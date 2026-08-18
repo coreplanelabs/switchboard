@@ -123,16 +123,18 @@ class SlackIO implements ChannelIO {
           status: LOADING_PHRASES[0],
           loading_messages: LOADING_PHRASES,
         })
-        .catch(() => {});
-    await setShimmer();
-    const shimmerTimer = setInterval(() => void setShimmer(), 75_000);
+        .catch((err: Error) => console.error(`[shimmer] ${err.message}`));
 
-    // Plus the persistent activity card: spinner headline + recent tool calls.
+    // Post the activity card FIRST: any bot message in the thread auto-clears
+    // the inline status, so the shimmer must be set after the card exists
+    // (edits to the card don't clear it; only new messages do).
     const posted = await this.client.chat.postMessage({
       channel: this.ev.channel,
       thread_ts: this.ev.threadTs,
       ...render(initial),
     });
+    await setShimmer();
+    const shimmerTimer = setInterval(() => void setShimmer(), 75_000);
     const ts = posted.ts as string;
     const edit = (frame: StatusUpdate) =>
       this.client.chat
