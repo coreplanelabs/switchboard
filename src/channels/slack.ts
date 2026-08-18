@@ -75,7 +75,8 @@ export function createSlackApp(deps: CoreDeps) {
     });
   });
 
-  // DMs to the bot
+  // DMs to the bot, and follow-up replies in threads the bot participates in
+  // (no re-mention needed once a conversation has started).
   app.message(async ({ message, client }) => {
     const m = message as {
       channel_type?: string;
@@ -90,12 +91,21 @@ export function createSlackApp(deps: CoreDeps) {
     };
     // "file_share" is how Slack marks a message with attachments — still a
     // user message, so let it through the subtype gate.
-    if (m.channel_type !== "im" || m.bot_id || (m.subtype && m.subtype !== "file_share")) return;
+    if (m.bot_id || (m.subtype && m.subtype !== "file_share")) return;
     botUserId ??= (await client.auth.test()).user_id ?? undefined;
+    if (m.channel_type !== "im") {
+      // Channel/group messages: only thread follow-ups, and only in threads
+      // the bot is already part of. Mentions are app_mention's job (the same
+      // message fires both events — skip here to avoid double-handling), and
+      // top-level channel posts still require a mention.
+      if (!m.thread_ts) return;
+      if (botUserId && (m.text ?? "").includes(`<@${botUserId}>`)) return;
+      if (!(await botInThread(client, m.channel, m.thread_ts, botUserId))) return;
+    }
     await handle(deps, client, {
       channel: m.channel,
       user: m.user ?? "unknown",
-      text: m.text ?? "",
+      text: stripMention(m.text ?? "", botUserId),
       ts: m.ts,
       threadTs: m.thread_ts ?? m.ts,
       files: m.files,
@@ -326,6 +336,29 @@ function chunkText(text: string, limit: number): string[] {
   }
   chunks.push(rest);
   return chunks;
+}
+
+/**
+ * Is the bot already part of this thread? True when it has posted in it or
+ * was mentioned anywhere in it. Checked per follow-up (one replies call) so
+ * participation survives restarts — no in-memory thread registry to lose.
+ */
+async function botInThread(
+  client: SlackClient,
+  channel: string,
+  threadTs: string,
+  botUserId?: string,
+): Promise<boolean> {
+  if (!botUserId) return false;
+  try {
+    const replies = await client.conversations.replies({ channel, ts: threadTs, limit: 50 });
+    return (replies.messages ?? []).some((m) => {
+      const mm = m as { user?: string; text?: string };
+      return mm.user === botUserId || (mm.text ?? "").includes(`<@${botUserId}>`);
+    });
+  } catch {
+    return false; // can't read the thread => stay quiet
+  }
 }
 
 function stripMention(text: string, botUserId?: string): string {

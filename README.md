@@ -194,7 +194,7 @@ fly deploy && fly logs   # set workspaceDir: ./data/workspaces in config.yaml fi
 @switchboard config set me models.coding=openai/gpt-5
 ```
 
-DMs to the bot work the same way (no mention needed).
+DMs to the bot work the same way (no mention needed). In channels, only the first message of a conversation needs the mention: once the bot is part of a thread (it replied, or was mentioned anywhere in it), every follow-up reply in that thread reaches it without re-mentioning.
 
 ## Permissions
 
@@ -218,7 +218,7 @@ permissions:
 1. **Create the Slack app** (api.slack.com/apps → From scratch):
    - Enable **Socket Mode**; create an app-level token with `connections:write` → `SLACK_APP_TOKEN`.
    - **OAuth scopes** (Bot Token): `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `im:history`, `im:read`, `im:write`, `files:read` (image attachments are downloaded and passed to the model; without this scope they're reported as unavailable).
-   - **Event subscriptions**: `app_mention`, `message.im`.
+   - **Event subscriptions**: `app_mention`, `message.im`, `message.channels`, `message.groups` (the channel/group message events deliver thread follow-ups so no re-mention is needed mid-conversation).
    - Install to workspace → `SLACK_BOT_TOKEN`.
 2. **Configure**:
    ```bash
