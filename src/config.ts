@@ -43,6 +43,7 @@ export interface AppConfig {
   channels?: Record<string, Scope>;
   users?: Record<string, Scope>;
   permissions?: Permissions;
+  execution?: import("./execution/factory.js").ExecutionConfig;
   workspaceDir?: string;
 }
 

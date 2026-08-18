@@ -1,32 +1,16 @@
-import { execFile } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
 import type { ToolDef } from "../providers/types.js";
+import type { Executor } from "../execution/executor.js";
 
-// Tools execute inside a per-conversation workspace directory. Every path is
-// resolved and confined to the workspace root; bash gets the workspace as cwd.
+// Tools are thin declarations over the Executor seam. Where the command
+// actually runs (local host vs per-thread sandbox) is the Executor's concern —
+// see src/execution/.
 
 export interface ToolContext {
-  workspaceDir: string;
+  executor: Executor;
 }
 
 export interface RunnableTool extends ToolDef {
   run(input: Record<string, unknown>, ctx: ToolContext): Promise<string>;
-}
-
-function confine(root: string, p: string): string {
-  const abs = resolve(root, p);
-  if (abs !== root && !abs.startsWith(root + "/")) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return abs;
-}
-
-const BASH_TIMEOUT_MS = 5 * 60_000;
-const MAX_OUTPUT = 30_000;
-
-function truncate(s: string): string {
-  return s.length > MAX_OUTPUT ? s.slice(0, MAX_OUTPUT) + `\n...[truncated ${s.length - MAX_OUTPUT} chars]` : s;
 }
 
 export const bashTool: RunnableTool = {
@@ -42,22 +26,7 @@ export const bashTool: RunnableTool = {
     required: ["command"],
   },
   run(input, ctx) {
-    const command = String(input.command ?? "");
-    return new Promise((res) => {
-      execFile(
-        "bash",
-        ["-c", command],
-        { cwd: ctx.workspaceDir, timeout: BASH_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
-        (err, stdout, stderr) => {
-          const parts = [stdout, stderr].filter(Boolean).join("\n--- stderr ---\n");
-          if (err) {
-            res(truncate(`exit ${(err as NodeJS.ErrnoException & { code?: number }).code ?? "error"}: ${err.message}\n${parts}`));
-          } else {
-            res(truncate(parts || "(no output)"));
-          }
-        },
-      );
-    });
+    return ctx.executor.exec(String(input.command ?? ""));
   },
 };
 
@@ -71,9 +40,8 @@ export const readFileTool: RunnableTool = {
     },
     required: ["path"],
   },
-  async run(input, ctx) {
-    const p = confine(ctx.workspaceDir, String(input.path ?? ""));
-    return truncate(readFileSync(p, "utf8"));
+  run(input, ctx) {
+    return ctx.executor.readFile(String(input.path ?? ""));
   },
 };
 
@@ -89,11 +57,8 @@ export const writeFileTool: RunnableTool = {
     },
     required: ["path", "content"],
   },
-  async run(input, ctx) {
-    const p = confine(ctx.workspaceDir, String(input.path ?? ""));
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, String(input.content ?? ""));
-    return `Wrote ${input.path}`;
+  run(input, ctx) {
+    return ctx.executor.writeFile(String(input.path ?? ""), String(input.content ?? ""));
   },
 };
 
@@ -102,10 +67,3 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
   readonly: [bashTool, readFileTool],
   none: [],
 };
-
-export function ensureWorkspace(baseDir: string, key: string): string {
-  const safe = key.replace(/[^a-zA-Z0-9_.-]/g, "_");
-  const dir = join(resolve(baseDir), safe);
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}

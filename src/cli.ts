@@ -9,7 +9,7 @@ import { ProviderRegistry } from "./providers/registry.js";
 import { getAgent } from "./agents/registry.js";
 import { parseDirectives } from "./directives.js";
 import { runAgent } from "./runner.js";
-import { ensureWorkspace } from "./tools/workspace.js";
+import { makeExecutor } from "./execution/factory.js";
 import { parseModelRef } from "./providers/types.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
@@ -33,18 +33,25 @@ async function main() {
   const agent = getAgent(resolved.agentName);
   const { provider: providerName, model } = parseModelRef(resolved.modelRef);
 
-  const workspaceDir = ensureWorkspace(
-    config.config.workspaceDir ?? "./workspaces",
-    `cli-${Date.now()}`,
+  const threadKey = `cli-${Date.now()}`;
+  const executor = await makeExecutor(
+    {
+      execution: config.config.execution,
+      workspaceDir: config.config.workspaceDir ?? "./workspaces",
+      dataDir: "./data",
+    },
+    threadKey,
   );
-  console.error(`[agent=${agent.name} model=${resolved.modelRef} workspace=${workspaceDir}]`);
+  console.error(
+    `[agent=${agent.name} model=${resolved.modelRef} execution=${config.config.execution?.type ?? "local"} thread=${threadKey}]`,
+  );
 
   const answer = await runAgent({
     provider: providers.get(providerName),
     model,
     agent,
     messages: [{ role: "user", content: [{ type: "text", text: d.text }] }],
-    toolContext: { workspaceDir },
+    toolContext: { executor },
     onProgress: (note) => console.error(`  > ${note}`),
   });
   console.log("\n" + answer);

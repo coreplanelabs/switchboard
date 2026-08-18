@@ -3,7 +3,7 @@ import type { ConfigStore, Scope } from "./config.js";
 import { getAgent, AGENTS } from "./agents/registry.js";
 import { parseDirectives } from "./directives.js";
 import { runAgent } from "./runner.js";
-import { ensureWorkspace } from "./tools/workspace.js";
+import { makeExecutor } from "./execution/factory.js";
 import { parseModelRef, type ChatMessage } from "./providers/types.js";
 import type { ProviderRegistry } from "./providers/registry.js";
 
@@ -95,8 +95,12 @@ async function handleRequest(deps: SlackDeps, client: SlackClient, req: Incoming
     // Build conversation from the thread so follow-ups have context.
     const messages = await buildThreadMessages(client, req, directives.text);
 
-    const workspaceDir = ensureWorkspace(
-      deps.config.config.workspaceDir ?? "./workspaces",
+    const executor = await makeExecutor(
+      {
+        execution: deps.config.config.execution,
+        workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
+        dataDir: "./data",
+      },
       `${req.channel}-${req.threadTs}`,
     );
 
@@ -125,7 +129,7 @@ async function handleRequest(deps: SlackDeps, client: SlackClient, req: Incoming
       model,
       agent,
       messages,
-      toolContext: { workspaceDir },
+      toolContext: { executor },
       onProgress,
     });
 

@@ -84,7 +84,25 @@ flowchart TD
     RQ -->|unset?| US -->|unset?| CH -->|unset?| DF
 ```
 
-**Trust model (important):** the `review` agent is read-only by *toolset* (no `write_file`) and prompt convention — but `bash` can still mutate anything the process can reach. The capability boundary is therefore the **host environment**: container filesystem, container user, and the scoped `GH_TOKEN`. Assume anything a channel member asks for can run with those credentials.
+**Trust model (important):** the `review` agent is read-only by *toolset* (no `write_file`) and prompt convention — but `bash` can still mutate anything its executor can reach. The capability boundary depends on `execution.type`:
+
+- `local` — tools run on the bot host; the boundary is the container filesystem/user and the scoped `GH_TOKEN`. Fine for dev and trusted operators.
+- `e2b` — **control plane / execution plane split.** The bot (always-on, holds only Slack + model keys) ships every tool call to a per-thread E2B micro-VM that holds the repo checkout and `GH_TOKEN`. Blast radius of a malicious or prompt-injected request = its own sandbox plus a repo-scoped token; the bot host, other threads, and the AWS account are unreachable. Sandboxes expire after `timeoutMinutes` idle; thread follow-ups reconnect (map persisted in `data/sandboxes.json`), and an expired sandbox is transparently recreated (repos re-clone).
+
+```mermaid
+flowchart LR
+    subgraph cp [Control plane — always-on]
+        BOT[Switchboard bot<br/>Slack + model keys only<br/>no GH_TOKEN, no tool exec]
+    end
+    subgraph ep [Execution plane — ephemeral]
+        S1[Sandbox: thread A<br/>repo checkout + GH_TOKEN]
+        S2[Sandbox: thread B]
+    end
+    BOT -->|exec / read / write per tool call| S1 & S2
+    S1 & S2 -->|git push, gh pr create| GH[GitHub]
+```
+
+The `Executor` interface in `src/execution/` is the seam — a Cloudflare Sandbox (or any other) backend is one file plus config, without touching agents, tools, or the runner.
 
 ## Deployment
 

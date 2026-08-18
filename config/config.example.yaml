@@ -50,6 +50,16 @@ defaults:
 #   channelConfig: []               # who may run `config set/clear channel`;
 #                                   # empty = admins only; key absent = everyone
 
-# Where per-conversation agent workspaces are created.
+# Where agent tools execute. "local" runs them on the bot host (dev/CLI);
+# "e2b" runs each thread's tools in its own E2B micro-VM — the repo checkout
+# and GH_TOKEN live in the sandbox, never on the bot host. Recommended for
+# any deployment where untrusted users can reach the coding agent.
+execution:
+  type: local
+  # type: e2b
+  # apiKeyEnv: E2B_API_KEY
+  # timeoutMinutes: 30   # sandbox idle lifetime; thread follow-ups reconnect
+
+# Where per-conversation agent workspaces are created (local execution only).
 # On Fly.io set this to ./data/workspaces so checkouts live on the volume.
 workspaceDir: ./workspaces
