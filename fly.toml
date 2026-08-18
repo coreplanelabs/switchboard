@@ -1,0 +1,42 @@
+# Fly.io deployment — one always-on Machine, one volume.
+#   fly launch --no-deploy          # creates the app from this file
+#   fly volumes create switchboard_data --size 3
+#   fly secrets set SLACK_BOT_TOKEN=... SLACK_APP_TOKEN=... ANTHROPIC_API_KEY=... GH_TOKEN=...
+#   fly deploy
+#
+# Fly allows one volume mount per machine, so both persistent dirs live under
+# /app/data — set these in config/config.yaml:
+#   workspaceDir: ./data/workspaces
+# (overrides.json already lives in ./data by default)
+
+app = "switchboard"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[mounts]
+  source = "switchboard_data"
+  destination = "/app/data"
+
+# The port is health-check only; Slack traffic is an outbound websocket.
+# auto_stop is off because there's no inbound traffic to wake the machine.
+[http_service]
+  internal_port = 8080
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

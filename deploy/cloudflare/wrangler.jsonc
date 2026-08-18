@@ -1,0 +1,22 @@
+{
+  "name": "switchboard",
+  "main": "worker.ts",
+  "compatibility_date": "2026-08-01",
+  "containers": [
+    {
+      "class_name": "Switchboard",
+      // Builds ../../Dockerfile (the same image docker-compose uses)
+      "image": "../../Dockerfile",
+      "max_instances": 1,
+      "instance_type": "basic"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "SWITCHBOARD", "class_name": "Switchboard" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Switchboard"] }],
+  "triggers": {
+    // keep-alive ping; also restarts the container after platform maintenance
+    "crons": ["*/5 * * * *"]
+  }
+}
