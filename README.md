@@ -165,7 +165,7 @@ fly deploy && fly logs   # set workspaceDir: ./data/workspaces in config.yaml fi
 
 ### Deployment FAQ
 
-**Can the bot itself run in a sandbox (Cloudflare Sandbox, E2B, Modal)?** No — sandboxes are per-run environments with caller-owned lifecycles; the bot is a daemon that holds a websocket 24/7 and initiates work. Sandboxes are where the *agents' tools* run (`execution.type: e2b`), not where the bot lives.
+**Can the bot itself run in a Cloudflare Sandbox?** Technically yes — a Cloudflare Sandbox is a container underneath, and terrateam proves long-lived processes run fine on Cloudflare Containers. But hosting the bot *via the Sandbox SDK* just re-implements deployment option A with an extra orchestration layer, so there's no reason to: deploy on Containers directly. Sandboxes earn their keep as the **execution plane** — where the agents' tools run (`execution.type: e2b` today; a Cloudflare Sandbox executor backend is one file plus a small proxy Worker, since its SDK runs Worker-side).
 
 **Can it run on the Workers runtime / serverless-native?** Not as-is: the Slack adapter is a Socket Mode daemon and config/state use the filesystem. A serverless-native version means switching the Slack adapter to HTTP Events API (ack within 3s, continue work durably) and moving config/state off disk — the problem durable-agent frameworks (Vercel's eve, Cloudflare's Agents SDK) productize. Our seams map 1:1 onto those frameworks, so that door stays open; there's no reason to pay for it before horizontal scale matters.
 
