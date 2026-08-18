@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { LocalExecutor, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
+import { resolveGithubToken } from "./githubApp.js";
 
 export interface ExecutionConfig {
   /**
@@ -43,8 +44,7 @@ export async function makeExecutor(
     const apiKeyEnv = opts.execution?.apiKeyEnv ?? "E2B_API_KEY";
     const apiKey = process.env[apiKeyEnv];
     if (!apiKey) throw new Error(`execution.type is "e2b" but ${apiKeyEnv} is not set`);
-    const envs: Record<string, string> = {};
-    if (process.env.GH_TOKEN) envs.GH_TOKEN = process.env.GH_TOKEN;
+    const envs = await githubEnvs();
     return E2BExecutor.open({
       apiKey,
       threadKey,
@@ -61,8 +61,7 @@ export async function makeExecutor(
     const apiKeyEnv = opts.execution.apiKeyEnv ?? "SANDBOX_TOKEN";
     const token = process.env[apiKeyEnv];
     if (!token) throw new Error(`execution.type is "cloudflare" but ${apiKeyEnv} is not set`);
-    const envs: Record<string, string> = {};
-    if (process.env.GH_TOKEN) envs.GH_TOKEN = process.env.GH_TOKEN;
+    const envs = await githubEnvs();
     return new CloudflareSandboxExecutor({
       url: opts.execution.url,
       token,
@@ -72,4 +71,11 @@ export async function makeExecutor(
   }
 
   throw new Error(`Unknown execution.type "${type}" (valid: local, e2b, cloudflare)`);
+}
+
+/** GitHub credential for the sandbox env: freshly-minted App installation
+ *  token when a GitHub App is configured, else static GH_TOKEN, else none. */
+async function githubEnvs(): Promise<Record<string, string>> {
+  const token = await resolveGithubToken();
+  return token ? { GH_TOKEN: token } : {};
 }
