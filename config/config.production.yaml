@@ -10,7 +10,7 @@ providers:
 defaults:
   agent: general
   models:
-    general: anthropic/claude-opus-5
+    general: anthropic/claude-haiku-4-5
     coding: anthropic/claude-fable-5
     review: anthropic/claude-fable-5
 
