@@ -12,6 +12,21 @@ type SlackClient = bolt.webApi.WebClient;
 const PLATFORM = "slack";
 const SLACK_MSG_LIMIT = 3500;
 
+// Rotating inline-status phrases (assistant.threads.setStatus loading_messages).
+// Switchboard-flavored; Slack cycles through them while a turn runs.
+const LOADING_PHRASES = [
+  "is patching you through…",
+  "is untangling the cords…",
+  "is ringing the exchange…",
+  "is consulting the operators…",
+  "is rerouting the trunk lines…",
+  "is holding the line…",
+  "is splicing the wires…",
+  "is checking the jacks…",
+  "is dialing long distance…",
+  "is clearing the static…",
+];
+
 export function createSlackApp(deps: CoreDeps) {
   const app = new App({
     token: process.env.SLACK_BOT_TOKEN,
@@ -96,6 +111,23 @@ class SlackIO implements ChannelIO {
   }
 
   async status(initial: StatusUpdate): Promise<StatusHandle> {
+    // Native Slack shimmer: rotating loading phrases shown inline in the
+    // thread ("Switchboard is <phrase>"). Works in channel threads since
+    // March 2026 with chat:write; auto-clears when the bot replies, times out
+    // after ~2 min idle, so re-up every 75s during long turns.
+    const setShimmer = () =>
+      this.client.assistant.threads
+        .setStatus({
+          channel_id: this.ev.channel,
+          thread_ts: this.ev.threadTs,
+          status: LOADING_PHRASES[0],
+          loading_messages: LOADING_PHRASES,
+        })
+        .catch(() => {});
+    await setShimmer();
+    const shimmerTimer = setInterval(() => void setShimmer(), 75_000);
+
+    // Plus the persistent activity card: spinner headline + recent tool calls.
     const posted = await this.client.chat.postMessage({
       channel: this.ev.channel,
       thread_ts: this.ev.threadTs,
@@ -109,7 +141,12 @@ class SlackIO implements ChannelIO {
     return {
       update: (frame) => void edit(frame),
       done: async (frame) => {
+        clearInterval(shimmerTimer);
         await edit(frame);
+        // reply auto-clears the shimmer; clear explicitly for error paths
+        await this.client.assistant.threads
+          .setStatus({ channel_id: this.ev.channel, thread_ts: this.ev.threadTs, status: "" })
+          .catch(() => {});
       },
     };
   }
