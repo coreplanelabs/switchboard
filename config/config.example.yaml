@@ -56,6 +56,11 @@ defaults:
 # any deployment where untrusted users can reach the coding agent.
 execution:
   type: local
+  # Cloudflare Sandbox via the proxy Worker (deploy/cloudflare-sandbox/):
+  # type: cloudflare
+  # url: https://switchboard-sandbox.<account>.workers.dev
+  # apiKeyEnv: SANDBOX_TOKEN     # bearer secret shared with the Worker
+  # E2B:
   # type: e2b
   # apiKeyEnv: E2B_API_KEY
   # timeoutMinutes: 30   # sandbox idle lifetime; thread follow-ups reconnect

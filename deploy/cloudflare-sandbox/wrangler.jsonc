@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "switchboard-sandbox",
+  "main": "worker.ts",
+  "compatibility_date": "2026-08-01",
+  // coreplane-infra account — same as terrateam and the switchboard bot
+  "account_id": "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
+  // Reachable only with the SANDBOX_TOKEN bearer secret; workers.dev URL is fine.
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "containers": [
+    {
+      "class_name": "SwitchboardSandbox",
+      // @cloudflare/sandbox ships its own container image; see the Sandbox
+      // docs for the current image reference if this needs pinning.
+      "image": "./Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 10
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "Sandbox", "class_name": "SwitchboardSandbox" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SwitchboardSandbox"] }]
+}

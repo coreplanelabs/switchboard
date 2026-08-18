@@ -22,7 +22,7 @@ Agent gateway: messages arrive over a channel, get routed to an agent, which run
 | `src/cli.ts` | CLI adapter | Second channel; proof of the abstraction; use for local testing |
 | `src/agents/registry.ts` | Agents as data: prompt + toolset + budgets | Add agents here; give them a default model in config |
 | `src/providers/` | `Provider` interface, Anthropic + OpenAI-compatible adapters, registry | OpenAI-compatible endpoints are config-only additions |
-| `src/execution/` | `Executor` interface, local + E2B backends, factory | E2B: per-thread sandbox, `data/sandboxes.json` maps thread→sandbox |
+| `src/execution/` | `Executor` interface; local, E2B, and Cloudflare Sandbox backends; factory | E2B keys sandboxes via `data/sandboxes.json`; Cloudflare keys them on `X-Thread-Key` through the proxy Worker in `deploy/cloudflare-sandbox/` |
 | `src/runner.ts` | Provider-blind agent loop (complete → run tools → append → repeat) | Turn budgets on the agent def |
 | `src/config.ts` | Layered config, runtime overrides, permissions | `data/overrides.json` persists chat-set overrides |
 | `src/directives.ts` | `agent:x model:p/m` inline parsing | |
@@ -40,7 +40,7 @@ Agent gateway: messages arrive over a channel, get routed to an agent, which run
 
 ## Current state / known gaps
 
-- E2B executor is typechecked but not yet exercised against a live sandbox.
+- Remote executors (E2B, Cloudflare Sandbox) are typechecked but not yet exercised against live sandboxes; the Cloudflare proxy Worker (`deploy/cloudflare-sandbox/`) additionally needs its SDK method names verified on first deploy.
 - The Slack app has DM support wired but the recommended rollout keeps `im:*` scopes off initially.
 - No token/cost accounting per request yet.
 - No test framework — smoke tests are ad hoc.
