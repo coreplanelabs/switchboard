@@ -17,9 +17,13 @@ interface OAIToolCall {
   function: { name: string; arguments: string };
 }
 
+type OAIContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 interface OAIMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: string | OAIContentPart[] | null;
   tool_calls?: OAIToolCall[];
   tool_call_id?: string;
 }
@@ -74,7 +78,7 @@ export class OpenAICompatProvider implements Provider {
     if (!choice) throw new Error(`Provider "${this.name}": empty choices in response`);
 
     const content: ContentPart[] = [];
-    if (choice.message.content) {
+    if (typeof choice.message.content === "string" && choice.message.content) {
       content.push({ type: "text", text: choice.message.content });
     }
     for (const tc of choice.message.tool_calls ?? []) {
@@ -130,14 +134,30 @@ function toOAIMessages(m: ChatMessage): OAIMessage[] {
     ];
   }
 
-  // user message: tool_results become role:"tool" messages, text becomes role:"user"
+  // user message: tool_results become role:"tool" messages; text and images
+  // collect into one role:"user" message (array content only when images exist,
+  // since some compat endpoints reject arrays)
   const out: OAIMessage[] = [];
+  const parts: OAIContentPart[] = [];
   for (const part of m.content) {
     if (part.type === "tool_result") {
       out.push({ role: "tool", tool_call_id: part.toolUseId, content: part.content });
     } else if (part.type === "text") {
-      out.push({ role: "user", content: part.text });
+      parts.push({ type: "text", text: part.text });
+    } else if (part.type === "image") {
+      parts.push({
+        type: "image_url",
+        image_url: { url: `data:${part.mediaType};base64,${part.data}` },
+      });
     }
+  }
+  if (parts.length > 0) {
+    out.push({
+      role: "user",
+      content: parts.every((p) => p.type === "text")
+        ? parts.map((p) => (p as { text: string }).text).join("\n")
+        : parts,
+    });
   }
   return out;
 }

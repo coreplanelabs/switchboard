@@ -1,7 +1,13 @@
 import bolt from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
 import { mdToMrkdwn } from "./mrkdwn.js";
-import type { ChannelIO, HistoryItem, StatusHandle, StatusUpdate } from "../core/types.js";
+import type {
+  ChannelIO,
+  HistoryItem,
+  ImageAttachment,
+  StatusHandle,
+  StatusUpdate,
+} from "../core/types.js";
 
 // Slack channel adapter: pure transport. Wires Bolt (Socket Mode) events into
 // the core dispatcher and implements ChannelIO on top of the Slack Web API.
@@ -12,6 +18,25 @@ type SlackClient = bolt.webApi.WebClient;
 
 const PLATFORM = "slack";
 const SLACK_MSG_LIMIT = 3500;
+
+// Attachment ingestion. Only image types every provider accepts; Slack file
+// downloads need the files:read bot scope.
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // provider hard limit per image
+const MAX_IMAGES_PER_MESSAGE = 10;
+// Budget across a whole thread history so a screenshot-heavy thread can't
+// blow up the request payload; spent newest-first (recent images matter most).
+const MAX_HISTORY_IMAGES = 20;
+const MAX_HISTORY_IMAGE_BYTES = 24 * 1024 * 1024;
+
+interface SlackFile {
+  id?: string;
+  name?: string;
+  mimetype?: string;
+  size?: number;
+  url_private_download?: string;
+  url_private?: string;
+}
 
 // Rotating inline-status phrases (assistant.threads.setStatus loading_messages).
 // Switchboard-flavored; Slack cycles through them while a turn runs.
@@ -43,7 +68,9 @@ export function createSlackApp(deps: CoreDeps) {
       channel: event.channel,
       user: event.user ?? "unknown",
       text: stripMention(event.text ?? "", botUserId),
+      ts: event.ts,
       threadTs: event.thread_ts ?? event.ts,
+      files: (event as { files?: SlackFile[] }).files,
       botUserId,
     });
   });
@@ -59,14 +86,19 @@ export function createSlackApp(deps: CoreDeps) {
       thread_ts?: string;
       bot_id?: string;
       subtype?: string;
+      files?: SlackFile[];
     };
-    if (m.channel_type !== "im" || m.bot_id || m.subtype) return;
+    // "file_share" is how Slack marks a message with attachments — still a
+    // user message, so let it through the subtype gate.
+    if (m.channel_type !== "im" || m.bot_id || (m.subtype && m.subtype !== "file_share")) return;
     botUserId ??= (await client.auth.test()).user_id ?? undefined;
     await handle(deps, client, {
       channel: m.channel,
       user: m.user ?? "unknown",
       text: m.text ?? "",
+      ts: m.ts,
       threadTs: m.thread_ts ?? m.ts,
+      files: m.files,
       botUserId,
     });
   });
@@ -78,21 +110,85 @@ interface SlackEvent {
   channel: string;
   user: string;
   text: string;
+  /** ts of the triggering message itself (history() skips it by this) */
+  ts: string;
   threadTs: string;
+  files?: SlackFile[];
   botUserId?: string;
 }
 
 async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Promise<void> {
+  const { images, skipped } = await fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE);
+  // Tell the model about attachments it can't see, so it never claims an
+  // attached file simply didn't come through.
+  const note =
+    skipped.length > 0
+      ? `\n\n(Note: ${skipped.length} attachment(s) could not be passed through: ${skipped.join(", ")})`
+      : "";
   await dispatch(
     deps,
     {
       channelId: `${PLATFORM}:${ev.channel}`,
       userId: `${PLATFORM}:${ev.user}`,
       threadKey: `${PLATFORM}:${ev.channel}:${ev.threadTs}`,
-      text: ev.text,
+      text: ev.text + note,
+      images: images.length > 0 ? images : undefined,
     },
     new SlackIO(client, ev),
   );
+}
+
+/**
+ * Download Slack-hosted files and return the ones usable as model image input.
+ * Anything else (wrong type, too big, download failed) lands in `skipped` with
+ * a human-readable label. Requires the files:read bot scope.
+ */
+async function fetchImages(
+  files: SlackFile[] | undefined,
+  maxImages: number,
+  maxTotalBytes = Infinity,
+): Promise<{ images: ImageAttachment[]; skipped: string[]; bytes: number }> {
+  const images: ImageAttachment[] = [];
+  const skipped: string[] = [];
+  let bytes = 0;
+  const token = process.env.SLACK_BOT_TOKEN;
+  for (const f of files ?? []) {
+    const label = `${f.name ?? f.id ?? "file"} (${f.mimetype ?? "unknown type"})`;
+    const url = f.url_private_download ?? f.url_private;
+    if (
+      !url ||
+      !f.mimetype ||
+      !IMAGE_TYPES.has(f.mimetype) ||
+      (f.size ?? 0) > MAX_IMAGE_BYTES ||
+      images.length >= maxImages
+    ) {
+      skipped.push(label);
+      continue;
+    }
+    try {
+      const res = await fetch(url, {
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+      });
+      // Slack answers unauthorized file fetches with an HTML login page and
+      // HTTP 200 — content-type is the reliable failure signal.
+      if (!res.ok || res.headers.get("content-type")?.includes("text/html")) {
+        console.error(`[files] download failed for ${label}: HTTP ${res.status}`);
+        skipped.push(label);
+        continue;
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.byteLength > MAX_IMAGE_BYTES || bytes + buf.byteLength > maxTotalBytes) {
+        skipped.push(label);
+        continue;
+      }
+      bytes += buf.byteLength;
+      images.push({ mediaType: f.mimetype, data: buf.toString("base64"), name: f.name });
+    } catch (err) {
+      console.error(`[files] download failed for ${label}: ${(err as Error).message}`);
+      skipped.push(label);
+    }
+  }
+  return { images, skipped, bytes };
 }
 
 class SlackIO implements ChannelIO {
@@ -162,18 +258,41 @@ class SlackIO implements ChannelIO {
         ts: this.ev.threadTs,
         limit: 50,
       });
+      const kept: { role: "user" | "assistant"; text: string; files?: SlackFile[] }[] = [];
       for (const m of replies.messages ?? []) {
-        const mm = m as { bot_id?: string; text?: string; ts?: string };
-        if (!mm.text) continue;
+        const mm = m as { bot_id?: string; text?: string; ts?: string; files?: SlackFile[] };
         // Skip the triggering message itself; the dispatcher appends it
-        // (directive-stripped) as the current turn.
-        if (mm.text === this.ev.text) continue;
-        if (mm.ts === this.ev.threadTs && (replies.messages?.length ?? 0) === 1) continue;
-        const text = this.ev.botUserId
-          ? mm.text.replaceAll(`<@${this.ev.botUserId}>`, "").trim()
-          : mm.text;
-        if (!text || STATUS_PREFIXES.some((p) => text.startsWith(p))) continue;
-        items.push({ role: mm.bot_id ? "assistant" : "user", text });
+        // (directive-stripped, images included) as the current turn.
+        if (mm.ts === this.ev.ts) continue;
+        const raw = mm.text ?? "";
+        const text = this.ev.botUserId ? raw.replaceAll(`<@${this.ev.botUserId}>`, "").trim() : raw;
+        if (STATUS_PREFIXES.some((p) => text.startsWith(p))) continue;
+        const files = mm.bot_id ? undefined : mm.files; // only user attachments go to the model
+        if (!text && !files?.length) continue;
+        kept.push({ role: mm.bot_id ? "assistant" : "user", text, files });
+      }
+      // Download attachments newest-first so the thread-wide budget favors
+      // the most recent images when a long thread overflows it.
+      const imagesByIndex: (ImageAttachment[] | undefined)[] = [];
+      let imagesLeft = MAX_HISTORY_IMAGES;
+      let bytesLeft = MAX_HISTORY_IMAGE_BYTES;
+      for (let i = kept.length - 1; i >= 0; i--) {
+        const files = kept[i].files;
+        if (!files?.length || imagesLeft <= 0 || bytesLeft <= 0) continue;
+        const { images, bytes } = await fetchImages(
+          files,
+          Math.min(MAX_IMAGES_PER_MESSAGE, imagesLeft),
+          bytesLeft,
+        );
+        imagesLeft -= images.length;
+        bytesLeft -= bytes;
+        if (images.length > 0) imagesByIndex[i] = images;
+      }
+      for (let i = 0; i < kept.length; i++) {
+        const { role, text } = kept[i];
+        const images = imagesByIndex[i];
+        if (!text && !images) continue; // attachment-only turn whose downloads all failed
+        items.push({ role, text, images });
       }
     } catch {
       // best-effort; the dispatcher still has the current message

@@ -4,6 +4,15 @@
 // talk back through. Everything else — config resolution, permissions, agent
 // selection, execution — is channel-agnostic and lives in the dispatcher.
 
+/** An image the user attached, already downloaded and base64-encoded. */
+export interface ImageAttachment {
+  /** e.g. "image/png" — adapters only pass types every provider accepts */
+  mediaType: string;
+  /** base64 payload, no data: URI prefix */
+  data: string;
+  name?: string;
+}
+
 export interface IncomingMessage {
   /**
    * Scope key for channel-level config. Must be globally unique across
@@ -19,11 +28,15 @@ export interface IncomingMessage {
   threadKey: string;
   /** The request text, already stripped of platform artifacts (mentions etc.). */
   text: string;
+  /** Images attached to the triggering message, if any. */
+  images?: ImageAttachment[];
 }
 
 export interface HistoryItem {
   role: "user" | "assistant";
   text: string;
+  /** Images attached to this turn, if any (user turns only in practice). */
+  images?: ImageAttachment[];
 }
 
 /** A structured progress frame; adapters decide how to render it. */

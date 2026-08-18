@@ -80,6 +80,15 @@ function toAnthropicMessage(m: ChatMessage): Anthropic.MessageParam {
     switch (part.type) {
       case "text":
         return { type: "text", text: part.text };
+      case "image":
+        return {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: part.mediaType as Anthropic.Base64ImageSource["media_type"],
+            data: part.data,
+          },
+        };
       case "tool_use":
         return {
           type: "tool_use",
