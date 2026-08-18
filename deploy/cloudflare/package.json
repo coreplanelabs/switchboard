@@ -1,0 +1,19 @@
+{
+  "name": "@coreplane/switchboard-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit worker.ts --skipLibCheck --target es2022 --module es2022 --moduleResolution bundler --types ./node_modules/@cloudflare/workers-types",
+    "typegen": "wrangler types",
+    "tail": "wrangler tail switchboard",
+    "secrets": "while read -r name; do [ -z \"$name\" ] && continue; echo \"--- $name ---\"; wrangler secret put \"$name\"; done < secrets.txt"
+  },
+  "dependencies": { "@cloudflare/containers": "^0.3.7" },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260810.1",
+    "typescript": "^5.7.3",
+    "wrangler": "^4.120.1"
+  }
+}

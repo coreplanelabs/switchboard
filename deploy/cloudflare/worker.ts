@@ -16,7 +16,11 @@ interface Env {
   ANTHROPIC_API_KEY: string;
   OPENAI_API_KEY?: string;
   E2B_API_KEY?: string;
-  GH_TOKEN?: string; // not needed when execution.type is e2b
+  SANDBOX_TOKEN?: string; // cloudflare execution: bearer for the sandbox Worker
+  GH_TOKEN?: string; // fallback when no GitHub App is configured
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_INSTALLATION_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string;
 }
 
 export class SwitchboardServer extends Container<Env> {
@@ -28,12 +32,21 @@ export class SwitchboardServer extends Container<Env> {
   constructor(ctx: ConstructorParameters<typeof Container>[0], env: Env) {
     super(ctx, env);
     this.envVars = {
+      SWITCHBOARD_CONFIG: "./config/config.production.yaml",
       SLACK_BOT_TOKEN: env.SLACK_BOT_TOKEN,
       SLACK_APP_TOKEN: env.SLACK_APP_TOKEN,
       ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
       ...(env.OPENAI_API_KEY ? { OPENAI_API_KEY: env.OPENAI_API_KEY } : {}),
       ...(env.E2B_API_KEY ? { E2B_API_KEY: env.E2B_API_KEY } : {}),
+      ...(env.SANDBOX_TOKEN ? { SANDBOX_TOKEN: env.SANDBOX_TOKEN } : {}),
       ...(env.GH_TOKEN ? { GH_TOKEN: env.GH_TOKEN } : {}),
+      ...(env.GITHUB_APP_ID ? { GITHUB_APP_ID: env.GITHUB_APP_ID } : {}),
+      ...(env.GITHUB_APP_INSTALLATION_ID
+        ? { GITHUB_APP_INSTALLATION_ID: env.GITHUB_APP_INSTALLATION_ID }
+        : {}),
+      ...(env.GITHUB_APP_PRIVATE_KEY
+        ? { GITHUB_APP_PRIVATE_KEY: env.GITHUB_APP_PRIVATE_KEY }
+        : {}),
     };
   }
 

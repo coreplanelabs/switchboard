@@ -1,0 +1,28 @@
+# Production configuration — baked into the image; selected via
+# SWITCHBOARD_CONFIG=./config/config.production.yaml (set by the Worker shim).
+# No secrets live here; keys arrive as container env from wrangler secrets.
+
+providers:
+  anthropic:
+    type: anthropic
+    apiKeyEnv: ANTHROPIC_API_KEY
+
+defaults:
+  agent: general
+  models:
+    general: anthropic/claude-opus-5
+    coding: anthropic/claude-fable-5
+    review: anthropic/claude-fable-5
+
+permissions:
+  admins: [slack:U0BMRFRLT1P] # justin
+  agents:
+    coding: [] # admins only until the pilot widens
+  channelConfig: [] # admins only
+
+execution:
+  type: cloudflare
+  url: https://switchboard-sandbox.coreplanelabs.dev
+  apiKeyEnv: SANDBOX_TOKEN
+
+workspaceDir: ./workspaces # unused with cloudflare execution; kept for fallback
