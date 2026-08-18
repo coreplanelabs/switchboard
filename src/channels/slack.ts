@@ -1,5 +1,6 @@
 import bolt from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
+import { mdToMrkdwn } from "./mrkdwn.js";
 import type { ChannelIO, HistoryItem, StatusHandle, StatusUpdate } from "../core/types.js";
 
 // Slack channel adapter: pure transport. Wires Bolt (Socket Mode) events into
@@ -101,7 +102,7 @@ class SlackIO implements ChannelIO {
   ) {}
 
   async reply(text: string): Promise<void> {
-    for (const chunk of chunkText(text, SLACK_MSG_LIMIT)) {
+    for (const chunk of chunkText(mdToMrkdwn(text), SLACK_MSG_LIMIT)) {
       await this.client.chat.postMessage({
         channel: this.ev.channel,
         thread_ts: this.ev.threadTs,
