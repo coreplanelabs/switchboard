@@ -3,9 +3,9 @@ import { AGENTS, getAgent } from "../agents/registry.js";
 import { parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
 import { makeExecutor } from "../execution/factory.js";
-import { parseModelRef, type ChatMessage } from "../providers/types.js";
+import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
-import type { ChannelIO, HistoryItem, IncomingMessage } from "./types.js";
+import type { ChannelIO, HistoryItem, ImageAttachment, IncomingMessage } from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
 // parsing, layered resolution, permission gates, history assembly, executor
@@ -56,7 +56,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
     const provider = deps.providers.get(providerName);
 
-    const messages = buildMessages(await io.history(), directives.text);
+    const messages = buildMessages(await io.history(), directives.text, msg.images);
 
     const executor = await makeExecutor(
       {
@@ -129,16 +129,29 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
  *  own status noise out of history. */
 export const STATUS_PREFIXES = ["⏳", "✅", "◐", "◓", "◑", "◒"];
 
-function buildMessages(history: HistoryItem[], currentText: string): ChatMessage[] {
+function buildMessages(
+  history: HistoryItem[],
+  currentText: string,
+  currentImages?: ImageAttachment[],
+): ChatMessage[] {
   const messages: ChatMessage[] = history.map((h) => ({
     role: h.role,
-    content: [{ type: "text" as const, text: h.text }],
+    content: turnContent(h.text, h.images),
   }));
-  messages.push({
-    role: "user",
-    content: [{ type: "text", text: currentText || "(empty message)" }],
-  });
+  messages.push({ role: "user", content: turnContent(currentText, currentImages) });
   return normalizeAlternation(messages);
+}
+
+/** Images first, then text — a turn always has at least one part. */
+function turnContent(text: string, images?: ImageAttachment[]): ContentPart[] {
+  const parts: ContentPart[] = (images ?? []).map((img) => ({
+    type: "image" as const,
+    mediaType: img.mediaType,
+    data: img.data,
+  }));
+  if (text) parts.push({ type: "text", text });
+  if (parts.length === 0) parts.push({ type: "text", text: "(empty message)" });
+  return parts;
 }
 
 /** Providers require user-first and behave best with merged consecutive roles. */
