@@ -30,6 +30,7 @@ export interface AppConfig {
   };
   channels?: Record<string, Scope>;
   users?: Record<string, Scope>;
+  execution?: import("./execution/factory.js").ExecutionConfig;
   workspaceDir?: string;
 }
 
