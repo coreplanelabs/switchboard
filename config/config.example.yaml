@@ -23,7 +23,7 @@ defaults:
   agent: general
   # Default model per agent, as <provider>/<model>.
   models:
-    general: anthropic/claude-opus-5
+    general: anthropic/claude-haiku-4-5
     coding: anthropic/claude-opus-5
     review: anthropic/claude-opus-5
 
