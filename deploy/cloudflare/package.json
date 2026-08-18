@@ -3,14 +3,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy && npm run wake",
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit worker.ts --skipLibCheck --target es2022 --module es2022 --moduleResolution bundler --types ./node_modules/@cloudflare/workers-types",
     "typegen": "wrangler types",
     "tail": "wrangler tail switchboard",
-    "secrets": "while read -r name; do [ -z \"$name\" ] && continue; echo \"--- $name ---\"; wrangler secret put \"$name\"; done < secrets.txt"
+    "secrets": "while read -r name; do [ -z \"$name\" ] && continue; echo \"--- $name ---\"; wrangler secret put \"$name\"; done < secrets.txt",
+    "wake": "curl -s -o /dev/null -w 'container awake: HTTP %{http_code}\\n' --max-time 180 https://switchboard.coreplane-infra.workers.dev/healthz"
   },
-  "dependencies": { "@cloudflare/containers": "^0.3.7" },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260810.1",
     "typescript": "^5.7.3",
