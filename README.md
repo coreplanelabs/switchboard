@@ -140,10 +140,12 @@ Two Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastruct
 ```bash
 # one-time: wrangler login (account: coreplane-infra), Docker running
 
+# 0. Generate the shared bearer once: openssl rand -hex 32  (paste it as
+#    SANDBOX_TOKEN into BOTH workers' secrets prompts below)
+
 # 1. Sandbox worker — per-thread execution VMs at switchboard-sandbox.coreplanelabs.dev
 cd deploy/cloudflare-sandbox && npm install
-openssl rand -hex 32 | tee /tmp/sandbox-token.txt | npm run --silent deploy >/dev/null 2>&1 || true
-npm run secrets   # paste the generated token for SANDBOX_TOKEN
+npm run secrets
 npm run deploy
 
 # 2. Bot worker — always-on Switchboard container
