@@ -72,30 +72,24 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const startedAt = Date.now();
     const spinner = ["◐", "◓", "◑", "◒"];
     let frame = 0;
-    const recentTools: string[] = [];
     const title = (icon?: string) =>
       `${icon ?? spinner[frame++ % spinner.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
     const status = await io.status({ title: title() });
     let lastToolAt = Date.now();
-    let lastUpdate = 0;
+    // The card body is the agent's own checklist (via the update_status tool),
+    // not a raw command stream — commands go to stdout for operators only.
+    let checklist: string | undefined;
     const currentFrame = () => {
       const quiet = Date.now() - lastToolAt;
-      // No tool activity for a while = the model is thinking (or reading a
-      // long result); say so instead of looking frozen.
       const thinking = quiet > 20_000 ? ` — thinking (${Math.round(quiet / 1000)}s since last tool)` : "";
-      return {
-        title: title() + thinking,
-        detail: recentTools.length > 0 ? recentTools.join("\n") : undefined,
-      };
+      return { title: title() + thinking, detail: checklist };
     };
     const onProgress = (note: string) => {
       console.log(`[tool] ${msg.threadKey} ${note}`);
       lastToolAt = Date.now();
-      recentTools.push(note.replace(/`/g, "'"));
-      if (recentTools.length > 4) recentTools.shift();
-      const now = Date.now();
-      if (now - lastUpdate < STATUS_UPDATE_MIN_MS) return;
-      lastUpdate = now;
+    };
+    const reportProgress = (list: string) => {
+      checklist = list.trim() || undefined;
       status.update(currentFrame());
     };
     // Heartbeat: the card ticks every 5s no matter what. A ticking timer means
@@ -111,11 +105,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         model,
         agent,
         messages,
-        toolContext: { executor },
+        toolContext: { executor, reportProgress },
         onProgress,
       });
     } catch (err) {
-      await status.done({ title: title("❌"), detail: recentTools.join("\n") || undefined });
+      await status.done({ title: title("❌"), detail: checklist });
       throw err;
     } finally {
       activeRuns--;
@@ -123,7 +117,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     }
 
     console.log(`[done] ${msg.threadKey} ${answer.length} chars`);
-    await status.done({ title: title("✅") });
+    await status.done({ title: title("✅"), detail: checklist });
     await io.reply(answer);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);

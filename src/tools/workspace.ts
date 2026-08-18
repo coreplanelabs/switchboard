@@ -7,6 +7,8 @@ import type { Executor } from "../execution/executor.js";
 
 export interface ToolContext {
   executor: Executor;
+  /** Replace the user-facing progress checklist on the status card. */
+  reportProgress?: (checklist: string) => void;
 }
 
 export interface RunnableTool extends ToolDef {
@@ -62,8 +64,31 @@ export const writeFileTool: RunnableTool = {
   },
 };
 
+export const updateStatusTool: RunnableTool = {
+  name: "update_status",
+  description:
+    "Update the short user-facing status checklist shown while you work. " +
+    "Call it right after planning (all items pending) and again whenever an item's state changes. " +
+    "Format: one item per line, prefixed with a state marker: ✓ done, ✱ in progress, ○ pending. " +
+    "Keep it to 3-6 short outcome-oriented items (what, not how — never raw commands).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      checklist: {
+        type: "string",
+        description: "The full checklist, one '✓|✱|○ item' per line (replaces the previous one)",
+      },
+    },
+    required: ["checklist"],
+  },
+  async run(input, ctx) {
+    ctx.reportProgress?.(String(input.checklist ?? ""));
+    return "status updated";
+  },
+};
+
 export const TOOLSETS: Record<string, RunnableTool[]> = {
-  full: [bashTool, readFileTool, writeFileTool],
-  readonly: [bashTool, readFileTool],
+  full: [bashTool, readFileTool, writeFileTool, updateStatusTool],
+  readonly: [bashTool, readFileTool, updateStatusTool],
   none: [],
 };

@@ -189,7 +189,7 @@ function render(frame: StatusUpdate): { text: string; blocks: object[] } {
   if (frame.detail) {
     blocks.push({
       type: "section",
-      text: { type: "mrkdwn", text: "```" + frame.detail.slice(0, 2900) + "```" },
+      text: { type: "mrkdwn", text: frame.detail.slice(0, 2900) },
     });
   }
   return { text: frame.title, blocks };
