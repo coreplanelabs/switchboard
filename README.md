@@ -8,7 +8,7 @@ Every boundary is a swappable seam, same pattern at each one:
 |---|---|---|---|
 | Channel | `ChannelIO` + `IncomingMessage` (`src/core/types.ts`) | Slack (Bolt/Socket Mode), CLI | one adapter file in `src/channels/` |
 | Provider | `Provider` (`src/providers/types.ts`) | Anthropic, OpenAI-compatible (OpenAI/Groq/Ollama/vLLM = config-only) | one adapter file, or just config |
-| Executor | `Executor` (`src/execution/executor.ts`) | local host, E2B micro-VM | one backend file + config |
+| Executor | `Executor` (`src/execution/executor.ts`) | local host, E2B micro-VM, Cloudflare Sandbox (via `deploy/cloudflare-sandbox/` proxy Worker) | one backend file + config |
 | Agent | `AgentDef` data (`src/agents/registry.ts`) | general, coding, review | one registry entry |
 
 The **core dispatcher** (`src/core/dispatcher.ts`) is the only place orchestration lives: config commands, directive parsing, layered resolution, permission gates, history assembly, the agent run. Channels are pure transports; the dispatcher never imports a platform SDK.

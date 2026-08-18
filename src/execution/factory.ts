@@ -2,14 +2,22 @@ import { resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { LocalExecutor, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
+import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 
 export interface ExecutionConfig {
-  /** "local" (default): run tools on the bot host. "e2b": per-thread micro-VM. */
-  type?: "local" | "e2b";
-  /** env var holding the sandbox provider API key (e2b only) */
+  /**
+   * "local" (default): run tools on the bot host.
+   * "e2b": per-thread E2B micro-VM.
+   * "cloudflare": per-thread Cloudflare Sandbox via the proxy Worker
+   *   (deploy/cloudflare-sandbox/).
+   */
+  type?: "local" | "e2b" | "cloudflare";
+  /** env var holding the sandbox provider API key/token (e2b, cloudflare) */
   apiKeyEnv?: string;
   /** sandbox idle lifetime in minutes (e2b only, default 30) */
   timeoutMinutes?: number;
+  /** base URL of the sandbox proxy Worker (cloudflare only) */
+  url?: string;
 }
 
 export interface ExecutorFactoryOptions {
@@ -46,5 +54,22 @@ export async function makeExecutor(
     });
   }
 
-  throw new Error(`Unknown execution.type "${type}" (valid: local, e2b)`);
+  if (type === "cloudflare") {
+    if (!opts.execution?.url) {
+      throw new Error(`execution.type is "cloudflare" but execution.url is not set`);
+    }
+    const apiKeyEnv = opts.execution.apiKeyEnv ?? "SANDBOX_TOKEN";
+    const token = process.env[apiKeyEnv];
+    if (!token) throw new Error(`execution.type is "cloudflare" but ${apiKeyEnv} is not set`);
+    const envs: Record<string, string> = {};
+    if (process.env.GH_TOKEN) envs.GH_TOKEN = process.env.GH_TOKEN;
+    return new CloudflareSandboxExecutor({
+      url: opts.execution.url,
+      token,
+      threadKey,
+      envs,
+    });
+  }
+
+  throw new Error(`Unknown execution.type "${type}" (valid: local, e2b, cloudflare)`);
 }
