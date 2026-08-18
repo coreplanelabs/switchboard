@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { ConfigStore } from "./config.js";
 import { ProviderRegistry } from "./providers/registry.js";
-import { createApp } from "./slack.js";
+import { createSlackApp } from "./channels/slack.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
@@ -16,7 +16,7 @@ async function main() {
 
   const config = new ConfigStore(CONFIG_PATH, OVERRIDES_PATH);
   const providers = new ProviderRegistry(config.config.providers);
-  const app = createApp({ config, providers });
+  const app = createSlackApp({ config, providers });
 
   await app.start();
 

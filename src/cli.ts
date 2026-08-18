@@ -1,18 +1,32 @@
-// Local test harness: run any agent from the terminal, no Slack involved.
+// Local test harness — implemented as a second channel adapter over the same
+// core dispatcher the Slack adapter uses, which is also the proof that the
+// core is channel-agnostic.
 //   npx tsx src/cli.ts "what is 2+2"
 //   npx tsx src/cli.ts "agent:review review acme/api#123"
 //   npx tsx src/cli.ts "agent:coding model:openai/gpt-5 ship a PR that ..."
-// Uses config/config.yaml, a scratch overrides file, and ./workspaces/cli-<ts>.
 
 import { ConfigStore } from "./config.js";
 import { ProviderRegistry } from "./providers/registry.js";
-import { getAgent } from "./agents/registry.js";
-import { parseDirectives } from "./directives.js";
-import { runAgent } from "./runner.js";
-import { makeExecutor } from "./execution/factory.js";
-import { parseModelRef } from "./providers/types.js";
+import { dispatch } from "./core/dispatcher.js";
+import type { ChannelIO, StatusHandle } from "./core/types.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
+
+class ConsoleIO implements ChannelIO {
+  async reply(text: string): Promise<void> {
+    console.log("\n" + text);
+  }
+  async status(initial: string): Promise<StatusHandle> {
+    console.error(initial);
+    return {
+      update: (note) => console.error(note.split("\n").join(" | ")),
+      done: async (summary) => console.error(summary),
+    };
+  }
+  async history(): Promise<[]> {
+    return []; // one-shot harness; no prior turns
+  }
+}
 
 async function main() {
   const input = process.argv.slice(2).join(" ").trim();
@@ -24,37 +38,16 @@ async function main() {
   const config = new ConfigStore(CONFIG_PATH, "./data/cli-overrides.json");
   const providers = new ProviderRegistry(config.config.providers);
 
-  const d = parseDirectives(input);
-  const resolved = config.resolve({
-    channelId: "cli",
-    userId: "cli",
-    request: { agent: d.agent, model: d.model },
-  });
-  const agent = getAgent(resolved.agentName);
-  const { provider: providerName, model } = parseModelRef(resolved.modelRef);
-
-  const threadKey = `cli-${Date.now()}`;
-  const executor = await makeExecutor(
+  await dispatch(
+    { config, providers },
     {
-      execution: config.config.execution,
-      workspaceDir: config.config.workspaceDir ?? "./workspaces",
-      dataDir: "./data",
+      channelId: "cli:local",
+      userId: "cli:local",
+      threadKey: `cli:${Date.now()}`,
+      text: input,
     },
-    threadKey,
+    new ConsoleIO(),
   );
-  console.error(
-    `[agent=${agent.name} model=${resolved.modelRef} execution=${config.config.execution?.type ?? "local"} thread=${threadKey}]`,
-  );
-
-  const answer = await runAgent({
-    provider: providers.get(providerName),
-    model,
-    agent,
-    messages: [{ role: "user", content: [{ type: "text", text: d.text }] }],
-    toolContext: { executor },
-    onProgress: (note) => console.error(`  > ${note}`),
-  });
-  console.log("\n" + answer);
 }
 
 main().catch((err) => {
