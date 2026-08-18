@@ -40,27 +40,27 @@ One long-lived Node process, no inbound server. The Slack adapter opens an **out
 
 ```mermaid
 flowchart LR
-    subgraph channels [Channel adapters — pure transport]
-        SL[Slack adapter<br/>Bolt, Socket Mode websocket<br/>src/channels/slack.ts]
-        CLI[CLI adapter<br/>src/cli.ts]
-        FUT[Discord / Teams / HTTP<br/>one adapter file each]
+    subgraph channels ["Channel adapters — pure transport"]
+        SL["Slack adapter<br/>Bolt, Socket Mode websocket<br/>src/channels/slack.ts"]
+        CLI["CLI adapter<br/>src/cli.ts"]
+        FUT["Discord / Teams / HTTP<br/>one adapter file each"]
     end
 
-    subgraph core [Core — channel-agnostic]
+    subgraph core ["Core — channel-agnostic"]
         D{core dispatcher<br/>src/core/dispatcher.ts}
-        CC[Config commands<br/>show / set / clear / help]
-        R[Resolution + permission gates<br/>request > user > channel > defaults]
-        RUN[runner.ts<br/>agent loop, up to maxTurns]
+        CC["Config commands<br/>show / set / clear / help"]
+        R["Resolution + permission gates<br/>request > user > channel > defaults"]
+        RUN["runner.ts<br/>agent loop, up to maxTurns"]
     end
 
-    subgraph providers [Provider adapters]
-        A[anthropic<br/>@anthropic-ai/sdk]
-        O[openai-compatible<br/>fetch → any /chat/completions]
+    subgraph providers ["Provider adapters"]
+        A["anthropic<br/>@anthropic-ai/sdk"]
+        O["openai-compatible<br/>fetch → any /chat/completions"]
     end
 
-    subgraph exec [Executors]
-        LX[local<br/>workspace dir on host]
-        EX[e2b<br/>per-thread micro-VM]
+    subgraph exec ["Executors"]
+        LX["local<br/>workspace dir on host"]
+        EX["e2b<br/>per-thread micro-VM"]
     end
 
     SL & CLI -->|IncomingMessage + ChannelIO| D
@@ -89,19 +89,19 @@ flowchart TD
 **Trust model (important):** the `review` agent is read-only by *toolset* (no `write_file`) and prompt convention — but `bash` can still mutate anything its executor can reach. The capability boundary depends on `execution.type`:
 
 - `local` — tools run on the bot host; the boundary is the container filesystem/user and the scoped `GH_TOKEN`. Fine for dev and trusted operators.
-- `e2b` — **control plane / execution plane split.** The bot (always-on, holds only Slack + model keys) ships every tool call to a per-thread E2B micro-VM that holds the repo checkout and `GH_TOKEN`. Blast radius of a malicious or prompt-injected request = its own sandbox plus a repo-scoped token; the bot host, other threads, and the AWS account are unreachable. Sandboxes expire after `timeoutMinutes` idle; thread follow-ups reconnect (map persisted in `data/sandboxes.json`), and an expired sandbox is transparently recreated (repos re-clone).
+- `e2b` — **control plane / execution plane split.** The bot (always-on, holds only Slack + model keys) ships every tool call to a per-thread E2B micro-VM that holds the repo checkout and `GH_TOKEN`. Blast radius of a malicious or prompt-injected request = its own sandbox plus a repo-scoped token; the bot host, other threads, and the hosting account are unreachable. Sandboxes expire after `timeoutMinutes` idle; thread follow-ups reconnect (map persisted in `data/sandboxes.json`), and an expired sandbox is transparently recreated (repos re-clone).
 
 ```mermaid
 flowchart LR
-    subgraph cp [Control plane — always-on]
-        BOT[Switchboard bot<br/>Slack + model keys only<br/>no GH_TOKEN, no tool exec]
+    subgraph cp ["Control plane — always-on"]
+        BOT["Switchboard bot<br/>Slack + model keys only<br/>no GH_TOKEN, no tool exec"]
     end
-    subgraph ep [Execution plane — ephemeral]
-        S1[Sandbox: thread A<br/>repo checkout + GH_TOKEN]
-        S2[Sandbox: thread B]
+    subgraph ep ["Execution plane — ephemeral"]
+        S1["Sandbox: thread A<br/>repo checkout + GH_TOKEN"]
+        S2["Sandbox: thread B"]
     end
     BOT -->|exec / read / write per tool call| S1 & S2
-    S1 & S2 -->|git push, gh pr create| GH[GitHub]
+    S1 & S2 -->|git push, gh pr create| GH["GitHub"]
 ```
 
 The `Executor` interface in `src/execution/` is the seam — a Cloudflare Sandbox (or any other) backend is one file plus config, without touching agents, tools, or the runner.
@@ -112,72 +112,62 @@ The process must run somewhere always-on for the bot to be live. Because Socket 
 
 ```mermaid
 flowchart LR
-    subgraph img [One Docker image]
-        P[node dist/index.js<br/>+ git + gh<br/>health probe on :8080]
+    subgraph img ["One Docker image"]
+        P["node dist/index.js<br/>+ git + gh<br/>health probe on :8080"]
     end
-    img -->|A · wrangler deploy — recommended, house pattern| CF[Cloudflare Containers<br/>deploy/cloudflare/, terrateam-style]
-    img -->|B · ECS Fargate service| ECS[Fargate task, desired count 1<br/>no inbound, EFS optional]
-    img -->|C · fly deploy| FLY[Fly.io Machine<br/>fly.toml + volume at /app/data]
-    img -->|D · docker compose up -d| VPS[Any VPS / home server]
-    P -.->|outbound websocket| SLK[Slack]
-    P -.->|HTTPS| PRV[Model providers]
-    P -.->|git/gh over HTTPS| GH[GitHub]
+    img -->|A · wrangler deploy — recommended, house pattern| CF["Cloudflare Containers<br/>deploy/cloudflare/, terrateam-style"]
+    img -->|B · fly deploy| FLY["Fly.io Machine<br/>fly.toml + volume at /app/data"]
+    img -->|C · docker compose up -d| VPS["Any VPS / home server"]
+    P -.->|outbound websocket| SLK["Slack"]
+    P -.->|HTTPS| PRV["Model providers"]
+    P -.->|git/gh over HTTPS| GH["GitHub"]
 ```
 
 | Option | Fit | Notes |
 |---|---|---|
 | **A. Cloudflare Containers** (`deploy/cloudflare/`) — **recommended: the house pattern** | Proven in this org — `coreplanelabs/infrastructure` runs Terrateam (a long-lived server) exactly this way: singleton DO, `sleepAfter: 2h`, 5-min cron keep-alive. Our shim mirrors it, same account | Disk is ephemeral — but with `execution.type: e2b` workspaces live in sandboxes anyway, so the only loss on instance restart is `data/overrides.json` (put durable channel/user config in `config.yaml`). Thread context always rebuilds from Slack |
-| **B. AWS ECS Fargate service** | Managed containers on the AWS accounts we have (raw EC2 is banned) | One always-on task (0.25–0.5 vCPU / 1GB, ~$9–12/mo); zero inbound SG rules; secrets from Secrets Manager; optional EFS at `/app/data` |
-| **C. Fly.io Machine** (`fly.toml`) | Cheapest managed always-on (~$3–6/mo + volume) if org constraints don't apply | One volume at `/app/data` persists overrides + workspaces (set `workspaceDir: ./data/workspaces`) |
-| **D. Docker on any VPS** (`docker-compose.yml`) | Max control / dev box | Volumes persist `data/` and `workspaces/`; compose restart policy covers supervision |
+| **B. Fly.io Machine** (`fly.toml`) | Cheapest managed always-on (~$3–6/mo + volume) if org constraints don't apply | One volume at `/app/data` persists overrides + workspaces (set `workspaceDir: ./data/workspaces`) |
+| **C. Docker on any VPS** (`docker-compose.yml`) | Max control / dev box | Volumes persist `data/` and `workspaces/`; compose restart policy covers supervision |
 
 **Pairing note:** Cloudflare Containers + `execution.type: e2b` is the natural combination — the bot host becomes stateless-except-overrides, which is exactly what an ephemeral-disk platform wants. If you deploy on Cloudflare with `execution.type: local` instead, expect workspace checkouts to reset on instance restarts.
 
 Railway/Render/k8s also work with the same image — anything that runs an always-on container with a volume. **Cloud sandbox providers (E2B, Modal, Daytona, Cloudflare Sandbox) are not a hosting option for the bot** — they solve a different problem: isolating each agent run's `bash` in a throwaway VM. That's the right future hardening step for the tool layer once untrusted users can reach the coding agent; the bot process itself still needs a long-lived home.
 
-### Requesting a home for it (ECS Fargate or equivalent)
-
-What the service needs — paste this into your platform-team request:
-
-- **Runtime:** 1 Docker container (image provided, we can push to ECR), always-on, single instance (`desiredCount: 1`), no autoscaling
-- **Size:** 0.25–0.5 vCPU, 512MB–1GB RAM (mostly idle)
-- **Network:** *outbound HTTPS only* — `slack.com`/`wss-*.slack.com`, `api.anthropic.com`, `api.openai.com` (or other model endpoints), `github.com`. **No inbound traffic at all** (the app dials out to Slack over a websocket). Private subnet + NAT or public IP + empty inbound SG — either works
-- **Secrets:** 4–5 env vars from Secrets Manager/SSM: `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `ANTHROPIC_API_KEY`, `GH_TOKEN`, optionally `OPENAI_API_KEY`
-- **IAM task role:** none/empty — the app makes no AWS API calls, and its `bash` tool executes model-generated commands, so least privilege matters here specifically
-- **Storage:** optional 2–5GB persistent volume (EFS) at `/app/data` for git checkouts + runtime config overrides; degrades gracefully without it (restarts re-clone; thread context rebuilds from Slack)
-- **Health:** `GET :8080/healthz` returns 200; restart-on-failure policy
-- **Logs:** stdout/stderr → CloudWatch
-
-### Why not run it *in* a sandbox (Cloudflare Sandbox, E2B, Modal)?
-
-Sandboxes are per-run execution environments driven by a caller: ephemeral disk, lifecycle owned by whoever spawned them, designed to be torn down. The bot is the opposite shape — a long-lived daemon that must hold a websocket open 24/7 and *initiate* work. You can technically start a daemon inside a Cloudflare Sandbox (it's a container underneath), but you inherit exactly the Cloudflare Containers caveats above plus an extra orchestration layer — it's the same deployment, made worse.
-
-Where a sandbox **is** the right tool: the agents' `bash`. The strongest future architecture splits the two — the bot (a small, tool-less process) lives on Fargate/Fly, and each agent run executes its commands in a throwaway per-thread sandbox (Cloudflare Sandbox, E2B, ...). That removes model-generated code execution from the bot host entirely. The `RunnableTool` interface in `src/tools/` is the seam: implement a sandbox-backed toolset and nothing else changes.
-
-### Deploying on Fly.io (recommended if you don't want to manage an instance)
-
-```bash
-fly launch --no-deploy        # uses fly.toml; say no to Postgres/Redis prompts
-fly volumes create switchboard_data --size 3
-fly secrets set SLACK_BOT_TOKEN=xoxb-... SLACK_APP_TOKEN=xapp-... ANTHROPIC_API_KEY=sk-ant-... GH_TOKEN=github_pat_...
-# in config/config.yaml set: workspaceDir: ./data/workspaces
-fly deploy
-fly logs                      # look for "switchboard running (providers: ...)"
-```
-
-What does **not** work: porting the app itself to the Workers runtime — the agents spawn real processes (`bash`, `git`, `gh`) and need a filesystem. A Workers-native rewrite (Events API webhooks → Worker, Durable Object per thread, Cloudflare Sandbox per workspace) is possible but is a redesign, not a deployment choice; there's no reason to pay for it until you need horizontal scale.
-
-### Deploying on Cloudflare Containers
+### Deploying on Cloudflare Containers (recommended)
 
 ```bash
 cd deploy/cloudflare
 npm install @cloudflare/containers
-wrangler secret put SLACK_BOT_TOKEN     # repeat for SLACK_APP_TOKEN, ANTHROPIC_API_KEY, GH_TOKEN, ...
-wrangler deploy                          # builds ../../Dockerfile and ships it
-curl https://switchboard.<your-subdomain>.workers.dev/healthz   # starts the container
+wrangler secret put SLACK_BOT_TOKEN   # repeat: SLACK_APP_TOKEN, ANTHROPIC_API_KEY, E2B_API_KEY, GH_TOKEN
+wrangler deploy                        # builds ../../Dockerfile and ships it
 ```
 
-The shim's field names track the `@cloudflare/containers` beta — sanity-check against [the Containers docs](https://developers.cloudflare.com/containers/) on first deploy.
+The shim (`deploy/cloudflare/worker.ts`) mirrors the proven `terrateam/` deployment in `coreplanelabs/infrastructure`: singleton Durable Object, `sleepAfter: 2h`, 5-minute cron keep-alive, secrets forwarded as container env. Long-term this belongs in the infrastructure repo's Terraform/Terrateam flow like terrateam itself.
+
+### What any host must provide
+
+Platform-agnostic requirements, for evaluating alternatives:
+
+- **Runtime:** 1 always-on Docker container, single instance, no autoscaling; 0.25–0.5 vCPU, 512MB–1GB RAM (mostly idle)
+- **Network:** outbound HTTPS only — Slack (`slack.com`/`wss-*.slack.com`), model provider APIs, `github.com`, E2B. **Zero inbound** — the app dials out over a websocket
+- **Secrets as env vars:** `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `ANTHROPIC_API_KEY`, `E2B_API_KEY`, optionally `OPENAI_API_KEY`; `GH_TOKEN` only when `execution.type: local`
+- **No cloud credentials on the host** — the app makes no cloud API calls, and its agents execute model-generated commands, so least privilege matters here specifically
+- **Storage:** optional small persistent volume at `/app/data`; degrades gracefully without it (repos re-clone, thread context rebuilds from the channel)
+- **Health/logs:** `GET :8080/healthz` → 200; logs on stdout
+
+### Deploying on Fly.io
+
+```bash
+fly launch --no-deploy && fly volumes create switchboard_data --size 3
+fly secrets set SLACK_BOT_TOKEN=... SLACK_APP_TOKEN=... ANTHROPIC_API_KEY=... E2B_API_KEY=...
+fly deploy && fly logs   # set workspaceDir: ./data/workspaces in config.yaml first
+```
+
+### Deployment FAQ
+
+**Can the bot itself run in a sandbox (Cloudflare Sandbox, E2B, Modal)?** No — sandboxes are per-run environments with caller-owned lifecycles; the bot is a daemon that holds a websocket 24/7 and initiates work. Sandboxes are where the *agents' tools* run (`execution.type: e2b`), not where the bot lives.
+
+**Can it run on the Workers runtime / serverless-native?** Not as-is: the Slack adapter is a Socket Mode daemon and config/state use the filesystem. A serverless-native version means switching the Slack adapter to HTTP Events API (ack within 3s, continue work durably) and moving config/state off disk — the problem durable-agent frameworks (Vercel's eve, Cloudflare's Agents SDK) productize. Our seams map 1:1 onto those frameworks, so that door stays open; there's no reason to pay for it before horizontal scale matters.
 
 ## Usage in Slack
 
