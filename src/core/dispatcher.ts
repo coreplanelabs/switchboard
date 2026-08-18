@@ -20,6 +20,13 @@ export interface CoreDeps {
 
 const STATUS_UPDATE_MIN_MS = 3000;
 
+// In-flight run tracking so the process can drain before exiting (restarts
+// must not kill runs mid-flight — see index.ts signal handling).
+let activeRuns = 0;
+export function activeRunCount(): number {
+  return activeRuns;
+}
+
 export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO): Promise<void> {
   try {
     // Config commands are answered inline, never sent to a model.
@@ -60,26 +67,63 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       msg.threadKey,
     );
 
-    const label = `\`${agent.name}\` on \`${resolved.modelRef}\``;
-    const status = await io.status(`⏳ ${label}...`);
+    const label = `*${agent.name}* on \`${resolved.modelRef}\``;
+    console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
+    const startedAt = Date.now();
+    const spinner = ["◐", "◓", "◑", "◒"];
+    let frame = 0;
+    const recentTools: string[] = [];
+    const title = (icon?: string) =>
+      `${icon ?? spinner[frame++ % spinner.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
+    const status = await io.status({ title: title() });
+    let lastToolAt = Date.now();
     let lastUpdate = 0;
+    const currentFrame = () => {
+      const quiet = Date.now() - lastToolAt;
+      // No tool activity for a while = the model is thinking (or reading a
+      // long result); say so instead of looking frozen.
+      const thinking = quiet > 20_000 ? ` — thinking (${Math.round(quiet / 1000)}s since last tool)` : "";
+      return {
+        title: title() + thinking,
+        detail: recentTools.length > 0 ? recentTools.join("\n") : undefined,
+      };
+    };
     const onProgress = (note: string) => {
+      console.log(`[tool] ${msg.threadKey} ${note}`);
+      lastToolAt = Date.now();
+      recentTools.push(note.replace(/`/g, "'"));
+      if (recentTools.length > 4) recentTools.shift();
       const now = Date.now();
       if (now - lastUpdate < STATUS_UPDATE_MIN_MS) return;
       lastUpdate = now;
-      status.update(`⏳ ${label}\n\`\`\`${note.replace(/`/g, "'")}\`\`\``);
+      status.update(currentFrame());
     };
+    // Heartbeat: the card ticks every 5s no matter what. A ticking timer means
+    // the run is alive; a stopped timer means the process died — the reader
+    // can always tell the difference.
+    const heartbeat = setInterval(() => status.update(currentFrame()), 5000);
 
-    const answer = await runAgent({
-      provider,
-      model,
-      agent,
-      messages,
-      toolContext: { executor },
-      onProgress,
-    });
+    activeRuns++;
+    let answer: string;
+    try {
+      answer = await runAgent({
+        provider,
+        model,
+        agent,
+        messages,
+        toolContext: { executor },
+        onProgress,
+      });
+    } catch (err) {
+      await status.done({ title: title("❌"), detail: recentTools.join("\n") || undefined });
+      throw err;
+    } finally {
+      activeRuns--;
+      clearInterval(heartbeat);
+    }
 
-    await status.done(`✅ ${label}`);
+    console.log(`[done] ${msg.threadKey} ${answer.length} chars`);
+    await status.done({ title: title("✅") });
     await io.reply(answer);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -89,7 +133,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
 
 /** Prefixes the core stamps on status text — adapters use this to filter their
  *  own status noise out of history. */
-export const STATUS_PREFIXES = ["⏳", "✅"];
+export const STATUS_PREFIXES = ["⏳", "✅", "◐", "◓", "◑", "◒"];
 
 function buildMessages(history: HistoryItem[], currentText: string): ChatMessage[] {
   const messages: ChatMessage[] = history.map((h) => ({

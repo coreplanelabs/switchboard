@@ -26,10 +26,18 @@ export interface HistoryItem {
   text: string;
 }
 
+/** A structured progress frame; adapters decide how to render it. */
+export interface StatusUpdate {
+  /** one-line headline, e.g. "⚡ review on anthropic/claude-fable-5 · 42s" */
+  title: string;
+  /** recent activity, shown as preformatted text (e.g. last tool commands) */
+  detail?: string;
+}
+
 /** A live, updatable progress indicator (e.g. an edited Slack message). */
 export interface StatusHandle {
-  update(note: string): void;
-  done(summary: string): Promise<void>;
+  update(frame: StatusUpdate): void;
+  done(frame: StatusUpdate): Promise<void>;
 }
 
 /** What the core needs from a channel to serve one request. */
@@ -37,7 +45,7 @@ export interface ChannelIO {
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
   reply(text: string): Promise<void>;
   /** Create a progress indicator. Adapters may return a no-op handle. */
-  status(initial: string): Promise<StatusHandle>;
+  status(initial: StatusUpdate): Promise<StatusHandle>;
   /**
    * Prior turns of this conversation, oldest first, excluding the triggering
    * message and any bot status noise. Adapters without history return [].

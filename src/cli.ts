@@ -8,7 +8,7 @@
 import { ConfigStore } from "./config.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { dispatch } from "./core/dispatcher.js";
-import type { ChannelIO, StatusHandle } from "./core/types.js";
+import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
@@ -16,11 +16,11 @@ class ConsoleIO implements ChannelIO {
   async reply(text: string): Promise<void> {
     console.log("\n" + text);
   }
-  async status(initial: string): Promise<StatusHandle> {
-    console.error(initial);
+  async status(initial: StatusUpdate): Promise<StatusHandle> {
+    console.error(initial.title);
     return {
-      update: (note) => console.error(note.split("\n").join(" | ")),
-      done: async (summary) => console.error(summary),
+      update: (f) => console.error([f.title, f.detail].filter(Boolean).join(" | ").split("\n").join(" | ")),
+      done: async (f) => console.error(f.title),
     };
   }
   async history(): Promise<[]> {

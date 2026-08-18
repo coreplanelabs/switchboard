@@ -35,6 +35,26 @@ async function main() {
   console.log(
     `switchboard running (providers: ${providers.names().join(", ")}; default agent: ${config.config.defaults.agent})`,
   );
+
+  // Graceful drain: close the Slack socket (no new events), let in-flight
+  // agent runs finish (up to 15 min), then exit. A plain kill mid-run loses
+  // the run and leaves a frozen status card in the thread.
+  const { activeRunCount } = await import("./core/dispatcher.js");
+  let draining = false;
+  const drain = async (signal: string) => {
+    if (draining) return;
+    draining = true;
+    console.log(`[drain] ${signal}: closing Slack socket, ${activeRunCount()} run(s) in flight`);
+    await app.stop().catch(() => {});
+    const deadline = Date.now() + 15 * 60_000;
+    while (activeRunCount() > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    console.log(`[drain] exiting (${activeRunCount()} run(s) abandoned)`);
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => void drain("SIGTERM"));
+  process.on("SIGINT", () => void drain("SIGINT"));
 }
 
 main().catch((err) => {
