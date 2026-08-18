@@ -1,6 +1,6 @@
 import bolt from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
-import type { ChannelIO, HistoryItem, StatusHandle } from "../core/types.js";
+import type { ChannelIO, HistoryItem, StatusHandle, StatusUpdate } from "../core/types.js";
 
 // Slack channel adapter: pure transport. Wires Bolt (Socket Mode) events into
 // the core dispatcher and implements ChannelIO on top of the Slack Web API.
@@ -95,19 +95,21 @@ class SlackIO implements ChannelIO {
     }
   }
 
-  async status(initial: string): Promise<StatusHandle> {
+  async status(initial: StatusUpdate): Promise<StatusHandle> {
     const posted = await this.client.chat.postMessage({
       channel: this.ev.channel,
       thread_ts: this.ev.threadTs,
-      text: initial,
+      ...render(initial),
     });
     const ts = posted.ts as string;
-    const edit = (text: string) =>
-      this.client.chat.update({ channel: this.ev.channel, ts, text }).catch(() => {});
+    const edit = (frame: StatusUpdate) =>
+      this.client.chat
+        .update({ channel: this.ev.channel, ts, ...render(frame) })
+        .catch(() => {});
     return {
-      update: (note) => void edit(note),
-      done: async (summary) => {
-        await edit(summary);
+      update: (frame) => void edit(frame),
+      done: async (frame) => {
+        await edit(frame);
       },
     };
   }
@@ -138,6 +140,20 @@ class SlackIO implements ChannelIO {
     }
     return items;
   }
+}
+
+/** Status frames render as Block Kit: context headline + preformatted activity. */
+function render(frame: StatusUpdate): { text: string; blocks: object[] } {
+  const blocks: object[] = [
+    { type: "context", elements: [{ type: "mrkdwn", text: frame.title }] },
+  ];
+  if (frame.detail) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: "```" + frame.detail.slice(0, 2900) + "```" },
+    });
+  }
+  return { text: frame.title, blocks };
 }
 
 function chunkText(text: string, limit: number): string[] {
