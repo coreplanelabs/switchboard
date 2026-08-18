@@ -21,16 +21,23 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   const toolsByName = new Map(tools.map((t) => [t.name, t]));
   const messages: ChatMessage[] = [...opts.messages];
 
-  // update_status-only turns don't consume the budget (they're bookkeeping,
-  // not work); the absolute cap below still bounds the loop.
+  // The wall clock is the real budget; turns are a backstop. At the deadline
+  // the loop ends and the agent is forced to write up findings so far.
+  const deadline = Date.now() + opts.agent.maxMinutes * 60_000;
+  const warnAt = deadline - Math.min(3 * 60_000, opts.agent.maxMinutes * 15_000);
+  let warned = false;
+
+  // update_status-only turns don't consume the turn budget (bookkeeping,
+  // not work); the absolute iteration cap still bounds the loop.
   let turn = 0;
-  for (let iteration = 0; turn < opts.agent.maxTurns && iteration < opts.agent.maxTurns * 2; iteration++) {
+  for (let iteration = 0; turn < opts.agent.maxTurns && iteration < opts.agent.maxTurns * 2 && Date.now() < deadline; iteration++) {
     const result = await opts.provider.complete({
       model: opts.model,
       system: opts.agent.system,
       messages,
       tools: tools.length > 0 ? tools : undefined,
       maxTokens: opts.agent.maxTokens,
+      effort: opts.agent.effort,
     });
 
     if (result.stopReason === "refusal") {
@@ -78,12 +85,23 @@ export async function runAgent(opts: RunOptions): Promise<string> {
         });
       }
     }
+    // One-time wrap-up warning as time runs low, attached to the tool results.
+    if (!warned && Date.now() >= warnAt) {
+      warned = true;
+      const minutesLeft = Math.max(1, Math.round((deadline - Date.now()) / 60_000));
+      opts.onProgress?.(`~${minutesLeft} min left — signaling wrap-up`);
+      results.push({
+        type: "text",
+        text: `⏱ Time budget: about ${minutesLeft} minute(s) of tool time remain before cutoff. Finish your current check and start consolidating your answer; prefer writing up over starting new exploration.`,
+      });
+    }
     messages.push({ role: "user", content: results });
   }
 
-  // Budget exhausted: make one final tool-less call so the work so far is
-  // written up instead of discarded.
-  opts.onProgress?.("turn budget exhausted — writing up findings so far");
+  // Budget exhausted (time or turns): one final tool-less call so the work
+  // so far is written up instead of discarded.
+  const wasTimeout = Date.now() >= deadline;
+  opts.onProgress?.(`${wasTimeout ? "time" : "turn"} budget exhausted — writing up findings so far`);
   messages.push({
     role: "user",
     content: [
@@ -100,9 +118,10 @@ export async function runAgent(opts: RunOptions): Promise<string> {
     maxTokens: opts.agent.maxTokens,
   });
   const text = collectText(finale.content);
+  const budgetLabel = wasTimeout ? `${opts.agent.maxMinutes}-minute` : `${opts.agent.maxTurns}-turn`;
   return text
-    ? `⚠️ _Hit the ${opts.agent.maxTurns}-turn budget before finishing — findings so far:_\n\n${text}`
-    : `Stopped after ${opts.agent.maxTurns} turns without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
+    ? `⚠️ _Hit the ${budgetLabel} budget before finishing — findings so far:_\n\n${text}`
+    : `Stopped at the ${budgetLabel} budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
 }
 
 function collectText(parts: ContentPart[]): string {

@@ -17,7 +17,7 @@ export interface Executor {
 }
 
 export const BASH_TIMEOUT_MS = 5 * 60_000;
-const MAX_OUTPUT = 30_000;
+const MAX_OUTPUT = 120_000;
 
 export function truncate(s: string): string {
   return s.length > MAX_OUTPUT

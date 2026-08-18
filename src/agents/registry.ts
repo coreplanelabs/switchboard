@@ -8,8 +8,15 @@ export interface AgentDef {
   system: string;
   /** key into TOOLSETS: "full" | "readonly" | "none" */
   toolset: "full" | "readonly" | "none";
+  /** backstop only — the wall clock below is the real budget */
   maxTurns: number;
   maxTokens: number;
+  /** hard wall-clock budget for the tool loop; at the deadline the agent is
+   *  cut off and forced to write up findings so far */
+  maxMinutes: number;
+  /** model effort (Anthropic output_config.effort); omit for model default.
+   *  Lower effort = much faster turns. Skipped for models without support. */
+  effort?: "low" | "medium" | "high";
 }
 
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
@@ -35,14 +42,17 @@ const REVIEW_SYSTEM = `You are Switchboard's code review agent, operating from a
 
 You have bash and read_file tools in a workspace directory. Do not modify code, commit, or push — you are read-only by convention.
 
-Typical job: review a pull request and produce a high-quality review.
-1. Fetch the PR: \`gh pr view <ref> --json title,body,url\` and \`gh pr diff <ref>\` (clone the repo first if you need full-file context — reviewing hunks alone misses bugs).
-2. Read the surrounding code for every non-trivial hunk, not just the diff. Conserve turns: batch related commands with && and read several files per tool call; on very large PRs, prioritize the riskiest files first so a budget cutoff still yields the important findings.
-3. Report every issue you find, including ones you are uncertain about or consider low-severity. For each finding include a severity estimate and your confidence, with file:line references and a concrete failure scenario for correctness bugs.
-4. Order findings most-severe first. Distinguish correctness bugs from style/simplification suggestions.
-5. If the change looks correct, say so plainly — do not manufacture findings.
+Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your context window is large enough to hold the entire change. Speed matters: a review should take minutes, not an hour.
 
-Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Clone repo and read the diff", "Run the test suite"), never commands. This is the only progress the user sees while you work.
+1. GATHER, in 2-4 batched tool calls total:
+   - \`gh pr view <ref> --json title,body,url,baseRefName\` and \`gh pr diff <ref>\` (the complete diff) in one command
+   - clone the repo and check out the PR branch
+   - in ONE command, print the full current contents of every changed source file, e.g.: \`gh pr diff <ref> --name-only | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
+   - if the PR is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
+2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then design/simplification notes. At most 2-3 targeted follow-up reads if a specific caller or callee is load-bearing — never a general exploration loop.
+3. REPORT every issue you find, including uncertain or low-severity ones, each with severity, confidence, and file:line. Order findings most-severe first. If the change looks correct, say so plainly — do not manufacture findings.
+
+Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending), update as items start (✱) and finish (✓). Items are short outcomes, never commands.
 
 Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
 
@@ -57,6 +67,7 @@ export const AGENTS: Record<string, AgentDef> = {
     toolset: "none",
     maxTurns: 1,
     maxTokens: 16000,
+    maxMinutes: 5,
   },
   coding: {
     name: "coding",
@@ -65,14 +76,17 @@ export const AGENTS: Record<string, AgentDef> = {
     toolset: "full",
     maxTurns: 100,
     maxTokens: 64000,
+    maxMinutes: 45,
   },
   review: {
     name: "review",
     description: "Reviews PRs and produces high-quality findings. Read-only.",
     system: REVIEW_SYSTEM,
     toolset: "readonly",
-    maxTurns: 80,
+    maxTurns: 12, // gather-once architecture: ~4 gather calls + analysis + targeted follow-ups
     maxTokens: 64000,
+    maxMinutes: 12, // safety net, not the mechanism — typical reviews land in ~5
+    effort: "medium", // fast turns; one big-context pass does the deep work
   },
 };
 
