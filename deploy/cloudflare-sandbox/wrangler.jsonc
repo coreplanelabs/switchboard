@@ -5,8 +5,10 @@
   "compatibility_date": "2026-08-01",
   // coreplane-infra account — same as terrateam and the switchboard bot
   "account_id": "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
-  // Reachable only with the SANDBOX_TOKEN bearer secret; workers.dev URL is fine.
-  "workers_dev": true,
+  // Reachable only with the SANDBOX_TOKEN bearer secret. Custom domain on the
+  // coreplanelabs.dev zone (same account) so the bot config has a stable URL.
+  "workers_dev": false,
+  "routes": [{ "pattern": "switchboard-sandbox.coreplanelabs.dev", "custom_domain": true }],
   "observability": { "enabled": true },
   "containers": [
     {

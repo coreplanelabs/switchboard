@@ -135,14 +135,25 @@ Railway/Render/k8s also work with the same image — anything that runs an alway
 
 ### Deploying on Cloudflare Containers (recommended)
 
+Two Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastructure` (per-worker `package.json` with pinned wrangler, `secrets.txt`, manual `wrangler deploy` with Docker running):
+
 ```bash
-cd deploy/cloudflare
-npm install @cloudflare/containers
-wrangler secret put SLACK_BOT_TOKEN   # repeat: SLACK_APP_TOKEN, ANTHROPIC_API_KEY, E2B_API_KEY, GH_TOKEN
-wrangler deploy                        # builds ../../Dockerfile and ships it
+# one-time: wrangler login (account: coreplane-infra), Docker running
+
+# 1. Sandbox worker — per-thread execution VMs at switchboard-sandbox.coreplanelabs.dev
+cd deploy/cloudflare-sandbox && npm install
+openssl rand -hex 32 | tee /tmp/sandbox-token.txt | npm run --silent deploy >/dev/null 2>&1 || true
+npm run secrets   # paste the generated token for SANDBOX_TOKEN
+npm run deploy
+
+# 2. Bot worker — always-on Switchboard container
+cd ../cloudflare && npm install
+npm run secrets   # prompts through secrets.txt (Slack, Anthropic, SANDBOX_TOKEN, GitHub App)
+npm run deploy
+npm run tail      # watch it connect: "switchboard running (providers: anthropic...)"
 ```
 
-The shim (`deploy/cloudflare/worker.ts`) mirrors the proven `terrateam/` deployment in `coreplanelabs/infrastructure`: singleton Durable Object, `sleepAfter: 2h`, 5-minute cron keep-alive, secrets forwarded as container env. Long-term this belongs in the infrastructure repo's Terraform/Terrateam flow like terrateam itself.
+The bot shim mirrors terrateam exactly: singleton Durable Object, `sleepAfter: 2h`, 5-minute cron keep-alive, secrets forwarded as container env, `startAndWaitForPorts` with generous timeout. Production behavior comes from `config/config.production.yaml` (committed, no secrets), selected via `SWITCHBOARD_CONFIG`; the sandbox Worker gets a stable custom domain on the `coreplanelabs.dev` zone so that config never changes.
 
 ### What any host must provide
 
