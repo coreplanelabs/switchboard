@@ -171,6 +171,23 @@ The shim's field names track the `@cloudflare/containers` beta — sanity-check 
 
 DMs to the bot work the same way (no mention needed).
 
+## Permissions
+
+Optional `permissions` block in `config.yaml` — absent means everything is open:
+
+```yaml
+permissions:
+  admins: [U0123ADMIN]      # bypass all restrictions
+  agents:
+    coding: [U0456DEV]      # only these users (+ admins) may run coding
+  channelConfig: []          # who may run `config set/clear channel`
+                             # empty = admins only; key absent = everyone
+```
+
+- Agent allowlists are enforced **at run time against the resolved agent**, so they can't be bypassed via `agent:` directives, `config set me`, or channel defaults.
+- `config set me` is always allowed — pointing yourself at a restricted agent is harmless because the run-time gate still applies.
+- Denials reply in-thread naming the admins to ask; `config show` lists which agents are unavailable to you.
+
 ## Setup
 
 1. **Create the Slack app** (api.slack.com/apps → From scratch):
@@ -210,6 +227,6 @@ Add an entry to `AGENTS` in `src/agents/registry.ts` (system prompt, toolset, tu
 
 ## Security notes
 
-- The `bash` tool executes model-generated commands on the host with the bot's permissions. Run Switchboard in a container or dedicated user/VM, scope the `gh` token to the repos it should touch, and restrict which channels can reach it.
+- The `bash` tool executes model-generated commands on the host with the bot's permissions. Run Switchboard in a container or dedicated user/VM, scope the `gh` token to the repos it should touch, restrict which channels can reach it, and put the `coding` agent behind a `permissions.agents` allowlist.
 - API keys are only ever read from environment variables (`apiKeyEnv`), never from config files.
 - Workspaces are confined for file tools, but `bash` is inherently unconfined — isolation belongs at the host level.
