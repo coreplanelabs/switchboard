@@ -40,6 +40,16 @@ defaults:
 #   U0123456789:
 #     model: openai/gpt-5
 
+# Authorization (optional — absent means everything is open).
+# Enforcement is at run time against the resolved agent, so allowlists can't
+# be bypassed via directives or config scopes.
+# permissions:
+#   admins: [U0123ADMIN]            # bypass all restrictions below
+#   agents:
+#     coding: [U0456DEV]            # only these users (+ admins) may run coding
+#   channelConfig: []               # who may run `config set/clear channel`;
+#                                   # empty = admins only; key absent = everyone
+
 # Where per-conversation agent workspaces are created.
 # On Fly.io set this to ./data/workspaces so checkouts live on the volume.
 workspaceDir: ./workspaces

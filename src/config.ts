@@ -20,6 +20,18 @@ export interface Scope {
   models?: Record<string, string>;
 }
 
+export interface Permissions {
+  /** Users who bypass all restrictions below. */
+  admins?: string[];
+  /** If an agent is listed, only these users (+ admins) may run it. */
+  agents?: Record<string, string[]>;
+  /**
+   * If present, only these users (+ admins) may run `config set channel` /
+   * `config clear channel`. Empty list = admins only. Absent = everyone.
+   */
+  channelConfig?: string[];
+}
+
 export interface AppConfig {
   providers: Record<string, ProviderConfig>;
   defaults: {
@@ -30,6 +42,7 @@ export interface AppConfig {
   };
   channels?: Record<string, Scope>;
   users?: Record<string, Scope>;
+  permissions?: Permissions;
   workspaceDir?: string;
 }
 
@@ -103,6 +116,39 @@ export class ConfigStore {
     return { agentName, modelRef };
   }
 
+  // ---- permissions ---------------------------------------------------------
+  // Absent config = open. Enforcement happens at run time against the
+  // *resolved* agent, so no config layer (including "config set me") can
+  // bypass an agent allowlist.
+
+  private isAdmin(userId: string): boolean {
+    return this.config.permissions?.admins?.includes(userId) ?? false;
+  }
+
+  canRunAgent(userId: string, agentName: string): boolean {
+    const allowlist = this.config.permissions?.agents?.[agentName];
+    if (!allowlist) return true; // agent not restricted
+    return this.isAdmin(userId) || allowlist.includes(userId);
+  }
+
+  canEditChannelConfig(userId: string): boolean {
+    const allowlist = this.config.permissions?.channelConfig;
+    if (!allowlist) return true; // key absent = everyone
+    return this.isAdmin(userId) || allowlist.includes(userId);
+  }
+
+  /** Who to ask when denied — for actionable error messages. */
+  adminsHint(): string {
+    const admins = this.config.permissions?.admins ?? [];
+    return admins.length > 0 ? admins.map((u) => `<@${u}>`).join(", ") : "an admin";
+  }
+
+  /** Agents restricted by allowlist that this user cannot run. */
+  restrictedAgentsFor(userId: string): string[] {
+    const agents = this.config.permissions?.agents ?? {};
+    return Object.keys(agents).filter((a) => !this.canRunAgent(userId, a));
+  }
+
   setChannelOverride(channelId: string, patch: Scope): Scope {
     this.overrides.channels[channelId] = { ...this.overrides.channels[channelId], ...patch };
     this.save();
@@ -133,6 +179,13 @@ export class ConfigStore {
       `*Channel scope:* ${fmtScope(this.channelScope(channelId))}`,
       `*Your scope:* ${fmtScope(this.userScope(userId))}`,
     ];
+    const denied = this.restrictedAgentsFor(userId);
+    if (denied.length > 0) {
+      lines.push(`*Not available to you:* ${denied.map((a) => `\`${a}\``).join(", ")} (ask ${this.adminsHint()})`);
+    }
+    if (!this.canEditChannelConfig(userId)) {
+      lines.push(`*Note:* channel config changes are restricted (ask ${this.adminsHint()})`);
+    }
     return lines.join("\n");
   }
 

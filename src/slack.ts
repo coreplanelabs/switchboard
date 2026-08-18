@@ -79,6 +79,15 @@ async function handleRequest(deps: SlackDeps, client: SlackClient, req: Incoming
       userId: req.user,
       request: { agent: directives.agent, model: directives.model },
     });
+    // Authorization gate: checked against the *resolved* agent and invoking
+    // user, so no config layer (directives, user or channel scope) bypasses it.
+    if (!deps.config.canRunAgent(req.user, resolved.agentName)) {
+      await post(
+        `:no_entry: You're not on the allowlist for the \`${resolved.agentName}\` agent. Ask ${deps.config.adminsHint()} for access.`,
+      );
+      return;
+    }
+
     const agent = getAgent(resolved.agentName);
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
     const provider = deps.providers.get(providerName);
@@ -213,6 +222,13 @@ function handleConfigCommand(config: ConfigStore, req: IncomingRequest): string 
   const scopeMatch = rest.trim().match(/^(channel|me)\s*(.*)$/is);
   if (!scopeMatch) return `Usage: \`config ${verb} channel|me ...\``;
   const [, scopeName, args] = scopeMatch;
+
+  // Channel-scope changes affect everyone in the channel — gate them.
+  // "me" scope stays open: pointing yourself at a restricted agent is harmless
+  // because the run-time agent gate still applies to you.
+  if (scopeName === "channel" && !config.canEditChannelConfig(req.user)) {
+    return `:no_entry: Channel config changes are restricted. Ask ${config.adminsHint()}.`;
+  }
 
   if (verb === "clear") {
     if (scopeName === "channel") config.clearChannelOverride(req.channel);
