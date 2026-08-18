@@ -48,11 +48,15 @@ export default {
     const body = (await request.json().catch(() => ({}))) as Record<string, string>;
 
     try {
+      // Per-exec `env` doesn't propagate through the default session in SDK
+      // 0.3.7 — set env at the sandbox level instead (persists per sandbox,
+      // which is per thread, so this is exactly the scope we want).
+      if (Object.keys(envVars).length > 0) {
+        await sandbox.setEnvVars(envVars);
+      }
       switch (url.pathname) {
         case "/exec": {
-          const result = await sandbox.exec(`mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${body.command}`, {
-            env: envVars,
-          });
+          const result = await sandbox.exec(`mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${body.command}`);
           return json({
             stdout: result.stdout ?? "",
             stderr: result.stderr ?? "",
