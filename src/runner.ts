@@ -21,7 +21,10 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   const toolsByName = new Map(tools.map((t) => [t.name, t]));
   const messages: ChatMessage[] = [...opts.messages];
 
-  for (let turn = 0; turn < opts.agent.maxTurns; turn++) {
+  // update_status-only turns don't consume the budget (they're bookkeeping,
+  // not work); the absolute cap below still bounds the loop.
+  let turn = 0;
+  for (let iteration = 0; turn < opts.agent.maxTurns && iteration < opts.agent.maxTurns * 2; iteration++) {
     const result = await opts.provider.complete({
       model: opts.model,
       system: opts.agent.system,
@@ -45,6 +48,8 @@ export async function runAgent(opts: RunOptions): Promise<string> {
       }
       return text || "_(no response)_";
     }
+
+    if (!toolUses.every((t) => t.name === "update_status")) turn++;
 
     // Echo the assistant turn, run tools, append results as one user turn.
     messages.push({ role: "assistant", content: result.content });
@@ -76,7 +81,28 @@ export async function runAgent(opts: RunOptions): Promise<string> {
     messages.push({ role: "user", content: results });
   }
 
-  return `Stopped after ${opts.agent.maxTurns} turns without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
+  // Budget exhausted: make one final tool-less call so the work so far is
+  // written up instead of discarded.
+  opts.onProgress?.("turn budget exhausted — writing up findings so far");
+  messages.push({
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: "You have reached the turn budget and can make no more tool calls. Write your final answer now from what you have learned so far: report your findings/results to date, then state plainly which parts of the task you did not get to and what a follow-up (in this thread, to reuse this workspace) should focus on.",
+      },
+    ],
+  });
+  const finale = await opts.provider.complete({
+    model: opts.model,
+    system: opts.agent.system,
+    messages,
+    maxTokens: opts.agent.maxTokens,
+  });
+  const text = collectText(finale.content);
+  return text
+    ? `⚠️ _Hit the ${opts.agent.maxTurns}-turn budget before finishing — findings so far:_\n\n${text}`
+    : `Stopped after ${opts.agent.maxTurns} turns without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
 }
 
 function collectText(parts: ContentPart[]): string {

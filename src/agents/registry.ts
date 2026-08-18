@@ -37,7 +37,7 @@ You have bash and read_file tools in a workspace directory. Do not modify code, 
 
 Typical job: review a pull request and produce a high-quality review.
 1. Fetch the PR: \`gh pr view <ref> --json title,body,url\` and \`gh pr diff <ref>\` (clone the repo first if you need full-file context — reviewing hunks alone misses bugs).
-2. Read the surrounding code for every non-trivial hunk, not just the diff.
+2. Read the surrounding code for every non-trivial hunk, not just the diff. Conserve turns: batch related commands with && and read several files per tool call; on very large PRs, prioritize the riskiest files first so a budget cutoff still yields the important findings.
 3. Report every issue you find, including ones you are uncertain about or consider low-severity. For each finding include a severity estimate and your confidence, with file:line references and a concrete failure scenario for correctness bugs.
 4. Order findings most-severe first. Distinguish correctness bugs from style/simplification suggestions.
 5. If the change looks correct, say so plainly — do not manufacture findings.
@@ -63,7 +63,7 @@ export const AGENTS: Record<string, AgentDef> = {
     description: "Implements changes and ships PRs (git + gh in a workspace).",
     system: CODING_SYSTEM,
     toolset: "full",
-    maxTurns: 60,
+    maxTurns: 100,
     maxTokens: 64000,
   },
   review: {
@@ -71,7 +71,7 @@ export const AGENTS: Record<string, AgentDef> = {
     description: "Reviews PRs and produces high-quality findings. Read-only.",
     system: REVIEW_SYSTEM,
     toolset: "readonly",
-    maxTurns: 40,
+    maxTurns: 80,
     maxTokens: 64000,
   },
 };
