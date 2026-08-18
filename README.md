@@ -95,7 +95,7 @@ flowchart LR
     subgraph img [One Docker image]
         P[node dist/index.js<br/>+ git + gh<br/>health probe on :8080]
     end
-    img -->|A · docker compose on EC2 — recommended| EC2[EC2 t4g.micro<br/>no inbound rules, SSM access]
+    img -->|A · ECS Fargate service — recommended| ECS[Fargate task, desired count 1<br/>no inbound, EFS optional]
     img -->|B · fly deploy| FLY[Fly.io Machine<br/>fly.toml + volume at /app/data]
     img -->|C · docker compose up -d| VPS[Any VPS / home server]
     img -->|D · wrangler deploy| CF[Cloudflare Containers<br/>Worker shim, deploy/cloudflare/]
@@ -106,37 +106,31 @@ flowchart LR
 
 | Option | Fit | Notes |
 |---|---|---|
-| **A. EC2 + compose** (`deploy/aws/`) — **recommended if you run AWS** | No new vendor; existing IAM/billing/monitoring; `t4g.micro` ~$6/mo (free-tier/credit eligible) | Zero inbound security-group rules (outbound-only websocket); SSM Session Manager instead of SSH; EBS persists everything |
+| **A. AWS ECS Fargate service** — **recommended if you run AWS** | Managed containers on the account you already have; no instances to own (the usual reason raw EC2 is banned org-side) | One always-on task (0.25–0.5 vCPU / 1GB, ~$9–12/mo); zero inbound SG rules; secrets from Secrets Manager; optional EFS at `/app/data` for persistent workspaces (fine without — state rebuilds from Slack, repos re-clone) |
 | **B. Fly.io Machine** (`fly.toml`) — recommended otherwise | Cheapest managed always-on (~$3–6/mo + $0.15/GB volume); one-command deploys | One volume at `/app/data` persists overrides + workspaces (set `workspaceDir: ./data/workspaces`). Health-checked, auto-restarted |
 | **C. Docker on any VPS** (`docker-compose.yml`) | You already have a box, or want max control | Volumes persist `data/` and `workspaces/`; compose `restart: unless-stopped` + Docker's systemd unit cover supervision |
 | **D. Cloudflare Containers** (`deploy/cloudflare/`) | Only if consolidating on CF matters more than cost/simplicity | Needs a Worker + DO + cron shim just to stay alive; always-on container billing; **disk is ephemeral** — workspaces and `data/overrides.json` reset on instance restart (thread context rebuilds from Slack; put durable config in `config.yaml`) |
 
 Railway/Render/k8s also work with the same image — anything that runs an always-on container with a volume. **Cloud sandbox providers (E2B, Modal, Daytona, Cloudflare Sandbox) are not a hosting option for the bot** — they solve a different problem: isolating each agent run's `bash` in a throwaway VM. That's the right future hardening step for the tool layer once untrusted users can reach the coding agent; the bot process itself still needs a long-lived home.
 
-### Deploying on EC2 (recommended if you already run AWS)
+### Requesting a home for it (ECS Fargate or equivalent)
 
-No new vendor, IAM/billing you already have, and the workload fits a tiny instance. `t4g.micro` (1GB, ARM, ~$6/mo) is enough; `t4g.small` if you want headroom.
+What the service needs — paste this into your platform-team request:
 
-```bash
-# 1. Launch: Amazon Linux 2023, t4g.micro, 10–20GB gp3 root volume,
-#    security group with NO inbound rules (Slack is outbound-only; use SSM
-#    Session Manager instead of SSH), user-data from deploy/aws/user-data.sh
-# 2. Ship the app (from your machine):
-rsync -a --exclude node_modules --exclude workspaces . ec2-user@<host>:/opt/switchboard/
-# 3. On the instance:
-cd /opt/switchboard
-cp config/config.example.yaml config/config.yaml   # edit models/defaults
-vi .env                                            # tokens + keys (or template from SSM Parameter Store)
-docker compose up -d
-docker compose logs -f    # look for "switchboard running (providers: ...)"
-```
+- **Runtime:** 1 Docker container (image provided, we can push to ECR), always-on, single instance (`desiredCount: 1`), no autoscaling
+- **Size:** 0.25–0.5 vCPU, 512MB–1GB RAM (mostly idle)
+- **Network:** *outbound HTTPS only* — `slack.com`/`wss-*.slack.com`, `api.anthropic.com`, `api.openai.com` (or other model endpoints), `github.com`. **No inbound traffic at all** (the app dials out to Slack over a websocket). Private subnet + NAT or public IP + empty inbound SG — either works
+- **Secrets:** 4–5 env vars from Secrets Manager/SSM: `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `ANTHROPIC_API_KEY`, `GH_TOKEN`, optionally `OPENAI_API_KEY`
+- **IAM task role:** none/empty — the app makes no AWS API calls, and its `bash` tool executes model-generated commands, so least privilege matters here specifically
+- **Storage:** optional 2–5GB persistent volume (EFS) at `/app/data` for git checkouts + runtime config overrides; degrades gracefully without it (restarts re-clone; thread context rebuilds from Slack)
+- **Health:** `GET :8080/healthz` returns 200; restart-on-failure policy
+- **Logs:** stdout/stderr → CloudWatch
 
-Notes:
-- **Zero inbound rules.** The health port stays bound to 127.0.0.1 via compose; access the box with SSM Session Manager. This is the smallest possible network blast radius.
-- Secrets: fine to start with `.env` on the instance; graduate to SSM Parameter Store / Secrets Manager rendered into `.env` at boot when you productionize.
-- The root EBS volume persists `data/` and `workspaces/` across restarts (compose named volumes live on it). Instance stop/start is safe; state rebuilds from Slack regardless.
-- `restart: unless-stopped` in compose + `systemctl enable docker` = survives reboots. No other supervision needed.
-- ECS Fargate is the "cattle" alternative, but it needs EFS for persistent workspaces and more moving parts — not worth it for one instance.
+### Why not run it *in* a sandbox (Cloudflare Sandbox, E2B, Modal)?
+
+Sandboxes are per-run execution environments driven by a caller: ephemeral disk, lifecycle owned by whoever spawned them, designed to be torn down. The bot is the opposite shape — a long-lived daemon that must hold a websocket open 24/7 and *initiate* work. You can technically start a daemon inside a Cloudflare Sandbox (it's a container underneath), but you inherit exactly the Cloudflare Containers caveats above plus an extra orchestration layer — it's the same deployment, made worse.
+
+Where a sandbox **is** the right tool: the agents' `bash`. The strongest future architecture splits the two — the bot (a small, tool-less process) lives on Fargate/Fly, and each agent run executes its commands in a throwaway per-thread sandbox (Cloudflare Sandbox, E2B, ...). That removes model-generated code execution from the bot host entirely. The `RunnableTool` interface in `src/tools/` is the seam: implement a sandbox-backed toolset and nothing else changes.
 
 ### Deploying on Fly.io (recommended if you don't want to manage an instance)
 
