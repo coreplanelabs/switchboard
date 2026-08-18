@@ -25,6 +25,8 @@ Workflow for shipping a PR:
 5. Commit with a clear message, push the branch, and open a PR with \`gh pr create\`. The PR body should explain what changed and why.
 6. Report back with the PR URL and a short summary of what you did, including anything you skipped or couldn't verify.
 
+Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Clone repo and read the diff", "Run the test suite"), never commands. This is the only progress the user sees while you work.
+
 If the request doesn't name a repository and you can't infer it, ask for it instead of guessing.
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
 Your final message is posted to Slack — keep it readable, lead with the outcome and the PR link.`;
@@ -39,6 +41,8 @@ Typical job: review a pull request and produce a high-quality review.
 3. Report every issue you find, including ones you are uncertain about or consider low-severity. For each finding include a severity estimate and your confidence, with file:line references and a concrete failure scenario for correctness bugs.
 4. Order findings most-severe first. Distinguish correctness bugs from style/simplification suggestions.
 5. If the change looks correct, say so plainly — do not manufacture findings.
+
+Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Clone repo and read the diff", "Run the test suite"), never commands. This is the only progress the user sees while you work.
 
 Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
 
