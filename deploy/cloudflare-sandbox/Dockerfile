@@ -1,6 +1,8 @@
 # Sandbox container image: the @cloudflare/sandbox base plus git + gh, so the
 # coding/review agents work out of the box.
-FROM docker.io/cloudflare/sandbox:latest
+# The tag MUST match the @cloudflare/sandbox version in package.json exactly
+# (no 'latest' tag exists) — bump both together.
+FROM docker.io/cloudflare/sandbox:0.3.7
 USER root
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git curl ca-certificates \
