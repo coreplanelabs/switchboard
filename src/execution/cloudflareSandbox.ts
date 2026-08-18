@@ -27,16 +27,22 @@ export class CloudflareSandboxExecutor implements Executor {
     };
     for (const [k, v] of Object.entries(this.opts.envs)) headers[`x-env-${k}`] = v;
 
-    const res = await fetch(`${this.opts.url.replace(/\/$/, "")}${route}`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok) {
-      throw new Error(`sandbox worker ${route} HTTP ${res.status}: ${String(data.error ?? "")}`);
+    // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
+    const delays = [0, 3000, 6000, 12000];
+    let lastErr = "";
+    for (const delay of delays) {
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      const res = await fetch(`${this.opts.url.replace(/\/$/, "")}${route}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (res.ok) return data;
+      lastErr = `sandbox worker ${route} HTTP ${res.status}: ${String(data.error ?? "")}`;
+      if (res.status < 500) break; // 4xx is not retryable
     }
-    return data;
+    throw new Error(lastErr);
   }
 
   async exec(command: string): Promise<string> {

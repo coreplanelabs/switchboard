@@ -47,12 +47,18 @@ export default {
     const url = new URL(request.url);
     const body = (await request.json().catch(() => ({}))) as Record<string, string>;
 
+    // Env injection is inline per command (base64-safe export prefix): the
+    // per-exec `env` option is ignored in SDK 0.3.7, and setEnvVars only
+    // applies when a session is first created — inline is correct every time
+    // and persists nothing in the sandbox beyond the command's lifetime.
+    const envPrefix = Object.entries(envVars)
+      .map(([k, v]) => `export ${k}="$(echo '${btoa(v)}' | base64 -d)" && `)
+      .join("");
+
     try {
       switch (url.pathname) {
         case "/exec": {
-          const result = await sandbox.exec(`mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${body.command}`, {
-            env: envVars,
-          });
+          const result = await sandbox.exec(`${envPrefix}mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${body.command}`);
           return json({
             stdout: result.stdout ?? "",
             stderr: result.stderr ?? "",
