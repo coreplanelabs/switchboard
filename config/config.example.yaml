@@ -30,23 +30,23 @@ defaults:
 # Static per-channel defaults (channel ID -> scope). Runtime overrides set via
 # "config set channel ..." are stored in data/overrides.json and win over these.
 # channels:
-#   C0123456789:
+#   slack:C0123456789:
 #     agent: review
 #     models:
 #       review: anthropic/claude-opus-5
 
 # Static per-user defaults (user ID -> scope).
 # users:
-#   U0123456789:
+#   slack:U0123456789:
 #     model: openai/gpt-5
 
 # Authorization (optional — absent means everything is open).
 # Enforcement is at run time against the resolved agent, so allowlists can't
 # be bypassed via directives or config scopes.
 # permissions:
-#   admins: [U0123ADMIN]            # bypass all restrictions below
+#   admins: [slack:U0123ADMIN]            # bypass all restrictions below
 #   agents:
-#     coding: [U0456DEV]            # only these users (+ admins) may run coding
+#     coding: [slack:U0456DEV]            # only these users (+ admins) may run coding
 #   channelConfig: []               # who may run `config set/clear channel`;
 #                                   # empty = admins only; key absent = everyone
 

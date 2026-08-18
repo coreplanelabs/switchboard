@@ -189,9 +189,9 @@ Optional `permissions` block in `config.yaml` — absent means everything is ope
 
 ```yaml
 permissions:
-  admins: [U0123ADMIN]      # bypass all restrictions
+  admins: [slack:U0123ADMIN]      # bypass all restrictions
   agents:
-    coding: [U0456DEV]      # only these users (+ admins) may run coding
+    coding: [slack:U0456DEV]      # only these users (+ admins) may run coding
   channelConfig: []          # who may run `config set/clear channel`
                              # empty = admins only; key absent = everyone
 ```
