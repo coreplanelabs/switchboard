@@ -13,10 +13,17 @@ export function mdToMrkdwn(md: string): string {
 }
 
 function convertOutsideInlineCode(text: string): string {
-  return text
-    .split(/(`[^`\n]*`)/g)
-    .map((seg) => (seg.startsWith("`") ? seg : convert(seg)))
-    .join("");
+  // Protect inline code with placeholders instead of splitting: formatting
+  // spans that CONTAIN inline code (e.g. **bold with \`code\`**) must still
+  // convert, which splitting made impossible (the ** halves landed in
+  // different segments).
+  const spans: string[] = [];
+  const protectedText = text.replace(/`[^`\n]*`/g, (m) => {
+    spans.push(m);
+    return `\uE000${spans.length - 1}\uE001`;
+  });
+  const converted = convert(protectedText);
+  return converted.replace(/\uE000(\d+)\uE001/g, (_, i) => spans[Number(i)]);
 }
 
 function convert(text: string): string {
