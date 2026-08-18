@@ -1,10 +1,17 @@
 # Switchboard
 
-A cheap, configurable Slack bot that routes requests to **agents** (coding, review, general) running on **pluggable inference providers**. Replaces/subsumes a plain "Claude in Slack" bot with per-channel, per-user, and per-request configuration.
+A cheap, configurable agent gateway: requests arrive over a **channel** (Slack today; the CLI is a second channel; Discord/Teams/HTTP are adapters away), get routed to an **agent** (coding, review, general), which runs on a **pluggable inference provider** and executes its tools through a **pluggable executor** (local or per-thread micro-VM). Replaces/subsumes a plain "Claude in Slack" bot with per-channel, per-user, and per-request configuration.
 
-- **Socket Mode** — no public URL, runs on any box (laptop, $5 VPS, a container).
-- **Provider-neutral** — models are addressed as `<provider>/<model>`. Anthropic is supported natively; anything OpenAI-compatible (OpenAI, Groq, Together, Ollama, vLLM, ...) is config-only.
-- **Agents** are prompts + toolsets + turn budgets; any agent can run on any model.
+Every boundary is a swappable seam, same pattern at each one:
+
+| Seam | Interface | Implementations | Adding one |
+|---|---|---|---|
+| Channel | `ChannelIO` + `IncomingMessage` (`src/core/types.ts`) | Slack (Bolt/Socket Mode), CLI | one adapter file in `src/channels/` |
+| Provider | `Provider` (`src/providers/types.ts`) | Anthropic, OpenAI-compatible (OpenAI/Groq/Ollama/vLLM = config-only) | one adapter file, or just config |
+| Executor | `Executor` (`src/execution/executor.ts`) | local host, E2B micro-VM | one backend file + config |
+| Agent | `AgentDef` data (`src/agents/registry.ts`) | general, coding, review | one registry entry |
+
+The **core dispatcher** (`src/core/dispatcher.ts`) is the only place orchestration lives: config commands, directive parsing, layered resolution, permission gates, history assembly, the agent run. Channels are pure transports; the dispatcher never imports a platform SDK.
 
 ## Agents
 
@@ -29,23 +36,21 @@ Runtime overrides persist to `data/overrides.json`. Static defaults for channels
 
 ## Architecture
 
-One long-lived Node process, no inbound server. Bolt opens an **outbound websocket** to Slack (Socket Mode), so there is no public URL, webhook endpoint, or signature verification to host. State lives in Slack threads and on disk — a restart loses nothing except in-flight runs.
+One long-lived Node process, no inbound server. The Slack adapter opens an **outbound websocket** (Socket Mode), so there is no public URL, webhook endpoint, or signature verification to host. State lives in the channel's own thread history and on disk — a restart loses nothing except in-flight runs.
 
 ```mermaid
 flowchart LR
-    subgraph slack [Slack]
-        U[User mentions bot / DMs]
-        T[(Thread history)]
-        S[Status + result messages]
+    subgraph channels [Channel adapters — pure transport]
+        SL[Slack adapter<br/>Bolt, Socket Mode websocket<br/>src/channels/slack.ts]
+        CLI[CLI adapter<br/>src/cli.ts]
+        FUT[Discord / Teams / HTTP<br/>one adapter file each]
     end
 
-    subgraph proc [Switchboard process]
-        B[Bolt app<br/>Socket Mode websocket]
-        H{handleRequest}
+    subgraph core [Core — channel-agnostic]
+        D{core dispatcher<br/>src/core/dispatcher.ts}
         CC[Config commands<br/>show / set / clear / help]
-        R[Config resolution<br/>request > user > channel > defaults]
+        R[Resolution + permission gates<br/>request > user > channel > defaults]
         RUN[runner.ts<br/>agent loop, up to maxTurns]
-        TOOLS[Tools: bash / read / write<br/>confined to workspace dir]
     end
 
     subgraph providers [Provider adapters]
@@ -53,23 +58,20 @@ flowchart LR
         O[openai-compatible<br/>fetch → any /chat/completions]
     end
 
-    subgraph disk [Local state]
-        W[(workspaces/&lt;channel&gt;-&lt;thread&gt;/<br/>git checkouts)]
-        OV[(data/overrides.json)]
-        CF[(config/config.yaml)]
+    subgraph exec [Executors]
+        LX[local<br/>workspace dir on host]
+        EX[e2b<br/>per-thread micro-VM]
     end
 
-    U -->|websocket event| B --> H
-    H -->|config …| CC --> S
-    H --> R
-    T -->|conversations.replies<br/>rebuilds history per request| R
-    CF --> R
-    OV --> R
-    R --> RUN
-    RUN <-->|provider/model prefix picks adapter| A & O
-    RUN <--> TOOLS <--> W
-    RUN -->|progress + final answer| S
+    SL & CLI -->|IncomingMessage + ChannelIO| D
+    D --> CC
+    D --> R --> RUN
+    RUN <-->|provider/model prefix| A & O
+    RUN <-->|bash / read / write| LX & EX
+    D -->|status + replies via ChannelIO| SL & CLI
 ```
+
+Channel adapters translate exactly three things: an incoming event → `IncomingMessage` (namespaced IDs: `slack:C0123`, `slack:U0123`, thread key `slack:C0123:<ts>`), history fetch → `HistoryItem[]`, and replies/status back to the platform (chunking, formatting, message editing are adapter concerns). Everything else is the dispatcher's.
 
 **Agent loop** (`runner.ts`, vendor-blind): call `provider.complete()` → execute any requested tool calls → append results → repeat until the model stops or the turn budget runs out (coding 60, review 40, general 1). Progress notes edit a single Slack status message, rate-limited to one edit per 3s.
 
@@ -113,10 +115,10 @@ flowchart LR
     subgraph img [One Docker image]
         P[node dist/index.js<br/>+ git + gh<br/>health probe on :8080]
     end
-    img -->|A · ECS Fargate service — recommended| ECS[Fargate task, desired count 1<br/>no inbound, EFS optional]
-    img -->|B · fly deploy| FLY[Fly.io Machine<br/>fly.toml + volume at /app/data]
-    img -->|C · docker compose up -d| VPS[Any VPS / home server]
-    img -->|D · wrangler deploy| CF[Cloudflare Containers<br/>Worker shim, deploy/cloudflare/]
+    img -->|A · wrangler deploy — recommended, house pattern| CF[Cloudflare Containers<br/>deploy/cloudflare/, terrateam-style]
+    img -->|B · ECS Fargate service| ECS[Fargate task, desired count 1<br/>no inbound, EFS optional]
+    img -->|C · fly deploy| FLY[Fly.io Machine<br/>fly.toml + volume at /app/data]
+    img -->|D · docker compose up -d| VPS[Any VPS / home server]
     P -.->|outbound websocket| SLK[Slack]
     P -.->|HTTPS| PRV[Model providers]
     P -.->|git/gh over HTTPS| GH[GitHub]
@@ -124,10 +126,12 @@ flowchart LR
 
 | Option | Fit | Notes |
 |---|---|---|
-| **A. AWS ECS Fargate service** — **recommended if you run AWS** | Managed containers on the account you already have; no instances to own (the usual reason raw EC2 is banned org-side) | One always-on task (0.25–0.5 vCPU / 1GB, ~$9–12/mo); zero inbound SG rules; secrets from Secrets Manager; optional EFS at `/app/data` for persistent workspaces (fine without — state rebuilds from Slack, repos re-clone) |
-| **B. Fly.io Machine** (`fly.toml`) — recommended otherwise | Cheapest managed always-on (~$3–6/mo + $0.15/GB volume); one-command deploys | One volume at `/app/data` persists overrides + workspaces (set `workspaceDir: ./data/workspaces`). Health-checked, auto-restarted |
-| **C. Docker on any VPS** (`docker-compose.yml`) | You already have a box, or want max control | Volumes persist `data/` and `workspaces/`; compose `restart: unless-stopped` + Docker's systemd unit cover supervision |
-| **D. Cloudflare Containers** (`deploy/cloudflare/`) | Only if consolidating on CF matters more than cost/simplicity | Needs a Worker + DO + cron shim just to stay alive; always-on container billing; **disk is ephemeral** — workspaces and `data/overrides.json` reset on instance restart (thread context rebuilds from Slack; put durable config in `config.yaml`) |
+| **A. Cloudflare Containers** (`deploy/cloudflare/`) — **recommended: the house pattern** | Proven in this org — `coreplanelabs/infrastructure` runs Terrateam (a long-lived server) exactly this way: singleton DO, `sleepAfter: 2h`, 5-min cron keep-alive. Our shim mirrors it, same account | Disk is ephemeral — but with `execution.type: e2b` workspaces live in sandboxes anyway, so the only loss on instance restart is `data/overrides.json` (put durable channel/user config in `config.yaml`). Thread context always rebuilds from Slack |
+| **B. AWS ECS Fargate service** | Managed containers on the AWS accounts we have (raw EC2 is banned) | One always-on task (0.25–0.5 vCPU / 1GB, ~$9–12/mo); zero inbound SG rules; secrets from Secrets Manager; optional EFS at `/app/data` |
+| **C. Fly.io Machine** (`fly.toml`) | Cheapest managed always-on (~$3–6/mo + volume) if org constraints don't apply | One volume at `/app/data` persists overrides + workspaces (set `workspaceDir: ./data/workspaces`) |
+| **D. Docker on any VPS** (`docker-compose.yml`) | Max control / dev box | Volumes persist `data/` and `workspaces/`; compose restart policy covers supervision |
+
+**Pairing note:** Cloudflare Containers + `execution.type: e2b` is the natural combination — the bot host becomes stateless-except-overrides, which is exactly what an ephemeral-disk platform wants. If you deploy on Cloudflare with `execution.type: local` instead, expect workspace checkouts to reset on instance restarts.
 
 Railway/Render/k8s also work with the same image — anything that runs an always-on container with a volume. **Cloud sandbox providers (E2B, Modal, Daytona, Cloudflare Sandbox) are not a hosting option for the bot** — they solve a different problem: isolating each agent run's `bash` in a throwaway VM. That's the right future hardening step for the tool layer once untrusted users can reach the coding agent; the bot process itself still needs a long-lived home.
 

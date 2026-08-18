@@ -1,22 +1,27 @@
 {
+  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "switchboard",
   "main": "worker.ts",
   "compatibility_date": "2026-08-01",
+  // coreplane-infra account — same as terrateam (see coreplanelabs/infrastructure)
+  "account_id": "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
+  // No routes: Slack traffic is the container's outbound websocket; the only
+  // inbound path is the cron keep-alive, which stays internal.
+  "workers_dev": false,
+  "observability": { "enabled": true, "traces": { "enabled": true } },
   "containers": [
     {
-      "class_name": "Switchboard",
+      "class_name": "SwitchboardServer",
       // Builds ../../Dockerfile (the same image docker-compose uses)
       "image": "../../Dockerfile",
-      "max_instances": 1,
-      "instance_type": "basic"
+      "instance_type": "basic",
+      "max_instances": 1
     }
   ],
   "durable_objects": {
-    "bindings": [{ "name": "SWITCHBOARD", "class_name": "Switchboard" }]
+    "bindings": [{ "name": "SWITCHBOARD", "class_name": "SwitchboardServer" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Switchboard"] }],
-  "triggers": {
-    // keep-alive ping; also restarts the container after platform maintenance
-    "crons": ["*/5 * * * *"]
-  }
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SwitchboardServer"] }],
+  // Keep-alive ping; also restarts the container after platform maintenance.
+  "triggers": { "crons": ["*/5 * * * *"] }
 }
