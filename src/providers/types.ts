@@ -24,6 +24,8 @@ export interface CompletionRequest {
   messages: ChatMessage[];
   tools?: ToolDef[];
   maxTokens: number;
+  /** model effort hint; providers apply it only where the model supports it */
+  effort?: "low" | "medium" | "high";
 }
 
 export interface CompletionResult {
