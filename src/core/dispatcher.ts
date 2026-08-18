@@ -76,16 +76,32 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const title = (icon?: string) =>
       `${icon ?? spinner[frame++ % spinner.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
     const status = await io.status({ title: title() });
+    let lastToolAt = Date.now();
     let lastUpdate = 0;
+    const currentFrame = () => {
+      const quiet = Date.now() - lastToolAt;
+      // No tool activity for a while = the model is thinking (or reading a
+      // long result); say so instead of looking frozen.
+      const thinking = quiet > 20_000 ? ` — thinking (${Math.round(quiet / 1000)}s since last tool)` : "";
+      return {
+        title: title() + thinking,
+        detail: recentTools.length > 0 ? recentTools.join("\n") : undefined,
+      };
+    };
     const onProgress = (note: string) => {
       console.log(`[tool] ${msg.threadKey} ${note}`);
+      lastToolAt = Date.now();
       recentTools.push(note.replace(/`/g, "'"));
       if (recentTools.length > 4) recentTools.shift();
       const now = Date.now();
       if (now - lastUpdate < STATUS_UPDATE_MIN_MS) return;
       lastUpdate = now;
-      status.update({ title: title(), detail: recentTools.join("\n") });
+      status.update(currentFrame());
     };
+    // Heartbeat: the card ticks every 5s no matter what. A ticking timer means
+    // the run is alive; a stopped timer means the process died — the reader
+    // can always tell the difference.
+    const heartbeat = setInterval(() => status.update(currentFrame()), 5000);
 
     activeRuns++;
     let answer: string;
@@ -98,8 +114,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         toolContext: { executor },
         onProgress,
       });
+    } catch (err) {
+      await status.done({ title: title("❌"), detail: recentTools.join("\n") || undefined });
+      throw err;
     } finally {
       activeRuns--;
+      clearInterval(heartbeat);
     }
 
     console.log(`[done] ${msg.threadKey} ${answer.length} chars`);
