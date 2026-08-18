@@ -16,8 +16,8 @@ defaults:
 
 permissions:
   admins: [slack:U0BMRFRLT1P] # justin
-  agents:
-    coding: [] # admins only until the pilot widens
+  # No agents block: every agent is open to the whole workspace (an absent
+  # allowlist key means unrestricted, enforced in ConfigService.canRunAgent).
   channelConfig: [] # admins only
 
 execution:
