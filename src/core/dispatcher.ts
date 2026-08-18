@@ -20,6 +20,13 @@ export interface CoreDeps {
 
 const STATUS_UPDATE_MIN_MS = 3000;
 
+// In-flight run tracking so the process can drain before exiting (restarts
+// must not kill runs mid-flight — see index.ts signal handling).
+let activeRuns = 0;
+export function activeRunCount(): number {
+  return activeRuns;
+}
+
 export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO): Promise<void> {
   try {
     // Config commands are answered inline, never sent to a model.
@@ -80,14 +87,20 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       status.update({ title: title(), detail: recentTools.join("\n") });
     };
 
-    const answer = await runAgent({
-      provider,
-      model,
-      agent,
-      messages,
-      toolContext: { executor },
-      onProgress,
-    });
+    activeRuns++;
+    let answer: string;
+    try {
+      answer = await runAgent({
+        provider,
+        model,
+        agent,
+        messages,
+        toolContext: { executor },
+        onProgress,
+      });
+    } finally {
+      activeRuns--;
+    }
 
     console.log(`[done] ${msg.threadKey} ${answer.length} chars`);
     await status.done({ title: title("✅") });
