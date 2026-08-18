@@ -40,6 +40,16 @@ defaults:
 #   U0123456789:
 #     model: openai/gpt-5
 
+# Authorization (optional — absent means everything is open).
+# Enforcement is at run time against the resolved agent, so allowlists can't
+# be bypassed via directives or config scopes.
+# permissions:
+#   admins: [U0123ADMIN]            # bypass all restrictions below
+#   agents:
+#     coding: [U0456DEV]            # only these users (+ admins) may run coding
+#   channelConfig: []               # who may run `config set/clear channel`;
+#                                   # empty = admins only; key absent = everyone
+
 # Where agent tools execute. "local" runs them on the bot host (dev/CLI);
 # "e2b" runs each thread's tools in its own E2B micro-VM — the repo checkout
 # and GH_TOKEN live in the sandbox, never on the bot host. Recommended for
