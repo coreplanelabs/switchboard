@@ -22,6 +22,8 @@
     "bindings": [{ "name": "SWITCHBOARD", "class_name": "SwitchboardServer" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SwitchboardServer"] }],
-  // Keep-alive ping; also restarts the container after platform maintenance.
-  "triggers": { "crons": ["*/5 * * * *"] }
+  // Keep-alive every minute: this is also what RESTARTS the container after
+  // a deploy rollout or platform maintenance — the interval bounds the deaf
+  // window (Socket Mode events during downtime are lost, never redelivered).
+  "triggers": { "crons": ["* * * * *"] }
 }
