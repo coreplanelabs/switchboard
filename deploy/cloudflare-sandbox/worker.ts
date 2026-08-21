@@ -64,6 +64,16 @@ interface Env {
 
 const WORKDIR = "/workspace";
 
+// Per-command time limit, enforced by coreutils `timeout` inside the sandbox.
+// Must stay BELOW the SDK backstop (COMMAND_TIMEOUT_MS in the Dockerfile) so
+// the real exit 124 wins, and below undici's 300s client ceilings.
+const EXEC_TIMEOUT_SECS = 280;
+
+/** POSIX single-quote escaping so an arbitrary command survives `bash -c`. */
+function shellQuote(s: string): string {
+  return `'${s.replaceAll("'", `'\\''`)}'`;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const auth = request.headers.get("authorization");
@@ -114,7 +124,21 @@ export default {
           // connection. Heartbeats are pure whitespace, which is legal around
           // a JSON document — the executor's res.json() on the full body
           // parses unchanged.
-          return streamExec(sandbox, `${envPrefix}mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${body.command}`);
+          //
+          // The time limit is enforced with coreutils `timeout` INSIDE the
+          // sandbox, not by the SDK: the SDK's COMMAND_TIMEOUT_MS rejection is
+          // useless to callers — its exec handler wraps every failure as a
+          // generic "Command execution failed" and buries the real message in
+          // a field its client discards (measured live). Shell-level timeout
+          // produces a real exit 124 through the normal result path, no error
+          // classification needed. SIGKILL follows 10s after TERM for
+          // stragglers. COMMAND_TIMEOUT_MS (Dockerfile) sits above this as a
+          // pure backstop.
+          const full = `${envPrefix}mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${body.command}`;
+          return streamExec(
+            sandbox,
+            `timeout -k 10 ${EXEC_TIMEOUT_SECS} bash -c ${shellQuote(full)}`,
+          );
         }
         case "/read": {
           const file = await withSessionRecovery(sandbox, () => sandbox.readFile(abs(body.path)));
@@ -162,34 +186,28 @@ function streamExec(
         }
       };
       withSessionRecovery(sandbox, () => sandbox.exec(command))
-        .then((result) =>
+        .then((result) => {
+          const exitCode = result.exitCode ?? 0;
+          // coreutils `timeout` exits 124 when the deadline killed the
+          // command (137 when the follow-up SIGKILL had to) — annotate so the
+          // agent knows what happened and how to adapt.
+          const timedOut = exitCode === 124 || exitCode === 137;
+          const note = timedOut
+            ? `command timed out in the sandbox after ${EXEC_TIMEOUT_SECS}s; re-run as smaller/faster steps or background it with nohup`
+            : "";
           finish({
             stdout: result.stdout ?? "",
-            stderr: result.stderr ?? "",
-            exitCode: result.exitCode ?? 0,
-          }),
-        )
+            stderr: [result.stderr ?? "", note].filter(Boolean).join("\n"),
+            exitCode: timedOut ? 124 : exitCode,
+          });
+        })
         .catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
-          // The container server kills commands at COMMAND_TIMEOUT_MS and
-          // rejects with "Command timeout: <full command>". Surface that as a
-          // failed command (shell-style exit 124) the agent can act on. The
-          // raw message is dropped — it embeds the full command, including
-          // the injected GH_TOKEN env prefix.
-          if (/command timeout/i.test(msg)) {
-            finish({
-              stdout: "",
-              stderr:
-                "command timed out in the sandbox (COMMAND_TIMEOUT_MS exceeded); re-run as smaller/faster steps or background it with nohup",
-              exitCode: 124,
-            });
-          } else {
-            // Carry the failure in BOTH shapes so rollout order can't create
-            // a silent-success window: a new executor throws on `error`, and
-            // an executor that predates in-body errors (only checks exitCode)
-            // still renders "exit 127: <message>" instead of "(no output)".
-            finish({ error: msg, stdout: "", stderr: msg, exitCode: 127 });
-          }
+          // Carry the failure in BOTH shapes so rollout order can't create
+          // a silent-success window: a new executor throws on `error`, and
+          // an executor that predates in-body errors (only checks exitCode)
+          // still renders "exit 127: <message>" instead of "(no output)".
+          finish({ error: msg, stdout: "", stderr: msg, exitCode: 127 });
         });
     },
   });
