@@ -52,6 +52,14 @@ export class CloudflareSandboxExecutor implements Executor {
         );
       }
       const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      // /exec streams its response (heartbeat whitespace + one JSON document,
+      // always HTTP 200 since headers are sent before the outcome is known),
+      // so failures arrive as {error} in an ok response. Not retried: by the
+      // time an in-body error arrives the command may have run — replaying a
+      // possibly side-effectful command is worse than reporting the failure.
+      if (res.ok && typeof data.error === "string" && data.error) {
+        throw new Error(`sandbox worker ${route}: ${data.error}`);
+      }
       if (res.ok) return data;
       lastErr = `sandbox worker ${route} HTTP ${res.status}: ${String(data.error ?? "")}`;
       if (res.status < 500) break; // 4xx is not retryable

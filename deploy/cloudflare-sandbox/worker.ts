@@ -103,14 +103,18 @@ export default {
     try {
       switch (url.pathname) {
         case "/exec": {
-          const result = await withSessionRecovery(sandbox, () =>
-            sandbox.exec(`${envPrefix}mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${body.command}`),
-          );
-          return json({
-            stdout: result.stdout ?? "",
-            stderr: result.stderr ?? "",
-            exitCode: result.exitCode ?? 0,
-          });
+          // Streamed with a whitespace heartbeat. A long command otherwise
+          // holds a byteless HTTP request open for minutes, and some hop
+          // between the bot and this Worker silently drops idle connections —
+          // measured live: the container answered a 290s command at its 280s
+          // timeout, but the bot's fetch died without ever seeing the
+          // response (undici gives up 300s after sending a request that has
+          // received no headers). Headers go out immediately and a heartbeat
+          // byte flows every 15s, so no intermediary ever sees an idle
+          // connection. Heartbeats are pure whitespace, which is legal around
+          // a JSON document — the executor's res.json() on the full body
+          // parses unchanged.
+          return streamExec(sandbox, `${envPrefix}mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${body.command}`);
         }
         case "/read": {
           const file = await withSessionRecovery(sandbox, () => sandbox.readFile(abs(body.path)));
@@ -124,24 +128,73 @@ export default {
           return json({ error: "unknown route" }, 404);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // The container server kills commands at COMMAND_TIMEOUT_MS and rejects
-      // with "Command timeout: <full command>". Surface that as a failed
-      // command result (shell-style exit 124) instead of a 500: the agent sees
-      // what happened and can adapt, and the executor doesn't burn its 5xx
-      // retry loop on a non-transient error. The raw message is dropped — it
-      // embeds the full command, including the injected GH_TOKEN env prefix.
-      if (url.pathname === "/exec" && /command timeout/i.test(msg)) {
-        return json({
-          stdout: "",
-          stderr: "command timed out in the sandbox (COMMAND_TIMEOUT_MS exceeded); re-run as smaller/faster steps or background it with nohup",
-          exitCode: 124,
-        });
-      }
-      return json({ error: msg }, 500);
+      return json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
   },
 } satisfies ExportedHandler<Env>;
+
+/** Execute a command and stream the response: immediate headers, a whitespace
+ *  heartbeat every 15s while the command runs, then one JSON document. All
+ *  outcomes arrive in-body with HTTP 200 (headers are long gone by the time
+ *  the result is known): a completed command as {stdout, stderr, exitCode},
+ *  a sandbox-enforced timeout as exit 124, and any other failure as {error}. */
+function streamExec(
+  sandbox: { resetDefaultSession(): void | Promise<void>; exec(command: string): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> },
+  command: string,
+): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const beat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode("\n"));
+        } catch {
+          clearInterval(beat); // client went away; the exec promise still settles
+        }
+      }, 15_000);
+      const finish = (payload: object) => {
+        clearInterval(beat);
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(payload)));
+          controller.close();
+        } catch {
+          // stream already errored/cancelled — nothing left to deliver to
+        }
+      };
+      withSessionRecovery(sandbox, () => sandbox.exec(command))
+        .then((result) =>
+          finish({
+            stdout: result.stdout ?? "",
+            stderr: result.stderr ?? "",
+            exitCode: result.exitCode ?? 0,
+          }),
+        )
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          // The container server kills commands at COMMAND_TIMEOUT_MS and
+          // rejects with "Command timeout: <full command>". Surface that as a
+          // failed command (shell-style exit 124) the agent can act on. The
+          // raw message is dropped — it embeds the full command, including
+          // the injected GH_TOKEN env prefix.
+          if (/command timeout/i.test(msg)) {
+            finish({
+              stdout: "",
+              stderr:
+                "command timed out in the sandbox (COMMAND_TIMEOUT_MS exceeded); re-run as smaller/faster steps or background it with nohup",
+              exitCode: 124,
+            });
+          } else {
+            // Carry the failure in BOTH shapes so rollout order can't create
+            // a silent-success window: a new executor throws on `error`, and
+            // an executor that predates in-body errors (only checks exitCode)
+            // still renders "exit 127: <message>" instead of "(no output)".
+            finish({ error: msg, stdout: "", stderr: msg, exitCode: 127 });
+          }
+        });
+    },
+  });
+  return new Response(stream, { headers: { "content-type": "application/json" } });
+}
 
 function abs(p: string): string {
   if (!p) throw new Error("missing path");
