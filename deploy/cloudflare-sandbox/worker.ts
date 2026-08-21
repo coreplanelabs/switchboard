@@ -15,7 +15,47 @@
 // first deploy; the SDK is young and its surface may shift.
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 
-export class SwitchboardSandbox extends Sandbox {}
+export class SwitchboardSandbox extends Sandbox {
+  // SDK 0.3.x caches its default ExecutionSession in Durable Object memory
+  // (`private defaultSession`), but the session itself lives in the
+  // container's memory. When the container restarts under a live DO (image
+  // rollout, crash, sleep/wake), every subsequent call fails with
+  // "Session '<id>' not found" forever — the SDK never invalidates the cache.
+  // Clearing it makes the next call recreate the session on the fresh
+  // container. The workspace disk is gone either way; repos re-clone — the
+  // same graceful degradation as an expired E2B sandbox.
+  resetDefaultSession(): void {
+    (this as unknown as { defaultSession: unknown }).defaultSession = null;
+  }
+}
+
+// Stale-session detection. /exec throws the container's literal
+// "Session '<id>' not found". /read and /write cannot: the SDK's file handler
+// (container_src/handler/file.ts, createServerErrorResponse) buries that text
+// in a `message` field the client discards, and throws only a generic
+// "Failed to read file" / "Failed to write file". Treat those as potentially
+// stale too — reads are pure and a same-content rewrite is idempotent, so a
+// one-shot reset+retry is safe even when the real cause was something else
+// (the retry then fails identically and the error propagates).
+const STALE_SESSION = /session '[^']*' not found/i;
+const STALE_FILE_OP = /^failed to (read|write) file/i;
+
+/** Run a sandbox call; on a (possibly) stale-session error, reset the cached
+ *  session and retry once. Safe to retry: the session lookup fails before the
+ *  command or file op ever executes. */
+async function withSessionRecovery<T>(
+  sandbox: { resetDefaultSession(): void | Promise<void> },
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!STALE_SESSION.test(msg) && !STALE_FILE_OP.test(msg)) throw err;
+    await sandbox.resetDefaultSession();
+    return await fn();
+  }
+}
 
 interface Env {
   Sandbox: DurableObjectNamespace<SwitchboardSandbox>;
@@ -35,8 +75,13 @@ export default {
     const threadKey = request.headers.get("x-thread-key");
     if (!threadKey) return json({ error: "missing X-Thread-Key" }, 400);
 
-    // One sandbox per thread; the DO name is the thread key.
-    const sandbox = getSandbox(env.Sandbox, threadKey);
+    // One sandbox per thread; the DO name is the thread key. getSandbox's
+    // 0.3.x typing is fixed to the base Sandbox class — cast the stub so the
+    // subclass's resetDefaultSession is callable over RPC.
+    const sandbox = getSandbox(
+      env.Sandbox as unknown as Parameters<typeof getSandbox>[0],
+      threadKey,
+    ) as unknown as DurableObjectStub<SwitchboardSandbox>;
 
     // Optional env passthrough (e.g. GH_TOKEN) — set on the sandbox process env.
     const envVars: Record<string, string> = {};
@@ -58,7 +103,9 @@ export default {
     try {
       switch (url.pathname) {
         case "/exec": {
-          const result = await sandbox.exec(`${envPrefix}mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${body.command}`);
+          const result = await withSessionRecovery(sandbox, () =>
+            sandbox.exec(`${envPrefix}mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${body.command}`),
+          );
           return json({
             stdout: result.stdout ?? "",
             stderr: result.stderr ?? "",
@@ -66,11 +113,11 @@ export default {
           });
         }
         case "/read": {
-          const file = await sandbox.readFile(abs(body.path));
+          const file = await withSessionRecovery(sandbox, () => sandbox.readFile(abs(body.path)));
           return json({ content: typeof file === "string" ? file : (file?.content ?? "") });
         }
         case "/write": {
-          await sandbox.writeFile(abs(body.path), body.content ?? "");
+          await withSessionRecovery(sandbox, () => sandbox.writeFile(abs(body.path), body.content ?? ""));
           return json({ ok: true });
         }
         default:
