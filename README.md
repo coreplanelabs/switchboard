@@ -217,7 +217,7 @@ permissions:
 
 1. **Create the Slack app** (api.slack.com/apps → From scratch):
    - Enable **Socket Mode**; create an app-level token with `connections:write` → `SLACK_APP_TOKEN`.
-   - **OAuth scopes** (Bot Token): `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `im:history`, `im:read`, `im:write`, `files:read` (image attachments are downloaded and passed to the model; without this scope they're reported as unavailable).
+   - **OAuth scopes** (Bot Token): `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `im:history`, `im:read`, `im:write`, `files:read` (image attachments are downloaded and passed to the model; without this scope they're reported as unavailable), `reactions:write` (the bot reacts :telephone_receiver: to a message the moment it accepts it; without this scope requests still work, just without the receipt).
    - **Event subscriptions**: `app_mention`, `message.im`, `message.channels`, `message.groups` (the channel/group message events deliver thread follow-ups so no re-mention is needed mid-conversation).
    - Install to workspace → `SLACK_BOT_TOKEN`.
 2. **Configure**:

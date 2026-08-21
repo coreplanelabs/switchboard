@@ -18,6 +18,8 @@ type SlackClient = bolt.webApi.WebClient;
 
 const PLATFORM = "slack";
 const SLACK_MSG_LIMIT = 3500;
+// Reaction added to a triggering message the moment the bot accepts it.
+const ACK_EMOJI = "telephone_receiver";
 
 // Attachment ingestion. Only image types every provider accepts; Slack file
 // downloads need the files:read bot scope.
@@ -128,6 +130,15 @@ interface SlackEvent {
 }
 
 async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Promise<void> {
+  // Immediate receipt: react to the triggering message so the sender knows it
+  // was accepted, before any model/tool work starts. Fire-and-forget — a
+  // missing reactions:write scope (or a re-run reacting twice) must never
+  // block or fail the request itself.
+  client.reactions
+    .add({ channel: ev.channel, timestamp: ev.ts, name: ACK_EMOJI })
+    .catch((err: Error) => {
+      if (!err.message.includes("already_reacted")) console.error(`[ack] ${err.message}`);
+    });
   const { images, skipped } = await fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE);
   // Tell the model about attachments it can't see, so it never claims an
   // attached file simply didn't come through.
