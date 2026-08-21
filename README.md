@@ -225,7 +225,7 @@ permissions:
    cp config/config.example.yaml config/config.yaml
    cp .env.example .env   # fill in tokens/keys
    ```
-3. **GitHub identity for coding/review agents**: create a **GitHub App** on the org (Settings → Developer settings → GitHub Apps → New): permissions Contents + Pull requests, webhook off; generate a private key; install it on the repos the bot may touch. Set `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY` — the bot mints 1-hour installation tokens on demand and injects them into sandboxes; PRs are authored as `<app-name>[bot]`. (Fallback: a repo-scoped fine-grained `GH_TOKEN` PAT.) With sandboxed execution the bot host itself needs no git/gh.
+3. **GitHub identity for coding/review agents**: create a **GitHub App** on the org (Settings → Developer settings → GitHub Apps → New): permissions Contents (read & write) + Pull requests (read & write) + Issues (read & write — agents read issues for task context and comment on them; without it any `gh issue` call 403s with "Resource not accessible by integration"), webhook off; generate a private key; install it on the repos the bot may touch. Set `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY` — the bot mints 1-hour installation tokens on demand and injects them into sandboxes; PRs are authored as `<app-name>[bot]`. (Fallback: a repo-scoped fine-grained `GH_TOKEN` PAT.) With sandboxed execution the bot host itself needs no git/gh.
 4. **Run**:
    ```bash
    npm install
