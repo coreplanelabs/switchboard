@@ -13,6 +13,28 @@ export interface RequestDirectives {
 
 const DIRECTIVE_RE = /(?:^|\s)(agent|model)[:=](\S+)/g;
 
+/**
+ * Last agent/model directives mentioned in earlier thread messages (user turns
+ * only, last one wins) — used to keep follow-ups on the agent/model a thread
+ * already established instead of falling back to the global default. Lenient
+ * where parseDirectives is strict: history is data being scanned, not a
+ * command being executed, so malformed or unknown values are skipped, never
+ * thrown.
+ */
+export function lastThreadDirectives(
+  history: Array<{ role: string; text: string }>,
+): { agent?: string; model?: string } {
+  const out: { agent?: string; model?: string } = {};
+  for (const h of history) {
+    if (h.role !== "user") continue;
+    for (const m of h.text.matchAll(DIRECTIVE_RE)) {
+      if (m[1] === "agent" && AGENTS[m[2]]) out.agent = m[2];
+      else if (m[1] === "model") out.model = m[2];
+    }
+  }
+  return out;
+}
+
 export function parseDirectives(input: string): RequestDirectives {
   const out: RequestDirectives = { text: input };
   const found: Array<{ key: string; value: string; match: string }> = [];
