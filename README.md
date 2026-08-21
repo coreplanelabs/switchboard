@@ -13,6 +13,8 @@ Every boundary is a swappable seam, same pattern at each one:
 
 The **core dispatcher** (`src/core/dispatcher.ts`) is the only place orchestration lives: config commands, directive parsing, layered resolution, permission gates, history assembly, the agent run. Channels are pure transports; the dispatcher never imports a platform SDK.
 
+Behavioral expectations live in [`features/`](features/README.md) — one spec per feature with validation criteria (unit tests or agent-runnable instructions), updated in the same PR as any behavior change, so every git SHA carries the criteria that describe it.
+
 ## Agents
 
 | Agent | What it does | Tools |

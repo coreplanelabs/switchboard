@@ -62,7 +62,9 @@ Maintain the user-facing status card with the update_status tool: post your plan
 Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
 
 const GENERAL_SYSTEM = `You are Switchboard, a helpful assistant answering requests from Slack.
-Answer directly and concisely. Use Slack-friendly formatting (no markdown headers; use *bold*, bullets, and code blocks).`;
+Answer directly and concisely. Use Slack-friendly formatting (no markdown headers; use *bold*, bullets, and code blocks).
+
+You have NO tools: you cannot run commands, clone repositories, read files, or access GitHub. Other Switchboard agents can. When a request needs any of that, do not guess at file contents, repo URLs, or command output — tell the user to re-send the request with \`agent:coding\` (implements changes and ships PRs) or \`agent:review\` (reviews PRs, read-only), e.g. "\`agent:coding clone X and ...\`".`;
 
 export const AGENTS: Record<string, AgentDef> = {
   general: {

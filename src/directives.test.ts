@@ -1,0 +1,67 @@
+import { describe, expect, it } from "vitest";
+import { lastThreadDirectives, parseDirectives } from "./directives.js";
+
+// Feature: features/routing-and-config.md — per-request directives & thread stickiness.
+
+describe("parseDirectives", () => {
+  it("extracts agent and model and strips them from the text", () => {
+    const d = parseDirectives("agent:review model:openai/gpt-5 look at PR #42");
+    expect(d.agent).toBe("review");
+    expect(d.model).toBe("openai/gpt-5");
+    expect(d.text).toBe("look at PR #42");
+  });
+
+  it("accepts directives anywhere in the message", () => {
+    const d = parseDirectives("please agent:coding fix the bug model:anthropic/claude-opus-5 now");
+    expect(d.agent).toBe("coding");
+    expect(d.model).toBe("anthropic/claude-opus-5");
+    expect(d.text).toBe("please fix the bug now");
+  });
+
+  it("throws on an unknown agent, naming the available ones", () => {
+    expect(() => parseDirectives("agent:nonsense hi")).toThrow(/Unknown agent "nonsense"/);
+    expect(() => parseDirectives("agent:nonsense hi")).toThrow(/general/);
+  });
+
+  it("leaves messages without directives untouched", () => {
+    const d = parseDirectives("just a normal question");
+    expect(d.agent).toBeUndefined();
+    expect(d.model).toBeUndefined();
+    expect(d.text).toBe("just a normal question");
+  });
+});
+
+describe("lastThreadDirectives (thread stickiness)", () => {
+  it("returns the last agent/model directives from user turns", () => {
+    const sticky = lastThreadDirectives([
+      { role: "user", text: "agent:coding fix the thing" },
+      { role: "assistant", text: "on it" },
+      { role: "user", text: "agent:review model:anthropic/claude-opus-5 check it" },
+    ]);
+    expect(sticky.agent).toBe("review");
+    expect(sticky.model).toBe("anthropic/claude-opus-5");
+  });
+
+  it("ignores assistant turns so quoted directives cannot hijack the thread", () => {
+    const sticky = lastThreadDirectives([
+      { role: "user", text: "agent:coding fix" },
+      { role: "assistant", text: "you could try agent:review here" },
+    ]);
+    expect(sticky.agent).toBe("coding");
+  });
+
+  it("is lenient: unknown agents in history are skipped, never thrown", () => {
+    const sticky = lastThreadDirectives([
+      { role: "user", text: "agent:doesnotexist do something" },
+      { role: "user", text: "agent:coding do it" },
+      { role: "user", text: "agent:alsofake follow up" },
+    ]);
+    expect(sticky.agent).toBe("coding");
+  });
+
+  it("returns nothing for a thread with no directives", () => {
+    const sticky = lastThreadDirectives([{ role: "user", text: "hello" }]);
+    expect(sticky.agent).toBeUndefined();
+    expect(sticky.model).toBeUndefined();
+  });
+});
