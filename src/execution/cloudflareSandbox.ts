@@ -32,11 +32,25 @@ export class CloudflareSandboxExecutor implements Executor {
     let lastErr = "";
     for (const delay of delays) {
       if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-      const res = await fetch(`${this.opts.url.replace(/\/$/, "")}${route}`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-      });
+      let res: Response;
+      try {
+        res = await fetch(`${this.opts.url.replace(/\/$/, "")}${route}`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        // Network-level failure ("fetch failed"): undici drops the connection
+        // after ~300s without response headers, so a command that outlives the
+        // sandbox's COMMAND_TIMEOUT_MS margin surfaces here, not as exit 124.
+        // Don't retry — the command may have side effects and may still be
+        // running in the sandbox; give the agent a legible error instead.
+        throw new Error(
+          `sandbox worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
+            "The command may still be running or have been killed mid-flight in the sandbox; " +
+            "re-check its effects before re-running it.",
+        );
+      }
       const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (res.ok) return data;
       lastErr = `sandbox worker ${route} HTTP ${res.status}: ${String(data.error ?? "")}`;
