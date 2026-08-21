@@ -28,9 +28,10 @@ Each request runs in a per-thread workspace directory (`workspaces/<channel>-<th
 Resolution order (highest wins):
 
 1. **Per-request** — inline directives in the message: `agent:review model:openai/gpt-5 look at PR #42`
-2. **Per-user** — `config set me model=openai/gpt-5`
-3. **Per-channel** — `config set channel agent=review`
-4. **Defaults** — `config/config.yaml` (`defaults.agent`, per-agent `defaults.models`)
+2. **Per-thread (sticky)** — a follow-up without directives stays on the agent/model this thread last used (derived from the thread's history, never stored)
+3. **Per-user** — `config set me model=openai/gpt-5`
+4. **Per-channel** — `config set channel agent=review`
+5. **Defaults** — `config/config.yaml` (`defaults.agent`, per-agent `defaults.models`)
 
 Runtime overrides persist to `data/overrides.json`. Static defaults for channels/users can also live in `config.yaml`.
 

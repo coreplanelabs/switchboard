@@ -1,6 +1,6 @@
 import type { ConfigStore, Scope } from "../config.js";
 import { AGENTS, getAgent } from "../agents/registry.js";
-import { parseDirectives } from "../directives.js";
+import { lastThreadDirectives, parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
 import { makeExecutor } from "../execution/factory.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
@@ -37,10 +37,21 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     }
 
     const directives = parseDirectives(msg.text);
+    // Thread stickiness: a follow-up without explicit directives runs on the
+    // agent/model this thread already established (last directive in the
+    // thread's history), not the channel/global default — otherwise "continue"
+    // in an agent:coding thread silently lands on the toolless default agent.
+    // Derived from history on every message, never stored: restart-safe, and
+    // consistent with how the Slack adapter re-derives thread participation.
+    const history = await io.history();
+    const sticky = lastThreadDirectives(history);
     const resolved = deps.config.resolve({
       channelId: msg.channelId,
       userId: msg.userId,
-      request: { agent: directives.agent, model: directives.model },
+      request: {
+        agent: directives.agent ?? sticky.agent,
+        model: directives.model ?? sticky.model,
+      },
     });
 
     // Authorization gate: checked against the *resolved* agent and invoking
@@ -56,7 +67,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
     const provider = deps.providers.get(providerName);
 
-    const messages = buildMessages(await io.history(), directives.text, msg.images);
+    const messages = buildMessages(history, directives.text, msg.images);
 
     const executor = await makeExecutor(
       {
