@@ -19,7 +19,7 @@ type SlackClient = bolt.webApi.WebClient;
 const PLATFORM = "slack";
 const SLACK_MSG_LIMIT = 3500;
 // Reaction added to a triggering message the moment the bot accepts it.
-const ACK_EMOJI = "telephone_receiver";
+const ACK_EMOJI = "eyes";
 
 // Attachment ingestion. Only image types every provider accepts; Slack file
 // downloads need the files:read bot scope.
