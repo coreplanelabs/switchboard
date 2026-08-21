@@ -77,7 +77,21 @@ export default {
           return json({ error: "unknown route" }, 404);
       }
     } catch (err) {
-      return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      const msg = err instanceof Error ? err.message : String(err);
+      // The container server kills commands at COMMAND_TIMEOUT_MS and rejects
+      // with "Command timeout: <full command>". Surface that as a failed
+      // command result (shell-style exit 124) instead of a 500: the agent sees
+      // what happened and can adapt, and the executor doesn't burn its 5xx
+      // retry loop on a non-transient error. The raw message is dropped — it
+      // embeds the full command, including the injected GH_TOKEN env prefix.
+      if (url.pathname === "/exec" && /command timeout/i.test(msg)) {
+        return json({
+          stdout: "",
+          stderr: "command timed out in the sandbox (COMMAND_TIMEOUT_MS exceeded); re-run as smaller/faster steps or background it with nohup",
+          exitCode: 124,
+        });
+      }
+      return json({ error: msg }, 500);
     }
   },
 } satisfies ExportedHandler<Env>;

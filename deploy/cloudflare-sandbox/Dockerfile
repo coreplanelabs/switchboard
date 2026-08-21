@@ -4,6 +4,11 @@
 # (no 'latest' tag exists) — bump both together.
 FROM docker.io/cloudflare/sandbox:0.3.7
 USER root
+# The SDK's container server kills any command after COMMAND_TIMEOUT_MS
+# (default 30s) — far too short for clones, installs, and test runs. exec()
+# in 0.3.x ignores per-call timeouts, so this env var is the only lever.
+# Matches BASH_TIMEOUT_MS (5 min) in src/execution/executor.ts.
+ENV COMMAND_TIMEOUT_MS=300000
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git curl ca-certificates \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
