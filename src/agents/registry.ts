@@ -88,9 +88,9 @@ export const AGENTS: Record<string, AgentDef> = {
     description: "Reviews PRs and produces high-quality findings. Read-only.",
     system: REVIEW_SYSTEM,
     toolset: "readonly",
-    maxTurns: 12, // gather-once architecture: ~4 gather calls + analysis + targeted follow-ups
+    maxTurns: 30, // backstop only; wall clock is the real budget (12 bound at ~4 min in practice)
     maxTokens: 64000,
-    maxMinutes: 12, // safety net, not the mechanism — typical reviews land in ~5
+    maxMinutes: 25, // safety net, not the mechanism — typical reviews land in ~5
     effort: "medium", // fast turns; one big-context pass does the deep work
   },
 };
