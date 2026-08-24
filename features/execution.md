@@ -23,6 +23,6 @@ Tools never touch the bot host: every `bash`/`read_file`/`write_file` runs throu
 | Long commands stream heartbeats (no `fetch failed`) | `[agent]` Covered by the same run — pre-#32 the 320s case surfaced as `fetch failed`. |
 | Session recovery after container replacement | `[agent]` Run a command in a thread, `wrangler deploy` the sandbox worker (replaces containers), run a follow-up in the same thread — it must succeed (repo re-clones), not 500 `Session not found`. |
 | Thread workspace reuse | `[agent]` `agent:coding create file /workspace/marker.txt`, then follow-up `cat marker.txt` — must print the content (same sandbox), unless the sandbox expired (then a legible re-clone story, not a crash). |
-| Shell quoting through the timeout wrapper | `[unit]`-adjacent: `scratchpad quote suite ran in node:22-bookworm-slim (9/9)` — **`[gap]`**: promote to a committed test that runs in CI on Linux. |
-| GH App token minting & caching | `[gap]` unit-testable with a mocked fetch around `src/execution/githubApp.ts`. |
+| Shell quoting through the timeout wrapper | `[unit]` `src/execution/shellQuote.test.ts` — tests the exact `shellQuote` module the worker ships (extracted to `deploy/cloudflare-sandbox/shellQuote.ts`); the `timeout`-binary cases run on CI's Linux and skip on macOS. |
+| GH App token minting & caching | `[unit]` `src/execution/githubApp.test.ts` — mocked fetch: JWT shape, cache hit, 5-min-early re-mint, mint-failure surfacing, GH_TOKEN/null fallbacks. |
 | App installation covers the target repo | `[agent]` `agent:review run \`gh repo view <owner/repo> --json name\`` for each repo agents work on — must return JSON, not 404. Failure signature: "GitHub credentials don't have access" + 404 (observed 2026-08-21 on this repo). |

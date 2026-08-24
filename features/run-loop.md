@@ -23,4 +23,4 @@ The runner is provider-blind: complete → execute tools → append results → 
 | Deadline exhaustion → write-up labeled `N-minute` | `[unit]` `src/runner.test.ts::labels the write-up with the minute budget` |
 | Status-only turns don't consume the turn budget | `[unit]` `src/runner.test.ts::update_status-only turns` |
 | Refusal and truncation surfaced legibly | `[unit]` `src/runner.test.ts::refusals / truncated` |
-| Wrap-up warning fires once near the deadline | `[gap]` needs a clock-injectable runner (currently `Date.now()`), or a slow live run observed for the `⏱ Time budget` message. |
+| Wrap-up warning fires once near the deadline | `[unit]` `src/runner.test.ts::emits the wrap-up warning` (runner takes an injectable `now` clock). |

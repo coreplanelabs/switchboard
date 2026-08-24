@@ -25,7 +25,10 @@ function agent(overrides: Partial<AgentDef> = {}): AgentDef {
   };
 }
 
-/** Provider that replays a script of results, then repeats the last one. */
+/** Provider that replays a script of results, then repeats the last one.
+ *  Requests are deep-snapshotted at call time — the runner mutates its live
+ *  messages array across turns, so storing the reference would let later
+ *  turns leak into earlier snapshots. */
 function scripted(results: CompletionResult[]): Provider & { requests: CompletionRequest[] } {
   const requests: CompletionRequest[] = [];
   let i = 0;
@@ -33,7 +36,8 @@ function scripted(results: CompletionResult[]): Provider & { requests: Completio
     name: "fake",
     requests,
     async complete(req) {
-      requests.push(req);
+      // messages are plain data; tools carry functions and stay by reference
+      requests.push({ ...req, messages: structuredClone(req.messages) });
       const r = results[Math.min(i, results.length - 1)];
       i++;
       return r;
@@ -110,6 +114,43 @@ describe("runAgent budgets", () => {
       toolContext: { executor: fakeExecutor },
     });
     expect(answer).toBe("done");
+  });
+
+  it("emits the wrap-up warning exactly once, and only past the threshold", async () => {
+    // Injectable clock: turn 1 runs and stays below warnAt (no warning);
+    // turn 2's tool execution advances past warnAt (deadline - 3 min), so the
+    // warning attaches to turn 2's results; turn 3 runs after the warning and
+    // must not produce a second one; then the model finishes normally.
+    let t = 0;
+    let calls = 0;
+    const advancingExecutor: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        calls++;
+        if (calls === 2) t = 8 * 60_000; // 10-min budget → warnAt at 7 min
+        return "ok";
+      },
+    };
+    const provider = scripted([bashUse("t1"), bashUse("t2"), bashUse("t3"), text("wrapped up")]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 5, maxMinutes: 10 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: advancingExecutor },
+      now: () => t,
+    });
+    expect(answer).toBe("wrapped up");
+    const warningsPerRequest = provider.requests.map(
+      (r) =>
+        r.messages
+          .flatMap((m) => m.content)
+          .filter((p) => p.type === "text" && (p as { text: string }).text.includes("⏱ Time budget")).length,
+    );
+    // Requests 0-1 (before/at turn 1's results): no warning. From request 2 on
+    // (turn 2's results included): exactly one, never a second.
+    expect(warningsPerRequest[1]).toBe(0);
+    expect(warningsPerRequest.at(-1)).toBe(1);
   });
 
   it("surfaces safety refusals as a user-facing message", async () => {
