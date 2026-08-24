@@ -1,0 +1,55 @@
+# CI: the automated half of the feature-spec discipline (features/README.md).
+# Every [unit] criterion in features/*.md must be green here before merge;
+# [agent] criteria are validated against the live deployment and receipted in
+# the feature files instead.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Rapid successive pushes to the same PR cancel the stale run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bot:
+    name: typecheck + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # dist/ must never ship test files (see PR #35's review finding).
+      - name: build excludes tests
+        run: |
+          npm run build
+          count=$(find dist -name '*.test.js' | wc -l)
+          echo "test files in dist: $count"
+          test "$count" -eq 0
+
+  sandbox-worker:
+    name: sandbox worker typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/cloudflare-sandbox
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: deploy/cloudflare-sandbox/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit

@@ -19,7 +19,7 @@ Each claim must be demonstrable in one interaction. These are the demo moments; 
 
 ## Exit criteria for the milestone
 
-1. Every `[unit]` criterion in the three agent files + routing/run-loop files is green in CI (`npm test`).
+1. Every `[unit]` criterion in the three agent files + routing/run-loop files is green in CI (`.github/workflows/ci.yml` runs typecheck, the test suite, the dist-excludes-tests check, and the sandbox-worker typecheck on every PR). ✅
 2. Every `[agent]` criterion in [agent-general.md](agent-general.md), [agent-review.md](agent-review.md), [agent-coding.md](agent-coding.md) has a dated receipt (link in the file) from the production deployment.
 3. Claims 1–6 above each carry a dated receipt in the table. ✅
 4. A cold-start comparison run: give Claude Tag and Switchboard the same three tasks (a question, a PR review, an issue-to-PR) in parallel channels; the Switchboard result must be visibly superior in the thread itself with no narration needed. Post the side-by-side as the milestone-closing receipt here.
@@ -27,4 +27,3 @@ Each claim must be demonstrable in one interaction. These are the demo moments; 
 ## Known gaps standing between here and "done"
 
 - `[gap]` items in the feature files (trigger-gating unit tests, image fixtures, wrap-up-warning clock injection, quoting suite in CI, GH App token unit tests).
-- No CI workflow runs `npm test` yet — the suite exists but only runs locally.
