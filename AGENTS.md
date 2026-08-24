@@ -54,5 +54,5 @@ Non-negotiable discipline:
 - Remote executors (E2B, Cloudflare Sandbox) are typechecked but not yet exercised against live sandboxes; the Cloudflare proxy Worker (`deploy/cloudflare-sandbox/`) additionally needs its SDK method names verified on first deploy.
 - The Slack app has DM support wired but the recommended rollout keeps `im:*` scopes off initially.
 - No token/cost accounting per request yet.
-- Test suite exists (vitest) but no CI workflow runs it yet — `npm test` is local-only until a CI pipeline lands.
+- CI (`.github/workflows/ci.yml`) runs typecheck + tests + the dist-excludes-tests check + the sandbox-worker typecheck on every PR and on main.
 - Feature-spec `[gap]` items (see `features/*.md`) are the known-unproven criteria backlog.
