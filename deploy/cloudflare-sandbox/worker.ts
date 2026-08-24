@@ -14,6 +14,7 @@
 // Verify method names against https://developers.cloudflare.com/sandbox/ on
 // first deploy; the SDK is young and its surface may shift.
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
+import { shellQuote } from "../../src/execution/shellQuote.js";
 
 export class SwitchboardSandbox extends Sandbox {
   // SDK 0.3.x caches its default ExecutionSession in Durable Object memory
@@ -68,11 +69,6 @@ const WORKDIR = "/workspace";
 // Must stay BELOW the SDK backstop (COMMAND_TIMEOUT_MS in the Dockerfile) so
 // the real exit 124 wins, and below undici's 300s client ceilings.
 const EXEC_TIMEOUT_SECS = 280;
-
-/** POSIX single-quote escaping so an arbitrary command survives `bash -c`. */
-function shellQuote(s: string): string {
-  return `'${s.replaceAll("'", `'\\''`)}'`;
-}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

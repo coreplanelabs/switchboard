@@ -14,6 +14,8 @@ export interface RunOptions {
   toolContext: ToolContext;
   /** called with short progress notes (e.g. tool activity) for Slack updates */
   onProgress?: (note: string) => void;
+  /** injectable clock for tests; defaults to Date.now */
+  now?: () => number;
 }
 
 export async function runAgent(opts: RunOptions): Promise<string> {
@@ -23,14 +25,15 @@ export async function runAgent(opts: RunOptions): Promise<string> {
 
   // The wall clock is the real budget; turns are a backstop. At the deadline
   // the loop ends and the agent is forced to write up findings so far.
-  const deadline = Date.now() + opts.agent.maxMinutes * 60_000;
+  const now = opts.now ?? Date.now;
+  const deadline = now() + opts.agent.maxMinutes * 60_000;
   const warnAt = deadline - Math.min(3 * 60_000, opts.agent.maxMinutes * 15_000);
   let warned = false;
 
   // update_status-only turns don't consume the turn budget (bookkeeping,
   // not work); the absolute iteration cap still bounds the loop.
   let turn = 0;
-  for (let iteration = 0; turn < opts.agent.maxTurns && iteration < opts.agent.maxTurns * 2 && Date.now() < deadline; iteration++) {
+  for (let iteration = 0; turn < opts.agent.maxTurns && iteration < opts.agent.maxTurns * 2 && now() < deadline; iteration++) {
     const result = await opts.provider.complete({
       model: opts.model,
       system: opts.agent.system,
@@ -86,9 +89,9 @@ export async function runAgent(opts: RunOptions): Promise<string> {
       }
     }
     // One-time wrap-up warning as time runs low, attached to the tool results.
-    if (!warned && Date.now() >= warnAt) {
+    if (!warned && now() >= warnAt) {
       warned = true;
-      const minutesLeft = Math.max(1, Math.round((deadline - Date.now()) / 60_000));
+      const minutesLeft = Math.max(1, Math.round((deadline - now()) / 60_000));
       opts.onProgress?.(`~${minutesLeft} min left — signaling wrap-up`);
       results.push({
         type: "text",
@@ -100,7 +103,7 @@ export async function runAgent(opts: RunOptions): Promise<string> {
 
   // Budget exhausted (time or turns): one final tool-less call so the work
   // so far is written up instead of discarded.
-  const wasTimeout = Date.now() >= deadline;
+  const wasTimeout = now() >= deadline;
   opts.onProgress?.(`${wasTimeout ? "time" : "turn"} budget exhausted — writing up findings so far`);
   messages.push({
     role: "user",
