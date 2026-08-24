@@ -26,4 +26,4 @@ Each claim must be demonstrable in one interaction. These are the demo moments; 
 
 ## Known gaps standing between here and "done"
 
-- `[gap]` items in the feature files: trigger-gating unit tests and image-passthrough fixtures (both need the Slack adapter's handlers extracted from Bolt wiring). Closed: wrap-up-warning clock injection, quoting suite in CI, GH App token unit tests.
+- ~~`[gap]` items in the feature files~~ — **all closed** (trigger gating, image fixtures, wrap-up-warning clock, quoting suite in CI, GH App token tests). The only remaining exit criterion is #4, the cold-start side-by-side.

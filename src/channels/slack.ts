@@ -55,6 +55,37 @@ const LOADING_PHRASES = [
   "is clearing the static…",
 ];
 
+/** What to do with an incoming message event. Pure — the async thread-
+ *  participation lookup stays with the caller. Exported for tests. */
+export type MessageDecision = "skip" | "handle" | "handle-if-bot-in-thread";
+
+export function classifyMessage(
+  m: { bot_id?: string; subtype?: string; channel_type?: string; thread_ts?: string; text?: string },
+  botUserId?: string,
+): MessageDecision {
+  // "file_share" is how Slack marks a message with attachments — still a
+  // user message, so let it through the subtype gate.
+  if (m.bot_id || (m.subtype && m.subtype !== "file_share")) return "skip";
+  if (m.channel_type === "im") return "handle";
+  // Channel/group messages: only thread follow-ups, and only in threads the
+  // bot is already part of. Mentions are app_mention's job (the same message
+  // fires both events — skip here to avoid double-handling), and top-level
+  // channel posts still require a mention.
+  if (!m.thread_ts) return "skip";
+  if (botUserId && (m.text ?? "").includes(`<@${botUserId}>`)) return "skip";
+  return "handle-if-bot-in-thread";
+}
+
+/** Is the bot part of this thread — has it posted, or been mentioned anywhere
+ *  in it? Pure over already-fetched messages. Exported for tests. */
+export function threadIncludesBot(
+  messages: Array<{ user?: string; text?: string }>,
+  botUserId?: string,
+): boolean {
+  if (!botUserId) return false;
+  return messages.some((m) => m.user === botUserId || (m.text ?? "").includes(`<@${botUserId}>`));
+}
+
 export function createSlackApp(deps: CoreDeps) {
   const app = new App({
     token: process.env.SLACK_BOT_TOKEN,
@@ -91,18 +122,17 @@ export function createSlackApp(deps: CoreDeps) {
       subtype?: string;
       files?: SlackFile[];
     };
-    // "file_share" is how Slack marks a message with attachments — still a
-    // user message, so let it through the subtype gate.
-    if (m.bot_id || (m.subtype && m.subtype !== "file_share")) return;
+    // Two-phase, deliberately: the botUserId-free pre-check catches every
+    // skip except mention-in-thread, so definite skips (bot messages,
+    // subtypes, top-level channel posts) never cost an auth.test call — a
+    // small improvement over the pre-extraction code, which called auth.test
+    // before the top-level-post check. Dispatch outcomes are identical.
+    if (classifyMessage(m) === "skip") return;
     botUserId ??= (await client.auth.test()).user_id ?? undefined;
-    if (m.channel_type !== "im") {
-      // Channel/group messages: only thread follow-ups, and only in threads
-      // the bot is already part of. Mentions are app_mention's job (the same
-      // message fires both events — skip here to avoid double-handling), and
-      // top-level channel posts still require a mention.
-      if (!m.thread_ts) return;
-      if (botUserId && (m.text ?? "").includes(`<@${botUserId}>`)) return;
-      if (!(await botInThread(client, m.channel, m.thread_ts, botUserId))) return;
+    const decision = classifyMessage(m, botUserId);
+    if (decision === "skip") return;
+    if (decision === "handle-if-bot-in-thread") {
+      if (!(await botInThread(client, m.channel, m.thread_ts!, botUserId))) return;
     }
     await handle(deps, client, {
       channel: m.channel,
@@ -164,7 +194,7 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
  * Anything else (wrong type, too big, download failed) lands in `skipped` with
  * a human-readable label. Requires the files:read bot scope.
  */
-async function fetchImages(
+export async function fetchImages(
   files: SlackFile[] | undefined,
   maxImages: number,
   maxTotalBytes = Infinity,
@@ -205,7 +235,7 @@ async function fetchImages(
       bytes += buf.byteLength;
       images.push({ mediaType: f.mimetype, data: buf.toString("base64"), name: f.name });
     } catch (err) {
-      console.error(`[files] download failed for ${label}: ${(err as Error).message}`);
+      console.error(`[files] download failed for ${label}: ${err instanceof Error ? err.message : String(err)}`);
       skipped.push(label);
     }
   }
@@ -363,16 +393,14 @@ async function botInThread(
   if (!botUserId) return false;
   try {
     const replies = await client.conversations.replies({ channel, ts: threadTs, limit: 50 });
-    return (replies.messages ?? []).some((m) => {
-      const mm = m as { user?: string; text?: string };
-      return mm.user === botUserId || (mm.text ?? "").includes(`<@${botUserId}>`);
-    });
+    return threadIncludesBot((replies.messages ?? []) as Array<{ user?: string; text?: string }>, botUserId);
   } catch {
     return false; // can't read the thread => stay quiet
   }
 }
 
-function stripMention(text: string, botUserId?: string): string {
+/** Exported for tests. */
+export function stripMention(text: string, botUserId?: string): string {
   const stripped = botUserId
     ? text.replaceAll(`<@${botUserId}>`, "")
     : text.replace(/<@[A-Z0-9]+>/, "");
