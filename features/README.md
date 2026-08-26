@@ -24,6 +24,7 @@ The behavioral contract of Switchboard, versioned with the code. Every file in t
 | [slack-channel.md](slack-channel.md) | Triggers (mention/DM/follow-up), ack reaction, status cards, formatting, attachments |
 | [run-loop.md](run-loop.md) | Turn/time budgets, wrap-up behavior, forced write-up, refusal/truncation handling |
 | [execution.md](execution.md) | Per-thread workspaces, sandbox timeouts (exit 124), heartbeat streaming, session recovery, GitHub identity |
+| [resident-repos.md](resident-repos.md) | Resident repo environments: auth scopes, atomic cap, onboard/offboard/reconfigure, lifecycle states, x-env hardening |
 | [agent-general.md](agent-general.md) | Default passthrough agent |
 | [agent-review.md](agent-review.md) | Code review agent |
 | [agent-coding.md](agent-coding.md) | Coding agent (ships PRs) |
