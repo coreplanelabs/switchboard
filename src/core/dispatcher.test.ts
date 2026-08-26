@@ -195,7 +195,92 @@ describe("executor provisioning by agent resources", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(replies).toContain("answer");
-    const executor = await vi.mocked(makeExecutor).mock.results[0].value;
+    const { executor } = await vi.mocked(makeExecutor).mock.results[0].value;
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+  });
+});
+
+// Feature: features/resident-repos.md — the KD7 per-repo gate (a refused user
+// sees a NAMED refusal, never a silent per-thread fallback) and the KTD10
+// fallback note surfacing on the status card.
+const REPO_PERMS_YAML = `
+providers:
+  anthropic:
+    type: anthropic
+    apiKeyEnv: ANTHROPIC_API_KEY
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+    coding: anthropic/coding-model
+permissions:
+  admins: ["slack:UADMIN"]
+  agents:
+    coding: ["slack:UADMIN", "slack:UDEV"]
+  repos:
+    "acme/api": ["slack:UADMIN"]
+workspaceDir: __WORKDIR__
+`;
+
+const RESIDENT_YAML_FIXTURE =
+  REPO_PERMS_YAML +
+  `execution:
+  type: cloudflare
+  url: https://sandbox.example
+  resident:
+    baseUrl: https://resident.example
+`;
+
+describe("resident repo dispatch", () => {
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.mocked(makeExecutor).mockClear();
+    (await import("../execution/factory.js")).resetResidentProbeCache();
+  });
+
+  it("a canUseRepo refusal is a named reply and no executor is created", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api" });
+    const { io, replies } = fakeIO();
+    // UDEV may run the coding agent but is NOT on acme/api's repo allowlist.
+    await dispatch(deps, msg("agent:coding fix it", "slack:UDEV"), io);
+    expect(replies[0]).toContain("🚫");
+    expect(replies[0]).toContain("acme/api");
+    expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
+  });
+
+  it("an allowed user's repo context flows to executor selection as ctx.repo/ctx.ref", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    const ctx = vi.mocked(makeExecutor).mock.calls[0][1];
+    expect(ctx).toMatchObject({ threadKey: "slack:CX:1.0", repo: "acme/api", ref: "main" });
+  });
+
+  it("a resident fallback note appears in the status frames (named, never silent)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    // The /status probe answers restoring; the run then uses the per-thread
+    // backend (no further resident calls happen before the fake provider ends).
+    const fetchSpy = vi.fn(async () =>
+      new Response(JSON.stringify({ state: "restoring", reason: "rehydrating" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(replies).toContain("answer");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(
+      statuses.some((s) => s.title.includes("resident restoring (rehydrating) — using fresh sandbox")),
+    ).toBe(true);
   });
 });

@@ -49,6 +49,10 @@ defaults:
 #     coding: [slack:U0456DEV]            # only these users (+ admins) may run coding
 #   channelConfig: []               # who may run `config set/clear channel`;
 #                                   # empty = admins only; key absent = everyone
+#   repos:                          # per-repo access for resident environments;
+#     acme/api: [slack:U0456DEV]    # map or key absent = open to every allowed
+#                                   # coding-agent user; a listed repo refuses
+#                                   # non-listed users by name (never silently)
 
 # Where agent tools execute. "local" runs them on the bot host (dev/CLI);
 # "e2b" runs each thread's tools in its own E2B micro-VM — the repo checkout
@@ -64,6 +68,14 @@ execution:
   # type: e2b
   # apiKeyEnv: E2B_API_KEY
   # timeoutMinutes: 30   # sandbox idle lifetime; thread follow-ups reconnect
+  # Resident repo environments (deploy/cloudflare-resident/): when set, a
+  # request whose target repo is onboarded and warm runs against the resident
+  # Worker; any other resident state falls back to the backend above with a
+  # named reason on the status card. Works alongside any per-thread type.
+  # resident:
+  #   baseUrl: https://switchboard-resident.<account>.workers.dev
+  #   tokenEnv: RESIDENT_OPERATOR_TOKEN  # operator bearer secret (default)
+  #   probeTimeoutMs: 2000               # /status probe budget; timeout = not warm
 
 # Where per-conversation agent workspaces are created (local execution only).
 # On Fly.io set this to ./data/workspaces so checkouts live on the volume.

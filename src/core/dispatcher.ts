@@ -16,6 +16,15 @@ export interface CoreDeps {
   providers: ProviderRegistry;
   /** where runtime state (sandboxes.json) lives; default ./data */
   dataDir?: string;
+  /**
+   * Resolves the target repo/ref for a message (resident environments). The
+   * real resolver — repo/PR/branch signal extraction — lands in U7; until one
+   * is wired the context stays empty and executor selection takes the
+   * per-thread path with no resident probe (total input contract).
+   */
+  resolveRepoContext?: (
+    msg: IncomingMessage,
+  ) => Promise<{ repo?: string; ref?: string }> | { repo?: string; ref?: string };
 }
 
 const STATUS_UPDATE_MIN_MS = 3000;
@@ -67,21 +76,35 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
     const provider = deps.providers.get(providerName);
 
+    // Target repo/ref for resident environments (U7 wires the real resolver).
+    const repoCtx = (await deps.resolveRepoContext?.(msg)) ?? {};
+
+    // Per-repo access gate (KD7): open when permissions.repos is absent or
+    // the repo is unlisted; a configured allowlist refuses BY NAME — a
+    // refused user must see why, never get a silent per-thread fallback.
+    if (repoCtx.repo && !deps.config.canUseRepo(msg.userId, repoCtx.repo)) {
+      await io.reply(
+        `🚫 You're not on the allowlist for the \`${repoCtx.repo}\` repo environment. Ask ${deps.config.adminsHint()} for access.`,
+      );
+      return;
+    }
+
     const messages = buildMessages(history, directives.text, msg.images);
 
     // Executor selection is context-aware: the agent's resource declarations
     // decide whether anything is provisioned at all (general gets nothing),
-    // and repo/ref will carry resident-repo inference in later milestones.
-    const executor = await makeExecutor(
+    // and repo/ref carry resident-repo inference. A resident fallback comes
+    // back with a named note (KTD10) that rides on every status frame below.
+    const { executor, note } = await makeExecutor(
       {
         execution: deps.config.config.execution,
         workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
         dataDir: deps.dataDir ?? "./data",
       },
-      { threadKey: msg.threadKey, agent },
+      { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref },
     );
 
-    const label = `*${agent.name}* on \`${resolved.modelRef}\``;
+    const label = `*${agent.name}* on \`${resolved.modelRef}\`` + (note ? ` · ${note}` : "");
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
     const startedAt = Date.now();
     const spinner = ["◐", "◓", "◑", "◒"];

@@ -17,6 +17,7 @@ interface Env {
   OPENAI_API_KEY?: string;
   E2B_API_KEY?: string;
   SANDBOX_TOKEN?: string; // cloudflare execution: bearer for the sandbox Worker
+  RESIDENT_OPERATOR_TOKEN?: string; // resident repos: operator bearer for the resident Worker
   GH_TOKEN?: string; // fallback when no GitHub App is configured
   GITHUB_APP_ID?: string;
   GITHUB_APP_INSTALLATION_ID?: string;
@@ -39,6 +40,9 @@ export class SwitchboardServer extends Container<Env> {
       ...(env.OPENAI_API_KEY ? { OPENAI_API_KEY: env.OPENAI_API_KEY } : {}),
       ...(env.E2B_API_KEY ? { E2B_API_KEY: env.E2B_API_KEY } : {}),
       ...(env.SANDBOX_TOKEN ? { SANDBOX_TOKEN: env.SANDBOX_TOKEN } : {}),
+      ...(env.RESIDENT_OPERATOR_TOKEN
+        ? { RESIDENT_OPERATOR_TOKEN: env.RESIDENT_OPERATOR_TOKEN }
+        : {}),
       ...(env.GH_TOKEN ? { GH_TOKEN: env.GH_TOKEN } : {}),
       ...(env.GITHUB_APP_ID ? { GITHUB_APP_ID: env.GITHUB_APP_ID } : {}),
       ...(env.GITHUB_APP_INSTALLATION_ID

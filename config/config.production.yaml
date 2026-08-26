@@ -24,5 +24,12 @@ execution:
   type: cloudflare
   url: https://switchboard-sandbox.coreplanelabs.dev
   apiKeyEnv: SANDBOX_TOKEN
+  # Resident repo environments: selection additionally requires a resolved
+  # target repo (ctx.repo), which the U7 resolver populates — until then this
+  # block is inert for live traffic and every request takes the per-thread
+  # sandbox above.
+  resident:
+    baseUrl: https://switchboard-resident.coreplanelabs.dev
+    tokenEnv: RESIDENT_OPERATOR_TOKEN
 
 workspaceDir: ./workspaces # unused with cloudflare execution; kept for fallback

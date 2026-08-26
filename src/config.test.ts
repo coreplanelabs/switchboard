@@ -36,10 +36,10 @@ permissions:
   channelConfig: []
 `;
 
-function store(): ConfigStore {
+function store(yaml: string = YAML_FIXTURE): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
   const cfg = join(dir, "config.yaml");
-  writeFileSync(cfg, YAML_FIXTURE);
+  writeFileSync(cfg, yaml);
   return new ConfigStore(cfg, join(dir, "overrides.json"));
 }
 
@@ -109,5 +109,29 @@ describe("permission gates", () => {
   it("empty channelConfig list means admins only", () => {
     expect(s.canEditChannelConfig("slack:URANDOM")).toBe(false);
     expect(s.canEditChannelConfig("slack:UADMIN")).toBe(true);
+  });
+});
+
+// Feature: features/resident-repos.md — per-repo access is open-when-absent
+// (KD7): no permissions.repos config → every allowed coding-agent user may
+// use every onboarded repo; a configured allowlist refuses non-listed users.
+describe("per-repo access (canUseRepo)", () => {
+  it("absent permissions.repos map → every repo is open (KD7 open-when-absent)", () => {
+    const s = store(); // YAML_FIXTURE has no repos map
+    expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(true);
+  });
+
+  const REPOS_FIXTURE = YAML_FIXTURE + `  repos:\n    "acme/api": ["slack:UDEV"]\n`;
+
+  it("a repo absent from a configured map stays open", () => {
+    const s = store(REPOS_FIXTURE);
+    expect(s.canUseRepo("slack:URANDOM", "acme/other")).toBe(true);
+  });
+
+  it("a listed repo admits members and admins, refuses everyone else", () => {
+    const s = store(REPOS_FIXTURE);
+    expect(s.canUseRepo("slack:UDEV", "acme/api")).toBe(true);
+    expect(s.canUseRepo("slack:UADMIN", "acme/api")).toBe(true);
+    expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(false);
   });
 });

@@ -4,7 +4,17 @@ import type { AgentDef } from "../agents/registry.js";
 import { LocalExecutor, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
+import { ResidentExecutor, type ResidentStatusProbe } from "./resident.js";
 import { resolveGithubToken } from "./githubApp.js";
+
+export interface ResidentExecutionConfig {
+  /** base URL of the resident Worker (deploy/cloudflare-resident/) */
+  baseUrl: string;
+  /** env var holding the operator bearer (default RESIDENT_OPERATOR_TOKEN) */
+  tokenEnv?: string;
+  /** /status probe timeout in ms (default 2000); a timed-out probe = not warm */
+  probeTimeoutMs?: number;
+}
 
 export interface ExecutionConfig {
   /**
@@ -20,6 +30,13 @@ export interface ExecutionConfig {
   timeoutMinutes?: number;
   /** base URL of the sandbox proxy Worker (cloudflare only) */
   url?: string;
+  /**
+   * Resident repo environments (deploy/cloudflare-resident/): when set AND
+   * the request resolved a target repo (ctx.repo), a warm resident serves the
+   * thread; any other resident state falls back to the per-thread backend
+   * above with a named note (KTD10). No ctx.repo → per-thread, no probe.
+   */
+  resident?: ResidentExecutionConfig;
 }
 
 export interface ExecutorFactoryOptions {
@@ -30,25 +47,103 @@ export interface ExecutorFactoryOptions {
 
 /** What executor selection knows about the run it is provisioning for.
  *  The agent's resource declarations drive whether anything is provisioned at
- *  all; repo/ref carry resident-repo inference once later units supply it. */
+ *  all; repo/ref carry resident-repo inference (populated by the dispatcher's
+ *  repo resolver — U7; undefined means the per-thread path, no probe). */
 export interface ExecutorContext {
   threadKey: string;
   /** the resolved agent (never mutated here) */
   agent: AgentDef;
-  /** inferred target repo, e.g. "org/name" — reserved, not yet populated */
+  /** inferred target repo, e.g. "org/name" */
   repo?: string;
-  /** inferred git ref within `repo` — reserved, not yet populated */
+  /** inferred git ref within `repo` */
   ref?: string;
 }
 
-export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorContext): Promise<Executor> {
+/** Executor selection result. `note` is present when resident selection fell
+ *  back to the per-thread backend — the NAMED reason (state + reason, KTD10)
+ *  the dispatcher surfaces on the status card. Never silent. */
+export interface ExecutorSelection {
+  executor: Executor;
+  note?: string;
+}
+
+// Negative cache (circuit breaker) for resident /status probe TRANSPORT
+// failures only: a resident-service outage costs one probe timeout, not one
+// per concurrent dispatch. Not-warm lifecycle states are definite answers and
+// are NEVER cached (the next dispatch must see a recovery immediately).
+// In-process only — deliberately not persisted (restart-survival invariant).
+const PROBE_OUTAGE_WINDOW_MS = 30_000;
+let probeOutage: { until: number; error: string } | undefined;
+
+/** Test seam: clears the module-level probe circuit breaker. */
+export function resetResidentProbeCache(): void {
+  probeOutage = undefined;
+}
+
+export async function makeExecutor(
+  opts: ExecutorFactoryOptions,
+  ctx: ExecutorContext,
+): Promise<ExecutorSelection> {
   // Agents declare the resources they need (KD2). No repo declared → nothing
   // to provision: no workspace dir, no sandbox created or reconnected, no
   // credential required. The general agent (toolset "none") lands here.
   if (ctx.agent.resources?.repo !== "required") {
-    return new NullExecutor(ctx.agent.name);
+    return { executor: new NullExecutor(ctx.agent.name) };
   }
 
+  // Resident selection (KTD11): only when a target repo was resolved AND the
+  // resident backend is configured. Warm → ResidentExecutor; anything else
+  // (not-warm state, probe timeout, outage) → the per-thread backend below,
+  // with the reason carried in `note` (KTD10 — never a silent stall). A repo
+  // that is simply not onboarded is the ordinary per-thread case: no note.
+  let note: string | undefined;
+  if (ctx.repo && opts.execution?.resident) {
+    const resident = opts.execution.resident;
+    const tokenEnv = resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN";
+    const token = process.env[tokenEnv];
+    if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
+    const resource = `repo:${ctx.repo}`;
+    const probe = await probeResident(resident, token, resource);
+    if (probe.kind === "status" && probe.state === "warm") {
+      return {
+        executor: await ResidentExecutor.open({
+          baseUrl: resident.baseUrl,
+          token,
+          resource,
+          threadKey: ctx.threadKey,
+          refHint: ctx.ref,
+        }),
+      };
+    }
+    if (probe.kind === "unreachable") {
+      note = `resident unreachable (${probe.error}) — using fresh sandbox`;
+    } else if (probe.state !== "not-onboarded") {
+      note = `resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — using fresh sandbox`;
+    }
+  }
+
+  return { executor: await makePerThreadExecutor(opts, ctx), note };
+}
+
+/** /status probe through the negative cache: inside an outage window the
+ *  cached transport failure answers without a fetch. */
+async function probeResident(
+  cfg: ResidentExecutionConfig,
+  token: string,
+  resource: string,
+): Promise<ResidentStatusProbe> {
+  if (probeOutage && Date.now() < probeOutage.until) {
+    return { kind: "unreachable", error: `${probeOutage.error}; probe skipped during outage window`, transport: true };
+  }
+  const probe = await ResidentExecutor.probeStatus(cfg.baseUrl, token, resource, cfg.probeTimeoutMs ?? 2000);
+  if (probe.kind === "unreachable" && probe.transport) {
+    probeOutage = { until: Date.now() + PROBE_OUTAGE_WINDOW_MS, error: probe.error };
+  }
+  return probe;
+}
+
+/** The per-thread backends (the pre-resident selection, unchanged). */
+async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorContext): Promise<Executor> {
   const { threadKey } = ctx;
   const type = opts.execution?.type ?? "local";
 

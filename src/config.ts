@@ -30,6 +30,13 @@ export interface Permissions {
    * `config clear channel`. Empty list = admins only. Absent = everyone.
    */
   channelConfig?: string[];
+  /**
+   * Per-repo access for resident environments (repo slug -> allowed user
+   * IDs). Open-when-absent (KD7): no map, or a repo not listed in it, means
+   * every allowed coding-agent user may use that repo. A configured allowlist
+   * refuses non-listed users BY NAME (never a silent per-thread fallback).
+   */
+  repos?: Record<string, string[]>;
 }
 
 export interface AppConfig {
@@ -129,6 +136,13 @@ export class ConfigStore {
   canRunAgent(userId: string, agentName: string): boolean {
     const allowlist = this.config.permissions?.agents?.[agentName];
     if (!allowlist) return true; // agent not restricted
+    return this.isAdmin(userId) || allowlist.includes(userId);
+  }
+
+  /** Per-repo access for resident environments (KD7: open-when-absent). */
+  canUseRepo(userId: string, slug: string): boolean {
+    const allowlist = this.config.permissions?.repos?.[slug];
+    if (!allowlist) return true; // repo (or the whole map) not restricted
     return this.isAdmin(userId) || allowlist.includes(userId);
   }
 
