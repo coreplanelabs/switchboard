@@ -17,13 +17,21 @@
 //   unauthenticated GET /healthz (deploy wake ping; touches no DO)
 //
 // U2 implemented auth, registry storage, onboard/offboard/reconfigure/status/
-// residents, and the provisioning deadline. U3 (this unit) adds the lifecycle
-// engine: alarm-driven provisioning (clone → install/build → stamped snapshot
-// → warm), wake-path rehydration (restoring persisted BEFORE restore, stamped
+// residents, and the provisioning deadline. U3 added the lifecycle engine:
+// alarm-driven provisioning (clone → install/build → stamped snapshot →
+// warm), wake-path rehydration (restoring persisted BEFORE restore, stamped
 // snapshots refused on mismatch), the self-rescheduling refresh alarm, the
 // watchdog (re-arm dead chains + degraded(alarm-missed); time out stuck
 // onboarding), and repo-scoped GitHub App token minting on WebCrypto.
-// /attach /exec /read /write remain 501 stubs (U4); /op is a 501 stub (U6).
+// U4 (this unit) adds the operator data plane: POST /attach (per-thread
+// worktree off the bare mirror + sticky ref binding + dep materialization +
+// per-attach credential file), POST /exec (privilege-dropped per-thread
+// execution), POST /read and /write (thread-user file ops confined to the
+// worktree), the in-DO mirror mutex serializing every mirror mutation, and
+// the inactivity sweep that evicts idle worktrees while keeping the binding
+// record. /op is a 501 stub (U6). All four thread routes take a `resource`
+// field alongside `threadKey` — the service hosts many residents, and the
+// resource picks the DO exactly as GET /status does.
 //
 // SECURITY (deliberate deviations from the thread-sandbox Worker):
 //   1. Bearer comparison is constant-time (timingSafeEqual below), never a
@@ -113,6 +121,46 @@ const READY_MARKER = `${RESIDENT_STATE_DIR}/ready`; // holds the sha the disk wa
 /** Unprivileged user for default-branch install/build (KTD5: repo code never
  *  runs as root). worker2..worker8 stay free for U4's per-thread users. */
 const BUILD_USER = "worker1";
+
+/** Per-thread worktrees (U4) hang here: one 700 thread dir per threadKey
+ *  (owned by that thread's OS user — other thread users cannot even
+ *  traverse), one worktree per bound ref beneath it. Disk is cache: a slept
+ *  container loses these, and the next attach recreates them. */
+const THREADS_DIR = "/workspace/threads";
+
+/** The thread-user pool (KTD5). worker1 is the engine's build user; each
+ *  attach allocates one of these to the thread (persisted in the binding)
+ *  and every /exec /read /write for that thread runs privilege-dropped as
+ *  that user. The pool is released by the inactivity sweep. */
+const THREAD_USERS = ["worker2", "worker3", "worker4", "worker5", "worker6", "worker7", "worker8"] as const;
+
+/** Inactivity eviction: worktrees whose binding lastAttachAt is older than
+ *  this many days are removed and their user returned to the pool; the
+ *  binding record is KEPT (KTD6) so the next attach recreates with the same
+ *  ref. Overridable per resident via the onboard-time `worktreeTtlDays`. */
+const WORKTREE_TTL_DAYS_DEFAULT = 7;
+/** The sweep self-reschedules daily (armed by attach when no sweep pends). */
+const SWEEP_INTERVAL_S = 24 * 60 * 60;
+
+/** Attach waits on the mirror mutex under this named timeout; expiry answers
+ *  503 {state, reason: "mirror-busy"} instead of queueing forever. */
+const ATTACH_MUTEX_WAIT_MS = 60_000;
+
+/** /exec budget (5-minute default per the U4 contract; also the ceiling —
+ *  longer work belongs in background jobs, and the streamed heartbeat only
+ *  protects the HTTP hop, not the DO wall clock). */
+const DEFAULT_THREAD_EXEC_TIMEOUT_MS = 5 * 60_000;
+const MAX_THREAD_EXEC_TIMEOUT_MS = 5 * 60_000;
+const MAX_EXEC_COMMAND_LENGTH = 8_000;
+/** Output caps, per stream; truncation is annotated in stderr like the
+ *  thread-sandbox Worker annotates its timeout note. */
+const EXEC_OUTPUT_CAP = 100_000;
+const READ_CONTENT_CAP = 262_144;
+const MAX_WRITE_CONTENT = 524_288;
+
+/** Dep/build cache dirs materialized from the warm checkout into a fresh
+ *  worktree when the committed-lockfile key matches (KTD7). */
+const DEP_CACHE_DIRS = ["node_modules", "dist", "build", "out", ".next"] as const;
 
 /** Files whose COMMITTED content keys the dependency/build cache (KTD7).
  *  The key hashes `git ls-tree <sha> -- <these>` output from the mirror —
@@ -308,8 +356,57 @@ interface ResidentRecord {
   defaultRef: string;
   diskBudgetMb?: number;
   provisioningTimeoutMs: number;
+  /** Inactivity window (days) before the sweep evicts a thread's worktree
+   *  and releases its user; the binding record survives (KTD6). */
+  worktreeTtlDays?: number;
   onboardedAt: string;
   updatedAt: string;
+}
+
+/** Per-thread binding (KTD6): persisted in the resident DO keyed by
+ *  threadKey; survives restarts and eviction. `user`/`evicted` describe the
+ *  current allocation; `ref` is sticky for the thread's whole life. */
+interface ThreadBinding {
+  threadKey: string;
+  ref: string;
+  /** Allocated OS user (worker2..worker8); "" once evicted (pool released). */
+  user: string;
+  worktreePath: string;
+  boundAt: string;
+  lastAttachAt: string;
+  evicted?: boolean;
+  evictedAt?: string;
+  /** How deps were last materialized (evidence for KTD7). */
+  deps?: ThreadDepsMechanism;
+}
+
+type ThreadDepsMechanism = "hardlink" | "copy" | "install" | "none";
+
+/** Named, RPC-cloneable error shape for the thread data plane. The Worker
+ *  maps `status` to the HTTP status; extra fields (`needs`, `state`,
+ *  `reason`) ride along into the body. */
+interface ThreadErr {
+  error: string;
+  status: number;
+  needs?: string;
+  state?: ResidentState;
+  reason?: string;
+}
+
+interface AttachOk {
+  workspace: string;
+  ref: string;
+  sha: string;
+  user: string;
+  /** True only when a scoped install had to run (lockfile key differed). */
+  reconciled: boolean;
+  /** True when a dirty/stale/missing worktree was wiped and recreated. */
+  recreated: boolean;
+  deps: ThreadDepsMechanism;
+  credentials: "ok" | "unavailable";
+  credentialsError?: string;
+  mutexWaitMs: number;
+  attachMs: number;
 }
 
 /** DO-recorded repo facts — the truth the disk is rehydrated against (KTD3). */
@@ -380,7 +477,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  `commands`, when present, REPLACES the whole command table. */
   async updateConfig(
     resource: string,
-    patch: Partial<Pick<ResidentRecord, "commands" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs">>,
+    patch: Partial<Pick<ResidentRecord, "commands" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs" | "worktreeTtlDays">>,
   ): Promise<ResidentRecord | null> {
     const key = registryKey(resource);
     const record = await this.ctx.storage.get<ResidentRecord>(key);
@@ -390,6 +487,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     if (patch.defaultRef !== undefined) updated.defaultRef = patch.defaultRef;
     if (patch.diskBudgetMb !== undefined) updated.diskBudgetMb = patch.diskBudgetMb;
     if (patch.provisioningTimeoutMs !== undefined) updated.provisioningTimeoutMs = patch.provisioningTimeoutMs;
+    if (patch.worktreeTtlDays !== undefined) updated.worktreeTtlDays = patch.worktreeTtlDays;
     await this.ctx.storage.put(key, updated);
     return updated;
   }
@@ -406,6 +504,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 const PROVISIONING_CALLBACK = "onProvisioningDeadline"; // fail-closed deadline
 const PROVISION_RUN_CALLBACK = "runProvisioning"; // the actual provisioning work
 const REFRESH_CALLBACK = "onRefreshAlarm"; // self-rescheduling freshness chain
+const SWEEP_CALLBACK = "onWorktreeSweep"; // daily worktree inactivity eviction (U4)
 
 const STATE_KEY = "resident:state";
 const REASON_KEY = "resident:reason";
@@ -414,6 +513,39 @@ const UPDATED_KEY = "resident:updatedAt";
 const FACTS_KEY = "resident:facts";
 const SNAPSHOT_KEY = "resident:snapshot";
 const DEADLINE_AT_KEY = "resident:provisionDeadlineAt";
+
+/** Thread bindings live under their own prefix, keyed by threadKey (KTD6). */
+const THREAD_KEY_PREFIX = "thread:";
+const threadBindingKey = (threadKey: string) => `${THREAD_KEY_PREFIX}${threadKey}`;
+
+const parentDir = (p: string): string => p.slice(0, p.lastIndexOf("/"));
+
+/** Deterministic per-thread+ref worktree path. Slugs replace anything outside
+ *  [A-Za-z0-9._-]; a threadKey-derived hash suffix keeps two keys that slug
+ *  identically (e.g. "a:b" vs "a-b") from colliding on disk. */
+async function threadWorktreePath(threadKey: string, ref: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(threadKey));
+  const hash8 = [...new Uint8Array(digest).slice(0, 4)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const slug = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 60);
+  return `${THREADS_DIR}/${slug(threadKey)}-${hash8}/${slug(ref)}`;
+}
+
+/** Path confinement for /read and /write: conservative charset, no `..`
+ *  segments, and the resolved absolute path must stay under the worktree
+ *  root. Symlink tricks past this point are bounded by the OS layer — the
+ *  file op itself runs as the thread's unprivileged user. */
+export function confineThreadPath(root: string, path: unknown): string | null {
+  if (typeof path !== "string" || path.length === 0 || path.length > 512) return null;
+  if (!/^[A-Za-z0-9._/-]+$/.test(path)) return null;
+  const joined = path.startsWith("/") ? path : `${root}/${path}`;
+  const segments = joined.split("/").filter((s) => s !== "" && s !== ".");
+  if (segments.includes("..")) return null;
+  const resolved = `/${segments.join("/")}`;
+  return resolved.startsWith(`${root}/`) ? resolved : null;
+}
+
+/** Named mirror-mutex timeout — attach maps this to 503 {reason:"mirror-busy"}. */
+class MirrorBusyError extends Error {}
 
 /** Named failure of one engine step; becomes "<step>-flavored" reasons. */
 class StepError extends Error {
@@ -445,6 +577,55 @@ export class ResidentDO extends Sandbox<Env> {
    *  used as a "hydrated" flag — the container can sleep while the DO object
    *  survives, so hydration state is always probed from disk. */
   private hydration: Promise<void> | null = null;
+
+  /** Mirror mutex (KTD5): a DO yields at every await, so two in-flight
+   *  requests CAN interleave mid-handler — every mirror mutation (fetch,
+   *  worktree add/remove) runs under this explicit promise-chain lock. The
+   *  chain lives in DO memory only; that is sufficient because all mirror
+   *  work happens through this one DO instance, and a DO restart also drops
+   *  any in-flight work the lock was guarding. */
+  private mirrorLockTail: Promise<void> = Promise.resolve();
+
+  /** Run `fn` holding the mirror mutex. With waitTimeoutMs > 0, gives up
+   *  waiting after that long (throws MirrorBusyError) — the queued slot is
+   *  released so later waiters are not stuck behind a ghost. */
+  private async withMirrorLock<T>(fn: () => Promise<T>, waitTimeoutMs = 0): Promise<{ value: T; waitedMs: number }> {
+    const prev = this.mirrorLockTail;
+    let release!: () => void;
+    const slot = new Promise<void>((resolve) => (release = resolve));
+    // Chain synchronously (no await between read and write) so queue order is
+    // exactly arrival order within the DO's single-threaded event loop.
+    this.mirrorLockTail = prev.then(
+      () => slot,
+      () => slot,
+    );
+    const started = Date.now();
+    if (waitTimeoutMs > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = await Promise.race([
+        prev.then(
+          () => false,
+          () => false,
+        ),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(true), waitTimeoutMs);
+        }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+      if (timedOut) {
+        release(); // our slot becomes a no-op; the queue keeps moving
+        throw new MirrorBusyError(`mirror-busy: mutex not acquired within ${waitTimeoutMs}ms`);
+      }
+    } else {
+      await prev.catch(() => {});
+    }
+    const waitedMs = Date.now() - started;
+    try {
+      return { value: await fn(), waitedMs };
+    } finally {
+      release();
+    }
+  }
 
   private registry() {
     return this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
@@ -527,6 +708,17 @@ export class ResidentDO extends Sandbox<Env> {
   private async ensureGitSetup(): Promise<void> {
     await this.runOk(["install", "-d", "-m", "700", "-o", "root", "-g", "root", RESIDENT_STATE_DIR], "state-dir");
     await this.runOk(["git", "config", "--system", "safe.directory", MIRROR_DIR], "git-config");
+    // U4 isolation: thread users must not read the mirror directly (its
+    // config/refs are engine plumbing; repo content reaches threads only
+    // through their own worktrees). worker1 still needs read access — the
+    // warm checkout fetches from the mirror during refresh — so the mirror
+    // top dir is root:worker1 750, denying worker2..worker8 at traversal.
+    // Conditional: the dir does not exist before provisioning's clone
+    // creates it (runProvisioning re-runs this right after the clone).
+    await this.runOk(
+      ["sh", "-c", `if [ -d ${MIRROR_DIR} ]; then chown root:${BUILD_USER} ${MIRROR_DIR} && chmod 750 ${MIRROR_DIR}; fi`],
+      "mirror-perms",
+    );
   }
 
   private async refExists(ref: string): Promise<boolean> {
@@ -660,7 +852,10 @@ export class ResidentDO extends Sandbox<Env> {
 
       await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, READY_MARKER], "clean-workspace");
       await this.ensureGitSetup();
-      await this.gitWithCred(token, ["clone", "--mirror", `https://github.com/${slug}.git`, MIRROR_DIR], "clone", stepBudget);
+      await this.withMirrorLock(() =>
+        this.gitWithCred(token, ["clone", "--mirror", `https://github.com/${slug}.git`, MIRROR_DIR], "clone", stepBudget),
+      );
+      await this.ensureGitSetup(); // the clone just created MIRROR_DIR — lock its perms down
 
       // Resolve the default branch: the configured ref when it exists, else
       // the mirror's HEAD (what GitHub reports as the default branch).
@@ -845,7 +1040,12 @@ export class ResidentDO extends Sandbox<Env> {
 
       await this.setResidentState("refreshing");
       try {
-        await this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "fetch", GIT_NETWORK_TIMEOUT_MS);
+        // Same mirror mutex as attach's fetch/worktree work (KTD5): the
+        // refresh alarm and an in-flight attach serialize instead of racing
+        // a prune against a worktree clone.
+        await this.withMirrorLock(() =>
+          this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "fetch", GIT_NETWORK_TIMEOUT_MS),
+        );
       } catch (err) {
         await this.setResidentState("degraded", `github-unreachable: ${errMsg(err)}`);
         return;
@@ -923,6 +1123,491 @@ export class ResidentDO extends Sandbox<Env> {
       return { resource, state: "degraded", reason, action: "rearmed" };
     }
     return { resource, ...status, action: "none" };
+  }
+
+  // -- thread data plane (U4: attach / exec / read / write / sweep) ------------
+
+  /** Run a shell string privilege-dropped as the thread's OS user with the
+   *  worktree as cwd (KTD5). Never root, never a token in env or argv — the
+   *  only injected env var is GIT_TERMINAL_PROMPT, validated like every
+   *  injection. The worktree path is built from slugged components, so
+   *  embedding it in the -c string is shell-safe. */
+  private async threadRun(
+    user: string,
+    worktreePath: string,
+    command: string,
+    timeoutMs: number,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
+    const injected = { GIT_TERMINAL_PROMPT: "0" };
+    validateEnvNames(injected);
+    return this.run(["su", "-s", "/bin/bash", user, "-c", `cd ${worktreePath} && ${command}`], {
+      timeoutMs,
+      env: injected,
+    });
+  }
+
+  private async threadRunOk(user: string, worktreePath: string, command: string, step: string, timeoutMs: number): Promise<string> {
+    const r = await this.threadRun(user, worktreePath, command, timeoutMs);
+    if (r.exitCode !== 0 || r.timedOut) {
+      throw new StepError(step, `exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}: ${tail(r.stderr || r.stdout)}`);
+    }
+    return r.stdout;
+  }
+
+  /** Storage-only allocation (atomic under the DO input gate: get → list →
+   *  put touches nothing but this object's storage, so two concurrent
+   *  attaches cannot both claim the same user). Sticky: an existing live
+   *  binding is reused as-is; an evicted binding keeps its ref (KTD6) and
+   *  gets a fresh user from the pool. */
+  private async allocateThreadUser(
+    threadKey: string,
+    ref: string,
+    worktreePath: string,
+  ): Promise<{ binding: ThreadBinding; wrote: boolean } | ThreadErr> {
+    const key = threadBindingKey(threadKey);
+    const existing = await this.ctx.storage.get<ThreadBinding>(key);
+    if (existing && !existing.evicted && existing.user) return { binding: existing, wrote: false };
+    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    const used = new Set(
+      [...all.values()].filter((b) => !b.evicted && b.user && b.threadKey !== threadKey).map((b) => b.user),
+    );
+    const user = THREAD_USERS.find((u) => !used.has(u));
+    if (!user) {
+      return {
+        error: `user-pool-exhausted: all ${THREAD_USERS.length} thread users are allocated; wait for the inactivity sweep or evict a thread`,
+        status: 429,
+      };
+    }
+    const now = new Date().toISOString();
+    const binding: ThreadBinding = {
+      threadKey,
+      ref: existing?.ref ?? ref, // sticky across eviction (KTD6)
+      user,
+      worktreePath: existing?.worktreePath ?? worktreePath,
+      boundAt: existing?.boundAt ?? now,
+      lastAttachAt: now,
+      evicted: false,
+    };
+    await this.ctx.storage.put(key, binding);
+    return { binding, wrote: true };
+  }
+
+  /** POST /attach: idempotent per-thread workspace materialization.
+   *  Validated inputs only (the Worker enforces the patterns before this is
+   *  ever called). Flow: hydrate → resolve/blind the ref binding → allocate
+   *  a pool user → (mirror mutex) verify ref, wipe dirty/stale trees,
+   *  clone → materialize deps (KTD7) → per-attach credential file (KTD12). */
+  async attachThread(threadKey: string, refHint: string | null): Promise<AttachOk | ThreadErr> {
+    const t0 = Date.now();
+    try {
+      await this.ensureHydrated();
+    } catch (err) {
+      const s = await this.getStatus();
+      return { error: `not-serviceable: ${errMsg(err)}`, status: 503, state: s.state, reason: s.reason };
+    }
+    const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+    const slug = resource.slice("repo:".length);
+    const record = await this.registry().getRecord(resource);
+    const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
+    if (!record || !facts) return { error: "not-serviceable: registry record or repo facts missing", status: 503 };
+
+    const prior = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+    const ref = prior?.ref ?? refHint; // KTD6: the binding's ref wins for the thread's whole life
+    if (!ref) {
+      return { error: "needs-ref: this thread has no ref binding yet — supply refHint", status: 409, needs: "ref" };
+    }
+    const worktreePath = prior?.worktreePath ?? (await threadWorktreePath(threadKey, ref));
+
+    const alloc = await this.allocateThreadUser(threadKey, ref, worktreePath);
+    if ("error" in alloc) return alloc;
+    const binding = alloc.binding;
+    // "Nothing created" on failure: a FRESH allocation (new binding or a
+    // re-allocation after eviction) is rolled back if the attach fails below,
+    // so a bogus refHint can neither bind sticky garbage nor leak a pool user.
+    const rollback = async (): Promise<void> => {
+      if (!alloc.wrote) return;
+      if (prior) await this.ctx.storage.put(threadBindingKey(threadKey), prior);
+      else await this.ctx.storage.delete(threadBindingKey(threadKey));
+    };
+
+    // Command-level token mint (KTD12) — before the lock so mint latency
+    // never holds the mutex, and failure never blocks the attach.
+    let token: string | null = null;
+    let credentialsError: string | undefined;
+    if (githubAppConfigured(this.env)) {
+      try {
+        token = await mintRepoScopedToken(this.env, slug);
+      } catch (err) {
+        credentialsError = errMsg(err);
+      }
+    } else {
+      credentialsError = "github-app-not-configured: GITHUB_APP_* secrets are unset";
+    }
+
+    let locked: { value: { sha: string; threadLockKey: string; recreated: boolean }; waitedMs: number };
+    try {
+      locked = await this.withMirrorLock(async () => {
+        await this.ensureGitSetup();
+        if (!(await this.refExists(binding.ref))) {
+          await this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "fetch", GIT_NETWORK_TIMEOUT_MS);
+          if (!(await this.refExists(binding.ref))) {
+            throw new StepError("unknown-ref", `ref ${JSON.stringify(binding.ref)} does not resolve in the mirror (even after a fetch)`);
+          }
+        }
+        const sha = await this.readMirrorSha(binding.ref);
+        const threadLockKey = await this.lockfileKey(sha);
+        const recreated = await this.ensureThreadWorktree(binding, sha, slug);
+        return { sha, threadLockKey, recreated };
+      }, ATTACH_MUTEX_WAIT_MS);
+    } catch (err) {
+      await rollback();
+      if (err instanceof MirrorBusyError) {
+        const s = await this.getStatus();
+        return { error: errMsg(err), status: 503, state: s.state, reason: "mirror-busy" };
+      }
+      if (err instanceof StepError && err.step === "unknown-ref") {
+        return { error: `unknown-ref: ${err.message}`, status: 400 };
+      }
+      const step = err instanceof StepError ? ` at ${err.step}` : "";
+      return { error: `attach-failed${step}: ${errMsg(err)}`, status: 500 };
+    }
+
+    let deps: { deps: ThreadDepsMechanism; reconciled: boolean };
+    let credentials: "ok" | "unavailable" = "unavailable";
+    try {
+      const installCmd = record.commands.install ?? "npm install --no-audit --no-fund";
+      deps = await this.materializeThreadDeps(binding, locked.value.threadLockKey, facts.lockfileHash, installCmd);
+      if (token) {
+        await this.writeThreadCredentials(binding, token);
+        credentials = "ok";
+      }
+    } catch (err) {
+      await rollback();
+      const step = err instanceof StepError ? ` at ${err.step}` : "";
+      return { error: `attach-failed${step}: ${errMsg(err)}`, status: 500 };
+    }
+
+    await this.ctx.storage.put(threadBindingKey(threadKey), {
+      ...binding,
+      lastAttachAt: new Date().toISOString(),
+      deps: deps.deps,
+    } satisfies ThreadBinding);
+    if ((await this.listSchedules(SWEEP_CALLBACK)).length === 0) {
+      await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
+    }
+
+    return {
+      workspace: binding.worktreePath,
+      ref: binding.ref,
+      sha: locked.value.sha,
+      user: binding.user,
+      reconciled: deps.reconciled,
+      recreated: locked.value.recreated,
+      deps: deps.deps,
+      credentials,
+      ...(credentialsError ? { credentialsError } : {}),
+      mutexWaitMs: locked.waitedMs,
+      attachMs: Date.now() - t0,
+    };
+  }
+
+  /** Ensure the worktree exists, wiping dirty/stale trees (KTD5). Returns
+   *  true when the tree was (re)created. MUST be called holding the mirror
+   *  mutex — the clone reads the mirror.
+   *
+   *  "Dirty" is tracked-file dirt (`status --porcelain -uno`): untracked
+   *  scratch files are the thread's own state and survive re-attach.
+   *  "Stale" is a HEAD that is neither the mirror's current ref tip nor a
+   *  local descendant of it (thread commits on top of the tip are kept).
+   *
+   *  Mechanism note: per-thread trees are LOCAL CLONES of the mirror with
+   *  --no-hardlinks, not `git worktree` checkouts. A worktree checkout keeps
+   *  its index/objects inside the root-owned mirror (thread commits would
+   *  need write access there), and hardlinked objects would let a chown-ed
+   *  owner chmod shared inodes under every other tree. A no-hardlink clone
+   *  gives the thread user a fully-owned repo whose writes stay in its own
+   *  .git; `origin` is repointed at GitHub so fetch/push use the per-attach
+   *  credential file rather than the (deliberately unreadable) mirror. */
+  private async ensureThreadWorktree(binding: ThreadBinding, sha: string, slug: string): Promise<boolean> {
+    const wt = binding.worktreePath;
+    const threadDir = parentDir(wt);
+    await this.runOk(["install", "-d", "-m", "755", "-o", "root", "-g", "root", THREADS_DIR], "threads-dir");
+    // 700 + thread-user ownership: other thread users cannot traverse in.
+    await this.runOk(["install", "-d", "-m", "700", "-o", binding.user, "-g", binding.user, threadDir], "thread-dir");
+
+    let recreate = false;
+    const exists = (await this.run(["test", "-d", `${wt}/.git`])).exitCode === 0;
+    if (exists) {
+      const status = await this.threadRun(binding.user, wt, "git status --porcelain -uno", DEFAULT_EXEC_TIMEOUT_MS);
+      const head = await this.threadRun(binding.user, wt, "git rev-parse HEAD", DEFAULT_EXEC_TIMEOUT_MS);
+      if (status.exitCode !== 0 || head.exitCode !== 0) {
+        recreate = true; // unreadable/corrupt (or owned by a previous pool user)
+      } else if (status.stdout.trim() !== "") {
+        recreate = true; // dirty tracked files
+      } else {
+        const headSha = head.stdout.trim();
+        if (headSha !== sha) {
+          const anc = await this.threadRun(binding.user, wt, `git merge-base --is-ancestor ${sha} HEAD`, DEFAULT_EXEC_TIMEOUT_MS);
+          if (anc.exitCode !== 0) recreate = true; // stale: behind/diverged from the mirror tip
+        }
+      }
+      if (!recreate) return false;
+    }
+
+    await this.runOk(["rm", "-rf", wt], "worktree-clean");
+    await this.runOk(
+      ["git", "clone", "--no-hardlinks", "--branch", binding.ref, MIRROR_DIR, wt],
+      "worktree-clone",
+      { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
+    );
+    await this.runOk(["chown", "-R", `${binding.user}:${binding.user}`, wt], "worktree-chown");
+    await this.threadRunOk(
+      binding.user,
+      wt,
+      `git remote set-url origin https://github.com/${slug}.git`,
+      "worktree-remote",
+      DEFAULT_EXEC_TIMEOUT_MS,
+    );
+    return true;
+  }
+
+  /** Materialize the dep/build cache (KTD7). Same committed-lockfile key as
+   *  the warm checkout → hardlink-copy (cp -al) node_modules/build dirs from
+   *  it, chowning only DIRECTORIES to the thread user: file inodes stay
+   *  worker1-owned and read-only to the thread, so a thread can delete or
+   *  replace entries in its own tree but can never mutate the inodes shared
+   *  with the warm checkout. cp -al failing (e.g. cross-device) falls back
+   *  to a plain copy (fresh inodes, fully chowned). A differing key runs the
+   *  repo's install command in the worktree, token-free, as the thread user. */
+  private async materializeThreadDeps(
+    binding: ThreadBinding,
+    threadLockKey: string,
+    warmLockKey: string,
+    installCmd: string,
+  ): Promise<{ deps: ThreadDepsMechanism; reconciled: boolean }> {
+    const wt = binding.worktreePath;
+    const hasDeps = (await this.run(["test", "-d", `${wt}/node_modules`])).exitCode === 0;
+    if (hasDeps) return { deps: "none", reconciled: false }; // reused tree, cache already in place
+
+    if (threadLockKey === warmLockKey) {
+      let mech: ThreadDepsMechanism = "none";
+      for (const dir of DEP_CACHE_DIRS) {
+        const src = `${CHECKOUT_DIR}/${dir}`;
+        const dst = `${wt}/${dir}`;
+        if ((await this.run(["test", "-d", src])).exitCode !== 0) continue;
+        if ((await this.run(["test", "-e", dst])).exitCode === 0) continue;
+        const hard = await this.run(["cp", "-al", src, dst], { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
+        if (hard.exitCode === 0) {
+          await this.runOk(
+            ["sh", "-c", `find ${dst} -type d -exec chown ${binding.user}:${binding.user} {} +`],
+            "deps-chown",
+          );
+          if (mech === "none") mech = "hardlink";
+        } else {
+          await this.run(["rm", "-rf", dst]);
+          await this.runOk(["cp", "-R", src, dst], "deps-copy", { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
+          await this.runOk(["chown", "-R", `${binding.user}:${binding.user}`, dst], "deps-copy-chown");
+          mech = "copy";
+        }
+      }
+      return { deps: mech, reconciled: false };
+    }
+
+    // Committed lockfile differs from the warm checkout: scoped, token-free
+    // incremental install as the thread user (KTD7).
+    await this.threadRunOk(binding.user, wt, installCmd, "thread-install", REFRESH_BUILD_TIMEOUT_MS);
+    return { deps: "install", reconciled: true };
+  }
+
+  /** Per-attach credential file (KTD12): the minted token reaches the
+   *  worktree via the SDK file API into a 700 per-user staging dir, then a
+   *  privilege-dropped `cat` into `.git/github-credentials` (0600, owned by
+   *  the thread user). The token never appears in argv or process-wide env —
+   *  `ps` from another thread user sees file PATHS at most. The worktree's
+   *  git credential helper points at the file. */
+  private async writeThreadCredentials(binding: ThreadBinding, token: string): Promise<void> {
+    const stageDir = `/workspace/.stage-${binding.user}`;
+    const stage = `${stageDir}/cred`;
+    await this.runOk(["install", "-d", "-m", "700", "-o", binding.user, "-g", binding.user, stageDir], "stage-dir");
+    await this.writeFile(stage, `https://x-access-token:${token}@github.com\n`);
+    await this.runOk(["chown", `${binding.user}:${binding.user}`, stage], "stage-chown");
+    await this.runOk(["chmod", "600", stage], "stage-chmod");
+    const cred = `${binding.worktreePath}/.git/github-credentials`;
+    await this.threadRunOk(
+      binding.user,
+      binding.worktreePath,
+      `umask 077 && cat ${stage} > ${cred} && rm -f ${stage} && chmod 600 ${cred} && git config credential.helper 'store --file=${cred}'`,
+      "thread-cred",
+      DEFAULT_EXEC_TIMEOUT_MS,
+    );
+  }
+
+  /** Shared entry checks for exec/read/write: hydrated resident, live
+   *  binding, worktree actually on disk (the container may have slept since
+   *  the last attach — disk is cache, re-attach recreates). */
+  private async threadPreflight(threadKey: string): Promise<{ binding: ThreadBinding } | ThreadErr> {
+    try {
+      await this.ensureHydrated();
+    } catch (err) {
+      const s = await this.getStatus();
+      return { error: `not-serviceable: ${errMsg(err)}`, status: 503, state: s.state, reason: s.reason };
+    }
+    const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+    if (!binding) {
+      return { error: "not-attached: no binding for this threadKey — POST /attach first", status: 409, needs: "attach" };
+    }
+    if (binding.evicted || !binding.user) {
+      return { error: "evicted: this thread's worktree was evicted after inactivity — POST /attach to recreate", status: 409, needs: "attach" };
+    }
+    if ((await this.run(["test", "-d", `${binding.worktreePath}/.git`])).exitCode !== 0) {
+      return { error: "worktree-missing: the container disk was recycled since the last attach — POST /attach to recreate", status: 409, needs: "attach" };
+    }
+    return { binding };
+  }
+
+  /** POST /exec: run one shell command in the thread's worktree as the
+   *  thread's user. Output mirrors the thread-sandbox Worker's shape
+   *  ({stdout, stderr, exitCode}, notes appended to stderr, timeout as exit
+   *  124); streams/caps are the Worker's job, truncation happens here. */
+  async execThread(
+    threadKey: string,
+    command: string,
+    timeoutMs: number,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
+    const pre = await this.threadPreflight(threadKey);
+    if ("error" in pre) return pre;
+    const { binding } = pre;
+    await this.ctx.storage.put(threadBindingKey(threadKey), {
+      ...binding,
+      lastAttachAt: new Date().toISOString(), // exec counts as activity for the sweep
+    } satisfies ThreadBinding);
+
+    const r = await this.threadRun(binding.user, binding.worktreePath, command, timeoutMs);
+    const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP;
+    const notes: string[] = [];
+    if (r.timedOut) notes.push(`command timed out after ${timeoutMs}ms; re-run as smaller steps or background it`);
+    if (truncated) notes.push(`output truncated to ${EXEC_OUTPUT_CAP} chars per stream`);
+    const stderr = [r.stderr.slice(0, EXEC_OUTPUT_CAP), ...notes].filter(Boolean).join("\n");
+    return {
+      stdout: r.stdout.slice(0, EXEC_OUTPUT_CAP),
+      stderr,
+      exitCode: r.timedOut ? 124 : r.exitCode,
+      truncated,
+    };
+  }
+
+  /** POST /read: cat the file AS THE THREAD USER — the OS layer (not just
+   *  the prefix check) is what confines a symlink pointing outside. */
+  async readThreadFile(threadKey: string, path: string): Promise<{ content: string; truncated: boolean } | ThreadErr> {
+    const pre = await this.threadPreflight(threadKey);
+    if ("error" in pre) return pre;
+    const resolved = confineThreadPath(pre.binding.worktreePath, path);
+    if (!resolved) return { error: `path-escape: ${JSON.stringify(path)} does not stay inside the thread worktree`, status: 400 };
+    const r = await this.threadRun(pre.binding.user, pre.binding.worktreePath, `cat -- ${resolved}`, DEFAULT_EXEC_TIMEOUT_MS);
+    if (r.exitCode !== 0 || r.timedOut) return { error: `read-failed: ${tail(r.stderr || r.stdout)}`, status: 404 };
+    const truncated = r.stdout.length > READ_CONTENT_CAP;
+    return { content: truncated ? r.stdout.slice(0, READ_CONTENT_CAP) : r.stdout, truncated };
+  }
+
+  /** POST /write: content travels via the SDK file API into the thread's
+   *  700 staging dir (never argv — another thread's `ps` must not see it),
+   *  then a privilege-dropped `cat` moves it into the worktree. Writing as
+   *  the user (not root) means a planted symlink cannot escalate the write
+   *  beyond what the user could touch anyway. */
+  async writeThreadFile(threadKey: string, path: string, content: string): Promise<{ ok: true; bytes: number } | ThreadErr> {
+    const pre = await this.threadPreflight(threadKey);
+    if ("error" in pre) return pre;
+    const { binding } = pre;
+    const resolved = confineThreadPath(binding.worktreePath, path);
+    if (!resolved) return { error: `path-escape: ${JSON.stringify(path)} does not stay inside the thread worktree`, status: 400 };
+    const stageDir = `/workspace/.stage-${binding.user}`;
+    const stage = `${stageDir}/put`;
+    try {
+      await this.runOk(["install", "-d", "-m", "700", "-o", binding.user, "-g", binding.user, stageDir], "stage-dir");
+      await this.writeFile(stage, content);
+      await this.runOk(["chown", `${binding.user}:${binding.user}`, stage], "stage-chown");
+      await this.runOk(["chmod", "600", stage], "stage-chmod");
+      await this.threadRunOk(
+        binding.user,
+        binding.worktreePath,
+        `mkdir -p ${parentDir(resolved)} && cat ${stage} > ${resolved} && rm -f ${stage}`,
+        "thread-write",
+        DEFAULT_EXEC_TIMEOUT_MS,
+      );
+    } catch (err) {
+      const step = err instanceof StepError ? ` at ${err.step}` : "";
+      return { error: `write-failed${step}: ${errMsg(err)}`, status: 400 };
+    }
+    return { ok: true, bytes: content.length };
+  }
+
+  /** Daily inactivity sweep (schedule: onWorktreeSweep). Removes worktrees
+   *  whose binding is idle past the TTL, releases the user to the pool, and
+   *  KEEPS the binding record marked evicted (KTD6). Never wakes a slept
+   *  container just to delete files a sleep already destroyed. */
+  async onWorktreeSweep(payload: string): Promise<{ evicted: string[]; kept: number }> {
+    const resource = payload || ((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
+    const evicted: string[] = [];
+    let kept = 0;
+    try {
+      const record = await this.registry()
+        .getRecord(resource)
+        .catch(() => null);
+      const ttlDays = record?.worktreeTtlDays ?? WORKTREE_TTL_DAYS_DEFAULT;
+      const cutoff = Date.now() - ttlDays * 86_400_000;
+      const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+      const active = await this.isRuntimeActive().catch(() => false);
+      for (const binding of all.values()) {
+        if (binding.evicted || !binding.user) continue;
+        if (Date.parse(binding.lastAttachAt) >= cutoff) {
+          kept++;
+          continue;
+        }
+        const threadDir = parentDir(binding.worktreePath);
+        if (active && threadDir.startsWith(`${THREADS_DIR}/`)) {
+          try {
+            // Worktree removal counts as a mirror-adjacent mutation — same mutex (KTD5).
+            await this.withMirrorLock(() => this.runOk(["rm", "-rf", threadDir], "evict"));
+          } catch (err) {
+            console.log(`worktree-sweep ${resource}: rm failed for ${binding.threadKey}: ${errMsg(err)}`);
+          }
+        }
+        await this.ctx.storage.put(threadBindingKey(binding.threadKey), {
+          ...binding,
+          user: "",
+          evicted: true,
+          evictedAt: new Date().toISOString(),
+        } satisfies ThreadBinding);
+        evicted.push(binding.threadKey);
+      }
+    } finally {
+      const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+      const live = [...all.values()].some((b) => !b.evicted && b.user);
+      this.deleteSchedules(SWEEP_CALLBACK);
+      if (live) await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
+    }
+    return { evicted, kept };
+  }
+
+  /** Debug: enumerate thread bindings (admin scope; no secrets in bindings). */
+  async debugThreads(): Promise<{ threads: ThreadBinding[] }> {
+    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    return { threads: [...all.values()] };
+  }
+
+  /** Debug fault injection: age a binding so the sweep's TTL path can be
+   *  exercised without waiting N days. */
+  async debugBackdateThread(threadKey: string, days: number): Promise<{ ok: boolean; lastAttachAt?: string }> {
+    const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+    if (!binding) return { ok: false };
+    const lastAttachAt = new Date(Date.now() - days * 86_400_000).toISOString();
+    await this.ctx.storage.put(threadBindingKey(threadKey), { ...binding, lastAttachAt } satisfies ThreadBinding);
+    return { ok: true, lastAttachAt };
+  }
+
+  /** Debug: run the sweep pass now (the exact scheduled function). */
+  async debugSweepNow(): Promise<{ evicted: string[]; kept: number }> {
+    return this.onWorktreeSweep("");
   }
 
   // -- state + introspection ---------------------------------------------------
@@ -1049,6 +1734,7 @@ export class ResidentDO extends Sandbox<Env> {
     this.deleteSchedules(PROVISIONING_CALLBACK);
     this.deleteSchedules(PROVISION_RUN_CALLBACK);
     this.deleteSchedules(REFRESH_CALLBACK);
+    this.deleteSchedules(SWEEP_CALLBACK);
     const snap = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
     if (snap) {
       try {
@@ -1159,11 +1845,34 @@ function parseCommands(value: unknown): { commands: Record<string, string> } | {
 
 const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
-function parseDefaultRef(value: unknown): { defaultRef: string } | { error: string } {
-  if (typeof value !== "string" || !REF_RE.test(value) || value.includes("..")) {
-    return { error: 'defaultRef must be a plausible git ref (e.g. "main")' };
+/** Strict branch-ref pattern (P1 input validation): leading alnum rules out
+ *  `-option` and `/abs` shapes, the charset rules out shell metacharacters
+ *  and whitespace, and `..` / `@{` are refused before the value ever derives
+ *  a path or a git argument. */
+function parseRef(value: unknown, field: string): { ref: string } | { error: string } {
+  if (typeof value !== "string" || !REF_RE.test(value) || value.includes("..") || value.includes("@{") || value.endsWith(".lock")) {
+    return { error: `${field} must be a plausible git branch ref (e.g. "main")` };
   }
-  return { defaultRef: value };
+  return { ref: value };
+}
+
+function parseDefaultRef(value: unknown): { defaultRef: string } | { error: string } {
+  const parsed = parseRef(value, "defaultRef");
+  if ("error" in parsed) return parsed;
+  return { defaultRef: parsed.ref };
+}
+
+/** Platform-namespaced thread id (P1 input validation, deliberately
+ *  conservative): "<platform>:<id>" where the id charset excludes anything
+ *  that could carry `../`, whitespace, or shell metacharacters. Validated
+ *  BEFORE the key derives a storage key or a disk path. */
+const THREAD_KEY_RE = /^[a-z]{1,32}:[A-Za-z0-9._:-]{1,128}$/;
+
+function parseThreadKey(value: unknown): { threadKey: string } | { error: string } {
+  if (typeof value !== "string" || !THREAD_KEY_RE.test(value)) {
+    return { error: `threadKey must be a platform-namespaced id matching ${String(THREAD_KEY_RE)} (e.g. "slack:C0123ABC:1712345.6789")` };
+  }
+  return { threadKey: value };
 }
 
 function parsePositiveInt(value: unknown, field: string, min: number, max: number): { value: number } | { error: string } {
@@ -1224,7 +1933,9 @@ export default {
     const url = new URL(request.url);
 
     // Unauthenticated wake ping for `npm run deploy` — touches no DO, no data.
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true });
+    // `u` tracks the last shipped unit so a deploy's propagation is provable
+    // from the outside without auth.
+    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, u: "u4" });
 
     // Auth precedes existence: unknown paths demand admin before revealing
     // 404 vs 401, so an unauthenticated scanner learns nothing.
@@ -1253,10 +1964,13 @@ export default {
         case "/status":
           return await handleStatus(env, url);
         case "/attach":
+          return await handleAttach(env, body);
         case "/exec":
+          return await handleExec(env, body);
         case "/read":
+          return await handleRead(env, body);
         case "/write":
-          return json({ error: "not implemented", lands_in: "U4" }, 501);
+          return await handleWrite(env, body);
         case "/op":
           return json({ error: "not implemented", lands_in: "U6" }, 501);
         default:
@@ -1307,6 +2021,12 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
     if ("error" in parsed) return json({ error: parsed.error }, 400);
     provisioningTimeoutMs = parsed.value;
   }
+  let worktreeTtlDays: number | undefined;
+  if (body.worktreeTtlDays !== undefined) {
+    const parsed = parsePositiveInt(body.worktreeTtlDays, "worktreeTtlDays", 1, 365);
+    if ("error" in parsed) return json({ error: parsed.error }, 400);
+    worktreeTtlDays = parsed.value;
+  }
 
   const now = new Date().toISOString();
   const record: ResidentRecord = {
@@ -1315,6 +2035,7 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
     defaultRef: defaultRef.defaultRef,
     ...(diskBudgetMb !== undefined ? { diskBudgetMb } : {}),
     provisioningTimeoutMs,
+    ...(worktreeTtlDays !== undefined ? { worktreeTtlDays } : {}),
     onboardedAt: now,
     updatedAt: now,
   };
@@ -1378,7 +2099,7 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
 
-  const patch: Partial<Pick<ResidentRecord, "commands" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs">> = {};
+  const patch: Partial<Pick<ResidentRecord, "commands" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs" | "worktreeTtlDays">> = {};
   if (body.commands !== undefined) {
     const commands = parseCommands(body.commands);
     if ("error" in commands) return json({ error: commands.error }, 400);
@@ -1404,8 +2125,16 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
     if ("error" in parsed) return json({ error: parsed.error }, 400);
     patch.provisioningTimeoutMs = parsed.value;
   }
+  if (body.worktreeTtlDays !== undefined) {
+    const parsed = parsePositiveInt(body.worktreeTtlDays, "worktreeTtlDays", 1, 365);
+    if ("error" in parsed) return json({ error: parsed.error }, 400);
+    patch.worktreeTtlDays = parsed.value;
+  }
   if (Object.keys(patch).length === 0) {
-    return json({ error: "nothing to reconfigure (accepted: commands, defaultRef, diskBudgetMb, provisioningTimeoutMs)" }, 400);
+    return json(
+      { error: "nothing to reconfigure (accepted: commands, defaultRef, diskBudgetMb, provisioningTimeoutMs, worktreeTtlDays)" },
+      400,
+    );
   }
 
   const updated = await registryStub(env).updateConfig(resource.resource, patch);
@@ -1441,6 +2170,130 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   // lifecycle, not config.
   const status = await residentStub(env, resource.resource).getStatus();
   return json({ state: status.state, reason: status.reason });
+}
+
+// -- U4 thread data plane handlers --------------------------------------------
+
+/** Shared front half of /attach /exec /read /write: validate resource +
+ *  threadKey (P1: BEFORE anything derives a path or a git argument), check
+ *  the resource is onboarded (404 like /status), and hand back the stub. */
+async function resolveThreadRoute(
+  env: Env,
+  body: Record<string, unknown>,
+): Promise<{ stub: ReturnType<typeof residentStub>; resource: string; threadKey: string } | Response> {
+  const resource = parseResource(body.resource);
+  if ("error" in resource) return json({ error: resource.error }, 400);
+  const threadKey = parseThreadKey(body.threadKey);
+  if ("error" in threadKey) return json({ error: threadKey.error }, 400);
+  const record = await registryStub(env).getRecord(resource.resource);
+  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+  return { stub: residentStub(env, resource.resource), resource: resource.resource, threadKey: threadKey.threadKey };
+}
+
+/** Map a ThreadErr union member to its HTTP response (status leaves the body). */
+function threadErrResponse(result: ThreadErr): Response {
+  const { status, ...rest } = result;
+  return json(rest, status);
+}
+
+async function handleAttach(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const ctx = await resolveThreadRoute(env, body);
+  if (ctx instanceof Response) return ctx;
+  let refHint: string | null = null;
+  if (body.refHint !== undefined) {
+    const parsed = parseRef(body.refHint, "refHint");
+    if ("error" in parsed) return json({ error: parsed.error }, 400);
+    refHint = parsed.ref;
+  }
+  const result = await ctx.stub.attachThread(ctx.threadKey, refHint);
+  if ("error" in result) return threadErrResponse(result);
+  return json(result);
+}
+
+async function handleExec(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const ctx = await resolveThreadRoute(env, body);
+  if (ctx instanceof Response) return ctx;
+  if (typeof body.command !== "string" || body.command.length === 0 || body.command.length > MAX_EXEC_COMMAND_LENGTH) {
+    return json({ error: `command must be a non-empty string of at most ${MAX_EXEC_COMMAND_LENGTH} chars` }, 400);
+  }
+  let timeoutMs = DEFAULT_THREAD_EXEC_TIMEOUT_MS;
+  if (body.timeoutMs !== undefined) {
+    const parsed = parsePositiveInt(body.timeoutMs, "timeoutMs", 1000, MAX_THREAD_EXEC_TIMEOUT_MS);
+    if ("error" in parsed) return json({ error: parsed.error }, 400);
+    timeoutMs = parsed.value;
+  }
+  return streamThreadExec(ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs));
+}
+
+/** Stream the exec result with a whitespace heartbeat, exactly the
+ *  thread-sandbox Worker's convention: headers go out immediately, a
+ *  heartbeat byte every 15s keeps intermediaries from dropping the idle
+ *  connection while a long command runs, and every post-validation outcome
+ *  arrives in-body over HTTP 200 — a result as {stdout, stderr, exitCode},
+ *  a named failure as {error, needs?, stdout:"", stderr:error, exitCode:127}. */
+function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execThread"]>>>): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const beat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode("\n"));
+        } catch {
+          clearInterval(beat); // client went away; the exec promise still settles
+        }
+      }, 15_000);
+      const finish = (payload: object) => {
+        clearInterval(beat);
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(payload)));
+          controller.close();
+        } catch {
+          // stream already errored/cancelled — nothing left to deliver to
+        }
+      };
+      pending
+        .then((result) => {
+          if ("error" in result) {
+            finish({
+              error: result.error,
+              ...(result.needs ? { needs: result.needs } : {}),
+              ...(result.state ? { state: result.state, reason: result.reason } : {}),
+              stdout: "",
+              stderr: result.error,
+              exitCode: 127,
+            });
+          } else {
+            finish({ stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, truncated: result.truncated });
+          }
+        })
+        .catch((err: unknown) => {
+          const msg = errMsg(err);
+          finish({ error: msg, stdout: "", stderr: msg, exitCode: 127 });
+        });
+    },
+  });
+  return new Response(stream, { headers: { "content-type": "application/json" } });
+}
+
+async function handleRead(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const ctx = await resolveThreadRoute(env, body);
+  if (ctx instanceof Response) return ctx;
+  if (typeof body.path !== "string") return json({ error: "path must be a string relative to the thread worktree" }, 400);
+  const result = await ctx.stub.readThreadFile(ctx.threadKey, body.path);
+  if ("error" in result) return threadErrResponse(result);
+  return json(result);
+}
+
+async function handleWrite(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const ctx = await resolveThreadRoute(env, body);
+  if (ctx instanceof Response) return ctx;
+  if (typeof body.path !== "string") return json({ error: "path must be a string relative to the thread worktree" }, 400);
+  if (typeof body.content !== "string" || body.content.length > MAX_WRITE_CONTENT) {
+    return json({ error: `content must be a string of at most ${MAX_WRITE_CONTENT} chars` }, 400);
+  }
+  const result = await ctx.stub.writeThreadFile(ctx.threadKey, body.path, body.content);
+  if ("error" in result) return threadErrResponse(result);
+  return json(result);
 }
 
 /** Admin diagnostic surface, used by U3's live validation (kill-refresh /
@@ -1479,9 +2332,20 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       return json(await stub.debugStopContainer());
     case "force-onboarding":
       return json(await stub.debugForceOnboarding());
+    case "threads":
+      return json(await stub.debugThreads());
+    case "sweep-now":
+      return json(await stub.debugSweepNow());
+    case "backdate-thread": {
+      const threadKey = parseThreadKey(body.threadKey);
+      if ("error" in threadKey) return json({ error: threadKey.error }, 400);
+      const days = parsePositiveInt(body.days, "days", 1, 3650);
+      if ("error" in days) return json({ error: days.error }, 400);
+      return json(await stub.debugBackdateThread(threadKey.threadKey, days.value));
+    }
     default:
       return json(
-        { error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, mint-token, run-watchdog)` },
+        { error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, mint-token, run-watchdog, threads, sweep-now, backdate-thread)` },
         400,
       );
   }
