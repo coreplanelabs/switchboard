@@ -107,6 +107,12 @@ describe("ResidentExecutor.exec", () => {
     await expect(ex.exec("x")).rejects.toThrow(/command too long/);
     expect(fn).toHaveBeenCalledTimes(1);
   });
+
+  it("every route is bounded by an AbortSignal.timeout so a hung resident can't stall the dispatch", async () => {
+    const { calls } = stubFetch({ body: { stdout: "ok", stderr: "", exitCode: 0, truncated: false } });
+    await new ResidentExecutor(OPTS).exec("echo ok");
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+  });
 });
 
 describe("ResidentExecutor.readFile / writeFile", () => {
@@ -237,6 +243,12 @@ describe("ResidentOperations.run", () => {
     const res = await new ResidentOperations(OPS).run("build", { repo: "jshttp/vary" });
     expect(res).toMatchObject({ kind: "error" });
     if (res.kind === "error") expect(res.message).toMatch(/\/op request failed/);
+  });
+
+  it("bounds the /op request with an AbortSignal.timeout (a hung resident can't stall the dispatch)", async () => {
+    const { calls } = stubFetch({ body: { ok: true, summary: "s", exitCode: 0 } });
+    await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
+    expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
   });
 });
 

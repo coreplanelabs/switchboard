@@ -135,6 +135,23 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     });
   });
 
+  // Requires a POSITIVE same-repo match: a null head.repo (deleted fork) has a
+  // head.ref but no owner to compare, so it must NOT bind the base repo's ref.
+  // (Dropping the `headRepo &&` short-circuit is what makes this undefined.)
+  it("a null head.repo (deleted fork) does NOT bind the base repo's ref — repo only", async () => {
+    stubFetch({ body: { head: { ref: "patch-1", repo: null } } });
+    await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
+      repo: "jshttp/vary",
+    });
+  });
+
+  it("a missing head.repo.full_name likewise leaves the ref undefined (repo only)", async () => {
+    stubFetch({ body: { head: { ref: "patch-1", repo: {} } } });
+    await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
+      repo: "jshttp/vary",
+    });
+  });
+
   it("an explicit branch phrase wins over the PR head (no fetch happens)", async () => {
     const { fn } = stubFetch();
     await expect(

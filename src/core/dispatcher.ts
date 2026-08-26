@@ -3,7 +3,7 @@ import { AGENTS, getAgent } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
 import { localWorkspaceDir, makeExecutor } from "../execution/factory.js";
-import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations } from "../execution/resident.js";
+import { ResidentNeedsRefError, ResidentOperations } from "../execution/resident.js";
 import { LocalOperations } from "../execution/executor.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
@@ -135,13 +135,20 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
 
     // Target repo/ref for resident environments, resolved BEFORE the model
     // turn (U7): explicit signals in the message, else the repo this thread
-    // already established (from history — restart-safe, never stored).
-    const repoCtx = (await (deps.resolveRepoContext ?? resolveRepoContext)(msg, history)) ?? {};
+    // already established (from history — restart-safe, never stored). The
+    // gate belongs with the resource declaration: an agent that declares no
+    // repo (e.g. the toolless general default) never resolves or gates one, so
+    // a toolless follow-up in a repo-mentioning thread is not wrongly refused
+    // and a PR-URL never triggers a wasted GitHub REST call for it.
+    const needsRepo = agent.resources?.repo === "required";
+    const repoCtx: RepoContext = needsRepo
+      ? ((await (deps.resolveRepoContext ?? resolveRepoContext)(msg, history)) ?? {})
+      : {};
 
     // Per-repo access gate (KD7): open when permissions.repos is absent or
     // the repo is unlisted; a configured allowlist refuses BY NAME — a
     // refused user must see why, never get a silent per-thread fallback.
-    if (repoCtx.repo && !deps.config.canUseRepo(msg.userId, repoCtx.repo)) {
+    if (needsRepo && repoCtx.repo && !deps.config.canUseRepo(msg.userId, repoCtx.repo)) {
       await io.reply(
         `🚫 You're not on the allowlist for the \`${repoCtx.repo}\` repo environment. Ask ${deps.config.adminsHint()} for access.`,
       );
@@ -179,16 +186,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       }
       throw err;
     }
-    const { executor, note } = selection;
+    const { executor, note, resident } = selection;
 
     // Effective system prompt, composed AFTER executor resolution (via
     // RunOptions.system, U1): a resident-path run swaps in the agent's
     // resident variant — the workspace is a ready worktree, no cloning, no
     // installs — with the resolved repo named. Every other path keeps the
-    // agent's own prompt. The shared AgentDef is never mutated (concurrent
-    // dispatches share it).
+    // agent's own prompt. Selection reports the resident backend via a
+    // discriminant (not an executor `instanceof`), keeping the executor
+    // implementation out of the channel-agnostic core. The shared AgentDef is
+    // never mutated (concurrent dispatches share it).
     const system =
-      executor instanceof ResidentExecutor && agent.residentSystem
+      resident && agent.residentSystem
         ? `${agent.residentSystem}\n\nTarget repository: ${repoCtx.repo}. The worktree is already on this thread's bound branch (confirm with \`git branch --show-current\`).`
         : undefined;
 

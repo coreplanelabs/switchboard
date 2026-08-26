@@ -1,10 +1,11 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../config.js";
 import {
   handleRepoCommand,
+  makeResidentAdminClient,
   parseRepoCommand,
   type ResidentAdminClient,
   type ResidentAdminResponse,
@@ -393,5 +394,90 @@ describe("configuration preconditions", () => {
     const s = store(NO_RESIDENT);
     const reply = await handleRepoCommand(s, msg("repo list"));
     expect(reply).toContain("execution.resident");
+  });
+});
+
+// Coverage gap (testing P1): the REAL fetch-based admin client is never
+// constructed — every test above injects a hand-written mock. These exercise
+// makeResidentAdminClient directly (routes/headers/body over a mocked fetch)
+// AND the default-client wiring in handleRepoCommand, including the
+// admin-token-env-unset branch.
+describe("makeResidentAdminClient (real fetch client)", () => {
+  function stubFetch(...responses: Array<{ status?: number; body?: unknown; reject?: string }>) {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      const next = responses.shift();
+      if (!next) throw new Error(`unexpected fetch: ${String(url)}`);
+      if (next.reject) throw new TypeError(next.reject);
+      return new Response(JSON.stringify(next.body ?? {}), { status: next.status ?? 200 });
+    });
+    vi.stubGlobal("fetch", fn);
+    return { fn, calls };
+  }
+  const route = (c: { url: string }) => new URL(c.url).pathname;
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it("hits the right routes with the admin bearer; GET carries no body, POST carries a JSON body", async () => {
+    const { calls } = stubFetch({ body: { residents: [] } }, { body: { state: "onboarding" } });
+    // trailing slash on the base URL is normalized away (single-slash join)
+    const client = makeResidentAdminClient("https://resident.example/", "admin-tok");
+    await client.residents();
+    await client.onboard({ resource: "repo:acme/api", defaultRef: "main" });
+
+    // GET /residents — bearer, no body, no content-type
+    expect(route(calls[0])).toBe("/residents");
+    expect(calls[0].init.method).toBe("GET");
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer admin-tok");
+    expect(calls[0].init.body).toBeUndefined();
+    expect((calls[0].init.headers as Record<string, string>)["content-type"]).toBeUndefined();
+
+    // POST /onboard — bearer + content-type + the JSON body verbatim
+    expect(route(calls[1])).toBe("/onboard");
+    expect(calls[1].init.method).toBe("POST");
+    const h = calls[1].init.headers as Record<string, string>;
+    expect(h.authorization).toBe("Bearer admin-tok");
+    expect(h["content-type"]).toBe("application/json");
+    expect(JSON.parse(String(calls[1].init.body))).toEqual({ resource: "repo:acme/api", defaultRef: "main" });
+  });
+
+  it("offboard/rebuild pass the resource and a dryRun flag only when set", async () => {
+    const { calls } = stubFetch({ body: {} }, { body: {} });
+    const client = makeResidentAdminClient("https://resident.example", "admin-tok");
+    await client.offboard("repo:acme/api", true);
+    await client.rebuild("repo:acme/api", false);
+    expect(route(calls[0])).toBe("/offboard");
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ resource: "repo:acme/api", dryRun: true });
+    expect(route(calls[1])).toBe("/rebuild");
+    expect(JSON.parse(String(calls[1].init.body))).toEqual({ resource: "repo:acme/api" }); // no dryRun key when false
+  });
+
+  it("a transport failure is a legible error (names the route + `repo list` guidance, never a raw throw)", async () => {
+    stubFetch({ reject: "network down" }, { reject: "network down" });
+    const client = makeResidentAdminClient("https://resident.example", "admin-tok");
+    await expect(client.residents()).rejects.toThrow(/\/residents request failed/);
+    await expect(client.onboard({ resource: "repo:x/y" })).rejects.toThrow(/repo list/);
+  });
+
+  it("the default-client path (no injected client) errors legibly when the admin token env is unset", async () => {
+    vi.stubEnv("RESIDENT_ADMIN_TOKEN", ""); // unset → repo-management commands must name the missing bearer
+    const s = store(); // execution.resident.baseUrl configured
+    const reply = await handleRepoCommand(s, msg("repo onboard acme/api", "slack:UADMIN"));
+    expect(reply).toContain("RESIDENT_ADMIN_TOKEN");
+    expect(reply).toMatch(/not set/i);
+  });
+
+  it("the default-client path constructs the real client and hits /residents when the admin token IS set", async () => {
+    vi.stubEnv("RESIDENT_ADMIN_TOKEN", "admin-tok");
+    const { calls } = stubFetch({ body: { cap: 8, count: 0, residents: [] } });
+    const s = store();
+    const reply = await handleRepoCommand(s, msg("repo list", "slack:URANDOM"));
+    expect(route(calls[0])).toBe("/residents");
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer admin-tok");
+    expect(reply).toContain("No repos onboarded");
   });
 });

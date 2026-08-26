@@ -253,4 +253,13 @@ function validateConfig(cfg: AppConfig): void {
   if (!AGENTS[cfg.defaults.agent]) {
     throw new Error(`defaults.agent "${cfg.defaults.agent}" is not a known agent`);
   }
+  // Normalize permissions.repos keys to lowercase once at load: every caller
+  // looks the repo up by a lowercased slug (parseSlug/slugOf/repoResourceId),
+  // so a mixed-case allowlist key (e.g. "octocat/Hello-World") would otherwise
+  // never match and silently grant open access instead of restricting.
+  if (cfg.permissions?.repos) {
+    cfg.permissions.repos = Object.fromEntries(
+      Object.entries(cfg.permissions.repos).map(([slug, users]) => [slug.toLowerCase(), users]),
+    );
+  }
 }

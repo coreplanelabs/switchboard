@@ -263,6 +263,28 @@ describe("resident repo dispatch", () => {
     expect(ctx).toMatchObject({ threadKey: "slack:CX:1.0", repo: "acme/api", ref: "main" });
   });
 
+  // Over-fire fix: repo/ref resolution AND the canUseRepo gate run ONLY when
+  // the resolved agent declares resources.repo === "required". A no-repo agent
+  // (the toolless general default) in a thread that MENTIONS a restricted repo
+  // must not be refused — and must never even resolve or gate a repo.
+  it("a no-repo agent (general) in a thread mentioning a restricted repo is NOT refused, and never resolves/gates a repo", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider); // acme/api restricted to UADMIN
+    // If resolution ran for a no-repo agent this spy would record it; the whole
+    // resolve+gate step must be skipped for an agent that declares no repo.
+    const resolveSpy = vi.fn(() => ({ repo: "acme/api" }));
+    deps.resolveRepoContext = resolveSpy;
+    const history: HistoryItem[] = [{ role: "user", text: "earlier we were looking at acme/api" }];
+    const { io, replies } = fakeIO(history);
+    // UDEV is NOT on acme/api's allowlist, but the DEFAULT agent (general) has
+    // no repo resource — the KD7 gate must not fire.
+    await dispatch(deps, msg("give me a quick summary of the thread", "slack:UDEV"), io);
+    expect(replies).toContain("answer");
+    expect(replies.some((r) => r.includes("🚫"))).toBe(false);
+    expect(resolveSpy).not.toHaveBeenCalled();
+    expect(provider.requests).toHaveLength(1);
+  });
+
   it("a resident fallback note appears in the status frames (named, never silent)", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
@@ -548,6 +570,53 @@ describe("deterministic ops fast-path (U6)", () => {
     expect(provider.requests).toHaveLength(0);
   });
 
+  // Coverage gap (testing P2): the fast-path `case "error"` (a failing OR
+  // throwing backend) — untested for BOTH forms, though its not-onboarded
+  // sibling covers both. Explicit `repo test/build` is config-family → always
+  // a named ⚠️ reply; natural language is an accelerator → falls through so the
+  // agent can still serve the ask.
+  it("an explicit `repo test` whose op returns kind:error gets a named ⚠️ reply (never silently a model turn)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.operations = fakeOps({ kind: "error", message: "resident /op request failed (timeout)" });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
+    expect(replies[0]).toContain("⚠️");
+    expect(replies[0]).toContain("resident /op request failed (timeout)");
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("a natural-language ask whose op returns kind:error falls through to the agent path", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = fakeOps({ kind: "error", message: "resident /op HTTP 500" });
+    deps.operations = ops;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
+    expect(ops.calls).toHaveLength(1); // the op was attempted…
+    expect(provider.requests).toHaveLength(1); // …and the agent path served the ask
+    expect(replies).toContain("answer");
+  });
+
+  it("a THROWING op on the explicit path is caught (.catch → kind:error) and reported as ⚠️, never an unhandled crash", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = {
+      calls: [] as Array<{ op: string; req: { repo: string; ref?: string } }>,
+      async run(op: import("./operations.js").OpName, req: { repo: string; ref?: string }) {
+        this.calls.push({ op, req });
+        throw new Error("backend exploded");
+      },
+    };
+    deps.operations = ops;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
+    expect(ops.calls).toHaveLength(1);
+    expect(replies[0]).toContain("⚠️");
+    expect(replies[0]).toContain("backend exploded");
+    expect(provider.requests).toHaveLength(0);
+  });
+
   it("an explicit agent directive skips the natural-language fast-path (the user picked a model path)", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
@@ -557,6 +626,66 @@ describe("deterministic ops fast-path (U6)", () => {
     await dispatch(deps, msg("agent:coding run the tests on main in acme/api", "slack:UADMIN"), io);
     expect(ops.calls).toHaveLength(0);
     expect(provider.requests).toHaveLength(1);
+  });
+});
+
+// Coverage gap (testing P1): defaultOperations() — the REAL backend picker
+// behind the modelless fast-path — is otherwise never exercised (every test in
+// the fast-path describe injects deps.operations). Driven here through
+// dispatch() WITHOUT injecting deps.operations, so the real selection logic
+// runs: resident-backed when execution.resident is configured, local for local
+// execution, none for a per-thread remote backend.
+describe("defaultOperations backend selection (real, not injected)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  it("execution.resident configured (+ operator token) → ResidentOperations POSTs /op with the operator bearer", async () => {
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    const calls: Array<{ path: string; init: RequestInit }> = [];
+    const fetchSpy = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ path: new URL(String(url)).pathname, init: init ?? {} });
+      return new Response(
+        JSON.stringify({ ok: true, summary: "test passed on repo:acme/api @ main", stdout: "1 passing", exitCode: 0 }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider); // deps.operations NOT injected
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
+    expect(calls.map((c) => c.path)).toEqual(["/op"]);
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer rtok");
+    expect(replies[0]).toContain("✅");
+    expect(replies[0]).toContain("test passed");
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("local execution → LocalOperations runs against the thread's local workspace (no network)", async () => {
+    const fetchSpy = vi.fn(() => {
+      throw new Error("unexpected network call");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider); // execution absent → local; deps.operations NOT injected
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
+    // no checkout exists → LocalOperations' distinctive "no local workspace" result
+    expect(replies[0]).toContain("no local workspace");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("a per-thread remote backend with no resident → no ops backend; an explicit op says so", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider); // cloudflare, no resident; deps.operations NOT injected
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
+    expect(replies[0]).toContain("Deterministic ops need a backend");
+    expect(provider.requests).toHaveLength(0);
   });
 });
 

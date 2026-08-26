@@ -4,7 +4,7 @@ import type { AgentDef } from "../agents/registry.js";
 import { LocalExecutor, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
-import { ResidentExecutor, type ResidentStatusProbe } from "./resident.js";
+import { ResidentExecutor, ResidentNeedsRefError, type ResidentStatusProbe } from "./resident.js";
 import { repoResourceId } from "../core/repoCommands.js";
 import { resolveGithubToken } from "./githubApp.js";
 
@@ -66,10 +66,14 @@ export interface ExecutorContext {
 
 /** Executor selection result. `note` is present when resident selection fell
  *  back to the per-thread backend — the NAMED reason (state + reason, KTD10)
- *  the dispatcher surfaces on the status card. Never silent. */
+ *  the dispatcher surfaces on the status card. Never silent. `resident` is the
+ *  backend discriminant: true only when a warm ResidentExecutor was returned,
+ *  so the dispatcher can pick the resident system-prompt variant without an
+ *  `instanceof` on the executor implementation. */
 export interface ExecutorSelection {
   executor: Executor;
   note?: string;
+  resident?: boolean;
 }
 
 // Negative cache (circuit breaker) for resident /status probe TRANSPORT
@@ -110,17 +114,28 @@ export async function makeExecutor(
     const resource = repoResourceId(ctx.repo);
     const probe = await probeResident(resident, token, resource);
     if (probe.kind === "status" && probe.state === "warm") {
-      return {
-        executor: await ResidentExecutor.open({
-          baseUrl: resident.baseUrl,
-          token,
-          resource,
-          threadKey: ctx.threadKey,
-          refHint: ctx.ref,
-        }),
-      };
-    }
-    if (probe.kind === "unreachable") {
+      // The resident can degrade between the /status probe and /attach: 503
+      // (mirror-busy) or 429 (pool-exhausted) surface only at attach time.
+      // ResidentNeedsRefError must still propagate (the dispatcher's ask-once
+      // flow depends on it); any OTHER attach failure falls back to the
+      // per-thread backend with a named note (KTD10 / AE6 — never a silent
+      // stall or a raw ⚠️ for this window).
+      try {
+        return {
+          executor: await ResidentExecutor.open({
+            baseUrl: resident.baseUrl,
+            token,
+            resource,
+            threadKey: ctx.threadKey,
+            refHint: ctx.ref,
+          }),
+          resident: true,
+        };
+      } catch (err) {
+        if (err instanceof ResidentNeedsRefError) throw err;
+        note = `resident attach failed (${err instanceof Error ? err.message : String(err)}) — using fresh sandbox`;
+      }
+    } else if (probe.kind === "unreachable") {
       note = `resident unreachable (${probe.error}) — using fresh sandbox`;
     } else if (probe.state !== "not-onboarded") {
       note = `resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — using fresh sandbox`;

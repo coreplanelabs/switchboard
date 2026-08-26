@@ -58,6 +58,22 @@ describe("LocalOperations", () => {
     const res = await ops(dir).run("test", { repo: "acme/api", ref: "main" });
     if (res.kind === "result") expect(res.summary).toMatch(/ref .*ignored/i);
   });
+
+  // Local mode has no onboard-time repo binding, so "for <repo>" is an intent
+  // claim, not a verified checkout — the summary must disclose the workspace
+  // was not verified to hold req.repo (mirrors the ref-not-verified note).
+  it("a run against an existing workspace discloses it was not verified to hold the repo (local mode)", async () => {
+    const dir = workspace({ name: "x", version: "0.0.0", scripts: { test: "node -e \"0\"" } });
+    const res = await ops(dir).run("test", { repo: "acme/api" });
+    if (res.kind === "result") expect(res.summary).toMatch(/workspace not verified to hold acme\/api \(local mode\)/);
+  });
+
+  it("status on an existing workspace also discloses it was not verified to hold the repo", async () => {
+    const dir = workspace({ name: "x", version: "0.0.0" });
+    const res = await ops(dir).run("status", { repo: "acme/api" });
+    expect(res).toMatchObject({ kind: "result", ok: true });
+    if (res.kind === "result") expect(res.summary).toMatch(/workspace not verified to hold acme\/api \(local mode\)/);
+  });
 });
 
 function ops(dir: string): LocalOperations {

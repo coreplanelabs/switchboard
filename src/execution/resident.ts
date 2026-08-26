@@ -1,6 +1,6 @@
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { repoResourceId } from "../core/repoCommands.js";
-import { truncate, type Executor } from "./executor.js";
+import { BASH_TIMEOUT_MS, truncate, type Executor } from "./executor.js";
 
 // Remote execution against a resident repo environment — the always-warm
 // per-repo service behind the resident Worker (deploy/cloudflare-resident/).
@@ -86,6 +86,11 @@ export class ResidentOperations implements Operations {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
         body: JSON.stringify({ resource: repoResourceId(req.repo), op, ...(req.ref ? { ref: req.ref } : {}) }),
+        // Bound the request so a hung resident can't stall the dispatch; an op
+        // (test/build) legitimately runs minutes, so use the exec ceiling. A
+        // timeout throws here and becomes the same legible error as any other
+        // transport failure below.
+        signal: AbortSignal.timeout(BASH_TIMEOUT_MS),
       });
     } catch (err) {
       return {
@@ -173,6 +178,11 @@ export class ResidentExecutor implements Executor {
           authorization: `Bearer ${this.opts.token}`,
         },
         body: JSON.stringify({ resource: this.opts.resource, threadKey: this.opts.threadKey, ...body }),
+        // Bound every route so a hung resident can't stall the dispatch; /exec
+        // streams and can legitimately run minutes, so use the exec ceiling. A
+        // timeout throws here and is translated into the legible request-failed
+        // error below, never an unhandled throw.
+        signal: AbortSignal.timeout(BASH_TIMEOUT_MS),
       });
     } catch (err) {
       // Network-level failure: the command may still be running (or have run)

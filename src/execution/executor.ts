@@ -72,13 +72,17 @@ export class LocalOperations implements Operations {
 
   async run(op: OpName, req: { repo: string; ref?: string }): Promise<OperationResult> {
     const refNote = req.ref ? ` — ref \`${req.ref}\` ignored (local mode has no refs)` : "";
+    // Local mode has no onboard-time repo binding, so "for <repo>" is a claim
+    // about intent, not a verified checkout — disclose that the workspace was
+    // not verified to hold req.repo, mirroring the ref-not-verified note.
+    const repoNote = ` — workspace not verified to hold ${req.repo} (local mode)`;
     const exists = existsSync(this.workspaceDir);
     if (op === "status") {
       return {
         kind: "result",
         ok: exists,
         summary: exists
-          ? `status: local workspace for ${req.repo} exists at ${this.workspaceDir} (dev-only — no resident lifecycle locally)`
+          ? `status: local workspace for ${req.repo} exists at ${this.workspaceDir} (dev-only — no resident lifecycle locally)${repoNote}`
           : `status: no local workspace at ${this.workspaceDir} yet (dev-only — no resident lifecycle locally)`,
       };
     }
@@ -96,7 +100,7 @@ export class LocalOperations implements Operations {
       ok: r.exitCode === 0,
       summary:
         `${op} (\`${command}\`) ${r.exitCode === 0 ? "passed" : `failed (exit ${r.exitCode})`} ` +
-        `in the local workspace for ${req.repo}${refNote}`,
+        `in the local workspace for ${req.repo}${repoNote}${refNote}`,
       ...(r.output ? { output: truncate(r.output) } : {}),
     };
   }

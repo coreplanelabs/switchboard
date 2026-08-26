@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AGENTS } from "../agents/registry.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { LocalExecutor } from "./executor.js";
-import { ResidentExecutor } from "./resident.js";
+import { ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
 import { makeExecutor, resetResidentProbeCache, type ExecutorFactoryOptions } from "./factory.js";
 
 // Feature: features/execution.md — per-agent executor provisioning: agents
@@ -137,25 +137,62 @@ describe("makeExecutor resident selection", () => {
     expect(fn).not.toHaveBeenCalled();
   });
 
-  it("warm probe → ResidentExecutor, attached on open", async () => {
+  it("warm probe → ResidentExecutor, attached on open, with the resident discriminant set", async () => {
     stubEnvs();
     const { calls } = stubFetch(
       { body: { state: "warm", reason: "" } },
       { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2", deps: "hardlink" } },
     );
-    const { executor, note } = await makeExecutor(residentOpts(), repoCtx());
+    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(ResidentExecutor);
     expect(note).toBeUndefined();
+    // The discriminant is the backend signal the dispatcher branches its
+    // resident system-prompt on (never an executor `instanceof`): true ONLY on
+    // the warm-resident branch.
+    expect(resident).toBe(true);
     expect(calls).toEqual(["/status", "/attach"]);
   });
 
-  it("not-warm probe → fallback carrying state and reason verbatim; no attach", async () => {
+  it("not-warm probe → fallback carrying state and reason verbatim; no attach, discriminant NOT set", async () => {
     stubEnvs();
     const { calls } = stubFetch({ body: { state: "restoring", reason: "rehydrating" } });
-    const { executor, note } = await makeExecutor(residentOpts(), repoCtx());
+    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(note).toBe("resident restoring (rehydrating) — using fresh sandbox");
+    // A per-thread fallback is NOT the resident branch: the dispatcher must
+    // keep the agent's own prompt, so the discriminant stays falsy.
+    expect(resident).toBeFalsy();
     expect(calls).toEqual(["/status"]);
+  });
+
+  // AE6 (3-reviewer-corroborated): the resident can degrade between the warm
+  // /status probe and /attach (503 mirror-busy, 429 pool-exhausted). Any attach
+  // failure that is NOT needs-ref must fall back to the per-thread backend with
+  // a NAMED note (KTD10) — never a silent stall or a raw ⚠️.
+  it("warm probe then a NON-needs-ref attach failure → per-thread executor WITH a named 'resident attach failed' note", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(
+      { body: { state: "warm", reason: "" } },
+      { status: 503, body: { error: "mirror-busy: reprovisioning" } },
+    );
+    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+    expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(resident).toBeFalsy();
+    expect(note).toMatch(/^resident attach failed \(.*mirror-busy.*\) — using fresh sandbox$/);
+    // the probe WAS warm and the attach WAS attempted before falling back
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
+  // ResidentNeedsRefError must still propagate through the warm→attach window:
+  // the dispatcher's ask-once flow (one clarifying question, no model turn)
+  // depends on catching it — it must never be swallowed into a fallback note.
+  it("warm probe then a needs-ref attach failure → ResidentNeedsRefError propagates (dispatcher ask-once intact)", async () => {
+    stubEnvs();
+    stubFetch(
+      { body: { state: "warm", reason: "" } },
+      { status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref" } },
+    );
+    await expect(makeExecutor(residentOpts(), repoCtx())).rejects.toBeInstanceOf(ResidentNeedsRefError);
   });
 
   it("not-warm states are NOT cached — the next dispatch probes again", async () => {

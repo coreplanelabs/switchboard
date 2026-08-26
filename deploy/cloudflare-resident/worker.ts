@@ -266,16 +266,27 @@ export async function mintRepoScopedToken(env: Env, slug: string): Promise<strin
   // The installation-token API scopes by repo NAME within the installation's
   // owner — the owner half of the slug is fixed by the installation itself.
   const repoName = slug.includes("/") ? slug.slice(slug.indexOf("/") + 1) : slug;
-  const res = await fetch(`https://api.github.com/app/installations/${env.GITHUB_APP_INSTALLATION_ID}/access_tokens`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${jwt}`,
-      accept: "application/vnd.github+json",
-      "content-type": "application/json",
-      "user-agent": "switchboard-resident",
-    },
-    body: JSON.stringify({ repositories: [repoName] }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/app/installations/${env.GITHUB_APP_INSTALLATION_ID}/access_tokens`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        accept: "application/vnd.github+json",
+        "content-type": "application/json",
+        "user-agent": "switchboard-resident",
+      },
+      body: JSON.stringify({ repositories: [repoName] }),
+      // A slow GitHub must not hang attach/refresh. The 10s abort surfaces as a
+      // command-level Error (below), never a lifecycle transition (KTD12).
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err) {
+    // AbortSignal.timeout aborts with a "TimeoutError" DOMException; any other
+    // fetch throw (network/DNS) lands here too. Both are command-level per KTD12.
+    const aborted = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    throw new Error(`github-token-mint-failed: ${aborted ? "timed out after 10s contacting api.github.com" : errMsg(err)}`);
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`github-token-mint-failed: HTTP ${res.status} ${body.slice(0, 300)}`);
@@ -1130,19 +1141,28 @@ export class ResidentDO extends Sandbox<Env> {
       let snap: SnapshotRecord | null = null;
       let previous: SnapshotRecord | undefined;
       if (sha !== facts.sha) {
-        // Token-free from here on: repo code runs during install/build (KTD7).
-        await this.buildUserRun(
-          `git fetch --quiet origin && git reset --hard --quiet ${sha} && git clean -fdq`,
-          "checkout-update",
-          GIT_NETWORK_TIMEOUT_MS,
-        );
-        lockfileHash = await this.lockfileKey(sha);
-        if (lockfileHash !== facts.lockfileHash && record.commands.install) {
-          await this.buildUserRun(record.commands.install, "install", REFRESH_BUILD_TIMEOUT_MS);
-        }
-        await this.buildUserRun(record.commands.build, "build", REFRESH_BUILD_TIMEOUT_MS);
-        previous = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
-        snap = await this.takeSnapshot(resource, facts.defaultRef, sha, lockfileHash);
+        // Serialize the CHECKOUT_DIR mutation on the mirror mutex (FIX 2):
+        // materializeThreadDeps reads CHECKOUT_DIR via `cp -al` under the same
+        // lock, so an attach/op dep-copy can no longer hardlink a half-rebuilt
+        // checkout into a thread tree (torn cache → false ❌ from `repo test`).
+        // No wait timeout, exactly like the fetch lock above: the background
+        // refresh queues behind an in-flight attach instead of flipping to
+        // degraded on transient lock contention.
+        await this.withMirrorLock(async () => {
+          // Token-free from here on: repo code runs during install/build (KTD7).
+          await this.buildUserRun(
+            `git fetch --quiet origin && git reset --hard --quiet ${sha} && git clean -fdq`,
+            "checkout-update",
+            GIT_NETWORK_TIMEOUT_MS,
+          );
+          lockfileHash = await this.lockfileKey(sha);
+          if (lockfileHash !== facts.lockfileHash && record.commands.install) {
+            await this.buildUserRun(record.commands.install, "install", REFRESH_BUILD_TIMEOUT_MS);
+          }
+          await this.buildUserRun(record.commands.build, "build", REFRESH_BUILD_TIMEOUT_MS);
+          previous = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
+          snap = await this.takeSnapshot(resource, facts.defaultRef, sha, lockfileHash);
+        });
       }
 
       // Facts and snapshot move together so the stamp check never sees a
@@ -1388,6 +1408,13 @@ export class ResidentDO extends Sandbox<Env> {
       }
     } catch (err) {
       await rollback();
+      // The deps hardlink-copy now waits on the mirror mutex (FIX 2): a
+      // timed-out acquire surfaces as 503 mirror-busy, same as the fetch/
+      // worktree lock above, so the bot-side fallback can retry.
+      if (err instanceof MirrorBusyError) {
+        const s = await this.getStatus();
+        return { error: errMsg(err), status: 503, state: s.state, reason: "mirror-busy" };
+      }
       const step = err instanceof StepError ? ` at ${err.step}` : "";
       return { error: `attach-failed${step}: ${errMsg(err)}`, status: 500 };
     }
@@ -1496,25 +1523,47 @@ export class ResidentDO extends Sandbox<Env> {
 
     if (threadLockKey === warmLockKey) {
       let mech: ThreadDepsMechanism = "none";
-      for (const dir of DEP_CACHE_DIRS) {
-        const src = `${CHECKOUT_DIR}/${dir}`;
-        const dst = `${wt}/${dir}`;
-        if ((await this.run(["test", "-d", src])).exitCode !== 0) continue;
-        if ((await this.run(["test", "-e", dst])).exitCode === 0) continue;
-        const hard = await this.run(["cp", "-al", src, dst], { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
-        if (hard.exitCode === 0) {
-          await this.runOk(
-            ["sh", "-c", `find ${dst} -type d -exec chown ${binding.user}:${binding.user} {} +`],
-            "deps-chown",
-          );
-          if (mech === "none") mech = "hardlink";
-        } else {
-          await this.run(["rm", "-rf", dst]);
-          await this.runOk(["cp", "-R", src, dst], "deps-copy", { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
-          await this.runOk(["chown", "-R", `${binding.user}:${binding.user}`, dst], "deps-copy-chown");
-          mech = "copy";
+      // Serialize the hardlink-copy on the mirror mutex (FIX 2): `cp -al` reads
+      // CHECKOUT_DIR, which the refresh alarm rebuilds under the same lock, so
+      // this can never hardlink a half-rebuilt checkout into the thread tree.
+      // Bounded by ATTACH_MUTEX_WAIT_MS — an attach waits out an in-flight
+      // rebuild, else MirrorBusyError → 503 mirror-busy (the bot-side fallback
+      // retries). Callers invoke materializeThreadDeps OUTSIDE their own mirror
+      // lock, so this fresh acquire is not a re-entrant double-lock.
+      await this.withMirrorLock(async () => {
+        for (const dir of DEP_CACHE_DIRS) {
+          const src = `${CHECKOUT_DIR}/${dir}`;
+          const dst = `${wt}/${dir}`;
+          if ((await this.run(["test", "-d", src])).exitCode !== 0) continue;
+          if ((await this.run(["test", "-e", dst])).exitCode === 0) continue;
+          const hard = await this.run(["cp", "-al", src, dst], { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
+          if (hard.exitCode === 0) {
+            await this.runOk(
+              ["sh", "-c", `find ${dst} -type d -exec chown ${binding.user}:${binding.user} {} +`],
+              "deps-chown",
+            );
+            // The hardlinked FILE inodes stay owned by the warm-checkout user
+            // and are shared with the warm checkout and every peer worktree.
+            // Dirs-only chown lets the thread delete/replace entries in its own
+            // tree, but an unusual world/group-writable file (an odd dependency
+            // file or a permissively-emitted build artifact under node_modules/
+            // dist/build/.next) would still be mutable THROUGH the shared inode
+            // → cross-thread tamper / cache poisoning the next snapshot could
+            // capture. Strip group/world write from the shared file inodes
+            // (read stays intact, so the thread can still consume the cache).
+            await this.runOk(
+              ["sh", "-c", `find ${dst} -type f \\( -perm -g+w -o -perm -o+w \\) -exec chmod go-w {} +`],
+              "deps-harden",
+            );
+            if (mech === "none") mech = "hardlink";
+          } else {
+            await this.run(["rm", "-rf", dst]);
+            await this.runOk(["cp", "-R", src, dst], "deps-copy", { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
+            await this.runOk(["chown", "-R", `${binding.user}:${binding.user}`, dst], "deps-copy-chown");
+            mech = "copy";
+          }
         }
-      }
+      }, ATTACH_MUTEX_WAIT_MS);
       return { deps: mech, reconciled: false };
     }
 
@@ -2541,7 +2590,7 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
   // The DO teardown and the resident/<resource>/ prefix sweep touch disjoint
   // data (the teardown's backup objects live under backups/<id>/), so both
   // run unconditionally and concurrently.
-  const [teardown, r2ObjectsDeleted] = await Promise.all([
+  const [teardown, r2Sweep] = await Promise.all([
     residentStub(env, resource.resource)
       .teardown()
       .catch(
@@ -2553,8 +2602,19 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
           errors: [`teardown failed: ${errMsg(err)}`],
         }),
       ),
-    deleteR2Prefix(env.BACKUP_BUCKET, r2Prefix(resource.resource)),
+    // The registry is already gone, so the offboard cannot be retried; a
+    // transient R2 failure must degrade to a reported partial success (naming
+    // the prefix left behind) rather than throw an unretryable 500.
+    deleteR2Prefix(env.BACKUP_BUCKET, r2Prefix(resource.resource))
+      .then((deleted) => ({ deleted, error: undefined as string | undefined }))
+      .catch((err: unknown) => ({
+        deleted: 0,
+        error: `r2 prefix sweep failed for ${r2Prefix(resource.resource)}: ${errMsg(err)}`,
+      })),
   ]);
+
+  const errors = [...teardown.errors];
+  if (r2Sweep.error) errors.push(r2Sweep.error);
 
   return json({
     resource: resource.resource,
@@ -2563,8 +2623,8 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
     containerStopped: teardown.containerStopped,
     storageCleared: teardown.storageCleared,
     backupObjectsDeleted: teardown.backupObjectsDeleted,
-    r2ObjectsDeleted,
-    errors: teardown.errors,
+    r2ObjectsDeleted: r2Sweep.deleted,
+    errors,
   });
 }
 

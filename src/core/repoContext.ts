@@ -208,6 +208,9 @@ async function prHeadRef(pr: { repo: string; number: number }): Promise<string |
     head?: { ref?: string; repo?: { full_name?: string } };
   };
   const headRepo = data.head?.repo?.full_name?.toLowerCase();
-  if (!data.head?.ref || (headRepo && headRepo !== pr.repo)) return undefined;
+  // Require a POSITIVE same-repo match: a null head.repo (deleted fork) must
+  // not bind the base repo's ref to a fork PR. Dropping the `headRepo &&`
+  // short-circuit makes a missing/mismatched head repo return undefined.
+  if (!data.head?.ref || headRepo !== pr.repo) return undefined;
   return validRef(data.head.ref);
 }

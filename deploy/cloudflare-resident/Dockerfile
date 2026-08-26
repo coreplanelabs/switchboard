@@ -5,18 +5,13 @@
 # (no 'latest' tag exists on the @next line) — bump both together.
 FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1
 
-# gh CLI + git identity, mirroring the thread-sandbox image: agents talk to
-# GitHub with a short-lived App installation token injected per command (never
-# baked into the image).
-RUN apt-get update \
-  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-       -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
-  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-       > /etc/apt/sources.list.d/github-cli.list \
-  && apt-get update && apt-get install -y --no-install-recommends gh \
-  && rm -rf /var/lib/apt/lists/* \
-  && git config --system credential.helper '!gh auth git-credential' \
-  && git config --system user.name "switchboard-resident" \
+# Git identity only. The engine never uses the gh CLI (ops run git directly,
+# tokens are minted via the GitHub REST API in the Worker/DO, and per-attach
+# credentials use a repo-local `store` helper), so gh is deliberately NOT
+# installed here — matching the resident system prompts and the tests that pin
+# that claim. No system credential.helper is configured; each worktree sets its
+# own per-attach helper.
+RUN git config --system user.name "switchboard-resident" \
   && git config --system user.email "switchboard-resident@users.noreply.github.com"
 
 # KTD5: agent commands never run as root. The SDK's exec has no user/uid option

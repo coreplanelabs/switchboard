@@ -134,6 +134,20 @@ describe("per-repo access (canUseRepo)", () => {
     expect(s.canUseRepo("slack:UADMIN", "acme/api")).toBe(true);
     expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(false);
   });
+
+  // validateConfig lowercases every permissions.repos key at load: every
+  // caller looks the repo up by a lowercased slug (parseSlug/slugOf/
+  // repoResourceId), so a mixed-case allowlist key must still match — otherwise
+  // it would silently grant OPEN access instead of restricting.
+  it("mixed-case repos keys are lowercased at load so a lowercased-slug lookup still restricts (case-insensitive)", () => {
+    const MIXED = YAML_FIXTURE + `  repos:\n    "Acme/API": ["slack:UDEV"]\n`;
+    const s = store(MIXED);
+    expect(s.canUseRepo("slack:UDEV", "acme/api")).toBe(true);
+    expect(s.canUseRepo("slack:UADMIN", "acme/api")).toBe(true);
+    // The key would have failed to match (silently opening access) without the
+    // load-time lowercasing — a refused user proves it restricts.
+    expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(false);
+  });
 });
 
 // Feature: features/resident-repos.md — repo management is FAIL-CLOSED (KTD9):
