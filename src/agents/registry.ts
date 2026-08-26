@@ -17,6 +17,10 @@ export interface AgentDef {
   /** model effort (Anthropic output_config.effort); omit for model default.
    *  Lower effort = much faster turns. Skipped for models without support. */
   effort?: "low" | "medium" | "high";
+  /** Resources the agent needs (KD2: declared per agent, resolved by the
+   *  executor factory). No `repo` declared → no workspace/sandbox is ever
+   *  provisioned for this agent's runs. */
+  resources?: { repo?: "required" | "none" };
 }
 
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
@@ -84,12 +88,14 @@ export const AGENTS: Record<string, AgentDef> = {
     maxTurns: 60, // scoping is capped at ~5 calls by the prompt; this is implementation room
     maxTokens: 64000,
     maxMinutes: 45,
+    resources: { repo: "required" },
   },
   review: {
     name: "review",
     description: "Reviews PRs and produces high-quality findings. Read-only.",
     system: REVIEW_SYSTEM,
     toolset: "readonly",
+    resources: { repo: "required" },
     maxTurns: 30, // backstop only; wall clock is the real budget (12 bound at ~4 min in practice)
     maxTokens: 64000,
     maxMinutes: 25, // safety net, not the mechanism — typical reviews land in ~5

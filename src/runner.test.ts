@@ -165,6 +165,47 @@ describe("runAgent budgets", () => {
     expect(answer).toContain("declined");
   });
 
+  it("a system override in RunOptions reaches the provider request", async () => {
+    // The dispatcher may choose an effective system prompt after executor
+    // resolution; it must flow per-run, never by mutating the shared AgentDef.
+    const provider = scripted([text("done")]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ system: "base prompt" }),
+      system: "override prompt",
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+    });
+    expect(provider.requests[0].system).toBe("override prompt");
+  });
+
+  it("the system override also governs the forced write-up call", async () => {
+    // maxTurns=1 with a tool-hungry model → loop turn, then the finale call.
+    const provider = scripted([bashUse("t1"), text("partial")]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 1, system: "base prompt" }),
+      system: "override prompt",
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+    });
+    expect(provider.requests.at(-1)?.system).toBe("override prompt");
+  });
+
+  it("without an override the agent's own system prompt is used", async () => {
+    const provider = scripted([text("done")]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ system: "base prompt" }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+    });
+    expect(provider.requests[0].system).toBe("base prompt");
+  });
+
   it("marks truncated answers when the token limit was hit", async () => {
     const provider = scripted([text("half an ans", "max_tokens")]);
     const answer = await runAgent({

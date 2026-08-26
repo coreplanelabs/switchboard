@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { mkdirSync } from "node:fs";
+import type { AgentDef } from "../agents/registry.js";
 import { LocalExecutor, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
@@ -27,10 +28,28 @@ export interface ExecutorFactoryOptions {
   dataDir: string; // e2b mode: where the thread->sandbox map is persisted
 }
 
-export async function makeExecutor(
-  opts: ExecutorFactoryOptions,
-  threadKey: string,
-): Promise<Executor> {
+/** What executor selection knows about the run it is provisioning for.
+ *  The agent's resource declarations drive whether anything is provisioned at
+ *  all; repo/ref carry resident-repo inference once later units supply it. */
+export interface ExecutorContext {
+  threadKey: string;
+  /** the resolved agent (never mutated here) */
+  agent: AgentDef;
+  /** inferred target repo, e.g. "org/name" — reserved, not yet populated */
+  repo?: string;
+  /** inferred git ref within `repo` — reserved, not yet populated */
+  ref?: string;
+}
+
+export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorContext): Promise<Executor> {
+  // Agents declare the resources they need (KD2). No repo declared → nothing
+  // to provision: no workspace dir, no sandbox created or reconnected, no
+  // credential required. The general agent (toolset "none") lands here.
+  if (ctx.agent.resources?.repo !== "required") {
+    return new NullExecutor(ctx.agent.name);
+  }
+
+  const { threadKey } = ctx;
   const type = opts.execution?.type ?? "local";
 
   if (type === "local") {
@@ -51,6 +70,8 @@ export async function makeExecutor(
       timeoutMs: (opts.execution?.timeoutMinutes ?? 30) * 60_000,
       statePath: resolve(opts.dataDir, "sandboxes.json"),
       envs,
+      repo: ctx.repo,
+      ref: ctx.ref,
     });
   }
 
@@ -67,10 +88,36 @@ export async function makeExecutor(
       token,
       threadKey,
       envs,
+      repo: ctx.repo,
+      ref: ctx.ref,
     });
   }
 
   throw new Error(`Unknown execution.type "${type}" (valid: local, e2b, cloudflare)`);
+}
+
+/** Executor for agents that declare no repo resource. Provisions nothing; a
+ *  tool call reaching it is a wiring bug (an agent with tools but no declared
+ *  resources) and surfaces as a legible tool error, not a crash. */
+class NullExecutor implements Executor {
+  constructor(private agentName: string) {}
+
+  private fail(): never {
+    throw new Error(
+      `Agent "${this.agentName}" declares no repo resource, so it has no execution workspace. ` +
+        `Declare resources: { repo: "required" } on the agent if its tools need one.`,
+    );
+  }
+
+  async exec(): Promise<string> {
+    this.fail();
+  }
+  async readFile(): Promise<string> {
+    this.fail();
+  }
+  async writeFile(): Promise<string> {
+    this.fail();
+  }
 }
 
 /** GitHub credential for the sandbox env: freshly-minted App installation

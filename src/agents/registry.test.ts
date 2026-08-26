@@ -33,6 +33,14 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.general.system).toMatch(/NO tools/i);
   });
 
+  it("resource declarations: coding and review require a repo; general declares none", () => {
+    // KD2: agents declare the resources they need; the general-purpose agent
+    // runs without a repo, so executor selection provisions it nothing.
+    expect(AGENTS.coding.resources?.repo).toBe("required");
+    expect(AGENTS.review.resources?.repo).toBe("required");
+    expect(AGENTS.general.resources?.repo).toBeUndefined();
+  });
+
   it("getAgent throws on unknown agents, naming the available ones", () => {
     expect(() => getAgent("bogus")).toThrow(/Unknown agent/);
     expect(() => getAgent("bogus")).toThrow(/general/);

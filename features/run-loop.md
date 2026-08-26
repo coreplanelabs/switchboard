@@ -13,6 +13,7 @@ The runner is provider-blind: complete → execute tools → append results → 
 3. **Forced write-up**: on budget exhaustion the model gets one final tool-less call to report findings so far + what a follow-up should do; the answer is prefixed `⚠️ Hit the <N>-minute/-turn budget…`. An empty write-up still produces a user-facing message.
 4. **Refusals** surface as a clear user-facing message suggesting rephrase/model-switch; **token-limit truncation** is labeled, never silent.
 5. Current budgets: general 1 turn/5 min · review 30 turns/25 min · coding 60 turns/45 min. Changing them is a feature change — update this file and the registry together.
+6. **Per-run system override**: `RunOptions.system` replaces `agent.system` for a single run — every provider call in the run, including the forced write-up, uses it. The dispatcher can choose an effective prompt after executor resolution (resident-repo context, later milestones) without ever mutating the shared `AgentDef` (concurrent dispatches share it). No override → `agent.system`, unchanged.
 
 ## Validation criteria
 
@@ -24,3 +25,4 @@ The runner is provider-blind: complete → execute tools → append results → 
 | Status-only turns don't consume the turn budget | `[unit]` `src/runner.test.ts::update_status-only turns` |
 | Refusal and truncation surfaced legibly | `[unit]` `src/runner.test.ts::refusals / truncated` |
 | Wrap-up warning fires once near the deadline | `[unit]` `src/runner.test.ts::emits the wrap-up warning` (runner takes an injectable `now` clock). |
+| `RunOptions.system` override reaches every provider call; absent → `agent.system` | `[unit]` `src/runner.test.ts::a system override in RunOptions reaches the provider request`, `::the system override also governs the forced write-up call`, `::without an override the agent's own system prompt is used` |

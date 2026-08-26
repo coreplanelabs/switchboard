@@ -69,13 +69,16 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
 
     const messages = buildMessages(history, directives.text, msg.images);
 
+    // Executor selection is context-aware: the agent's resource declarations
+    // decide whether anything is provisioned at all (general gets nothing),
+    // and repo/ref will carry resident-repo inference in later milestones.
     const executor = await makeExecutor(
       {
         execution: deps.config.config.execution,
         workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
         dataDir: deps.dataDir ?? "./data",
       },
-      msg.threadKey,
+      { threadKey: msg.threadKey, agent },
     );
 
     const label = `*${agent.name}* on \`${resolved.modelRef}\``;
