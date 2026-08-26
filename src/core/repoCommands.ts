@@ -87,33 +87,41 @@ const SLUG_RE =
 // Mirrors the resident's strict branch-ref pattern (U4).
 const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
-function parseSlug(token: string): string | undefined {
+/** "owner/name" (optionally ".git") → lowercase slug, or undefined. Exported
+ *  for the U6 op recognizer (src/core/operations.ts), which validates the
+ *  same shapes. */
+export function parseSlug(token: string): string | undefined {
   const cleaned = token.replace(/\.git$/i, "");
   return SLUG_RE.test(cleaned) ? cleaned.toLowerCase() : undefined;
 }
 
-function validRef(candidate: string): string | undefined {
+/** Validated ref or undefined — the resident's strict pattern. Exported for
+ *  the U6 op recognizer: a ref that fails this NEVER reaches any backend. */
+export function validRef(candidate: string): string | undefined {
   if (!REF_RE.test(candidate)) return undefined;
   if (candidate.includes("..") || candidate.includes("@{") || candidate.endsWith(".lock")) return undefined;
   return candidate;
 }
 
-type RepoVerb = "list" | "onboard" | "offboard" | "reconfigure" | "rebuild";
+type RepoVerb = "list" | "onboard" | "offboard" | "reconfigure" | "rebuild" | "test" | "build";
 
 export type RepoCommand =
   | { verb: "list" }
   | { verb: "onboard"; slug: string; commands: Record<CommandKey, string>; defaultRef: string }
   | { verb: "offboard" | "rebuild"; slug: string; dryRun: boolean }
   | { verb: "reconfigure"; slug: string; commands?: Partial<Record<CommandKey, string>>; defaultRef?: string }
+  // U6 deterministic ops (KTD8): OPERATOR-level, executed by the dispatcher
+  // fast-path (never by handleRepoCommand, never behind canManageRepos).
+  | { verb: "test" | "build"; slug: string; ref?: string }
   | { error: string };
 
 /** Parses `repo <verb> ...` or returns null when the text is not a repo
- *  command. Only the five known verbs match — prose like "repo onboarding is
+ *  command. Only the known verbs match — prose like "repo onboarding is
  *  done how?" passes through to the model untouched. */
 export function parseRepoCommand(text: string): RepoCommand | null {
   // Slack autoformat turns straight quotes into curly ones; normalize first.
   const normalized = text.trim().replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
-  const m = normalized.match(/^repo\s+(list|onboard|offboard|reconfigure|rebuild)\b\s*(.*)$/is);
+  const m = normalized.match(/^repo\s+(list|onboard|offboard|reconfigure|rebuild|test|build)\b\s*(.*)$/is);
   if (!m) return null;
   const verb = m[1].toLowerCase() as RepoVerb;
   const rest = m[2].trim();
@@ -128,6 +136,23 @@ export function parseRepoCommand(text: string): RepoCommand | null {
     return {
       error: `\`repo ${verb}\` needs a GitHub \`owner/name\` slug, e.g. \`repo ${verb} acme/api\`.`,
     };
+  }
+
+  // U6 deterministic ops: `repo test <owner/name> [<ref>]` / `repo build …`.
+  // Parsed here so every op has a deterministic invocation the user can reach
+  // for when phrasing fails; the dispatcher fast-path executes them. The ref
+  // must pass the resident's strict pattern — a hostile ref is a NAMED parse
+  // error that never reaches any backend (KTD8).
+  if (verb === "test" || verb === "build") {
+    if (tokens.length > 1) {
+      return { error: `\`repo ${verb}\` takes \`<owner/name> [<ref>]\` only.` };
+    }
+    let ref: string | undefined;
+    if (tokens.length === 1) {
+      ref = validRef(tokens[0]);
+      if (!ref) return { error: `\`${tokens[0]}\` is not a plausible git branch ref (e.g. \`main\`).` };
+    }
+    return { verb, slug, ...(ref ? { ref } : {}) };
   }
 
   if (verb === "offboard" || verb === "rebuild") {
@@ -193,6 +218,11 @@ export async function handleRepoCommand(
   const cmd = parseRepoCommand(msg.text);
   if (!cmd) return null;
   if ("error" in cmd) return cmd.error;
+
+  // U6 op verbs are OPERATOR-level and dispatcher-owned: the deterministic
+  // ops fast-path gates them with canRunAgent(coding) + canUseRepo (KD7) and
+  // executes them modelless — never the admin client, never canManageRepos.
+  if (cmd.verb === "test" || cmd.verb === "build") return null;
 
   // KTD9 fail-closed gate: everything but `list` provisions or destroys
   // billable always-on compute — admins (+ permissions.repoManagement) only.

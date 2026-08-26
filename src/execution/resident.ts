@@ -1,3 +1,4 @@
+import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { truncate, type Executor } from "./executor.js";
 
 // Remote execution against a resident repo environment — the always-warm
@@ -48,6 +49,53 @@ export class ResidentNeedsRefError extends Error {
         `Name the branch to work on (e.g. "on main") and try again.`,
     );
     this.name = "ResidentNeedsRefError";
+  }
+}
+
+/** Deterministic-ops client (U6, KTD8) for the resident Worker's POST /op:
+ *  a name from the fixed op enum resolves resident-side ONLY through the
+ *  onboard-time command table and runs in a disposable per-op checkout —
+ *  never a thread's attached worktree, so no threadKey rides in the body.
+ *  Post-validation responses stream like /exec (heartbeat whitespace + ONE
+ *  JSON document over HTTP 200 — parse the body, never the status);
+ *  pre-validation refusals use real statuses (400/404/409). A failing op is
+ *  a RESULT (ok:false), not an error. */
+export class ResidentOperations implements Operations {
+  constructor(private opts: { baseUrl: string; token: string }) {}
+
+  async run(op: OpName, req: { repo: string; ref?: string }): Promise<OperationResult> {
+    let res: Response;
+    try {
+      res = await fetch(`${this.opts.baseUrl.replace(/\/$/, "")}/op`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
+        body: JSON.stringify({ resource: `repo:${req.repo}`, op, ...(req.ref ? { ref: req.ref } : {}) }),
+      });
+    } catch (err) {
+      return {
+        kind: "error",
+        message: `resident /op request failed (${err instanceof Error ? err.message : String(err)})`,
+      };
+    }
+    if (res.status === 404) return { kind: "not-onboarded" };
+    const text = await res.text();
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(text.trim() || "{}") as Record<string, unknown>;
+    } catch {
+      // non-JSON body (edge error page) — falls through to the status check
+    }
+    const err = typeof data.error === "string" ? data.error : "";
+    if (err.startsWith("op-refused")) return { kind: "refused", reason: err };
+    if (err) return { kind: "error", message: `resident /op: ${err}` };
+    if (!res.ok) return { kind: "error", message: `resident /op HTTP ${res.status}` };
+    const ok = data.ok === true;
+    const summary =
+      typeof data.summary === "string" && data.summary ? data.summary : `${op} ${ok ? "succeeded" : "failed"}`;
+    const output = [data.stdout, data.stderr]
+      .filter((s): s is string => typeof s === "string" && s.length > 0)
+      .join("\n--- stderr ---\n");
+    return { kind: "result", ok, summary, ...(output ? { output: truncate(output) } : {}) };
   }
 }
 

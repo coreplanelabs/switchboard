@@ -82,6 +82,14 @@ execution:
   # Setup; gated by permissions.repoManagement — fail-closed, admins only when
   # unset). `repo list` shows lifecycle; `repo offboard`/`repo rebuild` accept
   # --dry-run for an itemized plan without executing.
+  # Deterministic ops (no model turn): `repo test <owner/name> [<ref>]` /
+  # `repo build <owner/name> [<ref>]` — and natural asks like "run the tests
+  # on main in acme/api" — run the repo's onboarded command in a disposable
+  # resident checkout and post the result with zero model calls. Operator-
+  # level: gated by the coding-agent allowlist + permissions.repos (NOT
+  # repoManagement). Anything ambiguous falls through to the agent. With
+  # local execution the same asks run fixed Node commands in the thread's
+  # local workspace (dev-only).
   # resident:
   #   baseUrl: https://switchboard-resident.<account>.workers.dev
   #   tokenEnv: RESIDENT_OPERATOR_TOKEN  # operator bearer secret (default)

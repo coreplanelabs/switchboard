@@ -384,6 +384,182 @@ describe("repo management commands (U8)", () => {
   });
 });
 
+// Feature: features/resident-repos.md, features/routing-and-config.md — U6
+// deterministic ops fast-path (KTD8): recognized ops answer with a real op
+// execution and ZERO model turns, mirroring the config-command inline-reply
+// shape. Only the model call is skipped — the implicit target agent (coding)
+// passes canRunAgent and the repo passes canUseRepo (KD7) BEFORE anything
+// executes. Anything ambiguous or non-matching falls through to the agent
+// (KD3: never guess).
+describe("deterministic ops fast-path (U6)", () => {
+  afterEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  function fakeOps(result: import("./operations.js").OperationResult) {
+    return {
+      calls: [] as Array<{ op: string; req: { repo: string; ref?: string } }>,
+      async run(op: import("./operations.js").OpName, req: { repo: string; ref?: string }) {
+        this.calls.push({ op, req });
+        return result;
+      },
+    };
+  }
+
+  const OK_RESULT = {
+    kind: "result",
+    ok: true,
+    summary: "test passed on repo:acme/api @ main (abc12345) in 3s",
+    output: "1 passing",
+  } as const;
+
+  it('F3: "run the tests on main" for an onboarded repo → op result posted, provider NEVER called', async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = fakeOps(OK_RESULT);
+    deps.operations = ops;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
+    expect(ops.calls).toEqual([{ op: "test", req: { repo: "acme/api", ref: "main" } }]);
+    expect(replies[0]).toContain("✅");
+    expect(replies[0]).toContain("test passed");
+    expect(replies[0]).toContain("1 passing");
+    expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
+  });
+
+  it("explicit `repo test <owner/name> <ref>` executes for an authorized user regardless of phrasing", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = fakeOps(OK_RESULT);
+    deps.operations = ops;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
+    expect(ops.calls).toEqual([{ op: "test", req: { repo: "acme/api", ref: "main" } }]);
+    expect(replies[0]).toContain("✅");
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("a user without coding-agent access gets the SAME refusal as a normal coding request; the op never executes", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider); // coding restricted to UADMIN
+    const ops = fakeOps(OK_RESULT);
+    deps.operations = ops;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UX"), io);
+    expect(replies[0]).toContain("🚫");
+    expect(replies[0]).toContain("`coding` agent");
+    expect(ops.calls).toHaveLength(0);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("a canUseRepo refusal (KD7) names the repo; the op never executes", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider); // acme/api restricted to UADMIN; UDEV may run coding
+    const ops = fakeOps(OK_RESULT);
+    deps.operations = ops;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo test acme/api main", "slack:UDEV"), io);
+    expect(replies[0]).toContain("🚫");
+    expect(replies[0]).toContain("acme/api");
+    expect(ops.calls).toHaveLength(0);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it('ambiguous phrasing ("can you check the tests seem fine?") falls through to the agent path', async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = fakeOps(OK_RESULT);
+    deps.operations = ops;
+    const { io, replies } = fakeIO([{ role: "user", text: "we are looking at acme/api" }]);
+    await dispatch(deps, msg("can you check the tests seem fine?"), io);
+    expect(ops.calls).toHaveLength(0);
+    expect(provider.requests).toHaveLength(1); // the agent path served it
+    expect(replies).toContain("answer");
+  });
+
+  it("a natural-language ref with shell metacharacters falls through silently (never reaches any backend)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = fakeOps(OK_RESULT);
+    deps.operations = ops;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("run the tests on main;rm in acme/api"), io);
+    expect(ops.calls).toHaveLength(0);
+    expect(provider.requests).toHaveLength(1);
+  });
+
+  it("an explicit `repo test` with a hostile ref is a NAMED refusal before any backend", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = fakeOps(OK_RESULT);
+    deps.operations = ops;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo test acme/api main;rm", "slack:UADMIN"), io);
+    expect(replies[0]).toMatch(/ref/i);
+    expect(ops.calls).toHaveLength(0);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("an op failure (tests fail) is posted as ❌ with the named summary — a result, not an error path", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = fakeOps({ kind: "result", ok: false, summary: "test failed (exit 1) on repo:acme/api @ main (abc12345)", output: "1 failing" });
+    deps.operations = ops;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
+    expect(replies[0]).toContain("❌");
+    expect(replies[0]).toContain("test failed (exit 1)");
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("a mutating command-table entry is refused on the modelless path with the named reason", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = fakeOps({ kind: "refused", reason: 'op-refused: the "test" command-table entry is marked effects: mutating — the modelless op path executes readonly entries only' });
+    deps.operations = ops;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
+    expect(replies[0]).toContain("🚫");
+    expect(replies[0]).toContain("mutating");
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("a non-onboarded repo natural-language ask falls through to the agent path", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = fakeOps({ kind: "not-onboarded" });
+    deps.operations = ops;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
+    expect(ops.calls).toHaveLength(1); // the op was attempted…
+    expect(provider.requests).toHaveLength(1); // …and the agent path served the ask
+    expect(replies).toContain("answer");
+  });
+
+  it("an explicit `repo test` on a non-onboarded repo gets a named reply (config-family commands never silently become a model turn)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = fakeOps({ kind: "not-onboarded" });
+    deps.operations = ops;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
+    expect(replies[0]).toContain("not onboarded");
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("an explicit agent directive skips the natural-language fast-path (the user picked a model path)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const ops = fakeOps(OK_RESULT);
+    deps.operations = ops;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding run the tests on main in acme/api", "slack:UADMIN"), io);
+    expect(ops.calls).toHaveLength(0);
+    expect(provider.requests).toHaveLength(1);
+  });
+});
+
 describe("repo/ref resolution + resident prompt selection (U7)", () => {
   afterEach(async () => {
     vi.unstubAllEnvs();

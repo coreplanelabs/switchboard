@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../config.js";
 import {
   handleRepoCommand,
+  parseRepoCommand,
   type ResidentAdminClient,
   type ResidentAdminResponse,
 } from "./repoCommands.js";
@@ -96,6 +97,55 @@ describe("repo command recognition", () => {
     expect(await handleRepoCommand(s, msg("hello there"), c)).toBeNull();
     expect(await handleRepoCommand(s, msg("repo onboarding is done how?"), c)).toBeNull();
     expect(await handleRepoCommand(s, msg("repository list please"), c)).toBeNull();
+  });
+});
+
+// U6: `repo test` / `repo build` extend the verb whitelist as OPERATOR-level
+// deterministic ops (KTD8) — parsed here so every op has a deterministic
+// invocation, but EXECUTED by the dispatcher fast-path, never by
+// handleRepoCommand, and never gated by canManageRepos.
+describe("deterministic op verbs (U6: repo test / repo build)", () => {
+  it("parseRepoCommand recognizes `repo test <owner/name> <ref>`", () => {
+    expect(parseRepoCommand("repo test acme/api main")).toEqual({ verb: "test", slug: "acme/api", ref: "main" });
+  });
+
+  it("parseRepoCommand recognizes `repo build <owner/name>` without a ref", () => {
+    expect(parseRepoCommand("repo build Acme/API")).toEqual({ verb: "build", slug: "acme/api" });
+  });
+
+  it("a hostile ref (shell metacharacters) is a NAMED parse error, never a command", () => {
+    for (const text of ["repo test acme/api main;rm", "repo test acme/api `whoami`", "repo build acme/api $(id)"]) {
+      const cmd = parseRepoCommand(text);
+      expect(cmd).not.toBeNull();
+      expect(cmd && "error" in cmd ? cmd.error : "").toMatch(/ref/i);
+    }
+  });
+
+  it("extra tokens are refused naming the accepted shape", () => {
+    const cmd = parseRepoCommand("repo test acme/api main extra");
+    expect(cmd && "error" in cmd ? cmd.error : "").toMatch(/<owner\/name> \[<ref>\]/);
+  });
+
+  it("a missing slug is refused like every other repo verb", () => {
+    const cmd = parseRepoCommand("repo test");
+    expect(cmd && "error" in cmd ? cmd.error : "").toContain("owner/name");
+  });
+
+  it("handleRepoCommand passes valid op commands through as null (dispatcher-owned), with NO canManageRepos gate and no client call", async () => {
+    const s = store();
+    const c = mockClient();
+    // non-admin user: an op verb must NOT hit the fail-closed admin gate
+    expect(await handleRepoCommand(s, msg("repo test acme/api main", "slack:URANDOM"), c)).toBeNull();
+    expect(await handleRepoCommand(s, msg("repo build acme/api", "slack:URANDOM"), c)).toBeNull();
+    for (const fn of Object.values(c)) expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("handleRepoCommand still replies the named error for malformed op commands", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo test acme/api main;rm", "slack:URANDOM"), c);
+    expect(reply).toMatch(/ref/i);
+    for (const fn of Object.values(c)) expect(fn).not.toHaveBeenCalled();
   });
 });
 

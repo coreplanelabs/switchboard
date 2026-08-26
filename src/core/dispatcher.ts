@@ -1,13 +1,16 @@
+import { resolve } from "node:path";
 import type { ConfigStore, Scope } from "../config.js";
 import { AGENTS, getAgent } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
 import { makeExecutor } from "../execution/factory.js";
-import { ResidentExecutor, ResidentNeedsRefError } from "../execution/resident.js";
+import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations } from "../execution/resident.js";
+import { LocalOperations } from "../execution/executor.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { resolveRepoContext, type RepoContext } from "./repoContext.js";
 import { handleRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
+import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
 import type { ChannelIO, HistoryItem, ImageAttachment, IncomingMessage } from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
@@ -36,6 +39,13 @@ export interface CoreDeps {
    * execution.resident.baseUrl + the RESIDENT_ADMIN_TOKEN env bearer.
    */
   residentAdmin?: ResidentAdminClient;
+  /**
+   * Deterministic-operations backend behind the modelless fast-path (U6,
+   * KTD8); injectable for tests. Default per dispatch: resident-backed when
+   * execution.resident is configured (operator bearer), local when execution
+   * is local, else none — the recognizer then falls through to the agent.
+   */
+  operations?: Operations;
 }
 
 const STATUS_UPDATE_MIN_MS = 3000;
@@ -66,13 +76,36 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     }
 
     const directives = parseDirectives(msg.text);
+    const history = await io.history();
+
+    // Deterministic ops fast-path (U6, KTD8): explicit `repo test/build`
+    // commands and conservative natural-language forms answer with a REAL op
+    // execution and zero model turns, mirroring the config-command
+    // inline-reply shape. Only the model call is skipped — the implicit
+    // target agent (coding) passes canRunAgent and the repo passes canUseRepo
+    // (KD7) before anything executes. Anything ambiguous or non-matching
+    // falls through to the agent below (KD3: never guess); on the
+    // natural-language path so do not-onboarded repos and backend failures
+    // (the agent can still serve the ask), while explicit commands are
+    // config-family and always get a reply. An explicit agent:/model:
+    // directive disables natural recognition — the user picked a model path.
+    const opAsk = recognizeOperation(msg.text, history, {
+      allowNatural: !directives.agent && !directives.model,
+    });
+    if (opAsk) {
+      const opReply = await runOperationFastPath(deps, msg, opAsk);
+      if (opReply !== null) {
+        await io.reply(opReply);
+        return;
+      }
+    }
+
     // Thread stickiness: a follow-up without explicit directives runs on the
     // agent/model this thread already established (last directive in the
     // thread's history), not the channel/global default — otherwise "continue"
     // in an agent:coding thread silently lands on the toolless default agent.
     // Derived from history on every message, never stored: restart-safe, and
     // consistent with how the Slack adapter re-derives thread participation.
-    const history = await io.history();
     const sticky = lastThreadDirectives(history);
     const resolved = deps.config.resolve({
       channelId: msg.channelId,
@@ -214,6 +247,78 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
   }
 }
 
+// ---- deterministic ops fast-path (U6, KTD8) ---------------------------------
+
+/** Gate + execute one recognized op. Returns the reply text, or null to fall
+ *  through to the agent path. Refusals are replies (a refused user must see
+ *  why), and only the model call is ever skipped — never the permission
+ *  machinery. */
+async function runOperationFastPath(
+  deps: CoreDeps,
+  msg: IncomingMessage,
+  ask: RecognizedOp,
+): Promise<string | null> {
+  // The implicit target agent for a deterministic op is coding (KTD8): the
+  // exact refusal a normal coding-agent request would get, op never executed.
+  if (!deps.config.canRunAgent(msg.userId, "coding")) {
+    return `🚫 You're not on the allowlist for the \`coding\` agent. Ask ${deps.config.adminsHint()} for access.`;
+  }
+  if (!deps.config.canUseRepo(msg.userId, ask.repo)) {
+    return `🚫 You're not on the allowlist for the \`${ask.repo}\` repo environment. Ask ${deps.config.adminsHint()} for access.`;
+  }
+  const ops = deps.operations ?? defaultOperations(deps, msg.threadKey);
+  if (!ops) {
+    return ask.explicit
+      ? "⚠️ Deterministic ops need a backend: configure `execution.resident` (with its operator token) or local execution."
+      : null;
+  }
+  console.log(
+    `[op] ${msg.threadKey} user=${msg.userId} op=${ask.op} repo=${ask.repo} ref=${ask.ref ?? "(default)"} explicit=${ask.explicit}`,
+  );
+  const result = await ops
+    .run(ask.op, { repo: ask.repo, ...(ask.ref ? { ref: ask.ref } : {}) })
+    .catch((err: unknown) => ({ kind: "error" as const, message: err instanceof Error ? err.message : String(err) }));
+  switch (result.kind) {
+    case "result": {
+      const icon = result.ok ? "✅" : "❌";
+      const output = result.output?.trim();
+      return output ? `${icon} ${result.summary}\n\`\`\`\n${clipOpOutput(output)}\n\`\`\`` : `${icon} ${result.summary}`;
+    }
+    case "refused":
+      return `🚫 ${result.reason}`;
+    case "not-onboarded":
+      return ask.explicit
+        ? `⚠️ \`${ask.repo}\` is not onboarded as a resident, so \`repo ${ask.op}\` has nothing to run against — \`repo onboard ${ask.repo}\` first, or ask the coding agent directly.`
+        : null; // natural language: the agent path can still serve the ask
+    case "error":
+      return ask.explicit ? `⚠️ ${result.message}` : null;
+  }
+}
+
+/** Default Operations backend, mirroring executor selection's config reads:
+ *  resident-backed wherever a resident service is configured, local for local
+ *  execution (the thread's local workspace dir — dev/CLI), else none. */
+function defaultOperations(deps: CoreDeps, threadKey: string): Operations | null {
+  const execution = deps.config.config.execution;
+  const resident = execution?.resident;
+  if (resident?.baseUrl) {
+    const tokenEnv = resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN";
+    const token = process.env[tokenEnv];
+    return token ? new ResidentOperations({ baseUrl: resident.baseUrl, token }) : null;
+  }
+  if (!execution?.type || execution.type === "local") {
+    const safe = threadKey.replace(/[^a-zA-Z0-9_.-]/g, "_");
+    return new LocalOperations(resolve(deps.config.config.workspaceDir ?? "./workspaces", safe));
+  }
+  return null; // per-thread remote backends have no deterministic-op surface
+}
+
+/** Failures usually speak from the END of the output — keep the tail. */
+function clipOpOutput(output: string): string {
+  const MAX = 3000;
+  return output.length > MAX ? `…${output.slice(-MAX)}` : output;
+}
+
 /** Prefixes the core stamps on status text — adapters use this to filter their
  *  own status noise out of history. */
 export const STATUS_PREFIXES = ["⏳", "✅", "◐", "◓", "◑", "◒"];
@@ -334,10 +439,11 @@ function helpText(): string {
     "`config set channel models.coding=anthropic/claude-opus-5` — per-agent model for this channel",
     "`config clear channel` / `config clear me`",
     "",
-    "*Repo commands* (resident environments; all but `list` admin-gated):",
+    "*Repo commands* (resident environments; management verbs admin-gated):",
     "`repo list` — onboarded repos + lifecycle state",
     '`repo onboard <owner/name> [ref=<branch>] [test="<cmd>"] [build="<cmd>"] [install="<cmd>"]`',
     '`repo reconfigure <owner/name> [ref=…] [test="…"] [build="…"] [install="…"]`',
     "`repo offboard <owner/name> [--dry-run]` / `repo rebuild <owner/name> [--dry-run]`",
+    "`repo test <owner/name> [<ref>]` / `repo build <owner/name> [<ref>]` — run the repo's onboarded command with no model turn (also: \"run the tests on <ref> in <owner/name>\")",
   ].join("\n");
 }

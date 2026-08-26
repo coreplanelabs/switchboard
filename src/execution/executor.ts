@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import type { OperationResult, Operations, OpName } from "../core/operations.js";
 
 // The Executor is the seam between agents and where their commands actually
 // run. Tools never touch the filesystem or spawn processes directly — they
@@ -66,4 +67,62 @@ export class LocalExecutor implements Executor {
     writeFileSync(abs, content);
     return `Wrote ${path}`;
   }
+}
+
+/** Dev-only deterministic ops against the thread's LOCAL workspace directory
+ *  (U6, KTD8) — the second Operations implementation (≥2-implementations
+ *  invariant) and the CLI-testable one. Honest about its limits: there is no
+ *  onboard-time command table and no refs locally, so ops run fixed Node
+ *  conventions (test → `npm test`, build → `npm run build --if-present`,
+ *  status → workspace existence) against the workspace AS IT STANDS, and a
+ *  requested ref is reported as ignored rather than silently dropped. A
+ *  failing command is a RESULT (ok:false), never an error path. */
+export class LocalOperations implements Operations {
+  constructor(private workspaceDir: string) {}
+
+  async run(op: OpName, req: { repo: string; ref?: string }): Promise<OperationResult> {
+    const refNote = req.ref ? ` — ref \`${req.ref}\` ignored (local mode has no refs)` : "";
+    const exists = existsSync(this.workspaceDir);
+    if (op === "status") {
+      return {
+        kind: "result",
+        ok: exists,
+        summary: exists
+          ? `status: local workspace for ${req.repo} exists at ${this.workspaceDir} (dev-only — no resident lifecycle locally)`
+          : `status: no local workspace at ${this.workspaceDir} yet (dev-only — no resident lifecycle locally)`,
+      };
+    }
+    if (!exists) {
+      return {
+        kind: "result",
+        ok: false,
+        summary: `${op} failed: no local workspace at ${this.workspaceDir} — nothing checked out yet${refNote}`,
+      };
+    }
+    const command = op === "test" ? "npm test" : "npm run build --if-present";
+    const r = await runLocalCommand(command, this.workspaceDir);
+    return {
+      kind: "result",
+      ok: r.exitCode === 0,
+      summary:
+        `${op} (\`${command}\`) ${r.exitCode === 0 ? "passed" : `failed (exit ${r.exitCode})`} ` +
+        `in the local workspace for ${req.repo}${refNote}`,
+      ...(r.output ? { output: truncate(r.output) } : {}),
+    };
+  }
+}
+
+function runLocalCommand(command: string, cwd: string): Promise<{ exitCode: number; output: string }> {
+  return new Promise((res) => {
+    execFile(
+      "bash",
+      ["-c", command],
+      { cwd, timeout: BASH_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        const output = [stdout, stderr].filter(Boolean).join("\n--- stderr ---\n");
+        const code = err ? ((err as NodeJS.ErrnoException & { code?: number }).code ?? 1) : 0;
+        res({ exitCode: typeof code === "number" ? code : 1, output });
+      },
+    );
+  });
 }

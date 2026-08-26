@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
+import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations } from "./resident.js";
 
 // Feature: features/resident-repos.md — bot-side resident client (U5): every
 // route POSTs {resource, threadKey, ...}; /exec streams heartbeat whitespace
@@ -161,6 +161,82 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
   it("404 (not onboarded) on open is a named error", async () => {
     stubFetch({ status: 404, body: { error: "not onboarded" } });
     await expect(ResidentExecutor.open(OPTS)).rejects.toThrow(/not onboarded/);
+  });
+});
+
+// Feature: features/resident-repos.md — U6 ResidentOperations (KTD8): the
+// deterministic-ops client for POST /op. Responses stream like /exec
+// (heartbeat whitespace + one JSON document, parsed from the BODY); a failing
+// op is a RESULT (ok:false), a mutating-entry refusal and not-onboarded are
+// distinct named kinds, and transport failures never masquerade as results.
+describe("ResidentOperations.run", () => {
+  const OPS = { baseUrl: "https://resident.example", token: "op-token" };
+
+  it("POSTs {resource, op, ref} with the operator bearer and parses the streamed result", async () => {
+    const { calls } = stubFetch({
+      raw:
+        "\n \n" +
+        JSON.stringify({
+          ok: true,
+          op: "test",
+          ref: "master",
+          sha: "1220b9c4a123",
+          summary: "test passed on repo:jshttp/vary @ master (1220b9c4) in 8s",
+          stdout: "1 passing\n",
+          stderr: "",
+          exitCode: 0,
+        }),
+    });
+    const ops = new ResidentOperations(OPS);
+    const res = await ops.run("test", { repo: "jshttp/vary", ref: "master" });
+    expect(res).toMatchObject({ kind: "result", ok: true });
+    if (res.kind === "result") {
+      expect(res.summary).toContain("test passed");
+      expect(res.output).toContain("1 passing");
+    }
+    expect(route(calls[0])).toBe("/op");
+    expect(sentBody(calls[0])).toEqual({ resource: "repo:jshttp/vary", op: "test", ref: "master" });
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers.authorization).toBe("Bearer op-token");
+  });
+
+  it("a failing op is a RESULT (ok:false with the named summary), not an error", async () => {
+    stubFetch({
+      body: { ok: false, op: "test", summary: "test failed (exit 1) on repo:jshttp/vary @ master (1220b9c4)", stdout: "", stderr: "1 failing", exitCode: 1 },
+    });
+    const res = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
+    expect(res).toMatchObject({ kind: "result", ok: false });
+    if (res.kind === "result") expect(res.summary).toMatch(/failed \(exit 1\)/);
+  });
+
+  it("404 → not-onboarded (the natural-language path falls through to the agent)", async () => {
+    stubFetch({ status: 404, body: { error: "repo:acme/api is not onboarded" } });
+    const res = await new ResidentOperations(OPS).run("test", { repo: "acme/api" });
+    expect(res).toEqual({ kind: "not-onboarded" });
+  });
+
+  it("an op-refused error (mutating command-table entry) is a named refusal", async () => {
+    stubFetch({
+      status: 409,
+      body: { error: 'op-refused: the "test" command-table entry is marked effects: mutating — the modelless op path executes readonly entries only' },
+    });
+    const res = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
+    expect(res).toMatchObject({ kind: "refused" });
+    if (res.kind === "refused") expect(res.reason).toMatch(/mutating/);
+  });
+
+  it("an in-body error (e.g. unknown-ref over the 200 stream) is kind error, never a fake result", async () => {
+    stubFetch({ raw: " \n" + JSON.stringify({ error: 'unknown-ref: ref "nope" does not resolve in the mirror (even after a fetch)' }) });
+    const res = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary", ref: "nope" });
+    expect(res).toMatchObject({ kind: "error" });
+    if (res.kind === "error") expect(res.message).toContain("unknown-ref");
+  });
+
+  it("a transport failure is kind error with the request named", async () => {
+    stubFetch({ reject: "fetch failed" });
+    const res = await new ResidentOperations(OPS).run("build", { repo: "jshttp/vary" });
+    expect(res).toMatchObject({ kind: "error" });
+    if (res.kind === "error") expect(res.message).toMatch(/\/op request failed/);
   });
 });
 

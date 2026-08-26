@@ -36,9 +36,16 @@
 // execution), POST /read and /write (thread-user file ops confined to the
 // worktree), the in-DO mirror mutex serializing every mirror mutation, and
 // the inactivity sweep that evicts idle worktrees while keeping the binding
-// record. /op is a 501 stub (U6). All four thread routes take a `resource`
-// field alongside `threadKey` — the service hosts many residents, and the
-// resource picks the DO exactly as GET /status does.
+// record. All four thread routes take a `resource` field alongside
+// `threadKey` — the service hosts many residents, and the resource picks the
+// DO exactly as GET /status does.
+// U6 (this unit) turns the /op stub into the deterministic modelless path
+// (KTD8): a name from a fixed enum {test, build, status} resolves through
+// the onboard-time command table only, gated by per-entry `effects`
+// profiles (readonly runs, mutating refused by name), executed in a
+// DISPOSABLE per-op checkout under /workspace/ops — never a thread's
+// attached worktree — and deleted afterwards; `status` touches no checkout
+// at all. /reconfigure accepts the new `effects` map.
 //
 // SECURITY (deliberate deviations from the thread-sandbox Worker):
 //   1. Bearer comparison is constant-time (timingSafeEqual below), never a
@@ -134,6 +141,13 @@ const BUILD_USER = "worker1";
  *  traverse), one worktree per bound ref beneath it. Disk is cache: a slept
  *  container loses these, and the next attach recreates them. */
 const THREADS_DIR = "/workspace/threads";
+
+/** Disposable per-op checkouts (U6, KTD8) hang here: one 700 uuid dir per
+ *  in-flight op, owned by a transiently-held pool user, DELETED when the op
+ *  completes (success or failure). Ops never touch a thread's attached
+ *  worktree. An orphan from a mid-op DO restart dies with the container disk
+ *  at the latest (disk is cache). */
+const OPS_DIR = "/workspace/ops";
 
 /** The thread-user pool (KTD5). worker1 is the engine's build user; each
  *  attach allocates one of these to the thread (persisted in the binding)
@@ -371,6 +385,13 @@ interface ResidentRecord {
    *  Commands execute inside the resident as BUILD_USER — never on the
    *  Worker, never as root, never with a GitHub token in env (KTD5/KTD7). */
   commands: Record<string, string>;
+  /** Execution profile per command-table entry (U6, KTD8): the modelless /op
+   *  path executes "readonly" entries and refuses "mutating" ones BY NAME.
+   *  An absent entry means readonly — test/build/status are readonly by
+   *  construction; the refusal is the guard rail for future mutating entries.
+   *  Admin-writable only, like `commands` (set via /reconfigure; replaced
+   *  whole, never merged). */
+  effects?: Record<string, "readonly" | "mutating">;
   defaultRef: string;
   diskBudgetMb?: number;
   provisioningTimeoutMs: number;
@@ -425,6 +446,25 @@ interface AttachOk {
   credentialsError?: string;
   mutexWaitMs: number;
   attachMs: number;
+}
+
+/** Result of one /op test/build execution (U6, KTD8). `ok` is the command's
+ *  verdict — a failing test run is a RESULT with ok:false, never an error. */
+interface OpRunOk {
+  ok: boolean;
+  op: string;
+  resource: string;
+  ref: string;
+  sha: string;
+  summary: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  truncated: boolean;
+  /** dep materialization evidence (KTD7) — shared with the attach mechanism */
+  deps: ThreadDepsMechanism;
+  reconciled: boolean;
+  durationMs: number;
 }
 
 /** DO-recorded repo facts — the truth the disk is rehydrated against (KTD3). */
@@ -495,13 +535,14 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  `commands`, when present, REPLACES the whole command table. */
   async updateConfig(
     resource: string,
-    patch: Partial<Pick<ResidentRecord, "commands" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs" | "worktreeTtlDays">>,
+    patch: Partial<Pick<ResidentRecord, "commands" | "effects" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs" | "worktreeTtlDays">>,
   ): Promise<ResidentRecord | null> {
     const key = registryKey(resource);
     const record = await this.ctx.storage.get<ResidentRecord>(key);
     if (!record) return null;
     const updated: ResidentRecord = { ...record, updatedAt: new Date().toISOString() };
     if (patch.commands !== undefined) updated.commands = patch.commands;
+    if (patch.effects !== undefined) updated.effects = patch.effects;
     if (patch.defaultRef !== undefined) updated.defaultRef = patch.defaultRef;
     if (patch.diskBudgetMb !== undefined) updated.diskBudgetMb = patch.diskBudgetMb;
     if (patch.provisioningTimeoutMs !== undefined) updated.provisioningTimeoutMs = patch.provisioningTimeoutMs;
@@ -1223,6 +1264,9 @@ export class ResidentDO extends Sandbox<Env> {
     const used = new Set(
       [...all.values()].filter((b) => !b.evicted && b.user && b.threadKey !== threadKey).map((b) => b.user),
     );
+    // U6: users transiently held by in-flight ops are off-limits too — an
+    // attach must never share an OS user with a running op.
+    for (const u of this.opUsersInUse) used.add(u);
     const user = THREAD_USERS.find((u) => !used.has(u));
     if (!user) {
       return {
@@ -1432,7 +1476,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  to a plain copy (fresh inodes, fully chowned). A differing key runs the
    *  repo's install command in the worktree, token-free, as the thread user. */
   private async materializeThreadDeps(
-    binding: ThreadBinding,
+    binding: { user: string; worktreePath: string }, // a ThreadBinding, or U6's per-op checkout
     threadLockKey: string,
     warmLockKey: string,
     installCmd: string,
@@ -1639,6 +1683,141 @@ export class ResidentDO extends Sandbox<Env> {
       if (live) await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
     }
     return { evicted, kept };
+  }
+
+  // -- deterministic ops (U6, KTD8: /op — disposable per-op checkouts) ---------
+
+  /** Pool users transiently held by in-flight ops. DO memory only: an op is
+   *  bounded by one request, and a DO restart kills the in-flight op anyway
+   *  (its orphaned OPS_DIR entry dies with the container disk at the latest).
+   *  Both this allocator and allocateThreadUser exclude the set, so an op
+   *  never shares an OS user with a thread or another op. */
+  private opUsersInUse = new Set<string>();
+
+  /** Transient allocation: storage reads + a synchronous set-add in the same
+   *  microtask (atomic under the DO input gate, like allocateThreadUser).
+   *  Returns null when threads + ops have the whole pool busy. */
+  private async allocateOpUser(): Promise<string | null> {
+    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    const used = new Set([...all.values()].filter((b) => !b.evicted && b.user).map((b) => b.user));
+    for (const u of this.opUsersInUse) used.add(u);
+    const user = THREAD_USERS.find((u) => !used.has(u));
+    if (user) this.opUsersInUse.add(user);
+    return user ?? null;
+  }
+
+  /** POST /op work half (U6, KTD8): run ONE readonly command-table entry in a
+   *  disposable checkout under OPS_DIR — never a thread's attached worktree —
+   *  privilege-dropped as a transiently-held pool user, then delete the
+   *  checkout whatever happened. The command STRING comes exclusively from
+   *  the admin-written table; the ref was pattern-validated by the Worker and
+   *  must additionally resolve in the mirror (fetching once if unknown);
+   *  request text is never interpolated into a shell command. Deps
+   *  materialize through the exact thread mechanism (KTD7): the shared
+   *  lockfile-keyed cache, scoped token-free install only when the committed
+   *  key differs. No snapshot is ever written here (KTD3). */
+  async runOp(op: "test" | "build", refArg: string | null): Promise<OpRunOk | ThreadErr> {
+    const t0 = Date.now();
+    try {
+      await this.ensureHydrated();
+    } catch (err) {
+      const s = await this.getStatus();
+      return { error: `not-serviceable: ${errMsg(err)}`, status: 503, state: s.state, reason: s.reason };
+    }
+    const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+    const record = await this.registry().getRecord(resource);
+    const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
+    if (!record || !facts) return { error: "not-serviceable: registry record or repo facts missing", status: 503 };
+    const command = record.commands[op];
+    if (!command) return { error: `op-unavailable: the command table has no "${op}" entry`, status: 400 };
+
+    const user = await this.allocateOpUser();
+    if (!user) {
+      return {
+        error: `user-pool-exhausted: all ${THREAD_USERS.length} pool users are busy (threads or in-flight ops); try again shortly`,
+        status: 429,
+      };
+    }
+    const opDir = `${OPS_DIR}/${crypto.randomUUID()}`;
+    const checkout = `${opDir}/checkout`;
+    try {
+      // Command-level token mint, attach's discipline (KTD12): only a mirror
+      // fetch for an unknown ref would use it; failure never blocks the op.
+      let token: string | null = null;
+      if (githubAppConfigured(this.env)) {
+        token = await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null);
+      }
+      const locked = await this.withMirrorLock(async () => {
+        await this.ensureGitSetup();
+        const ref = refArg ?? facts.defaultRef;
+        if (!(await this.refExists(ref))) {
+          await this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "fetch", GIT_NETWORK_TIMEOUT_MS);
+          if (!(await this.refExists(ref))) {
+            throw new StepError("unknown-ref", `ref ${JSON.stringify(ref)} does not resolve in the mirror (even after a fetch)`);
+          }
+        }
+        const sha = await this.readMirrorSha(ref);
+        const lockKey = await this.lockfileKey(sha);
+        await this.runOk(["install", "-d", "-m", "755", "-o", "root", "-g", "root", OPS_DIR], "ops-dir");
+        // 700 op dir first, clone beneath it: the tree is unreadable to peer
+        // users for its whole life, exactly like a thread dir (KTD5).
+        await this.runOk(["install", "-d", "-m", "700", "-o", user, "-g", user, opDir], "op-dir");
+        await this.runOk(["git", "clone", "--no-hardlinks", "--branch", ref, MIRROR_DIR, checkout], "op-clone", {
+          timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+        });
+        await this.runOk(["chown", "-R", `${user}:${user}`, checkout], "op-chown");
+        return { ref, sha, lockKey };
+      }, ATTACH_MUTEX_WAIT_MS);
+
+      const deps = await this.materializeThreadDeps(
+        { user, worktreePath: checkout },
+        locked.value.lockKey,
+        facts.lockfileHash,
+        record.commands.install ?? "npm install --no-audit --no-fund",
+      );
+
+      const r = await this.threadRun(user, checkout, command, MAX_THREAD_EXEC_TIMEOUT_MS);
+      const ok = r.exitCode === 0 && !r.timedOut;
+      const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP;
+      const notes: string[] = [];
+      if (r.timedOut) notes.push(`command timed out after ${MAX_THREAD_EXEC_TIMEOUT_MS}ms`);
+      if (truncated) notes.push(`output truncated to ${EXEC_OUTPUT_CAP} chars per stream`);
+      const durationMs = Date.now() - t0;
+      const sha8 = locked.value.sha.slice(0, 8);
+      const exitCode = r.timedOut ? 124 : r.exitCode;
+      return {
+        ok,
+        op,
+        resource,
+        ref: locked.value.ref,
+        sha: locked.value.sha,
+        summary: ok
+          ? `${op} passed on ${resource} @ ${locked.value.ref} (${sha8}) in ${Math.round(durationMs / 1000)}s`
+          : `${op} failed (exit ${exitCode}${r.timedOut ? ", timed out" : ""}) on ${resource} @ ${locked.value.ref} (${sha8})`,
+        stdout: r.stdout.slice(0, EXEC_OUTPUT_CAP),
+        stderr: [r.stderr.slice(0, EXEC_OUTPUT_CAP), ...notes].filter(Boolean).join("\n"),
+        exitCode,
+        truncated,
+        deps: deps.deps,
+        reconciled: deps.reconciled,
+        durationMs,
+      };
+    } catch (err) {
+      if (err instanceof MirrorBusyError) {
+        const s = await this.getStatus();
+        return { error: errMsg(err), status: 503, state: s.state, reason: "mirror-busy" };
+      }
+      if (err instanceof StepError && err.step === "unknown-ref") {
+        return { error: `unknown-ref: ${err.message}`, status: 400 };
+      }
+      const step = err instanceof StepError ? ` at ${err.step}` : "";
+      return { error: `op-failed${step}: ${errMsg(err)}`, status: 500 };
+    } finally {
+      // Disposable means disposable: the checkout dies with the op, pass or
+      // fail (best effort — a slept container already destroyed it anyway).
+      await this.run(["rm", "-rf", opDir]).catch(() => {});
+      this.opUsersInUse.delete(user);
+    }
   }
 
   /** Debug: enumerate thread bindings (admin scope; no secrets in bindings). */
@@ -2018,6 +2197,24 @@ function parseCommands(value: unknown): { commands: Record<string, string> } | {
   return { commands };
 }
 
+/** Execution-profile values (U6, KTD8). */
+const EFFECTS_VALUES = new Set(["readonly", "mutating"]);
+
+function parseEffects(value: unknown): { effects: Record<string, "readonly" | "mutating"> } | { error: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { error: 'effects must be an object like { "test": "readonly" } (values: readonly | mutating)' };
+  }
+  const effects: Record<string, "readonly" | "mutating"> = {};
+  for (const [name, effect] of Object.entries(value)) {
+    if (!COMMAND_NAME_RE.test(name)) return { error: `invalid command name ${JSON.stringify(name)} in effects` };
+    if (typeof effect !== "string" || !EFFECTS_VALUES.has(effect)) {
+      return { error: `effects[${JSON.stringify(name)}] must be "readonly" or "mutating"` };
+    }
+    effects[name] = effect as "readonly" | "mutating";
+  }
+  return { effects };
+}
+
 const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
 /** Strict branch-ref pattern (P1 input validation): leading alnum rules out
@@ -2123,7 +2320,7 @@ export default {
     // Unauthenticated wake ping for `npm run deploy` — touches no DO, no data.
     // `u` tracks the last shipped unit so a deploy's propagation is provable
     // from the outside without auth.
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, u: "u8" });
+    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, u: "u6" });
 
     // Auth precedes existence: unknown paths demand admin before revealing
     // 404 vs 401, so an unauthenticated scanner learns nothing.
@@ -2162,7 +2359,7 @@ export default {
         case "/write":
           return await handleWrite(env, body);
         case "/op":
-          return json({ error: "not implemented", lands_in: "U6" }, 501);
+          return await handleOp(env, body);
         default:
           return json({ error: "unknown route" }, 404);
       }
@@ -2346,11 +2543,19 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
 
-  const patch: Partial<Pick<ResidentRecord, "commands" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs" | "worktreeTtlDays">> = {};
+  const patch: Partial<Pick<ResidentRecord, "commands" | "effects" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs" | "worktreeTtlDays">> = {};
   if (body.commands !== undefined) {
     const commands = parseCommands(body.commands);
     if ("error" in commands) return json({ error: commands.error }, 400);
     patch.commands = commands.commands;
+  }
+  if (body.effects !== undefined) {
+    // U6/KTD8 execution profiles. Like `commands`, the map REPLACES the whole
+    // stored one (admin-writable only; {} clears every override back to the
+    // readonly default).
+    const effects = parseEffects(body.effects);
+    if ("error" in effects) return json({ error: effects.error }, 400);
+    patch.effects = effects.effects;
   }
   if (body.defaultRef !== undefined) {
     const defaultRef = parseDefaultRef(body.defaultRef);
@@ -2379,7 +2584,7 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
   }
   if (Object.keys(patch).length === 0) {
     return json(
-      { error: "nothing to reconfigure (accepted: commands, defaultRef, diskBudgetMb, provisioningTimeoutMs, worktreeTtlDays)" },
+      { error: "nothing to reconfigure (accepted: commands, effects, defaultRef, diskBudgetMb, provisioningTimeoutMs, worktreeTtlDays)" },
       400,
     );
   }
@@ -2567,6 +2772,113 @@ async function handleWrite(env: Env, body: Record<string, unknown>): Promise<Res
   const result = await ctx.stub.writeThreadFile(ctx.threadKey, body.path, body.content);
   if ("error" in result) return threadErrResponse(result);
   return json(result);
+}
+
+// -- U6 deterministic ops handler (KTD8) ---------------------------------------
+
+const OP_NAMES = ["test", "build", "status"] as const;
+
+/** POST /op {resource, op, ref?} (operator scope): the deterministic
+ *  modelless path. `op` resolves ONLY through this fixed enum into the
+ *  onboard-time command table (never request text into a shell); `ref` passes
+ *  the same strict pattern as every ref input and must resolve in the mirror.
+ *  Every entry's `effects` profile gates execution — readonly runs, mutating
+ *  is refused BY NAME (test/build/status are readonly by construction; the
+ *  refusal is the guard rail for future entries). test/build run in a
+ *  disposable per-op checkout (see ResidentDO.runOp) and stream like /exec;
+ *  status touches no checkout at all — DO storage reads only. */
+async function handleOp(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const resource = parseResource(body.resource);
+  if ("error" in resource) return json({ error: resource.error }, 400);
+  const op = body.op;
+  if (typeof op !== "string" || !(OP_NAMES as readonly string[]).includes(op)) {
+    return json({ error: `op must be one of ${OP_NAMES.join(", ")}` }, 400);
+  }
+  let ref: string | null = null;
+  if (body.ref !== undefined) {
+    const parsed = parseRef(body.ref, "ref");
+    if ("error" in parsed) return json({ error: parsed.error }, 400);
+    ref = parsed.ref;
+  }
+  const record = await registryStub(env).getRecord(resource.resource);
+  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+
+  const effects = record.effects?.[op] ?? "readonly";
+  if (effects !== "readonly") {
+    return json(
+      {
+        error: `op-refused: the "${op}" command-table entry is marked effects: ${effects} — the modelless op path executes readonly entries only`,
+      },
+      409,
+    );
+  }
+
+  const stub = residentStub(env, resource.resource);
+  if (op === "status") {
+    const info = await stub.getResidentInfo();
+    const state = String(info.state ?? "down");
+    const sha = typeof info.sha === "string" ? info.sha : "";
+    const summary =
+      `${resource.resource} is ${state}` +
+      (info.reason ? ` (${String(info.reason)})` : "") +
+      (info.defaultRef ? ` on ${String(info.defaultRef)}` : "") +
+      (sha ? ` @ ${sha.slice(0, 8)}` : "") +
+      (info.lastRefreshAt ? `, last refresh ${String(info.lastRefreshAt)}` : "");
+    return json({
+      // ok = serviceable: down is the one state nothing can serve from
+      // (degraded still serves the last snapshot).
+      ok: state !== "down",
+      op,
+      resource: resource.resource,
+      state,
+      reason: info.reason ?? "",
+      ref: info.defaultRef ?? null,
+      sha: info.sha ?? null,
+      lastRefreshAt: info.lastRefreshAt ?? null,
+      lastRestore: info.lastRestore ?? null,
+      summary,
+    });
+  }
+  return streamOp(stub.runOp(op as "test" | "build", ref));
+}
+
+/** Stream one op result with /exec's heartbeat convention: headers out
+ *  immediately, a whitespace byte every 15s (installs/tests can run minutes),
+ *  then exactly ONE JSON document. Every post-validation outcome — results
+ *  AND named errors — arrives in-body over HTTP 200. */
+function streamOp(pending: Promise<Awaited<ReturnType<ResidentDO["runOp"]>>>): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const beat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode("\n"));
+        } catch {
+          clearInterval(beat); // client went away; the op promise still settles
+        }
+      }, 15_000);
+      const finish = (payload: object) => {
+        clearInterval(beat);
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(payload)));
+          controller.close();
+        } catch {
+          // stream already errored/cancelled — nothing left to deliver to
+        }
+      };
+      pending
+        .then((result) => {
+          if ("error" in result) {
+            const { status: _status, ...rest } = result;
+            finish(rest);
+          } else {
+            finish(result);
+          }
+        })
+        .catch((err: unknown) => finish({ error: errMsg(err) }));
+    },
+  });
+  return new Response(stream, { headers: { "content-type": "application/json" } });
 }
 
 /** Admin diagnostic surface, used by U3's live validation (kill-refresh /
