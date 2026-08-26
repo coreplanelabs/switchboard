@@ -7,6 +7,7 @@ import { ResidentExecutor, ResidentNeedsRefError } from "../execution/resident.j
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { resolveRepoContext, type RepoContext } from "./repoContext.js";
+import { handleRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import type { ChannelIO, HistoryItem, ImageAttachment, IncomingMessage } from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
@@ -29,6 +30,12 @@ export interface CoreDeps {
     msg: IncomingMessage,
     history: HistoryItem[],
   ) => Promise<RepoContext> | RepoContext;
+  /**
+   * Admin client for the resident Worker's repo-management routes (U8);
+   * injectable for tests. Default: a fetch client built per command from
+   * execution.resident.baseUrl + the RESIDENT_ADMIN_TOKEN env bearer.
+   */
+  residentAdmin?: ResidentAdminClient;
 }
 
 const STATUS_UPDATE_MIN_MS = 3000;
@@ -46,6 +53,15 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const configReply = handleConfigCommand(deps.config, msg);
     if (configReply) {
       await io.reply(configReply);
+      return;
+    }
+
+    // Repo-management commands (U8) are config-family too: answered inline,
+    // never a model turn. Gated inside — canManageRepos is KTD9 fail-closed
+    // for everything but `repo list`.
+    const repoReply = await handleRepoCommand(deps.config, msg, deps.residentAdmin);
+    if (repoReply) {
+      await io.reply(repoReply);
       return;
     }
 
@@ -317,5 +333,11 @@ function helpText(): string {
     "`config set me model=openai/gpt-5` — your personal model",
     "`config set channel models.coding=anthropic/claude-opus-5` — per-agent model for this channel",
     "`config clear channel` / `config clear me`",
+    "",
+    "*Repo commands* (resident environments; all but `list` admin-gated):",
+    "`repo list` — onboarded repos + lifecycle state",
+    '`repo onboard <owner/name> [ref=<branch>] [test="<cmd>"] [build="<cmd>"] [install="<cmd>"]`',
+    '`repo reconfigure <owner/name> [ref=…] [test="…"] [build="…"] [install="…"]`',
+    "`repo offboard <owner/name> [--dry-run]` / `repo rebuild <owner/name> [--dry-run]`",
   ].join("\n");
 }

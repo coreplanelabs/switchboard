@@ -53,6 +53,12 @@ defaults:
 #     acme/api: [slack:U0456DEV]    # map or key absent = open to every allowed
 #                                   # coding-agent user; a listed repo refuses
 #                                   # non-listed users by name (never silently)
+#   repoManagement: []              # who may run `repo onboard/offboard/
+#                                   # reconfigure/rebuild` (`repo list` is open).
+#                                   # FAIL-CLOSED, unlike every gate above: key
+#                                   # absent OR empty = ADMINS ONLY — these
+#                                   # commands provision billable always-on
+#                                   # compute and bind GitHub credentials
 
 # Where agent tools execute. "local" runs them on the bot host (dev/CLI);
 # "e2b" runs each thread's tools in its own E2B micro-VM — the repo checkout
@@ -72,9 +78,14 @@ execution:
   # request whose target repo is onboarded and warm runs against the resident
   # Worker; any other resident state falls back to the backend above with a
   # named reason on the status card. Works alongside any per-thread type.
+  # Repos are onboarded from chat: `repo onboard <owner/name>` (see README
+  # Setup; gated by permissions.repoManagement — fail-closed, admins only when
+  # unset). `repo list` shows lifecycle; `repo offboard`/`repo rebuild` accept
+  # --dry-run for an itemized plan without executing.
   # resident:
   #   baseUrl: https://switchboard-resident.<account>.workers.dev
   #   tokenEnv: RESIDENT_OPERATOR_TOKEN  # operator bearer secret (default)
+  #   adminTokenEnv: RESIDENT_ADMIN_TOKEN # admin bearer for `repo ...` commands (default)
   #   probeTimeoutMs: 2000               # /status probe budget; timeout = not warm
 
 # Where per-conversation agent workspaces are created (local execution only).

@@ -18,6 +18,7 @@ interface Env {
   E2B_API_KEY?: string;
   SANDBOX_TOKEN?: string; // cloudflare execution: bearer for the sandbox Worker
   RESIDENT_OPERATOR_TOKEN?: string; // resident repos: operator bearer for the resident Worker
+  RESIDENT_ADMIN_TOKEN?: string; // resident repos: admin bearer for `repo onboard/offboard/...` chat commands
   GH_TOKEN?: string; // fallback when no GitHub App is configured
   GITHUB_APP_ID?: string;
   GITHUB_APP_INSTALLATION_ID?: string;
@@ -43,6 +44,7 @@ export class SwitchboardServer extends Container<Env> {
       ...(env.RESIDENT_OPERATOR_TOKEN
         ? { RESIDENT_OPERATOR_TOKEN: env.RESIDENT_OPERATOR_TOKEN }
         : {}),
+      ...(env.RESIDENT_ADMIN_TOKEN ? { RESIDENT_ADMIN_TOKEN: env.RESIDENT_ADMIN_TOKEN } : {}),
       ...(env.GH_TOKEN ? { GH_TOKEN: env.GH_TOKEN } : {}),
       ...(env.GITHUB_APP_ID ? { GITHUB_APP_ID: env.GITHUB_APP_ID } : {}),
       ...(env.GITHUB_APP_INSTALLATION_ID

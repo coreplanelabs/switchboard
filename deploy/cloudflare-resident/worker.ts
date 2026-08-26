@@ -12,9 +12,16 @@
 // note '/' rules the id out of hostname-based preview URLs, use tunnels).
 //
 // Route surface (JSON in/out; every route below requires a bearer secret):
-//   admin scope     POST /onboard /offboard /reconfigure /debug   GET /residents
-//   operator scope  POST /attach /exec /read /write /op           GET /status
+//   admin scope     POST /onboard /offboard /reconfigure /rebuild /debug   GET /residents
+//   operator scope  POST /attach /exec /read /write /op                    GET /status
 //   unauthenticated GET /healthz (deploy wake ping; touches no DO)
+//
+// U8 added: POST /rebuild (down→onboarding: discard snapshots, reprovision;
+// dryRun supported), dryRun on /offboard (itemized plan, nothing executed),
+// the onboard-time GitHub App installation-membership check (enforced when
+// the App is configured, skipped with an honest `warning` when not), and the
+// watchdog's auto-rebuild after N consecutive down passes on a rehydration-
+// flavored reason.
 //
 // U2 implemented auth, registry storage, onboard/offboard/reconfigure/status/
 // residents, and the provisioning deadline. U3 added the lifecycle engine:
@@ -145,6 +152,17 @@ const SWEEP_INTERVAL_S = 24 * 60 * 60;
 /** Attach waits on the mirror mutex under this named timeout; expiry answers
  *  503 {state, reason: "mirror-busy"} instead of queueing forever. */
 const ATTACH_MUTEX_WAIT_MS = 60_000;
+
+/** Watchdog auto-rebuild (U8): a resident down with a REHYDRATION-flavored
+ *  reason (bad/unreadable snapshots — states only a rebuild can escape, since
+ *  down chains never retry hydration) accumulates one strike per watchdog
+ *  pass; at N strikes the watchdog triggers the same down→onboarding rebuild
+ *  an admin would, discarding the unusable snapshots and reprovisioning from
+ *  GitHub. Provision-failure downs never auto-rebuild — they would loop
+ *  against the same broken build. With the 10-minute cron, N=3 ≈ 30 minutes
+ *  down before the automatic escape hatch fires. */
+const AUTO_REBUILD_AFTER_STRIKES = 3;
+const REHYDRATION_FAILURE_RE = /^(r2-restore-failed|snapshot-stamp-mismatch|no-snapshot)/;
 
 /** /exec budget (5-minute default per the U4 contract; also the ceiling —
  *  longer work belongs in background jobs, and the streamed heartbeat only
@@ -513,6 +531,7 @@ const UPDATED_KEY = "resident:updatedAt";
 const FACTS_KEY = "resident:facts";
 const SNAPSHOT_KEY = "resident:snapshot";
 const DEADLINE_AT_KEY = "resident:provisionDeadlineAt";
+const REBUILD_STRIKES_KEY = "resident:rebuildStrikes"; // watchdog auto-rebuild counter (U8)
 
 /** Thread bindings live under their own prefix, keyed by threadKey (KTD6). */
 const THREAD_KEY_PREFIX = "thread:";
@@ -780,6 +799,14 @@ export class ResidentDO extends Sandbox<Env> {
     let deleted = 0;
     for (const id of ids) deleted += await deleteR2Prefix(this.env.BACKUP_BUCKET, `backups/${id}/`);
     return deleted;
+  }
+
+  /** Count (never delete) the R2 objects behind SDK backup handles — the
+   *  read-only twin of deleteBackupObjects, for the dry-run itemizations. */
+  private async countBackupObjects(ids: string[]): Promise<number> {
+    let count = 0;
+    for (const id of ids) count += await countR2Prefix(this.env.BACKUP_BUCKET, `backups/${id}/`);
+    return count;
   }
 
   private async armRefresh(resource: string): Promise<void> {
@@ -1098,8 +1125,11 @@ export class ResidentDO extends Sandbox<Env> {
   /** One watchdog pass over this resident (invoked by the Worker cron):
    *  re-arm a dead refresh chain and mark degraded(alarm-missed); time out an
    *  onboarding stuck past its budget → down(provision-timeout) + cap slot
-   *  release. Storage/schedule reads only — never starts the container. */
-  async watchdogCheck(): Promise<{ resource: string; state: ResidentState; reason: string; action: "none" | "rearmed" | "provision-timed-out" }> {
+   *  release; auto-rebuild a resident stuck down on unusable snapshots (U8:
+   *  one strike per pass, rebuild at AUTO_REBUILD_AFTER_STRIKES). Storage/
+   *  schedule reads (plus the strike counter) only — containers start via the
+   *  re-armed alarms, never in this pass. */
+  async watchdogCheck(): Promise<{ resource: string; state: ResidentState; reason: string; action: "none" | "rearmed" | "provision-timed-out" | "auto-rebuilt" }> {
     const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
     const status = await this.getStatus();
     if (status.state === "onboarding") {
@@ -1111,7 +1141,29 @@ export class ResidentDO extends Sandbox<Env> {
       }
       return { resource, ...status, action: "none" };
     }
-    if (status.state === "down") return { resource, ...status, action: "none" };
+    if (status.state === "down") {
+      // Auto-rebuild escape hatch (U8): only rehydration-flavored downs — the
+      // snapshots themselves are the problem, and down chains never retry, so
+      // without this the resident would stay down forever.
+      if (REHYDRATION_FAILURE_RE.test(status.reason)) {
+        const strikes = ((await this.ctx.storage.get<number>(REBUILD_STRIKES_KEY)) ?? 0) + 1;
+        if (strikes >= AUTO_REBUILD_AFTER_STRIKES) {
+          const record = await this.registry()
+            .getRecord(resource)
+            .catch(() => null);
+          if (record) {
+            const reason = `auto-rebuild: down for ${strikes} watchdog passes (${status.reason})`;
+            await this.rebuild(resource, record.defaultRef, record.provisioningTimeoutMs, false);
+            return { resource, state: "onboarding", reason, action: "auto-rebuilt" };
+          }
+        }
+        await this.ctx.storage.put(REBUILD_STRIKES_KEY, strikes);
+      }
+      return { resource, ...status, action: "none" };
+    }
+    // Any serving state clears accumulated strikes (a recovery must reset the
+    // counter, or an unrelated later down inherits stale strikes).
+    await this.ctx.storage.delete(REBUILD_STRIKES_KEY);
 
     const pending = await this.listSchedules(REFRESH_CALLBACK);
     if (pending.length === 0) {
@@ -1716,6 +1768,129 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
+  /** Fault injection for the watchdog's auto-rebuild path (U8): persist
+   *  `down` with a rehydration-flavored reason and stop the refresh chain
+   *  (mirroring what a real goDown does), so repeated watchdog passes can
+   *  strike it up to the auto-rebuild without corrupting real R2 objects.
+   *  Test-only semantics; admin scope. */
+  async debugForceDown(reason: string): Promise<ResidentStatus> {
+    await this.setResidentState("down", reason);
+    this.deleteSchedules(REFRESH_CALLBACK);
+    return this.getStatus();
+  }
+
+  /** Rebuild (U8): the down→onboarding escape hatch — discard the recorded
+   *  snapshots (R2 objects included) and reprovision from scratch through the
+   *  ordinary alarm-driven pipeline, reusing the registry record's command
+   *  table/ref/budget. `dryRun` returns the same itemized plan WITHOUT
+   *  executing: nothing deleted, no state change, schedules untouched.
+   *  Refused while the engine owns the state (onboarding/refreshing/
+   *  restoring) — two engine chains must never race the same disk. */
+  async rebuild(
+    resource: string,
+    defaultRef: string,
+    provisioningTimeoutMs: number,
+    dryRun: boolean,
+  ): Promise<
+    | {
+        resource: string;
+        dryRun: boolean;
+        from: ResidentStatus;
+        discards: {
+          snapshot: {
+            ref: string;
+            sha: string;
+            lockfileHash: string;
+            createdAt: string;
+            mirrorBackupId: string;
+            checkoutBackupId: string;
+          } | null;
+          backupObjects: number;
+        };
+        reprovision: { defaultRef: string; provisioningTimeoutMs: number };
+        keeps: { registryRecord: true; threadBindings: number };
+        backupObjectsDeleted?: number;
+        state?: ResidentState;
+      }
+    | { error: string; status: number }
+  > {
+    const from = await this.getStatus();
+    if (from.state === "onboarding" || from.state === "refreshing" || from.state === "restoring") {
+      return {
+        error: `rebuild-refused: the engine is mid-flight (state ${from.state}) — retry once it settles (warm/degraded/down)`,
+        status: 409,
+      };
+    }
+    const snap = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
+    const bindings = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    const plan = {
+      resource,
+      dryRun,
+      from,
+      discards: {
+        snapshot: snap
+          ? {
+              ref: snap.ref,
+              sha: snap.sha,
+              lockfileHash: snap.lockfileHash,
+              createdAt: snap.createdAt,
+              mirrorBackupId: snap.mirror.id,
+              checkoutBackupId: snap.checkout.id,
+            }
+          : null,
+        backupObjects: snap ? await this.countBackupObjects([snap.mirror.id, snap.checkout.id]) : 0,
+      },
+      reprovision: { defaultRef, provisioningTimeoutMs },
+      keeps: { registryRecord: true as const, threadBindings: bindings.size },
+    };
+    if (dryRun) return plan;
+
+    // Old snapshot objects go FIRST: initResident wipes the stored handles,
+    // and backups/<id>/ lives outside the resident/<resource>/ prefix — this
+    // is the only path that can still reach them (same ordering as teardown).
+    let backupObjectsDeleted = 0;
+    if (snap) {
+      try {
+        backupObjectsDeleted = await this.deleteBackupObjects([snap.mirror.id, snap.checkout.id]);
+      } catch {
+        // best effort — the 1-year R2 TTL is the leak backstop
+      }
+    }
+    await this.ctx.storage.delete(REBUILD_STRIKES_KEY);
+    await this.initResident(resource, provisioningTimeoutMs);
+    return { ...plan, backupObjectsDeleted, state: "onboarding" as const };
+  }
+
+  /** Dry-run itemization for offboard (U8): everything the real teardown
+   *  below would remove, computed READ-ONLY — no schedule, storage,
+   *  container, or R2 mutation. */
+  async teardownPlan(): Promise<{
+    state: ResidentState;
+    reason: string;
+    schedules: number;
+    snapshotBackupIds: string[];
+    backupObjects: number;
+    threadBindings: number;
+  }> {
+    const status = await this.getStatus();
+    const [prov, run, refresh, sweep] = await Promise.all([
+      this.listSchedules(PROVISIONING_CALLBACK),
+      this.listSchedules(PROVISION_RUN_CALLBACK),
+      this.listSchedules(REFRESH_CALLBACK),
+      this.listSchedules(SWEEP_CALLBACK),
+    ]);
+    const snap = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
+    const ids = snap ? [snap.mirror.id, snap.checkout.id] : [];
+    const bindings = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    return {
+      ...status,
+      schedules: prov.length + run.length + refresh.length + sweep.length,
+      snapshotBackupIds: ids,
+      backupObjects: await this.countBackupObjects(ids),
+      threadBindings: bindings.size,
+    };
+  }
+
   /** Offboard teardown: cancel timers, delete the R2 objects behind the SDK
    *  backup handles (they live under backups/<uuid>/, OUTSIDE the
    *  resident/<resource>/ prefix, and the handles die with deleteAll — so
@@ -1890,6 +2065,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/onboard": { scope: "admin", method: "POST" },
   "/offboard": { scope: "admin", method: "POST" },
   "/reconfigure": { scope: "admin", method: "POST" },
+  "/rebuild": { scope: "admin", method: "POST" },
   "/residents": { scope: "admin", method: "GET" },
   "/debug": { scope: "admin", method: "POST" },
   "/status": { scope: "operator", method: "GET" },
@@ -1928,6 +2104,18 @@ async function deleteR2Prefix(bucket: R2Bucket, prefix: string): Promise<number>
   return deleted;
 }
 
+/** Read-only twin of deleteR2Prefix, for the U8 dry-run itemizations. */
+async function countR2Prefix(bucket: R2Bucket, prefix: string): Promise<number> {
+  let count = 0;
+  let cursor: string | undefined;
+  do {
+    const page = await bucket.list({ prefix, cursor });
+    count += page.objects.length;
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return count;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -1935,7 +2123,7 @@ export default {
     // Unauthenticated wake ping for `npm run deploy` — touches no DO, no data.
     // `u` tracks the last shipped unit so a deploy's propagation is provable
     // from the outside without auth.
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, u: "u4" });
+    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, u: "u8" });
 
     // Auth precedes existence: unknown paths demand admin before revealing
     // 404 vs 401, so an unauthenticated scanner learns nothing.
@@ -1957,6 +2145,8 @@ export default {
           return await handleOffboard(env, body);
         case "/reconfigure":
           return await handleReconfigure(env, body);
+        case "/rebuild":
+          return await handleRebuild(env, body);
         case "/residents":
           return await handleResidents(env);
         case "/debug":
@@ -2028,6 +2218,34 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
     worktreeTtlDays = parsed.value;
   }
 
+  // Installation membership (U8): the GitHub App installation is repository-
+  // scoped and that scoping is a real control — onboard requires the repo to
+  // already be in the installation's repository list. A repo-scoped mint
+  // proves membership (the token API 422s for a repo outside the
+  // installation), so the check IS the mechanism it protects. Enforced when
+  // the App is configured; SKIPPED WITH AN HONEST WARNING when it is not
+  // (anonymous clones still work for public repos). Runs BEFORE the registry
+  // insert so a refused onboard never consumes a cap slot.
+  let warning: string | undefined;
+  if (githubAppConfigured(env)) {
+    try {
+      await mintRepoScopedToken(env, resource.resource.slice("repo:".length));
+    } catch (err) {
+      return json(
+        {
+          error:
+            `not-in-installation: the GitHub App cannot mint a token scoped to ${resource.resource} — ` +
+            `install the App on the repository first (${errMsg(err)})`,
+        },
+        403,
+      );
+    }
+  } else {
+    warning =
+      "github-app-not-configured: installation membership was NOT verified (GITHUB_APP_* secrets unset); " +
+      "clones/fetches will be anonymous — public repos only, and thread credentials stay unavailable";
+  }
+
   const now = new Date().toISOString();
   const record: ResidentRecord = {
     resource: resource.resource,
@@ -2054,7 +2272,10 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
     return json({ error: `onboard failed arming the resident: ${errMsg(err)}` }, 500);
   }
 
-  return json({ resource: resource.resource, state: "onboarding" satisfies ResidentState }, 202);
+  return json(
+    { resource: resource.resource, state: "onboarding" satisfies ResidentState, ...(warning ? { warning } : {}) },
+    202,
+  );
 }
 
 async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<Response> {
@@ -2064,6 +2285,32 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
   const registry = registryStub(env);
   const record = await registry.getRecord(resource.resource);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+
+  // --dry-run (U8): the itemized plan of what the real teardown below would
+  // remove, computed READ-ONLY — the resident stays fully intact (state,
+  // schedules, snapshots, registry slot all untouched).
+  if (body.dryRun === true) {
+    let plan: Awaited<ReturnType<ResidentDO["teardownPlan"]>>;
+    try {
+      plan = await residentStub(env, resource.resource).teardownPlan();
+    } catch (err) {
+      return json({ error: `offboard dry-run failed: ${errMsg(err)}` }, 500);
+    }
+    const r2Objects = await countR2Prefix(env.BACKUP_BUCKET, r2Prefix(resource.resource));
+    return json({
+      resource: resource.resource,
+      dryRun: true,
+      wouldRemove: {
+        registryRecord: true,
+        schedules: plan.schedules,
+        snapshotBackupIds: plan.snapshotBackupIds,
+        backupObjects: plan.backupObjects,
+        r2Objects,
+        threadBindings: plan.threadBindings,
+        container: plan.state,
+      },
+    });
+  }
 
   // Registry first: the slot frees atomically and no new work routes here.
   const registryRemoved = await registry.remove(resource.resource);
@@ -2140,6 +2387,32 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
   const updated = await registryStub(env).updateConfig(resource.resource, patch);
   if (!updated) return json({ error: `${resource.resource} is not onboarded` }, 404);
   return json({ resource: updated.resource, record: updated });
+}
+
+/** U8: down→onboarding rebuild — discard the stamped snapshots and
+ *  reprovision from scratch through the ordinary provisioning pipeline,
+ *  reusing the registry record (command table, ref, budget) as-is; the cap
+ *  slot and thread bindings are untouched. `dryRun:true` answers 200 with the
+ *  itemized plan and executes nothing; a real rebuild answers 202 like
+ *  onboard (the transition is alarm-driven). */
+async function handleRebuild(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const resource = parseResource(body.resource);
+  if ("error" in resource) return json({ error: resource.error }, 400);
+  const dryRun = body.dryRun === true;
+
+  const record = await registryStub(env).getRecord(resource.resource);
+  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+
+  const result = await residentStub(env, resource.resource).rebuild(
+    resource.resource,
+    record.defaultRef,
+    record.provisioningTimeoutMs,
+    dryRun,
+  );
+  // "in" narrowing: the RPC stub intersects returns with Disposable, which
+  // defeats boolean-discriminant narrowing (same note as handleOnboard).
+  if ("error" in result) return json({ error: result.error }, result.status);
+  return json(result, dryRun ? 200 : 202);
 }
 
 /** Admin enumeration: registry config + each resident's live engine view
@@ -2332,6 +2605,13 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       return json(await stub.debugStopContainer());
     case "force-onboarding":
       return json(await stub.debugForceOnboarding());
+    case "force-down": {
+      // Fault injection for the U8 watchdog auto-rebuild path; a
+      // rehydration-flavored default reason makes it strike-eligible.
+      const reason =
+        typeof body.reason === "string" && body.reason ? body.reason : "r2-restore-failed: injected (debug force-down)";
+      return json(await stub.debugForceDown(reason));
+    }
     case "threads":
       return json(await stub.debugThreads());
     case "sweep-now":
@@ -2345,7 +2625,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     }
     default:
       return json(
-        { error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, mint-token, run-watchdog, threads, sweep-now, backdate-thread)` },
+        { error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, threads, sweep-now, backdate-thread)` },
         400,
       );
   }

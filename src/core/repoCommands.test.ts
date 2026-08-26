@@ -1,0 +1,347 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { ConfigStore } from "../config.js";
+import {
+  handleRepoCommand,
+  type ResidentAdminClient,
+  type ResidentAdminResponse,
+} from "./repoCommands.js";
+
+// Feature: features/resident-repos.md — U8 repo-management chat commands:
+// `repo onboard/offboard/reconfigure/rebuild/list` in the config-command
+// family. All but `list` are gated by canManageRepos (KTD9 fail-closed);
+// destructive commands accept --dry-run and render the resident's itemized
+// plan; parsing is key="value" tokens with sensible Node defaults.
+
+const YAML_FIXTURE = `
+providers:
+  anthropic:
+    type: anthropic
+    apiKeyEnv: ANTHROPIC_API_KEY
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+permissions:
+  admins: ["slack:UADMIN"]
+execution:
+  type: local
+  resident:
+    baseUrl: https://resident.example
+`;
+
+function store(yaml: string = YAML_FIXTURE): ConfigStore {
+  const dir = mkdtempSync(join(tmpdir(), "swb-repocmd-"));
+  const cfg = join(dir, "config.yaml");
+  writeFileSync(cfg, yaml);
+  return new ConfigStore(cfg, join(dir, "overrides.json"));
+}
+
+const ok = (data: Record<string, unknown>, status = 200): ResidentAdminResponse => ({ status, data });
+
+/** Mock admin client capturing calls; every route answers a canned success. */
+function mockClient(overrides: Partial<Record<keyof ResidentAdminClient, ResidentAdminResponse>> = {}) {
+  const client: ResidentAdminClient = {
+    onboard: vi.fn(async () => overrides.onboard ?? ok({ resource: "repo:acme/api", state: "onboarding" }, 202)),
+    offboard: vi.fn(async () => overrides.offboard ?? ok({
+      resource: "repo:acme/api",
+      registryRemoved: true,
+      schedulesCancelled: true,
+      containerStopped: true,
+      storageCleared: true,
+      backupObjectsDeleted: 4,
+      r2ObjectsDeleted: 0,
+      errors: [],
+    })),
+    reconfigure: vi.fn(async () => overrides.reconfigure ?? ok({ resource: "repo:acme/api", record: {} })),
+    rebuild: vi.fn(async () => overrides.rebuild ?? ok({
+      resource: "repo:acme/api",
+      dryRun: false,
+      from: { state: "down", reason: "r2-restore-failed: x" },
+      discards: { snapshot: { createdAt: "2026-08-26T00:00:00Z", mirrorBackupId: "m1", checkoutBackupId: "c1" }, backupObjects: 4 },
+      reprovision: { defaultRef: "master", provisioningTimeoutMs: 300000 },
+      keeps: { registryRecord: true, threadBindings: 2 },
+      backupObjectsDeleted: 4,
+      state: "onboarding",
+    }, 202)),
+    residents: vi.fn(async () => overrides.residents ?? ok({
+      cap: 8,
+      count: 1,
+      residents: [
+        {
+          resource: "repo:jshttp/vary",
+          defaultRef: "master",
+          commands: { test: "npm test", build: "npm pack --dry-run", install: "npm install --no-audit --no-fund" },
+          live: { state: "warm", reason: "", sha: "1220b9c4a123", lastRefreshAt: "2026-08-26T12:00:00Z" },
+        },
+      ],
+    })),
+  };
+  return client;
+}
+
+const msg = (text: string, user = "slack:UADMIN") => ({
+  channelId: "slack:CX",
+  userId: user,
+  threadKey: "slack:CX:1.0",
+  text,
+});
+
+describe("repo command recognition", () => {
+  it("non-repo text and prose starting with 'repo' pass through as null", async () => {
+    const s = store();
+    const c = mockClient();
+    expect(await handleRepoCommand(s, msg("hello there"), c)).toBeNull();
+    expect(await handleRepoCommand(s, msg("repo onboarding is done how?"), c)).toBeNull();
+    expect(await handleRepoCommand(s, msg("repository list please"), c)).toBeNull();
+  });
+});
+
+describe("KTD9 fail-closed gate", () => {
+  it("non-admin `repo onboard` → refusal naming the admins; no client call", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo onboard acme/api", "slack:URANDOM"), c);
+    expect(reply).toContain("🚫");
+    expect(reply).toContain("<@slack:UADMIN>");
+    expect(c.onboard).not.toHaveBeenCalled();
+  });
+
+  it("non-admin offboard/reconfigure/rebuild are refused the same way", async () => {
+    const s = store();
+    const c = mockClient();
+    for (const text of ["repo offboard acme/api", "repo reconfigure acme/api ref=main", "repo rebuild acme/api"]) {
+      const reply = await handleRepoCommand(s, msg(text, "slack:URANDOM"), c);
+      expect(reply).toContain("🚫");
+    }
+    expect(c.offboard).not.toHaveBeenCalled();
+    expect(c.reconfigure).not.toHaveBeenCalled();
+    expect(c.rebuild).not.toHaveBeenCalled();
+  });
+
+  it("`repo list` stays open to non-admins", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo list", "slack:URANDOM"), c);
+    expect(c.residents).toHaveBeenCalledTimes(1);
+    expect(reply).toContain("jshttp/vary");
+    expect(reply).toContain("warm");
+  });
+
+  it("a permissions.repoManagement member may manage repos", async () => {
+    const s = store(YAML_FIXTURE.replace('admins: ["slack:UADMIN"]', 'admins: ["slack:UADMIN"]\n  repoManagement: ["slack:UDEV"]'));
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo onboard acme/api", "slack:UDEV"), c);
+    expect(reply).not.toContain("🚫");
+    expect(c.onboard).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("onboard parsing", () => {
+  it("bare onboard uses sensible Node defaults and ref=main; slug is lowercased", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo onboard Acme/API"), c);
+    expect(c.onboard).toHaveBeenCalledWith({
+      resource: "repo:acme/api",
+      commands: {
+        install: "npm install --no-audit --no-fund",
+        build: "npm run build --if-present",
+        test: "npm test",
+      },
+      defaultRef: "main",
+    });
+    expect(reply).toContain("acme/api");
+    expect(reply).toContain("onboarding");
+  });
+
+  it('key="value" overrides and ref= are honored', async () => {
+    const s = store();
+    const c = mockClient();
+    await handleRepoCommand(
+      s,
+      msg('repo onboard acme/api ref=develop test="npm run test:unit" build="make build" install="pnpm install"'),
+      c,
+    );
+    expect(c.onboard).toHaveBeenCalledWith({
+      resource: "repo:acme/api",
+      commands: { install: "pnpm install", build: "make build", test: "npm run test:unit" },
+      defaultRef: "develop",
+    });
+  });
+
+  it("smart quotes (Slack autoformat) are normalized", async () => {
+    const s = store();
+    const c = mockClient();
+    await handleRepoCommand(s, msg("repo onboard acme/api test=“npm run check”"), c);
+    const body = vi.mocked(c.onboard).mock.calls[0][0] as { commands: Record<string, string> };
+    expect(body.commands.test).toBe("npm run check");
+  });
+
+  it("an invalid slug is rejected naming the expected form; no client call", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo onboard not-a-slug"), c);
+    expect(reply).toContain("owner/name");
+    expect(c.onboard).not.toHaveBeenCalled();
+  });
+
+  it("a hostile ref is rejected before any client call", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo onboard acme/api ref=../evil"), c);
+    expect(reply).toMatch(/ref/i);
+    expect(c.onboard).not.toHaveBeenCalled();
+  });
+
+  it("an unknown key is rejected naming the valid ones", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg('repo onboard acme/api foo="bar"'), c);
+    expect(reply).toMatch(/test|build|install|ref/);
+    expect(c.onboard).not.toHaveBeenCalled();
+  });
+
+  it("a resident-side error (e.g. cap reached) is relayed verbatim", async () => {
+    const s = store();
+    const c = mockClient({ onboard: ok({ error: "resident cap reached (8/8); offboard a resident first" }, 429) });
+    const reply = await handleRepoCommand(s, msg("repo onboard acme/api"), c);
+    expect(reply).toContain("resident cap reached");
+    expect(reply).toContain("429");
+  });
+
+  it("an onboard warning field (App unconfigured) surfaces in the reply", async () => {
+    const s = store();
+    const c = mockClient({
+      onboard: ok(
+        { resource: "repo:acme/api", state: "onboarding", warning: "github-app-not-configured: installation membership was NOT verified" },
+        202,
+      ),
+    });
+    const reply = await handleRepoCommand(s, msg("repo onboard acme/api"), c);
+    expect(reply).toContain("github-app-not-configured");
+  });
+});
+
+describe("offboard + rebuild (--dry-run)", () => {
+  it("offboard --dry-run calls the client with dryRun and renders the itemized plan", async () => {
+    const s = store();
+    const c = mockClient({
+      offboard: ok({
+        resource: "repo:acme/api",
+        dryRun: true,
+        wouldRemove: {
+          registryRecord: true,
+          schedules: 2,
+          snapshotBackupIds: ["m1", "c1"],
+          backupObjects: 4,
+          r2Objects: 0,
+          threadBindings: 3,
+          container: "warm",
+        },
+      }),
+    });
+    const reply = await handleRepoCommand(s, msg("repo offboard acme/api --dry-run"), c);
+    expect(c.offboard).toHaveBeenCalledWith("repo:acme/api", true);
+    expect(reply).toContain("Dry run");
+    expect(reply).toContain("4 snapshot backup object");
+    expect(reply).toContain("3 thread binding");
+    expect(reply).toContain("Nothing was changed");
+  });
+
+  it("real offboard calls with dryRun=false and renders the teardown result", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo offboard acme/api"), c);
+    expect(c.offboard).toHaveBeenCalledWith("repo:acme/api", false);
+    expect(reply).toContain("Offboarded");
+    expect(reply).toContain("4");
+  });
+
+  it("rebuild --dry-run renders discards + reprovision plan without executing", async () => {
+    const s = store();
+    const c = mockClient({
+      rebuild: ok({
+        resource: "repo:acme/api",
+        dryRun: true,
+        from: { state: "warm", reason: "" },
+        discards: { snapshot: { createdAt: "2026-08-26T00:00:00Z", mirrorBackupId: "m1", checkoutBackupId: "c1" }, backupObjects: 4 },
+        reprovision: { defaultRef: "master", provisioningTimeoutMs: 300000 },
+        keeps: { registryRecord: true, threadBindings: 2 },
+      }),
+    });
+    const reply = await handleRepoCommand(s, msg("repo rebuild acme/api --dry-run"), c);
+    expect(c.rebuild).toHaveBeenCalledWith("repo:acme/api", true);
+    expect(reply).toContain("Dry run");
+    expect(reply).toContain("master");
+    expect(reply).toContain("Nothing was changed");
+  });
+
+  it("real rebuild reports the down→onboarding transition", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo rebuild acme/api"), c);
+    expect(c.rebuild).toHaveBeenCalledWith("repo:acme/api", false);
+    expect(reply).toContain("onboarding");
+  });
+
+  it("an unknown flag is rejected", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo offboard acme/api --force"), c);
+    expect(reply).toContain("--dry-run");
+    expect(c.offboard).not.toHaveBeenCalled();
+  });
+});
+
+describe("reconfigure", () => {
+  it("merges command overrides onto the current table (resident replaces whole tables)", async () => {
+    const s = store();
+    const c = mockClient({
+      residents: ok({
+        cap: 8,
+        count: 1,
+        residents: [
+          {
+            resource: "repo:acme/api",
+            defaultRef: "main",
+            commands: { test: "old-test", build: "old-build", install: "old-install" },
+            live: { state: "warm", reason: "" },
+          },
+        ],
+      }),
+    });
+    await handleRepoCommand(s, msg('repo reconfigure acme/api test="new-test"'), c);
+    expect(c.reconfigure).toHaveBeenCalledWith({
+      resource: "repo:acme/api",
+      commands: { test: "new-test", build: "old-build", install: "old-install" },
+    });
+  });
+
+  it("ref-only reconfigure sends defaultRef without touching commands", async () => {
+    const s = store();
+    const c = mockClient();
+    await handleRepoCommand(s, msg("repo reconfigure acme/api ref=develop"), c);
+    expect(c.reconfigure).toHaveBeenCalledWith({ resource: "repo:acme/api", defaultRef: "develop" });
+    expect(c.residents).not.toHaveBeenCalled();
+  });
+
+  it("reconfigure with nothing to change is a usage error", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo reconfigure acme/api"), c);
+    expect(reply).toMatch(/nothing to (re)?configure/i);
+    expect(c.reconfigure).not.toHaveBeenCalled();
+  });
+});
+
+describe("configuration preconditions", () => {
+  it("without execution.resident (and no injected client) the reply names the missing config", async () => {
+    const NO_RESIDENT = YAML_FIXTURE.replace(/  resident:[\s\S]*$/m, "");
+    const s = store(NO_RESIDENT);
+    const reply = await handleRepoCommand(s, msg("repo list"));
+    expect(reply).toContain("execution.resident");
+  });
+});

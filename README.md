@@ -8,7 +8,7 @@ Every boundary is a swappable seam, same pattern at each one:
 |---|---|---|---|
 | Channel | `ChannelIO` + `IncomingMessage` (`src/core/types.ts`) | Slack (Bolt/Socket Mode), CLI | one adapter file in `src/channels/` |
 | Provider | `Provider` (`src/providers/types.ts`) | Anthropic, OpenAI-compatible (OpenAI/Groq/Ollama/vLLM = config-only) | one adapter file, or just config |
-| Executor | `Executor` (`src/execution/executor.ts`) | local host, E2B micro-VM, Cloudflare Sandbox (via `deploy/cloudflare-sandbox/` proxy Worker) | one backend file + config |
+| Executor | `Executor` (`src/execution/executor.ts`) | local host, E2B micro-VM, Cloudflare Sandbox (via `deploy/cloudflare-sandbox/` proxy Worker), resident repo environments (always-warm per-repo, via `deploy/cloudflare-resident/`) | one backend file + config |
 | Agent | `AgentDef` data (`src/agents/registry.ts`) | general, coding, review | one registry entry |
 
 The **core dispatcher** (`src/core/dispatcher.ts`) is the only place orchestration lives: config commands, directive parsing, layered resolution, permission gates, history assembly, the agent run. Channels are pure transports; the dispatcher never imports a platform SDK.
@@ -63,16 +63,28 @@ flowchart LR
 
     subgraph exec ["Executors"]
         LX["local<br/>workspace dir on host"]
-        EX["e2b<br/>per-thread micro-VM"]
+        EX["e2b / cloudflare<br/>per-thread sandbox"]
+        RX["resident<br/>always-warm per-repo env"]
+    end
+
+    subgraph resplane ["Resident plane — deploy/cloudflare-resident"]
+        RW["resident Worker<br/>admin + operator routes"]
+        RDO["per-repo Durable Objects<br/>(Sandbox containers: mirror,<br/>warm checkout, thread worktrees)"]
+        R2[("R2<br/>stamped snapshots")]
     end
 
     SL & CLI -->|IncomingMessage + ChannelIO| D
     D --> CC
     D --> R --> RUN
     RUN <-->|provider/model prefix| A & O
-    RUN <-->|bash / read / write| LX & EX
+    RUN <-->|bash / read / write| LX & EX & RX
+    RX -->|attach / exec / read / write| RW
+    RW --> RDO
+    RDO <--> R2
     D -->|status + replies via ChannelIO| SL & CLI
 ```
+
+**Resident repo environments** (`deploy/cloudflare-resident/`): repos an admin onboards (`repo onboard <owner/name>` in chat) each get an always-warm per-repo service — a bare mirror kept fresh by a refresh alarm, a built checkout, and per-thread git worktrees with OS-user isolation — so a coding request on an onboarded repo starts with zero setup (no clone, no install). Any other resident state falls back to the per-thread sandbox with a named reason on the status card. Behavioral contract: [features/resident-repos.md](features/resident-repos.md).
 
 Channel adapters translate exactly three things: an incoming event → `IncomingMessage` (namespaced IDs: `slack:C0123`, `slack:U0123`, thread key `slack:C0123:<ts>`), history fetch → `HistoryItem[]`, and replies/status back to the platform (chunking, formatting, message editing are adapter concerns). Everything else is the dispatcher's.
 
@@ -103,9 +115,17 @@ flowchart LR
         S1["Sandbox: thread A<br/>repo checkout + GH_TOKEN"]
         S2["Sandbox: thread B"]
     end
+    subgraph rp ["Resident plane — second credential domain"]
+        RW["resident Worker<br/>GitHub App key in ITS OWN secrets<br/>self-mints repo-scoped 1h tokens"]
+        RD["resident: repo X<br/>root-owned mirror + warm checkout<br/>per-thread worktrees, one OS user each"]
+    end
     BOT -->|exec / read / write per tool call| S1 & S2
+    BOT -->|operator bearer per tool call| RW --> RD
     S1 & S2 -->|git push, gh pr create| GH["GitHub"]
+    RD -->|git push via per-attach credential file| GH
 ```
+
+**Residents are a second credential domain**: the GitHub App private key lives in the resident Worker's own wrangler secrets (never the bot's env, never a container); the Worker mints 1-hour installation tokens scoped to exactly the resident's one repo, and each thread receives its token through a mode-600 per-attach credential file — never argv, never process-wide env. Repo code (installs/builds) always executes token-free and unprivileged. Two bearer scopes gate the Worker itself: the operator token (bot runtime: attach/exec/read/write/status) and the admin token (`repo onboard/offboard/reconfigure/rebuild` chat commands — fail-closed to admins, see Permissions).
 
 The `Executor` interface in `src/execution/` is the seam — a Cloudflare Sandbox (or any other) backend is one file plus config, without touching agents, tools, or the runner.
 
@@ -121,9 +141,14 @@ flowchart LR
     img -->|A · wrangler deploy — recommended, house pattern| CF["Cloudflare Containers<br/>deploy/cloudflare/, terrateam-style"]
     img -->|B · fly deploy| FLY["Fly.io Machine<br/>fly.toml + volume at /app/data"]
     img -->|C · docker compose up -d| VPS["Any VPS / home server"]
+    subgraph companions ["Companion Workers — own wrangler deploys"]
+        SBW["switchboard-sandbox<br/>deploy/cloudflare-sandbox/<br/>per-thread exec VMs"]
+        RSW["switchboard-resident<br/>deploy/cloudflare-resident/<br/>always-warm per-repo envs,<br/>R2 snapshots, watchdog cron"]
+    end
     P -.->|outbound websocket| SLK["Slack"]
     P -.->|HTTPS| PRV["Model providers"]
     P -.->|git/gh over HTTPS| GH["GitHub"]
+    P -.->|bearer HTTPS| SBW & RSW
 ```
 
 | Option | Fit | Notes |
@@ -138,27 +163,40 @@ Railway/Render/k8s also work with the same image — anything that runs an alway
 
 ### Deploying on Cloudflare Containers (recommended)
 
-Two Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastructure` (per-worker `package.json` with pinned wrangler, `secrets.txt`, manual `wrangler deploy` with Docker running):
+Three Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastructure` (per-worker `package.json` with pinned wrangler, `secrets.txt`, manual `wrangler deploy` with Docker running):
 
 ```bash
 # one-time: wrangler login (account: coreplane-infra), Docker running
 
-# 0. Generate the shared bearer once: openssl rand -hex 32  (paste it as
-#    SANDBOX_TOKEN into BOTH workers' secrets prompts below)
+# 0. Generate bearers once with: openssl rand -hex 32
+#    SANDBOX_TOKEN — shared by the sandbox worker and the bot worker
+#    RESIDENT_OPERATOR_TOKEN + RESIDENT_ADMIN_TOKEN — shared by the resident
+#    worker and the bot worker (operator = runtime tool calls; admin = the
+#    `repo onboard/offboard/...` chat commands)
 
 # 1. Sandbox worker — per-thread execution VMs at switchboard-sandbox.coreplanelabs.dev
 cd deploy/cloudflare-sandbox && npm install
 npm run secrets
 npm run deploy
 
-# 2. Bot worker — always-on Switchboard container
+# 2. Resident worker — always-warm per-repo environments at
+#    switchboard-resident.coreplanelabs.dev (per-repo Durable Objects on
+#    Cloudflare Sandbox 1.0, R2 bucket for stamped snapshots, watchdog cron)
+cd ../cloudflare-resident && npm install
+npm run secrets   # RESIDENT_ADMIN_TOKEN, RESIDENT_OPERATOR_TOKEN, GITHUB_APP_*
+                  # (the resident holds its own copy of the App key — the
+                  # second credential domain; see trust model above)
+env -u CLOUDFLARE_API_TOKEN npm run deploy   # ends with a wake ping: /healthz 200
+
+# 3. Bot worker — always-on Switchboard container
 cd ../cloudflare && npm install
-npm run secrets   # prompts through secrets.txt (Slack, Anthropic, SANDBOX_TOKEN, GitHub App)
+npm run secrets   # prompts through secrets.txt (Slack, Anthropic, SANDBOX_TOKEN,
+                  # RESIDENT_OPERATOR_TOKEN, RESIDENT_ADMIN_TOKEN, GitHub App)
 npm run deploy
 npm run tail      # watch it connect: "switchboard running (providers: anthropic...)"
 ```
 
-The bot shim mirrors terrateam exactly: singleton Durable Object, `sleepAfter: 2h`, 5-minute cron keep-alive, secrets forwarded as container env, `startAndWaitForPorts` with generous timeout. Production behavior comes from `config/config.production.yaml` (committed, no secrets), selected via `SWITCHBOARD_CONFIG`; the sandbox Worker gets a stable custom domain on the `coreplanelabs.dev` zone so that config never changes.
+The bot shim mirrors terrateam exactly: singleton Durable Object, `sleepAfter: 2h`, 5-minute cron keep-alive, secrets forwarded as container env, `startAndWaitForPorts` with generous timeout. Production behavior comes from `config/config.production.yaml` (committed, no secrets), selected via `SWITCHBOARD_CONFIG`; the sandbox and resident Workers get stable custom domains on the `coreplanelabs.dev` zone so that config never changes. Repos are onboarded to the resident Worker at runtime from chat (`repo onboard` — next section), never at deploy time.
 
 ### What any host must provide
 
@@ -166,7 +204,7 @@ Platform-agnostic requirements, for evaluating alternatives:
 
 - **Runtime:** 1 always-on Docker container, single instance, no autoscaling; 0.25–0.5 vCPU, 512MB–1GB RAM (mostly idle)
 - **Network:** outbound HTTPS only — Slack (`slack.com`/`wss-*.slack.com`), model provider APIs, `github.com`, E2B. **Zero inbound** — the app dials out over a websocket
-- **Secrets as env vars:** `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `ANTHROPIC_API_KEY`, `E2B_API_KEY`, optionally `OPENAI_API_KEY`; `GH_TOKEN` only when `execution.type: local`
+- **Secrets as env vars:** `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `ANTHROPIC_API_KEY`, `E2B_API_KEY`, optionally `OPENAI_API_KEY`; `GH_TOKEN` only when `execution.type: local`; `SANDBOX_TOKEN` / `RESIDENT_OPERATOR_TOKEN` / `RESIDENT_ADMIN_TOKEN` when the Cloudflare sandbox / resident Workers are configured
 - **No cloud credentials on the host** — the app makes no cloud API calls, and its agents execute model-generated commands, so least privilege matters here specifically
 - **Storage:** optional small persistent volume at `/app/data`; degrades gracefully without it (repos re-clone, thread context rebuilds from the channel)
 - **Health/logs:** `GET :8080/healthz` → 200; logs on stdout
@@ -210,11 +248,19 @@ permissions:
     coding: [slack:U0456DEV]      # only these users (+ admins) may run coding
   channelConfig: []          # who may run `config set/clear channel`
                              # empty = admins only; key absent = everyone
+  repos:                     # per-repo access for resident environments
+    acme/api: [slack:U0456DEV]   # a listed repo admits members + admins and
+                             # refuses everyone else BY NAME; map or key
+                             # absent = open to every allowed coding user
+  repoManagement: []         # who may run `repo onboard/offboard/reconfigure/
+                             # rebuild` (`repo list` is open). FAIL-CLOSED:
+                             # key absent OR empty = admins only
 ```
 
 - Agent allowlists are enforced **at run time against the resolved agent**, so they can't be bypassed via `agent:` directives, `config set me`, or channel defaults.
 - `config set me` is always allowed — pointing yourself at a restricted agent is harmless because the run-time gate still applies.
 - Denials reply in-thread naming the admins to ask; `config show` lists which agents are unavailable to you.
+- **`repoManagement` is the one fail-closed gate** — every other key is open when absent, but repo management defaults to admins-only because `repo onboard`/`rebuild` provision billable always-on compute and bind GitHub credentials.
 
 ## Setup
 
@@ -234,6 +280,24 @@ permissions:
    npm install
    npm run dev          # or: npm run build && npm start
    ```
+5. **Resident repo environments** (optional — always-warm per-repo executors):
+   - Deploy the resident Worker (`deploy/cloudflare-resident/` — see Deployment above) and point config at it:
+     ```yaml
+     execution:
+       resident:
+         baseUrl: https://switchboard-resident.<your-zone>
+     ```
+     with `RESIDENT_OPERATOR_TOKEN` (runtime tool calls) and `RESIDENT_ADMIN_TOKEN` (repo-management commands) in the bot's env. Set the `GITHUB_APP_*` secrets on the **resident Worker** too — it self-mints repo-scoped tokens (trust model above); without them, clones are anonymous (public repos only) and pushes from resident threads are unavailable.
+   - Onboard repos from chat (admin-gated, fail-closed via `permissions.repoManagement`):
+     ```
+     @switchboard repo onboard acme/api ref=main test="npm test" build="npm run build" install="npm ci"
+     @switchboard repo list                      # lifecycle: onboarding → warm
+     @switchboard repo reconfigure acme/api test="npm run test:unit"
+     @switchboard repo offboard acme/api --dry-run   # itemized plan, nothing executed
+     @switchboard repo rebuild acme/api              # discard snapshots, reprovision from scratch
+     ```
+     Omitted commands get Node defaults (`npm install --no-audit --no-fund` / `npm run build --if-present` / `npm test`). Onboarding requires the repo to already be in the GitHub App installation's repository list when the App is configured (the onboard reply carries an honest warning when it is not).
+   - Once a repo is `warm`, any coding/review request that names it (slug, GitHub URL, or PR link) runs in its resident: ready worktree on the thread's branch, deps installed, zero setup. Restrict who may use a given repo's resident with `permissions.repos`.
 
 ## Adding a provider
 

@@ -37,6 +37,14 @@ export interface Permissions {
    * refuses non-listed users BY NAME (never a silent per-thread fallback).
    */
   repos?: Record<string, string[]>;
+  /**
+   * Who may run repo-management commands (`repo onboard/offboard/reconfigure/
+   * rebuild`). FAIL-CLOSED (KTD9): key absent or empty = ADMINS ONLY —
+   * deliberately diverging from channelConfig's open-when-absent, because
+   * onboarding provisions billable always-on compute and binds GitHub
+   * credentials. `repo list` is never gated.
+   */
+  repoManagement?: string[];
 }
 
 export interface AppConfig {
@@ -150,6 +158,17 @@ export class ConfigStore {
     const allowlist = this.config.permissions?.channelConfig;
     if (!allowlist) return true; // key absent = everyone
     return this.isAdmin(userId) || allowlist.includes(userId);
+  }
+
+  /**
+   * Repo-management gate (KTD9): FAIL-CLOSED, deliberately diverging from
+   * canEditChannelConfig's open-when-absent — no `repoManagement` config means
+   * admins only, because `repo onboard`/`rebuild` provision billable always-on
+   * compute and bind GitHub credentials. Session-settled decision (KTD9).
+   */
+  canManageRepos(userId: string): boolean {
+    if (this.isAdmin(userId)) return true;
+    return this.config.permissions?.repoManagement?.includes(userId) ?? false;
   }
 
   /** Who to ask when denied — for actionable error messages. */

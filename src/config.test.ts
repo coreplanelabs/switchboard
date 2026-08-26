@@ -135,3 +135,35 @@ describe("per-repo access (canUseRepo)", () => {
     expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(false);
   });
 });
+
+// Feature: features/resident-repos.md — repo management is FAIL-CLOSED (KTD9):
+// no permissions.repoManagement configured → ADMINS ONLY, deliberately
+// diverging from canEditChannelConfig's open-when-absent, because onboarding
+// provisions billable always-on compute and binds GitHub credentials.
+describe("repo management gate (canManageRepos)", () => {
+  it("absent repoManagement key → non-admins refused, admins allowed (fail-closed)", () => {
+    const s = store(); // YAML_FIXTURE has no repoManagement key
+    expect(s.canManageRepos("slack:URANDOM")).toBe(false);
+    expect(s.canManageRepos("slack:UDEV")).toBe(false);
+    expect(s.canManageRepos("slack:UADMIN")).toBe(true);
+  });
+
+  it("a configured allowlist admits listed users and admins only", () => {
+    const s = store(YAML_FIXTURE + `  repoManagement: ["slack:UDEV"]\n`);
+    expect(s.canManageRepos("slack:UDEV")).toBe(true);
+    expect(s.canManageRepos("slack:UADMIN")).toBe(true);
+    expect(s.canManageRepos("slack:URANDOM")).toBe(false);
+  });
+
+  it("an empty allowlist stays admins-only", () => {
+    const s = store(YAML_FIXTURE + `  repoManagement: []\n`);
+    expect(s.canManageRepos("slack:UDEV")).toBe(false);
+    expect(s.canManageRepos("slack:UADMIN")).toBe(true);
+  });
+
+  it("no admins configured at all → nobody may manage repos (still closed)", () => {
+    const NO_PERMS = YAML_FIXTURE.replace(/permissions:[\s\S]*$/m, "");
+    const s = store(NO_PERMS);
+    expect(s.canManageRepos("slack:URANDOM")).toBe(false);
+  });
+});

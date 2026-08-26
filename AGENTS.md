@@ -8,7 +8,7 @@ Agent gateway: messages arrive over a channel, get routed to an agent, which run
 2. **Every boundary is an interface with ≥2 implementations.** Channel (`ChannelIO`), provider (`Provider`), executor (`Executor`), agent (`AgentDef` data). New capability = new implementation behind the existing seam, not a special case in the core.
 3. **Permission gates run against the *resolved* agent, post-resolution** (`dispatch()` in `src/core/dispatcher.ts`). Never add a code path that runs an agent without passing `config.canRunAgent`.
 4. **IDs are platform-namespaced**: `slack:C0123` (channel scope), `slack:U0123` (user scope), `slack:C0123:<ts>` (thread key). Config scopes and permissions key on these. New adapters must namespace with their own prefix.
-5. **Tools never touch the host directly** — they call `ctx.executor`. `LocalExecutor` is the only place local process/fs access is allowed for tool execution.
+5. **Tools never touch the host directly** — they call `ctx.executor`. `LocalExecutor` is the only place local process/fs access is allowed for tool execution. Resident environments keep this invariant by being remote: `ResidentExecutor` speaks HTTPS to the resident Worker, and even the dispatcher's repo/PR resolution uses the GitHub REST API — never a `gh` shell-out from the bot process.
 6. **State must survive restarts**: conversation context rebuilds from channel history; workspaces/sandboxes are recreatable (repos re-clone). Never introduce in-memory state a restart would lose silently.
 7. **Model refs are `<provider>/<model>` strings** resolved through config layers (request directive > user > channel > defaults). Never hardcode a model in an agent or the core.
 
@@ -18,16 +18,20 @@ Agent gateway: messages arrive over a channel, get routed to an agent, which run
 |---|---|---|
 | `src/core/types.ts` | Channel contract (`IncomingMessage`, `ChannelIO`, `StatusHandle`, `HistoryItem`) | The open-closed seam for platforms |
 | `src/core/dispatcher.ts` | All orchestration: config commands, directives, resolution, permissions, history assembly, agent run | The only place these live |
+| `src/core/repoContext.ts` | Pre-model repo/ref resolution (slug/URL/PR in the message, thread history) | Feeds resident selection; PR→ref via one REST call, never `gh` |
+| `src/core/repoCommands.ts` | `repo onboard/offboard/reconfigure/rebuild/list` chat commands | Gated by `canManageRepos` (KTD9 fail-closed); talks to the resident Worker's admin routes |
 | `src/channels/slack.ts` | Slack adapter (Bolt, Socket Mode) | Transport only: mention-strip, thread fetch, chunked replies, status edits |
 | `src/cli.ts` | CLI adapter | Second channel; proof of the abstraction; use for local testing |
 | `src/agents/registry.ts` | Agents as data: prompt + toolset + budgets | Add agents here; give them a default model in config |
 | `src/providers/` | `Provider` interface, Anthropic + OpenAI-compatible adapters, registry | OpenAI-compatible endpoints are config-only additions |
-| `src/execution/` | `Executor` interface; local, E2B, and Cloudflare Sandbox backends; factory | E2B keys sandboxes via `data/sandboxes.json`; Cloudflare keys them on `X-Thread-Key` through the proxy Worker in `deploy/cloudflare-sandbox/` |
+| `src/execution/` | `Executor` interface; local, E2B, Cloudflare Sandbox, and resident backends; factory | E2B keys sandboxes via `data/sandboxes.json`; Cloudflare keys them on `X-Thread-Key` through the proxy Worker in `deploy/cloudflare-sandbox/` |
+| `src/execution/resident.ts` | `ResidentExecutor`: attach-on-open client for the resident Worker | Warm-gated selection + named fallback live in `factory.ts` |
 | `src/runner.ts` | Provider-blind agent loop (complete → run tools → append → repeat) | Turn budgets on the agent def |
 | `src/config.ts` | Layered config, runtime overrides, permissions | `data/overrides.json` persists chat-set overrides |
 | `src/directives.ts` | `agent:x model:p/m` inline parsing | |
 | `config/config.example.yaml` | All config knobs, documented | Copy to `config/config.yaml` (gitignored) |
 | `deploy/cloudflare/` | Worker+Container shim, mirrors `coreplanelabs/infrastructure` `terrateam/` pattern | Recommended deploy target |
+| `deploy/cloudflare-resident/` | Resident Worker: always-warm per-repo DOs on Cloudflare Sandbox 1.0, R2 snapshots, refresh alarms + watchdog cron | Live at switchboard-resident.coreplanelabs.dev; contract in `features/resident-repos.md`; holds its own GitHub App secrets (second credential domain) |
 | `Dockerfile`, `docker-compose.yml`, `fly.toml` | Same image, other deploy targets | |
 
 ## Feature specs — the behavioral contract (`features/`)
@@ -51,7 +55,9 @@ Non-negotiable discipline:
 
 ## Current state / known gaps
 
-- Remote executors (E2B, Cloudflare Sandbox) are typechecked but not yet exercised against live sandboxes; the Cloudflare proxy Worker (`deploy/cloudflare-sandbox/`) additionally needs its SDK method names verified on first deploy.
+- The Cloudflare execution path IS live-tested: the resident Worker (`deploy/cloudflare-resident/`) runs at switchboard-resident.coreplanelabs.dev with `repo:jshttp/vary` onboarded, and its attach/exec/read/write plane plus onboard/offboard/rebuild lifecycle have live receipts in `features/resident-repos.md` (validated 2026-08-26).
+- `GITHUB_APP_*` secrets are UNSET on the resident Worker: onboard's installation-membership check skips with an honest warning, clones/fetches run anonymously (public repos only), thread credential files are never provisioned, and pushes from resident threads are unavailable. Setting the three secrets (`npm run secrets` in `deploy/cloudflare-resident`) lights all of it up — the `[gap]` rows in `features/resident-repos.md` list the checks to run afterwards.
+- The E2B executor path is typechecked but still not exercised against a live sandbox.
 - The Slack app has DM support wired but the recommended rollout keeps `im:*` scopes off initially.
 - No token/cost accounting per request yet.
 - CI (`.github/workflows/ci.yml`) runs typecheck + tests + the dist-excludes-tests check + the sandbox-worker typecheck on every PR and on main.

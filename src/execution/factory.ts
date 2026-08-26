@@ -12,6 +12,10 @@ export interface ResidentExecutionConfig {
   baseUrl: string;
   /** env var holding the operator bearer (default RESIDENT_OPERATOR_TOKEN) */
   tokenEnv?: string;
+  /** env var holding the ADMIN bearer for `repo onboard/offboard/...` chat
+   *  commands (default RESIDENT_ADMIN_TOKEN). Unset env = repo-management
+   *  commands answer with a named configuration error; runs are unaffected. */
+  adminTokenEnv?: string;
   /** /status probe timeout in ms (default 2000); a timed-out probe = not warm */
   probeTimeoutMs?: number;
 }

@@ -319,6 +319,71 @@ function residentFetchStub(handlers: {
   return { fn, calls };
 }
 
+// Feature: features/resident-repos.md — U8: repo-management commands are
+// config-family (answered inline, never a model turn); all but `list` gated
+// by canManageRepos (KTD9 fail-closed).
+describe("repo management commands (U8)", () => {
+  afterEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  function mockAdmin() {
+    return {
+      onboard: vi.fn(async () => ({ status: 202, data: { resource: "repo:acme/api", state: "onboarding" } })),
+      offboard: vi.fn(async () => ({ status: 200, data: {} })),
+      reconfigure: vi.fn(async () => ({ status: 200, data: {} })),
+      rebuild: vi.fn(async () => ({ status: 202, data: {} })),
+      residents: vi.fn(async () => ({
+        status: 200,
+        data: { cap: 8, count: 1, residents: [{ resource: "repo:jshttp/vary", defaultRef: "master", live: { state: "warm", reason: "" } }] },
+      })),
+    };
+  }
+
+  it("`repo list` is answered inline without a model call", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.residentAdmin = mockAdmin();
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo list"), io);
+    expect(replies[0]).toContain("jshttp/vary");
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("non-admin `repo onboard` → refusal naming admins; no model call, no resident call", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const admin = mockAdmin();
+    deps.residentAdmin = admin;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo onboard acme/api", "slack:UX"), io);
+    expect(replies[0]).toContain("🚫");
+    expect(replies[0]).toContain("<@slack:UADMIN>");
+    expect(provider.requests).toHaveLength(0);
+    expect(admin.onboard).not.toHaveBeenCalled();
+  });
+
+  it("admin `repo offboard --dry-run` reaches the resident client with dryRun", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const admin = mockAdmin();
+    admin.offboard = vi.fn(async () => ({
+      status: 200,
+      data: {
+        resource: "repo:acme/api",
+        dryRun: true,
+        wouldRemove: { registryRecord: true, schedules: 1, snapshotBackupIds: [], backupObjects: 4, r2Objects: 0, threadBindings: 0, container: "warm" },
+      },
+    }));
+    deps.residentAdmin = admin;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo offboard acme/api --dry-run", "slack:UADMIN"), io);
+    expect(admin.offboard).toHaveBeenCalledWith("repo:acme/api", true);
+    expect(replies[0]).toContain("Nothing was changed");
+    expect(provider.requests).toHaveLength(0);
+  });
+});
+
 describe("repo/ref resolution + resident prompt selection (U7)", () => {
   afterEach(async () => {
     vi.unstubAllEnvs();
