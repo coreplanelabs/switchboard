@@ -3,8 +3,10 @@ import { AGENTS, getAgent } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
 import { makeExecutor } from "../execution/factory.js";
+import { ResidentExecutor, ResidentNeedsRefError } from "../execution/resident.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
+import { resolveRepoContext, type RepoContext } from "./repoContext.js";
 import type { ChannelIO, HistoryItem, ImageAttachment, IncomingMessage } from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
@@ -17,14 +19,16 @@ export interface CoreDeps {
   /** where runtime state (sandboxes.json) lives; default ./data */
   dataDir?: string;
   /**
-   * Resolves the target repo/ref for a message (resident environments). The
-   * real resolver — repo/PR/branch signal extraction — lands in U7; until one
-   * is wired the context stays empty and executor selection takes the
-   * per-thread path with no resident probe (total input contract).
+   * Resolves the target repo/ref for a message (resident environments).
+   * Defaults to the production resolver in repoContext.ts (explicit repo/PR/
+   * branch signals in the message, then the thread-established repo from
+   * history); injectable for tests. No repo signal → {} → the per-thread
+   * executor path with no resident probe (total input contract).
    */
   resolveRepoContext?: (
     msg: IncomingMessage,
-  ) => Promise<{ repo?: string; ref?: string }> | { repo?: string; ref?: string };
+    history: HistoryItem[],
+  ) => Promise<RepoContext> | RepoContext;
 }
 
 const STATUS_UPDATE_MIN_MS = 3000;
@@ -76,8 +80,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
     const provider = deps.providers.get(providerName);
 
-    // Target repo/ref for resident environments (U7 wires the real resolver).
-    const repoCtx = (await deps.resolveRepoContext?.(msg)) ?? {};
+    // Target repo/ref for resident environments, resolved BEFORE the model
+    // turn (U7): explicit signals in the message, else the repo this thread
+    // already established (from history — restart-safe, never stored).
+    const repoCtx = (await (deps.resolveRepoContext ?? resolveRepoContext)(msg, history)) ?? {};
 
     // Per-repo access gate (KD7): open when permissions.repos is absent or
     // the repo is unlisted; a configured allowlist refuses BY NAME — a
@@ -95,14 +101,43 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // decide whether anything is provisioned at all (general gets nothing),
     // and repo/ref carry resident-repo inference. A resident fallback comes
     // back with a named note (KTD10) that rides on every status frame below.
-    const { executor, note } = await makeExecutor(
-      {
-        execution: deps.config.config.execution,
-        workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
-        dataDir: deps.dataDir ?? "./data",
-      },
-      { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref },
-    );
+    let selection: Awaited<ReturnType<typeof makeExecutor>>;
+    try {
+      selection = await makeExecutor(
+        {
+          execution: deps.config.config.execution,
+          workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
+          dataDir: deps.dataDir ?? "./data",
+        },
+        { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref },
+      );
+    } catch (err) {
+      // Ask-once (KTD6): the resident has no ref binding for this thread and
+      // the message named no branch — binding is explicit-or-ask-once, never
+      // a silent guess. ONE clarifying question, no model turn burned (mirrors
+      // the named-refusal reply shape). The user's answer in the thread (e.g.
+      // "on main") carries the ref on the next message and re-attach binds it.
+      if (err instanceof ResidentNeedsRefError) {
+        await io.reply(
+          `🌿 Which branch of \`${repoCtx.repo}\` should this thread work on? ` +
+            `No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I'll pick it up from there.`,
+        );
+        return;
+      }
+      throw err;
+    }
+    const { executor, note } = selection;
+
+    // Effective system prompt, composed AFTER executor resolution (via
+    // RunOptions.system, U1): a resident-path run swaps in the agent's
+    // resident variant — the workspace is a ready worktree, no cloning, no
+    // installs — with the resolved repo named. Every other path keeps the
+    // agent's own prompt. The shared AgentDef is never mutated (concurrent
+    // dispatches share it).
+    const system =
+      executor instanceof ResidentExecutor && agent.residentSystem
+        ? `${agent.residentSystem}\n\nTarget repository: ${repoCtx.repo}. The worktree is already on this thread's bound branch (confirm with \`git branch --show-current\`).`
+        : undefined;
 
     const label = `*${agent.name}* on \`${resolved.modelRef}\`` + (note ? ` · ${note}` : "");
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
@@ -142,6 +177,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         model,
         agent,
         messages,
+        system,
         toolContext: { executor, reportProgress },
         onProgress,
       });

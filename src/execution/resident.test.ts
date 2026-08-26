@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ResidentExecutor } from "./resident.js";
+import { ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
 
 // Feature: features/resident-repos.md — bot-side resident client (U5): every
 // route POSTs {resource, threadKey, ...}; /exec streams heartbeat whitespace
@@ -149,6 +149,13 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
   it("409 needs:\"ref\" on open tells the user to name a branch", async () => {
     stubFetch({ status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref" } });
     await expect(ResidentExecutor.open(OPTS)).rejects.toThrow(/branch/i);
+  });
+
+  it("409 needs:\"ref\" is a TYPED error the dispatcher can catch for the ask-once flow (U7)", async () => {
+    stubFetch({ status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref" } });
+    const err = await ResidentExecutor.open(OPTS).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ResidentNeedsRefError);
+    expect((err as ResidentNeedsRefError).resource).toBe(OPTS.resource);
   });
 
   it("404 (not onboarded) on open is a named error", async () => {

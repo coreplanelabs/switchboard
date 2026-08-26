@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../config.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import type { CompletionRequest, CompletionResult, Provider } from "../providers/types.js";
+import { AGENTS } from "../agents/registry.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
@@ -282,5 +283,125 @@ describe("resident repo dispatch", () => {
     expect(
       statuses.some((s) => s.title.includes("resident restoring (rehydrating) — using fresh sandbox")),
     ).toBe(true);
+  });
+});
+
+// Feature: features/resident-repos.md — U7: repo/ref resolved BEFORE the model
+// turn (production default resolver), the needs-ref ask-once flow (one
+// clarifying question, no model turn burned), and the resident prompt variant
+// selected AFTER executor resolution via RunOptions.system.
+
+/** Router-style fetch stub for the resident service: /status and /attach. */
+function residentFetchStub(handlers: {
+  status?: () => Response;
+  attach?: (body: Record<string, unknown>) => Response;
+} = {}) {
+  const calls: Array<{ path: string; body?: Record<string, unknown> }> = [];
+  const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
+    const path = new URL(String(url)).pathname;
+    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+    calls.push({ path, body });
+    if (path === "/status") {
+      return handlers.status?.() ?? new Response(JSON.stringify({ state: "warm", reason: "" }), { status: 200 });
+    }
+    if (path === "/attach") {
+      return (
+        handlers.attach?.(body ?? {}) ??
+        new Response(
+          JSON.stringify({ workspace: "/workspace/threads/t/main", ref: "main", sha: "abc", user: "worker2" }),
+          { status: 200 },
+        )
+      );
+    }
+    throw new Error(`unexpected fetch: ${String(url)}`);
+  });
+  vi.stubGlobal("fetch", fn);
+  return { fn, calls };
+}
+
+describe("repo/ref resolution + resident prompt selection (U7)", () => {
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.mocked(makeExecutor).mockClear();
+    (await import("../execution/factory.js")).resetResidentProbeCache();
+  });
+
+  it("the production default resolver (no injection) extracts repo/ref from the message text", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider); // resolveRepoContext NOT injected
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix the login bug in acme/api on branch fix/login", "slack:UADMIN"), io);
+    const ctx = vi.mocked(makeExecutor).mock.calls[0][1];
+    expect(ctx).toMatchObject({ repo: "acme/api", ref: "fix/login" });
+  });
+
+  it("needs-ref from attach → ONE clarifying question; no model turn, no status card", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    residentFetchStub({
+      attach: () =>
+        new Response(JSON.stringify({ error: "needs-ref: this thread has no ref binding yet", needs: "ref" }), {
+          status: 409,
+        }),
+    });
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix the login bug in acme/api", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatch(/branch/i);
+    expect(replies[0]).toContain("acme/api");
+    expect(replies[0]).not.toContain("⚠️"); // a question, not an error surface
+    expect(provider.requests).toHaveLength(0); // no model turn burned
+    expect(statuses).toHaveLength(0); // asked before any run started
+  });
+
+  it('the thread answer "on main" rebinds via re-attach and runs', async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const { calls } = residentFetchStub();
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const history: HistoryItem[] = [
+      { role: "user", text: "agent:coding fix the login bug in acme/api" },
+      { role: "assistant", text: "🌿 Which branch of `acme/api` should this thread work on?" },
+    ];
+    const { io, replies } = fakeIO(history);
+    await dispatch(deps, msg("on main", "slack:UADMIN"), io);
+    const attach = calls.find((c) => c.path === "/attach");
+    expect(attach?.body).toMatchObject({ resource: "repo:acme/api", refHint: "main" });
+    expect(provider.requests).toHaveLength(1); // sticky agent:coding thread ran
+    expect(provider.requests[0].model).toBe("coding-model");
+    expect(replies).toContain("answer");
+  });
+
+  it("a resident run gets the agent's resident system variant naming the repo", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    residentFetchStub();
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix the login bug in acme/api on branch main", "slack:UADMIN"), io);
+    const system = provider.requests[0].system ?? "";
+    expect(system).toContain(AGENTS.coding.residentSystem!);
+    expect(system).toContain("acme/api"); // the resolved repo is named
+    expect(system).not.toMatch(/clone the relevant repository/i);
+    expect(system).not.toContain("gh pr create");
+  });
+
+  it("the per-thread fallback path keeps the agent's own system prompt (regression)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    vi.stubEnv("GH_TOKEN", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider); // no resident configured
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix the login bug in acme/api", "slack:UADMIN"), io);
+    expect(provider.requests[0].system).toBe(AGENTS.coding.system);
   });
 });

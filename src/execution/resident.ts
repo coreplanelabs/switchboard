@@ -35,6 +35,22 @@ export interface ResidentExecutorOptions {
   refHint?: string;
 }
 
+/** 409 needs:"ref" from /attach — the thread has no ref binding yet (KTD6:
+ *  binding is explicit-or-ask-once, never a silent guess). Typed so the
+ *  dispatcher can catch it and ask the user ONE clarifying question (U7)
+ *  instead of surfacing a raw error; the user's answer in the thread carries
+ *  the ref on the next message and re-attach binds it. */
+export class ResidentNeedsRefError extends Error {
+  readonly needs = "ref";
+  constructor(readonly resource: string) {
+    super(
+      `the ${resource} resident needs a branch for this thread: no ref is bound yet. ` +
+        `Name the branch to work on (e.g. "on main") and try again.`,
+    );
+    this.name = "ResidentNeedsRefError";
+  }
+}
+
 /** Result of a /status probe: a definite lifecycle answer, or an unreachable
  *  marker. `transport: true` means the failure was network-level (fetch threw
  *  or timed out) — the only kind the factory's negative cache may store. */
@@ -127,10 +143,7 @@ export class ResidentExecutor implements Executor {
     if (status === 200) return;
     const err = String(data.error ?? `HTTP ${status}`);
     if (status === 409 && data.needs === "ref") {
-      throw new Error(
-        `the ${this.opts.resource} resident needs a branch for this thread: no ref is bound yet. ` +
-          `Name the branch to work on (e.g. "on main") and try again.`,
-      );
+      throw new ResidentNeedsRefError(this.opts.resource);
     }
     if (status === 404) {
       throw new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`);
