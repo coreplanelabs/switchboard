@@ -42,6 +42,7 @@ The wishlist that seeded this program (Matanya's Slack post, 2026-08-18) adds ca
 - KD3. **LLM as orchestrator, never the whole machine** (session-settled: user-directed — chosen over LLM-does-everything: reliability comes from deterministic mechanics). Simple operations run as plain endpoints/commands with no model in the loop; complex work is a hybrid; agents are tuned for specific jobs, never "running random stuff." Governs R7, R11.
 - KD4. **Universal ingress, Slack as adapter #1** (session-settled: user-directed — chosen over Slack-native product: nothing in the golden product is Slack-specific). The same message over CLI, HTTP, or MCP behaves identically; the existing channel seam (`src/core/types.ts`, `src/cli.ts`) is the extension point. Governs R1, R2, R3.
 - KD5. **Item 8 is an ethos, not a rewrite** (session-settled: user-approved — chosen over a Go port: speed and conciseness are product qualities, not a language). Fast, concise, low-fluff defaults are tuned continuously across every area. Governs R21.
+- KD7. **Per-repo resident access follows the open-when-absent permission convention** (session-settled: user-directed — chosen over a fail-closed per-repo allowlist and over shipping no gate: zero friction for a small trusted team while the check seam still exists). A `canUseRepo(userId, slug)` gate runs in the factory before resident selection and in the deterministic fast-path; with no `permissions.repos` configured, every allowed coding-agent user may use every onboarded repo, and a per-repo allowlist tightens it when configured — the same absent-means-everyone semantics as the existing agent permission. Governs R3, R4 interaction.
 - KD6. **Non-Slack callers authenticate with keys mapped to identities** (session-settled: user-directed — chosen over human-only keys and service-only identities: keeps "same person, any channel" while giving machines their own gated identities). A human's key maps to the person and inherits their permissions; a machine key is a service identity with its own allowlist, in the existing platform-namespaced ID scheme. Governs R3.
 
 ```mermaid
@@ -180,10 +181,6 @@ This plan owns the program-level requirements; each area below is planned and de
 - Sandbox SDK 1.0 (`@cloudflare/sandbox@next`) exposes the documented lifecycle, backups, mounts, and tunnels APIs; the repo's Cloudflare execution path has never been live-tested (AGENTS.md known gap), so first deploy verifies SDK method names.
 
 ### Outstanding Questions
-
-**From 2026-08-26 review — resolve before U5 lands**
-
-- OQ6. Per-repo access policy (security-lens, P1): the only gate on the resident path is per-agent (`canRunAgent`), so any coding-agent user can execute inside any onboarded repo's resident with a repo-scoped write token. Decide between a per-repo allowlist (`canUseRepo`, fail-closed like onboarding — safest, but blocks all resident use until configured) and the existing permission convention (key absent = every allowed agent user; per-repo tightening optional). The check seam belongs in the factory before resident selection and in the U6 fast-path either way.
 
 **Deferred to planning of later areas**
 
@@ -386,10 +383,10 @@ Attach sequence (directional guidance, not implementation specification): attach
 - **Goal:** The bot runs repo-bound agents against residents when warm, and degrades loudly to the per-thread path otherwise.
 - **Requirements:** R6 (AE1, AE4, AE6), KTD10, KTD11.
 - **Dependencies:** U1, U4.
-- **Files:** `src/execution/resident.ts` (new), `src/execution/factory.ts`, `src/core/dispatcher.ts` (status wording), `src/cli.ts` (stable thread-key flag), `deploy/cloudflare/worker.ts` + `deploy/cloudflare/secrets.txt` (bearer passthrough), `config/config.example.yaml`, `config/config.production.yaml`.
+- **Files:** `src/execution/resident.ts` (new), `src/execution/factory.ts`, `src/config.ts` (`canUseRepo` gate + `permissions.repos`), `src/core/dispatcher.ts` (status wording), `src/cli.ts` (stable thread-key flag), `deploy/cloudflare/worker.ts` + `deploy/cloudflare/secrets.txt` (bearer passthrough), `config/config.example.yaml`, `config/config.production.yaml`.
 - **Approach:**
   1. `ResidentExecutor` as the fourth `Executor`: exec/read/write against the resident Worker with the operator bearer + thread/repo/ref headers, mirroring `CloudflareSandboxExecutor`'s client shape (but not its env-header contract — U2).
-  2. Factory: when the agent declares `repo: "required"`, the target repo resolved by U7's resolver is onboarded, and its state is `warm` (one operator-scope `/status` probe), select `ResidentExecutor`; an unresolved repo means the per-thread path with no probe; otherwise fall back to the configured per-thread backend and surface the resident's lifecycle state and `reason` through the status card ("resident restoring (rehydrating) — using fresh sandbox"), per KTD10.
+  2. Factory: when the agent declares `repo: "required"`, the target repo resolved by U7's resolver is onboarded, the caller passes `canUseRepo(userId, slug)` (KD7: open when `permissions.repos` is absent; allowlist when configured), and the resident's state is `warm` (one operator-scope `/status` probe), select `ResidentExecutor`; an unresolved repo means the per-thread path with no probe; a `canUseRepo` refusal is a named refusal, not a silent fallback; otherwise fall back to the configured per-thread backend and surface the resident's lifecycle state and `reason` through the status card ("resident restoring (rehydrating) — using fresh sandbox"), per KTD10.
   3. Wrap the probe in a short-lived in-process negative cache (circuit breaker): after a Worker-level probe failure, skip probing for a brief window so a resident-service outage costs one timeout, not one per concurrent dispatch (System-Wide Impact).
   4. Config: `execution.resident` block (base URL, token env name) typed in `src/execution/factory.ts` per the existing `ExecutionConfig` convention; plumb the operator token env var through the bot Worker shim — add it to `deploy/cloudflare/secrets.txt` and the explicit `envVars` allowlist in `deploy/cloudflare/worker.ts`, the same way `SANDBOX_TOKEN` reaches the bot today.
   5. CLI: accept a stable thread key (flag or env var) so repeated `src/cli.ts` invocations can act as one thread — required for the re-attach verification this unit and U6/U7 assign to the CLI.
@@ -400,6 +397,7 @@ Attach sequence (directional guidance, not implementation specification): attach
   - Membership probe timeout → treated as not-warm (fallback), never a hang past the probe timeout.
   - Two dispatches inside the negative-cache window after a probe failure → second dispatch skips the probe and falls back immediately.
   - Fallback status text carries the resident's `reason`, not a generic string.
+  - With `permissions.repos` unconfigured, any allowed coding-agent user reaches the resident (KD7 open-when-absent); with a repo allowlist configured, a non-listed user gets a named refusal, never a silent per-thread fallback.
 - **Verification:** `npm run typecheck`; CLI end-to-end (`npx tsx src/cli.ts "agent:coding ..."`) against a live resident and against a deliberately offboarded repo.
 
 ### U6. Deterministic operations seam and dispatcher fast-path
