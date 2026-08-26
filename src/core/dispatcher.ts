@@ -1,15 +1,14 @@
-import { resolve } from "node:path";
 import type { ConfigStore, Scope } from "../config.js";
 import { AGENTS, getAgent } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
-import { makeExecutor } from "../execution/factory.js";
+import { localWorkspaceDir, makeExecutor } from "../execution/factory.js";
 import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations } from "../execution/resident.js";
 import { LocalOperations } from "../execution/executor.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { resolveRepoContext, type RepoContext } from "./repoContext.js";
-import { handleRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
+import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
 import type { ChannelIO, HistoryItem, ImageAttachment, IncomingMessage } from "./types.js";
 
@@ -68,8 +67,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
 
     // Repo-management commands (U8) are config-family too: answered inline,
     // never a model turn. Gated inside — canManageRepos is KTD9 fail-closed
-    // for everything but `repo list`.
-    const repoReply = await handleRepoCommand(deps.config, msg, deps.residentAdmin);
+    // for everything but `repo list`. The message is parsed as a repo command
+    // ONCE per dispatch; the op recognizer below reuses the same result.
+    const repoCmd = parseRepoCommand(msg.text);
+    const repoReply = await handleRepoCommand(deps.config, msg, deps.residentAdmin, repoCmd);
     if (repoReply) {
       await io.reply(repoReply);
       return;
@@ -89,9 +90,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // (the agent can still serve the ask), while explicit commands are
     // config-family and always get a reply. An explicit agent:/model:
     // directive disables natural recognition — the user picked a model path.
-    const opAsk = recognizeOperation(msg.text, history, {
-      allowNatural: !directives.agent && !directives.model,
-    });
+    const opAsk = recognizeOperation(
+      msg.text,
+      history,
+      { allowNatural: !directives.agent && !directives.model },
+      repoCmd,
+    );
     if (opAsk) {
       const opReply = await runOperationFastPath(deps, msg, opAsk);
       if (opReply !== null) {
@@ -307,8 +311,7 @@ function defaultOperations(deps: CoreDeps, threadKey: string): Operations | null
     return token ? new ResidentOperations({ baseUrl: resident.baseUrl, token }) : null;
   }
   if (!execution?.type || execution.type === "local") {
-    const safe = threadKey.replace(/[^a-zA-Z0-9_.-]/g, "_");
-    return new LocalOperations(resolve(deps.config.config.workspaceDir ?? "./workspaces", safe));
+    return new LocalOperations(localWorkspaceDir(deps.config.config.workspaceDir ?? "./workspaces", threadKey));
   }
   return null; // per-thread remote backends have no deterministic-op surface
 }

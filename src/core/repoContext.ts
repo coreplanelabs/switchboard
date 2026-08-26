@@ -1,4 +1,5 @@
 import { resolveGithubToken } from "../execution/githubApp.js";
+import { validRef } from "./repoCommands.js";
 
 // Repo/ref resolution for resident environments (U7, KD7/KTD11): the
 // dispatcher resolves the target repo and ref BEFORE the model turn, from
@@ -30,9 +31,9 @@ export interface RepoContext {
 const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 // Repo name: word chars, dots, hyphens (GitHub's charset).
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
-// The resident's strict ref pattern (U4): validated here too so a hostile or
-// malformed phrase never becomes a refHint.
-const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+// Ref candidates are validated with validRef (the resident's strict ref
+// pattern, shared with repoCommands.ts) so a hostile or malformed phrase
+// never becomes a refHint.
 const WELL_KNOWN_REFS = new Set(["main", "master", "develop", "trunk"]);
 
 /** Slack link markup `<url>` / `<url|label>` → the bare url. */
@@ -52,13 +53,6 @@ function slugOf(token: string): string | undefined {
   const [owner, name] = parts;
   if (!OWNER_RE.test(owner) || !NAME_RE.test(name) || /^\.+$/.test(name)) return undefined;
   return `${owner}/${name}`.toLowerCase();
-}
-
-/** Validated ref or undefined — mirrors the resident's attach validation. */
-function validRef(candidate: string): string | undefined {
-  if (!REF_RE.test(candidate)) return undefined;
-  if (candidate.includes("..") || candidate.includes("@{") || candidate.endsWith(".lock")) return undefined;
-  return candidate;
 }
 
 interface Signals {
@@ -138,6 +132,11 @@ function extractSignals(rawText: string): Signals {
   return out;
 }
 
+/** repoFromThread is a pure function of the history array, and one dispatch
+ *  can scan the same array more than once (op recognition + repo resolution)
+ *  — memoize per array reference so the second call reuses the scan. */
+const repoFromThreadCache = new WeakMap<Array<{ role: string; text: string }>, string | undefined>();
+
 /**
  * The repo this thread already established: last user turn with an explicit
  * repo signal wins (like `lastThreadDirectives` — derived from history on
@@ -145,6 +144,7 @@ function extractSignals(rawText: string): Signals {
  * in history contributes its repo part only, never a fetch.
  */
 export function repoFromThread(history: Array<{ role: string; text: string }>): string | undefined {
+  if (repoFromThreadCache.has(history)) return repoFromThreadCache.get(history);
   let repo: string | undefined;
   for (const h of history) {
     if (h.role !== "user") continue;
@@ -153,6 +153,7 @@ export function repoFromThread(history: Array<{ role: string; text: string }>): 
     if (explicit) repo = explicit;
     else if (!repo && s.onSlug) repo = slugOf(s.onSlug);
   }
+  repoFromThreadCache.set(history, repo);
   return repo;
 }
 

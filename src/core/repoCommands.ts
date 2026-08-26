@@ -103,6 +103,11 @@ export function validRef(candidate: string): string | undefined {
   return candidate;
 }
 
+/** The resident service's resource id for a repo slug (KTD1: "<type>:<id>"). */
+export function repoResourceId(slug: string): string {
+  return `repo:${slug}`;
+}
+
 type RepoVerb = "list" | "onboard" | "offboard" | "reconfigure" | "rebuild" | "test" | "build";
 
 export type RepoCommand =
@@ -209,13 +214,15 @@ export function parseRepoCommand(text: string): RepoCommand | null {
 // ---- handling -----------------------------------------------------------------
 
 /** Handles a repo command, or returns null when `text` is not one. Replies
- *  are strings in the handleConfigCommand convention. */
+ *  are strings in the handleConfigCommand convention. The dispatcher parses
+ *  the message ONCE and threads the result in as `cmd`; callers that omit it
+ *  get the parse done here. */
 export async function handleRepoCommand(
   config: ConfigStore,
   msg: IncomingMessage,
   client?: ResidentAdminClient,
+  cmd: RepoCommand | null = parseRepoCommand(msg.text),
 ): Promise<string | null> {
-  const cmd = parseRepoCommand(msg.text);
   if (!cmd) return null;
   if ("error" in cmd) return cmd.error;
 
@@ -248,14 +255,14 @@ export async function handleRepoCommand(
         return renderList(await api.residents());
       case "onboard":
         return renderOnboard(cmd, await api.onboard({
-          resource: `repo:${cmd.slug}`,
+          resource: repoResourceId(cmd.slug),
           commands: cmd.commands,
           defaultRef: cmd.defaultRef,
         }));
       case "offboard":
-        return renderOffboard(cmd, await api.offboard(`repo:${cmd.slug}`, cmd.dryRun));
+        return renderOffboard(cmd, await api.offboard(repoResourceId(cmd.slug), cmd.dryRun));
       case "rebuild":
-        return renderRebuild(cmd, await api.rebuild(`repo:${cmd.slug}`, cmd.dryRun));
+        return renderRebuild(cmd, await api.rebuild(repoResourceId(cmd.slug), cmd.dryRun));
       case "reconfigure":
         return handleReconfigure(cmd, api);
     }
@@ -351,12 +358,12 @@ async function handleReconfigure(
   cmd: { slug: string; commands?: Partial<Record<CommandKey, string>>; defaultRef?: string },
   api: ResidentAdminClient,
 ): Promise<string> {
-  const body: Record<string, unknown> = { resource: `repo:${cmd.slug}` };
+  const body: Record<string, unknown> = { resource: repoResourceId(cmd.slug) };
   if (cmd.commands) {
     const list = await api.residents();
     if (list.status !== 200) return fail(`repo reconfigure ${cmd.slug}`, list);
     const residents = (list.data.residents as Array<Record<string, unknown>> | undefined) ?? [];
-    const record = residents.find((rec) => rec.resource === `repo:${cmd.slug}`);
+    const record = residents.find((rec) => rec.resource === repoResourceId(cmd.slug));
     if (!record) return `⚠️ \`${cmd.slug}\` is not onboarded — \`repo onboard ${cmd.slug}\` first.`;
     const current = (record.commands as Record<string, string> | undefined) ?? {};
     body.commands = { ...current, ...cmd.commands };

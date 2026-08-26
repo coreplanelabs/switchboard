@@ -16,36 +16,34 @@
 //   operator scope  POST /attach /exec /read /write /op                    GET /status
 //   unauthenticated GET /healthz (deploy wake ping; touches no DO)
 //
-// U8 added: POST /rebuild (down→onboarding: discard snapshots, reprovision;
-// dryRun supported), dryRun on /offboard (itemized plan, nothing executed),
-// the onboard-time GitHub App installation-membership check (enforced when
-// the App is configured, skipped with an honest `warning` when not), and the
-// watchdog's auto-rebuild after N consecutive down passes on a rehydration-
-// flavored reason.
+// Lifecycle engine: alarm-driven provisioning (clone → install/build →
+// stamped snapshot → warm), wake-path rehydration (`restoring` persisted
+// BEFORE restore, stamped snapshots refused on mismatch), a self-rescheduling
+// refresh alarm, and a cron watchdog (re-arm dead chains + degraded
+// (alarm-missed); time out stuck onboarding; auto-rebuild after N consecutive
+// down passes on a rehydration-flavored reason). GitHub App tokens are minted
+// repo-scoped on WebCrypto. POST /rebuild is the down→onboarding escape hatch
+// (discard snapshots, reprovision from scratch); /offboard and /rebuild
+// support dryRun (itemized plan, nothing executed); onboard verifies GitHub
+// App installation membership when the App is configured and skips the check
+// with an honest `warning` when it is not.
 //
-// U2 implemented auth, registry storage, onboard/offboard/reconfigure/status/
-// residents, and the provisioning deadline. U3 added the lifecycle engine:
-// alarm-driven provisioning (clone → install/build → stamped snapshot →
-// warm), wake-path rehydration (restoring persisted BEFORE restore, stamped
-// snapshots refused on mismatch), the self-rescheduling refresh alarm, the
-// watchdog (re-arm dead chains + degraded(alarm-missed); time out stuck
-// onboarding), and repo-scoped GitHub App token minting on WebCrypto.
-// U4 (this unit) adds the operator data plane: POST /attach (per-thread
-// worktree off the bare mirror + sticky ref binding + dep materialization +
-// per-attach credential file), POST /exec (privilege-dropped per-thread
-// execution), POST /read and /write (thread-user file ops confined to the
-// worktree), the in-DO mirror mutex serializing every mirror mutation, and
-// the inactivity sweep that evicts idle worktrees while keeping the binding
-// record. All four thread routes take a `resource` field alongside
-// `threadKey` — the service hosts many residents, and the resource picks the
-// DO exactly as GET /status does.
-// U6 (this unit) turns the /op stub into the deterministic modelless path
-// (KTD8): a name from a fixed enum {test, build, status} resolves through
-// the onboard-time command table only, gated by per-entry `effects`
-// profiles (readonly runs, mutating refused by name), executed in a
-// DISPOSABLE per-op checkout under /workspace/ops — never a thread's
-// attached worktree — and deleted afterwards; `status` touches no checkout
-// at all. /reconfigure accepts the new `effects` map.
+// Operator data plane: POST /attach (per-thread worktree off the bare mirror
+// + sticky ref binding + dep materialization + per-attach credential file),
+// POST /exec (privilege-dropped per-thread execution), POST /read and /write
+// (thread-user file ops confined to the worktree), an in-DO mirror mutex
+// serializing every mirror mutation, and an inactivity sweep that evicts idle
+// worktrees while keeping the binding record. All four thread routes take a
+// `resource` field alongside `threadKey` — the service hosts many residents,
+// and the resource picks the DO exactly as GET /status does.
+//
+// POST /op is the deterministic modelless path (KTD8): a name from a fixed
+// enum {test, build, status} resolves through the onboard-time command table
+// only, gated by per-entry `effects` profiles (readonly runs, mutating
+// refused by name), executed in a DISPOSABLE per-op checkout under
+// /workspace/ops — never a thread's attached worktree — and deleted
+// afterwards; `status` touches no checkout at all. /reconfigure accepts the
+// `effects` map.
 //
 // SECURITY (deliberate deviations from the thread-sandbox Worker):
 //   1. Bearer comparison is constant-time (timingSafeEqual below), never a
@@ -711,16 +709,24 @@ export class ResidentDO extends Sandbox<Env> {
     return { stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, timedOut: out.timedOut };
   }
 
+  /** Shared success gate for run/threadRun results: a non-zero exit or a
+   *  timeout becomes the step's named StepError; success hands back stdout. */
+  private assertOk(
+    r: { stdout: string; stderr: string; exitCode: number; timedOut: boolean },
+    step: string,
+  ): string {
+    if (r.exitCode !== 0 || r.timedOut) {
+      throw new StepError(step, `exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}: ${tail(r.stderr || r.stdout)}`);
+    }
+    return r.stdout;
+  }
+
   private async runOk(
     argv: readonly string[],
     step: string,
     opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {},
   ): Promise<string> {
-    const r = await this.run(argv, opts);
-    if (r.exitCode !== 0 || r.timedOut) {
-      throw new StepError(step, `exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}: ${tail(r.stderr || r.stdout)}`);
-    }
-    return r.stdout;
+    return this.assertOk(await this.run(argv, opts), step);
   }
 
   /** Run one command-table entry as the unprivileged build user in the warm
@@ -1240,11 +1246,21 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   private async threadRunOk(user: string, worktreePath: string, command: string, step: string, timeoutMs: number): Promise<string> {
-    const r = await this.threadRun(user, worktreePath, command, timeoutMs);
-    if (r.exitCode !== 0 || r.timedOut) {
-      throw new StepError(step, `exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}: ${tail(r.stderr || r.stdout)}`);
-    }
-    return r.stdout;
+    return this.assertOk(await this.threadRun(user, worktreePath, command, timeoutMs), step);
+  }
+
+  /** The user-pool scan shared by both allocators: live bindings (optionally
+   *  ignoring one threadKey's own binding) plus users transiently held by
+   *  in-flight ops mark the pool as used — an attach must never share an OS
+   *  user with a running op, and vice versa. Storage reads + set reads only,
+   *  so callers stay atomic under the DO input gate. */
+  private async findFreePoolUser(excludeThreadKey?: string): Promise<string | undefined> {
+    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    const used = new Set(
+      [...all.values()].filter((b) => !b.evicted && b.user && b.threadKey !== excludeThreadKey).map((b) => b.user),
+    );
+    for (const u of this.opUsersInUse) used.add(u);
+    return THREAD_USERS.find((u) => !used.has(u));
   }
 
   /** Storage-only allocation (atomic under the DO input gate: get → list →
@@ -1260,14 +1276,7 @@ export class ResidentDO extends Sandbox<Env> {
     const key = threadBindingKey(threadKey);
     const existing = await this.ctx.storage.get<ThreadBinding>(key);
     if (existing && !existing.evicted && existing.user) return { binding: existing, wrote: false };
-    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-    const used = new Set(
-      [...all.values()].filter((b) => !b.evicted && b.user && b.threadKey !== threadKey).map((b) => b.user),
-    );
-    // U6: users transiently held by in-flight ops are off-limits too — an
-    // attach must never share an OS user with a running op.
-    for (const u of this.opUsersInUse) used.add(u);
-    const user = THREAD_USERS.find((u) => !used.has(u));
+    const user = await this.findFreePoolUser(threadKey);
     if (!user) {
       return {
         error: `user-pool-exhausted: all ${THREAD_USERS.length} thread users are allocated; wait for the inactivity sweep or evict a thread`,
@@ -1698,10 +1707,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  microtask (atomic under the DO input gate, like allocateThreadUser).
    *  Returns null when threads + ops have the whole pool busy. */
   private async allocateOpUser(): Promise<string | null> {
-    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-    const used = new Set([...all.values()].filter((b) => !b.evicted && b.user).map((b) => b.user));
-    for (const u of this.opUsersInUse) used.add(u);
-    const user = THREAD_USERS.find((u) => !used.has(u));
+    const user = await this.findFreePoolUser();
     if (user) this.opUsersInUse.add(user);
     return user ?? null;
   }
@@ -1905,11 +1911,12 @@ export class ResidentDO extends Sandbox<Env> {
   // -- debug surface (admin-scoped via POST /debug; used by live validation) ---
 
   async debugSchedules(): Promise<Record<string, unknown>> {
-    return {
-      refresh: await this.listSchedules(REFRESH_CALLBACK),
-      provisionRun: await this.listSchedules(PROVISION_RUN_CALLBACK),
-      provisionDeadline: await this.listSchedules(PROVISIONING_CALLBACK),
-    };
+    const [refresh, provisionRun, provisionDeadline] = await Promise.all([
+      this.listSchedules(REFRESH_CALLBACK),
+      this.listSchedules(PROVISION_RUN_CALLBACK),
+      this.listSchedules(PROVISIONING_CALLBACK),
+    ]);
+    return { refresh, provisionRun, provisionDeadline };
   }
 
   /** Kill the refresh chain (simulates a dead alarm chain for watchdog tests). */
@@ -2254,6 +2261,36 @@ function parsePositiveInt(value: unknown, field: string, min: number, max: numbe
   return { value };
 }
 
+/** Optional resident limits shared by /onboard and /reconfigure: each field
+ *  is validated only when present; an absent field stays undefined (onboard
+ *  applies its own provisioningTimeoutMs default). */
+function parseResidentLimits(
+  body: Record<string, unknown>,
+): { diskBudgetMb?: number; provisioningTimeoutMs?: number; worktreeTtlDays?: number } | { error: string } {
+  const limits: { diskBudgetMb?: number; provisioningTimeoutMs?: number; worktreeTtlDays?: number } = {};
+  if (body.diskBudgetMb !== undefined) {
+    const parsed = parsePositiveInt(body.diskBudgetMb, "diskBudgetMb", 1, 100_000);
+    if ("error" in parsed) return { error: parsed.error };
+    limits.diskBudgetMb = parsed.value;
+  }
+  if (body.provisioningTimeoutMs !== undefined) {
+    const parsed = parsePositiveInt(
+      body.provisioningTimeoutMs,
+      "provisioningTimeoutMs",
+      MIN_PROVISIONING_TIMEOUT_MS,
+      MAX_PROVISIONING_TIMEOUT_MS,
+    );
+    if ("error" in parsed) return { error: parsed.error };
+    limits.provisioningTimeoutMs = parsed.value;
+  }
+  if (body.worktreeTtlDays !== undefined) {
+    const parsed = parsePositiveInt(body.worktreeTtlDays, "worktreeTtlDays", 1, 365);
+    if ("error" in parsed) return { error: parsed.error };
+    limits.worktreeTtlDays = parsed.value;
+  }
+  return limits;
+}
+
 // ---------------------------------------------------------------------------
 // Worker
 // ---------------------------------------------------------------------------
@@ -2287,29 +2324,33 @@ function residentStub(env: Env, resource: string) {
  *  handles in ResidentDO.teardown(). */
 const r2Prefix = (resource: string) => `resident/${resource}/`;
 
-async function deleteR2Prefix(bucket: R2Bucket, prefix: string): Promise<number> {
-  let deleted = 0;
+/** Cursor-pagination walk over every list page under `prefix` — the shared
+ *  half of the delete and count sweeps below. Each next page is fetched only
+ *  after the caller finishes with the current one. */
+async function* r2PrefixPages(bucket: R2Bucket, prefix: string): AsyncGenerator<Awaited<ReturnType<R2Bucket["list"]>>> {
   let cursor: string | undefined;
   do {
     const page = await bucket.list({ prefix, cursor });
+    yield page;
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+}
+
+async function deleteR2Prefix(bucket: R2Bucket, prefix: string): Promise<number> {
+  let deleted = 0;
+  for await (const page of r2PrefixPages(bucket, prefix)) {
     if (page.objects.length > 0) {
       await bucket.delete(page.objects.map((object) => object.key));
       deleted += page.objects.length;
     }
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor);
+  }
   return deleted;
 }
 
 /** Read-only twin of deleteR2Prefix, for the U8 dry-run itemizations. */
 async function countR2Prefix(bucket: R2Bucket, prefix: string): Promise<number> {
   let count = 0;
-  let cursor: string | undefined;
-  do {
-    const page = await bucket.list({ prefix, cursor });
-    count += page.objects.length;
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor);
+  for await (const page of r2PrefixPages(bucket, prefix)) count += page.objects.length;
   return count;
 }
 
@@ -2391,29 +2432,10 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
   const defaultRef = parseDefaultRef(body.defaultRef);
   if ("error" in defaultRef) return json({ error: defaultRef.error }, 400);
 
-  let diskBudgetMb: number | undefined;
-  if (body.diskBudgetMb !== undefined) {
-    const parsed = parsePositiveInt(body.diskBudgetMb, "diskBudgetMb", 1, 100_000);
-    if ("error" in parsed) return json({ error: parsed.error }, 400);
-    diskBudgetMb = parsed.value;
-  }
-  let provisioningTimeoutMs = DEFAULT_PROVISIONING_TIMEOUT_MS;
-  if (body.provisioningTimeoutMs !== undefined) {
-    const parsed = parsePositiveInt(
-      body.provisioningTimeoutMs,
-      "provisioningTimeoutMs",
-      MIN_PROVISIONING_TIMEOUT_MS,
-      MAX_PROVISIONING_TIMEOUT_MS,
-    );
-    if ("error" in parsed) return json({ error: parsed.error }, 400);
-    provisioningTimeoutMs = parsed.value;
-  }
-  let worktreeTtlDays: number | undefined;
-  if (body.worktreeTtlDays !== undefined) {
-    const parsed = parsePositiveInt(body.worktreeTtlDays, "worktreeTtlDays", 1, 365);
-    if ("error" in parsed) return json({ error: parsed.error }, 400);
-    worktreeTtlDays = parsed.value;
-  }
+  const limits = parseResidentLimits(body);
+  if ("error" in limits) return json({ error: limits.error }, 400);
+  const { diskBudgetMb, worktreeTtlDays } = limits;
+  const provisioningTimeoutMs = limits.provisioningTimeoutMs ?? DEFAULT_PROVISIONING_TIMEOUT_MS;
 
   // Installation membership (U8): the GitHub App installation is repository-
   // scoped and that scoping is a real control — onboard requires the repo to
@@ -2485,15 +2507,19 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
 
   // --dry-run (U8): the itemized plan of what the real teardown below would
   // remove, computed READ-ONLY — the resident stays fully intact (state,
-  // schedules, snapshots, registry slot all untouched).
+  // schedules, snapshots, registry slot all untouched). The DO plan and the
+  // R2 prefix count touch disjoint data, so they run concurrently.
   if (body.dryRun === true) {
+    const planPending = residentStub(env, resource.resource).teardownPlan();
+    const countPending = countR2Prefix(env.BACKUP_BUCKET, r2Prefix(resource.resource));
     let plan: Awaited<ReturnType<ResidentDO["teardownPlan"]>>;
     try {
-      plan = await residentStub(env, resource.resource).teardownPlan();
+      plan = await planPending;
     } catch (err) {
+      countPending.catch(() => {}); // the plan's named failure answers; the count is read-only
       return json({ error: `offboard dry-run failed: ${errMsg(err)}` }, 500);
     }
-    const r2Objects = await countR2Prefix(env.BACKUP_BUCKET, r2Prefix(resource.resource));
+    const r2Objects = await countPending;
     return json({
       resource: resource.resource,
       dryRun: true,
@@ -2512,20 +2538,23 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
   // Registry first: the slot frees atomically and no new work routes here.
   const registryRemoved = await registry.remove(resource.resource);
 
-  let teardown: Awaited<ReturnType<ResidentDO["teardown"]>>;
-  try {
-    teardown = await residentStub(env, resource.resource).teardown();
-  } catch (err) {
-    teardown = {
-      schedulesCancelled: false,
-      containerStopped: false,
-      storageCleared: false,
-      backupObjectsDeleted: 0,
-      errors: [`teardown failed: ${errMsg(err)}`],
-    };
-  }
-
-  const r2ObjectsDeleted = await deleteR2Prefix(env.BACKUP_BUCKET, r2Prefix(resource.resource));
+  // The DO teardown and the resident/<resource>/ prefix sweep touch disjoint
+  // data (the teardown's backup objects live under backups/<id>/), so both
+  // run unconditionally and concurrently.
+  const [teardown, r2ObjectsDeleted] = await Promise.all([
+    residentStub(env, resource.resource)
+      .teardown()
+      .catch(
+        (err: unknown): Awaited<ReturnType<ResidentDO["teardown"]>> => ({
+          schedulesCancelled: false,
+          containerStopped: false,
+          storageCleared: false,
+          backupObjectsDeleted: 0,
+          errors: [`teardown failed: ${errMsg(err)}`],
+        }),
+      ),
+    deleteR2Prefix(env.BACKUP_BUCKET, r2Prefix(resource.resource)),
+  ]);
 
   return json({
     resource: resource.resource,
@@ -2562,26 +2591,11 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
     if ("error" in defaultRef) return json({ error: defaultRef.error }, 400);
     patch.defaultRef = defaultRef.defaultRef;
   }
-  if (body.diskBudgetMb !== undefined) {
-    const parsed = parsePositiveInt(body.diskBudgetMb, "diskBudgetMb", 1, 100_000);
-    if ("error" in parsed) return json({ error: parsed.error }, 400);
-    patch.diskBudgetMb = parsed.value;
-  }
-  if (body.provisioningTimeoutMs !== undefined) {
-    const parsed = parsePositiveInt(
-      body.provisioningTimeoutMs,
-      "provisioningTimeoutMs",
-      MIN_PROVISIONING_TIMEOUT_MS,
-      MAX_PROVISIONING_TIMEOUT_MS,
-    );
-    if ("error" in parsed) return json({ error: parsed.error }, 400);
-    patch.provisioningTimeoutMs = parsed.value;
-  }
-  if (body.worktreeTtlDays !== undefined) {
-    const parsed = parsePositiveInt(body.worktreeTtlDays, "worktreeTtlDays", 1, 365);
-    if ("error" in parsed) return json({ error: parsed.error }, 400);
-    patch.worktreeTtlDays = parsed.value;
-  }
+  const limits = parseResidentLimits(body);
+  if ("error" in limits) return json({ error: limits.error }, 400);
+  if (limits.diskBudgetMb !== undefined) patch.diskBudgetMb = limits.diskBudgetMb;
+  if (limits.provisioningTimeoutMs !== undefined) patch.provisioningTimeoutMs = limits.provisioningTimeoutMs;
+  if (limits.worktreeTtlDays !== undefined) patch.worktreeTtlDays = limits.worktreeTtlDays;
   if (Object.keys(patch).length === 0) {
     return json(
       { error: "nothing to reconfigure (accepted: commands, effects, defaultRef, diskBudgetMb, provisioningTimeoutMs, worktreeTtlDays)" },
@@ -2621,19 +2635,20 @@ async function handleRebuild(env: Env, body: Record<string, unknown>): Promise<R
 }
 
 /** Admin enumeration: registry config + each resident's live engine view
- *  (state, sha, cache keys, snapshot stamp, refresh telemetry). */
+ *  (state, sha, cache keys, snapshot stamp, refresh telemetry). Each probe
+ *  targets a different DO, so they run concurrently; a failing one degrades
+ *  to {error} without touching its neighbors, and the response order follows
+ *  the registry list. */
 async function handleResidents(env: Env): Promise<Response> {
   const residents = await registryStub(env).list();
-  const enriched: unknown[] = [];
-  for (const record of residents) {
-    let live: unknown;
-    try {
-      live = await residentStub(env, record.resource).getResidentInfo();
-    } catch (err) {
-      live = { error: errMsg(err) };
-    }
-    enriched.push({ ...record, live });
-  }
+  const settled = await Promise.allSettled(
+    residents.map((record) => residentStub(env, record.resource).getResidentInfo()),
+  );
+  const enriched: unknown[] = residents.map((record, i) => {
+    const s = settled[i];
+    const live: unknown = s.status === "fulfilled" ? s.value : { error: errMsg(s.reason) };
+    return { ...record, live };
+  });
   return json({ cap: RESIDENT_CAP, count: residents.length, residents: enriched });
 }
 
@@ -2703,13 +2718,17 @@ async function handleExec(env: Env, body: Record<string, unknown>): Promise<Resp
   return streamThreadExec(ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs));
 }
 
-/** Stream the exec result with a whitespace heartbeat, exactly the
- *  thread-sandbox Worker's convention: headers go out immediately, a
- *  heartbeat byte every 15s keeps intermediaries from dropping the idle
- *  connection while a long command runs, and every post-validation outcome
- *  arrives in-body over HTTP 200 — a result as {stdout, stderr, exitCode},
- *  a named failure as {error, needs?, stdout:"", stderr:error, exitCode:127}. */
-function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execThread"]>>>): Response {
+/** Stream one pending result with the thread-sandbox Worker's heartbeat
+ *  convention (shared by /exec and /op): headers go out immediately, a
+ *  whitespace byte every 15s keeps intermediaries from dropping the idle
+ *  connection while a long command runs, then exactly ONE JSON document.
+ *  Every post-validation outcome — results AND named errors — arrives
+ *  in-body over HTTP 200; the handlers supply only the payload mapping. */
+function streamHeartbeatJson<T>(
+  pending: Promise<T>,
+  toPayload: (result: T) => object,
+  toErrorPayload: (err: unknown) => object,
+): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -2717,7 +2736,7 @@ function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execTh
         try {
           controller.enqueue(encoder.encode("\n"));
         } catch {
-          clearInterval(beat); // client went away; the exec promise still settles
+          clearInterval(beat); // client went away; the pending promise still settles
         }
       }, 15_000);
       const finish = (payload: object) => {
@@ -2729,28 +2748,33 @@ function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execTh
           // stream already errored/cancelled — nothing left to deliver to
         }
       };
-      pending
-        .then((result) => {
-          if ("error" in result) {
-            finish({
-              error: result.error,
-              ...(result.needs ? { needs: result.needs } : {}),
-              ...(result.state ? { state: result.state, reason: result.reason } : {}),
-              stdout: "",
-              stderr: result.error,
-              exitCode: 127,
-            });
-          } else {
-            finish({ stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, truncated: result.truncated });
-          }
-        })
-        .catch((err: unknown) => {
-          const msg = errMsg(err);
-          finish({ error: msg, stdout: "", stderr: msg, exitCode: 127 });
-        });
+      pending.then((result) => finish(toPayload(result))).catch((err: unknown) => finish(toErrorPayload(err)));
     },
   });
   return new Response(stream, { headers: { "content-type": "application/json" } });
+}
+
+/** /exec's payload mapping: a result as {stdout, stderr, exitCode, truncated},
+ *  a named failure as {error, needs?, stdout:"", stderr:error, exitCode:127}. */
+function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execThread"]>>>): Response {
+  return streamHeartbeatJson(
+    pending,
+    (result) =>
+      "error" in result
+        ? {
+            error: result.error,
+            ...(result.needs ? { needs: result.needs } : {}),
+            ...(result.state ? { state: result.state, reason: result.reason } : {}),
+            stdout: "",
+            stderr: result.error,
+            exitCode: 127,
+          }
+        : { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, truncated: result.truncated },
+    (err) => {
+      const msg = errMsg(err);
+      return { error: msg, stdout: "", stderr: msg, exitCode: 127 };
+    },
+  );
 }
 
 async function handleRead(env: Env, body: Record<string, unknown>): Promise<Response> {
@@ -2842,43 +2866,20 @@ async function handleOp(env: Env, body: Record<string, unknown>): Promise<Respon
   return streamOp(stub.runOp(op as "test" | "build", ref));
 }
 
-/** Stream one op result with /exec's heartbeat convention: headers out
- *  immediately, a whitespace byte every 15s (installs/tests can run minutes),
- *  then exactly ONE JSON document. Every post-validation outcome — results
- *  AND named errors — arrives in-body over HTTP 200. */
+/** /op's payload mapping: results pass through; a named error sheds its
+ *  transport-only `status` field (the body is the contract, never the code). */
 function streamOp(pending: Promise<Awaited<ReturnType<ResidentDO["runOp"]>>>): Response {
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const beat = setInterval(() => {
-        try {
-          controller.enqueue(encoder.encode("\n"));
-        } catch {
-          clearInterval(beat); // client went away; the op promise still settles
-        }
-      }, 15_000);
-      const finish = (payload: object) => {
-        clearInterval(beat);
-        try {
-          controller.enqueue(encoder.encode(JSON.stringify(payload)));
-          controller.close();
-        } catch {
-          // stream already errored/cancelled — nothing left to deliver to
-        }
-      };
-      pending
-        .then((result) => {
-          if ("error" in result) {
-            const { status: _status, ...rest } = result;
-            finish(rest);
-          } else {
-            finish(result);
-          }
-        })
-        .catch((err: unknown) => finish({ error: errMsg(err) }));
+  return streamHeartbeatJson(
+    pending,
+    (result) => {
+      if ("error" in result) {
+        const { status: _status, ...rest } = result;
+        return rest;
+      }
+      return result;
     },
-  });
-  return new Response(stream, { headers: { "content-type": "application/json" } });
+    (err) => ({ error: errMsg(err) }),
+  );
 }
 
 /** Admin diagnostic surface, used by U3's live validation (kill-refresh /
@@ -2944,23 +2945,28 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
 }
 
 /** One watchdog pass over every registered resident. Shared by the cron
- *  handler and the /debug run-watchdog op. */
+ *  handler and the /debug run-watchdog op. Each check targets a different DO,
+ *  so they run concurrently; a failing one becomes its own {error} entry
+ *  without touching its neighbors, and the results follow the registry list. */
 async function runWatchdog(env: Env): Promise<Record<string, unknown>> {
   const registry = registryStub(env);
   const residents = await registry.list();
-  const results: unknown[] = [];
-  for (const record of residents) {
-    try {
+  const settled = await Promise.allSettled(
+    residents.map(async (record) => {
       const check = await residentStub(env, record.resource).watchdogCheck();
       if (check.action === "provision-timed-out") {
         // The DO already tried to release its own slot; this is the backstop.
         await registry.remove(record.resource);
       }
-      results.push({ resource: record.resource, state: check.state, reason: check.reason, action: check.action });
-    } catch (err) {
-      results.push({ resource: record.resource, error: errMsg(err) });
-    }
-  }
+      return check;
+    }),
+  );
+  const results: unknown[] = residents.map((record, i) => {
+    const s = settled[i];
+    return s.status === "fulfilled"
+      ? { resource: record.resource, state: s.value.state, reason: s.value.reason, action: s.value.action }
+      : { resource: record.resource, error: errMsg(s.reason) };
+  });
   return { cap: RESIDENT_CAP, count: residents.length, results };
 }
 

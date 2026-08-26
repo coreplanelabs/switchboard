@@ -5,6 +5,7 @@ import { LocalExecutor, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ResidentExecutor, type ResidentStatusProbe } from "./resident.js";
+import { repoResourceId } from "../core/repoCommands.js";
 import { resolveGithubToken } from "./githubApp.js";
 
 export interface ResidentExecutionConfig {
@@ -106,7 +107,7 @@ export async function makeExecutor(
     const tokenEnv = resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN";
     const token = process.env[tokenEnv];
     if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
-    const resource = `repo:${ctx.repo}`;
+    const resource = repoResourceId(ctx.repo);
     const probe = await probeResident(resident, token, resource);
     if (probe.kind === "status" && probe.state === "warm") {
       return {
@@ -146,14 +147,21 @@ async function probeResident(
   return probe;
 }
 
+/** The thread's local workspace directory under `baseDir`: the threadKey is
+ *  sanitized to a filesystem-safe slug before resolving. Shared by the local
+ *  executor path here and the dispatcher's local Operations backend. */
+export function localWorkspaceDir(baseDir: string, threadKey: string): string {
+  const safe = threadKey.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  return resolve(baseDir, safe);
+}
+
 /** The per-thread backends (the pre-resident selection, unchanged). */
 async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorContext): Promise<Executor> {
   const { threadKey } = ctx;
   const type = opts.execution?.type ?? "local";
 
   if (type === "local") {
-    const safe = threadKey.replace(/[^a-zA-Z0-9_.-]/g, "_");
-    const dir = resolve(opts.workspaceDir, safe);
+    const dir = localWorkspaceDir(opts.workspaceDir, threadKey);
     mkdirSync(dir, { recursive: true });
     return new LocalExecutor(dir);
   }

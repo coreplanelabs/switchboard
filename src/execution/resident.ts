@@ -1,4 +1,5 @@
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
+import { repoResourceId } from "../core/repoCommands.js";
 import { truncate, type Executor } from "./executor.js";
 
 // Remote execution against a resident repo environment — the always-warm
@@ -52,6 +53,21 @@ export class ResidentNeedsRefError extends Error {
   }
 }
 
+/** Tolerant body parse shared by every resident route: read the FULL body as
+ *  text first (streamed routes send heartbeat whitespace, then exactly one
+ *  JSON document), tolerate a non-JSON body (edge error page) as {} — the
+ *  caller then surfaces the HTTP status. */
+async function parseResidentBody(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  let data: Record<string, unknown> = {};
+  try {
+    data = JSON.parse(text.trim() || "{}") as Record<string, unknown>;
+  } catch {
+    // non-JSON body (edge error page) — the caller falls back to the status
+  }
+  return data;
+}
+
 /** Deterministic-ops client (U6, KTD8) for the resident Worker's POST /op:
  *  a name from the fixed op enum resolves resident-side ONLY through the
  *  onboard-time command table and runs in a disposable per-op checkout —
@@ -69,7 +85,7 @@ export class ResidentOperations implements Operations {
       res = await fetch(`${this.opts.baseUrl.replace(/\/$/, "")}/op`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
-        body: JSON.stringify({ resource: `repo:${req.repo}`, op, ...(req.ref ? { ref: req.ref } : {}) }),
+        body: JSON.stringify({ resource: repoResourceId(req.repo), op, ...(req.ref ? { ref: req.ref } : {}) }),
       });
     } catch (err) {
       return {
@@ -78,13 +94,7 @@ export class ResidentOperations implements Operations {
       };
     }
     if (res.status === 404) return { kind: "not-onboarded" };
-    const text = await res.text();
-    let data: Record<string, unknown> = {};
-    try {
-      data = JSON.parse(text.trim() || "{}") as Record<string, unknown>;
-    } catch {
-      // non-JSON body (edge error page) — falls through to the status check
-    }
+    const data = await parseResidentBody(res);
     const err = typeof data.error === "string" ? data.error : "";
     if (err.startsWith("op-refused")) return { kind: "refused", reason: err };
     if (err) return { kind: "error", message: `resident /op: ${err}` };
@@ -172,14 +182,7 @@ export class ResidentExecutor implements Executor {
           "The operation may still have run in the resident; re-check its effects before re-running it.",
       );
     }
-    const text = await res.text();
-    let data: Record<string, unknown> = {};
-    try {
-      data = JSON.parse(text.trim() || "{}") as Record<string, unknown>;
-    } catch {
-      // non-JSON body (edge error page); the caller surfaces the HTTP status
-    }
-    return { status: res.status, data };
+    return { status: res.status, data: await parseResidentBody(res) };
   }
 
   /** Bind/reuse this thread's worktree. Legible errors for every named

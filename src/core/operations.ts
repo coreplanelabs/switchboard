@@ -1,4 +1,4 @@
-import { parseRepoCommand, parseSlug, validRef } from "./repoCommands.js";
+import { parseRepoCommand, parseSlug, validRef, type RepoCommand } from "./repoCommands.js";
 import { repoFromThread } from "./repoContext.js";
 
 // Deterministic operations (U6, KTD8): the seam behind the dispatcher's
@@ -62,14 +62,17 @@ const NL_BUILD_RE = /^build\s+(\S+)(?:\s+in\s+(\S+))?$/i;
  * path) and only when BOTH the ref and the repo are unambiguous: the repo
  * comes from the "in <owner/name>" tail or the thread's established repo
  * (message or history — the same sources as repoContext). Anything else → null.
+ *
+ * The dispatcher parses the message as a repo command ONCE and threads the
+ * result in as `cmd`; callers that omit it get the parse done here.
  */
 export function recognizeOperation(
   text: string,
   history: Array<{ role: string; text: string }>,
   opts: { allowNatural: boolean },
+  cmd: RepoCommand | null = parseRepoCommand(text),
 ): RecognizedOp | null {
   // Explicit command form first: it IS the deterministic invocation.
-  const cmd = parseRepoCommand(text);
   if (cmd) {
     if ("error" in cmd) return null; // named error already owned by handleRepoCommand
     if (cmd.verb === "test" || cmd.verb === "build") {

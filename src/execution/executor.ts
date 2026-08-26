@@ -38,23 +38,13 @@ export class LocalExecutor implements Executor {
     return abs;
   }
 
-  exec(command: string): Promise<string> {
-    return new Promise((res) => {
-      execFile(
-        "bash",
-        ["-c", command],
-        { cwd: this.workspaceDir, timeout: BASH_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
-        (err, stdout, stderr) => {
-          const parts = [stdout, stderr].filter(Boolean).join("\n--- stderr ---\n");
-          if (err) {
-            const code = (err as NodeJS.ErrnoException & { code?: number }).code ?? "error";
-            res(truncate(`exit ${code}: ${err.message}\n${parts}`));
-          } else {
-            res(truncate(parts || "(no output)"));
-          }
-        },
-      );
-    });
+  async exec(command: string): Promise<string> {
+    const r = await runBash(command, this.workspaceDir);
+    const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
+    if (r.error) {
+      return truncate(`exit ${r.error.code ?? "error"}: ${r.error.message}\n${parts}`);
+    }
+    return truncate(parts || "(no output)");
   }
 
   async readFile(path: string): Promise<string> {
@@ -112,16 +102,34 @@ export class LocalOperations implements Operations {
   }
 }
 
-function runLocalCommand(command: string, cwd: string): Promise<{ exitCode: number; output: string }> {
+async function runLocalCommand(command: string, cwd: string): Promise<{ exitCode: number; output: string }> {
+  const r = await runBash(command, cwd);
+  const output = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
+  const code = r.error ? (r.error.code ?? 1) : 0;
+  return { exitCode: typeof code === "number" ? code : 1, output };
+}
+
+/** Shared bash spawn-and-collect (`bash -c` under the standard budget and
+ *  buffer). `error` is null on a clean zero-exit run; otherwise it carries
+ *  execFile's raw code (number exit code, string errno, or undefined when
+ *  signal-killed) and message — each caller formats its own result. */
+function runBash(
+  command: string,
+  cwd: string,
+): Promise<{ stdout: string; stderr: string; error: { code?: number | string; message: string } | null }> {
   return new Promise((res) => {
     execFile(
       "bash",
       ["-c", command],
       { cwd, timeout: BASH_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
       (err, stdout, stderr) => {
-        const output = [stdout, stderr].filter(Boolean).join("\n--- stderr ---\n");
-        const code = err ? ((err as NodeJS.ErrnoException & { code?: number }).code ?? 1) : 0;
-        res({ exitCode: typeof code === "number" ? code : 1, output });
+        res({
+          stdout,
+          stderr,
+          error: err
+            ? { code: (err as NodeJS.ErrnoException & { code?: number | string }).code, message: err.message }
+            : null,
+        });
       },
     );
   });
