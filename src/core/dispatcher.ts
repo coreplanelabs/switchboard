@@ -226,9 +226,20 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // is simply omitted — the feature degrades gracefully, the run is otherwise
     // unchanged. Events are fed to the registry in onEvent below.
     const registry = deps.runRegistry ?? defaultRunRegistry;
-    // A short human label for the Access-gated runs index (`GET /runs`): the
-    // agent plus the repo it targets, or the thread key when no repo is bound.
-    const runLabel = `${agent.name} · ${repoCtx.repo ?? msg.threadKey}`;
+    // A human-first label for the Access-gated runs index (`GET /runs`): agent +
+    // repo (repo runs) or channel/user (chat runs) + a snippet of the request,
+    // so a row reads like `review · #switchboard-prompting · justin · "…"` rather
+    // than raw ids. Built from the directive-stripped text so directives (agent:/
+    // model:) never clutter the snippet.
+    const runLabel = composeRunLabel({
+      agent: agent.name,
+      repo: repoCtx.repo,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      channelName: msg.channelName,
+      userName: msg.userName,
+      text: directives.text,
+    });
     const run = registry.create(runLabel);
     const liveLink = liveViewLink(run.id, run.token);
     // The card body is the agent's own checklist (via the update_status tool)
@@ -376,6 +387,85 @@ function liveViewLink(id: string, token: string): string | undefined {
   const base = process.env.PUBLIC_BASE_URL?.trim();
   if (!base) return undefined;
   return `${base.replace(/\/+$/, "")}/runs/${encodeURIComponent(id)}?t=${encodeURIComponent(token)}`;
+}
+
+// ---- run label (Area 2 / live-view index) -----------------------------------
+
+/** Everything `composeRunLabel` needs to build one human-readable run label.
+ *  Channel-agnostic: `channelName`/`userName` are optional display hints (Slack
+ *  provides them; HTTP/MCP don't), and `channelId`/`userId` are the always-present
+ *  namespaced ids the label falls back to. */
+export interface RunLabelInput {
+  /** Resolved agent name — the label always leads with this. */
+  agent: string;
+  /** Target repo (`owner/name`) for repo runs; absent for chat runs. */
+  repo?: string;
+  /** Namespaced channel id (`slack:C…`), used when no `channelName` resolved. */
+  channelId: string;
+  /** Namespaced user id (`slack:U…`), used when no `userName` resolved. */
+  userId: string;
+  /** Human channel/conversation name, if the adapter resolved one. */
+  channelName?: string;
+  /** Human user display name, if the adapter resolved one. */
+  userName?: string;
+  /** The request text; a short quoted snippet of it is appended to the label. */
+  text: string;
+}
+
+/** Max chars in a snippet before it is cut (at a word boundary) and ellipsized. */
+const SNIPPET_MAX = 60;
+/** Hard cap on the whole label so one hostile/huge field can't dominate the index. */
+const RUN_LABEL_MAX = 120;
+
+/** Drop the platform prefix from a namespaced id (`slack:U0123` → `U0123`) so an
+ *  id fallback reads a little better when no display name is available. */
+function stripPlatformPrefix(id: string): string {
+  const i = id.indexOf(":");
+  return i === -1 ? id : id.slice(i + 1);
+}
+
+/** A short, quoted snippet of the request text for a run label: whitespace
+ *  collapsed, cut at the first sentence end or ~SNIPPET_MAX chars (whichever
+ *  comes first, on a word boundary), ellipsized when anything was dropped.
+ *  Empty/whitespace-only text → undefined (no snippet segment). */
+function textSnippet(text: string): string | undefined {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  if (!collapsed) return undefined;
+  // First sentence, when it ends within the budget AND there is more after it.
+  const end = collapsed.slice(0, SNIPPET_MAX).search(/[.!?]/);
+  if (end !== -1 && end + 1 < collapsed.length) return `"${collapsed.slice(0, end)}…"`;
+  // Otherwise the whole thing if it fits …
+  if (collapsed.length <= SNIPPET_MAX) return `"${collapsed}"`;
+  // … or a word-boundary cut with an ellipsis (fall back to a hard cut if the
+  // first "word" alone already overflows the budget).
+  const hard = collapsed.slice(0, SNIPPET_MAX);
+  const wordCut = hard.replace(/\s+\S*$/, "").trimEnd();
+  const body = wordCut.length >= SNIPPET_MAX / 2 ? wordCut : hard.trimEnd();
+  return `"${body}…"`;
+}
+
+/**
+ * Build the human-first run label shown on the Access-gated `/runs` index. Rules:
+ * - always lead with the agent name;
+ * - a repo run is repo-identified (`coding · owner/repo · "…"`);
+ * - a chat run shows channel + user (`review · #<channel> · <user> · "…"`),
+ *   preferring display names and falling back to the prefix-stripped ids;
+ * - a short quoted snippet of the request is appended when the text is non-empty;
+ * - the whole thing is capped to RUN_LABEL_MAX chars.
+ * Pure and channel-agnostic (HTTP/MCP have no names → the id fallback applies).
+ */
+export function composeRunLabel(input: RunLabelInput): string {
+  const segments: string[] = [input.agent];
+  if (input.repo) {
+    segments.push(input.repo);
+  } else {
+    segments.push(`#${input.channelName ?? stripPlatformPrefix(input.channelId)}`);
+    segments.push(input.userName ?? stripPlatformPrefix(input.userId));
+  }
+  const snippet = textSnippet(input.text);
+  if (snippet) segments.push(snippet);
+  const label = segments.join(" · ");
+  return label.length > RUN_LABEL_MAX ? `${label.slice(0, RUN_LABEL_MAX - 1).trimEnd()}…` : label;
 }
 
 /** Prefixes the core stamps on status text — adapters use this to filter their

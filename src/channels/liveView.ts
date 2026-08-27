@@ -98,7 +98,16 @@ export function renderRunPage(id: string, token: string): string {
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .75rem;
     border-bottom: 1px solid #2a2f3a; padding-bottom: .5rem; }
   h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  a.back { color: #9ecbff; text-decoration: none; font-size: .8rem; }
+  a.back:hover { text-decoration: underline; }
+  .conn { margin-left: auto; display: inline-flex; align-items: center; gap: .35rem; }
   #state { font-size: .8rem; color: #8b93a7; }
+  .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%;
+    background: #6e7681; flex: 0 0 auto; }
+  .dot.green { background: #2ea043; }
+  .dot.amber { background: #d29922; }
+  .dot.red { background: #f85149; }
+  .dot.grey { background: #6e7681; }
   #log { list-style: none; margin: 0; padding: 0; }
   #log li { padding: .3rem .5rem; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
   #log li + li { margin-top: .25rem; }
@@ -110,8 +119,9 @@ export function renderRunPage(id: string, token: string): string {
 </head>
 <body>
 <header>
+  <a class="back" href="/runs">← All runs</a>
   <h1>Live run</h1>
-  <span id="state">connecting…</span>
+  <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>
 </header>
 <ul id="log"><li class="empty" id="placeholder">Waiting for activity…</li></ul>
 <script>
@@ -119,7 +129,15 @@ export function renderRunPage(id: string, token: string): string {
   var url = ${JSON.stringify(eventsPath)};
   var log = document.getElementById("log");
   var state = document.getElementById("state");
+  var stateDot = document.getElementById("statedot");
   var placeholder = document.getElementById("placeholder");
+  // Connection indicator: color the dot + set its label via classList/textContent
+  // (never via raw markup). green = live, amber = connecting, red = disconnected,
+  // grey = finished.
+  function setConn(color, text) {
+    stateDot.className = "dot " + color;
+    state.textContent = text;
+  }
   function row(cls, text) {
     if (placeholder) { placeholder.remove(); placeholder = null; }
     var li = document.createElement("li");
@@ -129,7 +147,7 @@ export function renderRunPage(id: string, token: string): string {
     li.scrollIntoView({ block: "nearest" });
   }
   var es = new EventSource(url);
-  es.onopen = function () { state.textContent = "live"; };
+  es.onopen = function () { setConn("green", "live"); };
   es.onmessage = function (m) {
     var e;
     try { e = JSON.parse(m.data); } catch (_) { return; }
@@ -140,11 +158,11 @@ export function renderRunPage(id: string, token: string): string {
     }
   };
   es.addEventListener("end", function () {
-    state.textContent = "finished";
+    setConn("grey", "finished");
     es.close();
   });
   es.onerror = function () {
-    if (es.readyState === EventSource.CLOSED) state.textContent = "disconnected";
+    if (es.readyState === EventSource.CLOSED) setConn("red", "disconnected");
   };
 })();
 </script>
@@ -180,21 +198,25 @@ function eventCountLabel(n: number): string {
 }
 
 /** Server-rendered markup for one index row, keyed `data-run-id` so the client
- *  can find and update it in place. Every dynamic string is HTML-escaped and the
- *  href's id/token URL-encoded — a hostile label or id can break out of neither
- *  the markup nor the attribute. The client mirrors this exact shape via the DOM
- *  (textContent + setAttribute), so a row looks the same whether painted here or
- *  by an `upsert`. */
+ *  can find and update it in place. The ENTIRE row is a single `<a>` (full-row
+ *  clickable), leading with a colored status dot (green = live, grey = finished)
+ *  that carries an accessible label since color alone isn't accessible. Every
+ *  dynamic string is HTML-escaped and the href's id/token URL-encoded — a hostile
+ *  label or id can break out of neither the markup nor the attribute. The client
+ *  mirrors this exact shape via the DOM (createElement + textContent/setAttribute),
+ *  so a row looks the same whether painted here or by an `upsert`. */
 function indexRowHtml(r: RunSummary): string {
   const href = `/runs/${encodeURIComponent(r.id)}?t=${encodeURIComponent(r.token)}`;
   const label = escapeHtml(r.label ?? shortId(r.id));
-  const badge = r.finished
-    ? `<span class="badge done">finished</span>`
-    : `<span class="badge live">live</span>`;
+  const dotClass = r.finished ? "grey" : "green"; // static — safe, not user input
+  const dotWord = r.finished ? "finished" : "live";
   return (
     `<li data-run-id="${escapeHtml(r.id)}" data-started-at="${r.startedAt}">` +
-    `<a href="${escapeHtml(href)}">${label}</a> ${badge}` +
-    `<span class="meta">${escapeHtml(eventCountLabel(r.eventCount))}</span></li>`
+    `<a class="row" href="${escapeHtml(href)}">` +
+    `<span class="dot ${dotClass}" role="img" aria-label="${dotWord}" title="${dotWord}"></span>` +
+    `<span class="label">${label}</span>` +
+    `<span class="meta">${escapeHtml(eventCountLabel(r.eventCount))}</span>` +
+    `</a></li>`
   );
 }
 
@@ -235,25 +257,31 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .75rem;
     border-bottom: 1px solid #2a2f3a; padding-bottom: .5rem; }
   h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  .conn { margin-left: auto; display: inline-flex; align-items: center; gap: .35rem; }
   #state { font-size: .8rem; color: #8b93a7; }
+  .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%;
+    background: #6e7681; flex: 0 0 auto; }
+  .dot.green { background: #2ea043; }
+  .dot.amber { background: #d29922; }
+  .dot.red { background: #f85149; }
+  .dot.grey { background: #6e7681; }
   #runs { list-style: none; margin: 0; padding: 0; }
-  #runs li { padding: .45rem .5rem; border-radius: 6px; display: flex; align-items: baseline;
-    gap: .6rem; flex-wrap: wrap; }
-  #runs li + li { margin-top: .25rem; border-top: 1px solid #1b1f28; }
-  #runs a { color: #9ecbff; text-decoration: none; font-weight: 600; }
-  #runs a:hover { text-decoration: underline; }
-  .badge { font-size: .7rem; padding: .05rem .4rem; border-radius: 999px; }
-  .badge.live { color: #7ee787; border: 1px solid #2ea043; }
-  .badge.done { color: #8b93a7; border: 1px solid #2a2f3a; }
+  #runs li { border-radius: 6px; }
+  #runs li + li { border-top: 1px solid #1b1f28; }
+  /* The whole row is the link (full-row clickable), with a clear hover bg. */
+  #runs a.row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+    padding: .45rem .5rem; border-radius: 6px; color: inherit; text-decoration: none; }
+  #runs a.row:hover { background: #161b22; }
+  #runs a.row .label { color: #9ecbff; font-weight: 600; }
   .meta { font-size: .75rem; color: #8b93a7; }
-  .empty { color: #8b93a7; }
+  .empty { color: #8b93a7; padding: .45rem .5rem; }
   [hidden] { display: none; }
 </style>
 </head>
 <body>
 <header>
   <h1>Live runs</h1>
-  <span id="state">connecting…</span>
+  <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>
 </header>
 <ul id="runs">${rows}<li class="empty" id="empty"${emptyHidden}>No active runs.</li></ul>
 <script>
@@ -261,6 +289,13 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   var list = document.getElementById("runs");
   var empty = document.getElementById("empty");
   var state = document.getElementById("state");
+  var stateDot = document.getElementById("statedot");
+  // Connection indicator: color the dot + set its label via classList/textContent
+  // (never via raw markup). green = live, amber = connecting, red = disconnected.
+  function setConn(color, text) {
+    stateDot.className = "dot " + color;
+    state.textContent = text;
+  }
   // Rows keyed by run id — avoids building CSS selectors from (untrusted) ids.
   var rows = Object.create(null);
   var seeded = list.querySelectorAll("li[data-run-id]");
@@ -272,25 +307,33 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   function shortId(id) { return id.length > 8 ? id.slice(0, 8) + "\\u2026" : id; }
   function countLabel(n) { return n + (n === 1 ? " event" : " events"); }
 
-  // Rebuild a row's contents from a run summary using textContent + setAttribute
-  // only (no raw-markup assignment), so a hostile label/id is rendered as data.
+  // Rebuild a row's contents from a run summary using createElement +
+  // textContent/setAttribute only (no raw-markup assignment), so a hostile
+  // label/id is rendered as data. Mirrors the server's full-row shape: the whole
+  // row is one <a class="row">, led by an accessible status dot.
   function fill(li, run) {
     li.setAttribute("data-run-id", run.id);
     li.setAttribute("data-started-at", String(run.startedAt)); // drives sorted insert
     li.textContent = ""; // clear any prior children (server-rendered or stale)
     var a = document.createElement("a");
+    a.className = "row";
     a.setAttribute("href", runHref(run));
-    a.textContent = run.label || shortId(run.id);
-    li.appendChild(a);
-    li.appendChild(document.createTextNode(" "));
-    var badge = document.createElement("span");
-    badge.className = "badge " + (run.finished ? "done" : "live");
-    badge.textContent = run.finished ? "finished" : "live";
-    li.appendChild(badge);
+    var dotWord = run.finished ? "finished" : "live";
+    var dot = document.createElement("span");
+    dot.className = "dot " + (run.finished ? "grey" : "green");
+    dot.setAttribute("role", "img");
+    dot.setAttribute("aria-label", dotWord);
+    dot.setAttribute("title", dotWord);
+    a.appendChild(dot);
+    var label = document.createElement("span");
+    label.className = "label";
+    label.textContent = run.label || shortId(run.id);
+    a.appendChild(label);
     var meta = document.createElement("span");
     meta.className = "meta";
     meta.textContent = countLabel(run.eventCount);
-    li.appendChild(meta);
+    a.appendChild(meta);
+    li.appendChild(a);
   }
   function refreshEmpty() {
     var has = false;
@@ -334,7 +377,7 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   }
 
   var es = new EventSource("/runs?stream=1");
-  es.onopen = function () { state.textContent = "live"; };
+  es.onopen = function () { setConn("green", "live"); };
   es.onmessage = function (m) {
     var ev;
     try { ev = JSON.parse(m.data); } catch (_) { return; }
@@ -342,7 +385,8 @@ export function renderRunsIndex(runs: RunSummary[]): string {
     else if (ev.type === "removed" && ev.id) remove(ev.id);
   };
   es.onerror = function () {
-    state.textContent = es.readyState === EventSource.CLOSED ? "disconnected" : "connecting\\u2026";
+    if (es.readyState === EventSource.CLOSED) setConn("red", "disconnected");
+    else setConn("amber", "connecting\\u2026");
   };
 })();
 </script>
