@@ -2,6 +2,7 @@ import type { ConfigStore, Scope } from "../config.js";
 import { AGENTS, getAgent } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
+import { makeWebCapability } from "../tools/web.js";
 import { localWorkspaceDir, makeExecutor } from "../execution/factory.js";
 import { ResidentNeedsRefError, ResidentOperations } from "../execution/resident.js";
 import { LocalOperations } from "../execution/executor.js";
@@ -240,7 +241,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         agent,
         messages,
         system,
-        toolContext: { executor, reportProgress },
+        toolContext: { executor, reportProgress, web: makeWebCapability(process.env) },
         onProgress,
       });
     } catch (err) {

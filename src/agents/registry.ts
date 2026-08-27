@@ -6,8 +6,8 @@ export interface AgentDef {
   name: string;
   description: string;
   system: string;
-  /** key into TOOLSETS: "full" | "readonly" | "none" */
-  toolset: "full" | "readonly" | "none";
+  /** key into TOOLSETS: "full" | "readonly" | "web" | "none" */
+  toolset: "full" | "readonly" | "web" | "none";
   /** backstop only — the wall clock below is the real budget */
   maxTurns: number;
   maxTokens: number;
@@ -118,10 +118,27 @@ Maintain the user-facing status card with the update_status tool: post your plan
 
 Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
 
+// Research agent (Area 5 / R16): no repo, no workspace — just web search + URL
+// reading, so a user can drop a link or ask a research question and get an
+// answer without invoking a repo-bound agent. Keeps `general` deliberately
+// fast and tool-less.
+const RESEARCH_SYSTEM = `You are Switchboard's research agent, answering a request from Slack.
+
+You have two tools and no workspace: \`web_search\` (find sources) and \`web_fetch\` (read a URL's text). You cannot run commands, clone repos, or read local files.
+
+How to work:
+1. If the user gave a URL, read it with web_fetch first. If they asked a question, web_search for good sources, then web_fetch the most promising 1-3 to read the actual content — don't answer from snippets alone when the page is readable.
+2. Prefer primary sources; corroborate a surprising claim with a second source.
+3. Answer concisely and cite the URLs you used. If sources conflict or you couldn't verify something, say so plainly. If web search is unconfigured, use web_fetch on any URLs you have and say search was unavailable.
+
+Maintain the user-facing status card with the update_status tool: post a short checklist (○ pending) after you plan, and update items as they start (✱) and finish (✓ — only once they actually happened).
+
+Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks). Your final message is posted to Slack — lead with the answer, then supporting detail and sources.`;
+
 const GENERAL_SYSTEM = `You are Switchboard, a helpful assistant answering requests from Slack.
 Answer directly and concisely. Use Slack-friendly formatting (no markdown headers; use *bold*, bullets, and code blocks).
 
-You have NO tools: you cannot run commands, clone repositories, read files, or access GitHub. Other Switchboard agents can. When a request needs any of that, do not guess at file contents, repo URLs, or command output — tell the user to re-send the request with \`agent:coding\` (implements changes and ships PRs) or \`agent:review\` (reviews PRs, read-only), e.g. "\`agent:coding clone X and ...\`".`;
+You have NO tools: you cannot run commands, clone repositories, read files, access GitHub, or browse the web. Other Switchboard agents can. When a request needs any of that, do not guess at file contents, repo URLs, command output, or what a web page says — tell the user to re-send the request with \`agent:coding\` (implements changes and ships PRs), \`agent:review\` (reviews PRs, read-only), or \`agent:research\` (searches the web and reads URLs), e.g. "\`agent:coding clone X and ...\`" or "\`agent:research summarize <url>\`".`;
 
 export const AGENTS: Record<string, AgentDef> = {
   general: {
@@ -155,6 +172,17 @@ export const AGENTS: Record<string, AgentDef> = {
     maxTokens: 64000,
     maxMinutes: 25, // safety net, not the mechanism — typical reviews land in ~5
     effort: "medium", // fast turns; one big-context pass does the deep work
+  },
+  research: {
+    name: "research",
+    description: "Answers questions with web search + URL reading. No repo.",
+    system: RESEARCH_SYSTEM,
+    toolset: "web",
+    resources: { repo: "none" }, // web I/O only; no workspace is provisioned
+    maxTurns: 12,
+    maxTokens: 24000,
+    maxMinutes: 8,
+    effort: "medium",
   },
 };
 
