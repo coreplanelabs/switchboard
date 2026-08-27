@@ -25,4 +25,4 @@ You can see what an agent is doing while it works, in real time (Area 2 / R12). 
 | Redaction covers realistic env/curl/cloud/connection-string shapes | `[unit]` `::redactSecrets::redacts realistic env / curl / cloud / connection-string secrets` (repro-verified against the review's exact leaked payloads) |
 | Redact-before-cap: no fragment leak at a truncation boundary | `[unit]` `::redactAndCap::redacts BEFORE capping — a secret near the boundary never leaks as a fragment`; `src/runner.test.ts::run-visibility events::redacts a secret in a long bash command before capping` |
 | Live card refresh per event (perceived-latency fix) | `[agent]` (post-deploy) — pending; observe the Slack card ticking per tool call/result rather than every 5 s. |
-| External live-view page consuming this stream | `[deferred]` — next PR (chosen direction); needs an authed served endpoint (security owned in-band via auth). |
+| External live-view page consuming this stream | Shipped — see [live-view.md](live-view.md) (per-run capability token + SSE; consumes this same event stream). |

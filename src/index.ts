@@ -4,6 +4,8 @@ import { ProviderRegistry } from "./providers/registry.js";
 import { createSlackApp } from "./channels/slack.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
+import { createLiveViewHandler } from "./channels/liveView.js";
+import { defaultRunRegistry } from "./core/runRegistry.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
@@ -35,7 +37,13 @@ async function main() {
     const auth = parseIngressTokens(process.env);
     const ingress = createIngressHandler({ config, providers }, { auth });
     const mcp = createMcpHandler({ config, providers }, { auth });
+    // Live run view (Area 2 / #43): GET /runs/:id (page) + /runs/:id/events
+    // (SSE), token-gated per run. Shares defaultRunRegistry with the dispatcher
+    // — the run created during dispatch() is the run this streams. Auth is the
+    // per-run capability token in the URL, not SWITCHBOARD_INGRESS_TOKENS.
+    const liveView = createLiveViewHandler(defaultRunRegistry);
     const tokenCount = Object.keys(auth.tokens).length;
+    const liveViewState = process.env.PUBLIC_BASE_URL ? "GET /runs/:id (live view)" : "live view (no PUBLIC_BASE_URL — links omitted)";
     createServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0];
       if (path === "/ingress") {
@@ -46,11 +54,16 @@ async function main() {
         mcp(req, res);
         return;
       }
+      // The live-view handler owns /runs/:id and /runs/:id/events; it returns
+      // false for anything else, falling through to the health probe.
+      if (liveView(req, res)) {
+        return;
+      }
       res.writeHead(200, { "content-type": "text/plain" });
       res.end("ok");
     }).listen(Number(process.env.PORT), () =>
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"})`,
       ),
     );

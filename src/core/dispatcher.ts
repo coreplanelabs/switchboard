@@ -12,6 +12,7 @@ import { resolveRepoContext, type RepoContext } from "./repoContext.js";
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
 import type { RunEvent } from "./runEvents.js";
+import { defaultRunRegistry, type RunRegistry } from "./runRegistry.js";
 import type { ChannelIO, HistoryItem, ImageAttachment, IncomingMessage } from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
@@ -47,6 +48,13 @@ export interface CoreDeps {
    * is local, else none — the recognizer then falls through to the agent.
    */
   operations?: Operations;
+  /**
+   * Live run-view registry (Area 2 / #43): every run is registered here and its
+   * events published so the external /runs page can stream them. Optional;
+   * defaults to the process-wide singleton so the dispatcher and the served
+   * /runs endpoints (src/index.ts) share one instance. Injectable for tests.
+   */
+  runRegistry?: RunRegistry;
 }
 
 const STATUS_UPDATE_MIN_MS = 3000;
@@ -212,6 +220,14 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       `${icon ?? spinner[frame++ % spinner.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
     const status = await io.status({ title: title() });
     let lastToolAt = Date.now();
+    // Live run view (Area 2 / #43): register the run and mint its capability
+    // link AFTER the card exists (so nothing awaits between create() and the
+    // run loop's finally that finish()es it). With no PUBLIC_BASE_URL the link
+    // is simply omitted — the feature degrades gracefully, the run is otherwise
+    // unchanged. Events are fed to the registry in onEvent below.
+    const registry = deps.runRegistry ?? defaultRunRegistry;
+    const run = registry.create();
+    const liveLink = liveViewLink(run.id, run.token);
     // The card body is the agent's own checklist (via the update_status tool)
     // plus a live one-line activity trace (current tool call + redacted result
     // summary) so the card reflects progress per tool event, not only on the
@@ -221,7 +237,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const currentFrame = () => {
       const quiet = Date.now() - lastToolAt;
       const thinking = quiet > 20_000 ? ` — thinking (${Math.round(quiet / 1000)}s since last tool)` : "";
-      const detail = [checklist, lastActivity].filter(Boolean).join("\n");
+      const detail = [liveLink, checklist, lastActivity].filter(Boolean).join("\n");
       return { title: title() + thinking, detail: detail || undefined };
     };
     const onProgress = (note: string) => {
@@ -231,6 +247,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // Live run-visibility (Area 2): each tool call/result refreshes the card
     // immediately, so activity is visible without waiting for the heartbeat.
     const onEvent = (e: RunEvent) => {
+      registry.publish(run.id, e); // feed the external live-view stream
       lastToolAt = Date.now();
       lastActivity =
         e.type === "tool_call" ? `→ ${e.summary}` : `${e.ok ? "✓" : "✗"} ${e.tool}: ${e.summary}`;
@@ -265,6 +282,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     } finally {
       activeRuns--;
       clearInterval(heartbeat);
+      registry.finish(run.id); // close the live-view stream; start its TTL
     }
 
     console.log(`[done] ${msg.threadKey} ${answer.length} chars`);
@@ -345,6 +363,16 @@ function defaultOperations(deps: CoreDeps, threadKey: string): Operations | null
 function clipOpOutput(output: string): string {
   const MAX = 3000;
   return output.length > MAX ? `…${output.slice(-MAX)}` : output;
+}
+
+/** The external live-view capability URL for a run, or undefined when
+ *  PUBLIC_BASE_URL is unset/blank — the feature degrades gracefully (no link,
+ *  everything else works). The token is a per-run capability, unguessable and
+ *  scoped to one run; it is not a logged credential. */
+function liveViewLink(id: string, token: string): string | undefined {
+  const base = process.env.PUBLIC_BASE_URL?.trim();
+  if (!base) return undefined;
+  return `${base.replace(/\/+$/, "")}/runs/${encodeURIComponent(id)}?t=${encodeURIComponent(token)}`;
 }
 
 /** Prefixes the core stamps on status text — adapters use this to filter their
