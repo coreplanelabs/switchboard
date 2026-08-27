@@ -2,7 +2,7 @@ import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerRespons
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
 import {
-  authenticate,
+  authorizeRequest,
   MAX_BODY_BYTES,
   readBody,
   type DispatchFn,
@@ -240,21 +240,33 @@ async function route(
  * happens upstream in the node wrapper, before the body is ever fully buffered.
  */
 export async function handleMcpRequest(req: McpRequest, deps: CoreDeps, options: McpOptions): Promise<McpResponse> {
-  if ((req.method ?? "GET").toUpperCase() !== "POST") {
-    return { status: 405, body: err(null, INVALID_REQUEST, "method not allowed; POST only") };
-  }
-  // Fail-closed: with no tokens configured the endpoint is disabled, never open.
-  if (Object.keys(options.auth.tokens).length === 0) {
-    return { status: 503, body: err(null, AUTH_ERROR, "disabled: no ingress tokens configured") };
-  }
-  const identity = authenticate(req.headers, options.auth);
-  if (!identity) {
-    return { status: 401, body: err(null, AUTH_ERROR, "unauthorized") };
-  }
+  // Auth gate (method → disabled → bearer) is the SAME decision the HTTP ingress
+  // uses — reuse authorizeRequest so both surfaces share one fail-closed,
+  // constant-time gate with no duplicated logic; map its rejection to the
+  // MCP-shaped JSON-RPC error.
+  const gate = authorizeRequest(req.method, req.headers, options);
+  if ("status" in gate) return mcpErrorForStatus(gate.status);
+  return handleMcpMessage(gate.identity, req.body, deps, options);
+}
 
+/** Map the shared (HTTP-shaped) authorizeRequest rejection status to the
+ *  equivalent MCP JSON-RPC error response. */
+function mcpErrorForStatus(status: number): McpResponse {
+  if (status === 405) return { status, body: err(null, INVALID_REQUEST, "method not allowed; POST only") };
+  if (status === 503) return { status, body: err(null, AUTH_ERROR, "disabled: no ingress tokens configured") };
+  return { status: 401, body: err(null, AUTH_ERROR, "unauthorized") };
+}
+
+/** Parse and route one JSON-RPC message from an already-authed caller. */
+async function handleMcpMessage(
+  identity: IngressIdentity,
+  rawBody: string,
+  deps: CoreDeps,
+  options: McpOptions,
+): Promise<McpResponse> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(req.body);
+    parsed = JSON.parse(rawBody);
   } catch {
     return { status: 200, body: err(null, PARSE_ERROR, "parse error: invalid JSON") };
   }
@@ -262,6 +274,15 @@ export async function handleMcpRequest(req: McpRequest, deps: CoreDeps, options:
     return { status: 200, body: err(null, INVALID_REQUEST, "invalid request: expected a JSON-RPC object") };
   }
   const msg = parsed as Record<string, unknown>;
+  // Strict JSON-RPC 2.0: the version field is required and must be exactly "2.0".
+  if (msg.jsonrpc !== "2.0") {
+    return { status: 200, body: err(readId(msg), INVALID_REQUEST, 'invalid request: `jsonrpc` must be "2.0"') };
+  }
+  // An `id`, when present, must be a string, number, or null — a malformed id
+  // (object/boolean) is itself an invalid request, not silently coerced to null.
+  if ("id" in msg && typeof msg.id !== "string" && typeof msg.id !== "number" && msg.id !== null) {
+    return { status: 200, body: err(null, INVALID_REQUEST, "invalid request: `id` must be a string, number, or null") };
+  }
   if (typeof msg.method !== "string") {
     return { status: 200, body: err(readId(msg), INVALID_REQUEST, "invalid request: `method` is required") };
   }
@@ -303,17 +324,23 @@ export function createMcpHandler(
   return (req, res) => {
     void (async () => {
       try {
+        // Authorize from headers BEFORE reading the body (unified with the HTTP
+        // ingress via authorizeRequest): an unauthorized/wrong-method/disabled
+        // caller is rejected without buffering a body it has no right to send.
+        const gate = authorizeRequest(req.method, req.headers, options);
+        if ("status" in gate) {
+          const rejection = mcpErrorForStatus(gate.status);
+          write(res, rejection.status, rejection.body);
+          req.destroy();
+          return;
+        }
         const read = await readBody(req, maxBytes);
         if (!read.ok) {
           write(res, 413, err(null, INVALID_REQUEST, "request body too large"));
           req.destroy();
           return;
         }
-        const result = await handleMcpRequest(
-          { method: req.method, headers: req.headers, body: read.body },
-          deps,
-          options,
-        );
+        const result = await handleMcpMessage(gate.identity, read.body, deps, options);
         write(res, result.status, result.body);
       } catch (e) {
         // dispatch() catches its own errors and replies, so reaching here means
