@@ -24,6 +24,8 @@ interface Env {
   GITHUB_APP_INSTALLATION_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   PUBLIC_BASE_URL?: string; // live-view: base for /runs/<id>?t=… links on the status card
+  ACCESS_TEAM_DOMAIN?: string; // live-view SSO gate: Cloudflare Access team domain (JWKS + iss)
+  ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
 }
 
 export class SwitchboardServer extends Container<Env> {
@@ -55,6 +57,8 @@ export class SwitchboardServer extends Container<Env> {
         ? { GITHUB_APP_PRIVATE_KEY: env.GITHUB_APP_PRIVATE_KEY }
         : {}),
       ...(env.PUBLIC_BASE_URL ? { PUBLIC_BASE_URL: env.PUBLIC_BASE_URL } : {}),
+      ...(env.ACCESS_TEAM_DOMAIN ? { ACCESS_TEAM_DOMAIN: env.ACCESS_TEAM_DOMAIN } : {}),
+      ...(env.ACCESS_AUD ? { ACCESS_AUD: env.ACCESS_AUD } : {}),
     };
   }
 

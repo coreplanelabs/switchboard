@@ -17,7 +17,17 @@
   // Non-secret, deploy-constant: the public base for live-view links. The
   // dispatcher (in the container) reads process.env.PUBLIC_BASE_URL to put the
   // /runs/<id>?t=… link on the status card; worker.ts forwards it into envVars.
-  "vars": { "PUBLIC_BASE_URL": "https://switchboard.coreplanelabs.dev" },
+  // Non-secret, deploy-constant config for the container. PUBLIC_BASE_URL: the
+  // live-view link base. ACCESS_*: the Cloudflare Access app this bot sits
+  // behind — the app-layer gate (src/channels/accessAuth.ts) verifies the
+  // Cf-Access-Jwt-Assertion JWT against this team's keys and AUD, fail-closed,
+  // so /runs is denied without a valid Access identity. Neither ACCESS_ value is
+  // a secret (forging a JWT needs Cloudflare's private key, not these).
+  "vars": {
+    "PUBLIC_BASE_URL": "https://switchboard.coreplanelabs.dev",
+    "ACCESS_TEAM_DOMAIN": "coreplane.cloudflareaccess.com",
+    "ACCESS_AUD": "3886ef9ed724728da863bbeb96d09f79e53c0832f2fdabc1534f155dca9a4f5c"
+  },
   "observability": { "enabled": true, "traces": { "enabled": true } },
   "containers": [
     {
