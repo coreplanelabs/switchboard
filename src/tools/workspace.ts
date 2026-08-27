@@ -1,14 +1,20 @@
 import type { ToolDef } from "../providers/types.js";
 import type { Executor } from "../execution/executor.js";
+import { webFetchTool, webSearchTool, type WebCapability } from "./web.js";
 
 // Tools are thin declarations over the Executor seam. Where the command
 // actually runs (local host vs per-thread sandbox) is the Executor's concern —
-// see src/execution/.
+// see src/execution/. Web tools are the exception: they do network I/O in the
+// bot process via the injected `web` capability, not through the Executor, so a
+// no-repo agent can use them with no workspace.
 
 export interface ToolContext {
   executor: Executor;
   /** Replace the user-facing progress checklist on the status card. */
   reportProgress?: (checklist: string) => void;
+  /** Web fetch + search capability (Area 5). Injected by the dispatcher;
+   *  absent → web tools report themselves unavailable. */
+  web?: WebCapability;
 }
 
 export interface RunnableTool extends ToolDef {
@@ -87,8 +93,11 @@ export const updateStatusTool: RunnableTool = {
   },
 };
 
+// R16: URL reading (web_fetch) is available broadly to agents with tool loops;
+// web_search is gated to the research-capable toolset ("web").
 export const TOOLSETS: Record<string, RunnableTool[]> = {
-  full: [bashTool, readFileTool, writeFileTool, updateStatusTool],
-  readonly: [bashTool, readFileTool, updateStatusTool],
+  full: [bashTool, readFileTool, writeFileTool, updateStatusTool, webFetchTool],
+  readonly: [bashTool, readFileTool, updateStatusTool, webFetchTool],
+  web: [webFetchTool, webSearchTool, updateStatusTool],
   none: [],
 };
