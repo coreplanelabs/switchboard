@@ -1,4 +1,5 @@
 import { lookup as dnsLookup } from "node:dns/promises";
+import { Agent, fetch as undiciFetch } from "undici";
 import type { RunnableTool, ToolContext } from "./workspace.js";
 
 // Provider-agnostic web tools (Area 5 / R16): URL reading (web_fetch) and web
@@ -70,32 +71,73 @@ export class BraveWebSearch implements WebSearch {
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 /** Resolve a hostname to its IP addresses (injectable for tests). */
-export type DnsLookup = (hostname: string) => Promise<string[]>;
+export type DnsResolve = (hostname: string) => Promise<string[]>;
 
 export interface WebCapability {
+  /** SSRF-safe fetch: in production its connection is IP-pinned + validated at
+   *  connect time (see makeWebCapability). Injectable for tests. */
   fetch: FetchLike;
   search: WebSearch;
-  lookup: DnsLookup;
 }
 
-const nodeDnsLookup: DnsLookup = async (hostname) => {
+const nodeDnsResolve: DnsResolve = async (hostname) => {
   const records = await dnsLookup(hostname, { all: true });
   return records.map((r) => r.address);
 };
 
-/** Build the web capability from env: a real Brave adapter when the key is
- *  present, else the Null seam. Injected into ToolContext by the dispatcher. */
-export function makeWebCapability(
-  env: Record<string, string | undefined>,
-  fetchImpl: FetchLike = globalThis.fetch,
-  lookup: DnsLookup = nodeDnsLookup,
-): WebCapability {
-  const key = env.BRAVE_SEARCH_API_KEY;
-  const search: WebSearch = key ? new BraveWebSearch(key, fetchImpl) : new NullWebSearch();
-  return { fetch: fetchImpl, search, lookup };
+/** A dns.lookup-compatible function for undici's connector: it resolves the
+ *  hostname and REFUSES if any resolved IP is internal. Because undici calls
+ *  this at connect time and connects to exactly the address it returns, the
+ *  validated IP and the connected IP are the same resolution — closing the
+ *  TOCTOU / DNS-rebinding gap a separate pre-check would leave open. Exported
+ *  for direct unit testing. */
+export function makeSsrfLookup(resolve: DnsResolve) {
+  return (
+    hostname: string,
+    options: { all?: boolean } | ((err: Error | null, address?: unknown, family?: number) => void),
+    callback?: (err: Error | null, address?: unknown, family?: number) => void,
+  ): void => {
+    const cb = (typeof options === "function" ? options : callback)!;
+    const all = typeof options === "object" && options?.all === true;
+    const family = (ip: string) => (ip.includes(":") ? 6 : 4);
+    resolve(hostname).then(
+      (ips) => {
+        const blocked = ips.find((ip) => ipInBlockedRange(ip));
+        if (blocked) {
+          cb(new BlockedUrlError(`host ${hostname} resolves to blocked address ${blocked}`));
+          return;
+        }
+        if (ips.length === 0) {
+          cb(new BlockedUrlError(`host ${hostname} did not resolve`));
+          return;
+        }
+        if (all) cb(null, ips.map((ip) => ({ address: ip, family: family(ip) })));
+        else cb(null, ips[0], family(ips[0]));
+      },
+      (e) => cb(e instanceof Error ? e : new Error(String(e))),
+    );
+  };
 }
 
-// ---- SSRF hardening ---------------------------------------------------------
+/** Build the web capability from env: a real Brave adapter when the key is
+ *  present, else the Null seam; and an SSRF-safe fetch whose undici connector
+ *  validates the actual connect-time IP. Injected into ToolContext by the
+ *  dispatcher. */
+export function makeWebCapability(
+  env: Record<string, string | undefined>,
+  fetchImpl?: FetchLike,
+  resolve: DnsResolve = nodeDnsResolve,
+): WebCapability {
+  const agent = new Agent({ connect: { lookup: makeSsrfLookup(resolve) } as never });
+  const boundFetch: FetchLike =
+    fetchImpl ??
+    ((url, init) => undiciFetch(url, { ...(init as Record<string, unknown>), dispatcher: agent }) as unknown as Promise<Response>);
+  const key = env.BRAVE_SEARCH_API_KEY;
+  const search: WebSearch = key ? new BraveWebSearch(key, boundFetch) : new NullWebSearch();
+  return { fetch: boundFetch, search };
+}
+
+// ---- SSRF hardening (literal-address guard) --------------------------------
 
 export class BlockedUrlError extends Error {
   constructor(message: string) {
@@ -116,13 +158,55 @@ function isIpLiteral(host: string): boolean {
   return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":");
 }
 
-/** True if an IP literal falls in a loopback/private/link-local/metadata/
- *  reserved range — the ranges SSRF abuses to reach internal services. */
+function v4FromGroups(g6: number, g7: number): string {
+  return `${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`;
+}
+
+/** Expand an IPv6 literal to its 8 16-bit groups, or null if unparseable.
+ *  Handles `::` compression and a trailing embedded IPv4 (`::ffff:1.2.3.4`,
+ *  `::1.2.3.4`) by rewriting the dotted-quad to two hex groups first — so the
+ *  hex forms the URL parser actually emits (`::ffff:a9fe:a9fe`) expand too. */
+function expandIpv6(ip: string): number[] | null {
+  let s = ip.toLowerCase();
+  if (!s.includes(":")) return null;
+  const v4 = s.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (v4) {
+    const p = v4[1].split(".").map(Number);
+    if (p.some((n) => Number.isNaN(n) || n > 255)) return null;
+    s = s.slice(0, v4.index) + ((p[0] << 8) | p[1]).toString(16) + ":" + ((p[2] << 8) | p[3]).toString(16);
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const parse = (part: string): number[] | null => {
+    if (part === "") return [];
+    const out: number[] = [];
+    for (const g of part.split(":")) {
+      if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+      out.push(parseInt(g, 16));
+    }
+    return out;
+  };
+  const head = parse(halves[0]);
+  const tail = halves.length === 2 ? parse(halves[1]) : [];
+  if (head === null || tail === null) return null;
+  if (halves.length === 2) {
+    const explicit = head.length + tail.length;
+    if (explicit > 7) return null; // "::" must stand for at least one zero group
+    return [...head, ...Array(8 - explicit).fill(0), ...tail];
+  }
+  return head.length === 8 ? head : null;
+}
+
+/** True if an IP literal (v4 or v6) falls in a loopback/private/link-local/
+ *  metadata/reserved range — the ranges SSRF abuses to reach internal
+ *  services. IPv6 is fully expanded, so IPv4-mapped/compat/NAT64 forms that
+ *  embed an internal IPv4 are caught too. */
 export function ipInBlockedRange(ip: string): boolean {
   const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
     const a = Number(v4[1]);
     const b = Number(v4[2]);
+    if ([a, b, Number(v4[3]), Number(v4[4])].some((n) => n > 255)) return true; // malformed → refuse
     if (a === 127) return true; // loopback 127/8
     if (a === 10) return true; // private 10/8
     if (a === 172 && b >= 16 && b <= 31) return true; // private 172.16/12
@@ -133,17 +217,32 @@ export function ipInBlockedRange(ip: string): boolean {
     if (a >= 224) return true; // multicast/reserved 224/4+
     return false;
   }
-  const v6 = ip.toLowerCase().replace(/^\[|\]$/g, "");
-  if (v6 === "::1" || v6 === "::") return true; // loopback / unspecified
-  if (v6.startsWith("fe80")) return true; // link-local fe80::/10
-  if (v6.startsWith("fc") || v6.startsWith("fd")) return true; // ULA fc00::/7
-  const mapped = v6.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (mapped) return ipInBlockedRange(mapped[1]); // IPv4-mapped IPv6
+  const groups = expandIpv6(ip.replace(/^\[|\]$/g, ""));
+  if (!groups) return false; // not a parseable IP literal → not our concern here
+  if (groups.every((g) => g === 0)) return true; // :: unspecified
+  if (groups.slice(0, 7).every((g) => g === 0) && groups[7] === 1) return true; // ::1 loopback
+  if ((groups[0] & 0xfe00) === 0xfc00) return true; // ULA fc00::/7
+  if ((groups[0] & 0xffc0) === 0xfe80) return true; // link-local fe80::/10
+  // IPv4-mapped ::ffff:0:0/96
+  if (groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff) {
+    return ipInBlockedRange(v4FromGroups(groups[6], groups[7]));
+  }
+  // IPv4-compat ::/96 (deprecated) — an embedded IPv4 in the low 32 bits
+  if (groups.slice(0, 6).every((g) => g === 0) && (groups[6] !== 0 || groups[7] !== 0)) {
+    return ipInBlockedRange(v4FromGroups(groups[6], groups[7]));
+  }
+  // NAT64 64:ff9b::/96 — also embeds an IPv4
+  if (groups[0] === 0x64 && groups[1] === 0xff9b && groups.slice(2, 6).every((g) => g === 0)) {
+    return ipInBlockedRange(v4FromGroups(groups[6], groups[7]));
+  }
   return false;
 }
 
-/** Structural URL guard (sync): http(s) only, reject literal internal IPs and
- *  internal hostnames. Returns the parsed URL. */
+/** Structural URL guard (sync): http(s) only, reject literal internal IPs
+ *  (all IPv6 forms included) and internal hostnames. A fast, clear-error
+ *  first line of defense; hostnames that resolve to internal IPs are caught at
+ *  connect time by the SSRF-guarded dispatcher (makeWebCapability). Returns
+ *  the parsed URL. */
 export function assertUrlAllowed(raw: string): URL {
   let u: URL;
   try {
@@ -158,22 +257,6 @@ export function assertUrlAllowed(raw: string): URL {
   if (isBlockedHostname(host)) throw new BlockedUrlError(`blocked host: ${u.hostname}`);
   if (isIpLiteral(host) && ipInBlockedRange(host)) throw new BlockedUrlError(`blocked address: ${u.hostname}`);
   return u;
-}
-
-/** DNS-rebinding guard: resolve a hostname and reject if ANY resolved IP is
- *  internal. Skips literals (already checked by assertUrlAllowed). */
-export async function assertResolvedIpsAllowed(u: URL, lookup: DnsLookup): Promise<void> {
-  const host = u.hostname.replace(/^\[|\]$/g, "");
-  if (isIpLiteral(host)) return;
-  let ips: string[];
-  try {
-    ips = await lookup(host);
-  } catch {
-    throw new BlockedUrlError(`could not resolve host: ${host}`);
-  }
-  for (const ip of ips) {
-    if (ipInBlockedRange(ip)) throw new BlockedUrlError(`host ${host} resolves to blocked address ${ip}`);
-  }
 }
 
 // ---- web_fetch tool ---------------------------------------------------------
@@ -243,8 +326,9 @@ export const webFetchTool: RunnableTool = {
     if (!ctx.web) return "web tools are not available in this context.";
     const raw = String(input.url ?? "").trim();
     try {
+      // Sync literal guard first; the connect-time dispatcher guard (production
+      // fetch) validates hostnames' resolved IPs and pins them.
       let target = assertUrlAllowed(raw);
-      await assertResolvedIpsAllowed(target, ctx.web.lookup);
       let res: Response;
       let redirects = 0;
       for (;;) {
@@ -257,7 +341,6 @@ export const webFetchTool: RunnableTool = {
         if (!location) break;
         if (redirects++ >= MAX_REDIRECTS) return `web_fetch: too many redirects for ${raw}`;
         target = assertUrlAllowed(new URL(location, target).toString());
-        await assertResolvedIpsAllowed(target, ctx.web.lookup);
       }
       if (!res.ok) return `web_fetch: ${target.toString()} returned HTTP ${res.status}`;
       const ctype = res.headers.get("content-type") ?? "";
@@ -272,6 +355,10 @@ export const webFetchTool: RunnableTool = {
       if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
         return `web_fetch: ${raw} timed out`;
       }
+      // A connect-time SSRF refusal surfaces as a fetch failure whose cause is
+      // our BlockedUrlError — report it as a refusal, not a generic failure.
+      const cause = e instanceof Error ? (e.cause as unknown) : undefined;
+      if (cause instanceof BlockedUrlError) return `web_fetch refused: ${cause.message}`;
       return `web_fetch failed: ${e instanceof Error ? e.message : String(e)}`;
     }
   },
