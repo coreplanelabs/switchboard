@@ -86,3 +86,33 @@ describe("resident prompt variants", () => {
     expect(AGENTS.review.system).toContain("gh pr diff");
   });
 });
+
+// Feature: features/validated-review.md (R14 distilled diffs, R15 validated
+// review). The resident prompts gain two behaviors: coding includes a distilled
+// diff digest in the PR body; review actually RUNS the project's tests/build in
+// the warm worktree and reports what it ran + pass/fail.
+describe("validated-review prompt behavior (resident variants)", () => {
+  it("coding resident: calls diff_digest and puts the distilled digest in the PR body (R14)", () => {
+    const sys = AGENTS.coding.residentSystem!;
+    expect(sys).toContain("diff_digest");
+    expect(sys).toMatch(/distilled/i);
+    expect(sys).toMatch(/PR body/i);
+    // the digest, not the raw diff, goes in the body
+    expect(sys).toMatch(/not the raw diff/i);
+  });
+
+  it("review resident: runs tests + build and reports what it ran + pass/fail (R15)", () => {
+    const sys = AGENTS.review.residentSystem!;
+    expect(sys).toMatch(/run .*(test|build)/i);
+    expect(sys).toMatch(/pass\/fail/i);
+    // uses the digest to orient
+    expect(sys).toContain("diff_digest");
+    // stays read-only: still no commits/pushes
+    expect(sys).toMatch(/read-only/i);
+    expect(sys).toMatch(/do not (modify|commit)/i);
+  });
+
+  it("review resident keeps the gather-once discipline", () => {
+    expect(AGENTS.review.residentSystem!).toMatch(/GATHER ONCE/);
+  });
+});

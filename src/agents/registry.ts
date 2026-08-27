@@ -72,8 +72,9 @@ Workflow for shipping a change:
 2. Implement the change. Match the surrounding code's style and conventions.
 3. Run the project's tests/linters if they exist and are quick enough to run (dependencies are already present).
 4. Commit with a clear message and push the branch with \`git push -u origin <branch>\`.
-5. Open a PR via the GitHub REST API: take the token from \`.git/github-credentials\` and \`curl -s -X POST https://api.github.com/repos/<owner>/<repo>/pulls -H "Authorization: Bearer <token>" -d '{"title":...,"head":...,"base":...,"body":...}'\`. If credentials are unavailable or the call is refused, report the branch's compare URL instead (https://github.com/<owner>/<repo>/compare/<branch>) and state plainly that PR creation was unavailable from this environment.
-6. Report back with the PR URL (or the pushed branch + compare URL) and a short summary of what you did, including anything you skipped or couldn't verify.
+5. Before opening the PR, call the \`diff_digest\` tool to get a distilled summary of your change — per-file churn, totals, and risky-file flags — and include that digest in the PR body. It is a distilled summary, not the raw diff: it gives the reviewer the shape of the change at a glance.
+6. Open a PR via the GitHub REST API: take the token from \`.git/github-credentials\` and \`curl -s -X POST https://api.github.com/repos/<owner>/<repo>/pulls -H "Authorization: Bearer <token>" -d '{"title":...,"head":...,"base":...,"body":...}'\`. If credentials are unavailable or the call is refused, report the branch's compare URL instead (https://github.com/<owner>/<repo>/compare/<branch>) and state plainly that PR creation was unavailable from this environment.
+7. Report back with the PR URL (or the pushed branch + compare URL) and a short summary of what you did, including anything you skipped or couldn't verify.
 
 Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Implement the fix", "Run the test suite"), never commands. Mark an item ✓ only after it has actually happened — never pre-mark reporting/posting steps. This is the only progress the user sees while you work.
 
@@ -109,10 +110,12 @@ Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your c
 
 1. GATHER, in 2-4 batched tool calls total:
    - \`git fetch origin <base>\` (usually the default branch), then \`git log --oneline <base>..HEAD\` and \`git diff <base>...HEAD\` (the complete diff) in one command
+   - call the \`diff_digest\` tool to orient: it gives per-file churn, totals, and risky-file flags (migrations/schema, auth/permission, whole-file deletions, lockfiles, very large files) so you know where to look hardest before you read a line
    - in ONE command, print the full current contents of every changed source file, e.g.: \`git diff --name-only <base>...HEAD | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
+   - RUN the project's tests and build in this worktree — dependencies are already warm, so this is cheap. Use the project's own commands (e.g. \`npm test\` and \`npm run build --if-present\`, or the equivalents you find in package.json / the repo's docs). This is validated review: you verify the change actually builds and passes its tests, you don't just read the diff. Running tests keeps you read-only in the way that matters — you never modify tracked code, commit, or push. Capture exactly what you ran and whether each command passed or failed.
    - if the change is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
 2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then design/simplification notes. At most 2-3 targeted follow-up reads if a specific caller or callee is load-bearing — never a general exploration loop.
-3. REPORT every issue you find, including uncertain or low-severity ones, each with severity, confidence, and file:line. Order findings most-severe first. If the change looks correct, say so plainly — do not manufacture findings.
+3. REPORT every issue you find, including uncertain or low-severity ones, each with severity, confidence, and file:line. Order findings most-severe first. State exactly which tests/build commands you ran and their pass/fail results as validation evidence, alongside the findings. If the change looks correct, say so plainly — do not manufacture findings.
 
 Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending), update as items start (✱) and finish (✓ — only after they actually happened; never pre-mark reporting steps). Items are short outcomes, never commands.
 

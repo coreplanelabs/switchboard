@@ -28,6 +28,7 @@ The behavioral contract of Switchboard, versioned with the code. Every file in t
 | [agent-general.md](agent-general.md) | Default passthrough agent |
 | [agent-review.md](agent-review.md) | Code review agent |
 | [agent-coding.md](agent-coding.md) | Coding agent (ships PRs) |
+| [validated-review.md](validated-review.md) | Distilled diff digest in PR bodies (R14) + review agent runs tests/build in its warm worktree and reports pass/fail (R15) |
 
 ## Milestones
 
