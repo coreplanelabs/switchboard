@@ -5,11 +5,19 @@
   "compatibility_date": "2026-08-01",
   // coreplane-infra account — same as terrateam (see coreplanelabs/infrastructure)
   "account_id": "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
-  // No routes: Slack traffic is the container's outbound websocket; the only
-  // inbound path is the cron keep-alive, which stays internal.
-  // workers.dev URL enabled so deploys can wake the container immediately
-  // (the fetch handler only proxies to the container's health endpoint).
-  "workers_dev": true,
+  // Custom domain on the coreplanelabs.dev zone (same account as the resident's
+  // switchboard-resident.coreplanelabs.dev). Slack traffic is the container's
+  // outbound websocket; the inbound HTTP surface here is the cron keep-alive +
+  // the authed ingress/MCP endpoints + the live-view dashboard (/runs).
+  // workers.dev is DISABLED: the /runs dashboard must sit behind Cloudflare
+  // Access (SSO), and Access can only front a real zone domain — leaving the
+  // workers.dev URL up would expose an un-SSO'd copy of /runs.
+  "workers_dev": false,
+  "routes": [{ "pattern": "switchboard.coreplanelabs.dev", "custom_domain": true }],
+  // Non-secret, deploy-constant: the public base for live-view links. The
+  // dispatcher (in the container) reads process.env.PUBLIC_BASE_URL to put the
+  // /runs/<id>?t=… link on the status card; worker.ts forwards it into envVars.
+  "vars": { "PUBLIC_BASE_URL": "https://switchboard.coreplanelabs.dev" },
   "observability": { "enabled": true, "traces": { "enabled": true } },
   "containers": [
     {

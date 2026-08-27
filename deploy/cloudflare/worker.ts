@@ -23,6 +23,7 @@ interface Env {
   GITHUB_APP_ID?: string;
   GITHUB_APP_INSTALLATION_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
+  PUBLIC_BASE_URL?: string; // live-view: base for /runs/<id>?t=… links on the status card
 }
 
 export class SwitchboardServer extends Container<Env> {
@@ -53,6 +54,7 @@ export class SwitchboardServer extends Container<Env> {
       ...(env.GITHUB_APP_PRIVATE_KEY
         ? { GITHUB_APP_PRIVATE_KEY: env.GITHUB_APP_PRIVATE_KEY }
         : {}),
+      ...(env.PUBLIC_BASE_URL ? { PUBLIC_BASE_URL: env.PUBLIC_BASE_URL } : {}),
     };
   }
 
