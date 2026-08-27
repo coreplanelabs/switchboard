@@ -83,6 +83,23 @@ Status legend: ⬜ not run · 🟡 running · ✅ done (receipt linked).
 
 ## Results log
 
-_(filled as tests run — one dated entry per test with both receipts and the verdict)_
+### Run 1 — 2026-08-27, #switchboard-prompting (both bots live)
 
-- ⬜ pending first run.
+**Headline:** Switchboard answers in **seconds** at matching quality; Claude Tag is thorough but **~20–40× slower** (~2–3 min/response). Switchboard also puts a structured live status card + a `/runs` dashboard link on every run, supports per-request `agent:`/`model:` steering, and its review agent checks out the branch and executes code — catching a real bug in this run.
+
+| Test | Switchboard | Claude Tag | Verdict |
+|------|-------------|------------|---------|
+| A1 Q&A (DO vs Worker) | 👀 ~1s · `general`/haiku · **~4s** · accurate, 4 sentences | `fable-5` · **~117s** · richer (calls out the single-instance-worldwide guarantee) | Claude deeper *at its default model*; but **B2 shows switchboard matches that depth in 6s with `model:fable-5`** → switchboard wins on speed at equal quality |
+| A2 Node LTS (cite source) | `research`/haiku · **~9s** · v24 "Krypton", EOL 2028-04-30, src endoflife.date | `fable-5` · **~175s** · same + v22/v26 context, cites primary `nodejs/Release schedule.json` | Both correct; Claude's source more authoritative, switchboard ~20× faster |
+| A3 Fetch URL + summarize (`vary`) | `research`/haiku · **~4s** · accurate 2-sentence summary | `fable-5` · **~163s** · accurate, slightly more API detail | Quality parity; switchboard ~40× faster |
+| A4 PR review (switchboard#62) | `review`/fable-5 · **168s** · checked out the branch + read changed files; returned **file:line + severity + confidence + a failure scenario per finding**; caught a **real High-severity issue** (PR body claimed deploy wiring absent from the diff — which actually happened) + the JWKS negative-cache gap | ~3.5 min: attached the repo, "reviewing" — **verdict still pending** | Switchboard clearly superior: deeper, executed code, actionable, caught a real bug while Claude was still working |
+| A6 Instant ack | 👀 in ~1s + structured live status card (agent·model·elapsed, checklist, `/runs` link) | 👀 + a "todos" status line | Both ack; switchboard's card is richer and links a live dashboard |
+| B2 Model steering | `model:anthropic/claude-fable-5` → **6s**, matches Claude's A1 depth exactly | **N/A** — no per-request model control | Switchboard-only, and the punchline to A1 |
+
+**Switchboard-only capabilities** (already carrying dated receipts in [milestone-1-vs-claude-tag.md](milestone-1-vs-claude-tag.md); Claude Tag = N/A on each): `agent:`/`model:` routing + per-channel/user defaults (claim 4), sandboxed + budgeted execution with legible `exit 124` timeouts (claim 3), warm per-org residents, the live `/runs` dashboard behind Cloudflare Access (built + validated this session), HTTP `/ingress` + MCP `/mcp` (enabled this session), and self-hosted own-infra + own endpoint security.
+
+**Notes / caveats for the next run:**
+- **Claude Tag latency is the long pole** — ~2–3 min per reply vs switchboard's seconds, so head-to-head runs are paced by Claude. Every switchboard reply also carried its live status card + a `/runs` link (observability the thread-only Claude flow doesn't have).
+- **A4 authenticity:** switchboard's review caught a genuine discrepancy from earlier in the day (the #62 deploy-wiring split), which is the strongest possible evidence for "reviews with the whole PR in context."
+- **A5 (issue-to-PR head-to-head) deferred** — it creates real PRs on both sides; best run attended. Switchboard's side is already proven (claim 1, [nominal#1347](https://github.com/coreplanelabs/nominal/pull/1347)).
+- **A4 @claude verdict** was still pending when this was written; re-check the thread for the final side-by-side.
