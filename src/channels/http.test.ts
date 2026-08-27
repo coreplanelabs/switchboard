@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders } from "node:http";
 import {
   authenticate,
+  authorizeRequest,
   createIngressHandler,
   handleIngressRequest,
   HttpIO,
@@ -287,6 +288,47 @@ describe("createIngressHandler (node:http wrapper)", () => {
     await vi.waitFor(() => expect(t.status()).toBe(413));
     expect(d.calls).toHaveLength(0);
     expect((t.reqRaw as unknown as { destroy: ReturnType<typeof vi.fn> }).destroy).toHaveBeenCalled();
+  });
+
+  // Hardening (review follow-up): an unauthorized caller must be rejected from
+  // headers alone, WITHOUT the body ever being read/buffered.
+  it("rejects an unauthorized request without reading the body (pre-auth)", async () => {
+    const d = fakeDispatch();
+    let bodyRead = false;
+    async function* iter() {
+      bodyRead = true;
+      yield Buffer.from(JSON.stringify({ text: "hi" }), "utf8");
+    }
+    const destroy = vi.fn();
+    const req = Object.assign(iter(), { method: "POST", headers: bearer("wrong-token"), destroy });
+    let statusCode = 0;
+    const res = { writeHead: (c: number) => { statusCode = c; }, end: () => {} };
+    const handler = createIngressHandler(deps, { auth: authConfig({ tok: { subject: "alice" } }), dispatch: d.fn });
+    handler(
+      req as unknown as Parameters<ReturnType<typeof createIngressHandler>>[0],
+      res as unknown as Parameters<ReturnType<typeof createIngressHandler>>[1],
+    );
+    await vi.waitFor(() => expect(statusCode).toBe(401));
+    expect(bodyRead).toBe(false); // body iterator never consumed
+    expect(d.calls).toHaveLength(0);
+    expect(destroy).toHaveBeenCalled();
+  });
+});
+
+describe("authorizeRequest (header-only gate)", () => {
+  const opts = (tokens: IngressConfig["tokens"] = { tok: { subject: "alice" } }) => ({ auth: authConfig(tokens) });
+  it("405 on non-POST", () => {
+    expect(authorizeRequest("GET", bearer("tok"), opts())).toMatchObject({ status: 405 });
+  });
+  it("503 when no tokens are configured (fail-closed)", () => {
+    expect(authorizeRequest("POST", bearer("tok"), opts({}))).toMatchObject({ status: 503 });
+  });
+  it("401 on missing or unknown token", () => {
+    expect(authorizeRequest("POST", {}, opts())).toMatchObject({ status: 401 });
+    expect(authorizeRequest("POST", bearer("nope"), opts())).toMatchObject({ status: 401 });
+  });
+  it("returns the identity for a valid token", () => {
+    expect(authorizeRequest("POST", bearer("tok"), opts())).toEqual({ identity: { subject: "alice", channel: undefined } });
   });
 });
 

@@ -198,26 +198,42 @@ export interface IngressResponse {
  *   3. missing/unknown token   -> 401 unauthorized
  *   4. invalid/bad JSON body   -> 400
  *   5. authed + valid          -> dispatch(), reply collected -> 200
- * Body-size enforcement (413) happens upstream in the node wrapper, before the
- * body is ever fully buffered.
+ * Steps 1-3 are header-only (`authorizeRequest`), so the node wrapper runs them
+ * BEFORE reading the body — an unauthorized/wrong-method/disabled caller never
+ * buffers a body. Body-size enforcement (413) is streamed in `readBody`.
  */
-export async function handleIngressRequest(
-  req: IngressRequest,
-  deps: CoreDeps,
+
+/** Header-only authorization gate: method (405), fail-closed disabled check
+ *  (503), and bearer auth (401). Decidable without the body, so the transport
+ *  wrapper can reject before buffering. Returns the rejection response, or the
+ *  resolved identity to proceed with. */
+export function authorizeRequest(
+  method: string | undefined,
+  headers: IncomingHttpHeaders,
   options: IngressOptions,
-): Promise<IngressResponse> {
-  if ((req.method ?? "GET").toUpperCase() !== "POST") {
+): IngressResponse | { identity: IngressIdentity } {
+  if ((method ?? "GET").toUpperCase() !== "POST") {
     return { status: 405, body: { error: "method not allowed; POST only" } };
   }
   // Fail-closed: with no tokens configured the endpoint is disabled, never open.
   if (Object.keys(options.auth.tokens).length === 0) {
     return { status: 503, body: { error: "disabled", detail: "no ingress tokens configured" } };
   }
-  const identity = authenticate(req.headers, options.auth);
+  const identity = authenticate(headers, options.auth);
   if (!identity) {
     return { status: 401, body: { error: "unauthorized" } };
   }
-  const parsed = parseBody(req.body);
+  return { identity };
+}
+
+/** Post-auth handling: validate the (already-read) body and dispatch. */
+async function handleAuthorized(
+  identity: IngressIdentity,
+  body: string,
+  deps: CoreDeps,
+  options: IngressOptions,
+): Promise<IngressResponse> {
+  const parsed = parseBody(body);
   if ("error" in parsed) {
     return { status: 400, body: { error: parsed.error } };
   }
@@ -226,6 +242,16 @@ export async function handleIngressRequest(
   const dispatchFn = options.dispatch ?? realDispatch;
   await dispatchFn(deps, msg, io);
   return { status: 200, body: { reply: io.collected() } };
+}
+
+export async function handleIngressRequest(
+  req: IngressRequest,
+  deps: CoreDeps,
+  options: IngressOptions,
+): Promise<IngressResponse> {
+  const gate = authorizeRequest(req.method, req.headers, options);
+  if ("status" in gate) return gate;
+  return handleAuthorized(gate.identity, req.body, deps, options);
 }
 
 /**
@@ -266,17 +292,22 @@ export function createIngressHandler(
   return (req, res) => {
     void (async () => {
       try {
+        // Authorize from headers BEFORE reading the body: a wrong-method /
+        // disabled / unauthorized caller is rejected without ever buffering a
+        // body it has no right to send (pre-auth DoS surface — review follow-up).
+        const gate = authorizeRequest(req.method, req.headers, options);
+        if ("status" in gate) {
+          write(res, gate.status, gate.body);
+          req.destroy();
+          return;
+        }
         const read = await readBody(req, maxBytes);
         if (!read.ok) {
           write(res, 413, { error: "request body too large" });
           req.destroy();
           return;
         }
-        const result = await handleIngressRequest(
-          { method: req.method, headers: req.headers, body: read.body },
-          deps,
-          options,
-        );
+        const result = await handleAuthorized(gate.identity, read.body, deps, options);
         write(res, result.status, result.body);
       } catch (err) {
         // dispatch() catches its own errors and replies, so reaching here means
