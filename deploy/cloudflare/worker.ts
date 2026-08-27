@@ -26,6 +26,8 @@ interface Env {
   PUBLIC_BASE_URL?: string; // live-view: base for /runs/<id>?t=… links on the status card
   ACCESS_TEAM_DOMAIN?: string; // live-view SSO gate: Cloudflare Access team domain (JWKS + iss)
   ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
+  SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map)
+  BRAVE_SEARCH_API_KEY?: string; // web_search backend (Brave); web_fetch works without it
 }
 
 export class SwitchboardServer extends Container<Env> {
@@ -59,6 +61,10 @@ export class SwitchboardServer extends Container<Env> {
       ...(env.PUBLIC_BASE_URL ? { PUBLIC_BASE_URL: env.PUBLIC_BASE_URL } : {}),
       ...(env.ACCESS_TEAM_DOMAIN ? { ACCESS_TEAM_DOMAIN: env.ACCESS_TEAM_DOMAIN } : {}),
       ...(env.ACCESS_AUD ? { ACCESS_AUD: env.ACCESS_AUD } : {}),
+      ...(env.SWITCHBOARD_INGRESS_TOKENS
+        ? { SWITCHBOARD_INGRESS_TOKENS: env.SWITCHBOARD_INGRESS_TOKENS }
+        : {}),
+      ...(env.BRAVE_SEARCH_API_KEY ? { BRAVE_SEARCH_API_KEY: env.BRAVE_SEARCH_API_KEY } : {}),
     };
   }
 
