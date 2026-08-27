@@ -162,6 +162,65 @@ describe("RunRegistry.finish", () => {
   });
 });
 
+describe("RunRegistry.listActive", () => {
+  it("returns non-evicted runs newest-first with id, token, label, startedAt, and event count", () => {
+    const { reg, tick } = testRegistry();
+    const a = reg.create("coding · owner/repo");
+    tick(10);
+    const b = reg.create("review · thread-42");
+    reg.publish(b.id, call("x"));
+    reg.publish(b.id, result(true, "ok"));
+
+    const list = reg.listActive();
+    expect(list.map((r) => r.id)).toEqual(["id-2", "id-1"]); // newest run first
+    expect(list[0]).toEqual({
+      id: "id-2",
+      token: "tok-2",
+      label: "review · thread-42",
+      finished: false,
+      startedAt: 1010, // clock at create()
+      eventCount: 2,
+    });
+    expect(list[1]).toEqual({
+      id: "id-1",
+      token: "tok-1",
+      label: "coding · owner/repo",
+      finished: false,
+      startedAt: 1000,
+      eventCount: 0,
+    });
+    expect(a.id).toBe("id-1");
+  });
+
+  it("omits label when the run was created without one", () => {
+    const { reg } = testRegistry();
+    reg.create();
+    const [only] = reg.listActive();
+    expect(only.label).toBeUndefined();
+  });
+
+  it("includes a recently-finished run (until TTL) marked finished, then excludes it once evicted", () => {
+    const { reg, tick } = testRegistry({ ttlMs: 60_000 });
+    const { id } = reg.create("done-soon");
+    reg.publish(id, call("x"));
+    reg.finish(id);
+
+    tick(59_000); // still within TTL
+    const still = reg.listActive();
+    expect(still.map((r) => r.id)).toEqual([id]);
+    expect(still[0].finished).toBe(true);
+    expect(still[0].eventCount).toBe(1); // count survives finish
+
+    tick(2_000); // past the TTL → evicted
+    expect(reg.listActive()).toEqual([]);
+  });
+
+  it("returns an empty list when there are no runs", () => {
+    const { reg } = testRegistry();
+    expect(reg.listActive()).toEqual([]);
+  });
+});
+
 describe("RunRegistry — finished-run eviction after TTL", () => {
   it("keeps a finished run subscribable until the TTL, then evicts it (subscribe → null)", () => {
     const { reg, tick } = testRegistry({ ttlMs: 60_000 });

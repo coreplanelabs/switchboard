@@ -226,7 +226,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // is simply omitted — the feature degrades gracefully, the run is otherwise
     // unchanged. Events are fed to the registry in onEvent below.
     const registry = deps.runRegistry ?? defaultRunRegistry;
-    const run = registry.create();
+    // A short human label for the Access-gated runs index (`GET /runs`): the
+    // agent plus the repo it targets, or the thread key when no repo is bound.
+    const runLabel = `${agent.name} · ${repoCtx.repo ?? msg.threadKey}`;
+    const run = registry.create(runLabel);
     const liveLink = liveViewLink(run.id, run.token);
     // The card body is the agent's own checklist (via the update_status tool)
     // plus a live one-line activity trace (current tool call + redacted result

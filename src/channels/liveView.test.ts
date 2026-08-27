@@ -2,13 +2,16 @@ import { describe, expect, it } from "vitest";
 import type { IncomingHttpHeaders } from "node:http";
 import {
   createLiveViewHandler,
+  escapeHtml,
   parseRunRoute,
   renderRunPage,
+  renderRunsIndex,
   serveEvents,
   type SseSink,
 } from "./liveView.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import type { RunEvent } from "../core/runEvents.js";
+import type { RunSummary } from "../core/runRegistry.js";
 
 // Feature: features/live-view.md — the external live-view page + SSE stream.
 // Auth is a per-run capability token (in the URL, not a header); a wrong/missing
@@ -67,12 +70,67 @@ describe("parseRunRoute", () => {
   it("decodes a percent-encoded id", () => {
     expect(parseRunRoute("/runs/a%2Db")).toEqual({ id: "a-b", kind: "page" });
   });
+  it("matches the bare index route (the Access-gated home page, no id)", () => {
+    expect(parseRunRoute("/runs")).toEqual({ kind: "index" });
+    expect(parseRunRoute("/runs/")).toEqual({ kind: "index" });
+  });
   it("returns null for non-run paths, an empty id, or malformed encoding", () => {
     expect(parseRunRoute("/ingress")).toBeNull();
-    expect(parseRunRoute("/runs")).toBeNull();
-    expect(parseRunRoute("/runs/")).toBeNull();
     expect(parseRunRoute("/runs/abc/events/extra")).toBeNull();
     expect(parseRunRoute("/runs/%zz")).toBeNull();
+  });
+});
+
+describe("escapeHtml", () => {
+  it("escapes &, <, >, \", ' so a payload cannot break out of server-rendered markup", () => {
+    expect(escapeHtml(`<script>"x" & 'y'</script>`)).toBe(
+      "&lt;script&gt;&quot;x&quot; &amp; &#39;y&#39;&lt;/script&gt;",
+    );
+  });
+  it("escapes & before the entity-introducing characters (no double-escaping order bug)", () => {
+    expect(escapeHtml("a<b")).toBe("a&lt;b");
+    expect(escapeHtml("&amp;")).toBe("&amp;amp;"); // the literal input & is escaped once
+  });
+});
+
+describe("renderRunsIndex", () => {
+  const summary = (over: Partial<RunSummary> = {}): RunSummary => ({
+    id: "run-1",
+    token: "tok-1",
+    label: "coding · owner/repo",
+    finished: false,
+    startedAt: 1000,
+    eventCount: 3,
+    ...over,
+  });
+
+  it("lists each run as a link carrying its per-run token", () => {
+    const html = renderRunsIndex([summary()]);
+    expect(html).toContain('href="/runs/run-1?t=tok-1"');
+    expect(html).toContain("coding · owner/repo");
+  });
+
+  it("shows an empty-state message when there are no active runs", () => {
+    expect(renderRunsIndex([])).toMatch(/no active runs/i);
+  });
+
+  it("is self-contained (no external/CDN assets — CSP-safe)", () => {
+    const html = renderRunsIndex([summary()]);
+    expect(html).not.toMatch(/src\s*=\s*["']https?:/i);
+    expect(html).not.toMatch(/href\s*=\s*["']https?:/i);
+    expect(html).not.toContain("//cdn");
+  });
+
+  it("HTML-escapes a malicious label instead of injecting it", () => {
+    const html = renderRunsIndex([summary({ label: "<script>alert(1)</script>" })]);
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("URL-encodes id/token into the href so special chars can't break the link or markup", () => {
+    const html = renderRunsIndex([summary({ id: 'a/b"c', token: 'x"y', label: undefined })]);
+    expect(html).toContain("/runs/a%2Fb%22c?t=x%22y");
+    expect(html).not.toContain('t=x"y'); // raw quote never lands in an attribute
   });
 });
 
@@ -278,5 +336,62 @@ describe("createLiveViewHandler (node:http)", () => {
     const t = fakeReqRes("POST", `/runs/${id}?t=${token}`);
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(405);
+  });
+
+  // The bare /runs index is the Access-gated home page: it is NOT token-gated
+  // (Cloudflare Access is the "who" gate), and it renders the per-run capability
+  // links — so it must only ever be exposed behind Access. Same CSP + clickjacking
+  // + no-store headers as the per-run page.
+  it("serves the HTML index at bare /runs, listing active runs with their token links (CSP + no-store)", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create("coding · owner/repo");
+    const handler = createLiveViewHandler(reg);
+    const t = fakeReqRes("GET", "/runs");
+    expect(handler(t.req, t.res)).toBe(true);
+    expect(t.status).toBe(200);
+    expect(t.headers["content-type"]).toContain("text/html");
+    expect(t.headers["content-security-policy"]).toContain("default-src 'none'");
+    expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+    expect(t.headers["x-frame-options"]).toBe("DENY");
+    expect(t.headers["cache-control"]).toBe("no-store");
+    expect(t.body()).toContain(`/runs/${id}?t=${token}`);
+    expect(t.body()).toContain("coding · owner/repo");
+  });
+
+  it("also serves the index at /runs/ (trailing slash)", () => {
+    const reg = fixedRegistry();
+    reg.create();
+    const handler = createLiveViewHandler(reg);
+    const t = fakeReqRes("GET", "/runs/");
+    expect(handler(t.req, t.res)).toBe(true);
+    expect(t.status).toBe(200);
+    expect(t.headers["content-type"]).toContain("text/html");
+  });
+
+  it("renders the empty state when there are no active runs", () => {
+    const reg = fixedRegistry();
+    const handler = createLiveViewHandler(reg);
+    const t = fakeReqRes("GET", "/runs");
+    handler(t.req, t.res);
+    expect(t.status).toBe(200);
+    expect(t.body()).toMatch(/no active runs/i);
+  });
+
+  it("405s a non-GET method on the index", () => {
+    const reg = fixedRegistry();
+    const handler = createLiveViewHandler(reg);
+    const t = fakeReqRes("POST", "/runs");
+    expect(handler(t.req, t.res)).toBe(true);
+    expect(t.status).toBe(405);
+  });
+
+  it("HTML-escapes a malicious run label in the index instead of injecting markup", () => {
+    const reg = new RunRegistry({ genId: () => "run-1", genToken: () => "tok-1" });
+    reg.create("<script>alert(1)</script>");
+    const handler = createLiveViewHandler(reg);
+    const t = fakeReqRes("GET", "/runs");
+    handler(t.req, t.res);
+    expect(t.body()).not.toContain("<script>alert(1)</script>");
+    expect(t.body()).toContain("&lt;script&gt;");
   });
 });
