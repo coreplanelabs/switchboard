@@ -270,4 +270,26 @@ describe("run-visibility events", () => {
     expect(result?.ok).toBe(false);
     expect(result?.summary).toContain("kaboom");
   });
+
+  it("redacts a secret in a long bash command before capping (no fragment leak)", async () => {
+    // Token sits past the old 120-char truncation point; a truncate-then-redact
+    // path would sever it below its length floor and leak a raw prefix.
+    const token = "ghp_" + "A".repeat(40);
+    const command = "curl " + "x".repeat(140) + " -H 'Authorization: token " + token + "'";
+    const provider = scripted([
+      { content: [{ type: "tool_use", id: "t1", name: "bash", input: { command } }], stopReason: "tool_use" },
+      text("done"),
+    ]);
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    const call = events.find((e) => e.type === "tool_call");
+    expect(call?.summary).not.toContain("ghp_AAAA");
+  });
 });
