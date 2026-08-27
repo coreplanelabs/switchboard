@@ -9,7 +9,7 @@
     "typegen": "wrangler types",
     "tail": "wrangler tail switchboard",
     "secrets": "while read -r name; do [ -z \"$name\" ] && continue; echo \"--- $name ---\"; wrangler secret put \"$name\"; done < secrets.txt",
-    "wake": "curl -s -o /dev/null -w 'container awake: HTTP %{http_code}\\n' --max-time 180 https://switchboard.coreplane-infra.workers.dev/healthz"
+    "wake": "curl -s -o /dev/null -w 'container awake: HTTP %{http_code}\\n' --max-time 180 https://switchboard.coreplanelabs.dev/healthz"
   },
   "dependencies": {
     "@cloudflare/containers": "^0.3.7"
