@@ -10,6 +10,8 @@ import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
 import { dispatch, type CoreDeps } from "./dispatcher.js";
+import { RunRegistry } from "./runRegistry.js";
+import type { RunEvent } from "./runEvents.js";
 
 // Feature: features/routing-and-config.md — end-to-end dispatch: config
 // commands, permission gates, and thread-sticky agent resolution.
@@ -773,5 +775,87 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:coding fix the login bug in acme/api", "slack:UADMIN"), io);
     expect(provider.requests[0].system).toBe(AGENTS.coding.system);
+  });
+});
+
+// Feature: features/live-view.md — the dispatcher registers every run in the
+// RunRegistry, publishes each RunEvent to it (feeding the external /runs
+// stream), finishes it in the run-loop finally, and puts the per-run capability
+// link on the status card ONLY when PUBLIC_BASE_URL is set (graceful otherwise).
+describe("live run-view wiring (Area 2)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  /** A provider that requests one tool then answers — so the runner emits
+   *  run events (tool_call + tool_result) the dispatcher forwards. The default
+   *  general agent is toolless, so the tool is "unknown" and the result is
+   *  ok:false; two events are emitted either way, which is all we assert. */
+  function toolThenAnswer(): Provider {
+    let n = 0;
+    return {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (n++ === 0) {
+          return {
+            content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } }],
+            stopReason: "tool_use",
+          };
+        }
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+  }
+
+  it("registers the run, publishes its events, and finishes it", async () => {
+    const events: RunEvent[] = [];
+    const log: string[] = [];
+    const spy = {
+      create() {
+        log.push("create");
+        return { id: "run-x", token: "tok-x" };
+      },
+      publish(_id: string, e: RunEvent) {
+        events.push(e);
+      },
+      finish() {
+        log.push("finish");
+      },
+      has: () => true,
+      subscribe: () => () => {},
+      size: () => 1,
+    } as unknown as RunRegistry;
+
+    const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
+    deps.runRegistry = spy;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+
+    expect(log).toEqual(["create", "finish"]); // created before the run, finished after
+    expect(events.map((e) => e.type)).toEqual(["tool_call", "tool_result"]);
+    expect(replies.some((r) => r.includes("answer"))).toBe(true);
+  });
+
+  it("puts the per-run capability link on the status card when PUBLIC_BASE_URL is set", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example/");
+    const registry = new RunRegistry({ genId: () => "abc", genToken: () => "secret" });
+    const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
+    deps.runRegistry = registry;
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    // Trailing slash is trimmed; id/token are the capability URL's path/query.
+    expect(statuses.some((s) => s.detail?.includes("https://bot.example/runs/abc?t=secret"))).toBe(true);
+  });
+
+  it("omits the link entirely when PUBLIC_BASE_URL is unset (graceful degradation, no crash)", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", ""); // explicitly unset — link must be omitted
+    const registry = new RunRegistry({ genId: () => "abc", genToken: () => "secret" });
+    const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
+    deps.runRegistry = registry;
+    const { io, statuses, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    expect(replies.some((r) => r.includes("answer"))).toBe(true);
+    expect(statuses.some((s) => s.detail?.includes("/runs/"))).toBe(false);
   });
 });

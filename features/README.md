@@ -22,6 +22,8 @@ The behavioral contract of Switchboard, versioned with the code. Every file in t
 |---|---|
 | [routing-and-config.md](routing-and-config.md) | Directives, config layers, thread stickiness, permission gates, config commands |
 | [slack-channel.md](slack-channel.md) | Triggers (mention/DM/follow-up), ack reaction, status cards, formatting, attachments |
+| [run-visibility.md](run-visibility.md) | Typed run-event stream (tool calls + redacted result summaries); live in-channel status card |
+| [live-view.md](live-view.md) | External live run page: per-run capability token, SSE stream, in-memory live-only registry (#43) |
 | [run-loop.md](run-loop.md) | Turn/time budgets, wrap-up behavior, forced write-up, refusal/truncation handling |
 | [execution.md](execution.md) | Per-thread workspaces, sandbox timeouts (exit 124), heartbeat streaming, session recovery, GitHub identity |
 | [resident-repos.md](resident-repos.md) | Resident repo environments: auth scopes, atomic cap, lifecycle engine, thread data plane, bot-side selection, `repo onboard/offboard/rebuild/list` chat commands (fail-closed gate, --dry-run plans) |
