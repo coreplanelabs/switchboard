@@ -225,6 +225,9 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.status).toBe(200);
     expect(t.headers["content-type"]).toContain("text/html");
     expect(t.headers["content-security-policy"]).toContain("default-src 'none'");
+    // Clickjacking defense on this public page (CSP frame-ancestors + legacy header).
+    expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+    expect(t.headers["x-frame-options"]).toBe("DENY");
     expect(t.body()).toContain(`/runs/${id}/events?t=${token}`);
   });
 

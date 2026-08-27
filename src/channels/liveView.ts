@@ -42,9 +42,10 @@ export function parseRunRoute(pathname: string): RunRoute | null {
 
 /** Content-Security-Policy for the run page: everything self/inline only, no
  *  external or CDN assets. `connect-src 'self'` allows the same-origin
- *  EventSource; no img/font/frame sources are needed. */
+ *  EventSource; `frame-ancestors 'none'` blocks the page being iframed
+ *  (clickjacking), since `default-src 'none'` does NOT cover frame-ancestors. */
 const PAGE_CSP =
-  "default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
+  "default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /** SSE response headers. `no-transform` + `x-accel-buffering: no` keep proxies
  *  from buffering the stream, so events arrive as they are written. */
@@ -240,6 +241,7 @@ export function createLiveViewHandler(
       res.writeHead(200, {
         "content-type": "text/html; charset=utf-8",
         "content-security-policy": PAGE_CSP,
+        "x-frame-options": "DENY", // belt-and-suspenders with CSP frame-ancestors
         "cache-control": "no-store",
       });
       res.end(renderRunPage(route.id, token));
