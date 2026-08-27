@@ -36,10 +36,10 @@ permissions:
   channelConfig: []
 `;
 
-function store(): ConfigStore {
+function store(yaml: string = YAML_FIXTURE): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
   const cfg = join(dir, "config.yaml");
-  writeFileSync(cfg, YAML_FIXTURE);
+  writeFileSync(cfg, yaml);
   return new ConfigStore(cfg, join(dir, "overrides.json"));
 }
 
@@ -109,5 +109,75 @@ describe("permission gates", () => {
   it("empty channelConfig list means admins only", () => {
     expect(s.canEditChannelConfig("slack:URANDOM")).toBe(false);
     expect(s.canEditChannelConfig("slack:UADMIN")).toBe(true);
+  });
+});
+
+// Feature: features/resident-repos.md — per-repo access is open-when-absent
+// (KD7): no permissions.repos config → every allowed coding-agent user may
+// use every onboarded repo; a configured allowlist refuses non-listed users.
+describe("per-repo access (canUseRepo)", () => {
+  it("absent permissions.repos map → every repo is open (KD7 open-when-absent)", () => {
+    const s = store(); // YAML_FIXTURE has no repos map
+    expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(true);
+  });
+
+  const REPOS_FIXTURE = YAML_FIXTURE + `  repos:\n    "acme/api": ["slack:UDEV"]\n`;
+
+  it("a repo absent from a configured map stays open", () => {
+    const s = store(REPOS_FIXTURE);
+    expect(s.canUseRepo("slack:URANDOM", "acme/other")).toBe(true);
+  });
+
+  it("a listed repo admits members and admins, refuses everyone else", () => {
+    const s = store(REPOS_FIXTURE);
+    expect(s.canUseRepo("slack:UDEV", "acme/api")).toBe(true);
+    expect(s.canUseRepo("slack:UADMIN", "acme/api")).toBe(true);
+    expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(false);
+  });
+
+  // validateConfig lowercases every permissions.repos key at load: every
+  // caller looks the repo up by a lowercased slug (parseSlug/slugOf/
+  // repoResourceId), so a mixed-case allowlist key must still match — otherwise
+  // it would silently grant OPEN access instead of restricting.
+  it("mixed-case repos keys are lowercased at load so a lowercased-slug lookup still restricts (case-insensitive)", () => {
+    const MIXED = YAML_FIXTURE + `  repos:\n    "Acme/API": ["slack:UDEV"]\n`;
+    const s = store(MIXED);
+    expect(s.canUseRepo("slack:UDEV", "acme/api")).toBe(true);
+    expect(s.canUseRepo("slack:UADMIN", "acme/api")).toBe(true);
+    // The key would have failed to match (silently opening access) without the
+    // load-time lowercasing — a refused user proves it restricts.
+    expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(false);
+  });
+});
+
+// Feature: features/resident-repos.md — repo management is FAIL-CLOSED (KTD9):
+// no permissions.repoManagement configured → ADMINS ONLY, deliberately
+// diverging from canEditChannelConfig's open-when-absent, because onboarding
+// provisions billable always-on compute and binds GitHub credentials.
+describe("repo management gate (canManageRepos)", () => {
+  it("absent repoManagement key → non-admins refused, admins allowed (fail-closed)", () => {
+    const s = store(); // YAML_FIXTURE has no repoManagement key
+    expect(s.canManageRepos("slack:URANDOM")).toBe(false);
+    expect(s.canManageRepos("slack:UDEV")).toBe(false);
+    expect(s.canManageRepos("slack:UADMIN")).toBe(true);
+  });
+
+  it("a configured allowlist admits listed users and admins only", () => {
+    const s = store(YAML_FIXTURE + `  repoManagement: ["slack:UDEV"]\n`);
+    expect(s.canManageRepos("slack:UDEV")).toBe(true);
+    expect(s.canManageRepos("slack:UADMIN")).toBe(true);
+    expect(s.canManageRepos("slack:URANDOM")).toBe(false);
+  });
+
+  it("an empty allowlist stays admins-only", () => {
+    const s = store(YAML_FIXTURE + `  repoManagement: []\n`);
+    expect(s.canManageRepos("slack:UDEV")).toBe(false);
+    expect(s.canManageRepos("slack:UADMIN")).toBe(true);
+  });
+
+  it("no admins configured at all → nobody may manage repos (still closed)", () => {
+    const NO_PERMS = YAML_FIXTURE.replace(/permissions:[\s\S]*$/m, "");
+    const s = store(NO_PERMS);
+    expect(s.canManageRepos("slack:URANDOM")).toBe(false);
   });
 });

@@ -14,6 +14,9 @@ export interface CloudflareSandboxOptions {
   threadKey: string;
   /** env vars forwarded into the sandbox (e.g. GH_TOKEN) */
   envs: Record<string, string>;
+  /** resident repo/ref context — reserved for resident environments (not yet used) */
+  repo?: string;
+  ref?: string;
 }
 
 export class CloudflareSandboxExecutor implements Executor {

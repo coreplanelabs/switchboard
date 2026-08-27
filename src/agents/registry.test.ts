@@ -33,8 +33,56 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.general.system).toMatch(/NO tools/i);
   });
 
+  it("resource declarations: coding and review require a repo; general declares none", () => {
+    // KD2: agents declare the resources they need; the general-purpose agent
+    // runs without a repo, so executor selection provisions it nothing.
+    expect(AGENTS.coding.resources?.repo).toBe("required");
+    expect(AGENTS.review.resources?.repo).toBe("required");
+    expect(AGENTS.general.resources?.repo).toBeUndefined();
+  });
+
   it("getAgent throws on unknown agents, naming the available ones", () => {
     expect(() => getAgent("bogus")).toThrow(/Unknown agent/);
     expect(() => getAgent("bogus")).toThrow(/general/);
+  });
+});
+
+// Feature: features/resident-repos.md (U7) — resident-path prompt variants:
+// the workspace is a ready worktree (no cloning, no installs, no repo
+// discovery, no gh CLI); selected by the dispatcher AFTER executor resolution,
+// never by mutating the shared AgentDef.
+describe("resident prompt variants", () => {
+  it("coding and review carry a resident variant; general does not", () => {
+    expect(AGENTS.coding.residentSystem).toBeTruthy();
+    expect(AGENTS.review.residentSystem).toBeTruthy();
+    expect(AGENTS.general.residentSystem).toBeUndefined();
+  });
+
+  it("variants describe a ready worktree and forbid setup work", () => {
+    for (const sys of [AGENTS.coding.residentSystem!, AGENTS.review.residentSystem!]) {
+      expect(sys).toMatch(/ready git worktree/i);
+      expect(sys).toMatch(/do not clone/i);
+      expect(sys).toMatch(/do not install/i);
+      // no setup instructions: nothing telling the agent to clone or install
+      expect(sys).not.toMatch(/clone the (repo|relevant repository)/i);
+      expect(sys).not.toMatch(/clone the repo into/i);
+      // gh is not in the resident image — the variant must not lean on it
+      expect(sys).not.toContain("gh pr create");
+      expect(sys).not.toContain("gh pr diff");
+      expect(sys).toMatch(/`gh` CLI is NOT installed/i);
+    }
+  });
+
+  it("coding variant is honest about PR creation: push + compare URL fallback", () => {
+    const sys = AGENTS.coding.residentSystem!;
+    expect(sys).toContain("git push");
+    expect(sys).toMatch(/compare/i); // compare-URL fallback when credentials aren't provisioned
+    expect(sys).toMatch(/api\.github\.com|REST/i); // PR creation via REST, not gh
+  });
+
+  it("fallback prompts are unchanged: coding still clones and uses gh pr create", () => {
+    expect(AGENTS.coding.system).toContain("clone the relevant repository");
+    expect(AGENTS.coding.system).toContain("gh pr create");
+    expect(AGENTS.review.system).toContain("gh pr diff");
   });
 });

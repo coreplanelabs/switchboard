@@ -30,6 +30,21 @@ export interface Permissions {
    * `config clear channel`. Empty list = admins only. Absent = everyone.
    */
   channelConfig?: string[];
+  /**
+   * Per-repo access for resident environments (repo slug -> allowed user
+   * IDs). Open-when-absent (KD7): no map, or a repo not listed in it, means
+   * every allowed coding-agent user may use that repo. A configured allowlist
+   * refuses non-listed users BY NAME (never a silent per-thread fallback).
+   */
+  repos?: Record<string, string[]>;
+  /**
+   * Who may run repo-management commands (`repo onboard/offboard/reconfigure/
+   * rebuild`). FAIL-CLOSED (KTD9): key absent or empty = ADMINS ONLY —
+   * deliberately diverging from channelConfig's open-when-absent, because
+   * onboarding provisions billable always-on compute and binds GitHub
+   * credentials. `repo list` is never gated.
+   */
+  repoManagement?: string[];
 }
 
 export interface AppConfig {
@@ -132,10 +147,28 @@ export class ConfigStore {
     return this.isAdmin(userId) || allowlist.includes(userId);
   }
 
+  /** Per-repo access for resident environments (KD7: open-when-absent). */
+  canUseRepo(userId: string, slug: string): boolean {
+    const allowlist = this.config.permissions?.repos?.[slug];
+    if (!allowlist) return true; // repo (or the whole map) not restricted
+    return this.isAdmin(userId) || allowlist.includes(userId);
+  }
+
   canEditChannelConfig(userId: string): boolean {
     const allowlist = this.config.permissions?.channelConfig;
     if (!allowlist) return true; // key absent = everyone
     return this.isAdmin(userId) || allowlist.includes(userId);
+  }
+
+  /**
+   * Repo-management gate (KTD9): FAIL-CLOSED, deliberately diverging from
+   * canEditChannelConfig's open-when-absent — no `repoManagement` config means
+   * admins only, because `repo onboard`/`rebuild` provision billable always-on
+   * compute and bind GitHub credentials. Session-settled decision (KTD9).
+   */
+  canManageRepos(userId: string): boolean {
+    if (this.isAdmin(userId)) return true;
+    return this.config.permissions?.repoManagement?.includes(userId) ?? false;
   }
 
   /** Who to ask when denied — for actionable error messages. */
@@ -219,5 +252,14 @@ function validateConfig(cfg: AppConfig): void {
   }
   if (!AGENTS[cfg.defaults.agent]) {
     throw new Error(`defaults.agent "${cfg.defaults.agent}" is not a known agent`);
+  }
+  // Normalize permissions.repos keys to lowercase once at load: every caller
+  // looks the repo up by a lowercased slug (parseSlug/slugOf/repoResourceId),
+  // so a mixed-case allowlist key (e.g. "octocat/Hello-World") would otherwise
+  // never match and silently grant open access instead of restricting.
+  if (cfg.permissions?.repos) {
+    cfg.permissions.repos = Object.fromEntries(
+      Object.entries(cfg.permissions.repos).map(([slug, users]) => [slug.toLowerCase(), users]),
+    );
   }
 }

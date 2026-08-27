@@ -24,5 +24,15 @@ execution:
   type: cloudflare
   url: https://switchboard-sandbox.coreplanelabs.dev
   apiKeyEnv: SANDBOX_TOKEN
+  # Resident repo environments: ACTIVE. The U7 repo/ref resolver ships as the
+  # dispatcher default, so any repo-targeted request populates ctx.repo and this
+  # block is selected. The bot Worker MUST have RESIDENT_OPERATOR_TOKEN set (and
+  # RESIDENT_ADMIN_TOKEN for `repo` management commands) — otherwise a
+  # repo-naming dispatch hard-fails ("execution.resident is configured but
+  # RESIDENT_OPERATOR_TOKEN is not set") rather than falling back to the
+  # per-thread sandbox above.
+  resident:
+    baseUrl: https://switchboard-resident.coreplanelabs.dev
+    tokenEnv: RESIDENT_OPERATOR_TOKEN
 
 workspaceDir: ./workspaces # unused with cloudflare execution; kept for fallback

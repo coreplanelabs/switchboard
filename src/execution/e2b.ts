@@ -31,6 +31,9 @@ export interface E2BOptions {
   statePath: string;
   /** env vars injected into the sandbox (e.g. GH_TOKEN) */
   envs: Record<string, string>;
+  /** resident repo/ref context — reserved for resident environments (not yet used) */
+  repo?: string;
+  ref?: string;
 }
 
 export class E2BExecutor implements Executor {

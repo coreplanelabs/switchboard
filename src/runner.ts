@@ -12,6 +12,11 @@ export interface RunOptions {
   agent: AgentDef;
   messages: ChatMessage[];
   toolContext: ToolContext;
+  /** Per-run system prompt override — the dispatcher may choose an effective
+   *  prompt after executor resolution (e.g. resident-repo context). Flows
+   *  here, never by mutating the shared AgentDef (concurrent dispatches share
+   *  it). Absent → `agent.system`. */
+  system?: string;
   /** called with short progress notes (e.g. tool activity) for Slack updates */
   onProgress?: (note: string) => void;
   /** injectable clock for tests; defaults to Date.now */
@@ -22,6 +27,7 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   const tools: RunnableTool[] = TOOLSETS[opts.agent.toolset] ?? [];
   const toolsByName = new Map(tools.map((t) => [t.name, t]));
   const messages: ChatMessage[] = [...opts.messages];
+  const system = opts.system ?? opts.agent.system;
 
   // The wall clock is the real budget; turns are a backstop. At the deadline
   // the loop ends and the agent is forced to write up findings so far.
@@ -36,7 +42,7 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   for (let iteration = 0; turn < opts.agent.maxTurns && iteration < opts.agent.maxTurns * 2 && now() < deadline; iteration++) {
     const result = await opts.provider.complete({
       model: opts.model,
-      system: opts.agent.system,
+      system,
       messages,
       tools: tools.length > 0 ? tools : undefined,
       maxTokens: opts.agent.maxTokens,
@@ -116,7 +122,7 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   });
   const finale = await opts.provider.complete({
     model: opts.model,
-    system: opts.agent.system,
+    system,
     messages,
     maxTokens: opts.agent.maxTokens,
   });

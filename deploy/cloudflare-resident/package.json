@@ -1,0 +1,22 @@
+{
+  "name": "@coreplane/switchboard-resident-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy && npm run wake",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit worker.ts --skipLibCheck --target es2022 --module es2022 --moduleResolution bundler --types ./node_modules/@cloudflare/workers-types",
+    "typegen": "wrangler types",
+    "tail": "wrangler tail switchboard-resident",
+    "secrets": "while read -r name; do [ -z \"$name\" ] && continue; echo \"--- $name ---\"; wrangler secret put \"$name\"; done < secrets.txt",
+    "wake": "curl -s -o /dev/null -w 'resident worker awake: HTTP %{http_code}\\n' --max-time 180 https://switchboard-resident.coreplanelabs.dev/healthz"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "0.13.0-next.751.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260810.1",
+    "typescript": "^5.7.3",
+    "wrangler": "^4.120.1"
+  }
+}

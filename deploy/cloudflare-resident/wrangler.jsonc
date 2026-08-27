@@ -1,0 +1,56 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "switchboard-resident",
+  "main": "worker.ts",
+  "compatibility_date": "2026-08-01",
+  // @cloudflare/sandbox@next needs Node builtins (same as the SDK's own examples).
+  "compatibility_flags": ["nodejs_compat"],
+  // coreplane-infra account — same as terrateam and the switchboard bot
+  "account_id": "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
+  // Reachable only with the RESIDENT_ADMIN_TOKEN / RESIDENT_OPERATOR_TOKEN
+  // bearer secrets (plus an unauthenticated GET /healthz wake ping). Custom
+  // domain on the coreplanelabs.dev zone (same account) so the bot config has
+  // a stable URL.
+  "workers_dev": false,
+  "routes": [{ "pattern": "switchboard-resident.coreplanelabs.dev", "custom_domain": true }],
+  "observability": { "enabled": true },
+  "containers": [
+    {
+      "class_name": "ResidentDO",
+      // Extends docker.io/cloudflare/sandbox:<version>. The image tag MUST
+      // match the @cloudflare/sandbox version in package.json EXACTLY (no
+      // 'latest' tag exists) — bump both together.
+      "image": "./Dockerfile",
+      // Larger than the thread-sandbox Worker's "basic": a resident keeps a
+      // full repo clone + node_modules + build artifacts warm on disk.
+      "instance_type": "standard-1",
+      // Platform ceiling only. The enforced cap is RESIDENT_CAP (8) in
+      // worker.ts — deliberately below this so an onboard is always refused
+      // atomically by the registry, never by a platform scheduling failure.
+      "max_instances": 10
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      // One ResidentDO (Sandbox subclass = container) per onboarded resource;
+      // the DO name IS the resource id ("repo:<slug>").
+      { "name": "RESIDENT", "class_name": "ResidentDO" },
+      // Singleton registry: onboarded set + command table + cap enforcement.
+      { "name": "REGISTRY", "class_name": "ResidentRegistryDO" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ResidentDO", "ResidentRegistryDO"] }],
+  // Resident cache + snapshots. The binding name BACKUP_BUCKET is load-bearing:
+  // the Sandbox SDK's createBackup({ localBucket: true }) resolves exactly this
+  // binding from the DO's env (verified live on 0.13.0-next.751.1 — a backup +
+  // restore round-trip works in production with only this binding, no R2 API
+  // keys). Non-localBucket (presigned) backups would additionally need the
+  // CLOUDFLARE_R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY /
+  // BACKUP_BUCKET_NAME secrets.
+  "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "switchboard-resident-cache" }],
+  // Watchdog cadence (KTD4): every 10 minutes, strictly BELOW the container
+  // sleep window (SLEEP_AFTER = "20m" in worker.ts) so a healthy resident is
+  // re-warmed before the platform can ever sleep it. Invariant: watchdog/alarm
+  // cadence < sleepAfter — bump the two together.
+  "triggers": { "crons": ["*/10 * * * *"] }
+}
