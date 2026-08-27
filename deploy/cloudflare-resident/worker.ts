@@ -1150,13 +1150,30 @@ export class ResidentDO extends Sandbox<Env> {
         // degraded on transient lock contention.
         await this.withMirrorLock(async () => {
           // Token-free from here on: repo code runs during install/build (KTD7).
+          //
+          // Isolation invariant (review 1b): attach hardlink-copies (cp -al)
+          // CHECKOUT_DIR's node_modules/build dirs into already-attached,
+          // sha-pinned thread worktrees, so those FILE inodes are shared and
+          // worker1-owned. A rebuild that writes THROUGH an existing inode —
+          // many bundlers do (e.g. .next incremental manifests open+truncate
+          // rather than recreate) — would silently mutate an attached thread's
+          // pinned artifacts, breaking the sha pin the whole cache keys on.
+          // `git clean -fdq` (no -x) leaves these gitignored dirs in place, so
+          // the rebuild would reuse the very inodes threads still hold. `-x`
+          // removes them, so install/build allocate FRESH inodes; a thread's
+          // outstanding hardlink just keeps the old inode (link count drops).
+          // Cost: a full reinstall per default-branch advance (background, only
+          // when the sha actually moved) — accepted for the invariant. It also
+          // purges deps a later lockfile dropped (the -fdq staleness gap).
           await this.buildUserRun(
-            `git fetch --quiet origin && git reset --hard --quiet ${sha} && git clean -fdq`,
+            `git fetch --quiet origin && git reset --hard --quiet ${sha} && git clean -fdx`,
             "checkout-update",
             GIT_NETWORK_TIMEOUT_MS,
           );
           lockfileHash = await this.lockfileKey(sha);
-          if (lockfileHash !== facts.lockfileHash && record.commands.install) {
+          // `-x` just removed node_modules, so install unconditionally — the
+          // old lockfile-hash gate assumed the cache survived the clean.
+          if (record.commands.install) {
             await this.buildUserRun(record.commands.install, "install", REFRESH_BUILD_TIMEOUT_MS);
           }
           await this.buildUserRun(record.commands.build, "build", REFRESH_BUILD_TIMEOUT_MS);
