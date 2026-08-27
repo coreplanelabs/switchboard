@@ -205,6 +205,27 @@ describe("handleMcpRequest — JSON-RPC framing errors", () => {
     }
   });
 
+  it("a missing or non-\"2.0\" jsonrpc field → -32600", async () => {
+    for (const raw of [
+      JSON.stringify({ method: "tools/list", id: 1 }), // jsonrpc missing
+      JSON.stringify({ jsonrpc: "1.0", method: "tools/list", id: 1 }), // wrong version
+    ]) {
+      const res = await handleMcpRequest({ method: "POST", headers: bearer("tok"), body: raw }, deps, { auth: good });
+      expect((res.body as RpcError).error.code).toBe(-32600);
+    }
+  });
+
+  it("a malformed id (object/boolean) → -32600, not silently coerced to null", async () => {
+    for (const badId of [{}, true]) {
+      const res = await handleMcpRequest(
+        { method: "POST", headers: bearer("tok"), body: JSON.stringify({ jsonrpc: "2.0", id: badId, method: "tools/list" }) },
+        deps,
+        { auth: good },
+      );
+      expect((res.body as RpcError).error.code).toBe(-32600);
+    }
+  });
+
   it("non-POST → 405, dispatch never called", async () => {
     const d = fakeDispatch();
     const res = await handleMcpRequest({ method: "GET", headers: bearer("tok"), body: "" }, deps, {
@@ -280,6 +301,30 @@ describe("createMcpHandler (node:http wrapper)", () => {
     await vi.waitFor(() => expect(t.status()).toBe(200));
     expect(t.json().result).toEqual({ content: [{ type: "text", text: "wrapped" }] });
     expect(d.calls[0].msg.userId).toBe("mcp:alice");
+  });
+
+  // Unified with #56: an unauthorized caller is rejected from headers without
+  // the body ever being read/buffered.
+  it("rejects an unauthorized request without reading the body (pre-auth)", async () => {
+    const d = fakeDispatch();
+    let bodyRead = false;
+    async function* iter() {
+      bodyRead = true;
+      yield Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }), "utf8");
+    }
+    const destroy = vi.fn();
+    const req = Object.assign(iter(), { method: "POST", headers: bearer("wrong"), destroy });
+    let statusCode = 0;
+    const res = { writeHead: (c: number) => { statusCode = c; }, end: () => {} };
+    const handler = createMcpHandler(deps, { auth: good, dispatch: d.fn });
+    handler(
+      req as unknown as Parameters<ReturnType<typeof createMcpHandler>>[0],
+      res as unknown as Parameters<ReturnType<typeof createMcpHandler>>[1],
+    );
+    await vi.waitFor(() => expect(statusCode).toBe(401));
+    expect(bodyRead).toBe(false); // body iterator never consumed
+    expect(d.calls).toHaveLength(0);
+    expect(destroy).toHaveBeenCalled();
   });
 
   it("writes an empty 202 body for a notification", async () => {
