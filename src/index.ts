@@ -37,13 +37,18 @@ async function main() {
     const auth = parseIngressTokens(process.env);
     const ingress = createIngressHandler({ config, providers }, { auth });
     const mcp = createMcpHandler({ config, providers }, { auth });
-    // Live run view (Area 2 / #43): GET /runs/:id (page) + /runs/:id/events
-    // (SSE), token-gated per run. Shares defaultRunRegistry with the dispatcher
-    // — the run created during dispatch() is the run this streams. Auth is the
-    // per-run capability token in the URL, not SWITCHBOARD_INGRESS_TOKENS.
+    // Live run view (Area 2 / #43): GET /runs (index) + /runs/:id (page) +
+    // /runs/:id/events (SSE). Shares defaultRunRegistry with the dispatcher —
+    // the run created during dispatch() is the run this streams. The per-run
+    // page/stream are token-gated (capability token in the URL, not
+    // SWITCHBOARD_INGRESS_TOKENS); the bare index is instead Access-gated
+    // (Cloudflare Access fronts it) and must only be exposed behind it, since it
+    // renders the per-run capability links.
     const liveView = createLiveViewHandler(defaultRunRegistry);
     const tokenCount = Object.keys(auth.tokens).length;
-    const liveViewState = process.env.PUBLIC_BASE_URL ? "GET /runs/:id (live view)" : "live view (no PUBLIC_BASE_URL — links omitted)";
+    const liveViewState = process.env.PUBLIC_BASE_URL
+      ? "GET /runs (index) + /runs/:id (live view)"
+      : "GET /runs (index) + live view (no PUBLIC_BASE_URL — per-run links omitted)";
     createServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0];
       if (path === "/ingress") {
@@ -54,8 +59,9 @@ async function main() {
         mcp(req, res);
         return;
       }
-      // The live-view handler owns /runs/:id and /runs/:id/events; it returns
-      // false for anything else, falling through to the health probe.
+      // The live-view handler owns /runs (index), /runs/:id, and
+      // /runs/:id/events; it returns false for anything else, falling through
+      // to the health probe.
       if (liveView(req, res)) {
         return;
       }

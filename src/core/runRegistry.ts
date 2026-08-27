@@ -23,6 +23,25 @@ export interface RunHandle {
   token: string;
 }
 
+/**
+ * A live-only snapshot of one non-evicted run, for the Access-gated runs index
+ * (`GET /runs`). It intentionally carries the per-run `token` so the index can
+ * render each run's full capability link — the index is the ONE place tokens
+ * surface, and it must only ever be exposed behind Cloudflare Access (see
+ * features/live-view.md). `eventCount` is monotonic (total published, not the
+ * bounded-backlog length) and `startedAt` is the injectable-clock time at
+ * `create()`, so callers can sort/label without reaching into run internals.
+ */
+export interface RunSummary {
+  id: string;
+  token: string;
+  /** Short human label set at create() (e.g. "coding · owner/repo"); optional. */
+  label?: string;
+  finished: boolean;
+  startedAt: number;
+  eventCount: number;
+}
+
 export type RunSubscriber = (event: RunEvent) => void;
 /** Called once when the run it is subscribed to finishes. */
 export type RunFinishListener = () => void;
@@ -48,12 +67,21 @@ interface Subscription {
 }
 
 interface RunState {
+  id: string;
   token: string;
   backlog: RunEvent[];
   subscribers: Set<Subscription>;
   finished: boolean;
   /** Wall-clock finish time; drives TTL eviction. */
   finishedAt?: number;
+  /** Short human label for the runs index; set at create(). */
+  label?: string;
+  /** Clock time at create() — the index sorts newest-first on this. */
+  startedAt: number;
+  /** Monotonic creation order; a stable tiebreak when two runs share a clock. */
+  seq: number;
+  /** Total events published (monotonic; unlike backlog, never trimmed). */
+  eventCount: number;
 }
 
 /** Equal-length constant-time string compare (mirrors channels/http.ts). Guards
@@ -73,6 +101,8 @@ export class RunRegistry {
   private readonly genId: () => string;
   private readonly genToken: () => string;
   private readonly now: () => number;
+  /** Monotonic creation counter; stamps each run's `seq` for stable ordering. */
+  private seq = 0;
 
   constructor(opts: RunRegistryOptions = {}) {
     this.backlogLimit = opts.backlogLimit ?? 1000;
@@ -82,12 +112,24 @@ export class RunRegistry {
     this.now = opts.now ?? Date.now;
   }
 
-  /** Register a new run; returns its capability handle (id + view token). */
-  create(): RunHandle {
+  /** Register a new run; returns its capability handle (id + view token). An
+   *  optional short human `label` (e.g. the agent + repo/thread) is stored for
+   *  the runs index and is otherwise inert. */
+  create(label?: string): RunHandle {
     this.sweep();
     const id = this.genId();
     const token = this.genToken();
-    this.runs.set(id, { token, backlog: [], subscribers: new Set(), finished: false });
+    this.runs.set(id, {
+      id,
+      token,
+      backlog: [],
+      subscribers: new Set(),
+      finished: false,
+      label,
+      startedAt: this.now(),
+      seq: ++this.seq,
+      eventCount: 0,
+    });
     return { id, token };
   }
 
@@ -96,6 +138,7 @@ export class RunRegistry {
   publish(id: string, event: RunEvent): void {
     const run = this.runs.get(id);
     if (!run || run.finished) return;
+    run.eventCount++;
     run.backlog.push(event);
     if (run.backlog.length > this.backlogLimit) run.backlog.shift();
     for (const sub of run.subscribers) sub.onEvent(event);
@@ -153,6 +196,30 @@ export class RunRegistry {
   size(): number {
     this.sweep();
     return this.runs.size;
+  }
+
+  /**
+   * Snapshot of every non-evicted run (live plus recently-finished within the
+   * TTL), newest-first, for the Access-gated runs index. Sweeps first so evicted
+   * runs never appear. Each summary carries the per-run token so the index can
+   * render full capability links — this method (and the index it feeds) is the
+   * only place tokens surface outside a per-run link, which is why the index
+   * must sit behind Cloudflare Access (see features/live-view.md). Ordering is
+   * by `startedAt` descending, tie-broken by creation `seq` descending so runs
+   * created within the same clock tick still come out newest-first.
+   */
+  listActive(): RunSummary[] {
+    this.sweep();
+    return [...this.runs.values()]
+      .sort((a, b) => b.startedAt - a.startedAt || b.seq - a.seq)
+      .map((run) => ({
+        id: run.id,
+        token: run.token,
+        ...(run.label !== undefined ? { label: run.label } : {}),
+        finished: run.finished,
+        startedAt: run.startedAt,
+        eventCount: run.eventCount,
+      }));
   }
 
   /** Constant-time token check against a live run. Unknown id → null (fast);
