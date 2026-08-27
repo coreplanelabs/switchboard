@@ -48,6 +48,19 @@ export type RunFinishListener = () => void;
 /** Tear-down returned by a successful subscribe(); safe to call more than once. */
 export type Unsubscribe = () => void;
 
+/**
+ * A single change on the Access-gated runs index (`GET /runs`), delivered live to
+ * `subscribeIndex` listeners. `upsert` carries the run's current summary — the
+ * same shape `listActive()` returns — and covers create, per-event activity, and
+ * finish (a finished run is an `upsert` with `finished: true`, not a removal).
+ * `removed` fires exactly once, when a finished run is finally evicted by the TTL
+ * sweep — the only removal signal (eviction stays lazy/timer-free).
+ */
+export type IndexEvent = { type: "upsert"; run: RunSummary } | { type: "removed"; id: string };
+
+/** A live subscriber to the runs-index feed. */
+export type IndexSubscriber = (event: IndexEvent) => void;
+
 export interface RunRegistryOptions {
   /** Max events retained per run for late-subscriber replay. Default 1000. */
   backlogLimit?: number;
@@ -96,6 +109,9 @@ function safeEqual(a: string, b: string): boolean {
 
 export class RunRegistry {
   private readonly runs = new Map<string, RunState>();
+  /** Live subscribers to the runs-index feed (see subscribeIndex). Separate from
+   *  per-run `subscribers`: these get every run's lifecycle, not one run's events. */
+  private readonly indexSubscribers = new Set<IndexSubscriber>();
   private readonly backlogLimit: number;
   private readonly ttlMs: number;
   private readonly genId: () => string;
@@ -119,7 +135,7 @@ export class RunRegistry {
     this.sweep();
     const id = this.genId();
     const token = this.genToken();
-    this.runs.set(id, {
+    const run: RunState = {
       id,
       token,
       backlog: [],
@@ -129,7 +145,9 @@ export class RunRegistry {
       startedAt: this.now(),
       seq: ++this.seq,
       eventCount: 0,
-    });
+    };
+    this.runs.set(id, run);
+    this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
     return { id, token };
   }
 
@@ -142,6 +160,10 @@ export class RunRegistry {
     run.backlog.push(event);
     if (run.backlog.length > this.backlogLimit) run.backlog.shift();
     for (const sub of run.subscribers) sub.onEvent(event);
+    // Index rows show live activity (event count + running state). Agent tool
+    // events are seconds apart, so one upsert per event is not chatty; the
+    // summary is built cheaply from the run we already hold.
+    this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
   }
 
   /** Mark a run finished: notify live subscribers, stop forwarding, and start
@@ -154,6 +176,9 @@ export class RunRegistry {
     const subs = [...run.subscribers];
     run.subscribers.clear();
     for (const sub of subs) sub.onFinish?.();
+    // A finished run stays on the index (marked finished) until the TTL evicts
+    // it — so finish is an upsert, not a removal. Eviction emits the removal.
+    this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
   }
 
   /** True iff the run exists (not yet evicted) and the token matches — the same
@@ -192,6 +217,26 @@ export class RunRegistry {
     return () => void run.subscribers.delete(sub);
   }
 
+  /**
+   * Subscribe to the Access-gated runs index as a live feed. On subscribe, the
+   * current active set is replayed as `upsert` events in `listActive()` order
+   * (newest-first) — mirroring the per-run backlog replay — so a viewer who opens
+   * the index sees every current run before any live delta. Thereafter each
+   * create/publish/finish is an `upsert` and each TTL eviction a `removed`.
+   * Returns an idempotent unsubscribe. Runs of every channel flow through the
+   * shared lifecycle, so this feed reflects all of them without a dispatcher hook.
+   */
+  subscribeIndex(onEvent: IndexSubscriber): Unsubscribe {
+    for (const run of this.listActive()) onEvent({ type: "upsert", run });
+    this.indexSubscribers.add(onEvent);
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      this.indexSubscribers.delete(onEvent);
+    };
+  }
+
   /** Live + finished-but-unevicted run count (observability / tests). */
   size(): number {
     this.sweep();
@@ -212,14 +257,35 @@ export class RunRegistry {
     this.sweep();
     return [...this.runs.values()]
       .sort((a, b) => b.startedAt - a.startedAt || b.seq - a.seq)
-      .map((run) => ({
-        id: run.id,
-        token: run.token,
-        ...(run.label !== undefined ? { label: run.label } : {}),
-        finished: run.finished,
-        startedAt: run.startedAt,
-        eventCount: run.eventCount,
-      }));
+      .map((run) => this.summaryOf(run));
+  }
+
+  /** Build the index summary for one run. The single source of the run→summary
+   *  mapping, shared by `listActive()` and the `subscribeIndex` feed so the two
+   *  can never drift. `label` is omitted (not set to `undefined`) when absent. */
+  private summaryOf(run: RunState): RunSummary {
+    return {
+      id: run.id,
+      token: run.token,
+      ...(run.label !== undefined ? { label: run.label } : {}),
+      finished: run.finished,
+      startedAt: run.startedAt,
+      eventCount: run.eventCount,
+    };
+  }
+
+  /** Fan an index event out to index subscribers. Each callback is isolated: one
+   *  that throws (e.g. a dead SSE sink) is swallowed so it can neither corrupt
+   *  registry state nor throw into the create/publish/finish/sweep caller. */
+  private notifyIndex(ev: IndexEvent): void {
+    for (const onEvent of this.indexSubscribers) {
+      try {
+        onEvent(ev);
+      } catch {
+        // A misbehaving index subscriber must not break the lifecycle call that
+        // triggered this notification, nor stop the other subscribers.
+      }
+    }
   }
 
   /** Constant-time token check against a live run. Unknown id → null (fast);
@@ -239,6 +305,10 @@ export class RunRegistry {
     for (const [id, run] of this.runs) {
       if (run.finished && run.finishedAt !== undefined && run.finishedAt <= cutoff) {
         this.runs.delete(id);
+        // Eviction is the ONLY removal signal for the index feed (a finished-but-
+        // -unevicted run stays listed). Fires once per run — the delete above
+        // ensures a later sweep won't re-emit it.
+        this.notifyIndex({ type: "removed", id });
       }
     }
   }

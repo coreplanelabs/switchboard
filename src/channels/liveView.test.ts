@@ -7,11 +7,12 @@ import {
   renderRunPage,
   renderRunsIndex,
   serveEvents,
+  serveIndexEvents,
   type SseSink,
 } from "./liveView.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import type { RunEvent } from "../core/runEvents.js";
-import type { RunSummary } from "../core/runRegistry.js";
+import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
 
 // Feature: features/live-view.md — the external live-view page + SSE stream.
 // Auth is a per-run capability token (in the URL, not a header); a wrong/missing
@@ -132,6 +133,53 @@ describe("renderRunsIndex", () => {
     expect(html).toContain("/runs/a%2Fb%22c?t=x%22y");
     expect(html).not.toContain('t=x"y'); // raw quote never lands in an attribute
   });
+
+  it("opens an EventSource on the index SSE feed (/runs?stream=1) for live updates", () => {
+    const html = renderRunsIndex([summary()]);
+    expect(html).toContain('new EventSource("/runs?stream=1")');
+  });
+
+  it("keys each server-rendered row by data-run-id so the client can reconcile it", () => {
+    const html = renderRunsIndex([summary()]);
+    expect(html).toContain('data-run-id="run-1"');
+  });
+
+  it("escapes the data-run-id attribute so a hostile id can't break out of it", () => {
+    const html = renderRunsIndex([summary({ id: 'a"b', label: undefined })]);
+    expect(html).toContain('data-run-id="a&quot;b"');
+    expect(html).not.toContain('data-run-id="a"b"');
+  });
+
+  it("updates rows client-side with textContent, never innerHTML (no injection)", () => {
+    const html = renderRunsIndex([summary()]);
+    expect(html).toContain("textContent");
+    expect(html).not.toContain("innerHTML");
+  });
+
+  it("has a connection-state indicator like the per-run page", () => {
+    const html = renderRunsIndex([]);
+    expect(html).toContain('id="state"');
+  });
+
+  it("carries data-started-at on each row so the client can place rows by start time", () => {
+    const html = renderRunsIndex([summary({ startedAt: 1000 })]);
+    expect(html).toContain('data-started-at="1000"');
+  });
+
+  it("server-renders multiple runs newest-first, with matching data-started-at order", () => {
+    const html = renderRunsIndex([
+      summary({ id: "newer", startedAt: 2000, label: undefined }),
+      summary({ id: "older", startedAt: 1000, label: undefined }),
+    ]);
+    expect(html.indexOf('data-run-id="newer"')).toBeLessThan(html.indexOf('data-run-id="older"'));
+    expect(html.indexOf('data-started-at="2000"')).toBeLessThan(html.indexOf('data-started-at="1000"'));
+  });
+
+  it("inserts new rows by startedAt (sorted), not a blind prepend — so a replayed batch isn't inverted", () => {
+    const html = renderRunsIndex([summary()]);
+    expect(html).toContain("insertSorted"); // client places by comparing data-started-at
+    expect(html).not.toContain("list.firstChild"); // the old blind-prepend is gone
+  });
 });
 
 describe("renderRunPage", () => {
@@ -228,6 +276,48 @@ describe("serveEvents (SSE, transport-free)", () => {
     rec.fireClose(); // client disconnects
     reg.publish(id, call("after-close"));
     expect(rec.body()).not.toContain("after-close");
+  });
+});
+
+describe("serveIndexEvents (index SSE, transport-free)", () => {
+  it("buffers the synchronous replay, writes the 200 head, flushes it, then live-forwards; unsubscribes on close", () => {
+    let emit: (ev: IndexEvent) => void = () => {};
+    let unsubscribed = false;
+    const rec = recordingSink();
+    const replayed: IndexEvent = {
+      type: "upsert",
+      run: { id: "r1", token: "t1", finished: false, startedAt: 1, eventCount: 0 },
+    };
+
+    serveIndexEvents((onEvent) => {
+      onEvent(replayed); // synchronous replay, BEFORE serveIndexEvents writes the head
+      emit = onEvent;
+      return () => void (unsubscribed = true);
+    }, rec.sink);
+
+    expect(rec.status).toBe(200);
+    expect(rec.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+    expect(rec.headers["cache-control"]).toContain("no-cache");
+    // The replay frame was buffered and flushed only after the 200 head.
+    expect(rec.body()).toBe(`data: ${JSON.stringify(replayed)}\n\n`);
+
+    const live: IndexEvent = { type: "removed", id: "r1" };
+    emit(live);
+    expect(rec.body()).toBe(`data: ${JSON.stringify(replayed)}\n\n` + `data: ${JSON.stringify(live)}\n\n`);
+
+    rec.fireClose();
+    expect(unsubscribed).toBe(true);
+  });
+
+  it("streams a live upsert frame when a run is created on the shared registry", () => {
+    const reg = fixedRegistry();
+    const rec = recordingSink();
+    serveIndexEvents((onEvent) => reg.subscribeIndex(onEvent), rec.sink);
+    expect(rec.body()).toBe(""); // nothing to replay
+    reg.create("coding · owner/repo");
+    expect(rec.body()).toContain('"type":"upsert"');
+    expect(rec.body()).toContain('"id":"run-1"');
+    expect(rec.body()).toContain('"label":"coding · owner/repo"');
   });
 });
 
@@ -393,5 +483,45 @@ describe("createLiveViewHandler (node:http)", () => {
     handler(t.req, t.res);
     expect(t.body()).not.toContain("<script>alert(1)</script>");
     expect(t.body()).toContain("&lt;script&gt;");
+  });
+
+  it("routes /runs (no flag) to HTML and /runs?stream=1 to the index SSE feed", () => {
+    const reg = fixedRegistry();
+    reg.create("coding · owner/repo");
+    const handler = createLiveViewHandler(reg);
+
+    const htmlReq = fakeReqRes("GET", "/runs");
+    handler(htmlReq.req, htmlReq.res);
+    expect(htmlReq.headers["content-type"]).toContain("text/html");
+
+    const sseReq = fakeReqRes("GET", "/runs?stream=1");
+    handler(sseReq.req, sseReq.res);
+    expect(sseReq.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+  });
+
+  it("streams the index SSE feed at /runs?stream=1: replays active runs, forwards new ones, unsubscribes on close", () => {
+    const reg = fixedRegistry();
+    reg.create("coding · owner/repo"); // active before connect → replayed
+    const handler = createLiveViewHandler(reg);
+    const t = fakeReqRes("GET", "/runs?stream=1");
+    expect(handler(t.req, t.res)).toBe(true);
+    expect(t.status).toBe(200);
+    expect(t.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+    expect(t.body()).toContain('"label":"coding · owner/repo"'); // replayed upsert
+
+    reg.create("review · thread-9"); // live upsert
+    expect(t.body()).toContain('"label":"review · thread-9"');
+
+    t.fireClose(); // client disconnects → unsubscribe
+    reg.create("after-close");
+    expect(t.body()).not.toContain("after-close");
+  });
+
+  it("405s a non-GET method on the index SSE stream", () => {
+    const reg = fixedRegistry();
+    const handler = createLiveViewHandler(reg);
+    const t = fakeReqRes("POST", "/runs?stream=1");
+    expect(handler(t.req, t.res)).toBe(true);
+    expect(t.status).toBe(405);
   });
 });
