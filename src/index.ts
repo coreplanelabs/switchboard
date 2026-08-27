@@ -3,6 +3,7 @@ import { ConfigStore } from "./config.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { createSlackApp } from "./channels/slack.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
+import { createMcpHandler } from "./channels/mcp.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
@@ -23,24 +24,34 @@ async function main() {
 
   // Optional HTTP server. Slack traffic arrives over the outbound Socket Mode
   // websocket, so this port serves (a) a health probe for container platforms
-  // (Cloudflare Containers, Fly, k8s) and (b) the authenticated HTTP ingress
-  // channel (adapter #3): POST /ingress turns an authed request into the same
-  // IncomingMessage the Slack/CLI adapters build and calls the same dispatch().
+  // (Cloudflare Containers, Fly, k8s) and the two authenticated universal
+  // ingress channels, both fed by the SAME SWITCHBOARD_INGRESS_TOKENS token map
+  // (one credential set, two surfaces) and both landing in the same dispatch()
+  // the Slack/CLI adapters use: (b) HTTP ingress (adapter #3): POST /ingress,
+  // and (c) MCP ingress (adapter #4): POST /mcp — a minimal MCP server over
+  // streamable-HTTP (JSON-RPC 2.0). With no tokens configured BOTH are
+  // fail-closed disabled.
   if (process.env.PORT) {
     const auth = parseIngressTokens(process.env);
     const ingress = createIngressHandler({ config, providers }, { auth });
+    const mcp = createMcpHandler({ config, providers }, { auth });
     const tokenCount = Object.keys(auth.tokens).length;
     createServer((req, res) => {
-      if ((req.url ?? "/").split("?")[0] === "/ingress") {
+      const path = (req.url ?? "/").split("?")[0];
+      if (path === "/ingress") {
         ingress(req, res);
+        return;
+      }
+      if (path === "/mcp") {
+        mcp(req, res);
         return;
       }
       res.writeHead(200, { "content-type": "text/plain" });
       res.end("ok");
     }).listen(Number(process.env.PORT), () =>
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress; ` +
-          `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress DISABLED — no tokens configured"})`,
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp; ` +
+          `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"})`,
       ),
     );
   }
