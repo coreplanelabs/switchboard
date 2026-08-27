@@ -22,6 +22,11 @@ import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
 const call = (summary: string): RunEvent => ({ type: "tool_call", tool: "bash", summary });
 const result = (ok: boolean, summary: string): RunEvent => ({ type: "tool_result", tool: "bash", ok, summary });
 
+/** Every SSE response now writes this prelude first, to flush the 200 head so the
+ *  browser's EventSource fires `onopen` even before any data (fixes the page being
+ *  stuck "connecting" through a buffering proxy when there's nothing to replay). */
+const PRELUDE = "retry: 3000\n\n";
+
 /** Deterministic registry so ids/tokens are predictable in URL assertions. */
 function fixedRegistry() {
   let n = 0;
@@ -230,7 +235,16 @@ describe("serveEvents (SSE, transport-free)", () => {
 
     reg.publish(id, call("$ echo hi"));
     reg.publish(id, result(true, "hi"));
-    expect(rec.body()).toBe(`data: ${JSON.stringify(call("$ echo hi"))}\n\n` + `data: ${JSON.stringify(result(true, "hi"))}\n\n`);
+    expect(rec.body()).toBe(PRELUDE + `data: ${JSON.stringify(call("$ echo hi"))}\n\n` + `data: ${JSON.stringify(result(true, "hi"))}\n\n`);
+  });
+
+  it("flushes the head with the prelude even when the backlog is empty (no stuck 'connecting')", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    const rec = recordingSink();
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
+    expect(rec.status).toBe(200);
+    expect(rec.body()).toBe(PRELUDE); // head flushed immediately, before any run event
   });
 
   it("flushes a late subscriber's replayed backlog AFTER the 200 head (never before)", () => {
@@ -298,12 +312,12 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
     expect(rec.status).toBe(200);
     expect(rec.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
     expect(rec.headers["cache-control"]).toContain("no-cache");
-    // The replay frame was buffered and flushed only after the 200 head.
-    expect(rec.body()).toBe(`data: ${JSON.stringify(replayed)}\n\n`);
+    // The prelude flushes the head, then the replay frame follows (after the 200 head).
+    expect(rec.body()).toBe(PRELUDE + `data: ${JSON.stringify(replayed)}\n\n`);
 
     const live: IndexEvent = { type: "removed", id: "r1" };
     emit(live);
-    expect(rec.body()).toBe(`data: ${JSON.stringify(replayed)}\n\n` + `data: ${JSON.stringify(live)}\n\n`);
+    expect(rec.body()).toBe(PRELUDE + `data: ${JSON.stringify(replayed)}\n\n` + `data: ${JSON.stringify(live)}\n\n`);
 
     rec.fireClose();
     expect(unsubscribed).toBe(true);
@@ -313,7 +327,9 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
     const reg = fixedRegistry();
     const rec = recordingSink();
     serveIndexEvents((onEvent) => reg.subscribeIndex(onEvent), rec.sink);
-    expect(rec.body()).toBe(""); // nothing to replay
+    // Nothing to replay, but the prelude still flushes the head immediately — this
+    // is the fix for the page hanging on "connecting…" when no runs are active.
+    expect(rec.body()).toBe(PRELUDE);
     reg.create("coding · owner/repo");
     expect(rec.body()).toContain('"type":"upsert"');
     expect(rec.body()).toContain('"id":"run-1"');
@@ -323,8 +339,16 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
 
 describe("createLiveViewHandler (node:http)", () => {
   function fakeReqRes(method: string, url: string, headers: IncomingHttpHeaders = {}) {
-    const listeners: Record<string, () => void> = {};
-    const req = { method, url, headers, on: (ev: string, cb: () => void) => void (listeners[ev] = cb) };
+    // Mimic node's EventEmitter: multiple listeners per event, all fired on emit.
+    // (The SSE handler registers two "close" listeners — the sink's unsubscribe
+    // and the heartbeat's clearInterval — and both must run.)
+    const listeners: Record<string, Array<() => void>> = {};
+    const req = {
+      method,
+      url,
+      headers,
+      on: (ev: string, cb: () => void) => void (listeners[ev] ??= []).push(cb),
+    };
     let status = 0;
     let outHeaders: Record<string, string> = {};
     const chunks: string[] = [];
@@ -353,7 +377,7 @@ describe("createLiveViewHandler (node:http)", () => {
       get ended() {
         return ended;
       },
-      fireClose: () => listeners.close?.(),
+      fireClose: () => listeners.close?.forEach((cb) => cb()),
     };
   }
 
