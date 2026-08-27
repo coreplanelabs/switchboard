@@ -1,0 +1,90 @@
+// Run visibility (Area 2 / R12): a typed stream of what an agent is doing —
+// tool calls and their (redacted, summarized) results — emitted by the runner.
+// Today the in-channel status card consumes it live; the external live-view
+// page (a follow-up) will consume the same stream. Keeping it a small typed
+// seam here means neither consumer reaches into the runner's internals.
+
+export type RunEvent =
+  | { type: "tool_call"; tool: string; summary: string }
+  | { type: "tool_result"; tool: string; ok: boolean; summary: string };
+
+// Credential shapes we must never surface in a run-visibility stream (which may
+// be shown in-channel or on a shared page). Two layers: (1) specific known
+// formats (below), and (2) a name-gated assignment pass (redactNamedAssignments)
+// that hides the VALUE of any `…SECRET`/`…KEY`/`…TOKEN`-style identifier. We
+// redact recognized shapes rather than any long string, to avoid mangling
+// legitimate output (SHAs, UUIDs, digests, version numbers all pass through).
+const REDACT: Array<{ re: RegExp; replace: string }> = [
+  // PEM private keys — full block (incl. \n-escaped inside JSON) and a bare header.
+  { re: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g, replace: "«redacted-private-key»" },
+  { re: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g, replace: "«redacted-private-key»" },
+  // URL / connection-string basic-auth: scheme://user:password@host
+  { re: /([a-z][a-z0-9+.\-]*:\/\/)([^\s:/@]+):([^\s:/@]+)@/gi, replace: "$1$2:«redacted»@" },
+  // curl -u user:pass
+  { re: /(^|\s)(-u|--user)(\s+|=)\S+:\S+/g, replace: "$1$2$3«redacted»" },
+  // HTTP auth headers (Bearer / Basic / token) and bare Bearer tokens
+  { re: /\b(Authorization\s*:\s*)(Bearer|Basic|token)\s+[A-Za-z0-9._~+/=\-]{8,}/gi, replace: "$1$2 «redacted»" },
+  { re: /\b[Bb]earer\s+[A-Za-z0-9._~+/\-]{12,}=*/g, replace: "Bearer «redacted»" },
+  // Cookies (whole header value)
+  { re: /\b((?:Set-)?Cookie\s*:\s*)[^\r\n]+/gi, replace: "$1«redacted»" },
+  // Provider / cloud token formats
+  { re: /xox[baprs]-[A-Za-z0-9-]{8,}/g, replace: "«redacted-slack-token»" },
+  { re: /gh[pousr]_[A-Za-z0-9]{20,}/g, replace: "«redacted-github-token»" },
+  { re: /github_pat_[A-Za-z0-9_]{20,}/g, replace: "«redacted-github-pat»" },
+  { re: /x-access-token:[^@\s/'"]+/gi, replace: "x-access-token:«redacted»" },
+  { re: /sk-ant-[A-Za-z0-9_-]{16,}/g, replace: "«redacted-anthropic-key»" },
+  { re: /sk-(?:proj-)?[A-Za-z0-9_-]{16,}/g, replace: "«redacted-api-key»" },
+  { re: /AKIA[0-9A-Z]{16}/g, replace: "«redacted-aws-key»" },
+  { re: /AIza[0-9A-Za-z_\-]{35}/g, replace: "«redacted-gcp-key»" },
+  { re: /\b(?:whsec|sk_live|sk_test|rk_live|pk_live)_[A-Za-z0-9]{16,}/g, replace: "«redacted-stripe-key»" },
+];
+
+// An identifier component (split on _ or -) that marks its assignment's value as
+// secret. Matched case-insensitively against each component, so `AWS_SECRET_
+// ACCESS_KEY` (…SECRET, …KEY) and `STRIPE_WEBHOOK_SECRET` are caught while
+// `PORT`, `REACT_VERSION`, `DATABASE_URL`, `MONKEY_BARS` are not.
+const SECRET_COMPONENT = /^(secret|token|password|passwd|pwd|credential|credentials|key|apikey|auth|session|sessionid|cookie)$/i;
+
+/** Redact the VALUE of any `<name> = value` / `<name>: value` where the name has
+ *  a secret-marking component. Handles quoted values (with spaces) and unquoted.
+ *  Name-gated so ordinary config assignments are untouched. */
+function redactNamedAssignments(text: string): string {
+  return text.replace(
+    /([A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)*)(\s*[=:]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s]{4,})/g,
+    (whole, id: string, sep: string, val: string) => {
+      if (!id.split(/[_-]/).some((p) => SECRET_COMPONENT.test(p))) return whole;
+      const quote = val[0] === '"' || val[0] === "'" ? val[0] : "";
+      return `${id}${sep}${quote}«redacted»${quote}`;
+    },
+  );
+}
+
+/** Strip known credential formats from text before it enters a run-visibility
+ *  stream: specific shapes first, then the name-gated assignment pass. */
+export function redactSecrets(text: string): string {
+  let out = text;
+  for (const { re, replace } of REDACT) out = out.replace(re, replace);
+  return redactNamedAssignments(out);
+}
+
+/** Redact THEN cap — the correct order for a length-limited display string, so a
+ *  secret near a truncation boundary can never be emitted as a raw fragment. */
+export function redactAndCap(text: string, cap = 200): string {
+  const redacted = redactSecrets(text);
+  return redacted.length > cap ? `${redacted.slice(0, cap)}…` : redacted;
+}
+
+const SUMMARY_CAP = 200;
+
+/** One-line, redacted, length-capped summary of a tool's output for the run
+ *  stream — the first non-empty line plus a size note. */
+export function summarizeToolResult(output: string): string {
+  const redacted = redactSecrets(output);
+  const trimmed = redacted.trim();
+  if (trimmed === "") return "(no output)";
+  const firstLine = trimmed.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
+  const head = firstLine.length > SUMMARY_CAP ? `${firstLine.slice(0, SUMMARY_CAP)}…` : firstLine;
+  const lineCount = trimmed.split("\n").length;
+  const more = trimmed.length > head.length ? ` (${trimmed.length} chars${lineCount > 1 ? `, ${lineCount} lines` : ""})` : "";
+  return head + more;
+}

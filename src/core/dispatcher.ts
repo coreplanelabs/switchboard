@@ -11,6 +11,7 @@ import type { ProviderRegistry } from "../providers/registry.js";
 import { resolveRepoContext, type RepoContext } from "./repoContext.js";
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
+import type { RunEvent } from "./runEvents.js";
 import type { ChannelIO, HistoryItem, ImageAttachment, IncomingMessage } from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
@@ -211,17 +212,30 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       `${icon ?? spinner[frame++ % spinner.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
     const status = await io.status({ title: title() });
     let lastToolAt = Date.now();
-    // The card body is the agent's own checklist (via the update_status tool),
-    // not a raw command stream — commands go to stdout for operators only.
+    // The card body is the agent's own checklist (via the update_status tool)
+    // plus a live one-line activity trace (current tool call + redacted result
+    // summary) so the card reflects progress per tool event, not only on the
+    // 5s heartbeat. Full command output still goes to stdout for operators.
     let checklist: string | undefined;
+    let lastActivity: string | undefined;
     const currentFrame = () => {
       const quiet = Date.now() - lastToolAt;
       const thinking = quiet > 20_000 ? ` — thinking (${Math.round(quiet / 1000)}s since last tool)` : "";
-      return { title: title() + thinking, detail: checklist };
+      const detail = [checklist, lastActivity].filter(Boolean).join("\n");
+      return { title: title() + thinking, detail: detail || undefined };
     };
     const onProgress = (note: string) => {
-      console.log(`[tool] ${msg.threadKey} ${note}`);
+      console.log(`[note] ${msg.threadKey} ${note}`);
       lastToolAt = Date.now();
+    };
+    // Live run-visibility (Area 2): each tool call/result refreshes the card
+    // immediately, so activity is visible without waiting for the heartbeat.
+    const onEvent = (e: RunEvent) => {
+      lastToolAt = Date.now();
+      lastActivity =
+        e.type === "tool_call" ? `→ ${e.summary}` : `${e.ok ? "✓" : "✗"} ${e.tool}: ${e.summary}`;
+      console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
+      status.update(currentFrame());
     };
     const reportProgress = (list: string) => {
       checklist = list.trim() || undefined;
@@ -243,6 +257,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         system,
         toolContext: { executor, reportProgress, web: makeWebCapability(process.env) },
         onProgress,
+        onEvent,
       });
     } catch (err) {
       await status.done({ title: title("❌"), detail: checklist });

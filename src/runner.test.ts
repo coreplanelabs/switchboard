@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentDef } from "./agents/registry.js";
 import type { CompletionRequest, CompletionResult, Provider } from "./providers/types.js";
 import type { Executor } from "./execution/executor.js";
+import type { RunEvent } from "./core/runEvents.js";
 import { runAgent } from "./runner.js";
 
 // Feature: features/run-loop.md — turn/time budgets and forced write-up.
@@ -217,5 +218,78 @@ describe("runAgent budgets", () => {
     });
     expect(answer).toContain("half an ans");
     expect(answer).toContain("truncated");
+  });
+});
+
+describe("run-visibility events", () => {
+  it("emits tool_call then tool_result for each tool use", async () => {
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    expect(events).toEqual([
+      { type: "tool_call", tool: "bash", summary: expect.stringContaining("echo hi") },
+      { type: "tool_result", tool: "bash", ok: true, summary: expect.stringContaining("ok") },
+    ]);
+  });
+
+  it("redacts secrets in tool_result summaries", async () => {
+    const secret = "ghp_" + "A".repeat(36);
+    const leaky: Executor = { ...fakeExecutor, exec: async () => `deploy token=${secret}` };
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: leaky },
+      onEvent: (e) => events.push(e),
+    });
+    const result = events.find((e) => e.type === "tool_result");
+    expect(result?.summary).not.toContain(secret);
+    expect(result?.summary).toContain("«redacted");
+  });
+
+  it("marks a failing tool with ok:false", async () => {
+    const boom: Executor = { ...fakeExecutor, exec: async () => { throw new Error("kaboom"); } };
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: boom },
+      onEvent: (e) => events.push(e),
+    });
+    const result = events.find((e) => e.type === "tool_result");
+    expect(result?.ok).toBe(false);
+    expect(result?.summary).toContain("kaboom");
+  });
+
+  it("redacts a secret in a long bash command before capping (no fragment leak)", async () => {
+    // Token sits past the old 120-char truncation point; a truncate-then-redact
+    // path would sever it below its length floor and leak a raw prefix.
+    const token = "ghp_" + "A".repeat(40);
+    const command = "curl " + "x".repeat(140) + " -H 'Authorization: token " + token + "'";
+    const provider = scripted([
+      { content: [{ type: "tool_use", id: "t1", name: "bash", input: { command } }], stopReason: "tool_use" },
+      text("done"),
+    ]);
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    const call = events.find((e) => e.type === "tool_call");
+    expect(call?.summary).not.toContain("ghp_AAAA");
   });
 });

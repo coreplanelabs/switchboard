@@ -1,5 +1,6 @@
 import type { AgentDef } from "./agents/registry.js";
 import type { ChatMessage, ContentPart, Provider } from "./providers/types.js";
+import { redactAndCap, summarizeToolResult, type RunEvent } from "./core/runEvents.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
 
 // The runner is the provider-neutral agent loop: send messages, execute any
@@ -17,8 +18,11 @@ export interface RunOptions {
    *  here, never by mutating the shared AgentDef (concurrent dispatches share
    *  it). Absent → `agent.system`. */
   system?: string;
-  /** called with short progress notes (e.g. tool activity) for Slack updates */
+  /** called with short progress notes (wrap-up warnings, budget notices) */
   onProgress?: (note: string) => void;
+  /** structured run-visibility events (tool calls + redacted result summaries),
+   *  consumed live by the status card and, later, the external live-view page */
+  onEvent?: (event: RunEvent) => void;
   /** injectable clock for tests; defaults to Date.now */
   now?: () => number;
 }
@@ -71,9 +75,12 @@ export async function runAgent(opts: RunOptions): Promise<string> {
     messages.push({ role: "assistant", content: result.content });
     const results: ContentPart[] = [];
     for (const tu of toolUses) {
-      opts.onProgress?.(describeToolCall(tu));
+      // Redact THEN cap (redactAndCap): a pre-truncated command could sever a
+      // token below its detector's length floor and leak a raw fragment.
+      opts.onEvent?.({ type: "tool_call", tool: tu.name, summary: redactAndCap(describeToolCall(tu)) });
       const tool = toolsByName.get(tu.name);
       if (!tool) {
+        opts.onEvent?.({ type: "tool_result", tool: tu.name, ok: false, summary: redactAndCap(`Unknown tool: ${tu.name}`) });
         results.push({
           type: "tool_result",
           toolUseId: tu.id,
@@ -84,12 +91,15 @@ export async function runAgent(opts: RunOptions): Promise<string> {
       }
       try {
         const output = await tool.run((tu.input ?? {}) as Record<string, unknown>, opts.toolContext);
+        opts.onEvent?.({ type: "tool_result", tool: tu.name, ok: true, summary: summarizeToolResult(output) });
         results.push({ type: "tool_result", toolUseId: tu.id, content: output });
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        opts.onEvent?.({ type: "tool_result", tool: tu.name, ok: false, summary: summarizeToolResult(message) });
         results.push({
           type: "tool_result",
           toolUseId: tu.id,
-          content: `Error: ${err instanceof Error ? err.message : String(err)}`,
+          content: `Error: ${message}`,
           isError: true,
         });
       }
@@ -144,7 +154,9 @@ function collectText(parts: ContentPart[]): string {
 function describeToolCall(tu: Extract<ContentPart, { type: "tool_use" }>): string {
   const input = tu.input as Record<string, unknown> | undefined;
   if (tu.name === "bash" && input?.command) {
-    return `$ ${String(input.command).slice(0, 120)}`;
+    // Full command — redaction + capping happens at the call site (redactAndCap),
+    // so we never truncate before redacting.
+    return `$ ${String(input.command)}`;
   }
   if (input?.path) return `${tu.name} ${String(input.path)}`;
   return tu.name;
