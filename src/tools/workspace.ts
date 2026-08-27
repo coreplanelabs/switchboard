@@ -95,13 +95,21 @@ export const diffDigestTool: RunnableTool = {
   },
   async run(input, ctx) {
     const base = String(input.base ?? "").trim();
+    // git OPTION injection (distinct from shell injection): a base like
+    // `--output=/path` or `-O/etc/passwd` is parsed by GIT itself as an option
+    // — arbitrary file write/read — even though the shell token is inert. Reject
+    // a leading dash, and pass `--end-of-options` so git treats the token as a
+    // revision regardless.
+    if (base.startsWith("-")) {
+      return "diff_digest: base ref may not start with '-' (rejected to prevent git option injection).";
+    }
     // Quote a caller-supplied base into one inert shell token so it can't break
     // out of the argument. No base → resolve the default branch at run time,
     // falling back to origin/main when origin/HEAD isn't set.
     const baseExpr = base
       ? shellQuote(base)
       : '"$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)"';
-    const raw = await ctx.executor.exec(`git diff ${baseExpr}...HEAD`);
+    const raw = await ctx.executor.exec(`git diff --end-of-options ${baseExpr}...HEAD`);
     // The Executor returns command failures as text (never throws). If the diff
     // failed, distillDiff would render a misleading "no changes" — surface the
     // error instead.

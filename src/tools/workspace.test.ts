@@ -79,7 +79,35 @@ describe("diff_digest tool", () => {
     );
     // the malicious ref must be a single quoted shell token, not runnable code:
     // the embedded quotes are escaped so the injected `;` stays inside the arg.
-    expect(captured).toContain("git diff 'a'\\''; rm -rf /; echo '\\'''...HEAD");
+    expect(captured).toContain("git diff --end-of-options 'a'\\''; rm -rf /; echo '\\'''...HEAD");
+  });
+
+  // Review finding 2: git OPTION injection (distinct from shell injection). A
+  // base starting with '-' would be parsed by git as an option (e.g.
+  // --output=/path → arbitrary file write). It must be rejected before exec.
+  it("rejects a base ref starting with '-' (git option injection) without running git", async () => {
+    let called = false;
+    const out = await diffDigestTool.run(
+      { base: "--output=/tmp/pwn" },
+      ctxWith(async () => {
+        called = true;
+        return SAMPLE_DIFF;
+      }),
+    );
+    expect(out).toMatch(/may not start with '-'/);
+    expect(called).toBe(false);
+  });
+
+  it("passes --end-of-options so a ref is never parsed as a git option", async () => {
+    let captured = "";
+    await diffDigestTool.run(
+      { base: "main" },
+      ctxWith(async (cmd) => {
+        captured = cmd;
+        return SAMPLE_DIFF;
+      }),
+    );
+    expect(captured).toContain("--end-of-options");
   });
 });
 

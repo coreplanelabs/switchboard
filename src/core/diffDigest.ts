@@ -40,6 +40,11 @@ const MIGRATION_RE = /(^|\/)migrations?(\/|$)|\bmigrate\b|schema|\.sql$|\.prisma
 const AUTH_RE =
   /auth|permission|\bperms?\b|credential|secret|password|passwd|(^|\/)\.env|\boauth\b|\brbac\b|\bacl\b|\bsession\b|login/i;
 
+// Infra / deploy / CI config — a change here can alter how everything ships or
+// runs, so it warrants a reviewer's eye even when the diff looks small.
+const INFRA_RE =
+  /(^|\/)\.github\/workflows\/|\.tf$|\.tfvars$|(^|\/)terraform\/|(^|\/)dockerfile|(^|\/)deploy\/|(^|\/)wrangler\.(jsonc?|toml)|(^|\/)k8s\//i;
+
 // A single file changing this many lines (adds + dels) is flagged as a large
 // change — worth calling out so a reviewer knows to budget time for it.
 const LARGE_CHURN = 300;
@@ -49,32 +54,63 @@ function basename(p: string): string {
   return i === -1 ? p : p.slice(i + 1);
 }
 
+// Decode git's C-style path quoting (core.quotepath=true, the default): a path
+// with non-ASCII or special bytes is emitted inside double quotes with each
+// such byte as a \NNN octal escape. Reassemble the raw bytes and read them back
+// as UTF-8, so the digest shows the real filename instead of "\303\251".
+function decodeGitQuoted(s: string): string {
+  const bytes: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\" && i + 1 < s.length) {
+      const oct = s.slice(i + 1).match(/^[0-7]{1,3}/)?.[0];
+      if (oct) {
+        bytes.push(parseInt(oct, 8) & 0xff);
+        i += oct.length;
+        continue;
+      }
+      const simple: Record<string, number> = { t: 9, n: 10, r: 13, '"': 34, "\\": 92 };
+      const nx = s[i + 1];
+      bytes.push(nx in simple ? simple[nx] : nx.charCodeAt(0) & 0xff);
+      i += 1;
+      continue;
+    }
+    bytes.push(s.charCodeAt(i) & 0xff);
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
 // Strip git's a//b/ (and w//i//c//o/) path prefixes and surrounding quotes;
 // "/dev/null" (new/deleted side) resolves to no path.
 function stripPrefix(raw: string): string {
   if (raw === "/dev/null") return "";
   let s = raw;
-  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) s = s.slice(1, -1);
+  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) s = decodeGitQuoted(s.slice(1, -1));
   if (/^[abciwo]\//.test(s)) s = s.slice(2);
   return s;
 }
 
-// Fallback path from the "diff --git a/OLD b/NEW" header (used for renames /
-// binaries that carry no ---/+++ lines). Prefers the NEW (b/) side.
-function pathFromHeader(line: string): string {
+// Old + new paths from the "diff --git a/OLD b/NEW" header (used for renames /
+// binaries that carry no ---/+++ lines). Both sides matter for risk scoring.
+function pathsFromHeader(line: string): { old: string; new: string } {
   const rest = line.slice("diff --git ".length);
   const m = /^a\/(.+) b\/(.+)$/.exec(rest);
-  if (m) return m[2];
-  return stripPrefix(rest.split(" ")[0] ?? "");
+  if (m) return { old: m[1], new: m[2] };
+  const only = stripPrefix(rest.split(" ")[0] ?? "");
+  return { old: only, new: only };
 }
 
-function riskReasons(entry: FileEntry): string[] {
+// Risk is assessed against BOTH the new and old paths: a risky file renamed to
+// an innocuous name (src/auth/x.ts → src/misc/y.ts, or .env → config.json) must
+// still be flagged — the rename doesn't make the change safe.
+function riskReasons(entry: FileEntry, paths: string[]): string[] {
   const reasons: string[] = [];
-  const { path } = entry;
-  if (MIGRATION_RE.test(path)) reasons.push("migration/schema");
-  if (AUTH_RE.test(path)) reasons.push("auth/permission-sensitive");
+  const candidates = [...new Set(paths.filter(Boolean))];
+  const any = (re: RegExp) => candidates.some((p) => re.test(p));
+  if (any(MIGRATION_RE)) reasons.push("migration/schema");
+  if (any(AUTH_RE)) reasons.push("auth/permission-sensitive");
+  if (any(INFRA_RE)) reasons.push("infra/deploy config");
   if (entry.status === "deleted") reasons.push("whole-file deletion");
-  if (LOCKFILES.has(basename(path).toLowerCase())) reasons.push("lockfile");
+  if (candidates.some((p) => LOCKFILES.has(basename(p).toLowerCase()))) reasons.push("lockfile");
   const churn = entry.adds + entry.dels;
   if (churn >= LARGE_CHURN) reasons.push(`large change (${churn} lines)`);
   return reasons;
@@ -91,10 +127,12 @@ interface Acc {
 }
 
 function finalize(a: Acc): FileEntry {
-  // Prefer the new-side path, then the old-side, then the header.
-  const path = a.pathPlus || a.pathMinus || pathFromHeader(a.header) || "(unknown)";
-  const entry: FileEntry = { path, adds: a.adds, dels: a.dels, status: a.status, reasons: [] };
-  entry.reasons = riskReasons(entry);
+  const header = pathsFromHeader(a.header);
+  // Prefer the new-side path for display; keep the old side for risk scoring.
+  const newPath = a.pathPlus || header.new || "(unknown)";
+  const oldPath = a.pathMinus || header.old || newPath;
+  const entry: FileEntry = { path: newPath, adds: a.adds, dels: a.dels, status: a.status, reasons: [] };
+  entry.reasons = riskReasons(entry, [newPath, oldPath]);
   return entry;
 }
 

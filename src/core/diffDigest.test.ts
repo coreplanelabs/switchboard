@@ -150,4 +150,76 @@ index aaa..bbb 100644
 `;
     expect(distillDiff(diff)).toContain("1 file changed, +1 -1");
   });
+
+  // Review finding 1: a risky file renamed to an innocuous name must still be
+  // flagged — risk is scored against BOTH the old and new paths.
+  it("flags a risky file renamed to a bland name (old-side risk)", () => {
+    const diff = `diff --git a/src/auth/login.ts b/src/misc/utils2.ts
+similarity index 60%
+rename from src/auth/login.ts
+rename to src/misc/utils2.ts
+index aaa..bbb 100644
+--- a/src/auth/login.ts
++++ b/src/misc/utils2.ts
+@@ -1,2 +1,3 @@
+ function check() {}
++if (process.env.SKIP_AUTH) return true;
+`;
+    const out = distillDiff(diff);
+    expect(out).toContain("src/misc/utils2.ts");
+    expect(out).toContain("Risky files");
+    expect(out).toMatch(/utils2\.ts — .*auth\/permission-sensitive/);
+  });
+
+  it("flags a secrets file relocated to a non-secret name (.env → config.json)", () => {
+    const diff = `diff --git a/.env b/config.json
+rename from .env
+rename to config.json
+index aaa..bbb 100644
+--- a/.env
++++ b/config.json
+@@ -1 +1 @@
+-SECRET=old
++{"secret":"new"}
+`;
+    expect(distillDiff(diff)).toMatch(/config\.json — .*auth\/permission-sensitive/);
+  });
+
+  // Review finding 3: git C-quoted (core.quotepath) non-ASCII paths decode to
+  // the real filename, not raw octal escapes.
+  it("decodes git-quoted non-ASCII filenames", () => {
+    const diff = `diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"
+index aaa..bbb 100644
+--- "a/caf\\303\\251.txt"
++++ "b/caf\\303\\251.txt"
+@@ -1 +1 @@
+-x
++y
+`;
+    const out = distillDiff(diff);
+    expect(out).toContain("café.txt");
+    expect(out).not.toContain("\\303");
+  });
+
+  // Review finding 4: infra/deploy/CI config is a risk category.
+  it("flags infra/deploy/CI config files", () => {
+    const diff = `diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index aaa..bbb 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1 +1 @@
+-x
++y
+diff --git a/infra/main.tf b/infra/main.tf
+index ccc..ddd 100644
+--- a/infra/main.tf
++++ b/infra/main.tf
+@@ -1 +1 @@
+-a
++b
+`;
+    const out = distillDiff(diff);
+    expect(out).toMatch(/ci\.yml — .*infra\/deploy config/);
+    expect(out).toMatch(/main\.tf — .*infra\/deploy config/);
+  });
 });
