@@ -12,7 +12,7 @@ You can watch an agent run in real time from a browser. When a run starts, the b
 
 - **Code**: [`src/core/runRegistry.ts`](../src/core/runRegistry.ts) (`RunRegistry`: `create(label?)`/`publish`/`finish`/`subscribe`/`has`/`listActive`, per-run label + `startedAt` + `eventCount`, bounded backlog, TTL eviction, constant-time token gate, `defaultRunRegistry` singleton); [`src/channels/liveView.ts`](../src/channels/liveView.ts) (`parseRunRoute` incl. the `index` route, `renderRunPage`, `renderRunsIndex`, `escapeHtml`, `serveEvents`, `createLiveViewHandler`); [`src/core/dispatcher.ts`](../src/core/dispatcher.ts) (registers the run with a short label, publishes events in `onEvent`, finishes in the run-loop `finally`, adds the link to the status card when `PUBLIC_BASE_URL` is set); [`src/index.ts`](../src/index.ts) (routes `GET /runs` + `/runs/:id` + `/runs/:id/events`, sharing `defaultRunRegistry` with the dispatcher).
 - **Tests**: [`src/core/runRegistry.test.ts`](../src/core/runRegistry.test.ts), [`src/channels/liveView.test.ts`](../src/channels/liveView.test.ts), [`src/core/dispatcher.test.ts`](../src/core/dispatcher.test.ts) (`live run-view wiring (Area 2)`).
-- **Docs**: [AGENTS.md invariants 1, 2, 6](../AGENTS.md), [run-visibility.md](run-visibility.md).
+- **Docs**: [AGENTS.md invariants 1, 2, 6](../AGENTS.md), [run-visibility.md](run-visibility.md). The whole `/runs*` surface sits behind fail-closed Cloudflare Access (SSO) enforced in our own code — see [access-gate.md](access-gate.md); that identity gate runs before the per-run capability-token check here (defense in depth).
 
 ## Behavior
 

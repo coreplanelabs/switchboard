@@ -1,0 +1,51 @@
+# Access gate: fail-closed Cloudflare Access (SSO) for /runs\*
+
+The whole `/runs*` surface — the per-run live-view page (`GET /runs/:id?t=…`), its SSE stream (`GET /runs/:id/events`), and the forthcoming bare `GET /runs` index — sits behind our Cloudflare Access (SSO). The bot runs on a custom domain; a Cloudflare Access edge rule on `/runs*` authenticates the user and injects a signed RS256 JWT in the `Cf-Access-Jwt-Assertion` request header. **We do not trust the edge alone.** This module re-verifies that identity in our own code and **fails closed**, so `/runs*` refuses to serve without a valid Access JWT — even if the edge rule is ever misconfigured, removed, or a client reaches the origin directly and spoofs the header.
+
+This is the identity gate only. It runs FIRST; the live-view handler still applies its existing per-run capability-token check afterward ([live-view.md](live-view.md)) — defense in depth. Non-`/runs` paths (`/ingress`, `/mcp`, the health probe) are unaffected and not gated.
+
+- **Code**: [`src/channels/accessAuth.ts`](../src/channels/accessAuth.ts) (`parseAccessConfig`, `parseAccessDevBypass`, `verifyAccessJwt`, `JwksCache`, `httpJwksFetcher`, `requireAccessForRuns`); [`src/index.ts`](../src/index.ts) (builds the config + verifier once, runs the async gate before the `liveView` dispatch, states the access mode in the startup log).
+- **Tests**: [`src/channels/accessAuth.test.ts`](../src/channels/accessAuth.test.ts).
+- **Docs**: [AGENTS.md invariants 2 (≥2 implementations — the JWKS fetch seam)](../AGENTS.md), [live-view.md](live-view.md), [http-ingress.md](http-ingress.md) (sibling fail-closed / constant-time auth patterns).
+
+## Environment
+
+| Var | Meaning |
+|-----|---------|
+| `ACCESS_TEAM_DOMAIN` | Bare Access team host, e.g. `coreplane.cloudflareaccess.com`. Defensively normalized (scheme + trailing slash stripped, trimmed). Sets `iss` (`https://<team-domain>`) and the JWKS URL (`https://<team-domain>/cdn-cgi/access/certs`). |
+| `ACCESS_AUD` | The Access application's AUD tag; the token's `aud` (string or array) must include it. |
+| `ACCESS_DEV_BYPASS` | **LOCAL DEV ONLY.** `"1"`/`"true"` (case-insensitive) serves `/runs*` with NO SSO check — but only when no Access config is present. Never set it in a deployed environment. |
+
+Both `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` must be set and non-blank for Access to be considered configured; otherwise the config is `null`.
+
+## Behavior
+
+1. **Fail-closed by default.** `requireAccessForRuns` with a `null` config denies every `/runs*` request with `403 forbidden` — `/runs` is never exposed without SSO configured. The only escape hatch is `ACCESS_DEV_BYPASS`, which (with a `null` config) allows the request as identity `{ sub: "dev-bypass" }`. When a real Access config is present, the bypass is ignored and a JWT is always required.
+2. **RS256 verification against the live JWKS.** `verifyAccessJwt` splits the compact JWS, base64url-decodes the header + payload, looks up the signing key by header `kid`, and verifies the signature over the exact `header.payload` bytes with `crypto.verify("RSA-SHA256", …)` using `crypto.createPublicKey({ format: "jwk", key })`. A bad/absent signature → `null`.
+3. **Algorithm-confusion defense (critical).** The header `alg` MUST be `RS256`; `none`, `HS256`, or anything else is rejected before any signature work, and verification is always RSA-SHA256 — never an algorithm named by the attacker-controlled header. This is red-verified: a token bearing a genuine RS256 signature but a lying `alg` header is accepted only if the guard is removed.
+4. **Spoofed-header defense.** Because we re-verify the JWT at the origin, a client that reaches the origin directly and sets `Cf-Access-Jwt-Assertion` to a forged, expired, wrong-`aud`/`iss`, or differently-signed token is rejected (`403`). The header is trusted only after cryptographic + claim validation.
+5. **Claim validation.** `iss` must equal `https://<team-domain>`; `aud` (string or array) must include `ACCESS_AUD`; `exp` must be present and in the future; `nbf`/`iat`, if present, must not be in the future beyond a 60s skew. On success the identity is `{ sub, email? }`.
+6. **JWKS seam + caching.** The JWKS fetch is injectable (`JwksFetcher`): the real `httpJwksFetcher` uses global `fetch`; tests inject a fake (the ≥2-implementations invariant). Keys are cached by `kid` with a TTL (default 3600s) in a shared `JwksCache`; an unknown `kid` triggers exactly one refetch per verify (handles key rotation), and a genuinely unknown kid or a failed fetch fails closed (`null`).
+7. **Never throws on bad input.** Any malformed token — wrong segment count, non-base64url, non-JSON header/payload, missing `kid`, empty — yields `null`, not an exception. In `src/index.ts` the async gate's `.catch` is a `403`, never a `500` that would serve the page.
+8. **Startup log states the mode.** The HTTP server logs one of: `Access SSO configured (<team-domain>)`, `Access DEV BYPASS (/runs open — LOCAL DEV ONLY)`, or `Access FAIL-CLOSED (/runs denied — no ACCESS_* configured)`.
+
+## Validation criteria
+
+| Criterion | Evidence |
+|-----------|----------|
+| Valid RS256 token → `{ sub, email }`; email omitted → `{ sub, email: undefined }` | `[unit]` `src/channels/accessAuth.test.ts::verifyAccessJwt::accepts a valid RS256 token and returns { sub, email }`, `::returns { sub } with email undefined when the email claim is absent` |
+| Expired or missing `exp` → null | `[unit]` `::verifyAccessJwt::rejects an expired token (exp in the past)`, `::rejects a token whose exp claim is missing` |
+| `aud` mismatch (string + array) → null; array containing the AUD → ok | `[unit]` `::verifyAccessJwt::rejects an aud mismatch (string and array forms)`, `::accepts aud as an array that includes the configured AUD` |
+| `iss` mismatch → null; future `nbf` beyond skew → null | `[unit]` `::verifyAccessJwt::rejects an iss mismatch`, `::rejects a token whose nbf is in the future beyond skew` |
+| Signature integrity: tampered signature, altered payload, attacker key → null (**red-verified**: skipping signature verification flips all three) | `[unit]` `::verifyAccessJwt::rejects a token with a tampered signature`, `::rejects a token whose payload was altered after signing`, `::rejects a token signed by a different (attacker) key` |
+| Algorithm confusion: `alg:none` (empty sig), `HS256` HMAC-forged with the public key, and — **red-verified** — `alg:none`/`HS256` carrying a genuine RS256 signature → null (removing the alg guard flips the last two + the gate's spoof test) | `[unit]` `::verifyAccessJwt::rejects alg:none with an empty signature`, `::rejects alg:none even when a valid RS256 signature is attached (alg guard, red-verifiable)`, `::rejects an HS256 token forged with the public key as the HMAC secret`, `::rejects alg:HS256 even when a valid RS256 signature is attached (alg guard, red-verifiable)`; `::requireAccessForRuns::config present + spoofed HS256 token → 403 forbidden` |
+| Malformed/empty tokens and non-JSON header never throw → null | `[unit]` `::verifyAccessJwt::returns null (never throws) for malformed or empty tokens`, `::returns null when the header base64 decodes to non-JSON` |
+| kid resolution: missing kid → null; unknown kid → null after exactly one refetch | `[unit]` `::verifyAccessJwt::rejects a token whose header has no kid`, `::returns null for an unknown kid after exactly one refetch attempt` |
+| JWKS caching: fetcher called once across repeated verifies of the same kid; unknown kid → one refetch then verifies (rotation); certs URL is the team domain's cdn-cgi path; TTL expiry re-fetches | `[unit]` `::verifyAccessJwt::caches JWKS by kid: the fetcher is called once across repeated verifies of the same kid`, `::an unknown kid triggers exactly one refetch, then verifies (key rotation)`, `::requests the JWKS from the team domain's cdn-cgi certs URL`; `::JwksCache::re-fetches once a cached key has passed its TTL` |
+| Fail-closed on JWKS fetch failure → null | `[unit]` `::verifyAccessJwt::fails closed (null) when the JWKS fetch throws` |
+| `parseAccessConfig`: both vars → config; scheme/slash/whitespace normalized; either missing/blank → null | `[unit]` `::parseAccessConfig::*` |
+| `parseAccessDevBypass`: only `1`/`true` (case-insensitive) → true | `[unit]` `::parseAccessDevBypass::*` |
+| Gate: config + valid header → ok+identity; config + missing/bad/spoofed token → 403; config null + no bypass → 403 (fail closed); config null + bypass → ok (dev-bypass identity) | `[unit]` `::requireAccessForRuns::*` |
+| Live end-to-end: with `ACCESS_*` set and a Cloudflare Access rule on `/runs*`, an SSO'd browser opens the live-view link; a direct origin request with a forged/absent `Cf-Access-Jwt-Assertion` gets 403; unsetting `ACCESS_*` denies `/runs*` (fail-closed) | `[agent]` (post-deploy) — pending; requires the bot deployed on the custom domain with the Access edge rule in place and `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` set. |
+
+> `src/index.ts` route wiring (the `/runs*` gate dispatch, startup-log mode string) has no unit harness in this repo — consistent with how `liveView`/`ingress`/`mcp` wiring is left to the handler unit tests. The gate's decision logic lives entirely in `requireAccessForRuns` + `parseAccessConfig` + `parseAccessDevBypass`, which are covered above.
