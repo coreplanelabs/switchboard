@@ -1,6 +1,6 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { RunEvent } from "../core/runEvents.js";
-import type { RunRegistry, RunSummary, Unsubscribe } from "../core/runRegistry.js";
+import type { IndexEvent, RunRegistry, RunSummary, Unsubscribe } from "../core/runRegistry.js";
 
 // Live-view channel: the external, browser-facing surface for a live agent run
 // (Area 2 / #43). It streams the SAME redacted RunEvents the in-channel status
@@ -167,37 +167,59 @@ export function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
+/** Short, display-only fallback for a run with no label: the first 8 chars of
+ *  its (unguessable) id, ellipsized. Kept byte-identical to the client mirror in
+ *  `renderRunsIndex` so a server-rendered row and its later live upsert agree. */
+function shortId(id: string): string {
+  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
+}
+
+/** One live-count label for a run's event tally ("1 event" / "N events"). */
+function eventCountLabel(n: number): string {
+  return `${n} event${n === 1 ? "" : "s"}`;
+}
+
+/** Server-rendered markup for one index row, keyed `data-run-id` so the client
+ *  can find and update it in place. Every dynamic string is HTML-escaped and the
+ *  href's id/token URL-encoded — a hostile label or id can break out of neither
+ *  the markup nor the attribute. The client mirrors this exact shape via the DOM
+ *  (textContent + setAttribute), so a row looks the same whether painted here or
+ *  by an `upsert`. */
+function indexRowHtml(r: RunSummary): string {
+  const href = `/runs/${encodeURIComponent(r.id)}?t=${encodeURIComponent(r.token)}`;
+  const label = escapeHtml(r.label ?? shortId(r.id));
+  const badge = r.finished
+    ? `<span class="badge done">finished</span>`
+    : `<span class="badge live">live</span>`;
+  return (
+    `<li data-run-id="${escapeHtml(r.id)}" data-started-at="${r.startedAt}">` +
+    `<a href="${escapeHtml(href)}">${label}</a> ${badge}` +
+    `<span class="meta">${escapeHtml(eventCountLabel(r.eventCount))}</span></li>`
+  );
+}
+
 /**
- * The Access-gated runs index (`GET /runs`): a self-contained HTML page listing
- * every non-evicted run, each linking to its per-run page WITH that run's
- * capability token in the URL. Unlike the per-run page/stream, the index has NO
- * token gate — Cloudflare Access is the "who" gate in front of it. Because it
- * renders the capability links, it must ONLY be exposed behind Access; without
- * Access it would leak every live run link (see features/live-view.md).
+ * The Access-gated runs index (`GET /runs`): a self-contained, **live** HTML page
+ * listing every non-evicted run, each linking to its per-run page WITH that run's
+ * capability token in the URL. The initial snapshot is server-rendered (fast
+ * first paint); an inline `EventSource("/runs?stream=1")` then keeps it live —
+ * rows appear, update (activity/finish), and disappear (eviction) without a
+ * refresh, driven by `IndexEvent`s from the shared registry (so runs from every
+ * channel show up). Unlike the per-run page/stream, the index has NO token gate —
+ * Cloudflare Access is the "who" gate in front of it. Because it renders the
+ * capability links, it must ONLY be exposed behind Access; without Access it would
+ * leak every live-run link (see features/live-view.md).
  *
- * Pure and CSP-safe (same inline-only, no-external-asset style as the per-run
- * page). Every dynamic string — labels AND ids — is HTML-escaped via
- * `escapeHtml`, and the href's id/token are URL-encoded, so a hostile label or
- * id cannot break out of the markup or the attribute.
+ * CSP-safe (inline-only, no external assets). Server-rendered rows escape every
+ * dynamic string via `escapeHtml` and URL-encode the href; the client updates
+ * exclusively via `textContent`/`setAttribute` (never `innerHTML`), so a hostile
+ * label or id cannot inject markup or break out of the link on either path.
  */
 export function renderRunsIndex(runs: RunSummary[]): string {
-  const rows =
-    runs.length === 0
-      ? `<li class="empty">No active runs.</li>`
-      : runs
-          .map((r) => {
-            const href = `/runs/${encodeURIComponent(r.id)}?t=${encodeURIComponent(r.token)}`;
-            const label = escapeHtml(r.label ?? r.id);
-            const state = r.finished
-              ? `<span class="badge done">finished</span>`
-              : `<span class="badge live">live</span>`;
-            const count = `${r.eventCount} event${r.eventCount === 1 ? "" : "s"}`;
-            return (
-              `<li><a href="${escapeHtml(href)}">${label}</a> ${state}` +
-              `<span class="meta">${escapeHtml(r.id)} · ${escapeHtml(count)}</span></li>`
-            );
-          })
-          .join("");
+  const rows = runs.map(indexRowHtml).join("");
+  // The empty-state <li> always exists; it is only visible when the list has no
+  // run rows (server-side here, and toggled client-side as rows come and go).
+  const emptyHidden = runs.length === 0 ? "" : " hidden";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -213,6 +235,7 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .75rem;
     border-bottom: 1px solid #2a2f3a; padding-bottom: .5rem; }
   h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  #state { font-size: .8rem; color: #8b93a7; }
   #runs { list-style: none; margin: 0; padding: 0; }
   #runs li { padding: .45rem .5rem; border-radius: 6px; display: flex; align-items: baseline;
     gap: .6rem; flex-wrap: wrap; }
@@ -224,13 +247,105 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   .badge.done { color: #8b93a7; border: 1px solid #2a2f3a; }
   .meta { font-size: .75rem; color: #8b93a7; }
   .empty { color: #8b93a7; }
+  [hidden] { display: none; }
 </style>
 </head>
 <body>
 <header>
   <h1>Live runs</h1>
+  <span id="state">connecting…</span>
 </header>
-<ul id="runs">${rows}</ul>
+<ul id="runs">${rows}<li class="empty" id="empty"${emptyHidden}>No active runs.</li></ul>
+<script>
+(function () {
+  var list = document.getElementById("runs");
+  var empty = document.getElementById("empty");
+  var state = document.getElementById("state");
+  // Rows keyed by run id — avoids building CSS selectors from (untrusted) ids.
+  var rows = Object.create(null);
+  var seeded = list.querySelectorAll("li[data-run-id]");
+  for (var i = 0; i < seeded.length; i++) rows[seeded[i].getAttribute("data-run-id")] = seeded[i];
+
+  function runHref(run) {
+    return "/runs/" + encodeURIComponent(run.id) + "?t=" + encodeURIComponent(run.token);
+  }
+  function shortId(id) { return id.length > 8 ? id.slice(0, 8) + "\\u2026" : id; }
+  function countLabel(n) { return n + (n === 1 ? " event" : " events"); }
+
+  // Rebuild a row's contents from a run summary using textContent + setAttribute
+  // only (no raw-markup assignment), so a hostile label/id is rendered as data.
+  function fill(li, run) {
+    li.setAttribute("data-run-id", run.id);
+    li.setAttribute("data-started-at", String(run.startedAt)); // drives sorted insert
+    li.textContent = ""; // clear any prior children (server-rendered or stale)
+    var a = document.createElement("a");
+    a.setAttribute("href", runHref(run));
+    a.textContent = run.label || shortId(run.id);
+    li.appendChild(a);
+    li.appendChild(document.createTextNode(" "));
+    var badge = document.createElement("span");
+    badge.className = "badge " + (run.finished ? "done" : "live");
+    badge.textContent = run.finished ? "finished" : "live";
+    li.appendChild(badge);
+    var meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = countLabel(run.eventCount);
+    li.appendChild(meta);
+  }
+  function refreshEmpty() {
+    var has = false;
+    for (var k in rows) { has = true; break; }
+    empty.hidden = has;
+  }
+  // Insert a new row in newest-first position by startedAt, so rows land
+  // correctly whether they arrive via the replay (newest-first) or as live new
+  // runs — a blind prepend would invert any batch that isn't server-seeded.
+  // Existing rows are never repositioned (startedAt is immutable), so an update
+  // never reorders the list.
+  function insertSorted(li, startedAt) {
+    var kids = list.children;
+    for (var i = 0; i < kids.length; i++) {
+      var k = kids[i];
+      if (k === empty) break; // real rows sit above the empty sentinel
+      if (startedAt >= Number(k.getAttribute("data-started-at"))) {
+        list.insertBefore(li, k);
+        return;
+      }
+    }
+    list.insertBefore(li, empty); // oldest so far (or empty list) → above the sentinel
+  }
+  function upsert(run) {
+    var li = rows[run.id];
+    if (li) {
+      fill(li, run); // update in place — startedAt is immutable, so position holds
+    } else {
+      li = document.createElement("li");
+      rows[run.id] = li;
+      fill(li, run);
+      insertSorted(li, run.startedAt);
+    }
+    refreshEmpty();
+  }
+  function remove(id) {
+    var li = rows[id];
+    if (li && li.parentNode) li.parentNode.removeChild(li);
+    delete rows[id];
+    refreshEmpty();
+  }
+
+  var es = new EventSource("/runs?stream=1");
+  es.onopen = function () { state.textContent = "live"; };
+  es.onmessage = function (m) {
+    var ev;
+    try { ev = JSON.parse(m.data); } catch (_) { return; }
+    if (ev.type === "upsert" && ev.run) upsert(ev.run);
+    else if (ev.type === "removed" && ev.id) remove(ev.id);
+  };
+  es.onerror = function () {
+    state.textContent = es.readyState === EventSource.CLOSED ? "disconnected" : "connecting\\u2026";
+  };
+})();
+</script>
 </body>
 </html>`;
 }
@@ -297,6 +412,44 @@ export function serveEvents(
   sink.onClose(unsubscribe);
 }
 
+/** One SSE `data:` frame for an index event (upsert/removed). */
+function sseIndexData(ev: IndexEvent): string {
+  return `data: ${JSON.stringify(ev)}\n\n`;
+}
+
+/**
+ * Serve the live runs-index feed (`GET /runs?stream=1`) to an SseSink, given a
+ * bound `subscribeIndex`. Mirrors `serveEvents`: the registry replays the current
+ * active set synchronously during `subscribeIndex` (before the status is chosen),
+ * so those frames are buffered and flushed only after the 200 head; new events
+ * live-forward. A client disconnect unsubscribes.
+ *
+ * Two deliberate differences from the per-run stream: there is **no token gate**
+ * (the index is Access-gated at the edge, never token-gated — so it always 200s
+ * and streams), and there is **no terminal `end` frame** — the index feed spans
+ * the whole registry and stays open; a finished run is an `upsert` (finished),
+ * and an evicted one a `removed`, not a stream close.
+ */
+export function serveIndexEvents(
+  subscribeIndex: (onEvent: (ev: IndexEvent) => void) => Unsubscribe,
+  sink: SseSink,
+): void {
+  const buffered: string[] = [];
+  let live = false;
+  const send = (chunk: string) => {
+    if (live) sink.write(chunk);
+    else buffered.push(chunk);
+  };
+
+  const unsubscribe = subscribeIndex((ev) => send(sseIndexData(ev)));
+
+  sink.writeHead(200, SSE_HEADERS);
+  live = true;
+  for (const chunk of buffered) sink.write(chunk);
+  buffered.length = 0;
+  sink.onClose(unsubscribe);
+}
+
 /** Wrap a node ServerResponse/request pair as an SseSink. */
 function nodeSseSink(req: HttpRequest, res: ServerResponse): SseSink {
   return {
@@ -311,11 +464,15 @@ function nodeSseSink(req: HttpRequest, res: ServerResponse): SseSink {
  * node:http handler for the live-view routes. Returns `true` if it owned the
  * request (so the server stops routing), `false` to fall through. All routes are
  * GET-only (405 otherwise):
- *   GET /runs                 → the runs index (Access-gated, NOT token-gated)
+ *   GET /runs                 → the runs index HTML page (Access-gated, NOT token-gated)
+ *   GET /runs?stream=1        → the live runs-index SSE feed (Access-gated, NOT token-gated)
  *   GET /runs/:id?t=…         → the HTML page (404 on bad/missing token)
  *   GET /runs/:id/events?t=…  → the SSE stream (404 on bad/missing token)
- * The two per-run routes are token-gated via the registry; the index is not —
- * Cloudflare Access fronts it, and it renders the per-run capability links.
+ * The two per-run routes are token-gated via the registry; the index (page AND
+ * feed) is not — Cloudflare Access fronts it, and it renders the per-run
+ * capability links. `?stream=1` (a query flag, not a new path) selects the feed
+ * so it never collides with `/runs/<id>` where an id could legitimately be
+ * "events" or "stream".
  */
 export function createLiveViewHandler(
   registry: RunRegistry,
@@ -333,8 +490,13 @@ export function createLiveViewHandler(
 
     // The bare index has NO token gate — Cloudflare Access is the "who" gate in
     // front of it. It renders the per-run capability links, so it must only be
-    // exposed behind Access (see features/live-view.md).
+    // exposed behind Access (see features/live-view.md). `?stream=1` selects the
+    // live SSE feed; otherwise the (initial-snapshot) HTML page.
     if (route.kind === "index") {
+      if (url.searchParams.get("stream") === "1") {
+        serveIndexEvents((onEvent) => registry.subscribeIndex(onEvent), nodeSseSink(req, res));
+        return true;
+      }
       res.writeHead(200, HTML_PAGE_HEADERS);
       res.end(renderRunsIndex(registry.listActive()));
       return true;
