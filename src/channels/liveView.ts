@@ -368,6 +368,37 @@ function sseData(event: RunEvent): string {
 /** The terminal `end` frame the page listens for to close its EventSource. */
 const SSE_END = "event: end\ndata: {}\n\n";
 
+/** First bytes of every SSE response, written right after the 200 head and before
+ *  any buffered replay. It exists to FLUSH THE HEAD immediately: when there is
+ *  nothing to replay yet (an empty runs index, or a run with no events), a proxy
+ *  that waits for the first body byte before forwarding the response holds the
+ *  head, and the browser's EventSource is stuck "connecting" (never fires
+ *  `onopen`). A lone `retry:` directive is valid SSE, is ignored as data by
+ *  EventSource (it only sets the reconnect backoff), and gives the proxy a byte
+ *  to forward. */
+const SSE_PRELUDE = "retry: 3000\n\n";
+
+/** Idle keepalive interval (ms). Cloudflare (and most proxies) drop a connection
+ *  with no bytes for ~100s; a run-less index or an idle run would otherwise be
+ *  silently disconnected. */
+const SSE_HEARTBEAT_MS = 20_000;
+
+/** Start a periodic SSE comment on a live stream so an idle connection stays open
+ *  and dropped clients are detected. Unref'd so it never keeps the process alive;
+ *  cleared when the client disconnects (and if a write ever throws). node:http
+ *  only — the transport-free `serve*` fns stay timer-free for unit tests. */
+function startSseHeartbeat(req: HttpRequest, res: ServerResponse): void {
+  const hb = setInterval(() => {
+    try {
+      res.write(": hb\n\n");
+    } catch {
+      clearInterval(hb);
+    }
+  }, SSE_HEARTBEAT_MS);
+  (hb as { unref?: () => void }).unref?.();
+  req.on("close", () => clearInterval(hb));
+}
+
 /**
  * Serve one run's event stream to an SseSink, given a bound `subscribe` fn
  * (already carrying the run id + token — token validation lives in the
@@ -379,6 +410,7 @@ const SSE_END = "event: end\ndata: {}\n\n";
 export function serveEvents(
   subscribe: (onEvent: (e: RunEvent) => void, onFinish: () => void) => Unsubscribe | null,
   sink: SseSink,
+  onLive?: () => void,
 ): void {
   const buffered: string[] = [];
   let live = false;
@@ -403,6 +435,7 @@ export function serveEvents(
 
   sink.writeHead(200, SSE_HEADERS);
   live = true;
+  sink.write(SSE_PRELUDE); // flush the head immediately (a run with no events yet has an empty backlog)
   for (const chunk of buffered) sink.write(chunk);
   buffered.length = 0;
   if (endedDuringReplay) {
@@ -410,6 +443,7 @@ export function serveEvents(
     return;
   }
   sink.onClose(unsubscribe);
+  onLive?.(); // stream stays open → safe to start the keepalive heartbeat
 }
 
 /** One SSE `data:` frame for an index event (upsert/removed). */
@@ -433,6 +467,7 @@ function sseIndexData(ev: IndexEvent): string {
 export function serveIndexEvents(
   subscribeIndex: (onEvent: (ev: IndexEvent) => void) => Unsubscribe,
   sink: SseSink,
+  onLive?: () => void,
 ): void {
   const buffered: string[] = [];
   let live = false;
@@ -445,9 +480,11 @@ export function serveIndexEvents(
 
   sink.writeHead(200, SSE_HEADERS);
   live = true;
+  sink.write(SSE_PRELUDE); // flush the head immediately so onopen fires even with no active runs
   for (const chunk of buffered) sink.write(chunk);
   buffered.length = 0;
   sink.onClose(unsubscribe);
+  onLive?.(); // stream stays open → safe to start the keepalive heartbeat
 }
 
 /** Wrap a node ServerResponse/request pair as an SseSink. */
@@ -494,7 +531,11 @@ export function createLiveViewHandler(
     // live SSE feed; otherwise the (initial-snapshot) HTML page.
     if (route.kind === "index") {
       if (url.searchParams.get("stream") === "1") {
-        serveIndexEvents((onEvent) => registry.subscribeIndex(onEvent), nodeSseSink(req, res));
+        serveIndexEvents(
+          (onEvent) => registry.subscribeIndex(onEvent),
+          nodeSseSink(req, res),
+          () => startSseHeartbeat(req, res),
+        );
         return true;
       }
       res.writeHead(200, HTML_PAGE_HEADERS);
@@ -519,6 +560,7 @@ export function createLiveViewHandler(
     serveEvents(
       (onEvent, onFinish) => registry.subscribe(route.id, token, onEvent, onFinish),
       nodeSseSink(req, res),
+      () => startSseHeartbeat(req, res),
     );
     return true;
   };
