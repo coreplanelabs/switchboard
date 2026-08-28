@@ -10,7 +10,8 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "agent-env-bootstrap": "tsx src/agentEnv/bootstrapCli.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

@@ -3,4 +3,5 @@ dist/
 data/
 workspaces/
 .env
+.agent-env/
 config/config.yaml
