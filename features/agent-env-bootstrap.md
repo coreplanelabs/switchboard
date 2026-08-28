@@ -32,6 +32,47 @@ Keyed **env-first, then service-first**, so a section reads as "the UAT creds fo
 - **Read-only tool.** The tool only ever READS from 1Password and WRITES the env file. It never writes to 1Password and never touches prod.
 - **Values never leak.** Resolved values travel `op read` → the chmod-600 file contents / the returned env map only. They are never logged and never placed in argv (the token is read by `op` from the environment; refs — not values — are the only args).
 
+## Setup: creating the 1Password service account (one-time, org-admin)
+
+> **Product gap — human-gated.** This tool cannot self-provision its own 1Password
+> credential. A 1Password **Business owner/admin** must create the service account
+> once; the agent can never do this itself. Until it exists, the tool runs dry-run
+> only (it fails closed on `--apply` when `OP_SERVICE_ACCOUNT_TOKEN` is unset).
+
+**Prerequisites**
+- Owner/admin on the 1Password **Business** account (service accounts are a Business feature).
+- The name of the single **UAT vault** that holds the downstream service's creds — the vault your `op://<vault>/…` refs point at. The service account is scoped to *only* that vault.
+
+**Route A — Web console (recommended; unambiguous scoping)**
+1. Sign in to `https://<team>.1password.com` as owner/admin.
+2. Sidebar → **Developer** (may sit under **Integrations** or **Settings → Developer**).
+3. **Service Accounts → Create Service Account**.
+4. Name it `switchboard-agent-uat-ro`.
+5. **Vault access (critical):** add **only the one UAT vault**, permission **Read / View items** only. Do **not** select "All vaults" and do **not** grant write/manage.
+6. Optional: set an expiration (e.g. 90 days).
+7. Create, then **copy the `ops_…` token** — it is shown **once**. Store it in 1Password.
+
+**Route B — CLI (`op` v2+, signed in as owner/admin)**
+
+```bash
+op service-account create "switchboard-agent-uat-ro" \
+  --expires-in 90d \
+  --vault "<UAT-vault-name>:read_items"
+```
+
+`read_items` = read-only; do **not** add `write_items`. Prints the `ops_…` token once. (Confirm the flag grammar for your version with `op service-account create --help`.)
+
+**Verify (fresh shell, not the admin session)**
+
+```bash
+export OP_SERVICE_ACCOUNT_TOKEN=ops_...
+op vault list          # must list ONLY the UAT vault
+op read "op://<UAT-vault>/<item>/<field>"                        # read works
+op item create --vault "<UAT-vault>" --title t --category login  # must FAIL (proves read-only)
+```
+
+The **read-only + single-UAT-vault scope is the real safety guard**; the `["uat"]` allowlist is defense-in-depth on top of it.
+
 ## Dry-run and apply
 
 - **Dry-run is the default** (no `--apply`): prints the plan — env-var NAMES + their `op://vault/item/field` refs — resolving nothing, writing nothing, never a value.
@@ -81,3 +122,13 @@ The decision (mechanism, where the service name comes from, whether the resident
 | CLI arg parsing: `--env`/`--service` required, dry-run default, `--apply`/`--out`/`--manifest`, unknown args rejected | `[unit]` `::parseArgs::parses --env, --service and defaults to dry-run`, `::--apply sets the apply flag; --out and --manifest override paths`, `::requires --env and --service`, `::rejects unknown args` |
 | CLI end-to-end (dry-run prints plan; prod refused; apply with a real read-only UAT token writes the 600 file the toolchain sources) | `[gap]` — dry-run + prod-refusal + missing-token fail-closed verified via the CLI locally; a full live apply needs the operator's read-only, UAT-vault-scoped service account + real refs. |
 | Integration into the deployed resident/executor | `[gap]` — intentionally not wired in v1; the owner's integration decision (see above). |
+
+## Validation status & product gap
+
+**Validated now (on `main`, CI green):** JSONC/manifest parsing, `op://` ref parsing, the env-name allowlist (UAT-only, fail-closed before any read/write), env-var **name** validation, dry-run reads/writes nothing, apply writes exactly one mode-600 file and never logs a value, fail-closed on missing `OP_SERVICE_ACCOUNT_TOKEN`, the shell-quoted dotenv surviving adversarial values, and the atomic 600 write. Receipts: `src/agentEnv/bootstrap.test.ts` + CI.
+
+**Human-gated gap (not yet validated live):**
+1. **Live `--apply` against a real service account** — requires a 1Password Business **owner/admin** to create the read-only, UAT-vault-scoped service account (see *Setup* above). This is an org-admin action the agent cannot self-serve; until then only dry-run + fail-closed paths are exercised.
+2. **Executor integration** — `buildAgentEnv` is a ready seam but is intentionally not wired into the deployed executor in v1 (see *Integration hook + the open decision*). Wiring it (and choosing mechanism 1 vs 2) is a follow-up.
+
+Validating (1) is a one-time setup plus a single dry-run/apply round once the service account exists.
