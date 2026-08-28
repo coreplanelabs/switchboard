@@ -1,0 +1,214 @@
+import { SELF } from "cloudflare:test";
+import { describe, expect, it } from "vitest";
+
+// Feature: features/memory.md — the Memory Worker (PR3, #85): the durable
+// backend behind WorkerMemoryStore. Runs in workerd against the real
+// SQLite-backed Durable Object, so FTS5 + persistence are exercised for real.
+
+const BASE = "https://memory.test";
+const AUTH = { authorization: "Bearer test-token", "content-type": "application/json" };
+
+/** Unique scope per test so DO state never leaks between cases. */
+let n = 0;
+const scope = () => `org:test-${Date.now()}-${n++}`;
+
+async function post(path: string, body: unknown, headers: Record<string, string> = AUTH) {
+  const res = await SELF.fetch(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+  const text = await res.text();
+  let data: Record<string, unknown> = {};
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // non-JSON: leave {}
+  }
+  return { status: res.status, data, text };
+}
+
+const cand = (text: string, over: Record<string, unknown> = {}) => ({
+  kind: "fact",
+  text,
+  sourceThreadKey: "slack:C1:1.0",
+  sourceRunId: "run-1",
+  ...over,
+});
+
+describe("auth + routing", () => {
+  it("GET /healthz is open", async () => {
+    const res = await SELF.fetch(`${BASE}/healthz`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it("refuses a missing, malformed, or wrong bearer with 401 and touches no data", async () => {
+    const body = { scopeKey: scope(), query: "x", limit: 8 };
+    expect((await post("/retrieve", body, { "content-type": "application/json" })).status).toBe(401);
+    expect((await post("/retrieve", body, { ...AUTH, authorization: "Bearer wrong" })).status).toBe(401);
+    expect((await post("/retrieve", body, { ...AUTH, authorization: "Basic dGVzdA==" })).status).toBe(401);
+  });
+
+  it("unknown routes and non-POST methods are 404/405, even authenticated", async () => {
+    expect((await post("/nope", {})).status).toBe(404);
+    const res = await SELF.fetch(`${BASE}/retrieve`, { headers: AUTH });
+    expect(res.status).toBe(405);
+  });
+
+  it("rejects malformed bodies with 400 and a reason", async () => {
+    expect((await post("/retrieve", "not json")).status).toBe(400);
+    expect((await post("/retrieve", { scopeKey: "", query: "x", limit: 8 })).status).toBe(400);
+    expect((await post("/retrieve", { scopeKey: "has space", query: "x", limit: 8 })).status).toBe(400);
+    expect((await post("/retrieve", { scopeKey: "org:a", query: "x", limit: 0 })).status).toBe(400);
+    expect((await post("/retrieve", { scopeKey: "org:a", query: "x", limit: 999 })).status).toBe(400);
+    expect((await post("/retrieve", { scopeKey: "org:a", query: 5, limit: 8 })).status).toBe(400);
+    expect((await post("/write", { scopeKey: "org:a", records: "nope" })).status).toBe(400);
+    const bad = await post("/write", { scopeKey: "org:a", records: [{ kind: "opinion", text: "x", sourceThreadKey: "t" }] });
+    expect(bad.status).toBe(400);
+    expect(String(bad.data.error)).toMatch(/kind/);
+    expect((await post("/write", { scopeKey: "org:a", records: [cand("   ")] })).status).toBe(400);
+    expect((await post("/write", { scopeKey: "org:a", records: [cand("x", { sourceThreadKey: 1 })] })).status).toBe(400);
+    expect((await post("/write", { scopeKey: "org:a", records: [cand("x", { keywords: "deploy" })] })).status).toBe(400);
+    expect((await post("/write", { scopeKey: "org:a", records: [cand("x".repeat(4001))] })).status).toBe(400);
+  });
+});
+
+describe("write → retrieve round trip", () => {
+  it("inserts minted, namespaced, active records with provenance and returns them ranked by keyword+recency", async () => {
+    const s = scope();
+    const w = await post("/write", {
+      scopeKey: s,
+      records: [
+        cand("the deploy command is npm run deploy", { keywords: ["deploy", "npm"], confidence: 0.9 }),
+        cand("vacation policy is 20 days"),
+        { kind: "summary", text: "User asked how to deploy.", sourceThreadKey: "slack:C1:1.0" },
+      ],
+    });
+    expect(w.status).toBe(200);
+    expect(w.data).toMatchObject({ ok: true, inserted: 3, deduped: 0, superseded: 0 });
+
+    const r = await post("/retrieve", { scopeKey: s, query: "how do we deploy", limit: 8 });
+    expect(r.status).toBe(200);
+    const records = r.data.records as Array<Record<string, unknown>>;
+    // Shared-engine ranking: the summary hits 2 of the 4 query tokens ("how",
+    // "deploy"), the fact hits 1 ("deploy"); "vacation policy" hits none and is
+    // gated out.
+    expect(records.map((x) => x.text)).toEqual(["User asked how to deploy.", "the deploy command is npm run deploy"]);
+    const fact = records[1];
+    expect(fact).toMatchObject({
+      id: `mem:${s}:0`,
+      scopeKey: s,
+      kind: "fact",
+      keywords: ["deploy", "npm"],
+      sourceThreadKey: "slack:C1:1.0",
+      sourceRunId: "run-1",
+      confidence: 0.9,
+      status: "active",
+      useCount: 1, // bumped by this retrieval
+    });
+    expect(typeof fact.createdAt).toBe("number");
+    expect(typeof fact.lastUsedAt).toBe("number");
+    expect(records[0]).not.toHaveProperty("sourceRunId"); // absent stays absent, never null
+    expect(records[0]).not.toHaveProperty("confidence");
+  });
+
+  it("is whole-token: a one-letter query token does not match inside a word; no query tokens → []", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("the deploy command is npm run deploy")] });
+    expect((await post("/retrieve", { scopeKey: s, query: "a", limit: 8 })).data.records).toEqual([]);
+    expect((await post("/retrieve", { scopeKey: s, query: "!!! ???", limit: 8 })).data.records).toEqual([]);
+    expect((await post("/retrieve", { scopeKey: s, query: "COMMAND", limit: 8 })).data.records).toHaveLength(1);
+  });
+
+  it("respects the limit and bumps useCount/lastUsedAt only on returned records", async () => {
+    const s = scope();
+    await post("/write", {
+      scopeKey: s,
+      records: [cand("deploy variant one"), cand("deploy variant two"), cand("deploy variant three")],
+    });
+    const first = await post("/retrieve", { scopeKey: s, query: "deploy", limit: 2 });
+    expect(first.data.records).toHaveLength(2);
+    const all = (await post("/retrieve", { scopeKey: s, query: "deploy variant", limit: 8 })).data.records as Array<
+      Record<string, unknown>
+    >;
+    const counts = all.map((r) => r.useCount).sort();
+    expect(counts).toEqual([1, 2, 2]); // two records seen twice, one seen once
+  });
+
+  it("scopes are isolated: another scope's records are invisible", async () => {
+    const a = scope();
+    const b = scope();
+    await post("/write", { scopeKey: a, records: [cand("deploy secret of scope a")] });
+    expect((await post("/retrieve", { scopeKey: b, query: "deploy", limit: 8 })).data.records).toEqual([]);
+  });
+
+  it("special characters in the query never break the FTS match (treated as tokens, not syntax)", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("the deploy command is npm run deploy")] });
+    for (const q of ['deploy" OR "x', "deploy AND NOT command", "deploy*", "(deploy)", "NEAR(deploy command)", "deploy:x"]) {
+      const r = await post("/retrieve", { scopeKey: s, query: q, limit: 8 });
+      expect(r.status).toBe(200);
+      expect((r.data.records as unknown[]).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("empty write batch is a no-op 200", async () => {
+    const w = await post("/write", { scopeKey: scope(), records: [] });
+    expect(w.status).toBe(200);
+    expect(w.data).toMatchObject({ ok: true, inserted: 0 });
+  });
+});
+
+describe("dedup / supersede (shared engine rules)", () => {
+  it("dedups identical normalized text: bumps useCount, inserts nothing", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("the deploy command is npm run deploy")] });
+    const w = await post("/write", { scopeKey: s, records: [cand("  The DEPLOY   command is npm run deploy ")] });
+    expect(w.data).toMatchObject({ inserted: 0, deduped: 1 });
+    const r = (await post("/retrieve", { scopeKey: s, query: "deploy", limit: 8 })).data.records as Array<Record<string, unknown>>;
+    expect(r).toHaveLength(1);
+    expect(r[0].useCount).toBe(2); // dedup bump + this retrieval
+  });
+
+  it("supersede: soft-deletes the named active record (kept, invisible to retrieval) and inserts the correction", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("the deploy command is npm run deploy")] });
+    const w = await post("/write", {
+      scopeKey: s,
+      records: [cand("the deploy command is now npm run ship", { supersedes: `mem:${s}:0` })],
+    });
+    expect(w.data).toMatchObject({ inserted: 1, superseded: 1 });
+    const r = (await post("/retrieve", { scopeKey: s, query: "deploy command", limit: 8 })).data.records as Array<
+      Record<string, unknown>
+    >;
+    expect(r.map((x) => x.text)).toEqual(["the deploy command is now npm run ship"]);
+    expect(r[0].supersedes).toBe(`mem:${s}:0`);
+  });
+
+  it("an unknown supersedes id supersedes nothing; the record still lands", async () => {
+    const s = scope();
+    const w = await post("/write", { scopeKey: s, records: [cand("deploy fact", { supersedes: `mem:${s}:999` })] });
+    expect(w.data).toMatchObject({ inserted: 1, superseded: 0 });
+  });
+
+  it("a targeted supersede is not swallowed by a text collision with an unrelated record", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("stale deploy fact"), cand("the deploy command is npm run ship")] });
+    // Correct record 0 with text identical to (unrelated) record 1.
+    const w = await post("/write", {
+      scopeKey: s,
+      records: [cand("the deploy command is npm run ship", { supersedes: `mem:${s}:0` })],
+    });
+    expect(w.data).toMatchObject({ inserted: 1, deduped: 0, superseded: 1 });
+    const r = (await post("/retrieve", { scopeKey: s, query: "deploy", limit: 8 })).data.records as Array<Record<string, unknown>>;
+    expect(r.map((x) => x.text).sort()).toEqual(["the deploy command is npm run ship", "the deploy command is npm run ship"]);
+    expect(r.some((x) => x.text === "stale deploy fact")).toBe(false);
+  });
+
+  it("restating a superseded record's text creates a fresh active record (superseded rows are not dedup targets)", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("deploy v1")] });
+    await post("/write", { scopeKey: s, records: [cand("deploy v2", { supersedes: `mem:${s}:0` })] });
+    const w = await post("/write", { scopeKey: s, records: [cand("deploy v1")] });
+    expect(w.data).toMatchObject({ inserted: 1, deduped: 0 });
+    const r = (await post("/retrieve", { scopeKey: s, query: "deploy", limit: 8 })).data.records as Array<Record<string, unknown>>;
+    expect(r.map((x) => x.text).sort()).toEqual(["deploy v1", "deploy v2"]);
+  });
+});

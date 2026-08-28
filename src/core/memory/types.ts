@@ -87,4 +87,12 @@ export interface MemoryConfig {
   /** `<provider>/<model>` ref for the post-run reflection (write path) — a cheap
    *  tier. Absent → the run's own resolved model. Never hardcoded (invariant 7). */
   model?: string;
+  /** The durable store: the Memory Worker (deploy/cloudflare-memory/). Absent →
+   *  an in-process store that a restart loses (dev only; startup warns). */
+  worker?: {
+    /** Base URL, e.g. https://switchboard-memory.coreplanelabs.dev */
+    baseUrl: string;
+    /** Env var holding the bearer secret. Default MEMORY_TOKEN. */
+    tokenEnv?: string;
+  };
 }

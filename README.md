@@ -146,6 +146,7 @@ flowchart LR
     subgraph companions ["Companion Workers — own wrangler deploys"]
         SBW["switchboard-sandbox<br/>deploy/cloudflare-sandbox/<br/>per-thread exec VMs"]
         RSW["switchboard-resident<br/>deploy/cloudflare-resident/<br/>always-warm per-repo envs,<br/>R2 snapshots, watchdog cron"]
+        MW["switchboard-memory<br/>deploy/cloudflare-memory/<br/>cross-session memory:<br/>SQLite DO per scope"]
     end
     P -.->|outbound websocket| SLK["Slack"]
     P -.->|HTTPS| PRV["Model providers"]
@@ -165,7 +166,7 @@ Railway/Render/k8s also work with the same image — anything that runs an alway
 
 ### Deploying on Cloudflare Containers (recommended)
 
-Three Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastructure` (per-worker `package.json` with pinned wrangler, `secrets.txt`, manual `wrangler deploy` with Docker running):
+Four Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastructure` (per-worker `package.json` with pinned wrangler, `secrets.txt`, manual `wrangler deploy` with Docker running):
 
 ```bash
 # one-time: wrangler login (account: coreplane-infra), Docker running
@@ -175,6 +176,8 @@ Three Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastru
 #    RESIDENT_OPERATOR_TOKEN + RESIDENT_ADMIN_TOKEN — shared by the resident
 #    worker and the bot worker (operator = runtime tool calls; admin = the
 #    `repo onboard/offboard/...` chat commands)
+#    MEMORY_TOKEN — shared by the memory worker and the bot worker (only needed
+#    when memory.enabled is on; see features/memory.md)
 
 # 1. Sandbox worker — per-thread execution VMs at switchboard-sandbox.coreplanelabs.dev
 cd deploy/cloudflare-sandbox && npm install
@@ -190,10 +193,18 @@ npm run secrets   # RESIDENT_ADMIN_TOKEN, RESIDENT_OPERATOR_TOKEN, GITHUB_APP_*
                   # second credential domain; see trust model above)
 env -u CLOUDFLARE_API_TOKEN npm run deploy   # ends with a wake ping: /healthz 200
 
-# 3. Bot worker — always-on Switchboard container
+# 3. Memory worker — durable cross-session memory at
+#    switchboard-memory.coreplanelabs.dev (one SQLite Durable Object per memory
+#    scope; no container, no Docker needed). Optional: only if memory.enabled.
+cd ../cloudflare-memory && npm install
+npm test          # runs the DO tests inside workerd
+npm run secrets   # MEMORY_TOKEN
+env -u CLOUDFLARE_API_TOKEN npm run deploy   # ends with a wake ping: /healthz 200
+
+# 4. Bot worker — always-on Switchboard container
 cd ../cloudflare && npm install
 npm run secrets   # prompts through secrets.txt (Slack, Anthropic, SANDBOX_TOKEN,
-                  # RESIDENT_OPERATOR_TOKEN, RESIDENT_ADMIN_TOKEN, GitHub App)
+                  # RESIDENT_OPERATOR_TOKEN, RESIDENT_ADMIN_TOKEN, MEMORY_TOKEN, GitHub App)
 npm run deploy
 npm run tail      # watch it connect: "switchboard running (providers: anthropic...)"
 ```
