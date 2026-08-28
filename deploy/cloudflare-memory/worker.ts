@@ -348,7 +348,11 @@ export default {
     // make us JSON-parse an oversized body just to be told 400 by the field
     // caps. A missing/unparseable Content-Length is treated as too large —
     // every legitimate client (WorkerMemoryStore) sends a sized JSON body.
-    const declared = Number(request.headers.get("content-length"));
+    // NOTE: `Number(null)` and `Number("")` are both 0, which would let a
+    // chunked/streamed body (no header) or a blank header sail through the
+    // fence — so an absent or blank header is mapped to NaN explicitly.
+    const header = request.headers.get("content-length");
+    const declared = header === null || header.trim() === "" ? NaN : Number(header);
     if (!Number.isFinite(declared) || declared < 0 || declared > MAX_BODY_BYTES) {
       return json({ error: `body must declare Content-Length of at most ${MAX_BODY_BYTES} bytes` }, 413);
     }
