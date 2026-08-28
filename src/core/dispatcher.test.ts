@@ -413,6 +413,37 @@ describe("executor provisioning by agent resources", () => {
     expect(ctx).toMatchObject({ threadKey: "slack:CX:1.0", agent: { name: "general" } });
   });
 
+  it("releases the executor's workspace when the run ends: if-clean for a coding run, always for a read-only agent", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const { io } = fakeIO();
+    const release = vi.fn(async () => ({ released: true }));
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "", release };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledWith("if-clean");
+
+    release.mockClear();
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    await dispatch(deps, msg("agent:review look at it", "slack:UADMIN"), io);
+    expect(release).toHaveBeenCalledWith("always");
+  });
+
+  it("a release that throws never fails the run — the answer is still delivered", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO();
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "", release: async () => { throw new Error("boom"); } };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(replies).toContain("answer");
+  });
+
   it("a coding ask still selects the configured remote backend", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", ""); // keep githubEnvs off the network

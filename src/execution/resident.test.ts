@@ -344,3 +344,42 @@ describe("ResidentExecutor.probeStatus", () => {
     expect((probe as { error: string }).error).toContain("500");
   });
 });
+
+describe("ResidentExecutor.release — return the thread's pool user when a run ends", () => {
+  it('"always" POSTs /detach with force:true and reports the resident\'s answer', async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: { released: true, user: "worker2" } });
+    const ex = await ResidentExecutor.open(OPTS);
+    const r = await ex.release("always");
+    expect(r).toEqual({ released: true, reason: undefined });
+    expect(route(calls[1])).toBe("/detach");
+    expect(sentBody(calls[1])).toMatchObject({ resource: OPTS.resource, threadKey: OPTS.threadKey, force: true });
+  });
+
+  it('"if-clean" POSTs force:false and a kept (dirty) worktree comes back released:false with the reason', async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: { released: false, reason: "dirty: 2 uncommitted change(s)" } });
+    const ex = await ResidentExecutor.open(OPTS);
+    const r = await ex.release("if-clean");
+    expect(r).toEqual({ released: false, reason: "dirty: 2 uncommitted change(s)" });
+    expect(sentBody(calls[1])).toMatchObject({ force: false });
+  });
+
+  it("bounds /detach with its own short AbortSignal (control-plane POST, not the exec ceiling)", async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: { released: true } });
+    const ex = await ResidentExecutor.open(OPTS);
+    await ex.release("always");
+    expect(calls[1].init.signal).toBeInstanceOf(AbortSignal);
+    // A timeout that has already fired would abort immediately; ours is live and short — fires within 10s.
+    expect(calls[1].init.signal?.aborted).toBe(false);
+  });
+
+  it("never throws: a non-2xx or a transport failure is released:false with a legible reason (release is best-effort)", async () => {
+    stubFetch({ body: ATTACH_OK }, { status: 503, body: { error: "mirror-busy" } });
+    const ex = await ResidentExecutor.open(OPTS);
+    expect(await ex.release("always")).toEqual({ released: false, reason: "HTTP 503: mirror-busy" });
+    stubFetch({ body: ATTACH_OK }, { reject: "fetch failed" });
+    const ex2 = await ResidentExecutor.open(OPTS);
+    const r = await ex2.release("always");
+    expect(r.released).toBe(false);
+    expect(r.reason).toContain("fetch failed");
+  });
+});

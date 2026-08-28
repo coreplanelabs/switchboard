@@ -131,7 +131,7 @@ const CRED_FILE = `${RESIDENT_STATE_DIR}/git-credentials`; // one-shot token fil
 const READY_MARKER = `${RESIDENT_STATE_DIR}/ready`; // holds the sha the disk was hydrated to
 
 /** Unprivileged user for default-branch install/build (KTD5: repo code never
- *  runs as root). worker2..worker8 stay free for U4's per-thread users. */
+ *  runs as root). worker2..worker17 stay free for U4's per-thread users. */
 const BUILD_USER = "worker1";
 
 /** Per-thread worktrees (U4) hang here: one 700 thread dir per threadKey
@@ -151,15 +151,21 @@ const OPS_DIR = "/workspace/ops";
  *  attach allocates one of these to the thread (persisted in the binding)
  *  and every /exec /read /write for that thread runs privilege-dropped as
  *  that user. The pool is released by the inactivity sweep. */
-const THREAD_USERS = ["worker2", "worker3", "worker4", "worker5", "worker6", "worker7", "worker8"] as const;
+/** Pool of OS users for thread worktrees (worker1 is the build user). Sized
+ *  for SIMULTANEOUS runs, not for every thread ever seen: a run returns its
+ *  user via /detach when it ends, so the pool only fills when 16 runs on one
+ *  repo are genuinely concurrent. Memory, not this list, is the real ceiling
+ *  — see the instance_type note in wrangler.jsonc. Must match the useradd loop
+ *  in the Dockerfile. */
+const THREAD_USERS = Array.from({ length: 16 }, (_, i) => `worker${i + 2}`);
 
 /** Inactivity eviction: worktrees whose binding lastAttachAt is older than
  *  this many days are removed and their user returned to the pool; the
  *  binding record is KEPT (KTD6) so the next attach recreates with the same
  *  ref. Overridable per resident via the onboard-time `worktreeTtlDays`. */
 const WORKTREE_TTL_DAYS_DEFAULT = 7;
-/** The sweep self-reschedules daily (armed by attach when no sweep pends). */
-const SWEEP_INTERVAL_S = 24 * 60 * 60;
+/** The sweep self-reschedules hourly (armed by attach when no sweep pends). */
+const SWEEP_INTERVAL_S = 60 * 60; // hourly: the sweep is the backstop for trees a run kept (dirty) or never released
 
 /** Attach waits on the mirror mutex under this named timeout; expiry answers
  *  503 {state, reason: "mirror-busy"} instead of queueing forever. */
@@ -417,7 +423,7 @@ interface ResidentRecord {
 interface ThreadBinding {
   threadKey: string;
   ref: string;
-  /** Allocated OS user (worker2..worker8); "" once evicted (pool released). */
+  /** Allocated OS user (worker2..worker17); "" once evicted (pool released). */
   user: string;
   worktreePath: string;
   boundAt: string;
@@ -575,7 +581,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 const PROVISIONING_CALLBACK = "onProvisioningDeadline"; // fail-closed deadline
 const PROVISION_RUN_CALLBACK = "runProvisioning"; // the actual provisioning work
 const REFRESH_CALLBACK = "onRefreshAlarm"; // self-rescheduling freshness chain
-const SWEEP_CALLBACK = "onWorktreeSweep"; // daily worktree inactivity eviction (U4)
+const SWEEP_CALLBACK = "onWorktreeSweep"; // hourly worktree inactivity eviction (U4)
 
 const STATE_KEY = "resident:state";
 const REASON_KEY = "resident:reason";
@@ -792,7 +798,7 @@ export class ResidentDO extends Sandbox<Env> {
     // config/refs are engine plumbing; repo content reaches threads only
     // through their own worktrees). worker1 still needs read access — the
     // warm checkout fetches from the mirror during refresh — so the mirror
-    // top dir is root:worker1 750, denying worker2..worker8 at traversal.
+    // top dir is root:worker1 750, denying worker2..worker17 at traversal.
     // Conditional: the dir does not exist before provisioning's clone
     // creates it (runProvisioning re-runs this right after the clone).
     await this.runOk(
@@ -1644,7 +1650,32 @@ export class ResidentDO extends Sandbox<Env> {
    *  thread's user. Output mirrors the thread-sandbox Worker's shape
    *  ({stdout, stderr, exitCode}, notes appended to stderr, timeout as exit
    *  124); streams/caps are the Worker's job, truncation happens here. */
+  /** In-flight thread operations (exec/read/write) per threadKey — DO memory
+   *  only. /detach refuses (keeps, reason "busy") while any is running so a
+   *  run's release can never yank a worktree out from under a concurrent
+   *  command on the same thread (a queued follow-up message, two runs racing). */
+  private threadOpsInFlight = new Map<string, number>();
+
+  private async withThreadBusy<T>(threadKey: string, fn: () => Promise<T>): Promise<T> {
+    this.threadOpsInFlight.set(threadKey, (this.threadOpsInFlight.get(threadKey) ?? 0) + 1);
+    try {
+      return await fn();
+    } finally {
+      const n = (this.threadOpsInFlight.get(threadKey) ?? 1) - 1;
+      if (n <= 0) this.threadOpsInFlight.delete(threadKey);
+      else this.threadOpsInFlight.set(threadKey, n);
+    }
+  }
+
   async execThread(
+    threadKey: string,
+    command: string,
+    timeoutMs: number,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
+    return this.withThreadBusy(threadKey, () => this.execThreadImpl(threadKey, command, timeoutMs));
+  }
+
+  private async execThreadImpl(
     threadKey: string,
     command: string,
     timeoutMs: number,
@@ -1674,6 +1705,10 @@ export class ResidentDO extends Sandbox<Env> {
   /** POST /read: cat the file AS THE THREAD USER — the OS layer (not just
    *  the prefix check) is what confines a symlink pointing outside. */
   async readThreadFile(threadKey: string, path: string): Promise<{ content: string; truncated: boolean } | ThreadErr> {
+    return this.withThreadBusy(threadKey, () => this.readThreadFileImpl(threadKey, path));
+  }
+
+  private async readThreadFileImpl(threadKey: string, path: string): Promise<{ content: string; truncated: boolean } | ThreadErr> {
     const pre = await this.threadPreflight(threadKey);
     if ("error" in pre) return pre;
     const resolved = confineThreadPath(pre.binding.worktreePath, path);
@@ -1690,6 +1725,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  the user (not root) means a planted symlink cannot escalate the write
    *  beyond what the user could touch anyway. */
   async writeThreadFile(threadKey: string, path: string, content: string): Promise<{ ok: true; bytes: number } | ThreadErr> {
+    return this.withThreadBusy(threadKey, () => this.writeThreadFileImpl(threadKey, path, content));
+  }
+
+  private async writeThreadFileImpl(threadKey: string, path: string, content: string): Promise<{ ok: true; bytes: number } | ThreadErr> {
     const pre = await this.threadPreflight(threadKey);
     if ("error" in pre) return pre;
     const { binding } = pre;
@@ -1716,7 +1755,80 @@ export class ResidentDO extends Sandbox<Env> {
     return { ok: true, bytes: content.length };
   }
 
-  /** Daily inactivity sweep (schedule: onWorktreeSweep). Removes worktrees
+  /** Remove a thread's worktree (when the runtime is up — a slept container
+   *  already lost it) and release its pool user; the binding is KEPT, marked
+   *  evicted, so the ref stays sticky and the next attach recreates the tree
+   *  (KTD6). Shared by the inactivity sweep and /detach. */
+  private async evictBinding(binding: ThreadBinding, runtimeActive: boolean, logCtx: string): Promise<void> {
+    const threadDir = parentDir(binding.worktreePath);
+    if (runtimeActive && threadDir.startsWith(`${THREADS_DIR}/`)) {
+      try {
+        // Worktree removal counts as a mirror-adjacent mutation — same mutex (KTD5).
+        await this.withMirrorLock(() => this.runOk(["rm", "-rf", threadDir], "evict"));
+      } catch (err) {
+        console.log(`${logCtx}: rm failed for ${binding.threadKey}: ${errMsg(err)}`);
+      }
+    }
+    await this.ctx.storage.put(threadBindingKey(binding.threadKey), {
+      ...binding,
+      user: "",
+      evicted: true,
+      evictedAt: new Date().toISOString(),
+    } satisfies ThreadBinding);
+  }
+
+  /** POST /detach: a run has ended — give the thread's pool user back now
+   *  instead of holding it until the TTL sweep (the pool is sized for
+   *  simultaneous runs). `force` releases unconditionally (read-only agents);
+   *  otherwise a worktree with uncommitted or unpushed work is KEPT and the
+   *  caller learns why. No binding → 404-shaped error; already evicted → a
+   *  no-op success. Never flips lifecycle state. */
+  async detachThread(threadKey: string, force: boolean): Promise<{ released: boolean; reason?: string; user?: string } | ThreadErr> {
+    const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+    if (!binding) return { error: `no-binding: ${threadKey} has never attached to this resident`, status: 404 };
+    if (binding.evicted || !binding.user) return { released: false, reason: "already-evicted" };
+    const busy = this.threadOpsInFlight.get(threadKey) ?? 0;
+    if (busy > 0) return { released: false, reason: `busy: ${busy} operation(s) in flight on this thread — kept`, user: binding.user };
+    const active = await this.isRuntimeActive().catch(() => false);
+    if (!force && active) {
+      // Run the check AS THE THREAD USER (threadRun → su), never as root: the
+      // worktree is thread-owned and thread-writable, so root git in it would
+      // (a) be refused by safe.directory (dubious ownership) and (b) be the
+      // exact repo-local-config execution vector safe.directory exists to
+      // block — same discipline as attach's own dirty check.
+      const status = await this.threadRun(binding.user, binding.worktreePath, "git status --porcelain", DEFAULT_EXEC_TIMEOUT_MS);
+      const ahead = await this.threadRun(
+        binding.user,
+        binding.worktreePath,
+        "git rev-list --count HEAD --not --remotes",
+        DEFAULT_EXEC_TIMEOUT_MS,
+      );
+      if (status.exitCode !== 0 || ahead.exitCode !== 0) {
+        // Can't prove the tree is clean → keep it (never destroy work on a guess).
+        const why = (status.stderr || ahead.stderr || "git exited non-zero").trim().split("\n")[0];
+        return { released: false, reason: `clean-check failed: ${why} — kept`, user: binding.user };
+      }
+      const changes = status.stdout.trim() ? status.stdout.trim().split("\n").length : 0;
+      const unpushed = Number(ahead.stdout.trim()) || 0;
+      if (changes > 0 || unpushed > 0) {
+        return {
+          released: false,
+          reason: `dirty: ${changes} uncommitted change(s), ${unpushed} unpushed commit(s) — kept for the inactivity sweep`,
+          user: binding.user,
+        };
+      }
+    }
+    // Re-check right before removal: the clean check above awaited (the DO
+    // yields at each await), so an exec that arrived mid-detach would otherwise
+    // have its tree removed under it.
+    const busyNow = this.threadOpsInFlight.get(threadKey) ?? 0;
+    if (busyNow > 0) return { released: false, reason: `busy: ${busyNow} operation(s) started during the clean check — kept`, user: binding.user };
+    const user = binding.user;
+    await this.evictBinding(binding, active, `detach`);
+    return { released: true, user };
+  }
+
+  /** Hourly inactivity sweep (schedule: onWorktreeSweep). Removes worktrees
    *  whose binding is idle past the TTL, releases the user to the pool, and
    *  KEEPS the binding record marked evicted (KTD6). Never wakes a slept
    *  container just to delete files a sleep already destroyed. */
@@ -1738,21 +1850,7 @@ export class ResidentDO extends Sandbox<Env> {
           kept++;
           continue;
         }
-        const threadDir = parentDir(binding.worktreePath);
-        if (active && threadDir.startsWith(`${THREADS_DIR}/`)) {
-          try {
-            // Worktree removal counts as a mirror-adjacent mutation — same mutex (KTD5).
-            await this.withMirrorLock(() => this.runOk(["rm", "-rf", threadDir], "evict"));
-          } catch (err) {
-            console.log(`worktree-sweep ${resource}: rm failed for ${binding.threadKey}: ${errMsg(err)}`);
-          }
-        }
-        await this.ctx.storage.put(threadBindingKey(binding.threadKey), {
-          ...binding,
-          user: "",
-          evicted: true,
-          evictedAt: new Date().toISOString(),
-        } satisfies ThreadBinding);
+        await this.evictBinding(binding, active, `worktree-sweep ${resource}`);
         evicted.push(binding.threadKey);
       }
     } finally {
@@ -2384,6 +2482,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/debug": { scope: "admin", method: "POST" },
   "/status": { scope: "operator", method: "GET" },
   "/attach": { scope: "operator", method: "POST" },
+  "/detach": { scope: "operator", method: "POST" },
   "/exec": { scope: "operator", method: "POST" },
   "/read": { scope: "operator", method: "POST" },
   "/write": { scope: "operator", method: "POST" },
@@ -2473,6 +2572,8 @@ export default {
           return await handleStatus(env, url);
         case "/attach":
           return await handleAttach(env, body);
+        case "/detach":
+          return await handleDetach(env, body);
         case "/exec":
           return await handleExec(env, body);
         case "/read":
@@ -2790,6 +2891,14 @@ async function handleAttach(env: Env, body: Record<string, unknown>): Promise<Re
     refHint = parsed.ref;
   }
   const result = await ctx.stub.attachThread(ctx.threadKey, refHint);
+  if ("error" in result) return threadErrResponse(result);
+  return json(result);
+}
+
+async function handleDetach(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const ctx = await resolveThreadRoute(env, body);
+  if (ctx instanceof Response) return ctx;
+  const result = await ctx.stub.detachThread(ctx.threadKey, body.force === true);
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }

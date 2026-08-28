@@ -31,6 +31,6 @@ RUN npm install -g pnpm@latest
 #   - su back to root: root's password is locked, so workerN -> root fails.
 # `su` itself must stay (it is the demotion mechanism, used only by root).
 RUN set -eux; \
-    for i in 1 2 3 4 5 6 7 8; do useradd -m -u "$((2000 + i))" -s /bin/bash "worker$i"; chmod 700 "/home/worker$i"; done; \
+    for i in $(seq 1 17); do useradd -m -u "$((2000 + i))" -s /bin/bash "worker$i"; chmod 700 "/home/worker$i"; done; \
     if dpkg -s sudo >/dev/null 2>&1; then apt-get remove -y --purge sudo; fi; \
     passwd -l root

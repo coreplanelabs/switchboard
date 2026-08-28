@@ -16,7 +16,10 @@
       // @cloudflare/sandbox ships its own container image; see the Sandbox
       // docs for the current image reference if this needs pinning.
       "image": "./Dockerfile",
-      "instance_type": "basic",
+      // standard-3 = 8 GiB RAM / 16 GB disk. "basic" (1 GiB) died running a
+      // repo's test suite during a cold review (vitest forks per vCPU); the
+      // cold path clones + installs + tests a whole repo per thread.
+      "instance_type": "standard-3",
       "max_instances": 10
     }
   ],

@@ -1,6 +1,6 @@
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { repoResourceId } from "../core/repoCommands.js";
-import { BASH_TIMEOUT_MS, ExecInfraError, truncate, type Executor } from "./executor.js";
+import { BASH_TIMEOUT_MS, ExecInfraError, truncate, type Executor, type ReleaseMode, type ReleaseResult } from "./executor.js";
 
 // Remote execution against a resident repo environment — the always-warm
 // per-repo service behind the resident Worker (deploy/cloudflare-resident/).
@@ -24,6 +24,11 @@ import { BASH_TIMEOUT_MS, ExecInfraError, truncate, type Executor } from "./exec
 // recycled; the binding survives in the resident's storage, so one re-attach
 // recreates the tree on the same ref — this client auto-re-attaches ONCE and
 // retries, then fails legibly.
+
+/** /detach is a small control-plane POST that runs in the dispatcher's finally
+ *  BEFORE the answer is sent: bound it tightly so a sick resident delays a
+ *  reply by seconds, not the 5-minute exec ceiling. */
+const DETACH_TIMEOUT_MS = 10_000;
 
 export interface ResidentExecutorOptions {
   /** Base URL of the resident Worker. */
@@ -168,6 +173,7 @@ export class ResidentExecutor implements Executor {
   private async call(
     route: string,
     body: Record<string, unknown>,
+    timeoutMs: number = BASH_TIMEOUT_MS,
   ): Promise<{ status: number; data: Record<string, unknown> }> {
     let res: Response;
     try {
@@ -179,10 +185,11 @@ export class ResidentExecutor implements Executor {
         },
         body: JSON.stringify({ resource: this.opts.resource, threadKey: this.opts.threadKey, ...body }),
         // Bound every route so a hung resident can't stall the dispatch; /exec
-        // streams and can legitimately run minutes, so use the exec ceiling. A
-        // timeout throws here and is translated into the legible request-failed
-        // error below, never an unhandled throw.
-        signal: AbortSignal.timeout(BASH_TIMEOUT_MS),
+        // streams and can legitimately run minutes, so the default is the exec
+        // ceiling; control-plane routes pass a short bound. A timeout throws
+        // here and is translated into the legible request-failed error below,
+        // never an unhandled throw.
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
       // Network-level failure: the command may still be running (or have run)
@@ -211,6 +218,22 @@ export class ResidentExecutor implements Executor {
       throw new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`);
     }
     throw new Error(`resident attach failed for ${this.opts.resource}: ${err}`);
+  }
+
+  /** POST /detach: return this thread's pool user (and remove its worktree)
+   *  now that the run is over, instead of holding both until the inactivity
+   *  sweep. `force` (mode "always") skips the resident's clean check; "if-clean"
+   *  lets the resident keep a worktree with uncommitted/unpushed work — the
+   *  binding (ref) survives either way (KTD6), so the next attach recreates
+   *  the tree on the same ref. Best-effort by contract: never throws. */
+  async release(mode: ReleaseMode): Promise<ReleaseResult> {
+    try {
+      const { status, data } = await this.call("/detach", { force: mode === "always" }, DETACH_TIMEOUT_MS);
+      if (status !== 200) return { released: false, reason: `HTTP ${status}: ${String(data.error ?? "")}` };
+      return { released: data.released === true, reason: typeof data.reason === "string" ? data.reason : undefined };
+    } catch (err) {
+      return { released: false, reason: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /** Run a route; on needs:"attach" (evicted/recycled worktree, in-body for
