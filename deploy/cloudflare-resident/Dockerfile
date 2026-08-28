@@ -14,6 +14,12 @@ FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1
 RUN git config --system user.name "switchboard-resident" \
   && git config --system user.email "switchboard-resident@users.noreply.github.com"
 
+# pnpm: the base ships Node 24 + npm + bun but not pnpm, so a pnpm repo can't be
+# provisioned (install → build) when onboarded. corepack ships with the base Node
+# (no apt package needed); `prepare` fetches and pins pnpm at build time so it's
+# baked into the image and ready offline when a worktree provisions.
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
 # KTD5: agent commands never run as root. The SDK's exec has no user/uid option
 # (verified against 0.13.0-next.751.1), so the container server itself runs as
 # root and per-command demotion is done with `su -s /bin/bash workerN -c ...`
