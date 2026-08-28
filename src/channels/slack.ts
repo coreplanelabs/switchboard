@@ -1,6 +1,7 @@
 import bolt from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
 import { mdToMrkdwn } from "./mrkdwn.js";
+import { SlackFormatter } from "./slackFormatter.js";
 import type {
   ChannelIO,
   HistoryItem,
@@ -334,13 +335,27 @@ export async function fetchImages(
 }
 
 class SlackIO implements ChannelIO {
+  /** Structured output renders through the Slack formatter (structured →
+   *  mrkdwn); `sendFormatted` posts its output verbatim. */
+  readonly formatter = new SlackFormatter();
+
   constructor(
     private client: SlackClient,
     private ev: SlackEvent,
   ) {}
 
   async reply(text: string): Promise<void> {
-    for (const chunk of chunkText(mdToMrkdwn(text), SLACK_MSG_LIMIT)) {
+    await this.post(mdToMrkdwn(text));
+  }
+
+  /** Post an already-mrkdwn payload (from `this.formatter`) without re-running
+   *  the Markdown→mrkdwn converter — doing so would double-convert. */
+  async sendFormatted(payload: string): Promise<void> {
+    await this.post(payload);
+  }
+
+  private async post(mrkdwn: string): Promise<void> {
+    for (const chunk of chunkText(mrkdwn, SLACK_MSG_LIMIT)) {
       await this.client.chat.postMessage({
         channel: this.ev.channel,
         thread_ts: this.ev.threadTs,

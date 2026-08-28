@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
+import { PlainTextFormatter } from "../core/structuredMessage.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
 
 // HTTP channel adapter: adapter #3. Like Slack and the CLI, it is pure
@@ -108,6 +109,8 @@ function toIncomingMessage(identity: IngressIdentity, body: IngressBody): Incomi
 /** ChannelIO for a single-shot HTTP request: reply() collects, status() is a
  *  no-op, history() replays what the body supplied. */
 export class HttpIO implements ChannelIO {
+  /** Structured output renders as plain text for a machine HTTP consumer. */
+  readonly formatter = new PlainTextFormatter();
   private replies: string[] = [];
   constructor(private readonly priorTurns: HistoryItem[] = []) {}
 

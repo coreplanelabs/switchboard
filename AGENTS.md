@@ -17,6 +17,8 @@ Agent gateway: messages arrive over a channel, get routed to an agent, which run
 | Path | What | Notes |
 |---|---|---|
 | `src/core/types.ts` | Channel contract (`IncomingMessage`, `ChannelIO`, `StatusHandle`, `HistoryItem`) | The open-closed seam for platforms |
+| `src/core/structuredMessage.ts` | Structured-output zod schema + `ChannelFormatter` seam + `PlainTextFormatter` | Channel-agnostic output blocks; `SlackFormatter` in `src/channels/slackFormatter.ts` is the 2nd impl (invariant 2). See `features/channel-formatter.md` |
+| `src/core/structuredOutput.ts` | Validation + fixed-retry self-heal loop + provider-backed producer | Flag-gated (`output.structured`, default off); wired in `dispatcher.sendAnswer` |
 | `src/core/dispatcher.ts` | All orchestration: config commands, directives, resolution, permissions, history assembly, agent run | The only place these live |
 | `src/core/repoContext.ts` | Pre-model repo/ref resolution (slug/URL/PR in the message, thread history) | Feeds resident selection; PR→ref via one REST call, never `gh` |
 | `src/core/repoCommands.ts` | `repo onboard/offboard/reconfigure/rebuild/list` chat commands | Gated by `canManageRepos` (KTD9 fail-closed); talks to the resident Worker's admin routes |

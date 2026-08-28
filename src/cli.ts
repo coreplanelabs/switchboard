@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import { ConfigStore } from "./config.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { dispatch } from "./core/dispatcher.js";
+import { PlainTextFormatter } from "./core/structuredMessage.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
@@ -46,6 +47,9 @@ export function parseCliInvocation(
 }
 
 class ConsoleIO implements ChannelIO {
+  /** Structured output renders as plain text for the terminal. */
+  readonly formatter = new PlainTextFormatter();
+
   async reply(text: string): Promise<void> {
     console.log("\n" + text);
   }
