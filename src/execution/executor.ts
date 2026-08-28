@@ -17,6 +17,61 @@ export interface Executor {
   writeFile(path: string, content: string): Promise<string>;
 }
 
+/** An exec-INFRASTRUCTURE failure: the sandbox/exec transport itself failed —
+ *  unreachable, an HTTP error, an in-body worker error (the sandbox's
+ *  "Command execution failed" / exitCode 127 signal), or a worktree that stays
+ *  unrecoverable after re-attach. This is categorically different from a normal
+ *  nonzero command exit, which every Executor returns as ordinary output text
+ *  and NEVER as a throw. Remote executors throw this (not a bare `Error`) for
+ *  infra failures so the runner can tell a wedged sandbox from a command the
+ *  agent should keep handling, and fail fast instead of toiling commands into a
+ *  dead sandbox (#92). Extends `Error`, so `err.message`/`instanceof Error`
+ *  callers are unaffected. */
+export class ExecInfraError extends Error {
+  readonly infra = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "ExecInfraError";
+  }
+}
+
+/** Decorates an Executor to track CONSECUTIVE exec-infrastructure failures
+ *  (`ExecInfraError`) with no successful operation between them — the signal the
+ *  runner uses to detect an unrecoverable sandbox (#92). A successful op resets
+ *  the count to 0 (proves the sandbox is alive, so a one-off blip never aborts);
+ *  an `ExecInfraError` increments it; any OTHER throw (e.g. a path-escape
+ *  rejection, a missing file) is neither a health signal nor a reset and leaves
+ *  the count untouched. A normal nonzero exit returns output (no throw), so it
+ *  too resets the count and can never trip the abort. */
+export class ExecHealthTracker implements Executor {
+  consecutiveInfraFailures = 0;
+
+  constructor(private readonly inner: Executor) {}
+
+  private async track<T>(op: () => Promise<T>): Promise<T> {
+    try {
+      const out = await op();
+      this.consecutiveInfraFailures = 0;
+      return out;
+    } catch (err) {
+      if (err instanceof ExecInfraError) this.consecutiveInfraFailures++;
+      throw err;
+    }
+  }
+
+  exec(command: string): Promise<string> {
+    return this.track(() => this.inner.exec(command));
+  }
+
+  readFile(path: string): Promise<string> {
+    return this.track(() => this.inner.readFile(path));
+  }
+
+  writeFile(path: string, content: string): Promise<string> {
+    return this.track(() => this.inner.writeFile(path, content));
+  }
+}
+
 export const BASH_TIMEOUT_MS = 5 * 60_000;
 const MAX_OUTPUT = 120_000;
 

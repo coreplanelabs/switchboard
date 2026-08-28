@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ExecHealthTracker, ExecInfraError } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations } from "./resident.js";
 
 // Feature: features/resident-repos.md — bot-side resident client (U5): every
@@ -89,22 +90,47 @@ describe("ResidentExecutor.exec", () => {
     expect(sentBody(calls[2]).command).toBe("echo recovered");
   });
 
-  it("a second needs:\"attach\" after re-attach is a legible error, not a loop", async () => {
+  it("a second needs:\"attach\" after re-attach is a legible ExecInfraError, not a loop", async () => {
     stubFetch(
       { body: { error: "evicted: worktree was evicted", needs: "attach", stdout: "", stderr: "evicted", exitCode: 127 } },
       { body: ATTACH_OK },
       { body: { error: "worktree-missing: still gone", needs: "attach", stdout: "", stderr: "worktree-missing", exitCode: 127 } },
     );
     const ex = new ResidentExecutor(OPTS);
-    await expect(ex.exec("echo x")).rejects.toThrow(/re-attach/);
+    const err = await ex.exec("echo x").catch((e: unknown) => e);
+    // worktree still gone after a re-attach → the resident is unhealthy: genuine
+    // infra, so it counts toward fail-fast (#92).
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/re-attach/);
   });
 
-  it("an in-body error without needs is surfaced verbatim, never retried", async () => {
+  it("a command-too-long rejection (plain HTTP 400, no needs) is a normal client Error, not infra", async () => {
+    // The resident rejects an over-length command PRE-validation: a plain HTTP
+    // 400 with an {error} and NO `needs`, nothing streamed (worker.ts handleExec).
+    // It's agent-fixable, so it must be a normal Error — NOT an ExecInfraError
+    // that would falsely count toward the fail-fast abort on a HEALTHY resident.
     const { fn } = stubFetch({
-      body: { error: "command too long", stdout: "", stderr: "command too long", exitCode: 127 },
+      status: 400,
+      body: { error: "command must be a non-empty string of at most 8000 chars" },
     });
     const ex = new ResidentExecutor(OPTS);
-    await expect(ex.exec("x")).rejects.toThrow(/command too long/);
+    const err = await ex.exec("x").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/at most 8000 chars/);
+    expect(fn).toHaveBeenCalledTimes(1); // never retried
+  });
+
+  it("an in-body error over the HTTP 200 stream (post-validation exec failure) stays infra", async () => {
+    // A post-validation failure arrives IN-BODY over the HTTP 200 stream (no
+    // `needs`): the exec transport itself failed, so it remains ExecInfraError.
+    const { fn } = stubFetch({
+      body: { error: "exec transport crashed", stdout: "", stderr: "exec transport crashed", exitCode: 127 },
+    });
+    const ex = new ResidentExecutor(OPTS);
+    const err = await ex.exec("x").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/exec transport crashed/);
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
@@ -112,6 +138,45 @@ describe("ResidentExecutor.exec", () => {
     const { calls } = stubFetch({ body: { stdout: "ok", stderr: "", exitCode: 0, truncated: false } });
     await new ResidentExecutor(OPTS).exec("echo ok");
     expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+// The #92 fail-fast counter (ExecHealthTracker) must fire on a genuinely dead
+// resident but NEVER on a healthy one that merely rejected agent-fixable input.
+// A client/validation rejection (command-too-long) is the exact false-positive
+// the classification fix closes.
+describe("ResidentExecutor infra classification through ExecHealthTracker (#92)", () => {
+  it("two consecutive command-too-long rejections don't increment the infra counter (healthy resident)", async () => {
+    stubFetch(
+      { status: 400, body: { error: "command must be a non-empty string of at most 8000 chars" } },
+      { status: 400, body: { error: "command must be a non-empty string of at most 8000 chars" } },
+    );
+    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    await expect(tracker.exec("x".repeat(9000))).rejects.toThrow(/8000 chars/);
+    await expect(tracker.exec("y".repeat(9000))).rejects.toThrow(/8000 chars/);
+    // Two client rejections crossed the old MAX_CONSECUTIVE_INFRA_FAILURES (2)
+    // and falsely aborted; a healthy resident must stay at zero.
+    expect(tracker.consecutiveInfraFailures).toBe(0);
+  });
+
+  it("a genuine infra failure (worktree still gone after re-attach) counts toward fail-fast", async () => {
+    stubFetch(
+      { body: { error: "evicted", needs: "attach", stdout: "", stderr: "evicted", exitCode: 127 } },
+      { body: ATTACH_OK },
+      { body: { error: "worktree-missing: still gone", needs: "attach", stdout: "", stderr: "worktree-missing", exitCode: 127 } },
+    );
+    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    const err = await tracker.exec("echo x").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect(tracker.consecutiveInfraFailures).toBe(1);
+  });
+
+  it("a non-2xx HTTP status is infra and counts toward fail-fast", async () => {
+    stubFetch({ status: 503, raw: "mirror busy" });
+    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    const err = await tracker.exec("echo x").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect(tracker.consecutiveInfraFailures).toBe(1);
   });
 });
 
