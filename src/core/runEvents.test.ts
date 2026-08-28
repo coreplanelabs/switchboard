@@ -68,6 +68,10 @@ describe("redactSecrets", () => {
 });
 
 describe("redactAndCap", () => {
+  it("strips ANSI escapes", () => {
+    expect(redactAndCap("\x1b[1mgit\x1b[0m status")).toBe("git status");
+  });
+
   it("redacts BEFORE capping — a secret near the boundary never leaks as a fragment", () => {
     const token = "ghp_" + "A".repeat(40);
     const out = redactAndCap("x".repeat(190) + " " + token, 200);
@@ -94,6 +98,22 @@ describe("summarizeToolResult", () => {
 
   it("handles empty output", () => {
     expect(summarizeToolResult("   ")).toBe("(no output)");
+  });
+
+  it("strips ANSI color/style escapes so vitest-style output reads as plain text", () => {
+    const s = summarizeToolResult("\x1b[32m✓\x1b[39m src/tools/skills.test.ts \x1b[2m(\x1b[22m\x1b[2m9 tests\x1b[22m\x1b[2m)\x1b[22m \x1b[32m 11\x1b[2mms\x1b[22m\x1b[39m\nline2");
+    expect(s).toContain("✓ src/tools/skills.test.ts (9 tests)  11ms");
+    expect(s).not.toMatch(/\x1b|\[\d+m/);
+  });
+
+  it("strips OSC hyperlinks and cursor-control sequences", () => {
+    const s = summarizeToolResult("\x1b]8;;https://x.test\x07link\x1b]8;;\x07 \x1b[2K\x1b[1Adone\r");
+    expect(s).toBe("link done");
+  });
+
+  it("counts chars/lines on the stripped text", () => {
+    const s = summarizeToolResult("\x1b[32mok\x1b[39m\nb");
+    expect(s).toBe("ok (4 chars, 2 lines)");
   });
 
   it("redacts secrets in the summary", () => {
