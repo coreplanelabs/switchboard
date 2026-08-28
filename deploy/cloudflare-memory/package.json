@@ -1,0 +1,22 @@
+{
+  "name": "@coreplane/switchboard-memory-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy && npm run wake",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "typegen": "wrangler types",
+    "tail": "wrangler tail switchboard-memory",
+    "secrets": "while read -r name; do [ -z \"$name\" ] && continue; echo \"--- $name ---\"; wrangler secret put \"$name\"; done < secrets.txt",
+    "wake": "curl -s -o /dev/null -w 'memory worker awake: HTTP %{http_code}\\n' --max-time 60 https://switchboard-memory.coreplanelabs.dev/healthz"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260810.1",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.120.1"
+  }
+}

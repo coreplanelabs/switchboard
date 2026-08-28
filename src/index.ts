@@ -15,7 +15,7 @@ import {
 } from "./channels/accessAuth.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
-import { InMemoryMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
+import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import type { CoreDeps } from "./core/dispatcher.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
@@ -37,10 +37,10 @@ async function main() {
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
   // Cross-session memory (#85): ONE store instance shared by every channel so
   // what the reflection pass writes after a run is what the next run reads.
-  // Process-lifetime only until the durable WorkerMemoryStore (PR3) replaces
-  // it — a restart loses it (known invariant-6 gap, features/memory.md).
+  // Durable WorkerMemoryStore when memory.worker (+ its bearer) is configured;
+  // otherwise an in-process store with a loud warning (a restart loses it).
   // Disabled (default) → undefined → the dispatcher uses a NullMemoryStore.
-  const memory = config.config.memory?.enabled ? new InMemoryMemoryStore() : undefined;
+  const memory = buildMemoryStore(config.config.memory, process.env, (m) => console.warn(`[memory] ${m}`));
   const deps: CoreDeps = { config, providers, skills, memory };
   const app = createSlackApp(deps);
 

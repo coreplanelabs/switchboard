@@ -119,10 +119,15 @@ workspaceDir: ./workspaces
 # each reply, a run that did real work (used tools, or a thread ≥4 turns deep)
 # fires ONE async reflection call on `model` that distills ≤5 durable facts + 1
 # summary into the store (secret-redacted, confidence-gated, dedup/supersede on
-# write) — fire-and-forget, so it never delays or fails the reply. The store is
-# in-process until the durable Worker store (PR3) lands — see features/memory.md.
+# write) — fire-and-forget, so it never delays or fails the reply. Records live
+# in the Memory Worker (deploy/cloudflare-memory/: one SQLite Durable Object per
+# scope, survives bot restarts); with no `worker` configured the bot falls back
+# to an IN-PROCESS store and warns at startup — dev only. See features/memory.md.
 # memory:
 #   enabled: false      # master switch (default false)
+#   worker:
+#     baseUrl: https://switchboard-memory.coreplanelabs.dev
+#     tokenEnv: MEMORY_TOKEN   # env var holding the Worker's bearer (default)
 #   scope: org          # which resource to scope to; `org` only for now
 #                       # (→ org:coreplanelabs). repo/channel are a PR4 gap.
 #   limit: 8            # max records retrieved/injected per request (default 8)

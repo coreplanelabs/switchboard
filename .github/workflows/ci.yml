@@ -54,6 +54,24 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
 
+  memory-worker:
+    name: memory worker typecheck + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/cloudflare-memory
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: deploy/cloudflare-memory/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      # Runs inside workerd (vitest-pool-workers) against the real SQLite DO.
+      - run: npm test
+
   resident-worker:
     name: resident worker typecheck
     runs-on: ubuntu-latest

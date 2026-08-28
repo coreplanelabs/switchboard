@@ -32,6 +32,9 @@ export {
 } from "./scorer.js";
 export { deriveScopeKey, ORG_RESOURCE } from "./scope.js";
 export { NullMemoryStore, InMemoryMemoryStore, selectMemoryStore } from "./stores.js";
+export { normalizeText, rankRecords, planWrite, mintRecord, type WritePlan } from "./engine.js";
+export { WorkerMemoryStore, MEMORY_WORKER_TIMEOUT_MS, type WorkerMemoryStoreOptions } from "./workerStore.js";
+export { buildMemoryStore, DEFAULT_MEMORY_TOKEN_ENV } from "./buildStore.js";
 export {
   REFLECT_MIN_TURNS,
   MAX_REFLECTION_FACTS,
