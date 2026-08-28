@@ -198,6 +198,8 @@ npm run tail      # watch it connect: "switchboard running (providers: anthropic
 
 The bot shim mirrors terrateam exactly: singleton Durable Object, `sleepAfter: 2h`, 5-minute cron keep-alive, secrets forwarded as container env, `startAndWaitForPorts` with generous timeout. Production behavior comes from `config/config.production.yaml` (committed, no secrets), selected via `SWITCHBOARD_CONFIG`; the sandbox and resident Workers get stable custom domains on the `coreplanelabs.dev` zone so that config never changes. Repos are onboarded to the resident Worker at runtime from chat (`repo onboard` — next section), never at deploy time.
 
+**Filling secrets from 1Password (optional).** Instead of pasting each secret into the interactive `npm run secrets` prompt, an operator can populate a Worker's secrets from 1Password via a read-only service account: map each secret name to an `op://<vault>/<item>/<field>` ref in `deploy/op-env.jsonc`, then run `deploy/op-env-fill.sh --env uat --target both` (dry-run: prints the plan) and `--apply` (sets them). UAT-only by default; prod is hard-guarded behind `--i-understand-prod`. Behavioral contract: [features/1password-env-fill.md](features/1password-env-fill.md).
+
 ### What any host must provide
 
 Platform-agnostic requirements, for evaluating alternatives:

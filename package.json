@@ -10,7 +10,8 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "op-env-fill": "tsx src/deploy/opEnvFillCli.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

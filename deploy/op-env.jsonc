@@ -1,0 +1,75 @@
+{
+  // ---------------------------------------------------------------------------
+  // op-env-fill config — 1Password references for deploy secrets (GitHub #72).
+  //
+  // Maps, PER ENVIRONMENT and PER TARGET, each Worker secret NAME to a
+  // 1Password secret reference: op://<vault>/<item>/<field>. The tool reads
+  // these refs with a READ-ONLY service account and pipes the resolved value
+  // into `wrangler secret put <NAME>` for the chosen Worker. It NEVER hard-codes
+  // vault contents — you fill in the refs below.
+  //
+  // Isolation: environments are separate top-level sections. A `--env uat` run
+  // only ever reads the `uat` section; it cannot see `prod`. Targeting `prod` is
+  // additionally hard-guarded in the tool (needs --i-understand-prod).
+  //
+  // Targets:
+  //   bot      -> deploy/cloudflare            (the switchboard bot Worker)
+  //   resident -> deploy/cloudflare-resident   (the resident Worker)
+  //
+  // NOTE (AGENTS.md invariant 5): the resident holds its OWN GitHub App
+  // credentials — a SECOND credential domain, distinct from the bot's. Point
+  // the resident's GITHUB_APP_* refs at a SEPARATE 1Password item from the
+  // bot's, so the two credential domains never collapse into one.
+  //
+  // Secret name lists are the source of truth in each Worker's secrets.txt
+  // (deploy/cloudflare/secrets.txt, deploy/cloudflare-resident/secrets.txt).
+  // Replace every "REPLACE-ME-*" placeholder with your real vault/item/field.
+  // ---------------------------------------------------------------------------
+
+  // ===== UAT (the only environment that runs by default) =====
+  "uat": {
+    "bot": {
+      "SLACK_BOT_TOKEN": "op://REPLACE-ME-UAT-VAULT/switchboard-bot/slack-bot-token",
+      "SLACK_APP_TOKEN": "op://REPLACE-ME-UAT-VAULT/switchboard-bot/slack-app-token",
+      "ANTHROPIC_API_KEY": "op://REPLACE-ME-UAT-VAULT/switchboard-bot/anthropic-api-key",
+      "SANDBOX_TOKEN": "op://REPLACE-ME-UAT-VAULT/switchboard-bot/sandbox-token",
+      "RESIDENT_OPERATOR_TOKEN": "op://REPLACE-ME-UAT-VAULT/switchboard-bot/resident-operator-token",
+      "RESIDENT_ADMIN_TOKEN": "op://REPLACE-ME-UAT-VAULT/switchboard-bot/resident-admin-token",
+      "GITHUB_APP_ID": "op://REPLACE-ME-UAT-VAULT/switchboard-bot-github-app/app-id",
+      "GITHUB_APP_INSTALLATION_ID": "op://REPLACE-ME-UAT-VAULT/switchboard-bot-github-app/installation-id",
+      "GITHUB_APP_PRIVATE_KEY": "op://REPLACE-ME-UAT-VAULT/switchboard-bot-github-app/private-key"
+    },
+    "resident": {
+      "RESIDENT_ADMIN_TOKEN": "op://REPLACE-ME-UAT-VAULT/switchboard-resident/resident-admin-token",
+      "RESIDENT_OPERATOR_TOKEN": "op://REPLACE-ME-UAT-VAULT/switchboard-resident/resident-operator-token",
+      // Second credential domain — a SEPARATE item from the bot's GitHub App.
+      "GITHUB_APP_ID": "op://REPLACE-ME-UAT-VAULT/switchboard-resident-github-app/app-id",
+      "GITHUB_APP_INSTALLATION_ID": "op://REPLACE-ME-UAT-VAULT/switchboard-resident-github-app/installation-id",
+      "GITHUB_APP_PRIVATE_KEY": "op://REPLACE-ME-UAT-VAULT/switchboard-resident-github-app/private-key"
+    }
+  },
+
+  // ===== PROD (hard-guarded — the tool refuses this section unless
+  //       --i-understand-prod is ALSO passed; kept here only so the refs are
+  //       ready when prod is deliberately enabled later) =====
+  "prod": {
+    "bot": {
+      "SLACK_BOT_TOKEN": "op://REPLACE-ME-PROD-VAULT/switchboard-bot/slack-bot-token",
+      "SLACK_APP_TOKEN": "op://REPLACE-ME-PROD-VAULT/switchboard-bot/slack-app-token",
+      "ANTHROPIC_API_KEY": "op://REPLACE-ME-PROD-VAULT/switchboard-bot/anthropic-api-key",
+      "SANDBOX_TOKEN": "op://REPLACE-ME-PROD-VAULT/switchboard-bot/sandbox-token",
+      "RESIDENT_OPERATOR_TOKEN": "op://REPLACE-ME-PROD-VAULT/switchboard-bot/resident-operator-token",
+      "RESIDENT_ADMIN_TOKEN": "op://REPLACE-ME-PROD-VAULT/switchboard-bot/resident-admin-token",
+      "GITHUB_APP_ID": "op://REPLACE-ME-PROD-VAULT/switchboard-bot-github-app/app-id",
+      "GITHUB_APP_INSTALLATION_ID": "op://REPLACE-ME-PROD-VAULT/switchboard-bot-github-app/installation-id",
+      "GITHUB_APP_PRIVATE_KEY": "op://REPLACE-ME-PROD-VAULT/switchboard-bot-github-app/private-key"
+    },
+    "resident": {
+      "RESIDENT_ADMIN_TOKEN": "op://REPLACE-ME-PROD-VAULT/switchboard-resident/resident-admin-token",
+      "RESIDENT_OPERATOR_TOKEN": "op://REPLACE-ME-PROD-VAULT/switchboard-resident/resident-operator-token",
+      "GITHUB_APP_ID": "op://REPLACE-ME-PROD-VAULT/switchboard-resident-github-app/app-id",
+      "GITHUB_APP_INSTALLATION_ID": "op://REPLACE-ME-PROD-VAULT/switchboard-resident-github-app/installation-id",
+      "GITHUB_APP_PRIVATE_KEY": "op://REPLACE-ME-PROD-VAULT/switchboard-resident-github-app/private-key"
+    }
+  }
+}
