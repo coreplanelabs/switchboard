@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders } from "node:http";
 import {
   createLiveViewHandler,
@@ -185,6 +185,47 @@ describe("renderRunsIndex", () => {
     expect(html).toContain("insertSorted"); // client places by comparing data-started-at
     expect(html).not.toContain("list.firstChild"); // the old blind-prepend is gone
   });
+
+  it("makes the ENTIRE row a link (full-row clickable), with the label inside the anchor", () => {
+    const html = renderRunsIndex([summary()]);
+    // the whole row content sits inside a single anchor carrying the token URL
+    expect(html).toContain('<a class="row" href="/runs/run-1?t=tok-1">');
+    // the label lives inside that anchor (not a bare text node beside it)
+    expect(html).toMatch(/<a class="row"[^>]*>[\s\S]*coding · owner\/repo[\s\S]*<\/a>/);
+    // the data attrs the client reconciles on stay on the <li>, not the <a>
+    expect(html).toContain('<li data-run-id="run-1" data-started-at="1000">');
+  });
+
+  it("has a :hover background so the row reads as clickable", () => {
+    const html = renderRunsIndex([summary()]);
+    expect(html).toMatch(/\.row:hover\s*\{[^}]*background/);
+  });
+
+  it("renders a per-row status dot: green for live, grey for finished, with an accessible label", () => {
+    const live = renderRunsIndex([summary({ finished: false })]);
+    expect(live).toMatch(/<span class="dot green"[^>]*aria-label="live"/);
+    const done = renderRunsIndex([summary({ finished: true })]);
+    expect(done).toMatch(/<span class="dot grey"[^>]*aria-label="finished"/);
+  });
+
+  it("gives the header connection indicator a status dot alongside its label (dot + label)", () => {
+    const html = renderRunsIndex([]);
+    expect(html).toContain('id="statedot"'); // the colored connection dot
+    expect(html).toContain('id="state"'); // and its text label
+  });
+
+  it("client-added rows are full-row clickable and carry a status dot too (parity with server rows)", () => {
+    const html = renderRunsIndex([summary()]);
+    expect(html).toContain('a.className = "row"'); // client builds the same full-row anchor
+    expect(html).toContain('dot.setAttribute("aria-label"'); // …and an accessible status dot
+    expect(html).not.toContain("innerHTML"); // still textContent/setAttribute only
+  });
+
+  it("HTML-escapes a hostile label even inside the full-row anchor", () => {
+    const html = renderRunsIndex([summary({ label: "<img src=x onerror=alert(1)>" })]);
+    expect(html).not.toContain("<img src=x");
+    expect(html).toContain("&lt;img src=x");
+  });
 });
 
 describe("renderRunPage", () => {
@@ -211,6 +252,18 @@ describe("renderRunPage", () => {
     expect(page).toContain("/runs/a%2Fb/events?t=x%22y");
     // JSON-encoded into the script, so no raw quote breaks out of the string.
     expect(page).not.toContain('t=x"y');
+  });
+
+  it('has a "← All runs" back link to the token-less, Access-gated index', () => {
+    expect(html).toContain('<a class="back" href="/runs">');
+    expect(html).toContain("← All runs");
+    // the index is Access-gated, not token-gated — the back link must carry no token
+    expect(html).not.toMatch(/href="\/runs\?[^"]*t=/);
+  });
+
+  it("renders a connection status dot in the header (dot + label)", () => {
+    expect(html).toContain('id="statedot"');
+    expect(html).toContain('id="state"');
   });
 });
 
@@ -547,5 +600,33 @@ describe("createLiveViewHandler (node:http)", () => {
     const t = fakeReqRes("POST", "/runs?stream=1");
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(405);
+  });
+
+  // #66 follow-up: prove the keepalive TIMER's real behavior (not just the
+  // prelude wiring). An idle live stream must emit a `: hb` comment every
+  // SSE_HEARTBEAT_MS, and a client disconnect must clearInterval so no further
+  // heartbeat is written. Driven with fake timers through the real handler.
+  it("SSE heartbeat: writes a keepalive comment on an idle live stream, then stops on client close", () => {
+    vi.useFakeTimers();
+    try {
+      const reg = fixedRegistry();
+      const handler = createLiveViewHandler(reg);
+      // The index feed with no runs stays open and idle — the exact case the
+      // heartbeat exists for (only the prelude, then nothing but heartbeats).
+      const t = fakeReqRes("GET", "/runs?stream=1");
+      expect(handler(t.req, t.res)).toBe(true);
+      expect(t.status).toBe(200);
+      expect(t.body()).not.toContain(": hb"); // none before the first interval elapses
+
+      vi.advanceTimersByTime(20_000);
+      expect(t.body()).toContain(": hb\n\n"); // one heartbeat fired at the interval
+      const afterOne = t.body();
+
+      t.fireClose(); // client disconnects → clearInterval must stop the timer
+      vi.advanceTimersByTime(40_000);
+      expect(t.body()).toBe(afterOne); // nothing more written — the interval was cleared
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

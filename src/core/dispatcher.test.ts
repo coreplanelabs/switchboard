@@ -9,7 +9,7 @@ import { AGENTS } from "../agents/registry.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
-import { dispatch, type CoreDeps } from "./dispatcher.js";
+import { composeRunLabel, dispatch, type CoreDeps } from "./dispatcher.js";
 import { RunRegistry } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 
@@ -83,6 +83,89 @@ const msg = (text: string, user = "slack:UX") => ({
   userId: user,
   threadKey: "slack:CX:1.0",
   text,
+});
+
+// Feature: features/live-view.md — the human-readable run label the dispatcher
+// stamps on each run for the Access-gated /runs index. `composeRunLabel` is the
+// pure, channel-agnostic composer: agent-first, repo-identified for repo runs,
+// channel+user (names or stripped ids) for chat runs, always with a short quoted
+// snippet of the request, capped to a sane length.
+describe("composeRunLabel", () => {
+  const base = { agent: "review", channelId: "slack:C0BQ", userId: "slack:U123", text: "" };
+
+  it("a repo run is repo-identified: agent · owner/repo · snippet", () => {
+    expect(composeRunLabel({ ...base, agent: "coding", repo: "owner/repo", text: "fix the login bug" })).toBe(
+      'coding · owner/repo · "fix the login bug"',
+    );
+  });
+
+  it("a chat run shows channel + user display names when available", () => {
+    expect(
+      composeRunLabel({
+        ...base,
+        channelName: "switchboard-prompting",
+        userName: "justin",
+        text: "run these with bash",
+      }),
+    ).toBe('review · #switchboard-prompting · justin · "run these with bash"');
+  });
+
+  it("falls back to the raw ids (slack: prefix stripped) when names are absent", () => {
+    expect(composeRunLabel({ ...base, text: "hello" })).toBe('review · #C0BQ · U123 · "hello"');
+  });
+
+  it("uses the channel name but the stripped user id when only one name resolved", () => {
+    expect(composeRunLabel({ ...base, channelName: "general", text: "hi" })).toBe(
+      'review · #general · U123 · "hi"',
+    );
+  });
+
+  it("is channel-agnostic: http/mcp ids (no names) strip their platform prefix", () => {
+    expect(
+      composeRunLabel({ agent: "review", channelId: "http:svc", userId: "http:alice", text: "go" }),
+    ).toBe('review · #svc · alice · "go"');
+  });
+
+  it("empty (or whitespace-only) text yields no snippet segment", () => {
+    expect(composeRunLabel({ ...base, repo: "owner/repo", text: "   " })).toBe("review · owner/repo");
+    expect(composeRunLabel({ ...base, channelName: "c", userName: "u", text: "" })).toBe("review · #c · u");
+  });
+
+  it("collapses internal whitespace in the snippet", () => {
+    expect(
+      composeRunLabel({ ...base, channelName: "c", userName: "u", text: "  do   this\n\tnow  " }),
+    ).toBe('review · #c · u · "do this now"');
+  });
+
+  it("prefers the first sentence when it ends within the budget", () => {
+    expect(
+      composeRunLabel({ ...base, repo: "owner/repo", text: "Deploy the app. Then celebrate loudly." }),
+    ).toBe('review · owner/repo · "Deploy the app…"');
+  });
+
+  it("truncates a long snippet at a word boundary with an ellipsis", () => {
+    const label = composeRunLabel({
+      ...base,
+      channelName: "c",
+      userName: "u",
+      text: "please run all of the integration tests and then report the results back to me thanks",
+    });
+    expect(label.startsWith('review · #c · u · "please run all of the ')).toBe(true);
+    expect(label.endsWith('…"')).toBe(true);
+    expect(label).not.toContain("  "); // no doubled whitespace leaks through
+    expect(label).not.toMatch(/ …"$/); // cut on a word boundary — no trailing space before the ellipsis
+  });
+
+  it("caps the overall label to a sane length", () => {
+    const label = composeRunLabel({
+      ...base,
+      channelName: "c".repeat(200),
+      userName: "u".repeat(200),
+      text: "hello there",
+    });
+    expect(label.length).toBeLessThanOrEqual(120);
+    expect(label.endsWith("…")).toBe(true);
+  });
 });
 
 describe("dispatch", () => {

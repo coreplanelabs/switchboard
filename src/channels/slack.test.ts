@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { classifyMessage, fetchImages, stripMention, threadIncludesBot } from "./slack.js";
+import {
+  classifyMessage,
+  fetchImages,
+  resetSlackNameCaches,
+  resolveChannelName,
+  resolveUserName,
+  stripMention,
+  threadIncludesBot,
+} from "./slack.js";
 
 // Feature: features/slack-channel.md — trigger gating (which events start a
 // run) and image-attachment ingestion within budgets.
@@ -60,6 +68,88 @@ describe("stripMention", () => {
 
   it("removes only the first generic mention when the bot id is unknown", () => {
     expect(stripMention("<@UANY> hello <@UOTHER>", undefined)).toBe("hello <@UOTHER>");
+  });
+});
+
+// Feature: features/slack-channel.md — the adapter resolves human display names
+// for the channel + user (feeding IncomingMessage.channelName/userName for the
+// live-view run label). Best-effort and cached: one API call per new id, any
+// error falls back to undefined, and a failure is never cached.
+describe("resolveChannelName / resolveUserName (best-effort, cached)", () => {
+  afterEach(() => resetSlackNameCaches());
+
+  type ChannelInfo = () => Promise<{ channel?: { name?: string } }>;
+  type UserInfo = () => Promise<{
+    user?: { name?: string; real_name?: string; profile?: { display_name?: string; real_name?: string } };
+  }>;
+
+  function fakeClient(over: { channelInfo?: ChannelInfo; userInfo?: UserInfo } = {}) {
+    return {
+      conversations: {
+        info: vi.fn(over.channelInfo ?? (async () => ({ channel: { name: "switchboard-prompting" } }))),
+      },
+      users: {
+        info: vi.fn(
+          over.userInfo ??
+            (async () => ({
+              user: { name: "juser", real_name: "Justin Helmer", profile: { display_name: "justin", real_name: "Justin Helmer" } },
+            })),
+        ),
+      },
+    };
+  }
+
+  it("resolves a channel name and a user display name", async () => {
+    const c = fakeClient();
+    expect(await resolveChannelName(c, "C1")).toBe("switchboard-prompting");
+    expect(await resolveUserName(c, "U1")).toBe("justin");
+  });
+
+  it("prefers profile.display_name, then real_name, then name", async () => {
+    const realNameOnly = fakeClient({
+      userInfo: async () => ({ user: { name: "juser", real_name: "Justin Helmer", profile: { display_name: "" } } }),
+    });
+    expect(await resolveUserName(realNameOnly, "U2")).toBe("Justin Helmer");
+    resetSlackNameCaches();
+    const handleOnly = fakeClient({ userInfo: async () => ({ user: { name: "juser", profile: {} } }) });
+    expect(await resolveUserName(handleOnly, "U3")).toBe("juser");
+  });
+
+  it("caches: a second lookup for the same id does NOT re-call the API", async () => {
+    const c = fakeClient();
+    expect(await resolveChannelName(c, "C1")).toBe("switchboard-prompting");
+    expect(await resolveChannelName(c, "C1")).toBe("switchboard-prompting");
+    expect(c.conversations.info).toHaveBeenCalledTimes(1);
+    expect(await resolveUserName(c, "U1")).toBe("justin");
+    expect(await resolveUserName(c, "U1")).toBe("justin");
+    expect(c.users.info).toHaveBeenCalledTimes(1);
+  });
+
+  it("an API error falls back to undefined without throwing", async () => {
+    const boom = fakeClient({
+      channelInfo: async () => {
+        throw new Error("channel_not_found");
+      },
+      userInfo: async () => {
+        throw new Error("user_not_found");
+      },
+    });
+    await expect(resolveChannelName(boom, "CX")).resolves.toBeUndefined();
+    await expect(resolveUserName(boom, "UX")).resolves.toBeUndefined();
+  });
+
+  it("does not cache a failed lookup — a later success still resolves", async () => {
+    let n = 0;
+    const flaky = fakeClient({
+      channelInfo: async () => {
+        n++;
+        if (n === 1) throw new Error("rate_limited");
+        return { channel: { name: "general" } };
+      },
+    });
+    expect(await resolveChannelName(flaky, "CF")).toBeUndefined();
+    expect(await resolveChannelName(flaky, "CF")).toBe("general");
+    expect(flaky.conversations.info).toHaveBeenCalledTimes(2);
   });
 });
 

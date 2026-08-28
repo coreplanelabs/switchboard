@@ -86,6 +86,87 @@ export function threadIncludesBot(
   return messages.some((m) => m.user === botUserId || (m.text ?? "").includes(`<@${botUserId}>`));
 }
 
+// ---- human display-name resolution ------------------------------------------
+// The core wants human names (IncomingMessage.channelName/userName) for the
+// live-view run label, but stays channel-agnostic — so the Slack adapter resolves
+// them here. Best-effort: a lookup failure leaves the name undefined and the
+// label falls back to the raw id; a name lookup never delays or fails a dispatch.
+// Names change rarely, so each id is resolved once and cached — one API call per
+// new id, not per message.
+
+/** The slice of the Slack Web API the name resolvers use — declared structurally
+ *  so both the real WebClient and a test mock satisfy it. */
+interface NameLookupClient {
+  conversations: { info(args: { channel: string }): Promise<{ channel?: { name?: string } }> };
+  users: {
+    info(args: {
+      user: string;
+    }): Promise<{
+      user?: { name?: string; real_name?: string; profile?: { display_name?: string; real_name?: string } };
+    }>;
+  };
+}
+
+// Bounded so a long-lived process can't grow them without limit. On overflow the
+// oldest-inserted entry is dropped (Map preserves insertion order) — names are
+// cheap to re-resolve, so a simple FIFO bound suffices; no LRU is warranted.
+const NAME_CACHE_MAX = 1000;
+const channelNameCache = new Map<string, string>();
+const userNameCache = new Map<string, string>();
+
+function cachePut(cache: Map<string, string>, key: string, value: string): void {
+  cache.set(key, value);
+  if (cache.size > NAME_CACHE_MAX) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+}
+
+/** Resolve a channel's human name (cached, best-effort). Undefined on any API
+ *  error or when the channel has no name — the caller falls back to the raw id. A
+ *  failed lookup is NOT cached, so a transient error can be retried next time.
+ *  Exported for tests. */
+export async function resolveChannelName(
+  client: NameLookupClient,
+  channel: string,
+): Promise<string | undefined> {
+  const hit = channelNameCache.get(channel);
+  if (hit !== undefined) return hit;
+  try {
+    const info = await client.conversations.info({ channel });
+    const name = info.channel?.name;
+    if (name) cachePut(channelNameCache, channel, name);
+    return name || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve a user's display name (cached, best-effort): profile.display_name,
+ *  then real_name, then the handle. Same failure/caching contract as
+ *  `resolveChannelName`. Exported for tests. */
+export async function resolveUserName(
+  client: NameLookupClient,
+  user: string,
+): Promise<string | undefined> {
+  const hit = userNameCache.get(user);
+  if (hit !== undefined) return hit;
+  try {
+    const u = (await client.users.info({ user })).user;
+    const name = u?.profile?.display_name || u?.profile?.real_name || u?.real_name || u?.name;
+    if (name) cachePut(userNameCache, user, name);
+    return name || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Clear both name caches — for tests, so cache-hit assertions start clean. */
+export function resetSlackNameCaches(): void {
+  channelNameCache.clear();
+  userNameCache.clear();
+}
+
 export function createSlackApp(deps: CoreDeps) {
   const app = new App({
     token: process.env.SLACK_BOT_TOKEN,
@@ -170,6 +251,14 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
       if (!err.message.includes("already_reacted")) console.error(`[ack] ${err.message}`);
     });
   const { images, skipped } = await fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE);
+  // Human display names for the run label — best-effort and cached: a failed
+  // lookup leaves the field undefined (the label falls back to the raw id) and
+  // never fails the dispatch. Resolved in parallel so the two lookups don't add
+  // up on the first message for a new channel/user.
+  const [channelName, userName] = await Promise.all([
+    resolveChannelName(client, ev.channel),
+    resolveUserName(client, ev.user),
+  ]);
   // Tell the model about attachments it can't see, so it never claims an
   // attached file simply didn't come through.
   const note =
@@ -183,6 +272,8 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
       userId: `${PLATFORM}:${ev.user}`,
       threadKey: `${PLATFORM}:${ev.channel}:${ev.threadTs}`,
       text: ev.text + note,
+      channelName,
+      userName,
       images: images.length > 0 ? images : undefined,
     },
     new SlackIO(client, ev),
