@@ -65,4 +65,4 @@ You can watch an agent run in real time from a browser. When a run starts, the b
 | Live link on the status card when `PUBLIC_BASE_URL` set; omitted (no crash) when unset | `[unit]` `::puts the per-run capability link on the status card when PUBLIC_BASE_URL is set`, `::omits the link entirely when PUBLIC_BASE_URL is unset …` |
 | Live end-to-end: open the link in a browser during a real run and watch tool calls/results stream, ✓/✗ per result; a wrong `t=` gives 404; the stream closes when the run finishes | `[agent]` (post-deploy) — pending; requires the bot deployed with `PUBLIC_BASE_URL` set and `PORT` exposed. |
 
-The runs index header links across to the residents dash (`/residents`, [resident-repos.md](resident-repos.md) item 33), which sits behind the same Access gate and links back.
+The runs index header links across to the residents dash (`/residents`, [resident-repos.md](resident-repos.md) item 42), which sits behind the same Access gate and links back.
