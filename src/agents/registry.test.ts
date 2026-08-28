@@ -116,3 +116,22 @@ describe("validated-review prompt behavior (resident variants)", () => {
     expect(AGENTS.review.residentSystem!).toMatch(/GATHER ONCE/);
   });
 });
+
+// Feature: features/agent-review.md (issue #69) — posting the review back to the
+// PR is the system's job (a deterministic dispatcher post-step), NOT the model's.
+// Both review prompts must forbid self-posting so the run never double-comments,
+// and must say the system posts by default (comment-only) with an opt-out.
+describe("review post-step: prompts defer posting to the system (issue #69)", () => {
+  it("both review prompts forbid self-posting and say the system posts by default", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
+      expect(sys).toMatch(/do NOT post your review to GitHub yourself/i);
+      expect(sys).toMatch(/posts your final message to that PR automatically/i);
+      expect(sys).toMatch(/never an approval or a merge/i); // comment-only
+      expect(sys).toMatch(/slack only/i); // opt-out acknowledged
+    }
+  });
+
+  it("the sandbox review prompt names `gh pr comment` as the thing NOT to do", () => {
+    expect(AGENTS.review.system).toContain("gh pr comment");
+  });
+});

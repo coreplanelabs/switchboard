@@ -9,6 +9,8 @@ import { LocalOperations } from "../execution/executor.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { resolveRepoContext, type RepoContext } from "./repoContext.js";
+import { decideReviewPost } from "./reviewPost.js";
+import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
 import type { RunEvent } from "./runEvents.js";
@@ -55,6 +57,14 @@ export interface CoreDeps {
    * /runs endpoints (src/index.ts) share one instance. Injectable for tests.
    */
   runRegistry?: RunRegistry;
+  /**
+   * Posts a review comment back to a PR (issue #69). Called after a `review`
+   * run against a resolved PR, unless the request opted out. Default: the real
+   * GitHub REST post with the App installation token (App `pull_requests:write`;
+   * no `gh` shell-out — AGENTS.md invariant 5). Injectable so tests assert the
+   * decision without a network call.
+   */
+  postReviewComment?: (target: ReviewCommentTarget, body: string) => Promise<void>;
 }
 
 const STATUS_UPDATE_MIN_MS = 3000;
@@ -302,6 +312,28 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     console.log(`[done] ${msg.threadKey} ${answer.length} chars`);
     await status.done({ title: title("✅"), detail: checklist });
     await io.reply(answer);
+
+    // Deterministic review post-step (issue #69): a `review` run against a
+    // resolved PR posts its findings back to that PR by default — no need to
+    // ask. Only for PR reviews (a resolved PR number); a review of pasted code
+    // or a repo with no PR posts nowhere. Best-effort: a post failure is logged
+    // but never fails the dispatch (the review already landed in Slack).
+    const postTarget = decideReviewPost({
+      agentName: resolved.agentName,
+      repo: repoCtx.repo,
+      pr: repoCtx.pr,
+      requestText: directives.text,
+    });
+    if (postTarget) {
+      const post = deps.postReviewComment ?? postReviewComment;
+      await post(postTarget, answer)
+        .then(() => console.log(`[review-post] ${msg.threadKey} → ${postTarget.repo}#${postTarget.number}`))
+        .catch((err: unknown) =>
+          console.error(
+            `[review-post] ${msg.threadKey} failed for ${postTarget.repo}#${postTarget.number}: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+    }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     await io.reply(`⚠️ ${errMsg}`).catch(() => {});

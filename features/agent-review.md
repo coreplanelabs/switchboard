@@ -2,9 +2,9 @@
 
 Reviews a PR with the full change in context and reports ranked, evidence-anchored findings. Gather once, analyze once — a review takes minutes, not an hour.
 
-- **Code**: `src/agents/registry.ts` (`REVIEW_SYSTEM`; resident-path variant `REVIEW_SYSTEM_RESIDENT`)
+- **Code**: `src/agents/registry.ts` (`REVIEW_SYSTEM`; resident-path variant `REVIEW_SYSTEM_RESIDENT`); post-step in `src/core/dispatcher.ts` + `src/core/reviewPost.ts` + `src/execution/githubComments.ts`
 - **Docs**: [README — Agents](../README.md#agents)
-- **Budgets**: 30 turns (backstop) / 25 min / 64k tokens · effort `medium` · toolset `readonly` (bash + read; read-only by convention — bash can still run `gh pr comment` etc.)
+- **Budgets**: 30 turns (backstop) / 25 min / 64k tokens · effort `medium` · toolset `readonly` (bash + read; read-only by convention)
 
 ## Behavior
 
@@ -13,7 +13,12 @@ Reviews a PR with the full change in context and reports ranked, evidence-anchor
 3. **Report everything found** with severity, confidence, and `file:line`, most-severe first. A correct change gets a plain "looks correct" — no manufactured findings.
 4. Maintains the status-card checklist; never pre-marks reporting steps.
 5. Leads the final message with a one-line verdict.
-6. **Resident-path variant** ([resident-repos.md](resident-repos.md) §31): in a resident repo environment the dispatcher swaps in `REVIEW_SYSTEM_RESIDENT` via `RunOptions.system` — same gather-once discipline, but against the ready worktree (already on the branch under review, deps installed; no cloning) using git directly, since `gh` is not in the resident image.
+6. **Posts the review back to the PR by default** (issue [#69](https://github.com/coreplanelabs/switchboard/issues/69)): the user never has to add "and post to the PR". A deterministic dispatcher post-step (`decideReviewPost` in [`reviewPost.ts`](../src/core/reviewPost.ts)) fires whenever the resolved agent is `review` AND a PR was resolved (`RepoContext.pr`, from a PR URL or `owner/name#N` in the current message); the bot then posts the agent's final review text to that PR as a **comment** — never an approval or a merge. This is a system-level guarantee (code, not model memory), so it holds identically on the sandbox and resident paths.
+   - **Mechanism + auth**: the post runs in the bot process via the GitHub REST API (`POST /repos/{repo}/issues/{n}/comments`, [`githubComments.ts`](../src/execution/githubComments.ts)) with the GitHub App installation token (App needs `pull_requests:write`) — the same REST-with-App-token path repo/PR resolution uses, never a `gh` shell-out and never from inside the sandbox/resident ([AGENTS.md](../AGENTS.md) invariant 5). Best-effort: a post failure is logged but never fails the run (the review already landed in Slack).
+   - **The agent never self-posts**: `REVIEW_SYSTEM`/`REVIEW_SYSTEM_RESIDENT` instruct the model to just produce the review as its final message and NOT run `gh pr comment` or any comment-creating API call — so there is exactly one comment.
+   - **Opt-out**: an explicit "don't post" / "slack only" (or `post:off`) in the request suppresses the GitHub post; the review still replies in Slack.
+   - **Only for PR reviews**: a review with no resolved PR (pasted code, or a repo mention with no PR) posts nowhere — no crash, just the Slack reply.
+7. **Resident-path variant** ([resident-repos.md](resident-repos.md) §31): in a resident repo environment the dispatcher swaps in `REVIEW_SYSTEM_RESIDENT` via `RunOptions.system` — same gather-once discipline, but against the ready worktree (already on the branch under review, deps installed; no cloning) using git directly, since `gh` is not in the resident image.
 
 ## Validation criteria
 
@@ -23,5 +28,5 @@ Reviews a PR with the full change in context and reports ranked, evidence-anchor
 | Resident variant: ready worktree, git-based gather, no clone/gh instructions; fallback prompt unchanged | `[unit]` `src/agents/registry.test.ts::resident prompt variants`; selection wiring in `src/core/dispatcher.test.ts::repo/ref resolution + resident prompt selection (U7)`. |
 | Real PR review lands within budget with verdict-first output | `[agent]` `@switchboard agent:review <PR URL>` on a real PR (~<2k changed lines). Expect: status checklist, completion well under 25 min, one-line verdict first, findings with file:line + severity + confidence. |
 | Findings are real (spot-check) | `[agent]` For the top finding, open the cited file:line and confirm the described failure scenario is coherent with the code. A fabricated citation is a critical failure. |
-| Posts review to GitHub when asked | `[agent]` `agent:review review <PR> and post the review as a PR comment` — expect `gh pr comment` to succeed and the comment to appear (requires app `pull_requests:write`; validated after the sandbox-timeout chain, PRs [#27](https://github.com/coreplanelabs/switchboard/pull/27)–[#33](https://github.com/coreplanelabs/switchboard/pull/33)). |
+| Posts review to GitHub by default for PR reviews (opt-out available) | `[unit]` `src/core/reviewPost.test.ts` (decision + opt-out parse), `src/core/dispatcher.test.ts::review post-step (issue #69)` (posts on a resolved PR, suppressed on opt-out, no-op with no PR, non-review never posts, post failure swallowed), `src/core/repoContext.test.ts` (PR number carried on `RepoContext.pr`). `[agent]` `agent:review <PR URL>` with NO "post" phrasing → a review comment appears on the PR authored by the App (requires App `pull_requests:write`; mechanism confirmed on PR [#68](https://github.com/coreplanelabs/switchboard/pull/68)). Opt-out: add "don't post" / "slack only" → no comment appears, Slack still gets the review. |
 | Quality bar (see milestone 1) | `[agent]` Reviews on this repo's own PRs #27–#34 each caught ≥1 real blocker or verified root causes against vendored SDK source — that's the bar to hold. |

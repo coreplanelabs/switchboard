@@ -12,6 +12,7 @@ import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
 import { composeRunLabel, dispatch, type CoreDeps } from "./dispatcher.js";
 import { RunRegistry } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
+import type { ReviewCommentTarget } from "../execution/githubComments.js";
 
 // Feature: features/routing-and-config.md — end-to-end dispatch: config
 // commands, permission gates, and thread-sticky agent resolution.
@@ -858,6 +859,85 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:coding fix the login bug in acme/api", "slack:UADMIN"), io);
     expect(provider.requests[0].system).toBe(AGENTS.coding.system);
+  });
+});
+
+// Feature: features/agent-review.md — the deterministic review post-step (issue
+// #69): a `review` run against a resolved PR posts its findings back to that PR
+// by default (no "and post to the PR" needed). The system decides and posts (via
+// the injected postReviewComment seam — no real network here); opt-out and
+// no-PR reviews post nowhere; a post failure never fails the dispatch.
+describe("review post-step (issue #69)", () => {
+  afterEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  function postSpy() {
+    const calls: Array<{ target: ReviewCommentTarget; body: string }> = [];
+    const fn = vi.fn(async (target: ReviewCommentTarget, body: string) => {
+      calls.push({ target, body });
+    });
+    return { calls, fn };
+  }
+
+  it("a review of a resolved PR posts the review back to the PR by default", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    expect(replies).toContain("answer"); // Slack still gets the review
+    expect(spy.calls).toEqual([{ target: { repo: "acme/api", number: 42 }, body: "answer" }]);
+  });
+
+  it("opt-out ('don't post' / 'slack only') suppresses the GitHub post; Slack still gets it", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review acme/api#42 — don't post, slack only"), io);
+    expect(replies).toContain("answer");
+    expect(spy.fn).not.toHaveBeenCalled();
+  });
+
+  it("a review with no resolved PR (pasted code / repo-only) posts nowhere — no crash", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api" }); // repo but no PR number
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review look at the diff in acme/api"), io);
+    expect(replies).toContain("answer");
+    expect(spy.fn).not.toHaveBeenCalled();
+  });
+
+  it("a non-review agent never posts, even when a PR is resolved", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding acme/api#42 fix it", "slack:UADMIN"), io);
+    expect(spy.fn).not.toHaveBeenCalled();
+  });
+
+  it("a post failure is swallowed — the dispatch still completes and Slack gets the review", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    deps.postReviewComment = vi.fn(async () => {
+      throw new Error("HTTP 403 forbidden");
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review acme/api#42"), io);
+    expect(replies).toContain("answer");
+    expect(deps.postReviewComment).toHaveBeenCalledTimes(1);
   });
 });
 
