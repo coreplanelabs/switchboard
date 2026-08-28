@@ -65,8 +65,8 @@ Non-negotiable discipline:
 
 ## Current state / known gaps
 
-- The Cloudflare execution path IS live-tested: the resident Worker (`deploy/cloudflare-resident/`) runs at switchboard-resident.coreplanelabs.dev with `repo:jshttp/vary` onboarded, and its attach/exec/read/write plane plus onboard/offboard/rebuild lifecycle have live receipts in `features/resident-repos.md` (validated 2026-08-26).
-- `GITHUB_APP_*` secrets are UNSET on the resident Worker: onboard's installation-membership check skips with an honest warning, clones/fetches run anonymously (public repos only), thread credential files are never provisioned, and pushes from resident threads are unavailable. Setting the three secrets (`npm run secrets` in `deploy/cloudflare-resident`) lights all of it up — the `[gap]` rows in `features/resident-repos.md` list the checks to run afterwards.
+- The Cloudflare execution path IS live-tested: the resident Worker (`deploy/cloudflare-resident/`) runs at switchboard-resident.coreplanelabs.dev with `repo:jshttp/vary` (public) and `repo:coreplanelabs/switchboard` (private) onboarded, and its attach/exec/read/write plane plus onboard/offboard/rebuild lifecycle have live receipts in `features/resident-repos.md` (validated 2026-08-26; private onboard 2026-08-28).
+- `GITHUB_APP_*` secrets ARE set on the resident Worker (2026-08-28; it is a second copy of the bot's App credential — rotate both). Onboard's installation-membership check runs for real and private repos clone via minted installation tokens (`coreplanelabs/switchboard` reached `warm`). Still `[gap]` in `features/resident-repos.md`: the not-in-installation refusal, the cross-repo token-scope proof, and a push from a resident thread.
 - The E2B executor path is typechecked but still not exercised against a live sandbox.
 - The Slack app has DM support wired but the recommended rollout keeps `im:*` scopes off initially.
 - No token/cost accounting per request yet.
