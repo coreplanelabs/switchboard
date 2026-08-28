@@ -74,4 +74,52 @@ describe("mdToMrkdwn", () => {
   it("keeps a leading blockquote marker while escaping the quoted prose", () => {
     expect(mdToMrkdwn("> quote <!channel>")).toBe("> quote &lt;!channel&gt;");
   });
+
+  // #91 review (BLOCKING): the image path stashed its url verbatim while the link
+  // path ran it through encodeMrkdwnUrl — so an image url of <!channel>/<@U…>
+  // reached Slack live and fired a broadcast/mention. Image urls now go through
+  // encodeMrkdwnUrl exactly like links.
+  it("percent-encodes an image url's <!channel> so it can't fire a broadcast", () => {
+    const out = mdToMrkdwn("![x](<!channel>)");
+    expect(out).toBe("%3C!channel%3E");
+    expect(out).not.toContain("<!channel>");
+  });
+
+  it("percent-encodes an image url's <@U…> so it can't fire a mention", () => {
+    const out = mdToMrkdwn("![x](<@U123>)");
+    expect(out).toBe("%3C@U123%3E");
+    expect(out).not.toContain("<@U123>");
+  });
+
+  it("percent-encodes an image url's structural chars (< > |)", () => {
+    const out = mdToMrkdwn("![x](https://e.com/<a>|b)");
+    expect(out).toBe("https://e.com/%3Ca%3E%7Cb");
+    expect(out).not.toMatch(/[<>|]/);
+  });
+
+  it("keeps the link path correct while encoding the image path", () => {
+    const out = mdToMrkdwn("![i](<!channel>) and [t](https://x.test)");
+    expect(out).toContain("<https://x.test|t>");
+    expect(out).toContain("%3C!channel%3E");
+    expect(out).not.toContain("<!channel>");
+  });
+
+  // #91 review: the stash/restore placeholders are private-use-area sentinels
+  // (U+E000–U+E003). Agent-controlled input carrying those literal chars used to
+  // collide with real placeholders — restoring an out-of-range index threw
+  // (uncaught up the reply path = crash), or an injected struct placeholder
+  // cross-spliced a real stashed link onto itself. The raw input is now stripped
+  // of these sentinels before any stashing, so user content can never collide.
+  it("does not throw when input carries the code-placeholder sentinels", () => {
+    const input = `5 and [real](https://r.test)`;
+    expect(() => mdToMrkdwn(input)).not.toThrow();
+    expect(mdToMrkdwn(input)).toContain("<https://r.test|real>");
+  });
+
+  it("does not cross-splice a real link onto an injected struct placeholder", () => {
+    const input = `0 x [real](https://r.test)`;
+    const out = mdToMrkdwn(input);
+    const links = out.match(/<https:\/\/r\.test\|real>/g) ?? [];
+    expect(links).toHaveLength(1);
+  });
 });

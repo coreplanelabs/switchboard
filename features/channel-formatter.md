@@ -67,8 +67,13 @@ degraded — instead of shipped.
    visible text. Only the structural syntax `mdToMrkdwn` itself produces is
    exempt from that escape: generated `<url|label>` links (label `escapeMrkdwn`'d,
    url `encodeMrkdwnUrl`'d but keeping its literal `&` for query params), image
-   URLs, and leading blockquote `>` markers are stashed before the escape pass
-   and restored after, so they stay functional and are never double-escaped. On →
+   URLs (also `encodeMrkdwnUrl`'d so an image url of `<!channel>`/`<@U…>` can't
+   reach Slack as a live broadcast/mention), and leading blockquote `>` markers
+   are stashed before the escape pass and restored after, so they stay functional
+   and are never double-escaped. The stash/restore placeholders are private-use
+   sentinels (U+E000–U+E003); the raw input is stripped of those chars before any
+   stashing, so agent-controlled text carrying them can't collide with a real
+   placeholder (which would otherwise throw or cross-splice on restore). On →
    `dispatch` runs the structuring pass and routes the result through the
    channel's `formatter` + `sendFormatted` (Slack posts the mrkdwn verbatim
    rather than re-running the Markdown→mrkdwn converter).

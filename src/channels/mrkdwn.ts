@@ -23,11 +23,20 @@ const STRUCT_OPEN = "\uE002";
 const STRUCT_CLOSE = "\uE003";
 
 export function mdToMrkdwn(md: string): string {
+  // Strip the private-use sentinels the placeholder scheme relies on before any
+  // stashing happens. These chars have no legitimate meaning in a chat reply, so
+  // removing them is harmless — but if agent-controlled input carried them
+  // literally they would collide with real placeholders on restore (an
+  // out-of-range index throws; a matching index cross-splices unrelated stashed
+  // content). Doing it here, at the true raw-input boundary, keeps both the
+  // inline-code (CODE_*) and structural (STRUCT_*) placeholders collision-proof.
+  const sanitized = md.replace(/[-]/g, "");
+
   // Split out fenced code blocks first, then inline code, so no formatting
   // transform ever touches code content. The fence markers stay; the content
   // still gets its `&`/`<`/`>` escaped (Slack renders those literally only when
   // escaped, inside code too), so `<!channel>` in a code block is inert.
-  return md
+  return sanitized
     .split(/(```[\s\S]*?```)/g)
     .map((seg) => (seg.startsWith("```") ? escapeMrkdwn(seg) : convertOutsideInlineCode(seg)))
     .join("");
@@ -63,9 +72,11 @@ function convert(text: string): string {
     return `${STRUCT_OPEN}${structural.length - 1}${STRUCT_CLOSE}`;
   };
 
-  // images can't render inline; keep the bare URL. Stash it so its query-string
-  // `&` (and any other char) survives the prose escape untouched.
-  out = out.replace(/!\[[^\]]*\]\(([^)\s]+)\)/g, (_, url: string) => stash(url));
+  // images can't render inline; keep the bare URL. Percent-encode its structural
+  // `<`/`>`/`|` (mirroring the link path) so an image url of `<!channel>`/`<@U…>`
+  // can't reach Slack as a live broadcast/mention, then stash it so its literal
+  // `&` (query params) survives the prose escape untouched.
+  out = out.replace(/!\[[^\]]*\]\(([^)\s]+)\)/g, (_, url: string) => stash(encodeMrkdwnUrl(url)));
 
   // links [text](url) -> <url|label>. Escape the label and percent-encode only
   // the url's structural chars (<>|) so a link can't forge or break out of the
