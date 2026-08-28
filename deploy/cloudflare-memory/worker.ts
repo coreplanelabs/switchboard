@@ -346,15 +346,17 @@ export default {
 
     // Size fence BEFORE parsing: a caller holding a valid bearer still can't
     // make us JSON-parse an oversized body just to be told 400 by the field
-    // caps. A missing/unparseable Content-Length is treated as too large —
-    // every legitimate client (WorkerMemoryStore) sends a sized JSON body.
-    // NOTE: `Number(null)` and `Number("")` are both 0, which would let a
-    // chunked/streamed body (no header) or a blank header sail through the
-    // fence — so an absent or blank header is mapped to NaN explicitly.
+    // caps. Content-Length must be a plain digit string (RFC 9110) — that
+    // rules out the absent header of a chunked/streamed body, a blank value,
+    // and forms `Number()` would accept ("0x1000", "5e2", "12.5"); each is
+    // 411 Length Required. A well-formed length over the cap is 413. Every
+    // legitimate client (WorkerMemoryStore) sends a sized JSON body.
     const header = request.headers.get("content-length");
-    const declared = header === null || header.trim() === "" ? NaN : Number(header);
-    if (!Number.isFinite(declared) || declared < 0 || declared > MAX_BODY_BYTES) {
-      return json({ error: `body must declare Content-Length of at most ${MAX_BODY_BYTES} bytes` }, 413);
+    if (header === null || !/^\d+$/.test(header.trim())) {
+      return json({ error: "body must declare a numeric Content-Length" }, 411);
+    }
+    if (Number(header) > MAX_BODY_BYTES) {
+      return json({ error: `body must be at most ${MAX_BODY_BYTES} bytes` }, 413);
     }
 
     let body: unknown;
