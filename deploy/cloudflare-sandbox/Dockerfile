@@ -24,3 +24,9 @@ RUN apt-get update \
   && git config --system credential.helper '!gh auth git-credential' \
   && git config --system user.name "switchboard-bot" \
   && git config --system user.email "switchboard-bot@users.noreply.github.com"
+
+# pnpm: the base image ships Node/npm/corepack but not pnpm, so coding runs in
+# pnpm repos hit `pnpm: command not found` on install/build. corepack ships with
+# the base Node (no apt package needed); `prepare` fetches and pins pnpm at
+# build time so it's baked into the image and ready offline at run time.
+RUN corepack enable && corepack prepare pnpm@latest --activate

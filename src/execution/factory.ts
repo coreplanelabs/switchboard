@@ -104,7 +104,8 @@ export async function makeExecutor(
   // resident backend is configured. Warm → ResidentExecutor; anything else
   // (not-warm state, probe timeout, outage) → the per-thread backend below,
   // with the reason carried in `note` (KTD10 — never a silent stall). A repo
-  // that is simply not onboarded is the ordinary per-thread case: no note.
+  // that is simply not onboarded also runs per-thread, but carries a note so
+  // the cold fall-through is visible (with the onboarding fix).
   let note: string | undefined;
   if (ctx.repo && opts.execution?.resident) {
     const resident = opts.execution.resident;
@@ -139,6 +140,14 @@ export async function makeExecutor(
       note = `resident unreachable (${probe.error}) — using fresh sandbox`;
     } else if (probe.state !== "not-onboarded") {
       note = `resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — using fresh sandbox`;
+    } else {
+      // not-onboarded is the ordinary per-thread case — but still make the cold
+      // fall-through visible (KTD10): the user needs to know coding ran cold in a
+      // per-thread sandbox instead of on a warm, deps-ready resident, and how to
+      // fix it. Routing is unchanged; only the note is added.
+      note =
+        `repo not onboarded as a resident — running in a cold per-thread sandbox; ` +
+        `onboard it (\`repo onboard ${ctx.repo}\`) for a warm, deps-ready environment`;
     }
   }
 

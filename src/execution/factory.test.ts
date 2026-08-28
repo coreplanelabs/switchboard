@@ -256,12 +256,19 @@ describe("makeExecutor resident selection", () => {
     expect(fn).toHaveBeenCalledTimes(1); // circuit breaker: one timeout per outage window
   });
 
-  it("404 not-onboarded → the ordinary per-thread path with NO note", async () => {
+  // A repo that is simply not onboarded still runs — on the per-thread backend —
+  // but the fall-through must be VISIBLE (KTD10): the user needs to know coding
+  // ran cold instead of on a warm, deps-ready resident, plus how to fix it.
+  it("404 not-onboarded → per-thread path with a named cold-fallback note pointing at onboarding", async () => {
     stubEnvs();
     const { fn } = stubFetch({ status: 404, body: { error: "unknown resource" } });
-    const { executor, note } = await makeExecutor(residentOpts(), repoCtx());
+    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
-    expect(note).toBeUndefined();
+    expect(resident).toBeFalsy();
+    expect(note).toBe(
+      "repo not onboarded as a resident — running in a cold per-thread sandbox; " +
+        "onboard it (`repo onboard jshttp/vary`) for a warm, deps-ready environment",
+    );
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
