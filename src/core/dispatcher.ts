@@ -621,15 +621,37 @@ function stripPlatformPrefix(id: string): string {
   return i === -1 ? id : id.slice(i + 1);
 }
 
-/** A short, quoted snippet of the request text for a run label: whitespace
- *  collapsed, cut at the first sentence end or ~SNIPPET_MAX chars (whichever
- *  comes first, on a word boundary), ellipsized when anything was dropped.
- *  Empty/whitespace-only text → undefined (no snippet segment). */
+/** Rewrite one URL into its shortest useful display form: a GitHub PR/issue
+ *  becomes `owner/repo#N` (any trailing `/files`, `#discussion_…` dropped);
+ *  anything else loses its scheme and `www.` so the host/path is what shows. */
+function compactUrl(url: string): string {
+  const gh = /^https?:\/\/(?:www\.)?github\.com\/([^/\s]+\/[^/\s]+)\/(?:pull|issues)\/(\d+)/.exec(url);
+  if (gh) return `${gh[1]}#${gh[2]}`;
+  return url.replace(/^https?:\/\/(?:www\.)?/, "");
+}
+
+/** Make request text readable as a label: Slack's `<url|label>` renders as its
+ *  label and `<url>` as the url; every remaining bare URL is compacted. The raw
+ *  mrkdwn a Slack review request carries (`<https://github.com/…/pull/41|…>`)
+ *  would otherwise be sliced mid-URL by the snippet budget. */
+function humanizeLinks(text: string): string {
+  return text
+    .replace(/<([^<>|\s]+)\|([^<>]*)>/g, (_m, url: string, label: string) => (label.trim() ? label : compactUrl(url)))
+    .replace(/<([a-z][a-z0-9+.-]*:\/\/[^<>\s]+)>/gi, (_m, url: string) => compactUrl(url))
+    .replace(/\bhttps?:\/\/[^\s<>"']+/gi, (url) => compactUrl(url));
+}
+
+/** A short, quoted snippet of the request text for a run label: links
+ *  humanized, whitespace collapsed, cut at the first sentence end or ~SNIPPET_MAX
+ *  chars (whichever comes first, on a word boundary), ellipsized when anything
+ *  was dropped. Empty/whitespace-only text → undefined (no snippet segment). */
 function textSnippet(text: string): string | undefined {
-  const collapsed = text.replace(/\s+/g, " ").trim();
+  const collapsed = humanizeLinks(text).replace(/\s+/g, " ").trim();
   if (!collapsed) return undefined;
   // First sentence, when it ends within the budget AND there is more after it.
-  const end = collapsed.slice(0, SNIPPET_MAX).search(/[.!?]/);
+  // `#41` / `example.com/x` must not count as a sentence end, so a period only
+  // ends a sentence when followed by whitespace or the end of the text.
+  const end = collapsed.slice(0, SNIPPET_MAX + 1).search(/[.!?](?=\s|$)/);
   if (end !== -1 && end + 1 < collapsed.length) return `"${collapsed.slice(0, end)}…"`;
   // Otherwise the whole thing if it fits …
   if (collapsed.length <= SNIPPET_MAX) return `"${collapsed}"`;

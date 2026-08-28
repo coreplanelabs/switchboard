@@ -161,6 +161,41 @@ describe("composeRunLabel", () => {
     expect(label).not.toMatch(/ …"$/); // cut on a word boundary — no trailing space before the ellipsis
   });
 
+  it("unwraps Slack angle-links and compacts GitHub PR/issue URLs to owner/repo#N", () => {
+    expect(
+      composeRunLabel({
+        ...base,
+        repo: "coreplanelabs/switchboard",
+        text: "<https://github.com/coreplanelabs/switchboard/pull/41|https://github.com/coreplanelabs/switchboard/pull/41> — lead with a verdict",
+      }),
+    ).toBe('review · coreplanelabs/switchboard · "coreplanelabs/switchboard#41 — lead with a verdict"');
+    expect(composeRunLabel({ ...base, repo: "o/r", text: "<https://github.com/o/r/issues/7>" })).toBe(
+      'review · o/r · "o/r#7"',
+    );
+    expect(
+      composeRunLabel({ ...base, repo: "o/r", text: "fix https://github.com/o/r/pull/12/files please" }),
+    ).toBe('review · o/r · "fix o/r#12 please"');
+  });
+
+  it("a Slack link with a human label shows the label, and other URLs drop their scheme", () => {
+    expect(composeRunLabel({ ...base, repo: "o/r", text: "see <https://example.com/docs/a|the docs>" })).toBe(
+      'review · o/r · "see the docs"',
+    );
+    expect(composeRunLabel({ ...base, repo: "o/r", text: "read https://www.example.com/x/y" })).toBe(
+      'review · o/r · "read example.com/x/y"',
+    );
+  });
+
+  it("a snippet never ends in a severed URL", () => {
+    const label = composeRunLabel({
+      ...base,
+      repo: "o/r",
+      text: "please look at https://example.com/a/very/long/path/that/keeps/going/and/going/forever/more/and/more",
+    });
+    expect(label).not.toMatch(/https?:/);
+    expect(label.endsWith('…"')).toBe(true);
+  });
+
   it("caps the overall label to a sane length", () => {
     const label = composeRunLabel({
       ...base,
