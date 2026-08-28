@@ -1,4 +1,5 @@
 import type { ToolDef, ToolResultContent } from "../providers/types.js";
+import { parseVerdictInput, type ReviewVerdict } from "../core/reviewVerdict.js";
 import type { Executor } from "../execution/executor.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { distillDiff } from "../core/diffDigest.js";
@@ -25,6 +26,11 @@ export interface ToolContext {
   /** The calling agent's name — scopes list_skills/use_skill so an agent only
    *  sees and loads skills declared for it. */
   agentName?: string;
+  /** Receives the review agent's structured verdict from `submit_verdict`.
+   *  Injected by the dispatcher for review runs; the last call wins. The
+   *  dispatcher turns it into the deterministic first line of the GitHub post
+   *  (src/core/reviewVerdict.ts). Absent → the tool still accepts the call. */
+  onVerdict?: (verdict: ReviewVerdict) => void;
 }
 
 export interface RunnableTool extends ToolDef {
@@ -130,6 +136,29 @@ export const diffDigestTool: RunnableTool = {
   },
 };
 
+export const submitVerdictTool: RunnableTool = {
+  name: "submit_verdict",
+  description:
+    "Record your review verdict. REQUIRED before your final message when reviewing a PR: " +
+    "`approve` when there are no blocking issues (nits alone are not blocking), `request_changes` otherwise. " +
+    "Switchboard writes the verdict as the first line of the GitHub comment itself (`LGTM:` only for approve); " +
+    "a review with no submitted verdict is posted as NOT approving. Call it once, after your analysis; a later call replaces the earlier one.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      verdict: { type: "string", enum: ["approve", "request_changes"], description: "approve | request_changes" },
+      summary: { type: "string", description: "One-line rationale shown right after the verdict token" },
+    },
+    required: ["verdict", "summary"],
+  },
+  async run(input, ctx) {
+    const verdict = parseVerdictInput(input);
+    if (!verdict) return "error: verdict must be exactly `approve` or `request_changes`";
+    ctx.onVerdict?.(verdict);
+    return `verdict recorded: ${verdict.verdict}`;
+  },
+};
+
 export const updateStatusTool: RunnableTool = {
   name: "update_status",
   description:
@@ -160,7 +189,7 @@ export const updateStatusTool: RunnableTool = {
 // never mutates the workspace, so it is safe for the read-only review agent.
 export const TOOLSETS: Record<string, RunnableTool[]> = {
   full: [bashTool, readFileTool, writeFileTool, updateStatusTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
-  readonly: [bashTool, readFileTool, updateStatusTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
+  readonly: [bashTool, readFileTool, updateStatusTool, submitVerdictTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
   web: [webFetchTool, webSearchTool, updateStatusTool],
   none: [],
 };

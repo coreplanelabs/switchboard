@@ -8,8 +8,13 @@ import { resolveGithubToken } from "./githubApp.js";
 // works uniformly for sandbox and resident runs: the post happens in the bot,
 // after the run, regardless of where the run executed.
 //
-// A PR comment is an issue comment (`POST /repos/{repo}/issues/{n}/comments`):
-// this is a plain comment ONLY — never a review, an approval, or a merge.
+// The post is a pull-request REVIEW with `event: "COMMENT"`
+// (`POST /repos/{repo}/pulls/{n}/reviews`) — a comment-state review, never an
+// APPROVE or REQUEST_CHANGES event, never a merge. A review (rather than an
+// issue comment) is what the org's auto-approve workflow listens to
+// (`pull_request_review` → state `commented`, body starting with `LGTM:`), and
+// it carries `commit_id`, which lets that workflow refuse to approve a review
+// pinned to a commit that is no longer the PR head.
 
 // GitHub rejects a comment body over 65536 chars; clip with a visible note so a
 // huge review still posts instead of 422-ing.
@@ -18,8 +23,11 @@ const MAX_COMMENT_CHARS = 65000;
 export interface ReviewCommentTarget {
   /** `owner/name` */
   repo: string;
-  /** PR (issue) number */
+  /** PR number */
   number: number;
+  /** Head SHA the review looked at; pins the review so a later push cannot
+   *  inherit its verdict. Omitted → GitHub pins to the head at post time. */
+  commitId?: string;
 }
 
 /**
@@ -36,8 +44,10 @@ export async function postReviewComment(target: ReviewCommentTarget, body: strin
     body.length > MAX_COMMENT_CHARS
       ? `${body.slice(0, MAX_COMMENT_CHARS)}\n\n_(review truncated to fit GitHub's comment size limit)_`
       : body;
+  const payload: Record<string, string> = { event: "COMMENT", body: clipped };
+  if (target.commitId) payload.commit_id = target.commitId;
   const res = await fetch(
-    `https://api.github.com/repos/${target.repo}/issues/${target.number}/comments`,
+    `https://api.github.com/repos/${target.repo}/pulls/${target.number}/reviews`,
     {
       method: "POST",
       headers: {
@@ -46,7 +56,7 @@ export async function postReviewComment(target: ReviewCommentTarget, body: strin
         "content-type": "application/json",
         "user-agent": "switchboard",
       },
-      body: JSON.stringify({ body: clipped }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(15000),
     },
   );

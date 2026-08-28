@@ -1,3 +1,4 @@
+import { NO_VERDICT_LINE } from "./reviewVerdict.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -964,7 +965,63 @@ describe("review post-step (issue #69)", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     expect(replies).toContain("answer"); // Slack still gets the review
-    expect(spy.calls).toEqual([{ target: { repo: "acme/api", number: 42 }, body: "answer" }]);
+    // No submit_verdict call → fail-closed: the body leads with the explicit
+    // non-approving line, never "LGTM".
+    expect(spy.calls).toEqual([
+      { target: { repo: "acme/api", number: 42 }, body: `${NO_VERDICT_LINE}\n\nanswer` },
+    ]);
+  });
+
+  /** A review-agent provider that calls submit_verdict, then answers. */
+  function verdictThenAnswer(verdict: string, summary: string, answer = "the findings"): Provider {
+    let n = 0;
+    return {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (n++ === 0) {
+          return {
+            content: [{ type: "tool_use", id: "v1", name: "submit_verdict", input: { verdict, summary } }],
+            stopReason: "tool_use",
+          };
+        }
+        return { content: [{ type: "text", text: answer }], stopReason: "end_turn" };
+      },
+    };
+  }
+
+  it("an `approve` verdict makes the posted body start with the exact `LGTM:` token (deterministic, not prose)", async () => {
+    const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "no blocking issues", "Looks solid.\n- nit: naming"));
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "c".repeat(40) });
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].body).toBe("LGTM: no blocking issues\n\nLooks solid.\n- nit: naming");
+    // pinned to the reviewed head so the workflow's stale-review guard can bite
+    expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: "c".repeat(40) });
+  });
+
+  it("a `request_changes` verdict never yields an LGTM-prefixed body, even when the prose says LGTM", async () => {
+    const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("request_changes", "null deref", "LGTM except for the null deref"));
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    expect(spy.calls[0].body.startsWith("Changes requested: null deref\n\n")).toBe(true);
+    expect(spy.calls[0].body.startsWith("LGTM")).toBe(false);
+    expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42 }); // no sha → no pin
+  });
+
+  it("a verdict from a non-review agent is impossible: the tool is not in the coding toolset", async () => {
+    const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "x"));
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding https://github.com/acme/api/pull/42 fix it", "slack:UADMIN"), io);
+    expect(spy.fn).not.toHaveBeenCalled();
   });
 
   it("opt-out ('don't post' / 'slack only') suppresses the GitHub post; Slack still gets it", async () => {

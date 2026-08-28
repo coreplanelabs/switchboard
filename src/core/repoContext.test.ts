@@ -252,3 +252,32 @@ describe("resolveRepoContext: thread history inheritance", () => {
     expect(fn).not.toHaveBeenCalled();
   });
 });
+
+// Feature: features/agent-review.md — the PR head SHA rides along with the PR
+// number so the posted review is pinned via commit_id.
+describe("PR head SHA for review pinning", () => {
+  const SHA = "a".repeat(40);
+
+  it("a same-repo PR carries headSha alongside ref and pr", async () => {
+    stubFetch({ body: { head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } });
+    const ctx = await resolveRepoContext({ text: "review https://github.com/acme/api/pull/7" });
+    expect(ctx).toEqual({ repo: "acme/api", ref: "patch-1", pr: 7, headSha: SHA });
+  });
+
+  it("a cross-fork PR still carries headSha even though its ref is not bound", async () => {
+    stubFetch({ body: { head: { ref: "fork-branch", sha: SHA, repo: { full_name: "other/fork" } } } });
+    const ctx = await resolveRepoContext({ text: "review https://github.com/acme/api/pull/7" });
+    expect(ctx.ref).toBeUndefined();
+    expect(ctx.headSha).toBe(SHA);
+    expect(ctx.pr).toBe(7);
+  });
+
+  it("a malformed sha is dropped; a failed fetch leaves headSha undefined", async () => {
+    stubFetch({ body: { head: { ref: "patch-1", sha: "not-a-sha", repo: { full_name: "acme/api" } } } });
+    expect((await resolveRepoContext({ text: "https://github.com/acme/api/pull/7" })).headSha).toBeUndefined();
+    stubFetch({ reject: "fetch failed" });
+    const ctx = await resolveRepoContext({ text: "https://github.com/acme/api/pull/7" });
+    expect(ctx.headSha).toBeUndefined();
+    expect(ctx.pr).toBe(7);
+  });
+});

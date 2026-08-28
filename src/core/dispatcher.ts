@@ -12,6 +12,7 @@ import type { ProviderRegistry } from "../providers/registry.js";
 import { resolveRepoContext, type RepoContext } from "./repoContext.js";
 import { decideReviewPost } from "./reviewPost.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
+import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
@@ -382,6 +383,13 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     activeRuns++;
     counted = true;
     let answer: string;
+    // Review verdict, set only through the structured submit_verdict tool; the
+    // post-step below turns it into the deterministic first line of the GitHub
+    // body (fail-closed: no call → not approving). See reviewVerdict.ts.
+    let verdict: ReviewVerdict | undefined;
+    const onVerdict = (v: ReviewVerdict) => {
+      verdict = v;
+    };
     try {
       answer = await runAgent({
         provider,
@@ -389,7 +397,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         agent,
         messages,
         system,
-        toolContext: { executor, reportProgress, web: makeWebCapability(process.env), skills: deps.skills, agentName: agent.name },
+        toolContext: { executor, reportProgress, web: makeWebCapability(process.env), skills: deps.skills, agentName: agent.name, onVerdict },
         onProgress,
         onEvent,
       });
@@ -437,8 +445,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     });
     if (postTarget) {
       const post = deps.postReviewComment ?? postReviewComment;
-      await post(postTarget, answer)
-        .then(() => console.log(`[review-post] ${msg.threadKey} → ${postTarget.repo}#${postTarget.number}`))
+      const target: ReviewCommentTarget = repoCtx.headSha ? { ...postTarget, commitId: repoCtx.headSha } : postTarget;
+      // The verdict line is built here, by code — the model's prose never
+      // decides whether the body starts with "LGTM:" (auto-approve contract).
+      const body = buildReviewPostBody(answer, verdict);
+      await post(target, body)
+        .then(() => console.log(`[review-post] ${msg.threadKey} → ${postTarget.repo}#${postTarget.number} (${verdict?.verdict ?? "no verdict"})`))
         .catch((err: unknown) =>
           console.error(
             `[review-post] ${msg.threadKey} failed for ${postTarget.repo}#${postTarget.number}: ${err instanceof Error ? err.message : String(err)}`,

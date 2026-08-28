@@ -30,6 +30,10 @@ export interface RepoContext {
    *  reference itself, so it survives a failed/cross-fork head-ref fetch. Lets
    *  the dispatcher post a review back to the PR by default (issue #69). */
   pr?: number;
+  /** Head commit SHA of that PR at resolution time (from the same REST call as
+   *  the head ref). Pins the posted review via `commit_id`. Set whenever the PR
+   *  fetch succeeded — including cross-fork PRs, whose ref is not bound. */
+  headSha?: string;
 }
 
 // GitHub owner: alphanumeric + hyphens, no leading/trailing hyphen, ≤39.
@@ -184,8 +188,11 @@ export async function resolveRepoContext(
 
   // PR head ref — one REST call, only when nothing more explicit bound a ref
   // and the PR belongs to the resolved repo. Failure degrades to repo-only.
+  let headSha: string | undefined;
   if (!ref && s.pr && repo === s.pr.repo) {
-    ref = await prHeadRef(s.pr).catch(() => undefined);
+    const head = await prHead(s.pr).catch(() => undefined);
+    ref = head?.ref;
+    headSha = head?.sha;
   }
 
   const out: RepoContext = {};
@@ -196,13 +203,15 @@ export async function resolveRepoContext(
   // (a stale PR must never receive a later review), and set regardless of
   // whether the head-ref fetch succeeded.
   if (repo && s.pr && repo === s.pr.repo) out.pr = s.pr.number;
+  if (out.pr !== undefined && headSha) out.headSha = headSha;
   return out;
 }
 
-/** GET /repos/{owner}/{repo}/pulls/{n} → head.ref. Cross-fork heads are NOT
- *  returned (they don't resolve in the resident's mirror). Never throws to
- *  the caller's happy path — callers .catch() to degrade. */
-async function prHeadRef(pr: { repo: string; number: number }): Promise<string | undefined> {
+/** GET /repos/{owner}/{repo}/pulls/{n} → { head.ref, head.sha }. Cross-fork
+ *  head REFS are NOT returned (they don't resolve in the resident's mirror);
+ *  the SHA is, since it only pins the review post. Never throws to the
+ *  caller's happy path — callers .catch() to degrade. */
+async function prHead(pr: { repo: string; number: number }): Promise<{ ref?: string; sha?: string } | undefined> {
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
     "user-agent": "switchboard",
@@ -215,12 +224,14 @@ async function prHeadRef(pr: { repo: string; number: number }): Promise<string |
   });
   if (!res.ok) return undefined;
   const data = (await res.json().catch(() => ({}))) as {
-    head?: { ref?: string; repo?: { full_name?: string } };
+    head?: { ref?: string; sha?: string; repo?: { full_name?: string } };
   };
+  const sha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
   const headRepo = data.head?.repo?.full_name?.toLowerCase();
-  // Require a POSITIVE same-repo match: a null head.repo (deleted fork) must
-  // not bind the base repo's ref to a fork PR. Dropping the `headRepo &&`
-  // short-circuit makes a missing/mismatched head repo return undefined.
-  if (!data.head?.ref || headRepo !== pr.repo) return undefined;
-  return validRef(data.head.ref);
+  // Require a POSITIVE same-repo match for the REF: a null head.repo (deleted
+  // fork) must not bind the base repo's ref to a fork PR. Dropping the
+  // `headRepo &&` short-circuit makes a missing/mismatched head repo leave the
+  // ref undefined.
+  const ref = data.head?.ref && headRepo === pr.repo ? validRef(data.head.ref) : undefined;
+  return { ref, sha };
 }
