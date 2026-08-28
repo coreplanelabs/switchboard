@@ -5,6 +5,8 @@ import { createSlackApp } from "./channels/slack.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
 import { createLiveViewHandler } from "./channels/liveView.js";
+import { createResidentsViewHandler } from "./channels/residentsView.js";
+import { makeResidentAdminClient } from "./core/repoCommands.js";
 import {
   httpJwksFetcher,
   JwksCache,
@@ -67,12 +69,26 @@ async function main() {
     // (Cloudflare Access fronts it) and must only be exposed behind it, since it
     // renders the per-run capability links.
     const liveView = createLiveViewHandler(defaultRunRegistry);
+    // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
+    // the browser twin of `repo list`. Reads the resident Worker's admin
+    // /residents route live on every request with the same bearer the chat
+    // commands use; undefined (not configured) → the handler answers 503.
+    // Access-gated below alongside /runs — it lists every onboarded repo and
+    // its build commands, so it must never be exposed without SSO.
+    const residentCfg = config.config.execution?.resident;
+    const residentAdminToken = residentCfg?.baseUrl ? process.env[residentCfg.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN"] : undefined;
+    const residentsView = createResidentsViewHandler(
+      residentCfg?.baseUrl && residentAdminToken ? makeResidentAdminClient(residentCfg.baseUrl, residentAdminToken) : undefined,
+    );
+    const residentsState = residentCfg?.baseUrl && residentAdminToken
+      ? `GET /residents (dash → ${residentCfg.baseUrl})`
+      : "GET /residents (503 — resident admin not configured)";
     const tokenCount = Object.keys(auth.tokens).length;
     const liveViewState = process.env.PUBLIC_BASE_URL
       ? "GET /runs (index) + /runs/:id (live view)"
       : "GET /runs (index) + live view (no PUBLIC_BASE_URL — per-run links omitted)";
 
-    // The whole /runs* surface sits behind Cloudflare Access (SSO), enforced
+    // The whole /runs* and /residents* surface sits behind Cloudflare Access (SSO), enforced
     // fail-closed in our own code: the edge rule injects a signed RS256 JWT in
     // `Cf-Access-Jwt-Assertion`, and we re-verify it here so /runs refuses to
     // serve without a valid Access identity — even if the edge rule is ever
@@ -97,14 +113,14 @@ async function main() {
         mcp(req, res);
         return;
       }
-      // /runs* SSO gate: identity FIRST (fail-closed), before the live-view
+      // /runs* + /residents* SSO gate: identity FIRST (fail-closed), before the view
       // dispatch. The gate is async (it may fetch the JWKS), so we resolve the
       // promise here; a rejection is a 403, never a 500 that serves the page.
       // On allow, dispatch to the live-view handler (which owns the /runs index,
       // /runs/:id, and /runs/:id/events, and still applies its own per-run
       // capability-token check — defense in depth). Non-/runs paths below are
       // unchanged and not gated.
-      if (path === "/runs" || path.startsWith("/runs/")) {
+      if (path === "/runs" || path.startsWith("/runs/") || path === "/residents" || path.startsWith("/residents/")) {
         requireAccessForRuns(req.headers, { config: accessConfig, verify: accessVerify, devBypass: accessDevBypass })
           .then((gate) => {
             if (!gate.ok) {
@@ -113,6 +129,7 @@ async function main() {
               return;
             }
             if (liveView(req, res)) return;
+            if (residentsView(req, res)) return;
             res.writeHead(200, { "content-type": "text/plain" });
             res.end("ok");
           })
@@ -141,7 +158,7 @@ async function main() {
       res.end("ok");
     }).listen(Number(process.env.PORT), () =>
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${residentsState}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       ),
     );

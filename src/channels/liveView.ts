@@ -57,7 +57,7 @@ const PAGE_CSP =
  *  in CSP + the legacy `X-Frame-Options`), and `no-store` so no proxy or browser
  *  caches a page that carries capability tokens. One constant so the two
  *  surfaces are provably identical. */
-const HTML_PAGE_HEADERS: Record<string, string> = {
+export const HTML_PAGE_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",
   "content-security-policy": PAGE_CSP,
   "x-frame-options": "DENY", // belt-and-suspenders with CSP frame-ancestors
@@ -270,6 +270,8 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   .dot.amber { background: #d29922; }
   .dot.red { background: #f85149; }
   .dot.grey { background: #6e7681; }
+  a.nav { font-size: .8rem; color: #8b93a7; text-decoration: none; }
+  a.nav:hover { color: #9ecbff; }
   #runs { list-style: none; margin: 0; padding: 0; }
   #runs li { border-radius: 6px; }
   #runs li + li { border-top: 1px solid #1b1f28; }
@@ -286,6 +288,7 @@ export function renderRunsIndex(runs: RunSummary[]): string {
 <body>
 <header>
   <h1>Live runs</h1>
+  <a class="nav" href="/residents">Residents →</a>
   <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>
 </header>
 <ul id="runs">${rows}<li class="empty" id="empty"${emptyHidden}>No active runs.</li></ul>
