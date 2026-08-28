@@ -136,6 +136,55 @@ describe("review post-step: prompts defer posting to the system (issue #69)", ()
   });
 });
 
+// Feature: features/agent-review.md — the review agent adopts the
+// addyosmani/agent-skills "code-review-and-quality" methodology (vendored
+// verbatim at docs/skills/code-review-and-quality.md). Both review prompts must
+// carry the five-axis framework and the severity scheme so the adoption is
+// pinned and cannot silently regress.
+describe("review prompts adopt the code-review-and-quality methodology", () => {
+  const bothReviewPrompts = () => [AGENTS.review.system, AGENTS.review.residentSystem!];
+
+  it("both review prompts name all five review axes", () => {
+    for (const sys of bothReviewPrompts()) {
+      expect(sys).toMatch(/five-axis|five axes/i);
+      expect(sys).toMatch(/correctness/i);
+      expect(sys).toMatch(/readability/i);
+      expect(sys).toMatch(/architecture/i);
+      expect(sys).toMatch(/security/i);
+      expect(sys).toMatch(/performance/i);
+    }
+  });
+
+  it("both review prompts carry the full severity scheme as the output format", () => {
+    for (const sys of bothReviewPrompts()) {
+      expect(sys).toContain("Critical:");
+      expect(sys).toMatch(/Required/); // the no-prefix tier is named
+      expect(sys).toContain("Optional:");
+      expect(sys).toContain("Consider:");
+      expect(sys).toContain("Nit:");
+      expect(sys).toContain("FYI");
+    }
+  });
+
+  it("both review prompts lead with impact and end with a verdict", () => {
+    for (const sys of bothReviewPrompts()) {
+      expect(sys).toMatch(/one structural problem outweighs ten nits/i);
+      expect(sys).toMatch(/Approve/);
+      expect(sys).toMatch(/Request changes/);
+    }
+  });
+
+  it("both review prompts keep the review disciplines (tests-first, structural remedies, honesty, dead code, deps)", () => {
+    for (const sys of bothReviewPrompts()) {
+      expect(sys).toMatch(/read the tests|tests first|tests before/i);
+      expect(sys).toMatch(/structural remed/i);
+      expect(sys).toMatch(/do not rubber-stamp/i);
+      expect(sys).toMatch(/dead-code hygiene/i);
+      expect(sys).toMatch(/dependency discipline/i);
+    }
+  });
+});
+
 // Feature: features/agent-coding.md — every PR the coding agent opens carries a
 // rich, templated description BY DEFAULT (not on request). Both prompts must
 // contain the template's sections plus the rules that keep it honest.
