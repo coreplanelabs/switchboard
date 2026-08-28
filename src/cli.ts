@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import { ConfigStore } from "./config.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { dispatch } from "./core/dispatcher.js";
+import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { PlainTextFormatter } from "./core/structuredMessage.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
 
@@ -77,9 +78,10 @@ async function main() {
 
   const config = new ConfigStore(CONFIG_PATH, "./data/cli-overrides.json");
   const providers = new ProviderRegistry(config.config.providers);
+  const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
 
   await dispatch(
-    { config, providers },
+    { config, providers, skills },
     {
       channelId: "cli:local",
       userId: "cli:local",
