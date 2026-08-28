@@ -16,7 +16,10 @@ import type { IncomingHttpHeaders } from "node:http";
 //     and verification always uses RSA-SHA256 (never an attacker-named alg).
 //   - The JWKS fetch is an injectable seam (real `httpJwksFetcher` + a test
 //     impl), satisfying the AGENTS.md ≥2-implementations invariant. Signing keys
-//     are cached by `kid` with a TTL and refreshed once on an unknown kid.
+//     are cached by `kid` with a TTL; an unknown kid triggers at most one JWKS
+//     refresh, single-flighted across concurrent verifies and negative-cached
+//     for a short interval so a flood of forged random kids can't amplify into
+//     one origin certs fetch per request.
 //   - Bad input never throws: every malformed token / claim yields `null`.
 //
 // Pure logic (verify + claim checks) is split from transport (the gate reads a
@@ -24,6 +27,10 @@ import type { IncomingHttpHeaders } from "node:http";
 
 const CERTS_PATH = "/cdn-cgi/access/certs";
 const DEFAULT_JWKS_TTL_SECONDS = 3600;
+/** Default negative-cache window (ms): after a successful JWKS fetch, an unknown
+ *  kid is refused WITHOUT a network fetch for this long. Small enough that key
+ *  rotation is picked up promptly, large enough to kill per-request amplification. */
+const DEFAULT_MIN_REFETCH_INTERVAL_MS = 30_000;
 /** Clock skew tolerance for nbf/iat, in seconds. */
 const SKEW_SECONDS = 60;
 
@@ -63,13 +70,23 @@ export const httpJwksFetcher: JwksFetcher = async (certsUrl) => {
 };
 
 /**
- * A small `kid` → signing-key cache with a TTL. Dumb store: it holds no clock or
- * fetcher of its own; `verifyAccessJwt` drives the TTL and the one-refresh-on-
- * unknown-kid policy. Reused across verifies (index.ts constructs one) so a warm
- * kid is served without a network round-trip.
+ * A `kid` → signing-key store with a per-key TTL, plus the refresh coordination
+ * that makes unknown-kid handling safe: single-flight (concurrent refreshes
+ * share ONE fetch) and a negative-cache interval (a fetch is suppressed for a
+ * short window after a successful one). It still owns no clock or fetcher — the
+ * caller (`verifyAccessJwt` via `resolveKey`) injects both through `refresh`, so
+ * it stays deterministic under test. Reused across verifies (index.ts
+ * constructs one) so a warm kid is served without a network round-trip.
  */
 export class JwksCache {
   private readonly entries = new Map<string, { jwk: AccessJwk; expiresAt: number }>();
+  /** Ms of the last SUCCESSFUL JWKS fetch, or null before the first one. Drives
+   *  the negative-cache interval in `refresh`; a failed fetch does not set it. */
+  private lastFetchAt: number | null = null;
+  /** The in-flight refresh shared by concurrent callers (single-flight); null
+   *  when no fetch is running. It never rejects — `runFetch` swallows failures to
+   *  fail closed — so both the owner and any joiners resolve cleanly. */
+  private inFlight: Promise<void> | null = null;
 
   /** The fresh JWK for `kid`, or null if absent/expired (expired entries are
    *  evicted lazily). `now` is milliseconds. */
@@ -92,6 +109,54 @@ export class JwksCache {
       }
     }
   }
+
+  /**
+   * Refresh the JWKS to (try to) learn an unknown kid, with two guards against
+   * the unknown-kid amplification vector:
+   *   - single-flight: if a refresh is already running, join it instead of
+   *     firing another — N concurrent unknown kids ⇒ at most one `fetch` call.
+   *   - negative cache: once a fetch has succeeded, another is suppressed until
+   *     `minRefetchIntervalMs` has elapsed, so an unknown kid resolves to null
+   *     WITHOUT a network round-trip inside that window. A genuinely rotated kid
+   *     is still picked up on the first refresh after the interval.
+   * Fail-closed: a fetch failure leaves the store unchanged and does not advance
+   * the last-fetch time. `now` is read lazily (ms) so the injected clock can move
+   * across the await.
+   */
+  async refresh(
+    fetch: () => Promise<AccessJwk[]>,
+    now: () => number,
+    ttlMs: number,
+    minRefetchIntervalMs: number,
+  ): Promise<void> {
+    if (this.inFlight) {
+      await this.inFlight; // single-flight: share the in-progress fetch
+      return;
+    }
+    if (this.lastFetchAt !== null && now() - this.lastFetchAt < minRefetchIntervalMs) {
+      return; // negative cache: fetched too recently to justify another round-trip
+    }
+    this.inFlight = this.runFetch(fetch, now, ttlMs);
+    try {
+      await this.inFlight;
+    } finally {
+      this.inFlight = null;
+    }
+  }
+
+  /** Perform one JWKS fetch and fold the result into the store. Never rejects:
+   *  on any failure the store is left unchanged (fail closed) and `lastFetchAt`
+   *  is not advanced, so `resolveKey` returns null and a later verify may retry. */
+  private async runFetch(fetch: () => Promise<AccessJwk[]>, now: () => number, ttlMs: number): Promise<void> {
+    try {
+      const keys = await fetch();
+      const fetchedAt = now();
+      this.put(keys, fetchedAt + ttlMs);
+      this.lastFetchAt = fetchedAt;
+    } catch {
+      // fail closed: a JWKS fetch failure is not a valid identity.
+    }
+  }
 }
 
 /** Verifier dependencies. `fetchJwks` + `now` are injectable for tests; an
@@ -104,6 +169,12 @@ export interface VerifyDeps {
   cache?: JwksCache;
   /** Cached-key TTL in seconds. Default 3600. */
   ttlSeconds?: number;
+  /** Min interval (ms) between JWKS refetches for unknown kids. Within this
+   *  window after a successful fetch, an unknown kid resolves to null WITHOUT a
+   *  network fetch (negative cache) — killing per-request amplification while a
+   *  genuinely rotated kid is still picked up once the interval passes. Default
+   *  30000. Effective only with a shared `cache` (a one-shot verify has none). */
+  minRefetchIntervalMs?: number;
 }
 
 /** base64url-decode to a Buffer, or null if the input is not valid base64url. */
@@ -125,22 +196,21 @@ function decodeJsonSegment(part: string): Record<string, unknown> | null {
   }
 }
 
-/** Resolve the signing key for `kid`, using the cache and refreshing at most
- *  once if the kid is unknown/expired. null if still not found or the fetch
- *  fails. One refresh attempt per verify. */
+/** Resolve the signing key for `kid` from the cache, refreshing the JWKS at most
+ *  once when the kid is unknown/expired. Fail-closed: null if the key is still
+ *  not found or the fetch fails. The refresh is single-flighted and negative-
+ *  cached (see `JwksCache.refresh`), so a flood of forged unknown kids cannot
+ *  amplify into one origin certs fetch per request. */
 async function resolveKey(kid: string, config: AccessConfig, deps: VerifyDeps): Promise<AccessJwk | null> {
   const cache = deps.cache ?? new JwksCache();
   const cached = cache.get(kid, deps.now());
   if (cached) return cached;
 
-  let keys: AccessJwk[];
-  try {
-    keys = await deps.fetchJwks(`https://${config.teamDomain}${CERTS_PATH}`);
-  } catch {
-    return null; // fail closed: a JWKS fetch failure is not a valid identity
-  }
   const ttlMs = (deps.ttlSeconds ?? DEFAULT_JWKS_TTL_SECONDS) * 1000;
-  cache.put(keys, deps.now() + ttlMs);
+  const minRefetchIntervalMs = deps.minRefetchIntervalMs ?? DEFAULT_MIN_REFETCH_INTERVAL_MS;
+  const certsUrl = `https://${config.teamDomain}${CERTS_PATH}`;
+  await cache.refresh(() => deps.fetchJwks(certsUrl), deps.now, ttlMs, minRefetchIntervalMs);
+
   return cache.get(kid, deps.now());
 }
 

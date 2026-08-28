@@ -208,23 +208,34 @@ describe("verifyAccessJwt", () => {
     expect(fetchJwks).toHaveBeenCalledTimes(1);
   });
 
-  it("an unknown kid triggers exactly one refetch, then verifies (key rotation)", async () => {
+  it("after the interval elapses, a rotated kid IS picked up (one refetch, then verifies)", async () => {
     const rotated = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const jwk2: AccessJwk = { ...(rotated.publicKey.export({ format: "jwk" }) as AccessJwk), kid: "kid-2" };
     let keys: AccessJwk[] = [jwk];
     const fetchJwks = vi.fn(async () => keys);
     const cache = new JwksCache();
-    const shared = deps(fetchJwks, cache);
+    let clock = NOW_MS;
+    const shared: VerifyDeps = { fetchJwks, now: () => clock, cache, minRefetchIntervalMs: 30_000 };
 
     // Warm the cache with the original key.
-    await verifyAccessJwt(mint(privateKey, rs256Header(), claims()), config, shared);
+    expect(await verifyAccessJwt(mint(privateKey, rs256Header(), claims()), config, shared)).toMatchObject({
+      sub: "user-1",
+    });
     expect(fetchJwks).toHaveBeenCalledTimes(1);
 
     // A token with a new kid arrives; JWKS is rotated to include it.
     keys = [jwk, jwk2];
     const rotatedToken = mint(rotated.privateKey, rs256Header({ kid: "kid-2" }), claims());
+
+    // Just inside the interval the unknown kid is negative-cached: no refetch, no verify.
+    clock += 29_999;
+    expect(await verifyAccessJwt(rotatedToken, config, shared)).toBeNull();
+    expect(fetchJwks).toHaveBeenCalledTimes(1);
+
+    // At the interval boundary exactly one refetch picks up the rotated kid.
+    clock += 1; // 30_000ms since the last successful fetch
     expect(await verifyAccessJwt(rotatedToken, config, shared)).toMatchObject({ sub: "user-1" });
-    expect(fetchJwks).toHaveBeenCalledTimes(2); // exactly one refetch for the unknown kid
+    expect(fetchJwks).toHaveBeenCalledTimes(2); // exactly one refetch for the rotated kid
   });
 
   it("requests the JWKS from the team domain's cdn-cgi certs URL", async () => {
@@ -260,6 +271,66 @@ describe("JwksCache", () => {
     clock += 60_000; // now past the 60s TTL
     expect(await verifyAccessJwt(token, config, shared)).toMatchObject({ sub: "user-1" });
     expect(fetchJwks).toHaveBeenCalledTimes(2);
+  });
+});
+
+// --- JWKS unknown-kid hardening (negative cache + single-flight) -------------
+// An unauthenticated client can mint well-formed tokens carrying random `kid`s
+// and loop GET /runs. Without these guards each such request drives one
+// origin→Cloudflare certs fetch (latency + an amplification vector). resolveKey
+// must (1) single-flight concurrent fetches so N racing unknown kids share ONE
+// fetch, and (2) negative-cache so, after a successful fetch, another is
+// suppressed until minRefetchIntervalMs elapses — a genuinely rotated kid is
+// still picked up once the interval passes (see the rotation test above).
+
+describe("JWKS unknown-kid hardening", () => {
+  const MIN_REFETCH_MS = 30_000;
+
+  it("single-flights concurrent unknown-kid verifies into ≤1 fetch", async () => {
+    // The fetcher returns only the real KID; the queried kid is never present,
+    // so every verify resolves null — but they must share ONE fetch.
+    const fetchJwks = fetcher([jwk]);
+    const cache = new JwksCache();
+    const shared: VerifyDeps = { fetchJwks, now: () => NOW_MS, cache, minRefetchIntervalMs: MIN_REFETCH_MS };
+    const token = mint(privateKey, rs256Header({ kid: "unknown" }), claims());
+
+    // All five verifies are kicked off before the shared fetch settles.
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => verifyAccessJwt(token, config, shared)),
+    );
+
+    expect(fetchJwks).toHaveBeenCalledTimes(1); // single-flight: one fetch for all five
+    expect(results).toEqual([null, null, null, null, null]); // unknown kid ⇒ all fail closed
+  });
+
+  it("negative-caches: repeated unknown-kid verifies within the interval do not refetch", async () => {
+    const fetchJwks = fetcher([jwk]); // real KID only; the queried kid is never present
+    const cache = new JwksCache();
+    let clock = NOW_MS;
+    const shared: VerifyDeps = { fetchJwks, now: () => clock, cache, minRefetchIntervalMs: MIN_REFETCH_MS };
+    const token = mint(privateKey, rs256Header({ kid: "unknown" }), claims());
+
+    expect(await verifyAccessJwt(token, config, shared)).toBeNull(); // first: the one allowed fetch
+    expect(fetchJwks).toHaveBeenCalledTimes(1);
+
+    clock += 10_000; // within the 30s interval
+    expect(await verifyAccessJwt(token, config, shared)).toBeNull();
+    clock += 19_999; // 29.999s since the fetch — still inside the interval
+    expect(await verifyAccessJwt(token, config, shared)).toBeNull();
+    expect(fetchJwks).toHaveBeenCalledTimes(1); // negative cache: no per-request amplification
+  });
+
+  it("still verifies a valid token off the warm cache without refetching", async () => {
+    const fetchJwks = fetcher([jwk]);
+    const cache = new JwksCache();
+    let clock = NOW_MS;
+    const shared: VerifyDeps = { fetchJwks, now: () => clock, cache, minRefetchIntervalMs: MIN_REFETCH_MS };
+    const token = mint(privateKey, rs256Header(), claims());
+
+    expect(await verifyAccessJwt(token, config, shared)).toMatchObject({ sub: "user-1" });
+    clock += MIN_REFETCH_MS * 10; // well past the interval; the warm kid needs no refetch
+    expect(await verifyAccessJwt(token, config, shared)).toMatchObject({ sub: "user-1" });
+    expect(fetchJwks).toHaveBeenCalledTimes(1);
   });
 });
 
