@@ -15,6 +15,7 @@ import {
   type WebCapability,
   type WebSearch,
 } from "./web.js";
+import { toolResultText } from "../providers/types.js";
 
 // Feature: features/web-tools.md — provider-agnostic URL reading + web search.
 
@@ -23,6 +24,7 @@ function fakeResponse(opts: {
   headers?: Record<string, string>;
   text?: string;
   json?: unknown;
+  bytes?: Uint8Array;
 }): Response {
   const status = opts.status ?? 200;
   const headers = new Map(Object.entries(opts.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
@@ -33,6 +35,9 @@ function fakeResponse(opts: {
     body: undefined,
     text: async () => opts.text ?? "",
     json: async () => opts.json,
+    ...(opts.bytes
+      ? { arrayBuffer: async () => opts.bytes!.buffer.slice(opts.bytes!.byteOffset, opts.bytes!.byteOffset + opts.bytes!.byteLength) }
+      : {}),
   } as unknown as Response;
 }
 
@@ -231,6 +236,96 @@ describe("web_fetch tool", () => {
     const out = await webFetchTool.run({ url: "https://example.com/start" }, ctxWith({ fetch: fetchSpy }));
     expect(out).toContain("arrived");
     expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("web_fetch tool: binary links become model-visible blocks (M1b)", () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  const pdf = new Uint8Array(Buffer.from("%PDF-1.4 fake"));
+
+  it("returns an image/* URL as an image content part the model can see", async () => {
+    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "image/png" }, bytes: png }));
+    const out = await webFetchTool.run({ url: "https://example.com/pic.png" }, ctxWith({ fetch: fetchSpy }));
+    expect(Array.isArray(out)).toBe(true);
+    const parts = out as Exclude<typeof out, string>;
+    expect(parts[0]).toEqual({ type: "text", text: expect.stringContaining("Fetched https://example.com/pic.png") });
+    expect(parts[1]).toEqual({ type: "image", mediaType: "image/png", data: Buffer.from(png).toString("base64") });
+  });
+
+  it("normalizes the content-type (parameters stripped, case-folded) before classifying", async () => {
+    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "Image/JPEG; charset=binary" }, bytes: png }));
+    const parts = await webFetchTool.run({ url: "https://example.com/a" }, ctxWith({ fetch: fetchSpy }));
+    expect((parts as Exclude<typeof parts, string>)[1]).toMatchObject({ type: "image", mediaType: "image/jpeg" });
+  });
+
+  it("returns an application/pdf URL as a document content part named after the path", async () => {
+    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "application/pdf" }, bytes: pdf }));
+    const out = await webFetchTool.run({ url: "https://example.com/docs/spec.pdf?v=2" }, ctxWith({ fetch: fetchSpy }));
+    const parts = out as Exclude<typeof out, string>;
+    expect(parts[1]).toEqual({
+      type: "document",
+      mediaType: "application/pdf",
+      data: Buffer.from(pdf).toString("base64"),
+      name: "spec.pdf",
+    });
+  });
+
+  it("a text URL still returns plain text (no regression)", async () => {
+    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "text/plain" }, text: "hello" }));
+    const out = await webFetchTool.run({ url: "https://example.com/t" }, ctxWith({ fetch: fetchSpy }));
+    expect(typeof out).toBe("string");
+    expect(out).toContain("hello");
+  });
+
+  it("refuses an oversize image/PDF with a message instead of a truncated block", async () => {
+    const bigImg = new Uint8Array(5 * 1024 * 1024 + 1);
+    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "image/png" }, bytes: bigImg }));
+    const out = await webFetchTool.run({ url: "https://example.com/big.png" }, ctxWith({ fetch: fetchSpy }));
+    expect(typeof out).toBe("string");
+    expect(out).toMatch(/too large/i);
+    expect(out).not.toContain("AAAA");
+
+    const bigPdf = new Uint8Array(10 * 1024 * 1024 + 1);
+    const pdfSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "application/pdf" }, bytes: bigPdf }));
+    const out2 = await webFetchTool.run({ url: "https://example.com/big.pdf" }, ctxWith({ fetch: pdfSpy }));
+    expect(out2).toMatch(/too large/i);
+  });
+
+  it("names an image type the model cannot consume instead of sending it", async () => {
+    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "image/svg+xml" }, bytes: png }));
+    const out = await webFetchTool.run({ url: "https://example.com/logo.svg" }, ctxWith({ fetch: fetchSpy }));
+    expect(typeof out).toBe("string");
+    expect(out).toMatch(/unsupported image type/i);
+    expect(out).toContain("image/svg+xml");
+  });
+
+  it("keeps SSRF guards in front of binary fetches (literal + connect-time + redirect)", async () => {
+    const never = vi.fn<FetchLike>(async () => {
+      throw new Error("must not fetch");
+    });
+    expect(await webFetchTool.run({ url: "http://169.254.169.254/x.png" }, ctxWith({ fetch: never }))).toMatch(/refused/i);
+    expect(never).not.toHaveBeenCalled();
+    const connect = vi.fn<FetchLike>(async () => {
+      throw new Error("fetch failed", { cause: new BlockedUrlError("host evil.example resolves to blocked address 10.0.0.5") });
+    });
+    expect(await webFetchTool.run({ url: "http://evil.example/x.pdf" }, ctxWith({ fetch: connect }))).toMatch(/refused/i);
+    const redirect = vi.fn<FetchLike>(async () => fakeResponse({ status: 302, headers: { location: "http://10.0.0.1/x.png" } }));
+    expect(await webFetchTool.run({ url: "https://example.com/r" }, ctxWith({ fetch: redirect }))).toMatch(/refused/i);
+    expect(redirect).toHaveBeenCalledOnce();
+  });
+
+  it("toolResultText renders a parts array as its text (binary summarized, never inlined)", () => {
+    const text = toolResultText([
+      { type: "text", text: "Fetched x" },
+      { type: "image", mediaType: "image/png", data: "AAAA" },
+      { type: "document", mediaType: "application/pdf", data: "BBBB", name: "a.pdf" },
+    ]);
+    expect(text).toContain("Fetched x");
+    expect(text).toContain("image/png");
+    expect(text).toContain("a.pdf");
+    expect(text).not.toContain("AAAA");
+    expect(text).not.toContain("BBBB");
+    expect(toolResultText("plain")).toBe("plain");
   });
 });
 

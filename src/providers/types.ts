@@ -6,7 +6,34 @@ export type ContentPart =
   | { type: "image"; mediaType: string; data: string } // data is base64, no data: prefix
   | { type: "document"; mediaType: string; data: string; name?: string } // PDF; data is base64
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; toolUseId: string; content: string; isError?: boolean };
+  | { type: "tool_result"; toolUseId: string; content: ToolResultContent; isError?: boolean };
+
+/** What a tool may hand back: plain text, or a list of text/image/document
+ *  parts when the result is something the model should *see* (e.g. web_fetch
+ *  on an image or PDF URL). Each provider adapter decides how much of a parts
+ *  list its wire format can carry inside the tool result and hoists the rest
+ *  into the surrounding user turn. */
+export type ToolResultPart = Extract<ContentPart, { type: "text" | "image" | "document" }>;
+export type ToolResultContent = string | ToolResultPart[];
+
+/** Text rendering of a tool result for logs, summaries, and text-only wire
+ *  formats: text parts verbatim, binary parts as a one-line descriptor (never
+ *  the base64 payload). */
+export function toolResultText(content: ToolResultContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((p) => {
+      if (p.type === "text") return p.text;
+      if (p.type === "image") return `[image ${p.mediaType}, ${base64Bytes(p.data)} bytes]`;
+      return `[document ${p.name ?? "document"} (${p.mediaType}), ${base64Bytes(p.data)} bytes]`;
+    })
+    .join("\n");
+}
+
+function base64Bytes(b64: string): number {
+  const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+  return Math.floor((b64.length * 3) / 4) - padding;
+}
 
 export interface ChatMessage {
   role: "user" | "assistant";

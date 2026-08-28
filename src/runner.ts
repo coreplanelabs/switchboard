@@ -1,5 +1,5 @@
 import type { AgentDef } from "./agents/registry.js";
-import type { ChatMessage, ContentPart, Provider } from "./providers/types.js";
+import { toolResultText, type ChatMessage, type ContentPart, type Provider } from "./providers/types.js";
 import { redactAndCap, summarizeToolResult, type RunEvent } from "./core/runEvents.js";
 import { ExecHealthTracker } from "./execution/executor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
@@ -112,7 +112,7 @@ export async function runAgent(opts: RunOptions): Promise<string> {
       }
       try {
         const output = await tool.run((tu.input ?? {}) as Record<string, unknown>, toolContext);
-        opts.onEvent?.({ type: "tool_result", tool: tu.name, ok: true, summary: summarizeToolResult(output) });
+        opts.onEvent?.({ type: "tool_result", tool: tu.name, ok: true, summary: summarizeToolResult(toolResultText(output)) });
         results.push({ type: "tool_result", toolUseId: tu.id, content: output });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

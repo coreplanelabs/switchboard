@@ -77,32 +77,20 @@ export class AnthropicProvider implements Provider {
 
 /** Exported for tests. */
 export function toAnthropicMessage(m: ChatMessage): Anthropic.MessageParam {
+  // A tool_result block carries text + image parts natively (SDK 0.39 types)
+  // but not document blocks. A PDF a tool returns is hoisted out as a sibling
+  // document block placed after every tool_result (the API requires
+  // tool_result blocks to lead the user turn), with a text pointer left inside
+  // the tool_result so the model can connect the two.
+  const hoisted: Anthropic.ContentBlockParam[] = [];
   const content: Anthropic.ContentBlockParam[] = m.content.map((part) => {
     switch (part.type) {
       case "text":
         return { type: "text", text: part.text };
       case "image":
-        return {
-          type: "image",
-          source: {
-            type: "base64",
-            media_type: part.mediaType as Anthropic.Base64ImageSource["media_type"],
-            data: part.data,
-          },
-        };
+        return imageBlock(part);
       case "document":
-        // Native document block (@anthropic-ai/sdk 0.39 supports it in the
-        // stable Messages API). Only PDFs reach here — text files are inlined
-        // as text parts upstream.
-        return {
-          type: "document",
-          source: {
-            type: "base64",
-            media_type: part.mediaType as Anthropic.Base64PDFSource["media_type"],
-            data: part.data,
-          },
-          ...(part.name ? { title: part.name } : {}),
-        };
+        return documentBlock(part);
       case "tool_use":
         return {
           type: "tool_use",
@@ -110,14 +98,54 @@ export function toAnthropicMessage(m: ChatMessage): Anthropic.MessageParam {
           name: part.name,
           input: part.input as Record<string, unknown>,
         };
-      case "tool_result":
+      case "tool_result": {
+        const inner: Anthropic.ToolResultBlockParam["content"] =
+          typeof part.content === "string"
+            ? part.content
+            : part.content.map((p) => {
+                if (p.type === "text") return { type: "text" as const, text: p.text };
+                if (p.type === "image") return imageBlock(p);
+                hoisted.push(documentBlock(p));
+                return {
+                  type: "text" as const,
+                  text: `[document ${p.name ?? "document"} (${p.mediaType}) is attached to this turn]`,
+                };
+              });
         return {
           type: "tool_result",
           tool_use_id: part.toolUseId,
-          content: part.content,
+          content: inner,
           ...(part.isError ? { is_error: true } : {}),
         };
+      }
     }
   });
+  content.push(...hoisted);
   return { role: m.role, content };
+}
+
+function imageBlock(part: Extract<ContentPart, { type: "image" }>): Anthropic.ImageBlockParam {
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: part.mediaType as Anthropic.Base64ImageSource["media_type"],
+      data: part.data,
+    },
+  };
+}
+
+/** Native document block (@anthropic-ai/sdk 0.39 supports it in the stable
+ *  Messages API). Only PDFs reach here — text files are inlined as text parts
+ *  upstream. */
+function documentBlock(part: Extract<ContentPart, { type: "document" }>): Anthropic.DocumentBlockParam {
+  return {
+    type: "document",
+    source: {
+      type: "base64",
+      media_type: part.mediaType as Anthropic.Base64PDFSource["media_type"],
+      data: part.data,
+    },
+    ...(part.name ? { title: part.name } : {}),
+  };
 }
