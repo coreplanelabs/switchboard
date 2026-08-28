@@ -14,6 +14,7 @@ import {
   type VerifyDeps,
 } from "./channels/accessAuth.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
+import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
@@ -28,7 +29,11 @@ async function main() {
 
   const config = new ConfigStore(CONFIG_PATH, OVERRIDES_PATH);
   const providers = new ProviderRegistry(config.config.providers);
-  const app = createSlackApp({ config, providers });
+  // Bundled skills (#100): loaded once from the seeded `skills/` dir and shared
+  // across all channels via CoreDeps, so review/coding get their scoped skill
+  // list in-prompt and can load bodies on demand with use_skill.
+  const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
+  const app = createSlackApp({ config, providers, skills });
 
   await app.start();
 
@@ -43,8 +48,8 @@ async function main() {
   // fail-closed disabled.
   if (process.env.PORT) {
     const auth = parseIngressTokens(process.env);
-    const ingress = createIngressHandler({ config, providers }, { auth });
-    const mcp = createMcpHandler({ config, providers }, { auth });
+    const ingress = createIngressHandler({ config, providers, skills }, { auth });
+    const mcp = createMcpHandler({ config, providers, skills }, { auth });
     // Live run view (Area 2 / #43): GET /runs (index) + /runs/:id (page) +
     // /runs/:id/events (SSE). Shares defaultRunRegistry with the dispatcher —
     // the run created during dispatch() is the run this streams. The per-run

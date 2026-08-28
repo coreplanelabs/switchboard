@@ -14,6 +14,7 @@ import { postReviewComment, type ReviewCommentTarget } from "../execution/github
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
 import { memoryContextBlock, type MemoryStore } from "./memory/index.js";
+import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import type { RunEvent } from "./runEvents.js";
 import { defaultRunRegistry, type RunRegistry } from "./runRegistry.js";
 import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
@@ -78,6 +79,16 @@ export interface CoreDeps {
    * memory-off. Injectable for tests; the durable WorkerMemoryStore is PR3.
    */
   memory?: MemoryStore;
+  /**
+   * Skill store backing the load-a-skill capability (#100). When present, the
+   * dispatcher appends the calling agent's scoped skill name+description list to
+   * its system prompt (progressive disclosure) and passes the store to the tool
+   * context so list_skills/use_skill work. Absent (as in most unit tests) →
+   * no skill block and the skill tools report themselves unavailable, leaving
+   * the request unchanged. Production wires a BundledSkillStore (src/index.ts,
+   * src/cli.ts); the DO-backed upload store is PR2, behind this same interface.
+   */
+  skills?: SkillStore;
 }
 
 const STATUS_UPDATE_MIN_MS = 3000;
@@ -246,13 +257,24 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         ? `${agent.residentSystem}\n\nTarget repository: ${repoCtx.repo}. The worktree is already on this thread's bound branch (confirm with \`git branch --show-current\`).`
         : undefined;
 
+    // Progressive disclosure (#100): append the calling agent's scoped skill
+    // name+description list AFTER the agent's own instructions (it is guidance
+    // about the agent's tools, not advisory context like the memory block).
+    // Bodies load on demand via use_skill — never dumped here. No store, or an
+    // agent with no scoped skills (general/research), leaves the prompt
+    // untouched: `skillsBlock` is undefined and `withSkills` stays `baseSystem`,
+    // preserving the byte-identical path (and the runner's `agent.system`
+    // fallback when `system` is undefined).
+    const skillsBlock = deps.skills ? skillGuidanceBlock(deps.skills, agent.name) : undefined;
+    const withSkills = skillsBlock ? `${baseSystem ?? agent.system}\n\n${skillsBlock}` : baseSystem;
+
     // Fold the memory block onto the FRONT of the effective system prompt (a
     // dedicated context segment, ahead of the agent's own instructions). With no
-    // block (memory off, or nothing matched) `system` stays exactly `baseSystem`
+    // block (memory off, or nothing matched) `system` stays exactly `withSkills`
     // — the byte-identical, zero-behavior-change path. `runAgent` falls back to
     // `agent.system` when `system` is undefined, so when we DO prepend a block we
-    // resolve the base ourselves (`baseSystem ?? agent.system`) to preserve it.
-    const system = memoryBlock ? `${memoryBlock}\n\n${baseSystem ?? agent.system}` : baseSystem;
+    // resolve the base ourselves (`withSkills ?? agent.system`) to preserve it.
+    const system = memoryBlock ? `${memoryBlock}\n\n${withSkills ?? agent.system}` : withSkills;
 
     const label = `*${agent.name}* on \`${resolved.modelRef}\`` + (note ? ` · ${note}` : "");
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
@@ -329,7 +351,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         agent,
         messages,
         system,
-        toolContext: { executor, reportProgress, web: makeWebCapability(process.env) },
+        toolContext: { executor, reportProgress, web: makeWebCapability(process.env), skills: deps.skills, agentName: agent.name },
         onProgress,
         onEvent,
       });

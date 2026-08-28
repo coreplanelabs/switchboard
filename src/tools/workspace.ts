@@ -3,6 +3,8 @@ import type { Executor } from "../execution/executor.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { distillDiff } from "../core/diffDigest.js";
 import { webFetchTool, webSearchTool, type WebCapability } from "./web.js";
+import { listSkillsTool, useSkillTool } from "./skills.js";
+import type { SkillStore } from "../skills/index.js";
 
 // Tools are thin declarations over the Executor seam. Where the command
 // actually runs (local host vs per-thread sandbox) is the Executor's concern —
@@ -17,6 +19,12 @@ export interface ToolContext {
   /** Web fetch + search capability (Area 5). Injected by the dispatcher;
    *  absent → web tools report themselves unavailable. */
   web?: WebCapability;
+  /** Skill store backing list_skills/use_skill (#100). Injected by the
+   *  dispatcher; absent → the skill tools report themselves unavailable. */
+  skills?: SkillStore;
+  /** The calling agent's name — scopes list_skills/use_skill so an agent only
+   *  sees and loads skills declared for it. */
+  agentName?: string;
 }
 
 export interface RunnableTool extends ToolDef {
@@ -145,9 +153,12 @@ export const updateStatusTool: RunnableTool = {
 
 // R16: URL reading (web_fetch) is available broadly to agents with tool loops;
 // web_search is gated to the research-capable toolset ("web").
+// #100: the read-only skill tools (list_skills/use_skill) join both the full
+// (coding) and readonly (review) toolsets — loading a methodology into context
+// never mutates the workspace, so it is safe for the read-only review agent.
 export const TOOLSETS: Record<string, RunnableTool[]> = {
-  full: [bashTool, readFileTool, writeFileTool, updateStatusTool, webFetchTool, diffDigestTool],
-  readonly: [bashTool, readFileTool, updateStatusTool, webFetchTool, diffDigestTool],
+  full: [bashTool, readFileTool, writeFileTool, updateStatusTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
+  readonly: [bashTool, readFileTool, updateStatusTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
   web: [webFetchTool, webSearchTool, updateStatusTool],
   none: [],
 };

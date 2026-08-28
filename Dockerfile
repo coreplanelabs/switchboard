@@ -27,6 +27,8 @@ COPY --from=build /app/dist ./dist
 COPY package.json ./
 # config.yaml is expected at /app/config/config.yaml — bake it in or mount it.
 COPY config ./config
+# Bundled skills (#100): loaded at startup by BundledSkillStore from /app/skills.
+COPY skills ./skills
 RUN mkdir -p /app/data /app/workspaces && chown -R switchboard:switchboard /app
 USER switchboard
 

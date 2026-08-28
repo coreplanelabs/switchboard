@@ -15,6 +15,7 @@ import { RunRegistry } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
+import { InMemorySkillStore, type Skill } from "../skills/index.js";
 
 // Feature: features/routing-and-config.md — end-to-end dispatch: config
 // commands, permission gates, and thread-sticky agent resolution.
@@ -1182,5 +1183,83 @@ describe("cross-session memory (Area 7c, #85)", () => {
 
     expect(JSON.stringify(on.requests[0])).toBe(JSON.stringify(off.requests[0]));
     expect(on.requests[0].system).not.toContain("Background memory");
+  });
+});
+
+// Feature: features/skills.md — progressive disclosure (#100). When a skill
+// store is on CoreDeps, the dispatcher appends the calling agent's scoped skill
+// name+description list to its system prompt (bodies load on demand via
+// use_skill, never dumped) and passes the store to the tool context. An agent
+// with no scoped skills (general) is left untouched; scoping keeps review skills
+// out of coding's list and vice-versa.
+function skillFixture(over: Partial<Skill> = {}): Skill {
+  return { name: "s", description: "d", body: "b", agents: ["review"], ...over };
+}
+
+function skillStore(): InMemorySkillStore {
+  return new InMemorySkillStore([
+    skillFixture({ name: "code-review-and-quality", description: "review methodology", agents: ["review"], body: "REVIEW SKILL BODY" }),
+    skillFixture({ name: "test-driven-development", description: "coding methodology", agents: ["coding"], body: "CODING SKILL BODY" }),
+  ]);
+}
+
+describe("skill loading / progressive disclosure (#100)", () => {
+  afterEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  it("a review run's system prompt gains the review skill list, excluding coding skills", async () => {
+    const provider = capturingProvider();
+    const deps: CoreDeps = { ...makeDeps(YAML_FIXTURE, provider), skills: skillStore() };
+    await dispatch(deps, msg("agent:review look at the code"), fakeIO().io);
+    const sys = provider.requests[0].system ?? "";
+    expect(sys).toContain("You are Switchboard"); // the agent's own prompt is preserved
+    expect(sys).toContain("use_skill"); // the load instruction
+    expect(sys).toContain("code-review-and-quality");
+    expect(sys).toContain("review methodology");
+    expect(sys).not.toContain("test-driven-development"); // a coding skill, out of scope
+    expect(sys).not.toContain("REVIEW SKILL BODY"); // bodies load on demand, never in-prompt
+  });
+
+  it("the default (general, no scoped skills) run's system prompt is unchanged even with a store present", async () => {
+    const withStore = capturingProvider();
+    await dispatch({ ...makeDeps(YAML_FIXTURE, withStore), skills: skillStore() }, msg("hello there"), fakeIO().io);
+    const withoutStore = capturingProvider();
+    await dispatch(makeDeps(YAML_FIXTURE, withoutStore), msg("hello there"), fakeIO().io);
+    // General declares no skills → block is undefined → byte-identical request.
+    expect(JSON.stringify(withStore.requests[0])).toBe(JSON.stringify(withoutStore.requests[0]));
+    expect(withStore.requests[0].system).not.toContain("use_skill");
+  });
+
+  it("no store on CoreDeps → no skill block (skilled agents unchanged)", async () => {
+    const provider = capturingProvider();
+    await dispatch(makeDeps(YAML_FIXTURE, provider), msg("agent:review look at the code"), fakeIO().io);
+    expect(provider.requests[0].system).not.toContain("use_skill");
+  });
+
+  it("passes the store to the tool context: use_skill returns the body into the run", async () => {
+    // Provider requests use_skill, then answers — so the runner dispatches the
+    // tool with the injected store + agent name and appends its body to context.
+    let n = 0;
+    const provider: Provider & { requests: CompletionRequest[] } = {
+      name: "fake",
+      requests: [],
+      async complete(req): Promise<CompletionResult> {
+        this.requests.push({ ...req, messages: structuredClone(req.messages) });
+        if (n++ === 0) {
+          return {
+            content: [{ type: "tool_use", id: "s1", name: "use_skill", input: { name: "code-review-and-quality" } }],
+            stopReason: "tool_use",
+          };
+        }
+        return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
+      },
+    };
+    const deps: CoreDeps = { ...makeDeps(YAML_FIXTURE, provider), skills: skillStore() };
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review load the review skill"), io);
+    expect(replies).toContain("done");
+    // The 2nd model call sees the loaded skill body in the tool result.
+    expect(JSON.stringify(provider.requests[1].messages)).toContain("REVIEW SKILL BODY");
   });
 });
