@@ -131,6 +131,8 @@ const STYLE = `
   table { border-collapse: collapse; width: 100%; }
   td { padding: .25rem .5rem; vertical-align: top; border-top: 1px solid #1b1f28; word-break: break-all; }
   td:first-child { color: #8b93a7; white-space: nowrap; width: 12rem; }
+  table.threads td:first-child { color: inherit; white-space: normal; width: auto; }
+  table.threads tr:first-child td { color: #8b93a7; font-size: .75rem; border-top: 0; }
   td a { color: #9ecbff; }
   code { font: inherit; }
   .none { color: #6e7681; }
@@ -268,15 +270,50 @@ export function renderResidentPage(record: ResidentRecordView): string {
     row("worktree TTL (days)", text(record.worktreeTtlDays ?? 7)),
   ].join("")}</table>`;
 
+  const threads = renderThreads(live.threads, ghRepo);
+
   const body =
     `<section><h2>Lifecycle</h2>${lifecycle}</section>` +
     `<section><h2>Pinned facts</h2>${facts}</section>` +
     `<section><h2>Snapshot stamp</h2>${snapshot}</section>` +
+    `<section><h2>Thread worktrees</h2>${threads}</section>` +
     `<section><h2>Pending schedules</h2>${schedules}</section>` +
     `<section><h2>Command table</h2>${commandTable}</section>` +
     `<section><h2>Registry settings</h2>${settings}</section>` +
     `<p class="meta">Manage from chat: <code>repo rebuild ${escapeHtml(slug)}</code> · <code>repo reconfigure ${escapeHtml(slug)} …</code> · <code>repo offboard ${escapeHtml(slug)} --dry-run</code></p>`;
   return shell(slug || "Resident", body, "/residents");
+}
+
+/** Per-thread worktrees bound to this resident (U4/KTD6): each row is one
+ *  thread's ref + last-attached sha (linked to its commit when hex), the OS
+ *  user it holds, how deps were materialized, bound/last-attach times, and
+ *  whether the inactivity sweep evicted it (binding kept, tree gone). Newest
+ *  attach first. This is the "which PRs are live on this resident" view —
+ *  only the default branch is pre-built; every other ref is a worktree here. */
+function renderThreads(raw: unknown, ghRepo: string | undefined): string {
+  const list = Array.isArray(raw) ? raw.map(rec) : [];
+  if (list.length === 0) return `<p class="meta">no thread worktrees</p>`;
+  const sorted = [...list].sort((a, b) => str(b.lastAttachAt).localeCompare(str(a.lastAttachAt)));
+  const live = sorted.filter((t) => !t.evicted).length;
+  const header = `<tr><td>thread</td><td>ref · sha</td><td>user · deps</td><td>bound · last attach</td></tr>`;
+  const rows = sorted
+    .map((t) => {
+      const sha = str(t.sha);
+      const shaHtml = ghRepo && /^[0-9a-f]{7,40}$/.test(sha)
+        ? `<a href="${escapeHtml(`${ghRepo}/commit/${sha}`)}">${escapeHtml(sha.slice(0, 8))}</a>`
+        : sha ? escapeHtml(sha.slice(0, 8)) : `<span class="none">—</span>`;
+      const state = t.evicted
+        ? `<span class="meta">evicted ${escapeHtml(str(t.evictedAt) || "—")}</span>`
+        : `<span class="dot green" role="img" aria-label="live" title="live"></span>`;
+      return (
+        `<tr><td>${state} ${escapeHtml(str(t.threadKey) || "?")}</td>` +
+        `<td>${escapeHtml(str(t.ref) || "?")} · ${shaHtml}</td>` +
+        `<td>${text(t.user)} · ${text(t.deps)}</td>` +
+        `<td>${text(t.boundAt)} · ${text(t.lastAttachAt)}</td></tr>`
+      );
+    })
+    .join("");
+  return `<p class="meta">${live} live · ${sorted.length - live} evicted</p><table class="threads">${header}${rows}</table>`;
 }
 
 // ---- handler ----------------------------------------------------------------

@@ -426,6 +426,9 @@ interface ThreadBinding {
   evictedAt?: string;
   /** How deps were last materialized (evidence for KTD7). */
   deps?: ThreadDepsMechanism;
+  /** Commit the worktree was last attached at (the ref's tip in the mirror
+   *  at that moment). Display only — the tree itself is authoritative. */
+  sha?: string;
 }
 
 type ThreadDepsMechanism = "hardlink" | "copy" | "install" | "none";
@@ -1440,6 +1443,7 @@ export class ResidentDO extends Sandbox<Env> {
       ...binding,
       lastAttachAt: new Date().toISOString(),
       deps: deps.deps,
+      sha: locked.value.sha,
     } satisfies ThreadBinding);
     if ((await this.listSchedules(SWEEP_CALLBACK)).length === 0) {
       await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
@@ -1943,11 +1947,20 @@ export class ResidentDO extends Sandbox<Env> {
     const map = await this.ctx.storage.get<unknown>([RESOURCE_KEY, STATE_KEY, REASON_KEY, UPDATED_KEY, FACTS_KEY, SNAPSHOT_KEY]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const snap = map.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
-    const [refresh, provisionRun, provisionDeadline] = await Promise.all([
+    const [refresh, provisionRun, provisionDeadline, bindings] = await Promise.all([
       this.listSchedules(REFRESH_CALLBACK),
       this.listSchedules(PROVISION_RUN_CALLBACK),
       this.listSchedules(PROVISIONING_CALLBACK),
+      this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX }),
     ]);
+    // Thread worktree bindings (U4/KTD6) for the admin view: which refs are
+    // live on this resident. worktreePath is an internal layout detail and is
+    // left out; nothing here is secret (credential files are never persisted).
+    const threads = [...bindings.values()]
+      .sort((a, b) => b.lastAttachAt.localeCompare(a.lastAttachAt))
+      .map(({ threadKey, ref, sha, user, deps, boundAt, lastAttachAt, evicted, evictedAt }) => ({
+        threadKey, ref, sha: sha ?? null, user, deps: deps ?? null, boundAt, lastAttachAt, evicted: evicted ?? false, evictedAt: evictedAt ?? null,
+      }));
     return {
       resource: map.get(RESOURCE_KEY) ?? null,
       state: map.get(STATE_KEY) ?? "down",
@@ -1971,6 +1984,7 @@ export class ResidentDO extends Sandbox<Env> {
           }
         : null,
       schedules: { refresh: refresh.length, provisionRun: provisionRun.length, provisionDeadline: provisionDeadline.length },
+      threads,
     };
   }
 

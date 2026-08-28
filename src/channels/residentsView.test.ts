@@ -41,6 +41,28 @@ const WARM = {
       checkoutBackupId: "bk_checkout_1",
     },
     schedules: { refresh: 1, provisionRun: 0, provisionDeadline: 0 },
+    threads: [
+      {
+        threadKey: "slack:C0BQS7KPJHK:1787954209.398379",
+        ref: "feat/residents-dash",
+        sha: "abcdef1234567890abcdef1234567890abcdef12",
+        user: "worker3",
+        deps: "hardlink",
+        boundAt: "2026-08-28T21:40:00.000Z",
+        lastAttachAt: "2026-08-28T21:45:00.000Z",
+        evicted: false,
+      },
+      {
+        threadKey: "slack:C0BQS7KPJHK:1787900000.000001",
+        ref: "master",
+        user: "",
+        deps: "install",
+        boundAt: "2026-08-20T10:00:00.000Z",
+        lastAttachAt: "2026-08-20T10:05:00.000Z",
+        evicted: true,
+        evictedAt: "2026-08-27T10:00:00.000Z",
+      },
+    ],
   },
 };
 
@@ -228,6 +250,29 @@ describe("renderResidentPage", () => {
     const html = renderResidentPage(hostile);
     expect(html).not.toContain("<script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("lists thread worktrees (ref, sha linked to its commit, deps mechanism, attach times), newest first, marking evicted ones", () => {
+    const html = renderResidentPage(WARM);
+    const a = html.indexOf("feat/residents-dash");
+    const b = html.indexOf("slack:C0BQS7KPJHK:1787900000.000001");
+    expect(a).toBeGreaterThan(-1);
+    expect(b).toBeGreaterThan(a); // newest lastAttachAt first
+    expect(html).toContain('href="https://github.com/jshttp/vary/commit/abcdef1234567890abcdef1234567890abcdef12"');
+    expect(html).toContain("hardlink");
+    expect(html).toContain("worker3");
+    expect(html).toContain("2026-08-28T21:45:00.000Z");
+    expect(html).toContain("evicted 2026-08-27T10:00:00.000Z");
+    expect(html).toContain("1 live · 1 evicted");
+  });
+
+  it("says so when a resident has no thread worktrees, and escapes hostile thread fields", () => {
+    expect(renderResidentPage(DOWN)).toContain("no thread worktrees");
+    const hostile = { ...WARM, live: { ...WARM.live, threads: [{ threadKey: "<b>x</b>", ref: "<i>r</i>", sha: "zz", lastAttachAt: "t" }] } };
+    const html = renderResidentPage(hostile);
+    expect(html).not.toContain("<b>x</b>");
+    expect(html).toContain("&lt;b&gt;x&lt;/b&gt;");
+    expect(html).not.toContain("/commit/zz"); // non-hex sha never becomes a link
   });
 
   it("shows the resident's live-view error when the registry record has no reachable engine", () => {
