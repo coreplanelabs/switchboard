@@ -109,6 +109,17 @@ async function main() {
           });
         return;
       }
+      // Root → dashboard. `/` is NOT Access-gated (only /runs* is), so this 302
+      // is public — but it leaks nothing (just "go to /runs"), and /runs itself
+      // stays behind Cloudflare Access. This fixes the bare-domain landing (was
+      // a plain "ok"). It is an EXACT-path match, so /healthz and everything
+      // else still fall through to the health "ok" below — the deploy wake and
+      // cron keep-alive hit /healthz, so health probing is unaffected.
+      if (path === "/") {
+        res.writeHead(302, { location: "/runs" });
+        res.end();
+        return;
+      }
       // Non-/runs paths (health probe, unknown paths). The live-view handler
       // only ever owns /runs*, which the gate above already handled, so there is
       // nothing else for it to serve here.
