@@ -119,6 +119,15 @@ export class ConfigStore {
   }
 
   /**
+   * The effective channel and user scopes (static config merged with runtime
+   * overrides) — what `resolve()` layers on top of the defaults. Read-only
+   * view for the dispatcher's system-prompt config block.
+   */
+  scopes(channelId: string, userId: string): { channel: Scope; user: Scope } {
+    return { channel: this.channelScope(channelId), user: this.userScope(userId) };
+  }
+
+  /**
    * Resolve which agent and model serve a request.
    * Agent: request directive > user scope > channel scope > default.
    * Model: request directive > (user > channel) forced model
