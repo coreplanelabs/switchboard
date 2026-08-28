@@ -1,7 +1,7 @@
 import type { AgentDef } from "./agents/registry.js";
 import { toolResultText, type ChatMessage, type ContentPart, type Provider } from "./providers/types.js";
-import { redactAndCap, summarizeToolResult, type RunEvent } from "./core/runEvents.js";
-import { ExecHealthTracker } from "./execution/executor.js";
+import { redactAndCap, summarizeToolResult, type RunEvent, type RunNoteKind } from "./core/runEvents.js";
+import { ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
 
 // The runner is the provider-neutral agent loop: send messages, execute any
@@ -54,6 +54,14 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   // The wall clock is the real budget; turns are a backstop. At the deadline
   // the loop ends and the agent is forced to write up findings so far.
   const now = opts.now ?? Date.now;
+  // Every run event is stamped `at: now()` so the friction analyzer (#84) can
+  // attribute wall time; lifecycle notices go out BOTH as free-text progress
+  // (the card/log) and as a typed `run_note` event (the stream).
+  const emit = (event: RunEvent) => opts.onEvent?.({ ...event, at: now() });
+  const note = (kind: RunNoteKind, summary: string) => {
+    opts.onProgress?.(summary);
+    emit({ type: "run_note", kind, summary });
+  };
   const deadline = now() + opts.agent.maxMinutes * 60_000;
   const warnAt = deadline - Math.min(3 * 60_000, opts.agent.maxMinutes * 15_000);
   let warned = false;
@@ -98,10 +106,10 @@ export async function runAgent(opts: RunOptions): Promise<string> {
     for (const tu of toolUses) {
       // Redact THEN cap (redactAndCap): a pre-truncated command could sever a
       // token below its detector's length floor and leak a raw fragment.
-      opts.onEvent?.({ type: "tool_call", tool: tu.name, summary: redactAndCap(describeToolCall(tu)) });
+      emit({ type: "tool_call", tool: tu.name, summary: redactAndCap(describeToolCall(tu)) });
       const tool = toolsByName.get(tu.name);
       if (!tool) {
-        opts.onEvent?.({ type: "tool_result", tool: tu.name, ok: false, summary: redactAndCap(`Unknown tool: ${tu.name}`) });
+        emit({ type: "tool_result", tool: tu.name, ok: false, summary: redactAndCap(`Unknown tool: ${tu.name}`) });
         results.push({
           type: "tool_result",
           toolUseId: tu.id,
@@ -112,11 +120,19 @@ export async function runAgent(opts: RunOptions): Promise<string> {
       }
       try {
         const output = await tool.run((tu.input ?? {}) as Record<string, unknown>, toolContext);
-        opts.onEvent?.({ type: "tool_result", tool: tu.name, ok: true, summary: summarizeToolResult(toolResultText(output)) });
+        emit({ type: "tool_result", tool: tu.name, ok: true, summary: summarizeToolResult(toolResultText(output)) });
         results.push({ type: "tool_result", toolUseId: tu.id, content: output });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        opts.onEvent?.({ type: "tool_result", tool: tu.name, ok: false, summary: summarizeToolResult(message) });
+        // `infra` marks a sandbox/transport failure (not the command's own error)
+        // so downstream analysis never mistakes a dead sandbox for a failing command.
+        emit({
+          type: "tool_result",
+          tool: tu.name,
+          ok: false,
+          summary: summarizeToolResult(message),
+          ...(err instanceof ExecInfraError ? { infra: true as const } : {}),
+        });
         results.push({
           type: "tool_result",
           toolUseId: tu.id,
@@ -129,7 +145,7 @@ export async function runAgent(opts: RunOptions): Promise<string> {
     if (!warned && now() >= warnAt) {
       warned = true;
       const minutesLeft = Math.max(1, Math.round((deadline - now()) / 60_000));
-      opts.onProgress?.(`~${minutesLeft} min left — signaling wrap-up`);
+      note("wrap_up", `~${minutesLeft} min left — signaling wrap-up`);
       results.push({
         type: "text",
         text: `⏱ Time budget: about ${minutesLeft} minute(s) of tool time remain before cutoff. Finish your current check and start consolidating your answer; prefer writing up over starting new exploration.`,
@@ -150,13 +166,17 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   // finale (a final tool-less call) so the run always closes with a useful
   // message instead of a silent drain.
   if (sandboxDead) {
+    note("sandbox_dead", "sandbox unresponsive — aborting instead of retrying into a dead sandbox");
     return await finishSandboxDead(opts, messages, system);
   }
 
   // Budget exhausted (time or turns): one final tool-less call so the work
   // so far is written up instead of discarded.
   const wasTimeout = now() >= deadline;
-  opts.onProgress?.(`${wasTimeout ? "time" : "turn"} budget exhausted — writing up findings so far`);
+  note(
+    wasTimeout ? "time_budget_exhausted" : "turn_budget_exhausted",
+    `${wasTimeout ? "time" : "turn"} budget exhausted — writing up findings so far`,
+  );
   const text = await runFinale(
     opts,
     messages,
@@ -206,7 +226,6 @@ async function finishSandboxDead(
   messages: ChatMessage[],
   system: string,
 ): Promise<string> {
-  opts.onProgress?.("sandbox unresponsive — aborting instead of retrying into a dead sandbox");
   const text = await runFinale(
     opts,
     messages,

@@ -26,6 +26,7 @@ The behavioral contract of Switchboard, versioned with the code. Every file in t
 | [run-visibility.md](run-visibility.md) | Typed run-event stream (tool calls + redacted result summaries); live in-channel status card |
 | [live-view.md](live-view.md) | External live run page: per-run capability token, SSE stream, in-memory live-only registry (#43) |
 | [run-loop.md](run-loop.md) | Turn/time budgets, wrap-up behavior, forced write-up, refusal/truncation handling |
+| [run-friction.md](run-friction.md) | Run-friction analyzer (#84, Area 7b first piece): pure deterministic diagnosis of delay causes from the run-event stream (slow/failed tools, retries, setup/install, wrap-up, budget hits, infra failures); `at`/`infra`/`run_note` stream extensions; read-only `GET /runs/:id/friction` + `frictionCli` |
 | [execution.md](execution.md) | Per-thread workspaces, sandbox timeouts (exit 124), heartbeat streaming, session recovery, GitHub identity |
 | [resident-repos.md](resident-repos.md) | Resident repo environments: auth scopes, atomic cap, lifecycle engine, thread data plane, bot-side selection, `repo onboard/offboard/rebuild/list` chat commands (fail-closed gate, --dry-run plans) |
 | [agent-general.md](agent-general.md) | Default passthrough agent |

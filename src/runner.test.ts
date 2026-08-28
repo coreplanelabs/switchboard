@@ -335,8 +335,8 @@ describe("run-visibility events", () => {
       onEvent: (e) => events.push(e),
     });
     expect(events).toEqual([
-      { type: "tool_call", tool: "bash", summary: expect.stringContaining("echo hi") },
-      { type: "tool_result", tool: "bash", ok: true, summary: expect.stringContaining("ok") },
+      { type: "tool_call", tool: "bash", summary: expect.stringContaining("echo hi"), at: expect.any(Number) },
+      { type: "tool_result", tool: "bash", ok: true, summary: expect.stringContaining("ok"), at: expect.any(Number) },
     ]);
   });
 
@@ -436,5 +436,108 @@ describe("tool results carrying non-text parts (M1b)", () => {
     const result = events.find((e) => e.type === "tool_result")!;
     expect(result.summary).toContain("Fetched");
     expect(result.summary).not.toContain("AQID");
+  });
+});
+
+describe("run-friction signals in the event stream (#84)", () => {
+  // Feature: features/run-friction.md — the analyzer needs timestamps, an
+  // infra marker, and typed lifecycle notes. All additive to the stream.
+  const go = { role: "user" as const, content: [{ type: "text" as const, text: "go" }] };
+
+  it("stamps every event with `at` from the injectable clock", async () => {
+    let t = 1000;
+    const events: RunEvent[] = [];
+    const ticking: Executor = { ...fakeExecutor, exec: async () => { t += 500; return "ok"; } };
+    await runAgent({
+      provider: scripted([bashUse("t1"), text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [go],
+      toolContext: { executor: ticking },
+      onEvent: (e) => events.push(e),
+      now: () => t,
+    });
+    expect(events.map((e) => e.at)).toEqual([1000, 1500]);
+  });
+
+  it("marks an ExecInfraError result with infra:true; an ordinary tool error is NOT marked", async () => {
+    const events: RunEvent[] = [];
+    let n = 0;
+    const flaky: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        n++;
+        if (n === 1) throw new ExecInfraError("sandbox worker /exec: 502");
+        throw new Error("command not found");
+      },
+    };
+    await runAgent({
+      provider: scripted([bashUse("t1"), bashUse("t2"), text("done")]),
+      model: "m",
+      agent: agent({ maxTurns: 5 }),
+      messages: [go],
+      toolContext: { executor: flaky },
+      onEvent: (e) => events.push(e),
+    });
+    const results = events.filter((e) => e.type === "tool_result");
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({ ok: false, infra: true });
+    expect(results[1]).toMatchObject({ ok: false });
+    expect(results[1]).not.toHaveProperty("infra");
+  });
+
+  it("emits a run_note for the wrap-up warning and for turn-budget exhaustion", async () => {
+    let t = 0;
+    let calls = 0;
+    const advancing: Executor = {
+      ...fakeExecutor,
+      exec: async () => { calls++; if (calls === 1) t = 8 * 60_000; return "ok"; },
+    };
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), bashUse("t2"), bashUse("t3"), text("late")]),
+      model: "m",
+      agent: agent({ maxTurns: 2, maxMinutes: 10 }),
+      messages: [go],
+      toolContext: { executor: advancing },
+      onEvent: (e) => events.push(e),
+      now: () => t,
+    });
+    const notes = events.filter((e) => e.type === "run_note");
+    expect(notes.map((n) => n.kind)).toEqual(["wrap_up", "turn_budget_exhausted"]);
+    expect(notes[0]).toMatchObject({ summary: expect.stringContaining("wrap-up"), at: 8 * 60_000 });
+  });
+
+  it("emits time_budget_exhausted when the wall clock ran out", async () => {
+    let t = 0;
+    const events: RunEvent[] = [];
+    const slow: Executor = { ...fakeExecutor, exec: async () => { t = 11 * 60_000; return "ok"; } };
+    await runAgent({
+      provider: scripted([bashUse("t1"), text("late")]),
+      model: "m",
+      agent: agent({ maxTurns: 5, maxMinutes: 10 }),
+      messages: [go],
+      toolContext: { executor: slow },
+      onEvent: (e) => events.push(e),
+      now: () => t,
+    });
+    const kinds = events.filter((e) => e.type === "run_note").map((n) => n.kind);
+    expect(kinds).toContain("time_budget_exhausted");
+    expect(kinds).not.toContain("turn_budget_exhausted");
+  });
+
+  it("emits sandbox_dead when consecutive infra failures abort the run", async () => {
+    const dead: Executor = { ...fakeExecutor, exec: async () => { throw new ExecInfraError("worker gone"); } };
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), bashUse("t2"), bashUse("t3"), text("x")]),
+      model: "m",
+      agent: agent({ maxTurns: 10 }),
+      messages: [go],
+      toolContext: { executor: dead },
+      onEvent: (e) => events.push(e),
+    });
+    const kinds = events.filter((e) => e.type === "run_note").map((n) => n.kind);
+    expect(kinds).toEqual(["sandbox_dead"]);
   });
 });

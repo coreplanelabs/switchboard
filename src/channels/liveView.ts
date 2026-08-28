@@ -1,5 +1,6 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { RunEvent } from "../core/runEvents.js";
+import { analyzeRunFriction } from "../core/runFriction.js";
 import type { IndexEvent, RunRegistry, RunSummary, Unsubscribe } from "../core/runRegistry.js";
 
 // Live-view channel: the external, browser-facing surface for a live agent run
@@ -23,15 +24,16 @@ import type { IndexEvent, RunRegistry, RunSummary, Unsubscribe } from "../core/r
 
 /** Which live-view route a path is, if any. The bare `/runs` index carries no
  *  id (it is Access-gated, not token-gated); the per-run page/events routes do. */
-export type RunRoute = { kind: "index" } | { id: string; kind: "page" | "events" };
+export type RunRoute = { kind: "index" } | { id: string; kind: "page" | "events" | "friction" };
 
-/** Match the bare index (`/runs`, `/runs/`), a per-run page (`/runs/:id`), or a
- *  per-run SSE stream (`/runs/:id/events`). Path only — the token is a query
- *  param, read separately. Returns null for anything else so the server can
- *  fall through to its other routes. */
+/** Match the bare index (`/runs`, `/runs/`), a per-run page (`/runs/:id`), a
+ *  per-run SSE stream (`/runs/:id/events`), or a per-run friction diagnosis
+ *  (`/runs/:id/friction`). Path only — the token is a query param, read
+ *  separately. Returns null for anything else so the server can fall through
+ *  to its other routes. */
 export function parseRunRoute(pathname: string): RunRoute | null {
   if (pathname === "/runs" || pathname === "/runs/") return { kind: "index" };
-  const m = /^\/runs\/([^/]+)(\/events)?\/?$/.exec(pathname);
+  const m = /^\/runs\/([^/]+)(?:\/(events|friction))?\/?$/.exec(pathname);
   if (!m) return null;
   let id: string;
   try {
@@ -40,7 +42,7 @@ export function parseRunRoute(pathname: string): RunRoute | null {
     return null; // malformed percent-encoding → not a valid run route
   }
   if (id === "") return null;
-  return { id, kind: m[2] ? "events" : "page" };
+  return { id, kind: m[2] === "events" ? "events" : m[2] === "friction" ? "friction" : "page" };
 }
 
 /** Content-Security-Policy for the run page: everything self/inline only, no
@@ -114,6 +116,7 @@ export function renderRunPage(id: string, token: string): string {
   .call { color: #9ecbff; }
   .ok { color: #7ee787; }
   .err { color: #ff7b72; }
+  .note { color: #d29922; }
   .empty { color: #8b93a7; }
 </style>
 </head>
@@ -155,6 +158,8 @@ export function renderRunPage(id: string, token: string): string {
       row("call", "\\u2192 " + e.summary);
     } else if (e.type === "tool_result") {
       row(e.ok ? "ok" : "err", (e.ok ? "\\u2713 " : "\\u2717 ") + e.tool + ": " + e.summary);
+    } else if (e.type === "run_note") {
+      row("note", "\\u23f1 " + e.summary);
     }
   };
   es.addEventListener("end", function () {
@@ -597,6 +602,22 @@ export function createLiveViewHandler(
       }
       res.writeHead(200, HTML_PAGE_HEADERS);
       res.end(renderRunPage(route.id, token));
+      return true;
+    }
+
+    // Read-only friction diagnosis of the run's retained backlog (#84): same
+    // token gate → 404; JSON, never cached. Works mid-run (a diagnosis so far)
+    // and for a finished run still within the TTL.
+    if (route.kind === "friction") {
+      const snap = registry.snapshot(route.id, token);
+      if (!snap) {
+        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+        res.end("run not found");
+        return true;
+      }
+      const diagnosis = analyzeRunFriction(snap.events, { finished: snap.finished });
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      res.end(JSON.stringify({ id: route.id, finished: snap.finished, diagnosis }));
       return true;
     }
 

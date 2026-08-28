@@ -4,9 +4,23 @@
 // page (a follow-up) will consume the same stream. Keeping it a small typed
 // seam here means neither consumer reaches into the runner's internals.
 
+//
+// Timing + lifecycle (Area 7b / #84): every event carries an optional `at`
+// (epoch ms, stamped by the runner's injectable clock) so the run-friction
+// analyzer (`runFriction.ts`) can attribute delay; a `tool_result` marks exec-
+// INFRASTRUCTURE failures (`infra: true`, an `ExecInfraError` — the sandbox, not
+// the command) so they are never confused with an ordinary nonzero exit; and
+// `run_note` events carry the runner's lifecycle notices (wrap-up warning, budget
+// exhaustion, dead sandbox) as typed kinds instead of only free-text progress.
+// All additive: consumers that only know tool_call/tool_result keep working.
+
+/** Typed lifecycle notices the runner emits alongside its `onProgress` text. */
+export type RunNoteKind = "wrap_up" | "time_budget_exhausted" | "turn_budget_exhausted" | "sandbox_dead";
+
 export type RunEvent =
-  | { type: "tool_call"; tool: string; summary: string }
-  | { type: "tool_result"; tool: string; ok: boolean; summary: string };
+  | { type: "tool_call"; tool: string; summary: string; at?: number }
+  | { type: "tool_result"; tool: string; ok: boolean; summary: string; infra?: true; at?: number }
+  | { type: "run_note"; kind: RunNoteKind; summary: string; at?: number };
 
 // Credential shapes we must never surface in a run-visibility stream (which may
 // be shown in-channel or on a shared page). Two layers: (1) specific known
