@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentDef } from "./agents/registry.js";
 import type { CompletionRequest, CompletionResult, Provider } from "./providers/types.js";
 import type { Executor } from "./execution/executor.js";
+import { ExecInfraError } from "./execution/executor.js";
 import type { RunEvent } from "./core/runEvents.js";
 import { runAgent } from "./runner.js";
 
@@ -218,6 +219,107 @@ describe("runAgent budgets", () => {
     });
     expect(answer).toContain("half an ans");
     expect(answer).toContain("truncated");
+  });
+});
+
+describe("fail-fast on an unrecoverable sandbox (#92)", () => {
+  // K = MAX_CONSECUTIVE_INFRA_FAILURES in the runner (default 2). These tests
+  // assert the observable contract, not the constant's exact value.
+  it("aborts via the finale after consecutive infra failures instead of toiling into a dead sandbox", async () => {
+    let execCalls = 0;
+    const deadSandbox: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        execCalls++;
+        throw new ExecInfraError("sandbox worker /exec: Command execution failed");
+      },
+    };
+    // The model keeps asking for bash for as long as tools are offered (exactly
+    // the observed toil); only the runner's abort can stop the loop before the
+    // turn budget. When the finale offers no tools, it writes up its findings.
+    const requests: CompletionRequest[] = [];
+    const provider: Provider & { requests: CompletionRequest[] } = {
+      name: "fake",
+      requests,
+      async complete(req) {
+        requests.push({ ...req, messages: structuredClone(req.messages) });
+        if (!req.tools) {
+          return { content: [{ type: "text", text: "what I found before the sandbox died" }], stopReason: "end_turn" };
+        }
+        return {
+          content: [{ type: "tool_use", id: `t${requests.length}`, name: "bash", input: { command: "pnpm install" } }],
+          stopReason: "tool_use",
+        };
+      },
+    };
+    const notes: string[] = [];
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10, maxMinutes: 30 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: deadSandbox },
+      onProgress: (n) => notes.push(n),
+    });
+    // Failed fast: the tool was called exactly twice (the abort threshold), NOT
+    // maxTurns (10) times — it did not keep issuing commands into a dead sandbox.
+    expect(execCalls).toBe(2);
+    // The finale carries the diagnostic and the model's write-up, and it is NOT
+    // the ordinary budget finale.
+    expect(answer).toMatch(/unresponsive/i);
+    expect(answer).toMatch(/aborting/i);
+    expect(answer).toContain("what I found before the sandbox died");
+    expect(answer).not.toContain("budget");
+    // The abort is surfaced as a progress note, not a silent drain.
+    expect(notes.some((n) => /unresponsive|abort/i.test(n))).toBe(true);
+    // The forced finale call must be tool-less.
+    expect(provider.requests.at(-1)?.tools).toBeUndefined();
+  });
+
+  it("does NOT abort on ordinary nonzero command exits (the agent keeps handling them)", async () => {
+    let execCalls = 0;
+    // A normal failing command: returned as output text, never a throw.
+    const nonzeroExit: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        execCalls++;
+        return "exit 1:\nnpm ERR! something broke";
+      },
+    };
+    const provider = scripted([bashUse("t1"), bashUse("t2"), text("handled the failures")]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10, maxMinutes: 30 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: nonzeroExit },
+    });
+    expect(execCalls).toBe(2);
+    expect(answer).toBe("handled the failures");
+    expect(answer).not.toMatch(/unresponsive/i);
+  });
+
+  it("does NOT abort when a single infra failure is followed by a success (counter resets)", async () => {
+    let execCalls = 0;
+    const flaky: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        execCalls++;
+        if (execCalls === 1) throw new ExecInfraError("sandbox worker /exec: Command execution failed");
+        return "ok";
+      },
+    };
+    const provider = scripted([bashUse("t1"), bashUse("t2"), text("recovered and finished")]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10, maxMinutes: 30 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: flaky },
+    });
+    expect(execCalls).toBe(2);
+    expect(answer).toBe("recovered and finished");
+    expect(answer).not.toMatch(/unresponsive/i);
   });
 });
 

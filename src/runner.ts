@@ -1,11 +1,22 @@
 import type { AgentDef } from "./agents/registry.js";
 import type { ChatMessage, ContentPart, Provider } from "./providers/types.js";
 import { redactAndCap, summarizeToolResult, type RunEvent } from "./core/runEvents.js";
+import { ExecHealthTracker } from "./execution/executor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
 
 // The runner is the provider-neutral agent loop: send messages, execute any
 // requested tools, feed results back, repeat until the model stops or the
 // turn budget runs out.
+
+// #92: a sandbox that becomes unrecoverable (e.g. a heavy `pnpm install` OOMs
+// or fills the disk and wedges the exec worker) surfaces every command — even a
+// bare `echo` — as an ExecInfraError, distinct from a normal nonzero exit.
+// After this many CONSECUTIVE infra-level failures with no successful exec
+// between them, the sandbox is treated as dead: the run fails fast through the
+// guaranteed finale with a diagnostic, instead of toiling commands into a dead
+// sandbox until the wall-clock budget kills it. A single success resets the
+// count, so a one-off blip never aborts.
+const MAX_CONSECUTIVE_INFRA_FAILURES = 2;
 
 export interface RunOptions {
   provider: Provider;
@@ -33,12 +44,22 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   const messages: ChatMessage[] = [...opts.messages];
   const system = opts.system ?? opts.agent.system;
 
+  // Watch exec-infrastructure health through the executor seam: the tracker
+  // counts consecutive ExecInfraError throws (a dead/wedged sandbox) and resets
+  // on any successful op. Tools consume the wrapped executor via ToolContext, so
+  // the runner reads sandbox health without knowing which tool ran (#92).
+  const execTracker = new ExecHealthTracker(opts.toolContext.executor);
+  const toolContext: ToolContext = { ...opts.toolContext, executor: execTracker };
+
   // The wall clock is the real budget; turns are a backstop. At the deadline
   // the loop ends and the agent is forced to write up findings so far.
   const now = opts.now ?? Date.now;
   const deadline = now() + opts.agent.maxMinutes * 60_000;
   const warnAt = deadline - Math.min(3 * 60_000, opts.agent.maxMinutes * 15_000);
   let warned = false;
+  // Set when consecutive exec-infra failures cross the threshold: the loop ends
+  // and the finale reports a dead sandbox instead of the ordinary budget notice.
+  let sandboxDead = false;
 
   // update_status-only turns don't consume the turn budget (bookkeeping,
   // not work); the absolute iteration cap still bounds the loop.
@@ -90,7 +111,7 @@ export async function runAgent(opts: RunOptions): Promise<string> {
         continue;
       }
       try {
-        const output = await tool.run((tu.input ?? {}) as Record<string, unknown>, opts.toolContext);
+        const output = await tool.run((tu.input ?? {}) as Record<string, unknown>, toolContext);
         opts.onEvent?.({ type: "tool_result", tool: tu.name, ok: true, summary: summarizeToolResult(output) });
         results.push({ type: "tool_result", toolUseId: tu.id, content: output });
       } catch (err) {
@@ -115,32 +136,89 @@ export async function runAgent(opts: RunOptions): Promise<string> {
       });
     }
     messages.push({ role: "user", content: results });
+
+    // Results are appended (every tool_use has its tool_result, so the finale
+    // call stays valid) — now check exec health and bail out of a dead sandbox
+    // before issuing another command into it.
+    if (execTracker.consecutiveInfraFailures >= MAX_CONSECUTIVE_INFRA_FAILURES) {
+      sandboxDead = true;
+      break;
+    }
+  }
+
+  // The loop ended for one of two reasons; both end through this one guaranteed
+  // finale (a final tool-less call) so the run always closes with a useful
+  // message instead of a silent drain.
+  if (sandboxDead) {
+    return await finishSandboxDead(opts, messages, system);
   }
 
   // Budget exhausted (time or turns): one final tool-less call so the work
   // so far is written up instead of discarded.
   const wasTimeout = now() >= deadline;
   opts.onProgress?.(`${wasTimeout ? "time" : "turn"} budget exhausted — writing up findings so far`);
-  messages.push({
-    role: "user",
-    content: [
-      {
-        type: "text",
-        text: "You have reached the turn budget and can make no more tool calls. Write your final answer now from what you have learned so far: report your findings/results to date, then state plainly which parts of the task you did not get to and what a follow-up (in this thread, to reuse this workspace) should focus on.",
-      },
-    ],
-  });
+  const text = await runFinale(
+    opts,
+    messages,
+    system,
+    "You have reached the turn budget and can make no more tool calls. Write your final answer now from what you have learned so far: report your findings/results to date, then state plainly which parts of the task you did not get to and what a follow-up (in this thread, to reuse this workspace) should focus on.",
+  );
+  const budgetLabel = wasTimeout ? `${opts.agent.maxMinutes}-minute` : `${opts.agent.maxTurns}-turn`;
+  return text
+    ? `⚠️ _Hit the ${budgetLabel} budget before finishing — findings so far:_\n\n${text}`
+    : `Stopped at the ${budgetLabel} budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
+}
+
+/** The guaranteed finale shared by both wind-down paths (budget exhaustion and a
+ *  dead sandbox, #92): push one final tool-less instruction and make a single
+ *  inference-only call, so the run always closes with a written-up answer even
+ *  when no more tools can run. Each caller supplies the instruction and formats
+ *  the returned text into its own outcome message. */
+async function runFinale(
+  opts: RunOptions,
+  messages: ChatMessage[],
+  system: string,
+  instruction: string,
+): Promise<string> {
+  messages.push({ role: "user", content: [{ type: "text", text: instruction }] });
   const finale = await opts.provider.complete({
     model: opts.model,
     system,
     messages,
     maxTokens: opts.agent.maxTokens,
   });
-  const text = collectText(finale.content);
-  const budgetLabel = wasTimeout ? `${opts.agent.maxMinutes}-minute` : `${opts.agent.maxTurns}-turn`;
-  return text
-    ? `⚠️ _Hit the ${budgetLabel} budget before finishing — findings so far:_\n\n${text}`
-    : `Stopped at the ${budgetLabel} budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
+  return collectText(finale.content);
+}
+
+/** The one-line diagnostic surfaced when the run aborts into an unrecoverable
+ *  sandbox (#92) — the run outcome the user acts on. */
+const SANDBOX_DEAD_MESSAGE =
+  "Sandbox became unresponsive (likely OOM/disk during a heavy install). " +
+  "Aborting instead of retrying into a dead sandbox.";
+
+/** Fail fast on an unrecoverable sandbox: the same guaranteed-finale path as
+ *  budget exhaustion — one tool-less call — but the model is told the sandbox
+ *  is dead (so it summarizes what it learned before it died rather than trying
+ *  more commands), and the answer leads with the diagnostic. The finale is pure
+ *  inference, so it works even though the sandbox does not. */
+async function finishSandboxDead(
+  opts: RunOptions,
+  messages: ChatMessage[],
+  system: string,
+): Promise<string> {
+  opts.onProgress?.("sandbox unresponsive — aborting instead of retrying into a dead sandbox");
+  const text = await runFinale(
+    opts,
+    messages,
+    system,
+    `The execution sandbox has become unresponsive: the last ${MAX_CONSECUTIVE_INFRA_FAILURES} commands failed at ` +
+      "the infrastructure level (the exec transport itself, not normal command errors), so no further commands can " +
+      "run — most likely the sandbox ran out of memory or disk during a heavy install. Do not attempt any more " +
+      "tools. Write your final answer now from what you learned before it died: report your findings/results to " +
+      "date, and state plainly that the run is aborting because the sandbox is unrecoverable and what a follow-up " +
+      "(a fresh sandbox, or a lighter approach that avoids the heavy install) should focus on.",
+  );
+  return text ? `⚠️ _${SANDBOX_DEAD_MESSAGE}_\n\n${text}` : `⚠️ ${SANDBOX_DEAD_MESSAGE}`;
 }
 
 function collectText(parts: ContentPart[]): string {

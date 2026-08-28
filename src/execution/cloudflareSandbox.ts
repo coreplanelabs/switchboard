@@ -1,4 +1,4 @@
-import { truncate, type Executor } from "./executor.js";
+import { ExecInfraError, truncate, type Executor } from "./executor.js";
 
 // Remote execution in a Cloudflare Sandbox, via the authenticated proxy Worker
 // in deploy/cloudflare-sandbox/ (the Sandbox SDK only runs inside Workers).
@@ -47,8 +47,9 @@ export class CloudflareSandboxExecutor implements Executor {
         // after ~300s without response headers, so a command that outlives the
         // sandbox's COMMAND_TIMEOUT_MS margin surfaces here, not as exit 124.
         // Don't retry — the command may have side effects and may still be
-        // running in the sandbox; give the agent a legible error instead.
-        throw new Error(
+        // running in the sandbox; give the agent a legible error instead. Infra
+        // (not a command exit): the runner counts these toward fail-fast (#92).
+        throw new ExecInfraError(
           `sandbox worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
             "The command may still be running or have been killed mid-flight in the sandbox; " +
             "re-check its effects before re-running it.",
@@ -61,13 +62,17 @@ export class CloudflareSandboxExecutor implements Executor {
       // time an in-body error arrives the command may have run — replaying a
       // possibly side-effectful command is worse than reporting the failure.
       if (res.ok && typeof data.error === "string" && data.error) {
-        throw new Error(`sandbox worker ${route}: ${data.error}`);
+        // In-body worker failure — the sandbox's "Command execution failed" /
+        // exitCode-127 signal (a wedged sandbox reports this for every command,
+        // even a bare echo). Infra, not a command exit — counts toward fail-fast.
+        throw new ExecInfraError(`sandbox worker ${route}: ${data.error}`);
       }
       if (res.ok) return data;
       lastErr = `sandbox worker ${route} HTTP ${res.status}: ${String(data.error ?? "")}`;
       if (res.status < 500) break; // 4xx is not retryable
     }
-    throw new Error(lastErr);
+    // Exhausted retries against an unreachable worker — infra, not a command exit.
+    throw new ExecInfraError(lastErr);
   }
 
   async exec(command: string): Promise<string> {

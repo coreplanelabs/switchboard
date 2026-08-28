@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { LocalOperations } from "./executor.js";
+import { ExecHealthTracker, ExecInfraError, LocalOperations, type Executor } from "./executor.js";
 
 // Feature: features/resident-repos.md — U6 LocalOperations: the dev-only
 // second Operations implementation (≥2-implementations invariant, KTD8).
@@ -79,3 +79,69 @@ describe("LocalOperations", () => {
 function ops(dir: string): LocalOperations {
   return new LocalOperations(dir);
 }
+
+// #92: distinguishing an exec-infrastructure failure (a dead/wedged sandbox)
+// from a normal nonzero command exit, and counting consecutive ones so the
+// runner can fail fast instead of toiling into a dead sandbox.
+describe("ExecHealthTracker", () => {
+  function scripted(fn: () => Promise<string>): Executor {
+    return { exec: fn, readFile: fn, writeFile: async () => fn() };
+  }
+
+  it("counts consecutive ExecInfraError throws", async () => {
+    const t = new ExecHealthTracker(
+      scripted(async () => {
+        throw new ExecInfraError("boom");
+      }),
+    );
+    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
+    expect(t.consecutiveInfraFailures).toBe(1);
+    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
+    expect(t.consecutiveInfraFailures).toBe(2);
+  });
+
+  it("resets the count on any successful op", async () => {
+    let calls = 0;
+    const t = new ExecHealthTracker(
+      scripted(async () => {
+        calls++;
+        if (calls === 1) throw new ExecInfraError("boom");
+        return "ok";
+      }),
+    );
+    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
+    expect(t.consecutiveInfraFailures).toBe(1);
+    await t.exec("x");
+    expect(t.consecutiveInfraFailures).toBe(0);
+  });
+
+  it("leaves the count untouched on a non-infra throw (not a health signal, not a reset)", async () => {
+    let calls = 0;
+    const t = new ExecHealthTracker(
+      scripted(async () => {
+        calls++;
+        if (calls === 1) throw new ExecInfraError("boom");
+        throw new Error("Path escapes workspace"); // an ordinary tool error
+      }),
+    );
+    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
+    expect(t.consecutiveInfraFailures).toBe(1);
+    await expect(t.exec("x")).rejects.toThrow("Path escapes workspace");
+    expect(t.consecutiveInfraFailures).toBe(1); // unchanged
+  });
+
+  it("a normal nonzero exit (returned as output, no throw) resets the count", async () => {
+    let calls = 0;
+    const t = new ExecHealthTracker(
+      scripted(async () => {
+        calls++;
+        if (calls === 1) throw new ExecInfraError("boom");
+        return "exit 1:\nnpm ERR!"; // a normal command failure is output, not a throw
+      }),
+    );
+    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
+    expect(t.consecutiveInfraFailures).toBe(1);
+    expect(await t.exec("x")).toContain("exit 1");
+    expect(t.consecutiveInfraFailures).toBe(0);
+  });
+});

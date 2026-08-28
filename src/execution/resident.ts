@@ -1,6 +1,6 @@
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { repoResourceId } from "../core/repoCommands.js";
-import { BASH_TIMEOUT_MS, truncate, type Executor } from "./executor.js";
+import { BASH_TIMEOUT_MS, ExecInfraError, truncate, type Executor } from "./executor.js";
 
 // Remote execution against a resident repo environment — the always-warm
 // per-repo service behind the resident Worker (deploy/cloudflare-resident/).
@@ -187,7 +187,8 @@ export class ResidentExecutor implements Executor {
     } catch (err) {
       // Network-level failure: the command may still be running (or have run)
       // in the resident — never blind-retry a possibly side-effectful call.
-      throw new Error(
+      // Infra (not a command exit): the runner counts these toward fail-fast (#92).
+      throw new ExecInfraError(
         `resident worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
           "The operation may still have run in the resident; re-check its effects before re-running it.",
       );
@@ -223,7 +224,10 @@ export class ResidentExecutor implements Executor {
       await this.attach();
       r = await this.call(route, body);
       if (r.data.needs === "attach") {
-        throw new Error(
+        // Worktree still gone after a re-attach — the resident is unhealthy
+        // (mid-restore or worse). Infra, not a command exit: counts toward
+        // fail-fast so the run doesn't keep dispatching into it (#92).
+        throw new ExecInfraError(
           `resident ${route}: worktree still unavailable after a re-attach (${String(r.data.error ?? "")}) — ` +
             "the resident may be mid-restore; try again shortly.",
         );
@@ -234,11 +238,22 @@ export class ResidentExecutor implements Executor {
 
   async exec(command: string): Promise<string> {
     const { status, data } = await this.opWithReattach("/exec", { command });
-    if (typeof data.error === "string" && data.error) {
-      // post-validation failure (exitCode 127 shape) — legible, never retried
+    // A pre-validation client rejection — a plain HTTP 400 with an {error} and NO
+    // `needs` (e.g. command-too-long), nothing streamed — is agent-fixable, not a
+    // sick resident. Surface it as a normal Error so it does NOT count toward the
+    // fail-fast infra counter (#92) and false-trip the abort on a HEALTHY
+    // resident. Discriminated on the same signals attach() uses: HTTP status +
+    // absence of `needs`.
+    if (status === 400 && typeof data.error === "string" && data.error && data.needs === undefined) {
       throw new Error(`resident /exec: ${data.error}`);
     }
-    if (status !== 200) throw new Error(`resident /exec HTTP ${status}`);
+    if (typeof data.error === "string" && data.error) {
+      // post-validation failure (exitCode 127 shape) — legible, never retried.
+      // Infra (the exec transport failed), not a command exit: counts toward
+      // fail-fast (#92).
+      throw new ExecInfraError(`resident /exec: ${data.error}`);
+    }
+    if (status !== 200) throw new ExecInfraError(`resident /exec HTTP ${status}`);
     const parts = [data.stdout, data.stderr].filter(Boolean).join("\n--- stderr ---\n");
     const exitCode = Number(data.exitCode ?? 0);
     if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);
@@ -247,13 +262,13 @@ export class ResidentExecutor implements Executor {
 
   async readFile(path: string): Promise<string> {
     const { status, data } = await this.opWithReattach("/read", { path });
-    if (status !== 200) throw new Error(`resident /read: ${String(data.error ?? `HTTP ${status}`)}`);
+    if (status !== 200) throw new ExecInfraError(`resident /read: ${String(data.error ?? `HTTP ${status}`)}`);
     return truncate(String(data.content ?? ""));
   }
 
   async writeFile(path: string, content: string): Promise<string> {
     const { status, data } = await this.opWithReattach("/write", { path, content });
-    if (status !== 200) throw new Error(`resident /write: ${String(data.error ?? `HTTP ${status}`)}`);
+    if (status !== 200) throw new ExecInfraError(`resident /write: ${String(data.error ?? `HTTP ${status}`)}`);
     return `Wrote ${path}`;
   }
 }
