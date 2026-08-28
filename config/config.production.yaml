@@ -36,3 +36,13 @@ execution:
     tokenEnv: RESIDENT_OPERATOR_TOKEN
 
 workspaceDir: ./workspaces # unused with cloudflare execution; kept for fallback
+
+# Cross-session self-learning memory (Area 7c, #85): ENABLED in prod to dogfood
+# the durable store. Records live in the Memory Worker (deploy/cloudflare-memory/,
+# switchboard-memory); the bot Worker MUST have MEMORY_TOKEN set. Reversible: set
+# enabled:false and redeploy. See features/memory.md.
+memory:
+  enabled: true
+  worker:
+    baseUrl: https://switchboard-memory.coreplanelabs.dev
+    tokenEnv: MEMORY_TOKEN
