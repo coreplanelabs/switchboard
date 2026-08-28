@@ -4,6 +4,8 @@
 // talk back through. Everything else — config resolution, permissions, agent
 // selection, execution — is channel-agnostic and lives in the dispatcher.
 
+import type { ChannelFormatter } from "./structuredMessage.js";
+
 /** An image the user attached, already downloaded and base64-encoded. */
 export interface ImageAttachment {
   /** e.g. "image/png" — adapters only pass types every provider accepts */
@@ -76,4 +78,19 @@ export interface ChannelIO {
    * message and any bot status noise. Adapters without history return [].
    */
   history(): Promise<HistoryItem[]>;
+  /**
+   * This channel's formatter for structured output — the render half of the
+   * ChannelFormatter seam (Slack → mrkdwn, CLI/HTTP/MCP → plain text). Used only
+   * when structured output is enabled (config `output.structured`); the core
+   * falls back to a PlainTextFormatter when a channel declares none. Optional so
+   * the flag-off path and minimal test IOs need not provide one.
+   */
+  formatter?: ChannelFormatter;
+  /**
+   * Send an already channel-native payload (the output of `formatter.format`)
+   * WITHOUT re-converting it — e.g. Slack posts the mrkdwn verbatim rather than
+   * running it back through the Markdown→mrkdwn converter. The core falls back to
+   * `reply` when a channel declares none.
+   */
+  sendFormatted?(payload: string): Promise<void>;
 }

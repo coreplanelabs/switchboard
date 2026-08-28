@@ -10,6 +10,7 @@ import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
 import { composeRunLabel, dispatch, type CoreDeps } from "./dispatcher.js";
+import { MAX_STRUCTURE_RETRIES, STRUCTURING_SYSTEM } from "./structuredOutput.js";
 import { RunRegistry } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
@@ -228,6 +229,75 @@ describe("dispatch", () => {
     await dispatch(deps, msg("keep going"), io);
     expect(replies[0]).toContain("🚫");
     expect(provider.requests).toHaveLength(0);
+  });
+});
+
+// Feature: features/channel-formatter.md — structured, self-healing output
+// routed through each channel's ChannelFormatter, behind the `output.structured`
+// flag (default off → identical to today).
+describe("structured output (channel formatter, #76)", () => {
+  const STRUCTURED_YAML_FIXTURE = YAML_FIXTURE + `\noutput:\n  structured: true\n`;
+
+  // Provider that answers the agent run with plain text, and the structuring
+  // pass (identified by its system prompt) with valid schema JSON.
+  function structuringProvider(structuredJson: string): Provider & { requests: CompletionRequest[] } {
+    const requests: CompletionRequest[] = [];
+    return {
+      name: "fake",
+      requests,
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        const text = req.system === STRUCTURING_SYSTEM ? structuredJson : "the answer";
+        return { content: [{ type: "text", text }], stopReason: "end_turn" };
+      },
+    };
+  }
+
+  // IO that records both paths: `sendFormatted` (native payload) vs `reply`.
+  function formattingIO() {
+    const sent: string[] = [];
+    const replies: string[] = [];
+    const io: ChannelIO = {
+      reply: async (t) => void replies.push(t),
+      status: async () => ({ update: () => {}, done: async () => {} }),
+      history: async () => [],
+      formatter: { name: "test", format: (m) => `FORMATTED[${m.blocks.map((b) => b.type).join(",")}]` },
+      sendFormatted: async (p) => void sent.push(p),
+    };
+    return { io, sent, replies };
+  }
+
+  it("flag OFF (default): sends the answer verbatim via reply, no structuring model call", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    expect(replies).toEqual(["answer"]); // identical to today
+    expect(provider.requests).toHaveLength(1); // only the agent run — no extra pass
+  });
+
+  it("flag ON: routes the answer through the channel formatter + sendFormatted", async () => {
+    const provider = structuringProvider(JSON.stringify({ blocks: [{ type: "paragraph", text: "hi" }] }));
+    const deps = makeDeps(STRUCTURED_YAML_FIXTURE, provider);
+    const { io, sent, replies } = formattingIO();
+    await dispatch(deps, msg("hello there"), io);
+    expect(sent).toEqual(["FORMATTED[paragraph]"]); // rendered by io.formatter, sent native
+    expect(replies).toEqual([]); // NOT the plain reply path
+    expect(provider.requests).toHaveLength(2); // agent run + one structuring pass (valid first try)
+    expect(provider.requests[1].system).toBe(STRUCTURING_SYSTEM);
+  });
+
+  it("flag ON: falls back gracefully (no crash) when the model never returns valid JSON", async () => {
+    // The structuring pass returns non-JSON every time → exhaust retries → plain
+    // fallback of the raw answer, still delivered through the formatter.
+    const provider = structuringProvider("not json at all");
+    const deps = makeDeps(STRUCTURED_YAML_FIXTURE, provider);
+    const { io, sent, replies } = formattingIO();
+    await dispatch(deps, msg("hello there"), io);
+    expect(sent).toEqual(["FORMATTED[paragraph]"]); // fallbackMessage → single paragraph
+    expect(replies).toEqual([]); // dispatch did not error (no ⚠️ reply)
+    // 1 agent run + (1 + MAX_STRUCTURE_RETRIES) structuring attempts
+    expect(provider.requests.length).toBe(2 + MAX_STRUCTURE_RETRIES);
   });
 });
 

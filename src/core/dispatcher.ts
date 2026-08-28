@@ -15,6 +15,9 @@ import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from ".
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
 import type { RunEvent } from "./runEvents.js";
 import { defaultRunRegistry, type RunRegistry } from "./runRegistry.js";
+import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
+import { produceStructured, providerProducer } from "./structuredOutput.js";
+import type { Provider } from "../providers/types.js";
 import type { ChannelIO, HistoryItem, ImageAttachment, IncomingMessage } from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
@@ -311,7 +314,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
 
     console.log(`[done] ${msg.threadKey} ${answer.length} chars`);
     await status.done({ title: title("✅"), detail: checklist });
-    await io.reply(answer);
+    await sendAnswer(deps, io, msg.threadKey, { provider, model, maxTokens: agent.maxTokens }, answer);
 
     // Deterministic review post-step (issue #69): a `review` run against a
     // resolved PR posts its findings back to that PR by default — no need to
@@ -337,6 +340,58 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     await io.reply(`⚠️ ${errMsg}`).catch(() => {});
+  }
+}
+
+// ---- channel-agnostic output (channel-formatter feature, #76) ---------------
+
+/**
+ * Send the agent's answer to the channel. Two paths, chosen by config:
+ *
+ * - Flag OFF (default, `output.structured` unset/false): the answer is sent
+ *   verbatim via `io.reply` — identical to today (each channel converts the
+ *   Markdown as it always has). Zero behavior change.
+ * - Flag ON: the answer is converted to a channel-agnostic structured message
+ *   (a constrained model pass), zod-validated with fixed-retry self-heal, then
+ *   rendered by the channel's own ChannelFormatter and sent as a native payload.
+ *   On validation failure after the retries it falls back to a plain render of
+ *   the raw answer — the run never fails over formatting.
+ *
+ * The core stays platform-blind: it uses the channel-provided formatter (or a
+ * PlainTextFormatter default) and `sendFormatted` (or `reply`), never Slack code.
+ */
+async function sendAnswer(
+  deps: CoreDeps,
+  io: ChannelIO,
+  threadKey: string,
+  model: { provider: Provider; model: string; maxTokens: number },
+  answer: string,
+): Promise<void> {
+  if (!deps.config.config.output?.structured) {
+    await io.reply(answer);
+    return;
+  }
+
+  const produce = providerProducer({
+    provider: model.provider,
+    model: model.model,
+    answer,
+    maxTokens: model.maxTokens,
+  });
+  const result = await produceStructured(produce, {
+    fallbackText: answer,
+    onWarn: (m) => console.warn(`[structured] ${threadKey} ${m}`),
+  });
+  if (result.fellBack) {
+    console.warn(`[structured] ${threadKey} used plain fallback after ${result.attempts} attempt(s)`);
+  }
+
+  const formatter: ChannelFormatter = io.formatter ?? new PlainTextFormatter();
+  const payload = formatter.format(result.message);
+  if (io.sendFormatted) {
+    await io.sendFormatted(payload);
+  } else {
+    await io.reply(payload);
   }
 }
 
