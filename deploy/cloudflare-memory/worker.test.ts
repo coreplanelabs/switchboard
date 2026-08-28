@@ -52,17 +52,17 @@ describe("auth + routing", () => {
     expect(res.status).toBe(405);
   });
 
-  it("fences body size before parsing: an oversized or undeclared Content-Length is 413, even authenticated", async () => {
+  it("fences body size before parsing: oversized → 413, undeclared → 411, even authenticated", async () => {
     const big = JSON.stringify({ scopeKey: "org:a", records: [cand("x".repeat(600 * 1024))] });
     const res = await SELF.fetch(`${BASE}/write`, { method: "POST", headers: AUTH, body: big });
     expect(res.status).toBe(413);
     // A bodiless POST declares no Content-Length in this runtime → undeclared
-    // → 413 at the fence, before the parser is ever reached.
+    // → 411 Length Required at the fence, before the parser is ever reached.
     const empty = await SELF.fetch(`${BASE}/retrieve`, { method: "POST", headers: AUTH });
-    expect(empty.status).toBe(413);
+    expect(empty.status).toBe(411);
   });
 
-  it("a streamed body with NO Content-Length is 413 — never parsed (regression: Number(null) is 0)", async () => {
+  it("a streamed body with NO Content-Length is 411 — never parsed (regression: Number(null) is 0)", async () => {
     // A chunked/streamed request declares no length. Even a small, well-formed
     // body must be refused: the fence can't know its size up front and the
     // only legitimate client always declares one.
@@ -80,10 +80,11 @@ describe("auth + routing", () => {
       // @ts-expect-error duplex is required for streaming request bodies but not yet in lib types
       duplex: "half",
     });
-    expect(res.status).toBe(413);
-    // (A blank `Content-Length: ""` is handled the same way in code, but fetch
+    expect(res.status).toBe(411);
+    // (A blank `Content-Length: ""` or a non-digit form like "0x1000"/"5e2" is
+    // refused the same way in code — the fence accepts only /^\d+$/ — but fetch
     // treats Content-Length as a forbidden header and replaces it with the real
-    // length, so that case cannot be constructed from a test client.)
+    // length, so those cases cannot be constructed from a test client.)
   });
 
   it("rejects malformed bodies with 400 and a reason", async () => {
