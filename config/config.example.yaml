@@ -108,3 +108,19 @@ workspaceDir: ./workspaces
 #   # -> plain text) — so the model never guesses per-channel markup. Default
 #   # false: the Markdown answer is sent as-is (today's behavior, unchanged).
 #   structured: false
+
+# Cross-session self-learning memory (Area 7c, #85). DEFAULT OFF: absent, or
+# enabled:false, means the dispatcher uses a NullMemoryStore and the model input
+# is byte-identical to memory-off — zero behavior change. When enabled, before
+# each model turn the dispatcher retrieves scope-relevant distilled records
+# (keyword + recency ranked, hard-budgeted) and injects them as a DEDICATED
+# advisory context block on the system prompt ("Background memory for <resource>
+# (may be outdated — verify before acting):"), never mixed into history.
+# PR1 ships the seam + read path only; the write/reflection path (PR2) and the
+# durable Worker store (PR3) are gaps — see features/memory.md.
+# memory:
+#   enabled: false      # master switch (default false)
+#   scope: org          # which resource to scope to; PR1 implements `org` only
+#                       # (→ org:coreplanelabs). repo/channel are a PR4 gap.
+#   limit: 8            # max records retrieved/injected per request (default 8)
+#   maxTokens: 800      # hard token budget for the injected block (default 800)

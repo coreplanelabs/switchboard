@@ -14,6 +14,7 @@ import { MAX_STRUCTURE_RETRIES, STRUCTURING_SYSTEM } from "./structuredOutput.js
 import { RunRegistry } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
+import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
 
 // Feature: features/routing-and-config.md — end-to-end dispatch: config
 // commands, permission gates, and thread-sticky agent resolution.
@@ -1090,5 +1091,96 @@ describe("live run-view wiring (Area 2)", () => {
     await dispatch(deps, msg("hello there"), io);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
     expect(statuses.some((s) => s.detail?.includes("/runs/"))).toBe(false);
+  });
+});
+
+// Feature: features/memory.md — cross-session memory READ path (Area 7c, #85).
+// The load-bearing guarantee: with memory off (or a NullMemoryStore) the request
+// sent to the provider is byte-identical to today; when enabled with a seeded
+// store the advisory block rides on the system prompt, never in history.
+const MEMORY_ON_YAML =
+  YAML_FIXTURE +
+  `
+memory:
+  enabled: true
+`;
+
+function memRecord(over: Partial<MemoryRecord> = {}): MemoryRecord {
+  return {
+    id: "mem:org:coreplanelabs:0",
+    scopeKey: "org:coreplanelabs",
+    kind: "fact",
+    text: "the deploy command is npm run deploy",
+    keywords: ["deploy", "command", "npm"],
+    sourceThreadKey: "slack:CX:9.9",
+    createdAt: Date.now(),
+    useCount: 0,
+    status: "active",
+    ...over,
+  };
+}
+
+describe("cross-session memory (Area 7c, #85)", () => {
+  const ask = "what is the deploy command?";
+
+  it("disabled path is byte-identical to memory-off (NullMemoryStore guarantee)", async () => {
+    const off = capturingProvider();
+    await dispatch(makeDeps(YAML_FIXTURE, off), msg(ask), fakeIO().io);
+
+    const on = capturingProvider();
+    const onDeps: CoreDeps = { ...makeDeps(MEMORY_ON_YAML, on), memory: new NullMemoryStore() };
+    await dispatch(onDeps, msg(ask), fakeIO().io);
+
+    expect(off.requests).toHaveLength(1);
+    expect(on.requests).toHaveLength(1);
+    // Full request (system + messages + tools + budgets) is byte-identical.
+    // The runner still resolves the agent's own system prompt; what must not
+    // differ is any memory block — and here there is none in either request.
+    expect(JSON.stringify(on.requests[0])).toBe(JSON.stringify(off.requests[0]));
+    expect(on.requests[0].system).not.toContain("Background memory");
+  });
+
+  it("memory off (default) injects nothing onto the system prompt", async () => {
+    const provider = capturingProvider();
+    await dispatch(makeDeps(YAML_FIXTURE, provider), msg(ask), fakeIO().io);
+    const sys = provider.requests[0].system;
+    expect(sys).not.toContain("Background memory");
+    expect(sys!.startsWith("You are Switchboard")).toBe(true); // just the agent's own prompt
+  });
+
+  it("enabled with a seeded store prepends the advisory block, preserving the agent prompt", async () => {
+    const provider = capturingProvider();
+    const store = new InMemoryMemoryStore([memRecord()]);
+    const deps: CoreDeps = { ...makeDeps(MEMORY_ON_YAML, provider), memory: store };
+    await dispatch(deps, msg(ask), fakeIO().io);
+
+    const sys = provider.requests[0].system;
+    expect(sys).toBeDefined();
+    expect(sys!.startsWith("Background memory for org:coreplanelabs (may be outdated — verify before acting):")).toBe(
+      true,
+    );
+    expect(sys).toContain("the deploy command is npm run deploy");
+    expect(sys).toContain("You are Switchboard"); // the general agent's own prompt is still there
+  });
+
+  it("keeps the block out of history — it never appears in the messages array", async () => {
+    const provider = capturingProvider();
+    const store = new InMemoryMemoryStore([memRecord()]);
+    const deps: CoreDeps = { ...makeDeps(MEMORY_ON_YAML, provider), memory: store };
+    await dispatch(deps, msg(ask), fakeIO().io);
+    expect(JSON.stringify(provider.requests[0].messages)).not.toContain("Background memory");
+  });
+
+  it("enabled but nothing relevant → no block, request identical to memory-off", async () => {
+    const off = capturingProvider();
+    await dispatch(makeDeps(YAML_FIXTURE, off), msg("tell me a joke"), fakeIO().io);
+
+    const on = capturingProvider();
+    const store = new InMemoryMemoryStore([memRecord()]); // has a deploy fact, irrelevant here
+    const onDeps: CoreDeps = { ...makeDeps(MEMORY_ON_YAML, on), memory: store };
+    await dispatch(onDeps, msg("tell me a joke"), fakeIO().io);
+
+    expect(JSON.stringify(on.requests[0])).toBe(JSON.stringify(off.requests[0]));
+    expect(on.requests[0].system).not.toContain("Background memory");
   });
 });

@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import YAML from "yaml";
 import type { ProviderConfig } from "./providers/types.js";
+import type { MemoryConfig } from "./core/memory/types.js";
 import { AGENTS } from "./agents/registry.js";
 
 // Configuration is layered. Lowest to highest precedence:
@@ -62,6 +63,12 @@ export interface AppConfig {
   workspaceDir?: string;
   /** Output-formatting behavior (channel-formatter feature, #76). */
   output?: OutputConfig;
+  /**
+   * Cross-session self-learning memory (Area 7c, #85). Absent or `enabled:
+   * false` (the default) → the dispatcher uses a NullMemoryStore and model
+   * input is byte-identical to memory-off. See features/memory.md.
+   */
+  memory?: MemoryConfig;
 }
 
 export interface OutputConfig {

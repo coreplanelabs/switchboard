@@ -33,6 +33,7 @@ The behavioral contract of Switchboard, versioned with the code. Every file in t
 | [agent-coding.md](agent-coding.md) | Coding agent (ships PRs) |
 | [validated-review.md](validated-review.md) | Distilled diff digest in PR bodies (R14) + review agent runs tests/build in its warm worktree and reports pass/fail (R15) |
 | [agent-env-bootstrap.md](agent-env-bootstrap.md) | Materialize a downstream service's UAT env vars into the agent's execution environment from 1Password via a read-only, UAT-vault-scoped service account (#72): JSONC manifest, UAT-only allowlist, dry-run default, chmod-600 env file, `buildAgentEnv` integration hook |
+| [memory.md](memory.md) | Cross-session self-learning memory (#85): `MemoryStore` seam + read path, flag-gated OFF by default (byte-identical to memory-off); keyword+recency scorer, hard budget, org-scoped advisory context block. Write/reflection (PR2) and durable Worker store (PR3) are `[gap]` |
 
 ## Milestones
 
