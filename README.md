@@ -15,7 +15,7 @@ The **core dispatcher** (`src/core/dispatcher.ts`) is the only place orchestrati
 
 Behavioral expectations live in [`features/`](features/README.md) — one spec per feature with validation criteria (unit tests or agent-runnable instructions), updated in the same PR as any behavior change, so every git SHA carries the criteria that describe it.
 
-- **How does it stack up against Claude in Slack?** See the [Switchboard-vs-Claude-Tag parity report](features/parity-testing.md) — a measured, receipt-linked side-by-side (same prompts, both bots, per-test metrics), not an asserted comparison.
+- **How does it stack up against Claude in Slack?** See the [Switchboard-vs-Claude-Tag parity report (issue #81)](https://github.com/coreplanelabs/switchboard/issues/81) — a measured, receipt-linked side-by-side (same prompts, both bots, per-test metrics), not an asserted comparison.
 
 ## Agents
 
