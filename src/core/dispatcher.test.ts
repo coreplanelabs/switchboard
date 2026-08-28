@@ -9,12 +9,13 @@ import { AGENTS } from "../agents/registry.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
-import { composeRunLabel, dispatch, turnContent, type CoreDeps } from "./dispatcher.js";
+import { activeRunCount, composeRunLabel, dispatch, turnContent, type CoreDeps } from "./dispatcher.js";
 import { MAX_STRUCTURE_RETRIES, STRUCTURING_SYSTEM } from "./structuredOutput.js";
 import { RunRegistry } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
+import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
 
 // Feature: features/routing-and-config.md — end-to-end dispatch: config
@@ -1298,5 +1299,172 @@ describe("turnContent (attachment assembly)", () => {
 
   it("falls back to a placeholder when a turn has no content at all", () => {
     expect(turnContent("")).toEqual([{ type: "text", text: "(empty message)" }]);
+  });
+});
+
+// Feature: features/memory.md — cross-session memory WRITE path (PR2, #85).
+// After the reply lands, a qualifying run (used tools, or a long thread) fires
+// ONE async reflection call on `memory.model`; disabled → nothing; fast paths
+// (config/deterministic) never reflect; reflection failures never touch the
+// user reply. The reflection promise is awaited only by the shutdown drain
+// (`drainReflections`), which tests use to observe the write.
+const MEMORY_WRITE_YAML =
+  YAML_FIXTURE +
+  `
+memory:
+  enabled: true
+  model: anthropic/cheap-model
+`;
+
+const REFLECTION_REPLY = JSON.stringify({
+  facts: [{ text: "the deploy command is npm run deploy", confidence: 0.9 }],
+  summary: "User asked how to deploy; the deploy command was confirmed.",
+});
+
+/** Provider that answers the run (optionally after one tool call) and then the
+ *  reflection request — keeping both requests observable. */
+function runThenReflect(opts: { toolFirst?: boolean; failReflection?: boolean } = {}) {
+  const requests: CompletionRequest[] = [];
+  const order: string[] = [];
+  let toolAsked = false;
+  const provider: Provider = {
+    name: "fake",
+    async complete(req): Promise<CompletionResult> {
+      requests.push(req);
+      if (req.system === REFLECTION_SYSTEM) {
+        order.push("reflect");
+        if (opts.failReflection) throw new Error("extractor down");
+        return { content: [{ type: "text", text: REFLECTION_REPLY }], stopReason: "end_turn" };
+      }
+      if (opts.toolFirst && !toolAsked) {
+        toolAsked = true;
+        return {
+          content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } }],
+          stopReason: "tool_use",
+        };
+      }
+      order.push("answer");
+      return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+    },
+  };
+  return { provider, requests, order };
+}
+
+const longHistory: HistoryItem[] = Array.from({ length: REFLECT_MIN_TURNS }, (_, i) => ({
+  role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+  text: `turn ${i} about the deploy command`,
+}));
+
+describe("cross-session memory WRITE path (PR2, #85)", () => {
+  async function run(yaml: string, history: HistoryItem[], opts: Parameters<typeof runThenReflect>[0] = {}) {
+    const { provider, requests, order } = runThenReflect(opts);
+    const store = new InMemoryMemoryStore();
+    const deps: CoreDeps = { ...makeDeps(yaml, provider), memory: store };
+    const { io, replies } = fakeIO(history);
+    await dispatch(deps, msg("how do we deploy?"), io);
+    await drainReflections();
+    const written = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy command", limit: 10 });
+    return { requests, order, replies, written, store };
+  }
+
+  it("a run that used tools reflects once on memory.model, after the reply, and writes to the store", async () => {
+    const { requests, order, replies, written } = await run(MEMORY_WRITE_YAML, [], { toolFirst: true });
+    const reflections = requests.filter((r) => r.system === REFLECTION_SYSTEM);
+    expect(reflections).toHaveLength(1);
+    expect(reflections[0].model).toBe("cheap-model");
+    expect(order).toEqual(["answer", "reflect"]);
+    // The user sees exactly one reply — the run's answer (the general agent's
+    // 1-turn budget prefixes a wrap-up note after a tool call; irrelevant here).
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("answer");
+    expect(written.map((r) => r.kind).sort()).toEqual(["fact", "summary"]);
+    expect(written[0].sourceThreadKey).toBe("slack:CX:1.0");
+    expect(written.every((r) => typeof r.sourceRunId === "string" && r.sourceRunId.length > 0)).toBe(true);
+  });
+
+  it("a long toolless thread qualifies too", async () => {
+    const { requests, written } = await run(MEMORY_WRITE_YAML, longHistory);
+    expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(1);
+    expect(written.length).toBeGreaterThan(0);
+  });
+
+  it("a short toolless chat does NOT reflect (no extra model call, nothing written)", async () => {
+    const { requests, written } = await run(MEMORY_WRITE_YAML, []);
+    expect(requests).toHaveLength(1);
+    expect(written).toEqual([]);
+  });
+
+  it("memory disabled → no reflection even on a qualifying run (zero behavior change)", async () => {
+    const { requests, written } = await run(YAML_FIXTURE, longHistory, { toolFirst: true });
+    expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(0);
+    expect(written).toEqual([]);
+  });
+
+  it("memory.model absent → reflection falls back to the run's own resolved model (never a hardcoded ref)", async () => {
+    const { requests } = await run(MEMORY_ON_YAML, longHistory);
+    const reflections = requests.filter((r) => r.system === REFLECTION_SYSTEM);
+    expect(reflections).toHaveLength(1);
+    expect(reflections[0].model).toBe("general-model");
+  });
+
+  it("a reflection failure never touches the user reply", async () => {
+    const { replies, written } = await run(MEMORY_WRITE_YAML, longHistory, { failReflection: true });
+    expect(replies).toEqual(["answer"]); // no ⚠️ reply, answer intact
+    expect(written).toEqual([]);
+  });
+
+  it("dispatch returns without awaiting the reflection (fire-and-forget; only the drain awaits it)", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        if (req.system === REFLECTION_SYSTEM) {
+          await gate;
+          return { content: [{ type: "text", text: REFLECTION_REPLY }], stopReason: "end_turn" };
+        }
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const store = new InMemoryMemoryStore();
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    const { io, replies } = fakeIO(longHistory);
+    await dispatch(deps, msg("how do we deploy?"), io);
+    expect(replies).toEqual(["answer"]);
+    expect(pendingReflectionCount()).toBe(1); // still in flight after dispatch returned
+    release();
+    await drainReflections();
+    expect(pendingReflectionCount()).toBe(0);
+    expect(await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy command", limit: 10 })).not.toEqual([]);
+  });
+
+  it("the run stays counted in flight through the reply and reflection scheduling (drain cannot see 0/0 in between)", async () => {
+    const { provider } = runThenReflect();
+    const store = new InMemoryMemoryStore();
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    const seen: Array<{ runs: number; reflections: number }> = [];
+    const io: ChannelIO = {
+      ...fakeIO(longHistory).io,
+      reply: async () => {
+        seen.push({ runs: activeRunCount(), reflections: pendingReflectionCount() });
+      },
+    };
+    await dispatch(deps, msg("how do we deploy?"), io);
+    // While the reply is being delivered the run loop has ended but the run is
+    // still counted, so activeRuns + pendingReflections is never 0 before the
+    // reflection is scheduled.
+    expect(seen).toEqual([{ runs: 1, reflections: 0 }]);
+    expect(activeRunCount()).toBe(0); // released once dispatch returns
+    expect(pendingReflectionCount()).toBe(1); // ...and the reflection is what's in flight now
+    await drainReflections();
+  });
+
+  it("config-command fast path never reflects", async () => {
+    const { provider, requests } = runThenReflect();
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: new InMemoryMemoryStore() };
+    await dispatch(deps, msg("config show"), fakeIO(longHistory).io);
+    await dispatch(deps, msg("help"), fakeIO(longHistory).io);
+    await drainReflections();
+    expect(requests).toHaveLength(0);
   });
 });

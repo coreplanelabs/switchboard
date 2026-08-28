@@ -106,6 +106,98 @@ describe("InMemoryMemoryStore.write", () => {
     expect(out).toHaveLength(1); // not duplicated
     expect(out[0].useCount).toBe(2); // 1 from the dup write + 1 from this retrieval
   });
+
+  it("dedup is whitespace/case-insensitive", async () => {
+    const store = new InMemoryMemoryStore([], { now: () => NOW });
+    await store.write("org:coreplanelabs", [cand]);
+    await store.write("org:coreplanelabs", [{ ...cand, text: "  The deploy   command is NPM run deploy " }]);
+    const out = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
+    expect(out).toHaveLength(1);
+  });
+
+  it("supersede: marks the named active record superseded (kept, not deleted) and inserts the new one", async () => {
+    const store = new InMemoryMemoryStore([], { now: () => NOW });
+    await store.write("org:coreplanelabs", [cand]);
+    const [old] = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
+    await store.write("org:coreplanelabs", [
+      { ...cand, text: "the deploy command is now npm run ship", supersedes: old.id },
+    ]);
+    const out = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
+    expect(out.map((r) => r.text)).toEqual(["the deploy command is now npm run ship"]);
+    expect(out[0].supersedes).toBe(old.id);
+    expect(old.status).toBe("superseded"); // soft delete: provenance preserved
+  });
+
+  it("supersede of an unknown or other-scope id still inserts the new record, superseding nothing", async () => {
+    const store = new InMemoryMemoryStore([], { now: () => NOW });
+    await store.write("org:other", [cand]);
+    const [other] = await store.retrieve({ scopeKey: "org:other", query: "deploy", limit: 8 });
+    await store.write("org:coreplanelabs", [
+      { ...cand, text: "new fact about deploy", supersedes: other.id },
+      { ...cand, text: "another deploy fact", supersedes: "mem:org:coreplanelabs:999" },
+    ]);
+    expect(other.status).toBe("active");
+    const out = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
+    expect(out).toHaveLength(2);
+  });
+
+  it("a candidate that restates the record it supersedes is a no-op dedup (target stays active, nothing inserted)", async () => {
+    const store = new InMemoryMemoryStore([], { now: () => NOW });
+    await store.write("org:coreplanelabs", [cand]);
+    const [old] = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
+    await store.write("org:coreplanelabs", [{ ...cand, text: "The deploy command is npm run deploy", supersedes: old.id }]);
+    expect(old.status).toBe("active");
+    const out = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
+    expect(out).toHaveLength(1);
+    expect(out[0].useCount).toBe(3); // first retrieval + dedup bump + this retrieval
+  });
+
+  it("a targeted supersede is NOT swallowed by a text collision with an UNRELATED record", async () => {
+    // The extractor sees existing record text verbatim; a collision (accidental or
+    // induced) with some other record must not cancel an explicit correction.
+    const store = new InMemoryMemoryStore([], { now: () => NOW });
+    await store.write("org:coreplanelabs", [cand, { ...cand, text: "the on-call rotation is weekly" }]);
+    const all = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy rotation", limit: 8 });
+    const deployFact = all.find((r) => r.text === cand.text)!;
+    const onCall = all.find((r) => r.text.includes("on-call"))!;
+    await store.write("org:coreplanelabs", [{ ...cand, supersedes: onCall.id }]); // text == deployFact's text
+    expect(onCall.status).toBe("superseded"); // the correction happened
+    expect(deployFact.status).toBe("active");
+    const out = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
+    expect(out.filter((r) => r.supersedes === onCall.id)).toHaveLength(1); // the new record landed
+  });
+
+  it("an UNRESOLVABLE `supersedes` (unknown id, or target already superseded earlier in the batch) still inserts — never falls back to global dedup", async () => {
+    const store = new InMemoryMemoryStore([], { now: () => NOW });
+    await store.write("org:coreplanelabs", [cand, { ...cand, text: "the on-call rotation is weekly" }]);
+    const all = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy rotation", limit: 8 });
+    const deployFact = all.find((r) => r.text === cand.text)!;
+    const onCall = all.find((r) => r.text.includes("on-call"))!;
+    // One batch: two corrections of the same record; the second's text collides
+    // with an unrelated record AND its target is already superseded by the first.
+    await store.write("org:coreplanelabs", [
+      { ...cand, text: "the on-call rotation is biweekly", supersedes: onCall.id },
+      { ...cand, supersedes: onCall.id }, // text == deployFact's text
+      { ...cand, supersedes: "mem:org:coreplanelabs:9999" }, // unknown id, same collision
+    ]);
+    expect(onCall.status).toBe("superseded");
+    expect(deployFact.useCount).toBe(1); // only this test's retrieval — never bumped by a dedup
+    const out = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy rotation", limit: 8 });
+    expect(out.filter((r) => r.text === cand.text)).toHaveLength(3); // original + both corrections landed
+    expect(out.some((r) => r.text === "the on-call rotation is biweekly")).toBe(true);
+  });
+
+  it("superseded records never match retrieval and are not dedup targets", async () => {
+    const store = new InMemoryMemoryStore([], { now: () => NOW });
+    await store.write("org:coreplanelabs", [cand]);
+    const [old] = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
+    await store.write("org:coreplanelabs", [{ ...cand, text: "deploy v2", supersedes: old.id }]);
+    // Re-asserting the old text is a NEW active record, not a bump on the superseded one.
+    await store.write("org:coreplanelabs", [cand]);
+    const out = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
+    expect(out.map((r) => r.text).sort()).toEqual(["deploy v2", "the deploy command is npm run deploy"]);
+    expect(old.status).toBe("superseded");
+  });
 });
 
 describe("selectMemoryStore", () => {

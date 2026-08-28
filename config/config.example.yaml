@@ -115,12 +115,18 @@ workspaceDir: ./workspaces
 # each model turn the dispatcher retrieves scope-relevant distilled records
 # (keyword + recency ranked, hard-budgeted) and injects them as a DEDICATED
 # advisory context block on the system prompt ("Background memory for <resource>
-# (may be outdated — verify before acting):"), never mixed into history.
-# PR1 ships the seam + read path only; the write/reflection path (PR2) and the
-# durable Worker store (PR3) are gaps — see features/memory.md.
+# (may be outdated — verify before acting):"), never mixed into history. After
+# each reply, a run that did real work (used tools, or a thread ≥4 turns deep)
+# fires ONE async reflection call on `model` that distills ≤5 durable facts + 1
+# summary into the store (secret-redacted, confidence-gated, dedup/supersede on
+# write) — fire-and-forget, so it never delays or fails the reply. The store is
+# in-process until the durable Worker store (PR3) lands — see features/memory.md.
 # memory:
 #   enabled: false      # master switch (default false)
-#   scope: org          # which resource to scope to; PR1 implements `org` only
+#   scope: org          # which resource to scope to; `org` only for now
 #                       # (→ org:coreplanelabs). repo/channel are a PR4 gap.
 #   limit: 8            # max records retrieved/injected per request (default 8)
 #   maxTokens: 800      # hard token budget for the injected block (default 800)
+#   model: anthropic/claude-haiku-4-5
+#                       # <provider>/<model> for the reflection pass — pick a
+#                       # cheap tier. Absent → the run's own resolved model.

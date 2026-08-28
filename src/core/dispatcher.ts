@@ -13,7 +13,7 @@ import { decideReviewPost } from "./reviewPost.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
-import { memoryContextBlock, type MemoryStore } from "./memory/index.js";
+import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import type { RunEvent } from "./runEvents.js";
 import { defaultRunRegistry, type RunRegistry } from "./runRegistry.js";
@@ -77,12 +77,13 @@ export interface CoreDeps {
    */
   postReviewComment?: (target: ReviewCommentTarget, body: string) => Promise<void>;
   /**
-   * Cross-session memory store (Area 7c, #85). Read only in PR1: when
-   * `config.memory.enabled` is true the dispatcher retrieves scope-relevant
-   * records from this store and injects them as an advisory context block
-   * before the model turn. When memory is disabled (the default) a
-   * NullMemoryStore is used regardless, so model input is byte-identical to
-   * memory-off. Injectable for tests; the durable WorkerMemoryStore is PR3.
+   * Cross-session memory store (Area 7c, #85). When `config.memory.enabled`
+   * is true the dispatcher retrieves scope-relevant records from this store
+   * and injects them as an advisory context block before the model turn, and
+   * after the reply a background reflection pass writes distilled records back
+   * to it. When memory is disabled (the default) a NullMemoryStore is used
+   * regardless, so model input is byte-identical to memory-off and nothing is
+   * written. Injectable for tests; the durable WorkerMemoryStore is PR3.
    */
   memory?: MemoryStore;
   /**
@@ -107,6 +108,7 @@ export function activeRunCount(): number {
 }
 
 export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO): Promise<void> {
+  let counted = false; // whether this dispatch holds an activeRuns slot
   try {
     // Config commands are answered inline, never sent to a model.
     const configReply = handleConfigCommand(deps.config, msg);
@@ -331,8 +333,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     };
     // Live run-visibility (Area 2): each tool call/result refreshes the card
     // immediately, so activity is visible without waiting for the heartbeat.
+    let toolCalls = 0; // "did real work" signal for the memory reflection gate
     const onEvent = (e: RunEvent) => {
       registry.publish(run.id, e); // feed the external live-view stream
+      if (e.type === "tool_call") toolCalls++;
       lastToolAt = Date.now();
       lastActivity =
         e.type === "tool_call" ? `→ ${e.summary}` : `${e.ok ? "✓" : "✗"} ${e.tool}: ${e.summary}`;
@@ -348,7 +352,13 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // can always tell the difference.
     const heartbeat = setInterval(() => status.update(currentFrame()), 5000);
 
+    // Counted in flight from here until the post-run steps (reply, review
+    // post, memory reflection scheduling) have run — decremented in the
+    // outer finally — so the shutdown drain can never observe "0 runs, 0
+    // reflections" in the window between the run loop ending and the
+    // reflection being scheduled.
     activeRuns++;
+    counted = true;
     let answer: string;
     try {
       answer = await runAgent({
@@ -365,7 +375,6 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       await status.done({ title: title("❌"), detail: checklist });
       throw err;
     } finally {
-      activeRuns--;
       clearInterval(heartbeat);
       registry.finish(run.id); // close the live-view stream; start its TTL
     }
@@ -373,6 +382,25 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     console.log(`[done] ${msg.threadKey} ${answer.length} chars`);
     await status.done({ title: title("✅"), detail: checklist });
     await sendAnswer(deps, io, msg.threadKey, { provider, model, maxTokens: agent.maxTokens }, answer);
+
+    // Cross-session memory (Area 7c, #85) — WRITE path. AFTER the reply has
+    // landed, distill this run into memory records: fire-and-forget (tracked
+    // only for the shutdown drain), so its latency/failures never reach the
+    // user; gated on memory.enabled (default off → nothing happens) and on the
+    // run having done real work (tools used, or a long thread). Fast paths
+    // above returned before this point and never reflect.
+    scheduleReflection({
+      cfg: deps.config.config.memory,
+      store: deps.memory,
+      providers: deps.providers,
+      runModelRef: resolved.modelRef,
+      gate: { toolCalls, historyTurns: history.length },
+      threadKey: msg.threadKey,
+      runId: run.id,
+      history,
+      request: directives.text,
+      answer,
+    });
 
     // Deterministic review post-step (issue #69): a `review` run against a
     // resolved PR posts its findings back to that PR by default — no need to
@@ -398,6 +426,8 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     await io.reply(`⚠️ ${errMsg}`).catch(() => {});
+  } finally {
+    if (counted) activeRuns--;
   }
 }
 
