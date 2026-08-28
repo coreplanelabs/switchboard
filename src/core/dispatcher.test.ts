@@ -931,7 +931,9 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     const deps = makeDeps(REMOTE_YAML_FIXTURE, provider); // no resident configured
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:coding fix the login bug in acme/api", "slack:UADMIN"), io);
-    expect(provider.requests[0].system).toBe(AGENTS.coding.system);
+    const system = provider.requests[0].system ?? "";
+    expect(system).toContain(AGENTS.coding.system);
+    expect(system).not.toContain(AGENTS.coding.residentSystem!);
   });
 });
 
@@ -1149,7 +1151,9 @@ describe("cross-session memory (Area 7c, #85)", () => {
     await dispatch(makeDeps(YAML_FIXTURE, provider), msg(ask), fakeIO().io);
     const sys = provider.requests[0].system;
     expect(sys).not.toContain("Background memory");
-    expect(sys!.startsWith("You are Switchboard")).toBe(true); // just the agent's own prompt
+    // The config block + the agent's own prompt, nothing else ahead of them.
+    expect(sys!.startsWith("Switchboard runtime config")).toBe(true);
+    expect(sys).toContain(AGENTS.general.system);
   });
 
   it("enabled with a seeded store prepends the advisory block, preserving the agent prompt", async () => {
@@ -1468,5 +1472,120 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     await dispatch(deps, msg("help"), fakeIO(longHistory).io);
     await drainReflections();
     expect(requests).toHaveLength(0);
+  });
+});
+
+// Feature: features/routing-and-config.md behavior 8 — config awareness. The
+// regression: asked "what are your settings, can I tune them?", the toolless
+// general agent answered "stateless, no per-user/per-channel tuning" — false;
+// the config system existed, the model was simply never told. Every run's
+// system prompt now carries the RESOLVED agent/model/scope and how to tune it.
+describe("config awareness in the system prompt", () => {
+  const CHANNEL_FORCED_YAML =
+    YAML_FIXTURE +
+    `
+channels:
+  "slack:CX":
+    agent: review
+`;
+
+  it("a default dispatch names the resolved agent+model and says config is tunable", async () => {
+    const provider = capturingProvider();
+    await dispatch(makeDeps(YAML_FIXTURE, provider), msg("what are your current settings?"), fakeIO().io);
+    const sys = provider.requests[0].system ?? "";
+    expect(sys).toContain("agent `general`");
+    expect(sys).toContain("model `anthropic/general-model`");
+    expect(sys).toMatch(/using defaults/i);
+    expect(sys).toContain("`config set me");
+    expect(sys).toContain("`config show`");
+    // Rides ahead of the agent's own instructions, exactly once.
+    expect(sys.indexOf("Switchboard runtime config")).toBeLessThan(sys.indexOf("You are Switchboard"));
+    expect(sys.match(/Switchboard runtime config/g)).toHaveLength(1);
+    expect(sys).toContain(AGENTS.general.system);
+  });
+
+  it("a `config set me` override is reflected as the actual resolved model on the next run", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("config set me model=anthropic/my-model"), io);
+    expect(replies[0]).toMatch(/Updated your scope/);
+    expect(provider.requests).toHaveLength(0); // config commands never reach a model
+
+    await dispatch(deps, msg("what model are you?"), fakeIO().io);
+    const sys = provider.requests[0].system ?? "";
+    expect(provider.requests[0].model).toBe("my-model");
+    expect(sys).toContain("model `anthropic/my-model`");
+    expect(sys).toContain("user override: model `anthropic/my-model`");
+    expect(sys).not.toMatch(/using defaults/i);
+  });
+
+  it("a channel-forced agent is reported as a channel override with the agent that actually ran", async () => {
+    const provider = capturingProvider();
+    await dispatch(makeDeps(CHANNEL_FORCED_YAML, provider), msg("hello"), fakeIO().io);
+    const sys = provider.requests[0].system ?? "";
+    expect(provider.requests[0].model).toBe("review-model");
+    expect(sys).toContain("agent `review`");
+    expect(sys).toContain("model `anthropic/review-model`");
+    expect(sys).toContain("channel override: agent `review`");
+    expect(sys).toContain(AGENTS.review.system);
+  });
+
+  it("per-message agent:/model: directives are reflected as the resolved state, attributed to the message", async () => {
+    const provider = capturingProvider();
+    await dispatch(
+      makeDeps(YAML_FIXTURE, provider),
+      msg("agent:review model:anthropic/x-model what are you running on?"),
+      fakeIO().io,
+    );
+    const sys = provider.requests[0].system ?? "";
+    expect(provider.requests[0].model).toBe("x-model");
+    expect(sys).toContain("agent `review`");
+    expect(sys).toContain("model `anthropic/x-model`");
+    expect(sys).toMatch(/this message's `agent:review model:anthropic\/x-model` directive/i);
+    expect(sys).not.toContain("general-model"); // never the default when a directive won
+  });
+
+  it("a sticky thread directive is attributed to the thread, not this message", async () => {
+    const provider = capturingProvider();
+    const history: HistoryItem[] = [
+      { role: "user", text: "agent:review look at this" },
+      { role: "assistant", text: "looked" },
+    ];
+    await dispatch(makeDeps(YAML_FIXTURE, provider), msg("and now?"), fakeIO(history).io);
+    const sys = provider.requests[0].system ?? "";
+    expect(sys).toContain("agent `review`");
+    expect(sys).toMatch(/`agent:review` directive earlier in this thread/i);
+    expect(sys).not.toMatch(/this message's/i);
+  });
+
+  it("channel-config gating is stated per the invoking user", async () => {
+    const gatedYaml = YAML_FIXTURE.replace("permissions:\n", "permissions:\n  channelConfig: []\n");
+    const user = capturingProvider();
+    await dispatch(makeDeps(gatedYaml, user), msg("hi"), fakeIO().io);
+    expect(user.requests[0].system).toMatch(/config set channel[^\n]*restricted for this user/i);
+
+    const admin = capturingProvider();
+    await dispatch(makeDeps(gatedYaml, admin), msg("hi", "slack:UADMIN"), fakeIO().io);
+    expect(admin.requests[0].system).not.toMatch(/restricted for this user/i);
+  });
+
+  it("does not regress the memory or skills blocks: memory still leads, skills still trail", async () => {
+    const provider = capturingProvider();
+    const deps: CoreDeps = {
+      ...makeDeps(MEMORY_ON_YAML, provider),
+      memory: new InMemoryMemoryStore([memRecord()]),
+      skills: skillStore(),
+    };
+    await dispatch(deps, msg("agent:review what is the deploy command?", "slack:UADMIN"), fakeIO().io);
+    const sys = provider.requests[0].system ?? "";
+    const iMem = sys.indexOf("Background memory");
+    const iCfg = sys.indexOf("Switchboard runtime config");
+    const iAgent = sys.indexOf(AGENTS.review.system);
+    const iSkills = sys.indexOf("use_skill");
+    expect(iMem).toBe(0);
+    expect(iCfg).toBeGreaterThan(iMem);
+    expect(iAgent).toBeGreaterThan(iCfg);
+    expect(iSkills).toBeGreaterThan(iAgent);
   });
 });

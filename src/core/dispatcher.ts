@@ -1,4 +1,5 @@
 import type { ConfigStore, Scope } from "../config.js";
+import { configAwarenessBlock } from "./configAwareness.js";
 import { AGENTS, getAgent } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
@@ -276,13 +277,30 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const skillsBlock = deps.skills ? skillGuidanceBlock(deps.skills, agent.name) : undefined;
     const withSkills = skillsBlock ? `${baseSystem ?? agent.system}\n\n${skillsBlock}` : baseSystem;
 
-    // Fold the memory block onto the FRONT of the effective system prompt (a
-    // dedicated context segment, ahead of the agent's own instructions). With no
-    // block (memory off, or nothing matched) `system` stays exactly `withSkills`
-    // — the byte-identical, zero-behavior-change path. `runAgent` falls back to
-    // `agent.system` when `system` is undefined, so when we DO prepend a block we
-    // resolve the base ourselves (`withSkills ?? agent.system`) to preserve it.
-    const system = memoryBlock ? `${memoryBlock}\n\n${withSkills ?? agent.system}` : withSkills;
+    // Config awareness (routing-and-config behavior 8): tell the model the
+    // RESOLVED agent/model/scope of this very run and how users tune it, so no
+    // agent can confabulate "I'm stateless / nothing is tunable". Built from
+    // the same `resolved`/`directives`/`sticky` values that selected the run,
+    // so it can never describe a different state than the one executing.
+    // Universal (every agent, every turn), a few lines, names only.
+    const scopes = deps.config.scopes(msg.channelId, msg.userId);
+    const configBlock = configAwarenessBlock({
+      agentName: agent.name,
+      modelRef: resolved.modelRef,
+      channel: scopes.channel,
+      user: scopes.user,
+      messageDirective: { agent: directives.agent, model: directives.model },
+      threadDirective: { agent: sticky.agent, model: sticky.model },
+      canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
+    });
+
+    // Effective system prompt order: memory (advisory context, leads when
+    // present) → config block → the agent's own instructions (+ skills). The
+    // memory block is absent with memory off (default), keeping the memory-off
+    // request byte-identical to a NullMemoryStore run.
+    const system = [memoryBlock, configBlock, withSkills ?? agent.system]
+      .filter((part): part is string => Boolean(part))
+      .join("\n\n");
 
     const label = `*${agent.name}* on \`${resolved.modelRef}\`` + (note ? ` · ${note}` : "");
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
