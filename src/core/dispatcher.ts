@@ -635,10 +635,27 @@ function compactUrl(url: string): string {
  *  mrkdwn a Slack review request carries (`<https://github.com/…/pull/41|…>`)
  *  would otherwise be sliced mid-URL by the snippet budget. */
 function humanizeLinks(text: string): string {
-  return text
-    .replace(/<([^<>|\s]+)\|([^<>]*)>/g, (_m, url: string, label: string) => (label.trim() ? label : compactUrl(url)))
-    .replace(/<([a-z][a-z0-9+.-]*:\/\/[^<>\s]+)>/gi, (_m, url: string) => compactUrl(url))
-    .replace(/\bhttps?:\/\/[^\s<>"']+/gi, (url) => compactUrl(url));
+  return (
+    text
+      // Slack mentions: `<@U…|name>` / `<#C…|name>` / `<!subteam^S…|@eng>` keep
+      // their label; label-less ones become a readable stub rather than a raw id.
+      .replace(/<@[^<>|\s]+\|([^<>]*)>/g, (_m, label: string) => `@${label.replace(/^@/, "")}`)
+      .replace(/<@[^<>\s]+>/g, "@user")
+      .replace(/<#[^<>|\s]+\|([^<>]*)>/g, (_m, label: string) => `#${label.replace(/^#/, "")}`)
+      .replace(/<#[^<>\s]+>/g, "#channel")
+      .replace(/<!(?:here|channel|everyone)(?:\|[^<>]*)?>/g, (m) => `@${/here|channel|everyone/.exec(m)![0]}`)
+      .replace(/<!subteam\^[^<>|\s]+\|([^<>]*)>/g, (_m, label: string) => `@${label.replace(/^@/, "")}`)
+      .replace(/<!subteam\^[^<>\s]+>/g, "@group")
+      // Slack links: `<url|label>` → label (or the compacted url when empty), `<url>` → url.
+      .replace(/<([^<>|\s]+)\|([^<>]*)>/g, (_m, url: string, label: string) => (label.trim() ? label : compactUrl(url)))
+      .replace(/<([a-z][a-z0-9+.-]*:\/\/[^<>\s]+)>/gi, (_m, url: string) => compactUrl(url))
+      // Bare URLs: trailing sentence punctuation (`…/pull/12,` / `…/a).`) belongs
+      // to the prose, not the url, so it is left in place.
+      .replace(/\bhttps?:\/\/[^\s<>"']+/gi, (url) => {
+        const trail = /[)\].,;:!?'"]+$/.exec(url)?.[0] ?? "";
+        return compactUrl(url.slice(0, url.length - trail.length)) + trail;
+      })
+  );
 }
 
 /** A short, quoted snippet of the request text for a run label: links
@@ -650,8 +667,11 @@ function textSnippet(text: string): string | undefined {
   if (!collapsed) return undefined;
   // First sentence, when it ends within the budget AND there is more after it.
   // `#41` / `example.com/x` must not count as a sentence end, so a period only
-  // ends a sentence when followed by whitespace or the end of the text.
-  const end = collapsed.slice(0, SNIPPET_MAX + 1).search(/[.!?](?=\s|$)/);
+  // ends a sentence when followed by whitespace. (No `$` alternative: it would
+  // match the end of the SLICE, turning a dot at the budget edge inside a token
+  // into a false sentence end. A dot ending the whole text needs no sentence
+  // cut — the "whole thing fits" branch below covers it.)
+  const end = collapsed.slice(0, SNIPPET_MAX + 1).search(/[.!?](?=\s)/);
   if (end !== -1 && end + 1 < collapsed.length) return `"${collapsed.slice(0, end)}…"`;
   // Otherwise the whole thing if it fits …
   if (collapsed.length <= SNIPPET_MAX) return `"${collapsed}"`;
