@@ -1,0 +1,48 @@
+{
+  // ---------------------------------------------------------------------------
+  // agent-env-bootstrap manifest — 1Password references for the DOWNSTREAM
+  // services' UAT environment variables (GitHub #72).
+  //
+  // What this is for: when the switchboard agent works on a downstream service,
+  // its execution environment (the shell where its `bash` tool runs) needs that
+  // service's env vars so the real toolchain works — running tests, a deploy to
+  // that service's UAT, code generation. This manifest maps, PER ENVIRONMENT and
+  // PER DOWNSTREAM SERVICE, each env-var NAME to a 1Password reference:
+  // op://<vault>/<item>/<field>. The tool reads these refs with a READ-ONLY
+  // service account and materializes NAME=value into the agent's env (a
+  // chmod-600 file the toolchain sources). It NEVER hard-codes vault contents —
+  // you fill in the refs below.
+  //
+  // These are DOWNSTREAM-service UAT creds — NOT switchboard's own Worker
+  // secrets. (Provisioning switchboard's Workers was a separate, closed effort.)
+  //
+  // Safety posture (read carefully):
+  //   - UAT ONLY. The tool refuses any environment except those in its
+  //     allowlist (currently ["uat"]) BEFORE reading or writing anything, so a
+  //     prod section here could never be materialized even by accident.
+  //   - The REAL guard is operational: the OP_SERVICE_ACCOUNT_TOKEN you export
+  //     MUST belong to a 1Password service account that is READ-ONLY and scoped
+  //     to the UAT vault only. Then the agent can only ever obtain UAT creds —
+  //     never prod — regardless of what this file says.
+  //   - Do NOT add a "prod" section. There is intentionally no prod path here.
+  //
+  // Fill in every "REPLACE-ME-*" placeholder with your real vault/item/field.
+  // Add one block per downstream service the agent works on.
+  // ---------------------------------------------------------------------------
+
+  "uat": {
+    // ---- example downstream service: replace "example-service" with the real
+    //      service name you pass to --service, and set each ref. ----
+    "example-service": {
+      "DATABASE_URL": "op://REPLACE-ME-UAT-VAULT/example-service-uat/database-url",
+      "REDIS_URL": "op://REPLACE-ME-UAT-VAULT/example-service-uat/redis-url",
+      "STRIPE_API_KEY": "op://REPLACE-ME-UAT-VAULT/example-service-uat/stripe-api-key",
+      "SERVICE_BASE_URL": "op://REPLACE-ME-UAT-VAULT/example-service-uat/base-url"
+    }
+
+    // ---- add more services here, e.g.:
+    // "checkout": {
+    //   "REDIS_URL": "op://REPLACE-ME-UAT-VAULT/checkout-uat/redis-url"
+    // }
+  }
+}
