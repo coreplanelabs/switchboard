@@ -25,8 +25,8 @@ degraded — instead of shipped.
    not silently stripped, so the self-heal loop gets corrective feedback on a
    misnamed field (e.g. `txt` for `text`). Sane **upper bounds** reject
    pathological input (→ self-heal, then fallback) rather than accept it: any
-   text/code/label string ≤ 12000 chars, url ≤ 2048, ≤ 100 bullet items, ≤ 50
-   blocks.
+   text/code/label string ≤ 12000 chars, a code fence's `language` tag ≤ 40 (a
+   short identifier, not prose), url ≤ 2048, ≤ 100 bullet items, ≤ 50 blocks.
 2. **`ChannelFormatter` seam — ≥2 implementations** (invariant 2).
    `format(message) → native payload string`.
    - `SlackFormatter` (structured → Slack mrkdwn): headings → `*bold*` (Slack has
@@ -77,7 +77,16 @@ formatters behind the flag. Not yet done:
   instructions from agent prompts (the issue's end state). The retry/self-heal
   infrastructure is built to serve that path unchanged.
 - **The status card** still renders via `StatusUpdate`/`render()` in the Slack
-  adapter; only the final reply is structured so far.
+  adapter (not through the block schema); only the final reply is *structured* so
+  far. Its Block Kit `mrkdwn` **is** now escaped, though: `render()` runs
+  `escapeMrkdwn` over both `frame.title` (the run label) and `frame.detail` (tool-
+  output summaries + the agent's free-text `update_status`) before they reach the
+  `mrkdwn` text fields and the top-level `text` fallback, so the injection class
+  (`<!channel>`/`<@U…>`/forged `<url|label>`) is closed across the bot's Slack
+  output, not just the structured-answer path. The raw detail is sliced to a
+  conservative length **before** escaping (escaping can expand up to 5×) and the
+  escaped result is hard-capped, so it always stays under Slack's ~3000-char
+  section limit.
 - **Slack Block Kit payloads.** `ChannelFormatter.format` returns a string
   (mrkdwn) for now; a richer `object[]` Block Kit payload is future work.
 - **Rich inline spans** (bold/italic *inside* a paragraph). Paragraph text is
@@ -99,6 +108,8 @@ formatters behind the flag. Not yet done:
 | Strict schema rejects an unknown key in a block and at the root (self-heal feedback, not silent strip) | `[unit]` `src/core/structuredMessage.test.ts::…::rejects an unknown key inside a block (strict) / rejects an unknown top-level key (strict root)` |
 | Upper bounds reject an oversized bullets array, an oversized string, and too many blocks | `[unit]` `src/core/structuredMessage.test.ts::…::rejects an oversized bullets array… / rejects an oversized string… / rejects too many blocks…` |
 | `SlackFormatter` escapes untrusted content: `<!channel>`/`<@U…>`/`<`,`>`,`&` in text neutralized; link url percent-encoded so its `\|` can't forge a separator; code with embedded ```` ``` ```` can't close the outer fence | `[unit]` `src/channels/slackFormatter.test.ts::SlackFormatter::escapes untrusted content (no injection)::*` |
+| Status card `render()` escapes `frame.title` + `frame.detail` (`<!channel>`/`<@U…>`/`<url|label>` neutralized in the block `mrkdwn` and the top-level `text`); intentional `*bold*`/`` `code` `` in the title survives; escaped detail stays under Slack's ~3000 section cap for adversarial input | `[unit]` `src/channels/slack.test.ts::render (status card mrkdwn escaping)::*` |
+| Code fence `language` bounded to ≤ 40 chars (rejects 41, accepts 40); link url bound proven at the edge (rejects 2049, accepts 2048) | `[unit]` `src/core/structuredMessage.test.ts::…::rejects a code block with an oversized language… / accepts a code block with a language at the bound… / rejects a link url over 2048 chars…` |
 | `mdToMrkdwn` link rendering escapes label + percent-encodes url (same gap, shared helpers) | `[unit]` `src/channels/mrkdwn.test.ts::mdToMrkdwn::escapes link labels and percent-encodes urls…` |
 | `PlainTextFormatter` renders every block type (and multi-block separation) | `[unit]` `src/core/structuredMessage.test.ts::PlainTextFormatter::*` |
 | `SlackFormatter` renders every block type to correct mrkdwn (≥2 impls exercised) | `[unit]` `src/channels/slackFormatter.test.ts::SlackFormatter::*` |

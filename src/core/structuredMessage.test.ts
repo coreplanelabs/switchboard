@@ -114,6 +114,32 @@ describe("validateStructuredMessage (zod schema)", () => {
     const result = validateStructuredMessage({ blocks });
     expect(result.ok).toBe(false);
   });
+
+  // A code language tag is a short identifier, not prose — bounded like the rest.
+  it("rejects a code block with an oversized language (> 40 chars)", () => {
+    const result = validateStructuredMessage({
+      blocks: [{ type: "code", code: "x=1", language: "x".repeat(41) }],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("accepts a code block with a language at the bound (40 chars)", () => {
+    const result = validateStructuredMessage({
+      blocks: [{ type: "code", code: "x=1", language: "x".repeat(40) }],
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  // The url ≤ 2048 bound: 2048 accepted, 2049 rejected.
+  it("rejects a link url over 2048 chars and accepts one exactly at the bound", () => {
+    const base = "https://e.co/"; // 13 chars
+    const at = base + "a".repeat(2048 - base.length);
+    const over = base + "a".repeat(2049 - base.length);
+    expect(at.length).toBe(2048);
+    expect(over.length).toBe(2049);
+    expect(validateStructuredMessage({ blocks: [{ type: "link", url: at }] }).ok).toBe(true);
+    expect(validateStructuredMessage({ blocks: [{ type: "link", url: over }] }).ok).toBe(false);
+  });
 });
 
 describe("PlainTextFormatter", () => {

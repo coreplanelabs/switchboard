@@ -25,6 +25,9 @@ const MAX_TEXT = 12_000;
 const MAX_URL = 2048;
 const MAX_BULLETS = 100;
 const MAX_BLOCKS = 50;
+// A code fence's language tag is a short identifier ("bash", "typescript"), never
+// prose — bound it like the other fields so an unbounded string can't ride in.
+const MAX_LANGUAGE = 40;
 
 // Every block object is `.strict()`: an unknown/extra key is REJECTED, not
 // silently stripped, so the self-heal loop gets corrective feedback on a misnamed
@@ -54,7 +57,7 @@ const codeBlock = z
   .object({
     type: z.literal("code"),
     code: z.string().max(MAX_TEXT),
-    language: z.string().optional(),
+    language: z.string().max(MAX_LANGUAGE).optional(),
   })
   .strict();
 
