@@ -29,6 +29,13 @@ const MAX_TRANSCRIPT_CHARS = 24_000;
 const EXISTING_LIMIT = 8;
 /** Output budget for the extractor reply (≤5 short facts + 1 summary as JSON). */
 const REFLECTION_MAX_TOKENS = 1024;
+/** Bound on the existing-records lookup query. The Memory Worker caps `query`
+ *  at MAX_QUERY_CHARS (deploy/cloudflare-memory/worker.ts); an over-long query
+ *  400s, the store swallows non-ok to [], and reflection then runs blind (never
+ *  dedups/supersedes). 2000 sits well under that cap and loses nothing —
+ *  retrieval only tokenizes the query for an FTS prefilter, so truncation is
+ *  semantically fine. */
+const MAX_RETRIEVE_QUERY_CHARS = 2000;
 
 /** Signals that a run did real work worth distilling. */
 export interface ReflectGateInput {
@@ -180,7 +187,7 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
   try {
     const existing = await deps.store.retrieve({
       scopeKey: deps.scopeKey,
-      query: `${deps.request} ${deps.answer}`,
+      query: `${deps.request} ${deps.answer}`.slice(0, MAX_RETRIEVE_QUERY_CHARS),
       limit: EXISTING_LIMIT,
     });
     const text = buildReflectionInput({ history: deps.history, request: deps.request, answer: deps.answer, existing });

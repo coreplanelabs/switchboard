@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CompletionRequest, CompletionResult, Provider } from "../../providers/types.js";
 import type { HistoryItem } from "../types.js";
 import { InMemoryMemoryStore } from "./stores.js";
-import type { MemoryRecord } from "./types.js";
+import type { MemoryQuery, MemoryRecord, MemoryStore } from "./types.js";
 import {
   buildReflectionInput,
   MAX_REFLECTION_FACTS,
@@ -322,6 +322,24 @@ describe("reflect (one extractor call → store.write)", () => {
     const store = new InMemoryMemoryStore();
     await reflect({ ...base, provider, store });
     expect(await store.retrieve({ scopeKey: SCOPE, query: "deploy ship", limit: 10 })).toEqual([]);
+  });
+
+  it("bounds the existing-records lookup query so a long answer can never overrun the Worker's query cap", async () => {
+    // The Worker caps `query` at MAX_QUERY_CHARS; an over-long query 400s and
+    // the store swallows it to [], so reflection would run blind. Regression
+    // guard: a substantive answer must still produce a bounded retrieve query.
+    const queries: string[] = [];
+    const store: MemoryStore = {
+      async retrieve(q: MemoryQuery): Promise<MemoryRecord[]> {
+        queries.push(q.query);
+        return [];
+      },
+      async write(): Promise<void> {},
+    };
+    const provider = fakeProvider(goodReply);
+    await reflect({ ...base, answer: "x".repeat(10_000), provider, store });
+    expect(queries).toHaveLength(1);
+    expect(queries[0].length).toBeLessThanOrEqual(2000);
   });
 });
 
