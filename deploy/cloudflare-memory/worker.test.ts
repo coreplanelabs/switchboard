@@ -56,12 +56,34 @@ describe("auth + routing", () => {
     const big = JSON.stringify({ scopeKey: "org:a", records: [cand("x".repeat(600 * 1024))] });
     const res = await SELF.fetch(`${BASE}/write`, { method: "POST", headers: AUTH, body: big });
     expect(res.status).toBe(413);
-    // A bodiless POST carries Content-Length: 0 in this runtime — inside the
-    // fence, so it falls through to the JSON parser's 400. (A truly undeclared
-    // length can't be constructed with fetch here; the fence treats it as too
-    // large by code inspection.)
+    // A bodiless POST declares no Content-Length in this runtime → undeclared
+    // → 413 at the fence, before the parser is ever reached.
     const empty = await SELF.fetch(`${BASE}/retrieve`, { method: "POST", headers: AUTH });
-    expect(empty.status).toBe(400);
+    expect(empty.status).toBe(413);
+  });
+
+  it("a streamed body with NO Content-Length is 413 — never parsed (regression: Number(null) is 0)", async () => {
+    // A chunked/streamed request declares no length. Even a small, well-formed
+    // body must be refused: the fence can't know its size up front and the
+    // only legitimate client always declares one.
+    const small = JSON.stringify({ scopeKey: scope(), query: "deploy", limit: 8 });
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(small));
+        c.close();
+      },
+    });
+    const res = await SELF.fetch(`${BASE}/retrieve`, {
+      method: "POST",
+      headers: AUTH,
+      body: stream,
+      // @ts-expect-error duplex is required for streaming request bodies but not yet in lib types
+      duplex: "half",
+    });
+    expect(res.status).toBe(413);
+    // (A blank `Content-Length: ""` is handled the same way in code, but fetch
+    // treats Content-Length as a forbidden header and replaces it with the real
+    // length, so that case cannot be constructed from a test client.)
   });
 
   it("rejects malformed bodies with 400 and a reason", async () => {
