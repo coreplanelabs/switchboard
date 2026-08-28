@@ -15,6 +15,13 @@ import type { MemoryCandidate, MemoryQuery, MemoryRecord, MemoryStore } from "./
  *  reply. */
 export const MEMORY_WORKER_TIMEOUT_MS = 5_000;
 
+/** Belt-and-suspenders clamp on the retrieve `query`. The Worker rejects a
+ *  query over its MAX_QUERY_CHARS (4000) cap with a 400, which degrades
+ *  retrieval to "no memory". Clamping just under that cap here means no caller
+ *  can ever overrun it, whatever it passes. Retrieval only tokenizes the query
+ *  for an FTS prefilter, so the tail we drop is not needed. */
+const MAX_RETRIEVE_QUERY_CHARS = 3900;
+
 export interface WorkerMemoryStoreOptions {
   /** Base URL of the Memory Worker (e.g. https://switchboard-memory.coreplanelabs.dev). */
   baseUrl: string;
@@ -41,9 +48,12 @@ export class WorkerMemoryStore implements MemoryStore {
    *  transport, timeout) degrades to "nothing remembered" with a warning — it
    *  must never fail or delay the run beyond the timeout. */
   async retrieve(q: MemoryQuery): Promise<MemoryRecord[]> {
+    // Clamp the query under the Worker's cap so no caller can 400 this retrieve
+    // into a "no memory" degrade (see MAX_RETRIEVE_QUERY_CHARS).
+    const query = q.query.length > MAX_RETRIEVE_QUERY_CHARS ? q.query.slice(0, MAX_RETRIEVE_QUERY_CHARS) : q.query;
     let res: Response;
     try {
-      res = await this.post("/retrieve", q);
+      res = await this.post("/retrieve", { ...q, query });
     } catch (err) {
       this.warn(`worker /retrieve failed (${err instanceof Error ? err.message : String(err)}); continuing without memory`);
       return [];

@@ -371,7 +371,11 @@ export default {
       if (!parsed.ok) return json({ error: parsed.error }, 400);
       const { scopeKey, query, limit } = parsed.value;
       const stub = env.MEMORY.get(env.MEMORY.idFromName(scopeKey));
-      return json({ records: await stub.retrieve(scopeKey, query, limit) });
+      const records = await stub.retrieve(scopeKey, query, limit);
+      // Observability (counts + scopeKey only, never record content/PII): makes
+      // `wrangler tail switchboard-memory` show retrieve traffic and depth.
+      console.log(`[retrieve] ${scopeKey} -> ${records.length} records`);
+      return json({ records });
     }
 
     const parsed = parseWrite(body);
@@ -379,6 +383,9 @@ export default {
     const { scopeKey, records } = parsed.value;
     const stub = env.MEMORY.get(env.MEMORY.idFromName(scopeKey));
     const counts = await stub.write(scopeKey, records);
+    // Observability (counts + scopeKey only, never record content/PII): confirms
+    // the reflection write fired and how many candidates it carried.
+    console.log(`[write] ${scopeKey} <- ${records.length} candidates`);
     return json({ ok: true, ...counts });
   },
 } satisfies ExportedHandler<Env>;
