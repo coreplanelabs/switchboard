@@ -81,19 +81,33 @@ export function redactSecrets(text: string): string {
   return redactNamedAssignments(out);
 }
 
+// Terminal control sequences: CSI (`ESC [ … final`, covers SGR colors, cursor
+// moves, erase), OSC (`ESC ] … BEL|ST`, covers hyperlinks/titles), two-byte
+// ESC sequences, plus C0 controls other than \n and \t. Tool output from
+// vitest/git/npm carries these; a browser drops the ESC byte and shows the
+// bare `[32m` remainder, so strip the whole sequence before display.
+const ANSI_RE =
+  // eslint-disable-next-line no-control-regex
+  /\x1b\[[0-?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|[\x00-\x08\x0b-\x1f\x7f]/g;
+
+/** Remove terminal escape/control sequences, leaving printable text, `\n`, `\t`. */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, "");
+}
+
 /** Redact THEN cap — the correct order for a length-limited display string, so a
  *  secret near a truncation boundary can never be emitted as a raw fragment. */
 export function redactAndCap(text: string, cap = 200): string {
-  const redacted = redactSecrets(text);
+  const redacted = redactSecrets(stripAnsi(text));
   return redacted.length > cap ? `${redacted.slice(0, cap)}…` : redacted;
 }
 
 const SUMMARY_CAP = 200;
 
-/** One-line, redacted, length-capped summary of a tool's output for the run
+/** One-line, ANSI-stripped, redacted, length-capped summary of a tool's output for the run
  *  stream — the first non-empty line plus a size note. */
 export function summarizeToolResult(output: string): string {
-  const redacted = redactSecrets(output);
+  const redacted = redactSecrets(stripAnsi(output));
   const trimmed = redacted.trim();
   if (trimmed === "") return "(no output)";
   const firstLine = trimmed.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
