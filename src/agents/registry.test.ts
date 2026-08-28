@@ -135,3 +135,33 @@ describe("review post-step: prompts defer posting to the system (issue #69)", ()
     expect(AGENTS.review.system).toContain("gh pr comment");
   });
 });
+
+// Feature: features/agent-coding.md — every PR the coding agent opens carries a
+// rich, templated description BY DEFAULT (not on request). Both prompts must
+// contain the template's sections plus the rules that keep it honest.
+describe("coding prompts: templated PR description by default", () => {
+  const SECTIONS = [
+    "**TL;DR**",
+    "**What & why**",
+    "**Changes**",
+    "**Decisions**",
+    "**Risks & implications**",
+    "**Validation**",
+    "**How to review**",
+  ];
+
+  it("both coding prompts include every PR-description section", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      for (const section of SECTIONS) expect(sys, section).toContain(section);
+    }
+  });
+
+  it("both prompts state the rules that keep the description honest", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).toMatch(/for EVERY PR/); // default, not on request
+      expect(sys).toMatch(/unwrapped/i); // no hard line breaks
+      expect(sys).toMatch(/hyperlink/i); // link the triggering issue/request
+      expect(sys).toMatch(/never fabricate validation/i); // real results only
+    }
+  });
+});
