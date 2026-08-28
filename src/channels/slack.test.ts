@@ -117,6 +117,29 @@ describe("stripMention", () => {
   });
 });
 
+describe("stripMention — Slack app 'Sent using' footer", () => {
+  // Messages posted through a Slack app on a user's behalf (e.g. the Claude
+  // Slack plugin) carry a trailing "*Sent using* <@APP|Name>" line. It is
+  // platform chrome, not user text: a `repo onboard owner/name` followed by it
+  // must parse exactly like the bare command.
+  it("drops a trailing '*Sent using* <@APP|Name>' footer line", () => {
+    expect(stripMention(`<@${BOT}> repo onboard coreplanelabs/switchboard\n*Sent using* <@U0BJJMDUCKY|Claude>`, BOT)).toBe(
+      "repo onboard coreplanelabs/switchboard",
+    );
+  });
+
+  it("accepts the unbolded and label-less forms and surrounding whitespace", () => {
+    expect(stripMention(`<@${BOT}> repo list\n\nSent using <@U0BJJMDUCKY>  `, BOT)).toBe("repo list");
+  });
+
+  it("leaves 'Sent using' alone when it is part of the user's own text (not a trailing footer line)", () => {
+    expect(stripMention(`<@${BOT}> what does "Sent using" mean here?`, BOT)).toBe('what does "Sent using" mean here?');
+    expect(stripMention(`<@${BOT}> Sent using <@U0BJJMDUCKY> is the footer\nplease explain`, BOT)).toBe(
+      "Sent using <@U0BJJMDUCKY> is the footer\nplease explain",
+    );
+  });
+});
+
 // Feature: features/slack-channel.md — the adapter resolves human display names
 // for the channel + user (feeding IncomingMessage.channelName/userName for the
 // live-view run label). Best-effort and cached: one API call per new id, any
