@@ -339,7 +339,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       if (e.type === "tool_call") toolCalls++;
       lastToolAt = Date.now();
       lastActivity =
-        e.type === "tool_call" ? `→ ${e.summary}` : `${e.ok ? "✓" : "✗"} ${e.tool}: ${e.summary}`;
+        e.type === "tool_call"
+          ? `→ ${e.summary}`
+          : e.type === "tool_result"
+            ? `${e.ok ? "✓" : "✗"} ${e.tool}: ${e.summary}`
+            : `⏱ ${e.summary}`;
       console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
       status.update(currentFrame());
     };

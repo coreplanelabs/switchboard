@@ -1069,7 +1069,9 @@ describe("live run-view wiring (Area 2)", () => {
     await dispatch(deps, msg("hello there"), io);
 
     expect(log).toEqual(["create", "finish"]); // created before the run, finished after
-    expect(events.map((e) => e.type)).toEqual(["tool_call", "tool_result"]);
+    // The 1-turn general agent hits its turn budget here, so the runner's typed
+    // budget note (#84) also flows into the registry after the tool pair.
+    expect(events.map((e) => e.type)).toEqual(["tool_call", "tool_result", "run_note"]);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
 

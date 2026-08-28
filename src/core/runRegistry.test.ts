@@ -354,3 +354,22 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     expect(reg.listActive().map((r) => r.label)).toEqual(["x"]);
   });
 });
+
+describe("snapshot — token-gated read of a run's backlog (#84)", () => {
+  it("returns a copy of the backlog plus the finished flag; null for a bad token or unknown run", () => {
+    const reg = new RunRegistry({ genId: () => "r1", genToken: () => "tok" });
+    const { id, token } = reg.create();
+    const ev = { type: "tool_call", tool: "bash", summary: "$ ls", at: 5 } as const;
+    reg.publish(id, ev);
+    const live = reg.snapshot(id, token);
+    expect(live).toEqual({ events: [ev], finished: false });
+    // A copy: mutating it does not touch the registry's backlog.
+    live!.events.push({ type: "tool_call", tool: "bash", summary: "$ rm -rf", at: 6 });
+    expect(reg.snapshot(id, token)!.events).toHaveLength(1);
+
+    reg.finish(id);
+    expect(reg.snapshot(id, token)).toEqual({ events: [ev], finished: true });
+    expect(reg.snapshot(id, "wrong")).toBeNull();
+    expect(reg.snapshot("nope", token)).toBeNull();
+  });
+});

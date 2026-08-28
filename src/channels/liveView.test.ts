@@ -630,3 +630,94 @@ describe("createLiveViewHandler (node:http)", () => {
     }
   });
 });
+
+describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => {
+  // Feature: features/run-friction.md. Same capability-token gate as the page
+  // and the stream; a JSON diagnosis of the run's backlog (live or finished).
+  function fakeReqRes(method: string, url: string) {
+    const req = { method, url, headers: {}, on: () => {} };
+    let status = 0;
+    let outHeaders: Record<string, string> = {};
+    const chunks: string[] = [];
+    const res = {
+      writeHead: (s: number, h?: Record<string, string>) => {
+        status = s;
+        outHeaders = h ?? {};
+      },
+      write: (c: string) => void chunks.push(c),
+      end: (c?: string) => {
+        if (c) chunks.push(c);
+      },
+    };
+    return {
+      req: req as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[0],
+      res: res as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[1],
+      get status() {
+        return status;
+      },
+      get headers() {
+        return outHeaders;
+      },
+      body: () => chunks.join(""),
+    };
+  }
+
+  it("parseRunRoute matches the friction route", () => {
+    expect(parseRunRoute("/runs/abc123/friction")).toEqual({ id: "abc123", kind: "friction" });
+    expect(parseRunRoute("/runs/abc123/friction/")).toEqual({ id: "abc123", kind: "friction" });
+    expect(parseRunRoute("/runs/abc/friction/extra")).toBeNull();
+  });
+
+  it("404s for a wrong or missing token, revealing nothing", () => {
+    const reg = fixedRegistry();
+    const { id } = reg.create();
+    reg.publish(id, call("$ npm install"));
+    const handler = createLiveViewHandler(reg);
+    for (const url of [`/runs/${id}/friction?t=nope`, `/runs/${id}/friction`, `/runs/unknown/friction?t=x`]) {
+      const t = fakeReqRes("GET", url);
+      expect(handler(t.req, t.res)).toBe(true);
+      expect(t.status).toBe(404);
+      expect(t.body()).not.toContain("npm install");
+    }
+  });
+
+  it("returns the JSON diagnosis of a finished run's backlog (no-store, GET only)", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    reg.publish(id, { type: "tool_call", tool: "bash", summary: "$ npm install", at: 1_000 });
+    reg.publish(id, { type: "tool_result", tool: "bash", ok: true, summary: "added 200 packages", at: 61_000 });
+    reg.publish(id, { type: "tool_call", tool: "bash", summary: "$ npm test", at: 62_000 });
+    reg.publish(id, { type: "tool_result", tool: "bash", ok: false, summary: "2 failing", at: 63_000 });
+    reg.finish(id);
+    const handler = createLiveViewHandler(reg);
+    const t = fakeReqRes("GET", `/runs/${id}/friction?t=${token}`);
+    expect(handler(t.req, t.res)).toBe(true);
+    expect(t.status).toBe(200);
+    expect(t.headers["content-type"]).toContain("application/json");
+    expect(t.headers["cache-control"]).toBe("no-store");
+    const body = JSON.parse(t.body());
+    expect(body).toMatchObject({ id, finished: true });
+    expect(body.diagnosis.eventCount).toBe(4);
+    expect(body.diagnosis.byCategory.setup_install).toEqual({ count: 1, durationMs: 60_000 });
+    expect(body.diagnosis.byCategory.failed_tool.count).toBe(1);
+    expect(body.diagnosis.verdict).toMatch(/setup\/install/);
+
+    const post = fakeReqRes("POST", `/runs/${id}/friction?t=${token}`);
+    handler(post.req, post.res);
+    expect(post.status).toBe(405);
+  });
+
+  it("works mid-run too (finished:false) — a diagnosis so far, never an error", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    reg.publish(id, call("$ ls"));
+    const handler = createLiveViewHandler(reg);
+    const t = fakeReqRes("GET", `/runs/${id}/friction?t=${token}`);
+    handler(t.req, t.res);
+    expect(t.status).toBe(200);
+    const body = JSON.parse(t.body());
+    expect(body.finished).toBe(false);
+    // The in-flight call has no result yet; mid-run that is not a failure.
+    expect(body.diagnosis.findings).toEqual([]);
+  });
+});

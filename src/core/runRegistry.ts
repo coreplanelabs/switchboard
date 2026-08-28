@@ -237,6 +237,20 @@ export class RunRegistry {
     };
   }
 
+  /**
+   * Token-gated, read-only snapshot of a run's retained backlog plus whether it
+   * has finished — the input to the run-friction analyzer (#84) for a run that
+   * is still in the registry (live, or finished within the TTL). A COPY of the
+   * backlog, so callers can't reach the live array. Same constant-time gate as
+   * subscribe(); `null` for an unknown run or wrong token (caller → 404).
+   */
+  snapshot(id: string, token: string): { events: RunEvent[]; finished: boolean } | null {
+    this.sweep();
+    const run = this.validate(id, token);
+    if (!run) return null;
+    return { events: [...run.backlog], finished: run.finished };
+  }
+
   /** Live + finished-but-unevicted run count (observability / tests). */
   size(): number {
     this.sweep();
