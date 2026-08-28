@@ -87,6 +87,48 @@ describe("resolveGithubToken", () => {
     expect(JSON.parse(Buffer.from(payload, "base64url").toString())).toMatchObject({ iss: "12345" });
   });
 
+  it("mints a READ-scoped token with a least-privilege permissions subset", async () => {
+    configureApp();
+    const fetchMock = mockMint("ghs_read", 60 * 60_000);
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshModule();
+
+    expect(await mod.resolveGithubToken("read")).toBe("ghs_read");
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    // The read token requests read-only permissions — it physically cannot
+    // write (no comment/review/push) even though the sandbox has `gh`.
+    expect(JSON.parse(String(init.body))).toEqual({
+      permissions: { contents: "read", pull_requests: "read", metadata: "read" },
+    });
+    expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json");
+  });
+
+  it("the default (write) scope requests NO permissions restriction — the full grant", async () => {
+    configureApp();
+    const fetchMock = mockMint("ghs_write", 60 * 60_000);
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshModule();
+
+    expect(await mod.resolveGithubToken("write")).toBe("ghs_write");
+    expect(await mod.resolveGithubToken()).toBe("ghs_write"); // default === "write"
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1); // default shares the write cache slot
+  });
+
+  it("read and write tokens cache in separate slots (one mint per scope)", async () => {
+    configureApp();
+    const fetchMock = mockMint("ghs_scoped", 60 * 60_000);
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshModule();
+
+    await mod.resolveGithubToken("read");
+    await mod.resolveGithubToken("write");
+    await mod.resolveGithubToken("read");
+    await mod.resolveGithubToken("write");
+    expect(fetchMock).toHaveBeenCalledTimes(2); // one mint each, then cache hits
+  });
+
   it("re-mints when the cached token is within 5 minutes of expiry", async () => {
     configureApp();
     const fetchMock = mockMint("ghs_shortlived", 4 * 60_000); // < 5-min buffer
