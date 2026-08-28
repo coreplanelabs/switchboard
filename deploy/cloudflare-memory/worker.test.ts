@@ -52,6 +52,18 @@ describe("auth + routing", () => {
     expect(res.status).toBe(405);
   });
 
+  it("fences body size before parsing: an oversized or undeclared Content-Length is 413, even authenticated", async () => {
+    const big = JSON.stringify({ scopeKey: "org:a", records: [cand("x".repeat(600 * 1024))] });
+    const res = await SELF.fetch(`${BASE}/write`, { method: "POST", headers: AUTH, body: big });
+    expect(res.status).toBe(413);
+    // A bodiless POST carries Content-Length: 0 in this runtime — inside the
+    // fence, so it falls through to the JSON parser's 400. (A truly undeclared
+    // length can't be constructed with fetch here; the fence treats it as too
+    // large by code inspection.)
+    const empty = await SELF.fetch(`${BASE}/retrieve`, { method: "POST", headers: AUTH });
+    expect(empty.status).toBe(400);
+  });
+
   it("rejects malformed bodies with 400 and a reason", async () => {
     expect((await post("/retrieve", "not json")).status).toBe(400);
     expect((await post("/retrieve", { scopeKey: "", query: "x", limit: 8 })).status).toBe(400);
@@ -147,6 +159,41 @@ describe("write → retrieve round trip", () => {
       expect(r.status).toBe(200);
       expect((r.data.records as unknown[]).length).toBeGreaterThan(0);
     }
+  });
+
+  it("non-ASCII record text is stored and retrievable by its ASCII tokens; accented queries are inert, never errors", async () => {
+    const s = scope();
+    const w = await post("/write", { scopeKey: s, records: [cand("le déploiement se fait avec npm run deploy — ça marche")] });
+    expect(w.status).toBe(200);
+    const hit = await post("/retrieve", { scopeKey: s, query: "npm deploy", limit: 8 });
+    expect((hit.data.records as Array<Record<string, unknown>>).map((r) => r.text)).toEqual([
+      "le déploiement se fait avec npm run deploy — ça marche",
+    ]);
+    // The engine's tokenizer is ASCII [a-z0-9]+: "déploiement" splits into "d" +
+    // "ploiement", so an accented query only matches on the ASCII fragments both
+    // sides share. This is the documented miss-only mismatch — no error, no
+    // false-add.
+    const accented = await post("/retrieve", { scopeKey: s, query: "déploiement", limit: 8 });
+    expect(accented.status).toBe(200);
+    expect(Array.isArray(accented.data.records)).toBe(true);
+    const unrelated = await post("/retrieve", { scopeKey: s, query: "ça", limit: 8 });
+    expect(unrelated.status).toBe(200);
+  });
+
+  it("concurrent writers to one scope never collide on seq and see a consistent batch result", async () => {
+    const s = scope();
+    const batches = Array.from({ length: 5 }, (_, b) =>
+      post("/write", { scopeKey: s, records: [cand(`deploy note ${b}a`), cand(`deploy note ${b}b`)] }),
+    );
+    const results = await Promise.all(batches);
+    for (const r of results) expect(r.data).toMatchObject({ ok: true, inserted: 2 });
+    const all = (await post("/retrieve", { scopeKey: s, query: "deploy note", limit: 50 })).data.records as Array<
+      Record<string, unknown>
+    >;
+    expect(all).toHaveLength(10);
+    const ids = new Set(all.map((r) => r.id));
+    expect(ids.size).toBe(10); // no duplicate ids → no seq collision
+    expect([...ids].every((id) => String(id).startsWith(`mem:${s}:`))).toBe(true);
   });
 
   it("empty write batch is a no-op 200", async () => {

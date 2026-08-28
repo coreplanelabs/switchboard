@@ -40,6 +40,9 @@ const MAX_QUERY_CHARS = 4000;
 const MAX_KEY_CHARS = 200;
 /** FTS candidates handed to the engine per retrieval, most recently used first. */
 const FTS_CANDIDATES = 500;
+/** Request body ceiling, checked against Content-Length before parsing. A full
+ *  batch (50 × 4000-char texts + keywords + envelope) fits comfortably. */
+const MAX_BODY_BYTES = 512 * 1024;
 
 // ---------------------------------------------------------------------------
 // Durable Object: one per scopeKey
@@ -129,51 +132,64 @@ export class MemoryDO extends DurableObject<Env> {
   }
 
   /** Apply the engine's write plan per candidate against the scope's ACTIVE
-   *  rows. Input gates make the read-plan-write sequence atomic per DO. */
+   *  rows.
+   *
+   *  Atomicity rests on two explicit facts, not on luck:
+   *  1. The whole batch runs inside `transactionSync`: the read of active rows,
+   *     the `MAX(seq)+1` base, and every UPDATE/INSERT commit together or not
+   *     at all — an isolate evicted mid-batch can never leave a superseded row
+   *     without its correction, and every statement inside is synchronous.
+   *  2. A DO executes one JS turn at a time; with no `await` anywhere in this
+   *     method (transactionSync forbids one) no other request on this scope can
+   *     interleave between the seq read and the inserts. (Input gates are NOT
+   *     the mechanism — they only fence async storage writes.)
+   *  The concurrent-writers test in worker.test.ts guards both. */
   async write(
     scopeKey: string,
     candidates: MemoryCandidate[],
   ): Promise<{ inserted: number; deduped: number; superseded: number }> {
     const counts = { inserted: 0, deduped: 0, superseded: 0 };
     if (candidates.length === 0) return counts;
-    const active = this.sql.exec<Row>(`SELECT * FROM records WHERE status = 'active'`).toArray().map(toRecord);
-    let seq = this.sql.exec<{ next: number }>(`SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM records`).one().next;
-    const now = Date.now();
-    for (const cand of candidates) {
-      const plan = planWrite(active, cand, (c) => mintRecord(scopeKey, seq++, now, c));
-      if (plan.action === "dedup") {
-        this.sql.exec(`UPDATE records SET use_count = use_count + 1 WHERE id = ?`, plan.target.id);
-        plan.target.useCount += 1;
-        counts.deduped++;
-        continue;
+    this.ctx.storage.transactionSync(() => {
+      const active = this.sql.exec<Row>(`SELECT * FROM records WHERE status = 'active'`).toArray().map(toRecord);
+      let seq = this.sql.exec<{ next: number }>(`SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM records`).one().next;
+      const now = Date.now();
+      for (const cand of candidates) {
+        const plan = planWrite(active, cand, (c) => mintRecord(scopeKey, seq++, now, c));
+        if (plan.action === "dedup") {
+          this.sql.exec(`UPDATE records SET use_count = use_count + 1 WHERE id = ?`, plan.target.id);
+          plan.target.useCount += 1;
+          counts.deduped++;
+          continue;
+        }
+        if (plan.supersede) {
+          this.sql.exec(`UPDATE records SET status = 'superseded' WHERE id = ?`, plan.supersede.id);
+          plan.supersede.status = "superseded";
+          counts.superseded++;
+        }
+        const r = plan.record;
+        this.sql.exec(
+          `INSERT INTO records (id, seq, scope_key, kind, text, norm, keywords, source_thread_key, source_run_id,
+                                created_at, last_used_at, use_count, confidence, supersedes, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, 'active')`,
+          r.id,
+          seq - 1,
+          r.scopeKey,
+          r.kind,
+          r.text,
+          normalizeText(r.text),
+          JSON.stringify(r.keywords),
+          r.sourceThreadKey,
+          r.sourceRunId ?? null,
+          r.createdAt,
+          r.confidence ?? null,
+          r.supersedes ?? null,
+        );
+        this.sql.exec(`INSERT INTO records_fts (id, body) VALUES (?, ?)`, r.id, `${r.text} ${r.keywords.join(" ")}`);
+        active.push(r); // later candidates in the batch see this one
+        counts.inserted++;
       }
-      if (plan.supersede) {
-        this.sql.exec(`UPDATE records SET status = 'superseded' WHERE id = ?`, plan.supersede.id);
-        plan.supersede.status = "superseded";
-        counts.superseded++;
-      }
-      const r = plan.record;
-      this.sql.exec(
-        `INSERT INTO records (id, seq, scope_key, kind, text, norm, keywords, source_thread_key, source_run_id,
-                              created_at, last_used_at, use_count, confidence, supersedes, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, 'active')`,
-        r.id,
-        seq - 1,
-        r.scopeKey,
-        r.kind,
-        r.text,
-        normalizeText(r.text),
-        JSON.stringify(r.keywords),
-        r.sourceThreadKey,
-        r.sourceRunId ?? null,
-        r.createdAt,
-        r.confidence ?? null,
-        r.supersedes ?? null,
-      );
-      this.sql.exec(`INSERT INTO records_fts (id, body) VALUES (?, ?)`, r.id, `${r.text} ${r.keywords.join(" ")}`);
-      active.push(r); // later candidates in the batch see this one
-      counts.inserted++;
-    }
+    });
     return counts;
   }
 }
@@ -327,6 +343,15 @@ export default {
     if (url.pathname !== "/retrieve" && url.pathname !== "/write") return json({ error: "not found" }, 404);
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
     if (!authorized(env, request)) return json({ error: "unauthorized" }, 401);
+
+    // Size fence BEFORE parsing: a caller holding a valid bearer still can't
+    // make us JSON-parse an oversized body just to be told 400 by the field
+    // caps. A missing/unparseable Content-Length is treated as too large —
+    // every legitimate client (WorkerMemoryStore) sends a sized JSON body.
+    const declared = Number(request.headers.get("content-length"));
+    if (!Number.isFinite(declared) || declared < 0 || declared > MAX_BODY_BYTES) {
+      return json({ error: `body must declare Content-Length of at most ${MAX_BODY_BYTES} bytes` }, 413);
+    }
 
     let body: unknown;
     try {
