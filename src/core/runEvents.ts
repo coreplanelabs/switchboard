@@ -82,15 +82,19 @@ export function redactSecrets(text: string): string {
 }
 
 // Terminal control sequences: CSI (`ESC [ … final`, covers SGR colors, cursor
-// moves, erase), OSC (`ESC ] … BEL|ST`, covers hyperlinks/titles), two-byte
-// ESC sequences, plus C0 controls other than \n and \t. Tool output from
-// vitest/git/npm carries these; a browser drops the ESC byte and shows the
-// bare `[32m` remainder, so strip the whole sequence before display.
+// moves, erase), OSC (`ESC ] … BEL|ST`, covers hyperlinks/titles; an OSC cut
+// off by truncation is stripped to end of line so its payload never shows),
+// two-byte ESC sequences, plus C0 controls other than \n and \t (so \r is
+// dropped too: CRLF becomes \n and progress-bar rewrites collapse). Tool
+// output from vitest/git/npm carries these; a browser drops the ESC byte and
+// shows the bare `[32m` remainder, so strip the whole sequence before display.
 const ANSI_RE =
   // eslint-disable-next-line no-control-regex
-  /\x1b\[[0-?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|[\x00-\x08\x0b-\x1f\x7f]/g;
+  /\x1b\[[0-?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]|[\x00-\x08\x0b-\x1f\x7f]/g;
 
-/** Remove terminal escape/control sequences, leaving printable text, `\n`, `\t`. */
+/** Remove terminal escape/control sequences, leaving printable text, `\n`, `\t`.
+ *  Callers strip BEFORE redactSecrets: an escape embedded mid-token would
+ *  otherwise split a secret across the redaction regex and let it leak. */
 export function stripAnsi(text: string): string {
   return text.replace(ANSI_RE, "");
 }
@@ -104,7 +108,7 @@ export function redactAndCap(text: string, cap = 200): string {
 
 const SUMMARY_CAP = 200;
 
-/** One-line, ANSI-stripped, redacted, length-capped summary of a tool's output for the run
+/** One-line, control-stripped, redacted, length-capped summary of a tool's output for the run
  *  stream — the first non-empty line plus a size note. */
 export function summarizeToolResult(output: string): string {
   const redacted = redactSecrets(stripAnsi(output));

@@ -68,7 +68,7 @@ describe("redactSecrets", () => {
 });
 
 describe("redactAndCap", () => {
-  it("strips ANSI escapes", () => {
+  it("strips terminal escapes", () => {
     expect(redactAndCap("\x1b[1mgit\x1b[0m status")).toBe("git status");
   });
 
@@ -109,6 +109,16 @@ describe("summarizeToolResult", () => {
   it("strips OSC hyperlinks and cursor-control sequences", () => {
     const s = summarizeToolResult("\x1b]8;;https://x.test\x07link\x1b]8;;\x07 \x1b[2K\x1b[1Adone\r");
     expect(s).toBe("link done");
+  });
+
+  it("drops the payload of an OSC sequence cut off by truncation", () => {
+    expect(summarizeToolResult("see \x1b]8;;https://x.test/very/long\nnext")).toBe("see (9 chars, 2 lines)");
+  });
+
+  it("strips escapes before redacting so a mid-token escape cannot split a secret", () => {
+    const s = summarizeToolResult("token=ghp_\x1b[0m" + "A".repeat(36));
+    expect(s).not.toContain("AAAA");
+    expect(s).toContain("«redacted");
   });
 
   it("counts chars/lines on the stripped text", () => {
