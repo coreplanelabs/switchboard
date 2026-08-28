@@ -4,6 +4,7 @@
 export type ContentPart =
   | { type: "text"; text: string }
   | { type: "image"; mediaType: string; data: string } // data is base64, no data: prefix
+  | { type: "document"; mediaType: string; data: string; name?: string } // PDF; data is base64
   | { type: "tool_use"; id: string; name: string; input: unknown }
   | { type: "tool_result"; toolUseId: string; content: string; isError?: boolean };
 

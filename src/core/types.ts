@@ -15,6 +15,20 @@ export interface ImageAttachment {
   name?: string;
 }
 
+/**
+ * A non-image file the user attached, already downloaded. Two representations
+ * share this carrier, keyed by `mediaType`:
+ * - PDFs (`mediaType === "application/pdf"`) → `data` is the base64 payload,
+ *   rendered as a provider-native document block where supported.
+ * - Text/code/CSV/log files (any other `mediaType`) → `data` is the decoded
+ *   UTF-8 file content, inlined as a fenced text part.
+ */
+export interface DocumentAttachment {
+  mediaType: string;
+  data: string;
+  name?: string;
+}
+
 export interface IncomingMessage {
   /**
    * Scope key for channel-level config. Must be globally unique across
@@ -44,6 +58,8 @@ export interface IncomingMessage {
   userName?: string;
   /** Images attached to the triggering message, if any. */
   images?: ImageAttachment[];
+  /** Non-image files (PDFs, text/code/CSV/logs) on the triggering message, if any. */
+  documents?: DocumentAttachment[];
 }
 
 export interface HistoryItem {
@@ -51,6 +67,8 @@ export interface HistoryItem {
   text: string;
   /** Images attached to this turn, if any (user turns only in practice). */
   images?: ImageAttachment[];
+  /** Non-image files attached to this turn, if any (user turns only in practice). */
+  documents?: DocumentAttachment[];
 }
 
 /** A structured progress frame; adapters decide how to render it. */
