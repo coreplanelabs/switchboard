@@ -28,6 +28,7 @@ interface Env {
   ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
   SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map)
   BRAVE_SEARCH_API_KEY?: string; // web_search backend (Brave); web_fetch works without it
+  MEMORY_TOKEN?: string; // durable memory: bearer for the memory service (else in-process store)
 }
 
 export class SwitchboardServer extends Container<Env> {
@@ -65,6 +66,7 @@ export class SwitchboardServer extends Container<Env> {
         ? { SWITCHBOARD_INGRESS_TOKENS: env.SWITCHBOARD_INGRESS_TOKENS }
         : {}),
       ...(env.BRAVE_SEARCH_API_KEY ? { BRAVE_SEARCH_API_KEY: env.BRAVE_SEARCH_API_KEY } : {}),
+      ...(env.MEMORY_TOKEN ? { MEMORY_TOKEN: env.MEMORY_TOKEN } : {}),
     };
   }
 
