@@ -30,4 +30,13 @@ describe("mdToMrkdwn", () => {
   it("keeps image URLs as bare links", () => {
     expect(mdToMrkdwn("![alt](https://img.test/a.png)")).toBe("https://img.test/a.png");
   });
+
+  // #88 review: [text](url) -> <url|text> shared the SlackFormatter link-injection
+  // gap. The url's structural chars are percent-encoded and the label's escaped so
+  // a link can't forge or break out of the <url|label> structure.
+  it("escapes link labels and percent-encodes urls so a link can't forge structure", () => {
+    expect(mdToMrkdwn("[click <here>](https://e.com/x|https://evil.com)")).toBe(
+      "<https://e.com/x%7Chttps://evil.com|click &lt;here&gt;>",
+    );
+  });
 });

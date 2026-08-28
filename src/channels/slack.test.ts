@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyMessage,
   fetchImages,
+  render,
   resetSlackNameCaches,
   resolveChannelName,
   resolveUserName,
@@ -43,6 +44,49 @@ describe("classifyMessage (trigger gating)", () => {
     expect(classifyMessage({ channel_type: "channel", thread_ts: "1.0", text: "continue" }, BOT)).toBe(
       "handle-if-bot-in-thread",
     );
+  });
+});
+
+// Feature: features/channel-formatter.md — the status/progress card is Block Kit
+// mrkdwn built from untrusted content (frame.detail carries tool-output summaries
+// and the agent's free-text update_status; frame.title carries the run label), so
+// both are escaped before they land in mrkdwn text fields — otherwise a value like
+// <!channel> would trigger a live @channel broadcast from a status card.
+describe("render (status card mrkdwn escaping)", () => {
+  type Section = { type: string; text?: { type: string; text: string }; elements?: { text: string }[] };
+
+  it("neutralizes injection (<!channel>, <@U…>, <url|label>) in frame.detail", () => {
+    const out = render({
+      title: "run",
+      detail: "<!channel> ping <@U123> see <https://evil.test|click>",
+    });
+    const section = out.blocks[1] as Section;
+    const text = section.text!.text;
+    expect(text).toContain("&lt;!channel&gt;");
+    expect(text).toContain("&lt;@U123&gt;");
+    expect(text).toContain("&lt;https://evil.test|click&gt;");
+    expect(text).not.toContain("<!channel>");
+    expect(text).not.toContain("<@U123>");
+  });
+
+  it("escapes frame.title in both the context block and the top-level text fallback", () => {
+    const out = render({ title: "coding <!channel> now" });
+    const context = out.blocks[0] as Section;
+    expect(context.elements![0].text).toContain("&lt;!channel&gt;");
+    expect(context.elements![0].text).not.toContain("<!channel>");
+    expect(out.text).toContain("&lt;!channel&gt;");
+    expect(out.text).not.toContain("<!channel>");
+  });
+
+  it("preserves intentional *bold*/`code` markup in the title (escapeMrkdwn only touches &<>)", () => {
+    const out = render({ title: "*coding* on `claude` · 42s" });
+    expect(out.text).toBe("*coding* on `claude` · 42s");
+  });
+
+  it("keeps the escaped detail under Slack's ~3000-char section cap even for adversarial input", () => {
+    const out = render({ title: "t", detail: "&".repeat(5000) });
+    const section = out.blocks[1] as Section;
+    expect(section.text!.text.length).toBeLessThanOrEqual(2900);
   });
 });
 

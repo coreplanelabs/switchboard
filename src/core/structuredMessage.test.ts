@@ -77,6 +77,69 @@ describe("validateStructuredMessage (zod schema)", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("blocks");
   });
+
+  // #88 review #3a: schemas are .strict(), so an unknown key is REJECTED (giving
+  // self-heal corrective feedback on a misnamed field) instead of silently stripped.
+  it("rejects an unknown key inside a block (strict)", () => {
+    const result = validateStructuredMessage({
+      blocks: [{ type: "heading", text: "hi", txt: "typo" }],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects an unknown top-level key (strict root)", () => {
+    const result = validateStructuredMessage({
+      blocks: [{ type: "paragraph", text: "ok" }],
+      extra: true,
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  // #88 review #3b: upper bounds reject pathological input (→ self-heal / fallback).
+  it("rejects an oversized bullets array (> 100 items)", () => {
+    const items = Array.from({ length: 101 }, (_, i) => `item ${i}`);
+    const result = validateStructuredMessage({ blocks: [{ type: "bullets", items }] });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects an oversized string (> 12000 chars)", () => {
+    const result = validateStructuredMessage({
+      blocks: [{ type: "paragraph", text: "x".repeat(12001) }],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects too many blocks (> 50)", () => {
+    const blocks = Array.from({ length: 51 }, () => ({ type: "paragraph", text: "b" }));
+    const result = validateStructuredMessage({ blocks });
+    expect(result.ok).toBe(false);
+  });
+
+  // A code language tag is a short identifier, not prose — bounded like the rest.
+  it("rejects a code block with an oversized language (> 40 chars)", () => {
+    const result = validateStructuredMessage({
+      blocks: [{ type: "code", code: "x=1", language: "x".repeat(41) }],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("accepts a code block with a language at the bound (40 chars)", () => {
+    const result = validateStructuredMessage({
+      blocks: [{ type: "code", code: "x=1", language: "x".repeat(40) }],
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  // The url ≤ 2048 bound: 2048 accepted, 2049 rejected.
+  it("rejects a link url over 2048 chars and accepts one exactly at the bound", () => {
+    const base = "https://e.co/"; // 13 chars
+    const at = base + "a".repeat(2048 - base.length);
+    const over = base + "a".repeat(2049 - base.length);
+    expect(at.length).toBe(2048);
+    expect(over.length).toBe(2049);
+    expect(validateStructuredMessage({ blocks: [{ type: "link", url: at }] }).ok).toBe(true);
+    expect(validateStructuredMessage({ blocks: [{ type: "link", url: over }] }).ok).toBe(false);
+  });
 });
 
 describe("PlainTextFormatter", () => {

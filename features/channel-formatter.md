@@ -9,7 +9,7 @@ The model's structured output is **zod-validated with a fixed-retry self-heal
 loop** before any formatter runs, so malformed output is corrected — or safely
 degraded — instead of shipped.
 
-- **Code**: `src/core/structuredMessage.ts` (schema + `ChannelFormatter` seam + `PlainTextFormatter`), `src/core/structuredOutput.ts` (validation + fixed-retry self-heal + provider-backed producer), `src/channels/slackFormatter.ts` (`SlackFormatter`), wiring in `src/core/dispatcher.ts` (`sendAnswer`) and each adapter (`src/channels/slack.ts`, `src/cli.ts`, `src/channels/http.ts`, `src/channels/mcp.ts`).
+- **Code**: `src/core/structuredMessage.ts` (schema + `ChannelFormatter` seam + `PlainTextFormatter`), `src/core/structuredOutput.ts` (validation + fixed-retry self-heal + provider-backed producer), `src/channels/slackFormatter.ts` (`SlackFormatter`), `src/channels/slackEscape.ts` (shared mrkdwn escaping/encoding), wiring in `src/core/dispatcher.ts` (`sendAnswer`) and each adapter (`src/channels/slack.ts`, `src/cli.ts`, `src/channels/http.ts`, `src/channels/mcp.ts`).
 - **Docs**: [AGENTS.md invariants 1 & 2](../AGENTS.md), [routing-and-config.md](routing-and-config.md), [issue #76](https://github.com/coreplanelabs/switchboard/issues/76).
 - **Tests**: `src/core/structuredMessage.test.ts`, `src/core/structuredOutput.test.ts`, `src/channels/slackFormatter.test.ts`, `src/core/dispatcher.test.ts`.
 
@@ -20,15 +20,36 @@ degraded — instead of shipped.
    `heading` · `paragraph` · `bullets` (items) · `code` (code + optional
    language) · `link` (url + optional text) · `status` (state
    `ok|warn|error|info` + text; covers review verdicts). A discriminated union on
-   `type`, so an unknown block type is rejected with a legible error.
+   `type`, so an unknown block type is rejected with a legible error. Every block
+   object **and** the root are `.strict()`: an unknown/extra key is **rejected**,
+   not silently stripped, so the self-heal loop gets corrective feedback on a
+   misnamed field (e.g. `txt` for `text`). Sane **upper bounds** reject
+   pathological input (→ self-heal, then fallback) rather than accept it: any
+   text/code/label string ≤ 12000 chars, a code fence's `language` tag ≤ 40 (a
+   short identifier, not prose), url ≤ 2048, ≤ 100 bullet items, ≤ 50 blocks.
 2. **`ChannelFormatter` seam — ≥2 implementations** (invariant 2).
    `format(message) → native payload string`.
    - `SlackFormatter` (structured → Slack mrkdwn): headings → `*bold*` (Slack has
      no headers), bullets → `•`, links → `<url|text>`, code → a bare fence (Slack
      fences take no language tag), status → ✅/⚠️/❌/ℹ️. Lives in `src/channels/`
-     (invariant 1: no platform formatting in the core).
+     (invariant 1: no platform formatting in the core). **All record content is
+     escaped before it lands in mrkdwn structural syntax** (shared helpers in
+     `src/channels/slackEscape.ts`, reused by `mdToMrkdwn`'s link rendering):
+     - **Text fields** (heading, paragraph, bullet items, status text, link
+       label) → `escapeMrkdwn`: `&`→`&amp;` first, then `<`→`&lt;`, `>`→`&gt;`
+       (Slack's own rule). This neutralizes injected `<!channel>` broadcasts,
+       `<@U…>` mentions, and forged `<url|label>` links — they become inert
+       visible text.
+     - **Link url** → `encodeMrkdwnUrl`: percent-encode only `<`→`%3C`, `>`→`%3E`,
+       `|`→`%7C`. HTML-escaping the url would corrupt the address; percent-encoding
+       stops the url forging a second `|` separator or breaking out of `<…>`, and
+       Slack decodes it back when opened.
+     - **Code** → `neutralizeCodeFence`: a zero-width space after every backtick,
+       so embedded ```` ``` ```` can't close the outer fence early and leak the
+       rest as live mrkdwn.
    - `PlainTextFormatter` (structured → plain text) for CLI/HTTP/MCP, and the
-     core's default when a channel declares no formatter.
+     core's default when a channel declares no formatter. (No escaping needed —
+     plain text has no structural syntax to inject into.)
 3. **Validation + fixed-retry self-heal.** The model's structured output is
    parsed (JSON string or object; a stray ```` ```json ```` fence is tolerated)
    and zod-validated. On failure the specific error is fed back and the model is
@@ -56,19 +77,40 @@ formatters behind the flag. Not yet done:
   instructions from agent prompts (the issue's end state). The retry/self-heal
   infrastructure is built to serve that path unchanged.
 - **The status card** still renders via `StatusUpdate`/`render()` in the Slack
-  adapter; only the final reply is structured so far.
+  adapter (not through the block schema); only the final reply is *structured* so
+  far. Its Block Kit `mrkdwn` **is** now escaped, though: `render()` runs
+  `escapeMrkdwn` over both `frame.title` (the run label) and `frame.detail` (tool-
+  output summaries + the agent's free-text `update_status`) before they reach the
+  `mrkdwn` text fields and the top-level `text` fallback, so the injection class
+  (`<!channel>`/`<@U…>`/forged `<url|label>`) is closed across the bot's Slack
+  output, not just the structured-answer path. The raw detail is sliced to a
+  conservative length **before** escaping (escaping can expand up to 5×) and the
+  escaped result is hard-capped, so it always stays under Slack's ~3000-char
+  section limit.
 - **Slack Block Kit payloads.** `ChannelFormatter.format` returns a string
   (mrkdwn) for now; a richer `object[]` Block Kit payload is future work.
 - **Rich inline spans** (bold/italic *inside* a paragraph). Paragraph text is
   plain; emphasis is expressed structurally (headings, status) for now.
 - **Discord and other adapters**: a Discord formatter is the natural third
   implementation once that channel exists.
+- **Escaping plain (non-link) text in `mdToMrkdwn`.** The flag-OFF Markdown path
+  now escapes link **labels/urls**, but a bare `<!channel>` sitting in ordinary
+  Markdown prose still passes through live. Escaping all non-code text there is a
+  broader change (it alters how every `<`/`>`/`&` renders) and is left for a
+  separate follow-up; the structured (flag-ON) path via `SlackFormatter` is fully
+  escaped today.
 
 ## Validation criteria
 
 | Criterion | Proof |
 |---|---|
 | Schema accepts the full block set; rejects unknown type, empty blocks, missing blocks, empty text, empty bullets, bad URL, out-of-set status, non-object | `[unit]` `src/core/structuredMessage.test.ts::validateStructuredMessage (zod schema)::*` |
+| Strict schema rejects an unknown key in a block and at the root (self-heal feedback, not silent strip) | `[unit]` `src/core/structuredMessage.test.ts::…::rejects an unknown key inside a block (strict) / rejects an unknown top-level key (strict root)` |
+| Upper bounds reject an oversized bullets array, an oversized string, and too many blocks | `[unit]` `src/core/structuredMessage.test.ts::…::rejects an oversized bullets array… / rejects an oversized string… / rejects too many blocks…` |
+| `SlackFormatter` escapes untrusted content: `<!channel>`/`<@U…>`/`<`,`>`,`&` in text neutralized; link url percent-encoded so its `\|` can't forge a separator; code with embedded ```` ``` ```` can't close the outer fence | `[unit]` `src/channels/slackFormatter.test.ts::SlackFormatter::escapes untrusted content (no injection)::*` |
+| Status card `render()` escapes `frame.title` + `frame.detail` (`<!channel>`/`<@U…>`/`<url|label>` neutralized in the block `mrkdwn` and the top-level `text`); intentional `*bold*`/`` `code` `` in the title survives; escaped detail stays under Slack's ~3000 section cap for adversarial input | `[unit]` `src/channels/slack.test.ts::render (status card mrkdwn escaping)::*` |
+| Code fence `language` bounded to ≤ 40 chars (rejects 41, accepts 40); link url bound proven at the edge (rejects 2049, accepts 2048) | `[unit]` `src/core/structuredMessage.test.ts::…::rejects a code block with an oversized language… / accepts a code block with a language at the bound… / rejects a link url over 2048 chars…` |
+| `mdToMrkdwn` link rendering escapes label + percent-encodes url (same gap, shared helpers) | `[unit]` `src/channels/mrkdwn.test.ts::mdToMrkdwn::escapes link labels and percent-encodes urls…` |
 | `PlainTextFormatter` renders every block type (and multi-block separation) | `[unit]` `src/core/structuredMessage.test.ts::PlainTextFormatter::*` |
 | `SlackFormatter` renders every block type to correct mrkdwn (≥2 impls exercised) | `[unit]` `src/channels/slackFormatter.test.ts::SlackFormatter::*` |
 | Fixed-retry loop: first-try success; fails schema N times then succeeds; feeds the error back on each re-ask | `[unit]` `src/core/structuredOutput.test.ts::produceStructured (fixed-retry self-heal)::*` |

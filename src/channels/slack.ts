@@ -1,6 +1,7 @@
 import bolt from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
 import { mdToMrkdwn } from "./mrkdwn.js";
+import { escapeMrkdwn } from "./slackEscape.js";
 import { SlackFormatter } from "./slackFormatter.js";
 import type {
   ChannelIO,
@@ -458,18 +459,39 @@ class SlackIO implements ChannelIO {
   }
 }
 
-/** Status frames render as Block Kit: context headline + preformatted activity. */
-function render(frame: StatusUpdate): { text: string; blocks: object[] } {
+// Slack's section mrkdwn field caps at ~3000 chars. escapeMrkdwn can expand text
+// up to 5× in the worst case (every char an `&` → `&amp;`), so the raw detail is
+// sliced to a conservative length BEFORE escaping (keeping the truncation intent),
+// then the escaped result is hard-capped as a provable belt-and-suspenders: any
+// input, adversarial mixes included, stays ≤ RENDER_DETAIL_ESCAPED_MAX < 3000. A
+// mid-entity cut only leaves inert text (e.g. `&am`) — escaping already removed
+// every raw `<`/`>`/`&`, so truncation can never re-introduce live mrkdwn syntax.
+const RENDER_DETAIL_RAW_MAX = 900;
+const RENDER_DETAIL_ESCAPED_MAX = 2900;
+
+/** Status frames render as Block Kit: context headline + preformatted activity.
+ *  `frame.title` (the run label) and `frame.detail` (tool-output summaries + the
+ *  agent's free-text update_status) are untrusted, so both are escaped before they
+ *  land in the `mrkdwn` text fields — otherwise a `<!channel>` in tool output
+ *  would fire a live @channel broadcast from a status card. escapeMrkdwn only
+ *  neutralizes `&`/`<`/`>`, so the title's intentional `*bold*`/`` `code` ``
+ *  markup renders as before. Exported for tests. */
+export function render(frame: StatusUpdate): { text: string; blocks: object[] } {
+  const title = escapeMrkdwn(frame.title);
   const blocks: object[] = [
-    { type: "context", elements: [{ type: "mrkdwn", text: frame.title }] },
+    { type: "context", elements: [{ type: "mrkdwn", text: title }] },
   ];
   if (frame.detail) {
+    const detail = escapeMrkdwn(frame.detail.slice(0, RENDER_DETAIL_RAW_MAX)).slice(
+      0,
+      RENDER_DETAIL_ESCAPED_MAX,
+    );
     blocks.push({
       type: "section",
-      text: { type: "mrkdwn", text: frame.detail.slice(0, 2900) },
+      text: { type: "mrkdwn", text: detail },
     });
   }
-  return { text: frame.title, blocks };
+  return { text: title, blocks };
 }
 
 function chunkText(text: string, limit: number): string[] {
