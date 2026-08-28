@@ -407,6 +407,20 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     } finally {
       clearInterval(heartbeat);
       registry.finish(run.id); // close the live-view stream; start its TTL
+      // Give the workspace back now rather than at the inactivity sweep: a
+      // resident's pool user is a scarce slot (features/resident-repos.md item
+      // 16). Read-only agents hold nothing worth keeping; a coding run keeps
+      // its worktree only while it has uncommitted/unpushed work. Best-effort —
+      // a failed release is a log line, never a failed run.
+      if (executor.release) {
+        const mode = agent.toolset === "readonly" ? "always" : "if-clean";
+        try {
+          const r = await executor.release(mode);
+          console.log(`[release] ${msg.threadKey} ${r.released ? "released" : "kept"}${r.reason ? ` (${r.reason})` : ""}`);
+        } catch (err) {
+          console.warn(`[release] ${msg.threadKey} failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     }
 
     console.log(`[done] ${msg.threadKey} ${answer.length} chars`);

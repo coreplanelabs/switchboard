@@ -15,6 +15,18 @@ export interface Executor {
   readFile(path: string): Promise<string>;
   /** Write a file (creating parent dirs), path relative to the workspace. */
   writeFile(path: string, content: string): Promise<string>;
+  /** Optional: give back whatever the run held for this thread once it ends
+   *  (a resident's pool user + worktree). "always" — nothing to preserve
+   *  (read-only agents); "if-clean" — keep the workspace if it has uncommitted
+   *  or unpushed work. Best-effort: implementations report, never throw. */
+  release?(mode: ReleaseMode): Promise<ReleaseResult>;
+}
+
+export type ReleaseMode = "always" | "if-clean";
+export interface ReleaseResult {
+  released: boolean;
+  /** Why the workspace was kept (or why release failed) — for the log line. */
+  reason?: string;
 }
 
 /** An exec-INFRASTRUCTURE failure: the sandbox/exec transport itself failed —

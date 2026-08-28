@@ -21,8 +21,14 @@
       // match the @cloudflare/sandbox version in package.json EXACTLY (no
       // 'latest' tag exists) — bump both together.
       "image": "./Dockerfile",
-      // Larger than the thread-sandbox Worker's "basic": a resident keeps a
-      // full repo clone + node_modules + build artifacts warm on disk.
+      // standard-1 = 4 GiB RAM / 8 GB disk — deliberately NOT bigger. A
+      // resident is effectively always-on (10-min refresh alarm < 20m
+      // sleepAfter), so its size is billed 24/7 per repo: ~$52/mo at 4 GiB vs
+      // ~$156/mo at 8 GiB. 4 GiB fits 1-2 simultaneous test-running threads,
+      // which matches observed concurrency; /detach on run finish (the real
+      // fix for pool exhaustion) keeps threads from piling up. Step to
+      // standard-2 (6 GiB) only if resident OOMs actually appear. (The
+      // thread-sandbox Worker is standard-3 — it lives only for one run.)
       "instance_type": "standard-1",
       // Platform ceiling only. The enforced cap is RESIDENT_CAP (8) in
       // worker.ts — deliberately below this so an onboard is always refused
