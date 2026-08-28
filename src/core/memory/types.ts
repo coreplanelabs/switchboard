@@ -35,7 +35,7 @@ export interface MemoryRecord {
   status: "active" | "superseded";
 }
 
-/** What an extractor emits (PR2). The store assigns id/timestamps/useCount/
+/** What the reflection extractor emits. The store assigns id/timestamps/useCount/
  *  status on write, so a candidate carries only the distilled content and its
  *  provenance. */
 export interface MemoryCandidate {
@@ -63,8 +63,9 @@ export interface MemoryStore {
   /** Scope-partitioned retrieval, ranked by the pure scorer, oldest-irrelevant
    *  dropped. Returns [] when nothing matches. */
   retrieve(q: MemoryQuery): Promise<MemoryRecord[]>;
-  /** Persist distilled candidates (dedup/supersede inside the store). A no-op in
-   *  PR1's read-only path; the reflection path (PR2) drives it. */
+  /** Persist distilled candidates. Dedup (identical normalized text → bump
+   *  `useCount`) and supersede (`supersedes` id → old record soft-deleted) live
+   *  inside the store. Driven by the post-run reflection pass (reflection.ts). */
   write(scopeKey: string, records: MemoryCandidate[]): Promise<void>;
 }
 
@@ -83,4 +84,7 @@ export interface MemoryConfig {
   limit?: number;
   /** Hard token budget for the injected block. Default ~800. */
   maxTokens?: number;
+  /** `<provider>/<model>` ref for the post-run reflection (write path) — a cheap
+   *  tier. Absent → the run's own resolved model. Never hardcoded (invariant 7). */
+  model?: string;
 }

@@ -15,6 +15,8 @@ import {
 } from "./channels/accessAuth.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
+import { InMemoryMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
+import type { CoreDeps } from "./core/dispatcher.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
@@ -33,7 +35,14 @@ async function main() {
   // across all channels via CoreDeps, so review/coding get their scoped skill
   // list in-prompt and can load bodies on demand with use_skill.
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
-  const app = createSlackApp({ config, providers, skills });
+  // Cross-session memory (#85): ONE store instance shared by every channel so
+  // what the reflection pass writes after a run is what the next run reads.
+  // Process-lifetime only until the durable WorkerMemoryStore (PR3) replaces
+  // it — a restart loses it (known invariant-6 gap, features/memory.md).
+  // Disabled (default) → undefined → the dispatcher uses a NullMemoryStore.
+  const memory = config.config.memory?.enabled ? new InMemoryMemoryStore() : undefined;
+  const deps: CoreDeps = { config, providers, skills, memory };
+  const app = createSlackApp(deps);
 
   await app.start();
 
@@ -48,8 +57,8 @@ async function main() {
   // fail-closed disabled.
   if (process.env.PORT) {
     const auth = parseIngressTokens(process.env);
-    const ingress = createIngressHandler({ config, providers, skills }, { auth });
-    const mcp = createMcpHandler({ config, providers, skills }, { auth });
+    const ingress = createIngressHandler(deps, { auth });
+    const mcp = createMcpHandler(deps, { auth });
     // Live run view (Area 2 / #43): GET /runs (index) + /runs/:id (page) +
     // /runs/:id/events (SSE). Shares defaultRunRegistry with the dispatcher —
     // the run created during dispatch() is the run this streams. The per-run
@@ -143,20 +152,24 @@ async function main() {
   );
 
   // Graceful drain: close the Slack socket (no new events), let in-flight
-  // agent runs finish (up to 15 min), then exit. A plain kill mid-run loses
-  // the run and leaves a frozen status card in the thread.
+  // agent runs — and the background memory reflections they spawn — finish (up
+  // to 15 min), then exit. A plain kill mid-run loses the run and leaves a
+  // frozen status card in the thread.
   const { activeRunCount } = await import("./core/dispatcher.js");
+  const inFlight = () => activeRunCount() + pendingReflectionCount();
   let draining = false;
   const drain = async (signal: string) => {
     if (draining) return;
     draining = true;
-    console.log(`[drain] ${signal}: closing Slack socket, ${activeRunCount()} run(s) in flight`);
+    console.log(
+      `[drain] ${signal}: closing Slack socket, ${activeRunCount()} run(s) + ${pendingReflectionCount()} reflection(s) in flight`,
+    );
     await app.stop().catch(() => {});
     const deadline = Date.now() + 15 * 60_000;
-    while (activeRunCount() > 0 && Date.now() < deadline) {
+    while (inFlight() > 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 2000));
     }
-    console.log(`[drain] exiting (${activeRunCount()} run(s) abandoned)`);
+    console.log(`[drain] exiting (${activeRunCount()} run(s), ${pendingReflectionCount()} reflection(s) abandoned)`);
     process.exit(0);
   };
   process.on("SIGTERM", () => void drain("SIGTERM"));

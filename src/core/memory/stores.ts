@@ -25,9 +25,9 @@ function normalizeText(text: string): string {
 }
 
 /** In-memory store: a `Map<scopeKey, MemoryRecord[]>` with whole-word keyword +
- *  recency ranking. Serves tests and dev; a fresh instance is empty (PR1 has no write
- *  path in the dispatch loop), and in-process state is never treated as durable
- *  (AGENTS.md invariant 6 — the durable path is PR3). */
+ *  recency ranking and dedup/supersede on write. Serves tests and dev; a fresh
+ *  instance is empty, and in-process state is never treated as durable (AGENTS.md
+ *  invariant 6 — the durable path is PR3). */
 export class InMemoryMemoryStore implements MemoryStore {
   private readonly byScope = new Map<string, MemoryRecord[]>();
   private readonly now: () => number;
@@ -68,12 +68,27 @@ export class InMemoryMemoryStore implements MemoryStore {
     const now = this.now();
     for (const cand of records) {
       const norm = normalizeText(cand.text);
-      const existing = list.find((r) => r.status === "active" && normalizeText(r.text) === norm);
+      // Supersede target: only an ACTIVE record in THIS scope; an unknown/foreign
+      // id supersedes nothing and the new record still lands.
+      const target = cand.supersedes
+        ? list.find((r) => r.status === "active" && r.id === cand.supersedes)
+        : undefined;
+      // Dedup: a restatement of an existing active fact bumps usage instead of
+      // inserting. A candidate carrying `supersedes` is an explicit correction
+      // and dedups ONLY against its own target (none when the id doesn't
+      // resolve — e.g. two facts in one batch correcting the same record) — a
+      // text collision with some UNRELATED record must never swallow it (the
+      // extractor sees existing text verbatim, so a collision can be induced
+      // by a poisoned transcript).
+      const dedupPool = cand.supersedes ? (target ? [target] : []) : list.filter((r) => r.status === "active");
+      const existing = dedupPool.find((r) => normalizeText(r.text) === norm);
       if (existing) {
-        // Dedup: bump usage instead of inserting a near-identical record.
         existing.useCount += 1;
         continue;
       }
+      // Soft delete the contradicted record (status flip, never a removal —
+      // provenance stays auditable).
+      if (target) target.status = "superseded";
       list.push({
         id: `mem:${scopeKey}:${this.seq++}`,
         scopeKey,
