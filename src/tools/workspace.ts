@@ -1,4 +1,4 @@
-import type { ToolDef } from "../providers/types.js";
+import type { ToolDef, ToolResultContent } from "../providers/types.js";
 import type { Executor } from "../execution/executor.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { distillDiff } from "../core/diffDigest.js";
@@ -28,7 +28,9 @@ export interface ToolContext {
 }
 
 export interface RunnableTool extends ToolDef {
-  run(input: Record<string, unknown>, ctx: ToolContext): Promise<string>;
+  /** Text for most tools; a parts list when the result should reach the model
+   *  as something it can see (image/PDF) — see `ToolResultContent`. */
+  run(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResultContent>;
 }
 
 export const bashTool: RunnableTool = {

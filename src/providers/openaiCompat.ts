@@ -1,10 +1,11 @@
-import type {
-  ChatMessage,
-  CompletionRequest,
-  CompletionResult,
-  ContentPart,
-  Provider,
-  ProviderConfig,
+import {
+  toolResultText,
+  type ChatMessage,
+  type CompletionRequest,
+  type CompletionResult,
+  type ContentPart,
+  type Provider,
+  type ProviderConfig,
 } from "./types.js";
 
 // Generic adapter for any OpenAI-compatible Chat Completions endpoint:
@@ -137,20 +138,19 @@ export function toOAIMessages(m: ChatMessage): OAIMessage[] {
 
   // user message: tool_results become role:"tool" messages; text and images
   // collect into one role:"user" message (array content only when images exist,
-  // since some compat endpoints reject arrays)
+  // since some compat endpoints reject arrays). A role:"tool" message is
+  // string-only on this wire format, so image/document parts inside a tool
+  // result are hoisted into that user message; the tool message keeps a text
+  // rendering that names them.
   const out: OAIMessage[] = [];
   const parts: OAIContentPart[] = [];
-  for (const part of m.content) {
-    if (part.type === "tool_result") {
-      out.push({ role: "tool", tool_call_id: part.toolUseId, content: part.content });
-    } else if (part.type === "text") {
-      parts.push({ type: "text", text: part.text });
-    } else if (part.type === "image") {
+  const pushVisible = (part: Extract<ContentPart, { type: "image" | "document" }>) => {
+    if (part.type === "image") {
       parts.push({
         type: "image_url",
         image_url: { url: `data:${part.mediaType};base64,${part.data}` },
       });
-    } else if (part.type === "document") {
+    } else {
       // OpenAI-compatible chat endpoints have inconsistent binary-PDF support,
       // so a PDF is surfaced as an inline-text note naming the file rather than
       // shipping raw base64 the model can't read. Text files never reach here —
@@ -159,6 +159,18 @@ export function toOAIMessages(m: ChatMessage): OAIMessage[] {
         type: "text",
         text: `\n\n[attached file: ${part.name ?? "document"} (${part.mediaType}); not supported by this provider]\n`,
       });
+    }
+  };
+  for (const part of m.content) {
+    if (part.type === "tool_result") {
+      if (typeof part.content !== "string") {
+        for (const p of part.content) if (p.type !== "text") pushVisible(p);
+      }
+      out.push({ role: "tool", tool_call_id: part.toolUseId, content: toolResultText(part.content) });
+    } else if (part.type === "text") {
+      parts.push({ type: "text", text: part.text });
+    } else if (part.type === "image" || part.type === "document") {
+      pushVisible(part);
     }
   }
   if (parts.length > 0) {

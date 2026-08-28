@@ -395,3 +395,46 @@ describe("run-visibility events", () => {
     expect(call?.summary).not.toContain("ghp_AAAA");
   });
 });
+
+describe("tool results carrying non-text parts (M1b)", () => {
+  it("passes a parts-array tool result through to the provider verbatim and summarizes it as text", async () => {
+    const events: RunEvent[] = [];
+    const provider = scripted([
+      { content: [{ type: "tool_use", id: "w1", name: "web_fetch", input: { url: "https://example.com/pic.png" } }], stopReason: "tool_use" },
+      text("done"),
+    ]);
+    const web = {
+      fetch: async () =>
+        ({
+          ok: true,
+          status: 200,
+          headers: { get: (k: string) => (k.toLowerCase() === "content-type" ? "image/png" : null) },
+          body: undefined,
+          arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+          text: async () => "",
+        }) as unknown as Response,
+      search: { search: async () => [] },
+    };
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor, web },
+      onEvent: (e) => events.push(e),
+    });
+    const toolTurn = provider.requests[1].messages[2];
+    expect(toolTurn.role).toBe("user");
+    expect(toolTurn.content[0]).toEqual({
+      type: "tool_result",
+      toolUseId: "w1",
+      content: [
+        { type: "text", text: expect.stringContaining("Fetched https://example.com/pic.png") },
+        { type: "image", mediaType: "image/png", data: "AQID" },
+      ],
+    });
+    const result = events.find((e) => e.type === "tool_result")!;
+    expect(result.summary).toContain("Fetched");
+    expect(result.summary).not.toContain("AQID");
+  });
+});

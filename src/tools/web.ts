@@ -262,6 +262,15 @@ export function assertUrlAllowed(raw: string): URL {
 // ---- web_fetch tool ---------------------------------------------------------
 
 const MAX_FETCH_BYTES = 1_000_000;
+// Binary links reach the model as image/document blocks (M1b), so the caps
+// match the attachment path's per-file limits (src/channels/slack.ts): the
+// provider's per-image hard limit and the PDF cap. Truncating a binary is
+// meaningless, so over-cap bytes are refused with a message, never trimmed.
+const MAX_IMAGE_FETCH_BYTES = 5 * 1024 * 1024;
+const MAX_DOCUMENT_FETCH_BYTES = 10 * 1024 * 1024;
+/** The image types the vision models accept; other image/* is named, not sent. */
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+const PDF_TYPE = "application/pdf";
 const FETCH_TIMEOUT_MS = 12_000;
 const SEARCH_TIMEOUT_MS = 10_000;
 const MAX_REDIRECTS = 3;
@@ -281,11 +290,15 @@ function htmlToText(html: string): string {
     .trim();
 }
 
-async function readCapped(res: Response, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+/** Read at most `maxBytes` of the body; `truncated` means the body had more.
+ *  Streams when the response exposes a body reader (abandoning the rest), else
+ *  falls back to the buffered accessors (test doubles, non-streaming fetches). */
+async function readCapped(res: Response, maxBytes: number): Promise<{ bytes: Buffer; truncated: boolean }> {
   const reader = res.body?.getReader?.();
   if (!reader) {
-    const t = await res.text();
-    return { text: t.length > maxBytes ? t.slice(0, maxBytes) : t, truncated: t.length > maxBytes };
+    const whole =
+      typeof res.arrayBuffer === "function" ? Buffer.from(await res.arrayBuffer()) : Buffer.from(await res.text(), "utf8");
+    return { bytes: whole.subarray(0, maxBytes), truncated: whole.length > maxBytes };
   }
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -296,7 +309,7 @@ async function readCapped(res: Response, maxBytes: number): Promise<{ text: stri
     if (value) {
       chunks.push(value);
       total += value.length;
-      if (total >= maxBytes) {
+      if (total > maxBytes) {
         truncated = true;
         break;
       }
@@ -307,14 +320,30 @@ async function readCapped(res: Response, maxBytes: number): Promise<{ text: stri
   } catch {
     // best-effort; the response is being abandoned anyway
   }
-  const buf = Buffer.concat(chunks.map((c) => Buffer.from(c))).subarray(0, maxBytes);
-  return { text: buf.toString("utf8"), truncated };
+  const bytes = Buffer.concat(chunks.map((c) => Buffer.from(c))).subarray(0, maxBytes);
+  return { bytes, truncated };
+}
+
+/** `Image/JPEG; charset=binary` → `image/jpeg`. */
+function mediaTypeOf(contentType: string): string {
+  return contentType.split(";")[0].trim().toLowerCase();
+}
+
+/** Last path segment, percent-decoded when well-formed — the document's title. */
+function fileNameOf(u: URL): string | undefined {
+  const last = u.pathname.split("/").filter(Boolean).pop();
+  if (!last) return undefined;
+  try {
+    return decodeURIComponent(last);
+  } catch {
+    return last;
+  }
 }
 
 export const webFetchTool: RunnableTool = {
   name: "web_fetch",
   description:
-    "Fetch a public web page or file by URL and return its readable text. Use it to read a link the user shared, a doc, a spec, or an issue. http(s) only; private/internal addresses are refused for safety.",
+    "Fetch a public web page or file by URL. Pages and text files come back as readable text; an image (jpeg/png/gif/webp) or PDF link comes back as the image/document itself so you can look at it. Use it to read a link the user shared, a doc, a spec, an issue, a screenshot. http(s) only; private/internal addresses are refused for safety.",
   inputSchema: {
     type: "object",
     properties: {
@@ -335,7 +364,10 @@ export const webFetchTool: RunnableTool = {
         res = await ctx.web.fetch(target.toString(), {
           redirect: "manual",
           signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-          headers: { "user-agent": "switchboard-web-fetch/1.0", accept: "text/html,text/plain,*/*" },
+          headers: {
+            "user-agent": "switchboard-web-fetch/1.0",
+            accept: "text/html,text/plain,image/*,application/pdf,*/*",
+          },
         });
         const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
         if (!location) break;
@@ -344,11 +376,33 @@ export const webFetchTool: RunnableTool = {
       }
       if (!res.ok) return `web_fetch: ${target.toString()} returned HTTP ${res.status}`;
       const ctype = res.headers.get("content-type") ?? "";
+      const mediaType = mediaTypeOf(ctype);
+      const where = `${target.toString()} (HTTP ${res.status}, ${ctype || "unknown type"})`;
+
+      // Binary links (M1b): hand the bytes to the model as a block it can see.
+      if (IMAGE_TYPES.has(mediaType) || mediaType === PDF_TYPE) {
+        const isPdf = mediaType === PDF_TYPE;
+        const cap = isPdf ? MAX_DOCUMENT_FETCH_BYTES : MAX_IMAGE_FETCH_BYTES;
+        const body = await readCapped(res, cap);
+        if (body.truncated) {
+          return `web_fetch: ${where} is too large to pass to the model (cap ${Math.round(cap / (1024 * 1024))} MB for ${isPdf ? "PDFs" : "images"}).`;
+        }
+        const data = body.bytes.toString("base64");
+        const kind = isPdf ? "PDF document" : "image";
+        const name = fileNameOf(target);
+        return [
+          { type: "text", text: `Fetched ${where}: the ${kind} (${body.bytes.length} bytes) follows.` },
+          isPdf ? { type: "document", mediaType, data, ...(name ? { name } : {}) } : { type: "image", mediaType, data },
+        ];
+      }
+      if (mediaType.startsWith("image/")) {
+        return `web_fetch: ${where} is an unsupported image type (${mediaType}); the model can view jpeg, png, gif, and webp.`;
+      }
+
       const body = await readCapped(res, MAX_FETCH_BYTES);
-      const text = ctype.includes("text/html") ? htmlToText(body.text) : body.text.trim();
-      const header = `Fetched ${target.toString()} (HTTP ${res.status}, ${ctype || "unknown type"})${
-        body.truncated ? " [truncated]" : ""
-      }:\n\n`;
+      const decoded = body.bytes.toString("utf8");
+      const text = mediaType === "text/html" ? htmlToText(decoded) : decoded.trim();
+      const header = `Fetched ${where}${body.truncated ? " [truncated]" : ""}:\n\n`;
       return header + text;
     } catch (e) {
       if (e instanceof BlockedUrlError) return `web_fetch refused: ${e.message}`;

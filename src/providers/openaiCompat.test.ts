@@ -41,4 +41,34 @@ describe("toOAIMessages (content-part mapping)", () => {
     expect(content[1].type).toBe("text");
     expect(content[1].text).toContain("a.pdf");
   });
+
+  it("array tool_result: text goes in the tool message; image is hoisted to a user message, PDF becomes a placeholder", () => {
+    const msg: ChatMessage = {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          toolUseId: "t1",
+          content: [
+            { type: "text", text: "Fetched https://x/pic.png" },
+            { type: "image", mediaType: "image/png", data: "aGk=" },
+            { type: "document", mediaType: "application/pdf", data: "JVBERi0=", name: "spec.pdf" },
+          ],
+        },
+      ],
+    };
+    const out = toOAIMessages(msg);
+    expect(out).toHaveLength(2);
+    expect(out[0].role).toBe("tool");
+    expect(out[0].tool_call_id).toBe("t1");
+    expect(typeof out[0].content).toBe("string");
+    expect(out[0].content).toContain("Fetched https://x/pic.png");
+    expect(out[0].content).not.toContain("aGk=");
+    expect(out[0].content).not.toContain("JVBERi0=");
+    const user = out[1].content as Array<Record<string, unknown>>;
+    expect(out[1].role).toBe("user");
+    expect(user[0]).toEqual({ type: "image_url", image_url: { url: "data:image/png;base64,aGk=" } });
+    expect(user[1].type).toBe("text");
+    expect(user[1].text).toContain("spec.pdf");
+  });
 });
