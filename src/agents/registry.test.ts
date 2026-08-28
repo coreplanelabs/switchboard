@@ -116,3 +116,52 @@ describe("validated-review prompt behavior (resident variants)", () => {
     expect(AGENTS.review.residentSystem!).toMatch(/GATHER ONCE/);
   });
 });
+
+// Feature: features/agent-review.md (issue #69) — posting the review back to the
+// PR is the system's job (a deterministic dispatcher post-step), NOT the model's.
+// Both review prompts must forbid self-posting so the run never double-comments,
+// and must say the system posts by default (comment-only) with an opt-out.
+describe("review post-step: prompts defer posting to the system (issue #69)", () => {
+  it("both review prompts forbid self-posting and say the system posts by default", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
+      expect(sys).toMatch(/do NOT post your review to GitHub yourself/i);
+      expect(sys).toMatch(/posts your final message to that PR automatically/i);
+      expect(sys).toMatch(/never an approval or a merge/i); // comment-only
+      expect(sys).toMatch(/slack only/i); // opt-out acknowledged
+    }
+  });
+
+  it("the sandbox review prompt names `gh pr comment` as the thing NOT to do", () => {
+    expect(AGENTS.review.system).toContain("gh pr comment");
+  });
+});
+
+// Feature: features/agent-coding.md — every PR the coding agent opens carries a
+// rich, templated description BY DEFAULT (not on request). Both prompts must
+// contain the template's sections plus the rules that keep it honest.
+describe("coding prompts: templated PR description by default", () => {
+  const SECTIONS = [
+    "**TL;DR**",
+    "**What & why**",
+    "**Changes**",
+    "**Decisions**",
+    "**Risks & implications**",
+    "**Validation**",
+    "**How to review**",
+  ];
+
+  it("both coding prompts include every PR-description section", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      for (const section of SECTIONS) expect(sys, section).toContain(section);
+    }
+  });
+
+  it("both prompts state the rules that keep the description honest", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).toMatch(/for EVERY PR/); // default, not on request
+      expect(sys).toMatch(/unwrapped/i); // no hard line breaks
+      expect(sys).toMatch(/hyperlink/i); // link the triggering issue/request
+      expect(sys).toMatch(/never fabricate validation/i); // real results only
+    }
+  });
+});

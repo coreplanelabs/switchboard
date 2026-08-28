@@ -25,6 +25,11 @@ import { validRef } from "./repoCommands.js";
 export interface RepoContext {
   repo?: string;
   ref?: string;
+  /** PR number, set when the CURRENT message references a PR of the resolved
+   *  repo (URL or `owner/name#N`). Independent of ref binding — known from the
+   *  reference itself, so it survives a failed/cross-fork head-ref fetch. Lets
+   *  the dispatcher post a review back to the PR by default (issue #69). */
+  pr?: number;
 }
 
 // GitHub owner: alphanumeric + hyphens, no leading/trailing hyphen, ≤39.
@@ -186,6 +191,11 @@ export async function resolveRepoContext(
   const out: RepoContext = {};
   if (repo) out.repo = repo;
   if (ref) out.ref = ref;
+  // PR number for the deterministic review post-step: only when the current
+  // message named a PR of the resolved repo. Not inherited from thread history
+  // (a stale PR must never receive a later review), and set regardless of
+  // whether the head-ref fetch succeeded.
+  if (repo && s.pr && repo === s.pr.repo) out.pr = s.pr.number;
   return out;
 }
 

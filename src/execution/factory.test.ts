@@ -7,6 +7,18 @@ import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { LocalExecutor } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
 import { makeExecutor, resetResidentProbeCache, type ExecutorFactoryOptions } from "./factory.js";
+import { resolveGithubToken } from "./githubApp.js";
+
+// The sandbox's GitHub credential is minted per toolset (least-privilege), so
+// mock the mint to a scope-tagged token: the test asserts the SCOPE requested
+// and the token that lands in the sandbox env, without JWT signing or network.
+vi.mock("./githubApp.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("./githubApp.js")>();
+  return {
+    ...mod,
+    resolveGithubToken: vi.fn(async (scope?: "read" | "write") => `ghs_${scope ?? "write"}`),
+  };
+});
 
 // Feature: features/execution.md — per-agent executor provisioning: agents
 // declare the resources they need (AgentDef.resources); an agent that declares
@@ -77,6 +89,30 @@ describe("makeExecutor per-agent provisioning", () => {
     await expect(makeExecutor({ execution: { type: "e2b" }, ...dirs() }, ctx("coding"))).rejects.toThrow(
       /E2B_API_KEY is not set/,
     );
+  });
+
+  // Security (#79 review): the review agent's sandbox has `gh` + the credential
+  // helper, so a write-capable GH_TOKEN there would let the model — or a
+  // prompt-injected diff — post/review/push. Least-privilege closes it at the
+  // token: a `readonly` toolset gets a READ-scoped token, a `full` toolset gets
+  // WRITE. (The bot-process review post uses its own write token, unaffected.)
+  const envOf = (ex: unknown) => (ex as { opts: { envs: Record<string, string> } }).opts.envs;
+
+  it("a readonly agent's sandbox gets a READ-scoped token; a full agent gets WRITE", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.mocked(resolveGithubToken).mockClear();
+    const cf: ExecutorFactoryOptions = {
+      execution: { type: "cloudflare", url: "https://sandbox.example" },
+      ...dirs(),
+    };
+    const review = await makeExecutor(cf, ctx("review")); // toolset "readonly"
+    const coding = await makeExecutor(cf, ctx("coding")); // toolset "full"
+
+    expect(resolveGithubToken).toHaveBeenCalledWith("read");
+    expect(resolveGithubToken).toHaveBeenCalledWith("write");
+    // …and the scoped token is exactly what lands in the sandbox env.
+    expect(envOf(review.executor).GH_TOKEN).toBe("ghs_read");
+    expect(envOf(coding.executor).GH_TOKEN).toBe("ghs_write");
   });
 });
 

@@ -1,0 +1,59 @@
+import { resolveGithubToken } from "./githubApp.js";
+
+// Posting a review back to a PR (issue #69). The bot process posts the comment
+// itself over the GitHub REST API with the App installation token — never a
+// `gh` shell-out and never from inside the sandbox/resident (AGENTS.md
+// invariant 5). The App needs `pull_requests:write`. This is the SAME
+// REST-with-App-token path repoContext.ts uses to resolve PR head refs, so it
+// works uniformly for sandbox and resident runs: the post happens in the bot,
+// after the run, regardless of where the run executed.
+//
+// A PR comment is an issue comment (`POST /repos/{repo}/issues/{n}/comments`):
+// this is a plain comment ONLY — never a review, an approval, or a merge.
+
+// GitHub rejects a comment body over 65536 chars; clip with a visible note so a
+// huge review still posts instead of 422-ing.
+const MAX_COMMENT_CHARS = 65000;
+
+export interface ReviewCommentTarget {
+  /** `owner/name` */
+  repo: string;
+  /** PR (issue) number */
+  number: number;
+}
+
+/**
+ * Post a plain comment to a PR. Throws on missing credential or a non-2xx
+ * response so the caller can log a receipt/failure; callers treat it as
+ * best-effort (the Slack reply is the primary delivery).
+ */
+export async function postReviewComment(target: ReviewCommentTarget, body: string): Promise<void> {
+  const token = await resolveGithubToken();
+  if (!token) {
+    throw new Error("no GitHub credential available to post the PR review comment");
+  }
+  const clipped =
+    body.length > MAX_COMMENT_CHARS
+      ? `${body.slice(0, MAX_COMMENT_CHARS)}\n\n_(review truncated to fit GitHub's comment size limit)_`
+      : body;
+  const res = await fetch(
+    `https://api.github.com/repos/${target.repo}/issues/${target.number}/comments`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "content-type": "application/json",
+        "user-agent": "switchboard",
+      },
+      body: JSON.stringify({ body: clipped }),
+      signal: AbortSignal.timeout(15000),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `PR comment post failed: HTTP ${res.status} ${text.slice(0, 300)}`,
+    );
+  }
+}

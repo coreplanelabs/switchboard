@@ -16,7 +16,29 @@ interface CachedToken {
   expiresAtMs: number;
 }
 
-let cache: CachedToken | null = null;
+// Token scope decides the installation token's permissions at mint time:
+//   "write" — the full installation grant (coding agent, and the bot process's
+//             deterministic review post via githubComments.ts).
+//   "read"  — least-privilege for a read-only agent's SANDBOX (the review
+//             agent): it can read/clone a private repo and read its PRs, but
+//             physically CANNOT comment, review, push, or otherwise write —
+//             even if the model or a prompt-injected diff tries. This closes
+//             the double-post / injection hole at the token, not the prompt.
+export type GithubTokenScope = "write" | "read";
+
+// Subset of the installation's permissions for a read-scoped token: enough for
+// `gh pr view`/`gh pr diff` and `git clone`/checkout on a PRIVATE repo, nothing
+// that writes. contents:read → clone/checkout; pull_requests:read → PR
+// metadata + diff; metadata:read → always required by GitHub.
+const READ_ONLY_PERMISSIONS = {
+  contents: "read",
+  pull_requests: "read",
+  metadata: "read",
+} as const;
+
+// One cache slot per scope: a write token must never be handed out where a read
+// token was requested (or vice-versa), so they can't share a slot.
+const cache = new Map<GithubTokenScope, CachedToken>();
 
 export function githubAppConfigured(): boolean {
   return Boolean(
@@ -30,38 +52,48 @@ export function githubAppConfigured(): boolean {
  * Resolve the GitHub credential to inject into sandboxes:
  * a freshly-minted installation token when a GitHub App is configured,
  * else the static GH_TOKEN, else null (agents without GitHub needs).
+ *
+ * `scope` (default "write") selects the minted token's permissions — pass
+ * "read" for a read-only agent's sandbox so it cannot write from inside.
+ * NOTE: the static GH_TOKEN fallback cannot be scoped down (it's an opaque PAT),
+ * so least-privilege for the review sandbox requires the GitHub App — the
+ * production configuration.
  */
-export async function resolveGithubToken(): Promise<string | null> {
-  if (githubAppConfigured()) return mintInstallationToken();
+export async function resolveGithubToken(scope: GithubTokenScope = "write"): Promise<string | null> {
+  if (githubAppConfigured()) return mintInstallationToken(scope);
   return process.env.GH_TOKEN ?? null;
 }
 
-async function mintInstallationToken(): Promise<string> {
+async function mintInstallationToken(scope: GithubTokenScope): Promise<string> {
   // Reuse until 5 minutes before expiry — sandbox runs are minutes-long, so a
   // token minted at request start comfortably outlives the run.
-  if (cache && Date.now() < cache.expiresAtMs - 5 * 60_000) return cache.token;
+  const cached = cache.get(scope);
+  if (cached && Date.now() < cached.expiresAtMs - 5 * 60_000) return cached.token;
 
   const appId = process.env.GITHUB_APP_ID!;
   const installationId = process.env.GITHUB_APP_INSTALLATION_ID!;
   const privateKey = process.env.GITHUB_APP_PRIVATE_KEY!.replace(/\\n/g, "\n");
 
+  // A read-scoped token requests a permissions subset; the write scope omits
+  // the field to receive the full installation grant (unchanged behavior).
+  const body = scope === "read" ? JSON.stringify({ permissions: READ_ONLY_PERMISSIONS }) : undefined;
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${appJwt(appId, privateKey)}`,
+    accept: "application/vnd.github+json",
+    "user-agent": "switchboard",
+  };
+  if (body) headers["content-type"] = "application/json";
+
   const res = await fetch(
     `https://api.github.com/app/installations/${installationId}/access_tokens`,
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${appJwt(appId, privateKey)}`,
-        accept: "application/vnd.github+json",
-        "user-agent": "switchboard",
-      },
-    },
+    { method: "POST", headers, ...(body ? { body } : {}) },
   );
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`GitHub App token mint failed: HTTP ${res.status} ${body.slice(0, 300)}`);
+    const errBody = await res.text().catch(() => "");
+    throw new Error(`GitHub App token mint failed: HTTP ${res.status} ${errBody.slice(0, 300)}`);
   }
   const data = (await res.json()) as { token: string; expires_at: string };
-  cache = { token: data.token, expiresAtMs: Date.parse(data.expires_at) };
+  cache.set(scope, { token: data.token, expiresAtMs: Date.parse(data.expires_at) });
   return data.token;
 }
 

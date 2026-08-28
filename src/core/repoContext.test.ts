@@ -94,7 +94,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     const { fn, calls } = stubFetch({ body: { head: { ref: "patch-1", repo: { full_name: "jshttp/vary" } } } });
     await expect(
       resolveRepoContext(msg("review <https://github.com/jshttp/vary/pull/42|#42>"), []),
-    ).resolves.toEqual({ repo: "jshttp/vary", ref: "patch-1" });
+    ).resolves.toEqual({ repo: "jshttp/vary", ref: "patch-1", pr: 42 });
     expect(fn).toHaveBeenCalledTimes(1);
     expect(calls[0].url).toBe("https://api.github.com/repos/jshttp/vary/pulls/42");
   });
@@ -104,6 +104,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     await expect(resolveRepoContext(msg("agent:review acme/api#7"), [])).resolves.toEqual({
       repo: "acme/api",
       ref: "patch-1",
+      pr: 7,
     });
   });
 
@@ -118,6 +119,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     stubFetch({ reject: "fetch failed" });
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
       repo: "jshttp/vary",
+      pr: 42,
     });
   });
 
@@ -125,6 +127,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     stubFetch({ status: 404, body: { message: "Not Found" } });
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
       repo: "jshttp/vary",
+      pr: 42,
     });
   });
 
@@ -132,6 +135,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     stubFetch({ body: { head: { ref: "fork-branch", repo: { full_name: "other/fork" } } } });
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
       repo: "jshttp/vary",
+      pr: 42,
     });
   });
 
@@ -142,6 +146,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     stubFetch({ body: { head: { ref: "patch-1", repo: null } } });
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
       repo: "jshttp/vary",
+      pr: 42,
     });
   });
 
@@ -149,6 +154,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     stubFetch({ body: { head: { ref: "patch-1", repo: {} } } });
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
       repo: "jshttp/vary",
+      pr: 42,
     });
   });
 
@@ -156,7 +162,27 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     const { fn } = stubFetch();
     await expect(
       resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42 on branch main"), []),
-    ).resolves.toEqual({ repo: "jshttp/vary", ref: "main" });
+    ).resolves.toEqual({ repo: "jshttp/vary", ref: "main", pr: 42 });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  // The PR number carries the deterministic review post-step (issue #69): set
+  // only when the CURRENT message names a PR of the resolved repo.
+  it("a bare repo mention (no PR reference) carries no pr — nowhere to post", async () => {
+    const { fn } = stubFetch();
+    await expect(resolveRepoContext(msg("review coreplanelabs/switchboard"), [])).resolves.toEqual({
+      repo: "coreplanelabs/switchboard",
+    });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("the PR number is NOT inherited from thread history (a stale PR never gets a later review)", async () => {
+    const { fn } = stubFetch();
+    const history = [{ role: "user" as const, text: "review https://github.com/acme/api/pull/7" }];
+    // A follow-up in the same thread inherits the repo but not the PR number.
+    await expect(resolveRepoContext(msg("take another look"), history)).resolves.toEqual({
+      repo: "acme/api",
+    });
     expect(fn).not.toHaveBeenCalled();
   });
 });

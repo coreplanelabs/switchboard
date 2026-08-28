@@ -185,7 +185,7 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: Executor
     const apiKeyEnv = opts.execution?.apiKeyEnv ?? "E2B_API_KEY";
     const apiKey = process.env[apiKeyEnv];
     if (!apiKey) throw new Error(`execution.type is "e2b" but ${apiKeyEnv} is not set`);
-    const envs = await githubEnvs();
+    const envs = await githubEnvs(ctx.agent);
     return E2BExecutor.open({
       apiKey,
       threadKey,
@@ -204,7 +204,7 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: Executor
     const apiKeyEnv = opts.execution.apiKeyEnv ?? "SANDBOX_TOKEN";
     const token = process.env[apiKeyEnv];
     if (!token) throw new Error(`execution.type is "cloudflare" but ${apiKeyEnv} is not set`);
-    const envs = await githubEnvs();
+    const envs = await githubEnvs(ctx.agent);
     return new CloudflareSandboxExecutor({
       url: opts.execution.url,
       token,
@@ -243,8 +243,16 @@ class NullExecutor implements Executor {
 }
 
 /** GitHub credential for the sandbox env: freshly-minted App installation
- *  token when a GitHub App is configured, else static GH_TOKEN, else none. */
-async function githubEnvs(): Promise<Record<string, string>> {
-  const token = await resolveGithubToken();
+ *  token when a GitHub App is configured, else static GH_TOKEN, else none.
+ *
+ *  Least-privilege by toolset: a `readonly` agent (the review agent) gets a
+ *  READ-scoped token, so even though its sandbox has `gh` + the credential
+ *  helper, it physically cannot post/review/push from inside — the deterministic
+ *  review post is done by the bot process (githubComments.ts) with a write
+ *  token, so this doesn't weaken it. A `full` agent (coding) gets the
+ *  write-scoped token it needs to push and open PRs. */
+async function githubEnvs(agent: AgentDef): Promise<Record<string, string>> {
+  const scope = agent.toolset === "readonly" ? "read" : "write";
+  const token = await resolveGithubToken(scope);
   return token ? { GH_TOKEN: token } : {};
 }
