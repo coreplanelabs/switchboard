@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Executor } from "../execution/executor.js";
-import { diffDigestTool, TOOLSETS, type ToolContext } from "./workspace.js";
+import { diffDigestTool, submitVerdictTool, TOOLSETS, type ToolContext } from "./workspace.js";
 
 // Feature: features/validated-review.md (R14). The diff_digest tool is a thin
 // wrapper: it runs `git diff <base>...HEAD` through the Executor seam and
@@ -118,5 +118,40 @@ describe("diff_digest toolset wiring", () => {
     expect(names("readonly")).toContain("diff_digest");
     expect(names("web")).not.toContain("diff_digest");
     expect(names("none")).not.toContain("diff_digest");
+  });
+});
+
+// Feature: features/agent-review.md — the structured verdict channel. The
+// review agent states approve/request_changes through this tool; the
+// dispatcher (not the model) writes the `LGTM:` line from it.
+describe("submit_verdict tool", () => {
+  const ctxWith = (onVerdict?: ToolContext["onVerdict"]): ToolContext =>
+    ({ executor: {} as ToolContext["executor"], onVerdict }) as ToolContext;
+
+  it("is in the review (readonly) toolset only — coding and research never emit verdicts", () => {
+    const names = (key: string) => (TOOLSETS[key] ?? []).map((t) => t.name);
+    expect(names("readonly")).toContain("submit_verdict");
+    expect(names("full")).not.toContain("submit_verdict");
+    expect(names("web")).not.toContain("submit_verdict");
+  });
+
+  it("forwards a valid verdict to the context and acknowledges it", async () => {
+    const got: unknown[] = [];
+    const out = await submitVerdictTool.run({ verdict: "approve", summary: "clean" }, ctxWith((v) => got.push(v)));
+    expect(got).toEqual([{ verdict: "approve", summary: "clean" }]);
+    expect(out).toBe("verdict recorded: approve");
+  });
+
+  it("rejects anything but the two verdict values without touching the context", async () => {
+    const got: unknown[] = [];
+    const out = await submitVerdictTool.run({ verdict: "LGTM", summary: "x" }, ctxWith((v) => got.push(v)));
+    expect(got).toEqual([]);
+    expect(String(out)).toMatch(/^error:/);
+  });
+
+  it("tolerates a context with no verdict sink", async () => {
+    await expect(submitVerdictTool.run({ verdict: "request_changes", summary: "bug" }, ctxWith(undefined))).resolves.toBe(
+      "verdict recorded: request_changes",
+    );
   });
 });
