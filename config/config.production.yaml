@@ -46,3 +46,6 @@ memory:
   worker:
     baseUrl: https://switchboard-memory.coreplanelabs.dev
     tokenEnv: MEMORY_TOKEN
+  # Reflection (post-run fact extraction) runs on a cheap model; the run's own
+  # model is only the fallback when this is unset.
+  model: anthropic/claude-haiku-4-5
