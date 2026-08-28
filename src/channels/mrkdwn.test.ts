@@ -39,4 +39,39 @@ describe("mdToMrkdwn", () => {
       "<https://e.com/x%7Chttps://evil.com|click &lt;here&gt;>",
     );
   });
+
+  // #90: the default reply path (mdToMrkdwn via io.reply) is the highest-traffic
+  // Slack output path. An agent answer that quotes <!channel>/<@U…> (from tool
+  // output or a prompt injection) must render them as inert visible text, not fire
+  // a live broadcast/mention. Prose &/</> are escaped WITHOUT breaking any
+  // structural conversion mdToMrkdwn itself produces.
+  it("escapes bare <!channel>/<@U…> in prose so they can't fire a broadcast/mention", () => {
+    const out = mdToMrkdwn("summary: <!channel> please, cc <@U99999>");
+    expect(out).toContain("&lt;!channel&gt;");
+    expect(out).toContain("&lt;@U99999&gt;");
+    expect(out).not.toContain("<!channel>");
+    expect(out).not.toContain("<@U99999>");
+  });
+
+  it("preserves a generated link url's literal & (query params must survive)", () => {
+    // The url keeps its literal `&`; only the label is escaped, and the url's
+    // structural <>| would be percent-encoded (none here).
+    expect(mdToMrkdwn("[click](https://x.com?a=1&b=2)")).toBe("<https://x.com?a=1&b=2|click>");
+  });
+
+  it("percent-encodes a generated link url's structural chars (< > |)", () => {
+    expect(mdToMrkdwn("[link](https://x.com/<a>|b)")).toBe("<https://x.com/%3Ca%3E%7Cb|link>");
+  });
+
+  it("escapes injected angle brackets inside a bold span, keeping the * marker", () => {
+    expect(mdToMrkdwn("**bold <x>**")).toBe("*bold &lt;x&gt;*");
+  });
+
+  it("escapes bare & < > in plain prose (& first, no double-escape)", () => {
+    expect(mdToMrkdwn("a & b < c > d")).toBe("a &amp; b &lt; c &gt; d");
+  });
+
+  it("keeps a leading blockquote marker while escaping the quoted prose", () => {
+    expect(mdToMrkdwn("> quote <!channel>")).toBe("> quote &lt;!channel&gt;");
+  });
 });
