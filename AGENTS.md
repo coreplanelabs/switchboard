@@ -23,6 +23,7 @@ Agent gateway: messages arrive over a channel, get routed to an agent, which run
 | `src/core/repoContext.ts` | Pre-model repo/ref resolution (slug/URL/PR in the message, thread history) | Feeds resident selection; PR→ref via one REST call, never `gh` |
 | `src/core/repoCommands.ts` | `repo onboard/offboard/reconfigure/rebuild/list` chat commands | Gated by `canManageRepos` (KTD9 fail-closed); talks to the resident Worker's admin routes |
 | `src/core/runRegistry.ts` | In-memory, live-only run registry (per-run id+token, bounded backlog, TTL eviction, constant-time gate) | Backs the external live-view page; `defaultRunRegistry` singleton shared with the dispatcher |
+| `src/core/memory/` | Cross-session memory (#85): `MemoryStore` seam + read path (types, keyword+recency scorer, scope deriver, `Null`/`InMemory` stores). Flag-gated OFF by default | `NullMemoryStore` when disabled → model input byte-identical to memory-off; see `features/memory.md` |
 | `src/channels/liveView.ts` | Live-view surface: token-gated `GET /runs/:id` (HTML) + `/runs/:id/events` (SSE) | Capability-URL auth (not bearer); consumes the run-visibility stream; see `features/live-view.md` |
 | `src/channels/slack.ts` | Slack adapter (Bolt, Socket Mode) | Transport only: mention-strip, thread fetch, chunked replies, status edits |
 | `src/cli.ts` | CLI adapter | Second channel; proof of the abstraction; use for local testing |

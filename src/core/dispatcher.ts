@@ -13,6 +13,7 @@ import { decideReviewPost } from "./reviewPost.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
+import { memoryContextBlock, type MemoryStore } from "./memory/index.js";
 import type { RunEvent } from "./runEvents.js";
 import { defaultRunRegistry, type RunRegistry } from "./runRegistry.js";
 import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
@@ -68,6 +69,15 @@ export interface CoreDeps {
    * decision without a network call.
    */
   postReviewComment?: (target: ReviewCommentTarget, body: string) => Promise<void>;
+  /**
+   * Cross-session memory store (Area 7c, #85). Read only in PR1: when
+   * `config.memory.enabled` is true the dispatcher retrieves scope-relevant
+   * records from this store and injects them as an advisory context block
+   * before the model turn. When memory is disabled (the default) a
+   * NullMemoryStore is used regardless, so model input is byte-identical to
+   * memory-off. Injectable for tests; the durable WorkerMemoryStore is PR3.
+   */
+  memory?: MemoryStore;
 }
 
 const STATUS_UPDATE_MIN_MS = 3000;
@@ -178,6 +188,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       return;
     }
 
+    // Cross-session memory (Area 7c, #85) — READ path. BEFORE assembling model
+    // input, retrieve scope-relevant records and render a dedicated advisory
+    // context block (kept OUT of history: it rides on the system prompt below,
+    // never mixed into the turns). Flag-gated: with memory disabled (default)
+    // this resolves to undefined via a NullMemoryStore, leaving `messages` and
+    // `system` byte-identical to memory-off.
+    const memoryBlock = await memoryContextBlock(
+      deps.config.config.memory,
+      deps.memory,
+      directives.text,
+    );
+
     const messages = buildMessages(history, directives.text, msg.images);
 
     // Executor selection is context-aware: the agent's resource declarations
@@ -219,10 +241,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // discriminant (not an executor `instanceof`), keeping the executor
     // implementation out of the channel-agnostic core. The shared AgentDef is
     // never mutated (concurrent dispatches share it).
-    const system =
+    const baseSystem =
       resident && agent.residentSystem
         ? `${agent.residentSystem}\n\nTarget repository: ${repoCtx.repo}. The worktree is already on this thread's bound branch (confirm with \`git branch --show-current\`).`
         : undefined;
+
+    // Fold the memory block onto the FRONT of the effective system prompt (a
+    // dedicated context segment, ahead of the agent's own instructions). With no
+    // block (memory off, or nothing matched) `system` stays exactly `baseSystem`
+    // — the byte-identical, zero-behavior-change path. `runAgent` falls back to
+    // `agent.system` when `system` is undefined, so when we DO prepend a block we
+    // resolve the base ourselves (`baseSystem ?? agent.system`) to preserve it.
+    const system = memoryBlock ? `${memoryBlock}\n\n${baseSystem ?? agent.system}` : baseSystem;
 
     const label = `*${agent.name}* on \`${resolved.modelRef}\`` + (note ? ` · ${note}` : "");
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);

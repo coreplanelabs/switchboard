@@ -1,0 +1,102 @@
+import type { MemoryCandidate, MemoryConfig, MemoryQuery, MemoryRecord, MemoryStore } from "./types.js";
+import { keywordMatch, scoreRecord, tokenize } from "./scorer.js";
+
+// Two implementations of the MemoryStore seam (AGENTS.md invariant 2). The
+// durable WorkerMemoryStore (DO + SQLite FTS5) is PR3, behind this same
+// interface — the core never changes.
+
+/** No-op store: `retrieve` always returns [], `write` does nothing. This is the
+ *  default when memory is disabled — the mechanism that guarantees zero behavior
+ *  change (the injected block is only ever built from `retrieve`'s output, so an
+ *  always-empty result means the model input is byte-identical to memory-off). */
+export class NullMemoryStore implements MemoryStore {
+  async retrieve(_q: MemoryQuery): Promise<MemoryRecord[]> {
+    return [];
+  }
+  async write(_scopeKey: string, _records: MemoryCandidate[]): Promise<void> {
+    // intentionally nothing
+  }
+}
+
+/** Normalized text key for write-time dedup (trim + lowercase + collapse
+ *  internal whitespace). */
+function normalizeText(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/** In-memory store: a `Map<scopeKey, MemoryRecord[]>` with whole-word keyword +
+ *  recency ranking. Serves tests and dev; a fresh instance is empty (PR1 has no write
+ *  path in the dispatch loop), and in-process state is never treated as durable
+ *  (AGENTS.md invariant 6 — the durable path is PR3). */
+export class InMemoryMemoryStore implements MemoryStore {
+  private readonly byScope = new Map<string, MemoryRecord[]>();
+  private readonly now: () => number;
+  private seq = 0;
+
+  constructor(seed: MemoryRecord[] = [], opts: { now?: () => number } = {}) {
+    this.now = opts.now ?? Date.now;
+    for (const r of seed) this.list(r.scopeKey).push(r);
+  }
+
+  private list(scopeKey: string): MemoryRecord[] {
+    let list = this.byScope.get(scopeKey);
+    if (!list) {
+      list = [];
+      this.byScope.set(scopeKey, list);
+    }
+    return list;
+  }
+
+  async retrieve(q: MemoryQuery): Promise<MemoryRecord[]> {
+    const now = this.now();
+    const ranked = this.list(q.scopeKey)
+      .filter((r) => r.status === "active" && keywordMatch(r, q.query) > 0)
+      .map((r) => ({ r, score: scoreRecord(r, q.query, now) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, q.limit)
+      .map(({ r }) => r);
+    // Retrieval bumps recency/usage (feeds the decay term next time).
+    for (const r of ranked) {
+      r.lastUsedAt = now;
+      r.useCount += 1;
+    }
+    return ranked;
+  }
+
+  async write(scopeKey: string, records: MemoryCandidate[]): Promise<void> {
+    const list = this.list(scopeKey);
+    const now = this.now();
+    for (const cand of records) {
+      const norm = normalizeText(cand.text);
+      const existing = list.find((r) => r.status === "active" && normalizeText(r.text) === norm);
+      if (existing) {
+        // Dedup: bump usage instead of inserting a near-identical record.
+        existing.useCount += 1;
+        continue;
+      }
+      list.push({
+        id: `mem:${scopeKey}:${this.seq++}`,
+        scopeKey,
+        kind: cand.kind,
+        text: cand.text,
+        keywords: cand.keywords ?? tokenize(cand.text),
+        sourceThreadKey: cand.sourceThreadKey,
+        sourceRunId: cand.sourceRunId,
+        createdAt: now,
+        useCount: 0,
+        confidence: cand.confidence,
+        supersedes: cand.supersedes,
+        status: "active",
+      });
+    }
+  }
+}
+
+/** Pick the store for a dispatch: `NullMemoryStore` when memory is disabled (the
+ *  zero-behavior-change default), else the injected store (PR3's durable
+ *  `WorkerMemoryStore`), falling back to a fresh `InMemoryMemoryStore` for
+ *  dev/tests when nothing is injected. */
+export function selectMemoryStore(cfg: MemoryConfig | undefined, injected?: MemoryStore): MemoryStore {
+  if (!cfg?.enabled) return new NullMemoryStore();
+  return injected ?? new InMemoryMemoryStore();
+}
