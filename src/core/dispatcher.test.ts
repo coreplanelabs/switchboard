@@ -197,6 +197,36 @@ describe("composeRunLabel", () => {
     expect(label.endsWith('…"')).toBe(true);
   });
 
+  it("a dot at the snippet budget edge inside a token is not a sentence end", () => {
+    // 60 chars of prose, then a hostname whose first '.' lands exactly at index 60.
+    const lead = "x".repeat(56) + " api";
+    expect(lead.length).toBe(60);
+    const label = composeRunLabel({ ...base, repo: "o/r", text: `${lead}.example.com is down please look` });
+    expect(label).not.toContain('api…"');
+    expect(label.startsWith(`review · o/r · "${"x".repeat(56)}`)).toBe(true);
+  });
+
+  it("trailing punctuation after a URL stays in the prose", () => {
+    expect(composeRunLabel({ ...base, repo: "o/r", text: "fix https://github.com/o/r/pull/12, then deploy" })).toBe(
+      'review · o/r · "fix o/r#12, then deploy"',
+    );
+    expect(composeRunLabel({ ...base, repo: "o/r", text: "(see https://example.com/a)." })).toBe(
+      'review · o/r · "(see example.com/a)."',
+    );
+  });
+
+  it("Slack user/channel mentions render as their label or a readable stub", () => {
+    expect(
+      composeRunLabel({ ...base, repo: "o/r", text: "<@U0BQNU1AD27> review this. Sent using <@U0BJJMDUCKY|Claude>" }),
+    ).toBe('review · o/r · "@user review this…"');
+    expect(composeRunLabel({ ...base, repo: "o/r", text: "post in <#C0BQS7KPJHK|general> and <#C0BQ>" })).toBe(
+      'review · o/r · "post in #general and #channel"',
+    );
+    expect(composeRunLabel({ ...base, repo: "o/r", text: "cc <!here> and <!subteam^S123|@eng>" })).toBe(
+      'review · o/r · "cc @here and @eng"',
+    );
+  });
+
   it("caps the overall label to a sane length", () => {
     const label = composeRunLabel({
       ...base,
