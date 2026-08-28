@@ -1,3 +1,4 @@
+import { extname } from "node:path";
 import bolt from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
 import { mdToMrkdwn } from "./mrkdwn.js";
@@ -5,6 +6,7 @@ import { escapeMrkdwn } from "./slackEscape.js";
 import { SlackFormatter } from "./slackFormatter.js";
 import type {
   ChannelIO,
+  DocumentAttachment,
   HistoryItem,
   ImageAttachment,
   StatusHandle,
@@ -32,6 +34,97 @@ const MAX_IMAGES_PER_MESSAGE = 10;
 // blow up the request payload; spent newest-first (recent images matter most).
 const MAX_HISTORY_IMAGES = 20;
 const MAX_HISTORY_IMAGE_BYTES = 24 * 1024 * 1024;
+
+// Document ingestion (mirrors images): PDFs (native document block where the
+// provider supports it) and text/code/CSV/log files (inlined as fenced text).
+const PDF_TYPE = "application/pdf";
+// Text-ish mimetypes beyond the `text/*` family that Slack may report.
+// `application/json` is deliberately absent: JSON is a common container for
+// credentials (service-account keys, token dumps), so a file is never inlined
+// just because Slack tags it application/json — the denylist below plus the
+// extension allowlist decide, never the JSON mimetype on its own.
+const TEXT_MIME_TYPES = new Set([
+  "application/xml",
+  "application/yaml",
+  "application/x-yaml",
+  "application/toml",
+  "application/x-sh",
+  "application/javascript",
+  "application/typescript",
+]);
+// Mimetypes Slack assigns when it can't identify a file — fall back to the
+// filename extension to decide whether it's a text/code file.
+const GENERIC_MIME_TYPES = new Set(["application/octet-stream", "binary/octet-stream", ""]);
+// Extensions inlined as text under the generic-mimetype fallback. JSON (`.json`,
+// `.jsonl`) and config formats (`.env`, `.ini`, `.cfg`, `.conf`) are absent by
+// design — the first two are frequent secret containers, the rest are covered by
+// the secret-file denylist — so a generic-typed config/JSON file is not "fair
+// game" for inlining just because of its extension.
+const TEXT_EXTENSIONS = new Set([
+  ".txt", ".md", ".markdown", ".log", ".csv", ".tsv", ".rst",
+  ".yaml", ".yml", ".toml",
+  ".xml", ".html", ".htm", ".css", ".scss", ".less",
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rb", ".go", ".rs",
+  ".java", ".kt", ".c", ".h", ".cpp", ".hpp", ".cc", ".cs", ".php", ".swift",
+  ".sh", ".bash", ".zsh", ".sql", ".r", ".pl", ".lua", ".dart", ".scala",
+  ".clj", ".ex", ".exs", ".vue", ".svelte", ".graphql", ".proto", ".dockerfile",
+]);
+// Secret-file denylist — filename shapes whose contents are likely credentials,
+// private keys, or secret config. Matching files are skipped-with-note and their
+// bytes NEVER reach the model prompt. This OVERRIDES text classification
+// (checked before the text-mimetype/extension allowlist), because the whole risk
+// is a secret file whose mimetype/extension otherwise reads as harmless text.
+//
+// Matched on the filename, case-insensitive, and independent of
+// `node:path.extname` — which returns "" for dotfiles like `.env` and `.npmrc`,
+// so an extname-based check would miss exactly the files that matter most.
+const SECRET_FILE_EXTENSIONS = [
+  ".pem", ".key", ".p12", ".pfx", ".npmrc", ".netrc", ".ini", ".cfg", ".conf",
+];
+const SECRET_FILE_PREFIXES = ["id_rsa"];
+
+/** Does this filename look like a secret/credential/key/config file? Case-
+ *  insensitive; conservative (a false match only skips a file, never leaks one).
+ *  Exported for tests. */
+export function isSecretFile(name: string | undefined): boolean {
+  const n = (name ?? "").trim().toLowerCase();
+  if (!n) return false;
+  // `.env` in any position: bare `.env`, dotfiles (`.env.local`,
+  // `.env.production`), and suffixed configs (`config.env`, `prod.env`).
+  if (n.includes(".env")) return true;
+  // SSH / private-key material by filename prefix (`id_rsa`, `id_rsa.pub`, …).
+  if (SECRET_FILE_PREFIXES.some((p) => n.startsWith(p))) return true;
+  // Credential JSON blobs — the common shapes secrets ship in.
+  if (n === "credentials.json") return true;
+  if (n.endsWith(".json") && (n.includes("service-account") || n.endsWith("-key.json"))) return true;
+  // Secret-ish extensions, including dotfiles `extname` can't see.
+  return SECRET_FILE_EXTENSIONS.some((ext) => n.endsWith(ext));
+}
+const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024; // per-file cap; PDFs run larger than images
+const MAX_DOCS_PER_MESSAGE = 10;
+// Thread-wide budget, spent newest-first (recent files matter most). Sized to
+// stay under Anthropic's ~32MB request ceiling for a document-heavy thread.
+const MAX_HISTORY_DOCS = 20;
+const MAX_HISTORY_DOCUMENT_BYTES = 32 * 1024 * 1024;
+
+/** Classify a file for document ingestion: a PDF, an inlinable text/code file,
+ *  or neither. A secret-file denylist match (`isSecretFile`) is classified as
+ *  neither — before any text check — so credentials never inline. Otherwise text
+ *  detection prefers the mimetype and falls back to the filename extension only
+ *  when Slack reports a generic/unknown type. Exported for tests. */
+export function classifyDocument(mimetype: string | undefined, name: string | undefined): "pdf" | "text" | null {
+  if (mimetype === PDF_TYPE) return "pdf";
+  // Secret-file denylist OVERRIDES text classification: a credentials/key/config
+  // file is skipped, never decoded into the prompt, even when its mimetype
+  // (application/json, text/plain) or extension would otherwise mark it text.
+  if (isSecretFile(name)) return null;
+  const mt = mimetype ?? "";
+  if (mt.startsWith("text/") || TEXT_MIME_TYPES.has(mt)) return "text";
+  if (GENERIC_MIME_TYPES.has(mt) && TEXT_EXTENSIONS.has(extname(name ?? "").toLowerCase())) {
+    return "text";
+  }
+  return null;
+}
 
 interface SlackFile {
   id?: string;
@@ -252,7 +345,13 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
     .catch((err: Error) => {
       if (!err.message.includes("already_reacted")) console.error(`[ack] ${err.message}`);
     });
-  const { images, skipped } = await fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE);
+  const { images, skipped: skippedImages } = await fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE);
+  const { documents, skipped: skippedDocs } = await fetchDocuments(ev.files, MAX_DOCS_PER_MESSAGE);
+  // A file is genuinely unsupported only when BOTH passes rejected it — the
+  // image pass skips every non-image (PDFs, text) and the document pass skips
+  // every non-document (images), so their intersection is exactly the files
+  // that are neither a usable image nor a usable document.
+  const skipped = skippedImages.filter((s) => skippedDocs.includes(s));
   // Human display names for the run label — best-effort and cached: a failed
   // lookup leaves the field undefined (the label falls back to the raw id) and
   // never fails the dispatch. Resolved in parallel so the two lookups don't add
@@ -277,6 +376,7 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
       channelName,
       userName,
       images: images.length > 0 ? images : undefined,
+      documents: documents.length > 0 ? documents : undefined,
     },
     new SlackIO(client, ev),
   );
@@ -333,6 +433,64 @@ export async function fetchImages(
     }
   }
   return { images, skipped, bytes };
+}
+
+/**
+ * Download Slack-hosted files and return the ones usable as model document
+ * input: PDFs (base64) and text/code/CSV/log files (decoded to UTF-8). Anything
+ * else (an image, an unsupported type, too big, download failed) lands in
+ * `skipped` with a human-readable label. Mirrors `fetchImages`; requires the
+ * files:read bot scope.
+ */
+export async function fetchDocuments(
+  files: SlackFile[] | undefined,
+  maxDocs: number,
+  maxTotalBytes = Infinity,
+): Promise<{ documents: DocumentAttachment[]; skipped: string[]; bytes: number }> {
+  const documents: DocumentAttachment[] = [];
+  const skipped: string[] = [];
+  let bytes = 0;
+  const token = process.env.SLACK_BOT_TOKEN;
+  for (const f of files ?? []) {
+    const label = `${f.name ?? f.id ?? "file"} (${f.mimetype ?? "unknown type"})`;
+    const url = f.url_private_download ?? f.url_private;
+    const kind = classifyDocument(f.mimetype, f.name);
+    if (!url || !kind || (f.size ?? 0) > MAX_DOCUMENT_BYTES || documents.length >= maxDocs) {
+      skipped.push(label);
+      continue;
+    }
+    try {
+      const res = await fetch(url, {
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+      });
+      // Slack answers unauthorized file fetches with an HTML login page and
+      // HTTP 200. Content-type is the signal — but a genuine .html text file is
+      // itself text/html, so only treat text/html as a login page when the file
+      // we requested wasn't HTML.
+      const contentType = res.headers.get("content-type") ?? "";
+      const looksLikeLoginPage = contentType.includes("text/html") && f.mimetype !== "text/html";
+      if (!res.ok || looksLikeLoginPage) {
+        console.error(`[files] download failed for ${label}: HTTP ${res.status}`);
+        skipped.push(label);
+        continue;
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.byteLength > MAX_DOCUMENT_BYTES || bytes + buf.byteLength > maxTotalBytes) {
+        skipped.push(label);
+        continue;
+      }
+      bytes += buf.byteLength;
+      documents.push({
+        mediaType: f.mimetype ?? "text/plain",
+        data: kind === "pdf" ? buf.toString("base64") : buf.toString("utf-8"),
+        name: f.name,
+      });
+    } catch (err) {
+      console.error(`[files] download failed for ${label}: ${err instanceof Error ? err.message : String(err)}`);
+      skipped.push(label);
+    }
+  }
+  return { documents, skipped, bytes };
 }
 
 class SlackIO implements ChannelIO {
@@ -429,28 +587,46 @@ class SlackIO implements ChannelIO {
         if (!text && !files?.length) continue;
         kept.push({ role: mm.bot_id ? "assistant" : "user", text, files });
       }
-      // Download attachments newest-first so the thread-wide budget favors
-      // the most recent images when a long thread overflows it.
+      // Download attachments newest-first so each thread-wide budget favors the
+      // most recent files when a long thread overflows it. Images and documents
+      // draw from independent budgets — one pool can't starve the other.
       const imagesByIndex: (ImageAttachment[] | undefined)[] = [];
+      const documentsByIndex: (DocumentAttachment[] | undefined)[] = [];
       let imagesLeft = MAX_HISTORY_IMAGES;
-      let bytesLeft = MAX_HISTORY_IMAGE_BYTES;
+      let imageBytesLeft = MAX_HISTORY_IMAGE_BYTES;
+      let docsLeft = MAX_HISTORY_DOCS;
+      let docBytesLeft = MAX_HISTORY_DOCUMENT_BYTES;
       for (let i = kept.length - 1; i >= 0; i--) {
         const files = kept[i].files;
-        if (!files?.length || imagesLeft <= 0 || bytesLeft <= 0) continue;
-        const { images, bytes } = await fetchImages(
-          files,
-          Math.min(MAX_IMAGES_PER_MESSAGE, imagesLeft),
-          bytesLeft,
-        );
-        imagesLeft -= images.length;
-        bytesLeft -= bytes;
-        if (images.length > 0) imagesByIndex[i] = images;
+        if (!files?.length) continue;
+        if (imagesLeft > 0 && imageBytesLeft > 0) {
+          const { images, bytes } = await fetchImages(
+            files,
+            Math.min(MAX_IMAGES_PER_MESSAGE, imagesLeft),
+            imageBytesLeft,
+          );
+          imagesLeft -= images.length;
+          imageBytesLeft -= bytes;
+          if (images.length > 0) imagesByIndex[i] = images;
+        }
+        if (docsLeft > 0 && docBytesLeft > 0) {
+          const { documents, bytes } = await fetchDocuments(
+            files,
+            Math.min(MAX_DOCS_PER_MESSAGE, docsLeft),
+            docBytesLeft,
+          );
+          docsLeft -= documents.length;
+          docBytesLeft -= bytes;
+          if (documents.length > 0) documentsByIndex[i] = documents;
+        }
       }
       for (let i = 0; i < kept.length; i++) {
         const { role, text } = kept[i];
         const images = imagesByIndex[i];
-        if (!text && !images) continue; // attachment-only turn whose downloads all failed
-        items.push({ role, text, images });
+        const documents = documentsByIndex[i];
+        // attachment-only turn whose downloads all failed
+        if (!text && !images && !documents) continue;
+        items.push({ role, text, images, documents });
       }
     } catch {
       // best-effort; the dispatcher still has the current message

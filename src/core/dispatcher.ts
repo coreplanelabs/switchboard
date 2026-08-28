@@ -20,7 +20,13 @@ import { defaultRunRegistry, type RunRegistry } from "./runRegistry.js";
 import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
 import { produceStructured, providerProducer } from "./structuredOutput.js";
 import type { Provider } from "../providers/types.js";
-import type { ChannelIO, HistoryItem, ImageAttachment, IncomingMessage } from "./types.js";
+import type {
+  ChannelIO,
+  DocumentAttachment,
+  HistoryItem,
+  ImageAttachment,
+  IncomingMessage,
+} from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
 // parsing, layered resolution, permission gates, history assembly, executor
@@ -211,7 +217,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       directives.text,
     );
 
-    const messages = buildMessages(history, directives.text, msg.images);
+    const messages = buildMessages(history, directives.text, msg.images, msg.documents);
 
     // Executor selection is context-aware: the agent's resource declarations
     // decide whether anything is provisioned at all (general gets nothing),
@@ -615,25 +621,47 @@ function buildMessages(
   history: HistoryItem[],
   currentText: string,
   currentImages?: ImageAttachment[],
+  currentDocuments?: DocumentAttachment[],
 ): ChatMessage[] {
   const messages: ChatMessage[] = history.map((h) => ({
     role: h.role,
-    content: turnContent(h.text, h.images),
+    content: turnContent(h.text, h.images, h.documents),
   }));
-  messages.push({ role: "user", content: turnContent(currentText, currentImages) });
+  messages.push({ role: "user", content: turnContent(currentText, currentImages, currentDocuments) });
   return normalizeAlternation(messages);
 }
 
-/** Images first, then text — a turn always has at least one part. */
-function turnContent(text: string, images?: ImageAttachment[]): ContentPart[] {
+/**
+ * Attachments first (images, then documents), then the user's text — a turn
+ * always has at least one part. PDFs become a native `document` part; text/code
+ * files are inlined as a fenced text part naming the file (provider-agnostic).
+ * Exported for tests.
+ */
+export function turnContent(
+  text: string,
+  images?: ImageAttachment[],
+  documents?: DocumentAttachment[],
+): ContentPart[] {
   const parts: ContentPart[] = (images ?? []).map((img) => ({
     type: "image" as const,
     mediaType: img.mediaType,
     data: img.data,
   }));
+  for (const doc of documents ?? []) {
+    if (doc.mediaType === "application/pdf") {
+      parts.push({ type: "document", mediaType: doc.mediaType, data: doc.data, name: doc.name });
+    } else {
+      parts.push({ type: "text", text: fenceFile(doc.name, doc.data) });
+    }
+  }
   if (text) parts.push({ type: "text", text });
   if (parts.length === 0) parts.push({ type: "text", text: "(empty message)" });
   return parts;
+}
+
+/** Inline a text/code file's content, fenced and labeled with its name. */
+function fenceFile(name: string | undefined, content: string): string {
+  return `\n\n[file: ${name ?? "attachment"}]\n\`\`\`\n${content}\n\`\`\`\n`;
 }
 
 /** Providers require user-first and behave best with merged consecutive roles. */

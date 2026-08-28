@@ -75,7 +75,8 @@ export class AnthropicProvider implements Provider {
   }
 }
 
-function toAnthropicMessage(m: ChatMessage): Anthropic.MessageParam {
+/** Exported for tests. */
+export function toAnthropicMessage(m: ChatMessage): Anthropic.MessageParam {
   const content: Anthropic.ContentBlockParam[] = m.content.map((part) => {
     switch (part.type) {
       case "text":
@@ -88,6 +89,19 @@ function toAnthropicMessage(m: ChatMessage): Anthropic.MessageParam {
             media_type: part.mediaType as Anthropic.Base64ImageSource["media_type"],
             data: part.data,
           },
+        };
+      case "document":
+        // Native document block (@anthropic-ai/sdk 0.39 supports it in the
+        // stable Messages API). Only PDFs reach here — text files are inlined
+        // as text parts upstream.
+        return {
+          type: "document",
+          source: {
+            type: "base64",
+            media_type: part.mediaType as Anthropic.Base64PDFSource["media_type"],
+            data: part.data,
+          },
+          ...(part.name ? { title: part.name } : {}),
         };
       case "tool_use":
         return {

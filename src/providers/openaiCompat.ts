@@ -112,7 +112,8 @@ export class OpenAICompatProvider implements Provider {
   }
 }
 
-function toOAIMessages(m: ChatMessage): OAIMessage[] {
+/** Exported for tests. */
+export function toOAIMessages(m: ChatMessage): OAIMessage[] {
   if (m.role === "assistant") {
     const text = m.content
       .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
@@ -148,6 +149,15 @@ function toOAIMessages(m: ChatMessage): OAIMessage[] {
       parts.push({
         type: "image_url",
         image_url: { url: `data:${part.mediaType};base64,${part.data}` },
+      });
+    } else if (part.type === "document") {
+      // OpenAI-compatible chat endpoints have inconsistent binary-PDF support,
+      // so a PDF is surfaced as an inline-text note naming the file rather than
+      // shipping raw base64 the model can't read. Text files never reach here —
+      // they arrive as ordinary text parts upstream.
+      parts.push({
+        type: "text",
+        text: `\n\n[attached file: ${part.name ?? "document"} (${part.mediaType}); not supported by this provider]\n`,
       });
     }
   }
