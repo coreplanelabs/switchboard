@@ -16,41 +16,67 @@ import { z } from "zod";
 export const STATUS_STATES = ["ok", "warn", "error", "info"] as const;
 export type StatusState = (typeof STATUS_STATES)[number];
 
-const headingBlock = z.object({
-  type: z.literal("heading"),
-  text: z.string().min(1),
-});
+// Upper bounds so pathological input is rejected (→ self-heal feedback, then a
+// safe fallback) rather than silently accepted. Chosen generous enough never to
+// clip a real answer, small enough to stop abuse (a megabyte of text, thousands
+// of bullets): any text/code/label string ≤ 12000 chars, a URL ≤ 2048 chars,
+// ≤ 100 bullet items in a list, ≤ 50 blocks in a message.
+const MAX_TEXT = 12_000;
+const MAX_URL = 2048;
+const MAX_BULLETS = 100;
+const MAX_BLOCKS = 50;
 
-const paragraphBlock = z.object({
-  type: z.literal("paragraph"),
-  text: z.string().min(1),
-});
+// Every block object is `.strict()`: an unknown/extra key is REJECTED, not
+// silently stripped, so the self-heal loop gets corrective feedback on a misnamed
+// field (e.g. `txt` instead of `text`) instead of a block that quietly lost it.
+const headingBlock = z
+  .object({
+    type: z.literal("heading"),
+    text: z.string().min(1).max(MAX_TEXT),
+  })
+  .strict();
 
-const bulletsBlock = z.object({
-  type: z.literal("bullets"),
-  items: z.array(z.string().min(1)).min(1),
-});
+const paragraphBlock = z
+  .object({
+    type: z.literal("paragraph"),
+    text: z.string().min(1).max(MAX_TEXT),
+  })
+  .strict();
 
-const codeBlock = z.object({
-  type: z.literal("code"),
-  code: z.string(),
-  language: z.string().optional(),
-});
+const bulletsBlock = z
+  .object({
+    type: z.literal("bullets"),
+    items: z.array(z.string().min(1).max(MAX_TEXT)).min(1).max(MAX_BULLETS),
+  })
+  .strict();
 
-const linkBlock = z.object({
-  type: z.literal("link"),
-  url: z.url(),
-  text: z.string().optional(),
-});
+const codeBlock = z
+  .object({
+    type: z.literal("code"),
+    code: z.string().max(MAX_TEXT),
+    language: z.string().optional(),
+  })
+  .strict();
 
-const statusBlock = z.object({
-  type: z.literal("status"),
-  state: z.enum(STATUS_STATES),
-  text: z.string().min(1),
-});
+const linkBlock = z
+  .object({
+    type: z.literal("link"),
+    url: z.url().max(MAX_URL),
+    text: z.string().max(MAX_TEXT).optional(),
+  })
+  .strict();
+
+const statusBlock = z
+  .object({
+    type: z.literal("status"),
+    state: z.enum(STATUS_STATES),
+    text: z.string().min(1).max(MAX_TEXT),
+  })
+  .strict();
 
 /** One block of a structured message; a discriminated union on `type` so an
- *  unknown `type` is rejected with a legible error (fed back on self-heal). */
+ *  unknown `type` is rejected with a legible error (fed back on self-heal). Each
+ *  member is `.strict()`, so unknown keys within a block are rejected too. */
 export const messageBlockSchema = z.discriminatedUnion("type", [
   headingBlock,
   paragraphBlock,
@@ -60,10 +86,13 @@ export const messageBlockSchema = z.discriminatedUnion("type", [
   statusBlock,
 ]);
 
-/** A whole agent answer: an ordered, non-empty list of blocks. */
-export const structuredMessageSchema = z.object({
-  blocks: z.array(messageBlockSchema).min(1),
-});
+/** A whole agent answer: an ordered, non-empty, bounded list of blocks. Also
+ *  `.strict()` so an unknown top-level key is rejected, not silently ignored. */
+export const structuredMessageSchema = z
+  .object({
+    blocks: z.array(messageBlockSchema).min(1).max(MAX_BLOCKS),
+  })
+  .strict();
 
 export type MessageBlock = z.infer<typeof messageBlockSchema>;
 export type StructuredMessage = z.infer<typeof structuredMessageSchema>;

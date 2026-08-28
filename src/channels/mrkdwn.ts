@@ -1,3 +1,5 @@
+import { encodeMrkdwnUrl, escapeMrkdwn } from "./slackEscape.js";
+
 // Standard Markdown -> Slack mrkdwn. Agents write normal Markdown (the
 // contract for every channel); each adapter converts to its native dialect.
 // Slack differences handled: bold, italic, strikethrough, headers, links,
@@ -30,8 +32,13 @@ function convert(text: string): string {
   let out = text;
   // images can't render inline; keep the bare URL
   out = out.replace(/!\[[^\]]*\]\(([^)\s]+)\)/g, "$1");
-  // links: [text](url) -> <url|text>
-  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "<$2|$1>");
+  // links: [text](url) -> <url|text>. Escape the label and percent-encode the
+  // url so a link can't forge or break out of the <url|label> structure (e.g. a
+  // label of `x> <!channel` injecting a broadcast). Same helpers as SlackFormatter.
+  out = out.replace(
+    /\[([^\]]+)\]\(([^)\s]+)\)/g,
+    (_, text: string, url: string) => `<${encodeMrkdwnUrl(url)}|${escapeMrkdwn(text)}>`,
+  );
   // ORDER MATTERS below: italic (single *) runs first so the bold and header
   // passes — which *produce* single-asterisk output — can't be re-eaten by it.
   out = out.replace(/(^|[\s(])\*(?!\*)([^*\s][^*]*?)\*(?!\*)(?=[\s).,;:!?]|$)/gm, "$1_$2_");

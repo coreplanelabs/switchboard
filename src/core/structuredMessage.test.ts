@@ -77,6 +77,43 @@ describe("validateStructuredMessage (zod schema)", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("blocks");
   });
+
+  // #88 review #3a: schemas are .strict(), so an unknown key is REJECTED (giving
+  // self-heal corrective feedback on a misnamed field) instead of silently stripped.
+  it("rejects an unknown key inside a block (strict)", () => {
+    const result = validateStructuredMessage({
+      blocks: [{ type: "heading", text: "hi", txt: "typo" }],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects an unknown top-level key (strict root)", () => {
+    const result = validateStructuredMessage({
+      blocks: [{ type: "paragraph", text: "ok" }],
+      extra: true,
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  // #88 review #3b: upper bounds reject pathological input (→ self-heal / fallback).
+  it("rejects an oversized bullets array (> 100 items)", () => {
+    const items = Array.from({ length: 101 }, (_, i) => `item ${i}`);
+    const result = validateStructuredMessage({ blocks: [{ type: "bullets", items }] });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects an oversized string (> 12000 chars)", () => {
+    const result = validateStructuredMessage({
+      blocks: [{ type: "paragraph", text: "x".repeat(12001) }],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects too many blocks (> 50)", () => {
+    const blocks = Array.from({ length: 51 }, () => ({ type: "paragraph", text: "b" }));
+    const result = validateStructuredMessage({ blocks });
+    expect(result.ok).toBe(false);
+  });
 });
 
 describe("PlainTextFormatter", () => {
