@@ -177,6 +177,11 @@ describe("renderResidentsIndex", () => {
     expect(html).not.toContain('href="/residents/evil/');
   });
 
+  it("marks Residents as the current nav section on both the index and a detail page", () => {
+    expect(renderResidentsIndex(LISTING)).toContain('<a href="/residents" class="current">Residents</a>');
+    expect(renderResidentPage(WARM)).toContain('<a href="/residents" class="current">Residents</a>');
+  });
+
   it("links across to the runs dash and carries the same strict CSP-safe self-contained shape", () => {
     const html = renderResidentsIndex(LISTING);
     expect(html).toContain('href="/runs"');
@@ -304,6 +309,13 @@ describe("createResidentsViewHandler", () => {
     expect(a.status).toBe(502);
     expect(a.body()).toContain("401");
     expect(a.body()).toContain("unauthorized");
+
+    const huge = createResidentsViewHandler(fakeClient(() => Promise.resolve({ status: 500, data: { blob: "x".repeat(10_000) } })));
+    const c = fakeReqRes("GET", "/residents");
+    huge(c.req, c.res);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(c.status).toBe(502);
+    expect(c.body().length).toBeLessThan(700); // upstream body is capped, never echoed wholesale
 
     const throwing = createResidentsViewHandler(fakeClient(() => Promise.reject(new Error("resident admin /residents request failed (ECONNREFUSED)"))));
     const b = fakeReqRes("GET", "/residents/jshttp/vary");

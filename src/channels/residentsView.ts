@@ -136,7 +136,9 @@ const STYLE = `
   .none { color: #6e7681; }
 `;
 
-function shell(title: string, current: "residents" | "detail", body: string, back?: string): string {
+/** Page chrome shared by the index and detail pages. "Residents" is the
+ *  current section on both (the detail page is a child of the index). */
+function shell(title: string, body: string, back?: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -150,7 +152,7 @@ function shell(title: string, current: "residents" | "detail", body: string, bac
 <header>
   ${back ? `<a class="back" href="${escapeHtml(back)}">← All residents</a>` : ""}
   <h1>${escapeHtml(title)}</h1>
-  <nav><a href="/runs">Runs</a><a href="/residents"${current === "residents" ? ' class="current"' : ""}>Residents</a></nav>
+  <nav><a href="/runs">Runs</a><a href="/residents" class="current">Residents</a></nav>
 </header>
 ${body}
 </body>
@@ -193,7 +195,7 @@ export function renderResidentsIndex(listing: ResidentListing): string {
     listing.residents.length === 0
       ? `<ul id="residents"><li class="empty">No repos onboarded (0/${escapeHtml(cap)}). Onboard one from chat: <code>repo onboard &lt;owner/name&gt;</code>.</li></ul>`
       : `<p class="meta">${escapeHtml(count)}/${escapeHtml(cap)} resident slots in use · live registry read, not cached</p><ul id="residents">${rows}</ul>`;
-  return shell("Resident repos", "residents", body);
+  return shell("Resident repos", body);
 }
 
 function row(label: string, valueHtml: string): string {
@@ -274,10 +276,12 @@ export function renderResidentPage(record: ResidentRecordView): string {
     `<section><h2>Command table</h2>${commandTable}</section>` +
     `<section><h2>Registry settings</h2>${settings}</section>` +
     `<p class="meta">Manage from chat: <code>repo rebuild ${escapeHtml(slug)}</code> · <code>repo reconfigure ${escapeHtml(slug)} …</code> · <code>repo offboard ${escapeHtml(slug)} --dry-run</code></p>`;
-  return shell(slug || "Resident", "detail", body, "/residents");
+  return shell(slug || "Resident", body, "/residents");
 }
 
 // ---- handler ----------------------------------------------------------------
+
+const UPSTREAM_REASON_MAX = 500;
 
 function plain(res: ServerResponse, status: number, body: string, extra: Record<string, string> = {}): void {
   res.writeHead(status, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", ...extra });
@@ -313,7 +317,9 @@ export function createResidentsViewHandler(
       .residents()
       .then((r) => {
         if (r.status !== 200) {
-          const reason = typeof r.data.error === "string" ? r.data.error : JSON.stringify(r.data);
+          // Cap the echoed upstream body: an error page never relays a
+          // pathological response wholesale.
+          const reason = (typeof r.data.error === "string" ? r.data.error : JSON.stringify(r.data)).slice(0, UPSTREAM_REASON_MAX);
           plain(res, 502, `resident Worker answered ${r.status} to /residents: ${reason}`);
           return;
         }
