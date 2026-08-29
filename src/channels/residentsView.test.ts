@@ -382,9 +382,18 @@ describe("createResidentsViewHandler", () => {
   });
 });
 
-describe("nav (shared by both pages)", () => {
-  it("marks Residents as the current nav section on both the index and a detail page", () => {
-    expect(renderResidentsIndex(LISTING)).toContain('<a href="/residents" class="current">Residents</a>');
-    expect(renderResidentPage(WARM)).toContain('<a href="/residents" class="current">Residents</a>');
+describe("nav (shared site nav)", () => {
+  it("renders the shared site nav with Residents current on both the index and a detail page", () => {
+    for (const html of [renderResidentsIndex(LISTING), renderResidentPage(WARM)]) {
+      expect(html).toContain('<nav class="site" aria-label="Sections">');
+      expect(html).toContain('<a href="/residents" aria-current="page">Residents</a>');
+      expect(html).toContain('<a href="/runs">Runs</a>');
+      expect(html).toContain('<a href="/costs">Costs</a>');
+      expect(html.match(/<a href="[^"]+" aria-current="page"/g)?.length).toBe(1);
+    }
+    // The index links Residents once (the nav); the detail page twice — nav + the
+    // contextual "← All residents" back link — and nothing else.
+    expect(renderResidentsIndex(LISTING).match(/href="\/residents"/g)?.length).toBe(1);
+    expect(renderResidentPage(WARM).match(/href="\/residents"/g)?.length).toBe(2);
   });
 });

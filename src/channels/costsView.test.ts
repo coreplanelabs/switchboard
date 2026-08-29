@@ -119,6 +119,13 @@ describe("renderCostsPage", () => {
     expect(html).toContain("containersUsageAdaptiveGroups");
   });
 
+  it("carries the shared site nav with Costs current and no duplicate cross-links", () => {
+    expect(html).toContain('<nav class="site" aria-label="Sections">');
+    expect(html).toContain('<a href="/costs" aria-current="page">Costs</a>');
+    expect(html.match(/href="\/residents"/g)?.length).toBe(1);
+    expect(html.match(/href="\/runs"/g)?.length).toBe(1);
+  });
+
   it("links sibling groups when more than one is configured", () => {
     expect(html).toContain('href="/costs/other"');
     expect(renderCostsPage(report(), ["switchboard"])).not.toContain('href="/costs/other"');

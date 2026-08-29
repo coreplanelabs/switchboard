@@ -1,6 +1,7 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { ResidentAdminClient } from "../core/repoCommands.js";
 import { escapeHtml, HTML_PAGE_HEADERS } from "./liveView.js";
+import { NAV_CSS, renderNav } from "./nav.js";
 
 // Residents dash: an Access-gated, read-only browser view of the resident
 // Worker's live registry — which repos are onboarded, their lifecycle state
@@ -105,10 +106,10 @@ const STYLE = `
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .75rem;
     border-bottom: 1px solid #2a2f3a; padding-bottom: .5rem; }
   h1 { font-size: 1rem; margin: 0; font-weight: 600; }
-  nav { margin-left: auto; display: inline-flex; gap: .75rem; font-size: .8rem; }
-  nav a, a.back { color: #8b93a7; text-decoration: none; }
-  nav a:hover, a.back:hover { color: #9ecbff; }
-  nav a.current { color: #e6e6e6; }
+  a.back { color: #8b93a7; text-decoration: none; }
+  a.back:hover { color: #9ecbff; }
+  nav.site { margin-left: auto; }
+${NAV_CSS}
   .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%;
     background: #6e7681; flex: 0 0 auto; }
   .dot.green { background: #2ea043; }
@@ -138,8 +139,9 @@ const STYLE = `
   .none { color: #6e7681; }
 `;
 
-/** Page chrome shared by the index and detail pages. "Residents" is the
- *  current section on both (the detail page is a child of the index). */
+/** Page chrome shared by the index and detail pages. The site nav (shared with
+ *  /runs and /costs) marks "Residents" current on both — the detail page is a
+ *  child of the index, which the `← All residents` back link expresses. */
 function shell(title: string, body: string, back?: string): string {
   return `<!doctype html>
 <html lang="en">
@@ -154,7 +156,7 @@ function shell(title: string, body: string, back?: string): string {
 <header>
   ${back ? `<a class="back" href="${escapeHtml(back)}">← All residents</a>` : ""}
   <h1>${escapeHtml(title)}</h1>
-  <nav><a href="/runs">Runs</a><a href="/residents" class="current">Residents</a></nav>
+  ${renderNav("residents")}
 </header>
 ${body}
 </body>
