@@ -40,6 +40,58 @@ describe("resident deploy preflight — decide()", () => {
     expect(d.message).toMatch(/RESIDENT_DEPLOY_FORCE=1/);
   });
 
+  // #188: a deploy swaps every ResidentDO isolate; a refresh cycle's fetch/
+  // rebuild or a restore in progress is killed just like a thread run (live
+  // 2026-08-29: `degraded(build-failed: exit 143: Session terminated)` on
+  // repo:coreplanelabs/switchboard right after a deploy that passed preflight).
+  it("a resident mid-cycle (refreshing / restoring / onboarding) → refuse, naming the state, even with 0 in flight", () => {
+    for (const state of ["refreshing", "restoring", "onboarding"]) {
+      const d = decide(payload([resident("repo:jshttp/vary", 0), { resource: "repo:coreplanelabs/switchboard", live: { state, inFlight: 0 } }]));
+      expect(d.allow, state).toBe(false);
+      expect(d.midCycle).toEqual([{ resource: "repo:coreplanelabs/switchboard", state }]);
+      expect(d.message).toContain(`repo:coreplanelabs/switchboard (${state})`);
+      expect(d.message).toMatch(/RESIDENT_DEPLOY_FORCE=1/);
+    }
+  });
+
+  it("warm / degraded / down with 0 in flight are not mid-cycle → allow", () => {
+    const d = decide(
+      payload([
+        { resource: "repo:a/b", live: { state: "warm", inFlight: 0 } },
+        { resource: "repo:c/d", live: { state: "degraded", reason: "github-unreachable: x", inFlight: 0 } },
+        { resource: "repo:e/f", live: { state: "down", reason: "provision-failed at clone: y", inFlight: 0 } },
+      ]),
+    );
+    expect(d.allow).toBe(true);
+    expect(d.midCycle).toEqual([]);
+  });
+
+  it("busy AND mid-cycle are both reported — neither shadows the other", () => {
+    const d = decide(payload([{ resource: "repo:x/y", live: { state: "refreshing", inFlight: 2 } }]));
+    expect(d.allow).toBe(false);
+    expect(d.busy).toEqual([{ resource: "repo:x/y", inFlight: 2 }]);
+    expect(d.midCycle).toEqual([{ resource: "repo:x/y", state: "refreshing" }]);
+    expect(d.message).toContain("repo:x/y (2 in flight)");
+    expect(d.message).toContain("repo:x/y (refreshing)");
+  });
+
+  // Allow-list of settled states: this script is plain JS outside the shared
+  // ResidentLifecycleState type, so a state it has never heard of must fail
+  // closed rather than be assumed idle.
+  it("an unrecognized lifecycle state is unknown → refuse (fail closed on vocabulary drift)", () => {
+    const d = decide(payload([{ resource: "repo:x/y", live: { state: "hibernating", inFlight: 0 } }]));
+    expect(d.allow).toBe(false);
+    expect(d.midCycle).toEqual([]);
+    expect(d.unknown).toEqual([{ resource: "repo:x/y", error: expect.stringContaining('unrecognized state "hibernating"') }]);
+  });
+
+  it("force overrides mid-cycle — allowed, flagged, and the warning names the state", () => {
+    const d = decide(payload([{ resource: "repo:x/y", live: { state: "refreshing", inFlight: 0 } }]), { force: true });
+    expect(d.allow).toBe(true);
+    expect(d.forced).toBe(true);
+    expect(d.message).toContain("repo:x/y (refreshing)");
+  });
+
   it("a resident whose live view failed is unknown → refuse (fail closed)", () => {
     const d = decide(payload([resident("repo:jshttp/vary", 0), { resource: "repo:x/y", live: { error: "DO timed out" } }]));
     expect(d.allow).toBe(false);
