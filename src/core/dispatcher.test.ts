@@ -1238,10 +1238,36 @@ describe("review post-step (issue #69)", () => {
     return { calls, fn };
   }
 
+  const PR_HEAD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
+  const OTHER_HEAD = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+
+  /** An executor whose workspace is a checkout at `head` (`git rev-parse HEAD`
+   *  answers it); `head` undefined = a cwd that is not a git repo (the cold
+   *  sandbox's workspace root). Records the order of exec/release calls. */
+  function headExecutor(head: string | undefined) {
+    const order: string[] = [];
+    const executor = {
+      exec: async (cmd: string) => {
+        order.push(`exec:${cmd}`);
+        if (/git rev-parse HEAD/.test(cmd)) return head ? `${head}\n` : "fatal: not a git repository (or any of the parent directories): .git\nexit 128";
+        return "";
+      },
+      readFile: async () => "",
+      writeFile: async () => "",
+      release: async () => {
+        order.push("release");
+        return { released: true };
+      },
+    };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
+    return { executor, order };
+  }
+
   it("a review of a resolved PR posts the review back to the PR by default", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
-    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+    headExecutor(PR_HEAD);
     const spy = postSpy();
     deps.postReviewComment = spy.fn;
     const { io, replies } = fakeIO();
@@ -1250,7 +1276,7 @@ describe("review post-step (issue #69)", () => {
     // No submit_verdict call → fail-closed: the body leads with the explicit
     // non-approving line, never "LGTM".
     expect(spy.calls).toEqual([
-      { target: { repo: "acme/api", number: 42 }, body: `${NO_VERDICT_LINE}\n\nanswer` },
+      { target: { repo: "acme/api", number: 42, commitId: PR_HEAD }, body: `${NO_VERDICT_LINE}\n\nanswer` },
     ]);
   });
 
@@ -1282,14 +1308,14 @@ describe("review post-step (issue #69)", () => {
   });
 
   /** A review-agent provider that calls submit_verdict, then answers. */
-  function verdictThenAnswer(verdict: string, summary: string, answer = "the findings"): Provider {
+  function verdictThenAnswer(verdict: string, summary: string, answer = "the findings", head?: string): Provider {
     let n = 0;
     return {
       name: "fake",
       async complete(): Promise<CompletionResult> {
         if (n++ === 0) {
           return {
-            content: [{ type: "tool_use", id: "v1", name: "submit_verdict", input: { verdict, summary } }],
+            content: [{ type: "tool_use", id: "v1", name: "submit_verdict", input: head ? { verdict, summary, head } : { verdict, summary } }],
             stopReason: "tool_use",
           };
         }
@@ -1301,6 +1327,7 @@ describe("review post-step (issue #69)", () => {
   it("an `approve` verdict makes the posted body start with the exact `LGTM:` token (deterministic, not prose)", async () => {
     const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "no blocking issues", "Looks solid.\n- nit: naming"));
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "c".repeat(40) });
+    headExecutor("c".repeat(40));
     const spy = postSpy();
     deps.postReviewComment = spy.fn;
     const { io } = fakeIO();
@@ -1313,14 +1340,15 @@ describe("review post-step (issue #69)", () => {
 
   it("a `request_changes` verdict never yields an LGTM-prefixed body, even when the prose says LGTM", async () => {
     const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("request_changes", "null deref", "LGTM except for the null deref"));
-    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+    headExecutor(PR_HEAD);
     const spy = postSpy();
     deps.postReviewComment = spy.fn;
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     expect(spy.calls[0].body.startsWith("Changes requested: null deref\n\n")).toBe(true);
     expect(spy.calls[0].body.startsWith("LGTM")).toBe(false);
-    expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42 }); // no sha → no pin
+    expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: PR_HEAD });
   });
 
   it("a verdict from a non-review agent is impossible: the tool is not in the coding toolset", async () => {
@@ -1403,6 +1431,115 @@ describe("review post-step (issue #69)", () => {
     expect(note).not.toMatch(/could not be reached/);
   });
 
+  // Feature: features/agent-review.md item 8 — the reviewed-head guard.
+  // Incident 2026-08-29 (PR #182): the agent fetched another PR's branch,
+  // reviewed it, and its LGTM was posted (and auto-approved) on the wrong PR.
+  // The post-step now refuses to post unless the head the agent actually
+  // reviewed IS the PR head resolved for the run. Fail-closed.
+  describe("reviewed-head guard", () => {
+    it("the workspace HEAD is not the PR head → no post, the thread is told both shas (the #182 shape)", async () => {
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "looks great"));
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      headExecutor(OTHER_HEAD);
+      const spy = postSpy();
+      deps.postReviewComment = spy.fn;
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.fn).not.toHaveBeenCalled();
+      expect(replies).toContain("the findings"); // Slack still gets the review
+      const note = replies.find((r) => /not posted to acme\/api#42/.test(r));
+      expect(note).toMatch(new RegExp(`reviewed head ${OTHER_HEAD.slice(0, 7)} is not the PR head ${PR_HEAD.slice(0, 7)}`));
+      expect(log.mock.calls.map((c) => c.map(String).join(" "))).toContainEqual(
+        expect.stringMatching(/^\[review-post\] .* skipped: reviewed head .* is not the PR head/),
+      );
+      log.mockRestore();
+    });
+
+    it("the workspace HEAD is observed BEFORE the workspace is released (a re-attach would show the ref's current tip, not what was reviewed)", async () => {
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok"));
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      const { order } = headExecutor(PR_HEAD);
+      deps.postReviewComment = postSpy().fn;
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      const rev = order.findIndex((o) => /rev-parse HEAD/.test(o));
+      const rel = order.indexOf("release");
+      expect(rev).toBeGreaterThanOrEqual(0);
+      expect(rel).toBeGreaterThan(rev);
+    });
+
+    it("the PR head is unknown (resolution-time fetch failed) → no post, said in the thread", async () => {
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok"));
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 }); // no headSha
+      headExecutor(PR_HEAD);
+      const spy = postSpy();
+      deps.postReviewComment = spy.fn;
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.fn).not.toHaveBeenCalled();
+      expect(replies.some((r) => /not posted to acme\/api#42/.test(r) && /PR head unknown/.test(r))).toBe(true);
+    });
+
+    it("no git in the workspace cwd (cold sandbox root) → the agent-reported head decides: match posts, pinned", async () => {
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok", "fine", PR_HEAD.slice(0, 12)));
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      headExecutor(undefined);
+      const spy = postSpy();
+      deps.postReviewComment = spy.fn;
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.calls).toHaveLength(1);
+      expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: PR_HEAD });
+      expect(spy.calls[0].body.startsWith("LGTM: ok")).toBe(true);
+    });
+
+    it("no git in the cwd and the reported head mismatches → no post", async () => {
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok", "fine", OTHER_HEAD));
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      headExecutor(undefined);
+      const spy = postSpy();
+      deps.postReviewComment = spy.fn;
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.fn).not.toHaveBeenCalled();
+      expect(replies.some((r) => /not posted to acme\/api#42/.test(r))).toBe(true);
+    });
+
+    it("no git in the cwd and no reported head → no post (reviewed head unknown)", async () => {
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok"));
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      headExecutor(undefined);
+      const spy = postSpy();
+      deps.postReviewComment = spy.fn;
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.fn).not.toHaveBeenCalled();
+      expect(replies.some((r) => /not posted to acme\/api#42/.test(r) && /reviewed head unknown/.test(r))).toBe(true);
+    });
+
+    it("a matching reported head cannot override a mismatching observed HEAD", async () => {
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok", "fine", PR_HEAD));
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      headExecutor(OTHER_HEAD);
+      const spy = postSpy();
+      deps.postReviewComment = spy.fn;
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.fn).not.toHaveBeenCalled();
+    });
+
+    it("a non-PR review (no post target) never runs the head probe", async () => {
+      const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+      deps.resolveRepoContext = () => ({ repo: "acme/api" });
+      const { order } = headExecutor(PR_HEAD);
+      deps.postReviewComment = postSpy().fn;
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review look at acme/api"), io);
+      expect(order.some((o) => /rev-parse HEAD/.test(o))).toBe(false);
+    });
+  });
+
   it("a non-review agent never posts, even when a PR is resolved", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
@@ -1417,7 +1554,8 @@ describe("review post-step (issue #69)", () => {
   it("a post failure is swallowed — the dispatch still completes and Slack gets the review", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
-    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+    headExecutor(PR_HEAD);
     deps.postReviewComment = vi.fn(async () => {
       throw new Error("HTTP 403 forbidden");
     });

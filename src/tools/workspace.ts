@@ -146,14 +146,17 @@ export const submitVerdictTool: RunnableTool = {
     "Record your review verdict. REQUIRED before your final message when reviewing a PR: " +
     "`approve` when there are no blocking issues (nits alone are not blocking), `request_changes` otherwise. " +
     "Switchboard writes the verdict as the first line of the GitHub comment itself (`LGTM:` only for approve); " +
-    "a review with no submitted verdict is posted as NOT approving. Call it once, after your analysis; a later call replaces the earlier one.",
+    "a review with no submitted verdict is posted as NOT approving. Call it once, after your analysis; a later call replaces the earlier one. " +
+    "`head` is the commit you reviewed — run `git rev-parse HEAD` in the checkout you read and tested and pass its output; " +
+    "Switchboard posts to the PR only if that commit IS the PR's head, so a review of the wrong branch can never land on a PR.",
   inputSchema: {
     type: "object",
     properties: {
       verdict: { type: "string", enum: ["approve", "request_changes"], description: "approve | request_changes" },
       summary: { type: "string", description: "One-line rationale shown right after the verdict token" },
+      head: { type: "string", description: "Output of `git rev-parse HEAD` in the checkout you reviewed (the commit the review is about)" },
     },
-    required: ["verdict", "summary"],
+    required: ["verdict", "summary", "head"],
   },
   async run(input, ctx) {
     const verdict = parseVerdictInput(input);
