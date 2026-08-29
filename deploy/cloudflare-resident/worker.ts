@@ -66,6 +66,7 @@
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
+import { describeInterruptedExec, isRuntimeInterruption } from "../../src/execution/runtimeInterruption.js";
 import { DurableObject } from "cloudflare:workers";
 
 interface Env {
@@ -3217,17 +3218,51 @@ function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execTh
           }
         : { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, truncated: result.truncated },
     (err) => {
-      const msg = errMsg(err);
+      // A runtime interruption (a deploy/container restart recycled the DO under
+      // the running command) is NEVER retried here: the command may already
+      // have completed — the SDK marks these `admitted: "unknown"` — so a
+      // re-run would double-execute. It is named legibly instead, WITHOUT
+      // `needs:"attach"` (the client re-runs the command on that signal).
+      const msg = isRuntimeInterruption(err) ? describeInterruptedExec(err) : errMsg(err);
       return { error: msg, stdout: "", stderr: msg, exitCode: 127 };
     },
   );
+}
+
+/** Retry the idempotent thread file ops ONCE when the DO call was cut off by a
+ *  runtime interruption (deploy / container restart under the call). A read is
+ *  pure and a same-content write converges, so a second attempt cannot corrupt
+ *  anything; the retry goes through a FRESH stub because a superseded isolate's
+ *  stub is unusable and the SDK says in-isolate retries are futile. /exec is
+ *  deliberately excluded (see streamThreadExec). A second failure surfaces as
+ *  a named 503 so the client reports it as infra, not a crash. */
+async function retryOnceIfInterrupted<R>(
+  env: Env,
+  resource: string,
+  op: (stub: ReturnType<typeof residentStub>) => Promise<R>,
+): Promise<R | ThreadErr> {
+  try {
+    return await op(residentStub(env, resource));
+  } catch (err) {
+    if (!isRuntimeInterruption(err)) throw err;
+    try {
+      return await op(residentStub(env, resource));
+    } catch (again) {
+      if (!isRuntimeInterruption(again)) throw again;
+      return {
+        error: `interrupted: the sandbox runtime was replaced during the operation and again on retry (${errMsg(again)}) — try again shortly`,
+        status: 503,
+      };
+    }
+  }
 }
 
 async function handleRead(env: Env, body: Record<string, unknown>): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
   if (typeof body.path !== "string") return json({ error: "path must be a string relative to the thread worktree" }, 400);
-  const result = await ctx.stub.readThreadFile(ctx.threadKey, body.path);
+  const path = body.path;
+  const result = await retryOnceIfInterrupted(env, ctx.resource, (stub) => stub.readThreadFile(ctx.threadKey, path));
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }
@@ -3239,7 +3274,8 @@ async function handleWrite(env: Env, body: Record<string, unknown>): Promise<Res
   if (typeof body.content !== "string" || body.content.length > MAX_WRITE_CONTENT) {
     return json({ error: `content must be a string of at most ${MAX_WRITE_CONTENT} chars` }, 400);
   }
-  const result = await ctx.stub.writeThreadFile(ctx.threadKey, body.path, body.content);
+  const { path, content } = body;
+  const result = await retryOnceIfInterrupted(env, ctx.resource, (stub) => stub.writeThreadFile(ctx.threadKey, path, content));
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }

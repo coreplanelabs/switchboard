@@ -231,7 +231,9 @@ describe("fail-fast on an unrecoverable sandbox (#92)", () => {
       ...fakeExecutor,
       exec: async () => {
         execCalls++;
-        throw new ExecInfraError("sandbox worker /exec: Command execution failed");
+        // The 2026-08-29 incident shape: a resident redeploy recycled the DO under
+        // a running command — a transport failure, NOT an OOM.
+        throw new ExecInfraError("resident /exec: interrupted: Runtime identity is no longer active");
       },
     };
     // The model keeps asking for bash for as long as tools are offered (exactly
@@ -266,12 +268,23 @@ describe("fail-fast on an unrecoverable sandbox (#92)", () => {
     expect(execCalls).toBe(2);
     // The finale carries the diagnostic and the model's write-up, and it is NOT
     // the ordinary budget finale.
-    expect(answer).toMatch(/unresponsive/i);
-    expect(answer).toMatch(/aborting/i);
+    expect(answer).toMatch(/unreachable/i);
+    expect(answer).toMatch(/2 consecutive exec-transport failures/i);
+    expect(answer).toMatch(/aborting instead of retrying/i);
     expect(answer).toContain("what I found before the sandbox died");
     expect(answer).not.toContain("budget");
-    // The abort is surfaced as a progress note, not a silent drain.
-    expect(notes.some((n) => /unresponsive|abort/i.test(n))).toBe(true);
+    // Cause-neutral: the runner cannot know WHY the transport failed, so it
+    // states what it observed and carries the real error text — never a guess.
+    expect(answer).not.toMatch(/OOM|unresponsive/);
+    expect(answer).toContain("Runtime identity is no longer active");
+    // The abort is surfaced as a progress note, not a silent drain — and the
+    // note carries the last infra error too, so the card shows the cause.
+    const abortNote = notes.find((n) => /unreachable/i.test(n));
+    expect(abortNote).toMatch(/aborting instead of retrying/i);
+    expect(abortNote).toContain("Runtime identity is no longer active");
+    // The finale instruction to the model is cause-neutral as well.
+    const finaleSystem = String(provider.requests.at(-1)?.system ?? "") + JSON.stringify(provider.requests.at(-1)?.messages);
+    expect(finaleSystem).not.toMatch(/out of memory|OOM/);
     // The forced finale call must be tool-less.
     expect(provider.requests.at(-1)?.tools).toBeUndefined();
   });
@@ -296,7 +309,7 @@ describe("fail-fast on an unrecoverable sandbox (#92)", () => {
     });
     expect(execCalls).toBe(2);
     expect(answer).toBe("handled the failures");
-    expect(answer).not.toMatch(/unresponsive/i);
+    expect(answer).not.toMatch(/unreachable/i);
   });
 
   it("does NOT abort when a single infra failure is followed by a success (counter resets)", async () => {
@@ -319,7 +332,7 @@ describe("fail-fast on an unrecoverable sandbox (#92)", () => {
     });
     expect(execCalls).toBe(2);
     expect(answer).toBe("recovered and finished");
-    expect(answer).not.toMatch(/unresponsive/i);
+    expect(answer).not.toMatch(/unreachable/i);
   });
 });
 
@@ -537,7 +550,12 @@ describe("run-friction signals in the event stream (#84)", () => {
       toolContext: { executor: dead },
       onEvent: (e) => events.push(e),
     });
-    const kinds = events.filter((e) => e.type === "run_note").map((n) => n.kind);
-    expect(kinds).toEqual(["sandbox_dead"]);
+    const runNotes = events.filter((e) => e.type === "run_note");
+    expect(runNotes.map((n) => n.kind)).toEqual(["sandbox_dead"]);
+    // The typed note carries what was observed (count) and the last transport
+    // error verbatim, so the live view shows the real cause — never a guess.
+    expect(runNotes[0].summary).toMatch(/2 consecutive exec-transport failures/);
+    expect(runNotes[0].summary).toContain("worker gone");
+    expect(runNotes[0].summary).not.toMatch(/OOM|unresponsive/);
   });
 });

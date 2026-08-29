@@ -115,6 +115,25 @@ describe("ExecHealthTracker", () => {
     expect(t.consecutiveInfraFailures).toBe(0);
   });
 
+  it("remembers the LAST infra error's message for the fail-fast diagnostic and forgets it on success", async () => {
+    let calls = 0;
+    const t = new ExecHealthTracker(
+      scripted(async () => {
+        calls++;
+        if (calls === 1) throw new ExecInfraError("first");
+        if (calls === 2) throw new ExecInfraError("resident /exec: interrupted: Runtime identity is no longer active");
+        return "ok";
+      }),
+    );
+    expect(t.lastInfraError).toBeNull();
+    await expect(t.exec("x")).rejects.toThrow("first");
+    expect(t.lastInfraError?.message).toBe("first");
+    await expect(t.exec("x")).rejects.toThrow("interrupted");
+    expect(t.lastInfraError?.message).toContain("Runtime identity is no longer active");
+    await t.exec("x");
+    expect(t.lastInfraError).toBeNull();
+  });
+
   it("leaves the count untouched on a non-infra throw (not a health signal, not a reset)", async () => {
     let calls = 0;
     const t = new ExecHealthTracker(

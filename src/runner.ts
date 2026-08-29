@@ -166,8 +166,9 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   // finale (a final tool-less call) so the run always closes with a useful
   // message instead of a silent drain.
   if (sandboxDead) {
-    note("sandbox_dead", "sandbox unresponsive — aborting instead of retrying into a dead sandbox");
-    return await finishSandboxDead(opts, messages, system);
+    const diagnostic = sandboxDeadMessage(execTracker.consecutiveInfraFailures, execTracker.lastInfraError);
+    note("sandbox_dead", diagnostic);
+    return await finishSandboxDead(opts, messages, system, diagnostic);
   }
 
   // Budget exhausted (time or turns): one final tool-less call so the work
@@ -210,34 +211,47 @@ async function runFinale(
   return collectText(finale.content);
 }
 
-/** The one-line diagnostic surfaced when the run aborts into an unrecoverable
- *  sandbox (#92) — the run outcome the user acts on. */
-const SANDBOX_DEAD_MESSAGE =
-  "Sandbox became unresponsive (likely OOM/disk during a heavy install). " +
-  "Aborting instead of retrying into a dead sandbox.";
+/** The one-line diagnostic surfaced when the run aborts into an unreachable
+ *  sandbox (#92) — the run outcome the user acts on. Cause-NEUTRAL by design:
+ *  the runner only observes that the exec transport failed N times in a row;
+ *  it cannot tell a wedged/OOM'd sandbox from one that was replaced or
+ *  redeployed under the run (the 2026-08-29 incident, where a guessed "likely
+ *  OOM" misled the operator). So it states what it saw and quotes the last
+ *  transport error verbatim (redacted + capped) so the real cause is on the
+ *  card and the live view. */
+function sandboxDeadMessage(failures: number, lastError: Error | null): string {
+  const last = lastError ? ` Last error: ${redactAndCap(lastError.message, 300)}` : "";
+  return (
+    `Execution sandbox unreachable: ${failures} consecutive exec-transport failures ` +
+    "(the sandbox was wedged, or replaced/redeployed mid-run) — aborting instead of retrying into it." +
+    last
+  );
+}
 
-/** Fail fast on an unrecoverable sandbox: the same guaranteed-finale path as
+/** Fail fast on an unreachable sandbox: the same guaranteed-finale path as
  *  budget exhaustion — one tool-less call — but the model is told the sandbox
- *  is dead (so it summarizes what it learned before it died rather than trying
+ *  is gone (so it summarizes what it learned before that rather than trying
  *  more commands), and the answer leads with the diagnostic. The finale is pure
  *  inference, so it works even though the sandbox does not. */
 async function finishSandboxDead(
   opts: RunOptions,
   messages: ChatMessage[],
   system: string,
+  diagnostic: string,
 ): Promise<string> {
   const text = await runFinale(
     opts,
     messages,
     system,
-    `The execution sandbox has become unresponsive: the last ${MAX_CONSECUTIVE_INFRA_FAILURES} commands failed at ` +
-      "the infrastructure level (the exec transport itself, not normal command errors), so no further commands can " +
-      "run — most likely the sandbox ran out of memory or disk during a heavy install. Do not attempt any more " +
-      "tools. Write your final answer now from what you learned before it died: report your findings/results to " +
-      "date, and state plainly that the run is aborting because the sandbox is unrecoverable and what a follow-up " +
-      "(a fresh sandbox, or a lighter approach that avoids the heavy install) should focus on.",
+    `The execution sandbox is unreachable: the last ${MAX_CONSECUTIVE_INFRA_FAILURES} commands failed at the ` +
+      "infrastructure level (the exec transport itself, not normal command errors), so no further commands can run. " +
+      "The runner cannot tell WHY — the sandbox may be wedged, or it may have been replaced/redeployed under this run; " +
+      `the transport reported: ${JSON.stringify(diagnostic)}. Do not attempt any more tools. Write your final answer ` +
+      "now from what you learned before the transport failed: report your findings/results to date, note that the " +
+      "last command(s) may have completed without their results being collected, and state plainly that the run is " +
+      "aborting because the sandbox is unreachable and what a follow-up (a fresh run) should focus on.",
   );
-  return text ? `⚠️ _${SANDBOX_DEAD_MESSAGE}_\n\n${text}` : `⚠️ ${SANDBOX_DEAD_MESSAGE}`;
+  return text ? `⚠️ _${diagnostic}_\n\n${text}` : `⚠️ ${diagnostic}`;
 }
 
 function collectText(parts: ContentPart[]): string {
