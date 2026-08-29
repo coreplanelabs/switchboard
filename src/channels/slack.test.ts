@@ -132,6 +132,18 @@ describe("stripMention — Slack app 'Sent using' footer", () => {
     expect(stripMention(`<@${BOT}> repo list\n\nSent using <@U0BJJMDUCKY>  `, BOT)).toBe("repo list");
   });
 
+  it("strips only the two real shapes: asymmetric bold is not a footer", () => {
+    expect(stripMention(`<@${BOT}> repo list\n*Sent using <@U0BJJMDUCKY|Claude>`, BOT)).toBe("repo list\n*Sent using <@U0BJJMDUCKY|Claude>");
+  });
+
+  it("strips stacked footers (a forwarded app message can carry two)", () => {
+    expect(stripMention(`<@${BOT}> repo list\n*Sent using* <@U0BJJMDUCKY|Claude>\n*Sent using* <@U0BJJMDUCKY|Claude>`, BOT)).toBe("repo list");
+  });
+
+  it("a message that is only a mention plus the footer strips to empty", () => {
+    expect(stripMention(`<@${BOT}> *Sent using* <@U0BJJMDUCKY|Claude>`, BOT)).toBe("");
+  });
+
   it("leaves 'Sent using' alone when it is part of the user's own text (not a trailing footer line)", () => {
     expect(stripMention(`<@${BOT}> what does "Sent using" mean here?`, BOT)).toBe('what does "Sent using" mean here?');
     expect(stripMention(`<@${BOT}> Sent using <@U0BJJMDUCKY> is the footer\nplease explain`, BOT)).toBe(

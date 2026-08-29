@@ -706,15 +706,24 @@ async function botInThread(
 /** Slack appends "*Sent using* <@APP|Name>" as the LAST line of a message an
  *  app posts on a user's behalf (the Claude Slack plugin does this). It is
  *  platform chrome, not the user's words — left in, it breaks strict inline
- *  parsers (`repo onboard …` saw `*Sent` as a bad token). Only a whole
- *  trailing line of that exact shape is removed; the phrase inside a user's
- *  own text is untouched. */
-const APP_FOOTER_RE = /\n\s*\*?Sent using\*?\s+<@[A-Z0-9]+(?:\|[^>]*)?>\s*$/;
+ *  parsers (`repo onboard …` saw `*Sent` as a bad token). Only whole trailing
+ *  lines of exactly that shape are removed (repeated for stacked footers); the
+ *  phrase inside a user's own text is untouched. */
+const APP_FOOTER_RE = /(?:^|\n)\s*(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>\s*$/;
 
 /** Exported for tests. */
 export function stripMention(text: string, botUserId?: string): string {
   const stripped = botUserId
     ? text.replaceAll(`<@${botUserId}>`, "")
     : text.replace(/<@[A-Z0-9]+>/, "");
-  return stripped.trim().replace(APP_FOOTER_RE, "").trim();
+  // Exactly the two shapes Slack emits (bold or plain — never asymmetric), as
+  // a whole trailing line; repeated because a forwarded app message can stack
+  // two, and a message that is nothing but mention + footer strips to "".
+  let out = stripped.trim();
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(APP_FOOTER_RE, "").trim();
+  } while (out !== prev);
+  return out;
 }
