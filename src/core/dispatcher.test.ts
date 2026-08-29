@@ -1303,10 +1303,16 @@ describe("review post-step (issue #69)", () => {
     deps.resolveRepoContext = () => ({ repo: "acme/api" }); // repo but no PR number
     const spy = postSpy();
     deps.postReviewComment = spy.fn;
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review look at the diff in acme/api"), io);
     expect(replies).toContain("answer");
     expect(spy.fn).not.toHaveBeenCalled();
+    // The skip is never silent: a review that lands only in Slack says why.
+    expect(log.mock.calls.map((c) => c.map(String).join(" "))).toContainEqual(
+      expect.stringMatching(/^\[review-post\] .* skipped: no PR resolved/),
+    );
+    log.mockRestore();
   });
 
   it("a non-review agent never posts, even when a PR is resolved", async () => {

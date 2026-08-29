@@ -11,7 +11,7 @@ import { LocalOperations } from "../execution/executor.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { resolveRepoContext, type RepoContext } from "./repoContext.js";
-import { decideReviewPost } from "./reviewPost.js";
+import { decideReviewPost, type ReviewPostTarget } from "./reviewPost.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
@@ -553,12 +553,21 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // but never fails the dispatch (the review already landed in Slack). A
     // HARD-stopped review has no findings — only the abort line — so nothing is
     // posted to the PR; a soft stop's "findings so far" finale posts as usual.
-    const postTarget = stopped === "hard" ? null : decideReviewPost({
-      agentName: resolved.agentName,
-      repo: repoCtx.repo,
-      pr: repoCtx.pr,
-      requestText: directives.text,
-    });
+    let postTarget: ReviewPostTarget | null = null;
+    if (stopped !== "hard") {
+      postTarget = decideReviewPost({
+        agentName: resolved.agentName,
+        repo: repoCtx.repo,
+        pr: repoCtx.pr,
+        requestText: directives.text,
+      });
+      if (!postTarget && resolved.agentName === "review") {
+        // Never a silent skip: a review that lands only in Slack says why, so a
+        // re-review that failed to resolve its PR is visible in the logs.
+        const why = repoCtx.pr === undefined ? "no PR resolved" : "opted out";
+        console.log(`[review-post] ${msg.threadKey} skipped: ${why} (repo ${repoCtx.repo ?? "none"})`);
+      }
+    }
     if (postTarget) {
       const post = deps.postReviewComment ?? postReviewComment;
       const target: ReviewCommentTarget = repoCtx.headSha ? { ...postTarget, commitId: repoCtx.headSha } : postTarget;

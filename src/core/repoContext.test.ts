@@ -176,13 +176,86 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     expect(fn).not.toHaveBeenCalled();
   });
 
-  it("the PR number is NOT inherited from thread history (a stale PR never gets a later review)", async () => {
-    const { fn } = stubFetch();
+  it("a follow-up with no PR reference inherits the thread's OPEN PR for the post-step (pr + headSha, ref untouched)", async () => {
+    const SHA = "b".repeat(40);
+    const { fn, calls } = stubFetch({ body: { state: "open", head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } });
     const history = [{ role: "user" as const, text: "review https://github.com/acme/api/pull/7" }];
-    // A follow-up in the same thread inherits the repo but not the PR number.
-    await expect(resolveRepoContext(msg("take another look"), history)).resolves.toEqual({
+    // A re-review reply names no PR — the thread's PR is the target, pinned to
+    // the head SHA fetched NOW (not the one the first review saw). The ref is
+    // deliberately not rebound: inheritance serves the post-step only.
+    await expect(resolveRepoContext(msg("re-review please — head abc1234"), history)).resolves.toEqual({
       repo: "acme/api",
+      pr: 7,
+      headSha: SHA,
     });
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
+  });
+});
+
+describe("resolveRepoContext: re-review follow-ups inherit the thread's PR (fail-closed)", () => {
+  const SHA = "c".repeat(40);
+  const history = [
+    { role: "user" as const, text: "agent:review https://github.com/acme/api/pull/7 — lead with a verdict" },
+    { role: "assistant" as const, text: "Verdict: approve — see https://github.com/acme/api/pull/99 for context" },
+  ];
+
+  it("the LAST user turn naming a PR wins; assistant turns never establish one", async () => {
+    stubFetch({ body: { state: "open", head: { sha: SHA, repo: { full_name: "acme/api" } } } });
+    const h = [...history, { role: "user" as const, text: "also review acme/api#8" }];
+    const ctx = await resolveRepoContext(msg("re-review"), h);
+    expect(ctx.pr).toBe(8);
+    expect(ctx.headSha).toBe(SHA);
+  });
+
+  it("a PR named in the current message beats the thread's PR", async () => {
+    stubFetch({ body: { state: "open", head: { ref: "p9", sha: SHA, repo: { full_name: "acme/api" } } } });
+    await expect(resolveRepoContext(msg("now review acme/api#9"), history)).resolves.toEqual({
+      repo: "acme/api",
+      ref: "p9",
+      pr: 9,
+      headSha: SHA,
+    });
+  });
+
+  it("a CLOSED/merged thread PR is not inherited — a later review in the thread posts nowhere", async () => {
+    stubFetch({ body: { state: "closed", head: { sha: SHA, repo: { full_name: "acme/api" } } } });
+    await expect(resolveRepoContext(msg("review this snippet: `foo()`"), history)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("a failed or non-2xx fetch for the inherited PR fails closed: repo only, no pr, no headSha", async () => {
+    stubFetch({ reject: "fetch failed" });
+    await expect(resolveRepoContext(msg("take another look"), history)).resolves.toEqual({ repo: "acme/api" });
+    stubFetch({ status: 404 });
+    await expect(resolveRepoContext(msg("take another look"), history)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("a malformed head sha fails closed too (an unpinned inherited review could approve an unreviewed push)", async () => {
+    stubFetch({ body: { state: "open", head: { sha: "nope", repo: { full_name: "acme/api" } } } });
+    await expect(resolveRepoContext(msg("re-review"), history)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("redirecting the thread to another repo drops the PR (no cross-repo post)", async () => {
+    const { fn } = stubFetch();
+    const h = [...history, { role: "user" as const, text: "switch to acme/other" }];
+    await expect(resolveRepoContext(msg("run the tests"), h)).resolves.toEqual({ repo: "acme/other" });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("an explicit ref in the follow-up still binds and the PR is still inherited (one fetch, for the pin)", async () => {
+    stubFetch({ body: { state: "open", head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } });
+    await expect(resolveRepoContext(msg("re-review on branch patch-1"), history)).resolves.toEqual({
+      repo: "acme/api",
+      ref: "patch-1",
+      pr: 7,
+      headSha: SHA,
+    });
+  });
+
+  it("a thread with no PR anywhere never fetches", async () => {
+    const { fn } = stubFetch();
+    const h = [{ role: "user" as const, text: "agent:coding fix login in acme/api" }];
+    await expect(resolveRepoContext(msg("now run the tests"), h)).resolves.toEqual({ repo: "acme/api" });
     expect(fn).not.toHaveBeenCalled();
   });
 });
