@@ -99,6 +99,90 @@ export function reclaimDecision(input: ReclaimInput): { reclaim: boolean; why: R
 }
 
 // ---------------------------------------------------------------------------
+// 1b. Test overrides — lowering the effective cap / LRU floor for live checks
+// ---------------------------------------------------------------------------
+//
+// Why this exists: the over-cap behavior (429, `rejected[]`, the eviction and
+// its 1 h floor) is only reachable when the registry is FULL, and the
+// production cap (RESIDENT_CAP) is sized for the team's real fleet. Proving
+// item 46 on 2026-08-29 needed two deploys (cap 8→2, then →6) plus an hour of
+// clock time for the floor — and becomes impossible once six real residents
+// exist, because lowering the compiled cap below the fleet size would refuse
+// the team's own onboards. This is the resident's usual fault-injection
+// pattern (backdate-thread, force-down, force-onboarding …) applied to the
+// two limits: an admin-only debug op stores an override in the registry DO;
+// the registry enforces min(override, constant).
+//
+// Guard rails, by construction:
+//   - admin scope only (the /debug op is not in READ_DEBUG_OPS);
+//   - an override can only LOWER a limit — never above the compiled constant,
+//     so it can never become a back door past wrangler's max_instances;
+//   - deploy-scoped: the record carries the build marker it was set under and
+//     is ignored by any other build, so a forgotten test cap cannot outlive
+//     the session that set it;
+//   - visible: GET /residents reports the effective `cap` plus `capDefault`
+//     and the active `testOverrides`, so a dashboard never mistakes a test
+//     cap for the real one.
+
+/** The compiled limits the overrides may lower. */
+export interface LimitDefaults {
+  cap: number;
+  floorS: number;
+}
+
+/** What the registry DO stores. `build` is the healthz `u` marker of the
+ *  deploy that wrote it; a different build ignores the record. */
+export interface StoredTestOverrides {
+  cap?: number;
+  floorS?: number;
+  setAt: string;
+  build: string;
+}
+
+export type ParsedTestOverrides = { overrides: { cap?: number; floorS?: number } } | { clear: true } | { error: string };
+
+/** Parse the `/debug {"op":"set-test-overrides", cap?, floorS?}` body.
+ *  Neither field → clear. Each present field must be an integer within
+ *  [1, cap] / [0, floorS] of the compiled defaults — overrides only lower. */
+export function parseTestOverrides(body: Record<string, unknown>, defaults: LimitDefaults): ParsedTestOverrides {
+  const out: { cap?: number; floorS?: number } = {};
+  if (body.cap !== undefined) {
+    if (typeof body.cap !== "number" || !Number.isInteger(body.cap) || body.cap < 1 || body.cap > defaults.cap) {
+      return { error: `cap must be an integer between 1 and ${defaults.cap} (the compiled RESIDENT_CAP); overrides only lower it` };
+    }
+    out.cap = body.cap;
+  }
+  if (body.floorS !== undefined) {
+    if (typeof body.floorS !== "number" || !Number.isInteger(body.floorS) || body.floorS < 0 || body.floorS > defaults.floorS) {
+      return { error: `floorS must be an integer between 0 and ${defaults.floorS} (the compiled LRU_FLOOR_S); overrides only lower it` };
+    }
+    out.floorS = body.floorS;
+  }
+  if (out.cap === undefined && out.floorS === undefined) return { clear: true };
+  return { overrides: out };
+}
+
+export interface EffectiveLimits extends LimitDefaults {
+  /** The record in force, or null when none (or a stale one) applies. */
+  override: StoredTestOverrides | null;
+  /** Set when a stored record was ignored, naming why. */
+  ignored?: string;
+}
+
+/** The limits the registry enforces right now: the compiled defaults, lowered
+ *  by an override written under THIS build. Values are clamped to the
+ *  defaults even when stored (a later deploy may have lowered the constant). */
+export function effectiveLimits(stored: StoredTestOverrides | undefined, build: string, defaults: LimitDefaults): EffectiveLimits {
+  if (!stored) return { ...defaults, override: null };
+  if (stored.build !== build) return { ...defaults, override: null, ignored: `stale-build ${stored.build}` };
+  return {
+    cap: Math.min(defaults.cap, stored.cap ?? defaults.cap),
+    floorS: Math.min(defaults.floorS, stored.floorS ?? defaults.floorS),
+    override: stored,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 2. LRU eviction
 // ---------------------------------------------------------------------------
 
