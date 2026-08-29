@@ -229,6 +229,20 @@ const STALE_MIDFLIGHT_MS = 30 * 60_000;
  *  idle-park like a warm one; the next attach still refreshes first. */
 const DEGRADED_PARK_AFTER_CYCLES = 3;
 const DEGRADED_STREAK_KEY = "resident:degradedStreak";
+/** Degraded reasons stamped by the WATCHDOG rather than by an attempted refresh
+ *  (`watchdogCheck`: `alarm-missed: …`, `stale-mid-flight: …` — both always
+ *  carry a `: detail` suffix). They mean "a cycle must run", so they never
+ *  count toward the park streak (#177). Deliberate trade-off: a resident that
+ *  oscillates between a refresh-produced failure and watchdog stamps (e.g.
+ *  `install-failed` → DO eviction → `stale-mid-flight` → `install-failed` …)
+ *  keeps resetting the streak and never parks — full 10-min cadence for a
+ *  chronically broken repo. Accepted: a watchdog stamp means the previous
+ *  "same reason" observation is not trustworthy, and preserving the streak
+ *  across it would re-open the parked-degraded hole this fixes. */
+const WATCHDOG_REASON = /^(?:alarm-missed|stale-mid-flight):/;
+function isWatchdogReason(reason: string): boolean {
+  return WATCHDOG_REASON.test(reason);
+}
 
 /** Attach waits on the mirror mutex under this named timeout; expiry answers
  *  503 {state, reason: "mirror-busy"} instead of queueing forever. */
@@ -1357,15 +1371,22 @@ export class ResidentDO extends Sandbox<Env> {
       // every other state decision in this file.
       const entry = await this.getStatus();
       let settled = entry.state === "warm";
-      if (entry.state === "degraded") {
-        // Count consecutive cycles that found the same degraded reason; a
-        // stable streak means retrying is not going to help and parking is
-        // the right cost behavior. Any other state resets the streak (below).
+      if (entry.state === "degraded" && !isWatchdogReason(entry.reason)) {
+        // Count consecutive cycles that found the same REFRESH-PRODUCED degraded
+        // reason (github-unreachable, <step>-failed); a stable streak means
+        // retrying is not going to help and parking is the right cost behavior.
+        // Any other state resets the streak (below).
         const prev = await this.ctx.storage.get<{ reason: string; count: number }>(DEGRADED_STREAK_KEY);
         const streak = prev && prev.reason === entry.reason ? { reason: entry.reason, count: prev.count + 1 } : { reason: entry.reason, count: 1 };
         await this.ctx.storage.put(DEGRADED_STREAK_KEY, streak);
         settled = streak.count >= DEGRADED_PARK_AFTER_CYCLES;
       } else {
+        // Warm, or a degraded stamped by the WATCHDOG (alarm-missed /
+        // stale-mid-flight): the watchdog pulled this cycle to +5s precisely so
+        // a refresh RUNS. Counting those toward the streak was self-fulfilling —
+        // each cycle that found the reason parked without attempting anything,
+        // and after three the resident sat parked-degraded for 6h at a time
+        // (live 2026-08-29: repo:jshttp/vary, #177). Never settled; streak reset.
         await this.ctx.storage.delete(DEGRADED_STREAK_KEY);
       }
       if (settled && (await this.isIdle())) {
