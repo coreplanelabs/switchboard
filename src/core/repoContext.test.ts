@@ -425,6 +425,36 @@ describe("resolveRepoContext: thread history inheritance", () => {
   });
 });
 
+// Feature: features/agent-review.md item 9 — the PR's base branch rides along
+// from the same REST call so the review agent can be told its diff base.
+describe("PR base branch for the review target", () => {
+  const SHA = "d".repeat(40);
+  it("an explicit PR carries baseRef from base.ref (validated as a ref)", async () => {
+    stubFetch({ body: { state: "open", base: { ref: "release/2.x" }, head: { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } } } });
+    await expect(resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), [])).resolves.toEqual({
+      repo: "acme/api",
+      ref: "p1",
+      pr: 3,
+      headSha: SHA,
+      baseRef: "release/2.x",
+    });
+  });
+
+  it("an inherited PR carries baseRef too", async () => {
+    stubFetch({ body: { state: "open", base: { ref: "main" }, head: { sha: SHA, repo: { full_name: "acme/api" } } } });
+    const history = [{ role: "user" as const, text: "review https://github.com/acme/api/pull/3" }];
+    await expect(resolveRepoContext(msg("re-review"), history)).resolves.toEqual({ repo: "acme/api", pr: 3, headSha: SHA, baseRef: "main" });
+  });
+
+  it("a malformed or missing base.ref leaves baseRef unset (never partial garbage)", async () => {
+    stubFetch({ body: { state: "open", base: { ref: "../evil" }, head: { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } } } });
+    const ctx = await resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), []);
+    expect(ctx.baseRef).toBeUndefined();
+    stubFetch({ body: { state: "open", head: { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } } } });
+    expect((await resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), [])).baseRef).toBeUndefined();
+  });
+});
+
 // Feature: features/agent-review.md — the PR head SHA rides along with the PR
 // number so the posted review is pinned via commit_id.
 describe("PR head SHA for review pinning", () => {

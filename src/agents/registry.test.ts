@@ -115,6 +115,16 @@ describe("validated-review prompt behavior (resident variants)", () => {
   it("review resident keeps the gather-once discipline", () => {
     expect(AGENTS.review.residentSystem!).toMatch(/GATHER ONCE/);
   });
+
+  // features/agent-review.md item 9 — the prompt no longer hedges about which
+  // branch the worktree is on (the REVIEW TARGET block states it), and never
+  // asks the agent to fetch: `origin/<base>` is already in the clone.
+  it("review resident: no 'typically the branch under review' hedge, no git fetch instruction", () => {
+    const sys = AGENTS.review.residentSystem!;
+    expect(sys).not.toMatch(/typically the branch under review/);
+    expect(sys).not.toMatch(/git fetch/);
+    expect(sys).toMatch(/origin\/<base>/);
+  });
 });
 
 // Feature: features/agent-review.md (issue #69) — posting the review back to the
