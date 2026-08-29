@@ -7,6 +7,8 @@ import { createMcpHandler } from "./channels/mcp.js";
 import { createLiveViewHandler } from "./channels/liveView.js";
 import { createFrictionTriggerHandler, parseFrictionTriggerToken } from "./channels/frictionTrigger.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
+import { createCostsViewHandler } from "./channels/costsView.js";
+import { AnthropicCostReportSource, CloudflareGraphqlUsageSource, NullLlmCostSource, createCostsService, parseCostsConfig } from "./core/costs.js";
 import { makeResidentAdminClient } from "./core/repoCommands.js";
 import {
   httpJwksFetcher,
@@ -106,12 +108,34 @@ async function main() {
     const residentsState = residentCfg?.baseUrl && residentAdminToken
       ? `GET /residents (dash → ${residentCfg.baseUrl})`
       : "GET /residents (503 — resident admin not configured)";
+    // Costs dash: GET /costs (first group) + /costs/<group> (+ .json twin).
+    // Reads Cloudflare's billing datasets (and, when an Admin key is present,
+    // Anthropic's cost report) live per request. Fully off without the
+    // `costs:` config block or the Cloudflare token → 503. Access-gated below
+    // alongside /runs and /residents.
+    const costsCfg = parseCostsConfig(config.config.costs);
+    const cfAnalyticsToken = costsCfg ? process.env[costsCfg.cloudflareTokenEnv] : undefined;
+    const anthropicAdminKey = costsCfg ? process.env[costsCfg.anthropicAdminKeyEnv] : undefined;
+    const costsService =
+      costsCfg && cfAnalyticsToken
+        ? createCostsService(
+            costsCfg,
+            new CloudflareGraphqlUsageSource({ accountId: costsCfg.cloudflareAccountId, token: cfAnalyticsToken }),
+            anthropicAdminKey ? new AnthropicCostReportSource({ adminKey: anthropicAdminKey }) : new NullLlmCostSource(),
+          )
+        : undefined;
+    const costsView = createCostsViewHandler(costsService);
+    const costsState = costsService
+      ? `GET /costs (${Object.keys(costsCfg!.groups).join(",")}; LLM ${anthropicAdminKey ? "on" : "off"})`
+      : costsCfg
+        ? `GET /costs (503 — ${costsCfg.cloudflareTokenEnv} not set)`
+        : "GET /costs (503 — no costs config)";
     const tokenCount = Object.keys(auth.tokens).length;
     const liveViewState = process.env.PUBLIC_BASE_URL
       ? "GET /runs (index) + /runs/:id (live view)"
       : "GET /runs (index) + live view (no PUBLIC_BASE_URL — per-run links omitted)";
 
-    // The whole /runs* and /residents* surface sits behind Cloudflare Access (SSO), enforced
+    // The whole /runs*, /residents* and /costs* surface sits behind Cloudflare Access (SSO), enforced
     // fail-closed in our own code: the edge rule injects a signed RS256 JWT in
     // `Cf-Access-Jwt-Assertion`, and we re-verify it here so /runs refuses to
     // serve without a valid Access identity — even if the edge rule is ever
@@ -140,14 +164,14 @@ async function main() {
         frictionTrigger(req, res);
         return;
       }
-      // /runs* + /residents* SSO gate: identity FIRST (fail-closed), before the view
+      // /runs* + /residents* + /costs* SSO gate: identity FIRST (fail-closed), before the view
       // dispatch. The gate is async (it may fetch the JWKS), so we resolve the
       // promise here; a rejection is a 403, never a 500 that serves the page.
       // On allow, dispatch to the live-view handler (which owns the /runs index,
       // /runs/:id, and /runs/:id/events, and still applies its own per-run
       // capability-token check — defense in depth). Non-/runs paths below are
       // unchanged and not gated.
-      if (path === "/runs" || path.startsWith("/runs/") || path === "/residents" || path.startsWith("/residents/")) {
+      if (path === "/runs" || path.startsWith("/runs/") || path === "/residents" || path.startsWith("/residents/") || path === "/costs" || path === "/costs.json" || path.startsWith("/costs/")) {
         requireAccessForRuns(req.headers, { config: accessConfig, verify: accessVerify, devBypass: accessDevBypass })
           .then((gate) => {
             if (!gate.ok) {
@@ -157,6 +181,7 @@ async function main() {
             }
             if (liveView(req, res)) return;
             if (residentsView(req, res)) return;
+            if (costsView(req, res)) return;
             res.writeHead(200, { "content-type": "text/plain" });
             res.end("ok");
           })
@@ -185,7 +210,7 @@ async function main() {
       res.end("ok");
     }).listen(Number(process.env.PORT), () =>
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${frictionTriggerState} + ${liveViewState} + ${residentsState}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${frictionTriggerState} + ${liveViewState} + ${residentsState} + ${costsState}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       ),
     );

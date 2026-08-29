@@ -28,6 +28,8 @@ interface Env {
   ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
   SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map)
   BRAVE_SEARCH_API_KEY?: string; // web_search backend (Brave); web_fetch works without it
+  CF_ANALYTICS_TOKEN?: string; // costs dash: Cloudflare API token, Account Analytics:Read only
+  ANTHROPIC_ADMIN_KEY?: string; // costs dash (optional): Anthropic Admin API key for the LLM cost report
   MEMORY_TOKEN?: string; // durable memory: bearer for the memory service (else in-process store)
   FRICTION_TRIGGER_TOKEN?: string; // self-improvement (#84): bearer the weekly cron presents to POST /friction/propose
 }
@@ -66,6 +68,8 @@ export class SwitchboardServer extends Container<Env> {
       ...(env.PUBLIC_BASE_URL ? { PUBLIC_BASE_URL: env.PUBLIC_BASE_URL } : {}),
       ...(env.ACCESS_TEAM_DOMAIN ? { ACCESS_TEAM_DOMAIN: env.ACCESS_TEAM_DOMAIN } : {}),
       ...(env.ACCESS_AUD ? { ACCESS_AUD: env.ACCESS_AUD } : {}),
+      ...(env.CF_ANALYTICS_TOKEN ? { CF_ANALYTICS_TOKEN: env.CF_ANALYTICS_TOKEN } : {}),
+      ...(env.ANTHROPIC_ADMIN_KEY ? { ANTHROPIC_ADMIN_KEY: env.ANTHROPIC_ADMIN_KEY } : {}),
       ...(env.SWITCHBOARD_INGRESS_TOKENS
         ? { SWITCHBOARD_INGRESS_TOKENS: env.SWITCHBOARD_INGRESS_TOKENS }
         : {}),

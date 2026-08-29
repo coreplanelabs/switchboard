@@ -158,3 +158,16 @@ workspaceDir: ./workspaces
 #     baseUrl: https://switchboard-memory.coreplanelabs.dev
 #     tokenEnv: MEMORY_TOKEN    # env var holding the Worker's bearer (default)
 #   ledgerPath: ./data/friction.jsonl   # host-disk ledger path when no worker
+
+# Spend reporting: GET /costs (Access-gated). Optional. See features/costs.md.
+# costs:
+#   cloudflareAccountId: <32-hex account id>
+#   cloudflareTokenEnv: CF_ANALYTICS_TOKEN     # token with Account Analytics:Read
+#   anthropicAdminKeyEnv: ANTHROPIC_ADMIN_KEY  # optional: sk-ant-admin… for LLM spend
+#   groups:
+#     myapp:
+#       label: My App
+#       workers: [myapp, myapp-worker]           # Worker script names (their Durable Objects)
+#       containerApps:                            # container application id → label
+#         a0000000-0000-0000-0000-000000000000: server
+#       anthropicWorkspaceId: wrkspc_...          # this app's Anthropic workspace

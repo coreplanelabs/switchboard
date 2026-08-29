@@ -88,6 +88,12 @@ export interface AppConfig {
    * See features/self-improvement.md.
    */
   selfImprovement?: SelfImprovementConfig;
+  /**
+   * Spend reporting (`GET /costs`): which Cloudflare Workers / container apps
+   * / Anthropic workspace make up each named group. Validated at startup by
+   * `parseCostsConfig` (src/core/costs.ts); absent → the view answers 503.
+   */
+  costs?: unknown;
 }
 
 export interface OutputConfig {
