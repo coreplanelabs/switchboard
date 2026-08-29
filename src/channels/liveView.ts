@@ -1,4 +1,5 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import { NAV_CSS, renderNav } from "./nav.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { IndexEvent, RunRegistry, RunSummary, Unsubscribe } from "../core/runRegistry.js";
@@ -139,6 +140,7 @@ export function renderRunPage(id: string, token: string): string {
   h1 { font-size: 1rem; margin: 0; font-weight: 600; }
   a.back { color: #9ecbff; text-decoration: none; font-size: .8rem; }
   a.back:hover { text-decoration: underline; }
+  ${NAV_CSS}
   .conn { margin-left: auto; display: inline-flex; align-items: center; gap: .35rem; }
   #state { font-size: .8rem; color: #8b93a7; }
   .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%;
@@ -206,6 +208,7 @@ export function renderRunPage(id: string, token: string): string {
     <button class="stop hard" data-mode="hard" title="Hard stop: abort now, no summary, free the sandbox">Kill</button>
   </span>
   <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>
+  ${renderNav("runs")}
 </header>
 <section class="block" id="request" hidden><h2><span>Request</span><span class="ts" id="requestts"></span></h2><div class="md" id="requesttext"></div></section>
 <ul id="log"><li class="empty" id="placeholder"><span class="body">Waiting for activity…</span></li></ul>
@@ -444,8 +447,7 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   .dot.amber { background: #d29922; }
   .dot.red { background: #f85149; }
   .dot.grey { background: #6e7681; }
-  a.nav { font-size: .8rem; color: #8b93a7; text-decoration: none; }
-  a.nav:hover { color: #9ecbff; }
+  ${NAV_CSS}
   #runs { list-style: none; margin: 0; padding: 0; }
   #runs li { border-radius: 6px; display: flex; align-items: center; gap: .5rem; }
   /* The empty sentinel is an <li> too: this must outrank the flex rule above,
@@ -473,8 +475,8 @@ export function renderRunsIndex(runs: RunSummary[]): string {
 <body>
 <header>
   <h1>Live runs</h1>
-  <a class="nav" href="/residents">Residents →</a>
   <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>
+  ${renderNav("runs")}
 </header>
 <ul id="runs">${rows}<li class="empty" id="empty"${emptyHidden}>No active runs.</li></ul>
 <script>

@@ -1,6 +1,7 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { CostReport, CostsService, DailyCost } from "../core/costs.js";
 import { escapeHtml, HTML_PAGE_HEADERS } from "./liveView.js";
+import { NAV_CSS, renderNav } from "./nav.js";
 
 // Costs dash: an Access-gated, read-only browser view of what a group of
 // deployed pieces costs per day — `GET /costs` (first group), `/costs/<group>`,
@@ -160,7 +161,9 @@ main{max-width:1080px;margin:0 auto;padding:28px 24px 48px;display:grid;gap:22px
 header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px 24px;border-bottom:1px solid var(--line);padding-bottom:14px}
 h1{font-size:21px;font-weight:600;margin:0}h2{font-size:15px;font-weight:600;margin:0 0 6px}.sub{color:var(--ink-2);margin:0}
 .eyebrow{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:500}
-.nav a,.groups a,.ranges a{color:var(--accent);text-decoration:none}.nav a:hover,.groups a:hover,.ranges a:hover{text-decoration:underline}
+.groups a,.ranges a{color:var(--accent);text-decoration:none}.groups a:hover,.ranges a:hover{text-decoration:underline}
+.side{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}.ranges{font-size:12.5px;color:var(--ink-2)}
+${NAV_CSS}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
 .tile{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:14px 16px;display:grid;gap:2px}
 .tile .v{font-size:26px;font-weight:500;line-height:1.1;font-variant-numeric:tabular-nums}.tile .d{color:var(--ink-2);font-size:12.5px}
@@ -184,7 +187,7 @@ ${seriesCss()}
 <main>
 <header>
   <div><h1>${escapeHtml(report.label)} spend</h1><p class="sub">Cost per day by component · ${report.range.days} days · ${escapeHtml(report.range.from)} → ${escapeHtml(report.range.to)}${report.range.partialLastDay ? " (today is a partial day)" : ""}</p></div>
-  <div class="nav"><span class="ranges">${ranges}</span> · <a href="/runs">Runs</a> · <a href="/residents">Residents</a></div>
+  <div class="side"><span class="ranges">${ranges}</span>${renderNav("costs")}</div>
 </header>
 ${nav}
 ${tiles(report)}

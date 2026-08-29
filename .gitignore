@@ -5,3 +5,4 @@ workspaces/
 .env
 .agent-env/
 config/config.yaml
+node_modules

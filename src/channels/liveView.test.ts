@@ -336,6 +336,13 @@ describe("renderRunPage", () => {
     expect(page).not.toContain('t=x"y');
   });
 
+  it("carries the shared site nav with Runs current, plus the contextual back link", () => {
+    expect(html).toContain('<nav class="site" aria-label="Sections">');
+    expect(html).toContain('<a href="/runs" aria-current="page">Runs</a>');
+    expect(html).toContain('<a href="/residents">Residents</a>');
+    expect(html).toContain('<a href="/costs">Costs</a>');
+  });
+
   it('has a "← All runs" back link to the token-less, Access-gated index', () => {
     expect(html).toContain('<a class="back" href="/runs">');
     expect(html).toContain("← All runs");
