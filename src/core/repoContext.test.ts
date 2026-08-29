@@ -220,26 +220,69 @@ describe("resolveRepoContext: re-review follow-ups inherit the thread's PR (fail
 
   it("a CLOSED/merged thread PR is not inherited — a later review in the thread posts nowhere", async () => {
     stubFetch({ body: { state: "closed", head: { sha: SHA, repo: { full_name: "acme/api" } } } });
-    await expect(resolveRepoContext(msg("review this snippet: `foo()`"), history)).resolves.toEqual({ repo: "acme/api" });
+    const ctx = await resolveRepoContext(msg("review this snippet: `foo()`"), history);
+    expect(ctx.repo).toBe("acme/api");
+    expect(ctx.pr).toBeUndefined();
+    expect(ctx.headSha).toBeUndefined();
   });
 
   it("a failed or non-2xx fetch for the inherited PR fails closed: repo only, no pr, no headSha", async () => {
     stubFetch({ reject: "fetch failed" });
-    await expect(resolveRepoContext(msg("take another look"), history)).resolves.toEqual({ repo: "acme/api" });
+    await expect(resolveRepoContext(msg("take another look"), history)).resolves.toMatchObject({ repo: "acme/api" });
     stubFetch({ status: 404 });
-    await expect(resolveRepoContext(msg("take another look"), history)).resolves.toEqual({ repo: "acme/api" });
+    const ctx = await resolveRepoContext(msg("take another look"), history);
+    expect(ctx).toMatchObject({ repo: "acme/api" });
+    expect(ctx.pr).toBeUndefined();
+    expect(ctx.headSha).toBeUndefined();
   });
 
   it("a malformed head sha fails closed too (an unpinned inherited review could approve an unreviewed push)", async () => {
     stubFetch({ body: { state: "open", head: { sha: "nope", repo: { full_name: "acme/api" } } } });
-    await expect(resolveRepoContext(msg("re-review"), history)).resolves.toEqual({ repo: "acme/api" });
+    await expect(resolveRepoContext(msg("re-review"), history)).resolves.toEqual({
+      repo: "acme/api",
+      prUnpostable: { number: 7, reason: "unreachable" },
+    });
   });
 
-  it("redirecting the thread to another repo drops the PR (no cross-repo post)", async () => {
+  it("redirecting the thread to another repo BY URL drops the PR (no cross-repo post)", async () => {
     const { fn } = stubFetch();
-    const h = [...history, { role: "user" as const, text: "switch to acme/other" }];
+    const h = [...history, { role: "user" as const, text: "switch to https://github.com/acme/other" }];
     await expect(resolveRepoContext(msg("run the tests"), h)).resolves.toEqual({ repo: "acme/other" });
     expect(fn).not.toHaveBeenCalled();
+  });
+
+  // Regression (PR #167, 2026-08-29): the re-review reply said "(index.ts +
+  // features/memory.md §22)" — a bare path token outside backticks. It parsed
+  // as repo `features/memory.md`, which unbound the thread's PR, so the second
+  // LGTM never reached GitHub and the run went to a cold sandbox for a repo
+  // that does not exist. A thread bound to a repo by a STRONG signal (PR URL,
+  // repo URL, owner/name#N) is never rebound by a bare slug-shaped token.
+  it("a bare slug-shaped token never rebinds a thread bound by URL — the PR is still inherited (#167)", async () => {
+    stubFetch({ body: { state: "open", head: { sha: SHA, repo: { full_name: "acme/api" } } } });
+    const text = "both nits addressed (index.ts + features/memory.md §22). Please re-review; comment only.";
+    await expect(resolveRepoContext(msg(text), history)).resolves.toEqual({ repo: "acme/api", pr: 7, headSha: SHA });
+  });
+
+  it("a bare slug in an EARLIER follow-up does not rebind a URL-bound thread either", async () => {
+    stubFetch({ body: { state: "open", head: { sha: SHA, repo: { full_name: "acme/api" } } } });
+    const h = [...history, { role: "user" as const, text: "see features/memory.md for the rule" }];
+    await expect(resolveRepoContext(msg("re-review"), h)).resolves.toEqual({ repo: "acme/api", pr: 7, headSha: SHA });
+  });
+
+  it("a bound PR that is closed is reported as unpostable, not silently dropped", async () => {
+    stubFetch({ body: { state: "closed", head: { sha: SHA, repo: { full_name: "acme/api" } } } });
+    await expect(resolveRepoContext(msg("re-review"), history)).resolves.toEqual({
+      repo: "acme/api",
+      prUnpostable: { number: 7, reason: "closed" },
+    });
+  });
+
+  it("a bound PR whose fetch fails is reported as unreachable", async () => {
+    stubFetch({ status: 502 });
+    await expect(resolveRepoContext(msg("re-review"), history)).resolves.toEqual({
+      repo: "acme/api",
+      prUnpostable: { number: 7, reason: "unreachable" },
+    });
   });
 
   it("an explicit ref in the follow-up still binds and the PR is still inherited (one fetch, for the pin)", async () => {
@@ -354,7 +397,7 @@ describe("resolveRepoContext: thread history inheritance", () => {
     await expect(resolveRepoContext(msg("go ahead"), h)).resolves.toEqual({});
   });
 
-  it("repoFromThread: last user-turn repo wins; PR URLs count via their repo part, with NO fetch", async () => {
+  it("repoFromThread: the last STRONG user-turn signal wins; a later bare slug cannot rebind a URL-bound thread; NO fetch", async () => {
     const { fn } = stubFetch();
     expect(
       repoFromThread([
@@ -362,8 +405,23 @@ describe("resolveRepoContext: thread history inheritance", () => {
         { role: "assistant", text: "done" },
         { role: "user", text: "now look at acme/web" },
       ]),
+    ).toBe("acme/api");
+    expect(
+      repoFromThread([
+        { role: "user", text: "review https://github.com/acme/api/pull/7" },
+        { role: "user", text: "now look at acme/web#3" },
+      ]),
     ).toBe("acme/web");
     expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("repoFromThread: bare slugs still bind a thread that has no strong signal (last wins)", () => {
+    expect(
+      repoFromThread([
+        { role: "user", text: "agent:coding fix login in acme/api" },
+        { role: "user", text: "actually do it in acme/web" },
+      ]),
+    ).toBe("acme/web");
   });
 });
 
