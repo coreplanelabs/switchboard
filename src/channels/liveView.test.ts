@@ -10,6 +10,7 @@ import {
   serveIndexEvents,
   type SseSink,
 } from "./liveView.js";
+import { renderMarkdownInto } from "./markdownLite.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
@@ -232,20 +233,80 @@ describe("renderRunsIndex", () => {
 // (the `answer` event) as its own block, via textContent; the index hides its
 // empty-state sentinel even though rows are flex containers.
 describe("final answer on the run page + index empty-state (post-#137 fixes)", () => {
-  it("renders an `answer` event into a dedicated block with textContent", () => {
+  it("renders an `answer` event into a dedicated block through the safe markdown renderer", () => {
     const html = renderRunPage("run-1", "tok-1");
     expect(html).toContain('e.type === "answer"');
     expect(html).toContain('id="answer"');
-    expect(html).toMatch(/answer[A-Za-z]*\.textContent = /);
+    expect(html).toMatch(/md\(answerText, e\.text\)/);
     expect(html).not.toContain("innerHTML");
     // The answer only scrolls into view when the viewer is at the tail — a
     // reader parked on earlier rows keeps their place (review nit, #158).
     expect(html).toMatch(/if \(atTail\) answerBox\.scrollIntoView/);
   });
 
+  it("every markdown surface renders through a try/catch guard that falls back to textContent (#179 review)", () => {
+    const html = renderRunPage("run-1", "tok-1");
+    expect(html).toMatch(/function md\(target, text\) \{\s*try \{ renderMarkdownInto\(target, text\); \} catch \(_\) \{ target\.textContent = text; \}/);
+    // The three surfaces call the guard, never the renderer directly.
+    expect(html).toContain("md(box, e.text)");
+    expect(html).toContain("md(requestText, e.text)");
+    expect(html).toContain("md(answerText, e.text)");
+    expect(html.match(/renderMarkdownInto\(/g)?.length).toBe(1 + 1); // the definition + the guard's single call
+  });
+
   it("the index hides the empty sentinel with a rule that beats `#runs li { display:flex }`", () => {
     const html = renderRunsIndex([]);
     expect(html).toMatch(/#runs li\[hidden\]\s*\{\s*display:\s*none/);
+  });
+});
+
+// Feature: features/live-view.md item 12 — the run page is a timeline of the
+// whole run: the request on top, the model's prose between tool rows, a UTC
+// timestamp on every row, and markdown rendered through the inlined safe subset.
+describe("run page timeline (request, assistant turns, timestamps, markdown)", () => {
+  const html = renderRunPage("run-1", "tok-1");
+
+  it("inlines the self-contained markdown renderer (String(fn)) and uses it for Request/Answer/assistant", () => {
+    expect(html).toContain(String(renderMarkdownInto));
+    // The transpiler's keepNames helper (`__name`, emitted by esbuild under tsx)
+    // must resolve in the browser: a no-op shim precedes the inlined source.
+    const shim = html.indexOf("var __name = function (fn) { return fn; };");
+    expect(shim).toBeGreaterThan(-1);
+    expect(shim).toBeLessThan(html.indexOf("function renderMarkdownInto("));
+    // every markdown surface goes through the one renderer — never raw markup
+    expect(html).toMatch(/md\(requestText, e\.text\)/);
+    expect(html).toMatch(/md\(answerText, e\.text\)/);
+    expect(html).toMatch(/md\(box, e\.text\)/);
+    expect(html).not.toContain("innerHTML");
+  });
+
+  it("renders an `input` event into a Request block that sits ABOVE the log", () => {
+    expect(html).toContain('e.type === "input"');
+    expect(html).toContain('id="request"');
+    expect(html.indexOf('id="request"')).toBeLessThan(html.indexOf('<ul id="log"'));
+    expect(html.indexOf('<ul id="log"')).toBeLessThan(html.indexOf('id="answer"'));
+    expect(html).toContain(">Request<");
+  });
+
+  it("renders an `assistant` event as its own timeline row, styled distinctly from tool rows", () => {
+    expect(html).toContain('e.type === "assistant"');
+    expect(html).toMatch(/\.assistant\s*\{[^}]*border-left/); // the neutral left-border style
+  });
+
+  it("stamps every row and both blocks with a gray UTC [HH:MM:SS] from `at` (omitted when absent)", () => {
+    // toISOString().slice(11, 19) is UTC HH:MM:SS regardless of the viewer's zone
+    expect(html).toContain("toISOString().slice(11, 19)");
+    expect(html).toMatch(/\.ts\s*\{[^}]*color:\s*#8b93a7/); // gray
+    // no `at` → no bracket: the formatter returns "" for a missing timestamp
+    expect(html).toMatch(/function fmtTime\(at\)\s*\{\s*return typeof at === "number" \? "\[" \+ .*\] " : "";/);
+    // rows and blocks are built from a timestamp span + a body, via createElement/textContent
+    expect(html).toContain('ts.className = "ts"');
+    expect(html).toContain("ts.textContent = fmtTime(e.at)");
+  });
+
+  it("keeps the tool rows monospace and the markdown blocks proportional", () => {
+    expect(html).toMatch(/#log > li\.call, #log > li\.ok, #log > li\.err, #log > li\.note\s*\{[^}]*ui-monospace/);
+    expect(html).toMatch(/\.md\s*\{[^}]*-apple-system/);
   });
 });
 

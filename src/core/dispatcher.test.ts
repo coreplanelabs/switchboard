@@ -11,7 +11,7 @@ import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
-import { activeRunCount, composeRunLabel, dispatch, turnContent, type CoreDeps } from "./dispatcher.js";
+import { activeRunCount, attachmentSuffix, composeRunLabel, dispatch, turnContent, type CoreDeps } from "./dispatcher.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { MAX_STRUCTURE_RETRIES, STRUCTURING_SYSTEM } from "./structuredOutput.js";
 import { RunControl, RunRegistry } from "./runRegistry.js";
@@ -100,6 +100,22 @@ const msg = (text: string, user = "slack:UX") => ({
 // pure, channel-agnostic composer: agent-first, repo-identified for repo runs,
 // channel+user (names or stripped ids) for chat runs, always with a short quoted
 // snippet of the request, capped to a sane length.
+// Feature: features/live-view.md item 12 — the one-line attachment note the
+// dispatcher appends to the `input` event's text.
+describe("attachmentSuffix", () => {
+  const img = { name: "a.png", mediaType: "image/png" as const, data: "" };
+  const doc = { name: "a.txt", mediaType: "text/plain" as const, data: "" };
+  it("is empty with no attachments", () => {
+    expect(attachmentSuffix(undefined, undefined)).toBe("");
+    expect(attachmentSuffix([], [])).toBe("");
+  });
+  it("counts images and documents with singular/plural", () => {
+    expect(attachmentSuffix([img], undefined)).toBe("[+1 image]");
+    expect(attachmentSuffix([img, img], [doc])).toBe("[+2 images, 1 document]");
+    expect(attachmentSuffix(undefined, [doc, doc])).toBe("[+2 documents]");
+  });
+});
+
 describe("composeRunLabel", () => {
   const base = { agent: "review", channelId: "slack:C0BQ", userId: "slack:U123", text: "" };
 
@@ -1429,9 +1445,10 @@ describe("live run-view wiring (Area 2)", () => {
     expect(log).toEqual(["create", "finish"]); // created before the run, finished after
     // The 1-turn general agent hits its turn budget here, so the runner's typed
     // budget note (#84) also flows into the registry after the tool pair.
-    // …and the final answer itself lands in the stream (the run record is the
-    // source of truth; Slack is a projection of it) before the run finishes.
-    expect(events.map((e) => e.type)).toEqual(["tool_call", "tool_result", "run_note", "answer"]);
+    // …and the record is bookended by the request (`input`, live-view item 12)
+    // and the final answer (the run record is the source of truth; Slack is a
+    // projection of it), the latter before the run finishes.
+    expect(events.map((e) => e.type)).toEqual(["input", "tool_call", "tool_result", "run_note", "answer"]);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
 
@@ -1485,6 +1502,71 @@ describe("live run-view wiring (Area 2)", () => {
     expect(replies[0]).toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
     expect(order.indexOf("publish:answer")).toBeLessThan(order.indexOf("finish"));
     expect(order.indexOf("publish:answer")).toBeLessThan(order.indexOf("reply"));
+  });
+
+  // Feature: features/live-view.md item 12 — the request is the first event of
+  // the run record (`input`), published straight after create() so the run page
+  // can show it above the log; redacted like everything in the stream.
+  it("publishes the request as a redacted `input` event before any tool event, with an attachment suffix", async () => {
+    const events: RunEvent[] = [];
+    const spy = {
+      create() {
+        return { id: "run-i", token: "tok-i", control: new RunControl() };
+      },
+      publish(_id: string, e: RunEvent) {
+        events.push(e);
+      },
+      finish() {},
+      has: () => true,
+      subscribe: () => () => {},
+      size: () => 1,
+    } as unknown as RunRegistry;
+    const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
+    deps.runRegistry = spy;
+    const png = { name: "a.png", mediaType: "image/png" as const, data: "AAAA" };
+    await dispatch(
+      deps,
+      {
+        ...msg("agent:general please rotate ghp_abcdefghijklmnopqrstuvwxyz0123 now"),
+        images: [png, png],
+        documents: [{ name: "spec.pdf", mediaType: "application/pdf" as const, data: "AAAA" }],
+      },
+      fakeIO().io,
+    );
+    expect(events.map((e) => e.type)).toEqual(["input", "tool_call", "tool_result", "run_note", "answer"]);
+    const input = events[0];
+    if (input.type !== "input") throw new Error("unreachable");
+    expect(input.text).toBe("please rotate «redacted-github-token» now [+2 images, 1 document]"); // directives stripped, redacted
+    expect(input.at).toEqual(expect.any(Number));
+  });
+
+  it("shows an `assistant` turn on the status card as a one-line 💬 excerpt (capped), never the full text", async () => {
+    const long = "Let me look at the failing test first. ".repeat(6);
+    let n = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (n++ === 0) {
+          return {
+            content: [
+              { type: "text", text: long },
+              { type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } },
+            ],
+            stopReason: "tool_use",
+          };
+        }
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = new RunRegistry({ genId: () => "abc", genToken: () => "secret" });
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    const trace = statuses.map((s) => s.detail ?? "").find((d) => d.includes("💬"));
+    expect(trace).toBeDefined();
+    expect(trace).toContain("💬 Let me look at the failing test first.");
+    expect(trace).toContain("…");
+    expect(trace).not.toContain(long.trim());
   });
 
   it("puts the per-run capability link on the status card when PUBLIC_BASE_URL is set", async () => {

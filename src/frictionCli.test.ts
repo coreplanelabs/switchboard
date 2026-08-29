@@ -62,6 +62,19 @@ describe("parseRunEventLines", () => {
     expect(out.skipped).toBe(5);
   });
 
+  it("accepts the timeline events (`input`, `assistant`, `answer`) when they carry text, skips them otherwise", () => {
+    const text = [
+      '{"type":"input","text":"fix the bug","at":1}',
+      '{"type":"assistant","text":"checking…","at":2}',
+      '{"type":"answer","text":"done","at":3}',
+      '{"type":"input","text":42}', // wrong shape
+      '{"type":"assistant"}', // missing text
+    ].join("\n");
+    const out = parseRunEventLines(text);
+    expect(out.events.map((e) => e.type)).toEqual(["input", "assistant", "answer"]);
+    expect(out.skipped).toBe(2);
+  });
+
   it("empty input yields no events", () => {
     expect(parseRunEventLines("")).toEqual({ events: [], skipped: 0 });
   });
