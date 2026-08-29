@@ -35,7 +35,7 @@ interface Env {
 }
 
 /** The weekly self-improvement cron (Mondays 14:00 UTC) — must match wrangler.jsonc `triggers.crons`. */
-const FRICTION_CRON = "0 14 * * 1";
+const FRICTION_CRON = "0 0 * * *"; // TEMPORARY e2e test — revert to "0 14 * * 1" after the 2026-08-30 00:00 UTC firing
 
 export class SwitchboardServer extends Container<Env> {
   defaultPort = 8080; // the bot's health endpoint (PORT=8080 in the image)
