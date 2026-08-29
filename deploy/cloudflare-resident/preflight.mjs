@@ -23,6 +23,15 @@ const HOW_TO_SET_TOKEN =
   "`npm run secrets` put on the Worker; any scope may read /residents), e.g. " +
   "`RESIDENT_ADMIN_TOKEN=… npm run deploy`";
 const HOW_TO_FORCE = "to deploy anyway (this WILL kill in-flight runs): `RESIDENT_DEPLOY_FORCE=1 npm run deploy` (`node preflight.mjs --force` checks alone)";
+/** Lifecycle states in which NOTHING is executing on the resident — the only
+ *  states a deploy may land on. Every other state is either known mid-cycle
+ *  (the engine is running a refresh's fetch/rebuild, a restore, or
+ *  provisioning — an isolate swap kills that like a thread run, #188) or a
+ *  state this script does not know, which fails closed as `unknown`: this is
+ *  plain JS outside the shared `ResidentLifecycleState` type, so an allow-list
+ *  of settled states is what keeps vocabulary drift from silently allowing. */
+const SETTLED_STATES = new Set(["warm", "degraded", "down"]);
+const MID_CYCLE_STATES = new Set(["refreshing", "restoring", "onboarding"]);
 
 /** First present, non-blank bearer in preference order; null when none. */
 export function readToken(env) {
@@ -56,10 +65,11 @@ export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000 } = {}
 
 /**
  * The decision, pure. `fetched` is the result of `fetchResidents`.
- * @returns {{ allow: boolean, forced: boolean, busy: {resource:string,inFlight:number}[], unknown: {resource:string,error:string}[], message: string }}
+ * @returns {{ allow: boolean, forced: boolean, busy: {resource:string,inFlight:number}[], midCycle: {resource:string,state:string}[], unknown: {resource:string,error:string}[], message: string }}
  */
 export function decide(fetched, { force = false } = {}) {
   const busy = [];
+  const midCycle = [];
   const unknown = [];
   const problems = [];
 
@@ -82,18 +92,31 @@ export function decide(fetched, { force = false } = {}) {
           // counter bug (double release, unmatched decrement). We cannot tell
           // idle from busy, so it is unknown — never an implicit "0 busy".
           unknown.push({ resource, error: `live view carries an impossible inFlight=${live.inFlight} (counter bug)` });
-        } else if (live.inFlight > 0) {
-          busy.push({ resource, inFlight: live.inFlight });
+        } else {
+          // Runs and cycles are independent facts; report BOTH so an operator
+          // who waits for the runs to drain is not surprised by a second refusal.
+          if (live.inFlight > 0) busy.push({ resource, inFlight: live.inFlight });
+          if (MID_CYCLE_STATES.has(live.state)) {
+            // #188: the engine itself is mid-flight — a refresh's fetch/rebuild,
+            // a restore, or provisioning. An isolate swap kills that just like a
+            // thread run (live 2026-08-29: `build-failed: exit 143: Session
+            // terminated` right after a deploy that passed the inFlight check).
+            midCycle.push({ resource, state: live.state });
+          } else if (!SETTLED_STATES.has(live.state)) {
+            // A state this script does not know: fail closed rather than assume settled.
+            unknown.push({ resource, error: `live view carries an unrecognized state ${JSON.stringify(live.state)} (vocabulary drift — update preflight.mjs)` });
+          }
         }
       }
       if (busy.length) problems.push(`in flight: ${busy.map((b) => `${b.resource} (${b.inFlight} in flight)`).join(", ")}`);
+      if (midCycle.length) problems.push(`mid-cycle: ${midCycle.map((m) => `${m.resource} (${m.state})`).join(", ")} — the refresh/restore would be killed`);
       if (unknown.length) problems.push(`unknown state: ${unknown.map((u) => `${u.resource} (${u.error})`).join(", ")}`);
     }
   }
 
   if (problems.length === 0) {
     const count = fetched.payload.residents.length;
-    return { allow: true, forced: false, busy, unknown, message: `preflight ok: ${count} residents, no resident has work in flight` };
+    return { allow: true, forced: false, busy, midCycle, unknown, message: `preflight ok: ${count} residents, no resident has work in flight or a cycle running` };
   }
   const detail = problems.map((p) => `  - ${p}`).join("\n");
   if (force) {
@@ -101,8 +124,9 @@ export function decide(fetched, { force = false } = {}) {
       allow: true,
       forced: true,
       busy,
+      midCycle,
       unknown,
-      message: `preflight WARNING: deploying by force despite —\n${detail}\n  in-flight runs on the residents above WILL be killed (process handles invalidated by the isolate swap)`,
+      message: `preflight WARNING: deploying by force despite —\n${detail}\n  in-flight runs and cycles on the residents above WILL be killed (process handles invalidated by the isolate swap)`,
     };
   }
   const hints = [HOW_TO_FORCE];
@@ -111,8 +135,9 @@ export function decide(fetched, { force = false } = {}) {
     allow: false,
     forced: false,
     busy,
+    midCycle,
     unknown,
-    message: `preflight REFUSED: a Worker deploy swaps every ResidentDO isolate and kills in-flight runs —\n${detail}\n  wait for the runs to finish and retry; ${hints.join("; ")}`,
+    message: `preflight REFUSED: a Worker deploy swaps every ResidentDO isolate and kills in-flight runs and cycles —\n${detail}\n  wait for them to finish and retry; ${hints.join("; ")}`,
   };
 }
 
