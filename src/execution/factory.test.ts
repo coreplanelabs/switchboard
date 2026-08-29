@@ -201,6 +201,77 @@ describe("makeExecutor resident selection", () => {
     expect(calls).toEqual(["/status"]);
   });
 
+  // Serviceable non-warm states (live 2026-08-29): the resident keeps serving
+  // the last snapshot while `refreshing` (fetch/rebuild under the mirror lock)
+  // or `degraded` (a failed refresh; previous checkout intact), and /attach
+  // refuses neither — so the bot attaches, and says so on the card (KTD10).
+  it("refreshing probe → ResidentExecutor WITH an informational note (attached to the last snapshot)", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(
+      { body: { state: "refreshing", reason: "" } },
+      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2", deps: "hardlink" } },
+    );
+    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+    expect(executor).toBeInstanceOf(ResidentExecutor);
+    expect(resident).toBe(true);
+    expect(note).toBe("resident refreshing — attached to the last snapshot");
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
+  it("degraded probe → ResidentExecutor, note carries the reason", async () => {
+    stubEnvs();
+    stubFetch(
+      { body: { state: "degraded", reason: "github-unreachable: fetch timed out" } },
+      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2", deps: "hardlink" } },
+    );
+    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+    expect(executor).toBeInstanceOf(ResidentExecutor);
+    expect(resident).toBe(true);
+    expect(note).toBe("resident degraded (github-unreachable: fetch timed out) — attached to the last snapshot");
+  });
+
+  // Review finding on #162: a refresh that failed INSIDE the rebuild lock
+  // (install/build after `git clean -fdx`) leaves a checkout at the new sha with
+  // absent/partial deps; a fresh thread would hardlink that broken cache. Those
+  // degraded reasons stay cold until the next cycle rebuilds.
+  it("degraded by an in-rebuild failure (install-failed) → per-thread fallback, no attach", async () => {
+    stubEnvs();
+    const { calls } = stubFetch({ body: { state: "degraded", reason: "install-failed: npm ERR! ERESOLVE unable to resolve dependency tree" } });
+    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+    expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(resident).toBeFalsy();
+    expect(note).toBe("resident degraded (install-failed: npm ERR! ERESOLVE unable to resolve dependency tree) — using fresh sandbox");
+    expect(calls).toEqual(["/status"]);
+  });
+
+  it("refreshing probe then a mirror-busy attach (503) → per-thread fallback with the named attach-failed note", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(
+      { body: { state: "refreshing", reason: "" } },
+      { status: 503, body: { error: "mirror busy: rebuild in progress", state: "refreshing", reason: "mirror-busy" } },
+    );
+    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+    expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(resident).toBeFalsy();
+    expect(note).toMatch(/^resident attach failed \(.*mirror busy.*\) — using fresh sandbox$/);
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
+  // The engine-owned states: nothing serviceable to attach to.
+  it.each([
+    ["onboarding", ""],
+    ["restoring", "rehydrating"],
+    ["down", "provision-failed at clone: no such repo"],
+  ])("%s probe → per-thread fallback with the verbatim state/reason note; no attach", async (state, reason) => {
+    stubEnvs();
+    const { calls } = stubFetch({ body: { state, reason } });
+    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+    expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(resident).toBeFalsy();
+    expect(note).toBe(`resident ${state}${reason ? ` (${reason})` : ""} — using fresh sandbox`);
+    expect(calls).toEqual(["/status"]);
+  });
+
   // AE6 (3-reviewer-corroborated): the resident can degrade between the warm
   // /status probe and /attach (503 mirror-busy, 429 pool-exhausted). Any attach
   // failure that is NOT needs-ref must fall back to the per-thread backend with
@@ -234,11 +305,11 @@ describe("makeExecutor resident selection", () => {
   it("not-warm states are NOT cached — the next dispatch probes again", async () => {
     stubEnvs();
     const { fn } = stubFetch(
-      { body: { state: "degraded", reason: "alarm-missed: refresh chain was dead" } },
+      { body: { state: "restoring", reason: "rehydrating" } },
       { body: { state: "down", reason: "r2-restore-failed: boom" } },
     );
     const first = await makeExecutor(residentOpts(), repoCtx());
-    expect(first.note).toBe("resident degraded (alarm-missed: refresh chain was dead) — using fresh sandbox");
+    expect(first.note).toBe("resident restoring (rehydrating) — using fresh sandbox");
     const second = await makeExecutor(residentOpts(), repoCtx());
     expect(second.note).toBe("resident down (r2-restore-failed: boom) — using fresh sandbox");
     expect(fn).toHaveBeenCalledTimes(2);

@@ -76,6 +76,7 @@ import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
+import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 
 interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
@@ -533,7 +534,11 @@ const strToB64url = (s: string): string => bytesToB64url(new TextEncoder().encod
 // Lifecycle model (persisted in each ResidentDO)
 // ---------------------------------------------------------------------------
 
-type ResidentState = "onboarding" | "warm" | "refreshing" | "restoring" | "degraded" | "down";
+// The lifecycle union is shared with the bot's executor selection
+// (src/execution/residentState.ts — type-only import, bundled by wrangler), so
+// a renamed or added state is a compile error on both sides rather than a
+// silently changed attach gate.
+type ResidentState = ResidentLifecycleState;
 interface ResidentStatus {
   state: ResidentState;
   reason: string; // non-empty whenever state is degraded or down
