@@ -166,6 +166,17 @@ const THREAD_USERS = Array.from({ length: 16 }, (_, i) => `worker${i + 2}`);
 const WORKTREE_TTL_DAYS_DEFAULT = 7;
 /** The sweep self-reschedules hourly (armed by attach when no sweep pends). */
 const SWEEP_INTERVAL_S = 60 * 60; // hourly: the sweep is the backstop for trees a run kept (dirty) or never released
+/** A live binding whose last attach is older than this AND whose tree is clean
+ *  (no uncommitted/unpushed work) is released by the hourly sweep — runs that
+ *  ended before /detach existed, or whose release call was lost. Dirty trees
+ *  keep to the TTL. */
+const CLEAN_IDLE_RELEASE_S = 60 * 60;
+/** Idle sleep: when no thread has attached within this window and no live
+ *  tree is dirty, the refresh alarm skips the fetch and re-arms far out so
+ *  the container can actually sleep (SLEEP_AFTER); the next attach refreshes
+ *  first if the mirror is stale (refresh-on-attach). */
+const IDLE_AFTER_S = 60 * 60;
+const IDLE_REFRESH_INTERVAL_S = 6 * 60 * 60;
 
 /** Attach waits on the mirror mutex under this named timeout; expiry answers
  *  503 {state, reason: "mirror-busy"} instead of queueing forever. */
@@ -494,6 +505,8 @@ interface RepoFacts {
   lastRefreshAt: string;
   lastRefreshError?: string; // command-level failures (e.g. token mint) that did NOT flip lifecycle
   lastRestore?: { at: string; ms: number }; // proof of restore-not-reclone on the wake path
+  /** Set while the resident is in idle mode (refresh alarm parked far out so the container may sleep). */
+  idleSince?: string;
 }
 
 /** Stamped snapshot record (KTD3/KTD7): handles into R2 plus the {ref, sha,
@@ -876,9 +889,9 @@ export class ResidentDO extends Sandbox<Env> {
     return count;
   }
 
-  private async armRefresh(resource: string): Promise<void> {
+  private async armRefresh(resource: string, intervalS = REFRESH_INTERVAL_S): Promise<void> {
     this.deleteSchedules(REFRESH_CALLBACK); // at most one pending refresh
-    await this.schedule(REFRESH_INTERVAL_S, REFRESH_CALLBACK, resource);
+    await this.schedule(intervalS, REFRESH_CALLBACK, resource);
   }
 
   /** Persist `down` with a reason, stop the refresh chain, and hand back the
@@ -1120,6 +1133,27 @@ export class ResidentDO extends Sandbox<Env> {
       const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
       if (!facts) throw new StepError("facts", "no repo facts recorded despite hydration");
 
+      // Deploy-ordering hazard: `wrangler deploy` swaps the app's image but a
+      // RUNNING container keeps the old one, so new Worker code can name pool
+      // users the image lacks. Reconcile here (every cycle, cheap) — see
+      // reconcileImage — so a rollout self-applies within one refresh.
+      if (await this.reconcileImage("refresh")) return; // container stopping; finally re-arms
+
+      // Idle sleep: nobody has attached for IDLE_AFTER_S and no live tree is
+      // dirty → skip this fetch and park the alarm far out so SLEEP_AFTER can
+      // elapse. Staleness is repaid at the next attach (refreshIfStale). A
+      // dirty live tree pins the container awake: sleep destroys the disk and
+      // uncommitted work is not snapshotted.
+      if (await this.isIdle()) {
+        if (!facts.idleSince) await this.ctx.storage.put(FACTS_KEY, { ...facts, idleSince: new Date().toISOString() } satisfies RepoFacts);
+        this.idleRearm = true;
+        return; // finally re-arms at IDLE_REFRESH_INTERVAL_S
+      }
+      if (facts.idleSince) {
+        const { idleSince: _woke, ...awake } = facts;
+        await this.ctx.storage.put(FACTS_KEY, awake satisfies RepoFacts);
+      }
+
       // KTD12: token-mint failure is a command-level error — the resident
       // keeps serving the last snapshot and lifecycle state is NOT flipped.
       let token: string | null = null;
@@ -1209,8 +1243,80 @@ export class ResidentDO extends Sandbox<Env> {
       await this.setResidentState("degraded", reason); // last snapshot keeps serving
     } finally {
       const state = await this.ctx.storage.get<ResidentState>(STATE_KEY);
-      if (state && state !== "down" && state !== "onboarding") await this.armRefresh(resource);
+      const interval = this.idleRearm ? IDLE_REFRESH_INTERVAL_S : REFRESH_INTERVAL_S;
+      this.idleRearm = false;
+      if (state && state !== "down" && state !== "onboarding") await this.armRefresh(resource, interval);
     }
+  }
+
+  /** Set by the idle gate for the duration of one alarm so `finally` re-arms far out. */
+  private idleRearm = false;
+
+  /** Idle = no live binding attached within IDLE_AFTER_S AND (when the
+   *  runtime is up) no live tree is dirty. Bindings are storage; dirtiness
+   *  needs the container — if it is already asleep there is nothing to lose. */
+  private async isIdle(): Promise<boolean> {
+    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    const live = [...all.values()].filter((b) => !b.evicted && b.user);
+    const recent = Date.now() - IDLE_AFTER_S * 1000;
+    if (live.some((b) => Date.parse(b.lastAttachAt) >= recent)) return false;
+    if (this.inFlightCount() > 0) return false;
+    if (!(await this.isRuntimeActive().catch(() => false))) return true;
+    for (const b of live) {
+      const c = await this.worktreeCleanliness(b);
+      if (!c.clean) return false; // dirty or unknown → stay awake
+    }
+    return true;
+  }
+
+  /** Refresh-on-attach, BOUNDED: if the resident was idle (or the last
+   *  refresh is older than the active cadence), fetch the mirror now — seconds,
+   *  under the mirror lock — so the ref this thread binds is current, clear
+   *  idle mode, and pull the full refresh cycle (checkout rebuild if main
+   *  moved: minutes) to +1s in the BACKGROUND. The attach never waits on an
+   *  install/build, so a wake cannot become a cold-fallback generator. */
+  private async refreshIfStale(resource: string): Promise<void> {
+    const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
+    if (!facts) return;
+    const age = Date.now() - Date.parse(facts.lastRefreshAt);
+    if (!facts.idleSince && age < REFRESH_INTERVAL_S * 1000) return;
+    let token: string | null = null;
+    if (githubAppConfigured(this.env)) {
+      token = await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null);
+    }
+    try {
+      await this.withMirrorLock(() =>
+        this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "wake-fetch", GIT_NETWORK_TIMEOUT_MS),
+      );
+    } catch (err) {
+      console.log(`wake-fetch failed (attach proceeds on the last mirror): ${errMsg(err)}`);
+    }
+    if (facts.idleSince) {
+      const { idleSince: _woke, ...awake } = facts;
+      await this.ctx.storage.put(FACTS_KEY, awake satisfies RepoFacts);
+    }
+    await this.armRefresh(resource, 1); // full cycle now, in the background; it re-arms at the active cadence
+  }
+
+  /** Pool users live in the IMAGE (Dockerfile useradd loop) while THREAD_USERS
+   *  lives in the Worker. After a deploy that grows the pool, a still-running
+   *  container lacks the new users and `install -o workerN` fails. Check the
+   *  last pool user exists; if not and nothing is in flight, stop the container
+   *  so it restarts on the current image (state is DO storage + R2, KTD3 — the
+   *  disk is a cache). Returns true when a stop was issued. */
+  private async reconcileImage(where: string): Promise<boolean> {
+    if (!(await this.isRuntimeActive().catch(() => false))) return false;
+    const last = THREAD_USERS[THREAD_USERS.length - 1];
+    const probe = await this.run(["id", "-u", last]);
+    if (probe.exitCode === 0) return false;
+    const busy = this.inFlightCount();
+    if (busy > 0) {
+      console.log(`image-stale (${where}): ${last} missing but ${busy} operation(s)/attach(es) in flight — deferring restart`);
+      return false;
+    }
+    console.log(`image-stale (${where}): ${last} missing in the running container — stopping so it restarts on the current image`);
+    await this.stop().catch((err) => console.log(`image-stale: stop failed: ${errMsg(err)}`));
+    return true;
   }
 
   // -- watchdog (KTD4) ---------------------------------------------------------
@@ -1352,6 +1458,27 @@ export class ResidentDO extends Sandbox<Env> {
     const t0 = Date.now();
     try {
       await this.ensureHydrated();
+      const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+      if (await this.reconcileImage("attach")) {
+        return { error: "image-stale: the container predates the current pool and is restarting; retry shortly", status: 503, state: "restoring", reason: "image-stale" };
+      }
+      // From here the attach may hold the mirror lock through clone/install:
+      // count it so a concurrent refresh-cycle reconcileImage never stops the
+      // container under it (and isIdle never parks the alarm mid-attach).
+      this.attachesInFlight++;
+      try {
+        return await this.attachThreadBody(threadKey, refHint, resourceId, t0);
+      } finally {
+        this.attachesInFlight--;
+      }
+    } catch (err) {
+      return { error: `attach-failed: ${errMsg(err)}`, status: 500 };
+    }
+  }
+
+  private async attachThreadBody(threadKey: string, refHint: string | null, resourceId: string, t0: number): Promise<AttachOk | ThreadErr> {
+    try {
+      await this.refreshIfStale(resourceId);
     } catch (err) {
       const s = await this.getStatus();
       return { error: `not-serviceable: ${errMsg(err)}`, status: 503, state: s.state, reason: s.reason };
@@ -1791,32 +1918,8 @@ export class ResidentDO extends Sandbox<Env> {
     if (busy > 0) return { released: false, reason: `busy: ${busy} operation(s) in flight on this thread — kept`, user: binding.user };
     const active = await this.isRuntimeActive().catch(() => false);
     if (!force && active) {
-      // Run the check AS THE THREAD USER (threadRun → su), never as root: the
-      // worktree is thread-owned and thread-writable, so root git in it would
-      // (a) be refused by safe.directory (dubious ownership) and (b) be the
-      // exact repo-local-config execution vector safe.directory exists to
-      // block — same discipline as attach's own dirty check.
-      const status = await this.threadRun(binding.user, binding.worktreePath, "git status --porcelain", DEFAULT_EXEC_TIMEOUT_MS);
-      const ahead = await this.threadRun(
-        binding.user,
-        binding.worktreePath,
-        "git rev-list --count HEAD --not --remotes",
-        DEFAULT_EXEC_TIMEOUT_MS,
-      );
-      if (status.exitCode !== 0 || ahead.exitCode !== 0) {
-        // Can't prove the tree is clean → keep it (never destroy work on a guess).
-        const why = (status.stderr || ahead.stderr || "git exited non-zero").trim().split("\n")[0];
-        return { released: false, reason: `clean-check failed: ${why} — kept`, user: binding.user };
-      }
-      const changes = status.stdout.trim() ? status.stdout.trim().split("\n").length : 0;
-      const unpushed = Number(ahead.stdout.trim()) || 0;
-      if (changes > 0 || unpushed > 0) {
-        return {
-          released: false,
-          reason: `dirty: ${changes} uncommitted change(s), ${unpushed} unpushed commit(s) — kept for the inactivity sweep`,
-          user: binding.user,
-        };
-      }
+      const c = await this.worktreeCleanliness(binding);
+      if (!c.clean) return { released: false, reason: `${c.reason} — kept`, user: binding.user };
     }
     // Re-check right before removal: the clean check above awaited (the DO
     // yields at each await), so an exec that arrived mid-detach would otherwise
@@ -1827,6 +1930,38 @@ export class ResidentDO extends Sandbox<Env> {
     await this.evictBinding(binding, active, `detach`);
     return { released: true, user };
   }
+
+  /** Is this thread's tree safe to destroy? Runs AS THE THREAD USER (threadRun
+   *  → su), never as root: the worktree is thread-owned, so root git in it
+   *  would be refused by safe.directory and would be the exact repo-local-
+   *  config execution vector safe.directory exists to block. Unknown (git
+   *  failed) counts as NOT clean — never destroy work on a guess. */
+  private async worktreeCleanliness(binding: ThreadBinding): Promise<{ clean: boolean; reason?: string }> {
+    // A tree that no longer exists (disk recycled by a sleep/wake) has nothing
+    // to preserve: releasable, so a post-wake binding does not hold a pool
+    // user for 7 days on behalf of files that are already gone.
+    const present = await this.run(["test", "-d", `${binding.worktreePath}/.git`]);
+    if (present.exitCode !== 0) return { clean: true, reason: "worktree missing (disk recycled)" };
+    const status = await this.threadRun(binding.user, binding.worktreePath, "git status --porcelain", DEFAULT_EXEC_TIMEOUT_MS);
+    const ahead = await this.threadRun(binding.user, binding.worktreePath, "git rev-list --count HEAD --not --remotes", DEFAULT_EXEC_TIMEOUT_MS);
+    if (status.exitCode !== 0 || ahead.exitCode !== 0) {
+      const why = (status.stderr || ahead.stderr || "git exited non-zero").trim().split("\n")[0];
+      return { clean: false, reason: `clean-check failed: ${why}` };
+    }
+    const changes = status.stdout.trim() ? status.stdout.trim().split("\n").length : 0;
+    const unpushed = Number(ahead.stdout.trim()) || 0;
+    if (changes > 0 || unpushed > 0) return { clean: false, reason: `dirty: ${changes} uncommitted change(s), ${unpushed} unpushed commit(s)` };
+    return { clean: true };
+  }
+
+  /** Anything that must not be interrupted by a container stop or counted
+   *  as idle: thread exec/read/write, disposable /op runs, and attaches past
+   *  their own image check (mid clone/install under the mirror lock). */
+  private inFlightCount(): number {
+    const threadOps = [...this.threadOpsInFlight.values()].reduce((a, n) => a + n, 0);
+    return threadOps + this.opUsersInUse.size + this.attachesInFlight;
+  }
+  private attachesInFlight = 0;
 
   /** Hourly inactivity sweep (schedule: onWorktreeSweep). Removes worktrees
    *  whose binding is idle past the TTL, releases the user to the pool, and
@@ -1844,11 +1979,25 @@ export class ResidentDO extends Sandbox<Env> {
       const cutoff = Date.now() - ttlDays * 86_400_000;
       const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
       const active = await this.isRuntimeActive().catch(() => false);
+      const idleCutoff = Date.now() - CLEAN_IDLE_RELEASE_S * 1000;
       for (const binding of all.values()) {
         if (binding.evicted || !binding.user) continue;
-        if (Date.parse(binding.lastAttachAt) >= cutoff) {
-          kept++;
-          continue;
+        const last = Date.parse(binding.lastAttachAt);
+        if (last >= cutoff) {
+          // Not past the TTL. Still release it if it has been idle for an hour,
+          // nothing is running on it, and the tree is provably clean — the run
+          // that used it is over and there is nothing to preserve. A slept
+          // container cannot be checked (and has no tree): keep to the TTL.
+          const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
+          const cleanIdle = last < idleCutoff && busy === 0 && active && (await this.worktreeCleanliness(binding)).clean;
+          // Re-read right before removal: the clean check awaited (the DO
+          // yields), so an exec that arrived meanwhile would otherwise have
+          // its tree removed under it — same guard as detachThread.
+          const busyNow = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
+          if (!cleanIdle || busyNow > 0) {
+            kept++;
+            continue;
+          }
         }
         await this.evictBinding(binding, active, `worktree-sweep ${resource}`);
         evicted.push(binding.threadKey);
@@ -2071,6 +2220,7 @@ export class ResidentDO extends Sandbox<Env> {
       lastRefreshAt: facts?.lastRefreshAt ?? null,
       lastRefreshError: facts?.lastRefreshError ?? null,
       lastRestore: facts?.lastRestore ?? null,
+      idleSince: facts?.idleSince ?? null,
       snapshot: snap
         ? {
             ref: snap.ref,
