@@ -1,5 +1,6 @@
-import type { ConfigStore, Scope } from "../config.js";
+import { MAX_INSTRUCTIONS_LENGTH, type ConfigStore, type Scope } from "../config.js";
 import { configAwarenessBlock } from "./configAwareness.js";
+import { customInstructionsBlock } from "./customInstructions.js";
 import { AGENTS, getAgent } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
@@ -352,11 +353,19 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
     });
 
+    // Custom instructions (#107 phase 2): the requester's user text + this
+    // channel's text, as ONE advisory block. Read from the same resolved
+    // scopes as the config block, AFTER resolution and every gate above — so
+    // by construction they cannot influence agent, model, or permissions.
+    // Absent (the default) → no block, prompt unchanged.
+    const instructionsBlock = customInstructionsBlock(scopes);
+
     // Effective system prompt order: memory (advisory context, leads when
-    // present) → config block → the agent's own instructions (+ skills). The
-    // memory block is absent with memory off (default), keeping the memory-off
-    // request byte-identical to a NullMemoryStore run.
-    const system = [memoryBlock, configBlock, withSkills ?? agent.system]
+    // present) → config block → custom instructions → the agent's own
+    // instructions (+ skills). The memory block is absent with memory off
+    // (default), keeping the memory-off request byte-identical to a
+    // NullMemoryStore run.
+    const system = [memoryBlock, configBlock, instructionsBlock, withSkills ?? agent.system]
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
 
@@ -909,11 +918,50 @@ function handleConfigCommand(config: ConfigStore, msg: IncomingMessage): string 
   }
 
   // verb === "set"
+  const who = scopeName === "channel" ? "channel" : "your";
+
+  // `instructions` is free text (spaces, punctuation), so it takes the whole
+  // rest of the line — with or without `=`, optionally quoted (straight or the
+  // smart quotes Slack substitutes) — and can't be mixed with k=v tokens.
+  // No value at all only SHOWS the current text (a peek must never clear);
+  // an explicit empty value (`""`) clears just the instructions, leaving
+  // agent/model intact.
+  const instr = args.trim().match(/^instructions(?:\s*=\s*|\s+|$)([\s\S]*)$/i);
+  if (instr) {
+    const raw = instr[1].trim();
+    if (raw.length === 0) {
+      const scopes = config.scopes(msg.channelId, msg.userId);
+      const current = (scopeName === "channel" ? scopes.channel : scopes.user).instructions?.trim();
+      const clearHint = `To clear: \`config set ${scopeName} instructions ""\``;
+      if (!current) return `No ${who} instructions are set. Example: \`config set ${scopeName} instructions "Always reply in bullet points"\``;
+      return `Current ${who} instructions:\n> ${current.replace(/\n/g, "\n> ")}\n${clearHint}`;
+    }
+    const text = unquote(raw);
+    if (text.length > MAX_INSTRUCTIONS_LENGTH) {
+      return `That's too long (${text.length} characters). Instructions ride on every turn, so they're capped at ${MAX_INSTRUCTIONS_LENGTH} characters.`;
+    }
+    const patch: Scope = { instructions: text.length > 0 ? text : undefined };
+    const effective =
+      scopeName === "channel" ? config.setChannelOverride(msg.channelId, patch) : config.setUserOverride(msg.userId, patch);
+    if (text.length === 0) {
+      // Deleting the runtime key lets any static config.yaml text show
+      // through again — say so, rather than claiming nothing applies.
+      const fromStatic = effective.instructions?.trim();
+      return fromStatic
+        ? `Cleared ${who} instructions. The static config text now applies:\n> ${fromStatic.replace(/\n/g, "\n> ")}`
+        : `Cleared ${who} instructions.`;
+    }
+    return `Updated ${who} instructions (advisory prompt content — they never change agent, model, or permissions):\n> ${text.replace(/\n/g, "\n> ")}`;
+  }
+
   const patch: Scope = {};
   for (const token of args.split(/\s+/).filter(Boolean)) {
     const kv = token.match(/^([\w.]+)=(\S+)$/);
     if (!kv) return `Couldn't parse \`${token}\`. Use \`key=value\`, e.g. \`agent=review\`.`;
     const [, key, value] = kv;
+    if (key === "instructions") {
+      return `\`instructions\` is free text and goes on its own: \`config set ${scopeName} instructions "<text>"\`. Set agent/model in a separate command.`;
+    }
     if (key === "agent") {
       if (!AGENTS[value]) return `Unknown agent \`${value}\`. Available: ${Object.keys(AGENTS).join(", ")}`;
       patch.agent = value;
@@ -924,7 +972,7 @@ function handleConfigCommand(config: ConfigStore, msg: IncomingMessage): string 
       if (!AGENTS[agentName]) return `Unknown agent \`${agentName}\` in \`${key}\`.`;
       patch.models = { ...patch.models, [agentName]: value };
     } else {
-      return `Unknown key \`${key}\`. Valid: agent, model, models.<agent>`;
+      return `Unknown key \`${key}\`. Valid: agent, model, models.<agent>, instructions`;
     }
   }
   if (Object.keys(patch).length === 0) return `Nothing to set. Example: \`config set channel agent=review\``;
@@ -933,7 +981,33 @@ function handleConfigCommand(config: ConfigStore, msg: IncomingMessage): string 
     scopeName === "channel"
       ? config.setChannelOverride(msg.channelId, patch)
       : config.setUserOverride(msg.userId, patch);
-  return `Updated ${scopeName === "channel" ? "channel" : "your"} scope. Now: ${JSON.stringify(effective)}`;
+  return `Updated ${who} scope. Now: ${JSON.stringify(summarizeScope(effective))}`;
+}
+
+/**
+ * Scope as shown in k=v replies: instructions are elided to their length so a
+ * 2000-char paragraph isn't echoed every time someone changes their model.
+ */
+function summarizeScope(s: Scope): Record<string, unknown> {
+  const { instructions, ...rest } = s;
+  return instructions === undefined ? rest : { ...rest, instructions: `<${instructions.length} chars>` };
+}
+
+/**
+ * Strip one pair of wrapping quotes (straight or Slack smart quotes) — only
+ * when they wrap the WHOLE text, i.e. the same quote character does not recur
+ * inside. `"a" or "b"` is kept verbatim; `"Reply tersely."` becomes `Reply tersely.`.
+ */
+function unquote(raw: string): string {
+  const s = raw.trim();
+  const pairs: Array<[string, string]> = [['"', '"'], ["“", "”"], ["'", "'"], ["‘", "’"]];
+  for (const [open, close] of pairs) {
+    if (s.length < 2 || !s.startsWith(open) || !s.endsWith(close)) continue;
+    const inner = s.slice(1, -1);
+    if (inner.includes(open) || inner.includes(close)) return s;
+    return inner.trim();
+  }
+  return s;
 }
 
 function helpText(): string {
@@ -952,6 +1026,8 @@ function helpText(): string {
     "`config set channel agent=review` — channel default agent",
     "`config set me model=openai/gpt-5` — your personal model",
     "`config set channel models.coding=anthropic/claude-opus-5` — per-agent model for this channel",
+    '`config set me instructions "Always reply in bullet points"` — your custom instructions (advisory; apply only to runs you request; no value shows the current text, `""` clears)',
+    '`config set channel instructions "This channel is about billing"` — channel-wide instructions (same gate as other channel config)',
     "`config clear channel` / `config clear me`",
     "",
     "*Repo commands* (resident environments; management verbs admin-gated):",

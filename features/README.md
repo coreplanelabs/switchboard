@@ -20,7 +20,7 @@ The behavioral contract of Switchboard, versioned with the code. Every file in t
 
 | Feature | What it covers |
 |---|---|
-| [routing-and-config.md](routing-and-config.md) | Directives, config layers, thread stickiness, permission gates, config commands |
+| [routing-and-config.md](routing-and-config.md) | Directives, config layers, thread stickiness, permission gates, config commands, config awareness, custom instructions |
 | [slack-channel.md](slack-channel.md) | Triggers (mention/DM/follow-up), ack reaction, status cards, formatting, attachments |
 | [channel-formatter.md](channel-formatter.md) | Channel-agnostic structured output (zod schema), `ChannelFormatter` seam (Slack + plain), fixed-retry self-heal, flag-gated (#76) |
 | [run-visibility.md](run-visibility.md) | Typed run-event stream (tool calls + redacted result summaries); live in-channel status card |

@@ -84,3 +84,33 @@ describe("configAwarenessBlock", () => {
     expect(block.length).toBeLessThan(900);
   });
 });
+
+describe("configAwarenessBlock — custom instructions (#107 phase 2)", () => {
+  const base = {
+    agentName: "general",
+    modelRef: "anthropic/m",
+    channel: {},
+    user: {},
+    messageDirective: {},
+    threadDirective: {},
+    canEditChannelConfig: true,
+  };
+
+  it("notes which scopes have custom instructions active, as advisory content, without dumping the text", () => {
+    const both = configAwarenessBlock({
+      ...base,
+      channel: { instructions: "Channel rules." },
+      user: { instructions: "My rules." },
+    });
+    expect(both).toMatch(/Custom instructions are active for this run \(channel, user\)/);
+    expect(both).toMatch(/advisory/i);
+    expect(both).toContain("`config set me instructions");
+    const channelOnly = configAwarenessBlock({ ...base, channel: { instructions: "Channel rules." } });
+    expect(channelOnly).toMatch(/active for this run \(channel\)/);
+    expect(channelOnly).not.toContain("Channel rules.");
+  });
+
+  it("says nothing about instructions when none are set", () => {
+    expect(configAwarenessBlock(base)).not.toMatch(/custom instructions are active/i);
+  });
+});

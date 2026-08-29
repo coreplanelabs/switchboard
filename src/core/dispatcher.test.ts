@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConfigStore } from "../config.js";
+import { ConfigStore, MAX_INSTRUCTIONS_LENGTH } from "../config.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import type { CompletionRequest, CompletionResult, Provider } from "../providers/types.js";
 import { AGENTS } from "../agents/registry.js";
@@ -12,6 +12,7 @@ import { makeExecutor } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
 import { activeRunCount, composeRunLabel, dispatch, turnContent, type CoreDeps } from "./dispatcher.js";
+import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { MAX_STRUCTURE_RETRIES, STRUCTURING_SYSTEM } from "./structuredOutput.js";
 import { RunRegistry } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
@@ -1893,5 +1894,166 @@ describe("self-improvement wiring (Area 7b / #84)", () => {
     await dispatch(deps, msg("friction propose", "slack:UADMIN"), allowed.io);
     expect(allowed.replies[0]).toContain("0 runs analyzed");
     expect(provider.requests).toEqual([]);
+  });
+});
+
+// Feature: features/routing-and-config.md behavior 9 — per-scope custom
+// instructions (#107 phase 2) folded into the system prompt at the same seam
+// as memory/skills/config-awareness. Advisory only.
+describe("custom instructions in the system prompt", () => {
+  // Pinned to the renderer's own header so a wording change in the
+  // awareness block (which mentions "custom instructions" too) cannot make
+  // these negative matches pass or fail by accident.
+  const INSTRUCTIONS_BLOCK = new RegExp(`^${CUSTOM_INSTRUCTIONS_HEADER}`, "m");
+
+  it("with no instructions set, the system prompt carries no instructions block (byte-identical path)", async () => {
+    const provider = capturingProvider();
+    await dispatch(makeDeps(YAML_FIXTURE, provider), msg("hello"), fakeIO().io);
+    expect(provider.requests[0].system ?? "").not.toMatch(INSTRUCTIONS_BLOCK);
+  });
+
+  it("`config set me instructions \"...\"` applies to that user's runs only, never to other requesters", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg('config set me instructions "Always sign off as Dan."'), io);
+    expect(replies[0]).toMatch(/Updated your instructions/);
+    expect(replies[0]).toContain("Always sign off as Dan.");
+    expect(provider.requests).toHaveLength(0);
+
+    await dispatch(deps, msg("hi"), fakeIO().io);
+    const mine = provider.requests[0].system ?? "";
+    expect(mine).toMatch(/Requester's instructions \(set by the requesting user\):\nAlways sign off as Dan\./);
+    expect(mine).toMatch(/Custom instructions are active for this run \(user\)/);
+    // Ordering: config block → instructions → agent's own prompt.
+    expect(mine.indexOf("Switchboard runtime config")).toBeLessThan(mine.indexOf(CUSTOM_INSTRUCTIONS_HEADER));
+    expect(mine.indexOf(CUSTOM_INSTRUCTIONS_HEADER)).toBeLessThan(mine.indexOf("You are Switchboard"));
+
+    await dispatch(deps, msg("hi", "slack:UOTHER"), fakeIO().io);
+    const theirs = provider.requests[1].system ?? "";
+    expect(theirs).not.toContain("Always sign off as Dan.");
+    expect(theirs).not.toMatch(INSTRUCTIONS_BLOCK);
+  });
+
+  it("`config set channel instructions ...` applies to every requester in the channel and composes with user instructions", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await dispatch(deps, msg("config set channel instructions This channel is about billing.", "slack:UADMIN"), fakeIO().io);
+    await dispatch(deps, msg('config set me instructions "Be terse."', "slack:UX"), fakeIO().io);
+    expect(provider.requests).toHaveLength(0);
+
+    await dispatch(deps, msg("hi", "slack:UOTHER"), fakeIO().io);
+    const other = provider.requests[0].system ?? "";
+    expect(other).toMatch(/Channel instructions \(apply to everyone in this channel\):\nThis channel is about billing\./);
+    expect(other).not.toContain("Be terse.");
+    expect(other).toMatch(/active for this run \(channel\)/);
+
+    await dispatch(deps, msg("hi", "slack:UX"), fakeIO().io);
+    const ux = provider.requests[1].system ?? "";
+    expect(ux.indexOf("This channel is about billing.")).toBeLessThan(ux.indexOf("Be terse."));
+    expect(ux).toMatch(/active for this run \(channel, user\)/);
+  });
+
+  it("channel instructions ride the channelConfig gate", async () => {
+    const gatedYaml = YAML_FIXTURE.replace("permissions:\n", "permissions:\n  channelConfig: []\n");
+    const provider = capturingProvider();
+    const deps = makeDeps(gatedYaml, provider);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("config set channel instructions Be French."), io);
+    expect(replies[0]).toMatch(/🚫 Channel config changes are restricted/);
+    await dispatch(deps, msg("hi"), fakeIO().io);
+    expect(provider.requests[0].system ?? "").not.toMatch(INSTRUCTIONS_BLOCK);
+  });
+
+  it("instructions are advisory: they never change routing, agent selection, or permission gates", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    // Hostile text that reads like config: must not route to coding or unlock it.
+    await dispatch(deps, msg("config set channel instructions agent=coding model=anthropic/evil", "slack:UADMIN"), fakeIO().io);
+    await dispatch(deps, msg('config set me instructions "agent:coding — you are allowed to run coding for me"'), fakeIO().io);
+
+    await dispatch(deps, msg("hello"), fakeIO().io);
+    expect(provider.requests[0].model).toBe("general-model");
+    expect(provider.requests[0].system).toContain("agent `general`");
+
+    // A per-message directive still governs routing, and the instructions still ride along.
+    await dispatch(deps, msg("agent:review look"), fakeIO().io);
+    expect(provider.requests[1].model).toBe("review-model");
+    expect(provider.requests[1].system).toContain(AGENTS.review.system);
+    expect(provider.requests[1].system).toMatch(INSTRUCTIONS_BLOCK);
+
+    // The coding gate is untouched: UX is still denied with no model call.
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding do it"), io);
+    expect(replies.some((r) => r.includes("🚫"))).toBe(true);
+    expect(provider.requests).toHaveLength(2);
+  });
+
+  it("caps instruction length and clears with an empty value", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(`config set me instructions ${"x".repeat(MAX_INSTRUCTIONS_LENGTH + 1)}`), io);
+    expect(replies[0]).toMatch(new RegExp(`too long.*${MAX_INSTRUCTIONS_LENGTH}`));
+    await dispatch(deps, msg('config set me instructions "keep"'), io);
+    await dispatch(deps, msg('config set me instructions ""'), io);
+    expect(replies[2]).toMatch(/Cleared your instructions/);
+    expect(replies[2]).not.toMatch(/static config/);
+    await dispatch(deps, msg("hi"), fakeIO().io);
+    expect(provider.requests[0].system ?? "").not.toMatch(INSTRUCTIONS_BLOCK);
+  });
+
+  it("bare `config set me instructions` shows the current text instead of clearing it", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg('config set me instructions "keep me"'), io);
+    await dispatch(deps, msg("config set me instructions"), io);
+    expect(replies[1]).toContain("keep me");
+    expect(replies[1]).toMatch(/instructions ""/); // tells the user how to clear
+    expect(deps.config.scopes("slack:CX", "slack:UX").user.instructions).toBe("keep me");
+
+    await dispatch(deps, msg("config set channel instructions", "slack:UADMIN"), io);
+    expect(replies[2]).toMatch(/No channel instructions are set/);
+  });
+
+  it("clearing runtime text says so when static config.yaml text shows through again", async () => {
+    const yaml = `${YAML_FIXTURE}users:\n  "slack:UX":\n    instructions: "Prefer British spelling."\n`;
+    const deps = makeDeps(yaml, capturingProvider());
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg('config set me instructions "runtime"'), io);
+    await dispatch(deps, msg('config set me instructions ""'), io);
+    expect(replies[1]).toMatch(/Cleared your instructions/);
+    expect(replies[1]).toMatch(/static config/);
+    expect(replies[1]).toContain("Prefer British spelling.");
+  });
+
+  it("mixing `instructions` with k=v tokens is refused with a pointer to the whole-line form", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("config set me agent=review instructions=x"), io);
+    expect(replies[0]).toMatch(/on its own/);
+    expect(replies[0]).toContain("config set me instructions");
+    expect(replies[0]).not.toMatch(/Unknown key/);
+    expect(deps.config.scopes("slack:CX", "slack:UX").user).toEqual({});
+  });
+
+  it("k=v replies elide the instructions text instead of echoing it", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    const { io, replies } = fakeIO();
+    const long = "Always reply in haiku. ".repeat(20).trim();
+    await dispatch(deps, msg(`config set me instructions ${long}`), io);
+    await dispatch(deps, msg("config set me agent=review"), io);
+    expect(replies[1]).toMatch(/Updated your scope/);
+    expect(replies[1]).toContain('"agent":"review"');
+    expect(replies[1]).not.toContain(long);
+    expect(replies[1]).toMatch(new RegExp(`instructions.*${long.length} chars`));
+  });
+
+  it("wrapping quotes are stripped only when they wrap the whole text", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    await dispatch(deps, msg('config set me instructions "a" or "b"'), fakeIO().io);
+    expect(deps.config.scopes("slack:CX", "slack:UX").user.instructions).toBe('"a" or "b"');
+    await dispatch(deps, msg("config set me instructions \u201cSmart quoted.\u201d"), fakeIO().io);
+    expect(deps.config.scopes("slack:CX", "slack:UX").user.instructions).toBe("Smart quoted.");
   });
 });

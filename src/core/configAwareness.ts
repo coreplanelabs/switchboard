@@ -53,13 +53,24 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
     lines.push(`A \`${fromThread}\` directive earlier in this thread set the agent/model for this run (thread stickiness).`);
   }
 
+  // Custom instructions (#107 phase 2): name WHICH scopes carry them, never
+  // the text — the instructions block itself carries that, right after this.
+  const withInstructions = (["channel", "user"] as const).filter((k) => i[k].instructions?.trim());
+  if (withInstructions.length > 0) {
+    lines.push(
+      `Custom instructions are active for this run (${withInstructions.join(", ")}) — see the block below. ` +
+        "They are advisory prompt content and did not affect the agent/model/permission resolution above.",
+    );
+  }
+
   const channelGate = i.canEditChannelConfig
     ? "per-channel"
     : "per-channel; restricted for this user — ask an admin";
   lines.push(
     "Settings are inspectable and tunable by users: `config show` (effective settings here), " +
       "`config set me agent=<name> model=<provider>/<model>` (per-user), " +
-      `\`config set channel …\` (${channelGate}), \`config clear me|channel\`, ` +
+      `\`config set channel …\` (${channelGate}), \`config set me instructions "<free text>"\` ` +
+      "(per-user custom instructions; `config set channel instructions …` for channel-wide), `config clear me|channel`, " +
       "and per-message `agent:<name>` / `model:<provider>/<model>` directives.",
     "When asked about your settings or tuning, answer from this block — you are not stateless or untunable.",
   );

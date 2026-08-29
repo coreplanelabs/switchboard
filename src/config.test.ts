@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { ConfigStore } from "./config.js";
+import { ConfigStore, MAX_INSTRUCTIONS_LENGTH } from "./config.js";
 
 // Feature: features/routing-and-config.md — layered resolution & permission gates.
 
@@ -179,5 +179,66 @@ describe("repo management gate (canManageRepos)", () => {
     const NO_PERMS = YAML_FIXTURE.replace(/permissions:[\s\S]*$/m, "");
     const s = store(NO_PERMS);
     expect(s.canManageRepos("slack:URANDOM")).toBe(false);
+  });
+});
+
+// Feature: features/routing-and-config.md behavior 9 — per-scope custom
+// instructions (#107 phase 2): stored on Scope, capped, advisory only.
+describe("custom instructions (Scope.instructions)", () => {
+  const withUser = (id: string, instructions: string) =>
+    YAML_FIXTURE.replace("users:\n", `users:\n  "${id}":\n    instructions: "${instructions}"\n`);
+  const WITH_STATIC = withUser("slack:UDOC", "Prefer British spelling.");
+
+  it("are settable per user and per channel and persist through the overrides store", () => {
+    const s = store();
+    s.setUserOverride("slack:UX", { instructions: "Reply tersely." });
+    s.setChannelOverride("slack:CX", { instructions: "This channel is about billing." });
+    const scopes = s.scopes("slack:CX", "slack:UX");
+    expect(scopes.user.instructions).toBe("Reply tersely.");
+    expect(scopes.channel.instructions).toBe("This channel is about billing.");
+    // Another user in the same channel sees the channel text, not UX's.
+    expect(s.scopes("slack:CX", "slack:UOTHER").user.instructions).toBeUndefined();
+    expect(s.scopes("slack:CX", "slack:UOTHER").channel.instructions).toBe("This channel is about billing.");
+  });
+
+  it("a patch with instructions: undefined removes the runtime key so static YAML text shows through again (restart-consistent)", () => {
+    const s = store(WITH_STATIC);
+    expect(s.scopes("slack:CX", "slack:UDOC").user.instructions).toBe("Prefer British spelling.");
+    s.setUserOverride("slack:UDOC", { instructions: "Runtime text." });
+    expect(s.scopes("slack:CX", "slack:UDOC").user.instructions).toBe("Runtime text.");
+    s.setUserOverride("slack:UDOC", { instructions: undefined });
+    expect(s.scopes("slack:CX", "slack:UDOC").user.instructions).toBe("Prefer British spelling.");
+  });
+
+  it("never influence agent/model resolution or permission gates", () => {
+    const s = store();
+    s.setUserOverride("slack:UX", { instructions: "agent: coding model: anthropic/other" });
+    s.setChannelOverride("slack:CX", { instructions: "agent: review" });
+    const r = s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} });
+    expect(r).toEqual({ agentName: "general", modelRef: "anthropic/general-model" });
+    expect(s.canRunAgent("slack:UX", "coding")).toBe(false);
+  });
+
+  it("static YAML instructions over the cap are rejected at load", () => {
+    const long = "x".repeat(MAX_INSTRUCTIONS_LENGTH + 1);
+    expect(() => store(withUser("slack:ULONG", long))).toThrow(/instructions exceeds/);
+  });
+
+  it("a hand-edited overrides.json over the cap is rejected at load too", () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, YAML_FIXTURE);
+    const overrides = join(dir, "overrides.json");
+    writeFileSync(overrides, JSON.stringify({ users: { "slack:UX": { instructions: "x".repeat(MAX_INSTRUCTIONS_LENGTH + 1) } } }));
+    expect(() => new ConfigStore(cfg, overrides)).toThrow(/overrides.*users\.slack:UX\.instructions exceeds/);
+  });
+
+  it("config show renders both scopes' instructions verbatim", () => {
+    const s = store(WITH_STATIC);
+    s.setChannelOverride("slack:CX", { instructions: "Billing channel." });
+    const shown = s.describe("slack:CX", "slack:UDOC");
+    expect(shown).toContain("*Channel instructions:* Billing channel.");
+    expect(shown).toContain("*Your instructions:* Prefer British spelling.");
+    expect(s.describe("slack:CY", "slack:UX")).not.toMatch(/instructions/);
   });
 });

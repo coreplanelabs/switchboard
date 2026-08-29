@@ -39,6 +39,8 @@ Resolution order (highest wins):
 
 Runtime overrides persist to `data/overrides.json`. Static defaults for channels/users can also live in `config.yaml`.
 
+**Custom instructions** (per user / per channel, [#107](https://github.com/coreplanelabs/switchboard/issues/107)): `config set me instructions "Always reply in bullet points"` and `config set channel instructions "This channel is about billing"` store free text (≤2000 chars) on the same scopes. The dispatcher folds it into the system prompt as a clearly labeled advisory block — channel text on every run in that channel, a user's text only on runs that user requests; user wins on conflict. Instructions are prompt content only: they never change agent/model resolution or permission gates. A bare `config set me instructions` shows the current text; an explicit empty value (`config set me instructions ""`) clears it (any static `config.yaml` text then applies again, and the reply says so); `config show` displays them.
+
 ## Architecture
 
 One long-lived Node process, no inbound server. The Slack adapter opens an **outbound websocket** (Socket Mode), so there is no public URL, webhook endpoint, or signature verification to host. State lives in the channel's own thread history and on disk — a restart loses nothing except in-flight runs.
@@ -247,6 +249,7 @@ fly deploy && fly logs   # set workspaceDir: ./data/workspaces in config.yaml fi
 @switchboard config show
 @switchboard config set channel agent=review
 @switchboard config set me models.coding=openai/gpt-5
+@switchboard config set me instructions "Always reply in bullet points and sign off as Dan"
 ```
 
 DMs to the bot work the same way (no mention needed). In channels, only the first message of a conversation needs the mention: once the bot is part of a thread (it replied, or was mentioned anywhere in it), every follow-up reply in that thread reaches it without re-mentioning.
