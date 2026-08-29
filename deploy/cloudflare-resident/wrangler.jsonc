@@ -37,7 +37,7 @@
       // constraints: whole vCPUs 1-4, >=3 GiB per vCPU, <=2 GB disk per GiB.
       // (The thread-sandbox Worker is standard-3 — it lives only for one run.)
       "instance_type": { "vcpu": 1, "memory_mib": 4096, "disk_mb": 8000 },
-      // Platform ceiling only. The enforced cap is RESIDENT_CAP (8) in
+      // Platform ceiling only. The enforced cap is RESIDENT_CAP (temporarily 2) in
       // worker.ts — deliberately below this so an onboard is always refused
       // atomically by the registry, never by a platform scheduling failure.
       "max_instances": 10
