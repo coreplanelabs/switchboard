@@ -122,6 +122,19 @@ describe("stripMention — Slack app 'Sent using' footer", () => {
   // Slack plugin) carry a trailing "*Sent using* <@APP|Name>" line. It is
   // platform chrome, not user text: a `repo onboard owner/name` followed by it
   // must parse exactly like the bare command.
+  // Regression (2026-08-29, live): the footer now carries the sender's
+  // attribution after the mention — `*Sent using* <@APP|Claude> [justin
+  // <justin@coreplane.ai>]` — and the un-stripped line reached
+  // `friction report` as `Unknown option \`*Sent\``.
+  it("drops the footer when a bracketed sender attribution follows the mention", () => {
+    expect(stripMention(`<@${BOT}> friction report\n*Sent using* <@U0BJJMDUCKY|Claude> [justin <justin@coreplane.ai>]`, BOT)).toBe(
+      "friction report",
+    );
+    expect(stripMention(`<@${BOT}> repo list\nSent using <@U0BJJMDUCKY> [Justin Helmer]`, BOT)).toBe("repo list");
+    // Attribution text is never treated as the footer on its own.
+    expect(stripMention(`<@${BOT}> hello [justin <justin@coreplane.ai>]`, BOT)).toBe("hello [justin <justin@coreplane.ai>]");
+  });
+
   it("drops a trailing '*Sent using* <@APP|Name>' footer line", () => {
     expect(stripMention(`<@${BOT}> repo onboard coreplanelabs/switchboard\n*Sent using* <@U0BJJMDUCKY|Claude>`, BOT)).toBe(
       "repo onboard coreplanelabs/switchboard",
