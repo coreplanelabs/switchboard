@@ -212,6 +212,7 @@ env -u CLOUDFLARE_API_TOKEN npm run deploy   # ends with a wake ping: /healthz 2
 cd ../cloudflare && npm install
 npm run secrets   # prompts through secrets.txt (Slack, Anthropic, SANDBOX_TOKEN,
                   # RESIDENT_OPERATOR_TOKEN, RESIDENT_ADMIN_TOKEN, MEMORY_TOKEN, GitHub App)
+                  # + CF_ANALYTICS_TOKEN (costs dash) and optional ANTHROPIC_ADMIN_KEY (LLM spend)
 npm run deploy
 npm run tail      # watch it connect: "switchboard running (providers: anthropic...)"
 ```

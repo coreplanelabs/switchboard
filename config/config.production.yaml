@@ -62,3 +62,21 @@ selfImprovement:
   worker:
     baseUrl: https://switchboard-memory.coreplanelabs.dev
     tokenEnv: MEMORY_TOKEN
+
+# Spend reporting (GET /costs, Access-gated). Groups map the deployed pieces to
+# a name so the page — and /costs/<group>.json for agents — can be reused for
+# other apps on the account later. Ids are Cloudflare container application ids
+# (GET /accounts/{id}/containers/applications). Needs the CF_ANALYTICS_TOKEN
+# secret (Account Analytics:Read); ANTHROPIC_ADMIN_KEY + anthropicWorkspaceId
+# layer in LLM spend. See features/costs.md.
+costs:
+  cloudflareAccountId: 3c7b28f23cc93f09e77bb0a9ffcb7e6f
+  groups:
+    switchboard:
+      label: Switchboard
+      workers: [switchboard, switchboard-resident, switchboard-sandbox, switchboard-memory]
+      containerApps:
+        a0390da2-08e7-447f-aab9-f513815b9fce: bot
+        a0373f6a-a87c-429c-bb96-ac378de550c9: resident
+        a030b6eb-42de-4c30-ad2b-e692327ca813: sandbox
+      # anthropicWorkspaceId: wrkspc_...   # set once the bot's API key lives in its own Anthropic workspace
