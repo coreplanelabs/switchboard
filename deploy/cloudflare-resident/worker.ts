@@ -182,6 +182,10 @@ const SWEEP_INTERVAL_S = 60 * 60; // hourly: the sweep is the backstop for trees
  *  ended before /detach existed, or whose release call was lost. Dirty trees
  *  keep to the TTL. */
 const CLEAN_IDLE_RELEASE_S = 60 * 60;
+/** Slack over SWEEP_INTERVAL_S before a pending sweep row counts as config
+ *  drift (armed by older code with a longer interval). A healthy row is due at
+ *  most SWEEP_INTERVAL_S out and only gets closer, so this never trips on one. */
+const SWEEP_DRIFT_SLACK_S = 5 * 60;
 /** Idle sleep: when no thread has attached within this window and no live
  *  tree is dirty, the refresh alarm skips the fetch and re-arms far out so
  *  the container can actually sleep (SLEEP_AFTER); the next attach refreshes
@@ -1508,9 +1512,24 @@ export class ResidentDO extends Sandbox<Env> {
     // `sweepInFlight` is the explicit guard against arming a second chain while
     // a sweep is executing (its schedule row also stays listed until the callback
     // resolves, but that is a library detail we do not lean on).
-    if (liveBindings && !this.sweepInFlight && (await this.listSchedules(SWEEP_CALLBACK)).length === 0) {
-      await this.schedule(5, SWEEP_CALLBACK, resource);
-      console.log(`watchdog ${resource}: sweep chain was dead with live bindings — re-armed`);
+    if (liveBindings && !this.sweepInFlight) {
+      const pendingSweeps = await this.listSchedules(SWEEP_CALLBACK);
+      // Config drift: a row armed by OLDER code (e.g. the pre-#130 daily sweep,
+      // seen live 2026-08-29 due 24h out) is still honored by the runtime, so a
+      // shorter SWEEP_INTERVAL_S never takes effect until it fires. Treat a row
+      // due further out than the current interval (+ slack) as stale and
+      // replace it, so a deploy that shortens the cadence applies within one
+      // watchdog pass rather than after the old delay elapses.
+      const nowS = Math.floor(Date.now() / 1000);
+      const drifted = pendingSweeps.some((row) => (row.time ?? 0) - nowS > SWEEP_INTERVAL_S + SWEEP_DRIFT_SLACK_S);
+      // Re-check the guard: listSchedules yielded, and a sweep that started
+      // meanwhile owns the row its own `finally` is about to arm.
+      if ((pendingSweeps.length === 0 || drifted) && !this.sweepInFlight) {
+        this.deleteSchedules(SWEEP_CALLBACK);
+        await this.schedule(5, SWEEP_CALLBACK, resource);
+        // Disjoint by construction: inside this branch, a non-empty list implies `drifted`.
+        console.log(`watchdog ${resource}: sweep ${pendingSweeps.length === 0 ? "chain was dead" : "row was due beyond the current interval (config drift)"} with live bindings — re-armed`);
+      }
     }
 
     // A mid-flight state older than STALE_MIDFLIGHT_MS with no cycle or restore
