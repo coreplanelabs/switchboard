@@ -130,6 +130,25 @@ describe("ExecHealthTracker", () => {
     expect(t.consecutiveInfraFailures).toBe(1); // unchanged
   });
 
+  it("remembers the LAST infra error's text (for a truthful abort diagnosis) and forgets it on success", async () => {
+    let calls = 0;
+    const t = new ExecHealthTracker(
+      scripted(async () => {
+        calls++;
+        if (calls === 1) throw new ExecInfraError("first: transport reset");
+        if (calls === 2) throw new ExecInfraError("second: Process handle refers to a previous runtime incarnation");
+        return "ok";
+      }),
+    );
+    expect(t.lastInfraError).toBeUndefined();
+    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
+    expect(t.lastInfraError).toBe("first: transport reset");
+    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
+    expect(t.lastInfraError).toBe("second: Process handle refers to a previous runtime incarnation");
+    await t.exec("x");
+    expect(t.lastInfraError).toBeUndefined();
+  });
+
   it("a normal nonzero exit (returned as output, no throw) resets the count", async () => {
     let calls = 0;
     const t = new ExecHealthTracker(

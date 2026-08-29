@@ -104,6 +104,49 @@ describe("ResidentExecutor.exec", () => {
     expect((err as Error).message).toMatch(/re-attach/);
   });
 
+  it("runtime-replaced (a deploy mid-command) re-attaches once and returns the outcome as tool text — the command is NEVER re-run", async () => {
+    // The resident names a mid-command runtime replacement (a `wrangler deploy`
+    // swapped the isolate under a running command): the process may have
+    // started and produced side effects, so the client must not blind-retry.
+    // It re-attaches (proves the new isolate serves the thread) and hands the
+    // named outcome to the model as ordinary output — not an ExecInfraError.
+    const { fn, calls } = stubFetch(
+      { body: { error: "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran", reason: "runtime-replaced", stdout: "", stderr: "runtime-replaced", exitCode: 127 } },
+      { body: ATTACH_OK },
+    );
+    const ex = new ResidentExecutor(OPTS);
+    const out = await ex.exec("pnpm install");
+    expect(out).toMatch(/runtime-replaced/);
+    expect(out).toMatch(/re-check/i);
+    expect(fn).toHaveBeenCalledTimes(2);
+    expect(calls.map(route)).toEqual(["/exec", "/attach"]);
+  });
+
+  it("a second runtime-replaced in a row (no success between) is an ExecInfraError — a flapping resident, not one deploy", async () => {
+    const replaced = { error: "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran", reason: "runtime-replaced", stdout: "", stderr: "runtime-replaced", exitCode: 127 };
+    stubFetch({ body: replaced }, { body: ATTACH_OK }, { body: replaced });
+    const ex = new ResidentExecutor(OPTS);
+    await expect(ex.exec("echo a")).resolves.toMatch(/runtime-replaced/);
+    const err = await ex.exec("echo b").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/2 times in a row/);
+  });
+
+  it("a successful op between two runtime-replaced outcomes resets the streak (each is a one-off deploy)", async () => {
+    const replaced = { error: "runtime-replaced: deploy", reason: "runtime-replaced", stdout: "", stderr: "runtime-replaced", exitCode: 127 };
+    stubFetch(
+      { body: replaced },
+      { body: ATTACH_OK },
+      { body: { stdout: "fine", stderr: "", exitCode: 0, truncated: false } },
+      { body: replaced },
+      { body: ATTACH_OK },
+    );
+    const ex = new ResidentExecutor(OPTS);
+    await expect(ex.exec("echo a")).resolves.toMatch(/runtime-replaced/);
+    await expect(ex.exec("echo b")).resolves.toBe("fine");
+    await expect(ex.exec("echo c")).resolves.toMatch(/runtime-replaced/);
+  });
+
   it("a command-too-long rejection (plain HTTP 400, no needs) is a normal client Error, not infra", async () => {
     // The resident rejects an over-length command PRE-validation: a plain HTTP
     // 400 with an {error} and NO `needs`, nothing streamed (worker.ts handleExec).
@@ -171,6 +214,16 @@ describe("ResidentExecutor infra classification through ExecHealthTracker (#92)"
     expect(tracker.consecutiveInfraFailures).toBe(1);
   });
 
+  it("a single runtime-replaced (one deploy) never counts toward fail-fast", async () => {
+    stubFetch(
+      { body: { error: "runtime-replaced: deploy", reason: "runtime-replaced", stdout: "", stderr: "runtime-replaced", exitCode: 127 } },
+      { body: ATTACH_OK },
+    );
+    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    await expect(tracker.exec("echo x")).resolves.toMatch(/runtime-replaced/);
+    expect(tracker.consecutiveInfraFailures).toBe(0);
+  });
+
   it("a non-2xx HTTP status is infra and counts toward fail-fast", async () => {
     stubFetch({ status: 503, raw: "mirror busy" });
     const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
@@ -199,6 +252,30 @@ describe("ResidentExecutor.readFile / writeFile", () => {
     const ex = new ResidentExecutor(OPTS);
     await expect(ex.readFile("f.txt")).resolves.toBe("back");
     expect(calls.map(route)).toEqual(["/read", "/attach", "/read"]);
+  });
+
+  it("a 409 runtime-replaced on read (idempotent) re-attaches once and retries; a second one is infra", async () => {
+    const replaced = { status: 409, body: { error: "runtime-replaced: deploy", reason: "runtime-replaced" } };
+    const { calls } = stubFetch(replaced, { body: ATTACH_OK }, { body: { content: "back", truncated: false } });
+    const ex = new ResidentExecutor(OPTS);
+    await expect(ex.readFile("f.txt")).resolves.toBe("back");
+    expect(calls.map(route)).toEqual(["/read", "/attach", "/read"]);
+
+    stubFetch(replaced, { body: ATTACH_OK }, replaced);
+    const err = await new ResidentExecutor(OPTS).readFile("f.txt").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/2 times in a row/);
+  });
+
+  it("runtime-replaced then needs:\"attach\" on the retried read (deploy + evicted worktree) is the precise worktree-unavailable infra error", async () => {
+    stubFetch(
+      { status: 409, body: { error: "runtime-replaced: deploy", reason: "runtime-replaced" } },
+      { body: ATTACH_OK },
+      { status: 409, body: { error: "worktree-missing: still gone", needs: "attach" } },
+    );
+    const err = await new ResidentExecutor(OPTS).readFile("f.txt").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/worktree still unavailable after a re-attach/);
   });
 
   it("a path escape is a legible 400 error", async () => {

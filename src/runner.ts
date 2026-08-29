@@ -271,8 +271,9 @@ async function runLoop(
   }
 
   if (sandboxDead) {
-    note("sandbox_dead", "sandbox unresponsive — aborting instead of retrying into a dead sandbox");
-    return await finishSandboxDead(complete, opts, messages, system);
+    const diagnosis = sandboxDeadDiagnosis(execTracker.lastInfraError);
+    note("sandbox_dead", `${diagnosis} — aborting instead of retrying into a dead sandbox`);
+    return await finishSandboxDead(complete, opts, messages, system, diagnosis);
   }
 
   // Budget exhausted (time or turns): one final tool-less call so the work
@@ -375,35 +376,44 @@ async function finishSoftStop(
 }
 
 /** The one-line diagnostic surfaced when the run aborts into an unrecoverable
- *  sandbox (#92) — the run outcome the user acts on. */
-const SANDBOX_DEAD_MESSAGE =
-  "Sandbox became unresponsive (likely OOM/disk during a heavy install). " +
-  "Aborting instead of retrying into a dead sandbox.";
+ *  sandbox (#92) — the run outcome the user acts on. It states what was
+ *  OBSERVED (the count and the last exec-transport error, verbatim) and never
+ *  asserts a cause: the 2026-08-29 abort blamed "OOM/disk" when the real cause
+ *  was three `wrangler deploy`s replacing the resident isolate mid-run. The
+ *  generic hint appears only when no error text was captured. */
+function sandboxDeadDiagnosis(lastInfraError: string | undefined): string {
+  const evidence = lastInfraError?.trim()
+    ? `last: ${lastInfraError.trim()}`
+    : "no error text was captured; possible causes include the sandbox running out of memory or disk, or its exec transport dying";
+  return `Sandbox exec transport failed ${MAX_CONSECUTIVE_INFRA_FAILURES} times in a row (${evidence})`;
+}
 
 /** Fail fast on an unrecoverable sandbox: the same guaranteed-finale path as
  *  budget exhaustion — one tool-less call — but the model is told the sandbox
  *  is dead (so it summarizes what it learned before it died rather than trying
- *  more commands), and the answer leads with the diagnostic. The finale is pure
- *  inference, so it works even though the sandbox does not. */
+ *  more commands) and given the same evidence-only diagnosis the user sees, and
+ *  the answer leads with that diagnosis. The finale is pure inference, so it
+ *  works even though the sandbox does not. */
 async function finishSandboxDead(
   complete: Complete,
   opts: RunOptions,
   messages: ChatMessage[],
   system: string,
+  diagnosis: string,
 ): Promise<string> {
   const text = await runFinale(
     complete,
     opts,
     messages,
     system,
-    `The execution sandbox has become unresponsive: the last ${MAX_CONSECUTIVE_INFRA_FAILURES} commands failed at ` +
-      "the infrastructure level (the exec transport itself, not normal command errors), so no further commands can " +
-      "run — most likely the sandbox ran out of memory or disk during a heavy install. Do not attempt any more " +
+    `The execution sandbox is unrecoverable: ${diagnosis}. These failed at the infrastructure level (the exec ` +
+      "transport itself, not normal command errors), so no further commands can run. Do not attempt any more " +
       "tools. Write your final answer now from what you learned before it died: report your findings/results to " +
-      "date, and state plainly that the run is aborting because the sandbox is unrecoverable and what a follow-up " +
-      "(a fresh sandbox, or a lighter approach that avoids the heavy install) should focus on.",
+      "date, quote that infrastructure error as the reason the run is aborting (do not speculate about a different " +
+      "cause), and state what a follow-up (a fresh run in this thread once the sandbox is healthy) should focus on.",
   );
-  return text ? `⚠️ _${SANDBOX_DEAD_MESSAGE}_\n\n${text}` : `⚠️ ${SANDBOX_DEAD_MESSAGE}`;
+  const headline = `${diagnosis}. Aborting instead of retrying into a dead sandbox.`;
+  return text ? `⚠️ _${headline}_\n\n${text}` : `⚠️ ${headline}`;
 }
 
 function collectText(parts: ContentPart[]): string {

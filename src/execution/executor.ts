@@ -72,6 +72,10 @@ export class ExecInfraError extends Error {
  *  too resets the count and can never trip the abort. */
 export class ExecHealthTracker implements Executor {
   consecutiveInfraFailures = 0;
+  /** Message of the most recent `ExecInfraError` in the current streak — the
+   *  evidence the runner's abort diagnosis quotes instead of guessing a cause.
+   *  Cleared by a successful op along with the count. */
+  lastInfraError: string | undefined;
 
   constructor(private readonly inner: Executor) {}
 
@@ -79,9 +83,13 @@ export class ExecHealthTracker implements Executor {
     try {
       const out = await op();
       this.consecutiveInfraFailures = 0;
+      this.lastInfraError = undefined;
       return out;
     } catch (err) {
-      if (err instanceof ExecInfraError) this.consecutiveInfraFailures++;
+      if (err instanceof ExecInfraError) {
+        this.consecutiveInfraFailures++;
+        this.lastInfraError = err.message;
+      }
       throw err;
     }
   }
