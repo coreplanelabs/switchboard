@@ -6,10 +6,22 @@ import { validRef } from "./repoCommands.js";
 // explicit signals only. Extraction sources in priority order:
 //   1. the CURRENT message — an `owner/name` slug, a github.com repo/PR URL
 //      (Slack markup `<url|label>` unwrapped), or `owner/name#N` PR shorthand
-//   2. the thread's previously-established repo — and, for the review
-//      post-step only, its PR — derived from history on every message like
-//      `lastThreadDirectives` (restart-safe, never stored)
+//   2. the thread's BINDING — the repo (and, for the review post-step, the
+//      PR) the thread established earlier — derived from history on every
+//      message like `lastThreadDirectives` (restart-safe, never stored)
 //   3. none → {} → the per-thread executor path (AE4: total input contract).
+//
+// Signals have two strengths. STRONG: a github.com URL (repo, PR, /tree), or
+// `owner/name#N` shorthand — unambiguously a repository. WEAK: a bare
+// `owner/name`-shaped token, which is also the shape of every relative file
+// path (`features/memory.md`, `src/core`) and of ordinary prose. A thread
+// bound by a strong signal is rebound ONLY by another strong signal; weak
+// tokens are consulted only while nothing strong has bound the thread. This
+// is what makes the binding deterministic across a thread's life: the PR
+// named in the first message stays the target of every re-review until a
+// message names a different repo/PR explicitly (PR #167, 2026-08-29: a bare
+// `features/memory.md` in a re-review reply rebound the repo, unbound the
+// PR, and the LGTM never reached GitHub).
 //
 // Ref extraction is deliberately conservative (KTD6: ref binding is
 // explicit-or-ask-once, never a silent guess): explicit forms only —
@@ -41,6 +53,11 @@ export interface RepoContext {
    *  PR: set whenever the fetch succeeded — including cross-fork PRs, whose ref
    *  is not bound. Inherited PR: always set (its absence drops the PR). */
   headSha?: string;
+  /** Set when the thread's bound PR was NOT usable for the post-step: it is
+   *  closed/merged, or the fetch failed (network, non-2xx, malformed SHA).
+   *  Lets the dispatcher say so in the thread instead of a silent Slack-only
+   *  verdict. Never set alongside `pr`. */
+  prUnpostable?: { number: number; reason: "closed" | "unreachable" };
 }
 
 // GitHub owner: alphanumeric + hyphens, no leading/trailing hyphen, ≤39.
@@ -77,6 +94,9 @@ function slugOf(token: string): string | undefined {
 interface Signals {
   /** definite repo: URL form or a bare slug token not in ref position */
   repo?: string;
+  /** true when `repo` came from a URL (a bare slug token is weak — see the
+   *  file header). `pr` is always strong. */
+  repoStrong?: boolean;
   /** definite ref: keyword phrasing, well-known "on X", /tree/<ref> */
   ref?: string;
   /** PR reference; the head ref needs one REST call */
@@ -108,7 +128,10 @@ function extractSignals(rawText: string): Signals {
   if (treeUrl) {
     const slug = slugOf(`${stripPunct(treeUrl[1])}/${stripPunct(treeUrl[2])}`);
     if (slug) {
-      out.repo ??= slug;
+      if (!out.repo) {
+        out.repo = slug;
+        out.repoStrong = true;
+      }
       out.ref ??= validRef(stripPunct(treeUrl[3]));
     }
   }
@@ -117,7 +140,10 @@ function extractSignals(rawText: string): Signals {
   const repoUrl = /https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+)/i.exec(text);
   if (repoUrl && !out.repo) {
     const slug = slugOf(`${stripPunct(repoUrl[1])}/${stripPunct(repoUrl[2])}`);
-    if (slug) out.repo = slug;
+    if (slug) {
+      out.repo = slug;
+      out.repoStrong = true;
+    }
   }
 
   // Token scan: bare `owner/name` slugs, `owner/name#N` PR shorthand, and
@@ -161,12 +187,15 @@ function extractSignals(rawText: string): Signals {
   return out;
 }
 
-/** What a thread has established from its user turns: the repo (last explicit
- *  signal wins) and the last PR referenced. Sync, network-free, and a pure
- *  function of the history array — one dispatch can scan the same array more
- *  than once (op recognition + repo resolution), so memoize per reference. */
+/** What a thread has established from its user turns — its BINDING: the repo
+ *  (last STRONG signal wins; weak signals bind only while no strong one has)
+ *  and the last PR referenced. Sync, network-free, and a pure function of the
+ *  history array — one dispatch can scan the same array more than once (op
+ *  recognition + repo resolution), so memoize per reference. */
 interface ThreadSignals {
   repo?: string;
+  /** true once a strong signal (URL / `owner/name#N`) bound the repo */
+  repoStrong?: boolean;
   /** Last user-turn PR reference (URL or `owner/name#N`), any repo; the
    *  resolver checks it against the resolved repo. */
   pr?: { repo: string; number: number };
@@ -181,9 +210,15 @@ function threadSignals(history: Array<{ role: string; text: string }>): ThreadSi
   for (const h of history) {
     if (h.role !== "user") continue;
     const s = extractSignals(h.text);
-    const explicit = s.repo ?? s.pr?.repo;
-    if (explicit) out.repo = explicit;
-    else if (!out.repo && s.onSlug) out.repo = slugOf(s.onSlug);
+    const strong = s.pr?.repo ?? (s.repoStrong ? s.repo : undefined);
+    if (strong) {
+      out.repo = strong;
+      out.repoStrong = true;
+    } else if (!out.repoStrong) {
+      // Weak signals only while the thread is not strongly bound.
+      if (s.repo) out.repo = s.repo;
+      else if (!out.repo && s.onSlug) out.repo = slugOf(s.onSlug);
+    }
     if (s.pr) out.pr = s.pr;
   }
   threadSignalsCache.set(history, out);
@@ -191,8 +226,9 @@ function threadSignals(history: Array<{ role: string; text: string }>): ThreadSi
 }
 
 /**
- * The repo this thread already established: last user turn with an explicit
- * repo signal wins (like `lastThreadDirectives` — derived from history on
+ * The repo this thread already established (its binding): the last user turn
+ * with a STRONG repo signal wins; bare slugs count only in a thread no strong
+ * signal has bound (like `lastThreadDirectives` — derived from history on
  * every message, never stored, restart-safe). A PR URL in history contributes
  * its repo part only, never a fetch.
  */
@@ -210,7 +246,12 @@ export async function resolveRepoContext(
   history: Array<{ role: string; text: string }> = [],
 ): Promise<RepoContext> {
   const s = extractSignals(msg.text);
-  let repo = s.repo ?? s.pr?.repo ?? repoFromThread(history);
+  const thread = threadSignals(history);
+  // Strong signal in this message → it (re)binds. Else a strongly bound thread
+  // keeps its repo — a bare slug in this message (a file path, a phrase) is
+  // never a repo switch. Else weak signals, this message first.
+  const strongNow = s.pr?.repo ?? (s.repoStrong ? s.repo : undefined);
+  let repo = strongNow ?? (thread.repoStrong ? thread.repo : undefined) ?? s.repo ?? thread.repo;
   let ref = s.ref;
 
   // "on <owner/name-shaped>": a ref when a repo is independently established
@@ -246,12 +287,14 @@ export async function resolveRepoContext(
     out.pr = s.pr.number;
     if (headSha) out.headSha = headSha;
   } else if (repo && !s.pr) {
-    const inherited = threadSignals(history).pr;
+    const inherited = thread.pr;
     if (inherited && inherited.repo === repo) {
-      const sha = await openPrHeadSha(inherited);
-      if (sha) {
+      const head = await openPrHeadSha(inherited);
+      if ("sha" in head) {
         out.pr = inherited.number;
-        out.headSha = sha;
+        out.headSha = head.sha;
+      } else {
+        out.prUnpostable = { number: inherited.number, reason: head.reason };
       }
     }
   }
@@ -259,11 +302,15 @@ export async function resolveRepoContext(
 }
 
 /** The fail-closed contract for an INHERITED PR: its head SHA, only if the PR
- *  is fetched now, is `open`, and the SHA is well-formed; undefined otherwise
- *  (closed/merged, failed fetch, malformed SHA, unknown state). Never throws. */
-async function openPrHeadSha(pr: { repo: string; number: number }): Promise<string | undefined> {
+ *  is fetched now, is `open`, and the SHA is well-formed; otherwise the reason
+ *  it is unusable — `closed` (closed/merged) or `unreachable` (failed fetch,
+ *  malformed SHA, unknown state). Never throws. */
+async function openPrHeadSha(
+  pr: { repo: string; number: number },
+): Promise<{ sha: string } | { reason: "closed" | "unreachable" }> {
   const head = await prHead(pr).catch(() => undefined);
-  return head?.state === "open" ? head.sha : undefined;
+  if (head?.state === "closed") return { reason: "closed" };
+  return head?.state === "open" && head.sha ? { sha: head.sha } : { reason: "unreachable" };
 }
 
 /** GET /repos/{owner}/{repo}/pulls/{n} → { head.ref, head.sha, state }. Cross-fork

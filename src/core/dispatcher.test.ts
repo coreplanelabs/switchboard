@@ -1363,6 +1363,46 @@ describe("review post-step (issue #69)", () => {
     log.mockRestore();
   });
 
+  it("a bound PR that could not be posted to (closed / unreachable) is said out loud in the thread", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.resolveRepoContext = () => ({ repo: "acme/api", prUnpostable: { number: 42, reason: "closed" } });
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review re-review"), io);
+    expect(replies).toContain("answer");
+    expect(spy.fn).not.toHaveBeenCalled();
+    expect(replies.some((r) => /not posted to acme\/api#42/.test(r) && /closed/.test(r))).toBe(true);
+  });
+
+  it("an explicit opt-out wins over an unpostable bound PR: no thread note (the user already knows it's Slack-only)", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.resolveRepoContext = () => ({ repo: "acme/api", prUnpostable: { number: 42, reason: "closed" } });
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review re-review, slack only"), io);
+    expect(replies).toContain("answer");
+    expect(spy.fn).not.toHaveBeenCalled();
+    expect(replies.some((r) => /not posted to/.test(r))).toBe(false);
+    expect(log.mock.calls.map((c) => c.map(String).join(" "))).toContainEqual(
+      expect.stringMatching(/^\[review-post\] .* skipped: opted out/),
+    );
+    log.mockRestore();
+  });
+
+  it("the unreachable note does not claim GitHub was down — a malformed head counts as unreachable too", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.resolveRepoContext = () => ({ repo: "acme/api", prUnpostable: { number: 42, reason: "unreachable" } });
+    deps.postReviewComment = postSpy().fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review re-review"), io);
+    const note = replies.find((r) => /not posted to acme\/api#42/.test(r));
+    expect(note).toMatch(/head could not be verified/);
+    expect(note).not.toMatch(/could not be reached/);
+  });
+
   it("a non-review agent never posts, even when a PR is resolved", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
@@ -1385,6 +1425,8 @@ describe("review post-step (issue #69)", () => {
     await dispatch(deps, msg("agent:review acme/api#42"), io);
     expect(replies).toContain("answer");
     expect(deps.postReviewComment).toHaveBeenCalledTimes(1);
+    // …and the thread is told, so a Slack-only verdict is never mistaken for a posted one.
+    expect(replies.some((r) => /not posted to acme\/api#42/.test(r) && /403/.test(r))).toBe(true);
   });
 });
 

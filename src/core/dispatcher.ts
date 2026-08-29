@@ -11,7 +11,7 @@ import { LocalOperations } from "../execution/executor.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { resolveRepoContext, type RepoContext } from "./repoContext.js";
-import { decideReviewPost, type ReviewPostTarget } from "./reviewPost.js";
+import { decideReviewPost, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
@@ -576,9 +576,28 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       });
       if (!postTarget && resolved.agentName === "review") {
         // Never a silent skip: a review that lands only in Slack says why, so a
-        // re-review that failed to resolve its PR is visible in the logs.
-        const why = repoCtx.pr === undefined ? "no PR resolved" : "opted out";
+        // re-review that failed to resolve its PR is visible in the logs — and,
+        // when the thread HAD a bound PR that turned out unusable (closed, or
+        // its head could not be verified), in the thread itself: a Slack-only
+        // verdict must never be mistaken for a posted one. An explicit opt-out
+        // is the one case where the user already knows: log it, no note.
+        const optedOut = reviewPostOptedOut(directives.text);
+        const unpostable = optedOut ? undefined : repoCtx.prUnpostable;
+        const why = optedOut
+          ? "opted out"
+          : unpostable
+            ? `bound PR ${unpostable.reason}`
+            : "no PR resolved";
         console.log(`[review-post] ${msg.threadKey} skipped: ${why} (repo ${repoCtx.repo ?? "none"})`);
+        if (unpostable && repoCtx.repo) {
+          // `unreachable` also covers a malformed head SHA or unknown state on
+          // a successful fetch — the pin was unusable, not necessarily GitHub.
+          const detail =
+            unpostable.reason === "closed" ? "the PR is closed" : "the PR's head could not be verified on GitHub";
+          await io
+            .reply(`ℹ️ Review not posted to ${repoCtx.repo}#${unpostable.number}: ${detail} — this verdict is Slack-only.`)
+            .catch(() => {});
+        }
       }
     }
     if (postTarget) {
@@ -587,13 +606,15 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // The verdict line is built here, by code — the model's prose never
       // decides whether the body starts with "LGTM:" (auto-approve contract).
       const body = buildReviewPostBody(answer, verdict);
-      await post(target, body)
-        .then(() => console.log(`[review-post] ${msg.threadKey} → ${postTarget.repo}#${postTarget.number} (${verdict?.verdict ?? "no verdict"})`))
-        .catch((err: unknown) =>
-          console.error(
-            `[review-post] ${msg.threadKey} failed for ${postTarget.repo}#${postTarget.number}: ${err instanceof Error ? err.message : String(err)}`,
-          ),
-        );
+      const where = `${postTarget.repo}#${postTarget.number}`;
+      try {
+        await post(target, body);
+        console.log(`[review-post] ${msg.threadKey} → ${where} (${verdict?.verdict ?? "no verdict"})`);
+      } catch (err: unknown) {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.error(`[review-post] ${msg.threadKey} failed for ${where}: ${reason}`);
+        await io.reply(`ℹ️ Review not posted to ${where}: ${reason} — this verdict is Slack-only.`).catch(() => {});
+      }
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
