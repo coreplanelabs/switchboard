@@ -235,6 +235,47 @@ describe("resolveRepoContext: thread history inheritance", () => {
     await expect(resolveRepoContext(msg("also check acme/other"), history)).resolves.toEqual({ repo: "acme/other" });
   });
 
+  // Regression (found validating #138): a review follow-up saying "the
+  // `unset/unset` sentinel is gone" ran against repo `unset/unset` in a cold
+  // sandbox — a prose token in backticks outranked both the PR URL in the same
+  // message and the thread's repo, and the verdict never reached GitHub.
+  it("a token inside a code span never establishes a repo — the thread's repo is kept", async () => {
+    const { fn } = stubFetch();
+    await expect(resolveRepoContext(msg("the `unset/unset` sentinel is gone; re-review please"), history)).resolves.toEqual({
+      repo: "acme/api",
+    });
+    await expect(resolveRepoContext(msg("see `src/core` for the seam"), [])).resolves.toEqual({});
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a slug inside a fenced ``` block (pasted logs/diffs) never establishes a repo either", async () => {
+    const fence = "here is the log:\n```\n$ cd deploy/cloudflare && npm test\nFAIL src/core/x.test.ts\n```\nplease look";
+    await expect(resolveRepoContext(msg(fence), history)).resolves.toEqual({ repo: "acme/api" });
+    await expect(resolveRepoContext(msg(fence), [])).resolves.toEqual({});
+  });
+
+  it("a backticked ref still binds: `on \\`main\\`` and `on \\`fix/x\\`` (code spans only exclude the bare-slug branch)", async () => {
+    await expect(resolveRepoContext(msg("on `main`"), history)).resolves.toEqual({ repo: "acme/api", ref: "main" });
+    await expect(resolveRepoContext(msg("on `fix/x`"), history)).resolves.toEqual({ repo: "acme/api", ref: "fix/x" });
+    await expect(resolveRepoContext(msg("in acme/api on branch `release-2`"), [])).resolves.toEqual({ repo: "acme/api", ref: "release-2" });
+  });
+
+  it("a PR URL's repo outranks a bare slug elsewhere in the same message", async () => {
+    stubFetch({ body: { head: { ref: "feat/x", sha: "b".repeat(40), repo: { full_name: "acme/api" } } } });
+    await expect(
+      resolveRepoContext(msg("re-review https://github.com/acme/api/pull/9 — I removed the unset/unset sentinel"), []),
+    ).resolves.toEqual({ repo: "acme/api", ref: "feat/x", pr: 9, headSha: "b".repeat(40) });
+  });
+
+  it("repoFromThread ignores code-spanned tokens in history too", () => {
+    expect(
+      repoFromThread([
+        { role: "user", text: "review https://github.com/acme/api/pull/7" },
+        { role: "user", text: "the `foo/bar` helper is unused" },
+      ]),
+    ).toBe("acme/api");
+  });
+
   it("assistant turns never establish a repo (user signals only)", async () => {
     const h = [{ role: "assistant" as const, text: "try acme/fake maybe?" }];
     await expect(resolveRepoContext(msg("go ahead"), h)).resolves.toEqual({});
