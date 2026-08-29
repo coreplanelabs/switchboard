@@ -63,6 +63,7 @@ Non-negotiable discipline:
 
 ## Working on this repo
 
+- **Node ≥22 required:** `undici@8` calls `webidl.util.markAsUncloneable`, which only exists on Node 22+ — under Node 20 the test suite fails at load (`src/core/dispatcher.test.ts`). Enforced via `engines` in `package.json` (and the `deploy/cloudflare*/` packages) and `.nvmrc`; Dockerfile and CI already run Node 22.
 - **Verify:** `npm run typecheck` and `npm test` (vitest, `src/**/*.test.ts`) must both pass. Tests are the proof layer for feature specs — see the section above. For exploratory smoke tests, `npx tsx src/cli.ts` drives the full pipeline.
 - **Local run without Slack:** `npx tsx src/cli.ts "agent:review ..."` — full pipeline including executor selection.
 - **`execution.type: e2b` paths need `E2B_API_KEY`** and have not been live-tested until someone runs one CLI request against a real sandbox.
