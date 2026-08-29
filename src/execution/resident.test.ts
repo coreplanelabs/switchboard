@@ -294,6 +294,17 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[0])).toMatchObject({ resource: OPTS.resource, threadKey: OPTS.threadKey, refHint: "master" });
   });
 
+  // features/resident-repos.md item 50: a read-only run asks for a read-only
+  // worktree (no credential file, unfetchable origin). Sent only when true so
+  // an older resident sees the same body it always did.
+  it("sends readonly:true in the attach body when the run is read-only, and omits the field otherwise", async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: ATTACH_OK });
+    await ResidentExecutor.open({ ...OPTS, refHint: "master", readonly: true });
+    expect(sentBody(calls[0])).toMatchObject({ readonly: true });
+    await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(sentBody(calls[1])).not.toHaveProperty("readonly");
+  });
+
   it("records the attach result's ref@sha as the thread binding (the positive 'resident' marker's source)", async () => {
     stubFetch({ body: { workspace: "/workspace/threads/t/master", ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", user: "worker2", deps: "hardlink" } });
     const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });

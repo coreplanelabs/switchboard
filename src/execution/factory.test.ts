@@ -209,6 +209,19 @@ describe("makeExecutor resident selection", () => {
     expect(bodies[2]?.refHint).toBe("master"); // re-attach on the resident's default
   });
 
+  // features/resident-repos.md item 50: the review agent (toolset "readonly")
+  // attaches read-only; coding (toolset "full") attaches writable. The bot
+  // decides from the agent's declared toolset — never from the prompt.
+  it("a readonly-toolset agent attaches with readonly:true; a full-toolset agent's body has no readonly field", async () => {
+    stubEnvs();
+    const attachOk = { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2", deps: "hardlink" };
+    const { bodies } = stubFetch({ body: { state: "warm", reason: "" } }, { body: attachOk }, { body: { state: "warm", reason: "" } }, { body: attachOk });
+    await makeExecutor(residentOpts(), { ...repoCtx(), agent: AGENTS.review });
+    expect(bodies[1]?.readonly).toBe(true);
+    await makeExecutor(residentOpts(), repoCtx()); // AGENTS.coding
+    expect(bodies[3]).not.toHaveProperty("readonly");
+  });
+
   it("not-warm probe → fallback carrying state and reason verbatim; no attach, discriminant NOT set", async () => {
     stubEnvs();
     const { calls } = stubFetch({ body: { state: "restoring", reason: "rehydrating" } });

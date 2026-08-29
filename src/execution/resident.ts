@@ -49,6 +49,10 @@ export interface ResidentExecutorOptions {
   threadKey: string;
   /** Ref for a first attach; an existing thread binding always wins over it. */
   refHint?: string;
+  /** Read-only run (features/resident-repos.md item 50): the resident builds
+   *  the worktree with no credential file and an unfetchable origin. Sent only
+   *  when true, so an older resident sees the body it always did. */
+  readonly?: boolean;
 }
 
 /** What a successful /attach reports about the thread's worktree. */
@@ -252,6 +256,7 @@ export class ResidentExecutor implements Executor {
   async attach(): Promise<ResidentBinding> {
     const body: Record<string, unknown> = {};
     if (this.opts.refHint) body.refHint = this.opts.refHint;
+    if (this.opts.readonly) body.readonly = true;
     const { status, data } = await this.call("/attach", body);
     if (status === 200) {
       if (typeof data.ref !== "string" || typeof data.sha !== "string") {
