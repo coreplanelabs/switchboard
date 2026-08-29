@@ -3,6 +3,7 @@ import type { RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { IndexEvent, RunRegistry, RunSummary, Unsubscribe } from "../core/runRegistry.js";
 import type { StopMode } from "../core/runEvents.js";
+import { renderMarkdownInto } from "./markdownLite.js";
 
 // Live-view channel: the external, browser-facing surface for a live agent run
 // (Area 2 / #43). It streams the SAME redacted RunEvents the in-channel status
@@ -89,11 +90,30 @@ const SSE_HEADERS: Record<string, string> = {
 };
 
 /**
- * The self-contained HTML page for one run. Opens an EventSource to this run's
- * token-scoped event stream and renders each RunEvent as it arrives:
- * `tool_call` → a "running" row; `tool_result` → ✓/✗ + its (already redacted)
- * summary. All inline (CSP-safe); summaries are written with `textContent`
- * (never innerHTML), so a summary can never inject markup.
+ * The markdown renderer as browser source. `String(fn)` is the whole build step
+ * — no bundler, no second copy of the code (see markdownLite.ts) — but the
+ * source is whatever transpiled the module: under `tsx` (dev/CLI) esbuild's
+ * keepNames wraps every nested function in a module-scoped `__name(...)` helper
+ * that does not exist in the browser (seen live 2026-08-29: the page threw
+ * `__name is not defined` on every markdown event). The no-op shim ahead of the
+ * function satisfies that helper in both of its emitted shapes (a wrapper
+ * returning the function, or a bare statement) and is inert under plain `tsc`.
+ */
+export const MARKDOWN_RENDERER_SCRIPT = `var __name = function (fn) { return fn; };\n${String(renderMarkdownInto)}`;
+
+/**
+ * The self-contained HTML page for one run: a readable timeline of the whole
+ * run. Opens an EventSource to this run's token-scoped event stream and renders
+ * each RunEvent as it arrives — `input` → the **Request** block above the log;
+ * `assistant` → a prose row inline in the log; `tool_call` → a "running" row;
+ * `tool_result` → ✓/✗ + its (already redacted) summary; `run_note` → a notice;
+ * `answer` → the **Answer** block under the log. Every row/block leads with a
+ * gray UTC `[HH:MM:SS]` from the event's `at`. All inline (CSP-safe): tool rows
+ * are written with `textContent`, and the markdown surfaces (Request, Answer,
+ * assistant rows) go through `renderMarkdownInto` — the safe-subset renderer
+ * from markdownLite.ts, inlined here as `String(fn)` — which builds DOM only via
+ * createElement/textContent/setAttribute (angle brackets are text, only http(s)
+ * links become anchors). Nothing on this page ever assigns raw markup.
  *
  * `id`/`token` are JSON-encoded into the script — they are the only dynamic
  * values, and JSON.stringify neutralizes any `</script>`/quote breakout.
@@ -110,10 +130,10 @@ export function renderRunPage(id: string, token: string): string {
 <meta name="robots" content="noindex" />
 <title>Live run</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    background: #0b0d12; color: #e6e6e6; padding: 1rem; }
+    background: #0b0d12; color: #e6e6e6; padding: 1rem; max-width: 72rem; margin-inline: auto; }
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .75rem;
     border-bottom: 1px solid #2a2f3a; padding-bottom: .5rem; }
   h1 { font-size: 1rem; margin: 0; font-weight: 600; }
@@ -127,18 +147,48 @@ export function renderRunPage(id: string, token: string): string {
   .dot.amber { background: #d29922; }
   .dot.red { background: #f85149; }
   .dot.grey { background: #6e7681; }
+  /* Timestamps: a small gray [HH:MM:SS] leading every row and both blocks. */
+  .ts { color: #8b93a7; font-size: .75rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    flex: 0 0 auto; user-select: none; }
+  /* Request / Answer: headed blocks, proportional type, above and below the log. */
+  section.block { border: 1px solid #2a2f3a; border-radius: 8px; padding: .6rem .75rem; background: #0f1218; }
+  section.block > h2 { display: flex; align-items: baseline; gap: .5rem; font-size: .8rem; margin: 0 0 .4rem;
+    color: #8b93a7; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  #request { margin-bottom: .75rem; }
+  #answer { margin-top: .75rem; border-color: #2ea04366; }
+  #answer > h2 { color: #7ee787; }
+  /* The timeline. Tool rows stay monospace; each row is [ts] + body. */
   #log { list-style: none; margin: 0; padding: 0; }
-  #log li { padding: .3rem .5rem; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
-  #log li + li { margin-top: .25rem; }
+  #log > li { display: flex; gap: .6rem; align-items: baseline; padding: .3rem .5rem; border-radius: 6px;
+    word-break: break-word; }
+  #log > li + li { margin-top: .2rem; }
+  #log > li .body { white-space: pre-wrap; min-width: 0; flex: 1 1 auto; }
+  #log > li.call, #log > li.ok, #log > li.err, #log > li.note { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .call { color: #9ecbff; }
   .ok { color: #7ee787; }
   .err { color: #ff7b72; }
-  .note { color: #d29922; }
+  .note { color: #d29922; background: #d2992214; }
   .empty { color: #8b93a7; }
-  /* The final answer: its own block under the log, rendered as data (textContent). */
-  #answer { margin-top: 1rem; border-top: 1px solid #2a2f3a; padding-top: .75rem; }
-  #answer h2 { font-size: .85rem; margin: 0 0 .5rem; color: #8b93a7; font-weight: 600; }
-  #answertext { white-space: pre-wrap; word-break: break-word; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  /* The model talking between tools: neutral off-white prose with a quiet left border. */
+  #log > li.assistant { color: #d7dbe3; background: #12151c; border-left: 3px solid #3b4252; border-radius: 0 6px 6px 0;
+    margin-top: .4rem; margin-bottom: .4rem; padding: .5rem .75rem; }
+  /* Markdown surfaces: proportional type, tight vertical rhythm. */
+  .md { font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    white-space: pre-wrap; word-break: break-word; min-width: 0; flex: 1 1 auto; }
+  .md p, .md ul, .md ol, .md pre, .md blockquote, .md h1, .md h2, .md h3 { margin: 0 0 .5rem; }
+  .md > :last-child { margin-bottom: 0; }
+  .md h1, .md h2, .md h3 { font-size: 1rem; font-weight: 600; color: #e6e6e6; text-transform: none; letter-spacing: 0; display: block; }
+  .md h1 { font-size: 1.1rem; }
+  .md ul, .md ol { padding-left: 1.4rem; white-space: normal; }
+  .md ul { list-style: disc; } /* a top-level list inside an assistant row is nested in the row li — keep discs */
+  .md ul ul { list-style: circle; }
+  .md li { white-space: pre-wrap; }
+  .md code { font: .85em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #1b1f28; padding: .05em .3em; border-radius: 4px; }
+  .md pre { background: #0b0d12; border: 1px solid #2a2f3a; border-radius: 6px; padding: .5rem .6rem; overflow-x: auto; white-space: pre; }
+  .md pre code { background: none; padding: 0; font-size: .85em; }
+  .md blockquote { border-left: 3px solid #3b4252; padding-left: .6rem; color: #b6bcc8; }
+  .md a { color: #9ecbff; }
+  .md strong { color: #fff; }
   .actions { display: inline-flex; gap: .4rem; }
   button.stop { font: inherit; font-size: .75rem; padding: .1rem .5rem; border-radius: 4px; cursor: pointer;
     border: 1px solid #3b4252; background: #161b22; color: #e6e6e6; }
@@ -157,15 +207,21 @@ export function renderRunPage(id: string, token: string): string {
   </span>
   <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>
 </header>
-<ul id="log"><li class="empty" id="placeholder">Waiting for activity…</li></ul>
-<section id="answer" hidden><h2>Answer</h2><div id="answertext"></div></section>
+<section class="block" id="request" hidden><h2><span>Request</span><span class="ts" id="requestts"></span></h2><div class="md" id="requesttext"></div></section>
+<ul id="log"><li class="empty" id="placeholder"><span class="body">Waiting for activity…</span></li></ul>
+<section class="block" id="answer" hidden><h2><span>Answer</span><span class="ts" id="answerts"></span></h2><div class="md" id="answertext"></div></section>
 <script>
+${MARKDOWN_RENDERER_SCRIPT}
 (function () {
   var url = ${JSON.stringify(eventsPath)};
   var stopUrl = ${JSON.stringify(stopPath)};
   var log = document.getElementById("log");
+  var requestBox = document.getElementById("request");
+  var requestText = document.getElementById("requesttext");
+  var requestTs = document.getElementById("requestts");
   var answerBox = document.getElementById("answer");
   var answerText = document.getElementById("answertext");
+  var answerTs = document.getElementById("answerts");
   var state = document.getElementById("state");
   var stateDot = document.getElementById("statedot");
   var actions = document.getElementById("actions");
@@ -180,12 +236,42 @@ export function renderRunPage(id: string, token: string): string {
     stateDot.className = "dot " + color;
     state.textContent = text;
   }
-  function row(cls, text) {
+  // UTC wall-clock label for an event's \`at\`; "" when the event carries none.
+  function fmtTime(at) { return typeof at === "number" ? "[" + new Date(at).toISOString().slice(11, 19) + "] " : ""; }
+  // One timeline row: a gray timestamp span, then a body the caller fills.
+  // Everything is createElement + textContent — summaries are rendered as data.
+  function startRow(cls, e) {
     if (placeholder) { placeholder.remove(); placeholder = null; }
     var li = document.createElement("li");
     li.className = cls;
-    li.textContent = text; // textContent only — summaries are rendered as data
+    var ts = document.createElement("span");
+    ts.className = "ts";
+    ts.textContent = fmtTime(e.at);
+    li.appendChild(ts);
     log.appendChild(li);
+    return li;
+  }
+  function row(cls, e, text) {
+    var li = startRow(cls, e);
+    var body = document.createElement("span");
+    body.className = "body";
+    body.textContent = text;
+    li.appendChild(body);
+    li.scrollIntoView({ block: "nearest" });
+  }
+  // Every markdown surface renders through this guard: a renderer bug must cost
+  // at most the formatting of ONE event, never the event or the stream — on any
+  // throw the text is shown verbatim (textContent, still no markup).
+  function md(target, text) {
+    try { renderMarkdownInto(target, text); } catch (_) { target.textContent = text; }
+  }
+  // The model talking between tool calls: markdown through the safe renderer.
+  function proseRow(e) {
+    var li = startRow("assistant", e);
+    var box = document.createElement("div");
+    box.className = "md";
+    li.appendChild(box);
+    md(box, e.text);
     li.scrollIntoView({ block: "nearest" });
   }
   function markStopping(mode) {
@@ -210,19 +296,28 @@ export function renderRunPage(id: string, token: string): string {
   es.onmessage = function (m) {
     var e;
     try { e = JSON.parse(m.data); } catch (_) { return; }
-    if (e.type === "tool_call") {
-      row("call", "\\u2192 " + e.summary);
+    if (e.type === "input") {
+      // The request, above the log — the first event of the record.
+      requestTs.textContent = fmtTime(e.at);
+      md(requestText, e.text);
+      requestBox.hidden = false;
+    } else if (e.type === "assistant") {
+      proseRow(e);
+    } else if (e.type === "tool_call") {
+      row("call", e, "\\u2192 " + e.summary);
     } else if (e.type === "tool_result") {
-      row(e.ok ? "ok" : "err", (e.ok ? "\\u2713 " : "\\u2717 ") + e.tool + ": " + e.summary);
+      row(e.ok ? "ok" : "err", e, (e.ok ? "\\u2713 " : "\\u2717 ") + e.tool + ": " + e.summary);
     } else if (e.type === "run_note") {
-      row("note", "\\u23f1 " + e.summary);
+      row("note", e, "\\u23f1 " + e.summary);
       if ((e.kind === "stop_requested" || e.kind === "stopped") && e.mode) markStopping(e.mode);
     } else if (e.type === "answer") {
-      // The run's final answer — the same text the thread got. textContent only.
-      // Only bring it into view when the viewer is already at the tail; someone
-      // reading earlier rows keeps their place (same rule as log autoscroll).
+      // The run's final answer — the same text the thread got, as markdown via
+      // the safe renderer. Only bring it into view when the viewer is already at
+      // the tail; someone reading earlier rows keeps their place (same rule as
+      // log autoscroll).
       var atTail = window.innerHeight + window.scrollY >= document.body.scrollHeight - 40;
-      answerText.textContent = e.text;
+      answerTs.textContent = fmtTime(e.at);
+      md(answerText, e.text);
       answerBox.hidden = false;
       if (atTail) answerBox.scrollIntoView({ block: "nearest" });
     }

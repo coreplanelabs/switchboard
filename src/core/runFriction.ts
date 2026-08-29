@@ -201,9 +201,10 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       return;
     }
 
-    // The final answer is the run's outcome, not friction: it carries no
-    // timing of its own and never counts as a step.
-    if (ev.type === "answer") return;
+    // The narrative events — the request, the model's prose between tools, the
+    // final answer — are the run's story, not friction: they carry no timing of
+    // their own and never count as a step.
+    if (ev.type === "answer" || ev.type === "input" || ev.type === "assistant") return;
 
     switch (ev.kind) {
       case "wrap_up":

@@ -425,6 +425,76 @@ describe("run-visibility events", () => {
   });
 });
 
+// Feature: features/run-visibility.md item 1 / live-view.md item 12 — the model's
+// prose BETWEEN tool calls is a timeline event. It is emitted only when a
+// completion carries text alongside tool_use; the final text-only completion is
+// the `answer` the dispatcher publishes, so it is never duplicated here.
+describe("assistant text turns in the event stream", () => {
+  it("emits an `assistant` event for text that rides alongside tool_use, before that turn's tool_call", async () => {
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([
+        {
+          content: [
+            { type: "text", text: "Let me check the file." },
+            { type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } },
+          ],
+          stopReason: "tool_use",
+        },
+        text("done"),
+      ]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    expect(events.map((e) => e.type)).toEqual(["assistant", "tool_call", "tool_result"]);
+    expect(events[0]).toEqual({ type: "assistant", text: "Let me check the file.", at: expect.any(Number) });
+  });
+
+  it("does NOT emit `assistant` for a tool_use turn with no text, nor for the final text-only answer", async () => {
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), text("the final answer")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    expect(events.map((e) => e.type)).toEqual(["tool_call", "tool_result"]);
+  });
+
+  it("redacts secrets in assistant text but does not cap it", async () => {
+    const secret = "ghp_" + "B".repeat(36);
+    const long = "x".repeat(600);
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([
+        {
+          content: [
+            { type: "text", text: `token ${secret} ${long}` },
+            { type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } },
+          ],
+          stopReason: "tool_use",
+        },
+        text("done"),
+      ]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    const spoken = events.find((e) => e.type === "assistant");
+    if (spoken?.type !== "assistant") throw new Error("expected an assistant event");
+    expect(spoken.text).not.toContain(secret);
+    expect(spoken.text).toContain("«redacted-github-token»");
+    expect(spoken.text).toContain(long); // uncapped, like `answer`
+  });
+});
+
 describe("tool results carrying non-text parts (M1b)", () => {
   it("passes a parts-array tool result through to the provider verbatim and summarizes it as text", async () => {
     const events: RunEvent[] = [];

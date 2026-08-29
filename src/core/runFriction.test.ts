@@ -64,6 +64,21 @@ describe("analyzeRunFriction — empty / untimed input", () => {
     for (const f of d.findings) expect(f.durationMs).toBeUndefined();
   });
 
+  it("ignores the timeline events (`input`, `assistant`): they are narrative, not friction or steps", () => {
+    const withText: RunEvent[] = [
+      { type: "input", text: "please look at the failing test", at: T0 },
+      { type: "assistant", text: "Let me run it.", at: T0 + 500 },
+      ...bash("npm test", T0 + 1_000, 200),
+      { type: "assistant", text: "One failure; fixing.", at: T0 + 1_300 },
+      { type: "answer", text: "fixed", at: T0 + 1_400 },
+    ];
+    const without = withText.filter((e) => e.type !== "input" && e.type !== "assistant");
+    const a = analyzeRunFriction(withText);
+    const b = analyzeRunFriction(without);
+    expect(a.findings).toEqual(b.findings);
+    expect(a.toolCalls).toBe(1);
+  });
+
   it("is deterministic: the same stream yields a deep-equal diagnosis", () => {
     const events = [...bash("npm install", T0, 95_000, false, "ERR! network"), ...bash("npm install", T0 + 96_000, 60_000)];
     expect(analyzeRunFriction(events)).toEqual(analyzeRunFriction(events));

@@ -378,7 +378,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
     setupCard = undefined; // from here the run loop owns the card's close
     card.update({ title: title() }); // the ack card becomes the run card
-    let lastToolAt = Date.now();
+    let lastActivityAt = Date.now();
     // Live run view (Area 2 / #43): register the run and mint its capability
     // link AFTER the card exists (so nothing awaits between create() and the
     // run loop's finally that finish()es it). With no PUBLIC_BASE_URL the link
@@ -400,6 +400,16 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       text: directives.text,
     });
     const run = registry.create(runLabel);
+    // The request is the first event of the run record (live-view item 12): the
+    // directive-stripped text (+ an attachment count), redacted like every event,
+    // uncapped like `answer`. Published directly — it is not runner activity, so
+    // it never goes through onEvent (no card refresh, no friction input).
+    const attachments = attachmentSuffix(msg.images, msg.documents);
+    registry.publish(run.id, {
+      type: "input",
+      text: redactSecrets(attachments ? `${directives.text} ${attachments}` : directives.text),
+      at: Date.now(),
+    });
     const liveLink = liveViewLink(run.id, run.token);
     // The card body is the agent's own checklist (via the update_status tool)
     // plus a live one-line activity trace (current tool call + redacted result
@@ -408,7 +418,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     let checklist: string | undefined;
     let lastActivity: string | undefined;
     const currentFrame = () => {
-      const quiet = Date.now() - lastToolAt;
+      const quiet = Date.now() - lastActivityAt;
       const thinking = quiet > 20_000 ? ` — thinking (${Math.round(quiet / 1000)}s since last tool)` : "";
       const detail = [liveLink, checklist, lastActivity].filter(Boolean).join("\n");
       return { title: title() + thinking, detail: detail || undefined };
@@ -419,7 +429,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const finalDetail = () => [liveLink, checklist].filter(Boolean).join("\n") || undefined;
     const onProgress = (note: string) => {
       console.log(`[note] ${msg.threadKey} ${note}`);
-      lastToolAt = Date.now();
+      lastActivityAt = Date.now();
     };
     // Live run-visibility (Area 2): each tool call/result refreshes the card
     // immediately, so activity is visible without waiting for the heartbeat.
@@ -437,15 +447,8 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       runEvents.push(e);
       if (runEvents.length > RUN_EVENTS_CAP) runEvents.shift();
       if (e.type === "tool_call") toolCalls++;
-      lastToolAt = Date.now();
-      lastActivity =
-        e.type === "tool_call"
-          ? `→ ${e.summary}`
-          : e.type === "tool_result"
-            ? `${e.ok ? "✓" : "✗"} ${e.tool}: ${e.summary}`
-            : e.type === "run_note"
-              ? `⏱ ${e.summary}`
-              : "answer ready"; // `answer` is published directly to the registry, not through onEvent
+      lastActivityAt = Date.now();
+      lastActivity = activityLine(e);
       console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
       card.update(currentFrame());
     };
@@ -832,6 +835,48 @@ function textSnippet(text: string): string | undefined {
   const wordCut = hard.replace(/\s+\S*$/, "").trimEnd();
   const body = wordCut.length >= SNIPPET_MAX / 2 ? wordCut : hard.trimEnd();
   return `"${body}…"`;
+}
+
+/** Longest `assistant` excerpt shown as the card's one-line activity trace. */
+const ASSISTANT_TRACE_CAP = 80;
+
+/**
+ * The one-line activity trace the status card shows for a run event (the card
+ * is a digest; the run page is the record). An `assistant` turn becomes a short
+ * `💬` excerpt — one line, replaced by the next event, so the model's prose is
+ * visible in-channel without ever growing the card. `input` and `answer` are
+ * published straight to the registry and never arrive here; the fallback only
+ * keeps the switch total.
+ */
+function activityLine(e: RunEvent): string {
+  switch (e.type) {
+    case "tool_call":
+      return `→ ${e.summary}`;
+    case "tool_result":
+      return `${e.ok ? "✓" : "✗"} ${e.tool}: ${e.summary}`;
+    case "run_note":
+      return `⏱ ${e.summary}`;
+    case "assistant": {
+      const oneLine = e.text.replace(/\s+/g, " ").trim();
+      return `💬 ${oneLine.length > ASSISTANT_TRACE_CAP ? `${oneLine.slice(0, ASSISTANT_TRACE_CAP)}…` : oneLine}`;
+    }
+    case "input":
+      return "request received";
+    case "answer":
+      return "answer ready";
+  }
+}
+
+/**
+ * One-line note of what rode along with the request, for the `input` event
+ * (features/live-view.md item 12): `[+2 images, 1 document]`. Counts only — the
+ * payloads never enter the run stream. Empty when nothing was attached.
+ */
+export function attachmentSuffix(images: ImageAttachment[] | undefined, documents: DocumentAttachment[] | undefined): string {
+  const parts: string[] = [];
+  if (images && images.length > 0) parts.push(`${images.length} image${images.length === 1 ? "" : "s"}`);
+  if (documents && documents.length > 0) parts.push(`${documents.length} document${documents.length === 1 ? "" : "s"}`);
+  return parts.length > 0 ? `[+${parts.join(", ")}]` : "";
 }
 
 /**

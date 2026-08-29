@@ -59,7 +59,9 @@ function isRunEvent(v: unknown): v is RunEvent {
     case "run_note":
       return typeof o.summary === "string" && typeof o.kind === "string" && NOTE_KINDS.has(o.kind as RunNoteKind);
     case "answer":
-      return typeof o.text === "string"; // the final answer carries text, not a summary
+    case "input":
+    case "assistant":
+      return typeof o.text === "string"; // the narrative events carry text, not a summary
     default:
       return false;
   }

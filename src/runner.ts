@@ -1,6 +1,6 @@
 import type { AgentDef } from "./agents/registry.js";
 import { toolResultText, type ChatMessage, type ContentPart, type Provider } from "./providers/types.js";
-import { redactAndCap, summarizeToolResult, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
+import { redactAndCap, redactSecrets, summarizeToolResult, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
 import type { RunControl } from "./core/runRegistry.js";
 import { ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
@@ -189,6 +189,14 @@ async function runLoop(
     }
 
     if (!toolUses.every((t) => t.name === "update_status")) turn++;
+
+    // The model "talking" between tool calls is part of the run's timeline:
+    // text that rode alongside this turn's tool_use goes out as an `assistant`
+    // event (redacted, uncapped like `answer`) BEFORE the tool rows it explains.
+    // A text-only completion never reaches here — it returned above as the
+    // answer, which the dispatcher publishes — so nothing is emitted twice.
+    const spoken = collectText(result.content);
+    if (spoken) emit({ type: "assistant", text: redactSecrets(spoken) });
 
     // Echo the assistant turn, run tools, append results as one user turn.
     messages.push({ role: "assistant", content: result.content });

@@ -39,7 +39,16 @@ export type RunEvent =
    *  projected from, redacted like every event (NOT capped: the run record is
    *  the source of truth, the summaries are). Published by the dispatcher once
    *  per run, before the reply goes out; absent when the run threw. */
-  | { type: "answer"; text: string; at?: number };
+  | { type: "answer"; text: string; at?: number }
+  /** The request as received (directives stripped, attachments noted as a
+   *  one-line suffix), redacted, uncapped. Published by the dispatcher once per
+   *  run, right after the run is registered — the first event of the record, so
+   *  the run page can lead with what was asked (features/live-view.md item 12). */
+  | { type: "input"; text: string; at?: number }
+  /** The model's prose BETWEEN tool calls — text content that rode alongside
+   *  tool_use in one completion. Emitted by the runner, redacted, uncapped. The
+   *  final text-only completion is NOT one of these (that is the `answer`). */
+  | { type: "assistant"; text: string; at?: number };
 
 // Credential shapes we must never surface in a run-visibility stream (which may
 // be shown in-channel or on a shared page). Two layers: (1) specific known
