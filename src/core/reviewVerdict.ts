@@ -14,12 +14,19 @@
 // The model's prose follows after a blank line. Whatever the prose says, only
 // an explicit `approve` verdict can produce a body that begins with "LGTM".
 
+import { normalizeHead } from "./reviewedHead.js";
+
 export type ReviewVerdictKind = "approve" | "request_changes";
 
 export interface ReviewVerdict {
   verdict: ReviewVerdictKind;
   /** One line: why. Newlines are collapsed so the token line stays one line. */
   summary: string;
+  /** The commit the agent says it reviewed (`git rev-parse HEAD` in its
+   *  checkout), 7–40 lowercase hex. The dispatcher's reviewed-head guard
+   *  (reviewedHead.ts) compares it to the PR head when the workspace HEAD
+   *  could not be observed directly. Absent when not supplied or malformed. */
+  head?: string;
 }
 
 export const LGTM_TOKEN = "LGTM:";
@@ -31,7 +38,8 @@ export function parseVerdictInput(input: Record<string, unknown>): ReviewVerdict
   const verdict = input.verdict;
   if (verdict !== "approve" && verdict !== "request_changes") return null;
   const summary = typeof input.summary === "string" ? oneLine(input.summary) : "";
-  return { verdict, summary };
+  const head = normalizeHead(input.head);
+  return head ? { verdict, summary, head } : { verdict, summary };
 }
 
 function oneLine(s: string): string {

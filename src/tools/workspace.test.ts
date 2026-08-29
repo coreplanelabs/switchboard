@@ -142,6 +142,13 @@ describe("submit_verdict tool", () => {
     expect(out).toBe("verdict recorded: approve");
   });
 
+  it("forwards the reported head (the commit the agent reviewed) alongside the verdict", async () => {
+    const got: unknown[] = [];
+    await submitVerdictTool.run({ verdict: "approve", summary: "clean", head: "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3" }, ctxWith((v) => got.push(v)));
+    expect(got).toEqual([{ verdict: "approve", summary: "clean", head: "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3" }]);
+    expect(submitVerdictTool.inputSchema.required).toContain("head");
+  });
+
   it("rejects anything but the two verdict values without touching the context", async () => {
     const got: unknown[] = [];
     const out = await submitVerdictTool.run({ verdict: "LGTM", summary: "x" }, ctxWith((v) => got.push(v)));

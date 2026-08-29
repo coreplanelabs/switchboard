@@ -14,6 +14,7 @@ import { resolveRepoContext, type RepoContext } from "./repoContext.js";
 import { decideReviewPost, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
+import { checkReviewedHead, parseRevParseOutput } from "./reviewedHead.js";
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
@@ -476,6 +477,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const onVerdict = (v: ReviewVerdict) => {
       verdict = v;
     };
+    // The commit actually checked out in the run's workspace when the model
+    // finished — read by us, not reported by the model — for the reviewed-head
+    // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
+    let observedHead: string | undefined;
     try {
       answer = await runAgent({
         provider,
@@ -493,6 +498,15 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // every event, uncapped — a soft stop's "findings so far" included), then
       // the finally below finishes the run, and only after that is it sent.
       registry.publish(run.id, { type: "answer", text: redactSecrets(answer), at: Date.now() });
+      // Reviewed-head probe (features/agent-review.md item 8): for a PR review,
+      // read the workspace HEAD NOW — after the model is done, BEFORE the
+      // finally below releases the workspace. Post-release a resident would
+      // re-attach a fresh tree at the ref's CURRENT tip, which is not evidence
+      // of what was reviewed. Best-effort: a failed probe leaves it undefined
+      // and the guard falls back to the verdict's reported head.
+      if (resolved.agentName === "review" && repoCtx.pr !== undefined && run.control.requested !== "hard") {
+        observedHead = parseRevParseOutput(await executor.exec("git rev-parse HEAD").catch(() => ""));
+      }
     } catch (err) {
       await card.done({ title: title("❌"), detail: finalDetail() });
       throw err;
@@ -601,8 +615,25 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       }
     }
     if (postTarget) {
+      const where = `${postTarget.repo}#${postTarget.number}`;
+      // Reviewed-head guard (item 8): the review is posted to this PR only if
+      // the commit the agent reviewed IS the PR head resolved for this run.
+      // Observed HEAD is authoritative; the verdict's reported head is the
+      // fallback; unknown either way → no post (fail-closed). Found live on
+      // PR #182 (2026-08-29): the agent reviewed another PR's branch and its
+      // LGTM was posted — and auto-approved — on the wrong PR.
+      const head = checkReviewedHead({ expected: repoCtx.headSha, observed: observedHead, reported: verdict?.head });
+      if (!head.ok) {
+        console.log(`[review-post] ${msg.threadKey} skipped: ${head.reason} (${where})`);
+        await io.reply(`ℹ️ Review not posted to ${where}: ${head.reason} — this verdict is Slack-only.`).catch(() => {});
+        postTarget = null;
+      }
+    }
+    if (postTarget && repoCtx.headSha) { // headSha narrowing only — the guard above already required it
       const post = deps.postReviewComment ?? postReviewComment;
-      const target: ReviewCommentTarget = repoCtx.headSha ? { ...postTarget, commitId: repoCtx.headSha } : postTarget;
+      // Pinned to the PR head the guard just verified was reviewed, so the
+      // org's auto-approve stale-review check can bite on a later push.
+      const target: ReviewCommentTarget = { ...postTarget, commitId: repoCtx.headSha };
       // The verdict line is built here, by code — the model's prose never
       // decides whether the body starts with "LGTM:" (auto-approve contract).
       const body = buildReviewPostBody(answer, verdict);

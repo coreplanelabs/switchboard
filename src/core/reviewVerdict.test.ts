@@ -44,4 +44,19 @@ describe("review verdict → post body", () => {
     expect(parseVerdictInput({})).toBeNull();
     expect(parseVerdictInput({ verdict: 1 })).toBeNull();
   });
+
+  // features/agent-review.md item 8: the agent reports the commit it reviewed
+  // (`git rev-parse HEAD`); the dispatcher checks it against the PR head.
+  it("parseVerdictInput carries a well-formed reported head (7–40 hex, lowercased) and drops anything else", () => {
+    const sha = "E8E43F480a09b76989b85ebe6a2a254d99a4d2a3";
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: sha })).toEqual({
+      verdict: "approve",
+      summary: "ok",
+      head: sha.toLowerCase(),
+    });
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: " e8e43f4 " })).toEqual({ verdict: "approve", summary: "ok", head: "e8e43f4" });
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: "HEAD" })).toEqual({ verdict: "approve", summary: "ok" });
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: "e8e43f" })).toEqual({ verdict: "approve", summary: "ok" });
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: 42 })).toEqual({ verdict: "approve", summary: "ok" });
+  });
 });
