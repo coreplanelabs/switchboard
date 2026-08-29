@@ -194,7 +194,10 @@ npm run secrets   # RESIDENT_ADMIN_TOKEN, RESIDENT_OPERATOR_TOKEN, GITHUB_APP_*,
                   # RESIDENT_READ_TOKEN (optional: read-only /residents + debug info/schedules/threads)
                   # (the resident holds its own copy of the App key — the
                   # second credential domain; see trust model above)
-env -u CLOUDFLARE_API_TOKEN npm run deploy   # ends with a wake ping: /healthz 200
+RESIDENT_ADMIN_TOKEN=… env -u CLOUDFLARE_API_TOKEN npm run deploy
+                  # preflight first: refuses while any resident has a run in flight
+                  # (a Worker deploy kills them); fails closed without the bearer.
+                  # RESIDENT_DEPLOY_FORCE=1 bypasses. Ends with a wake ping: /healthz 200
 
 # 3. Memory worker — durable cross-session memory at
 #    switchboard-memory.coreplanelabs.dev (one SQLite Durable Object per memory

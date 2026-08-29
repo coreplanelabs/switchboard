@@ -14,7 +14,7 @@
 // Route surface (JSON in/out; every route below requires a bearer secret):
 //   admin scope     POST /onboard /offboard /reconfigure /rebuild /debug (all ops)
 //   read scope      GET /residents   POST /debug ops info|schedules|threads only (admin implied)
-//   operator scope  POST /attach /detach /exec /read /write /op            GET /status
+//   operator scope  POST /attach /detach /exec /read /write /op            GET /status (state, reason, inFlight)
 //   unauthenticated GET /healthz (deploy wake ping; touches no DO)
 //
 // Lifecycle engine: alarm-driven provisioning (clone → install/build →
@@ -2151,6 +2151,12 @@ export class ResidentDO extends Sandbox<Env> {
     const threadOps = [...this.threadOpsInFlight.values()].reduce((a, n) => a + n, 0);
     return threadOps + this.opUsersInUse.size + this.attachesInFlight + this.refreshesInFlight;
   }
+  /** In-flight activity for the deploy preflight (GET /status, GET /residents).
+   *  In-memory by nature: a fresh isolate answers 0, which is correct — nothing
+   *  survived to be interrupted. */
+  async getInFlightCount(): Promise<number> {
+    return this.inFlightCount();
+  }
   private attachesInFlight = 0;
   /** A refresh cycle past its idle/reconcile gates (fetching, rebuilding, snapshotting). */
   private refreshesInFlight = 0;
@@ -2443,6 +2449,7 @@ export class ResidentDO extends Sandbox<Env> {
           }
         : null,
       schedules: { refresh: refresh.length, provisionRun: provisionRun.length, provisionDeadline: provisionDeadline.length },
+      inFlight: this.inFlightCount(),
       threads,
     };
   }
@@ -3215,12 +3222,24 @@ async function handleResidents(env: Env): Promise<Response> {
   const settled = await Promise.allSettled(
     residents.map((record) => residentStub(env, record.resource).getResidentInfo()),
   );
+  // Fleet-wide in-flight view: one call answers "is anything running anywhere?".
+  // `inFlight` is the sum over residents whose live view answered with a count;
+  // it is null — not 0 — as soon as any resident is unknown (live view rejected
+  // or carried no numeric count), and `inFlightUnknown` says how many. A reader
+  // that trusts the aggregate can therefore never mistake "we don't know" for
+  // "idle". The deploy preflight walks `residents[].live` itself and refuses on
+  // any unknown; this aggregate is for dashboards and humans.
+  let known = 0;
+  let inFlightUnknown = 0;
   const enriched: unknown[] = residents.map((record, i) => {
     const s = settled[i];
+    if (s.status === "fulfilled" && typeof s.value.inFlight === "number") known += s.value.inFlight;
+    else inFlightUnknown += 1;
     const live: unknown = s.status === "fulfilled" ? s.value : { error: errMsg(s.reason) };
     return { ...record, live };
   });
-  return json({ cap: RESIDENT_CAP, count: residents.length, residents: enriched });
+  const inFlight: number | null = inFlightUnknown === 0 ? known : null;
+  return json({ cap: RESIDENT_CAP, count: residents.length, inFlight, inFlightUnknown, residents: enriched });
 }
 
 async function handleStatus(env: Env, url: URL): Promise<Response> {
@@ -3230,10 +3249,15 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   const record = await registryStub(env).getRecord(resource.resource);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
 
-  // Body deliberately limited to { state, reason } — operator scope sees
-  // lifecycle, not config.
-  const status = await residentStub(env, resource.resource).getStatus();
-  return json({ state: status.state, reason: status.reason });
+  // Body deliberately limited to { state, reason, inFlight } — operator scope
+  // sees lifecycle and activity, not config.
+  // Two RPCs, not one atomic snapshot: getStatus() awaits storage, and the DO
+  // may run other work in that gap, so `state`/`reason` and `inFlight` can be
+  // a hair apart (and differ slightly from a /residents sample taken alongside).
+  // Both are best-effort current-state reads; the deploy gate reads /residents.
+  const stub = residentStub(env, resource.resource);
+  const [status, inFlight] = await Promise.all([stub.getStatus(), stub.getInFlightCount()]);
+  return json({ state: status.state, reason: status.reason, inFlight });
 }
 
 // -- U4 thread data plane handlers --------------------------------------------

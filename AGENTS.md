@@ -66,6 +66,7 @@ Non-negotiable discipline:
 - **`execution.type: e2b` paths need `E2B_API_KEY`** and have not been live-tested until someone runs one CLI request against a real sandbox.
 - **Trust model:** agent `bash` executes model-generated commands. With `execution.type: local` the boundary is the container the bot runs in; with `e2b` it's the per-thread sandbox. Never put `GH_TOKEN` or other write-capable credentials on the bot host when `e2b` is enabled — they belong in the sandbox env only (`src/execution/factory.ts`).
 - **Docs discipline:** architecture changes update README diagrams *and* this file. Deployment changes update the Deployment section + `deploy/`.
+- **Resident deploys are preflighted:** `npm run deploy` in `deploy/cloudflare-resident/` runs `preflight.mjs` first and refuses while any resident has work in flight (a Worker deploy swaps the DO isolates and kills running threads — incident 2026-08-29). It needs a resident bearer in the env (`RESIDENT_ADMIN_TOKEN`, or operator/read) and fails closed without one or when the Worker is unreachable; `RESIDENT_DEPLOY_FORCE=1 npm run deploy` bypasses with a warning. Details: `features/resident-repos.md` item 44.
 
 ## Current state / known gaps
 
@@ -77,5 +78,5 @@ Non-negotiable discipline:
 - The Slack app has DM support wired but the recommended rollout keeps `im:*` scopes off initially.
 - No token/cost accounting per request yet — the self-improvement proposer (#84) uses `long_run` outliers (≥2× the median run time) as the cost-spike proxy until there is.
 - The friction ledger (`features/self-improvement.md`) is durable in prod (`FrictionDO` on the state Worker, `selfImprovement.worker`); without that config it falls back to `data/friction.jsonl` on the host disk (ephemeral on Cloudflare Containers) and warns at startup.
-- CI (`.github/workflows/ci.yml`) runs typecheck + tests + the dist-excludes-tests check + the sandbox-worker typecheck on every PR and on main.
+- CI (`.github/workflows/ci.yml`) runs typecheck + tests + the dist-excludes-tests check + the sandbox-worker typecheck + the memory- and resident-worker typecheck/tests on every PR and on main.
 - Feature-spec `[gap]` items (see `features/*.md`) are the known-unproven criteria backlog.
