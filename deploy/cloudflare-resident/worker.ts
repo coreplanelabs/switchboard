@@ -107,11 +107,10 @@ interface Env {
  *  Deliberately BELOW wrangler.jsonc's containers max_instances (10) so an
  *  over-cap onboard is always refused by the registry, never by a platform
  *  scheduling failure. Bump the two together. */
-// TEMPORARY (2026-08-29): 2, so the #50 LRU-eviction path can be proven on
-// prod against the two existing residents without provisioning six billable
-// fillers. Goes back up (to ~6, the team's concurrent-repo count) in the
-// follow-up PR that records those receipts.
-const RESIDENT_CAP = 2;
+// 6 = the number of repos the team works concurrently (Justin, 2026-08-29);
+// was 8 through 2026-08-29 and briefly 2 while the #50 LRU-eviction path was
+// proven on prod. Past the cap, `evictColdest:true` makes room (item 46).
+const RESIDENT_CAP = 6;
 
 /** Container sleep window, passed to every getSandbox() for ResidentDO.
  *  KTD4 invariant: REFRESH_INTERVAL_S and the watchdog cron (wrangler.jsonc,
