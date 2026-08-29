@@ -21,15 +21,22 @@
       // match the @cloudflare/sandbox version in package.json EXACTLY (no
       // 'latest' tag exists) — bump both together.
       "image": "./Dockerfile",
-      // standard-1 = 4 GiB RAM / 8 GB disk — deliberately NOT bigger. A
-      // resident is effectively always-on (10-min refresh alarm < 20m
-      // sleepAfter), so its size is billed 24/7 per repo: ~$52/mo at 4 GiB vs
-      // ~$156/mo at 8 GiB. 4 GiB fits 1-2 simultaneous test-running threads,
-      // which matches observed concurrency; /detach on run finish (the real
-      // fix for pool exhaustion) keeps threads from piling up. Step to
-      // standard-2 (6 GiB) only if resident OOMs actually appear. (The
-      // thread-sandbox Worker is standard-3 — it lives only for one run.)
-      "instance_type": "standard-1",
+      // Custom 1 vCPU / 4 GiB / 8 GB (was standard-1 = ½ vCPU / 4 GiB / 8 GB).
+      // Cloudflare bills vCPU on ACTIVE use only; memory and disk bill on the
+      // provisioned size for every second the container is awake. A resident
+      // is effectively always-on (10-min refresh alarm < 20m sleepAfter), so
+      // memory is the 24/7 line item (memory-only: ~$26/mo at 4 GiB, ~$39/mo
+      // at 6 GiB; the old ~$52 assumed the whole instance, vCPU included) and
+      // the extra vCPU costs nothing until a run uses it. 2026-08-29: a
+      // resident pinned at 100% of ½ vCPU with 2.2 GiB in use — CPU-bound,
+      // memory fine — so we doubled CPU and kept memory. Deliberately NOT
+      // standard-2: that adds 2 GiB nobody uses for +50% on the always-on
+      // cost. 4 GiB fits 1-2 simultaneous test-running threads, which matches
+      // observed concurrency; /detach on run finish keeps threads from piling
+      // up. Grow memory only if resident OOMs actually appear. Custom-type
+      // constraints: whole vCPUs 1-4, >=3 GiB per vCPU, <=2 GB disk per GiB.
+      // (The thread-sandbox Worker is standard-3 — it lives only for one run.)
+      "instance_type": { "vcpu": 1, "memory_mib": 4096, "disk_mb": 8000 },
       // Platform ceiling only. The enforced cap is RESIDENT_CAP (8) in
       // worker.ts — deliberately below this so an onboard is always refused
       // atomically by the registry, never by a platform scheduling failure.
