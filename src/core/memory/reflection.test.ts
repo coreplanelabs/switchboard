@@ -366,19 +366,37 @@ describe("reflect — user scope routing (#107 PR B)", () => {
     summary: "User asked for a deploy; it ran with a preview link.",
   });
 
-  it("routes `user` facts to the user scope and everything else (incl. the summary) to the org scope", async () => {
+  it("routes `user` facts to the user scope and `org` facts to the org scope; the summary follows the user when a user fact exists (#205)", async () => {
     const provider = fakeProvider(reply);
     const store = new InMemoryMemoryStore();
     await reflect({ ...base, provider, store });
     expect(provider.requests).toHaveLength(1); // still ONE extractor call
     const org = await store.retrieve({ scopeKey: SCOPE, query: "deploy preview vitest ran", limit: 10 });
     const user = await store.retrieve({ scopeKey: USER, query: "deploy preview vitest ran", limit: 10 });
-    expect(org.map((r) => r.text).sort()).toEqual(
-      ["CI runs vitest on deploy", "User asked for a deploy; it ran with a preview link.", "the deploy command is npm run deploy"].sort(),
+    expect(org.map((r) => r.text).sort()).toEqual(["CI runs vitest on deploy", "the deploy command is npm run deploy"].sort());
+    expect(user.map((r) => r.text).sort()).toEqual(
+      ["User asked for a deploy; it ran with a preview link.", "this user wants a deploy preview link before prod"].sort(),
     );
-    expect(user.map((r) => r.text)).toEqual(["this user wants a deploy preview link before prod"]);
-    expect(user[0].id.startsWith("mem:user:slack:U1:")).toBe(true);
-    expect(user[0].sourceThreadKey).toBe(PROVENANCE.sourceThreadKey);
+    expect(user.every((r) => r.id.startsWith("mem:user:slack:U1:"))).toBe(true);
+    expect(user.every((r) => r.sourceThreadKey === PROVENANCE.sourceThreadKey)).toBe(true);
+  });
+
+  it("a reflection with only `org` facts keeps its summary in the org scope (#205)", async () => {
+    const provider = fakeProvider(
+      JSON.stringify({
+        facts: [{ text: "CI runs vitest on deploy", confidence: 0.8, audience: "org" }],
+        summary: "User asked how CI runs; vitest on deploy was confirmed.",
+      }),
+    );
+    const store = new InMemoryMemoryStore();
+    await reflect({ ...base, provider, store });
+    const org = await store.retrieve({ scopeKey: SCOPE, query: "ci vitest deploy confirmed", limit: 10 });
+    expect(org.some((r) => r.kind === "summary")).toBe(true);
+    expect(await store.retrieve({ scopeKey: USER, query: "ci vitest deploy confirmed", limit: 10 })).toEqual([]);
+  });
+
+  it("the extractor is told to keep the summary impersonal (personal details belong in `user` facts) (#205)", () => {
+    expect(REFLECTION_SYSTEM).toMatch(/summary[^\n]*impersonal|impersonal[^\n]*summary/i);
   });
 
   it("without a user scope, `user` facts fall back to the org scope (nothing is dropped)", async () => {
@@ -423,8 +441,8 @@ describe("reflect — user scope routing (#107 PR B)", () => {
   });
 });
 
-describe("parseReflection — audience (#107 PR B)", () => {
-  it("keeps a valid audience, defaults anything else to org", () => {
+describe("parseReflection — audience (#107 PR B, #205)", () => {
+  it("keeps a valid audience, defaults anything else to org; the summary is `user` when any fact is", () => {
     const out = parseReflection(
       JSON.stringify({
         facts: [
@@ -445,6 +463,18 @@ describe("parseReflection — audience (#107 PR B)", () => {
       ["b", "org"],
       ["c", "org"],
       ["d", "org"],
+      ["s", "user"],
+    ]);
+  });
+
+  it("the summary stays `org` when no fact is `user`", () => {
+    const out = parseReflection(
+      JSON.stringify({ facts: [{ text: "b", confidence: 0.9, audience: "org" }], summary: "s" }),
+      PROVENANCE,
+      new Set(),
+    );
+    expect(out.ok && out.candidates.map((c) => [c.text, c.audience])).toEqual([
+      ["b", "org"],
       ["s", "org"],
     ]);
   });
