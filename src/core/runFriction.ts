@@ -201,6 +201,10 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       return;
     }
 
+    // The final answer is the run's outcome, not friction: it carries no
+    // timing of its own and never counts as a step.
+    if (ev.type === "answer") return;
+
     switch (ev.kind) {
       case "wrap_up":
         // Its duration is the time from the warning to the end of the stream

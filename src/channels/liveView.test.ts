@@ -228,6 +228,27 @@ describe("renderRunsIndex", () => {
   });
 });
 
+// Feature: features/live-view.md item 11 — the run page shows the final answer
+// (the `answer` event) as its own block, via textContent; the index hides its
+// empty-state sentinel even though rows are flex containers.
+describe("final answer on the run page + index empty-state (post-#137 fixes)", () => {
+  it("renders an `answer` event into a dedicated block with textContent", () => {
+    const html = renderRunPage("run-1", "tok-1");
+    expect(html).toContain('e.type === "answer"');
+    expect(html).toContain('id="answer"');
+    expect(html).toMatch(/answer[A-Za-z]*\.textContent = /);
+    expect(html).not.toContain("innerHTML");
+    // The answer only scrolls into view when the viewer is at the tail — a
+    // reader parked on earlier rows keeps their place (review nit, #158).
+    expect(html).toMatch(/if \(atTail\) answerBox\.scrollIntoView/);
+  });
+
+  it("the index hides the empty sentinel with a rule that beats `#runs li { display:flex }`", () => {
+    const html = renderRunsIndex([]);
+    expect(html).toMatch(/#runs li\[hidden\]\s*\{\s*display:\s*none/);
+  });
+});
+
 describe("renderRunPage", () => {
   const html = renderRunPage("run-1", "tok-secret");
 

@@ -18,7 +18,7 @@ import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from ".
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
-import type { RunEvent } from "./runEvents.js";
+import { redactSecrets, type RunEvent } from "./runEvents.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -434,7 +434,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
           ? `→ ${e.summary}`
           : e.type === "tool_result"
             ? `${e.ok ? "✓" : "✗"} ${e.tool}: ${e.summary}`
-            : `⏱ ${e.summary}`;
+            : e.type === "run_note"
+              ? `⏱ ${e.summary}`
+              : "answer ready"; // `answer` is published directly to the registry, not through onEvent
       console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
       card.update(currentFrame());
     };
@@ -474,6 +476,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         onEvent,
         control: run.control, // operator stop from /runs (#101)
       });
+      // The run record is the source of truth and Slack/GitHub are projections
+      // of it: publish the final answer into the stream FIRST (redacted like
+      // every event, uncapped — a soft stop's "findings so far" included), then
+      // the finally below finishes the run, and only after that is it sent.
+      registry.publish(run.id, { type: "answer", text: redactSecrets(answer), at: Date.now() });
     } catch (err) {
       await card.done({ title: title("❌"), detail: checklist });
       throw err;
