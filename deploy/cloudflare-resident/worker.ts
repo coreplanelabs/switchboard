@@ -75,6 +75,7 @@ import {
 import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
+import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 
 interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
@@ -171,6 +172,20 @@ const OPS_DIR = "/workspace/ops";
  *  — see the instance_type note in wrangler.jsonc. Must match the useradd loop
  *  in the Dockerfile. */
 const THREAD_USERS = Array.from({ length: 16 }, (_, i) => `worker${i + 2}`);
+
+/** Force-detach (#159): after killing the thread user's processes, how long
+ *  to wait for the in-flight op counter to drain (polled every
+ *  FORCE_DETACH_DRAIN_POLL_MS). The bot bounds the whole `/detach` at 10 s
+ *  (`DETACH_TIMEOUT_MS` in src/execution/resident.ts): the kill is a syscall
+ *  (milliseconds — its 2 s bound only matters if `run()` itself wedges, and
+ *  then the drain cannot succeed either), so kill + drain leaves ~2 s for the
+ *  eviction's rm. The worst case can still overshoot the bot's bound, and that
+ *  is tolerated: the bot only logs `[release] … failed`, while this DO method
+ *  runs to completion regardless (a dropped fetch does not cancel it), so the
+ *  user is freed either way. */
+const FORCE_DETACH_DRAIN_MS = 6_000;
+const FORCE_DETACH_DRAIN_POLL_MS = 250;
+const FORCE_DETACH_KILL_TIMEOUT_MS = 2_000;
 
 /** Inactivity eviction: worktrees whose binding lastAttachAt is older than
  *  this many days are removed and their user returned to the pool; the
@@ -2177,16 +2192,30 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** POST /detach: a run has ended — give the thread's pool user back now
    *  instead of holding it until the TTL sweep (the pool is sized for
-   *  simultaneous runs). `force` releases unconditionally (read-only agents);
-   *  otherwise a worktree with uncommitted or unpushed work is KEPT and the
-   *  caller learns why. No binding → 404-shaped error; already evicted → a
-   *  no-op success. Never flips lifecycle state. */
+   *  simultaneous runs). `force` releases unconditionally (read-only agents,
+   *  hard stops): an op still in flight is KILLED first (#159 — the bot has
+   *  already dropped its fetch, the command would otherwise run on and hold
+   *  the user until the sweep); otherwise a busy thread, or a worktree with
+   *  uncommitted or unpushed work, is KEPT and the caller learns why. No
+   *  binding → 404-shaped error; already evicted → a no-op success. Never
+   *  flips lifecycle state. */
   async detachThread(threadKey: string, force: boolean): Promise<{ released: boolean; reason?: string; user?: string } | ThreadErr> {
     const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
     if (!binding) return { error: `no-binding: ${threadKey} has never attached to this resident`, status: 404 };
     if (binding.evicted || !binding.user) return { released: false, reason: "already-evicted" };
-    const busy = this.threadOpsInFlight.get(threadKey) ?? 0;
-    if (busy > 0) return { released: false, reason: `busy: ${busy} operation(s) in flight on this thread — kept`, user: binding.user };
+    const plan = planForceDetach({
+      force,
+      inFlight: this.threadOpsInFlight.get(threadKey) ?? 0,
+      user: binding.user,
+      poolUsers: THREAD_USERS,
+    });
+    if (plan.action === "refuse") return { released: false, reason: plan.reason, user: binding.user };
+    if (plan.action === "kill") {
+      await this.killThreadUserProcesses(plan.user);
+      console.log(`detach: force — killed ${plan.user}'s processes for ${threadKey} (${plan.inFlight} op(s) were in flight)`);
+      const left = await this.waitForThreadDrain(threadKey);
+      if (left > 0) return { released: false, reason: busyAfterKillReason(left), user: binding.user };
+    }
     const active = await this.isRuntimeActive().catch(() => false);
     if (!force && active) {
       const c = await this.worktreeCleanliness(binding);
@@ -2196,7 +2225,7 @@ export class ResidentDO extends Sandbox<Env> {
     // yields at each await), so an exec that arrived mid-detach would otherwise
     // have its tree removed under it.
     const busyNow = this.threadOpsInFlight.get(threadKey) ?? 0;
-    if (busyNow > 0) return { released: false, reason: `busy: ${busyNow} operation(s) started during the clean check — kept`, user: binding.user };
+    if (busyNow > 0) return { released: false, reason: `busy: ${busyNow} operation(s) started during detach — kept`, user: binding.user };
     // Same re-read as the sweep: a re-attach during the clean check means a
     // fresh tree we must not remove from a stale snapshot.
     const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
@@ -2210,6 +2239,40 @@ export class ResidentDO extends Sandbox<Env> {
       return { released: false, reason: "re-attached during eviction — kept", user };
     }
     return { released: true, user };
+  }
+
+  /** Force-detach's kill (#159): end every process owned by the pool user —
+   *  `kill -9 -1` sent AS THAT USER reaches exactly its own processes (the
+   *  thread's `su … bash -c` shell, the command, anything it backgrounded),
+   *  nothing else in the container, and needs no procps. The shell kills
+   *  itself too, so su exits 137 — any exit code is fine, and a throw
+   *  (runtime replaced mid-kill) is fine as well: the drain wait after it is
+   *  what decides, and it is bounded. Only ever called with a plan from
+   *  `planForceDetach`, which refuses anything but a `THREAD_USERS` member. */
+  private async killThreadUserProcesses(user: string): Promise<void> {
+    try {
+      await this.run(["su", "-s", "/bin/bash", user, "-c", "kill -9 -1"], { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS });
+    } catch (err) {
+      console.log(`detach: force — kill as ${user} threw (continuing to the drain wait): ${errMsg(err)}`);
+    }
+  }
+
+  /** Wait (bounded, see FORCE_DETACH_DRAIN_MS) for this thread's in-flight op
+   *  counter to reach zero after a kill. The counter drops inside
+   *  `withThreadBusy`'s finally, i.e. only after `run()` has collected the
+   *  killed process's exit — so a zero here means every process the op ran
+   *  is already dead, and the eviction's `rm -rf` of the worktree (the op's
+   *  cwd) cannot race a live command. The killed op itself completes
+   *  normally through `execThreadImpl` → `streamThreadExec` (exit 137 to a
+   *  client that has usually already hung up). Returns the count still in
+   *  flight when the bound expires (0 = drained). */
+  private async waitForThreadDrain(threadKey: string): Promise<number> {
+    const deadline = Date.now() + FORCE_DETACH_DRAIN_MS;
+    for (;;) {
+      const left = this.threadOpsInFlight.get(threadKey) ?? 0;
+      if (left === 0 || Date.now() >= deadline) return left;
+      await new Promise((r) => setTimeout(r, FORCE_DETACH_DRAIN_POLL_MS));
+    }
   }
 
   /** Is this thread's tree safe to destroy? Runs AS THE THREAD USER (threadRun
