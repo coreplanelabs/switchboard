@@ -13,5 +13,5 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["worker.ts", "worker.test.ts", "test-env.d.ts"]
+  "include": ["worker.ts", "worker.test.ts", "friction.test.ts", "test-env.d.ts"]
 }

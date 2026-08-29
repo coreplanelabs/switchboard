@@ -16,8 +16,16 @@
     // "org:coreplanelabs") — the scope partition is the object boundary, so a
     // scope's rows live in one SQLite database and cross-scope reads are
     // impossible by construction.
-    "bindings": [{ "name": "MEMORY", "class_name": "MemoryDO" }]
+    "bindings": [
+      { "name": "MEMORY", "class_name": "MemoryDO" },
+      // One FrictionDO per ledger key (`friction:<repo>`): the durable friction
+      // ledger behind `friction propose` (#84, features/self-improvement.md).
+      { "name": "FRICTION", "class_name": "FrictionDO" }
+    ]
   },
-  // SQLite-backed DO (durable across restarts — AGENTS.md invariant 6).
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MemoryDO"] }]
+  // SQLite-backed DOs (durable across restarts — AGENTS.md invariant 6).
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MemoryDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["FrictionDO"] }
+  ]
 }

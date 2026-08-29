@@ -1,4 +1,12 @@
-import { formatMs, isSetupInstallCommand, type FrictionCategory, type FrictionDiagnosis, type FrictionFinding, type FrictionSeverity } from "./runFriction.js";
+import {
+  FRICTION_CATEGORIES,
+  formatMs,
+  isSetupInstallCommand,
+  type FrictionCategory,
+  type FrictionDiagnosis,
+  type FrictionFinding,
+  type FrictionSeverity,
+} from "./runFriction.js";
 
 // Friction proposer (Area 7b / #84, second piece): the PURE half of turning
 // the run-friction ANALYSIS (#105, `analyzeRunFriction`) into ACTION. Given the
@@ -25,6 +33,28 @@ export interface FrictionRunRecord {
   /** Epoch ms at run finish. */
   finishedAt: number;
   diagnosis: FrictionDiagnosis;
+}
+
+/** Structural check on a record from outside the process (a ledger line, a
+ *  Worker response, a CLI input file): only the fields the clusterer relies on.
+ *  Pure — shared by the bot and the state Worker's FrictionDO. */
+export function isFrictionRunRecord(v: unknown): v is FrictionRunRecord {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as Record<string, unknown>;
+  if (typeof r.runId !== "string" || r.runId.length === 0) return false; // the id is the upsert key everywhere
+  if (typeof r.finishedAt !== "number" || !Number.isFinite(r.finishedAt)) return false;
+  if (r.label !== undefined && typeof r.label !== "string") return false;
+  if (r.agent !== undefined && typeof r.agent !== "string") return false;
+  return isDiagnosis(r.diagnosis);
+}
+
+function isDiagnosis(v: unknown): boolean {
+  if (typeof v !== "object" || v === null) return false;
+  const d = v as Record<string, unknown>;
+  if (!Array.isArray(d.findings) || typeof d.eventCount !== "number" || typeof d.verdict !== "string") return false;
+  if (typeof d.byCategory !== "object" || d.byCategory === null) return false;
+  if (d.runMs !== undefined && typeof d.runMs !== "number") return false;
+  return FRICTION_CATEGORIES.every((c) => typeof (d.byCategory as Record<string, unknown>)[c] === "object");
 }
 
 /** A pattern kind is an analyzer category, plus the one cross-run kind. */

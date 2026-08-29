@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { MemoryCandidate, MemoryRecord } from "../../src/core/memory/types.ts";
 import { mintRecord, normalizeText, planWrite, rankRecords } from "../../src/core/memory/engine.ts";
 import { tokenize } from "../../src/core/memory/scorer.ts";
+import { isFrictionRunRecord, type FrictionRunRecord } from "../../src/core/frictionProposals.ts";
 
 // Memory Worker: the durable backend behind the bot's WorkerMemoryStore
 // (src/core/memory/workerStore.ts) — cross-session memory PR3 (#85). One
@@ -19,6 +20,11 @@ import { tokenize } from "../../src/core/memory/scorer.ts";
 //   POST /retrieve {scopeKey, query, limit} → {records: MemoryRecord[]}
 //   POST /write    {scopeKey, records: MemoryCandidate[]} → {ok, inserted, deduped, superseded}
 //   GET  /healthz  → {ok:true}  (deploy wake ping; touches no DO)
+// Friction ledger routes (#84 — the durable FrictionLedger behind the bot's
+// WorkerFrictionLedger, src/core/frictionLedgerWorker.ts): one FrictionDO per
+// ledger key, a bounded table of run diagnoses. Same bearer, same body fence.
+//   POST /friction/record {ledgerKey, record: FrictionRunRecord} → {ok:true, retained}
+//   POST /friction/recent {ledgerKey, limit?, sinceMs?} → {records: FrictionRunRecord[]} (oldest first)
 //
 // SECURITY: bearer comparison is constant-time (same helper as the resident
 // Worker); an unset/empty secret grants nothing (fail closed); every body field
@@ -26,6 +32,8 @@ import { tokenize } from "../../src/core/memory/scorer.ts";
 
 export interface Env {
   MEMORY: DurableObjectNamespace<MemoryDO>;
+  /** Friction ledgers (#84): one FrictionDO per ledger key (`friction:<repo>`). */
+  FRICTION: DurableObjectNamespace<FrictionDO>;
   MEMORY_TOKEN?: string;
 }
 
@@ -216,6 +224,115 @@ function toRecord(row: Row): MemoryRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Durable Object: one friction ledger per ledger key (#84)
+// ---------------------------------------------------------------------------
+
+/** Runs retained per ledger; the oldest fall off (mirrors the file ledger's default). */
+const FRICTION_MAX_RUNS = 500;
+/** One serialized run record — a diagnosis is a few KB; 64 KB is generous. */
+const MAX_FRICTION_RECORD_CHARS = 64 * 1024;
+const MAX_FRICTION_LIMIT = 1000;
+
+type FrictionRow = { run_id: string; finished_at: number; record: string };
+
+export class FrictionDO extends DurableObject<Env> {
+  private readonly sql: SqlStorage;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    // Idempotent schema: the record is stored verbatim as JSON (the bot's
+    // FrictionRunRecord, validated on the way in); finished_at is the sort/
+    // filter key. Re-recording a run id replaces it (idempotent retries).
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS friction_runs (
+        run_id TEXT PRIMARY KEY,
+        finished_at INTEGER NOT NULL,
+        record TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS friction_runs_finished ON friction_runs(finished_at);
+    `);
+  }
+
+  /** Upsert one run, then trim to the newest FRICTION_MAX_RUNS. One sync
+   *  transaction: a partial write can never leave the table over-bound or
+   *  half-replaced. Returns how many runs the ledger retains. */
+  async record(rec: FrictionRunRecord): Promise<number> {
+    let retained = 0;
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(
+        `INSERT INTO friction_runs (run_id, finished_at, record) VALUES (?, ?, ?)
+         ON CONFLICT(run_id) DO UPDATE SET finished_at = excluded.finished_at, record = excluded.record`,
+        rec.runId,
+        rec.finishedAt,
+        JSON.stringify(rec),
+      );
+      this.sql.exec(
+        `DELETE FROM friction_runs WHERE run_id IN (
+           SELECT run_id FROM friction_runs ORDER BY finished_at DESC, run_id DESC LIMIT -1 OFFSET ?)`,
+        FRICTION_MAX_RUNS,
+      );
+      retained = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM friction_runs`).one().n;
+    });
+    return retained;
+  }
+
+  /** Runs oldest-first, optionally at/after `sinceMs`, keeping the NEWEST `limit`. */
+  async recent(opts: { limit?: number; sinceMs?: number }): Promise<FrictionRunRecord[]> {
+    const rows = this.sql
+      .exec<FrictionRow>(
+        `SELECT run_id, finished_at, record FROM friction_runs
+          WHERE finished_at >= ? ORDER BY finished_at DESC, run_id DESC LIMIT ?`,
+        opts.sinceMs ?? 0,
+        opts.limit ?? FRICTION_MAX_RUNS,
+      )
+      .toArray();
+    const out: FrictionRunRecord[] = [];
+    for (const row of rows.reverse()) {
+      try {
+        const parsed: unknown = JSON.parse(row.record);
+        if (isFrictionRunRecord(parsed)) out.push(parsed);
+      } catch {
+        // a corrupt row is skipped, never fatal — the rest of the ledger still counts
+      }
+    }
+    return out;
+  }
+}
+
+function parseFrictionRecord(body: unknown): Validated<{ ledgerKey: string; record: FrictionRunRecord }> {
+  if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
+  const b = body as Record<string, unknown>;
+  const key = parseScopeKey(b.ledgerKey);
+  if (!key.ok) return invalid(key.error.replace("scopeKey", "ledgerKey"));
+  if (!isFrictionRunRecord(b.record)) return invalid("record must be a FrictionRunRecord (runId, finishedAt, diagnosis)");
+  if (b.record.runId.length > MAX_KEY_CHARS) return invalid(`record.runId must be at most ${MAX_KEY_CHARS} characters`);
+  if (JSON.stringify(b.record).length > MAX_FRICTION_RECORD_CHARS) {
+    return invalid(`record must serialize to at most ${MAX_FRICTION_RECORD_CHARS} characters`);
+  }
+  return { ok: true, value: { ledgerKey: key.value, record: b.record } };
+}
+
+function parseFrictionRecent(body: unknown): Validated<{ ledgerKey: string; limit?: number; sinceMs?: number }> {
+  if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
+  const b = body as Record<string, unknown>;
+  const key = parseScopeKey(b.ledgerKey);
+  if (!key.ok) return invalid(key.error.replace("scopeKey", "ledgerKey"));
+  const out: { ledgerKey: string; limit?: number; sinceMs?: number } = { ledgerKey: key.value };
+  if (b.limit !== undefined) {
+    if (typeof b.limit !== "number" || !Number.isInteger(b.limit) || b.limit < 1 || b.limit > MAX_FRICTION_LIMIT) {
+      return invalid(`limit must be an integer between 1 and ${MAX_FRICTION_LIMIT}`);
+    }
+    out.limit = b.limit;
+  }
+  if (b.sinceMs !== undefined) {
+    if (typeof b.sinceMs !== "number" || !Number.isFinite(b.sinceMs) || b.sinceMs < 0) return invalid("sinceMs must be a non-negative number");
+    out.sinceMs = b.sinceMs;
+  }
+  return { ok: true, value: out };
+}
+
+// ---------------------------------------------------------------------------
 // Auth (mirrors the resident Worker)
 // ---------------------------------------------------------------------------
 
@@ -340,7 +457,8 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true });
-    if (url.pathname !== "/retrieve" && url.pathname !== "/write") return json({ error: "not found" }, 404);
+    const ROUTES = new Set(["/retrieve", "/write", "/friction/record", "/friction/recent"]);
+    if (!ROUTES.has(url.pathname)) return json({ error: "not found" }, 404);
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
     if (!authorized(env, request)) return json({ error: "unauthorized" }, 401);
 
@@ -364,6 +482,24 @@ export default {
       body = await request.json();
     } catch {
       return json({ error: "body must be valid JSON" }, 400);
+    }
+
+    if (url.pathname === "/friction/record") {
+      const parsed = parseFrictionRecord(body);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      const { ledgerKey, record } = parsed.value;
+      const retained = await env.FRICTION.get(env.FRICTION.idFromName(ledgerKey)).record(record);
+      // Observability (ids + counts only, never finding text).
+      console.log(`[friction/record] ${ledgerKey} <- ${record.runId} (${retained} retained)`);
+      return json({ ok: true, retained });
+    }
+    if (url.pathname === "/friction/recent") {
+      const parsed = parseFrictionRecent(body);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      const { ledgerKey, ...opts } = parsed.value;
+      const records = await env.FRICTION.get(env.FRICTION.idFromName(ledgerKey)).recent(opts);
+      console.log(`[friction/recent] ${ledgerKey} -> ${records.length} runs`);
+      return json({ records });
     }
 
     if (url.pathname === "/retrieve") {

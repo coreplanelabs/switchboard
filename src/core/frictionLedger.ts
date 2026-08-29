@@ -1,19 +1,20 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import type { FrictionRunRecord } from "./frictionProposals.js";
-import { FRICTION_CATEGORIES } from "./runFriction.js";
+import { isFrictionRunRecord, type FrictionRunRecord } from "./frictionProposals.js";
+
+export { isFrictionRunRecord };
 
 // The friction ledger (Area 7b / #84): where each finished run's diagnosis is
 // kept so the proposer can look ACROSS runs. The live run registry evicts a
 // finished run 60s after it ends, so without this the "recent runs" the
-// self-improvement loop needs do not exist anywhere. Two implementations
-// (AGENTS.md invariant 2): in-memory (tests, dev) and an append-only JSONL file
-// under data/ — the same place and the same durability as data/overrides.json
-// (a volume on Fly/compose; on Cloudflare Containers the disk is ephemeral, so a
-// redeploy starts the ledger over — stated in features/self-improvement.md, and
-// index.ts logs the path at startup so the loss is never silent). A record
-// holds only what the runs index and the analyzer already expose: run id (not
-// the view token), label, agent, and the redacted-at-source diagnosis.
+// self-improvement loop needs do not exist anywhere. Three implementations
+// (AGENTS.md invariant 2): in-memory (tests, dev), an append-only JSONL file
+// under data/ (the same place and durability as data/overrides.json — a volume
+// on Fly/compose, ephemeral on Cloudflare Containers), and the durable
+// `WorkerFrictionLedger` (frictionLedgerWorker.ts — a Durable Object on the
+// state Worker; the production choice, AGENTS.md invariant 6). A record holds
+// only what the runs index and the analyzer already expose: run id (not the
+// view token), label, agent, and the redacted-at-source diagnosis.
 
 export interface LedgerReadOptions {
   /** Keep only the NEWEST n runs. */
@@ -36,27 +37,6 @@ export interface LedgerOptions {
 
 export const DEFAULT_LEDGER_MAX = 500;
 
-/** Structural check on a record read from disk (or a CLI input file): only the
- *  fields the clusterer relies on. A foreign or truncated line is skipped, never
- *  a crash. */
-export function isFrictionRunRecord(v: unknown): v is FrictionRunRecord {
-  if (typeof v !== "object" || v === null) return false;
-  const r = v as Record<string, unknown>;
-  if (typeof r.runId !== "string" || typeof r.finishedAt !== "number" || !Number.isFinite(r.finishedAt)) return false;
-  if (r.label !== undefined && typeof r.label !== "string") return false;
-  if (r.agent !== undefined && typeof r.agent !== "string") return false;
-  return isDiagnosis(r.diagnosis);
-}
-
-function isDiagnosis(v: unknown): boolean {
-  if (typeof v !== "object" || v === null) return false;
-  const d = v as Record<string, unknown>;
-  if (!Array.isArray(d.findings) || typeof d.eventCount !== "number" || typeof d.verdict !== "string") return false;
-  if (typeof d.byCategory !== "object" || d.byCategory === null) return false;
-  if (d.runMs !== undefined && typeof d.runMs !== "number") return false;
-  return FRICTION_CATEGORIES.every((c) => typeof (d.byCategory as Record<string, unknown>)[c] === "object");
-}
-
 function sortAndTrim(records: FrictionRunRecord[], max: number, opts: LedgerReadOptions): FrictionRunRecord[] {
   let out = [...records].sort((a, b) => a.finishedAt - b.finishedAt || a.runId.localeCompare(b.runId)).slice(-max);
   if (opts.sinceMs !== undefined) out = out.filter((r) => r.finishedAt >= opts.sinceMs!);
@@ -78,7 +58,10 @@ export class InMemoryFrictionLedger implements FrictionLedger {
     this.max = opts.max ?? DEFAULT_LEDGER_MAX;
   }
 
+  /** Upsert by run id: a retried write replaces, never double-counts. */
   async record(rec: FrictionRunRecord): Promise<void> {
+    const i = this.records.findIndex((r) => r.runId === rec.runId);
+    if (i !== -1) this.records.splice(i, 1);
     this.records.push(clone(rec));
     this.records.sort((a, b) => a.finishedAt - b.finishedAt || a.runId.localeCompare(b.runId));
     if (this.records.length > this.max) this.records.splice(0, this.records.length - this.max);
@@ -114,19 +97,25 @@ export class FileFrictionLedger implements FrictionLedger {
     return sortAndTrim(this.readAll(), this.max, opts);
   }
 
+  /** Every valid line, with a repeated run id resolved to its LAST line — the
+   *  append-only file's form of upsert (a retried write never double-counts);
+   *  compaction then materializes the dedup. */
   private readAll(): FrictionRunRecord[] {
     if (!existsSync(this.path)) return [];
-    const out: FrictionRunRecord[] = [];
+    const byRun = new Map<string, FrictionRunRecord>();
     for (const line of readFileSync(this.path, "utf8").split("\n")) {
       if (!line.trim()) continue;
       try {
         const parsed: unknown = JSON.parse(line);
-        if (isFrictionRunRecord(parsed)) out.push(parsed);
+        if (isFrictionRunRecord(parsed)) {
+          byRun.delete(parsed.runId); // re-insert so the newest write wins on ties
+          byRun.set(parsed.runId, parsed);
+        }
       } catch {
         // a torn or corrupt line: skip — the rest of the ledger still counts
       }
     }
-    return out;
+    return [...byRun.values()];
   }
 
   private countLines(): number {

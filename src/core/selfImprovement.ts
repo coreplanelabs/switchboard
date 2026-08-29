@@ -30,10 +30,18 @@ export interface SelfImprovementConfig {
   minRuns?: number;
   /** Proposals filed per pass (top-ranked patterns). Default 3. */
   top?: number;
-  /** JSONL ledger path. Default `<dataDir>/friction.jsonl`. */
+  /** JSONL ledger path (the host-disk ledger, used when no `worker`). Default `<dataDir>/friction.jsonl`. */
   ledgerPath?: string;
-  /** Runs retained in the ledger. Default 500. */
+  /** Runs retained in the ledger (file and Worker alike). Default 500. */
   ledgerMax?: number;
+  /** The durable ledger: the FrictionDO on the state Worker (deploy/cloudflare-memory/).
+   *  Absent → the host-disk file ledger, which an ephemeral-disk deploy loses on redeploy. */
+  worker?: {
+    /** Base URL, e.g. https://switchboard-memory.coreplanelabs.dev */
+    baseUrl: string;
+    /** Env var holding the bearer secret. Default MEMORY_TOKEN. */
+    tokenEnv?: string;
+  };
 }
 
 export interface RunSelfImprovementOptions {

@@ -59,6 +59,18 @@ function contract(name: string, make: (max?: number) => FrictionLedger) {
       expect((await l.recent()).map((r) => r.runId)).toEqual(["r3", "r4", "r5"]);
     });
 
+    it("upserts by run id: a retried or duplicated write replaces, never double-counts", async () => {
+      const l = make();
+      await l.record(rec("a", 100));
+      await l.record(rec("b", 200));
+      const again = rec("a", 100);
+      again.label = "replaced";
+      await l.record(again);
+      const all = await l.recent();
+      expect(all.map((r) => r.runId)).toEqual(["a", "b"]);
+      expect(all[0].label).toBe("replaced");
+    });
+
     it("hands back copies — mutating a result does not change the ledger", async () => {
       const l = make();
       await l.record(rec("a", 100));
@@ -108,6 +120,7 @@ describe("isFrictionRunRecord", () => {
   it("accepts a real record and rejects partial/foreign shapes", () => {
     expect(isFrictionRunRecord(rec("a", 1))).toBe(true);
     expect(isFrictionRunRecord({ runId: "a", finishedAt: 1 })).toBe(false);
+    expect(isFrictionRunRecord({ ...rec("a", 1), runId: "" })).toBe(false); // an id-less run has no identity to upsert on
     expect(isFrictionRunRecord({ runId: "a", finishedAt: "1", diagnosis: analyzeRunFriction([]) })).toBe(false);
     expect(isFrictionRunRecord({ runId: "a", finishedAt: 1, diagnosis: { findings: "nope" } })).toBe(false);
     expect(isFrictionRunRecord(null)).toBe(false);
