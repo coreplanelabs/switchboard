@@ -1,0 +1,87 @@
+/** The refresh cycle's rebuild decision for the resident Worker's
+ *  `onRefreshAlarm` (deploy/cloudflare-resident/worker.ts), kept pure and
+ *  dependency-free so it is unit-testable from src/ and imported across
+ *  packages by the resident Worker (like residentDetach) — the tested code IS
+ *  the shipped code.
+ *
+ *  Background (#163): the refresh used to `git clean -fdx` + `npm install` on
+ *  EVERY default-branch advance (a 130 s refresh was observed live), even
+ *  though the committed lockfile — the dependency cache key (KTD7) — rarely
+ *  moves. A refresh longer than the bot's 60 s attach wait sends runs cold.
+ *  The `-x` clean itself is load-bearing: attached, sha-pinned thread
+ *  worktrees hardlink the checkout's dep/build FILE inodes, so a rebuild must
+ *  allocate fresh inodes rather than write through shared ones (review 1b).
+ *  Skipping install therefore keeps `node_modules` — inodes nobody is about
+ *  to write through — while still cleaning every other gitignored path (build
+ *  output), so the build allocates fresh inodes exactly as before.
+ *
+ *  The disk facts come from two root-only markers the cycle writes as it
+ *  materializes (deps key after install, built sha after build) plus the
+ *  checkout's actual HEAD. A worker-code deploy resets the DO mid-cycle but
+ *  leaves the container disk alone, so the next alarm can pick up where the
+ *  interrupted one stopped instead of redoing the whole rebuild. */
+
+export interface RefreshDisk {
+  /** `git rev-parse HEAD` of the warm checkout; null when unreadable. */
+  head: string | null;
+  /** Lockfile key whose install fully completed into the checkout's node_modules; null when absent. */
+  installedKey: string | null;
+  /** Sha whose build fully completed in the checkout; null when absent. */
+  builtSha: string | null;
+}
+
+/** What the `-x` clean may remove: everything untracked, or everything except `node_modules`. */
+export type CleanScope = "all" | "keep-deps";
+
+export type RefreshPlan =
+  /** The default branch did not move — nothing to rebuild or snapshot. */
+  | { action: "unchanged" }
+  /** Checkout, deps and build already match the target (an interrupted cycle
+   *  got this far): skip straight to the snapshot. */
+  | { action: "reuse"; why: string }
+  /** Update the checkout; `install` only when the committed lockfile moved. */
+  | { action: "rebuild"; install: boolean; clean: CleanScope; why: string };
+
+export function planRefresh(input: {
+  /** Mirror sha of the default branch after the fetch. */
+  sha: string;
+  /** The sha the recorded facts (and the last snapshot) are at. */
+  factsSha: string;
+  /** Committed-lockfile key at `sha` (pure function of the commit, KTD7). */
+  lockfileKey: string;
+  disk: RefreshDisk;
+}): RefreshPlan {
+  const { sha, factsSha, lockfileKey, disk } = input;
+  if (sha === factsSha) return { action: "unchanged" };
+  const depsMatch = disk.installedKey !== null && disk.installedKey === lockfileKey;
+  if (depsMatch && disk.head === sha && disk.builtSha === sha) {
+    return { action: "reuse", why: `checkout, deps and build already materialized for ${sha.slice(0, 8)}` };
+  }
+  if (depsMatch) {
+    return { action: "rebuild", install: false, clean: "keep-deps", why: "lockfile unchanged — deps kept, build only" };
+  }
+  const why = disk.installedKey === null ? "no deps marker on disk — full install" : "lockfile changed — full install";
+  return { action: "rebuild", install: true, clean: "all", why };
+}
+
+/** Tool caches that BUILDS (not installs) write inside node_modules — and
+ *  typically open+truncate in place: babel-loader/eslint/webpack under
+ *  `.cache`, vite/vitest under `.vite`. Kept deps are hardlinked into attached
+ *  worktrees, so these must go before a keep-deps build or it would write
+ *  through shared inodes (review 1b). Pruned at any depth (workspaces). */
+export const NODE_MODULES_CACHE_DIRS = [".cache", ".vite"] as const;
+
+/** The checkout-update shell for the build user (runs inside the checkout):
+ *  fetch from the local mirror, hard-reset to `sha`, then the `-x` clean.
+ *  `-e node_modules` is a git exclude pattern (matches at any depth, so
+ *  workspace packages keep theirs too) that survives `-x`; everything else
+ *  gitignored — build output above all — is still removed so the build
+ *  allocates fresh inodes (review 1b). Keep-deps additionally sweeps the
+ *  build-written caches inside node_modules (NODE_MODULES_CACHE_DIRS). */
+export function checkoutUpdateCommand(sha: string, clean: CleanScope): string {
+  const base = `git fetch --quiet origin && git reset --hard --quiet ${sha}`;
+  if (clean === "all") return `${base} && git clean -fdx`;
+  const names = NODE_MODULES_CACHE_DIRS.map((d) => `-name ${d}`).join(" -o ");
+  const sweep = `find . -path '*/node_modules/*' -type d \\( ${names} \\) -prune -exec rm -rf {} +`;
+  return `${base} && git clean -fdx -e node_modules && ${sweep}`;
+}
