@@ -7,6 +7,7 @@ import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ResidentExecutor, ResidentNeedsRefError, type ResidentStatusProbe } from "./resident.js";
 import { repoResourceId } from "../core/repoCommands.js";
 import { resolveGithubToken } from "./githubApp.js";
+import { isServiceable } from "./residentState.js";
 
 export interface ResidentExecutionConfig {
   /** base URL of the resident Worker (deploy/cloudflare-resident/) */
@@ -66,15 +67,34 @@ export interface ExecutorContext {
 
 /** Executor selection result. `note` is present when resident selection fell
  *  back to the per-thread backend — the NAMED reason (state + reason, KTD10)
- *  the dispatcher surfaces on the status card. Never silent. `resident` is the
- *  backend discriminant: true only when a warm ResidentExecutor was returned,
- *  so the dispatcher can pick the resident system-prompt variant without an
+ *  the dispatcher surfaces on the status card — or when the resident was
+ *  attached in a non-warm but serviceable state (`refreshing`/`degraded`: the
+ *  last snapshot serves). Never silent. `resident` is the backend
+ *  discriminant: true only when a ResidentExecutor was returned, so the
+ *  dispatcher can pick the resident system-prompt variant without an
  *  `instanceof` on the executor implementation. */
 export interface ExecutorSelection {
   executor: Executor;
   note?: string;
   resident?: boolean;
 }
+
+// Resident lifecycle states the bot attaches in — `isServiceable` in
+// residentState.ts (shared with the resident Worker's own state union). The
+// resident's contract (features/resident-repos.md items 7/12) is that
+// `refreshing` keeps SERVING the last snapshot — the mirror lock serializes an
+// attach against a refresh's fetch/rebuild — and that `degraded` does too when
+// the failure happened BEFORE the checkout was touched (fetch/bookkeeping
+// reasons); a failure inside the rebuild can leave a broken dep cache, so
+// those reasons stay cold. Gating on `warm` alone (the original U5 rule) sent
+// every run cold for the whole of every refresh window: with an active default
+// branch (a dozen merges a day, each a 1–2 min rebuild every 10-min cycle)
+// plus each resident deploy's restore, that was most of a working day (live
+// 2026-08-29: "resident refreshing — using fresh sandbox" on run after run).
+// The engine-owned states stay excluded: `onboarding` (nothing to attach),
+// `restoring` (the disk is being rehydrated; attach's own ensureHydrated would
+// wait, but a restore is short and the note is more honest), `down` (only a
+// rebuild escapes).
 
 // Negative cache (circuit breaker) for resident /status probe TRANSPORT
 // failures only: a resident-service outage costs one probe timeout, not one
@@ -101,11 +121,11 @@ export async function makeExecutor(
   }
 
   // Resident selection (KTD11): only when a target repo was resolved AND the
-  // resident backend is configured. Warm → ResidentExecutor; anything else
-  // (not-warm state, probe timeout, outage) → the per-thread backend below,
-  // with the reason carried in `note` (KTD10 — never a silent stall). A repo
-  // that is simply not onboarded also runs per-thread, but carries a note so
-  // the cold fall-through is visible (with the onboarding fix).
+  // resident backend is configured. A SERVICEABLE state → ResidentExecutor;
+  // anything else (engine-owned state, probe timeout, outage) → the per-thread
+  // backend below, with the reason carried in `note` (KTD10 — never a silent
+  // stall). A repo that is simply not onboarded also runs per-thread, but
+  // carries a note so the cold fall-through is visible (with the onboarding fix).
   let note: string | undefined;
   if (ctx.repo && opts.execution?.resident) {
     const resident = opts.execution.resident;
@@ -114,7 +134,7 @@ export async function makeExecutor(
     if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
     const resource = repoResourceId(ctx.repo);
     const probe = await probeResident(resident, token, resource);
-    if (probe.kind === "status" && probe.state === "warm") {
+    if (probe.kind === "status" && isServiceable(probe.state, probe.reason)) {
       // The resident can degrade between the /status probe and /attach: 503
       // (mirror-busy) or 429 (pool-exhausted) surface only at attach time.
       // ResidentNeedsRefError must still propagate (the dispatcher's ask-once
@@ -122,16 +142,18 @@ export async function makeExecutor(
       // per-thread backend with a named note (KTD10 / AE6 — never a silent
       // stall or a raw ⚠️ for this window).
       try {
-        return {
-          executor: await ResidentExecutor.open({
-            baseUrl: resident.baseUrl,
-            token,
-            resource,
-            threadKey: ctx.threadKey,
-            refHint: ctx.ref,
-          }),
-          resident: true,
-        };
+        const executor = await ResidentExecutor.open({
+          baseUrl: resident.baseUrl,
+          token,
+          resource,
+          threadKey: ctx.threadKey,
+          refHint: ctx.ref,
+        });
+        // Non-warm but serviceable: say so on the card (KTD10), while the run
+        // still gets the warm worktree it came for.
+        const nonWarm =
+          probe.state === "warm" ? undefined : `resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — attached to the last snapshot`;
+        return { executor, resident: true, ...(nonWarm ? { note: nonWarm } : {}) };
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
         note = `resident attach failed (${err instanceof Error ? err.message : String(err)}) — using fresh sandbox`;
