@@ -364,8 +364,8 @@ describe("run-visibility events", () => {
       onEvent: (e) => events.push(e),
     });
     expect(events).toEqual([
-      { type: "tool_call", tool: "bash", summary: expect.stringContaining("echo hi"), at: expect.any(Number) },
-      { type: "tool_result", tool: "bash", ok: true, summary: expect.stringContaining("ok"), at: expect.any(Number) },
+      { type: "tool_call", tool: "bash", summary: expect.stringContaining("echo hi"), callId: "t1", at: expect.any(Number) },
+      { type: "tool_result", tool: "bash", ok: true, summary: expect.stringContaining("ok"), callId: "t1", exitCode: 0, output: "ok", at: expect.any(Number) },
     ]);
   });
 
@@ -400,6 +400,96 @@ describe("run-visibility events", () => {
     const result = events.find((e) => e.type === "tool_result");
     expect(result?.ok).toBe(false);
     expect(result?.summary).toContain("kaboom");
+  });
+
+  it("pairs each tool_result to its tool_call by callId (the provider's tool_use id)", async () => {
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([bashUse("toolu_1"), text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    expect(events[0]).toMatchObject({ type: "tool_call", callId: "toolu_1" });
+    expect(events[1]).toMatchObject({ type: "tool_result", callId: "toolu_1" });
+  });
+
+  it("carries the bash exit code and marks a nonzero exit as ok:false (the executor's `exit N:` prefix)", async () => {
+    const failing: Executor = { ...fakeExecutor, exec: async () => "exit 128:\nfatal: not a git repository\n--- stderr ---\nmore" };
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: failing },
+      onEvent: (e) => events.push(e),
+    });
+    const result = events.find((e) => e.type === "tool_result");
+    expect(result).toMatchObject({ ok: false, exitCode: 128 });
+    expect(result && "infra" in result).toBe(false); // a command failure is never an infra failure
+  });
+
+  it("a clean bash run carries exitCode 0 and ok:true", async () => {
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    expect(events.find((e) => e.type === "tool_result")).toMatchObject({ ok: true, exitCode: 0 });
+  });
+
+  it("non-bash tools carry no exitCode (the prefix contract is the executor's, not theirs)", async () => {
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([statusUse("t1"), text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    const result = events.find((e) => e.type === "tool_result");
+    expect(result && "exitCode" in result).toBe(false);
+  });
+
+  it("carries the redacted, escape-stripped tool output (bounded) alongside the one-line summary", async () => {
+    const secret = "ghp_" + "C".repeat(36);
+    const chatty: Executor = { ...fakeExecutor, exec: async () => `\x1b[1mline one\x1b[0m\nline two token=${secret}\nline three` };
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: chatty },
+      onEvent: (e) => events.push(e),
+    });
+    const result = events.find((e) => e.type === "tool_result");
+    expect(result?.type === "tool_result" && result.output).toBe("line one\nline two token=«redacted»\nline three");
+    expect(result?.summary).toContain("line one");
+  });
+
+  it("names the target of non-bash calls in the tool_call summary (skill name, path, url)", async () => {
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([
+        { content: [{ type: "tool_use", id: "t1", name: "use_skill", input: { name: "code-review-and-quality" } }], stopReason: "tool_use" },
+        text("done"),
+      ]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    expect(events[0]).toMatchObject({ type: "tool_call", tool: "use_skill", summary: "use_skill code-review-and-quality" });
   });
 
   it("redacts a secret in a long bash command before capping (no fragment leak)", async () => {

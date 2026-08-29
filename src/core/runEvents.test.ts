@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { redactAndCap, redactSecrets, summarizeToolResult } from "./runEvents.js";
+import { TOOL_OUTPUT_CAP, parseExitPrefix, prepareToolOutput, redactAndCap, redactSecrets, summarizeToolResult } from "./runEvents.js";
 
 // Feature: features/run-visibility.md — the run-event stream and its redaction.
 
@@ -130,5 +130,47 @@ describe("summarizeToolResult", () => {
     const s = summarizeToolResult("deploy token=ghp_" + "A".repeat(36));
     expect(s).not.toContain("ghp_AAAA");
     expect(s).toContain("«redacted");
+  });
+});
+
+// Feature: features/live-view.md item 13 — the run page shows each tool call
+// as a card with its real exit status and its (bounded) output inside.
+describe("parseExitPrefix", () => {
+  it("reads the numeric exit code every executor prefixes nonzero output with", () => {
+    expect(parseExitPrefix("exit 128: fatal: not a git repository\nmore")).toEqual({ failed: true, exitCode: 128 });
+    expect(parseExitPrefix("exit 1:\n--- stderr ---\nno match")).toEqual({ failed: true, exitCode: 1 });
+  });
+  it("treats a non-numeric code (execFile errno / 'error') as failed without an exit code", () => {
+    expect(parseExitPrefix("exit ETIMEDOUT: spawn timed out")).toEqual({ failed: true });
+    expect(parseExitPrefix("exit error: something")).toEqual({ failed: true });
+  });
+  it("is a clean pass for ordinary output, even output that mentions 'exit' later", () => {
+    expect(parseExitPrefix("ok")).toEqual({ failed: false, exitCode: 0 });
+    expect(parseExitPrefix("(no output)")).toEqual({ failed: false, exitCode: 0 });
+    expect(parseExitPrefix("the script calls exit 1: when done")).toEqual({ failed: false, exitCode: 0 });
+    expect(parseExitPrefix("")).toEqual({ failed: false, exitCode: 0 });
+  });
+  it("ignores a leading ANSI escape or whitespace before the prefix", () => {
+    expect(parseExitPrefix("\x1b[31mexit 2: boom")).toEqual({ failed: true, exitCode: 2 });
+    expect(parseExitPrefix("\n exit 3: boom")).toEqual({ failed: true, exitCode: 3 });
+  });
+});
+
+describe("prepareToolOutput", () => {
+  it("strips escapes, redacts, and returns the text unchanged otherwise", () => {
+    const out = prepareToolOutput("\x1b[32mPASS\x1b[0m token=ghp_" + "A".repeat(36) + "\nline 2");
+    expect(out).toBe("PASS token=«redacted»\nline 2");
+  });
+  it("caps at TOOL_OUTPUT_CAP chars AFTER redacting, with a visible note of what was cut", () => {
+    const secret = "ghp_" + "B".repeat(36);
+    const text = "x".repeat(TOOL_OUTPUT_CAP - 10) + secret + "y".repeat(500);
+    const out = prepareToolOutput(text);
+    expect(out.length).toBeLessThan(TOOL_OUTPUT_CAP + 80);
+    expect(out).not.toContain("ghp_BBBB");
+    expect(out).toMatch(/…\[\d+ more chars\]$/);
+  });
+  it("returns an empty string for empty/whitespace output", () => {
+    expect(prepareToolOutput("")).toBe("");
+    expect(prepareToolOutput("  \n ")).toBe("");
   });
 });
