@@ -1496,6 +1496,23 @@ export class ResidentDO extends Sandbox<Env> {
     // counter, or an unrelated later down inherits stale strikes).
     await this.ctx.storage.delete(REBUILD_STRIKES_KEY);
 
+    // The sweep chain has the same failure mode as the refresh chain (a DO
+    // eviction mid-callback kills the self-rescheduling), but nothing re-armed
+    // it: only an attach did, so a resident with live bindings and no traffic
+    // never swept again (live 2026-08-29: seven idle bindings, >1h, no sweep).
+    // Re-arm at +5s whenever live bindings exist and none is pending. Not a
+    // lifecycle event — the sweep is housekeeping, no state flip. Runs BEFORE
+    // the stale-mid-flight check so that branch's early return never skips it.
+    const bindings = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    const liveBindings = [...bindings.values()].some((b) => !b.evicted && b.user);
+    // `sweepInFlight` is the explicit guard against arming a second chain while
+    // a sweep is executing (its schedule row also stays listed until the callback
+    // resolves, but that is a library detail we do not lean on).
+    if (liveBindings && !this.sweepInFlight && (await this.listSchedules(SWEEP_CALLBACK)).length === 0) {
+      await this.schedule(5, SWEEP_CALLBACK, resource);
+      console.log(`watchdog ${resource}: sweep chain was dead with live bindings — re-armed`);
+    }
+
     // A mid-flight state older than STALE_MIDFLIGHT_MS with no cycle or restore
     // actually running is a marker orphaned by an interrupted cycle (DO evicted
     // by a deploy, platform restart). Left alone it is permanent — the idle gate
@@ -2165,10 +2182,16 @@ export class ResidentDO extends Sandbox<Env> {
    *  whose binding is idle past the TTL, releases the user to the pool, and
    *  KEEPS the binding record marked evicted (KTD6). Never wakes a slept
    *  container just to delete files a sleep already destroyed. */
+  /** True while onWorktreeSweep is executing (DO memory; a restart clears it
+   *  together with the in-flight sweep). The watchdog's re-arm checks it so
+   *  two sweep chains can never be armed by construction. */
+  private sweepInFlight = false;
+
   async onWorktreeSweep(payload: string): Promise<{ evicted: string[]; kept: number }> {
     const resource = payload || ((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
     const evicted: string[] = [];
     let kept = 0;
+    this.sweepInFlight = true;
     try {
       const record = await this.registry()
         .getRecord(resource)
@@ -2222,6 +2245,7 @@ export class ResidentDO extends Sandbox<Env> {
       const live = [...all.values()].some((b) => !b.evicted && b.user);
       this.deleteSchedules(SWEEP_CALLBACK);
       if (live) await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
+      this.sweepInFlight = false;
     }
     return { evicted, kept };
   }
@@ -2457,12 +2481,13 @@ export class ResidentDO extends Sandbox<Env> {
   // -- debug surface (admin-scoped via POST /debug; used by live validation) ---
 
   async debugSchedules(): Promise<Record<string, unknown>> {
-    const [refresh, provisionRun, provisionDeadline] = await Promise.all([
+    const [refresh, provisionRun, provisionDeadline, sweep] = await Promise.all([
       this.listSchedules(REFRESH_CALLBACK),
       this.listSchedules(PROVISION_RUN_CALLBACK),
       this.listSchedules(PROVISIONING_CALLBACK),
+      this.listSchedules(SWEEP_CALLBACK),
     ]);
-    return { refresh, provisionRun, provisionDeadline };
+    return { refresh, provisionRun, provisionDeadline, sweep };
   }
 
   /** Kill the refresh chain (simulates a dead alarm chain for watchdog tests). */
