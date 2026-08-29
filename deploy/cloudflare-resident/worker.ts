@@ -78,6 +78,7 @@ import { DurableObject } from "cloudflare:workers";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 import { decisivePull, parsePullsBody, pickEvictionCandidate, pullsFate, reclaimDecision, type RefFate, type ReclaimWhy, type ResidentView } from "./gc";
+import { checkoutUpdateCommand, planRefresh, type RefreshDisk } from "../../src/execution/residentRefresh.js";
 
 interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
@@ -145,6 +146,14 @@ const CHECKOUT_DIR = "/workspace/checkout"; // default-branch working tree + dep
 const RESIDENT_STATE_DIR = "/workspace/.resident"; // mode 700 root:root — worker users cannot traverse
 const CRED_FILE = `${RESIDENT_STATE_DIR}/git-credentials`; // one-shot token file (KTD12), deleted after each git command
 const READY_MARKER = `${RESIDENT_STATE_DIR}/ready`; // holds the sha the disk was hydrated to
+/** Refresh checkpoints (#163): the lockfile key whose install fully completed
+ *  into CHECKOUT_DIR/node_modules, and the sha whose build fully completed.
+ *  Written as each step lands, removed before the step is redone; the next
+ *  cycle reads them (plus the checkout's real HEAD) to skip work the disk
+ *  already holds — a DO reset mid-cycle leaves the container disk intact. */
+const DEPS_MARKER = `${RESIDENT_STATE_DIR}/deps-key`;
+const BUILT_MARKER = `${RESIDENT_STATE_DIR}/built`;
+const DISK_MARKERS = [READY_MARKER, DEPS_MARKER, BUILT_MARKER];
 
 /** Unprivileged user for default-branch install/build (KTD5: repo code never
  *  runs as root). worker2..worker17 stay free for U4's per-thread users. */
@@ -1051,6 +1060,38 @@ export class ResidentDO extends Sandbox<Env> {
     return r.exitCode === 0 && r.stdout.trim() === sha;
   }
 
+  /** Write the disk markers that a materialized checkout leaves behind (see
+   *  DEPS_MARKER/BUILT_MARKER); omitted fields are left as they are. */
+  private async writeDiskMarkers(m: { ready?: string; depsKey?: string; builtSha?: string }): Promise<void> {
+    if (m.ready !== undefined) await this.writeFile(READY_MARKER, `${m.ready}\n`);
+    if (m.depsKey !== undefined) await this.writeFile(DEPS_MARKER, `${m.depsKey}\n`);
+    if (m.builtSha !== undefined) await this.writeFile(BUILT_MARKER, `${m.builtSha}\n`);
+  }
+
+  /** What the checkout actually holds, for the refresh planner: its HEAD (read
+   *  as the build user — the tree is worker1-owned and git refuses dubious
+   *  ownership from root) and the two refresh checkpoints. Anything unreadable
+   *  is null, which the planner treats as "redo that step". */
+  private async readRefreshDisk(): Promise<RefreshDisk> {
+    // Each fact is emitted on its own tagged line, so parsing keys on the tag
+    // rather than line position (a su/PAM banner cannot shift a field).
+    const script = [
+      `echo "head=$(su -s /bin/bash ${BUILD_USER} -c 'git -C ${CHECKOUT_DIR} rev-parse --verify HEAD' 2>/dev/null)"`,
+      `echo "deps=$(cat ${DEPS_MARKER} 2>/dev/null)"`,
+      `echo "built=$(cat ${BUILT_MARKER} 2>/dev/null)"`,
+    ].join("; ");
+    const r = await this.run(["sh", "-c", script]);
+    const fields = new Map<string, string>();
+    if (r.exitCode === 0) {
+      for (const line of r.stdout.split("\n")) {
+        const m = /^(head|deps|built)=(.*)$/.exec(line.trim());
+        if (m) fields.set(m[1], m[2].trim());
+      }
+    }
+    const get = (tag: string) => fields.get(tag) || null;
+    return { head: get("head"), installedKey: get("deps"), builtSha: get("built") };
+  }
+
   /** Snapshot mirror + checkout to R2 (localBucket: the SDK resolves the
    *  BACKUP_BUCKET binding from this DO's env; objects land under
    *  backups/<uuid>/). gitignore stays false: node_modules and build output
@@ -1160,7 +1201,7 @@ export class ResidentDO extends Sandbox<Env> {
         }
       }
 
-      await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, READY_MARKER], "clean-workspace");
+      await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-workspace");
       await this.ensureGitSetup();
       await this.withMirrorLock(() =>
         this.gitWithCred(token, ["clone", "--mirror", `https://github.com/${slug}.git`, MIRROR_DIR], "clone", stepBudget),
@@ -1197,7 +1238,7 @@ export class ResidentDO extends Sandbox<Env> {
       const now = new Date().toISOString();
       const facts: RepoFacts = { defaultRef: ref, sha, lockfileHash, provisionedAt: now, lastRefreshAt: now };
       await this.ctx.storage.put({ [FACTS_KEY]: facts, [SNAPSHOT_KEY]: snap });
-      await this.writeFile(READY_MARKER, `${sha}\n`);
+      await this.writeDiskMarkers({ ready: sha, depsKey: lockfileHash, builtSha: sha });
       this.deleteSchedules(PROVISIONING_CALLBACK);
       await this.setResidentState("warm");
       await this.armRefresh(resource);
@@ -1282,7 +1323,7 @@ export class ResidentDO extends Sandbox<Env> {
     }
 
     const t0 = Date.now();
-    await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, READY_MARKER], "clean-before-restore");
+    await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-before-restore");
     try {
       await this.restoreBackup(snap.mirror);
       await this.restoreBackup(snap.checkout);
@@ -1306,7 +1347,9 @@ export class ResidentDO extends Sandbox<Env> {
     }
 
     await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, CHECKOUT_DIR], "chown");
-    await this.writeFile(READY_MARKER, `${snap.sha}\n`);
+    // The restored checkout carries the snapshot's deps + build, so the
+    // refresh checkpoints are exactly the stamp.
+    await this.writeDiskMarkers({ ready: snap.sha, depsKey: snap.lockfileHash, builtSha: snap.sha });
     await this.ctx.storage.put(FACTS_KEY, {
       ...facts,
       lastRestore: { at: new Date().toISOString(), ms: Date.now() - t0 },
@@ -1319,8 +1362,10 @@ export class ResidentDO extends Sandbox<Env> {
   /** Self-rescheduling refresh: rehydrate if the container slept → mint a
    *  repo-scoped token (mint failure is command-level: recorded, never a
    *  lifecycle flip) → fetch into the bare mirror → when the default branch
-   *  moved: update the checkout, reinstall ONLY if the lockfile hash changed,
-   *  rebuild, write a new stamped snapshot, delete the replaced backup
+   *  moved: plan against the disk checkpoints (planRefresh, #163) — reuse a
+   *  checkout an interrupted cycle already materialized, else update the
+   *  checkout and reinstall ONLY if the committed lockfile key changed, then
+   *  rebuild — write a new stamped snapshot, delete the replaced backup
    *  objects. Transitions: refreshing → warm, or degraded(reason) with the
    *  last snapshot still serving. */
   async onRefreshAlarm(payload: string): Promise<void> {
@@ -1429,10 +1474,15 @@ export class ResidentDO extends Sandbox<Env> {
       }
 
       const sha = await this.readMirrorSha(facts.defaultRef);
-      let lockfileHash = facts.lockfileHash;
+      // Pure function of the commit (KTD7) — computed from the mirror before
+      // any checkout work so the planner can compare it to the deps marker.
+      const lockfileHash = sha === facts.sha ? facts.lockfileHash : await this.lockfileKey(sha);
+      const plan = planRefresh({ sha, factsSha: facts.sha, lockfileKey: lockfileHash, disk: await this.readRefreshDisk() });
       let snap: SnapshotRecord | null = null;
       let previous: SnapshotRecord | undefined;
-      if (sha !== facts.sha) {
+      if (plan.action !== "unchanged") {
+        const t0 = Date.now();
+        console.log(`refresh: ${facts.sha.slice(0, 8)} → ${sha.slice(0, 8)}: ${plan.action} (${plan.why})`);
         // Serialize the CHECKOUT_DIR mutation on the mirror mutex (FIX 2):
         // materializeThreadDeps reads CHECKOUT_DIR via `cp -al` under the same
         // lock, so an attach/op dep-copy can no longer hardlink a half-rebuilt
@@ -1442,36 +1492,48 @@ export class ResidentDO extends Sandbox<Env> {
         // degraded on transient lock contention.
         await this.withMirrorLock(async () => {
           // Token-free from here on: repo code runs during install/build (KTD7).
-          //
-          // Isolation invariant (review 1b): attach hardlink-copies (cp -al)
-          // CHECKOUT_DIR's node_modules/build dirs into already-attached,
-          // sha-pinned thread worktrees, so those FILE inodes are shared and
-          // worker1-owned. A rebuild that writes THROUGH an existing inode —
-          // many bundlers do (e.g. .next incremental manifests open+truncate
-          // rather than recreate) — would silently mutate an attached thread's
-          // pinned artifacts, breaking the sha pin the whole cache keys on.
-          // `git clean -fdq` (no -x) leaves these gitignored dirs in place, so
-          // the rebuild would reuse the very inodes threads still hold. `-x`
-          // removes them, so install/build allocate FRESH inodes; a thread's
-          // outstanding hardlink just keeps the old inode (link count drops).
-          // Cost: a full reinstall per default-branch advance (background, only
-          // when the sha actually moved) — accepted for the invariant. It also
-          // purges deps a later lockfile dropped (the -fdq staleness gap).
-          await this.buildUserRun(
-            `git fetch --quiet origin && git reset --hard --quiet ${sha} && git clean -fdx`,
-            "checkout-update",
-            GIT_NETWORK_TIMEOUT_MS,
-          );
-          lockfileHash = await this.lockfileKey(sha);
-          // `-x` just removed node_modules, so install unconditionally — the
-          // old lockfile-hash gate assumed the cache survived the clean.
-          if (record.commands.install) {
-            await this.buildUserRun(record.commands.install, "install", REFRESH_BUILD_TIMEOUT_MS);
+          if (plan.action === "rebuild") {
+            // Isolation invariant (review 1b): attach hardlink-copies (cp -al)
+            // CHECKOUT_DIR's node_modules/build dirs into already-attached,
+            // sha-pinned thread worktrees, so those FILE inodes are shared and
+            // worker1-owned. A rebuild that writes THROUGH an existing inode —
+            // many bundlers do (e.g. .next incremental manifests open+truncate
+            // rather than recreate) — would silently mutate an attached thread's
+            // pinned artifacts, breaking the sha pin the whole cache keys on.
+            // `git clean -fdq` (no -x) leaves these gitignored dirs in place, so
+            // the rebuild would reuse the very inodes threads still hold. `-x`
+            // removes them, so install/build allocate FRESH inodes; a thread's
+            // outstanding hardlink just keeps the old inode (link count drops).
+            //
+            // Install gate (#163): when the committed lockfile key is unchanged,
+            // node_modules is excluded from that clean (`-e node_modules`) and
+            // install is skipped — nothing is about to write through those
+            // inodes, and a full reinstall per default-branch advance (1–3 min
+            // live) is what pushed refreshes past the bot's 60 s attach wait.
+            // A changed key takes the full clean + install exactly as before,
+            // which is also what purges deps the new lockfile dropped.
+            //
+            // Checkpoints: the markers for the steps being redone come off
+            // BEFORE the step starts, so an interruption mid-step can never be
+            // mistaken for completion by the next cycle.
+            await this.runOk(["rm", "-f", BUILT_MARKER, ...(plan.install ? [DEPS_MARKER] : [])], "clear-markers");
+            await this.buildUserRun(checkoutUpdateCommand(sha, plan.clean), "checkout-update", GIT_NETWORK_TIMEOUT_MS);
+            if (plan.install) {
+              if (record.commands.install) {
+                await this.buildUserRun(record.commands.install, "install", REFRESH_BUILD_TIMEOUT_MS);
+              }
+              await this.writeDiskMarkers({ depsKey: lockfileHash });
+            }
+            await this.buildUserRun(record.commands.build, "build", REFRESH_BUILD_TIMEOUT_MS);
+            await this.writeDiskMarkers({ builtSha: sha });
           }
-          await this.buildUserRun(record.commands.build, "build", REFRESH_BUILD_TIMEOUT_MS);
+          // `reuse`: the checkout already holds this sha with its deps and
+          // build (an interrupted cycle got that far) — only the snapshot,
+          // facts and stamp are missing, and they must still move together.
           previous = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
           snap = await this.takeSnapshot(resource, facts.defaultRef, sha, lockfileHash);
         });
+        console.log(`refresh: ${sha.slice(0, 8)} ${plan.action} done in ${Date.now() - t0}ms`);
       }
 
       // Facts and snapshot move together so the stamp check never sees a
@@ -1486,7 +1548,7 @@ export class ResidentDO extends Sandbox<Env> {
       delete updatedFacts.idleSince;
       if (snap) {
         await this.ctx.storage.put({ [FACTS_KEY]: updatedFacts, [SNAPSHOT_KEY]: snap });
-        await this.writeFile(READY_MARKER, `${sha}\n`);
+        await this.writeDiskMarkers({ ready: sha });
         if (previous) await this.deleteBackupObjects([previous.mirror.id, previous.checkout.id]).catch(() => {});
       } else {
         await this.ctx.storage.put(FACTS_KEY, updatedFacts);
