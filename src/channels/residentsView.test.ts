@@ -199,11 +199,6 @@ describe("renderResidentsIndex", () => {
     expect(html).not.toContain('href="/residents/evil/');
   });
 
-  it("marks Residents as the current nav section on both the index and a detail page", () => {
-    expect(renderResidentsIndex(LISTING)).toContain('<a href="/residents" class="current">Residents</a>');
-    expect(renderResidentPage(WARM)).toContain('<a href="/residents" class="current">Residents</a>');
-  });
-
   it("links across to the runs dash and carries the same strict CSP-safe self-contained shape", () => {
     const html = renderResidentsIndex(LISTING);
     expect(html).toContain('href="/runs"');
@@ -369,11 +364,25 @@ describe("createResidentsViewHandler", () => {
     expect(c.status).toBe(502);
     expect(c.body().length).toBeLessThan(700); // upstream body is capped, never echoed wholesale
 
+    const hugeErr = createResidentsViewHandler(fakeClient(() => Promise.reject(new Error("x".repeat(10_000)))));
+    const e = fakeReqRes("GET", "/residents");
+    hugeErr(e.req, e.res);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(e.status).toBe(502);
+    expect(e.body().length).toBeLessThan(700); // transport-failure message capped like the non-200 path
+
     const throwing = createResidentsViewHandler(fakeClient(() => Promise.reject(new Error("resident admin /residents request failed (ECONNREFUSED)"))));
     const b = fakeReqRes("GET", "/residents/jshttp/vary");
     throwing(b.req, b.res);
     await new Promise((r) => setTimeout(r, 0));
     expect(b.status).toBe(502);
     expect(b.body()).toContain("ECONNREFUSED");
+  });
+});
+
+describe("nav (shared by both pages)", () => {
+  it("marks Residents as the current nav section on both the index and a detail page", () => {
+    expect(renderResidentsIndex(LISTING)).toContain('<a href="/residents" class="current">Residents</a>');
+    expect(renderResidentPage(WARM)).toContain('<a href="/residents" class="current">Residents</a>');
   });
 });

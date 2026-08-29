@@ -377,7 +377,7 @@ export function createResidentsViewHandler(
         res.end(renderResidentPage(record));
       })
       .catch((err: unknown) => {
-        plain(res, 502, `resident Worker unreachable: ${err instanceof Error ? err.message : String(err)}`);
+        plain(res, 502, `resident Worker unreachable: ${(err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX)}`);
       });
     return true;
   };
