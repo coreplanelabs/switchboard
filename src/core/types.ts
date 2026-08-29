@@ -56,6 +56,12 @@ export interface IncomingMessage {
    * `channelName`: an optional adapter-provided hint, never required by the core.
    */
   userName?: string;
+  /**
+   * A link back to the triggering message on its platform (a Slack permalink),
+   * for human-facing surfaces such as the run page's Request block. Optional
+   * adapter hint like the names above — absent for HTTP/MCP.
+   */
+  sourceUrl?: string;
   /** Images attached to the triggering message, if any. */
   images?: ImageAttachment[];
   /** Non-image files (PDFs, text/code/CSV/logs) on the triggering message, if any. */

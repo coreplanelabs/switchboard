@@ -5,6 +5,7 @@ import { analyzeRunFriction } from "../core/runFriction.js";
 import type { IndexEvent, RunRegistry, RunSummary, Unsubscribe } from "../core/runRegistry.js";
 import type { StopMode } from "../core/runEvents.js";
 import { renderMarkdownInto } from "./markdownLite.js";
+import { createRunTimeline } from "./runTimeline.js";
 
 // Live-view channel: the external, browser-facing surface for a live agent run
 // (Area 2 / #43). It streams the SAME redacted RunEvents the in-channel status
@@ -103,21 +104,31 @@ const SSE_HEADERS: Record<string, string> = {
 export const MARKDOWN_RENDERER_SCRIPT = `var __name = function (fn) { return fn; };\n${String(renderMarkdownInto)}`;
 
 /**
+ * The run timeline as browser source, inlined like the markdown renderer (same
+ * `__name` shim rationale — see MARKDOWN_RENDERER_SCRIPT).
+ */
+export const RUN_TIMELINE_SCRIPT = String(createRunTimeline);
+
+/**
  * The self-contained HTML page for one run: a readable timeline of the whole
- * run. Opens an EventSource to this run's token-scoped event stream and renders
- * each RunEvent as it arrives — `input` → the **Request** block above the log;
- * `assistant` → a prose row inline in the log; `tool_call` → a "running" row;
- * `tool_result` → ✓/✗ + its (already redacted) summary; `run_note` → a notice;
- * `answer` → the **Answer** block under the log. Every row/block leads with a
- * gray UTC `[HH:MM:SS]` from the event's `at`. All inline (CSP-safe): tool rows
- * are written with `textContent`, and the markdown surfaces (Request, Answer,
- * assistant rows) go through `renderMarkdownInto` — the safe-subset renderer
- * from markdownLite.ts, inlined here as `String(fn)` — which builds DOM only via
- * createElement/textContent/setAttribute (angle brackets are text, only http(s)
- * links become anchors). Nothing on this page ever assigns raw markup.
+ * run, grouped the way a person reads it (features/live-view.md item 13).
+ * Opens an EventSource to this run's token-scoped event stream and folds each
+ * RunEvent through `createRunTimeline` (runTimeline.ts, inlined as `String(fn)`)
+ * into: the **Request** block above the log; **steps** — the model's prose
+ * (markdown) followed by the tool calls it explains, on a left rail; each call a
+ * collapsible **card** (`<details>`) whose header is the command (hanging indent
+ * for wrapped lines), a status glyph (spinner / ✓ / ✗ / ⚠), and facts (exit code,
+ * line count, duration), with the redacted output inside — failed calls open by
+ * default, everything else collapsed; `update_status` as one muted line;
+ * `run_note` as a notice; a live **tail** row naming what is running or that the
+ * agent is thinking, removed at `end`; and the **Answer** block under the log.
+ * Every row leads with a gray UTC `[HH:MM:SS]` from the event's `at`.
  *
- * `id`/`token` are JSON-encoded into the script — they are the only dynamic
- * values, and JSON.stringify neutralizes any `</script>`/quote breakout.
+ * All inline (CSP-safe): DOM is built with createElement/textContent only, the
+ * markdown surfaces go through `renderMarkdownInto` (markdownLite.ts), and
+ * nothing on this page ever assigns raw markup. `id`/`token` are JSON-encoded
+ * into the script — the only dynamic values; JSON.stringify neutralizes any
+ * `</script>`/quote breakout.
  */
 export function renderRunPage(id: string, token: string): string {
   const eventsPath = `/runs/${encodeURIComponent(id)}/events?t=${encodeURIComponent(token)}`;
@@ -131,71 +142,118 @@ export function renderRunPage(id: string, token: string): string {
 <meta name="robots" content="noindex" />
 <title>Live run</title>
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: dark;
+    --bg: #0b0d12; --panel: #0f1218; --card: #12151c; --card-open: #141821; --line: #232836; --rail: #1f2430;
+    --fg: #e6e6e6; --fg-soft: #b6bcc8; --muted: #8b93a7; --dim: #5f677a;
+    --blue: #9ecbff; --green: #7ee787; --red: #ff7b72; --amber: #d29922;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    background: #0b0d12; color: #e6e6e6; padding: 1rem; max-width: 72rem; margin-inline: auto; }
-  header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .75rem;
-    border-bottom: 1px solid #2a2f3a; padding-bottom: .5rem; }
+  body { margin: 0; font: 13px/1.5 var(--mono); background: var(--bg); color: var(--fg);
+    padding: 1.25rem 1.25rem 8rem; max-width: 72rem; margin-inline: auto; }
+  header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: 1rem;
+    border-bottom: 1px solid var(--line); padding-bottom: .6rem; }
   h1 { font-size: 1rem; margin: 0; font-weight: 600; }
-  a.back { color: #9ecbff; text-decoration: none; font-size: .8rem; }
+  a.back { color: var(--blue); text-decoration: none; font-size: .8rem; }
   a.back:hover { text-decoration: underline; }
   ${NAV_CSS}
   .conn { margin-left: auto; display: inline-flex; align-items: center; gap: .35rem; }
-  #state { font-size: .8rem; color: #8b93a7; }
-  .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%;
-    background: #6e7681; flex: 0 0 auto; }
+  #state { font-size: .8rem; color: var(--muted); }
+  .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%; background: #6e7681; flex: 0 0 auto; }
   .dot.green { background: #2ea043; }
-  .dot.amber { background: #d29922; }
+  .dot.amber { background: var(--amber); }
   .dot.red { background: #f85149; }
   .dot.grey { background: #6e7681; }
   /* Timestamps: a small gray [HH:MM:SS] leading every row and both blocks. */
-  .ts { color: #8b93a7; font-size: .75rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    flex: 0 0 auto; user-select: none; }
+  .ts { color: var(--dim); font-size: .75rem; font-family: var(--mono); flex: 0 0 auto; user-select: none; }
   /* Request / Answer: headed blocks, proportional type, above and below the log. */
-  section.block { border: 1px solid #2a2f3a; border-radius: 8px; padding: .6rem .75rem; background: #0f1218; }
-  section.block > h2 { display: flex; align-items: baseline; gap: .5rem; font-size: .8rem; margin: 0 0 .4rem;
-    color: #8b93a7; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
-  #request { margin-bottom: .75rem; }
-  #answer { margin-top: .75rem; border-color: #2ea04366; }
-  #answer > h2 { color: #7ee787; }
-  /* The timeline. Tool rows stay monospace; each row is [ts] + body. */
+  section.block { border: 1px solid var(--line); border-radius: 8px; padding: .6rem .75rem; background: var(--panel); }
+  section.block > h2 { display: flex; align-items: baseline; gap: .6rem; font-size: .75rem; margin: 0 0 .5rem;
+    color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  /* Where the request came from: channel · user · a link to the thread. */
+  .source { margin-left: auto; display: inline-flex; gap: .6rem; font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .source a { color: var(--blue); text-decoration: none; }
+  .source a:hover { text-decoration: underline; }
+  #request { margin-bottom: 1.25rem; }
+  #answer { margin-top: 1.5rem; border-color: #2ea04366; }
+  #answer > h2 { color: var(--green); }
+  /* The timeline: steps, each = optional narration + its calls. One left edge
+     for everything — timestamps line up down the page, prose and cards alike;
+     steps are separated by space, not lines. */
   #log { list-style: none; margin: 0; padding: 0; }
-  #log > li { display: flex; gap: .6rem; align-items: baseline; padding: .3rem .5rem; border-radius: 6px;
-    word-break: break-word; }
-  #log > li + li { margin-top: .2rem; }
-  #log > li .body { white-space: pre-wrap; min-width: 0; flex: 1 1 auto; }
-  #log > li.call, #log > li.ok, #log > li.err, #log > li.note { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .call { color: #9ecbff; }
-  .ok { color: #7ee787; }
-  .err { color: #ff7b72; }
-  .note { color: #d29922; background: #d2992214; }
-  .empty { color: #8b93a7; }
-  /* The model talking between tools: neutral off-white prose with a quiet left border. */
-  #log > li.assistant { color: #d7dbe3; background: #12151c; border-left: 3px solid #3b4252; border-radius: 0 6px 6px 0;
-    margin-top: .4rem; margin-bottom: .4rem; padding: .5rem .75rem; }
+  #log > li { margin: 0; padding: 0; }
+  #log > li.step + li.step { margin-top: 1.5rem; }
+  li.step > .narration { display: flex; gap: .75rem; align-items: baseline; padding: .15rem .75rem .65rem; color: var(--fg); }
+  li.step > .calls { display: flex; flex-direction: column; gap: .5rem; }
+  li.step > .calls:empty { display: none; }
+  /* A call card: <details> — header row is the <summary>, output inside. */
+  details.call { border: 1px solid var(--line); border-radius: 6px; background: var(--card); }
+  details.call[open] { background: var(--card-open); }
+  details.call > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: .75rem;
+    padding: .5rem .75rem; min-width: 0; }
+  details.call > summary::-webkit-details-marker { display: none; }
+  details.call > summary:hover { background: #181d27; border-radius: 6px; }
+  details.call[open] > summary { border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; }
+  details.call > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; border-radius: 6px; }
+  .glyph { flex: 0 0 1em; text-align: center; font-weight: 700; }
+  .ok > summary .glyph { color: var(--green); }
+  .failed > summary .glyph { color: var(--red); }
+  .infra > summary .glyph { color: var(--amber); }
+  .spin { display: inline-block; width: .7em; height: .7em; border: 2px solid #3b4252; border-top-color: var(--blue);
+    border-radius: 50%; animation: spin .9s linear infinite; vertical-align: -.05em; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .dollar { flex: 0 0 auto; color: var(--dim); user-select: none; }
+  .tool { flex: 0 0 auto; font-size: .7rem; color: var(--muted); background: #1b1f28; border-radius: 4px;
+    padding: 0 .35em; line-height: 1.5; }
+  /* The command: pre-wrap so a long pipeline wraps, and — because it is its own
+     flex item — every continuation line aligns under the command's first char. */
+  .cmd { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; word-break: break-word; color: var(--blue); }
+  /* Collapsed: the command's first line only (with a trailing …); open: all of it. */
+  details.call:not([open]) > summary .cmd.full { display: none; }
+  details.call[open] > summary .cmd.brief { display: none; }
+  details.call:not([open]) > summary .cmd.brief { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .facts { flex: 0 0 auto; display: inline-flex; gap: .75rem; font-size: .75rem; color: var(--muted); margin-left: auto; }
+  .fact.bad { color: var(--red); }
+  .chev { flex: 0 0 auto; color: var(--dim); font-size: .7rem; transition: transform .12s; }
+  details.call[open] > summary .chev { transform: rotate(90deg); }
+  pre.out { margin: 0; padding: .65rem .85rem; font: .8rem/1.5 var(--mono); color: var(--fg-soft);
+    white-space: pre-wrap; word-break: break-word; max-height: 28rem; overflow: auto; }
+  .failed pre.out { color: #f0d0cd; }
+  .none { padding: .4rem .75rem; color: var(--dim); font-style: italic; font-size: .8rem; }
+  /* Bookkeeping (update_status): one muted line, no card. */
+  .quiet { display: flex; gap: .75rem; align-items: baseline; padding: .2rem .75rem; color: var(--dim); font-size: .8rem; }
+  /* Runner notices (wrap-up, budget, stop). */
+  li.note { display: flex; gap: .75rem; align-items: baseline; padding: .4rem .75rem; margin-top: 1rem; border-radius: 6px;
+    color: var(--amber); background: #d2992214; }
+  /* The live tail: what is happening right now, always last while connected. */
+  li.tail { display: flex; gap: .75rem; align-items: center; padding: .6rem .75rem; margin-top: 1rem; color: var(--muted); font-size: .8rem; }
+  li.tail .pulse { width: .55em; height: .55em; border-radius: 50%; background: var(--blue); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+  .empty { color: var(--muted); }
   /* Markdown surfaces: proportional type, tight vertical rhythm. */
-  .md { font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-    white-space: pre-wrap; word-break: break-word; min-width: 0; flex: 1 1 auto; }
+  .md { font: 14px/1.55 var(--sans); white-space: pre-wrap; word-break: break-word; min-width: 0; flex: 1 1 auto; }
   .md p, .md ul, .md ol, .md pre, .md blockquote, .md h1, .md h2, .md h3 { margin: 0 0 .5rem; }
   .md > :last-child { margin-bottom: 0; }
-  .md h1, .md h2, .md h3 { font-size: 1rem; font-weight: 600; color: #e6e6e6; text-transform: none; letter-spacing: 0; display: block; }
+  .md h1, .md h2, .md h3 { font-size: 1rem; font-weight: 600; color: var(--fg); text-transform: none; letter-spacing: 0; display: block; }
   .md h1 { font-size: 1.1rem; }
   .md ul, .md ol { padding-left: 1.4rem; white-space: normal; }
-  .md ul { list-style: disc; } /* a top-level list inside an assistant row is nested in the row li — keep discs */
+  .md ul { list-style: disc; }
   .md ul ul { list-style: circle; }
   .md li { white-space: pre-wrap; }
-  .md code { font: .85em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #1b1f28; padding: .05em .3em; border-radius: 4px; }
-  .md pre { background: #0b0d12; border: 1px solid #2a2f3a; border-radius: 6px; padding: .5rem .6rem; overflow-x: auto; white-space: pre; }
+  .md code { font: .85em var(--mono); background: #1b1f28; padding: .05em .3em; border-radius: 4px; }
+  .md pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: .5rem .6rem; overflow-x: auto; white-space: pre; }
   .md pre code { background: none; padding: 0; font-size: .85em; }
-  .md blockquote { border-left: 3px solid #3b4252; padding-left: .6rem; color: #b6bcc8; }
-  .md a { color: #9ecbff; }
+  .md blockquote { border-left: 3px solid #3b4252; padding-left: .6rem; color: var(--fg-soft); }
+  .md a { color: var(--blue); }
   .md strong { color: #fff; }
   .actions { display: inline-flex; gap: .4rem; }
   button.stop { font: inherit; font-size: .75rem; padding: .1rem .5rem; border-radius: 4px; cursor: pointer;
-    border: 1px solid #3b4252; background: #161b22; color: #e6e6e6; }
-  button.stop.hard { border-color: #f85149; color: #ff7b72; }
+    border: 1px solid #3b4252; background: #161b22; color: var(--fg); }
+  button.stop.hard { border-color: #f85149; color: var(--red); }
   button.stop:disabled { opacity: .5; cursor: default; }
+  button.fold { font: inherit; font-size: .75rem; padding: .1rem .5rem; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--line); background: transparent; color: var(--muted); }
+  button.fold:hover { color: var(--fg); border-color: #3b4252; }
   [hidden] { display: none; }
 </style>
 </head>
@@ -207,14 +265,16 @@ export function renderRunPage(id: string, token: string): string {
     <button class="stop soft" data-mode="soft" title="Soft stop: no new steps, the agent writes up what it has">Stop</button>
     <button class="stop hard" data-mode="hard" title="Hard stop: abort now, no summary, free the sandbox">Kill</button>
   </span>
+  <button class="fold" id="fold" data-open="0" title="Open every call card">Expand all</button>
   <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>
   ${renderNav("runs")}
 </header>
-<section class="block" id="request" hidden><h2><span>Request</span><span class="ts" id="requestts"></span></h2><div class="md" id="requesttext"></div></section>
-<ul id="log"><li class="empty" id="placeholder"><span class="body">Waiting for activity…</span></li></ul>
+<section class="block" id="request" hidden><h2><span>Request</span><span class="ts" id="requestts"></span><span class="source" id="source"></span></h2><div class="md" id="requesttext"></div></section>
+<ol id="log"><li class="empty" id="placeholder">Waiting for activity…</li></ol>
 <section class="block" id="answer" hidden><h2><span>Answer</span><span class="ts" id="answerts"></span></h2><div class="md" id="answertext"></div></section>
 <script>
 ${MARKDOWN_RENDERER_SCRIPT}
+${RUN_TIMELINE_SCRIPT}
 (function () {
   var url = ${JSON.stringify(eventsPath)};
   var stopUrl = ${JSON.stringify(stopPath)};
@@ -229,9 +289,24 @@ ${MARKDOWN_RENDERER_SCRIPT}
   var stateDot = document.getElementById("statedot");
   var actions = document.getElementById("actions");
   var placeholder = document.getElementById("placeholder");
+  var source = document.getElementById("source");
+  var timeline = createRunTimeline();
+  // Which calls start open. Failures and sandbox errors are what you came to
+  // read; everything else is one click away. \`?open=tests,build\` on the page
+  // URL overrides the list (any call tag — tests, build, install, git, read,
+  // network, shell, a tool name — or \`all\`).
+  var OPEN_BY_DEFAULT = ["failed", "infra"];
+  var openParam = new URLSearchParams(window.location.search).get("open");
+  if (openParam) OPEN_BY_DEFAULT = openParam.split(",").map(function (t) { return t.trim(); }).filter(Boolean);
+  function opensByDefault(call) {
+    if (OPEN_BY_DEFAULT.indexOf("all") !== -1) return true;
+    for (var i = 0; i < call.tags.length; i++) if (OPEN_BY_DEFAULT.indexOf(call.tags[i]) !== -1) return true;
+    return false;
+  }
   // Set once a stop is requested (from the stream, so a viewer who didn't click
   // sees it too); the end frame then reads "stopped (mode)" not "finished".
   var stopMode = null;
+  var live = false;
   // Connection indicator: color the dot + set its label via classList/textContent
   // (never via raw markup). green = live, amber = connecting, red = disconnected,
   // grey = finished.
@@ -240,27 +315,28 @@ ${MARKDOWN_RENDERER_SCRIPT}
     state.textContent = text;
   }
   // UTC wall-clock label for an event's \`at\`; "" when the event carries none.
-  function fmtTime(at) { return typeof at === "number" ? "[" + new Date(at).toISOString().slice(11, 19) + "] " : ""; }
-  // One timeline row: a gray timestamp span, then a body the caller fills.
-  // Everything is createElement + textContent — summaries are rendered as data.
-  function startRow(cls, e) {
-    if (placeholder) { placeholder.remove(); placeholder = null; }
-    var li = document.createElement("li");
-    li.className = cls;
-    var ts = document.createElement("span");
-    ts.className = "ts";
-    ts.textContent = fmtTime(e.at);
-    li.appendChild(ts);
-    log.appendChild(li);
-    return li;
+  function fmtTime(at) { return typeof at === "number" ? "[" + new Date(at).toISOString().slice(11, 19) + "]" : ""; }
+  // Every node is createElement + textContent — event text is rendered as data.
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
   }
-  function row(cls, e, text) {
-    var li = startRow(cls, e);
-    var body = document.createElement("span");
-    body.className = "body";
-    body.textContent = text;
-    li.appendChild(body);
-    li.scrollIntoView({ block: "nearest" });
+  function stamp(at) { return el("span", "ts", fmtTime(at)); }
+  // The request's origin: channel · user · a link to the thread that started
+  // the run. Only http(s) URLs become links (setAttribute, never markup).
+  function showSource(src) {
+    source.textContent = "";
+    if (!src) return;
+    if (src.channel) source.appendChild(el("span", "", "#" + src.channel));
+    if (src.user) source.appendChild(el("span", "", src.user));
+    if (typeof src.url === "string" && /^https?:\\/\\//.test(src.url)) {
+      var a = el("a", "", "open thread \\u2197");
+      a.setAttribute("href", src.url);
+      a.setAttribute("rel", "noopener noreferrer");
+      source.appendChild(a);
+    }
   }
   // Every markdown surface renders through this guard: a renderer bug must cost
   // at most the formatting of ONE event, never the event or the stream — on any
@@ -268,15 +344,129 @@ ${MARKDOWN_RENDERER_SCRIPT}
   function md(target, text) {
     try { renderMarkdownInto(target, text); } catch (_) { target.textContent = text; }
   }
-  // The model talking between tool calls: markdown through the safe renderer.
-  function proseRow(e) {
-    var li = startRow("assistant", e);
-    var box = document.createElement("div");
-    box.className = "md";
-    li.appendChild(box);
-    md(box, e.text);
-    li.scrollIntoView({ block: "nearest" });
+  // Only follow the stream when the viewer is already at the tail; someone
+  // reading earlier steps keeps their place.
+  function atTail() { return window.innerHeight + window.scrollY >= document.body.scrollHeight - 60; }
+  function follow(node, wasAtTail) { if (wasAtTail) node.scrollIntoView({ block: "nearest" }); }
+
+  // The live tail: pinned last while connected; names the running call or
+  // says the agent is thinking. Removed on \`end\`.
+  var tail = el("li", "tail");
+  var tailDot = el("span", "pulse");
+  var tailText = el("span", "", "");
+  tail.appendChild(tailDot);
+  tail.appendChild(tailText);
+  tail.hidden = true;
+  log.appendChild(tail);
+  function refreshTail() {
+    if (!live) { tail.hidden = true; return; }
+    if (placeholder) { placeholder.remove(); placeholder = null; }
+    var p = timeline.pending();
+    tailText.textContent = p ? "running \\u00b7 " + (p.headline.length > 80 ? p.headline.slice(0, 80) + "\\u2026" : p.headline) : "thinking\\u2026";
+    tail.hidden = false;
   }
+
+  // --- steps ---------------------------------------------------------------
+  var stepNodes = {}; // step.index -> { li, calls }
+  var callNodes = {}; // call.id -> { details, glyph, facts, body }
+  function addStep(step) {
+    if (placeholder) { placeholder.remove(); placeholder = null; }
+    var li = el("li", "step");
+    if (step.narration) {
+      var nar = el("div", "narration");
+      nar.appendChild(stamp(step.narration.at));
+      var box = el("div", "md");
+      nar.appendChild(box);
+      md(box, step.narration.text);
+      li.appendChild(nar);
+    }
+    var calls = el("div", "calls");
+    li.appendChild(calls);
+    log.insertBefore(li, tail);
+    stepNodes[step.index] = { li: li, calls: calls };
+    return li;
+  }
+  function glyphFor(call) {
+    if (call.status === "running") return el("span", "spin");
+    return el("span", "glyph", call.status === "ok" ? "\\u2713" : call.status === "failed" ? "\\u2717" : "\\u26a0");
+  }
+  function fillFacts(node, call) {
+    node.textContent = "";
+    for (var i = 0; i < call.facts.length; i++) {
+      var f = call.facts[i];
+      var bad = call.status !== "ok" && i === 0;
+      node.appendChild(el("span", bad ? "fact bad" : "fact", f));
+    }
+  }
+  function fillBody(node, call) {
+    node.textContent = "";
+    if (!call.result) { node.appendChild(el("div", "none", "running\\u2026")); return; }
+    var text = call.result.output || call.result.summary;
+    if (text) node.appendChild(el("pre", "out", text));
+    else node.appendChild(el("div", "none", "no output"));
+  }
+  function addCall(step, call) {
+    var parent = stepNodes[step.index] ? stepNodes[step.index].calls : addStep(step).lastChild;
+    if (call.quiet) {
+      var q = el("div", "quiet");
+      q.appendChild(stamp(call.startedAt));
+      q.appendChild(el("span", "", "\\u270e " + (call.tool === "update_status" ? "status checklist updated" : call.title)));
+      parent.appendChild(q);
+      callNodes[call.id] = { quiet: q };
+      return q;
+    }
+    var details = el("details", "call " + call.status);
+    var summary = el("summary");
+    summary.appendChild(stamp(call.startedAt));
+    var glyph = glyphFor(call);
+    summary.appendChild(glyph);
+    summary.appendChild(call.shell ? el("span", "dollar", "$") : el("span", "tool", call.tool));
+    summary.appendChild(el("code", "cmd brief", call.headline));
+    summary.appendChild(el("code", "cmd full", call.title));
+    var facts = el("span", "facts");
+    fillFacts(facts, call);
+    summary.appendChild(facts);
+    summary.appendChild(el("span", "chev", "\\u276f"));
+    details.appendChild(summary);
+    var body = el("div", "body");
+    fillBody(body, call);
+    details.appendChild(body);
+    if (allOpen || opensByDefault(call)) details.open = true;
+    parent.appendChild(details);
+    callNodes[call.id] = { details: details, glyph: glyph, facts: facts, body: body };
+    return details;
+  }
+  function settleCall(step, call) {
+    var n = callNodes[call.id];
+    if (!n) return addCall(step, call);
+    if (n.quiet) return n.quiet;
+    n.details.className = "call " + call.status;
+    var glyph = glyphFor(call);
+    n.glyph.replaceWith(glyph);
+    n.glyph = glyph;
+    fillFacts(n.facts, call);
+    fillBody(n.body, call);
+    if (opensByDefault(call)) n.details.open = true;
+    return n.details;
+  }
+  function addNote(change) {
+    var li = el("li", "note");
+    li.appendChild(stamp(change.at));
+    li.appendChild(el("span", "", "\\u23f1 " + change.text));
+    log.insertBefore(li, tail);
+    return li;
+  }
+  // Expand all / Collapse all: flips every card, and every card added later
+  // while "expanded" starts open (a viewer who opened everything wants it all).
+  var fold = document.getElementById("fold");
+  var allOpen = false;
+  fold.addEventListener("click", function () {
+    allOpen = !allOpen;
+    fold.textContent = allOpen ? "Collapse all" : "Expand all";
+    fold.setAttribute("data-open", allOpen ? "1" : "0");
+    var cards = log.querySelectorAll("details.call");
+    for (var i = 0; i < cards.length; i++) cards[i].open = allOpen;
+  });
   function markStopping(mode) {
     stopMode = mode;
     actions.hidden = true; // one request is enough; the stream shows the outcome
@@ -294,44 +484,50 @@ ${MARKDOWN_RENDERER_SCRIPT}
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); markStopping(mode); })
       .catch(function (err) { btn.disabled = false; setConn("red", "stop failed: " + (err && err.message ? err.message : "error")); });
   });
+
+  function apply(change, wasAtTail) {
+    if (change.kind === "input") {
+      requestTs.textContent = fmtTime(change.at);
+      md(requestText, change.text);
+      showSource(change.source);
+      requestBox.hidden = false;
+    } else if (change.kind === "step") {
+      follow(addStep(change.step), wasAtTail);
+    } else if (change.kind === "call") {
+      follow(addCall(change.step, change.call), wasAtTail);
+    } else if (change.kind === "result") {
+      follow(settleCall(change.step, change.call), wasAtTail);
+    } else if (change.kind === "note") {
+      follow(addNote(change), wasAtTail);
+      if ((change.noteKind === "stop_requested" || change.noteKind === "stopped") && change.mode) markStopping(change.mode);
+    } else if (change.kind === "answer") {
+      // The run's final answer — the same text the thread got, as markdown.
+      answerTs.textContent = fmtTime(change.at);
+      md(answerText, change.text);
+      answerBox.hidden = false;
+      follow(answerBox, wasAtTail);
+    }
+  }
   var es = new EventSource(url);
-  es.onopen = function () { if (!stopMode) setConn("green", "live"); };
+  es.onopen = function () { live = true; if (!stopMode) setConn("green", "live"); refreshTail(); };
   es.onmessage = function (m) {
     var e;
     try { e = JSON.parse(m.data); } catch (_) { return; }
-    if (e.type === "input") {
-      // The request, above the log — the first event of the record.
-      requestTs.textContent = fmtTime(e.at);
-      md(requestText, e.text);
-      requestBox.hidden = false;
-    } else if (e.type === "assistant") {
-      proseRow(e);
-    } else if (e.type === "tool_call") {
-      row("call", e, "\\u2192 " + e.summary);
-    } else if (e.type === "tool_result") {
-      row(e.ok ? "ok" : "err", e, (e.ok ? "\\u2713 " : "\\u2717 ") + e.tool + ": " + e.summary);
-    } else if (e.type === "run_note") {
-      row("note", e, "\\u23f1 " + e.summary);
-      if ((e.kind === "stop_requested" || e.kind === "stopped") && e.mode) markStopping(e.mode);
-    } else if (e.type === "answer") {
-      // The run's final answer — the same text the thread got, as markdown via
-      // the safe renderer. Only bring it into view when the viewer is already at
-      // the tail; someone reading earlier rows keeps their place (same rule as
-      // log autoscroll).
-      var atTail = window.innerHeight + window.scrollY >= document.body.scrollHeight - 40;
-      answerTs.textContent = fmtTime(e.at);
-      md(answerText, e.text);
-      answerBox.hidden = false;
-      if (atTail) answerBox.scrollIntoView({ block: "nearest" });
-    }
+    var wasAtTail = atTail();
+    var changes = timeline.push(e);
+    for (var i = 0; i < changes.length; i++) apply(changes[i], wasAtTail);
+    refreshTail();
+    if (wasAtTail && !tail.hidden) tail.scrollIntoView({ block: "nearest" });
   };
   es.addEventListener("end", function () {
+    live = false;
+    refreshTail();
     actions.hidden = true;
     setConn("grey", stopMode ? "stopped (" + stopMode + ")" : "finished");
     es.close();
   });
   es.onerror = function () {
-    if (es.readyState === EventSource.CLOSED) setConn("red", "disconnected");
+    if (es.readyState === EventSource.CLOSED) { live = false; refreshTail(); setConn("red", "disconnected"); }
   };
 })();
 </script>

@@ -425,9 +425,15 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // uncapped like `answer`. Published directly — it is not runner activity, so
     // it never goes through onEvent (no card refresh, no friction input).
     const attachments = attachmentSuffix(msg.images, msg.documents);
+    const source = {
+      ...(msg.sourceUrl ? { url: msg.sourceUrl } : {}),
+      ...(msg.channelName ? { channel: msg.channelName } : {}),
+      ...(msg.userName ? { user: msg.userName } : {}),
+    };
     registry.publish(run.id, {
       type: "input",
       text: redactSecrets(attachments ? `${directives.text} ${attachments}` : directives.text),
+      ...(Object.keys(source).length > 0 ? { source } : {}),
       at: Date.now(),
     });
     const liveLink = liveViewLink(run.id, run.token);

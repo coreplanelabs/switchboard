@@ -62,7 +62,15 @@ export type RunEvent =
    *  one-line suffix), redacted, uncapped. Published by the dispatcher once per
    *  run, right after the run is registered — the first event of the record, so
    *  the run page can lead with what was asked (features/live-view.md item 12). */
-  | { type: "input"; text: string; at?: number }
+  | {
+      type: "input";
+      text: string;
+      /** Where the request came from, for the Request block: the channel and
+       *  user display names and a link back to the triggering message —
+       *  whatever the adapter supplied (all optional). */
+      source?: { url?: string; channel?: string; user?: string };
+      at?: number;
+    }
   /** The model's prose BETWEEN tool calls — text content that rode alongside
    *  tool_use in one completion. Emitted by the runner, redacted, uncapped. The
    *  final text-only completion is NOT one of these (that is the `answer`). */

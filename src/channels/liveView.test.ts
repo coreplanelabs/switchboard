@@ -5,12 +5,14 @@ import {
   escapeHtml,
   parseRunRoute,
   renderRunPage,
+  RUN_TIMELINE_SCRIPT,
   renderRunsIndex,
   serveEvents,
   serveIndexEvents,
   type SseSink,
 } from "./liveView.js";
 import { renderMarkdownInto } from "./markdownLite.js";
+import { createRunTimeline } from "./runTimeline.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
@@ -233,24 +235,28 @@ describe("renderRunsIndex", () => {
 // (the `answer` event) as its own block, via textContent; the index hides its
 // empty-state sentinel even though rows are flex containers.
 describe("final answer on the run page + index empty-state (post-#137 fixes)", () => {
-  it("renders an `answer` event into a dedicated block through the safe markdown renderer", () => {
+  it("renders an `answer` change into a dedicated block through the safe markdown renderer", () => {
     const html = renderRunPage("run-1", "tok-1");
-    expect(html).toContain('e.type === "answer"');
+    expect(html).toContain('change.kind === "answer"');
     expect(html).toContain('id="answer"');
-    expect(html).toMatch(/md\(answerText, e\.text\)/);
+    expect(html).toMatch(/md\(answerText, change\.text\)/);
     expect(html).not.toContain("innerHTML");
-    // The answer only scrolls into view when the viewer is at the tail — a
-    // reader parked on earlier rows keeps their place (review nit, #158).
-    expect(html).toMatch(/if \(atTail\) answerBox\.scrollIntoView/);
+    // Every addition — the answer included — only scrolls into view when the
+    // viewer was already at the tail; a reader parked on earlier steps keeps
+    // their place (review nit, #158). `wasAtTail` is sampled once per event,
+    // BEFORE anything is added, so the addition itself can't defeat the check.
+    expect(html).toMatch(/var wasAtTail = atTail\(\);\s*var changes = timeline\.push\(e\);/);
+    expect(html).toMatch(/function follow\(node, wasAtTail\) \{ if \(wasAtTail\) node\.scrollIntoView/);
+    expect(html).toContain("follow(answerBox, wasAtTail)");
   });
 
   it("every markdown surface renders through a try/catch guard that falls back to textContent (#179 review)", () => {
     const html = renderRunPage("run-1", "tok-1");
     expect(html).toMatch(/function md\(target, text\) \{\s*try \{ renderMarkdownInto\(target, text\); \} catch \(_\) \{ target\.textContent = text; \}/);
     // The three surfaces call the guard, never the renderer directly.
-    expect(html).toContain("md(box, e.text)");
-    expect(html).toContain("md(requestText, e.text)");
-    expect(html).toContain("md(answerText, e.text)");
+    expect(html).toContain("md(box, step.narration.text)");
+    expect(html).toContain("md(requestText, change.text)");
+    expect(html).toContain("md(answerText, change.text)");
     expect(html.match(/renderMarkdownInto\(/g)?.length).toBe(1 + 1); // the definition + the guard's single call
   });
 
@@ -266,47 +272,150 @@ describe("final answer on the run page + index empty-state (post-#137 fixes)", (
 describe("run page timeline (request, assistant turns, timestamps, markdown)", () => {
   const html = renderRunPage("run-1", "tok-1");
 
-  it("inlines the self-contained markdown renderer (String(fn)) and uses it for Request/Answer/assistant", () => {
+  it("inlines the self-contained markdown renderer AND the timeline model (String(fn)), shim first", () => {
     expect(html).toContain(String(renderMarkdownInto));
+    expect(html).toContain(RUN_TIMELINE_SCRIPT);
+    expect(RUN_TIMELINE_SCRIPT).toBe(String(createRunTimeline));
     // The transpiler's keepNames helper (`__name`, emitted by esbuild under tsx)
-    // must resolve in the browser: a no-op shim precedes the inlined source.
+    // must resolve in the browser: a no-op shim precedes BOTH inlined sources.
     const shim = html.indexOf("var __name = function (fn) { return fn; };");
     expect(shim).toBeGreaterThan(-1);
     expect(shim).toBeLessThan(html.indexOf("function renderMarkdownInto("));
-    // every markdown surface goes through the one renderer — never raw markup
-    expect(html).toMatch(/md\(requestText, e\.text\)/);
-    expect(html).toMatch(/md\(answerText, e\.text\)/);
-    expect(html).toMatch(/md\(box, e\.text\)/);
+    expect(shim).toBeLessThan(html.indexOf("function createRunTimeline("));
+    // every event goes through the model; the page applies its changes
+    expect(html).toContain("var timeline = createRunTimeline();");
+    expect(html).toContain("var changes = timeline.push(e);");
     expect(html).not.toContain("innerHTML");
   });
 
-  it("renders an `input` event into a Request block that sits ABOVE the log", () => {
-    expect(html).toContain('e.type === "input"');
+  it("renders the `input` change into a Request block that sits ABOVE the log, the answer below", () => {
+    expect(html).toContain('change.kind === "input"');
     expect(html).toContain('id="request"');
-    expect(html.indexOf('id="request"')).toBeLessThan(html.indexOf('<ul id="log"'));
-    expect(html.indexOf('<ul id="log"')).toBeLessThan(html.indexOf('id="answer"'));
+    expect(html.indexOf('id="request"')).toBeLessThan(html.indexOf('<ol id="log"'));
+    expect(html.indexOf('<ol id="log"')).toBeLessThan(html.indexOf('id="answer"'));
     expect(html).toContain(">Request<");
   });
 
-  it("renders an `assistant` event as its own timeline row, styled distinctly from tool rows", () => {
-    expect(html).toContain('e.type === "assistant"');
-    expect(html).toMatch(/\.assistant\s*\{[^}]*border-left/); // the neutral left-border style
+  it("renders a step's narration as proportional prose and its calls beneath it, on ONE left edge (no rails)", () => {
+    expect(html).toContain('change.kind === "step"');
+    expect(html).toMatch(/li\.step > \.narration\s*\{[^}]*display: flex/);
+    expect(html).not.toMatch(/\.calls\s*\{[^}]*border-left/); // the rail that misaligned with the prose is gone
+    // steps are separated by space that beats the `#log > li` margin reset
+    expect(html).toMatch(/#log > li\.step \+ li\.step\s*\{[^}]*margin-top/);
   });
 
   it("stamps every row and both blocks with a gray UTC [HH:MM:SS] from `at` (omitted when absent)", () => {
     // toISOString().slice(11, 19) is UTC HH:MM:SS regardless of the viewer's zone
     expect(html).toContain("toISOString().slice(11, 19)");
-    expect(html).toMatch(/\.ts\s*\{[^}]*color:\s*#8b93a7/); // gray
+    expect(html).toMatch(/\.ts\s*\{[^}]*color:\s*var\(--dim\)/); // gray
     // no `at` → no bracket: the formatter returns "" for a missing timestamp
-    expect(html).toMatch(/function fmtTime\(at\)\s*\{\s*return typeof at === "number" \? "\[" \+ .*\] " : "";/);
-    // rows and blocks are built from a timestamp span + a body, via createElement/textContent
-    expect(html).toContain('ts.className = "ts"');
-    expect(html).toContain("ts.textContent = fmtTime(e.at)");
+    expect(html).toMatch(/function fmtTime\(at\)\s*\{\s*return typeof at === "number" \? "\[" \+ .*\]" : "";/);
+    // rows are built from a timestamp span + a body, via createElement/textContent
+    expect(html).toContain('function stamp(at) { return el("span", "ts", fmtTime(at)); }');
+    expect(html).toContain("stamp(step.narration.at)");
+    expect(html).toContain("stamp(call.startedAt)");
+    expect(html).toContain("requestTs.textContent = fmtTime(change.at)");
+    expect(html).toContain("answerTs.textContent = fmtTime(change.at)");
   });
 
-  it("keeps the tool rows monospace and the markdown blocks proportional", () => {
-    expect(html).toMatch(/#log > li\.call, #log > li\.ok, #log > li\.err, #log > li\.note\s*\{[^}]*ui-monospace/);
-    expect(html).toMatch(/\.md\s*\{[^}]*-apple-system/);
+  it("keeps the commands monospace and the markdown surfaces proportional", () => {
+    expect(html).toMatch(/body\s*\{[^}]*font: 13px\/1\.5 var\(--mono\)/);
+    expect(html).toMatch(/--mono: ui-monospace/);
+    expect(html).toMatch(/\.md\s*\{[^}]*var\(--sans\)/);
+    expect(html).toMatch(/--sans: -apple-system/);
+  });
+});
+
+// Feature: features/live-view.md item 13 — the run page groups the flat stream
+// into steps and call cards: the command as a collapsible <details> with its
+// truthful status, exit code, size and duration in the header and the redacted
+// output inside; failures open by default; a live tail names what is running.
+describe("run page call cards (grouped timeline, item 13)", () => {
+  const html = renderRunPage("run-1", "tok-1");
+
+  it("renders each call as a native <details> card: <summary> header, output body — no custom toggle JS", () => {
+    expect(html).toContain('el("details", "call " + call.status)');
+    expect(html).toContain('el("summary")');
+    expect(html).toContain('el("pre", "out", text)');
+    expect(html).toMatch(/details\.call > summary::-webkit-details-marker \{ display: none; \}/);
+    expect(html).toMatch(/details\.call > summary:focus-visible \{ outline/); // keyboard-reachable
+  });
+
+  it("the header carries: timestamp, status glyph (spinner while running, ✓ ✗ ⚠ after), `$` for shell / tool chip otherwise, command, facts, chevron", () => {
+    expect(html).toContain('if (call.status === "running") return el("span", "spin");');
+    expect(html).toContain('call.status === "ok" ? "\\u2713" : call.status === "failed" ? "\\u2717" : "\\u26a0"');
+    expect(html).toContain('call.shell ? el("span", "dollar", "$") : el("span", "tool", call.tool)');
+    expect(html).toContain('el("span", bad ? "fact bad" : "fact", f)'); // exit 1 / error / sandbox error read red
+    expect(html).toContain('el("span", "chev", "\\u276f")');
+    expect(html).toMatch(/details\.call\[open\] > summary \.chev \{ transform: rotate\(90deg\); \}/);
+  });
+
+  it("collapsed shows the one-line headline; open shows the full command with a hanging indent for wrapped lines", () => {
+    expect(html).toContain('el("code", "cmd brief", call.headline)');
+    expect(html).toContain('el("code", "cmd full", call.title)');
+    expect(html).toMatch(/details\.call:not\(\[open\]\) > summary \.cmd\.full \{ display: none; \}/);
+    expect(html).toMatch(/details\.call\[open\] > summary \.cmd\.brief \{ display: none; \}/);
+    // the command is its own flex item with pre-wrap, so continuation lines
+    // align under the command's first character, not under the timestamp
+    expect(html).toMatch(/\.cmd \{[^}]*flex: 1 1 auto[^}]*white-space: pre-wrap/);
+    expect(html).toMatch(/\.cmd\.brief \{[^}]*text-overflow: ellipsis/);
+  });
+
+  it("the body shows the redacted output (or `no output` / `running…`), never markup", () => {
+    expect(html).toContain("var text = call.result.output || call.result.summary;");
+    expect(html).toContain('el("div", "none", "no output")');
+    expect(html).toContain('el("div", "none", "running\\u2026")');
+    expect(html).not.toContain("innerHTML");
+    expect(html).not.toContain("insertAdjacentHTML");
+  });
+
+  it("failures and sandbox errors open by default; the list is a page constant overridable with ?open=tag,tag (or all)", () => {
+    expect(html).toContain('var OPEN_BY_DEFAULT = ["failed", "infra"];');
+    expect(html).toContain('new URLSearchParams(window.location.search).get("open")');
+    expect(html).toMatch(/if \(OPEN_BY_DEFAULT\.indexOf\("all"\) !== -1\) return true;/);
+    expect(html).toContain("if (allOpen || opensByDefault(call)) details.open = true;"); // at creation (replayed backlog)
+    expect(html).toContain("if (opensByDefault(call)) n.details.open = true;"); // when the result lands
+  });
+
+  it("has an Expand all / Collapse all toggle that also applies to cards added later", () => {
+    expect(html).toContain('id="fold"');
+    expect(html).toContain('fold.textContent = allOpen ? "Collapse all" : "Expand all";');
+    expect(html).toContain('log.querySelectorAll("details.call")');
+  });
+
+  it("update_status is one muted line, not a card", () => {
+    expect(html).toContain("if (call.quiet) {");
+    expect(html).toContain('"status checklist updated"');
+  });
+
+  it("a live tail row is pinned last while connected — naming the running command or `thinking…` — and removed at end/disconnect", () => {
+    expect(html).toContain('var tail = el("li", "tail");');
+    expect(html).toContain("log.insertBefore(li, tail)"); // steps and notes go above the tail
+    expect(html).toMatch(/tailText\.textContent = p \? "running \\u00b7 " \+ .*p\.headline/);
+    expect(html).toContain(': "thinking\\u2026"');
+    expect(html).toMatch(/es\.onopen = function \(\) \{ live = true;[^}]*refreshTail\(\);/);
+    expect(html).toMatch(/es\.addEventListener\("end", function \(\) \{\s*live = false;\s*refreshTail\(\);/);
+    expect(html).toMatch(/if \(!live\) \{ tail\.hidden = true; return; \}/);
+    expect(html).toMatch(/li\.tail \.pulse \{[^}]*animation: pulse/);
+  });
+
+  it("the Request block shows where the request came from: #channel · user · an `open thread` link (http(s) only, noopener)", () => {
+    expect(html).toContain('id="source"');
+    expect(html).toContain("showSource(change.source)");
+    expect(html).toContain('source.appendChild(el("span", "", "#" + src.channel))');
+    expect(html).toMatch(/if \(typeof src\.url === "string" && \/\^https\?:\\\/\\\/\/\.test\(src\.url\)\)/);
+    expect(html).toContain('a.setAttribute("href", src.url)');
+    expect(html).toContain('a.setAttribute("rel", "noopener noreferrer")');
+  });
+
+  it("leaves room at the bottom so the tail never sits on the viewport edge", () => {
+    expect(html).toMatch(/body\s*\{[^}]*padding: 1\.25rem 1\.25rem 8rem/);
+  });
+
+  it("the inlined page script parses as JavaScript (shim + both String(fn) sources + the IIFE)", () => {
+    const script = html.slice(html.lastIndexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
+    // No DOM here — just prove the source is syntactically sound as shipped.
+    expect(() => new Function(script)).not.toThrow();
   });
 });
 
