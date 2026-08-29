@@ -188,7 +188,8 @@ npm run deploy
 #    switchboard-resident.coreplanelabs.dev (per-repo Durable Objects on
 #    Cloudflare Sandbox 1.0, R2 bucket for stamped snapshots, watchdog cron)
 cd ../cloudflare-resident && npm install
-npm run secrets   # RESIDENT_ADMIN_TOKEN, RESIDENT_OPERATOR_TOKEN, GITHUB_APP_*
+npm run secrets   # RESIDENT_ADMIN_TOKEN, RESIDENT_OPERATOR_TOKEN, GITHUB_APP_*,
+                  # RESIDENT_READ_TOKEN (optional: read-only /residents + debug info/schedules/threads)
                   # (the resident holds its own copy of the App key — the
                   # second credential domain; see trust model above)
 env -u CLOUDFLARE_API_TOKEN npm run deploy   # ends with a wake ping: /healthz 200

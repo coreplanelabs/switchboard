@@ -12,8 +12,9 @@
 // note '/' rules the id out of hostname-based preview URLs, use tunnels).
 //
 // Route surface (JSON in/out; every route below requires a bearer secret):
-//   admin scope     POST /onboard /offboard /reconfigure /rebuild /debug   GET /residents
-//   operator scope  POST /attach /exec /read /write /op                    GET /status
+//   admin scope     POST /onboard /offboard /reconfigure /rebuild /debug (all ops)
+//   read scope      GET /residents   POST /debug ops info|schedules|threads only (admin implied)
+//   operator scope  POST /attach /detach /exec /read /write /op            GET /status
 //   unauthenticated GET /healthz (deploy wake ping; touches no DO)
 //
 // Lifecycle engine: alarm-driven provisioning (clone → install/build →
@@ -73,6 +74,10 @@ interface Env {
   BACKUP_BUCKET: R2Bucket;
   RESIDENT_ADMIN_TOKEN: string;
   RESIDENT_OPERATOR_TOKEN: string;
+  /** Optional read-only bearer: GET /residents and the read-only /debug ops
+   *  (info, schedules, threads) — for dashboards and humans who need to look,
+   *  never to change anything. Unset = no read scope exists. */
+  RESIDENT_READ_TOKEN?: string;
   // GitHub App identity for minting installation tokens inside residents
   // (provisioned via secrets.txt; when unset, clones/fetches run anonymously —
   // fine for public repos — and any explicit mint attempt is a command-level
@@ -1122,6 +1127,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  last snapshot still serving. */
   async onRefreshAlarm(payload: string): Promise<void> {
     const resource = payload || ((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
+    let refreshCounted = false;
     const before = await this.getStatus();
     // down chains stay down (U8's rebuild is the escape hatch); onboarding is
     // owned by provisioning, which arms the first refresh itself.
@@ -1145,14 +1151,21 @@ export class ResidentDO extends Sandbox<Env> {
       // dirty live tree pins the container awake: sleep destroys the disk and
       // uncommitted work is not snapshotted.
       if (await this.isIdle()) {
-        if (!facts.idleSince) await this.ctx.storage.put(FACTS_KEY, { ...facts, idleSince: new Date().toISOString() } satisfies RepoFacts);
+        // isIdle awaited (git status per live tree) — re-read before writing.
+        const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
+        if (!now.idleSince) await this.ctx.storage.put(FACTS_KEY, { ...now, idleSince: new Date().toISOString() } satisfies RepoFacts);
         this.idleRearm = true;
         return; // finally re-arms at IDLE_REFRESH_INTERVAL_S
       }
       if (facts.idleSince) {
-        const { idleSince: _woke, ...awake } = facts;
+        const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
+        const { idleSince: _woke, ...awake } = now;
         await this.ctx.storage.put(FACTS_KEY, awake satisfies RepoFacts);
       }
+      // From here the cycle mutates the mirror/checkout: count it as in flight
+      // so an attach-path reconcileImage never stops the container under it.
+      this.refreshesInFlight++;
+      refreshCounted = true;
 
       // KTD12: token-mint failure is a command-level error — the resident
       // keeps serving the last snapshot and lifecycle state is NOT flipped.
@@ -1229,6 +1242,10 @@ export class ResidentDO extends Sandbox<Env> {
       // half-updated pair.
       const updatedFacts: RepoFacts = { ...facts, sha, lockfileHash, lastRefreshAt: new Date().toISOString() };
       delete updatedFacts.lastRefreshError;
+      // A wake cycle cleared idleSince above; `facts` was read at alarm entry and
+      // still carries it — never resurrect it here (the dash would show a stale
+      // "idle since" and every attach would take the wake-fetch path).
+      delete updatedFacts.idleSince;
       if (snap) {
         await this.ctx.storage.put({ [FACTS_KEY]: updatedFacts, [SNAPSHOT_KEY]: snap });
         await this.writeFile(READY_MARKER, `${sha}\n`);
@@ -1242,6 +1259,7 @@ export class ResidentDO extends Sandbox<Env> {
       const reason = err instanceof StepError ? `${err.step}-failed: ${err.message}` : `refresh-failed: ${errMsg(err)}`;
       await this.setResidentState("degraded", reason); // last snapshot keeps serving
     } finally {
+      if (refreshCounted) this.refreshesInFlight--;
       const state = await this.ctx.storage.get<ResidentState>(STATE_KEY);
       const interval = this.idleRearm ? IDLE_REFRESH_INTERVAL_S : REFRESH_INTERVAL_S;
       this.idleRearm = false;
@@ -1285,14 +1303,23 @@ export class ResidentDO extends Sandbox<Env> {
       token = await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null);
     }
     try {
-      await this.withMirrorLock(() =>
-        this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "wake-fetch", GIT_NETWORK_TIMEOUT_MS),
+      // Bounded like attach's own clone section: a full checkout rebuild
+      // holding the mutex must not stall a wake attach for minutes — on
+      // expiry (MirrorBusyError) proceed on the last mirror, same as a failed
+      // fetch. The background full cycle armed below repays the staleness.
+      await this.withMirrorLock(
+        () => this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "wake-fetch", GIT_NETWORK_TIMEOUT_MS),
+        ATTACH_MUTEX_WAIT_MS,
       );
     } catch (err) {
-      console.log(`wake-fetch failed (attach proceeds on the last mirror): ${errMsg(err)}`);
+      console.log(`wake-fetch ${err instanceof MirrorBusyError ? "skipped (mirror busy)" : "failed"} — attach proceeds on the last mirror: ${errMsg(err)}`);
     }
-    if (facts.idleSince) {
-      const { idleSince: _woke, ...awake } = facts;
+    // Re-read before writing: the awaits above yielded, and a concurrent
+    // refresh cycle may have advanced facts (sha/lastRefreshAt) meanwhile —
+    // never write a stale snapshot back over it.
+    const fresh = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
+    if (fresh?.idleSince) {
+      const { idleSince: _woke, ...awake } = fresh;
       await this.ctx.storage.put(FACTS_KEY, awake satisfies RepoFacts);
     }
     await this.armRefresh(resource, 1); // full cycle now, in the background; it re-arms at the active cadence
@@ -1926,8 +1953,13 @@ export class ResidentDO extends Sandbox<Env> {
     // have its tree removed under it.
     const busyNow = this.threadOpsInFlight.get(threadKey) ?? 0;
     if (busyNow > 0) return { released: false, reason: `busy: ${busyNow} operation(s) started during the clean check — kept`, user: binding.user };
-    const user = binding.user;
-    await this.evictBinding(binding, active, `detach`);
+    // Same re-read as the sweep: a re-attach during the clean check means a
+    // fresh tree we must not remove from a stale snapshot.
+    const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+    if (!current || current.evicted) return { released: false, reason: "already-evicted" };
+    if (current.lastAttachAt !== binding.lastAttachAt) return { released: false, reason: "re-attached during the clean check — kept", user: current.user };
+    const user = current.user;
+    await this.evictBinding(current, active, `detach`);
     return { released: true, user };
   }
 
@@ -1959,9 +1991,11 @@ export class ResidentDO extends Sandbox<Env> {
    *  their own image check (mid clone/install under the mirror lock). */
   private inFlightCount(): number {
     const threadOps = [...this.threadOpsInFlight.values()].reduce((a, n) => a + n, 0);
-    return threadOps + this.opUsersInUse.size + this.attachesInFlight;
+    return threadOps + this.opUsersInUse.size + this.attachesInFlight + this.refreshesInFlight;
   }
   private attachesInFlight = 0;
+  /** A refresh cycle past its idle/reconcile gates (fetching, rebuilding, snapshotting). */
+  private refreshesInFlight = 0;
 
   /** Hourly inactivity sweep (schedule: onWorktreeSweep). Removes worktrees
    *  whose binding is idle past the TTL, releases the user to the pool, and
@@ -1999,7 +2033,15 @@ export class ResidentDO extends Sandbox<Env> {
             continue;
           }
         }
-        await this.evictBinding(binding, active, `worktree-sweep ${resource}`);
+        // Re-read the binding too: a re-attach that completed inside the
+        // clean-check await bumped lastAttachAt and rebuilt the tree — evicting
+        // from this loop's stale snapshot would rm the fresh tree.
+        const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
+        if (!current || current.evicted || current.lastAttachAt !== binding.lastAttachAt) {
+          kept++;
+          continue;
+        }
+        await this.evictBinding(current, active, `worktree-sweep ${resource}`);
         evicted.push(binding.threadKey);
       }
     } finally {
@@ -2143,10 +2185,12 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  /** Debug: enumerate thread bindings (admin scope; no secrets in bindings). */
-  async debugThreads(): Promise<{ threads: ThreadBinding[] }> {
+  /** Debug: enumerate thread bindings (read scope). No secrets live in a
+   *  binding; worktreePath is omitted like getResidentInfo does — internal
+   *  disk layout is not part of the lower-trust read surface. */
+  async debugThreads(): Promise<{ threads: Array<Omit<ThreadBinding, "worktreePath">> }> {
     const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-    return { threads: [...all.values()] };
+    return { threads: [...all.values()].map(({ worktreePath: _internal, ...rest }) => rest) };
   }
 
   /** Debug fault injection: age a binding so the sweep's TTL path can be
@@ -2469,19 +2513,29 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-type Scope = "admin" | "operator";
+type Scope = "admin" | "operator" | "read";
 
-/** Fail closed: unset/empty secrets grant nothing. The admin token is a strict
- *  superset (valid on operator routes); the operator token never opens an
- *  admin route. */
-function hasScope(env: Env, token: string | null, scope: Scope): boolean {
-  if (!token) return false;
-  if (env.RESIDENT_ADMIN_TOKEN && timingSafeEqual(token, env.RESIDENT_ADMIN_TOKEN)) return true;
-  if (scope === "operator" && env.RESIDENT_OPERATOR_TOKEN && timingSafeEqual(token, env.RESIDENT_OPERATOR_TOKEN)) {
-    return true;
-  }
-  return false;
+/** Which token a bearer is, or null. Constant-time per comparison; fail closed
+ *  on unset/empty secrets. */
+function tokenScope(env: Env, token: string | null): Scope | null {
+  if (!token) return null;
+  if (env.RESIDENT_ADMIN_TOKEN && timingSafeEqual(token, env.RESIDENT_ADMIN_TOKEN)) return "admin";
+  if (env.RESIDENT_OPERATOR_TOKEN && timingSafeEqual(token, env.RESIDENT_OPERATOR_TOKEN)) return "operator";
+  if (env.RESIDENT_READ_TOKEN && timingSafeEqual(token, env.RESIDENT_READ_TOKEN)) return "read";
+  return null;
 }
+
+/** Admin is a strict superset of everything. Operator opens operator routes
+ *  only; read opens read routes only — neither ever reaches an admin route. */
+function hasScope(env: Env, token: string | null, scope: Scope): boolean {
+  const have = tokenScope(env, token);
+  if (have === null) return false;
+  if (have === "admin") return true;
+  return have === scope;
+}
+
+/** /debug ops a read-scope bearer may run: pure reads of DO storage/schedules. */
+const READ_DEBUG_OPS = new Set(["info", "schedules", "threads"]);
 
 // ---------------------------------------------------------------------------
 // Request validation
@@ -2628,8 +2682,8 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/offboard": { scope: "admin", method: "POST" },
   "/reconfigure": { scope: "admin", method: "POST" },
   "/rebuild": { scope: "admin", method: "POST" },
-  "/residents": { scope: "admin", method: "GET" },
-  "/debug": { scope: "admin", method: "POST" },
+  "/residents": { scope: "read", method: "GET" }, // admin implied; read-only bearer allowed
+  "/debug": { scope: "read", method: "POST" }, // per-op: READ_DEBUG_OPS for read scope, everything for admin
   "/status": { scope: "operator", method: "GET" },
   "/attach": { scope: "operator", method: "POST" },
   "/detach": { scope: "operator", method: "POST" },
@@ -2695,9 +2749,11 @@ export default {
     // Auth precedes existence: unknown paths demand admin before revealing
     // 404 vs 401, so an unauthenticated scanner learns nothing.
     const route = ROUTES[url.pathname];
-    if (!hasScope(env, bearerToken(request), route?.scope ?? "admin")) {
+    const bearer = bearerToken(request);
+    if (!hasScope(env, bearer, route?.scope ?? "admin")) {
       return json({ error: "unauthorized" }, 401);
     }
+    const isAdmin = tokenScope(env, bearer) === "admin";
     if (!route) return json({ error: "unknown route" }, 404);
     if (request.method !== route.method) return json({ error: `${route.method} only` }, 405);
 
@@ -2716,8 +2772,14 @@ export default {
           return await handleRebuild(env, body);
         case "/residents":
           return await handleResidents(env);
-        case "/debug":
+        case "/debug": {
+          // Read scope may only run the pure-read ops; the check happens AFTER
+          // auth so an unauthenticated caller still learns nothing extra.
+          const op = typeof body.op === "string" ? body.op : "";
+          // Authenticated but under-scoped → 403 (401 is reserved for "no valid bearer").
+          if (!isAdmin && !READ_DEBUG_OPS.has(op)) return json({ error: "forbidden: admin scope required for this op" }, 403);
           return await handleDebug(env, body);
+        }
         case "/status":
           return await handleStatus(env, url);
         case "/attach":
@@ -3235,7 +3297,8 @@ function streamOp(pending: Promise<Awaited<ReturnType<ResidentDO["runOp"]>>>): R
 /** Admin diagnostic surface, used by U3's live validation (kill-refresh /
  *  stop-container simulate dead chains and platform sleeps; mint-token proves
  *  the command-level mint failure shape without exposing token material).
- *  Deliberately admin-scope-only and side-effect-explicit. */
+ *  Side-effect-explicit; every op is admin-scope except the pure reads
+ *  info/schedules/threads, which the read scope may also run. */
 async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Response> {
   const op = typeof body.op === "string" ? body.op : "";
   if (op === "run-watchdog") return json(await runWatchdog(env));
