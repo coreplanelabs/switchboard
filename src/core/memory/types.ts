@@ -12,7 +12,7 @@
 export interface MemoryRecord {
   /** Internal id, namespaced per AGENTS.md invariant 4 (`mem:<scopeKey>:<n>`). */
   id: string;
-  /** The resource this record belongs to, e.g. `org:coreplanelabs`. */
+  /** The resource this record belongs to: `org:coreplanelabs` or `user:slack:U…`. */
   scopeKey: string;
   /** Semantic fact vs. episodic thread summary. */
   kind: "fact" | "summary";
@@ -69,17 +69,17 @@ export interface MemoryStore {
   write(scopeKey: string, records: MemoryCandidate[]): Promise<void>;
 }
 
-/** Which resource memory is scoped to. PR1 implements `org` only; `repo`/
- *  `channel` are a PR4 gap (features/memory.md). Tighter scope prevents
- *  cross-context poisoning (mirrors Claude's compartmentalization). */
-export type MemoryScope = "org";
+/** The resources memory is scoped to. `org` is the shared resource every
+ *  request reads; `user` is the requesting person's own records (#107 PR B),
+ *  read and written only for that person. `repo`/`channel` remain a gap
+ *  (features/memory.md). Tighter scope prevents cross-context poisoning
+ *  (mirrors Claude's compartmentalization). */
+export type MemoryScope = "org" | "user";
 
 /** The `memory` config section (all optional; default OFF). */
 export interface MemoryConfig {
   /** Master switch. Default false → `NullMemoryStore` → zero behavior change. */
   enabled?: boolean;
-  /** Which resource to scope to. Default `org`. */
-  scope?: MemoryScope;
   /** Max records retrieved/injected per request. Default 8. */
   limit?: number;
   /** Hard token budget for the injected block. Default ~800. */

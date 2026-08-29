@@ -267,15 +267,17 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     }
 
     // Cross-session memory (Area 7c, #85) — READ path. BEFORE assembling model
-    // input, retrieve scope-relevant records and render a dedicated advisory
-    // context block (kept OUT of history: it rides on the system prompt below,
-    // never mixed into the turns). Flag-gated: with memory disabled (default)
+    // input, retrieve scope-relevant records (the org's + this user's own,
+    // #107 PR B) and render a dedicated advisory context block (kept OUT of
+    // history: it rides on the system prompt below, never mixed into the
+    // turns). Flag-gated: with memory disabled (default)
     // this resolves to undefined via a NullMemoryStore, leaving `messages` and
     // `system` byte-identical to memory-off.
     const memoryBlock = await memoryContextBlock(
       deps.config.config.memory,
       deps.memory,
       directives.text,
+      msg.userId,
     );
 
     const messages = buildMessages(history, directives.text, msg.images, msg.documents);
@@ -541,6 +543,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       gate: { toolCalls, historyTurns: history.length },
       threadKey: msg.threadKey,
       runId: run.id,
+      userId: msg.userId,
       history,
       request: directives.text,
       answer,

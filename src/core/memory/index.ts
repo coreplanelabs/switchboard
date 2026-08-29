@@ -1,8 +1,8 @@
 import { parseModelRef, type Provider } from "../../providers/types.js";
 import type { HistoryItem } from "../types.js";
 import type { MemoryConfig, MemoryStore } from "./types.js";
-import { applyBudget, DEFAULT_MEMORY_LIMIT, DEFAULT_MEMORY_TOKENS, renderMemoryBlock } from "./scorer.js";
-import { deriveScopeKey } from "./scope.js";
+import { applyBudget, DEFAULT_MEMORY_LIMIT, DEFAULT_MEMORY_TOKENS, renderMemoryBlock, scoreRecord } from "./scorer.js";
+import { listScopeKeys, requestScopeKeys } from "./scope.js";
 import { selectMemoryStore } from "./stores.js";
 import { reflect, shouldReflect, trackReflection, type ReflectGateInput } from "./reflection.js";
 
@@ -30,7 +30,7 @@ export {
   type ScoreWeights,
   type MemoryBudget,
 } from "./scorer.js";
-export { deriveScopeKey, ORG_RESOURCE } from "./scope.js";
+export { deriveScopeKey, requestScopeKeys, listScopeKeys, ORG_RESOURCE, type ScopeContext, type RequestScopeKeys } from "./scope.js";
 export { NullMemoryStore, InMemoryMemoryStore, selectMemoryStore } from "./stores.js";
 export { normalizeText, rankRecords, planWrite, mintRecord, type WritePlan } from "./engine.js";
 export { WorkerMemoryStore, MEMORY_WORKER_TIMEOUT_MS, type WorkerMemoryStoreOptions } from "./workerStore.js";
@@ -52,6 +52,8 @@ export {
   type ReflectionProvenance,
   type ParsedReflection,
   type ReflectDeps,
+  type MemoryAudience,
+  type RoutedCandidate,
 } from "./reflection.js";
 
 /**
@@ -61,7 +63,9 @@ export {
  * caller, so its latency and failures cannot reach the user reply. Memory off
  * → returns without doing anything (zero behavior change). The model comes from
  * `memory.model`, falling back to the run's own resolved ref — both are config-
- * resolved `<provider>/<model>` strings (AGENTS.md invariant 7).
+ * resolved `<provider>/<model>` strings (AGENTS.md invariant 7). Records are
+ * written to the org scope and — for `user`-audience facts — the requesting
+ * user's own scope (#107 PR B).
  */
 export function scheduleReflection(input: {
   cfg: MemoryConfig | undefined;
@@ -72,6 +76,8 @@ export function scheduleReflection(input: {
   gate: ReflectGateInput;
   threadKey: string;
   runId: string;
+  /** The requesting user's namespaced id (`slack:U…`) → their memory scope. */
+  userId?: string;
   history: HistoryItem[];
   request: string;
   answer: string;
@@ -93,7 +99,7 @@ export function scheduleReflection(input: {
       provider,
       model,
       store: selectMemoryStore(input.cfg, input.store),
-      scopeKey: deriveScopeKey(input.cfg.scope ?? "org"),
+      scopeKeys: requestScopeKeys(input.userId),
       history: input.history,
       request: input.request,
       answer: input.answer,
@@ -106,24 +112,41 @@ export function scheduleReflection(input: {
 
 /**
  * The dispatcher-facing read path: select the store (NullMemoryStore when
- * disabled), derive the scope key, retrieve, apply the hard budget, and render
- * the dedicated advisory context block. Returns `undefined` when memory is off
- * or nothing matches — the caller then injects nothing, leaving the model input
- * byte-identical to memory-off.
+ * disabled), derive the request's scope keys (org + the requesting user's own
+ * scope, #107 PR B), retrieve each, merge into ONE ranked pool, apply the hard
+ * budget, and render the dedicated advisory context block. Returns `undefined`
+ * when memory is off or nothing matches — the caller then injects nothing,
+ * leaving the model input byte-identical to memory-off.
+ *
+ * Isolation is by construction: the only user scope ever queried is the one
+ * derived from `userId`, so another person's records cannot be returned.
  */
 export async function memoryContextBlock(
   cfg: MemoryConfig | undefined,
   injected: MemoryStore | undefined,
   query: string,
+  userId?: string,
 ): Promise<string | undefined> {
   const store = selectMemoryStore(cfg, injected);
-  const scopeKey = deriveScopeKey(cfg?.scope ?? "org");
+  const scopeKeys = listScopeKeys(requestScopeKeys(userId));
   const limit = cfg?.limit ?? DEFAULT_MEMORY_LIMIT;
-  const records = await store.retrieve({ scopeKey, query, limit });
-  const budgeted = applyBudget(records, {
+  const perScope = await Promise.all(scopeKeys.map((scopeKey) => store.retrieve({ scopeKey, query, limit })));
+  // Each store call returns its scope's top `limit`, already ranked; re-scoring
+  // the union with the same pure scorer gives one cross-scope order so the
+  // budget applies to the pool, not per scope. Because `retrieve` has just
+  // bumped `lastUsedAt` on every returned record, their recency terms are all
+  // ≈1 here and the merge order is decided by keyword match — recency did its
+  // work inside each scope's own ranking. Stable sort: ties keep org first.
+  const t = Date.now();
+  const merged = perScope
+    .flat()
+    .map((r) => ({ r, score: scoreRecord(r, query, t) }))
+    .sort((a, b) => b.score - a.score)
+    .map(({ r }) => r);
+  const budgeted = applyBudget(merged, {
     maxRecords: limit,
     maxTokens: cfg?.maxTokens ?? DEFAULT_MEMORY_TOKENS,
   });
   if (budgeted.length === 0) return undefined;
-  return renderMemoryBlock(scopeKey, budgeted);
+  return renderMemoryBlock(scopeKeys.join(" + "), budgeted);
 }

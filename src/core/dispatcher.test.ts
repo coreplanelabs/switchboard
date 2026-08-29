@@ -1542,9 +1542,10 @@ describe("cross-session memory (Area 7c, #85)", () => {
 
     const sys = provider.requests[0].system;
     expect(sys).toBeDefined();
-    expect(sys!.startsWith("Background memory for org:coreplanelabs (may be outdated — verify before acting):")).toBe(
-      true,
-    );
+    // The block names every scope read: the org, then the requesting user's.
+    expect(
+      sys!.startsWith("Background memory for org:coreplanelabs + user:slack:UX (may be outdated — verify before acting):"),
+    ).toBe(true);
     expect(sys).toContain("the deploy command is npm run deploy");
     expect(sys).toContain("You are Switchboard"); // the general agent's own prompt is still there
   });
@@ -1809,6 +1810,51 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     expect(replies.some((r) => r.includes("aborted"))).toBe(true);
     expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(0);
     expect(await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy command", limit: 10 })).toEqual([]);
+  });
+
+  // Feature: features/memory.md (#107 PR B) — user-scoped memory end to end:
+  // a `user`-audience fact from U1's run lands in U1's scope, surfaces on U1's
+  // next request, and never on U2's; org facts reach both.
+  it("user-scoped memory: a user's own records surface for them and never for another user", async () => {
+    const reply = JSON.stringify({
+      facts: [
+        { text: "the deploy command is npm run deploy", confidence: 0.9, audience: "org" },
+        { text: "this user wants a preview link before every deploy", confidence: 0.9, audience: "user" },
+      ],
+      summary: "",
+    });
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        if (req.system === REFLECTION_SYSTEM) return { content: [{ type: "text", text: reply }], stopReason: "end_turn" };
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const store = new InMemoryMemoryStore();
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+
+    await dispatch(deps, msg("how do we deploy?", "slack:U1"), fakeIO(longHistory).io);
+    await drainReflections();
+    expect((await store.retrieve({ scopeKey: "user:slack:U1", query: "preview link deploy", limit: 10 })).map((r) => r.text)).toEqual([
+      "this user wants a preview link before every deploy",
+    ]);
+    expect(await store.retrieve({ scopeKey: "user:slack:U2", query: "preview link deploy", limit: 10 })).toEqual([]);
+
+    requests.length = 0;
+    await dispatch(deps, msg("deploy preview link?", "slack:U1"), fakeIO().io);
+    const u1System = requests[0].system!;
+    expect(u1System).toContain("Background memory for org:coreplanelabs + user:slack:U1");
+    expect(u1System).toContain("this user wants a preview link before every deploy");
+    expect(u1System).toContain("the deploy command is npm run deploy");
+
+    requests.length = 0;
+    await dispatch(deps, msg("deploy preview link?", "slack:U2"), fakeIO().io);
+    const u2System = requests[0].system!;
+    expect(u2System).toContain("Background memory for org:coreplanelabs + user:slack:U2");
+    expect(u2System).not.toContain("preview link before every deploy");
+    expect(u2System).toContain("the deploy command is npm run deploy");
   });
 
   it("memory disabled → no reflection even on a qualifying run (zero behavior change)", async () => {
