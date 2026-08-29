@@ -20,7 +20,18 @@ export interface Scope {
   model?: string;
   /** Per-agent model overrides for this scope. */
   models?: Record<string, string>;
+  /**
+   * Free-text custom instructions folded into the system prompt as ADVISORY
+   * content only (#107 phase 2). Channel text applies to every run in the
+   * channel; user text applies only to runs that user requests. Never read by
+   * `resolve()` or any permission gate. Capped at MAX_INSTRUCTIONS_LENGTH
+   * because it rides every turn.
+   */
+  instructions?: string;
 }
+
+/** Upper bound on one scope's `instructions` text (prepended to every turn). */
+export const MAX_INSTRUCTIONS_LENGTH = 2000;
 
 export interface Permissions {
   /** Users who bypass all restrictions below. */
@@ -116,6 +127,9 @@ export class ConfigStore {
       : { channels: {}, users: {} };
     this.overrides.channels ??= {};
     this.overrides.users ??= {};
+    // The chat command enforces the cap on write; a hand-edited overrides.json
+    // is the one way around it, so hold it to the same bound at load.
+    validateInstructions(this.overrides, `overrides (${this.overridesPath})`);
   }
 
   private channelScope(channelId: string): Scope {
@@ -220,14 +234,20 @@ export class ConfigStore {
     return Object.keys(agents).filter((a) => !this.canRunAgent(userId, a));
   }
 
+  /**
+   * Merge a patch into a scope's runtime override. A key set to `undefined`
+   * in the patch is DELETED from the override (not stored as undefined), so
+   * the in-memory scope and the reloaded-from-disk scope agree: the static
+   * config.yaml value for that key shows through again in both.
+   */
   setChannelOverride(channelId: string, patch: Scope): Scope {
-    this.overrides.channels[channelId] = { ...this.overrides.channels[channelId], ...patch };
+    this.overrides.channels[channelId] = mergeScope(this.overrides.channels[channelId], patch);
     this.save();
     return this.channelScope(channelId);
   }
 
   setUserOverride(userId: string, patch: Scope): Scope {
-    this.overrides.users[userId] = { ...this.overrides.users[userId], ...patch };
+    this.overrides.users[userId] = mergeScope(this.overrides.users[userId], patch);
     this.save();
     return this.userScope(userId);
   }
@@ -250,6 +270,10 @@ export class ConfigStore {
       `*Channel scope:* ${fmtScope(this.channelScope(channelId))}`,
       `*Your scope:* ${fmtScope(this.userScope(userId))}`,
     ];
+    const channelInstructions = this.channelScope(channelId).instructions?.trim();
+    if (channelInstructions) lines.push(`*Channel instructions:* ${channelInstructions}`);
+    const userInstructions = this.userScope(userId).instructions?.trim();
+    if (userInstructions) lines.push(`*Your instructions:* ${userInstructions}`);
     const denied = this.restrictedAgentsFor(userId);
     if (denied.length > 0) {
       lines.push(`*Not available to you:* ${denied.map((a) => `\`${a}\``).join(", ")} (ask ${this.adminsHint()})`);
@@ -264,6 +288,26 @@ export class ConfigStore {
     mkdirSync(dirname(this.overridesPath), { recursive: true });
     writeFileSync(this.overridesPath, JSON.stringify(this.overrides, null, 2));
   }
+}
+
+/** Every scope's `instructions` (both kinds, either file) must be a string within the cap. */
+function validateInstructions(layer: { channels?: Record<string, Scope>; users?: Record<string, Scope> }, source: string): void {
+  for (const [kind, scopes] of [["channels", layer.channels], ["users", layer.users]] as const) {
+    for (const [id, scope] of Object.entries(scopes ?? {})) {
+      if (scope.instructions !== undefined && typeof scope.instructions !== "string") {
+        throw new Error(`${source}: ${kind}.${id}.instructions must be a string`);
+      }
+      if ((scope.instructions?.length ?? 0) > MAX_INSTRUCTIONS_LENGTH) {
+        throw new Error(`${source}: ${kind}.${id}.instructions exceeds ${MAX_INSTRUCTIONS_LENGTH} characters`);
+      }
+    }
+  }
+}
+
+function mergeScope(current: Scope | undefined, patch: Scope): Scope {
+  const merged: Record<string, unknown> = { ...current, ...patch };
+  for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key];
+  return merged as Scope;
 }
 
 function fmtScope(s: Scope): string {
@@ -290,6 +334,9 @@ function validateConfig(cfg: AppConfig): void {
   if (!AGENTS[cfg.defaults.agent]) {
     throw new Error(`defaults.agent "${cfg.defaults.agent}" is not a known agent`);
   }
+  // Static instructions ride every turn too — hold them to the same cap the
+  // chat command enforces, and fail loudly at load rather than silently truncate.
+  validateInstructions(cfg, "config.yaml");
   // Normalize permissions.repos keys to lowercase once at load: every caller
   // looks the repo up by a lowercased slug (parseSlug/slugOf/repoResourceId),
   // so a mixed-case allowlist key (e.g. "octocat/Hello-World") would otherwise
