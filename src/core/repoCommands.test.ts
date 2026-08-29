@@ -263,6 +263,34 @@ describe("onboard parsing", () => {
     expect(reply).toContain("429");
   });
 
+  it("`repo list` names an active test override (cap/floor lowered for live checks) so nobody mistakes it for the real cap", async () => {
+    const s = store();
+    const c = mockClient({
+      residents: ok({
+        cap: 2,
+        capDefault: 6,
+        testOverrides: { cap: 2, floorS: 600, floorDefaultS: 3600, setAt: "2026-08-29T23:00:00.000Z", build: "gc51" },
+        count: 1,
+        residents: [{ resource: "repo:acme/api", defaultRef: "main", live: { state: "warm" } }],
+      }),
+    });
+    const reply = await handleRepoCommand(s, msg("repo list"), c);
+    expect(reply).toContain("(1/2)");
+    expect(reply).toContain("⚠️ test overrides active");
+    expect(reply).toContain("cap 2 (default 6)");
+    expect(reply).toContain("LRU floor 600s (default 3600s)");
+    expect(reply).toContain("2026-08-29T23:00:00.000Z");
+  });
+
+  it("`repo list` without an override carries no warning", async () => {
+    const s = store();
+    const c = mockClient({
+      residents: ok({ cap: 6, capDefault: 6, count: 1, residents: [{ resource: "repo:acme/api", defaultRef: "main", live: { state: "warm" } }] }),
+    });
+    const reply = await handleRepoCommand(s, msg("repo list"), c);
+    expect(reply).not.toContain("test overrides");
+  });
+
   it("`--evict-coldest` opts the onboard into LRU eviction (#50): the body carries evictColdest:true", async () => {
     const s = store();
     const c = mockClient();

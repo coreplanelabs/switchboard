@@ -298,7 +298,17 @@ function renderList(r: ResidentAdminResponse): string {
     const refreshed = typeof live.lastRefreshAt === "string" && live.lastRefreshAt ? ` · refreshed ${live.lastRefreshAt}` : "";
     return `• \`${slug}\` — *${state}*${reason ? ` (${reason})` : ""} · ref \`${String(rec.defaultRef ?? "?")}\`${sha}${refreshed}`;
   });
-  return [`*Resident repos* (${n(r.data.count)}/${n(r.data.cap)}):`, ...lines].join("\n");
+  const out = [`*Resident repos* (${n(r.data.count)}/${n(r.data.cap)}):`, ...lines];
+  // Item 49: a test override lowers the enforced cap/floor for live checks —
+  // say so, or the count above reads as the real cap.
+  const t = r.data.testOverrides as Record<string, unknown> | undefined;
+  if (t && typeof t === "object") {
+    out.push(
+      `⚠️ test overrides active (set ${String(t.setAt ?? "?")}): cap ${n(r.data.cap)} (default ${n(r.data.capDefault)}), ` +
+        `LRU floor ${n(t.floorS)}s (default ${n(t.floorDefaultS)}s) — clear with \`POST /debug {"op":"set-test-overrides"}\`.`,
+    );
+  }
+  return out.join("\n");
 }
 
 function renderOnboard(cmd: { slug: string; commands: Record<CommandKey, string>; defaultRef: string }, r: ResidentAdminResponse): string {

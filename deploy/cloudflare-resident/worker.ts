@@ -77,8 +77,26 @@ import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
-import { decisivePull, parsePullsBody, pickEvictionCandidate, pullsFate, reclaimDecision, type RefFate, type ReclaimWhy, type ResidentView } from "./gc";
+import {
+  decisivePull,
+  effectiveLimits,
+  parsePullsBody,
+  parseTestOverrides,
+  pickEvictionCandidate,
+  pullsFate,
+  reclaimDecision,
+  type EffectiveLimits,
+  type RefFate,
+  type ReclaimWhy,
+  type ResidentView,
+  type StoredTestOverrides,
+} from "./gc";
 import { checkoutUpdateCommand, planRefresh, type RefreshDisk } from "../../src/execution/residentRefresh.js";
+
+/** Build marker: answered by GET /healthz (`u`) so a deploy's edge propagation
+ *  is provable from outside, and stamped on test overrides so they die with
+ *  the build that set them (gc.ts). Bump on every deploy-worthy change. */
+const BUILD_MARKER = "gc51";
 
 interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
@@ -709,6 +727,9 @@ interface SnapshotRecord {
 
 const REGISTRY_KEY_PREFIX = "resident:";
 const registryKey = (resource: string) => `${REGISTRY_KEY_PREFIX}${resource}`;
+/** Registry-DO key for the admin test overrides (gc.ts `StoredTestOverrides`).
+ *  Deliberately OUTSIDE the `resident:` prefix so it never counts as a slot. */
+const TEST_OVERRIDES_KEY = "testOverrides";
 
 type OnboardResult = { ok: true; record: ResidentRecord } | { ok: false; status: number; error: string };
 
@@ -723,16 +744,41 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     if (await this.ctx.storage.get(key)) {
       return { ok: false, status: 409, error: `${record.resource} is already onboarded` };
     }
+    const { cap } = await this.limits();
     const existing = await this.ctx.storage.list({ prefix: REGISTRY_KEY_PREFIX });
-    if (existing.size >= RESIDENT_CAP) {
+    if (existing.size >= cap) {
       return {
         ok: false,
         status: 429,
-        error: `resident cap reached (${existing.size}/${RESIDENT_CAP}); offboard a resident first, or onboard with evictColdest:true to make room`,
+        error: `resident cap reached (${existing.size}/${cap}); offboard a resident first, or onboard with evictColdest:true to make room`,
       };
     }
     await this.ctx.storage.put(key, record);
     return { ok: true, record };
+  }
+
+  /** The limits in force: the compiled constants, lowered by a test override
+   *  written under THIS build (gc.ts `effectiveLimits`). Read inside the same
+   *  input-gated section as the count/insert, so an override flip can never
+   *  interleave with an onboard. */
+  async limits(): Promise<EffectiveLimits> {
+    const stored = await this.ctx.storage.get<StoredTestOverrides>(TEST_OVERRIDES_KEY);
+    return effectiveLimits(stored, BUILD_MARKER, { cap: RESIDENT_CAP, floorS: LRU_FLOOR_S });
+  }
+
+  /** Admin-only by construction (reached solely via /debug set-test-overrides,
+   *  which is not in READ_DEBUG_OPS). `null` clears. The record is stamped
+   *  with the current build so a later deploy ignores it. */
+  async setTestOverrides(overrides: { cap?: number; floorS?: number } | null): Promise<EffectiveLimits> {
+    if (overrides === null) await this.ctx.storage.delete(TEST_OVERRIDES_KEY);
+    else {
+      await this.ctx.storage.put(TEST_OVERRIDES_KEY, {
+        ...overrides,
+        setAt: new Date().toISOString(),
+        build: BUILD_MARKER,
+      } satisfies StoredTestOverrides);
+    }
+    return this.limits();
   }
 
   /** LRU eviction (#50): release `evict`'s slot and insert `record` in ONE
@@ -748,9 +794,10 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     if (await this.ctx.storage.get(registryKey(record.resource))) {
       return { ok: false, status: 409, error: `${record.resource} is already onboarded` };
     }
+    const { cap } = await this.limits();
     const existing = await this.ctx.storage.list({ prefix: REGISTRY_KEY_PREFIX });
-    if (existing.size - 1 >= RESIDENT_CAP) {
-      return { ok: false, status: 429, error: `resident cap reached (${existing.size}/${RESIDENT_CAP}) even after evicting ${evict}` };
+    if (existing.size - 1 >= cap) {
+      return { ok: false, status: 429, error: `resident cap reached (${existing.size}/${cap}) even after evicting ${evict}` };
     }
     await this.ctx.storage.delete(registryKey(evict));
     await this.ctx.storage.put(registryKey(record.resource), record);
@@ -3367,7 +3414,7 @@ export default {
     // Unauthenticated wake ping for `npm run deploy` — touches no DO, no data.
     // `u` tracks the last shipped unit so a deploy's propagation is provable
     // from the outside without auth.
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, u: "gc50" });
+    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, u: BUILD_MARKER });
 
     // Auth precedes existence: unknown paths demand admin before revealing
     // 404 vs 401, so an unauthenticated scanner learns nothing.
@@ -3510,7 +3557,8 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
     // floor), then retry the atomic insert ONCE. No candidate → the ordinary
     // 429, itemizing why each resident was ineligible, so the admin can
     // offboard by hand with the facts in front of them.
-    const pick = pickEvictionCandidate(await collectResidentViews(env), Date.now(), LRU_FLOOR_S * 1000);
+    const { floorS } = await registry.limits(); // the compiled floor, or an active test override (item 49)
+    const pick = pickEvictionCandidate(await collectResidentViews(env), Date.now(), floorS * 1000);
     if (!pick.candidate) {
       return json({ error: `${result.error}; evictColdest found no eligible resident`, rejected: pick.rejected }, 429);
     }
@@ -3772,7 +3820,19 @@ async function handleResidents(env: Env): Promise<Response> {
     return { ...record, live };
   });
   const inFlight: number | null = inFlightUnknown === 0 ? known : null;
-  return json({ cap: RESIDENT_CAP, count: residents.length, inFlight, inFlightUnknown, residents: enriched });
+  // `cap` is what the registry ENFORCES right now; when a test override is
+  // active it is lower than `capDefault` and `testOverrides` says who/when, so
+  // a dashboard never mistakes a test cap for the real one (item 49).
+  const limits = await registryStub(env).limits();
+  return json({
+    cap: limits.cap,
+    capDefault: RESIDENT_CAP,
+    ...(limits.override ? { testOverrides: { ...limits.override, floorS: limits.floorS, floorDefaultS: LRU_FLOOR_S } } : {}),
+    count: residents.length,
+    inFlight,
+    inFlightUnknown,
+    residents: enriched,
+  });
 }
 
 async function handleStatus(env: Env, url: URL): Promise<Response> {
@@ -4033,6 +4093,17 @@ function streamOp(pending: Promise<Awaited<ReturnType<ResidentDO["runOp"]>>>): R
 async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Response> {
   const op = typeof body.op === "string" ? body.op : "";
   if (op === "run-watchdog") return json(await runWatchdog(env));
+  if (op === "set-test-overrides") {
+    // Item 49: lower the effective cap / LRU floor for live over-cap checks.
+    // Registry-wide (no `resource`), admin-only (not in READ_DEBUG_OPS), only
+    // ever lower than the compiled constants, and stamped with BUILD_MARKER so
+    // the next deploy ignores it. An empty body clears.
+    const parsed = parseTestOverrides(body, { cap: RESIDENT_CAP, floorS: LRU_FLOOR_S });
+    if ("error" in parsed) return json({ error: parsed.error }, 400);
+    const limits = await registryStub(env).setTestOverrides("clear" in parsed ? null : parsed.overrides);
+    console.log(`test-overrides: ${"clear" in parsed ? "cleared" : JSON.stringify(parsed.overrides)} → effective cap ${limits.cap}, floorS ${limits.floorS}`);
+    return json({ op, cap: limits.cap, capDefault: RESIDENT_CAP, floorS: limits.floorS, floorDefaultS: LRU_FLOOR_S, override: limits.override });
+  }
   if (op === "mint-token") {
     const resource = parseResource(body.resource);
     if ("error" in resource) return json({ error: resource.error }, 400);
@@ -4084,7 +4155,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     }
     default:
       return json(
-        { error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, threads, sweep-now, reclaim-now, backdate-thread)` },
+        { error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, backdate-thread)` },
         400,
       );
   }
@@ -4113,7 +4184,7 @@ async function runWatchdog(env: Env): Promise<Record<string, unknown>> {
       ? { resource: record.resource, state: s.value.state, reason: s.value.reason, action: s.value.action }
       : { resource: record.resource, error: errMsg(s.reason) };
   });
-  return { cap: RESIDENT_CAP, count: residents.length, results };
+  return { cap: (await registry.limits()).cap, count: residents.length, results };
 }
 
 function json(data: unknown, status = 200): Response {

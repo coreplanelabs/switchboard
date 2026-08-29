@@ -1,5 +1,61 @@
 import { describe, expect, it } from "vitest";
-import { decisivePull, parsePullsBody, pickEvictionCandidate, pullsFate, reclaimDecision, type ResidentView } from "./gc";
+import {
+  decisivePull,
+  effectiveLimits,
+  parsePullsBody,
+  parseTestOverrides,
+  pickEvictionCandidate,
+  pullsFate,
+  reclaimDecision,
+  type ResidentView,
+} from "./gc";
+
+// ---------------------------------------------------------------------------
+// Test overrides (#50 follow-up): lower the effective cap / LRU floor for live
+// checks without touching the production constants — admin, deploy-scoped.
+// ---------------------------------------------------------------------------
+
+const DEFAULTS = { cap: 6, floorS: 3600 };
+
+describe("parseTestOverrides — the /debug set-test-overrides body", () => {
+  it("cap and floorS are accepted when they LOWER the defaults (equal allowed)", () => {
+    expect(parseTestOverrides({ cap: 2, floorS: 600 }, DEFAULTS)).toEqual({ overrides: { cap: 2, floorS: 600 } });
+    expect(parseTestOverrides({ cap: 6 }, DEFAULTS)).toEqual({ overrides: { cap: 6 } });
+    expect(parseTestOverrides({ floorS: 0 }, DEFAULTS)).toEqual({ overrides: { floorS: 0 } });
+  });
+  it("neither field → clear (the op with an empty body removes the override)", () => {
+    expect(parseTestOverrides({}, DEFAULTS)).toEqual({ clear: true });
+    expect(parseTestOverrides({ op: "set-test-overrides", resource: "x" }, DEFAULTS)).toEqual({ clear: true });
+  });
+  it("an override can never RAISE a limit above the constant (no back door past max_instances)", () => {
+    expect(parseTestOverrides({ cap: 7 }, DEFAULTS)).toEqual({ error: "cap must be an integer between 1 and 6 (the compiled RESIDENT_CAP); overrides only lower it" });
+    expect(parseTestOverrides({ floorS: 3601 }, DEFAULTS)).toEqual({ error: "floorS must be an integer between 0 and 3600 (the compiled LRU_FLOOR_S); overrides only lower it" });
+  });
+  it("non-integers, zero cap, negatives, strings → named errors", () => {
+    expect(parseTestOverrides({ cap: 0 }, DEFAULTS)).toMatchObject({ error: expect.stringContaining("cap must be") });
+    expect(parseTestOverrides({ cap: 2.5 }, DEFAULTS)).toMatchObject({ error: expect.stringContaining("cap must be") });
+    expect(parseTestOverrides({ cap: "2" }, DEFAULTS)).toMatchObject({ error: expect.stringContaining("cap must be") });
+    expect(parseTestOverrides({ floorS: -1 }, DEFAULTS)).toMatchObject({ error: expect.stringContaining("floorS must be") });
+  });
+});
+
+describe("effectiveLimits — what the registry actually enforces", () => {
+  const stored = (o: { cap?: number; floorS?: number }, build = "gc51") => ({ ...o, setAt: "2026-08-29T23:00:00Z", build });
+  it("no override → the compiled defaults, override null", () => {
+    expect(effectiveLimits(undefined, "gc51", DEFAULTS)).toEqual({ cap: 6, floorS: 3600, override: null });
+  });
+  it("an active override lowers exactly the fields it names", () => {
+    expect(effectiveLimits(stored({ cap: 2 }), "gc51", DEFAULTS)).toMatchObject({ cap: 2, floorS: 3600 });
+    expect(effectiveLimits(stored({ floorS: 600 }), "gc51", DEFAULTS)).toMatchObject({ cap: 6, floorS: 600 });
+    expect(effectiveLimits(stored({ cap: 2, floorS: 600 }), "gc51", DEFAULTS).override).toEqual(stored({ cap: 2, floorS: 600 }));
+  });
+  it("an override written by a PREVIOUS deploy is ignored (deploy-scoped: a forgotten test cap cannot outlive the build)", () => {
+    expect(effectiveLimits(stored({ cap: 2 }, "gc50"), "gc51", DEFAULTS)).toEqual({ cap: 6, floorS: 3600, override: null, ignored: "stale-build gc50" });
+  });
+  it("a stored value above the compiled constant (constant lowered by a later deploy) is clamped, never honored", () => {
+    expect(effectiveLimits(stored({ cap: 9, floorS: 9999 }), "gc51", DEFAULTS)).toMatchObject({ cap: 6, floorS: 3600 });
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Event-triggered reclamation (#50): what happened to a thread's bound ref
