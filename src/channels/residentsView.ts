@@ -228,6 +228,7 @@ export function renderResidentPage(record: ResidentRecordView): string {
     row("last refresh error", text(live.lastRefreshError)),
     row("last restore", live.lastRestore ? escapeHtml(JSON.stringify(live.lastRestore)) : `<span class="none">—</span>`),
     row("state updated", text(live.updatedAt)),
+    row("idle since", live.idleSince ? `${escapeHtml(str(live.idleSince))} <span class="meta">(refresh parked; container may sleep)</span>` : `<span class="none">awake</span>`),
   ].join("")}</table>`;
 
   const facts = `<table>${[

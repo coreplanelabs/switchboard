@@ -229,6 +229,13 @@ describe("renderResidentPage", () => {
     expect(html).toContain("7"); // worktreeTtlDays
   });
 
+  it("shows idle mode when the resident parked its refresh, 'awake' otherwise", () => {
+    expect(renderResidentPage(WARM)).toContain("awake");
+    const idle = { ...WARM, live: { ...WARM.live, idleSince: "2026-08-29T03:00:00.000Z" } };
+    expect(renderResidentPage(idle)).toContain("2026-08-29T03:00:00.000Z");
+    expect(renderResidentPage(idle)).toContain("container may sleep");
+  });
+
   it("links to the GitHub repo, the pinned commit, and back to the residents index", () => {
     const html = renderResidentPage(WARM);
     expect(html).toContain('href="https://github.com/jshttp/vary"');
