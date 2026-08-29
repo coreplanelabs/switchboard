@@ -135,3 +135,19 @@ workspaceDir: ./workspaces
 #   model: anthropic/claude-haiku-4-5
 #                       # <provider>/<model> for the reflection pass — pick a
 #                       # cheap tier. Absent → the run's own resolved model.
+
+# Self-improvement proposals (Area 7b, #84). Every finished run's friction
+# diagnosis (features/run-friction.md) is appended to the friction ledger
+# regardless of this block. `friction report` (open to everyone) shows the
+# patterns that recur across recent runs; `friction propose [--dry-run]`
+# (admin-gated like repo management) files the top patterns as labeled GitHub
+# issues — evidence, affected runs, a concrete suggested fix — deduped against
+# the proposals already open. It only ever PROPOSES: no PRs, nothing merged.
+# Without `repo`, `friction propose` refuses. See features/self-improvement.md.
+# selfImprovement:
+#   repo: acme/switchboard      # owner/name the proposals are filed against
+#   label: self-improvement     # triage label (created if missing; default shown)
+#   minRuns: 2                  # a pattern must recur in ≥ this many distinct runs
+#   top: 3                      # proposals filed per pass
+#   ledgerPath: ./data/friction.jsonl   # JSONL ledger (same place/durability as overrides.json)
+#   ledgerMax: 500              # runs retained

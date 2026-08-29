@@ -49,3 +49,12 @@ memory:
   # Reflection (post-run fact extraction) runs on a cheap model; the run's own
   # model is only the fallback when this is unset.
   model: anthropic/claude-haiku-4-5
+
+# Self-improvement proposals (Area 7b, #84): `friction propose` (admin-gated)
+# clusters the friction ledger across recent runs and files the top recurring
+# patterns as `self-improvement` issues against this repo — deduped against
+# what is already open, proposals only (no PRs, nothing merged). The ledger
+# itself (data/friction.jsonl) is on the container's ephemeral disk: a redeploy
+# starts it over. See features/self-improvement.md.
+selfImprovement:
+  repo: coreplanelabs/switchboard

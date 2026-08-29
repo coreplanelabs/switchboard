@@ -18,6 +18,10 @@ import { recognizeOperation, type Operations, type RecognizedOp } from "./operat
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import type { RunEvent } from "./runEvents.js";
+import { analyzeRunFriction } from "./runFriction.js";
+import type { FrictionLedger } from "./frictionLedger.js";
+import type { IssueTracker } from "../execution/githubIssues.js";
+import { handleFrictionCommand } from "./frictionCommands.js";
 import { defaultRunRegistry, type RunRegistry } from "./runRegistry.js";
 import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
 import { produceStructured, providerProducer } from "./structuredOutput.js";
@@ -98,9 +102,27 @@ export interface CoreDeps {
    * src/cli.ts); the DO-backed upload store is PR2, behind this same interface.
    */
   skills?: SkillStore;
+  /**
+   * Friction ledger (Area 7b, #84): after every run the dispatcher analyzes the
+   * run's event stream (`analyzeRunFriction`) and records the diagnosis here,
+   * so `friction propose` can cluster friction ACROSS recent runs (the live
+   * registry forgets a finished run after its TTL). Absent (most unit tests) →
+   * nothing is recorded and the friction commands report the ledger as
+   * unavailable. Production wires a FileFrictionLedger (src/index.ts).
+   */
+  frictionLedger?: FrictionLedger;
+  /**
+   * Where `friction propose` files its proposals. Default: the GitHub REST
+   * tracker with the App installation token (App `issues:write`; never a `gh`
+   * shell-out — AGENTS.md invariant 5). Injectable so tests assert filing
+   * without a network call.
+   */
+  issueTracker?: IssueTracker;
 }
 
 const STATUS_UPDATE_MIN_MS = 3000;
+/** Max run events kept per run for the post-run friction diagnosis (#84); the newest are kept. */
+const RUN_EVENTS_CAP = 5000;
 
 // In-flight run tracking so the process can drain before exiting (restarts
 // must not kill runs mid-flight — see index.ts signal handling).
@@ -127,6 +149,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const repoReply = await handleRepoCommand(deps.config, msg, deps.residentAdmin, repoCmd);
     if (repoReply) {
       await io.reply(repoReply);
+      return;
+    }
+
+    // Self-improvement commands (Area 7b, #84) are config-family too: `friction
+    // report` reads the ledger; `friction propose` files deduped issue
+    // proposals (gated inside: canManageRepos, fail-closed). Never a model turn.
+    const frictionReply = await handleFrictionCommand(deps.config, msg, {
+      ledger: deps.frictionLedger,
+      tracker: deps.issueTracker,
+    });
+    if (frictionReply) {
+      await io.reply(frictionReply);
       return;
     }
 
@@ -353,8 +387,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // Live run-visibility (Area 2): each tool call/result refreshes the card
     // immediately, so activity is visible without waiting for the heartbeat.
     let toolCalls = 0; // "did real work" signal for the memory reflection gate
+    // The run's own copy of its event stream, for the post-run friction
+    // diagnosis (#84): needs no capability token to read back. Bounded as a
+    // ring that keeps the NEWEST events, so a pathological run cannot grow it
+    // without limit and its terminal signals (budget/infra notes at the very
+    // end — the ones most worth diagnosing) are never the part that is lost.
+    // Dropping the oldest can only orphan a tool_result, which the analyzer
+    // ignores; it can never fabricate a "run ended mid-tool" finding.
+    const runEvents: RunEvent[] = [];
     const onEvent = (e: RunEvent) => {
       registry.publish(run.id, e); // feed the external live-view stream
+      runEvents.push(e);
+      if (runEvents.length > RUN_EVENTS_CAP) runEvents.shift();
       if (e.type === "tool_call") toolCalls++;
       lastToolAt = Date.now();
       lastActivity =
@@ -407,6 +451,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     } finally {
       clearInterval(heartbeat);
       registry.finish(run.id); // close the live-view stream; start its TTL
+      // Friction ledger (#84): diagnose this run's stream and keep the result
+      // for the cross-run proposer. Best-effort and fire-and-forget — a ledger
+      // failure is a warning line, never a failed run or a delayed reply.
+      if (deps.frictionLedger) {
+        const ledger = deps.frictionLedger;
+        const diagnosis = analyzeRunFriction(runEvents);
+        void ledger
+          .record({ runId: run.id, label: runLabel, agent: agent.name, finishedAt: Date.now(), diagnosis })
+          .catch((err: unknown) =>
+            console.warn(`[friction] ${msg.threadKey} ledger write failed: ${err instanceof Error ? err.message : String(err)}`),
+          );
+      }
       // Give the workspace back now rather than at the inactivity sweep: a
       // resident's pool user is a scarce slot (features/resident-repos.md item
       // 16). Read-only agents hold nothing worth keeping; a coding run keeps
@@ -881,5 +937,9 @@ function helpText(): string {
     '`repo reconfigure <owner/name> [ref=…] [test="…"] [build="…"] [install="…"]`',
     "`repo offboard <owner/name> [--dry-run]` / `repo rebuild <owner/name> [--dry-run]`",
     "`repo test <owner/name> [<ref>]` / `repo build <owner/name> [<ref>]` — run the repo's onboarded command with no model turn (also: \"run the tests on <ref> in <owner/name>\")",
+    "",
+    "*Self-improvement* (friction across my own recent runs; `propose` is admin-gated):",
+    "`friction report` — recurring friction patterns across recent runs",
+    "`friction propose [--dry-run] [--top <n>] [--min-runs <n>]` — file the top patterns as labeled, deduped GitHub issues for a human to triage",
   ].join("\n");
 }
