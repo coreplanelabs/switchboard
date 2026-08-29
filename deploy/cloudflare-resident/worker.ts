@@ -186,6 +186,12 @@ const IDLE_REFRESH_INTERVAL_S = 6 * 60 * 60;
  *  an orphan from an interrupted cycle; the watchdog normalizes it. Comfortably
  *  above the longest legitimate cycle (REFRESH_BUILD_TIMEOUT_MS-scale installs). */
 const STALE_MIDFLIGHT_MS = 30 * 60_000;
+/** A resident degraded with the SAME reason for this many consecutive cycles
+ *  is chronically broken (e.g. the default branch's build fails); retrying
+ *  every 10 min bills the container 24/7 for nothing. After the streak it may
+ *  idle-park like a warm one; the next attach still refreshes first. */
+const DEGRADED_PARK_AFTER_CYCLES = 3;
+const DEGRADED_STREAK_KEY = "resident:degradedStreak";
 
 /** Attach waits on the mirror mutex under this named timeout; expiry answers
  *  503 {state, reason: "mirror-busy"} instead of queueing forever. */
@@ -1160,7 +1166,22 @@ export class ResidentDO extends Sandbox<Env> {
       // `refreshing` + parked → every run fell back cold because the bot's
       // warm-gate probe never saw `warm` again). Run the full cycle instead; it
       // ends warm or degraded, and the next one may park.
-      const settled = before.state === "warm";
+      // Decide off a FRESH state read — `before` predates several awaits
+      // (hydration, registry, facts, reconcile) — same re-read discipline as
+      // every other state decision in this file.
+      const entry = await this.getStatus();
+      let settled = entry.state === "warm";
+      if (entry.state === "degraded") {
+        // Count consecutive cycles that found the same degraded reason; a
+        // stable streak means retrying is not going to help and parking is
+        // the right cost behavior. Any other state resets the streak (below).
+        const prev = await this.ctx.storage.get<{ reason: string; count: number }>(DEGRADED_STREAK_KEY);
+        const streak = prev && prev.reason === entry.reason ? { reason: entry.reason, count: prev.count + 1 } : { reason: entry.reason, count: 1 };
+        await this.ctx.storage.put(DEGRADED_STREAK_KEY, streak);
+        settled = streak.count >= DEGRADED_PARK_AFTER_CYCLES;
+      } else {
+        await this.ctx.storage.delete(DEGRADED_STREAK_KEY);
+      }
       if (settled && (await this.isIdle())) {
         // isIdle awaited (git status per live tree) — re-read before writing.
         const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
@@ -1412,6 +1433,12 @@ export class ResidentDO extends Sandbox<Env> {
       const updatedAt = Date.parse((await this.ctx.storage.get<string>(UPDATED_KEY)) ?? "") || 0;
       const inFlight = this.refreshesInFlight > 0 || this.hydration !== null;
       if (!inFlight && Date.now() - updatedAt > STALE_MIDFLIGHT_MS) {
+        // The reads above yielded; a cycle that started meanwhile owns the
+        // state now — leave it alone rather than stamp `degraded` over it.
+        const again = await this.getStatus();
+        if (again.state !== status.state || this.refreshesInFlight > 0 || this.hydration !== null) {
+          return { resource, ...again, action: "none" };
+        }
         const reason = `stale-mid-flight: ${status.state} since ${new Date(updatedAt).toISOString()} with no cycle running; re-armed by watchdog`;
         await this.setResidentState("degraded", reason);
         this.deleteSchedules(REFRESH_CALLBACK);
@@ -1942,7 +1969,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  already lost it) and release its pool user; the binding is KEPT, marked
    *  evicted, so the ref stays sticky and the next attach recreates the tree
    *  (KTD6). Shared by the inactivity sweep and /detach. */
-  private async evictBinding(binding: ThreadBinding, runtimeActive: boolean, logCtx: string): Promise<void> {
+  private async evictBinding(binding: ThreadBinding, runtimeActive: boolean, logCtx: string): Promise<boolean> {
     const threadDir = parentDir(binding.worktreePath);
     if (runtimeActive && threadDir.startsWith(`${THREADS_DIR}/`)) {
       try {
@@ -1952,12 +1979,23 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(`${logCtx}: rm failed for ${binding.threadKey}: ${errMsg(err)}`);
       }
     }
+    // The rm above awaited the mirror lock; a re-attach that STARTED in that
+    // window has since bumped lastAttachAt (and will recreate the tree under
+    // the same lock). Writing `user:""` over it would free a user the
+    // re-attach is still holding — so re-read and give way instead.
+    const now = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
+    if (!now || now.evicted || now.lastAttachAt !== binding.lastAttachAt) {
+      const why = !now ? "binding deleted" : now.evicted ? "already evicted (concurrent eviction)" : "re-attached";
+      console.log(`${logCtx}: ${binding.threadKey} ${why} during eviction — binding left as is`);
+      return false;
+    }
     await this.ctx.storage.put(threadBindingKey(binding.threadKey), {
-      ...binding,
+      ...now,
       user: "",
       evicted: true,
       evictedAt: new Date().toISOString(),
     } satisfies ThreadBinding);
+    return true;
   }
 
   /** POST /detach: a run has ended — give the thread's pool user back now
@@ -1988,7 +2026,12 @@ export class ResidentDO extends Sandbox<Env> {
     if (!current || current.evicted) return { released: false, reason: "already-evicted" };
     if (current.lastAttachAt !== binding.lastAttachAt) return { released: false, reason: "re-attached during the clean check — kept", user: current.user };
     const user = current.user;
-    await this.evictBinding(current, active, `detach`);
+    // Same as the sweep: `active` was read before the clean check's awaits; a
+    // container that woke meanwhile must get the rm, not an orphaned tree.
+    const activeNow = await this.isRuntimeActive().catch(() => false);
+    if (!(await this.evictBinding(current, activeNow, `detach`))) {
+      return { released: false, reason: "re-attached during eviction — kept", user };
+    }
     return { released: true, user };
   }
 
@@ -2075,8 +2118,12 @@ export class ResidentDO extends Sandbox<Env> {
           kept++;
           continue;
         }
-        await this.evictBinding(current, active, `worktree-sweep ${resource}`);
-        evicted.push(binding.threadKey);
+        // `active` is re-read per binding: the container can wake mid-sweep (an
+        // attach), and an eviction decided on a stale "inactive" would skip the
+        // rm and orphan a real tree.
+        const activeNow = await this.isRuntimeActive().catch(() => false);
+        if (await this.evictBinding(current, activeNow, `worktree-sweep ${resource}`)) evicted.push(binding.threadKey);
+        else kept++;
       }
     } finally {
       const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
