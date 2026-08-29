@@ -3,6 +3,7 @@ import { redactSecrets } from "../runEvents.js";
 import { stripJsonFence } from "../structuredOutput.js";
 import type { HistoryItem } from "../types.js";
 import type { MemoryCandidate, MemoryRecord, MemoryStore } from "./types.js";
+import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
 
 // Cross-session memory WRITE path (Area 7c, #85, PR2): the post-run reflection
 // pass. After a run's reply has landed, ONE cheap model call distills the thread
@@ -12,6 +13,12 @@ import type { MemoryCandidate, MemoryRecord, MemoryStore } from "./types.js";
 // awaited only by the shutdown drain — so reflection latency and failures never
 // touch the user reply. Pure pieces (gate, input builder, parser) are exported
 // for unit tests; `reflect` composes them around a Provider.
+//
+// User scope (#107 PR B): the extractor tags each fact with an `audience` —
+// `user` for knowledge about the requesting person (preferences, habits, their
+// own setup), `org` for shared knowledge. `user` facts are written to the
+// requesting user's own scope; everything else (and the summary) to the org
+// scope. Still ONE extractor call per run.
 
 /** Toolless threads shorter than this many prior turns are not worth an
  *  extractor call (a one-shot Q&A rarely yields a durable fact). */
@@ -55,10 +62,12 @@ export function shouldReflect(input: ReflectGateInput): boolean {
 export const REFLECTION_SYSTEM = [
   "You distill a finished assistant thread into durable, reusable memory for the resource it concerns.",
   "Return ONLY a JSON object of the form:",
-  '{"facts":[{"text":"...","keywords":["..."],"confidence":0.0-1.0,"supersedes":"<existing id, optional>"}],"summary":"..."}',
+  '{"facts":[{"text":"...","keywords":["..."],"confidence":0.0-1.0,"audience":"org"|"user","supersedes":"<existing id, optional>"}],"summary":"..."}',
   `Rules: at most ${MAX_REFLECTION_FACTS} facts. Each fact is ONE self-contained sentence that will still be true and useful in a future, unrelated thread`,
   "(commands, conventions, decisions, preferences, architecture). Ignore ephemeral or one-off details (timestamps, transient errors, chit-chat).",
   "Never include secrets, tokens, passwords, or keys — omit the fact instead.",
+  '`audience` is "user" when the fact is about the requesting person specifically (their preferences, habits, personal conventions, their own setup — write it as "this user …"),',
+  'and "org" (the default) when it is shared knowledge about the codebase, tooling, or team. Only the requesting user will ever see "user" facts.',
   "`confidence` is how sure you are the fact is durable and correct. If a fact contradicts one of the EXISTING records you were shown, set `supersedes` to that record's id.",
   "`summary` is one or two sentences: what was asked and what was concluded. Output raw JSON with no code fence and no prose.",
 ].join("\n");
@@ -94,12 +103,23 @@ export interface ReflectionProvenance {
   sourceRunId?: string;
 }
 
-export type ParsedReflection = { ok: true; candidates: MemoryCandidate[] } | { ok: false; error: string };
+/** Who a distilled fact is for: the shared org scope, or the requesting user's
+ *  own scope (#107 PR B). Decided by the extractor, defaulting to `org`. */
+export type MemoryAudience = "org" | "user";
 
-/** Validate + sanitize the extractor's reply into MemoryCandidates. Lenient on
- *  shape inside the object (bad facts are dropped, not fatal), strict on the
- *  envelope (non-JSON / non-object → error). Every text field is redacted;
- *  `supersedes` survives only when it names a record the extractor was shown. */
+/** A validated candidate plus its routing tag. The tag is reflection-internal:
+ *  `reflect` resolves it to a scope key and strips it before `store.write`, so
+ *  the `MemoryStore` contract and the Worker's wire format are unchanged. */
+export type RoutedCandidate = MemoryCandidate & { audience: MemoryAudience };
+
+export type ParsedReflection = { ok: true; candidates: RoutedCandidate[] } | { ok: false; error: string };
+
+/** Validate + sanitize the extractor's reply into routed MemoryCandidates.
+ *  Lenient on shape inside the object (bad facts are dropped, not fatal), strict
+ *  on the envelope (non-JSON / non-object → error). Every text field is
+ *  redacted; `supersedes` survives only when it names a record the extractor was
+ *  shown; `audience` is `user` only when it says exactly that, else `org` (the
+ *  summary is always `org`). */
 export function parseReflection(raw: string, prov: ReflectionProvenance, knownIds: Set<string>): ParsedReflection {
   let value: unknown;
   try {
@@ -113,18 +133,18 @@ export function parseReflection(raw: string, prov: ReflectionProvenance, knownId
   const obj = value as Record<string, unknown>;
   if (!Array.isArray(obj.facts)) return { ok: false, error: "`facts` is not an array" };
 
-  const candidates: MemoryCandidate[] = [];
+  const candidates: RoutedCandidate[] = [];
   for (const f of obj.facts) {
     if (candidates.length >= MAX_REFLECTION_FACTS) break;
     const fact = parseFact(f, prov, knownIds);
     if (fact) candidates.push(fact);
   }
   const summary = cleanText(obj.summary);
-  if (summary) candidates.push({ kind: "summary", text: summary, ...prov });
+  if (summary) candidates.push({ kind: "summary", text: summary, audience: "org", ...prov });
   return { ok: true, candidates };
 }
 
-function parseFact(raw: unknown, prov: ReflectionProvenance, knownIds: Set<string>): MemoryCandidate | undefined {
+function parseFact(raw: unknown, prov: ReflectionProvenance, knownIds: Set<string>): RoutedCandidate | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
   const f = raw as Record<string, unknown>;
   const text = cleanText(f.text);
@@ -140,6 +160,7 @@ function parseFact(raw: unknown, prov: ReflectionProvenance, knownIds: Set<strin
     text,
     ...(keywords ? { keywords } : {}),
     confidence,
+    audience: f.audience === "user" ? "user" : "org",
     ...(supersedes ? { supersedes } : {}),
     ...prov,
   };
@@ -172,24 +193,37 @@ export interface ReflectDeps extends ReflectionProvenance {
    *  from `memory.model` (AGENTS.md invariant 7: never hardcoded here). */
   model: string;
   store: MemoryStore;
-  scopeKey: string;
+  /** The run's scopes: the org's, plus the requesting user's own when known. */
+  scopeKeys: RequestScopeKeys;
   history: HistoryItem[];
   request: string;
   answer: string;
   onWarn?: (message: string) => void;
 }
 
-/** One extractor call → validate → `store.write`. Never throws and never
- *  retries: reflection is best-effort background work, and a failed pass simply
- *  writes nothing (the thread history still holds the raw material). */
+/** Which scope a routed candidate lands in: a supersede follows the record it
+ *  corrects (the id was validated against the shown records, whose scopes we
+ *  know); otherwise `user` facts go to the user's scope when the run has one,
+ *  and everything else to the org scope. A `user` fact with no user scope falls
+ *  back to org rather than being dropped. */
+function routeCandidate(cand: RoutedCandidate, keys: RequestScopeKeys, scopeOf: Map<string, string>): string {
+  const superseded = cand.supersedes ? scopeOf.get(cand.supersedes) : undefined;
+  if (superseded) return superseded;
+  return cand.audience === "user" && keys.user ? keys.user : keys.org;
+}
+
+/** One extractor call → validate → `store.write` per scope. Never throws and
+ *  never retries: reflection is best-effort background work, and a failed pass
+ *  simply writes nothing (the thread history still holds the raw material). */
 export async function reflect(deps: ReflectDeps): Promise<void> {
   const warn = deps.onWarn ?? (() => {});
   try {
-    const existing = await deps.store.retrieve({
-      scopeKey: deps.scopeKey,
-      query: `${deps.request} ${deps.answer}`.slice(0, MAX_RETRIEVE_QUERY_CHARS),
-      limit: EXISTING_LIMIT,
-    });
+    const query = `${deps.request} ${deps.answer}`.slice(0, MAX_RETRIEVE_QUERY_CHARS);
+    const existing = (
+      await Promise.all(
+        listScopeKeys(deps.scopeKeys).map((scopeKey) => deps.store.retrieve({ scopeKey, query, limit: EXISTING_LIMIT })),
+      )
+    ).flat();
     const text = buildReflectionInput({ history: deps.history, request: deps.request, answer: deps.answer, existing });
     const result = await deps.provider.complete({
       model: deps.model,
@@ -208,7 +242,16 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
       return;
     }
     if (parsed.candidates.length === 0) return;
-    await deps.store.write(deps.scopeKey, parsed.candidates);
+    const scopeOf = new Map(existing.map((r) => [r.id, r.scopeKey]));
+    const byScope = new Map<string, MemoryCandidate[]>();
+    for (const cand of parsed.candidates) {
+      const { audience: _audience, ...plain } = cand;
+      const scopeKey = routeCandidate(cand, deps.scopeKeys, scopeOf);
+      let batch = byScope.get(scopeKey);
+      if (!batch) byScope.set(scopeKey, (batch = []));
+      batch.push(plain);
+    }
+    for (const [scopeKey, records] of byScope) await deps.store.write(scopeKey, records);
   } catch (err) {
     warn(`reflection failed: ${err instanceof Error ? err.message : String(err)}`);
   }

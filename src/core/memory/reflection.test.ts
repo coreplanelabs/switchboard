@@ -262,7 +262,7 @@ describe("reflect (one extractor call → store.write)", () => {
     summary: "Deploy command changed to npm run ship.",
   });
   const base = {
-    scopeKey: SCOPE,
+    scopeKeys: { org: SCOPE },
     model: "cheap-model",
     history: [] as HistoryItem[],
     request: "how do we deploy now?",
@@ -340,6 +340,113 @@ describe("reflect (one extractor call → store.write)", () => {
     await reflect({ ...base, answer: "x".repeat(10_000), provider, store });
     expect(queries).toHaveLength(1);
     expect(queries[0].length).toBeLessThanOrEqual(2000);
+  });
+});
+
+// Feature: features/memory.md (#107 PR B) — reflection writes user records
+// alongside org records: the extractor tags each fact with an `audience`;
+// `user` facts land in the requesting user's scope, everything else (and the
+// summary) in the org scope; a supersede follows the superseded record's scope.
+describe("reflect — user scope routing (#107 PR B)", () => {
+  const USER = "user:slack:U1";
+  const base = {
+    scopeKeys: { org: SCOPE, user: USER },
+    model: "cheap-model",
+    history: [] as HistoryItem[],
+    request: "deploy it the way I like",
+    answer: "done",
+    ...PROVENANCE,
+  };
+  const reply = JSON.stringify({
+    facts: [
+      { text: "the deploy command is npm run deploy", confidence: 0.9, audience: "org" },
+      { text: "this user wants a deploy preview link before prod", confidence: 0.9, audience: "user" },
+      { text: "CI runs vitest on deploy", confidence: 0.8 },
+    ],
+    summary: "User asked for a deploy; it ran with a preview link.",
+  });
+
+  it("routes `user` facts to the user scope and everything else (incl. the summary) to the org scope", async () => {
+    const provider = fakeProvider(reply);
+    const store = new InMemoryMemoryStore();
+    await reflect({ ...base, provider, store });
+    expect(provider.requests).toHaveLength(1); // still ONE extractor call
+    const org = await store.retrieve({ scopeKey: SCOPE, query: "deploy preview vitest ran", limit: 10 });
+    const user = await store.retrieve({ scopeKey: USER, query: "deploy preview vitest ran", limit: 10 });
+    expect(org.map((r) => r.text).sort()).toEqual(
+      ["CI runs vitest on deploy", "User asked for a deploy; it ran with a preview link.", "the deploy command is npm run deploy"].sort(),
+    );
+    expect(user.map((r) => r.text)).toEqual(["this user wants a deploy preview link before prod"]);
+    expect(user[0].id.startsWith("mem:user:slack:U1:")).toBe(true);
+    expect(user[0].sourceThreadKey).toBe(PROVENANCE.sourceThreadKey);
+  });
+
+  it("without a user scope, `user` facts fall back to the org scope (nothing is dropped)", async () => {
+    const provider = fakeProvider(reply);
+    const store = new InMemoryMemoryStore();
+    await reflect({ ...base, scopeKeys: { org: SCOPE }, provider, store });
+    const org = await store.retrieve({ scopeKey: SCOPE, query: "deploy preview", limit: 10 });
+    expect(org.map((r) => r.text)).toContain("this user wants a deploy preview link before prod");
+    expect(await store.retrieve({ scopeKey: USER, query: "deploy preview", limit: 10 })).toEqual([]);
+  });
+
+  it("shows the extractor the user's existing records too, and a supersede lands in the superseded record's scope", async () => {
+    const stale = existing({ id: "mem:user:slack:U1:0", scopeKey: USER, text: "this user wants deploys announced in #ops" });
+    const provider = fakeProvider(
+      JSON.stringify({
+        facts: [
+          {
+            text: "this user wants deploys announced in #releases",
+            confidence: 0.9,
+            audience: "org", // mislabeled on purpose — the supersede target decides the scope
+            supersedes: "mem:user:slack:U1:0",
+          },
+        ],
+        summary: "",
+      }),
+    );
+    const store = new InMemoryMemoryStore([stale]);
+    await reflect({ ...base, request: "announce deploys in #releases from now on", provider, store });
+    const shown = (provider.requests[0].messages[0].content[0] as { text: string }).text;
+    expect(shown).toContain("mem:user:slack:U1:0");
+    const user = await store.retrieve({ scopeKey: USER, query: "user deploys announced", limit: 10 });
+    expect(user.map((r) => r.text)).toEqual(["this user wants deploys announced in #releases"]);
+    expect(user[0].supersedes).toBe("mem:user:slack:U1:0");
+    expect(await store.retrieve({ scopeKey: SCOPE, query: "user deploys announced", limit: 10 })).toEqual([]);
+  });
+
+  it("never writes into a user scope the request did not name (another user's bucket stays untouched)", async () => {
+    const provider = fakeProvider(reply);
+    const store = new InMemoryMemoryStore();
+    await reflect({ ...base, provider, store });
+    expect(await store.retrieve({ scopeKey: "user:slack:U2", query: "deploy preview", limit: 10 })).toEqual([]);
+  });
+});
+
+describe("parseReflection — audience (#107 PR B)", () => {
+  it("keeps a valid audience, defaults anything else to org", () => {
+    const out = parseReflection(
+      JSON.stringify({
+        facts: [
+          { text: "a", confidence: 0.9, audience: "user" },
+          { text: "b", confidence: 0.9, audience: "org" },
+          { text: "c", confidence: 0.9 },
+          { text: "d", confidence: 0.9, audience: "everyone" },
+        ],
+        summary: "s",
+      }),
+      PROVENANCE,
+      new Set(),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.candidates.map((c) => [c.text, c.audience])).toEqual([
+      ["a", "user"],
+      ["b", "org"],
+      ["c", "org"],
+      ["d", "org"],
+      ["s", "org"],
+    ]);
   });
 });
 

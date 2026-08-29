@@ -128,8 +128,9 @@ workspaceDir: ./workspaces
 #   worker:
 #     baseUrl: https://switchboard-memory.coreplanelabs.dev
 #     tokenEnv: MEMORY_TOKEN   # env var holding the Worker's bearer (default)
-#   scope: org          # which resource to scope to; `org` only for now
-#                       # (→ org:coreplanelabs). repo/channel are a PR4 gap.
+#   # Scopes are derived per request, not configured: every request reads the
+#   # shared org scope (org:coreplanelabs) plus the requesting user's own scope
+#   # (user:slack:U…, #107) — a person's records never surface for anyone else.
 #   limit: 8            # max records retrieved/injected per request (default 8)
 #   maxTokens: 800      # hard token budget for the injected block (default 800)
 #   model: anthropic/claude-haiku-4-5
