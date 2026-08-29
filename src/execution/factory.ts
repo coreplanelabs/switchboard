@@ -4,7 +4,7 @@ import type { AgentDef } from "../agents/registry.js";
 import { LocalExecutor, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
-import { ResidentExecutor, ResidentNeedsRefError, type ResidentStatusProbe } from "./resident.js";
+import { ResidentExecutor, ResidentNeedsRefError, type ResidentBinding, type ResidentStatusProbe } from "./resident.js";
 import { repoResourceId } from "../core/repoCommands.js";
 import { resolveGithubToken } from "./githubApp.js";
 import { isServiceable } from "./residentState.js";
@@ -142,18 +142,10 @@ export async function makeExecutor(
       // per-thread backend with a named note (KTD10 / AE6 — never a silent
       // stall or a raw ⚠️ for this window).
       try {
-        const executor = await ResidentExecutor.open({
-          baseUrl: resident.baseUrl,
-          token,
-          resource,
-          threadKey: ctx.threadKey,
-          refHint: ctx.ref,
-        });
-        // Non-warm but serviceable: say so on the card (KTD10), while the run
-        // still gets the warm worktree it came for.
-        const nonWarm =
-          probe.state === "warm" ? undefined : `resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — attached to the last snapshot`;
-        return { executor, resident: true, ...(nonWarm ? { note: nonWarm } : {}) };
+        // Non-warm but serviceable: the note says so (KTD10) while the run
+        // still gets the worktree it came for; openResident adds ref@sha.
+        const nonWarm = probe.state === "warm" ? undefined : `${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`;
+        return await openResident({ baseUrl: resident.baseUrl, token, resource, threadKey: ctx.threadKey, refHint: ctx.ref }, nonWarm);
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
         note = `resident attach failed (${err instanceof Error ? err.message : String(err)}) — using fresh sandbox`;
@@ -174,6 +166,59 @@ export async function makeExecutor(
   }
 
   return { executor: await makePerThreadExecutor(opts, ctx), note };
+}
+
+/** Attach to a serviceable resident and name the result POSITIVELY: the note
+ *  reads `resident · <ref>@<sha7>` (warm) or `resident <state> (<reason>) ·
+ *  <ref>@<sha7> — attached to the last snapshot` (refreshing/degraded, #162)
+ *  so a reader can tell the resident path from Slack alone, never only from
+ *  the absence of a fallback note (KTD10 in both directions). Needs-ref (no binding for this thread, no branch named): when
+ *  the resident's 409 names its default branch, bind to it ONCE here and say
+ *  so in the note — the cold path already works on the default branch without
+ *  asking, and a coding run branches off it anyway. A 409 without a
+ *  defaultRef (an older Worker) still propagates to the dispatcher's ask-once
+ *  flow; a second needs-ref after binding by default is a resident bug and
+ *  becomes a plain Error — the caller's named `resident attach failed` fallback
+ *  note — never a loop. */
+async function openResident(
+  opts: {
+    baseUrl: string;
+    token: string;
+    resource: string;
+    threadKey: string;
+    refHint?: string;
+  },
+  /** `<state>[ (<reason>)]` of a serviceable non-warm resident; undefined when warm. */
+  nonWarm?: string,
+): Promise<ExecutorSelection> {
+  let executor = new ResidentExecutor(opts);
+  let binding: ResidentBinding;
+  let byDefault = false;
+  try {
+    binding = await executor.attach();
+  } catch (err) {
+    if (!(err instanceof ResidentNeedsRefError) || !err.defaultRef) throw err;
+    byDefault = true;
+    executor = new ResidentExecutor({ ...opts, refHint: err.defaultRef });
+    try {
+      binding = await executor.attach();
+    } catch (again) {
+      if (again instanceof ResidentNeedsRefError) {
+        throw new Error(`resident attach: ${opts.resource} refused its own default ref "${err.defaultRef}" (${again.message})`);
+      }
+      throw again;
+    }
+  }
+  // The note is the binding at open time — the worktree the run STARTS on. A
+  // mid-run re-attach (evicted worktree) may move to a newer sha; that later
+  // state is `executor.binding`, not the card's opening line.
+  const where = `${binding.ref}@${binding.sha.slice(0, 7)}`;
+  const why = byDefault ? " (repo default — no branch named)" : "";
+  return {
+    executor,
+    resident: true,
+    note: nonWarm ? `resident ${nonWarm} · ${where}${why} — attached to the last snapshot` : `resident · ${where}${why}`,
+  };
 }
 
 /** /status probe through the negative cache: inside an outage window the

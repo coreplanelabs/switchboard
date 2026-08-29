@@ -1122,6 +1122,38 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     expect(statuses.some((f) => f.title.includes("✅"))).toBe(false);
   });
 
+  it("needs-ref WITH a defaultRef → bound to the repo default with a loud note, no question, the run proceeds", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    let attaches = 0;
+    residentFetchStub({
+      attach: (body) => {
+        attaches++;
+        if (!body.refHint) {
+          return new Response(
+            JSON.stringify({ error: "needs-ref: this thread has no ref binding yet", needs: "ref", defaultRef: "main" }),
+            { status: 409 },
+          );
+        }
+        return new Response(
+          JSON.stringify({ workspace: "/workspace/threads/t/main", ref: String(body.refHint), sha: "f2fe51e2204", user: "worker2" }),
+          { status: 200 },
+        );
+      },
+    });
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix the login bug in acme/api", "slack:UADMIN"), io);
+    expect(attaches).toBe(2);
+    expect(replies.some((r) => /which branch/i.test(r))).toBe(false); // no question asked
+    expect(provider.requests).toHaveLength(1); // the run happened
+    const last = statuses[statuses.length - 1];
+    expect(last.title).toContain("✅");
+    expect(last.title).toContain("resident · main@f2fe51e (repo default — no branch named)");
+  });
+
   it('the thread answer "on main" rebinds via re-attach and runs', async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
@@ -1464,6 +1496,11 @@ describe("live run-view wiring (Area 2)", () => {
     await dispatch(deps, msg("hello there"), io);
     // Trailing slash is trimmed; id/token are the capability URL's path/query.
     expect(statuses.some((s) => s.detail?.includes("https://bot.example/runs/abc?t=secret"))).toBe(true);
+    // The FINAL ✅ frame keeps the link too — the run page outlives the run
+    // (it shows the final answer), so the closed card must still lead to it.
+    const last = statuses[statuses.length - 1];
+    expect(last.title).toContain("✅");
+    expect(last.detail).toContain("https://bot.example/runs/abc?t=secret");
   });
 
   it("omits the link entirely when PUBLIC_BASE_URL is unset (graceful degradation, no crash)", async () => {

@@ -599,6 +599,8 @@ interface ThreadErr {
   error: string;
   status: number;
   needs?: string;
+  /** With needs:"ref" — the resident's default branch, so the caller can bind by default. */
+  defaultRef?: string;
   state?: ResidentState;
   reason?: string;
 }
@@ -1777,7 +1779,10 @@ export class ResidentDO extends Sandbox<Env> {
     const prior = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
     const ref = prior?.ref ?? refHint; // KTD6: the binding's ref wins for the thread's whole life
     if (!ref) {
-      return { error: "needs-ref: this thread has no ref binding yet — supply refHint", status: 409, needs: "ref" };
+      // Name the default branch so the bot can bind to it (loudly) instead of
+      // asking the user when the message named no branch; the binding is still
+      // made by the caller's next attach, never here (KTD6: explicit, no guess).
+      return { error: "needs-ref: this thread has no ref binding yet — supply refHint", status: 409, needs: "ref", defaultRef: facts.defaultRef };
     }
     const worktreePath = prior?.worktreePath ?? (await threadWorktreePath(threadKey, ref));
 
