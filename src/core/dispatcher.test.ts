@@ -19,6 +19,8 @@ import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
 import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
+import { InMemoryFrictionLedger } from "./frictionLedger.js";
+import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 
 // Feature: features/routing-and-config.md — end-to-end dispatch: config
 // commands, permission gates, and thread-sticky agent resolution.
@@ -1812,5 +1814,84 @@ channels:
     expect(iCfg).toBeGreaterThan(iMem);
     expect(iAgent).toBeGreaterThan(iCfg);
     expect(iSkills).toBeGreaterThan(iAgent);
+  });
+});
+
+describe("self-improvement wiring (Area 7b / #84)", () => {
+  afterEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  function toolThenAnswer(): Provider {
+    let n = 0;
+    return {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (n++ === 0) {
+          return { content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } }], stopReason: "tool_use" };
+        }
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+  }
+
+  it("records every finished run's friction diagnosis to the ledger, keyed by the registry run id", async () => {
+    const ledger = new InMemoryFrictionLedger();
+    const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
+    deps.frictionLedger = ledger;
+    deps.runRegistry = new RunRegistry({ genId: () => "run-friction-1", genToken: () => "tok" });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+
+    const [rec] = await ledger.recent();
+    expect(rec.runId).toBe("run-friction-1");
+    expect(rec.agent).toBe("general");
+    expect(rec.label).toContain("general");
+    expect(rec.diagnosis.eventCount).toBe(3); // tool_call + tool_result + the turn-budget note
+    // The toolless general agent's `bash` call is an unknown tool → a failed_tool finding.
+    expect(rec.diagnosis.byCategory.failed_tool.count).toBe(1);
+  });
+
+  it("a ledger write failure is logged, never surfaced to the user or the run", async () => {
+    const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
+    deps.frictionLedger = {
+      record: async () => {
+        throw new Error("disk full");
+      },
+      recent: async () => [],
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    expect(replies.some((r) => r.includes("answer"))).toBe(true);
+    expect(replies.some((r) => r.includes("disk full"))).toBe(false);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("disk full"))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it("`friction report` is answered inline from the ledger — no model turn, no executor", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.frictionLedger = new InMemoryFrictionLedger();
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("friction report"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("0 runs analyzed");
+    expect(provider.requests).toEqual([]);
+    expect(makeExecutor).not.toHaveBeenCalled();
+  });
+
+  it("`friction propose` is gated (admins only when unconfigured) and files through the injected tracker", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(`${YAML_FIXTURE}\nselfImprovement:\n  repo: o/r\n`, provider);
+    deps.frictionLedger = new InMemoryFrictionLedger();
+    deps.issueTracker = new InMemoryIssueTracker();
+    const denied = fakeIO();
+    await dispatch(deps, msg("friction propose"), denied.io);
+    expect(denied.replies[0]).toMatch(/🚫/);
+    const allowed = fakeIO();
+    await dispatch(deps, msg("friction propose", "slack:UADMIN"), allowed.io);
+    expect(allowed.replies[0]).toContain("0 runs analyzed");
+    expect(provider.requests).toEqual([]);
   });
 });

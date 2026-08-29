@@ -18,10 +18,12 @@ import {
 import { defaultRunRegistry } from "./core/runRegistry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
+import { FileFrictionLedger } from "./core/frictionLedger.js";
 import type { CoreDeps } from "./core/dispatcher.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
+const FRICTION_LEDGER_PATH = "./data/friction.jsonl";
 
 async function main() {
   for (const v of ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]) {
@@ -43,7 +45,19 @@ async function main() {
   // otherwise an in-process store with a loud warning (a restart loses it).
   // Disabled (default) → undefined → the dispatcher uses a NullMemoryStore.
   const memory = buildMemoryStore(config.config.memory, process.env, (m) => console.warn(`[memory] ${m}`));
-  const deps: CoreDeps = { config, providers, skills, memory };
+  // Friction ledger (Area 7b, #84): every finished run's friction diagnosis,
+  // appended to a JSONL file next to overrides.json so `friction propose` can
+  // cluster across recent runs. Same durability as overrides.json — a volume on
+  // Fly/compose; on Cloudflare Containers the disk is ephemeral and a redeploy
+  // starts the ledger over (logged here so the loss is never silent).
+  const selfImprovement = config.config.selfImprovement;
+  const frictionLedgerPath = selfImprovement?.ledgerPath ?? FRICTION_LEDGER_PATH;
+  const frictionLedger = new FileFrictionLedger(frictionLedgerPath, { max: selfImprovement?.ledgerMax });
+  console.log(
+    `[friction] ledger at ${frictionLedgerPath} (host disk — lost with the instance on ephemeral-disk deploys); ` +
+      (selfImprovement?.repo ? `\`friction propose\` files to ${selfImprovement.repo}` : "`friction propose` disabled until selfImprovement.repo is set"),
+  );
+  const deps: CoreDeps = { config, providers, skills, memory, frictionLedger };
   const app = createSlackApp(deps);
 
   await app.start();

@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import YAML from "yaml";
 import type { ProviderConfig } from "./providers/types.js";
 import type { MemoryConfig } from "./core/memory/types.js";
+import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import { AGENTS } from "./agents/registry.js";
 
 // Configuration is layered. Lowest to highest precedence:
@@ -69,6 +70,13 @@ export interface AppConfig {
    * input is byte-identical to memory-off. See features/memory.md.
    */
   memory?: MemoryConfig;
+  /**
+   * Self-improvement proposals (Area 7b, #84): where `friction propose` files
+   * issues and how it clusters. Absent → runs are still recorded to the
+   * friction ledger, but `friction propose` refuses until `repo` is set.
+   * See features/self-improvement.md.
+   */
+  selfImprovement?: SelfImprovementConfig;
 }
 
 export interface OutputConfig {
