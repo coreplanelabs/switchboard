@@ -14,7 +14,7 @@ import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
 import { activeRunCount, composeRunLabel, dispatch, turnContent, type CoreDeps } from "./dispatcher.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { MAX_STRUCTURE_RETRIES, STRUCTURING_SYSTEM } from "./structuredOutput.js";
-import { RunRegistry } from "./runRegistry.js";
+import { RunControl, RunRegistry } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
@@ -434,6 +434,69 @@ describe("executor provisioning by agent resources", () => {
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
     await dispatch(deps, msg("agent:review look at it", "slack:UADMIN"), io);
     expect(release).toHaveBeenCalledWith("always");
+  });
+
+  // Feature: features/run-loop.md item 8 (#101) — a HARD stop tears the
+  // workspace down (`release("always")`, even for a coding run that would
+  // otherwise keep dirty work), and the card/answer say the run was stopped.
+  it("a hard stop from /runs releases the executor with 'always' and reports the abort", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+    let hardSignal: AbortSignal | undefined;
+    // A provider that hangs until the run is hard-stopped — the stop must cut it off.
+    const provider: Provider = {
+      name: "hang",
+      complete: (req) =>
+        new Promise((resolve) => {
+          hardSignal = req.signal;
+          req.signal?.addEventListener("abort", () => resolve({ content: [{ type: "text", text: "late" }], stopReason: "end_turn" }));
+        }),
+    };
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    const { io, replies, statuses } = fakeIO();
+    const release = vi.fn(async () => ({ released: true }));
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "", release };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    const run = dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    // Wait until the run is registered and the provider call is in flight.
+    while (!hardSignal) await new Promise((r) => setTimeout(r, 5));
+    expect(registry.requestStop("r1", "t1", "hard")).toEqual({ ok: true, mode: "hard" });
+    await run;
+    expect(release).toHaveBeenCalledWith("always"); // coding run, but hard stop → tear down
+    expect(replies.some((r) => r.includes("aborted"))).toBe(true);
+    expect(replies.some((r) => r.includes("late"))).toBe(false);
+    expect(statuses.at(-1)?.title).toContain("⛔");
+    expect(registry.listActive()[0].stop).toEqual({ mode: "hard", state: "stopped" });
+  });
+
+  it("a soft stop keeps the normal release policy (if-clean for coding) and marks the card stopped", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+    let calls = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        if (calls++ === 0) {
+          registry.requestStop("r1", "t1", "soft");
+          return { content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "echo" } }], stopReason: "tool_use" };
+        }
+        expect(req.tools).toBeUndefined(); // the finale
+        return { content: [{ type: "text", text: "summary so far" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    const { io, replies, statuses } = fakeIO();
+    const release = vi.fn(async () => ({ released: false, reason: "dirty" }));
+    const fake = { exec: async () => "ok", readFile: async () => "", writeFile: async () => "", release };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(release).toHaveBeenCalledWith("if-clean");
+    expect(replies.some((r) => r.includes("summary so far") && r.includes("Stopped early"))).toBe(true);
+    expect(statuses.at(-1)?.title).toContain("⏹");
   });
 
   it("a release that throws never fails the run — the answer is still delivered", async () => {
@@ -1143,6 +1206,33 @@ describe("review post-step (issue #69)", () => {
     ]);
   });
 
+  // Feature: features/run-loop.md item 8 (#101) — a HARD-stopped review has no
+  // findings (its answer is the abort line), so nothing is posted to the PR.
+  it("a hard-stopped review posts nothing to the PR", async () => {
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+    let hardSignal: AbortSignal | undefined;
+    const provider: Provider = {
+      name: "hang",
+      complete: (req) =>
+        new Promise((resolve) => {
+          hardSignal = req.signal;
+          req.signal?.addEventListener("abort", () => resolve({ content: [{ type: "text", text: "late" }], stopReason: "end_turn" }));
+        }),
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const { io, replies } = fakeIO();
+    const run = dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    while (!hardSignal) await new Promise((r) => setTimeout(r, 5));
+    registry.requestStop("r1", "t1", "hard");
+    await run;
+    expect(replies.some((r) => r.includes("aborted"))).toBe(true); // Slack still learns why it ended
+    expect(spy.calls).toEqual([]); // …but the PR gets no "review"
+  });
+
   /** A review-agent provider that calls submit_verdict, then answers. */
   function verdictThenAnswer(verdict: string, summary: string, answer = "the findings"): Provider {
     let n = 0;
@@ -1280,7 +1370,7 @@ describe("live run-view wiring (Area 2)", () => {
     const spy = {
       create() {
         log.push("create");
-        return { id: "run-x", token: "tok-x" };
+        return { id: "run-x", token: "tok-x", control: new RunControl() };
       },
       publish(_id: string, e: RunEvent) {
         events.push(e);
@@ -1626,6 +1716,39 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     const { requests, written } = await run(MEMORY_WRITE_YAML, []);
     expect(requests).toHaveLength(1);
     expect(written).toEqual([]);
+  });
+
+  // Feature: features/run-loop.md item 8 (#101) — a HARD-stopped run has no
+  // summary to distill (its answer is the abort line), so it never reflects even
+  // when the gate (long thread) would otherwise qualify it.
+  it("a hard-stopped run does NOT reflect, even when the gate would qualify it", async () => {
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+    const requests: CompletionRequest[] = [];
+    let hardSignal: AbortSignal | undefined;
+    const provider: Provider = {
+      name: "hang-then-reflect",
+      complete: (req) => {
+        requests.push(req);
+        if (req.system === REFLECTION_SYSTEM) {
+          return Promise.resolve({ content: [{ type: "text", text: REFLECTION_REPLY }], stopReason: "end_turn" });
+        }
+        return new Promise((resolve) => {
+          hardSignal = req.signal;
+          req.signal?.addEventListener("abort", () => resolve({ content: [{ type: "text", text: "late" }], stopReason: "end_turn" }));
+        });
+      },
+    };
+    const store = new InMemoryMemoryStore();
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store, runRegistry: registry };
+    const { io, replies } = fakeIO(longHistory);
+    const run = dispatch(deps, msg("how do we deploy?"), io);
+    while (!hardSignal) await new Promise((r) => setTimeout(r, 5));
+    expect(registry.requestStop("r1", "t1", "hard")).toEqual({ ok: true, mode: "hard" });
+    await run;
+    await drainReflections();
+    expect(replies.some((r) => r.includes("aborted"))).toBe(true);
+    expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(0);
+    expect(await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy command", limit: 10 })).toEqual([]);
   });
 
   it("memory disabled → no reflection even on a qualifying run (zero behavior change)", async () => {

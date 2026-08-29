@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ExecHealthTracker, ExecInfraError, LocalOperations, type Executor } from "./executor.js";
+import { ExecHealthTracker, ExecInfraError, LocalExecutor, LocalOperations, type Executor } from "./executor.js";
 
 // Feature: features/resident-repos.md — U6 LocalOperations: the dev-only
 // second Operations implementation (≥2-implementations invariant, KTD8).
@@ -143,5 +143,36 @@ describe("ExecHealthTracker", () => {
     expect(t.consecutiveInfraFailures).toBe(1);
     expect(await t.exec("x")).toContain("exit 1");
     expect(t.consecutiveInfraFailures).toBe(0);
+  });
+
+  it("forwards the exec abort signal to the inner executor (hard stop reaches the sandbox)", async () => {
+    let seen: AbortSignal | undefined;
+    const inner: Executor = {
+      exec: async (_c, opts) => {
+        seen = opts?.signal;
+        return "ok";
+      },
+      readFile: async () => "",
+      writeFile: async () => "",
+    };
+    const ctl = new AbortController();
+    await new ExecHealthTracker(inner).exec("x", { signal: ctl.signal });
+    expect(seen).toBe(ctl.signal);
+  });
+});
+
+// Feature: features/run-loop.md item 8 (#101) — a hard stop's AbortSignal kills
+// the local child process instead of waiting out its 5-minute budget.
+describe("LocalExecutor exec abort", () => {
+  it("kills a running command when the signal aborts and returns an exit line, never throws", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-local-abort-"));
+    const ex = new LocalExecutor(dir);
+    const ctl = new AbortController();
+    const started = Date.now();
+    const out = ex.exec("sleep 30", { signal: ctl.signal });
+    setTimeout(() => ctl.abort(), 50);
+    const text = await out;
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(text).toMatch(/^exit /); // aborted → legible failure text, not a throw
   });
 });

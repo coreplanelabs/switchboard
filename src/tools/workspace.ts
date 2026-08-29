@@ -15,6 +15,10 @@ import type { SkillStore } from "../skills/index.js";
 
 export interface ToolContext {
   executor: Executor;
+  /** Aborted on a hard run stop (#101). Tools that run something cancellable
+   *  (bash → `executor.exec`) pass it through; the runner stops waiting on the
+   *  tool regardless, so a tool that ignores it degrades safely. */
+  signal?: AbortSignal;
   /** Replace the user-facing progress checklist on the status card. */
   reportProgress?: (checklist: string) => void;
   /** Web fetch + search capability (Area 5). Injected by the dispatcher;
@@ -52,7 +56,7 @@ export const bashTool: RunnableTool = {
     required: ["command"],
   },
   run(input, ctx) {
-    return ctx.executor.exec(String(input.command ?? ""));
+    return ctx.executor.exec(String(input.command ?? ""), ctx.signal ? { signal: ctx.signal } : undefined);
   },
 };
 

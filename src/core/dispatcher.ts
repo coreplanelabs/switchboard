@@ -472,6 +472,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         toolContext: { executor, reportProgress, web: makeWebCapability(process.env), skills: deps.skills, agentName: agent.name, onVerdict },
         onProgress,
         onEvent,
+        control: run.control, // operator stop from /runs (#101)
       });
     } catch (err) {
       await card.done({ title: title("❌"), detail: checklist });
@@ -494,10 +495,13 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // Give the workspace back now rather than at the inactivity sweep: a
       // resident's pool user is a scarce slot (features/resident-repos.md item
       // 16). Read-only agents hold nothing worth keeping; a coding run keeps
-      // its worktree only while it has uncommitted/unpushed work. Best-effort —
-      // a failed release is a log line, never a failed run.
+      // its worktree only while it has uncommitted/unpushed work — unless an
+      // operator HARD-stopped it (#101), which means "tear it down now": the
+      // abandoned command may still be running in there, and the whole point
+      // of a hard stop is to free the resources. Best-effort — a failed
+      // release is a log line, never a failed run.
       if (executor.release) {
-        const mode = agent.toolset === "readonly" ? "always" : "if-clean";
+        const mode = agent.toolset === "readonly" || run.control.requested === "hard" ? "always" : "if-clean";
         try {
           const r = await executor.release(mode);
           console.log(`[release] ${msg.threadKey} ${r.released ? "released" : "kept"}${r.reason ? ` (${r.reason})` : ""}`);
@@ -507,8 +511,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       }
     }
 
-    console.log(`[done] ${msg.threadKey} ${answer.length} chars`);
-    await card.done({ title: title("✅"), detail: checklist });
+    // The card's final icon tells the stop apart from a normal finish: ⏹ soft
+    // (a summary was written), ⛔ hard (aborted, no summary).
+    const stopped = run.control.requested;
+    console.log(`[done] ${msg.threadKey} ${answer.length} chars${stopped ? ` (stopped: ${stopped})` : ""}`);
+    await card.done({ title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"), detail: checklist });
     await sendAnswer(deps, io, msg.threadKey, { provider, model, maxTokens: agent.maxTokens }, answer);
 
     // Cross-session memory (Area 7c, #85) — WRITE path. AFTER the reply has
@@ -516,8 +523,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // only for the shutdown drain), so its latency/failures never reach the
     // user; gated on memory.enabled (default off → nothing happens) and on the
     // run having done real work (tools used, or a long thread). Fast paths
-    // above returned before this point and never reflect.
-    scheduleReflection({
+    // above returned before this point and never reflect. A HARD-stopped run
+    // has no summary to distill (its answer is the abort line), so it is
+    // skipped too; a soft stop wrote a real finale and reflects normally.
+    if (stopped !== "hard") scheduleReflection({
       cfg: deps.config.config.memory,
       store: deps.memory,
       providers: deps.providers,
@@ -534,8 +543,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // resolved PR posts its findings back to that PR by default — no need to
     // ask. Only for PR reviews (a resolved PR number); a review of pasted code
     // or a repo with no PR posts nowhere. Best-effort: a post failure is logged
-    // but never fails the dispatch (the review already landed in Slack).
-    const postTarget = decideReviewPost({
+    // but never fails the dispatch (the review already landed in Slack). A
+    // HARD-stopped review has no findings — only the abort line — so nothing is
+    // posted to the PR; a soft stop's "findings so far" finale posts as usual.
+    const postTarget = stopped === "hard" ? null : decideReviewPost({
       agentName: resolved.agentName,
       repo: repoCtx.repo,
       pr: repoCtx.pr,

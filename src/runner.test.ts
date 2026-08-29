@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "./agents/registry.js";
-import type { CompletionRequest, CompletionResult, Provider } from "./providers/types.js";
+import type { ChatMessage, CompletionRequest, CompletionResult, Provider } from "./providers/types.js";
+import { RunControl } from "./core/runRegistry.js";
 import type { Executor } from "./execution/executor.js";
 import { ExecInfraError } from "./execution/executor.js";
 import type { RunEvent } from "./core/runEvents.js";
@@ -539,5 +540,251 @@ describe("run-friction signals in the event stream (#84)", () => {
     });
     const kinds = events.filter((e) => e.type === "run_note").map((n) => n.kind);
     expect(kinds).toEqual(["sandbox_dead"]);
+  });
+});
+
+// Feature: features/run-loop.md item 8 — run control (#101): a soft stop wraps
+// up through the guaranteed finale with no further tool steps; a hard stop
+// aborts the in-flight provider/tool call immediately with no finale.
+describe("run control: soft / hard stop (#101)", () => {
+  /** A provider that keeps asking for bash while tools are offered and answers
+   *  the (tool-less) finale with text. `hook` runs at each call so a test can
+   *  request a stop mid-run. */
+  function toolLoop(hook?: (callIndex: number) => void): Provider & { requests: CompletionRequest[] } {
+    const requests: CompletionRequest[] = [];
+    let n = 0;
+    return {
+      name: "fake",
+      requests,
+      async complete(req) {
+        requests.push({ ...req, messages: structuredClone(req.messages) });
+        hook?.(n);
+        n++;
+        if (!req.tools) return text("wrapped up findings");
+        return bashUse(`t${n}`);
+      },
+    };
+  }
+
+  const go = (): ChatMessage[] => [{ role: "user", content: [{ type: "text", text: "go" }] }];
+
+  it("soft stop: takes no new step after the request, then writes up via the finale", async () => {
+    const control = new RunControl();
+    const events: RunEvent[] = [];
+    // Request the soft stop while the FIRST tool turn is being produced.
+    const provider = toolLoop((i) => {
+      if (i === 0) control.requestStop("soft");
+    });
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10 }),
+      messages: go(),
+      toolContext: { executor: fakeExecutor },
+      control,
+      onEvent: (e) => events.push(e),
+    });
+    // Exactly one tool turn ran (the one already in flight), then the finale.
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests[1].tools).toBeUndefined(); // the finale is tool-less
+    expect(answer).toContain("Stopped early");
+    expect(answer).toContain("soft");
+    expect(answer).toContain("wrapped up findings");
+    // Typed lifecycle note so the stream/card/friction analyzer see the stop.
+    expect(events.some((e) => e.type === "run_note" && e.kind === "stopped" && e.mode === "soft")).toBe(true);
+  });
+
+  it("soft stop requested before the first step: no tool step at all, straight to the finale", async () => {
+    const control = new RunControl();
+    control.requestStop("soft");
+    const provider = toolLoop();
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10 }),
+      messages: go(),
+      toolContext: { executor: fakeExecutor },
+      control,
+    });
+    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests[0].tools).toBeUndefined();
+    expect(answer).toContain("wrapped up findings");
+  });
+
+  it("hard stop mid-tool: aborts the in-flight tool immediately, no finale", async () => {
+    const control = new RunControl();
+    const events: RunEvent[] = [];
+    let execResolved = false;
+    // A tool that hangs until its abort signal fires (a real executor cancels
+    // the remote command through the same signal).
+    const hanging: Executor = {
+      exec: (_cmd, opts) =>
+        new Promise((resolve) => {
+          opts?.signal?.addEventListener("abort", () => resolve("killed"), { once: true });
+          setTimeout(() => {
+            execResolved = true;
+            resolve("finished anyway");
+          }, 5_000).unref();
+        }),
+      readFile: async () => "",
+      writeFile: async () => "",
+    };
+    const provider = toolLoop();
+    const run = runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10 }),
+      messages: go(),
+      toolContext: { executor: hanging },
+      control,
+      onEvent: (e) => events.push(e),
+    });
+    // Let the first completion + tool call start, then pull the plug.
+    await new Promise((r) => setTimeout(r, 10));
+    control.requestStop("hard");
+    const answer = await run;
+    expect(execResolved).toBe(false); // did not wait for the tool
+    expect(provider.requests).toHaveLength(1); // no finale call
+    expect(answer).toContain("aborted");
+    expect(answer).toContain("hard");
+    expect(events.some((e) => e.type === "run_note" && e.kind === "stopped" && e.mode === "hard")).toBe(true);
+  });
+
+  it("hard stop mid-inference: the provider call is abandoned and its signal is aborted", async () => {
+    const control = new RunControl();
+    let seenSignal: AbortSignal | undefined;
+    const provider: Provider = {
+      name: "slow",
+      complete: (req) =>
+        new Promise((resolve) => {
+          seenSignal = req.signal;
+          req.signal?.addEventListener("abort", () => resolve(text("late")), { once: true });
+        }),
+    };
+    const run = runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10 }),
+      messages: go(),
+      toolContext: { executor: fakeExecutor },
+      control,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    control.requestStop("hard");
+    const answer = await run;
+    expect(seenSignal?.aborted).toBe(true); // the provider was handed the hard signal
+    expect(answer).toContain("aborted");
+    expect(answer).not.toContain("late");
+  });
+
+  it("hard stop escalates a soft stop already in its finale: the finale is abandoned", async () => {
+    const control = new RunControl();
+    control.requestStop("soft");
+    const provider: Provider = {
+      name: "slow-finale",
+      complete: (req) =>
+        new Promise((resolve) => {
+          req.signal?.addEventListener("abort", () => resolve(text("late finale")), { once: true });
+        }),
+    };
+    const run = runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10 }),
+      messages: go(),
+      toolContext: { executor: fakeExecutor },
+      control,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    control.requestStop("hard");
+    const answer = await run;
+    expect(answer).toContain("aborted");
+    expect(answer).not.toContain("late finale");
+  });
+
+  it("a hard stop never throws out of the loop: a tool REJECTING on abort is still an orderly outcome", async () => {
+    const control = new RunControl();
+    const rejecting: Executor = {
+      exec: (_cmd, opts) =>
+        new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener("abort", () => reject(new Error("AbortError: killed")), { once: true });
+        }),
+      readFile: async () => "",
+      writeFile: async () => "",
+    };
+    const run = runAgent({
+      provider: toolLoop(),
+      model: "m",
+      agent: agent({ maxTurns: 10 }),
+      messages: go(),
+      toolContext: { executor: rejecting },
+      control,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    control.requestStop("hard");
+    await expect(run).resolves.toContain("aborted");
+  });
+
+  it("a hard stop that is ALREADY in effect when a call starts leaves no unhandled rejection", async () => {
+    // Review finding (PR #137): the already-aborted fast path used to reject
+    // with HardStopError while the caller's promise — a provider handed an
+    // aborted signal, which rejects promptly — had no handler. Under Node's
+    // default policy that unhandled rejection kills the bot process.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const control = new RunControl();
+      control.requestStop("hard"); // aborted before the first call
+      const provider: Provider = {
+        name: "abort-aware",
+        complete: async (req) => {
+          if (req.signal?.aborted) throw new Error("AbortError: fetch aborted");
+          return text("never");
+        },
+      };
+      const answer = await runAgent({
+        provider,
+        model: "m",
+        agent: agent({ maxTurns: 10 }),
+        messages: go(),
+        toolContext: { executor: fakeExecutor },
+        control,
+      });
+      expect(answer).toContain("aborted");
+      await new Promise((r) => setTimeout(r, 20)); // let any stray rejection surface
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("the finale is bounded: a provider that hangs on the write-up yields the fallback message, not a hung run", async () => {
+    const control = new RunControl();
+    control.requestStop("soft");
+    const provider: Provider = { name: "hang", complete: () => new Promise(() => {}) };
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10 }),
+      messages: go(),
+      toolContext: { executor: fakeExecutor },
+      control,
+      finaleTimeoutMs: 30,
+    });
+    expect(answer).toContain("Stopped early by an operator (soft stop) before any findings were written");
+  });
+
+  it("without a control the loop is unchanged and no signal is handed to the provider", async () => {
+    const provider = scripted([bashUse("t1"), text("all done")]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent(),
+      messages: go(),
+      toolContext: { executor: fakeExecutor },
+    });
+    expect(answer).toBe("all done");
+    expect(provider.requests[0].signal).toBeUndefined();
   });
 });

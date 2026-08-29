@@ -1,6 +1,15 @@
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { repoResourceId } from "../core/repoCommands.js";
-import { BASH_TIMEOUT_MS, ExecInfraError, truncate, type Executor, type ReleaseMode, type ReleaseResult } from "./executor.js";
+import {
+  BASH_TIMEOUT_MS,
+  ExecInfraError,
+  execDeadline,
+  truncate,
+  type ExecOptions,
+  type Executor,
+  type ReleaseMode,
+  type ReleaseResult,
+} from "./executor.js";
 
 // Remote execution against a resident repo environment — the always-warm
 // per-repo service behind the resident Worker (deploy/cloudflare-resident/).
@@ -174,6 +183,7 @@ export class ResidentExecutor implements Executor {
     route: string,
     body: Record<string, unknown>,
     timeoutMs: number = BASH_TIMEOUT_MS,
+    signal?: AbortSignal,
   ): Promise<{ status: number; data: Record<string, unknown> }> {
     let res: Response;
     try {
@@ -188,8 +198,10 @@ export class ResidentExecutor implements Executor {
         // streams and can legitimately run minutes, so the default is the exec
         // ceiling; control-plane routes pass a short bound. A timeout throws
         // here and is translated into the legible request-failed error below,
-        // never an unhandled throw.
-        signal: AbortSignal.timeout(timeoutMs),
+        // never an unhandled throw. A hard run stop (#101) joins the deadline:
+        // it drops the bot-side request; the resident's own `timeout` still
+        // bounds the command inside the container.
+        signal: execDeadline(timeoutMs, signal),
       });
     } catch (err) {
       // Network-level failure: the command may still be running (or have run)
@@ -241,11 +253,12 @@ export class ResidentExecutor implements Executor {
   private async opWithReattach(
     route: string,
     body: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<{ status: number; data: Record<string, unknown> }> {
-    let r = await this.call(route, body);
+    let r = await this.call(route, body, BASH_TIMEOUT_MS, signal);
     if (r.data.needs === "attach") {
       await this.attach();
-      r = await this.call(route, body);
+      r = await this.call(route, body, BASH_TIMEOUT_MS, signal);
       if (r.data.needs === "attach") {
         // Worktree still gone after a re-attach — the resident is unhealthy
         // (mid-restore or worse). Infra, not a command exit: counts toward
@@ -259,8 +272,8 @@ export class ResidentExecutor implements Executor {
     return r;
   }
 
-  async exec(command: string): Promise<string> {
-    const { status, data } = await this.opWithReattach("/exec", { command });
+  async exec(command: string, opts?: ExecOptions): Promise<string> {
+    const { status, data } = await this.opWithReattach("/exec", { command }, opts?.signal);
     // A pre-validation client rejection — a plain HTTP 400 with an {error} and NO
     // `needs` (e.g. command-too-long), nothing streamed — is agent-fixable, not a
     // sick resident. Surface it as a normal Error so it does NOT count toward the

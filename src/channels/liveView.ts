@@ -2,6 +2,7 @@ import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { IndexEvent, RunRegistry, RunSummary, Unsubscribe } from "../core/runRegistry.js";
+import type { StopMode } from "../core/runEvents.js";
 
 // Live-view channel: the external, browser-facing surface for a live agent run
 // (Area 2 / #43). It streams the SAME redacted RunEvents the in-channel status
@@ -23,17 +24,18 @@ import type { IndexEvent, RunRegistry, RunSummary, Unsubscribe } from "../core/r
 // thin node:http wrapper.
 
 /** Which live-view route a path is, if any. The bare `/runs` index carries no
- *  id (it is Access-gated, not token-gated); the per-run page/events routes do. */
-export type RunRoute = { kind: "index" } | { id: string; kind: "page" | "events" | "friction" };
+ *  id (it is Access-gated, not token-gated); the per-run routes do. `stop` is
+ *  the one WRITE route (`POST /runs/:id/stop`, #101). */
+export type RunRoute = { kind: "index" } | { id: string; kind: "page" | "events" | "friction" | "stop" };
 
 /** Match the bare index (`/runs`, `/runs/`), a per-run page (`/runs/:id`), a
- *  per-run SSE stream (`/runs/:id/events`), or a per-run friction diagnosis
- *  (`/runs/:id/friction`). Path only — the token is a query param, read
- *  separately. Returns null for anything else so the server can fall through
- *  to its other routes. */
+ *  per-run SSE stream (`/runs/:id/events`), a per-run friction diagnosis
+ *  (`/runs/:id/friction`), or the per-run stop control (`/runs/:id/stop`).
+ *  Path only — the token is a query param, read separately. Returns null for
+ *  anything else so the server can fall through to its other routes. */
 export function parseRunRoute(pathname: string): RunRoute | null {
   if (pathname === "/runs" || pathname === "/runs/") return { kind: "index" };
-  const m = /^\/runs\/([^/]+)(?:\/(events|friction))?\/?$/.exec(pathname);
+  const m = /^\/runs\/([^/]+)(?:\/(events|friction|stop))?\/?$/.exec(pathname);
   if (!m) return null;
   let id: string;
   try {
@@ -42,7 +44,20 @@ export function parseRunRoute(pathname: string): RunRoute | null {
     return null; // malformed percent-encoding → not a valid run route
   }
   if (id === "") return null;
-  return { id, kind: m[2] === "events" ? "events" : m[2] === "friction" ? "friction" : "page" };
+  const sub = m[2];
+  return { id, kind: sub === "events" || sub === "friction" || sub === "stop" ? sub : "page" };
+}
+
+/** Parse the `?mode=` of a stop request; anything but the two modes is null
+ *  (→ 400). Never trust the query to name the mode for us. */
+export function parseStopMode(raw: string | null): StopMode | null {
+  return raw === "soft" || raw === "hard" ? raw : null;
+}
+
+/** Human label for a run's stop status ("stopping (soft)", "stopped (hard)").
+ *  Kept byte-identical to the client mirrors in both pages. */
+function stopLabel(stop: NonNullable<RunSummary["stop"]>): string {
+  return `${stop.state} (${stop.mode})`;
 }
 
 /** Content-Security-Policy for the run page: everything self/inline only, no
@@ -85,6 +100,8 @@ const SSE_HEADERS: Record<string, string> = {
  */
 export function renderRunPage(id: string, token: string): string {
   const eventsPath = `/runs/${encodeURIComponent(id)}/events?t=${encodeURIComponent(token)}`;
+  // Stop control (#101): same token, POST-only; `&mode=` is appended client-side.
+  const stopPath = `/runs/${encodeURIComponent(id)}/stop?t=${encodeURIComponent(token)}`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -118,22 +135,37 @@ export function renderRunPage(id: string, token: string): string {
   .err { color: #ff7b72; }
   .note { color: #d29922; }
   .empty { color: #8b93a7; }
+  .actions { display: inline-flex; gap: .4rem; }
+  button.stop { font: inherit; font-size: .75rem; padding: .1rem .5rem; border-radius: 4px; cursor: pointer;
+    border: 1px solid #3b4252; background: #161b22; color: #e6e6e6; }
+  button.stop.hard { border-color: #f85149; color: #ff7b72; }
+  button.stop:disabled { opacity: .5; cursor: default; }
+  [hidden] { display: none; }
 </style>
 </head>
 <body>
 <header>
   <a class="back" href="/runs">← All runs</a>
   <h1>Live run</h1>
+  <span class="actions" id="actions">
+    <button class="stop soft" data-mode="soft" title="Soft stop: no new steps, the agent writes up what it has">Stop</button>
+    <button class="stop hard" data-mode="hard" title="Hard stop: abort now, no summary, free the sandbox">Kill</button>
+  </span>
   <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>
 </header>
 <ul id="log"><li class="empty" id="placeholder">Waiting for activity…</li></ul>
 <script>
 (function () {
   var url = ${JSON.stringify(eventsPath)};
+  var stopUrl = ${JSON.stringify(stopPath)};
   var log = document.getElementById("log");
   var state = document.getElementById("state");
   var stateDot = document.getElementById("statedot");
+  var actions = document.getElementById("actions");
   var placeholder = document.getElementById("placeholder");
+  // Set once a stop is requested (from the stream, so a viewer who didn't click
+  // sees it too); the end frame then reads "stopped (mode)" not "finished".
+  var stopMode = null;
   // Connection indicator: color the dot + set its label via classList/textContent
   // (never via raw markup). green = live, amber = connecting, red = disconnected,
   // grey = finished.
@@ -149,8 +181,25 @@ export function renderRunPage(id: string, token: string): string {
     log.appendChild(li);
     li.scrollIntoView({ block: "nearest" });
   }
+  function markStopping(mode) {
+    stopMode = mode;
+    actions.hidden = true; // one request is enough; the stream shows the outcome
+    setConn("amber", "stopping (" + mode + ")");
+  }
+  // Stop control (#101): POST the mode to this run's token-scoped stop route.
+  // A hard stop is destructive (no summary, sandbox torn down) → confirm first.
+  actions.addEventListener("click", function (ev) {
+    var btn = ev.target.closest ? ev.target.closest("button[data-mode]") : null;
+    if (!btn) return;
+    var mode = btn.getAttribute("data-mode");
+    if (mode === "hard" && !window.confirm("Hard stop: abort the run now with no summary and free its sandbox?")) return;
+    btn.disabled = true;
+    fetch(stopUrl + "&mode=" + encodeURIComponent(mode), { method: "POST", credentials: "same-origin" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); markStopping(mode); })
+      .catch(function (err) { btn.disabled = false; setConn("red", "stop failed: " + (err && err.message ? err.message : "error")); });
+  });
   var es = new EventSource(url);
-  es.onopen = function () { setConn("green", "live"); };
+  es.onopen = function () { if (!stopMode) setConn("green", "live"); };
   es.onmessage = function (m) {
     var e;
     try { e = JSON.parse(m.data); } catch (_) { return; }
@@ -160,10 +209,12 @@ export function renderRunPage(id: string, token: string): string {
       row(e.ok ? "ok" : "err", (e.ok ? "\\u2713 " : "\\u2717 ") + e.tool + ": " + e.summary);
     } else if (e.type === "run_note") {
       row("note", "\\u23f1 " + e.summary);
+      if ((e.kind === "stop_requested" || e.kind === "stopped") && e.mode) markStopping(e.mode);
     }
   };
   es.addEventListener("end", function () {
-    setConn("grey", "finished");
+    actions.hidden = true;
+    setConn("grey", stopMode ? "stopped (" + stopMode + ")" : "finished");
     es.close();
   });
   es.onerror = function () {
@@ -203,11 +254,14 @@ function eventCountLabel(n: number): string {
 }
 
 /** Server-rendered markup for one index row, keyed `data-run-id` so the client
- *  can find and update it in place. The ENTIRE row is a single `<a>` (full-row
+ *  can find and update it in place. The run's content is a single `<a>` (full-row
  *  clickable), leading with a colored status dot (green = live, grey = finished)
- *  that carries an accessible label since color alone isn't accessible. Every
- *  dynamic string is HTML-escaped and the href's id/token URL-encoded — a hostile
- *  label or id can break out of neither the markup nor the attribute. The client
+ *  that carries an accessible label since color alone isn't accessible, and — for
+ *  a live run — a SIBLING `<span class="actions">` with the Stop/Kill buttons
+ *  (#101; a button may not nest inside an anchor). A requested stop shows as a
+ *  `stopping (mode)` / `stopped (mode)` badge inside the anchor. Every dynamic
+ *  string is HTML-escaped and the href's id/token URL-encoded — a hostile label
+ *  or id can break out of neither the markup nor the attribute. The client
  *  mirrors this exact shape via the DOM (createElement + textContent/setAttribute),
  *  so a row looks the same whether painted here or by an `upsert`. */
 function indexRowHtml(r: RunSummary): string {
@@ -215,13 +269,23 @@ function indexRowHtml(r: RunSummary): string {
   const label = escapeHtml(r.label ?? shortId(r.id));
   const dotClass = r.finished ? "grey" : "green"; // static — safe, not user input
   const dotWord = r.finished ? "finished" : "live";
+  const badge = r.stop ? `<span class="stopbadge ${r.stop.state}">${escapeHtml(stopLabel(r.stop))}</span>` : "";
+  // Buttons only while the run can still be stopped: live and not already asked.
+  const actions =
+    r.finished || r.stop
+      ? ""
+      : `<span class="actions">` +
+        `<button class="stop soft" data-mode="soft" title="Soft stop: no new steps, the agent writes up what it has">Stop</button>` +
+        `<button class="stop hard" data-mode="hard" title="Hard stop: abort now, no summary, free the sandbox">Kill</button>` +
+        `</span>`;
   return (
     `<li data-run-id="${escapeHtml(r.id)}" data-started-at="${r.startedAt}">` +
     `<a class="row" href="${escapeHtml(href)}">` +
     `<span class="dot ${dotClass}" role="img" aria-label="${dotWord}" title="${dotWord}"></span>` +
     `<span class="label">${label}</span>` +
     `<span class="meta">${escapeHtml(eventCountLabel(r.eventCount))}</span>` +
-    `</a></li>`
+    badge +
+    `</a>${actions}</li>`
   );
 }
 
@@ -273,14 +337,22 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   a.nav { font-size: .8rem; color: #8b93a7; text-decoration: none; }
   a.nav:hover { color: #9ecbff; }
   #runs { list-style: none; margin: 0; padding: 0; }
-  #runs li { border-radius: 6px; }
+  #runs li { border-radius: 6px; display: flex; align-items: center; gap: .5rem; }
   #runs li + li { border-top: 1px solid #1b1f28; }
-  /* The whole row is the link (full-row clickable), with a clear hover bg. */
-  #runs a.row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+  /* The run's row is the link (full-row clickable), with a clear hover bg; the
+     stop buttons sit beside it as a sibling (a button can't live in an anchor). */
+  #runs a.row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; flex: 1 1 auto;
     padding: .45rem .5rem; border-radius: 6px; color: inherit; text-decoration: none; }
   #runs a.row:hover { background: #161b22; }
   #runs a.row .label { color: #9ecbff; font-weight: 600; }
   .meta { font-size: .75rem; color: #8b93a7; }
+  .stopbadge { font-size: .75rem; color: #d29922; }
+  .stopbadge.stopped { color: #8b93a7; }
+  .actions { display: inline-flex; gap: .4rem; flex: 0 0 auto; padding-right: .5rem; }
+  button.stop { font: inherit; font-size: .75rem; padding: .1rem .5rem; border-radius: 4px; cursor: pointer;
+    border: 1px solid #3b4252; background: #161b22; color: #e6e6e6; }
+  button.stop.hard { border-color: #f85149; color: #ff7b72; }
+  button.stop:disabled { opacity: .5; cursor: default; }
   .empty { color: #8b93a7; padding: .45rem .5rem; }
   [hidden] { display: none; }
 </style>
@@ -306,19 +378,34 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   }
   // Rows keyed by run id — avoids building CSS selectors from (untrusted) ids.
   var rows = Object.create(null);
+  // The latest summary per run id — the stop buttons need the row's token.
+  var runs = Object.create(null);
   var seeded = list.querySelectorAll("li[data-run-id]");
   for (var i = 0; i < seeded.length; i++) rows[seeded[i].getAttribute("data-run-id")] = seeded[i];
 
   function runHref(run) {
     return "/runs/" + encodeURIComponent(run.id) + "?t=" + encodeURIComponent(run.token);
   }
+  function stopHref(run, mode) {
+    return "/runs/" + encodeURIComponent(run.id) + "/stop?t=" + encodeURIComponent(run.token) + "&mode=" + encodeURIComponent(mode);
+  }
   function shortId(id) { return id.length > 8 ? id.slice(0, 8) + "\\u2026" : id; }
   function countLabel(n) { return n + (n === 1 ? " event" : " events"); }
+  function stopLabel(stop) { return stop.state + " (" + stop.mode + ")"; }
+  function stopButton(mode, text, title) {
+    var b = document.createElement("button");
+    b.className = "stop " + mode;
+    b.setAttribute("data-mode", mode);
+    b.setAttribute("title", title);
+    b.textContent = text;
+    return b;
+  }
 
   // Rebuild a row's contents from a run summary using createElement +
   // textContent/setAttribute only (no raw-markup assignment), so a hostile
-  // label/id is rendered as data. Mirrors the server's full-row shape: the whole
-  // row is one <a class="row">, led by an accessible status dot.
+  // label/id is rendered as data. Mirrors the server's shape: one <a class="row">
+  // led by an accessible status dot (+ a stop badge once requested), then — for
+  // a stoppable run — a sibling <span class="actions"> with Stop/Kill.
   function fill(li, run) {
     li.setAttribute("data-run-id", run.id);
     li.setAttribute("data-started-at", String(run.startedAt)); // drives sorted insert
@@ -341,8 +428,37 @@ export function renderRunsIndex(runs: RunSummary[]): string {
     meta.className = "meta";
     meta.textContent = countLabel(run.eventCount);
     a.appendChild(meta);
+    if (run.stop) {
+      var badge = document.createElement("span");
+      badge.className = "stopbadge " + run.stop.state;
+      badge.textContent = stopLabel(run.stop);
+      a.appendChild(badge);
+    }
     li.appendChild(a);
+    if (!run.finished && !run.stop) {
+      var actions = document.createElement("span");
+      actions.className = "actions";
+      actions.appendChild(stopButton("soft", "Stop", "Soft stop: no new steps, the agent writes up what it has"));
+      actions.appendChild(stopButton("hard", "Kill", "Hard stop: abort now, no summary, free the sandbox"));
+      li.appendChild(actions);
+    }
   }
+  // Stop control (#101), delegated from the list: POST the mode to the row's
+  // token-scoped stop route; the registry's index upsert then repaints the row
+  // as "stopping". A hard stop is destructive → confirm first.
+  list.addEventListener("click", function (ev) {
+    var btn = ev.target.closest ? ev.target.closest("button[data-mode]") : null;
+    if (!btn) return;
+    var li = btn.closest("li[data-run-id]");
+    var run = li && runs[li.getAttribute("data-run-id")];
+    if (!run) return;
+    var mode = btn.getAttribute("data-mode");
+    if (mode === "hard" && !window.confirm("Hard stop: abort this run now with no summary and free its sandbox?")) return;
+    btn.disabled = true;
+    fetch(stopHref(run, mode), { method: "POST", credentials: "same-origin" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); })
+      .catch(function () { btn.disabled = false; });
+  });
   function refreshEmpty() {
     var has = false;
     for (var k in rows) { has = true; break; }
@@ -366,6 +482,7 @@ export function renderRunsIndex(runs: RunSummary[]): string {
     list.insertBefore(li, empty); // oldest so far (or empty list) → above the sentinel
   }
   function upsert(run) {
+    runs[run.id] = run;
     var li = rows[run.id];
     if (li) {
       fill(li, run); // update in place — startedAt is immutable, so position holds
@@ -381,6 +498,7 @@ export function renderRunsIndex(runs: RunSummary[]): string {
     var li = rows[id];
     if (li && li.parentNode) li.parentNode.removeChild(li);
     delete rows[id];
+    delete runs[id];
     refreshEmpty();
   }
 
@@ -551,17 +669,22 @@ function nodeSseSink(req: HttpRequest, res: ServerResponse): SseSink {
 
 /**
  * node:http handler for the live-view routes. Returns `true` if it owned the
- * request (so the server stops routing), `false` to fall through. All routes are
- * GET-only (405 otherwise):
- *   GET /runs                 → the runs index HTML page (Access-gated, NOT token-gated)
- *   GET /runs?stream=1        → the live runs-index SSE feed (Access-gated, NOT token-gated)
- *   GET /runs/:id?t=…         → the HTML page (404 on bad/missing token)
- *   GET /runs/:id/events?t=…  → the SSE stream (404 on bad/missing token)
- * The two per-run routes are token-gated via the registry; the index (page AND
+ * request (so the server stops routing), `false` to fall through. Every read
+ * route is GET-only and the one write route is POST-only (405 otherwise):
+ *   GET  /runs                          → the runs index HTML page (Access-gated, NOT token-gated)
+ *   GET  /runs?stream=1                 → the live runs-index SSE feed (Access-gated, NOT token-gated)
+ *   GET  /runs/:id?t=…                  → the HTML page (404 on bad/missing token)
+ *   GET  /runs/:id/events?t=…           → the SSE stream (404 on bad/missing token)
+ *   GET  /runs/:id/friction?t=…         → the friction diagnosis JSON (404 on bad/missing token)
+ *   POST /runs/:id/stop?t=…&mode=soft|hard → ask the run to stop (#101): 200 JSON, 400 bad
+ *        mode, 404 bad/missing token or unknown run, 409 already finished
+ * The per-run routes are token-gated via the registry; the index (page AND
  * feed) is not — Cloudflare Access fronts it, and it renders the per-run
- * capability links. `?stream=1` (a query flag, not a new path) selects the feed
- * so it never collides with `/runs/<id>` where an id could legitimately be
- * "events" or "stream".
+ * capability links. The stop route sits behind BOTH gates: Access at the edge
+ * (index.ts gates every method under /runs*) and the run's token here.
+ * `?stream=1` (a query flag, not a new path) selects the feed so it never
+ * collides with `/runs/<id>` where an id could legitimately be "events" or
+ * "stream".
  */
 export function createLiveViewHandler(
   registry: RunRegistry,
@@ -571,8 +694,10 @@ export function createLiveViewHandler(
     const route = parseRunRoute(url.pathname);
     if (!route) return false;
 
-    if ((req.method ?? "GET").toUpperCase() !== "GET") {
-      res.writeHead(405, { "content-type": "text/plain; charset=utf-8", allow: "GET" });
+    const method = (req.method ?? "GET").toUpperCase();
+    const allow = route.kind === "stop" ? "POST" : "GET";
+    if (method !== allow) {
+      res.writeHead(405, { "content-type": "text/plain; charset=utf-8", allow });
       res.end("method not allowed");
       return true;
     }
@@ -621,6 +746,31 @@ export function createLiveViewHandler(
       const diagnosis = analyzeRunFriction(snap.events, { finished: snap.finished });
       res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
       res.end(JSON.stringify({ id: route.id, finished: snap.finished, diagnosis }));
+      return true;
+    }
+
+    // Run control (#101): the only write. Mode is validated BEFORE the token is
+    // checked so a malformed request is a plain 400 with no registry lookup;
+    // the token gate then answers 404 for wrong token AND unknown run alike
+    // (never reveal which), and a finished run is a 409. Never throws: the
+    // registry call is total, and the run loop observes the control on its
+    // own schedule — this request only records the ask.
+    if (route.kind === "stop") {
+      const mode = parseStopMode(url.searchParams.get("mode"));
+      if (!mode) {
+        res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+        res.end("mode must be soft or hard");
+        return true;
+      }
+      const result = registry.requestStop(route.id, token, mode);
+      if (!result.ok) {
+        const [status, body] = result.reason === "finished" ? [409, "run already finished"] : [404, "run not found"];
+        res.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
+        res.end(body);
+        return true;
+      }
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      res.end(JSON.stringify({ id: route.id, mode: result.mode, state: "stopping" }));
       return true;
     }
 

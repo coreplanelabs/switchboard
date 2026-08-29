@@ -14,13 +14,27 @@
 // exhaustion, dead sandbox) as typed kinds instead of only free-text progress.
 // All additive: consumers that only know tool_call/tool_result keep working.
 
-/** Typed lifecycle notices the runner emits alongside its `onProgress` text. */
-export type RunNoteKind = "wrap_up" | "time_budget_exhausted" | "turn_budget_exhausted" | "sandbox_dead";
+/** Typed lifecycle notices the runner emits alongside its `onProgress` text.
+ *  `stop_requested` is published by the registry when an operator asks the run
+ *  to stop from /runs (#101); `stopped` by the runner when it honors it. */
+export type RunNoteKind =
+  | "wrap_up"
+  | "time_budget_exhausted"
+  | "turn_budget_exhausted"
+  | "sandbox_dead"
+  | "stop_requested"
+  | "stopped";
+
+/** How an operator asked a run to stop (#101): `soft` — take no new steps and
+ *  wrap up through the normal finale; `hard` — abort the in-flight call now, no
+ *  finale, tear the workspace down. */
+export type StopMode = "soft" | "hard";
 
 export type RunEvent =
   | { type: "tool_call"; tool: string; summary: string; at?: number }
   | { type: "tool_result"; tool: string; ok: boolean; summary: string; infra?: true; at?: number }
-  | { type: "run_note"; kind: RunNoteKind; summary: string; at?: number };
+  /** `mode` rides only on the stop notes (`stop_requested` / `stopped`). */
+  | { type: "run_note"; kind: RunNoteKind; summary: string; mode?: StopMode; at?: number };
 
 // Credential shapes we must never surface in a run-visibility stream (which may
 // be shown in-channel or on a shared page). Two layers: (1) specific known

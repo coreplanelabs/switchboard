@@ -1,4 +1,4 @@
-import { ExecInfraError, truncate, type Executor } from "./executor.js";
+import { ExecInfraError, truncate, type ExecOptions, type Executor } from "./executor.js";
 
 // Remote execution in a Cloudflare Sandbox, via the authenticated proxy Worker
 // in deploy/cloudflare-sandbox/ (the Sandbox SDK only runs inside Workers).
@@ -22,7 +22,11 @@ export interface CloudflareSandboxOptions {
 export class CloudflareSandboxExecutor implements Executor {
   constructor(private opts: CloudflareSandboxOptions) {}
 
-  private async call(route: string, body: Record<string, string>): Promise<Record<string, unknown>> {
+  private async call(
+    route: string,
+    body: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       authorization: `Bearer ${this.opts.token}`,
@@ -41,6 +45,10 @@ export class CloudflareSandboxExecutor implements Executor {
           method: "POST",
           headers,
           body: JSON.stringify(body),
+          // A hard run stop (#101) drops the bot-side request. The sandbox
+          // Worker has no kill route, so the command itself runs on to its own
+          // `timeout` inside the sandbox — the runner has already moved on.
+          ...(signal ? { signal } : {}),
         });
       } catch (err) {
         // Network-level failure ("fetch failed"): undici drops the connection
@@ -75,8 +83,8 @@ export class CloudflareSandboxExecutor implements Executor {
     throw new ExecInfraError(lastErr);
   }
 
-  async exec(command: string): Promise<string> {
-    const r = await this.call("/exec", { command });
+  async exec(command: string, opts?: ExecOptions): Promise<string> {
+    const r = await this.call("/exec", { command }, opts?.signal);
     const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
     const exitCode = Number(r.exitCode ?? 0);
     if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);

@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { RunEvent } from "./runEvents.js";
+import type { RunEvent, StopMode } from "./runEvents.js";
 
 // The run registry is the unit-testable core of the external live-view page
 // (Area 2 / #43). It is deliberately **in-memory and live-only**: a run's
@@ -15,13 +15,62 @@ import type { RunEvent } from "./runEvents.js";
 // id, compared in constant time. The token is the gate — an unguessable,
 // per-run secret carried in the live URL.
 
-/** The identifiers a freshly created run is addressed by. */
+/**
+ * Per-run stop control (#101). One per run, minted by `RunRegistry.create()` and
+ * handed to the runner; `requestStop` is driven through the registry's
+ * token-gated `requestStop(id, token, mode)`. Two modes, one direction:
+ *   - `soft`: only records the request. The runner polls `requested` between
+ *     steps, takes no new step, and wraps up through the guaranteed finale.
+ *   - `hard`: records the request AND aborts `hardSignal`, which the runner
+ *     threads into the in-flight provider call and tool execution so they are
+ *     cancelled now, with no finale.
+ * A soft request escalates to hard; a hard request never de-escalates; repeats
+ * are idempotent. Everything here is synchronous and never throws.
+ */
+export class RunControl {
+  private mode: StopMode | undefined;
+  private readonly hard = new AbortController();
+
+  /** The strongest stop requested so far, or undefined while none has been. */
+  get requested(): StopMode | undefined {
+    return this.mode;
+  }
+
+  /** Aborted iff a HARD stop has been requested. Pass to anything cancellable. */
+  get hardSignal(): AbortSignal {
+    return this.hard.signal;
+  }
+
+  /** Record a stop request; returns the effective mode after it (hard wins). */
+  requestStop(mode: StopMode): StopMode {
+    if (this.mode === "hard") return "hard";
+    this.mode = mode;
+    if (mode === "hard") this.hard.abort(new Error("run stopped (hard) by operator"));
+    return this.mode;
+  }
+}
+
+/** The identifiers a freshly created run is addressed by, plus its control. */
 export interface RunHandle {
   /** Random, unguessable run id — the `:id` in `/runs/:id`. */
   id: string;
   /** Random, unguessable view token — the `?t=` capability for this run. */
   token: string;
+  /** This run's stop control — the dispatcher hands it to the runner. */
+  control: RunControl;
 }
+
+/** A run's stop status for the index: `stopping` from the request until the run
+ *  finishes, then `stopped`. Absent when no stop was ever requested. */
+export interface RunStopStatus {
+  mode: StopMode;
+  state: "stopping" | "stopped";
+}
+
+/** Outcome of `RunRegistry.requestStop`. `not-found` covers BOTH an unknown run
+ *  and a wrong token (the caller maps it to 404 — existence is never revealed);
+ *  `finished` is a run that already ended (409). */
+export type StopRequestResult = { ok: true; mode: StopMode } | { ok: false; reason: "not-found" | "finished" };
 
 /**
  * A live-only snapshot of one non-evicted run, for the Access-gated runs index
@@ -40,6 +89,8 @@ export interface RunSummary {
   finished: boolean;
   startedAt: number;
   eventCount: number;
+  /** Present only once a stop has been requested (#101). */
+  stop?: RunStopStatus;
 }
 
 export type RunSubscriber = (event: RunEvent) => void;
@@ -95,6 +146,8 @@ interface RunState {
   seq: number;
   /** Total events published (monotonic; unlike backlog, never trimmed). */
   eventCount: number;
+  /** Stop control handed to the runner at create(); driven by requestStop(). */
+  control: RunControl;
 }
 
 /** Equal-length constant-time string compare (mirrors channels/http.ts). Guards
@@ -145,10 +198,36 @@ export class RunRegistry {
       startedAt: this.now(),
       seq: ++this.seq,
       eventCount: 0,
+      control: new RunControl(),
     };
     this.runs.set(id, run);
     this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
-    return { id, token };
+    return { id, token, control: run.control };
+  }
+
+  /**
+   * Ask a live run to stop (#101) — the control-plane entry behind
+   * `POST /runs/:id/stop`. Same constant-time token gate as every read (wrong
+   * token and unknown run are indistinguishable: `not-found`); a finished run is
+   * refused (`finished`). On success the run's `RunControl` is driven (the runner
+   * observes it), a typed `stop_requested` run_note is published to the run's
+   * stream so viewers see the request, and the index is upserted so rows repaint
+   * as `stopping`. Never throws.
+   */
+  requestStop(id: string, token: string, mode: StopMode): StopRequestResult {
+    this.sweep();
+    const run = this.validate(id, token);
+    if (!run) return { ok: false, reason: "not-found" };
+    if (run.finished) return { ok: false, reason: "finished" };
+    const effective = run.control.requestStop(mode);
+    this.publish(id, {
+      type: "run_note",
+      kind: "stop_requested",
+      mode: effective,
+      summary: effective === "hard" ? "hard stop requested — aborting now" : "soft stop requested — wrapping up",
+      at: this.now(),
+    });
+    return { ok: true, mode: effective };
   }
 
   /** Append an event to a run's backlog and fan it out to live subscribers.
@@ -285,6 +364,9 @@ export class RunRegistry {
       finished: run.finished,
       startedAt: run.startedAt,
       eventCount: run.eventCount,
+      ...(run.control.requested !== undefined
+        ? { stop: { mode: run.control.requested, state: run.finished ? ("stopped" as const) : ("stopping" as const) } }
+        : {}),
     };
   }
 

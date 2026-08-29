@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, posix } from "node:path";
 import { Sandbox } from "e2b";
-import { truncate, type Executor, BASH_TIMEOUT_MS } from "./executor.js";
+import { truncate, type Executor, type ReleaseMode, type ReleaseResult, BASH_TIMEOUT_MS } from "./executor.js";
 
 // Remote execution in an E2B micro-VM. One sandbox per thread: the repo
 // checkout and GH_TOKEN live inside the sandbox, never on the bot host.
@@ -67,6 +67,9 @@ export class E2BExecutor implements Executor {
     return new E2BExecutor(sbx);
   }
 
+  /** The e2b command API takes no AbortSignal, so a hard run stop (#101)
+   *  degrades safely here: the runner stops waiting on this call, and the
+   *  dispatcher's `release("always")` then kills the whole sandbox below. */
   async exec(command: string): Promise<string> {
     const result = await this.sbx.commands
       .run(command, { cwd: WORKDIR, timeoutMs: BASH_TIMEOUT_MS })
@@ -93,6 +96,20 @@ export class E2BExecutor implements Executor {
   async writeFile(path: string, content: string): Promise<string> {
     await this.sbx.files.write(confine(path), content);
     return `Wrote ${path}`;
+  }
+
+  /** "always" (a read-only run, or a hard stop) kills the micro-VM outright —
+   *  the only way to end a command e2b's API can't cancel; the next request in
+   *  the thread creates a fresh sandbox (repos re-clone). "if-clean" keeps the
+   *  sandbox: its idle timeout is the existing reclaim path. Never throws. */
+  async release(mode: ReleaseMode): Promise<ReleaseResult> {
+    if (mode !== "always") return { released: false, reason: "kept for the thread (idle timeout reclaims it)" };
+    try {
+      await this.sbx.kill();
+      return { released: true };
+    } catch (err) {
+      return { released: false, reason: err instanceof Error ? err.message : String(err) };
+    }
   }
 }
 
