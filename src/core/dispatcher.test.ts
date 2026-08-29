@@ -1,4 +1,5 @@
 import { NO_VERDICT_LINE } from "./reviewVerdict.js";
+import { reviewTargetBlock } from "./reviewTarget.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1204,6 +1205,61 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     expect(system).toContain("acme/api"); // the resolved repo is named
     expect(system).not.toMatch(/clone the relevant repository/i);
     expect(system).not.toContain("gh pr create");
+  });
+
+  // Feature: features/agent-review.md item 9 — a review run with a resolved PR
+  // is TOLD its target (repo, PR, head branch/commit, base) in the system
+  // prompt, on both paths, from RepoContext — never left to find it.
+  it("a resident review of a resolved PR gets the REVIEW TARGET block with the resolved head sha", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    residentFetchStub();
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const ctx = { repo: "acme/api", ref: "patch-1", pr: 42, headSha: "e".repeat(40), baseRef: "main" };
+    deps.resolveRepoContext = () => ctx;
+    deps.postReviewComment = vi.fn(async () => {});
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    const system = provider.requests[0].system ?? "";
+    expect(system).toContain(AGENTS.review.residentSystem!);
+    expect(system).toContain(reviewTargetBlock({ ...ctx, resident: true }));
+    expect(system).toContain(`Head commit: ${"e".repeat(40)}`);
+  });
+
+  it("a sandbox-path review of a resolved PR gets the sandbox variant of the REVIEW TARGET block", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    vi.stubEnv("GH_TOKEN", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider); // no resident configured
+    const ctx = { repo: "acme/api", pr: 42, headSha: "e".repeat(40) };
+    deps.resolveRepoContext = () => ctx;
+    deps.postReviewComment = vi.fn(async () => {});
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    const system = provider.requests[0].system ?? "";
+    expect(system).toContain(AGENTS.review.system);
+    expect(system).toContain(reviewTargetBlock({ ...ctx, resident: false }));
+    expect(system).toContain("`gh pr checkout 42`");
+  });
+
+  it("no REVIEW TARGET block for a coding run on a PR, nor for a review with no resolved PR", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    vi.stubEnv("GH_TOKEN", "");
+    const coding = capturingProvider();
+    const deps1 = makeDeps(REMOTE_YAML_FIXTURE, coding);
+    deps1.resolveRepoContext = () => ({ repo: "acme/api", pr: 42, headSha: "e".repeat(40) });
+    await dispatch(deps1, msg("agent:coding fix acme/api#42", "slack:UADMIN"), fakeIO().io);
+    expect(coding.requests[0].system ?? "").not.toContain("REVIEW TARGET");
+
+    const review = capturingProvider();
+    const deps2 = makeDeps(REMOTE_YAML_FIXTURE, review);
+    deps2.resolveRepoContext = () => ({ repo: "acme/api" });
+    await dispatch(deps2, msg("agent:review look at acme/api", "slack:UADMIN"), fakeIO().io);
+    expect(review.requests[0].system ?? "").not.toContain("REVIEW TARGET");
   });
 
   it("the per-thread fallback path keeps the agent's own system prompt (regression)", async () => {

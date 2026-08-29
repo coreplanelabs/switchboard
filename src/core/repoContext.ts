@@ -53,6 +53,10 @@ export interface RepoContext {
    *  PR: set whenever the fetch succeeded — including cross-fork PRs, whose ref
    *  is not bound. Inherited PR: always set (its absence drops the PR). */
   headSha?: string;
+  /** Base branch of that PR (from the same REST call), validated as a ref.
+   *  Tells the review agent its diff base (features/agent-review.md item 9);
+   *  unset when unknown — the agent then uses origin/HEAD. */
+  baseRef?: string;
   /** Set when the thread's bound PR was NOT usable for the post-step: it is
    *  closed/merged, or the fetch failed (network, non-2xx, malformed SHA).
    *  Lets the dispatcher say so in the thread instead of a silent Slack-only
@@ -264,10 +268,12 @@ export async function resolveRepoContext(
   // PR head ref — one REST call, only when nothing more explicit bound a ref
   // and the PR belongs to the resolved repo. Failure degrades to repo-only.
   let headSha: string | undefined;
+  let baseRef: string | undefined;
   if (!ref && s.pr && repo === s.pr.repo) {
     const head = await prHead(s.pr).catch(() => undefined);
     ref = head?.ref;
     headSha = head?.sha;
+    baseRef = head?.base;
   }
 
   const out: RepoContext = {};
@@ -286,6 +292,7 @@ export async function resolveRepoContext(
   if (repo && s.pr && repo === s.pr.repo) {
     out.pr = s.pr.number;
     if (headSha) out.headSha = headSha;
+    if (baseRef) out.baseRef = baseRef;
   } else if (repo && !s.pr) {
     const inherited = thread.pr;
     if (inherited && inherited.repo === repo) {
@@ -293,6 +300,7 @@ export async function resolveRepoContext(
       if ("sha" in head) {
         out.pr = inherited.number;
         out.headSha = head.sha;
+        if (head.base) out.baseRef = head.base;
       } else {
         out.prUnpostable = { number: inherited.number, reason: head.reason };
       }
@@ -307,10 +315,11 @@ export async function resolveRepoContext(
  *  malformed SHA, unknown state). Never throws. */
 async function openPrHeadSha(
   pr: { repo: string; number: number },
-): Promise<{ sha: string } | { reason: "closed" | "unreachable" }> {
+): Promise<{ sha: string; base?: string } | { reason: "closed" | "unreachable" }> {
   const head = await prHead(pr).catch(() => undefined);
   if (head?.state === "closed") return { reason: "closed" };
-  return head?.state === "open" && head.sha ? { sha: head.sha } : { reason: "unreachable" };
+  if (head?.state === "open" && head.sha) return head.base ? { sha: head.sha, base: head.base } : { sha: head.sha };
+  return { reason: "unreachable" };
 }
 
 /** GET /repos/{owner}/{repo}/pulls/{n} → { head.ref, head.sha, state }. Cross-fork
@@ -319,7 +328,7 @@ async function openPrHeadSha(
  *  caller's happy path — callers .catch() to degrade. */
 async function prHead(
   pr: { repo: string; number: number },
-): Promise<{ ref?: string; sha?: string; state?: "open" | "closed" } | undefined> {
+): Promise<{ ref?: string; sha?: string; base?: string; state?: "open" | "closed" } | undefined> {
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
     "user-agent": "switchboard",
@@ -334,7 +343,10 @@ async function prHead(
   const data = (await res.json().catch(() => ({}))) as {
     state?: string;
     head?: { ref?: string; sha?: string; repo?: { full_name?: string } };
+    base?: { ref?: string };
   };
+  // Base branch: validated like every ref candidate (never partial garbage).
+  const base = typeof data.base?.ref === "string" ? validRef(data.base.ref) : undefined;
   const sha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
   const headRepo = data.head?.repo?.full_name?.toLowerCase();
   // Require a POSITIVE same-repo match for the REF: a null head.repo (deleted
@@ -343,5 +355,5 @@ async function prHead(
   // ref undefined.
   const ref = data.head?.ref && headRepo === pr.repo ? validRef(data.head.ref) : undefined;
   const state = data.state === "open" || data.state === "closed" ? data.state : undefined;
-  return { ref, sha, state };
+  return { ref, sha, base, state };
 }

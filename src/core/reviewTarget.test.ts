@@ -1,0 +1,60 @@
+import { describe, expect, it } from "vitest";
+import { reviewTargetBlock } from "./reviewTarget.js";
+
+// Feature: features/agent-review.md item 9 — the review agent is TOLD what it is
+// reviewing, deterministically, from the facts Switchboard resolved before the
+// model turn (repo, PR, head branch/commit, base). Incident 2026-08-29 (PR #182,
+// review 5059339497): the agent was handed only a URL and a prompt saying the
+// worktree was "typically" the branch under review, went looking, and reviewed
+// another PR's branch. Item 8's guard is the backstop; this is the fix.
+
+const SHA = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
+
+describe("reviewTargetBlock", () => {
+  const full = { repo: "acme/api", pr: 42, ref: "patch-1", headSha: SHA, baseRef: "main" };
+
+  it("resident path: names every resolved fact and pins the first command to a HEAD check", () => {
+    const b = reviewTargetBlock({ ...full, resident: true });
+    expect(b.startsWith("REVIEW TARGET")).toBe(true);
+    expect(b).toContain("Repository: acme/api");
+    expect(b).toContain("Pull request: #42 — https://github.com/acme/api/pull/42");
+    expect(b).toContain("Head branch: patch-1");
+    expect(b).toContain(`Head commit: ${SHA}`);
+    expect(b).toContain("Base branch: main");
+    expect(b).toContain("The worktree is already at that head");
+    expect(b).toMatch(/FIRST command: `git rev-parse HEAD`/);
+    expect(b).toMatch(/STOP/);
+    expect(b).toMatch(/do not fetch or check out anything/i);
+    expect(b).toContain("`origin/main` is already present");
+    expect(b).toMatch(/do NOT run `git fetch`/);
+    expect(b).toContain("`head` to submit_verdict");
+    expect(b).not.toMatch(/gh pr checkout/);
+  });
+
+  it("sandbox path: clone + gh pr checkout, then the same HEAD check; no worktree claims", () => {
+    const b = reviewTargetBlock({ ...full, resident: false });
+    expect(b).toContain("`gh pr checkout 42`");
+    expect(b).toMatch(/`git rev-parse HEAD`/);
+    expect(b).toMatch(/STOP/);
+    expect(b).not.toContain("worktree is already");
+    expect(b).not.toContain("do NOT run `git fetch`");
+  });
+
+  it("unknown head branch / base are named as unknown, never invented", () => {
+    const b = reviewTargetBlock({ repo: "acme/api", pr: 7, headSha: SHA, resident: true });
+    expect(b).toContain("Head branch: unknown");
+    expect(b).toContain("Base branch: the repository's default branch");
+    expect(b).toContain("`origin/HEAD`"); // the diff base when the base branch is unknown
+  });
+
+  it("unknown head commit: says so and asks for `git rev-parse HEAD` as the reported head — no STOP rule to compare against", () => {
+    const b = reviewTargetBlock({ repo: "acme/api", pr: 7, ref: "patch-1", baseRef: "main", resident: true });
+    expect(b).toContain("Head commit: unknown");
+    expect(b).not.toMatch(/must equal/);
+    expect(b).toContain("`head` to submit_verdict");
+  });
+
+  it("is deterministic (same input, same text)", () => {
+    expect(reviewTargetBlock({ ...full, resident: true })).toBe(reviewTargetBlock({ ...full, resident: true }));
+  });
+});

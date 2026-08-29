@@ -15,6 +15,7 @@ import { decideReviewPost, reviewPostOptedOut, type ReviewPostTarget } from "./r
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
 import { checkReviewedHead, parseRevParseOutput } from "./reviewedHead.js";
+import { reviewTargetBlock } from "./reviewTarget.js";
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
@@ -326,10 +327,28 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // discriminant (not an executor `instanceof`), keeping the executor
     // implementation out of the channel-agnostic core. The shared AgentDef is
     // never mutated (concurrent dispatches share it).
-    const baseSystem =
+    const residentSystem =
       resident && agent.residentSystem
         ? `${agent.residentSystem}\n\nTarget repository: ${repoCtx.repo}. The worktree is already on this thread's bound branch (confirm with \`git branch --show-current\`).`
         : undefined;
+    // REVIEW TARGET (features/agent-review.md item 9): a review run whose repo
+    // resolution found a PR is TOLD what it is reviewing — repo, PR, head
+    // branch/commit, base — from the same RepoContext the post-step guard
+    // (item 8) later checks against. Both paths; the block is path-aware
+    // (ready worktree vs. clone + `gh pr checkout`). Nothing to tell for a
+    // coding run or a PR-less review, so those prompts stay byte-identical.
+    const target =
+      resolved.agentName === "review" && repoCtx.repo && repoCtx.pr !== undefined
+        ? reviewTargetBlock({
+            repo: repoCtx.repo,
+            pr: repoCtx.pr,
+            ref: repoCtx.ref,
+            headSha: repoCtx.headSha,
+            baseRef: repoCtx.baseRef,
+            resident: resident === true,
+          })
+        : undefined;
+    const baseSystem = target ? `${residentSystem ?? agent.system}\n\n${target}` : residentSystem;
 
     // Progressive disclosure (#100): append the calling agent's scoped skill
     // name+description list AFTER the agent's own instructions (it is guidance
