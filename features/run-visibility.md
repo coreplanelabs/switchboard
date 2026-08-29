@@ -13,10 +13,15 @@ You can see what an agent is doing while it works, in real time (Area 2 / R12). 
 4. **Result summaries are bounded**: `summarizeToolResult` returns the first non-empty (redacted) line, capped at 200 chars, with a size note for larger output — enough to see what happened without dumping the payload.
 5. **Failures are visible**: a throwing tool emits `tool_result` with `ok:false` and the (redacted) error, rendered with a `✗`.
 
+**Acknowledge before preparing (2026-08-29).** The status card is posted the moment the agent is resolved — `👀 *<agent>* on `<model>` · preparing workspace…` — BEFORE repo/PR resolution, memory retrieval and executor selection, which together can take minutes (a resident attach, or a cold sandbox clone + install) and used to be dead silence in the thread. The same card then becomes the run card (the first spinner frame replaces the 👀 title) and ends ✅/❌ as before. If setup stops before a run — repo allowlist refusal, the ask-once branch question, or a thrown setup error — the card is closed with a one-line reason (`🚫 … not started (repo access)`, `🌿 … not started (which branch?)`, `❌ setup failed · <error>`) so a spinner is never left behind; the reply text is unchanged. Refusals that happen before an agent is resolved (unknown/unauthorized agent) still get no card — there is nothing to acknowledge on behalf of.
+
 ## Validation criteria
 
 | Criterion | Evidence |
 |-----------|----------|
+| Ack card posted before executor selection; 👀 title names agent+model; the same card carries the run and ends ✅ (no second card) | `[unit]` `src/core/dispatcher.test.ts::acknowledges the thread with a 👀 card BEFORE executor selection …` (red-verified: statuses were empty at selection time before the change) |
+| Setup stopped before the run closes the card with a reason: ask-once branch → `not started`; thrown setup error → `❌ setup failed` + the error reply | `[unit]` `::closes the ack card with a reason when setup stops before the run …`, `::closes the ack card with ❌ when setup throws …`; resident-repos row "needs-ref → ONE question" |
+| Live: a mention on a repo with no warm resident shows the 👀 card within ~2 s, then the spinner, then ✅ — no multi-minute gap | `[agent]` (post-deploy) post `agent:review <PR>` for such a repo; time from post to first card edit. |
 | Runner emits `tool_call` then `tool_result` per tool use | `[unit]` `src/runner.test.ts::run-visibility events::emits tool_call then tool_result for each tool use` |
 | Failing tool → `tool_result ok:false` with the error | `[unit]` `::run-visibility events::marks a failing tool with ok:false` |
 | Secrets redacted from result summaries | `[unit]` `::run-visibility events::redacts secrets in tool_result summaries`; `src/core/runEvents.test.ts::redactSecrets::*` (redaction red-verified) |

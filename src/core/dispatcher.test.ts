@@ -9,6 +9,7 @@ import type { CompletionRequest, CompletionResult, Provider } from "../providers
 import { AGENTS } from "../agents/registry.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
+import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
 import { activeRunCount, composeRunLabel, dispatch, turnContent, type CoreDeps } from "./dispatcher.js";
 import { MAX_STRUCTURE_RETRIES, STRUCTURING_SYSTEM } from "./structuredOutput.js";
@@ -442,6 +443,73 @@ describe("executor provisioning by agent resources", () => {
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(replies).toContain("answer");
+  });
+
+  it("acknowledges the thread with a 👀 card BEFORE executor selection (no silence while a workspace is prepared)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const { io, statuses } = fakeIO();
+    let statusesAtSelection = -1;
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+    vi.mocked(makeExecutor).mockImplementationOnce(async () => {
+      statusesAtSelection = statuses.length;
+      return { executor: fake };
+    });
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(statusesAtSelection).toBe(1);
+    expect(statuses[0].title).toContain("👀");
+    expect(statuses[0].title).toContain("preparing workspace");
+    // The same card then carries the run and ends ✅ — no second card is created.
+    expect(statuses[statuses.length - 1].title).toContain("✅");
+  });
+
+  it("closes the ack card with a reason when setup stops before the run (ask-once for a branch)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const { io, statuses, replies } = fakeIO();
+    vi.mocked(makeExecutor).mockRejectedValueOnce(new ResidentNeedsRefError("repo:acme/api"));
+    await dispatch(deps, msg("agent:coding fix it in acme/api", "slack:UADMIN"), io);
+    expect(statuses[0].title).toContain("👀");
+    expect(statuses[statuses.length - 1].title).toContain("not started");
+    expect(replies.some((r) => r.includes("Which branch"))).toBe(true);
+  });
+
+  it("closes the ack card with ❌ when setup throws, and still replies the error", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const { io, statuses, replies } = fakeIO();
+    vi.mocked(makeExecutor).mockRejectedValueOnce(new Error("sandbox worker unreachable"));
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(statuses[statuses.length - 1].title).toContain("❌ setup failed");
+    expect(replies.some((r) => r.includes("sandbox worker unreachable"))).toBe(true);
+  });
+
+  it("a RUN failure keeps the run loop's ❌ card (label + checklist) — the outer catch does not relabel it as a setup failure", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        throw new Error("model exploded");
+      },
+    };
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const { io, statuses, replies } = fakeIO();
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    const last = statuses[statuses.length - 1];
+    expect(last.title).toContain("❌");
+    expect(last.title).toContain("*coding*");
+    expect(last.title).not.toContain("setup failed");
+    expect(statuses.some((f) => f.title.includes("setup failed"))).toBe(false); // never relabeled
+    expect(replies.some((r) => r.includes("model exploded"))).toBe(true);
   });
 
   it("a coding ask still selects the configured remote backend", async () => {
@@ -962,7 +1030,7 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     expect(ctx).toMatchObject({ repo: "acme/api", ref: "fix/login" });
   });
 
-  it("needs-ref from attach → ONE clarifying question; no model turn, no status card", async () => {
+  it("needs-ref from attach → ONE clarifying question; no model turn; the ack card closes as not started", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -981,7 +1049,11 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     expect(replies[0]).toContain("acme/api");
     expect(replies[0]).not.toContain("⚠️"); // a question, not an error surface
     expect(provider.requests).toHaveLength(0); // no model turn burned
-    expect(statuses).toHaveLength(0); // asked before any run started
+    // The 👀 ack card was posted before attach and is closed with the reason —
+    // no spinner is left behind and no run card was ever opened.
+    expect(statuses[0].title).toContain("👀");
+    expect(statuses[statuses.length - 1].title).toContain("not started");
+    expect(statuses.some((f) => f.title.includes("✅"))).toBe(false);
   });
 
   it('the thread answer "on main" rebinds via re-attach and runs', async () => {

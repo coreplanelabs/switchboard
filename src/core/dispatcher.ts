@@ -28,6 +28,7 @@ import type {
   HistoryItem,
   ImageAttachment,
   IncomingMessage,
+  StatusHandle,
 } from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
@@ -111,6 +112,10 @@ export function activeRunCount(): number {
 
 export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO): Promise<void> {
   let counted = false; // whether this dispatch holds an activeRuns slot
+  // The ack card while setup is still in progress. Cleared the moment it
+  // becomes the run card, so the outer catch closes ONLY a card that setup
+  // left open — a run failure is closed (with its checklist) by the run loop.
+  let setupCard: StatusHandle | undefined;
   try {
     // Config commands are answered inline, never sent to a model.
     const configReply = handleConfigCommand(deps.config, msg);
@@ -187,6 +192,22 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
     const provider = deps.providers.get(providerName);
 
+    // Acknowledge NOW, before anything slow. Everything between here and the
+    // model turn can take minutes — repo/PR resolution (GitHub REST), memory
+    // retrieval, and above all executor selection (resident attach or a cold
+    // sandbox clone+install) — and until this card existed the thread saw
+    // nothing for that whole stretch. The same handle becomes the run's status
+    // card below; a refusal or setup failure closes it with a reason instead of
+    // leaving a spinner behind.
+    let label = `*${agent.name}* on \`${resolved.modelRef}\``;
+    const startedAt = Date.now();
+    const spinner = ["◐", "◓", "◑", "◒"];
+    let frame = 0;
+    const title = (icon?: string) =>
+      `${icon ?? spinner[frame++ % spinner.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
+    const card = await io.status({ title: `👀 ${label} · preparing workspace…` });
+    setupCard = card;
+
     // Target repo/ref for resident environments, resolved BEFORE the model
     // turn (U7): explicit signals in the message, else the repo this thread
     // already established (from history — restart-safe, never stored). The
@@ -203,6 +224,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // the repo is unlisted; a configured allowlist refuses BY NAME — a
     // refused user must see why, never get a silent per-thread fallback.
     if (needsRepo && repoCtx.repo && !deps.config.canUseRepo(msg.userId, repoCtx.repo)) {
+      await card.done({ title: `🚫 ${label} · not started (repo access)` });
       await io.reply(
         `🚫 You're not on the allowlist for the \`${repoCtx.repo}\` repo environment. Ask ${deps.config.adminsHint()} for access.`,
       );
@@ -244,6 +266,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // the named-refusal reply shape). The user's answer in the thread (e.g.
       // "on main") carries the ref on the next message and re-attach binds it.
       if (err instanceof ResidentNeedsRefError) {
+        await card.done({ title: `🌿 ${label} · not started (which branch?)` });
         await io.reply(
           `🌿 Which branch of \`${repoCtx.repo}\` should this thread work on? ` +
             `No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I'll pick it up from there.`,
@@ -303,14 +326,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
 
-    const label = `*${agent.name}* on \`${resolved.modelRef}\`` + (note ? ` · ${note}` : "");
+    if (note) label = `${label} · ${note}`;
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
-    const startedAt = Date.now();
-    const spinner = ["◐", "◓", "◑", "◒"];
-    let frame = 0;
-    const title = (icon?: string) =>
-      `${icon ?? spinner[frame++ % spinner.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
-    const status = await io.status({ title: title() });
+    setupCard = undefined; // from here the run loop owns the card's close
+    card.update({ title: title() }); // the ack card becomes the run card
     let lastToolAt = Date.now();
     // Live run view (Area 2 / #43): register the run and mint its capability
     // link AFTER the card exists (so nothing awaits between create() and the
@@ -364,16 +383,16 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
             ? `${e.ok ? "✓" : "✗"} ${e.tool}: ${e.summary}`
             : `⏱ ${e.summary}`;
       console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
-      status.update(currentFrame());
+      card.update(currentFrame());
     };
     const reportProgress = (list: string) => {
       checklist = list.trim() || undefined;
-      status.update(currentFrame());
+      card.update(currentFrame());
     };
     // Heartbeat: the card ticks every 5s no matter what. A ticking timer means
     // the run is alive; a stopped timer means the process died — the reader
     // can always tell the difference.
-    const heartbeat = setInterval(() => status.update(currentFrame()), 5000);
+    const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
 
     // Counted in flight from here until the post-run steps (reply, review
     // post, memory reflection scheduling) have run — decremented in the
@@ -402,7 +421,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         onEvent,
       });
     } catch (err) {
-      await status.done({ title: title("❌"), detail: checklist });
+      await card.done({ title: title("❌"), detail: checklist });
       throw err;
     } finally {
       clearInterval(heartbeat);
@@ -424,7 +443,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     }
 
     console.log(`[done] ${msg.threadKey} ${answer.length} chars`);
-    await status.done({ title: title("✅"), detail: checklist });
+    await card.done({ title: title("✅"), detail: checklist });
     await sendAnswer(deps, io, msg.threadKey, { provider, model, maxTokens: agent.maxTokens }, answer);
 
     // Cross-session memory (Area 7c, #85) — WRITE path. AFTER the reply has
@@ -473,6 +492,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
+    // A card left spinning after a setup failure looks like a hang; close it.
+    // Only a card still in setup — a run failure was already closed by the run
+    // loop with its checklist, and must not be relabeled here.
+    await setupCard?.done({ title: `❌ setup failed · ${errMsg.slice(0, 120)}` }).catch(() => {});
     await io.reply(`⚠️ ${errMsg}`).catch(() => {});
   } finally {
     if (counted) activeRuns--;
