@@ -149,5 +149,11 @@ workspaceDir: ./workspaces
 #   label: self-improvement     # triage label (created if missing; default shown)
 #   minRuns: 2                  # a pattern must recur in ≥ this many distinct runs
 #   top: 3                      # proposals filed per pass
-#   ledgerPath: ./data/friction.jsonl   # JSONL ledger (same place/durability as overrides.json)
-#   ledgerMax: 500              # runs retained
+#   ledgerMax: 500              # runs retained (file and Worker alike)
+#   # Durable ledger: a FrictionDO on the state Worker (deploy/cloudflare-memory/,
+#   # the same Worker + bearer as memory). Without it the ledger is a JSONL file
+#   # on the host disk (ephemeral on Cloudflare Containers; startup warns).
+#   worker:
+#     baseUrl: https://switchboard-memory.coreplanelabs.dev
+#     tokenEnv: MEMORY_TOKEN    # env var holding the Worker's bearer (default)
+#   ledgerPath: ./data/friction.jsonl   # host-disk ledger path when no worker

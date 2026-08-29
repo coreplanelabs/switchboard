@@ -53,8 +53,12 @@ memory:
 # Self-improvement proposals (Area 7b, #84): `friction propose` (admin-gated)
 # clusters the friction ledger across recent runs and files the top recurring
 # patterns as `self-improvement` issues against this repo — deduped against
-# what is already open, proposals only (no PRs, nothing merged). The ledger
-# itself (data/friction.jsonl) is on the container's ephemeral disk: a redeploy
-# starts it over. See features/self-improvement.md.
+# what is already open, proposals only (no PRs, nothing merged). The ledger is
+# DURABLE: a FrictionDO on the state Worker (switchboard-memory — the same Worker
+# and MEMORY_TOKEN bearer as memory), so it survives container redeploys. See
+# features/self-improvement.md.
 selfImprovement:
   repo: coreplanelabs/switchboard
+  worker:
+    baseUrl: https://switchboard-memory.coreplanelabs.dev
+    tokenEnv: MEMORY_TOKEN
