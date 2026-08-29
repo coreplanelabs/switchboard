@@ -61,6 +61,7 @@ const WARM = {
         lastAttachAt: "2026-08-20T10:05:00.000Z",
         evicted: true,
         evictedAt: "2026-08-27T10:00:00.000Z",
+        evictedWhy: "merged #12 <b>",
       },
     ],
   },
@@ -264,7 +265,8 @@ describe("renderResidentPage", () => {
     expect(html).toContain("hardlink");
     expect(html).toContain("worker3");
     expect(html).toContain("2026-08-28T21:45:00.000Z");
-    expect(html).toContain("evicted 2026-08-27T10:00:00.000Z");
+    // The eviction reason (#50 reclamation audit trail) rides along, escaped.
+    expect(html).toContain("evicted 2026-08-27T10:00:00.000Z · merged #12 &lt;b&gt;");
     expect(html).toContain("1 live · 1 evicted");
   });
 

@@ -112,7 +112,8 @@ type RepoVerb = "list" | "onboard" | "offboard" | "reconfigure" | "rebuild" | "t
 
 export type RepoCommand =
   | { verb: "list" }
-  | { verb: "onboard"; slug: string; commands: Record<CommandKey, string>; defaultRef: string }
+  /** `evictColdest` (#50): `--evict-coldest` — over the cap, offboard the coldest eligible warm resident instead of failing. */
+  | { verb: "onboard"; slug: string; commands: Record<CommandKey, string>; defaultRef: string; evictColdest: boolean }
   | { verb: "offboard" | "rebuild"; slug: string; dryRun: boolean }
   | { verb: "reconfigure"; slug: string; commands?: Partial<Record<CommandKey, string>>; defaultRef?: string }
   // U6 deterministic ops (KTD8): OPERATOR-level, executed by the dispatcher
@@ -172,7 +173,13 @@ export function parseRepoCommand(text: string): RepoCommand | null {
   // onboard / reconfigure: key="value" tokens (test/build/install) + ref=<branch>
   const commands: Partial<Record<CommandKey, string>> = {};
   let defaultRef: string | undefined;
+  let evictColdest = false;
   for (const t of tokens) {
+    if (t === "--evict-coldest") {
+      if (verb !== "onboard") return { error: "`--evict-coldest` applies to `repo onboard` only (it makes room past the resident cap)." };
+      evictColdest = true;
+      continue;
+    }
     const kv = t.match(/^([\w-]+)=("?)(.*)\2$/s);
     if (!kv) {
       return { error: `Couldn't parse \`${t}\`. Use \`ref=<branch>\` or \`test="<cmd>"\` / \`build="<cmd>"\` / \`install="<cmd>"\`.` };
@@ -196,6 +203,7 @@ export function parseRepoCommand(text: string): RepoCommand | null {
       slug,
       commands: { ...DEFAULT_COMMANDS, ...commands },
       defaultRef: defaultRef ?? DEFAULT_REF,
+      evictColdest,
     };
   }
 
@@ -258,6 +266,7 @@ export async function handleRepoCommand(
           resource: repoResourceId(cmd.slug),
           commands: cmd.commands,
           defaultRef: cmd.defaultRef,
+          ...(cmd.evictColdest ? { evictColdest: true } : {}),
         }));
       case "offboard":
         return renderOffboard(cmd, await api.offboard(repoResourceId(cmd.slug), cmd.dryRun));
@@ -293,11 +302,28 @@ function renderList(r: ResidentAdminResponse): string {
 }
 
 function renderOnboard(cmd: { slug: string; commands: Record<CommandKey, string>; defaultRef: string }, r: ResidentAdminResponse): string {
-  if (r.status !== 202) return fail(`repo onboard ${cmd.slug}`, r);
+  if (r.status !== 202) {
+    // Over the cap with --evict-coldest and nothing eligible: the resident
+    // itemizes why each one was kept (#50) — relay it so the admin can
+    // offboard by hand with the facts in front of them.
+    const rejected = r.status === 429 && Array.isArray(r.data.rejected) ? (r.data.rejected as Array<Record<string, unknown>>) : [];
+    const reasons = rejected
+      .filter((x) => typeof x.resource === "string" && typeof x.why === "string")
+      .map((x) => `• \`${String(x.resource).replace(/^repo:/, "")}\` — ${String(x.why)}`);
+    return [fail(`repo onboard ${cmd.slug}`, r), ...reasons].join("\n");
+  }
   const lines = [
     `🏗️ Onboarding \`${cmd.slug}\` on \`${cmd.defaultRef}\` — provisioning started (state \`onboarding\`; watch \`repo list\` until it reaches \`warm\`).`,
     `Commands: install \`${cmd.commands.install}\` · build \`${cmd.commands.build}\` · test \`${cmd.commands.test}\``,
   ];
+  const evicted = r.data.evicted as Record<string, unknown> | undefined;
+  if (evicted && typeof evicted.resource === "string") {
+    const errors = Array.isArray(evicted.errors) ? evicted.errors.length : 0;
+    lines.push(
+      `♻️ Made room: evicted \`${evicted.resource.replace(/^repo:/, "")}\` (coldest warm resident, last used ${String(evicted.lastActivityAt ?? "unknown")}; ` +
+        `${n(evicted.backupObjectsDeleted)} backup objects deleted${errors ? `, ${errors} teardown error(s)` : ""}).`,
+    );
+  }
   if (typeof r.data.warning === "string" && r.data.warning) lines.push(`⚠️ ${r.data.warning}`);
   return lines.join("\n");
 }
