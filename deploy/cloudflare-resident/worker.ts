@@ -182,6 +182,10 @@ const CLEAN_IDLE_RELEASE_S = 60 * 60;
  *  first if the mirror is stale (refresh-on-attach). */
 const IDLE_AFTER_S = 60 * 60;
 const IDLE_REFRESH_INTERVAL_S = 6 * 60 * 60;
+/** A `refreshing`/`restoring` marker older than this with nothing running is
+ *  an orphan from an interrupted cycle; the watchdog normalizes it. Comfortably
+ *  above the longest legitimate cycle (REFRESH_BUILD_TIMEOUT_MS-scale installs). */
+const STALE_MIDFLIGHT_MS = 30 * 60_000;
 
 /** Attach waits on the mirror mutex under this named timeout; expiry answers
  *  503 {state, reason: "mirror-busy"} instead of queueing forever. */
@@ -1150,7 +1154,14 @@ export class ResidentDO extends Sandbox<Env> {
       // elapse. Staleness is repaid at the next attach (refreshIfStale). A
       // dirty live tree pins the container awake: sleep destroys the disk and
       // uncommitted work is not snapshotted.
-      if (await this.isIdle()) {
+      // Only a SETTLED resident may park: a cycle that finds `refreshing`/
+      // `restoring` at entry is looking at a marker left by a cycle that died
+      // mid-flight (a deploy evicting the DO, live 2026-08-29: stuck
+      // `refreshing` + parked → every run fell back cold because the bot's
+      // warm-gate probe never saw `warm` again). Run the full cycle instead; it
+      // ends warm or degraded, and the next one may park.
+      const settled = before.state === "warm";
+      if (settled && (await this.isIdle())) {
         // isIdle awaited (git status per live tree) — re-read before writing.
         const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
         if (!now.idleSince) await this.ctx.storage.put(FACTS_KEY, { ...now, idleSince: new Date().toISOString() } satisfies RepoFacts);
@@ -1390,6 +1401,24 @@ export class ResidentDO extends Sandbox<Env> {
     // Any serving state clears accumulated strikes (a recovery must reset the
     // counter, or an unrelated later down inherits stale strikes).
     await this.ctx.storage.delete(REBUILD_STRIKES_KEY);
+
+    // A mid-flight state older than STALE_MIDFLIGHT_MS with no cycle or restore
+    // actually running is a marker orphaned by an interrupted cycle (DO evicted
+    // by a deploy, platform restart). Left alone it is permanent — the idle gate
+    // above only parks from `warm`, but nothing else would ever rewrite it, and
+    // the bot's warm-gate keeps sending runs cold. Mark it degraded (visible,
+    // KTD10) and pull the next cycle to +5s so it normalizes.
+    if (status.state === "refreshing" || status.state === "restoring") {
+      const updatedAt = Date.parse((await this.ctx.storage.get<string>(UPDATED_KEY)) ?? "") || 0;
+      const inFlight = this.refreshesInFlight > 0 || this.hydration !== null;
+      if (!inFlight && Date.now() - updatedAt > STALE_MIDFLIGHT_MS) {
+        const reason = `stale-mid-flight: ${status.state} since ${new Date(updatedAt).toISOString()} with no cycle running; re-armed by watchdog`;
+        await this.setResidentState("degraded", reason);
+        this.deleteSchedules(REFRESH_CALLBACK);
+        await this.schedule(5, REFRESH_CALLBACK, resource);
+        return { resource, state: "degraded", reason, action: "rearmed" };
+      }
+    }
 
     const pending = await this.listSchedules(REFRESH_CALLBACK);
     if (pending.length === 0) {
@@ -2021,9 +2050,14 @@ export class ResidentDO extends Sandbox<Env> {
           // Not past the TTL. Still release it if it has been idle for an hour,
           // nothing is running on it, and the tree is provably clean — the run
           // that used it is over and there is nothing to preserve. A slept
-          // container cannot be checked (and has no tree): keep to the TTL.
+          // container has NO tree any more (sleep destroys the disk), so an
+          // idle binding on an inactive runtime is releasable outright: there is
+          // nothing left to protect, only a pool user to give back. (Live
+          // 2026-08-29: seven idle bindings sat on a sleeping resident until the
+          // 7-day TTL because this path kept them.)
           const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
-          const cleanIdle = last < idleCutoff && busy === 0 && active && (await this.worktreeCleanliness(binding)).clean;
+          const cleanIdle =
+            last < idleCutoff && busy === 0 && (!active || (await this.worktreeCleanliness(binding)).clean);
           // Re-read right before removal: the clean check awaited (the DO
           // yields), so an exec that arrived meanwhile would otherwise have
           // its tree removed under it — same guard as detachThread.
