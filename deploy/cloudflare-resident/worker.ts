@@ -1347,14 +1347,27 @@ export class ResidentDO extends Sandbox<Env> {
       refreshCounted = true;
 
       // KTD12: token-mint failure is a command-level error — the resident
-      // keeps serving the last snapshot and lifecycle state is NOT flipped.
+      // keeps serving the last snapshot and lifecycle state is NOT flipped by
+      // it. It is recorded, and the cycle then CONTINUES with an anonymous
+      // fetch (exactly what an unconfigured App does): a public repo outside
+      // the installation stays fresh, and a private one fails at the fetch
+      // below into a visible `degraded(github-unreachable: …)`. Returning here
+      // instead (the pre-#171 behavior) froze whatever state the resident was
+      // in — live 2026-08-29: `repo:jshttp/vary` sat in the watchdog's
+      // `degraded(alarm-missed)` forever with a 24h-stale mirror, because the
+      // App cannot mint for a repo it is not installed on.
       let token: string | null = null;
+      // This cycle's mint error, kept so it survives the warm facts write below
+      // (which clears errors from PRIOR cycles) and prefixes a fetch failure's
+      // reason — the observable for "App configured, repo outside the
+      // installation" is a warm-but-anonymous resident with the mint named.
+      let mintError: string | undefined;
       if (githubAppConfigured(this.env)) {
         try {
           token = await mintRepoScopedToken(this.env, resource.slice("repo:".length));
         } catch (err) {
-          await this.recordRefreshError(`token-mint-failed (command-level, still serving): ${errMsg(err)}`);
-          return; // finally re-arms the chain
+          mintError = `token-mint-failed (command-level, fetching anonymously): ${errMsg(err)}`;
+          await this.recordRefreshError(mintError);
         }
       }
 
@@ -1367,7 +1380,10 @@ export class ResidentDO extends Sandbox<Env> {
           this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "fetch", GIT_NETWORK_TIMEOUT_MS),
         );
       } catch (err) {
-        await this.setResidentState("degraded", `github-unreachable: ${errMsg(err)}`);
+        // A private repo whose mint failed lands here (the anonymous fetch is
+        // refused): say so, rather than blaming GitHub reachability alone.
+        const cause = mintError ? `${mintError}; then ` : "";
+        await this.setResidentState("degraded", `github-unreachable: ${cause}${errMsg(err)}`);
         return;
       }
 
@@ -1420,7 +1436,9 @@ export class ResidentDO extends Sandbox<Env> {
       // Facts and snapshot move together so the stamp check never sees a
       // half-updated pair.
       const updatedFacts: RepoFacts = { ...facts, sha, lockfileHash, lastRefreshAt: new Date().toISOString() };
+      // Clear a PRIOR cycle's error; keep THIS cycle's mint error visible (#171).
       delete updatedFacts.lastRefreshError;
+      if (mintError) updatedFacts.lastRefreshError = mintError;
       // A wake cycle cleared idleSince above; `facts` was read at alarm entry and
       // still carries it — never resurrect it here (the dash would show a stale
       // "idle since" and every attach would take the wake-fetch path).
