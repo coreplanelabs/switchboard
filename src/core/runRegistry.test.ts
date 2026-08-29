@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RunRegistry, type IndexEvent, type RunRegistryOptions } from "./runRegistry.js";
+import { RunControl, RunRegistry, type IndexEvent, type RunRegistryOptions } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 
 // Feature: features/live-view.md — the in-memory, live-only run registry that
@@ -30,10 +30,11 @@ describe("RunRegistry.create", () => {
     const { reg } = testRegistry();
     const a = reg.create();
     const b = reg.create();
-    expect(a).toEqual({ id: "id-1", token: "tok-1" });
-    expect(b).toEqual({ id: "id-2", token: "tok-2" });
+    expect(a).toMatchObject({ id: "id-1", token: "tok-1" });
+    expect(b).toMatchObject({ id: "id-2", token: "tok-2" });
     expect(a.id).not.toBe(b.id);
     expect(a.token).not.toBe(b.token);
+    expect(a.control).not.toBe(b.control); // each run owns its own stop control (#101)
   });
 
   it("defaults to crypto-random ids/tokens that are unguessable and distinct", () => {
@@ -371,5 +372,97 @@ describe("snapshot — token-gated read of a run's backlog (#84)", () => {
     expect(reg.snapshot(id, token)).toEqual({ events: [ev], finished: true });
     expect(reg.snapshot(id, "wrong")).toBeNull();
     expect(reg.snapshot("nope", token)).toBeNull();
+  });
+});
+
+// Feature: features/live-view.md item 10 — run control (#101). Every run owns a
+// RunControl (soft/hard stop request + a hard AbortSignal); `requestStop` is the
+// token-gated control-plane entry the /runs surface calls.
+describe("RunControl", () => {
+  it("starts unrequested with a live hard signal", () => {
+    const c = new RunControl();
+    expect(c.requested).toBeUndefined();
+    expect(c.hardSignal.aborted).toBe(false);
+  });
+
+  it("soft: records the mode, does NOT abort the hard signal", () => {
+    const c = new RunControl();
+    expect(c.requestStop("soft")).toBe("soft");
+    expect(c.requested).toBe("soft");
+    expect(c.hardSignal.aborted).toBe(false);
+  });
+
+  it("hard: records the mode AND aborts the hard signal", () => {
+    const c = new RunControl();
+    expect(c.requestStop("hard")).toBe("hard");
+    expect(c.requested).toBe("hard");
+    expect(c.hardSignal.aborted).toBe(true);
+  });
+
+  it("escalates soft → hard, never de-escalates hard → soft; repeats are idempotent", () => {
+    const c = new RunControl();
+    c.requestStop("soft");
+    expect(c.requestStop("hard")).toBe("hard");
+    expect(c.requested).toBe("hard");
+    expect(c.requestStop("soft")).toBe("hard"); // stays hard
+    expect(c.requested).toBe("hard");
+    expect(c.requestStop("hard")).toBe("hard");
+  });
+});
+
+describe("RunRegistry.requestStop — run control (#101)", () => {
+  it("create() hands out the run's control; a valid stop drives it and reports the effective mode", () => {
+    const { reg } = testRegistry();
+    const { id, token, control } = reg.create();
+    expect(reg.requestStop(id, token, "soft")).toEqual({ ok: true, mode: "soft" });
+    expect(control.requested).toBe("soft");
+    expect(reg.requestStop(id, token, "hard")).toEqual({ ok: true, mode: "hard" });
+    expect(control.hardSignal.aborted).toBe(true);
+  });
+
+  it("is token-gated like every read: wrong token / unknown run → not-found, control untouched", () => {
+    const { reg } = testRegistry();
+    const { id, control } = reg.create();
+    expect(reg.requestStop(id, "wrong", "hard")).toEqual({ ok: false, reason: "not-found" });
+    expect(reg.requestStop("nope", "tok-1", "hard")).toEqual({ ok: false, reason: "not-found" });
+    expect(control.requested).toBeUndefined();
+  });
+
+  it("refuses a stop on a finished run", () => {
+    const { reg } = testRegistry();
+    const { id, token, control } = reg.create();
+    reg.finish(id);
+    expect(reg.requestStop(id, token, "soft")).toEqual({ ok: false, reason: "finished" });
+    expect(control.requested).toBeUndefined();
+  });
+
+  it("publishes a typed `stop_requested` run_note to the run's stream (viewers see the request)", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    const got: RunEvent[] = [];
+    reg.subscribe(id, token, (e) => got.push(e));
+    reg.requestStop(id, token, "soft");
+    expect(got).toEqual([expect.objectContaining({ type: "run_note", kind: "stop_requested", mode: "soft" })]);
+  });
+
+  it("reflects the state on the index: stopping while live, stopped once finished", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    const seen: IndexEvent[] = [];
+    reg.subscribeIndex((ev) => seen.push(ev));
+    expect(reg.listActive()[0].stop).toBeUndefined();
+    reg.requestStop(id, token, "hard");
+    expect(reg.listActive()[0].stop).toEqual({ mode: "hard", state: "stopping" });
+    // The request itself is an index upsert so open index pages repaint the row.
+    expect(seen.at(-1)).toEqual({ type: "upsert", run: expect.objectContaining({ stop: { mode: "hard", state: "stopping" } }) });
+    reg.finish(id);
+    expect(reg.listActive()[0].stop).toEqual({ mode: "hard", state: "stopped" });
+  });
+
+  it("a run that was never asked to stop has no `stop` field (additive, inert)", () => {
+    const { reg } = testRegistry();
+    const { id } = reg.create();
+    reg.finish(id);
+    expect("stop" in reg.listActive()[0]).toBe(false);
   });
 });

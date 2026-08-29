@@ -1,6 +1,7 @@
 import type { AgentDef } from "./agents/registry.js";
 import { toolResultText, type ChatMessage, type ContentPart, type Provider } from "./providers/types.js";
-import { redactAndCap, summarizeToolResult, type RunEvent, type RunNoteKind } from "./core/runEvents.js";
+import { redactAndCap, summarizeToolResult, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
+import type { RunControl } from "./core/runRegistry.js";
 import { ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
 
@@ -36,32 +37,114 @@ export interface RunOptions {
   onEvent?: (event: RunEvent) => void;
   /** injectable clock for tests; defaults to Date.now */
   now?: () => number;
+  /** Operator stop control (#101), minted per run by the RunRegistry. Soft:
+   *  the loop takes no new step and wraps up through the finale. Hard: the
+   *  in-flight provider/tool call is abandoned (and cancelled where the
+   *  implementation can) and the run ends at once with no finale. Absent (CLI,
+   *  tests) → the loop can only end through its budgets. */
+  control?: RunControl;
+  /** Bound on the finale's single write-up call (default 3 min); injectable so
+   *  tests can prove the timeout path without waiting. */
+  finaleTimeoutMs?: number;
 }
 
+/** Thrown inside the loop the moment a hard stop is observed, so every await
+ *  unwinds to one place. Never escapes `runAgent`. */
+class HardStopError extends Error {
+  constructor() {
+    super("run hard-stopped by operator");
+    this.name = "HardStopError";
+  }
+}
+
+/** The one-line outcome of a hard stop: no finale was run, so this IS the
+ *  answer the thread gets. */
+const HARD_STOP_MESSAGE =
+  "⛔ Run aborted by an operator (hard stop). No summary was written; partial work may exist in the workspace.";
+
 export async function runAgent(opts: RunOptions): Promise<string> {
+  const control = opts.control;
+  // Every run event is stamped `at: now()` so the friction analyzer (#84) can
+  // attribute wall time; lifecycle notices go out BOTH as free-text progress
+  // (the card/log) and as a typed `run_note` event (the stream).
+  const now = opts.now ?? Date.now;
+  const emit = (event: RunEvent) => opts.onEvent?.({ ...event, at: now() });
+  const note = (kind: RunNoteKind, summary: string, mode?: StopMode) => {
+    opts.onProgress?.(summary);
+    emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
+  };
+
+  try {
+    return await runLoop(opts, now, note, emit);
+  } catch (err) {
+    // A hard stop is the ONLY expected way out here: whatever was awaited (a
+    // provider stream, a tool, even the soft-stop finale) was abandoned. Any
+    // other throw is a real failure and keeps propagating to the dispatcher.
+    if (control?.requested === "hard") {
+      note("stopped", "hard stop — run aborted, no summary written", "hard");
+      return HARD_STOP_MESSAGE;
+    }
+    throw err;
+  }
+}
+
+async function runLoop(
+  opts: RunOptions,
+  now: () => number,
+  note: (kind: RunNoteKind, summary: string, mode?: StopMode) => void,
+  emit: (event: RunEvent) => void,
+): Promise<string> {
   const tools: RunnableTool[] = TOOLSETS[opts.agent.toolset] ?? [];
   const toolsByName = new Map(tools.map((t) => [t.name, t]));
   const messages: ChatMessage[] = [...opts.messages];
   const system = opts.system ?? opts.agent.system;
+  const control = opts.control;
+  const hardSignal = control?.hardSignal;
 
   // Watch exec-infrastructure health through the executor seam: the tracker
   // counts consecutive ExecInfraError throws (a dead/wedged sandbox) and resets
   // on any successful op. Tools consume the wrapped executor via ToolContext, so
   // the runner reads sandbox health without knowing which tool ran (#92).
   const execTracker = new ExecHealthTracker(opts.toolContext.executor);
-  const toolContext: ToolContext = { ...opts.toolContext, executor: execTracker };
+  const toolContext: ToolContext = {
+    ...opts.toolContext,
+    executor: execTracker,
+    ...(hardSignal ? { signal: hardSignal } : {}),
+  };
+
+  // Every await inside the loop goes through here: the promise is raced against
+  // a signal, so the wait ends the moment the signal fires regardless of
+  // whether the provider/executor underneath honors the AbortSignal it was
+  // handed. The abandoned promise is never left dangling: on the race path
+  // `then(resolve, reject)` is its handler, and on the already-aborted fast
+  // path an explicit no-op catch swallows its eventual rejection (a provider
+  // handed an aborted signal rejects promptly — without this that rejection
+  // would be unhandled and, under Node's default policy, kill the process).
+  const raceSignal = <T>(p: Promise<T>, signal: AbortSignal | undefined, onAbort: () => Error): Promise<T> => {
+    if (!signal) return p;
+    if (signal.aborted) {
+      p.catch(() => {});
+      return Promise.reject(onAbort());
+    }
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => reject(onAbort());
+      signal.addEventListener("abort", abort, { once: true });
+      p.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    });
+  };
+  const untilHardStop = <T>(p: Promise<T>): Promise<T> => raceSignal(p, hardSignal, () => new HardStopError());
+  // A provider call under the hard signal, optionally joined with a deadline
+  // (the finale's timeout). A hard stop always unwinds as HardStopError; a
+  // deadline that fires first is a FinaleTimeoutError the finale caller handles.
+  const complete: Complete = (req, deadline) => {
+    const signal = hardSignal && deadline ? AbortSignal.any([hardSignal, deadline]) : (hardSignal ?? deadline);
+    return raceSignal(opts.provider.complete(signal ? { ...req, signal } : req), signal, () =>
+      hardSignal?.aborted ? new HardStopError() : new FinaleTimeoutError(),
+    );
+  };
 
   // The wall clock is the real budget; turns are a backstop. At the deadline
   // the loop ends and the agent is forced to write up findings so far.
-  const now = opts.now ?? Date.now;
-  // Every run event is stamped `at: now()` so the friction analyzer (#84) can
-  // attribute wall time; lifecycle notices go out BOTH as free-text progress
-  // (the card/log) and as a typed `run_note` event (the stream).
-  const emit = (event: RunEvent) => opts.onEvent?.({ ...event, at: now() });
-  const note = (kind: RunNoteKind, summary: string) => {
-    opts.onProgress?.(summary);
-    emit({ type: "run_note", kind, summary });
-  };
   const deadline = now() + opts.agent.maxMinutes * 60_000;
   const warnAt = deadline - Math.min(3 * 60_000, opts.agent.maxMinutes * 15_000);
   let warned = false;
@@ -72,8 +155,15 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   // update_status-only turns don't consume the turn budget (bookkeeping,
   // not work); the absolute iteration cap still bounds the loop.
   let turn = 0;
-  for (let iteration = 0; turn < opts.agent.maxTurns && iteration < opts.agent.maxTurns * 2 && now() < deadline; iteration++) {
-    const result = await opts.provider.complete({
+  // A requested stop (soft or hard) ends the loop before the NEXT step — the
+  // step already in flight completes (soft) or is abandoned (hard, via the race
+  // above). Checked as a loop condition so a stop can never start a new step.
+  for (
+    let iteration = 0;
+    turn < opts.agent.maxTurns && iteration < opts.agent.maxTurns * 2 && now() < deadline && !control?.requested;
+    iteration++
+  ) {
+    const result = await complete({
       model: opts.model,
       system,
       messages,
@@ -119,10 +209,19 @@ export async function runAgent(opts: RunOptions): Promise<string> {
         continue;
       }
       try {
-        const output = await tool.run((tu.input ?? {}) as Record<string, unknown>, toolContext);
+        const output = await untilHardStop(tool.run((tu.input ?? {}) as Record<string, unknown>, toolContext));
         emit({ type: "tool_result", tool: tu.name, ok: true, summary: summarizeToolResult(toolResultText(output)) });
         results.push({ type: "tool_result", toolUseId: tu.id, content: output });
       } catch (err) {
+        // A hard stop is not a tool error to feed back to the model — unwind.
+        // A genuine tool error that merely coincides with the hard request is
+        // unwound too (the outcome is the abort either way), but logged first
+        // so it is not silently swallowed behind the abort message.
+        if (err instanceof HardStopError) throw err;
+        if (control?.requested === "hard") {
+          console.warn(`[runner] tool ${tu.name} failed while hard-stopping: ${err instanceof Error ? err.message : String(err)}`);
+          throw err;
+        }
         const message = err instanceof Error ? err.message : String(err);
         // `infra` marks a sandbox/transport failure (not the command's own error)
         // so downstream analysis never mistakes a dead sandbox for a failing command.
@@ -162,12 +261,18 @@ export async function runAgent(opts: RunOptions): Promise<string> {
     }
   }
 
-  // The loop ended for one of two reasons; both end through this one guaranteed
-  // finale (a final tool-less call) so the run always closes with a useful
-  // message instead of a silent drain.
+  // The loop ended for one of three reasons; all end through this one
+  // guaranteed finale (a final tool-less call) so the run always closes with a
+  // useful message instead of a silent drain. (A HARD stop never reaches here —
+  // it unwinds through runAgent's catch with no finale.)
+  if (control?.requested === "soft") {
+    note("stopped", "soft stop — no further steps, writing up findings so far", "soft");
+    return await finishSoftStop(complete, opts, messages, system);
+  }
+
   if (sandboxDead) {
     note("sandbox_dead", "sandbox unresponsive — aborting instead of retrying into a dead sandbox");
-    return await finishSandboxDead(opts, messages, system);
+    return await finishSandboxDead(complete, opts, messages, system);
   }
 
   // Budget exhausted (time or turns): one final tool-less call so the work
@@ -178,6 +283,7 @@ export async function runAgent(opts: RunOptions): Promise<string> {
     `${wasTimeout ? "time" : "turn"} budget exhausted — writing up findings so far`,
   );
   const text = await runFinale(
+    complete,
     opts,
     messages,
     system,
@@ -189,25 +295,83 @@ export async function runAgent(opts: RunOptions): Promise<string> {
     : `Stopped at the ${budgetLabel} budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
 }
 
-/** The guaranteed finale shared by both wind-down paths (budget exhaustion and a
- *  dead sandbox, #92): push one final tool-less instruction and make a single
- *  inference-only call, so the run always closes with a written-up answer even
- *  when no more tools can run. Each caller supplies the instruction and formats
- *  the returned text into its own outcome message. */
+/** A provider call already wrapped with the run's hard-stop race + signal; an
+ *  optional `deadline` signal is joined in (the finale's timeout). */
+type Complete = (req: Parameters<Provider["complete"]>[0], deadline?: AbortSignal) => ReturnType<Provider["complete"]>;
+
+/** Thrown by `complete` when the finale's deadline fires before the provider
+ *  answers. Handled inside `runFinale` (→ empty write-up, so each caller's
+ *  fallback message applies); never escapes `runAgent`. */
+class FinaleTimeoutError extends Error {
+  constructor() {
+    super("finale timed out");
+    this.name = "FinaleTimeoutError";
+  }
+}
+
+/** Upper bound on the finale's single inference call. The loop's budgets end
+ *  the loop, but nothing else bounds the write-up call itself — a provider that
+ *  hangs there would otherwise keep the run alive indefinitely (an operator
+ *  could only escalate to a hard stop). Generous: a full write-up is one call. */
+const FINALE_TIMEOUT_MS = 3 * 60_000;
+
+/** The guaranteed finale shared by every wind-down path (budget exhaustion, a
+ *  dead sandbox #92, a soft stop #101): push one final tool-less instruction
+ *  and make a single inference-only call, so the run always closes with a
+ *  written-up answer even when no more tools can run. Each caller supplies the
+ *  instruction and formats the returned text into its own outcome message.
+ *  Bounded by `FINALE_TIMEOUT_MS` (`RunOptions.finaleTimeoutMs` in tests): on
+ *  timeout the write-up is empty, so the caller's "no findings" fallback is the
+ *  answer instead of a hung run. A hard stop still unwinds through the caller. */
 async function runFinale(
+  complete: Complete,
   opts: RunOptions,
   messages: ChatMessage[],
   system: string,
   instruction: string,
 ): Promise<string> {
   messages.push({ role: "user", content: [{ type: "text", text: instruction }] });
-  const finale = await opts.provider.complete({
-    model: opts.model,
-    system,
+  try {
+    const finale = await complete(
+      {
+        model: opts.model,
+        system,
+        messages,
+        maxTokens: opts.agent.maxTokens,
+      },
+      AbortSignal.timeout(opts.finaleTimeoutMs ?? FINALE_TIMEOUT_MS),
+    );
+    return collectText(finale.content);
+  } catch (err) {
+    if (err instanceof FinaleTimeoutError) {
+      opts.onProgress?.("finale timed out — closing the run without a write-up");
+      return "";
+    }
+    throw err;
+  }
+}
+
+/** Soft stop (#101): an operator asked the run to wind down. Same guaranteed
+ *  finale as budget exhaustion — the model is told to stop and write up — so the
+ *  thread gets a real summary, labeled as an early stop rather than a budget. */
+async function finishSoftStop(
+  complete: Complete,
+  opts: RunOptions,
+  messages: ChatMessage[],
+  system: string,
+): Promise<string> {
+  const text = await runFinale(
+    complete,
+    opts,
     messages,
-    maxTokens: opts.agent.maxTokens,
-  });
-  return collectText(finale.content);
+    system,
+    "An operator has asked this run to stop. You can make no more tool calls. Write your final answer now from what " +
+      "you have learned so far: report your findings/results to date, then state plainly which parts of the task you " +
+      "did not get to and what a follow-up (in this thread, to reuse this workspace) should focus on.",
+  );
+  return text
+    ? `⏹ _Stopped early by an operator (soft stop) — findings so far:_\n\n${text}`
+    : "⏹ Stopped early by an operator (soft stop) before any findings were written. Partial work may exist in the workspace.";
 }
 
 /** The one-line diagnostic surfaced when the run aborts into an unrecoverable
@@ -222,11 +386,13 @@ const SANDBOX_DEAD_MESSAGE =
  *  more commands), and the answer leads with the diagnostic. The finale is pure
  *  inference, so it works even though the sandbox does not. */
 async function finishSandboxDead(
+  complete: Complete,
   opts: RunOptions,
   messages: ChatMessage[],
   system: string,
 ): Promise<string> {
   const text = await runFinale(
+    complete,
     opts,
     messages,
     system,

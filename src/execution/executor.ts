@@ -9,8 +9,11 @@ import type { OperationResult, Operations, OpName } from "../core/operations.js"
 // per-thread sandbox (production).
 
 export interface Executor {
-  /** Run a shell command; returns combined output (never throws on non-zero exit). */
-  exec(command: string): Promise<string>;
+  /** Run a shell command; returns combined output (never throws on non-zero
+   *  exit). `opts.signal` is a hard run stop (#101): an implementation that can
+   *  cancel the underlying command does so and returns/throws promptly; one that
+   *  cannot simply ignores it — the runner stops waiting on it either way. */
+  exec(command: string, opts?: ExecOptions): Promise<string>;
   /** Read a file, path relative to the execution workspace. */
   readFile(path: string): Promise<string>;
   /** Write a file (creating parent dirs), path relative to the workspace. */
@@ -20,6 +23,18 @@ export interface Executor {
    *  (read-only agents); "if-clean" — keep the workspace if it has uncommitted
    *  or unpushed work. Best-effort: implementations report, never throw. */
   release?(mode: ReleaseMode): Promise<ReleaseResult>;
+}
+
+export interface ExecOptions {
+  /** Aborted when the run is hard-stopped; cancel the command if you can. */
+  signal?: AbortSignal;
+}
+
+/** The per-call deadline for a remote route, joined with an optional hard-stop
+ *  signal (#101): whichever fires first aborts the fetch. */
+export function execDeadline(timeoutMs: number, signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([timeout, signal]) : timeout;
 }
 
 export type ReleaseMode = "always" | "if-clean";
@@ -71,8 +86,8 @@ export class ExecHealthTracker implements Executor {
     }
   }
 
-  exec(command: string): Promise<string> {
-    return this.track(() => this.inner.exec(command));
+  exec(command: string, opts?: ExecOptions): Promise<string> {
+    return this.track(() => this.inner.exec(command, opts));
   }
 
   readFile(path: string): Promise<string> {
@@ -105,8 +120,8 @@ export class LocalExecutor implements Executor {
     return abs;
   }
 
-  async exec(command: string): Promise<string> {
-    const r = await runBash(command, this.workspaceDir);
+  async exec(command: string, opts?: ExecOptions): Promise<string> {
+    const r = await runBash(command, this.workspaceDir, opts?.signal);
     const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
     if (r.error) {
       return truncate(`exit ${r.error.code ?? "error"}: ${r.error.message}\n${parts}`);
@@ -183,16 +198,19 @@ async function runLocalCommand(command: string, cwd: string): Promise<{ exitCode
 /** Shared bash spawn-and-collect (`bash -c` under the standard budget and
  *  buffer). `error` is null on a clean zero-exit run; otherwise it carries
  *  execFile's raw code (number exit code, string errno, or undefined when
- *  signal-killed) and message — each caller formats its own result. */
+ *  signal-killed) and message — each caller formats its own result. An
+ *  optional AbortSignal (hard run stop, #101) kills the child; that surfaces as
+ *  an `error` like any other abnormal exit — never a throw. */
 function runBash(
   command: string,
   cwd: string,
+  signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; error: { code?: number | string; message: string } | null }> {
   return new Promise((res) => {
     execFile(
       "bash",
       ["-c", command],
-      { cwd, timeout: BASH_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
+      { cwd, timeout: BASH_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024, ...(signal ? { signal } : {}) },
       (err, stdout, stderr) => {
         res({
           stdout,

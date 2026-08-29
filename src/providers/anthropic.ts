@@ -24,22 +24,27 @@ export class AnthropicProvider implements Provider {
     // effort is supported on Opus 4.5+/Sonnet 4.6+/Fable; it 400s on Haiku —
     // apply only where safe, since per-request model overrides can be anything.
     const effortSupported = req.effort && !/haiku|claude-3|claude-2/.test(req.model);
-    const stream = this.client.messages.stream({
-      model: req.model,
-      max_tokens: req.maxTokens,
-      system: req.system,
-      messages: req.messages.map(toAnthropicMessage),
-      ...(effortSupported ? { output_config: { effort: req.effort } } : {}),
-      ...(req.tools && req.tools.length > 0
-        ? {
-            tools: req.tools.map((t) => ({
-              name: t.name,
-              description: t.description,
-              input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
-            })),
-          }
-        : {}),
-    });
+    const stream = this.client.messages.stream(
+      {
+        model: req.model,
+        max_tokens: req.maxTokens,
+        system: req.system,
+        messages: req.messages.map(toAnthropicMessage),
+        ...(effortSupported ? { output_config: { effort: req.effort } } : {}),
+        ...(req.tools && req.tools.length > 0
+          ? {
+              tools: req.tools.map((t) => ({
+                name: t.name,
+                description: t.description,
+                input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
+              })),
+            }
+          : {}),
+      },
+      // A hard run stop (#101) aborts the stream mid-flight instead of letting
+      // it run to completion in the background.
+      req.signal ? { signal: req.signal } : undefined,
+    );
     const msg = await stream.finalMessage();
 
     const content: ContentPart[] = [];

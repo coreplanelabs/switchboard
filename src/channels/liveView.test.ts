@@ -721,3 +721,183 @@ describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => 
     expect(body.diagnosis.findings).toEqual([]);
   });
 });
+
+// Feature: features/live-view.md item 10 — run control from /runs (#101):
+// `POST /runs/:id/stop?t=…&mode=soft|hard` behind the same token gate (Access
+// fronts every /runs* method at the edge), plus Stop/Kill controls on the index
+// rows and the per-run page, and stopping → stopped state on both.
+describe("run control: POST /runs/:id/stop (#101)", () => {
+  function fakeReqRes(method: string, url: string) {
+    const listeners: Record<string, Array<() => void>> = {};
+    const req = { method, url, headers: {}, on: (ev: string, cb: () => void) => void (listeners[ev] ??= []).push(cb) };
+    let status = 0;
+    let outHeaders: Record<string, string> = {};
+    const chunks: string[] = [];
+    const res = {
+      writeHead: (s: number, h?: Record<string, string>) => {
+        status = s;
+        outHeaders = h ?? {};
+      },
+      write: (c: string) => void chunks.push(c),
+      end: (c?: string) => {
+        if (c) chunks.push(c);
+      },
+    };
+    return {
+      req: req as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[0],
+      res: res as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[1],
+      get status() {
+        return status;
+      },
+      get headers() {
+        return outHeaders;
+      },
+      body: () => chunks.join(""),
+    };
+  }
+
+  it("parseRunRoute matches the stop route", () => {
+    expect(parseRunRoute("/runs/abc/stop")).toEqual({ id: "abc", kind: "stop" });
+    expect(parseRunRoute("/runs/abc/stop/")).toEqual({ id: "abc", kind: "stop" });
+  });
+
+  it("soft: drives the run's control, answers JSON {stopping, mode}", () => {
+    const reg = fixedRegistry();
+    const { id, token, control } = reg.create();
+    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=soft`);
+    expect(createLiveViewHandler(reg)(t.req, t.res)).toBe(true);
+    expect(t.status).toBe(200);
+    expect(t.headers["content-type"]).toContain("application/json");
+    expect(t.headers["cache-control"]).toBe("no-store");
+    expect(JSON.parse(t.body())).toEqual({ id, mode: "soft", state: "stopping" });
+    expect(control.requested).toBe("soft");
+    expect(control.hardSignal.aborted).toBe(false);
+  });
+
+  it("hard: aborts the run's hard signal immediately", () => {
+    const reg = fixedRegistry();
+    const { id, token, control } = reg.create();
+    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=hard`);
+    createLiveViewHandler(reg)(t.req, t.res);
+    expect(t.status).toBe(200);
+    expect(JSON.parse(t.body()).mode).toBe("hard");
+    expect(control.hardSignal.aborted).toBe(true);
+  });
+
+  it("400s a missing or unknown mode without touching the run", () => {
+    const reg = fixedRegistry();
+    const { id, token, control } = reg.create();
+    const handler = createLiveViewHandler(reg);
+    for (const q of ["", "&mode=", "&mode=nuke"]) {
+      const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}${q}`);
+      handler(t.req, t.res);
+      expect(t.status).toBe(400);
+    }
+    expect(control.requested).toBeUndefined();
+  });
+
+  it("404s a wrong/missing token or unknown run (existence never revealed), control untouched", () => {
+    const reg = fixedRegistry();
+    const { id, control } = reg.create();
+    const handler = createLiveViewHandler(reg);
+    for (const url of [`/runs/${id}/stop?t=wrong&mode=hard`, `/runs/${id}/stop?mode=hard`, `/runs/nope/stop?t=tok-1&mode=hard`]) {
+      const t = fakeReqRes("POST", url);
+      handler(t.req, t.res);
+      expect(t.status).toBe(404);
+    }
+    expect(control.requested).toBeUndefined();
+    expect(control.hardSignal.aborted).toBe(false);
+  });
+
+  it("409s a stop on a finished run", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    reg.finish(id);
+    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=soft`);
+    createLiveViewHandler(reg)(t.req, t.res);
+    expect(t.status).toBe(409);
+  });
+
+  it("is POST-only: GET on the stop route is 405 with allow: POST, and never stops the run", () => {
+    const reg = fixedRegistry();
+    const { id, token, control } = reg.create();
+    const t = fakeReqRes("GET", `/runs/${id}/stop?t=${token}&mode=hard`);
+    createLiveViewHandler(reg)(t.req, t.res);
+    expect(t.status).toBe(405);
+    expect(t.headers.allow).toBe("POST");
+    expect(control.requested).toBeUndefined();
+  });
+
+  it("the other run routes stay GET-only (405 on POST) — the stop route is the ONLY writer", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    const t = fakeReqRes("POST", `/runs/${id}/events?t=${token}`);
+    createLiveViewHandler(reg)(t.req, t.res);
+    expect(t.status).toBe(405);
+    expect(t.headers.allow).toBe("GET");
+  });
+
+  const summary = (over: Partial<RunSummary> = {}): RunSummary => ({
+    id: "run-1",
+    token: "tok-1",
+    label: "coding · owner/repo",
+    finished: false,
+    startedAt: 1000,
+    eventCount: 3,
+    ...over,
+  });
+
+  describe("index UI", () => {
+    it("renders Stop (soft) and Kill (hard) buttons OUTSIDE the row anchor for a live run", () => {
+      const html = renderRunsIndex([summary()]);
+      // buttons are siblings of the <a class="row">, never nested inside it (invalid HTML)
+      expect(html).toMatch(/<\/a><span class="actions">.*data-mode="soft".*data-mode="hard".*<\/span><\/li>/);
+      expect(html).not.toMatch(/<a class="row"[^>]*>[^]*?<button[^]*?<\/a>/);
+    });
+
+    it("hides the buttons for a finished run", () => {
+      const html = renderRunsIndex([summary({ finished: true })]);
+      expect(html).not.toContain('data-mode="soft"');
+      expect(html).not.toContain('data-mode="hard"');
+    });
+
+    it("shows a stopping / stopped badge from the summary's stop state", () => {
+      expect(renderRunsIndex([summary({ stop: { mode: "soft", state: "stopping" } })])).toContain(
+        '<span class="stopbadge stopping">stopping (soft)</span>',
+      );
+      expect(renderRunsIndex([summary({ finished: true, stop: { mode: "hard", state: "stopped" } })])).toContain(
+        '<span class="stopbadge stopped">stopped (hard)</span>',
+      );
+      expect(renderRunsIndex([summary()])).not.toContain('class="stopbadge');
+      // a run already asked to stop offers no second set of buttons
+      expect(renderRunsIndex([summary({ stop: { mode: "soft", state: "stopping" } })])).not.toContain('data-mode="hard"');
+    });
+
+    it("client-side rows mirror the buttons + badge and POST the stop with the row's token", () => {
+      const html = renderRunsIndex([summary()]);
+      expect(html).toContain('method: "POST"');
+      expect(html).toContain('"/stop?t="');
+      expect(html).toContain('stop.state + " (" + stop.mode + ")"'); // same label as the server badge
+      expect(html).toContain('stopButton("hard"');
+      expect(html).not.toContain("innerHTML");
+    });
+  });
+
+  describe("per-run page UI", () => {
+    it("has Stop and Kill buttons that POST to this run's token-scoped stop route", () => {
+      const html = renderRunPage("run-1", "tok-1");
+      expect(html).toContain('data-mode="soft"');
+      expect(html).toContain('data-mode="hard"');
+      expect(html).toContain("/runs/run-1/stop?t=tok-1");
+      expect(html).toContain('method: "POST"');
+    });
+
+    it("reflects stop_requested → stopping and end → stopped from the event stream (textContent only)", () => {
+      const html = renderRunPage("run-1", "tok-1");
+      expect(html).toContain('"stop_requested"');
+      expect(html).toContain("stopping (");
+      expect(html).toContain("stopped (");
+      expect(html).not.toContain("innerHTML");
+    });
+  });
+});

@@ -55,6 +55,9 @@ export interface CompletionRequest {
   maxTokens: number;
   /** model effort hint; providers apply it only where the model supports it */
   effort?: "low" | "medium" | "high";
+  /** Cancellation for a hard run stop (#101): providers pass it to their HTTP
+   *  call so an aborted run stops billing/streaming now. Absent → never aborts. */
+  signal?: AbortSignal;
 }
 
 export interface CompletionResult {
