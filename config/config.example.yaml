@@ -171,3 +171,15 @@ workspaceDir: ./workspaces
 #       containerApps:                            # container application id → label
 #         a0000000-0000-0000-0000-000000000000: server
 #       anthropicWorkspaceId: wrkspc_...          # this app's Anthropic workspace
+
+# Slack adapter — reconnect catch-up (#184). Socket Mode drops every mention
+# posted while the websocket is down (each bot deploy = drain + cold start).
+# On every (re)connect the bot re-reads recent history of the channels it is in
+# and runs whatever has no receipt from it (no :eyes:, no bot reply after it).
+# Defaults: enabled, 20-minute window (the 15-minute graceful drain + a cold
+# start). Needs channels:read + groups:read (channel listing) on top of the
+# history scopes.
+# slack:
+#   catchUp:
+#     enabled: true
+#     windowMinutes: 20

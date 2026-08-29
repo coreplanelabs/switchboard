@@ -94,6 +94,22 @@ export interface AppConfig {
    * `parseCostsConfig` (src/core/costs.ts); absent → the view answers 503.
    */
   costs?: unknown;
+  /** Slack adapter behavior that is not pure transport. */
+  slack?: SlackConfig;
+}
+
+export interface SlackConfig {
+  /**
+   * Reconnect catch-up (#184): on every Socket Mode (re)connect, re-read
+   * recent history of every channel the bot is in and dispatch mentions /
+   * follow-ups that carry no receipt from us (no 👀, no bot reply after them).
+   * Absent = enabled with a 20-minute window.
+   */
+  catchUp?: {
+    enabled?: boolean;
+    /** Messages older than this are left alone even if unanswered. */
+    windowMinutes?: number;
+  };
 }
 
 export interface OutputConfig {

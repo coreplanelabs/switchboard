@@ -4,6 +4,9 @@ import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js"
 import { mdToMrkdwn } from "./mrkdwn.js";
 import { escapeMrkdwn } from "./slackEscape.js";
 import { SlackFormatter } from "./slackFormatter.js";
+import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
+import { ACK_EMOJI, catchUpMissedMentions } from "./slackCatchUp.js";
+export { classifyMessage, threadIncludesBot, type MessageDecision } from "./slackTriggers.js";
 import type {
   ChannelIO,
   DocumentAttachment,
@@ -17,13 +20,11 @@ import type {
 // the core dispatcher and implements ChannelIO on top of the Slack Web API.
 // No routing, config, or agent logic lives here.
 
-const { App } = bolt;
+const { App, SocketModeReceiver } = bolt;
 type SlackClient = bolt.webApi.WebClient;
 
 const PLATFORM = "slack";
 const SLACK_MSG_LIMIT = 3500;
-// Reaction added to a triggering message the moment the bot accepts it.
-const ACK_EMOJI = "eyes";
 
 // Attachment ingestion. Only image types every provider accepts; Slack file
 // downloads need the files:read bot scope.
@@ -150,45 +151,6 @@ const LOADING_PHRASES = [
   "is clearing the static…",
 ];
 
-/** What to do with an incoming message event. Pure — the async thread-
- *  participation lookup stays with the caller. Exported for tests. */
-export type MessageDecision = "skip" | "handle" | "handle-if-bot-in-thread";
-
-export function classifyMessage(
-  m: { bot_id?: string; subtype?: string; channel_type?: string; thread_ts?: string; text?: string },
-  botUserId?: string,
-): MessageDecision {
-  // "file_share" is how Slack marks a message with attachments — still a
-  // user message, so let it through the subtype gate.
-  if (m.bot_id || (m.subtype && m.subtype !== "file_share")) return "skip";
-  if (m.channel_type === "im") return "handle";
-  // Channel/group messages: only thread follow-ups, and only in threads the
-  // bot is already part of. Mentions are app_mention's job (the same message
-  // fires both events — skip here to avoid double-handling), and top-level
-  // channel posts still require a mention.
-  if (!m.thread_ts) return "skip";
-  if (botUserId && (m.text ?? "").includes(`<@${botUserId}>`)) return "skip";
-  return "handle-if-bot-in-thread";
-}
-
-/** Is the bot part of this thread — has it posted, or been mentioned anywhere
- *  in it? Pure over already-fetched messages. Exported for tests. */
-export function threadIncludesBot(
-  messages: Array<{ user?: string; text?: string }>,
-  botUserId?: string,
-): boolean {
-  if (!botUserId) return false;
-  return messages.some((m) => m.user === botUserId || (m.text ?? "").includes(`<@${botUserId}>`));
-}
-
-// ---- human display-name resolution ------------------------------------------
-// The core wants human names (IncomingMessage.channelName/userName) for the
-// live-view run label, but stays channel-agnostic — so the Slack adapter resolves
-// them here. Best-effort: a lookup failure leaves the name undefined and the
-// label falls back to the raw id; a name lookup never delays or fails a dispatch.
-// Names change rarely, so each id is resolved once and cached — one API call per
-// new id, not per message.
-
 /** The slice of the Slack Web API the name resolvers use — declared structurally
  *  so both the real WebClient and a test mock satisfy it. */
 interface NameLookupClient {
@@ -263,13 +225,43 @@ export function resetSlackNameCaches(): void {
 }
 
 export function createSlackApp(deps: CoreDeps) {
-  const app = new App({
-    token: process.env.SLACK_BOT_TOKEN,
-    appToken: process.env.SLACK_APP_TOKEN,
-    socketMode: true,
-  });
+  // The receiver is built explicitly (rather than `socketMode: true`) so the
+  // adapter can listen to its websocket lifecycle: every `connected` — first
+  // start and each reconnect — triggers the missed-mention catch-up (#184).
+  const receiver = new SocketModeReceiver({ appToken: process.env.SLACK_APP_TOKEN ?? "" });
+  const app = new App({ token: process.env.SLACK_BOT_TOKEN, receiver });
 
   let botUserId: string | undefined;
+
+  const catchUp = deps.config.config.slack?.catchUp;
+  if (catchUp?.enabled !== false) {
+    receiver.client.on("connected", () => {
+      void (async () => {
+        botUserId ??= (await app.client.auth.test()).user_id ?? undefined;
+        if (!botUserId) return;
+        const id = botUserId;
+        await catchUpMissedMentions({
+          client: app.client,
+          botUserId: id,
+          windowMs: catchUp?.windowMinutes != null ? catchUp.windowMinutes * 60_000 : undefined,
+          alreadyHandled: wasHandledHere,
+          // Not awaited per message: a run takes minutes and live events run
+          // concurrently too — the runner only awaits the hand-off.
+          onMissed: (m) => {
+            void handle(deps, app.client, {
+              channel: m.channel,
+              user: m.user,
+              text: stripMention(m.text, id),
+              ts: m.ts,
+              threadTs: m.threadTs,
+              files: m.files as SlackFile[] | undefined,
+              botUserId: id,
+            }).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
+          },
+        });
+      })().catch((err: Error) => console.error(`[catch-up] ${err.message}`));
+    });
+  }
 
   app.event("app_mention", async ({ event, client }) => {
     botUserId ??= (await client.auth.test()).user_id ?? undefined;
@@ -335,7 +327,24 @@ interface SlackEvent {
   botUserId?: string;
 }
 
+// Same-process dedupe for the reconnect catch-up: (channel, ts) pairs this
+// process has accepted, live or via catch-up, so a message delivered both ways
+// runs once. Bounded FIFO; the durable record is Slack (👀 / bot reply).
+const HANDLED_MAX = 5000;
+const handledHere = new Set<string>();
+function markHandledHere(channel: string, ts: string): void {
+  handledHere.add(`${channel}:${ts}`);
+  if (handledHere.size > HANDLED_MAX) {
+    const oldest = handledHere.values().next().value;
+    if (oldest !== undefined) handledHere.delete(oldest);
+  }
+}
+function wasHandledHere(channel: string, ts: string): boolean {
+  return handledHere.has(`${channel}:${ts}`);
+}
+
 async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Promise<void> {
+  markHandledHere(ev.channel, ev.ts);
   // Immediate receipt: react to the triggering message so the sender knows it
   // was accepted, before any model/tool work starts. Fire-and-forget — a
   // missing reactions:write scope (or a re-run reacting twice) must never

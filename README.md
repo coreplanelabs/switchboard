@@ -288,8 +288,9 @@ permissions:
 
 1. **Create the Slack app** (api.slack.com/apps → From scratch):
    - Enable **Socket Mode**; create an app-level token with `connections:write` → `SLACK_APP_TOKEN`.
-   - **OAuth scopes** (Bot Token): `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `im:history`, `im:read`, `im:write`, `files:read` (image attachments are downloaded and passed to the model; without this scope they're reported as unavailable), `reactions:write` (the bot reacts :eyes: to a message the moment it accepts it; without this scope requests still work, just without the receipt).
+   - **OAuth scopes** (Bot Token): `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `im:history`, `im:read`, `im:write`, `files:read` (image attachments are downloaded and passed to the model; without this scope they're reported as unavailable), `reactions:write` (the bot reacts :eyes: to a message the moment it accepts it; without this scope requests still work, just without the receipt), `channels:read`, `groups:read`, `users:read` (channel/user display names for run labels, and the channel listing the reconnect catch-up scans — see below).
    - **Event subscriptions**: `app_mention`, `message.im`, `message.channels`, `message.groups` (the channel/group message events deliver thread follow-ups so no re-mention is needed mid-conversation).
+   - **Reconnect catch-up** ([#184](https://github.com/coreplanelabs/switchboard/issues/184)): Socket Mode drops every event that arrives while the bot is disconnected (each deploy = drain + cold start). On every (re)connect the bot re-reads the recent history of the channels it is in and runs whatever has no receipt from it (no :eyes:, no bot reply after it) — dedupe is Slack itself, no persisted cursor. On by default with a 20-minute window; `slack.catchUp` in `config.yaml` tunes it.
    - Install to workspace → `SLACK_BOT_TOKEN`.
 2. **Configure**:
    ```bash
