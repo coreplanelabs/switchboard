@@ -135,6 +135,10 @@ export function renderRunPage(id: string, token: string): string {
   .err { color: #ff7b72; }
   .note { color: #d29922; }
   .empty { color: #8b93a7; }
+  /* The final answer: its own block under the log, rendered as data (textContent). */
+  #answer { margin-top: 1rem; border-top: 1px solid #2a2f3a; padding-top: .75rem; }
+  #answer h2 { font-size: .85rem; margin: 0 0 .5rem; color: #8b93a7; font-weight: 600; }
+  #answertext { white-space: pre-wrap; word-break: break-word; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   .actions { display: inline-flex; gap: .4rem; }
   button.stop { font: inherit; font-size: .75rem; padding: .1rem .5rem; border-radius: 4px; cursor: pointer;
     border: 1px solid #3b4252; background: #161b22; color: #e6e6e6; }
@@ -154,11 +158,14 @@ export function renderRunPage(id: string, token: string): string {
   <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>
 </header>
 <ul id="log"><li class="empty" id="placeholder">Waiting for activity…</li></ul>
+<section id="answer" hidden><h2>Answer</h2><div id="answertext"></div></section>
 <script>
 (function () {
   var url = ${JSON.stringify(eventsPath)};
   var stopUrl = ${JSON.stringify(stopPath)};
   var log = document.getElementById("log");
+  var answerBox = document.getElementById("answer");
+  var answerText = document.getElementById("answertext");
   var state = document.getElementById("state");
   var stateDot = document.getElementById("statedot");
   var actions = document.getElementById("actions");
@@ -210,6 +217,14 @@ export function renderRunPage(id: string, token: string): string {
     } else if (e.type === "run_note") {
       row("note", "\\u23f1 " + e.summary);
       if ((e.kind === "stop_requested" || e.kind === "stopped") && e.mode) markStopping(e.mode);
+    } else if (e.type === "answer") {
+      // The run's final answer — the same text the thread got. textContent only.
+      // Only bring it into view when the viewer is already at the tail; someone
+      // reading earlier rows keeps their place (same rule as log autoscroll).
+      var atTail = window.innerHeight + window.scrollY >= document.body.scrollHeight - 40;
+      answerText.textContent = e.text;
+      answerBox.hidden = false;
+      if (atTail) answerBox.scrollIntoView({ block: "nearest" });
     }
   };
   es.addEventListener("end", function () {
@@ -338,6 +353,9 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   a.nav:hover { color: #9ecbff; }
   #runs { list-style: none; margin: 0; padding: 0; }
   #runs li { border-radius: 6px; display: flex; align-items: center; gap: .5rem; }
+  /* The empty sentinel is an <li> too: this must outrank the flex rule above,
+     or "No active runs." shows beside live rows (seen live 2026-08-29). */
+  #runs li[hidden] { display: none; }
   #runs li + li { border-top: 1px solid #1b1f28; }
   /* The run's row is the link (full-row clickable), with a clear hover bg; the
      stop buttons sit beside it as a sibling (a button can't live in an anchor). */

@@ -34,7 +34,12 @@ export type RunEvent =
   | { type: "tool_call"; tool: string; summary: string; at?: number }
   | { type: "tool_result"; tool: string; ok: boolean; summary: string; infra?: true; at?: number }
   /** `mode` rides only on the stop notes (`stop_requested` / `stopped`). */
-  | { type: "run_note"; kind: RunNoteKind; summary: string; mode?: StopMode; at?: number };
+  | { type: "run_note"; kind: RunNoteKind; summary: string; mode?: StopMode; at?: number }
+  /** The run's final answer — the same text the channel reply/PR post is
+   *  projected from, redacted like every event (NOT capped: the run record is
+   *  the source of truth, the summaries are). Published by the dispatcher once
+   *  per run, before the reply goes out; absent when the run threw. */
+  | { type: "answer"; text: string; at?: number };
 
 // Credential shapes we must never surface in a run-visibility stream (which may
 // be shown in-channel or on a shared page). Two layers: (1) specific known

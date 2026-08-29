@@ -51,14 +51,15 @@ function isRunEvent(v: unknown): v is RunEvent {
   if (typeof v !== "object" || v === null) return false;
   const o = v as Record<string, unknown>;
   if (o.at !== undefined && typeof o.at !== "number") return false;
-  if (typeof o.summary !== "string") return false;
   switch (o.type) {
     case "tool_call":
-      return typeof o.tool === "string";
+      return typeof o.summary === "string" && typeof o.tool === "string";
     case "tool_result":
-      return typeof o.tool === "string" && typeof o.ok === "boolean";
+      return typeof o.summary === "string" && typeof o.tool === "string" && typeof o.ok === "boolean";
     case "run_note":
-      return typeof o.kind === "string" && NOTE_KINDS.has(o.kind as RunNoteKind);
+      return typeof o.summary === "string" && typeof o.kind === "string" && NOTE_KINDS.has(o.kind as RunNoteKind);
+    case "answer":
+      return typeof o.text === "string"; // the final answer carries text, not a summary
     default:
       return false;
   }

@@ -1391,8 +1391,62 @@ describe("live run-view wiring (Area 2)", () => {
     expect(log).toEqual(["create", "finish"]); // created before the run, finished after
     // The 1-turn general agent hits its turn budget here, so the runner's typed
     // budget note (#84) also flows into the registry after the tool pair.
-    expect(events.map((e) => e.type)).toEqual(["tool_call", "tool_result", "run_note"]);
+    // …and the final answer itself lands in the stream (the run record is the
+    // source of truth; Slack is a projection of it) before the run finishes.
+    expect(events.map((e) => e.type)).toEqual(["tool_call", "tool_result", "run_note", "answer"]);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
+  });
+
+  // Feature: features/run-visibility.md item 5 — the final answer is a run
+  // event: published to the registry (SoT) BEFORE the channel reply, with the
+  // same redaction as every other event, so the run page shows what the thread
+  // got — including a soft stop's "findings so far".
+  it("publishes the final answer as a redacted `answer` event before finishing the run and before replying", async () => {
+    const order: string[] = [];
+    const events: RunEvent[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        return { content: [{ type: "text", text: "done — token was ghp_abcdefghijklmnopqrstuvwxyz0123" }], stopReason: "end_turn" };
+      },
+    };
+    const spy = {
+      create() {
+        return { id: "run-a", token: "tok-a", control: new RunControl() };
+      },
+      publish(_id: string, e: RunEvent) {
+        events.push(e);
+        order.push(`publish:${e.type}`);
+      },
+      finish() {
+        order.push("finish");
+      },
+      has: () => true,
+      subscribe: () => () => {},
+      size: () => 1,
+    } as unknown as RunRegistry;
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = spy;
+    const replies: string[] = [];
+    const io: ChannelIO = {
+      reply: async (t) => {
+        replies.push(t);
+        order.push("reply");
+      },
+      status: async () => ({ update: () => {}, done: async () => {} }),
+      history: async () => [],
+    };
+    await dispatch(deps, msg("hello there"), io);
+    const answer = events.find((e) => e.type === "answer");
+    expect(answer).toBeDefined();
+    if (answer?.type !== "answer") throw new Error("unreachable");
+    expect(answer.text).toContain("done — token was «redacted-github-token»"); // redacted like every event
+    // Intentional: the channel reply is NOT a run event, so it carries the model's
+    // text verbatim — only the run-visibility stream (card, /runs, friction) is
+    // redacted. Do not "fix" this assertion to expect redaction.
+    expect(replies[0]).toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
+    expect(order.indexOf("publish:answer")).toBeLessThan(order.indexOf("finish"));
+    expect(order.indexOf("publish:answer")).toBeLessThan(order.indexOf("reply"));
   });
 
   it("puts the per-run capability link on the status card when PUBLIC_BASE_URL is set", async () => {
