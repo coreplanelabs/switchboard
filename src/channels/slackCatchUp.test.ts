@@ -1,0 +1,252 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  catchUpMissedMentions,
+  findMissed,
+  isAckedByBot,
+  type CatchUpClient,
+  type SlackHistoryMessage,
+} from "./slackCatchUp.js";
+
+// Feature: features/slack-channel.md item 7 — mentions that land while the
+// Socket Mode websocket is down (bot rollover) are caught up from channel
+// history on (re)connect, never run twice.
+
+const BOT = "U0BOT";
+const NOW = 1_788_040_800_000; // 2026-08-29T22:00:00Z
+const ts = (secondsAgo: number, frac = "000100") => `${Math.floor(NOW / 1000) - secondsAgo}.${frac}`;
+const mention = (over: Partial<SlackHistoryMessage> = {}): SlackHistoryMessage & { ts: string } => ({
+  type: "message",
+  user: "U0USER",
+  text: `<@${BOT}> agent:review https://github.com/o/r/pull/180`,
+  ts: ts(60),
+  ...over,
+});
+
+describe("isAckedByBot", () => {
+  it("true only when the bot's own 👀 is on the message", () => {
+    expect(isAckedByBot(mention({ reactions: [{ name: "eyes", users: ["U0OTHER", BOT], count: 2 }] }), BOT)).toBe(true);
+    expect(isAckedByBot(mention({ reactions: [{ name: "eyes", users: ["U0OTHER"], count: 1 }] }), BOT)).toBe(false);
+    expect(isAckedByBot(mention({ reactions: [{ name: "thumbsup", users: [BOT], count: 1 }] }), BOT)).toBe(false);
+    expect(isAckedByBot(mention(), BOT)).toBe(false);
+  });
+});
+
+describe("findMissed (pure selection over fetched history)", () => {
+  const cutoff = NOW - 20 * 60_000;
+  const base = { botUserId: BOT, cutoffMs: cutoff, alreadyHandled: () => false };
+
+  it("picks an un-acked top-level mention inside the window, threaded to itself", () => {
+    const m = mention();
+    const out = findMissed({ ...base, channel: "C1", parents: [m], threads: new Map() });
+    expect(out).toEqual([
+      { channel: "C1", user: "U0USER", text: m.text, ts: m.ts, threadTs: m.ts, files: undefined },
+    ]);
+  });
+
+  it("skips a mention the bot already 👀-acked", () => {
+    const m = mention({ reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+    expect(findMissed({ ...base, channel: "C1", parents: [m], threads: new Map() })).toEqual([]);
+  });
+
+  it("skips a mention the bot already replied to in-thread (ack lost, but a status card/reply exists)", () => {
+    const m = mention({ reply_count: 1, latest_reply: ts(30) });
+    const threads = new Map([[m.ts, [m, { type: "message", user: BOT, bot_id: "B1", text: "⏳ working", ts: ts(30), thread_ts: m.ts }]]]);
+    expect(findMissed({ ...base, channel: "C1", parents: [m], threads })).toEqual([]);
+  });
+
+  it("does NOT treat a human's reply as the bot having handled it (and the bump itself is a missed follow-up, as live)", () => {
+    const m = mention({ reply_count: 1, latest_reply: ts(30) });
+    const bump = { type: "message", user: "U0OTHER", text: "bump", ts: ts(30), thread_ts: m.ts };
+    const threads = new Map([[m.ts, [m, bump]]]);
+    expect(findMissed({ ...base, channel: "C1", parents: [m], threads }).map((x) => x.ts)).toEqual([m.ts, bump.ts]);
+  });
+
+  it("ignores top-level messages older than the window, without a mention, from bots, or subtyped", () => {
+    const parents: SlackHistoryMessage[] = [
+      mention({ ts: ts(30 * 60) }), // too old
+      mention({ text: "no mention here" }),
+      mention({ bot_id: "B9", user: BOT }),
+      mention({ subtype: "channel_join" }),
+    ];
+    expect(findMissed({ ...base, channel: "C1", parents, threads: new Map() })).toEqual([]);
+  });
+
+  it("keeps file_share mentions and carries the files through", () => {
+    const files = [{ id: "F1", name: "a.png", mimetype: "image/png" }];
+    const m = mention({ subtype: "file_share", files });
+    const out = findMissed({ ...base, channel: "C1", parents: [m], threads: new Map() });
+    expect(out[0]?.files).toBe(files);
+  });
+
+  it("skips messages this process already handled live (same-process dedupe)", () => {
+    const m = mention();
+    const out = findMissed({
+      ...base,
+      channel: "C1",
+      parents: [m],
+      threads: new Map(),
+      alreadyHandled: (channel, t) => channel === "C1" && t === m.ts,
+    });
+    expect(out).toEqual([]);
+  });
+
+  it("picks an un-acked in-thread mention (a rereview follow-up) even when the parent is old", () => {
+    const parent = mention({ ts: ts(3 * 86_400), reply_count: 3, latest_reply: ts(45) });
+    const follow = mention({ ts: ts(45), thread_ts: parent.ts, text: `<@${BOT}> please re-review` });
+    const threads = new Map([[parent.ts, [parent, { ...mention({ ts: ts(3000), thread_ts: parent.ts, user: BOT, bot_id: "B1", text: "done" }) }, follow]]]);
+    const out = findMissed({ ...base, channel: "C1", parents: [parent], threads });
+    expect(out).toEqual([{ channel: "C1", user: "U0USER", text: follow.text, ts: follow.ts, threadTs: parent.ts, files: undefined }]);
+  });
+
+  it("picks an un-acked, un-mentioned follow-up in a thread the bot participates in (live trigger 1c)", () => {
+    const parent = mention({ ts: ts(3000), reply_count: 2, latest_reply: ts(40) });
+    const botReply = { type: "message", user: BOT, bot_id: "B1", text: "here you go", ts: ts(2000), thread_ts: parent.ts };
+    const follow = { type: "message", user: "U0USER", text: "and now do the other thing", ts: ts(40), thread_ts: parent.ts };
+    const threads = new Map([[parent.ts, [parent, botReply, follow]]]);
+    const out = findMissed({ ...base, channel: "C1", parents: [parent], threads });
+    expect(out.map((m) => m.ts)).toEqual([follow.ts]);
+  });
+
+  it("ignores an un-mentioned follow-up in a thread the bot is NOT part of", () => {
+    const parent = { type: "message", user: "U0A", text: "chatting", ts: ts(3000), reply_count: 1, latest_reply: ts(40) };
+    const follow = { type: "message", user: "U0B", text: "yep", ts: ts(40), thread_ts: parent.ts };
+    const threads = new Map([[parent.ts, [parent, follow]]]);
+    expect(findMissed({ ...base, channel: "C1", parents: [parent], threads })).toEqual([]);
+  });
+
+  it("skips a thread reply the bot answered after it, and one from the bot itself", () => {
+    const parent = mention({ ts: ts(3000), reply_count: 3, latest_reply: ts(10) });
+    const follow = mention({ ts: ts(40), thread_ts: parent.ts, text: `<@${BOT}> again` });
+    const botAfter = { type: "message", user: BOT, bot_id: "B1", text: "✅ done", ts: ts(10), thread_ts: parent.ts };
+    const threads = new Map([[parent.ts, [parent, follow, botAfter]]]);
+    expect(findMissed({ ...base, channel: "C1", parents: [parent], threads })).toEqual([]);
+  });
+
+  it("returns missed messages oldest-first across parents and threads", () => {
+    const p1 = mention({ ts: ts(50, "000001") });
+    const p2 = mention({ ts: ts(120, "000001"), reply_count: 1, latest_reply: ts(20) });
+    const follow = mention({ ts: ts(20), thread_ts: p2.ts });
+    const threads = new Map([[p2.ts, [p2, follow]]]);
+    const out = findMissed({ ...base, channel: "C1", parents: [p1, p2], threads });
+    expect(out.map((m) => m.ts)).toEqual([p2.ts, p1.ts, follow.ts]);
+  });
+});
+
+function mockClient(over: {
+  channels?: Array<{ id: string }>;
+  history?: Record<string, SlackHistoryMessage[]>;
+  replies?: Record<string, SlackHistoryMessage[]>;
+  historyError?: string;
+} = {}) {
+  const history = over.history ?? {};
+  const replies = over.replies ?? {};
+  const client = {
+    users: {
+      conversations: vi.fn(async () => ({ channels: over.channels ?? [{ id: "C1" }], response_metadata: {} })),
+    },
+    conversations: {
+      history: vi.fn(async ({ channel }: { channel: string }) => {
+        if (over.historyError) throw new Error(over.historyError);
+        return { messages: history[channel] ?? [], response_metadata: {} };
+      }),
+      replies: vi.fn(async ({ channel, ts: t }: { channel: string; ts: string }) => ({
+        messages: replies[`${channel}:${t}`] ?? [],
+        response_metadata: {},
+      })),
+    },
+  };
+  return client as typeof client & CatchUpClient;
+}
+
+describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
+  it("scans every channel the bot is in and re-dispatches un-acked mentions, oldest first", async () => {
+    const a = mention({ ts: ts(70) });
+    const b = mention({ ts: ts(50), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+    const c = mention({ ts: ts(90) });
+    const client = mockClient({ channels: [{ id: "C1" }, { id: "C2" }], history: { C1: [b, a], C2: [c] } });
+    const onMissed = vi.fn();
+    const log = vi.fn();
+    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, log });
+    expect(out).toEqual({ channels: 2, missed: 2 });
+    expect(onMissed.mock.calls.map(([m]) => [m.channel, m.ts])).toEqual([[ "C1", a.ts ], [ "C2", c.ts ]]);
+    expect(client.users.conversations).toHaveBeenCalledWith(
+      expect.objectContaining({ types: "public_channel,private_channel", exclude_archived: true }),
+    );
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("2 missed"));
+  });
+
+  it("fetches replies only for threads with activity inside the window", async () => {
+    const quiet = mention({ ts: ts(5000), reply_count: 2, latest_reply: ts(4000) });
+    const active = mention({ ts: ts(5000, "000002"), reply_count: 2, latest_reply: ts(30) });
+    const follow = mention({ ts: ts(30), thread_ts: active.ts });
+    const client = mockClient({
+      history: { C1: [active, quiet] },
+      replies: { [`C1:${active.ts}`]: [active, follow] },
+    });
+    const onMissed = vi.fn();
+    await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed });
+    expect(client.conversations.replies).toHaveBeenCalledTimes(1);
+    expect(client.conversations.replies).toHaveBeenCalledWith(expect.objectContaining({ channel: "C1", ts: active.ts }));
+    expect(onMissed.mock.calls.map(([m]) => m.ts)).toEqual([follow.ts]);
+  });
+
+  it("does nothing when everything was handled (the common reconnect)", async () => {
+    const client = mockClient({ history: { C1: [mention({ reactions: [{ name: "eyes", users: [BOT], count: 1 }] })] } });
+    const onMissed = vi.fn();
+    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed });
+    expect(out).toEqual({ channels: 1, missed: 0 });
+    expect(onMissed).not.toHaveBeenCalled();
+  });
+
+  it("never throws: a channel whose history fails is logged and skipped", async () => {
+    const client = mockClient({ historyError: "missing_scope" });
+    const log = vi.fn();
+    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), log });
+    expect(out).toEqual({ channels: 1, missed: 0 });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("missing_scope"));
+  });
+
+  it("a dispatch that rejects does not stop the remaining catch-up", async () => {
+    const a = mention({ ts: ts(70) });
+    const b = mention({ ts: ts(50) });
+    const client = mockClient({ history: { C1: [b, a] } });
+    const onMissed = vi.fn(async ({ ts: t }: { ts: string }) => {
+      if (t === a.ts) throw new Error("boom");
+    });
+    const log = vi.fn();
+    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, log });
+    expect(out.missed).toBe(2);
+    expect(onMissed).toHaveBeenCalledTimes(2);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("boom"));
+  });
+
+  it("pages a long thread's replies by cursor so the newest (in-window) messages are seen", async () => {
+    const parent = mention({ ts: ts(5000), reply_count: 3, latest_reply: ts(30) });
+    const botReply = { type: "message", user: BOT, bot_id: "B1", text: "here", ts: ts(4000), thread_ts: parent.ts };
+    const follow = { type: "message", user: "U0USER", text: "one more thing", ts: ts(30), thread_ts: parent.ts };
+    const client = mockClient({ history: { C1: [parent] } });
+    client.conversations.replies
+      .mockResolvedValueOnce({ messages: [parent, botReply], response_metadata: { next_cursor: "r2" } })
+      .mockResolvedValueOnce({ messages: [follow], response_metadata: { next_cursor: "" } });
+    const onMissed = vi.fn();
+    await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed });
+    expect(client.conversations.replies).toHaveBeenCalledTimes(2);
+    expect(client.conversations.replies.mock.calls[1][0]).toEqual(expect.objectContaining({ ts: parent.ts, cursor: "r2" }));
+    // the bot's reply on page 1 makes it a participating thread; the follow-up on page 2 is the missed message
+    expect(onMissed.mock.calls.map(([m]) => m.ts)).toEqual([follow.ts]);
+  });
+
+  it("asks history for the parent-lookback window and pages until it runs out", async () => {
+    const client = mockClient();
+    client.conversations.history
+      .mockResolvedValueOnce({ messages: [mention({ ts: ts(100) })], response_metadata: { next_cursor: "c2" } })
+      .mockResolvedValueOnce({ messages: [mention({ ts: ts(200), reactions: [{ name: "eyes", users: [BOT], count: 1 }] })], response_metadata: { next_cursor: "" } });
+    const onMissed = vi.fn();
+    await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, parentLookbackMs: 86_400_000 });
+    expect(client.conversations.history).toHaveBeenCalledTimes(2);
+    const first = client.conversations.history.mock.calls[0][0] as unknown as { oldest: string; cursor?: string };
+    expect(Number(first.oldest)).toBeCloseTo((NOW - 86_400_000) / 1000, 0);
+    expect(client.conversations.history.mock.calls[1][0]).toEqual(expect.objectContaining({ cursor: "c2" }));
+    expect(onMissed).toHaveBeenCalledTimes(1);
+  });
+});
