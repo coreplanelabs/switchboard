@@ -73,7 +73,7 @@ jobs:
       - run: npm test
 
   resident-worker:
-    name: resident worker typecheck
+    name: resident worker typecheck + tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -87,3 +87,5 @@ jobs:
           cache-dependency-path: deploy/cloudflare-resident/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      # Deploy preflight decision logic (plain Node, no workerd).
+      - run: npm test
