@@ -136,6 +136,12 @@ export type ResidentStatusProbe =
   | { kind: "unreachable"; error: string; transport: boolean };
 
 export class ResidentExecutor implements Executor {
+  /** Consecutive `runtime-replaced` outcomes with no successful op between
+   *  them. One is a deploy that swapped the resident isolate under a command
+   *  (routine, recoverable); two in a row is a flapping resident and becomes
+   *  infra so the runner's fail-fast (#92) still has teeth. */
+  private runtimeReplacedStreak = 0;
+
   constructor(private opts: ResidentExecutorOptions) {}
 
   /** Attach-on-open: bind (or reuse) the thread's worktree before the first
@@ -249,27 +255,57 @@ export class ResidentExecutor implements Executor {
   }
 
   /** Run a route; on needs:"attach" (evicted/recycled worktree, in-body for
-   *  /exec, 409 for /read //write) re-attach ONCE and retry, then fail legibly. */
+   *  /exec, 409 for /read //write) re-attach ONCE and retry, then fail legibly.
+   *
+   *  A `reason:"runtime-replaced"` answer (the resident isolate was swapped by
+   *  a deploy while the op ran) also re-attaches once — proving the new isolate
+   *  serves this thread — but the op is re-issued only for the idempotent
+   *  routes (/read, /write). /exec is handed back to the caller as-is: the
+   *  command may have started, so it is never blind-retried. Two such answers
+   *  with no success between them are infra (a flapping resident). */
   private async opWithReattach(
     route: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<{ status: number; data: Record<string, unknown> }> {
+    // Worktree still gone after a re-attach — the resident is unhealthy
+    // (mid-restore or worse). Infra, not a command exit: counts toward
+    // fail-fast so the run doesn't keep dispatching into it (#92).
+    const stillGone = (data: Record<string, unknown>): ExecInfraError =>
+      new ExecInfraError(
+        `resident ${route}: worktree still unavailable after a re-attach (${String(data.error ?? "")}) — ` +
+          "the resident may be mid-restore; try again shortly.",
+      );
     let r = await this.call(route, body, BASH_TIMEOUT_MS, signal);
     if (r.data.needs === "attach") {
       await this.attach();
       r = await this.call(route, body, BASH_TIMEOUT_MS, signal);
-      if (r.data.needs === "attach") {
-        // Worktree still gone after a re-attach — the resident is unhealthy
-        // (mid-restore or worse). Infra, not a command exit: counts toward
-        // fail-fast so the run doesn't keep dispatching into it (#92).
-        throw new ExecInfraError(
-          `resident ${route}: worktree still unavailable after a re-attach (${String(r.data.error ?? "")}) — ` +
-            "the resident may be mid-restore; try again shortly.",
-        );
+      if (r.data.needs === "attach") throw stillGone(r.data);
+    }
+    if (r.data.reason === "runtime-replaced") {
+      this.noteRuntimeReplaced(route, r.data);
+      await this.attach();
+      if (route === "/read" || route === "/write") {
+        r = await this.call(route, body, BASH_TIMEOUT_MS, signal);
+        if (r.data.reason === "runtime-replaced") this.noteRuntimeReplaced(route, r.data);
+        // Compound fault: the deploy also left the worktree evicted. The
+        // re-attach above was this op's one re-attach, so name it precisely
+        // instead of falling through to the generic status error.
+        if (r.data.needs === "attach") throw stillGone(r.data);
       }
     }
+    if (typeof r.data.error !== "string" || !r.data.error) this.runtimeReplacedStreak = 0;
     return r;
+  }
+
+  private noteRuntimeReplaced(route: string, data: Record<string, unknown>): void {
+    this.runtimeReplacedStreak++;
+    if (this.runtimeReplacedStreak >= 2) {
+      throw new ExecInfraError(
+        `resident ${route}: runtime replaced ${this.runtimeReplacedStreak} times in a row with no successful operation ` +
+          `between (${String(data.error ?? "")}) — a deploy storm or a flapping resident, not a one-off deploy.`,
+      );
+    }
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
@@ -282,6 +318,17 @@ export class ResidentExecutor implements Executor {
     // absence of `needs`.
     if (status === 400 && typeof data.error === "string" && data.error && data.needs === undefined) {
       throw new Error(`resident /exec: ${data.error}`);
+    }
+    if (data.reason === "runtime-replaced") {
+      // One deploy swapped the resident isolate under this command. The command
+      // may have started and had effects, so opWithReattach did not re-run it;
+      // hand the named outcome to the model as ordinary output (not infra — a
+      // single deploy must never count toward fail-fast) so it re-checks state
+      // before deciding whether to re-run.
+      return (
+        `${String(data.error)}\n` +
+        "The command may have started; re-check its effects (e.g. git status, the files it writes) before re-running it."
+      );
     }
     if (typeof data.error === "string" && data.error) {
       // post-validation failure (exitCode 127 shape) — legible, never retried.

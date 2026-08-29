@@ -265,16 +265,44 @@ describe("fail-fast on an unrecoverable sandbox (#92)", () => {
     // Failed fast: the tool was called exactly twice (the abort threshold), NOT
     // maxTurns (10) times — it did not keep issuing commands into a dead sandbox.
     expect(execCalls).toBe(2);
-    // The finale carries the diagnostic and the model's write-up, and it is NOT
-    // the ordinary budget finale.
-    expect(answer).toMatch(/unresponsive/i);
+    // The finale carries the TRUTHFUL diagnostic — the actual last infra error
+    // and the failure count, never a guessed cause — plus the model's write-up,
+    // and it is NOT the ordinary budget finale.
+    expect(answer).toMatch(/exec transport failed 2 times in a row/i);
+    expect(answer).toContain("sandbox worker /exec: Command execution failed");
+    expect(answer).not.toMatch(/OOM|likely/i);
     expect(answer).toMatch(/aborting/i);
     expect(answer).toContain("what I found before the sandbox died");
     expect(answer).not.toContain("budget");
-    // The abort is surfaced as a progress note, not a silent drain.
-    expect(notes.some((n) => /unresponsive|abort/i.test(n))).toBe(true);
-    // The forced finale call must be tool-less.
-    expect(provider.requests.at(-1)?.tools).toBeUndefined();
+    // The abort is surfaced as a progress note carrying the same error text,
+    // not a silent drain.
+    expect(notes.some((n) => /abort/i.test(n) && n.includes("Command execution failed"))).toBe(true);
+    // The forced finale call must be tool-less, and the model is told the real
+    // error so it can describe it (and a follow-up) accurately.
+    const finale = provider.requests.at(-1)!;
+    expect(finale.tools).toBeUndefined();
+    const instruction = JSON.stringify(finale.messages.at(-1));
+    expect(instruction).toContain("sandbox worker /exec: Command execution failed");
+    expect(instruction).not.toMatch(/most likely the sandbox ran out of memory/);
+  });
+
+  it("falls back to a generic hint only when the last infra error carries no text", async () => {
+    const deadSandbox: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        throw new ExecInfraError("");
+      },
+    };
+    const answer = await runAgent({
+      provider: scripted([bashUse("t1"), bashUse("t2"), text("wrote up")]),
+      model: "m",
+      agent: agent({ maxTurns: 10, maxMinutes: 30 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: deadSandbox },
+    });
+    expect(answer).toMatch(/exec transport failed 2 times in a row/i);
+    expect(answer).toMatch(/no error text was captured/i);
+    expect(answer).toContain("wrote up");
   });
 
   it("does NOT abort on ordinary nonzero command exits (the agent keeps handling them)", async () => {
@@ -297,7 +325,7 @@ describe("fail-fast on an unrecoverable sandbox (#92)", () => {
     });
     expect(execCalls).toBe(2);
     expect(answer).toBe("handled the failures");
-    expect(answer).not.toMatch(/unresponsive/i);
+    expect(answer).not.toMatch(/transport failed/i);
   });
 
   it("does NOT abort when a single infra failure is followed by a success (counter resets)", async () => {
@@ -320,7 +348,7 @@ describe("fail-fast on an unrecoverable sandbox (#92)", () => {
     });
     expect(execCalls).toBe(2);
     expect(answer).toBe("recovered and finished");
-    expect(answer).not.toMatch(/unresponsive/i);
+    expect(answer).not.toMatch(/transport failed/i);
   });
 });
 

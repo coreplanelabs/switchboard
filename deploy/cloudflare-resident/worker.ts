@@ -63,7 +63,13 @@
 //      container sees nothing but 1-hour installation tokens scoped to the
 //      resident's own repo, injected per command. Install/build executions
 //      (untrusted repo code) run unprivileged (worker1) and token-free (KTD7).
-import { getSandbox, Sandbox } from "@cloudflare/sandbox";
+import {
+  getSandbox,
+  isDurableObjectCodeUpdateReset,
+  OperationInterruptedError,
+  Sandbox,
+  StaleProcessHandleError,
+} from "@cloudflare/sandbox";
 import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
@@ -260,6 +266,48 @@ export function validateEnvNames(vars: Record<string, string>): void {
 }
 
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/** The resident runtime (the Sandbox SDK's control session to the container)
+ *  was replaced while a command was in flight — in practice a `wrangler deploy`
+ *  swapping this DO's isolate mid-run (2026-08-29: three deploys aborted a
+ *  review run as a fake "OOM"). `phase` says where the SDK failed: `"spawn"`
+ *  (the start RPC itself; the SDK never proves the process did NOT start) or
+ *  `"collect"` (a `StaleProcessHandleError` on an already-running process). In
+ *  both cases the command may have run, so the resident never re-issues it;
+ *  the thread routes answer the NAMED `runtime-replaced` error and the client
+ *  decides (idempotent read/write retry; exec is handed to the model). */
+class RuntimeReplacedError extends Error {
+  constructor(
+    readonly phase: "spawn" | "collect",
+    readonly cause: unknown,
+  ) {
+    super(
+      `runtime-replaced: the resident runtime was replaced (a deploy) while this command was ${
+        phase === "spawn" ? "starting" : "running"
+      }; its output is lost (${errMsg(cause)})`,
+    );
+    this.name = "RuntimeReplacedError";
+  }
+}
+
+/** Does this SDK error mean the runtime incarnation changed under us? Typed
+ *  checks first (`StaleProcessHandleError`, an `OperationInterruptedError`
+ *  with reason `runtime_replaced`, the platform's superseded-isolate reset),
+ *  then the SDK's message wording as a belt-and-braces fallback. Anything
+ *  else (a real spawn failure, a timeout) is NOT a runtime replacement. */
+function isRuntimeReplacement(err: unknown): boolean {
+  if (err instanceof StaleProcessHandleError) return true;
+  if (err instanceof OperationInterruptedError && err.reason === "runtime_replaced") return true;
+  if (isDurableObjectCodeUpdateReset(err)) return true;
+  return /previous runtime incarnation|interrupted because the runtime changed/i.test(errMsg(err));
+}
+
+/** The named ThreadErr every thread route (exec/read/write) answers for a
+ *  runtime replacement, so the client can classify it (409 like the other
+ *  recoverable thread states; `reason` is the discriminator). */
+function runtimeReplacedErr(err: RuntimeReplacedError): ThreadErr {
+  return { error: err.message, status: 409, reason: "runtime-replaced" };
+}
 /** Trailing slice of command output for error reasons — enough to diagnose,
  *  small enough to live in a lifecycle `reason`. */
 const tail = (s: string, n = 400): string => s.trim().slice(-n);
@@ -747,14 +795,39 @@ export class ResidentDO extends Sandbox<Env> {
     opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {},
   ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
     const timeout = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
-    const procs = createExtensionProcessSandbox(this);
-    const proc = await procs.exec(argv as unknown as SandboxCommand, {
+    const launch = {
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
       ...(opts.env ? { env: opts.env } : {}),
       timeout,
-    });
-    const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
-    return { stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, timedOut: out.timedOut };
+    };
+    // Two phases, because a runtime replacement (a deploy mid-command) means
+    // different things in each. Spawn: the start RPC failed. The SDK marks the
+    // interruption `retryable` only when it vouches the process never started
+    // (e.g. the container was still starting) — then, and only then, one retry
+    // on a fresh process sandbox is safe. Collect: the process handle is stale,
+    // so the command DID start and its output is gone — never re-run it. Both
+    // unsafe cases surface as RuntimeReplacedError for the routes to name.
+    let proc: Awaited<ReturnType<ReturnType<typeof createExtensionProcessSandbox>["exec"]>>;
+    try {
+      proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
+    } catch (err) {
+      if (!isRuntimeReplacement(err)) throw err;
+      // Forward-looking gate, structurally unreachable today: in the pinned SDK
+      // (@cloudflare/sandbox@0.13.0-next.751.1) every `reason:"runtime_replaced"`
+      // site hardcodes `retryable:false`, so a replacement currently always
+      // takes the throw below. It exists so that if a future SDK vouches "never
+      // started" we retry then — and only then — without a change here.
+      if (!(err instanceof OperationInterruptedError && err.retryable === true)) throw new RuntimeReplacedError("spawn", err);
+      console.log(`exec: runtime replaced before the process started (SDK says retryable) — retrying once: ${errMsg(err)}`);
+      proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
+    }
+    try {
+      const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
+      return { stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, timedOut: out.timedOut };
+    } catch (err) {
+      if (isRuntimeReplacement(err)) throw new RuntimeReplacedError("collect", err);
+      throw err;
+    }
   }
 
   /** Shared success gate for run/threadRun results: a non-zero exit or a
@@ -1898,7 +1971,13 @@ export class ResidentDO extends Sandbox<Env> {
       lastAttachAt: new Date().toISOString(), // exec counts as activity for the sweep
     } satisfies ThreadBinding);
 
-    const r = await this.threadRun(binding.user, binding.worktreePath, command, timeoutMs);
+    let r: Awaited<ReturnType<ResidentDO["threadRun"]>>;
+    try {
+      r = await this.threadRun(binding.user, binding.worktreePath, command, timeoutMs);
+    } catch (err) {
+      if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
+      throw err;
+    }
     const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP;
     const notes: string[] = [];
     if (r.timedOut) notes.push(`command timed out after ${timeoutMs}ms; re-run as smaller steps or background it`);
@@ -1923,7 +2002,13 @@ export class ResidentDO extends Sandbox<Env> {
     if ("error" in pre) return pre;
     const resolved = confineThreadPath(pre.binding.worktreePath, path);
     if (!resolved) return { error: `path-escape: ${JSON.stringify(path)} does not stay inside the thread worktree`, status: 400 };
-    const r = await this.threadRun(pre.binding.user, pre.binding.worktreePath, `cat -- ${resolved}`, DEFAULT_EXEC_TIMEOUT_MS);
+    let r: Awaited<ReturnType<ResidentDO["threadRun"]>>;
+    try {
+      r = await this.threadRun(pre.binding.user, pre.binding.worktreePath, `cat -- ${resolved}`, DEFAULT_EXEC_TIMEOUT_MS);
+    } catch (err) {
+      if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
+      throw err;
+    }
     if (r.exitCode !== 0 || r.timedOut) return { error: `read-failed: ${tail(r.stderr || r.stdout)}`, status: 404 };
     const truncated = r.stdout.length > READ_CONTENT_CAP;
     return { content: truncated ? r.stdout.slice(0, READ_CONTENT_CAP) : r.stdout, truncated };
@@ -1959,6 +2044,7 @@ export class ResidentDO extends Sandbox<Env> {
         DEFAULT_EXEC_TIMEOUT_MS,
       );
     } catch (err) {
+      if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       const step = err instanceof StepError ? ` at ${err.step}` : "";
       return { error: `write-failed${step}: ${errMsg(err)}`, status: 400 };
     }
@@ -3248,7 +3334,9 @@ function streamHeartbeatJson<T>(
 }
 
 /** /exec's payload mapping: a result as {stdout, stderr, exitCode, truncated},
- *  a named failure as {error, needs?, stdout:"", stderr:error, exitCode:127}. */
+ *  a named failure as {error, needs?, reason?, stdout:"", stderr:error, exitCode:127}
+ *  (`reason:"runtime-replaced"` is how the client tells a deploy from a dead
+ *  exec transport). */
 function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execThread"]>>>): Response {
   return streamHeartbeatJson(
     pending,
@@ -3257,7 +3345,12 @@ function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execTh
         ? {
             error: result.error,
             ...(result.needs ? { needs: result.needs } : {}),
-            ...(result.state ? { state: result.state, reason: result.reason } : {}),
+            // `reason` must stay independent of `state`: runtimeReplacedErr()
+            // sets reason:"runtime-replaced" with NO state, and the client's
+            // deploy-vs-dead-transport check reads it. Folding these two spreads
+            // back into one silently drops it (no test covers this Worker).
+            ...(result.state ? { state: result.state } : {}),
+            ...(result.reason ? { reason: result.reason } : {}),
             stdout: "",
             stderr: result.error,
             exitCode: 127,
