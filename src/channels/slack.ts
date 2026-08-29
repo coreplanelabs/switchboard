@@ -707,11 +707,14 @@ async function botInThread(
  *  app posts on a user's behalf (the Claude Slack plugin does this). It is
  *  platform chrome, not the user's words — left in, it breaks strict inline
  *  parsers (`repo onboard …` saw `*Sent` as a bad token). Only whole trailing
- *  lines of exactly that shape are removed (repeated for stacked footers); the
- *  phrase inside a user's own text is untouched. Since 2026-08-29 the footer
- *  may end with the sender's attribution in brackets — `[justin
- *  <justin@coreplane.ai>]` — which is part of the same chrome line. */
-const APP_FOOTER_RE = /(?:^|\n)\s*(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s*\[[^\]\n]*\])?\s*$/;
+ *  footers of exactly that shape are removed (repeated for stacked footers);
+ *  the phrase inside a user's own text is untouched. The footer is anchored to
+ *  the END of the text, not to its own line: the raw event text seen live on
+ *  2026-08-29 was `friction report *Sent using* <@U0BJJMDUCKY>` — same line,
+ *  no newline — and a line-anchored regex let `*Sent` reach the command
+ *  parser (`repo list` had masked this because it ignores trailing text). An
+ *  optional bracketed sender attribution after the mention is tolerated too. */
+const APP_FOOTER_RE = /(?:^|\s)(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s*\[[^\]\n]*\])?\s*$/;
 
 /** Exported for tests. */
 export function stripMention(text: string, botUserId?: string): string {
