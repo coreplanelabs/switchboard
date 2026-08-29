@@ -77,6 +77,7 @@ import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
+import { decisivePull, parsePullsBody, pickEvictionCandidate, pullsFate, reclaimDecision, type RefFate, type ReclaimWhy, type ResidentView } from "./gc";
 
 interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
@@ -210,6 +211,14 @@ const SWEEP_DRIFT_SLACK_S = 5 * 60;
  *  first if the mirror is stale (refresh-on-attach). */
 const IDLE_AFTER_S = 60 * 60;
 const IDLE_REFRESH_INTERVAL_S = 6 * 60 * 60;
+/** LRU eviction floor (#50): an over-cap onboard with `evictColdest:true` may
+ *  offboard the coldest eligible warm resident, but never one whose last
+ *  activity (attach or provisioning) is younger than this — a repo used
+ *  minutes ago must not go cold to make room. Same window as idle sleep. */
+const LRU_FLOOR_S = IDLE_AFTER_S;
+/** Budget for one GitHub REST call in the reclamation pass (pulls lookup per
+ *  live non-default binding); a slow API answers "unknown", never blocks the cycle. */
+const GITHUB_API_TIMEOUT_MS = 10_000;
 /** A `refreshing`/`restoring` marker older than this with nothing running is
  *  an orphan from an interrupted cycle; the watchdog normalizes it. Comfortably
  *  above the longest legitimate cycle (REFRESH_BUILD_TIMEOUT_MS-scale installs). */
@@ -583,6 +592,9 @@ interface ThreadBinding {
   lastAttachAt: string;
   evicted?: boolean;
   evictedAt?: string;
+  /** Why the last eviction happened (#50 audit trail): `ttl`, `clean-idle`,
+   *  `detach`, or a reclamation fate — `merged #N` / `closed #N` / `gone`. */
+  evictedWhy?: string;
   /** How deps were last materialized (evidence for KTD7). */
   deps?: ThreadDepsMechanism;
   /** Commit the worktree was last attached at (the ref's tip in the mirror
@@ -688,10 +700,32 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       return {
         ok: false,
         status: 429,
-        error: `resident cap reached (${existing.size}/${RESIDENT_CAP}); offboard a resident first`,
+        error: `resident cap reached (${existing.size}/${RESIDENT_CAP}); offboard a resident first, or onboard with evictColdest:true to make room`,
       };
     }
     await this.ctx.storage.put(key, record);
+    return { ok: true, record };
+  }
+
+  /** LRU eviction (#50): release `evict`'s slot and insert `record` in ONE
+   *  input-gated section, so the freed slot can never be taken by a
+   *  concurrent onboard between the two — the evicted resident is torn down
+   *  only after its replacement holds the slot. Refuses (409) if `evict` is
+   *  no longer registered (someone offboarded it meanwhile) or `record` is
+   *  already onboarded; the cap check is the same as onboard's. */
+  async replace(evict: string, record: ResidentRecord): Promise<OnboardResult> {
+    if (!(await this.ctx.storage.get(registryKey(evict)))) {
+      return { ok: false, status: 409, error: `${evict} is no longer onboarded — nothing to evict` };
+    }
+    if (await this.ctx.storage.get(registryKey(record.resource))) {
+      return { ok: false, status: 409, error: `${record.resource} is already onboarded` };
+    }
+    const existing = await this.ctx.storage.list({ prefix: REGISTRY_KEY_PREFIX });
+    if (existing.size - 1 >= RESIDENT_CAP) {
+      return { ok: false, status: 429, error: `resident cap reached (${existing.size}/${RESIDENT_CAP}) even after evicting ${evict}` };
+    }
+    await this.ctx.storage.delete(registryKey(evict));
+    await this.ctx.storage.put(registryKey(record.resource), record);
     return { ok: true, record };
   }
 
@@ -1456,6 +1490,16 @@ export class ResidentDO extends Sandbox<Env> {
         await this.ctx.storage.put(FACTS_KEY, updatedFacts);
       }
       await this.setResidentState("warm");
+      // Event-triggered reclamation (#50): the prune above already told the
+      // mirror which branches died; finished refs give their worktree and
+      // pool user back now, not at the idle TTL. Housekeeping, never a
+      // lifecycle flip — a failure here is a log line.
+      try {
+        const gc = await this.reclaimFinishedRefs(resource, facts.defaultRef, token);
+        if (gc.reclaimed.length > 0) console.log(`reclaim ${resource}: ${JSON.stringify(gc)}`);
+      } catch (err) {
+        console.log(`reclaim ${resource}: pass failed: ${errMsg(err)}`);
+      }
     } catch (err) {
       if (err instanceof ResidentDownError) return; // already down with reason; chain stops below
       const reason = err instanceof StepError ? `${err.step}-failed: ${err.message}` : `refresh-failed: ${errMsg(err)}`;
@@ -2184,7 +2228,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  already lost it) and release its pool user; the binding is KEPT, marked
    *  evicted, so the ref stays sticky and the next attach recreates the tree
    *  (KTD6). Shared by the inactivity sweep and /detach. */
-  private async evictBinding(binding: ThreadBinding, runtimeActive: boolean, logCtx: string): Promise<boolean> {
+  private async evictBinding(binding: ThreadBinding, runtimeActive: boolean, logCtx: string, why: string): Promise<boolean> {
     const threadDir = parentDir(binding.worktreePath);
     if (runtimeActive && threadDir.startsWith(`${THREADS_DIR}/`)) {
       try {
@@ -2209,6 +2253,7 @@ export class ResidentDO extends Sandbox<Env> {
       user: "",
       evicted: true,
       evictedAt: new Date().toISOString(),
+      evictedWhy: why,
     } satisfies ThreadBinding);
     return true;
   }
@@ -2258,7 +2303,7 @@ export class ResidentDO extends Sandbox<Env> {
     // Same as the sweep: `active` was read before the clean check's awaits; a
     // container that woke meanwhile must get the rm, not an orphaned tree.
     const activeNow = await this.isRuntimeActive().catch(() => false);
-    if (!(await this.evictBinding(current, activeNow, `detach`))) {
+    if (!(await this.evictBinding(current, activeNow, `detach`, "detach"))) {
       return { released: false, reason: "re-attached during eviction — kept", user };
     }
     return { released: true, user };
@@ -2397,7 +2442,7 @@ export class ResidentDO extends Sandbox<Env> {
         // attach), and an eviction decided on a stale "inactive" would skip the
         // rm and orphan a real tree.
         const activeNow = await this.isRuntimeActive().catch(() => false);
-        if (await this.evictBinding(current, activeNow, `worktree-sweep ${resource}`)) evicted.push(binding.threadKey);
+        if (await this.evictBinding(current, activeNow, `worktree-sweep ${resource}`, last >= cutoff ? "clean-idle" : "ttl")) evicted.push(binding.threadKey);
         else kept++;
       }
     } finally {
@@ -2565,6 +2610,134 @@ export class ResidentDO extends Sandbox<Env> {
     return this.onWorktreeSweep("");
   }
 
+  // -- event-triggered reclamation (#50) ---------------------------------------
+
+  /** Ask GitHub what happened to a head branch that still exists in the
+   *  mirror. One REST call, bounded; any failure is `unknown` (keep), never a
+   *  guess. Anonymous when the App is unconfigured (public repos). */
+  private async lookupPullFate(slug: string, ref: string, token: string | null): Promise<{ fate: RefFate; pr: number | null }> {
+    const owner = slug.split("/")[0];
+    const url = `https://api.github.com/repos/${slug}/pulls?state=all&head=${encodeURIComponent(`${owner}:${ref}`)}&sort=updated&direction=desc&per_page=10`;
+    try {
+      const res = await fetch(url, {
+        headers: {
+          accept: "application/vnd.github+json",
+          "user-agent": "switchboard-resident",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
+      });
+      if (!res.ok) return { fate: "unknown", pr: null };
+      const pulls = parsePullsBody(await res.json().catch(() => null));
+      if (!pulls) return { fate: "unknown", pr: null };
+      return { fate: pullsFate(pulls), pr: decisivePull(pulls)?.number ?? null };
+    } catch {
+      return { fate: "unknown", pr: null };
+    }
+  }
+
+  /** Reclaim worktrees whose ref is FINISHED: the branch vanished from the
+   *  mirror (the refresh cycle's `fetch --prune` just ran) or its PR was
+   *  merged/closed. Runs inside the refresh cycle — a poll on the existing
+   *  alarm, since the GitHub App has webhooks off — and via /debug
+   *  reclaim-now. Never touches the default branch, a busy thread, or a dirty
+   *  tree (reclaimDecision); every keep is named. The eviction itself is the
+   *  sweep's `evictBinding` with the same re-read guards. */
+  async reclaimFinishedRefs(
+    resource: string,
+    defaultRef: string,
+    token: string | null,
+  ): Promise<{ reclaimed: Array<{ threadKey: string; ref: string; why: string }>; kept: Array<{ threadKey: string; ref: string; why: ReclaimWhy }> }> {
+    const reclaimed: Array<{ threadKey: string; ref: string; why: string }> = [];
+    const kept: Array<{ threadKey: string; ref: string; why: ReclaimWhy }> = [];
+    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    const live = [...all.values()].filter((b) => !b.evicted && b.user);
+    if (live.length === 0) return { reclaimed, kept };
+    const slug = resource.slice("repo:".length);
+    const active = await this.isRuntimeActive().catch(() => false);
+    const fates = new Map<string, { fate: RefFate; detail: string }>();
+    for (const binding of live) {
+      const isDefaultRef = binding.ref === defaultRef;
+      let fate: RefFate = "unknown";
+      let detail = "";
+      if (!isDefaultRef) {
+        const cached = fates.get(binding.ref);
+        if (cached) ({ fate, detail } = cached);
+        else {
+          // Branch existence is read from the MIRROR (the cycle's fetch --prune
+          // just ran). A sleeping container has no mirror on disk, so `run`
+          // would wake it and read an empty disk as "every branch gone" — when
+          // the runtime is down only the PR lookup can speak.
+          const exists = active
+            ? await this.run(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", "--quiet", `refs/heads/${binding.ref}`])
+            : { exitCode: 0 };
+          if (exists.exitCode !== 0) fate = "gone";
+          else {
+            const looked = await this.lookupPullFate(slug, binding.ref, token);
+            fate = looked.fate;
+            if (looked.pr !== null && (fate === "merged" || fate === "closed")) detail = ` #${looked.pr}`;
+          }
+          fates.set(binding.ref, { fate, detail });
+        }
+      }
+      const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
+      // The clean check runs as the thread user and only when it can decide
+      // anything: a finished ref, nothing running, runtime up (down → the tree
+      // is already gone with the disk → null).
+      const finished = fate === "gone" || fate === "merged" || fate === "closed";
+      const clean = !active ? null : finished && !isDefaultRef && busy === 0 ? (await this.worktreeCleanliness(binding)).clean : null;
+      const decision = reclaimDecision({ fate, isDefaultRef, busy, clean });
+      if (!decision.reclaim) {
+        kept.push({ threadKey: binding.threadKey, ref: binding.ref, why: decision.why });
+        continue;
+      }
+      // Same guards as the sweep: the clean check awaited, so re-read the
+      // binding (a re-attach means a fresh tree) and the op counter.
+      const busyNow = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
+      const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
+      if (busyNow > 0) {
+        kept.push({ threadKey: binding.threadKey, ref: binding.ref, why: "busy" });
+        continue;
+      }
+      if (!current || current.evicted || current.lastAttachAt !== binding.lastAttachAt) {
+        kept.push({ threadKey: binding.threadKey, ref: binding.ref, why: "re-attached" });
+        continue;
+      }
+      const activeNow = await this.isRuntimeActive().catch(() => false);
+      const why = `${decision.why}${detail}`;
+      if (await this.evictBinding(current, activeNow, `reclaim ${resource}`, why)) {
+        reclaimed.push({ threadKey: binding.threadKey, ref: binding.ref, why });
+        console.log(`reclaim ${resource}: evicted ${binding.threadKey} on ${binding.ref} — ${why}`);
+      } else kept.push({ threadKey: binding.threadKey, ref: binding.ref, why: "re-attached" });
+    }
+    return { reclaimed, kept };
+  }
+
+  /** Debug: run the reclamation pass now (the exact refresh-cycle function,
+   *  with a fresh mint when the App is configured). Runs a `fetch --prune`
+   *  first so a branch deleted seconds ago already reads as gone. */
+  async debugReclaimNow(): Promise<{ reclaimed: unknown[]; kept: unknown[]; fetch: string }> {
+    const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+    const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
+    if (!facts) return { reclaimed: [], kept: [], fetch: "skipped" };
+    let token: string | null = null;
+    if (githubAppConfigured(this.env)) token = await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null);
+    let fetchResult = "skipped";
+    if (await this.isRuntimeActive().catch(() => false)) {
+      try {
+        await this.withMirrorLock(
+          () => this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "reclaim-fetch", GIT_NETWORK_TIMEOUT_MS),
+          ATTACH_MUTEX_WAIT_MS,
+        );
+        fetchResult = "ok";
+      } catch (err) {
+        fetchResult = `fetch failed: ${errMsg(err)}`;
+      }
+    }
+    const result = await this.reclaimFinishedRefs(resource, facts.defaultRef, token);
+    return { ...result, fetch: fetchResult };
+  }
+
   // -- state + introspection ---------------------------------------------------
 
   /** Persist a lifecycle transition. degraded/down always carry a reason. */
@@ -2606,8 +2779,8 @@ export class ResidentDO extends Sandbox<Env> {
     // left out; nothing here is secret (credential files are never persisted).
     const threads = [...bindings.values()]
       .sort((a, b) => b.lastAttachAt.localeCompare(a.lastAttachAt))
-      .map(({ threadKey, ref, sha, user, deps, boundAt, lastAttachAt, evicted, evictedAt }) => ({
-        threadKey, ref, sha: sha ?? null, user, deps: deps ?? null, boundAt, lastAttachAt, evicted: evicted ?? false, evictedAt: evictedAt ?? null,
+      .map(({ threadKey, ref, sha, user, deps, boundAt, lastAttachAt, evicted, evictedAt, evictedWhy }) => ({
+        threadKey, ref, sha: sha ?? null, user, deps: deps ?? null, boundAt, lastAttachAt, evicted: evicted ?? false, evictedAt: evictedAt ?? null, evictedWhy: evictedWhy ?? null,
       }));
     return {
       resource: map.get(RESOURCE_KEY) ?? null,
@@ -3103,7 +3276,7 @@ export default {
     // Unauthenticated wake ping for `npm run deploy` — touches no DO, no data.
     // `u` tracks the last shipped unit so a deploy's propagation is provable
     // from the outside without auth.
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, u: "u6" });
+    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, u: "gc50" });
 
     // Auth precedes existence: unknown paths demand admin before revealing
     // 404 vs 401, so an unauthenticated scanner learns nothing.
@@ -3229,24 +3402,86 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
     updatedAt: now,
   };
 
+  // LRU eviction opt-in (#50): admin-only by route, per-request, default off.
+  if (body.evictColdest !== undefined && typeof body.evictColdest !== "boolean") {
+    return json({ error: "evictColdest must be a boolean" }, 400);
+  }
+  const evictColdest = body.evictColdest === true;
+
   const registry = registryStub(env);
-  const result = await registry.onboard(record);
+  let result = await registry.onboard(record);
   // "in" narrowing: the RPC stub intersects returns with Disposable, which
   // defeats boolean-discriminant narrowing.
-  if ("error" in result) return json({ error: result.error }, result.status);
+  let evicted: Record<string, unknown> | undefined;
+  if ("error" in result && result.status === 429 && evictColdest) {
+    // Over the cap and asked to make room: offboard the coldest eligible warm
+    // resident (pickEvictionCandidate — warm, idle, no live worktree, past the
+    // floor), then retry the atomic insert ONCE. No candidate → the ordinary
+    // 429, itemizing why each resident was ineligible, so the admin can
+    // offboard by hand with the facts in front of them.
+    const pick = pickEvictionCandidate(await collectResidentViews(env), Date.now(), LRU_FLOOR_S * 1000);
+    if (!pick.candidate) {
+      return json({ error: `${result.error}; evictColdest found no eligible resident`, rejected: pick.rejected }, 429);
+    }
+    // Slot first, teardown second: `replace` frees the victim's slot and
+    // inserts the newcomer in one input-gated registry section, so a
+    // concurrent onboard can never take the freed slot and leave a resident
+    // destroyed for nothing. Only once the newcomer holds the slot is the
+    // victim's DO/R2 state torn down (its registry row is already gone, so no
+    // new work routes to it meanwhile).
+    result = await registry.replace(pick.candidate.resource, record);
+    if ("error" in result) return json({ error: result.error, wouldHaveEvicted: pick.candidate }, result.status);
+    const teardown = await teardownResident(env, pick.candidate.resource);
+    evicted = { ...pick.candidate, registryRemoved: true, ...teardown };
+    console.log(`lru-evict: offboarded ${pick.candidate.resource} (last activity ${pick.candidate.lastActivityAt}) to make room for ${resource.resource}`);
+  }
+  if ("error" in result) return json({ error: result.error, ...(evicted ? { evicted } : {}) }, result.status);
 
   try {
     await residentStub(env, resource.resource).initResident(resource.resource, provisioningTimeoutMs);
   } catch (err) {
     // Fail closed: no half-onboarded residents. Free the slot and report.
     await registry.remove(resource.resource);
-    return json({ error: `onboard failed arming the resident: ${errMsg(err)}` }, 500);
+    return json({ error: `onboard failed arming the resident: ${errMsg(err)}`, ...(evicted ? { evicted } : {}) }, 500);
   }
 
   return json(
-    { resource: resource.resource, state: "onboarding" satisfies ResidentState, ...(warning ? { warning } : {}) },
+    {
+      resource: resource.resource,
+      state: "onboarding" satisfies ResidentState,
+      ...(warning ? { warning } : {}),
+      ...(evicted ? { evicted } : {}),
+    },
     202,
   );
+}
+
+/** Registry record + live engine view per resident, shaped for the LRU
+ *  picker. A live view that failed reads as `state:"unknown"` / `inFlight:null`
+ *  — never as a cold candidate. */
+async function collectResidentViews(env: Env): Promise<ResidentView[]> {
+  const residents = await registryStub(env).list();
+  const settled = await Promise.allSettled(residents.map((record) => residentStub(env, record.resource).getResidentInfo()));
+  return residents.map((record, i) => {
+    const s = settled[i];
+    const live = s.status === "fulfilled" ? s.value : {};
+    // Validate each element like parsePullsBody does: a malformed thread row
+    // is dropped rather than silently comparing `undefined` timestamps.
+    const threads = (Array.isArray(live.threads) ? (live.threads as unknown[]) : []).flatMap((t) => {
+      if (!t || typeof t !== "object") return [];
+      const { lastAttachAt, evicted, user } = t as Record<string, unknown>;
+      if (typeof lastAttachAt !== "string" || typeof user !== "string") return [];
+      return [{ lastAttachAt, evicted: evicted === true, user }];
+    });
+    return {
+      resource: record.resource,
+      onboardedAt: record.onboardedAt,
+      state: s.status === "fulfilled" && typeof live.state === "string" ? live.state : "unknown",
+      inFlight: s.status === "fulfilled" && typeof live.inFlight === "number" ? live.inFlight : null,
+      provisionedAt: typeof live.provisionedAt === "string" ? live.provisionedAt : null,
+      threads,
+    };
+  });
 }
 
 async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<Response> {
@@ -3287,14 +3522,38 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
     });
   }
 
-  // Registry first: the slot frees atomically and no new work routes here.
-  const registryRemoved = await registry.remove(resource.resource);
+  return json(await offboardResident(env, resource.resource));
+}
 
-  // The DO teardown and the resident/<resource>/ prefix sweep touch disjoint
-  // data (the teardown's backup objects live under backups/<id>/), so both
-  // run unconditionally and concurrently.
+/** The full offboard teardown (item 11), shared by POST /offboard and the LRU
+ *  eviction path of POST /onboard: registry removal first (the slot frees
+ *  atomically and no new work routes here), then the DO teardown and the
+ *  resident/<resource>/ R2 prefix sweep concurrently — they touch disjoint
+ *  data (the teardown's backup objects live under backups/<id>/). */
+async function offboardResident(
+  env: Env,
+  resource: string,
+): Promise<{ resource: string; registryRemoved: boolean } & Awaited<ReturnType<typeof teardownResident>>> {
+  const registryRemoved = await registryStub(env).remove(resource);
+  return { resource, registryRemoved, ...(await teardownResident(env, resource)) };
+}
+
+/** Everything AFTER the registry removal: DO teardown + R2 prefix sweep.
+ *  Split out so the LRU path can reserve the slot atomically (registry
+ *  `replace`) before destroying anything. */
+async function teardownResident(
+  env: Env,
+  resource: string,
+): Promise<{
+  schedulesCancelled: boolean;
+  containerStopped: boolean;
+  storageCleared: boolean;
+  backupObjectsDeleted: number;
+  r2ObjectsDeleted: number;
+  errors: string[];
+}> {
   const [teardown, r2Sweep] = await Promise.all([
-    residentStub(env, resource.resource)
+    residentStub(env, resource)
       .teardown()
       .catch(
         (err: unknown): Awaited<ReturnType<ResidentDO["teardown"]>> => ({
@@ -3308,27 +3567,25 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
     // The registry is already gone, so the offboard cannot be retried; a
     // transient R2 failure must degrade to a reported partial success (naming
     // the prefix left behind) rather than throw an unretryable 500.
-    deleteR2Prefix(env.BACKUP_BUCKET, r2Prefix(resource.resource))
+    deleteR2Prefix(env.BACKUP_BUCKET, r2Prefix(resource))
       .then((deleted) => ({ deleted, error: undefined as string | undefined }))
       .catch((err: unknown) => ({
         deleted: 0,
-        error: `r2 prefix sweep failed for ${r2Prefix(resource.resource)}: ${errMsg(err)}`,
+        error: `r2 prefix sweep failed for ${r2Prefix(resource)}: ${errMsg(err)}`,
       })),
   ]);
 
   const errors = [...teardown.errors];
   if (r2Sweep.error) errors.push(r2Sweep.error);
 
-  return json({
-    resource: resource.resource,
-    registryRemoved,
+  return {
     schedulesCancelled: teardown.schedulesCancelled,
     containerStopped: teardown.containerStopped,
     storageCleared: teardown.storageCleared,
     backupObjectsDeleted: teardown.backupObjectsDeleted,
     r2ObjectsDeleted: r2Sweep.deleted,
     errors,
-  });
+  };
 }
 
 async function handleReconfigure(env: Env, body: Record<string, unknown>): Promise<Response> {
@@ -3725,6 +3982,8 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       return json(await stub.debugThreads());
     case "sweep-now":
       return json(await stub.debugSweepNow());
+    case "reclaim-now":
+      return json(await stub.debugReclaimNow());
     case "backdate-thread": {
       const threadKey = parseThreadKey(body.threadKey);
       if ("error" in threadKey) return json({ error: threadKey.error }, 400);
@@ -3734,7 +3993,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     }
     default:
       return json(
-        { error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, threads, sweep-now, backdate-thread)` },
+        { error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, threads, sweep-now, reclaim-now, backdate-thread)` },
         400,
       );
   }

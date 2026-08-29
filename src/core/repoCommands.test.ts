@@ -263,6 +263,59 @@ describe("onboard parsing", () => {
     expect(reply).toContain("429");
   });
 
+  it("`--evict-coldest` opts the onboard into LRU eviction (#50): the body carries evictColdest:true", async () => {
+    const s = store();
+    const c = mockClient();
+    await handleRepoCommand(s, msg("repo onboard acme/api --evict-coldest ref=develop"), c);
+    expect(c.onboard).toHaveBeenCalledWith(expect.objectContaining({ resource: "repo:acme/api", defaultRef: "develop", evictColdest: true }));
+  });
+
+  it("an onboard that evicted a resident says which one and when it was last used", async () => {
+    const s = store();
+    const c = mockClient({
+      onboard: ok(
+        {
+          resource: "repo:acme/api",
+          state: "onboarding",
+          evicted: { resource: "repo:jshttp/fresh", lastActivityAt: "2026-08-27T10:00:00.000Z", backupObjectsDeleted: 4, errors: [] },
+        },
+        202,
+      ),
+    });
+    const reply = await handleRepoCommand(s, msg("repo onboard acme/api --evict-coldest"), c);
+    expect(reply).toContain("acme/api");
+    expect(reply).toMatch(/evicted `jshttp\/fresh`.*last used 2026-08-27T10:00:00.000Z/);
+  });
+
+  it("an over-cap onboard with no eligible resident relays the per-resident reasons", async () => {
+    const s = store();
+    const c = mockClient({
+      onboard: ok(
+        {
+          error: "resident cap reached (8/8); offboard a resident first, or onboard with evictColdest:true to make room; evictColdest found no eligible resident",
+          rejected: [
+            { resource: "repo:a/hot", why: "active 12m ago (floor 60m)" },
+            { resource: "repo:b/busy", why: "2 live worktree(s)" },
+          ],
+        },
+        429,
+      ),
+    });
+    const reply = await handleRepoCommand(s, msg("repo onboard acme/api --evict-coldest"), c);
+    expect(reply).toContain("no eligible resident");
+    expect(reply).toContain("`a/hot` — active 12m ago (floor 60m)");
+    expect(reply).toContain("`b/busy` — 2 live worktree(s)");
+  });
+
+  it("`--evict-coldest` is an onboard-only flag; reconfigure refuses it by name", async () => {
+    const s = store();
+    const c = mockClient();
+    const reply = await handleRepoCommand(s, msg("repo reconfigure acme/api --evict-coldest"), c);
+    expect(reply).toContain("--evict-coldest");
+    expect(reply).toContain("repo onboard");
+    expect(c.reconfigure).not.toHaveBeenCalled();
+  });
+
   it("an onboard warning field (App unconfigured) surfaces in the reply", async () => {
     const s = store();
     const c = mockClient({

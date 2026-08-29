@@ -304,7 +304,7 @@ function renderThreads(raw: unknown, ghRepo: string | undefined): string {
         ? `<a href="${escapeHtml(`${ghRepo}/commit/${sha}`)}">${escapeHtml(sha.slice(0, 8))}</a>`
         : sha ? escapeHtml(sha.slice(0, 8)) : `<span class="none">—</span>`;
       const state = t.evicted
-        ? `<span class="meta">evicted ${escapeHtml(str(t.evictedAt) || "—")}</span>`
+        ? `<span class="meta">evicted ${escapeHtml(str(t.evictedAt) || "—")}${str(t.evictedWhy) ? ` · ${escapeHtml(str(t.evictedWhy))}` : ""}</span>`
         : `<span class="dot green" role="img" aria-label="live" title="live"></span>`;
       return (
         `<tr><td>${state} ${escapeHtml(str(t.threadKey) || "?")}</td>` +
