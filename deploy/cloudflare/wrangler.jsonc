@@ -48,5 +48,6 @@
   // Every minute: container keep-alive (/healthz). Mondays 14:00 UTC: the weekly
   // self-improvement pass (#84) — POST /friction/propose; must match
   // FRICTION_CRON in worker.ts.
-  "triggers": { "crons": ["* * * * *", "0 14 * * 1"] }
+  // TEMPORARY (e2e test, revert after the 2026-08-30 00:00 UTC firing): daily 00:00 UTC instead of Mondays 14:00 UTC.
+  "triggers": { "crons": ["* * * * *", "0 0 * * *"] }
 }
