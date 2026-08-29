@@ -122,10 +122,22 @@ describe("stripMention — Slack app 'Sent using' footer", () => {
   // Slack plugin) carry a trailing "*Sent using* <@APP|Name>" line. It is
   // platform chrome, not user text: a `repo onboard owner/name` followed by it
   // must parse exactly like the bare command.
-  // Regression (2026-08-29, live): the footer now carries the sender's
-  // attribution after the mention — `*Sent using* <@APP|Claude> [justin
-  // <justin@coreplane.ai>]` — and the un-stripped line reached
-  // `friction report` as `Unknown option \`*Sent\``.
+  // Regression (2026-08-29, live, raw event text): the plugin's footer arrives
+  // on the SAME line as the command — `<@BOT> friction report *Sent using*
+  // <@U0BJJMDUCKY>` — so a line-anchored regex never matched and `*Sent`
+  // reached the parser (`Unknown option \`*Sent\``). `repo list` had masked
+  // this for months because it ignores trailing text.
+  it("drops a same-line trailing footer (the shape Slack actually delivers)", () => {
+    expect(stripMention(`<@${BOT}> friction report *Sent using* <@U0BJJMDUCKY>`, BOT)).toBe("friction report");
+    expect(stripMention(`<@${BOT}> repo onboard acme/api test="npm test" *Sent using* <@U0BJJMDUCKY|Claude>`, BOT)).toBe(
+      'repo onboard acme/api test="npm test"',
+    );
+    // Still anchored to the END: the phrase mid-text is the user's own words.
+    expect(stripMention(`<@${BOT}> why does *Sent using* <@U0BJJMDUCKY> appear in my messages?`, BOT)).toBe(
+      "why does *Sent using* <@U0BJJMDUCKY> appear in my messages?",
+    );
+  });
+
   it("drops the footer when a bracketed sender attribution follows the mention", () => {
     expect(stripMention(`<@${BOT}> friction report\n*Sent using* <@U0BJJMDUCKY|Claude> [justin <justin@coreplane.ai>]`, BOT)).toBe(
       "friction report",
