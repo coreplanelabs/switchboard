@@ -17,8 +17,9 @@ import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
 // User scope (#107 PR B): the extractor tags each fact with an `audience` —
 // `user` for knowledge about the requesting person (preferences, habits, their
 // own setup), `org` for shared knowledge. `user` facts are written to the
-// requesting user's own scope; everything else (and the summary) to the org
-// scope. Still ONE extractor call per run.
+// requesting user's own scope, `org` facts to the org scope; the summary
+// follows the user scope whenever the run yielded a `user` fact (#205), else
+// org. Still ONE extractor call per run.
 
 /** Toolless threads shorter than this many prior turns are not worth an
  *  extractor call (a one-shot Q&A rarely yields a durable fact). */
@@ -69,7 +70,8 @@ export const REFLECTION_SYSTEM = [
   '`audience` is "user" when the fact is about the requesting person specifically (their preferences, habits, personal conventions, their own setup — write it as "this user …"),',
   'and "org" (the default) when it is shared knowledge about the codebase, tooling, or team. Only the requesting user will ever see "user" facts.',
   "`confidence` is how sure you are the fact is durable and correct. If a fact contradicts one of the EXISTING records you were shown, set `supersedes` to that record's id.",
-  "`summary` is one or two sentences: what was asked and what was concluded. Output raw JSON with no code fence and no prose.",
+  "`summary` is one or two impersonal sentences: what was asked and what was concluded about the shared subject. Keep the requesting person's preferences, habits, and other personal details OUT of the summary — they belong in `user` facts.",
+  "Output raw JSON with no code fence and no prose.",
 ].join("\n");
 
 export interface ReflectionInput {
@@ -118,8 +120,10 @@ export type ParsedReflection = { ok: true; candidates: RoutedCandidate[] } | { o
  *  Lenient on shape inside the object (bad facts are dropped, not fatal), strict
  *  on the envelope (non-JSON / non-object → error). Every text field is
  *  redacted; `supersedes` survives only when it names a record the extractor was
- *  shown; `audience` is `user` only when it says exactly that, else `org` (the
- *  summary is always `org`). */
+ *  shown; `audience` is `user` only when it says exactly that, else `org`. The
+ *  summary inherits `user` when ANY fact is `user` (#205): a thread that
+ *  yielded personal knowledge is a personal thread, and its summary restates
+ *  that knowledge — routing it to org would leak it to everyone. */
 export function parseReflection(raw: string, prov: ReflectionProvenance, knownIds: Set<string>): ParsedReflection {
   let value: unknown;
   try {
@@ -140,7 +144,10 @@ export function parseReflection(raw: string, prov: ReflectionProvenance, knownId
     if (fact) candidates.push(fact);
   }
   const summary = cleanText(obj.summary);
-  if (summary) candidates.push({ kind: "summary", text: summary, audience: "org", ...prov });
+  if (summary) {
+    const audience: MemoryAudience = candidates.some((c) => c.audience === "user") ? "user" : "org";
+    candidates.push({ kind: "summary", text: summary, audience, ...prov });
+  }
   return { ok: true, candidates };
 }
 
