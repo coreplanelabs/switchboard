@@ -708,8 +708,10 @@ async function botInThread(
  *  platform chrome, not the user's words — left in, it breaks strict inline
  *  parsers (`repo onboard …` saw `*Sent` as a bad token). Only whole trailing
  *  lines of exactly that shape are removed (repeated for stacked footers); the
- *  phrase inside a user's own text is untouched. */
-const APP_FOOTER_RE = /(?:^|\n)\s*(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>\s*$/;
+ *  phrase inside a user's own text is untouched. Since 2026-08-29 the footer
+ *  may end with the sender's attribution in brackets — `[justin
+ *  <justin@coreplane.ai>]` — which is part of the same chrome line. */
+const APP_FOOTER_RE = /(?:^|\n)\s*(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s*\[[^\]\n]*\])?\s*$/;
 
 /** Exported for tests. */
 export function stripMention(text: string, botUserId?: string): string {
