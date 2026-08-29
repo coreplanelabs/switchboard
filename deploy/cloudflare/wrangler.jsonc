@@ -45,5 +45,8 @@
   // Keep-alive every minute: this is also what RESTARTS the container after
   // a deploy rollout or platform maintenance — the interval bounds the deaf
   // window (Socket Mode events during downtime are lost, never redelivered).
-  "triggers": { "crons": ["* * * * *"] }
+  // Every minute: container keep-alive (/healthz). Mondays 14:00 UTC: the weekly
+  // self-improvement pass (#84) — POST /friction/propose; must match
+  // FRICTION_CRON in worker.ts.
+  "triggers": { "crons": ["* * * * *", "0 14 * * 1"] }
 }

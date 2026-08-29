@@ -5,6 +5,7 @@ import { createSlackApp } from "./channels/slack.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
 import { createLiveViewHandler } from "./channels/liveView.js";
+import { createFrictionTriggerHandler, parseFrictionTriggerToken } from "./channels/frictionTrigger.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { makeResidentAdminClient } from "./core/repoCommands.js";
 import {
@@ -75,6 +76,13 @@ async function main() {
     const auth = parseIngressTokens(process.env);
     const ingress = createIngressHandler(deps, { auth });
     const mcp = createMcpHandler(deps, { auth });
+    // Scheduled self-improvement (Area 7b, #84): POST /friction/propose runs the
+    // same step as the `friction propose` chat command, behind a dedicated
+    // bearer the Worker shim's weekly cron presents (FRICTION_TRIGGER_TOKEN).
+    // Fail-closed: no token → 503, nothing runs.
+    const frictionTriggerToken = parseFrictionTriggerToken(process.env);
+    const frictionTrigger = createFrictionTriggerHandler(deps, { token: frictionTriggerToken });
+    const frictionTriggerState = frictionTriggerToken ? "POST /friction/propose (scheduled trigger)" : "POST /friction/propose DISABLED — no FRICTION_TRIGGER_TOKEN";
     // Live run view (Area 2 / #43): GET /runs (index) + /runs/:id (page) +
     // /runs/:id/events (SSE). Shares defaultRunRegistry with the dispatcher —
     // the run created during dispatch() is the run this streams. The per-run
@@ -127,6 +135,10 @@ async function main() {
         mcp(req, res);
         return;
       }
+      if (path === "/friction/propose") {
+        frictionTrigger(req, res);
+        return;
+      }
       // /runs* + /residents* SSO gate: identity FIRST (fail-closed), before the view
       // dispatch. The gate is async (it may fetch the JWKS), so we resolve the
       // promise here; a rejection is a 403, never a 500 that serves the page.
@@ -172,7 +184,7 @@ async function main() {
       res.end("ok");
     }).listen(Number(process.env.PORT), () =>
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${residentsState}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${frictionTriggerState} + ${liveViewState} + ${residentsState}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       ),
     );

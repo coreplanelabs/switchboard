@@ -29,7 +29,11 @@ interface Env {
   SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map)
   BRAVE_SEARCH_API_KEY?: string; // web_search backend (Brave); web_fetch works without it
   MEMORY_TOKEN?: string; // durable memory: bearer for the memory service (else in-process store)
+  FRICTION_TRIGGER_TOKEN?: string; // self-improvement (#84): bearer the weekly cron presents to POST /friction/propose
 }
+
+/** The weekly self-improvement cron (Mondays 14:00 UTC) — must match wrangler.jsonc `triggers.crons`. */
+const FRICTION_CRON = "0 14 * * 1";
 
 export class SwitchboardServer extends Container<Env> {
   defaultPort = 8080; // the bot's health endpoint (PORT=8080 in the image)
@@ -67,6 +71,7 @@ export class SwitchboardServer extends Container<Env> {
         : {}),
       ...(env.BRAVE_SEARCH_API_KEY ? { BRAVE_SEARCH_API_KEY: env.BRAVE_SEARCH_API_KEY } : {}),
       ...(env.MEMORY_TOKEN ? { MEMORY_TOKEN: env.MEMORY_TOKEN } : {}),
+      ...(env.FRICTION_TRIGGER_TOKEN ? { FRICTION_TRIGGER_TOKEN: env.FRICTION_TRIGGER_TOKEN } : {}),
     };
   }
 
@@ -85,9 +90,30 @@ export default {
     return getContainer(env.SWITCHBOARD, INSTANCE).fetch(request);
   },
 
-  // Keep-alive + revive after platform maintenance: any touch starts the
-  // container if stopped and renews the activity timeout.
-  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+  // Two crons. Every minute: keep-alive + revive after platform maintenance —
+  // any touch starts the container if stopped and renews the activity timeout.
+  // Weekly (FRICTION_CRON): the self-improvement pass (#84) — POST the bot's
+  // /friction/propose with the dedicated bearer; the bot clusters the friction
+  // ledger and files deduped `self-improvement` issues. Proposals only; the
+  // issues are the notification. Without the secret the bot answers 503 and
+  // nothing runs (fail-closed) — logged here so a misconfiguration is visible.
+  async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+    if (controller.cron === FRICTION_CRON) {
+      const res = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
+        new Request("https://switchboard-keepalive.internal/friction/propose", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(env.FRICTION_TRIGGER_TOKEN ? { authorization: `Bearer ${env.FRICTION_TRIGGER_TOKEN}` } : {}),
+          },
+          body: "{}",
+        }),
+      );
+      const text = await res.text().catch(() => "");
+      // Counts and issue links only — the report never carries secrets, but keep the log a summary.
+      console.log(`[friction] weekly propose → HTTP ${res.status} ${text.slice(0, 600)}`);
+      return;
+    }
     const res = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
       new Request("https://switchboard-keepalive.internal/healthz"),
     );
