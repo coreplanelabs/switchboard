@@ -76,6 +76,8 @@ import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
+import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
+import { shellQuote } from "../../src/execution/shellQuote.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 import {
   decisivePull,
@@ -644,6 +646,10 @@ interface ThreadBinding {
   /** Commit the worktree was last attached at (the ref's tip in the mirror
    *  at that moment). Display only — the tree itself is authoritative. */
   sha?: string;
+  /** The mode the tree was last built for (item 50): true → no credential
+   *  file, origin = the unreadable mirror. An attach in the other mode
+   *  recreates the tree. Absent (pre-field bindings) = writable. */
+  readonly?: boolean;
 }
 
 type ThreadDepsMechanism = "hardlink" | "copy" | "install" | "none";
@@ -671,8 +677,13 @@ interface AttachOk {
   /** True when a dirty/stale/missing worktree was wiped and recreated. */
   recreated: boolean;
   deps: ThreadDepsMechanism;
-  credentials: "ok" | "unavailable";
+  /** `ok` — credential file written; `unavailable` — writable attach but no
+   *  token (see credentialsError); `none` — read-only attach, deliberately no
+   *  credentials and an unfetchable origin (item 50). */
+  credentials: "ok" | "unavailable" | "none";
   credentialsError?: string;
+  /** Echo of the mode the tree was built for. */
+  readonly: boolean;
   mutexWaitMs: number;
   attachMs: number;
 }
@@ -1918,7 +1929,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  ever called). Flow: hydrate → resolve/blind the ref binding → allocate
    *  a pool user → (mirror mutex) verify ref, wipe dirty/stale trees,
    *  clone → materialize deps (KTD7) → per-attach credential file (KTD12). */
-  async attachThread(threadKey: string, refHint: string | null): Promise<AttachOk | ThreadErr> {
+  async attachThread(threadKey: string, refHint: string | null, readonly = false): Promise<AttachOk | ThreadErr> {
     const t0 = Date.now();
     try {
       await this.ensureHydrated();
@@ -1931,7 +1942,7 @@ export class ResidentDO extends Sandbox<Env> {
       // container under it (and isIdle never parks the alarm mid-attach).
       this.attachesInFlight++;
       try {
-        return await this.attachThreadBody(threadKey, refHint, resourceId, t0);
+        return await this.attachThreadBody(threadKey, refHint, readonly, resourceId, t0);
       } finally {
         this.attachesInFlight--;
       }
@@ -1940,7 +1951,13 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  private async attachThreadBody(threadKey: string, refHint: string | null, resourceId: string, t0: number): Promise<AttachOk | ThreadErr> {
+  private async attachThreadBody(
+    threadKey: string,
+    refHint: string | null,
+    readonly: boolean,
+    resourceId: string,
+    t0: number,
+  ): Promise<AttachOk | ThreadErr> {
     try {
       await this.refreshIfStale(resourceId);
     } catch (err) {
@@ -1962,6 +1979,9 @@ export class ResidentDO extends Sandbox<Env> {
       return { error: "needs-ref: this thread has no ref binding yet — supply refHint", status: 409, needs: "ref", defaultRef: facts.defaultRef };
     }
     const worktreePath = prior?.worktreePath ?? (await threadWorktreePath(threadKey, ref));
+    // Read-only vs writable (item 50): decided here, once, from the request
+    // and the prior binding's mode — the tested pure helper is the shipped code.
+    const mode = planReadonlyAttach({ readonly, prior, slug, mirrorDir: MIRROR_DIR });
 
     const alloc = await this.allocateThreadUser(threadKey, ref, worktreePath);
     if ("error" in alloc) return alloc;
@@ -1979,7 +1999,9 @@ export class ResidentDO extends Sandbox<Env> {
     // never holds the mutex, and failure never blocks the attach.
     let token: string | null = null;
     let credentialsError: string | undefined;
-    if (githubAppConfigured(this.env)) {
+    if (!mode.credentialFile) {
+      // Read-only: no token for the TREE — nothing to leak, nothing to push with.
+    } else if (githubAppConfigured(this.env)) {
       try {
         token = await mintRepoScopedToken(this.env, slug);
       } catch (err) {
@@ -1988,20 +2010,30 @@ export class ResidentDO extends Sandbox<Env> {
     } else {
       credentialsError = "github-app-not-configured: GITHUB_APP_* secrets are unset";
     }
+    // The mirror's recovery fetch (a ref pushed since the last refresh cycle)
+    // is the RESIDENT's operation — root, against the mirror, never inside the
+    // tree — so a read-only attach must not lose it: mint a fetch-only token
+    // when the ref is missing and none was minted above. Outside the lock (mint
+    // latency never holds the mutex); the pre-check is a racy read that only
+    // decides whether to mint, the authoritative check runs under the lock.
+    let fetchToken: string | null = token;
+    if (!fetchToken && githubAppConfigured(this.env) && !(await this.refExists(binding.ref))) {
+      fetchToken = await mintRepoScopedToken(this.env, slug).catch(() => null);
+    }
 
     let locked: { value: { sha: string; threadLockKey: string; recreated: boolean }; waitedMs: number };
     try {
       locked = await this.withMirrorLock(async () => {
         await this.ensureGitSetup();
         if (!(await this.refExists(binding.ref))) {
-          await this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "fetch", GIT_NETWORK_TIMEOUT_MS);
+          await this.gitWithCred(fetchToken, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "fetch", GIT_NETWORK_TIMEOUT_MS);
           if (!(await this.refExists(binding.ref))) {
             throw new StepError("unknown-ref", `ref ${JSON.stringify(binding.ref)} does not resolve in the mirror (even after a fetch)`);
           }
         }
         const sha = await this.readMirrorSha(binding.ref);
         const threadLockKey = await this.lockfileKey(sha);
-        const recreated = await this.ensureThreadWorktree(binding, sha, slug);
+        const recreated = await this.ensureThreadWorktree(binding, sha, mode.originUrl, mode.modeSwitch);
         return { sha, threadLockKey, recreated };
       }, ATTACH_MUTEX_WAIT_MS);
     } catch (err) {
@@ -2018,11 +2050,15 @@ export class ResidentDO extends Sandbox<Env> {
     }
 
     let deps: { deps: ThreadDepsMechanism; reconciled: boolean };
-    let credentials: "ok" | "unavailable" = "unavailable";
+    let credentials: AttachOk["credentials"] = mode.readonly ? "none" : "unavailable";
     try {
       const installCmd = record.commands.install ?? "npm install --no-audit --no-fund";
       deps = await this.materializeThreadDeps(binding, locked.value.threadLockKey, facts.lockfileHash, installCmd);
-      if (token) {
+      if (mode.scrubCredentials) {
+        // Every read-only attach, reused tree included: a tree built before
+        // this rule (or by a writable attach on this thread) may carry a file.
+        await this.scrubThreadCredentials(binding);
+      } else if (token) {
         await this.writeThreadCredentials(binding, token);
         credentials = "ok";
       }
@@ -2044,6 +2080,7 @@ export class ResidentDO extends Sandbox<Env> {
       lastAttachAt: new Date().toISOString(),
       deps: deps.deps,
       sha: locked.value.sha,
+      readonly: mode.readonly,
     } satisfies ThreadBinding);
     if ((await this.listSchedules(SWEEP_CALLBACK)).length === 0) {
       await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
@@ -2059,6 +2096,7 @@ export class ResidentDO extends Sandbox<Env> {
       deps: deps.deps,
       credentials,
       ...(credentialsError ? { credentialsError } : {}),
+      readonly: mode.readonly,
       mutexWaitMs: locked.waitedMs,
       attachMs: Date.now() - t0,
     };
@@ -2081,15 +2119,18 @@ export class ResidentDO extends Sandbox<Env> {
    *  gives the thread user a fully-owned repo whose writes stay in its own
    *  .git; `origin` is repointed at GitHub so fetch/push use the per-attach
    *  credential file rather than the (deliberately unreadable) mirror. */
-  private async ensureThreadWorktree(binding: ThreadBinding, sha: string, slug: string): Promise<boolean> {
+  private async ensureThreadWorktree(binding: ThreadBinding, sha: string, originUrl: string, modeSwitch: boolean): Promise<boolean> {
     const wt = binding.worktreePath;
     const threadDir = parentDir(wt);
     await this.runOk(["install", "-d", "-m", "755", "-o", "root", "-g", "root", THREADS_DIR], "threads-dir");
     // 700 + thread-user ownership: other thread users cannot traverse in.
     await this.runOk(["install", "-d", "-m", "700", "-o", binding.user, "-g", binding.user, threadDir], "thread-dir");
 
-    let recreate = false;
-    const exists = (await this.run(["test", "-d", `${wt}/.git`])).exitCode === 0;
+    // A tree built for the other mode (item 50) is wiped before any other
+    // check: a mirror-origin, credential-less tree must never serve a
+    // writable run, and a GitHub-origin tree must never serve a read-only one.
+    let recreate = modeSwitch;
+    const exists = !recreate && (await this.run(["test", "-d", `${wt}/.git`])).exitCode === 0;
     if (exists) {
       const status = await this.threadRun(binding.user, wt, "git status --porcelain -uno", DEFAULT_EXEC_TIMEOUT_MS);
       const head = await this.threadRun(binding.user, wt, "git rev-parse HEAD", DEFAULT_EXEC_TIMEOUT_MS);
@@ -2114,14 +2155,25 @@ export class ResidentDO extends Sandbox<Env> {
       { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
     );
     await this.runOk(["chown", "-R", `${binding.user}:${binding.user}`, wt], "worktree-chown");
+    // Writable: origin → GitHub (fetch/push via the per-attach credential file).
+    // Read-only: origin stays the local mirror, which thread users cannot
+    // traverse (root:worker1 750) — fetch/push fail legibly, while the
+    // clone-time remote-tracking refs still serve `git diff origin/<base>...HEAD`.
+    await this.threadRunOk(binding.user, wt, `git remote set-url origin ${shellQuote(originUrl)}`, "worktree-remote", DEFAULT_EXEC_TIMEOUT_MS);
+    return true;
+  }
+
+  /** Read-only attach (item 50): make sure the tree carries no credential file
+   *  and no credential helper — idempotent, run on every read-only attach. */
+  private async scrubThreadCredentials(binding: ThreadBinding): Promise<void> {
+    const cred = `${binding.worktreePath}/.git/github-credentials`;
     await this.threadRunOk(
       binding.user,
-      wt,
-      `git remote set-url origin https://github.com/${slug}.git`,
-      "worktree-remote",
+      binding.worktreePath,
+      `rm -f ${cred} && (git config --unset-all credential.helper || true)`,
+      "thread-cred-scrub",
       DEFAULT_EXEC_TIMEOUT_MS,
     );
-    return true;
   }
 
   /** Materialize the dep/build cache (KTD7). Same committed-lockfile key as
@@ -3557,7 +3609,7 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
     // floor), then retry the atomic insert ONCE. No candidate → the ordinary
     // 429, itemizing why each resident was ineligible, so the admin can
     // offboard by hand with the facts in front of them.
-    const { floorS } = await registry.limits(); // the compiled floor, or an active test override (item 49)
+    const { floorS } = await registry.limits(); // the compiled floor, or an active test override (item 50)
     const pick = pickEvictionCandidate(await collectResidentViews(env), Date.now(), floorS * 1000);
     if (!pick.candidate) {
       return json({ error: `${result.error}; evictColdest found no eligible resident`, rejected: pick.rejected }, 429);
@@ -3822,7 +3874,7 @@ async function handleResidents(env: Env): Promise<Response> {
   const inFlight: number | null = inFlightUnknown === 0 ? known : null;
   // `cap` is what the registry ENFORCES right now; when a test override is
   // active it is lower than `capDefault` and `testOverrides` says who/when, so
-  // a dashboard never mistakes a test cap for the real one (item 49).
+  // a dashboard never mistakes a test cap for the real one (item 50).
   const limits = await registryStub(env).limits();
   return json({
     cap: limits.cap,
@@ -3886,7 +3938,9 @@ async function handleAttach(env: Env, body: Record<string, unknown>): Promise<Re
     if ("error" in parsed) return json({ error: parsed.error }, 400);
     refHint = parsed.ref;
   }
-  const result = await ctx.stub.attachThread(ctx.threadKey, refHint);
+  const readonly = parseReadonly(body.readonly);
+  if ("error" in readonly) return json({ error: readonly.error }, 400);
+  const result = await ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly);
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }

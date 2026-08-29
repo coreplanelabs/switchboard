@@ -145,7 +145,11 @@ export async function makeExecutor(
         // Non-warm but serviceable: the note says so (KTD10) while the run
         // still gets the worktree it came for; openResident adds ref@sha.
         const nonWarm = probe.state === "warm" ? undefined : `${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`;
-        return await openResident({ baseUrl: resident.baseUrl, token, resource, threadKey: ctx.threadKey, refHint: ctx.ref }, nonWarm);
+        // Read-only agents (the review toolset) get a read-only worktree —
+        // decided from the agent's declared toolset, never from the prompt
+        // (features/resident-repos.md item 50).
+        const readonly = ctx.agent.toolset === "readonly" ? true : undefined;
+        return await openResident({ baseUrl: resident.baseUrl, token, resource, threadKey: ctx.threadKey, refHint: ctx.ref, readonly }, nonWarm);
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
         note = `resident attach failed (${err instanceof Error ? err.message : String(err)}) — using fresh sandbox`;
@@ -187,6 +191,7 @@ async function openResident(
     resource: string;
     threadKey: string;
     refHint?: string;
+    readonly?: boolean;
   },
   /** `<state>[ (<reason>)]` of a serviceable non-warm resident; undefined when warm. */
   nonWarm?: string,
