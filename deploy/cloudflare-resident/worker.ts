@@ -67,6 +67,8 @@ import {
   getSandbox,
   isDurableObjectCodeUpdateReset,
   OperationInterruptedError,
+  RPCTransportError,
+  RuntimeIdentityInactiveError,
   Sandbox,
   StaleProcessHandleError,
 } from "@cloudflare/sandbox";
@@ -290,16 +292,69 @@ class RuntimeReplacedError extends Error {
   }
 }
 
+/** Every wording the pinned SDK (@cloudflare/sandbox@0.13.0-next.751.1) uses
+ *  when the runtime incarnation changed under a call, for the message-based
+ *  fallback below. Two of these come from classes the SDK does NOT export
+ *  (`SandboxLifetimeChangedError`) or throws raw before its adapter translates
+ *  them (`RuntimeIdentityInactiveError` at ~10 process/exec sites), so a typed
+ *  check alone would miss them. */
+const RUNTIME_REPLACEMENT_WORDING =
+  /previous runtime incarnation|interrupted because the runtime changed|runtime identity is no longer active|sandbox lifetime is no longer current|platform was updating the sandbox runtime|no longer identifies pid/i;
+
+/** `err` and its `cause` chain, bounded like the SDK's own `selfAndCauses`
+ *  walker: the SDK wraps platform errors, so the telling message can sit one or
+ *  two links down. */
+function* selfAndCauses(err: unknown): Generator<unknown> {
+  let current = err;
+  for (let depth = 0; depth < 8 && current != null; depth++) {
+    yield current;
+    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
+  }
+}
+
+/** `OperationInterruptedError` reasons that mean the runtime under the call is
+ *  gone and a new one serves the thread: a deploy swapped the isolate
+ *  (`runtime_replaced`), the sandbox's lifetime epoch moved
+ *  (`sandbox_lifetime_changed`), or the container itself stopped/restarted
+ *  under the command (`container_stopped`). Deliberately NOT `transport_disposed`
+ *  / `sandbox_destroyed` / `recovery_exhausted` — those are not "try the new
+ *  runtime", they are real failures the ordinary error path should report — and
+ *  NOT `unknown`, the union's catch-all: with no evidence of a replacement the
+ *  classifier stays conservative and lets the ordinary path report it. Note the
+ *  SDK's process control-plane wrapper (`processCapabilityLifecycle`) collapses
+ *  ANY interruption it sees into a `StaleProcessHandleError`, so on that path
+ *  the first `instanceof` below fires before this reason set is consulted; the
+ *  set matters for the routes that reach the SDK without that wrapper. */
+const RUNTIME_REPLACED_REASONS = new Set(["runtime_replaced", "sandbox_lifetime_changed", "container_stopped"]);
+
+/** `RPCTransportError` kinds that mean the capnweb session to the container
+ *  died under a live call. The SDK raises these RAW (not as an interruption)
+ *  while collecting a process's output — `FencedSubscriptionTarget.next()`
+ *  translates with `translateTransportErrorsAsInterruptions: false` — which is
+ *  exactly how a container stop/restart mid-command surfaces: the socket dies
+ *  before the container can send a structured error. Treating them as a
+ *  replacement is safe even for a mere network blip: the consequence is the same
+ *  legible outcome (re-attach once to prove the runtime serves the thread; the
+ *  command is never re-run; the model re-checks effects). Excluded:
+ *  `invalid_frame` / `protocol_error` (wire-format bugs, not a lost runtime) and
+ *  `unknown` (no evidence). */
+const RPC_TRANSPORT_LOSS_KINDS = new Set(["peer_closed", "connection_failed", "upgrade_failed", "session_disposed"]);
+
 /** Does this SDK error mean the runtime incarnation changed under us? Typed
- *  checks first (`StaleProcessHandleError`, an `OperationInterruptedError`
- *  with reason `runtime_replaced`, the platform's superseded-isolate reset),
- *  then the SDK's message wording as a belt-and-braces fallback. Anything
- *  else (a real spawn failure, a timeout) is NOT a runtime replacement. */
+ *  checks first (`StaleProcessHandleError`, `RuntimeIdentityInactiveError`, an
+ *  `OperationInterruptedError` with one of `RUNTIME_REPLACED_REASONS`, an
+ *  `RPCTransportError` with one of `RPC_TRANSPORT_LOSS_KINDS`, the platform's
+ *  superseded-isolate reset), then the SDK's message wording — on the error AND
+ *  its cause chain — as a belt-and-braces fallback. Anything else (a real spawn
+ *  failure, a timeout, a wire-format error) is NOT a runtime replacement. */
 function isRuntimeReplacement(err: unknown): boolean {
   if (err instanceof StaleProcessHandleError) return true;
-  if (err instanceof OperationInterruptedError && err.reason === "runtime_replaced") return true;
+  if (err instanceof RuntimeIdentityInactiveError) return true;
+  if (err instanceof OperationInterruptedError && RUNTIME_REPLACED_REASONS.has(err.reason)) return true;
+  if (err instanceof RPCTransportError && RPC_TRANSPORT_LOSS_KINDS.has(err.kind)) return true;
   if (isDurableObjectCodeUpdateReset(err)) return true;
-  return /previous runtime incarnation|interrupted because the runtime changed/i.test(errMsg(err));
+  for (const link of selfAndCauses(err)) if (RUNTIME_REPLACEMENT_WORDING.test(errMsg(link))) return true;
+  return false;
 }
 
 /** The named ThreadErr every thread route (exec/read/write) answers for a
