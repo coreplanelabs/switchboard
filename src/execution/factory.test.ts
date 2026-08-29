@@ -153,15 +153,17 @@ describe("makeExecutor resident selection", () => {
   /** FIFO fetch stub; a canned {reject} entry simulates a network failure. */
   function stubFetch(...responses: Array<{ status?: number; body?: unknown; reject?: string }>) {
     const calls: string[] = [];
-    const fn = vi.fn(async (url: unknown) => {
+    const bodies: Array<Record<string, unknown> | undefined> = [];
+    const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
       calls.push(new URL(String(url)).pathname);
+      bodies.push(init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined);
       const next = responses.shift();
       if (!next) throw new Error(`unexpected fetch: ${String(url)}`);
       if (next.reject) throw new TypeError(next.reject);
       return new Response(JSON.stringify(next.body ?? {}), { status: next.status ?? 200 });
     });
     vi.stubGlobal("fetch", fn);
-    return { fn, calls };
+    return { fn, calls, bodies };
   }
 
   it("ctx.repo undefined → per-thread path with ZERO probe calls (total input contract)", async () => {
@@ -181,12 +183,30 @@ describe("makeExecutor resident selection", () => {
     );
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(ResidentExecutor);
-    expect(note).toBeUndefined();
+    // The warm path is POSITIVELY named (never inferable only from the absence
+    // of a fallback note): ref@short-sha of the attached worktree.
+    expect(note).toBe("resident · master@abc");
     // The discriminant is the backend signal the dispatcher branches its
     // resident system-prompt on (never an executor `instanceof`): true ONLY on
     // the warm-resident branch.
     expect(resident).toBe(true);
     expect(calls).toEqual(["/status", "/attach"]);
+  });
+
+  it("needs-ref WITH the resident's defaultRef → re-attach once on that ref; the note says it was the repo default", async () => {
+    stubEnvs();
+    const { calls, bodies } = stubFetch(
+      { body: { state: "warm", reason: "" } },
+      { status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref", defaultRef: "master" } },
+      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc1234def", user: "worker2", deps: "hardlink" } },
+    );
+    const { executor, note, resident } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: undefined });
+    expect(executor).toBeInstanceOf(ResidentExecutor);
+    expect(resident).toBe(true);
+    expect(note).toBe("resident · master@abc1234 (repo default — no branch named)");
+    expect(calls).toEqual(["/status", "/attach", "/attach"]);
+    expect(bodies[1]?.refHint).toBeUndefined(); // first attach: nothing named
+    expect(bodies[2]?.refHint).toBe("master"); // re-attach on the resident's default
   });
 
   it("not-warm probe → fallback carrying state and reason verbatim; no attach, discriminant NOT set", async () => {
@@ -214,7 +234,7 @@ describe("makeExecutor resident selection", () => {
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(ResidentExecutor);
     expect(resident).toBe(true);
-    expect(note).toBe("resident refreshing — attached to the last snapshot");
+    expect(note).toBe("resident refreshing · master@abc — attached to the last snapshot");
     expect(calls).toEqual(["/status", "/attach"]);
   });
 
@@ -227,7 +247,7 @@ describe("makeExecutor resident selection", () => {
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(ResidentExecutor);
     expect(resident).toBe(true);
-    expect(note).toBe("resident degraded (github-unreachable: fetch timed out) — attached to the last snapshot");
+    expect(note).toBe("resident degraded (github-unreachable: fetch timed out) · master@abc — attached to the last snapshot");
   });
 
   // Review finding on #162: a refresh that failed INSIDE the rebuild lock

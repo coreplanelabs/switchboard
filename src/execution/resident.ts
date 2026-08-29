@@ -51,6 +51,12 @@ export interface ResidentExecutorOptions {
   refHint?: string;
 }
 
+/** What a successful /attach reports about the thread's worktree. */
+export interface ResidentBinding {
+  ref: string;
+  sha: string;
+}
+
 /** 409 needs:"ref" from /attach — the thread has no ref binding yet (KTD6:
  *  binding is explicit-or-ask-once, never a silent guess). Typed so the
  *  dispatcher can catch it and ask the user ONE clarifying question (U7)
@@ -58,7 +64,13 @@ export interface ResidentExecutorOptions {
  *  the ref on the next message and re-attach binds it. */
 export class ResidentNeedsRefError extends Error {
   readonly needs = "ref";
-  constructor(readonly resource: string) {
+  /** The resident's default branch when the Worker names one in the 409 body:
+   *  the factory binds the thread to it (loudly) instead of asking. Undefined
+   *  from a Worker predating that field → the dispatcher asks as before. */
+  constructor(
+    readonly resource: string,
+    readonly defaultRef?: string,
+  ) {
     super(
       `the ${resource} resident needs a branch for this thread: no ref is bound yet. ` +
         `Name the branch to work on (e.g. "on main") and try again.`,
@@ -142,6 +154,16 @@ export class ResidentExecutor implements Executor {
    *  infra so the runner's fail-fast (#92) still has teeth. */
   private runtimeReplacedStreak = 0;
 
+  private lastBinding?: ResidentBinding;
+
+  /** The thread's binding as the resident answered it on the most recent
+   *  successful attach — including a mid-run re-attach after an eviction, which
+   *  may land on a newer sha than the one the run started on. Undefined until
+   *  the first attach succeeds; set only by attach(). */
+  get binding(): ResidentBinding | undefined {
+    return this.lastBinding;
+  }
+
   constructor(private opts: ResidentExecutorOptions) {}
 
   /** Attach-on-open: bind (or reuse) the thread's worktree before the first
@@ -222,15 +244,26 @@ export class ResidentExecutor implements Executor {
   }
 
   /** Bind/reuse this thread's worktree. Legible errors for every named
-   *  refusal the service can answer with. */
-  async attach(): Promise<void> {
+   *  refusal the service can answer with. Answers the binding the resident
+   *  reported: the bound ref (authoritative — a differing refHint is ignored,
+   *  KTD6) and the sha the worktree is at. A 200 without both fields is a
+   *  malformed resident (the attach contract always carries them) and is an
+   *  error, never a half-bound executor. */
+  async attach(): Promise<ResidentBinding> {
     const body: Record<string, unknown> = {};
     if (this.opts.refHint) body.refHint = this.opts.refHint;
     const { status, data } = await this.call("/attach", body);
-    if (status === 200) return;
+    if (status === 200) {
+      if (typeof data.ref !== "string" || typeof data.sha !== "string") {
+        throw new Error(`resident attach: malformed answer for ${this.opts.resource} (missing ref/sha)`);
+      }
+      this.lastBinding = { ref: data.ref, sha: data.sha };
+      return this.lastBinding;
+    }
     const err = String(data.error ?? `HTTP ${status}`);
     if (status === 409 && data.needs === "ref") {
-      throw new ResidentNeedsRefError(this.opts.resource);
+      const defaultRef = typeof data.defaultRef === "string" && data.defaultRef ? data.defaultRef : undefined;
+      throw new ResidentNeedsRefError(this.opts.resource, defaultRef);
     }
     if (status === 404) {
       throw new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`);

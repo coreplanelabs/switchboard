@@ -297,11 +297,14 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref },
       );
     } catch (err) {
-      // Ask-once (KTD6): the resident has no ref binding for this thread and
-      // the message named no branch — binding is explicit-or-ask-once, never
-      // a silent guess. ONE clarifying question, no model turn burned (mirrors
-      // the named-refusal reply shape). The user's answer in the thread (e.g.
-      // "on main") carries the ref on the next message and re-attach binds it.
+      // Ask-once (KTD6): the resident has no ref binding for this thread, the
+      // message named no branch, AND the resident did not name a default to
+      // bind to (the factory binds to `defaultRef` itself when the 409 carries
+      // one — only a Worker predating that field reaches here). Binding is
+      // explicit-or-ask-once, never a silent guess. ONE clarifying question,
+      // no model turn burned (mirrors the named-refusal reply shape). The
+      // user's answer in the thread (e.g. "on main") carries the ref on the
+      // next message and re-attach binds it.
       if (err instanceof ResidentNeedsRefError) {
         await card.done({ title: `🌿 ${label} · not started (which branch?)` });
         await io.reply(
@@ -410,6 +413,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       const detail = [liveLink, checklist, lastActivity].filter(Boolean).join("\n");
       return { title: title() + thinking, detail: detail || undefined };
     };
+    // The closed card keeps the run link (the run page outlives the run and
+    // shows the final answer) and the agent's checklist; only the transient
+    // activity trace is dropped.
+    const finalDetail = () => [liveLink, checklist].filter(Boolean).join("\n") || undefined;
     const onProgress = (note: string) => {
       console.log(`[note] ${msg.threadKey} ${note}`);
       lastToolAt = Date.now();
@@ -484,7 +491,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // the finally below finishes the run, and only after that is it sent.
       registry.publish(run.id, { type: "answer", text: redactSecrets(answer), at: Date.now() });
     } catch (err) {
-      await card.done({ title: title("❌"), detail: checklist });
+      await card.done({ title: title("❌"), detail: finalDetail() });
       throw err;
     } finally {
       clearInterval(heartbeat);
@@ -524,7 +531,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // (a summary was written), ⛔ hard (aborted, no summary).
     const stopped = run.control.requested;
     console.log(`[done] ${msg.threadKey} ${answer.length} chars${stopped ? ` (stopped: ${stopped})` : ""}`);
-    await card.done({ title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"), detail: checklist });
+    await card.done({ title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"), detail: finalDetail() });
     await sendAnswer(deps, io, msg.threadKey, { provider, model, maxTokens: agent.maxTokens }, answer);
 
     // Cross-session memory (Area 7c, #85) — WRITE path. AFTER the reply has

@@ -294,6 +294,27 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[0])).toMatchObject({ resource: OPTS.resource, threadKey: OPTS.threadKey, refHint: "master" });
   });
 
+  it("records the attach result's ref@sha as the thread binding (the positive 'resident' marker's source)", async () => {
+    stubFetch({ body: { workspace: "/workspace/threads/t/master", ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", user: "worker2", deps: "hardlink" } });
+    const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(ex.binding).toEqual({ ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05" });
+  });
+
+  it("a 200 attach answer missing ref/sha is a legible error, never a half-bound executor", async () => {
+    stubFetch({ body: { workspace: "/workspace/threads/t/master", user: "worker2" } });
+    await expect(ResidentExecutor.open({ ...OPTS, refHint: "master" })).rejects.toThrow(/malformed answer.*missing ref\/sha/);
+  });
+
+  it("409 needs:\"ref\" carries the resident's defaultRef when the Worker names one (bind-by-default), undefined otherwise", async () => {
+    stubFetch({ status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref", defaultRef: "master" } });
+    const err = (await ResidentExecutor.open(OPTS).catch((e: unknown) => e)) as ResidentNeedsRefError;
+    expect(err).toBeInstanceOf(ResidentNeedsRefError);
+    expect(err.defaultRef).toBe("master");
+    stubFetch({ status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref" } });
+    const older = (await ResidentExecutor.open(OPTS).catch((e: unknown) => e)) as ResidentNeedsRefError;
+    expect(older.defaultRef).toBeUndefined();
+  });
+
   it("409 needs:\"ref\" on open tells the user to name a branch", async () => {
     stubFetch({ status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref" } });
     await expect(ResidentExecutor.open(OPTS)).rejects.toThrow(/branch/i);
