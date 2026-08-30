@@ -41,6 +41,7 @@ Nothing else goes on a criterion: no dates, no receipt links, no "observed live"
 | [agent-general.md](agent-general.md) | Default passthrough agent |
 | [agent-review.md](agent-review.md) | Code review agent |
 | [agent-coding.md](agent-coding.md) | Coding agent (ships PRs) |
+| [reading-diff.md](reading-diff.md) | Review runs carry the change as a reviewer reads it: a `review_artifact` event with the full git diff or meat.dev's abridged reading diff — a config/env switch (`git`\|`meat`\|`off`), meat falling back to git, produced concurrently with the review |
 | [pr-description.md](pr-description.md) | The PR description as data: typed `PrDescription` (TL;DR, what & why, hunk-anchored Tour, decisions, risks, validation criteria + proofs) with one renderer per surface — GitHub markdown today (anchors rendered at the head sha, so a repush is a re-render); #329 is the golden |
 | [validated-review.md](validated-review.md) | Distilled diff digest in PR bodies (R14) + review agent runs tests/build in its warm worktree and reports pass/fail (R15) |
 | [agent-env-bootstrap.md](agent-env-bootstrap.md) | Materialize a downstream service's UAT env vars into the agent's execution environment from 1Password via a read-only, UAT-vault-scoped service account (#72): JSONC manifest, UAT-only allowlist, dry-run default, chmod-600 env file, `buildAgentEnv` integration hook |

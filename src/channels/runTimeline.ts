@@ -317,6 +317,10 @@ export function createRunTimeline(): RunTimeline {
         if (cached !== undefined) facts.push(fmtTokens(cached) + " cached");
         return [{ kind: "turn", label: "Thought for " + fmtDuration(durationMs), facts, durationMs, at: num(e.at) }];
       }
+      case "review_artifact":
+        // The reading diff is the review panel's material (features/reading-diff.md
+        // roadmap) — the timeline's step story does not change shape for it.
+        return [];
       case "skill_use": {
         const name = str(e.skill);
         if (!name) return [];

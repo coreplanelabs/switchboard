@@ -193,7 +193,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   // `context` is replayed thread history published at run start with timestamps
   // of its own, so it is invisible to timing as well.
   let narrativeEvents = 0;
-  let skillEvents = 0; // skill_use facts ride alongside their tool pair; not steps
+  let sideFactEvents = 0; // skill_use / review_artifact: facts about the run, not steps
   events.forEach((ev, index) => {
     if (isNarrative(ev)) narrativeEvents++;
     if (ev.type === "context") return;
@@ -218,10 +218,11 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     // the source of truth here (it also covers captures from before turns
     // existed), so the event neither starts nor ends a model turn.
     if (ev.type === "turn" || ev.type === "run_meta") return; // run_meta: what the run is about, not a step
-    // skill_use: a fact about the use_skill call that already produced its own
-    // tool_call/tool_result pair — counting it would double-count the step.
-    if (ev.type === "skill_use") {
-      skillEvents++;
+    // Side facts about the run, not steps: skill_use rides beside a use_skill
+    // call that already produced its own tool pair; review_artifact is produced
+    // outside the model loop entirely. Counting either would distort the story.
+    if (ev.type === "skill_use" || ev.type === "review_artifact") {
+      sideFactEvents++;
       return;
     }
 
@@ -340,7 +341,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   }
 
   const diagnosis: FrictionDiagnosis = {
-    eventCount: events.length - narrativeEvents - skillEvents,
+    eventCount: events.length - narrativeEvents - sideFactEvents,
     toolCalls,
     hasTimings,
     ...(firstAt !== undefined && lastAt !== undefined ? { runMs: lastAt - firstAt, toolTimeMs, modelTimeMs } : {}),

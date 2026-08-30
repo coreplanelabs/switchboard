@@ -69,6 +69,14 @@ describe("parseRunEventLines", () => {
     expect(skipped).toBe(1);
   });
 
+  it("accepts `review_artifact` (reading_diff + string diff + known poweredBy), skips it otherwise", () => {
+    const ok = { type: "review_artifact", artifact: "reading_diff", poweredBy: "meat", baseRef: "main", diff: "d", truncated: false, at: 1 };
+    const bad = { type: "review_artifact", artifact: "reading_diff", poweredBy: "carrier-pigeon", diff: "d" };
+    const { events, skipped } = parseRunEventLines([JSON.stringify(ok), JSON.stringify(bad)].join("\n"));
+    expect(events).toEqual([ok]);
+    expect(skipped).toBe(1);
+  });
+
   it("empty input yields no events", () => {
     expect(parseRunEventLines("")).toEqual({ events: [], skipped: 0 });
   });

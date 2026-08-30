@@ -126,6 +126,10 @@ export interface AppConfig {
    * `parseCostsConfig` (src/core/costs.ts); absent → the view answers 503.
    */
   costs?: unknown;
+  /** Review-run behavior: the reading-diff artifact's provider switch
+   *  (`git` | `meat` | `off`; env `SWITCHBOARD_READING_DIFF` overrides).
+   *  See features/reading-diff.md. */
+  review?: { readingDiff?: import("./core/readingDiff.js").ReadingDiffConfig };
   /** Slack adapter behavior that is not pure transport. */
   slack?: SlackConfig;
   /**

@@ -32,6 +32,7 @@ import { formatTurnDuration, redactSecrets, type RunEvent } from "./runEvents.js
 import { fitRecordToBudget, utf8ByteLength, type RunRecord, type RunStatus } from "./runRecord.js";
 import type { RunHistoryWriter } from "./runHistoryWriter.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
+import { startReviewReadingDiff } from "./readingDiff.js";
 import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { invokeChatCommand, parseChatCommand, type ChatCommandResult, type ChatCommands, type ParsedChatCommand } from "./commandChat.js";
@@ -753,6 +754,32 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // can always tell the difference.
     const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
 
+    // Reading-diff artifacts (features/reading-diff.md): a PR review run gets
+    // the change as a reviewer reads it, produced CONCURRENTLY with the review
+    // by the run's own executor (read-only commands; the resident runs execs
+    // beside the model's) and published straight to the registry like the
+    // other dispatcher facts. The git BASELINE is guaranteed: the dispatcher
+    // joins it before the answer publish below (a join on a seconds-long
+    // command started here — never a timeout race). meat, when configured, is
+    // an UPGRADE artifact under its own runtime budget, never awaited: it
+    // lands iff it finishes within the review (a later publish is dropped by
+    // the registry's finished-run rule, and the baseline still stands).
+    let readingDiffBaseline: Promise<boolean> | undefined;
+    if (agent.name === "review" && repoCtx.pr !== undefined) {
+      const started = startReviewReadingDiff({
+        executor,
+        cfg: deps.config.config.review?.readingDiff,
+        env: process.env,
+        baseRef: repoCtx.baseRef,
+        publish: (e) => registry.publish(run.id, e),
+      });
+      readingDiffBaseline = started.baseline.then((published) => {
+        console.log(`[reading-diff] ${msg.threadKey} baseline ${published ? "published" : "none"}`);
+        return published;
+      });
+      void started.upgrade?.then((published) => console.log(`[reading-diff] ${msg.threadKey} meat ${published ? "published" : "did not land"}`));
+    }
+
     let answer: string;
     // Review verdict, set only through the structured submit_verdict tool; the
     // post-step below turns it into the deterministic first line of the GitHub
@@ -904,6 +931,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // answer). It MUST precede the finally below: `finish()` runs there, and a
       // publish on a finished run is a silent no-op. Only after that is the
       // reply sent.
+      // Join the reading-diff BASELINE so it is in the record before finish()
+      // (which drops later publishes). This is a join on the git command fired
+      // at run start, not a timeout: by now it finished minutes ago. The meat
+      // upgrade is deliberately NOT awaited — see the comment at the start.
+      if (readingDiffBaseline) await readingDiffBaseline;
       publishText("answer", answer);
     } catch (err) {
       runFailed = true;
@@ -1521,6 +1553,8 @@ function activityLine(e: RunEvent): string {
       return "run context recorded"; // published straight to the registry too — never arrives here
     case "skill_use":
       return `📚 skill ${e.skill} loaded`;
+    case "review_artifact":
+      return "reading diff ready"; // published straight to the registry — never arrives here
   }
 }
 

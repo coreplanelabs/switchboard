@@ -160,6 +160,27 @@ export type RunEvent =
       bodyBytes: number;
       seq?: number;
       at?: number;
+    }
+  /** A review run's reading diff (features/reading-diff.md): the change as a
+   *  reviewer reads it. The baseline artifact is the full `git diff`
+   *  (`poweredBy: "git"`, guaranteed on every PR review); with the meat
+   *  provider a SECOND artifact may follow — meat.dev's abridged reading diff
+   *  (`poweredBy: "meat"`, with its one-line `summary` and the abridging
+   *  call's own token usage) — iff meat finishes within the review. Published
+   *  by the dispatcher straight to the registry (like `input`/`run_meta`),
+   *  produced concurrently with the review by the run's own executor; readers
+   *  prefer the meat artifact when both exist. Additive: unknown → ignored. */
+  | {
+      type: "review_artifact";
+      artifact: "reading_diff";
+      poweredBy: "git" | "meat";
+      baseRef: string;
+      diff: string;
+      truncated: boolean;
+      summary?: string;
+      meatTokens?: { input: number; output: number };
+      seq?: number;
+      at?: number;
     };
 
 // Credential shapes we must never surface in a run-visibility stream (which may
