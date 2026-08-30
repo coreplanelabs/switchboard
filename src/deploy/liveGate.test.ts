@@ -1,0 +1,72 @@
+import { describe, expect, it } from "vitest";
+import { COLD_START_ALLOWANCE_MS, DRAIN_DEADLINE_MS, MIN_CATCH_UP_WINDOW_MS } from "../core/drain.js";
+import { decideLive, heartbeatLine, LIVE_GATE_DEADLINE_MS, parseHealthz, sameCommit } from "./liveGate.js";
+
+// features/slack-channel.md item 8 — deployed ≠ live: `deploy:all` exits 0 for
+// the bot only once `/healthz` is answered by the NEW container (not draining,
+// `build.commit` == the deployed commit). Incident 2026-08-30 05:12Z: the script
+// said `deployed` while the old container was still draining two runs.
+
+const HEAD = "e6af1aa0b7c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9";
+const live = (commit = HEAD) => ({ ok: true, inFlight: 0, draining: false, build: { commit, builtAt: "2026-08-30T05:00:00.000Z" } });
+
+describe("parseHealthz", () => {
+  it("parses a JSON object body; anything else is undefined", () => {
+    expect(parseHealthz(JSON.stringify(live()))).toMatchObject({ draining: false });
+    expect(parseHealthz("ok")).toBeUndefined();
+    expect(parseHealthz("")).toBeUndefined();
+    expect(parseHealthz("[1]")).toBeUndefined();
+    expect(parseHealthz("<html>502</html>")).toBeUndefined();
+  });
+});
+
+describe("decideLive", () => {
+  it("live: not draining and the served build is the deployed commit (full or short form)", () => {
+    expect(decideLive(live(), HEAD, 0)).toEqual({ kind: "live", commit: HEAD });
+    expect(decideLive(live(HEAD.slice(0, 7)), HEAD, 0)).toEqual({ kind: "live", commit: HEAD.slice(0, 7) });
+    expect(decideLive(live(), HEAD.slice(0, 12), 0)).toEqual({ kind: "live", commit: HEAD });
+  });
+
+  it("waiting while the old container drains — names the in-flight count and since when", () => {
+    const d = decideLive({ ok: true, inFlight: 2, draining: true, drainStartedAt: "2026-08-30T05:05:39.817Z" }, HEAD, 60_000);
+    expect(d).toEqual({ kind: "waiting", reason: "old container still draining — 2 run(s) in flight since 2026-08-30T05:05:39.817Z" });
+  });
+
+  it("waiting while an OLD commit answers (not draining yet, rollout not started) — names both commits", () => {
+    const d = decideLive(live("610682f7abcdef0123456789"), HEAD, 0);
+    expect(d).toEqual({ kind: "waiting", reason: `serving commit 610682f, expected ${HEAD.slice(0, 7)} (old container still up)` });
+  });
+
+  it("waiting when /healthz is not JSON (container restarting) or has no build identity (pre-gate container)", () => {
+    expect(decideLive(undefined, HEAD, 0)).toMatchObject({ kind: "waiting", reason: expect.stringContaining("not answering with JSON") });
+    expect(decideLive({ ok: true, inFlight: 0, draining: false }, HEAD, 0)).toMatchObject({ kind: "waiting", reason: expect.stringContaining("no build identity") });
+    expect(decideLive(live("unknown"), HEAD, 0)).toMatchObject({ kind: "waiting", reason: expect.stringContaining('"unknown"') });
+  });
+
+  it("a dirty build never counts as live, even on the same commit", () => {
+    expect(decideLive(live(`${HEAD}-dirty`), HEAD, 0).kind).toBe("waiting");
+    expect(sameCommit(`${HEAD}-dirty`, HEAD)).toBe(false);
+    expect(sameCommit("abc", "abc")).toBe(false); // too short to identify a commit
+  });
+
+  it("the same reason becomes a timeout once the deadline is reached; the deadline covers the full drain plus a cold start", () => {
+    const draining = { ok: true, inFlight: 1, draining: true };
+    expect(decideLive(draining, HEAD, LIVE_GATE_DEADLINE_MS - 1).kind).toBe("waiting");
+    expect(decideLive(draining, HEAD, LIVE_GATE_DEADLINE_MS)).toEqual({ kind: "timeout", reason: "old container still draining — 1 run(s) in flight" });
+    // Same cold-start allowance as the reconnect catch-up (item 7): the gate never gives up on a container the catch-up still expects.
+    expect(LIVE_GATE_DEADLINE_MS).toBe(DRAIN_DEADLINE_MS + COLD_START_ALLOWANCE_MS);
+    expect(LIVE_GATE_DEADLINE_MS).toBe(MIN_CATCH_UP_WINDOW_MS);
+    // A live answer is live regardless of elapsed time.
+    expect(decideLive(live(), HEAD, LIVE_GATE_DEADLINE_MS * 2).kind).toBe("live");
+  });
+});
+
+describe("heartbeatLine", () => {
+  it("says how many runs are in flight, whether draining, and how long we have waited of the budget", () => {
+    expect(heartbeatLine("bot", { inFlight: 2, draining: false }, 3 * 60_000 + 5_000, 30 * 60_000)).toBe(
+      "[deploy:all] bot: still waiting — 2 run(s) in flight (draining: no), waited 3m of 30m",
+    );
+    expect(heartbeatLine("bot", { inFlight: 1, draining: true }, 0, 30 * 60_000)).toContain("(draining: yes), waited 0m of 30m");
+    expect(heartbeatLine("bot", undefined, 120_000, 30 * 60_000)).toBe("[deploy:all] bot: still waiting — /healthz not answering, waited 2m of 30m");
+  });
+});

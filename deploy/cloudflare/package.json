@@ -6,7 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "deploy": "node preflight.mjs && wrangler deploy && npm run wake",
+    "deploy": "node preflight.mjs && node write-build.mjs && wrangler deploy && npm run wake",
     "preflight": "node preflight.mjs",
     "test": "vitest run",
     "dev": "wrangler dev",

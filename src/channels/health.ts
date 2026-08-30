@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { DRAIN_DEADLINE_MS } from "../core/drain.js";
 import type { CatchUpStatus } from "./slackCatchUpStatus.js";
 
@@ -22,6 +23,34 @@ import type { CatchUpStatus } from "./slackCatchUpStatus.js";
 // public (it must be reachable from the operator's shell without an Access
 // session).
 
+/** Which build this process is: the commit the image was built from (with a
+ *  `-dirty` suffix when the tree had uncommitted changes; `"unknown"` when the
+ *  image was built without `build.json`) and when. `npm run deploy` in
+ *  `deploy/cloudflare/` writes the file (`write-build.mjs`) and the Dockerfile
+ *  COPYs it; `deploy:all`'s live gate compares `commit` to what it deployed, so
+ *  "deployed" is never mistaken for "live" (the old container keeps answering
+ *  while it drains). */
+export interface BuildInfo {
+  commit: string;
+  builtAt?: string;
+}
+
+export const UNKNOWN_BUILD: BuildInfo = { commit: "unknown" };
+
+/** Read `build.json` once at startup. Missing or malformed → `UNKNOWN_BUILD`
+ *  (never throws — a bot built by hand still starts and says so). */
+export function readBuildInfo(path: string, read: (p: string) => string = (p) => readFileSync(p, "utf8")): BuildInfo {
+  try {
+    const parsed: unknown = JSON.parse(read(path));
+    if (typeof parsed !== "object" || parsed === null) return UNKNOWN_BUILD;
+    const b = parsed as Record<string, unknown>;
+    if (typeof b.commit !== "string" || b.commit === "") return UNKNOWN_BUILD;
+    return { commit: b.commit, ...(typeof b.builtAt === "string" ? { builtAt: b.builtAt } : {}) };
+  } catch {
+    return UNKNOWN_BUILD;
+  }
+}
+
 export interface HealthState {
   /** Agent runs in flight (`activeRunCount()`) plus pending memory reflections. */
   inFlight: number;
@@ -31,6 +60,8 @@ export interface HealthState {
   drainStartedAt?: number;
   /** The reconnect catch-up's record (`getCatchUpStatus()`); `{}` before the first scan. */
   catchUp?: CatchUpStatus;
+  /** The running build (`readBuildInfo`), when the entrypoint knows it. */
+  build?: BuildInfo;
 }
 
 export interface HealthPayload {
@@ -46,6 +77,10 @@ export interface HealthPayload {
    *  `/healthz` it is unconditionally present; a caller that omits the state
    *  (another entrypoint, a test) gets no key. Undefined fields are dropped. */
   catchUp?: CatchUpStatus;
+  /** Present whenever `HealthState.build` is given — the bot process always
+   *  passes `readBuildInfo(...)`, so on the live `/healthz` it is unconditionally
+   *  present (`commit: "unknown"` for an image built without `build.json`). */
+  build?: BuildInfo;
 }
 
 export function healthPayload(state: HealthState): HealthPayload {
@@ -63,5 +98,6 @@ export function healthPayload(state: HealthState): HealthPayload {
     for (const [k, v] of Object.entries(state.catchUp)) if (v !== undefined) catchUp[k] = v;
     payload.catchUp = catchUp as CatchUpStatus;
   }
+  if (state.build) payload.build = { commit: state.build.commit, ...(state.build.builtAt !== undefined ? { builtAt: state.build.builtAt } : {}) };
   return payload;
 }

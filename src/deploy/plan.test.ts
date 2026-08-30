@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  BOT_HEALTH_URL,
   classifyDeployOutput,
   DEPLOY_ORDER,
   formatPlan,
@@ -25,10 +26,22 @@ describe("WORKERS / DEPLOY_ORDER", () => {
     const byName = Object.fromEntries(WORKERS.map((w) => [w.name, w]));
     expect(byName.memory.preflight).toBeUndefined();
     expect(byName.sandbox.preflight).toBeUndefined();
-    expect(byName.bot.preflight).toEqual({ forceEnv: "SWITCHBOARD_DEPLOY_FORCE" });
+    expect(byName.bot.preflight).toEqual({ forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: BOT_HEALTH_URL });
     expect(byName.resident.preflight).toEqual({ forceEnv: "RESIDENT_DEPLOY_FORCE" });
     expect(byName.resident.requiredEnv).toEqual(["RESIDENT_ADMIN_TOKEN"]);
     expect(PRODUCTION_ACCOUNT_ID).toBe("3c7b28f23cc93f09e77bb0a9ffcb7e6f");
+  });
+
+  it("only the bot has a live gate — deployed ≠ live for the container; the other Workers swap instantly", () => {
+    const byName = Object.fromEntries(WORKERS.map((w) => [w.name, w]));
+    expect(byName.bot.liveGate).toEqual({ healthUrl: BOT_HEALTH_URL });
+    expect(BOT_HEALTH_URL).toBe("https://switchboard.coreplanelabs.dev/healthz");
+    for (const n of ["memory", "resident", "sandbox"] as const) expect(byName[n].liveGate, n).toBeUndefined();
+    const plan = planDeploy({ only: undefined, skip: undefined, dryRun: true, force: false, allowBranch: false, waitMaxMinutes: 30, pollSeconds: 60 });
+    expect(plan.steps.find((s) => s.name === "bot")).toMatchObject({ healthUrl: BOT_HEALTH_URL, liveGate: { healthUrl: BOT_HEALTH_URL } });
+    expect(plan.steps.find((s) => s.name === "resident")).not.toHaveProperty("liveGate");
+    expect(plan.steps.find((s) => s.name === "resident")).not.toHaveProperty("healthUrl");
+    expect(formatPlan(plan)).toContain("then wait until live (https://switchboard.coreplanelabs.dev/healthz not draining + build.commit == HEAD)");
   });
 });
 
