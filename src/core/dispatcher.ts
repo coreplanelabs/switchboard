@@ -296,7 +296,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
           workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
           dataDir: deps.dataDir ?? "./data",
         },
-        { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref },
+        { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref, headSha: repoCtx.headSha },
       );
     } catch (err) {
       // Ask-once (KTD6): the resident has no ref binding for this thread, the

@@ -19,7 +19,7 @@ import {
 // ref inside the resident, not a whole sandbox.
 //
 // U4 route contracts this client implements:
-//   /attach {resource, threadKey, refHint?} → 200 attach result
+//   /attach {resource, threadKey, refHint?, readonly?, sha?} → 200 attach result
 //     | 409 {needs:"ref"} (thread has no ref binding — ask the user)
 //     | 400 unknown-ref/pattern | 404 not onboarded | 503 mirror-busy | 429 pool
 //   /exec {resource, threadKey, command} → streamed HTTP 200: whitespace
@@ -53,6 +53,11 @@ export interface ResidentExecutorOptions {
    *  the worktree with no credential file and an unfetchable origin. Sent only
    *  when true, so an older resident sees the body it always did. */
   readonly?: boolean;
+  /** The commit the caller expects the ref to be at — a PR head (features/
+   *  resident-repos.md item 51). The resident fetches its mirror when the ref's
+   *  tip is not this commit instead of cloning a stale tip. Sent only when set,
+   *  so an older resident sees the body it always did. */
+  sha?: string;
 }
 
 /** What a successful /attach reports about the thread's worktree. */
@@ -257,6 +262,7 @@ export class ResidentExecutor implements Executor {
     const body: Record<string, unknown> = {};
     if (this.opts.refHint) body.refHint = this.opts.refHint;
     if (this.opts.readonly) body.readonly = true;
+    if (this.opts.sha) body.sha = this.opts.sha;
     const { status, data } = await this.call("/attach", body);
     if (status === 200) {
       if (typeof data.ref !== "string" || typeof data.sha !== "string") {

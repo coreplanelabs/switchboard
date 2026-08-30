@@ -63,6 +63,9 @@ export interface ExecutorContext {
   repo?: string;
   /** inferred git ref within `repo` */
   ref?: string;
+  /** the commit `ref` is expected to be at (a resolved PR head) — the resident
+   *  fetches a mirror whose tip lags it (features/resident-repos.md item 51) */
+  headSha?: string;
 }
 
 /** Executor selection result. `note` is present when resident selection fell
@@ -149,7 +152,9 @@ export async function makeExecutor(
         // decided from the agent's declared toolset, never from the prompt
         // (features/resident-repos.md item 50).
         const readonly = ctx.agent.toolset === "readonly" ? true : undefined;
-        return await openResident({ baseUrl: resident.baseUrl, token, resource, threadKey: ctx.threadKey, refHint: ctx.ref, readonly }, nonWarm);
+        // The resolved PR head rides along so the resident fetches a mirror
+        // whose ref tip lags it (item 51) instead of cloning a stale tip.
+        return await openResident({ baseUrl: resident.baseUrl, token, resource, threadKey: ctx.threadKey, refHint: ctx.ref, readonly, sha: ctx.headSha }, nonWarm);
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
         note = `resident attach failed (${err instanceof Error ? err.message : String(err)}) — using fresh sandbox`;
@@ -192,6 +197,7 @@ async function openResident(
     threadKey: string;
     refHint?: string;
     readonly?: boolean;
+    sha?: string;
   },
   /** `<state>[ (<reason>)]` of a serviceable non-warm resident; undefined when warm. */
   nonWarm?: string,
