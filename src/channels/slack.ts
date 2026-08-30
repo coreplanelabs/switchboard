@@ -337,8 +337,10 @@ export function createSlackApp(deps: CoreDeps) {
     botUserId ??= (await client.auth.test()).user_id ?? undefined;
     const decision = classifyMessage(m, botUserId);
     if (decision === "skip") return;
+    let thread: SlackThreadMessage[] | undefined;
     if (decision === "handle-if-bot-in-thread") {
-      if (!(await botInThread(client, m.channel, m.thread_ts!, botUserId))) return;
+      thread = await threadIfBotInIt(client, m.channel, m.thread_ts!, botUserId);
+      if (!thread) return;
     }
     await handle(deps, client, {
       channel: m.channel,
@@ -348,6 +350,7 @@ export function createSlackApp(deps: CoreDeps) {
       threadTs: m.thread_ts ?? m.ts,
       files: m.files,
       botUserId,
+      thread,
     });
   });
 
@@ -363,7 +366,13 @@ interface SlackEvent {
   threadTs: string;
   files?: SlackFile[];
   botUserId?: string;
+  /** The thread's messages when the handler has already fetched them (the
+   *  follow-up path's bot-in-thread check); `history()` reuses them. */
+  thread?: SlackThreadMessage[];
 }
+
+/** One message as `conversations.replies` returns it — the fields history() reads. */
+type SlackThreadMessage = { bot_id?: string; user?: string; text?: string; ts?: string; files?: SlackFile[] };
 
 // Same-process dedupe for the reconnect catch-up: (channel, ts) pairs this
 // process has accepted, live or via catch-up, so a message delivered both ways
@@ -413,8 +422,11 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
     .catch((err: Error) => {
       if (!err.message.includes("already_reacted")) console.error(`[ack] ${err.message}`);
     });
-  const { images, skipped: skippedImages } = await fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE);
-  const { documents, skipped: skippedDocs } = await fetchDocuments(ev.files, MAX_DOCS_PER_MESSAGE);
+  // Independent budgets, independent downloads — the two passes overlap.
+  const [{ images, skipped: skippedImages }, { documents, skipped: skippedDocs }] = await Promise.all([
+    fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE),
+    fetchDocuments(ev.files, MAX_DOCS_PER_MESSAGE),
+  ]);
   // A file is genuinely unsupported only when BOTH passes rejected it — the
   // image pass skips every non-image (PDFs, text) and the document pass skips
   // every non-document (images), so their intersection is exactly the files
@@ -465,44 +477,68 @@ export async function fetchImages(
   const images: ImageAttachment[] = [];
   const skipped: string[] = [];
   let bytes = 0;
-  const token = process.env.SLACK_BOT_TOKEN;
+  // Pass 1 (sync): decide which files are even candidates — type, declared
+  // size, and the per-message count budget. Pass 2: download the candidates
+  // CONCURRENTLY (each is a Slack CDN round trip; a screenshot-heavy message
+  // used to pay them one after another). Pass 3 (sync, in the original order):
+  // apply the byte budgets, so which file gets cut when the budget overflows is
+  // the same as it was serially. One deliberate drift from the serial loop: the
+  // count budget is spent by CANDIDATES, not by successful downloads, so a
+  // failed fetch no longer frees its slot for a later file (serially, image #11
+  // got in when #3 failed). Refilling would mean a second download round;
+  // a failed Slack fetch is rare and the cost is one fewer attachment.
+  const candidates: Array<{ f: SlackFile; label: string; url: string; mediaType: string }> = [];
   for (const f of files ?? []) {
-    const label = `${f.name ?? f.id ?? "file"} (${f.mimetype ?? "unknown type"})`;
+    const label = fileLabel(f);
     const url = f.url_private_download ?? f.url_private;
     if (
       !url ||
       !f.mimetype ||
       !IMAGE_TYPES.has(f.mimetype) ||
       (f.size ?? 0) > MAX_IMAGE_BYTES ||
-      images.length >= maxImages
+      candidates.length >= maxImages
     ) {
       skipped.push(label);
       continue;
     }
-    try {
-      const res = await fetch(url, {
-        headers: token ? { authorization: `Bearer ${token}` } : {},
-      });
-      // Slack answers unauthorized file fetches with an HTML login page and
-      // HTTP 200 — content-type is the reliable failure signal.
-      if (!res.ok || res.headers.get("content-type")?.includes("text/html")) {
-        console.error(`[files] download failed for ${label}: HTTP ${res.status}`);
-        skipped.push(label);
-        continue;
-      }
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.byteLength > MAX_IMAGE_BYTES || bytes + buf.byteLength > maxTotalBytes) {
-        skipped.push(label);
-        continue;
-      }
-      bytes += buf.byteLength;
-      images.push({ mediaType: f.mimetype, data: buf.toString("base64"), name: f.name });
-    } catch (err) {
-      console.error(`[files] download failed for ${label}: ${err instanceof Error ? err.message : String(err)}`);
-      skipped.push(label);
-    }
+    candidates.push({ f, label, url, mediaType: f.mimetype });
   }
+  // An image is never text/html, so any HTML answer is Slack's login page.
+  const downloads = await Promise.all(
+    candidates.map(({ url, label }) => downloadSlackFile(url, label, (contentType) => contentType.includes("text/html"))),
+  );
+  candidates.forEach(({ f, label, mediaType }, i) => {
+    const buf = downloads[i];
+    if (!buf || buf.byteLength > MAX_IMAGE_BYTES || bytes + buf.byteLength > maxTotalBytes) {
+      skipped.push(label);
+      return;
+    }
+    bytes += buf.byteLength;
+    images.push({ mediaType, data: buf.toString("base64"), name: f.name });
+  });
   return { images, skipped, bytes };
+}
+
+const fileLabel = (f: SlackFile) => `${f.name ?? f.id ?? "file"} (${f.mimetype ?? "unknown type"})`;
+
+/** One Slack-hosted file's bytes, or undefined when the download failed (the
+ *  failure is logged here; the caller only has to list the file as skipped).
+ *  Slack answers an unauthorized file fetch with an HTML login page and HTTP
+ *  200 — content-type is the reliable failure signal, judged by the caller
+ *  (`isLoginPage`) because a genuine .html attachment is itself text/html. */
+async function downloadSlackFile(url: string, label: string, isLoginPage: (contentType: string) => boolean): Promise<Buffer | undefined> {
+  const token = process.env.SLACK_BOT_TOKEN;
+  try {
+    const res = await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+    if (!res.ok || isLoginPage(res.headers.get("content-type") ?? "")) {
+      console.error(`[files] download failed for ${label}: HTTP ${res.status}`);
+      return undefined;
+    }
+    return Buffer.from(await res.arrayBuffer());
+  } catch (err) {
+    console.error(`[files] download failed for ${label}: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
 }
 
 /**
@@ -520,50 +556,40 @@ export async function fetchDocuments(
   const documents: DocumentAttachment[] = [];
   const skipped: string[] = [];
   let bytes = 0;
-  const token = process.env.SLACK_BOT_TOKEN;
+  // Same three passes as fetchImages: candidates → concurrent downloads →
+  // budgets applied in the original order.
+  const candidates: Array<{ f: SlackFile; label: string; url: string; kind: "pdf" | "text" }> = [];
   for (const f of files ?? []) {
-    const label = `${f.name ?? f.id ?? "file"} (${f.mimetype ?? "unknown type"})`;
+    const label = fileLabel(f);
     const url = f.url_private_download ?? f.url_private;
     const kind = classifyDocument(f.mimetype, f.name);
-    if (!url || !kind || (f.size ?? 0) > MAX_DOCUMENT_BYTES || documents.length >= maxDocs) {
+    if (!url || !kind || (f.size ?? 0) > MAX_DOCUMENT_BYTES || candidates.length >= maxDocs) {
       skipped.push(label);
       continue;
     }
-    try {
-      const res = await fetch(url, {
-        headers: token ? { authorization: `Bearer ${token}` } : {},
-      });
-      // Slack answers unauthorized file fetches with an HTML login page and
-      // HTTP 200. Content-type is the signal — but a genuine .html text file is
-      // itself text/html, so only treat text/html as a login page when the file
-      // we requested wasn't HTML.
-      const contentType = res.headers.get("content-type") ?? "";
-      const looksLikeLoginPage = contentType.includes("text/html") && f.mimetype !== "text/html";
-      if (!res.ok || looksLikeLoginPage) {
-        console.error(`[files] download failed for ${label}: HTTP ${res.status}`);
-        skipped.push(label);
-        continue;
-      }
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.byteLength > MAX_DOCUMENT_BYTES || bytes + buf.byteLength > maxTotalBytes) {
-        skipped.push(label);
-        continue;
-      }
-      bytes += buf.byteLength;
-      documents.push({
-        mediaType: f.mimetype ?? "text/plain",
-        data: kind === "pdf" ? buf.toString("base64") : buf.toString("utf-8"),
-        name: f.name,
-      });
-    } catch (err) {
-      console.error(`[files] download failed for ${label}: ${err instanceof Error ? err.message : String(err)}`);
-      skipped.push(label);
-    }
+    candidates.push({ f, label, url, kind });
   }
+  const downloads = await Promise.all(
+    candidates.map(({ url, label, f }) => downloadSlackFile(url, label, (contentType) => contentType.includes("text/html") && f.mimetype !== "text/html")),
+  );
+  candidates.forEach(({ f, label, kind }, i) => {
+    const buf = downloads[i];
+    if (!buf || buf.byteLength > MAX_DOCUMENT_BYTES || bytes + buf.byteLength > maxTotalBytes) {
+      skipped.push(label);
+      return;
+    }
+    bytes += buf.byteLength;
+    documents.push({
+      mediaType: f.mimetype ?? "text/plain",
+      data: kind === "pdf" ? buf.toString("base64") : buf.toString("utf-8"),
+      name: f.name,
+    });
+  });
   return { documents, skipped, bytes };
 }
 
-class SlackIO implements ChannelIO {
+/** Exported for tests. */
+export class SlackIO implements ChannelIO {
   /** Structured output renders through the Slack formatter (structured →
    *  mrkdwn); `sendFormatted` posts its output verbatim. */
   readonly formatter = new SlackFormatter();
@@ -641,13 +667,21 @@ class SlackIO implements ChannelIO {
   async history(): Promise<HistoryItem[]> {
     const items: HistoryItem[] = [];
     try {
-      const replies = await this.client.conversations.replies({
-        channel: this.ev.channel,
-        ts: this.ev.threadTs,
-        limit: 50,
-      });
+      // A follow-up handler already read this thread to decide the bot is in
+      // it (`threadIfBotInIt`) — that page is the same call with the same
+      // arguments, so it is reused instead of fetched a second time.
+      const thread =
+        this.ev.thread ??
+        (
+          await this.client.conversations.replies({
+            channel: this.ev.channel,
+            ts: this.ev.threadTs,
+            limit: 50,
+          })
+        ).messages ??
+        [];
       const kept: { role: "user" | "assistant"; text: string; files?: SlackFile[] }[] = [];
-      for (const m of replies.messages ?? []) {
+      for (const m of thread) {
         const mm = m as { bot_id?: string; text?: string; ts?: string; files?: SlackFile[] };
         // Skip the triggering message itself; the dispatcher appends it
         // (directive-stripped, images included) as the current turn.
@@ -668,28 +702,26 @@ class SlackIO implements ChannelIO {
       let imageBytesLeft = MAX_HISTORY_IMAGE_BYTES;
       let docsLeft = MAX_HISTORY_DOCS;
       let docBytesLeft = MAX_HISTORY_DOCUMENT_BYTES;
+      // Messages stay sequential (each one's downloads decide the budget left
+      // for the next); within a message the image and document passes run
+      // concurrently — independent budgets — and each pass downloads its files
+      // concurrently.
       for (let i = kept.length - 1; i >= 0; i--) {
         const files = kept[i].files;
         if (!files?.length) continue;
-        if (imagesLeft > 0 && imageBytesLeft > 0) {
-          const { images, bytes } = await fetchImages(
-            files,
-            Math.min(MAX_IMAGES_PER_MESSAGE, imagesLeft),
-            imageBytesLeft,
-          );
-          imagesLeft -= images.length;
-          imageBytesLeft -= bytes;
-          if (images.length > 0) imagesByIndex[i] = images;
+        const [imagePass, docPass] = await Promise.all([
+          imagesLeft > 0 && imageBytesLeft > 0 ? fetchImages(files, Math.min(MAX_IMAGES_PER_MESSAGE, imagesLeft), imageBytesLeft) : undefined,
+          docsLeft > 0 && docBytesLeft > 0 ? fetchDocuments(files, Math.min(MAX_DOCS_PER_MESSAGE, docsLeft), docBytesLeft) : undefined,
+        ]);
+        if (imagePass) {
+          imagesLeft -= imagePass.images.length;
+          imageBytesLeft -= imagePass.bytes;
+          if (imagePass.images.length > 0) imagesByIndex[i] = imagePass.images;
         }
-        if (docsLeft > 0 && docBytesLeft > 0) {
-          const { documents, bytes } = await fetchDocuments(
-            files,
-            Math.min(MAX_DOCS_PER_MESSAGE, docsLeft),
-            docBytesLeft,
-          );
-          docsLeft -= documents.length;
-          docBytesLeft -= bytes;
-          if (documents.length > 0) documentsByIndex[i] = documents;
+        if (docPass) {
+          docsLeft -= docPass.documents.length;
+          docBytesLeft -= docPass.bytes;
+          if (docPass.documents.length > 0) documentsByIndex[i] = docPass.documents;
         }
       }
       for (let i = 0; i < kept.length; i++) {
@@ -766,22 +798,26 @@ function chunkText(text: string, limit: number): string[] {
 }
 
 /**
- * Is the bot already part of this thread? True when it has posted in it or
- * was mentioned anywhere in it. Checked per follow-up (one replies call) so
+ * Is the bot already part of this thread — has it posted in it, or been
+ * mentioned anywhere in it? Checked per follow-up (one replies call) so
  * participation survives restarts — no in-memory thread registry to lose.
+ * Answers with the thread's messages when it is (else undefined): that page is
+ * handed on to `SlackIO.history()` so a follow-up costs ONE
+ * `conversations.replies`, not two identical ones.
  */
-async function botInThread(
+async function threadIfBotInIt(
   client: SlackClient,
   channel: string,
   threadTs: string,
   botUserId?: string,
-): Promise<boolean> {
-  if (!botUserId) return false;
+): Promise<SlackThreadMessage[] | undefined> {
+  if (!botUserId) return undefined;
   try {
     const replies = await client.conversations.replies({ channel, ts: threadTs, limit: 50 });
-    return threadIncludesBot((replies.messages ?? []) as Array<{ user?: string; text?: string }>, botUserId);
+    const messages = (replies.messages ?? []) as SlackThreadMessage[];
+    return threadIncludesBot(messages, botUserId) ? messages : undefined;
   } catch {
-    return false; // can't read the thread => stay quiet
+    return undefined; // can't read the thread => stay quiet
   }
 }
 

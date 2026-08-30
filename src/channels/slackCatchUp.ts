@@ -1,5 +1,6 @@
 import { LIVE_CARD_PREFIXES } from "../core/dispatcher.js";
 import { MIN_CATCH_UP_WINDOW_MS } from "../core/drain.js";
+import { mapLimit } from "../core/mapLimit.js";
 import type { StatusUpdate } from "../core/types.js";
 import { recordCatchUpOutcome, type CatchUpOutcome } from "./slackCatchUpStatus.js";
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
@@ -55,6 +56,12 @@ if (DEFAULT_WINDOW_MS < MIN_CATCH_UP_WINDOW_MS) {
 export const DEFAULT_PARENT_LOOKBACK_MS = 7 * 86_400_000;
 const HISTORY_PAGE = 200;
 const MAX_HISTORY_PAGES = 5;
+/** Channels scanned at once, and per channel, threads whose replies are fetched
+ *  at once. `conversations.history`/`replies` are Tier 3 (~50/min) and the
+ *  WebClient queues + honours Retry-After, so modest fan-out is safe; the point
+ *  is turning a sum of round trips into a max, not saturating the tier. */
+const CATCH_UP_CHANNEL_CONCURRENCY = 4;
+const CATCH_UP_THREAD_CONCURRENCY = 4;
 const REPLIES_LIMIT = 200;
 const MAX_REPLIES_PAGES = 5;
 
@@ -294,26 +301,43 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<Catch
     return { channels: 0, missed: 0, orphans: 0, skippedChannels: 0 };
   }
 
+  // Phase 1 — READ: scan channels with bounded concurrency. Each scan is a
+  // history page (or several) plus one replies fetch per recently-active
+  // thread; serially that summed every round trip (C channels + T threads ×
+  // Slack RTT — tens of seconds on a busy workspace, on EVERY reconnect, while
+  // the caller of a missed mention is still waiting for a receipt). A failed
+  // scan is a per-channel result (skipped), never a rejection that would stop
+  // the others. Phase 2 — ACT: in the original channel order, so re-dispatch
+  // order is exactly what the serial loop produced.
+  type Scan = { found: MissedMessage[]; orphaned: OrphanedCard[] } | { failed: string };
+  const scans = await mapLimit(channels, CATCH_UP_CHANNEL_CONCURRENCY, async (channel): Promise<Scan> => {
+    try {
+      const parents = await fetchParents(client, channel, (now - lookbackMs) / 1000);
+      const active = parents.filter(
+        (p) => p.ts && p.latest_reply && (p.reply_count ?? 0) > 0 && tsMs(p.latest_reply) >= threadCutoffMs,
+      );
+      const replies = await mapLimit(active, CATCH_UP_THREAD_CONCURRENCY, (p) => fetchReplies(client, channel, p.ts!));
+      const threads = new Map<string, SlackHistoryMessage[]>(active.map((p, i) => [p.ts!, replies[i]]));
+      const found = findMissed({ channel, botUserId, cutoffMs, parents, threads, alreadyHandled: opts.alreadyHandled });
+      const orphaned = sweep ? findOrphanedCards({ channel, botUserId, cutoffMs: orphanCutoffMs, threads, ownedHere: sweep.ownedHere }) : [];
+      return { found, orphaned };
+    } catch (err) {
+      return { failed: errMsg(err) };
+    }
+  });
+
   let missed = 0;
   let orphans = 0;
   let skippedChannels = 0;
-  for (const channel of channels) {
-    let found: MissedMessage[];
-    let orphaned: OrphanedCard[] = [];
-    try {
-      const parents = await fetchParents(client, channel, (now - lookbackMs) / 1000);
-      const threads = new Map<string, SlackHistoryMessage[]>();
-      for (const p of parents) {
-        if (!p.ts || !p.latest_reply || (p.reply_count ?? 0) === 0 || tsMs(p.latest_reply) < threadCutoffMs) continue;
-        threads.set(p.ts, await fetchReplies(client, channel, p.ts));
-      }
-      found = findMissed({ channel, botUserId, cutoffMs, parents, threads, alreadyHandled: opts.alreadyHandled });
-      if (sweep) orphaned = findOrphanedCards({ channel, botUserId, cutoffMs: orphanCutoffMs, threads, ownedHere: sweep.ownedHere });
-    } catch (err) {
-      log(`[catch-up] ${channel}: scan failed, skipped: ${errMsg(err)}`);
+  for (let i = 0; i < channels.length; i++) {
+    const channel = channels[i];
+    const scan = scans[i];
+    if ("failed" in scan) {
+      log(`[catch-up] ${channel}: scan failed, skipped: ${scan.failed}`);
       skippedChannels++;
       continue;
     }
+    const { found, orphaned } = scan;
     if (sweep && orphaned.length > 0) {
       // Counted per successful close, so the summary never claims a card the
       // update failed on; each failure is logged by itself.
