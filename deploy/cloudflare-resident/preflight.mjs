@@ -15,6 +15,8 @@
 // Dependency-free Node (fetch is built in). `decide()` is pure and unit-tested
 // (preflight.test.mjs); `main()` only does I/O around it.
 
+import { pathToFileURL } from "node:url";
+
 export const DEFAULT_BASE_URL = "https://switchboard-resident.coreplanelabs.dev";
 export const TOKEN_ENV_VARS = ["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"];
 
@@ -151,6 +153,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 }
 
 // Run only when executed directly (`node preflight.mjs`), not when imported by tests.
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+// pathToFileURL, not `file://${argv[1]}`, so the guard also holds on Windows paths.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   process.exitCode = await main();
 }
