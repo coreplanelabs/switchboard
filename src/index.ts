@@ -21,7 +21,7 @@ import { defaultRunRegistry } from "./core/runRegistry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { buildFrictionLedger, WorkerFrictionLedger } from "./core/frictionLedgerWorker.js";
-import { healthPayload } from "./channels/health.js";
+import { healthPayload, readBuildInfo } from "./channels/health.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { activeRunCount, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
@@ -39,6 +39,10 @@ async function main() {
     }
   }
 
+  // Build identity for /healthz (features/slack-channel.md item 8): written by
+  // `deploy/cloudflare/write-build.mjs` into the image; "unknown" when built by hand.
+  const build = readBuildInfo(process.env.SWITCHBOARD_BUILD_INFO ?? "./build.json");
+  console.log(`[build] ${build.commit}${build.builtAt ? ` @ ${build.builtAt}` : ""}`);
   const config = new ConfigStore(CONFIG_PATH, OVERRIDES_PATH);
   const providers = new ProviderRegistry(config.config.providers);
   // Bundled skills (#100): loaded once from the seeded `skills/` dir and shared
@@ -216,7 +220,7 @@ async function main() {
       // preflight refuses on (features/slack-channel.md item 8).
       if (path === "/healthz") {
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining, drainStartedAt, catchUp: getCatchUpStatus() })));
+        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining, drainStartedAt, catchUp: getCatchUpStatus(), build })));
         return;
       }
       // Unknown paths. The live-view handler only ever owns /runs*, which the

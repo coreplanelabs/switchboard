@@ -6,3 +6,4 @@ workspaces/
 .agent-env/
 config/config.yaml
 node_modules
+build.json

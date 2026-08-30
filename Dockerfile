@@ -24,7 +24,10 @@ RUN useradd -m -u 1001 switchboard
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY package.json ./
+# build.json is written by deploy/cloudflare/write-build.mjs (npm run deploy) and
+# served on /healthz as `build`; the glob keeps it optional so a bare
+# `wrangler deploy` / docker compose still builds (the bot then says "unknown").
+COPY package.json build.jso[n] ./
 # config.yaml is expected at /app/config/config.yaml — bake it in or mount it.
 COPY config ./config
 # Bundled skills (#100): loaded at startup by BundledSkillStore from /app/skills.

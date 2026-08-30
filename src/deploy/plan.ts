@@ -24,14 +24,23 @@ export const UNSET_ENV = ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"] as co
 
 export type WorkerName = "memory" | "bot" | "resident" | "sandbox";
 
+/** The bot's public health probe (deploy/cloudflare/preflight.mjs reads the same URL). */
+export const BOT_HEALTH_URL = "https://switchboard.coreplanelabs.dev/healthz";
+
 export interface WorkerDef {
   name: WorkerName;
   /** The Cloudflare Worker script name (what `wrangler deployments list` shows). */
   script: string;
   /** Repo-relative directory holding package.json + wrangler.jsonc. */
   dir: string;
-  /** Present when the dir's `npm run deploy` runs a preflight that can refuse. */
-  preflight?: { forceEnv: string };
+  /** Present when the dir's `npm run deploy` runs a preflight that can refuse.
+   *  `healthUrl` is the bot's public `/healthz`: the heartbeat reads it while
+   *  waiting, and the live gate polls it after the deploy. */
+  preflight?: { forceEnv: string; healthUrl?: string };
+  /** Present when "deployed" is not "live": the step is done only once
+   *  `healthUrl` is answered by a container that is not draining AND reports
+   *  the deployed commit as its `build.commit` (src/deploy/liveGate.ts). */
+  liveGate?: { healthUrl: string };
   /** Env vars the step needs present (the runner fails fast when missing). */
   requiredEnv?: string[];
   why: string;
@@ -49,8 +58,9 @@ export const WORKERS: readonly WorkerDef[] = [
     name: "bot",
     script: "switchboard",
     dir: "deploy/cloudflare",
-    preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE" },
-    why: "container shim — preflight refuses while runs are in flight",
+    preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: BOT_HEALTH_URL },
+    liveGate: { healthUrl: BOT_HEALTH_URL },
+    why: "container shim — preflight refuses while runs are in flight; done only when the new container is live",
   },
   {
     name: "resident",
@@ -147,6 +157,10 @@ export interface DeployStep {
   requiredEnv: string[];
   /** A "preflight REFUSED" exit is waited out and retried (never for forced or unpreflighted steps). */
   retryOnPreflightRefusal: boolean;
+  /** `/healthz` to read for the wait heartbeat (preflighted steps with a health URL). */
+  healthUrl?: string;
+  /** After the deploy, poll this `/healthz` until the new container is live (bot only). */
+  liveGate?: { healthUrl: string };
   why: string;
 }
 
@@ -170,6 +184,8 @@ export function planDeploy(opts: DeployOptions): DeployPlan {
     setEnv: opts.force && w.preflight ? { [w.preflight.forceEnv]: "1" } : {},
     requiredEnv: w.requiredEnv ?? [],
     retryOnPreflightRefusal: !!w.preflight && !opts.force,
+    ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
+    ...(w.liveGate ? { liveGate: w.liveGate } : {}),
     why: w.why,
   }));
   const forcedNames = steps.filter((s) => Object.keys(s.setEnv).length > 0).map((s) => s.name);
@@ -198,7 +214,8 @@ export function formatPlan(plan: DeployPlan): string {
         ? ` — preflight FORCED (${Object.keys(s.setEnv).join(",")}=1)`
         : "";
     const env = s.requiredEnv.length > 0 ? ` — needs ${s.requiredEnv.join(", ")}` : "";
-    lines.push(`  ${i + 1}. ${s.name} (${s.script}) — ${s.dir}: ${s.command.join(" ")}${pf}${env}\n     ${s.why}`);
+    const live = s.liveGate ? ` — then wait until live (${s.liveGate.healthUrl} not draining + build.commit == HEAD)` : "";
+    lines.push(`  ${i + 1}. ${s.name} (${s.script}) — ${s.dir}: ${s.command.join(" ")}${pf}${env}${live}\n     ${s.why}`);
   });
   if (plan.dryRun) lines.push("(dry run — nothing executed)");
   return lines.join("\n");
