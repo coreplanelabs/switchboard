@@ -2,7 +2,7 @@
 // (src/channels/http.ts, src/channels/mcp.ts) and the Cloudflare Worker shim
 // (deploy/cloudflare/worker.ts, which fires scheduled runs through /ingress)
 // read `SWITCHBOARD_INGRESS_TOKENS` with ONE parser. The shape is
-//   {"<raw bearer token>": {"subject": "alice", "channel": "ops"}, ...}
+//   {"<raw bearer token>": {"subject": "alice", "channel": "ops", "scopes": ["dispatch","runs:read"]}, ...}
 // Absent, empty, or malformed => an empty map. Callers treat an empty map as
 // "ingress disabled" (fail-closed) — this module never decides that, it only
 // parses. Token material is never logged here; the caller may log the reason.
@@ -12,6 +12,21 @@
 export interface IngressIdentity {
   subject: string;
   channel?: string;
+  /** What the token may do beyond nothing: `dispatch` (POST /ingress) and
+   *  command-registry scopes such as `runs:read` / `runs:write`
+   *  (features/command-registry.md). Absent in the env → `DEFAULT_INGRESS_SCOPES`;
+   *  malformed → the whole entry is skipped, never widened. */
+  scopes: string[];
+}
+
+export const DEFAULT_INGRESS_SCOPES: readonly string[] = ["dispatch"];
+
+/** `undefined` → the default; an array of non-empty strings → itself (deduped);
+ *  anything else → null (the caller skips the entry). */
+export function parseScopes(v: unknown): string[] | null {
+  if (v === undefined) return [...DEFAULT_INGRESS_SCOPES];
+  if (!Array.isArray(v) || v.some((s) => typeof s !== "string" || s === "")) return null;
+  return [...new Set(v as string[])];
 }
 
 export type IngressTokenMap = Record<string, IngressIdentity>;
@@ -44,7 +59,9 @@ export function parseIngressTokenMap(raw: string | undefined): ParsedIngressToke
     const channel = v.channel;
     if (typeof subject !== "string" || subject === "") continue;
     if (channel !== undefined && typeof channel !== "string") continue;
-    tokens[token] = typeof channel === "string" ? { subject, channel } : { subject };
+    const scopes = parseScopes(v.scopes);
+    if (!scopes) continue;
+    tokens[token] = typeof channel === "string" ? { subject, channel, scopes } : { subject, scopes };
   }
   return { ok: true, tokens };
 }

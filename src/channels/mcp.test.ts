@@ -1,9 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders } from "node:http";
 import { createMcpHandler, handleMcpRequest, McpIO } from "./mcp.js";
-import type { DispatchFn, IngressConfig } from "./http.js";
+import type { DispatchFn, IngressConfig, IngressIdentity } from "./http.js";
 import type { CoreDeps } from "../core/dispatcher.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
+import { z } from "zod";
+import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
+import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
+import type { RunEvent } from "../core/runEvents.js";
+import { analyzeRunFriction } from "../core/runFriction.js";
+import { RunRegistry } from "../core/runRegistry.js";
+import { InMemoryRunStore } from "../core/runStore.js";
+import { createRunsService } from "../core/runsService.js";
 
 // Feature: features/mcp-ingress.md — adapter #4 (MCP). A minimal MCP server over
 // streamable-HTTP (JSON-RPC 2.0 over POST /mcp). It reuses http.ts's fail-closed,
@@ -23,7 +31,10 @@ function fakeDispatch(reply = "the answer") {
   return { fn, calls };
 }
 
-const authConfig = (tokens: IngressConfig["tokens"]): IngressConfig => ({ tokens });
+/** Fixture identities carry the parser's default scopes (`["dispatch"]`). */
+const authConfig = (tokens: Record<string, Omit<IngressIdentity, "scopes">>): IngressConfig => ({
+  tokens: Object.fromEntries(Object.entries(tokens).map(([t, id]) => [t, { ...id, scopes: ["dispatch"] }])),
+});
 const bearer = (token: string): IncomingHttpHeaders => ({ authorization: `Bearer ${token}` });
 const good = authConfig({ tok: { subject: "alice" } });
 
@@ -343,5 +354,166 @@ describe("createMcpHandler (node:http wrapper)", () => {
     await vi.waitFor(() => expect(t.status()).toBe(413));
     expect(d.calls).toHaveLength(0);
     expect((t.reqRaw as unknown as { destroy: ReturnType<typeof vi.fn> }).destroy).toHaveBeenCalled();
+  });
+});
+
+// --- Registry commands as MCP tools (#157 U7: R7/R9, KTD2/KTD11/KTD17) -------
+
+const NOW = 1_700_000_000_000;
+
+/** One live run (with a `tok-` capability token) and one persisted run behind
+ *  the `runs.*` registrations, bound for the adapter. */
+async function commandFixture() {
+  let n = 0;
+  const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
+  const live = reg.create("coding · acme/live", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t" });
+  reg.publish(live.id, { type: "input", text: "live request" });
+  const store = new InMemoryRunStore({ now: () => NOW });
+  const events: RunEvent[] = [
+    { type: "input", text: "please do the thing", seq: 1 },
+    { type: "answer", text: "all done", seq: 2 },
+  ];
+  await store.put({
+    id: "fin-1",
+    label: "coding · acme/fin-1",
+    agent: "coding",
+    model: "anthropic/claude",
+    channelId: "slack:C1",
+    userId: "slack:U1",
+    threadKey: "slack:C1:fin-1",
+    startedAt: NOW - 11_000,
+    finishedAt: NOW - 1000,
+    status: "completed",
+    eventCount: 2,
+    storedEventCount: 2,
+    truncated: false,
+    events,
+    diagnosis: analyzeRunFriction(events),
+  });
+  const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
+  registerRunsCommands(registry);
+  const commands = bindCommands(registry, { runs: createRunsService({ registry: reg, store }) });
+  return { reg, live, commands };
+}
+
+const scoped = (scopes: string[], channel?: string): IngressConfig => ({ tokens: { tok: { subject: "alice", scopes, ...(channel ? { channel } : {}) } } });
+
+/** The tool result text is `<one-line header>\n<JSON>`; return the parsed JSON. */
+function toolJson(res: { body?: unknown }): unknown {
+  const text = ((res.body as RpcResult).result.content as { text: string }[])[0].text;
+  const nl = text.indexOf("\n");
+  expect(nl).toBeGreaterThan(0);
+  return JSON.parse(text.slice(nl + 1));
+}
+
+describe("handleMcpRequest — registry commands as tools", () => {
+  it("tools/list = dispatch + every registered command with a derived inputSchema (runs_list has the status enum)", async () => {
+    const { commands } = await commandFixture();
+    const res = await handleMcpRequest(rpc("tools/list", {}), deps, { auth: good, commands });
+    const tools = (res.body as RpcResult).result.tools as Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
+    expect(tools[0].name).toBe("dispatch");
+    expect(tools.map((t) => t.name)).toEqual(["dispatch", "runs_list", "runs_get", "runs_events", "runs_friction", "runs_stop"]);
+    const list = tools.find((t) => t.name === "runs_list")!;
+    expect(list.description).toBeTruthy();
+    expect((list.inputSchema.properties as Record<string, { enum?: string[] }>).status.enum).toEqual(["active", "finished", "all"]);
+    expect(list.inputSchema.type).toBe("object");
+  });
+
+  it("a command that opted out of MCP is not listed", async () => {
+    const registry = new CommandRegistry<unknown>({ audit: () => {} });
+    registry.register({
+      id: "hidden.cmd",
+      input: z.object({}),
+      scope: "hidden:read",
+      chatGate: "open",
+      effect: "read",
+      surfaces: { mcp: false },
+      describe: "not for MCP",
+      handler: async () => ({}),
+    });
+    const res = await handleMcpRequest(rpc("tools/list", {}), deps, { auth: good, commands: bindCommands(registry, undefined) });
+    expect(((res.body as RpcResult).result.tools as { name: string }[]).map((t) => t.name)).toEqual(["dispatch"]);
+  });
+
+  it("tools/call runs_list returns a header line plus the invoke JSON, with no token", async () => {
+    const { commands } = await commandFixture();
+    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, { auth: scoped(["runs:read"]), commands });
+    expect(res.status).toBe(200);
+    const body = toolJson(res) as { runs: { id: string }[] };
+    expect(body.runs.map((r) => r.id).sort()).toEqual(["fin-1", "live-1"]);
+    expect(JSON.stringify(res.body)).not.toContain("tok-");
+    const direct = await commands.invoke("runs.list", { status: "all" }, { kind: "mcp", id: "mcp:alice", scopes: new Set(["runs:read"]) });
+    expect(body).toEqual(direct.ok ? direct.value : null);
+  });
+
+  it("runs_get on an unknown run → JSON-RPC error with data.code 'not_found'", async () => {
+    const { commands } = await commandFixture();
+    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_get", arguments: { id: "nope" } }), deps, { auth: scoped(["runs:read"]), commands });
+    expect(res.status).toBe(200);
+    const body = res.body as RpcError & { error: { data?: { code: string } } };
+    expect(body.error.data?.code).toBe("not_found");
+    expect(body.error.message).toBeTruthy();
+  });
+
+  it("bad input → JSON-RPC -32602 with data.code 'invalid_input', never echoing the value", async () => {
+    const { commands } = await commandFixture();
+    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "s3cret" } }), deps, { auth: scoped(["runs:read"]), commands });
+    const body = res.body as RpcError & { error: { data?: { code: string } } };
+    expect(body.error.code).toBe(-32602);
+    expect(body.error.data?.code).toBe("invalid_input");
+    expect(JSON.stringify(body)).not.toContain("s3cret");
+  });
+
+  it("a dispatch-only token is refused on runs_list and runs_stop with data.code 'unauthorized' (AE5)", async () => {
+    const { commands, live, reg } = await commandFixture();
+    for (const [name, args] of [
+      ["runs_list", { status: "all" }],
+      ["runs_stop", { id: live.id, mode: "soft" }],
+    ] as const) {
+      const res = await handleMcpRequest(rpc("tools/call", { name, arguments: args }), deps, { auth: good, commands });
+      const body = res.body as RpcError & { error: { data?: { code: string } } };
+      expect(body.error.data?.code, name).toBe("unauthorized");
+    }
+    expect(reg.getById(live.id)?.stop).toBeUndefined();
+  });
+
+  it("a runs:write token stops a live run as actor mcp:<subject>; a finished run → data.code 'conflict'", async () => {
+    const { commands, live, reg } = await commandFixture();
+    const auth = scoped(["runs:write"]);
+    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_stop", arguments: { id: live.id, mode: "soft" } }), deps, { auth, commands });
+    expect((res.body as RpcResult).result).toBeTruthy();
+    const note = reg.snapshotById(live.id)!.events.find((e) => e.type === "run_note" && e.kind === "stop_requested") as { actor?: unknown };
+    expect(note.actor).toEqual({ kind: "mcp", id: "mcp:alice" });
+    const fin = await handleMcpRequest(rpc("tools/call", { name: "runs_stop", arguments: { id: "fin-1", mode: "soft" } }), deps, { auth, commands });
+    expect((fin.body as RpcError & { error: { data?: { code: string } } }).error.data?.code).toBe("conflict");
+  });
+
+  it("a token-pinned channel becomes the caller's mcp:-namespaced pin (other channels' runs are invisible)", async () => {
+    const { commands } = await commandFixture();
+    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, { auth: scoped(["runs:read"], "ops"), commands });
+    expect((toolJson(res) as { runs: unknown[] }).runs).toEqual([]);
+  });
+
+  it("a token without the dispatch scope (runs:read only) cannot call `dispatch`: -32001 data.code 'unauthorized', dispatch never called", async () => {
+    const { commands } = await commandFixture();
+    const d = fakeDispatch("hi");
+    const res = await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: { text: "start a run" } }), deps, { auth: scoped(["runs:read"]), commands, dispatch: d.fn });
+    const body = res.body as RpcError & { error: { data?: { code: string } } };
+    expect(body.error.code).toBe(-32001);
+    expect(body.error.data?.code).toBe("unauthorized");
+    expect(d.calls).toHaveLength(0);
+    // the same token still reads through the registry tool it IS scoped for
+    const list = await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, { auth: scoped(["runs:read"]), commands });
+    expect((list.body as RpcResult).result).toBeTruthy();
+  });
+
+  it("dispatch is unchanged alongside the registry tools; an unknown tool is still -32602", async () => {
+    const { commands } = await commandFixture();
+    const d = fakeDispatch("hi");
+    const res = await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: { text: "hello" } }), deps, { auth: good, commands, dispatch: d.fn });
+    expect((res.body as RpcResult).result).toEqual({ content: [{ type: "text", text: "hi" }] });
+    expect(d.calls).toHaveLength(1);
+    const unknown = await handleMcpRequest(rpc("tools/call", { name: "runs_frobnicate", arguments: {} }), deps, { auth: good, commands });
+    expect((unknown.body as RpcError).error.code).toBe(-32602);
   });
 });

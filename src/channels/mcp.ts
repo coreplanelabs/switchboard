@@ -1,9 +1,19 @@
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import {
+  CommandRegistry,
+  jsonSchemaFor,
+  toSurfaceNames,
+  type Caller,
+  type CommandDef,
+  type CommandInvoker,
+  type InvokeErrorCode,
+} from "../core/commandRegistry.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import { PlainTextFormatter } from "../core/structuredMessage.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
 import {
   authorizeRequest,
+  hasDispatchScope,
   MAX_BODY_BYTES,
   readBody,
   type DispatchFn,
@@ -20,8 +30,15 @@ import {
 // single POST /mcp with one JSON response per request (no SSE; request/response
 // tool calls don't need it). We hand-implement the small JSON-RPC subset rather
 // than take the MCP SDK as a dependency. Methods handled: initialize,
-// tools/list, tools/call (one tool: `dispatch`), and JSON-RPC notifications
-// (accepted, no response). Anything else is a proper JSON-RPC error.
+// tools/list, tools/call, and JSON-RPC notifications (accepted, no response).
+// Anything else is a proper JSON-RPC error.
+//
+// Tools: the hand-written `dispatch` (starts an agent run through dispatch())
+// PLUS every command registry entry exposed to MCP (#157 U7, KTD2/KTD11): tool
+// `runs_list` ↔ command `runs.list`, `inputSchema` derived from the zod input,
+// result text = one header line + the JSON object `invoke` returned, errors as
+// JSON-RPC errors carrying `data.code`. No per-command code lives here; the
+// registry authorizes from the token's `scopes` (default `dispatch` only).
 //
 // Auth is REUSED wholesale from the HTTP ingress adapter (http.ts): the same
 // fail-closed, constant-time bearer-token machinery and the same
@@ -38,7 +55,7 @@ const DEFAULT_THREAD = "default";
 const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_INFO = { name: "switchboard", version: "0.1.0" } as const;
 
-/** The single tool this server exposes. */
+/** The one hand-written tool; every other tool is a registry command. */
 const DISPATCH_TOOL = {
   name: "dispatch",
   description: "send a request to Switchboard",
@@ -68,14 +85,48 @@ export interface McpOptions {
   dispatch?: DispatchFn;
   /** Max body size in bytes (node wrapper enforces at read time). */
   maxBodyBytes?: number;
+  /** The command registry (deps bound) whose MCP-exposed commands become tools
+   *  beside `dispatch`. Absent → `dispatch` is the only tool. */
+  commands?: CommandInvoker;
 }
+
+/** KTD2/KTD11: `runs.list` → tool `runs_list` with a zod-derived inputSchema. */
+function toMcpTool(cmd: CommandDef<unknown>): { name: string; description: string; inputSchema: Record<string, unknown> } {
+  return { name: toSurfaceNames(cmd.id).mcp, description: cmd.describe, inputSchema: jsonSchemaFor(cmd) };
+}
+
+function mcpExposed(commands: CommandInvoker | undefined): CommandDef<unknown>[] {
+  return (commands?.list() ?? []).filter((c) => CommandRegistry.exposedTo(c, "mcp"));
+}
+
+/** R9: the Caller an MCP bearer identity resolves to — the token's explicit
+ *  scopes, and its pinned channel as the `mcp:`-namespaced pin (the same
+ *  namespace `toIncomingMessage` gives a dispatch's channelId). */
+function toCaller(identity: IngressIdentity): Caller {
+  return {
+    kind: "mcp",
+    id: `${PLATFORM}:${identity.subject}`,
+    scopes: new Set(identity.scopes),
+    ...(identity.channel !== undefined ? { channel: `${PLATFORM}:${identity.channel}` } : {}),
+  };
+}
+
+/** Registry error codes → JSON-RPC codes; the registry code itself rides in `data.code`. */
+const RPC_CODE_FOR: Readonly<Record<InvokeErrorCode, number>> = {
+  unauthorized: -32001, // AUTH_ERROR
+  invalid_input: -32602, // INVALID_PARAMS
+  not_found: -32002,
+  conflict: -32003,
+  internal: -32603, // INTERNAL_ERROR
+};
 
 type JsonRpcId = string | number | null;
 
 interface JsonRpcErrorBody {
   jsonrpc: "2.0";
   id: JsonRpcId;
-  error: { code: number; message: string };
+  /** `data.code` carries the registry's error vocabulary for command tools. */
+  error: { code: number; message: string; data?: { code: InvokeErrorCode } };
 }
 
 interface JsonRpcResultBody {
@@ -143,8 +194,8 @@ function ok(id: JsonRpcId, result: unknown): JsonRpcResultBody {
   return { jsonrpc: "2.0", id, result };
 }
 
-function err(id: JsonRpcId, code: number, message: string): JsonRpcErrorBody {
-  return { jsonrpc: "2.0", id, error: { code, message } };
+function err(id: JsonRpcId, code: number, message: string, data?: { code: InvokeErrorCode }): JsonRpcErrorBody {
+  return { jsonrpc: "2.0", id, error: data ? { code, message, data } : { code, message } };
 }
 
 export interface McpRequest {
@@ -193,15 +244,30 @@ async function route(
       });
 
     case "tools/list":
-      return ok(id, { tools: [DISPATCH_TOOL] });
+      return ok(id, { tools: [DISPATCH_TOOL, ...mcpExposed(options.commands).map(toMcpTool)] });
 
     case "tools/call": {
       const name = req.params.name;
+      const rawArgs = req.params.arguments;
+      const args = typeof rawArgs === "object" && rawArgs !== null ? (rawArgs as Record<string, unknown>) : {};
+      const command = options.commands && mcpExposed(options.commands).find((c) => toSurfaceNames(c.id).mcp === name);
+      if (command) {
+        // Registry tool: raw arguments straight to invoke (KTD10 authorization
+        // and the schema live there), the returned object straight back out.
+        const result = await options.commands!.invoke(command.id, args, toCaller(identity));
+        if (!result.ok) return err(id, RPC_CODE_FOR[result.error], result.message, { code: result.error });
+        return ok(id, { content: [{ type: "text", text: `${command.id}: ok\n${JSON.stringify(result.value)}` }] });
+      }
       if (name !== DISPATCH_TOOL.name) {
         return err(id, INVALID_PARAMS, `unknown tool: ${typeof name === "string" ? name : "(none)"}`);
       }
-      const rawArgs = req.params.arguments;
-      const args = typeof rawArgs === "object" && rawArgs !== null ? (rawArgs as Record<string, unknown>) : {};
+      // `dispatch` starts an agent run: only a token holding the `dispatch`
+      // scope may call it (fail-closed, before the arguments are looked at). A
+      // registry-only token (`runs:read`, …) gets the same `unauthorized` code
+      // the registry tools answer with.
+      if (!hasDispatchScope(identity)) {
+        return err(id, RPC_CODE_FOR.unauthorized, `${PLATFORM}:${identity.subject} is not allowed to call dispatch`, { code: "unauthorized" });
+      }
       if (typeof args.text !== "string" || args.text.trim() === "") {
         return err(id, INVALID_PARAMS, "`text` is required and must be a non-empty string");
       }

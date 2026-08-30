@@ -247,6 +247,40 @@ describe("repo management gate (canManageRepos)", () => {
     expect(s.canManageRepos("slack:UDEV")).toBe(false);
     expect(s.canManageRepos("slack:UADMIN")).toBe(true);
   });
+});
+
+// Feature: features/command-registry.md — the chat gate the command registry
+// resolves a `slack:U…` caller against. `isOperator` is FAIL-CLOSED: only
+// `permissions.admins` qualify, and no admins means no operators.
+describe("operator gate (isOperator, chatGateFor)", () => {
+  it("isOperator is true only for admins", () => {
+    const s = store();
+    expect(s.isOperator("slack:UADMIN")).toBe(true);
+    expect(s.isOperator("slack:UDEV")).toBe(false);
+    expect(s.isOperator("slack:URANDOM")).toBe(false);
+  });
+
+  it("isOperator is false for everyone when permissions.admins is absent", () => {
+    const s = store(YAML_FIXTURE.replace(/permissions:[\s\S]*$/, ""));
+    expect(s.isOperator("slack:UADMIN")).toBe(false);
+    expect(s.isOperator("slack:URANDOM")).toBe(false);
+  });
+
+  it("chatGateFor resolves open → everyone, operator → admins, repoManager → canManageRepos", () => {
+    const s = store(YAML_FIXTURE + `  repoManagement: ["slack:UDEV"]\n`);
+    const admin = s.chatGateFor("slack:UADMIN");
+    const dev = s.chatGateFor("slack:UDEV");
+    const rando = s.chatGateFor("slack:URANDOM");
+    expect([admin("open"), dev("open"), rando("open")]).toEqual([true, true, true]);
+    expect([admin("operator"), dev("operator"), rando("operator")]).toEqual([true, false, false]);
+    expect([admin("repoManager"), dev("repoManager"), rando("repoManager")]).toEqual([true, true, false]);
+  });
+
+  it("permissions.operators is parsed as the Access-identity write allowlist", () => {
+    const s = store(YAML_FIXTURE + `  operators: ["access:alice@example.com"]\n`);
+    expect(s.operatorIdentities()).toEqual(["access:alice@example.com"]);
+    expect(store().operatorIdentities()).toEqual([]);
+  });
 
   it("no admins configured at all → nobody may manage repos (still closed)", () => {
     const NO_PERMS = YAML_FIXTURE.replace(/permissions:[\s\S]*$/m, "");

@@ -1,9 +1,11 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { NAV_CSS, renderNav } from "./nav.js";
-import { serializedOnce, type RunEvent } from "../core/runEvents.js";
+import { serializedOnce, type RunEvent, type StopMode } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
+import type { RunStatus } from "../core/runRecord.js";
+import { STORE_UNAVAILABLE_BANNER } from "../core/commandRegistry.js";
 import type { IndexEvent, RunRegistry, RunSummary, Unsubscribe } from "../core/runRegistry.js";
-import type { StopMode } from "../core/runEvents.js";
+import type { Result, RunEventsPageView, RunsService, RunView } from "../core/runsService.js";
 import { renderMarkdownInto } from "./markdownLite.js";
 import { createRunTimeline } from "./runTimeline.js";
 import { formatLocalIso } from "./localIso.js";
@@ -15,12 +17,16 @@ import type { ScheduleStore } from "../core/scheduleStore.js";
 // (Area 2 / #43). It streams the SAME redacted RunEvents the in-channel status
 // card consumes, over Server-Sent Events, to a minimal self-contained page.
 //
-// Auth is a per-run CAPABILITY TOKEN, not a bearer header: a plain browser
-// navigation can't send an Authorization header, so the token rides in the URL
-// (`/runs/:id?t=…`) and is validated (constant-time) by the registry for BOTH
-// the page and the event stream. A wrong/missing token — or an unknown run — is
-// a 404 (never reveal existence). Events are already redacted + capped upstream
-// (runEvents.ts); this layer adds no data and re-exposes nothing.
+// Auth for a LIVE run is a per-run CAPABILITY TOKEN, not a bearer header: a
+// plain browser navigation can't send an Authorization header, so the token
+// rides in the URL (`/runs/:id?t=…`) and is validated (constant-time) by the
+// registry — via `RunsService.authorizeLive` — for the page, the event stream
+// and the stop control. A wrong/missing token on a live run — or an unknown run
+// — is a 404 (never reveal existence). A FINISHED run (still in the registry, or
+// persisted in the run store — #157) is served tokenless in history mode to the
+// Access-authenticated viewer, through the same page renderer. Events are
+// already redacted + capped upstream (runEvents.ts); this layer adds no data and
+// re-exposes nothing.
 //
 // SSE (not WebSocket) because the flow is strictly one-directional server→page,
 // EventSource auto-reconnects, and it needs no handshake or extra dependency.
@@ -59,12 +65,6 @@ export function parseRunRoute(pathname: string): RunRoute | null {
  *  (→ 400). Never trust the query to name the mode for us. */
 export function parseStopMode(raw: string | null): StopMode | null {
   return raw === "soft" || raw === "hard" ? raw : null;
-}
-
-/** Human label for a run's stop status ("stopping (soft)", "stopped (hard)").
- *  Kept byte-identical to the client mirrors in both pages. */
-function stopLabel(stop: NonNullable<RunSummary["stop"]>): string {
-  return `${stop.state} (${stop.mode})`;
 }
 
 /** Content-Security-Policy for the run page: everything self/inline only, no
@@ -114,8 +114,21 @@ export const MARKDOWN_RENDERER_SCRIPT = `var __name = function (fn) { return fn;
  * terminators JSON allows but JavaScript string literals do not). Exported for
  * the tests that pin the contract.
  */
-export function seedEventsJson(events: readonly RunEvent[]): string {
+export function seedEventsJson(events: readonly LiveFrame[]): string {
   return JSON.stringify(events).replace(/[<>&\u2028\u2029]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/** History-mode inputs for `renderRunPage`: the terminal status (absent for a
+ *  finished run the store has not confirmed yet) and the published event count
+ *  (for the AE11 omission marker). */
+export interface HistoryPage {
+  status?: RunStatus;
+  eventCount: number;
+}
+
+/** The history page's header label: `finished · completed`, `finished · stopped (soft)`, …, or bare `finished`. */
+function finishedLabel(status: RunStatus | undefined): string {
+  return status ? `finished · ${serverRows.statusLabel(status)}` : "finished";
 }
 
 /**
@@ -153,6 +166,12 @@ export const LOCAL_ISO_SCRIPT = String(formatLocalIso);
  * identically by construction. The LIVE page passes none: its SSE replay paints
  * the backlog, so seeding would duplicate rows.
  *
+ * `history` switches the page into history mode (R12): no EventSource is opened
+ * (the seed IS the stream — opening one would paint every row twice), the stop
+ * controls are hidden, the header reads a grey `finished · <status>`, and the
+ * AE11 omission marker is seeded in place. `token` is unused in that mode (pass
+ * ""): a history page never carries a capability URL.
+ *
  * All inline (CSP-safe): DOM is built with createElement/textContent only, the
  * markdown surfaces go through `renderMarkdownInto` (markdownLite.ts), and
  * nothing on this page ever assigns raw markup. `id`/`token` are percent-encoded
@@ -161,17 +180,22 @@ export const LOCAL_ISO_SCRIPT = String(formatLocalIso);
  * one other thing inside the script, and it is only ever there as the
  * `\u003c`-escaped JSON seed.
  */
-export function renderRunPage(id: string, token: string, events: readonly RunEvent[] = []): string {
+export function renderRunPage(id: string, token: string, events: readonly RunEvent[] = [], history?: HistoryPage): string {
   const eventsPath = `/runs/${encodeURIComponent(id)}/events?t=${encodeURIComponent(token)}`;
   // Stop control (#101): same token, POST-only; `&mode=` is appended client-side.
   const stopPath = `/runs/${encodeURIComponent(id)}/stop?t=${encodeURIComponent(token)}`;
+  const seed: readonly LiveFrame[] = history ? withOmittedMarkers(events, history.eventCount) : events;
+  const title = history ? "Run" : "Live run";
+  const conn = history
+    ? `<span class="dot grey" id="statedot"></span><span id="state">${escapeHtml(finishedLabel(history.status))}</span>`
+    : `<span class="dot amber" id="statedot"></span><span id="state">connecting…</span>`;
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex" />
-<title>Live run</title>
+<title>${title}</title>
 <style>
   :root { color-scheme: dark;
     --bg: #0b0d12; --panel: #0f1218; --card: #12151c; --card-open: #141821; --line: #232836; --rail: #1f2430;
@@ -311,13 +335,13 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
 <body>
 <header>
   <a class="back" href="/runs">← All runs</a>
-  <h1>Live run</h1>
-  <span class="actions" id="actions">
+  <h1>${title}</h1>
+  <span class="actions" id="actions"${history ? " hidden" : ""}>
     <button class="stop soft" data-mode="soft" title="Soft stop: no new steps, the agent writes up what it has">Stop</button>
     <button class="stop hard" data-mode="hard" title="Hard stop: abort now, no summary, free the sandbox">Kill</button>
   </span>
   <button class="fold" id="fold" data-open="0" title="Open every call card">Expand all</button>
-  <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>
+  <span class="conn">${conn}</span>
   ${renderNav("runs")}
 </header>
 <section class="block" id="request" hidden><h2><span>Request</span><span class="ts" id="requestts"></span><span class="source" id="source"></span></h2><div class="md" id="requesttext"></div></section>
@@ -329,8 +353,13 @@ ${MARKDOWN_RENDERER_SCRIPT}
 ${RUN_TIMELINE_SCRIPT}
 ${LOCAL_ISO_SCRIPT}
 (function () {
-  var url = ${JSON.stringify(eventsPath)};
-  var stopUrl = ${JSON.stringify(stopPath)};
+  // \`live\` = this page follows a stream: false on a history page (the seed is the
+  // whole record; no stream, no stop route), true on a live page until \`end\` or
+  // a dropped connection (EventSource reconnects re-assert it in onopen). The
+  // tail row shows only while it holds.
+  var live = ${history ? "false" : "true"};
+  var url = ${history ? "null" : JSON.stringify(eventsPath)};
+  var stopUrl = ${history ? "null" : JSON.stringify(stopPath)};
   var log = document.getElementById("log");
   var requestBox = document.getElementById("request");
   var requestText = document.getElementById("requesttext");
@@ -367,7 +396,6 @@ ${LOCAL_ISO_SCRIPT}
   // Set once a stop is requested (from the stream, so a viewer who didn't click
   // sees it too); the end frame then reads "stopped (mode)" not "finished".
   var stopMode = null;
-  var live = false;
   // Connection indicator: color the dot + set its label via classList/textContent
   // (never via raw markup). green = live, amber = connecting, red = disconnected,
   // grey = finished.
@@ -556,7 +584,7 @@ ${LOCAL_ISO_SCRIPT}
   function markStopping(mode) {
     stopMode = mode;
     actions.hidden = true; // one request is enough; the stream shows the outcome
-    setConn("amber", "stopping (" + mode + ")");
+    if (live) setConn("amber", "stopping (" + mode + ")"); // a history page already shows the outcome
   }
   // Stop control (#101): POST the mode to this run's token-scoped stop route.
   // A hard stop is destructive (no summary, sandbox torn down) → confirm first.
@@ -609,35 +637,37 @@ ${LOCAL_ISO_SCRIPT}
     refreshTail();
     if (wasAtTail && !tail.hidden) tail.scrollIntoView({ block: "nearest" });
   }
-  var seed = ${seedEventsJson(events)};
+  var seed = ${seedEventsJson(seed)};
   for (var i = 0; i < seed.length; i++) handle(seed[i]);
-  var es = new EventSource(url);
-  es.onopen = function () { live = true; if (!stopMode) setConn("green", "live"); refreshTail(); };
-  var lastSeq = 0;
-  es.onmessage = function (m) {
-    var e;
-    try { e = JSON.parse(m.data); } catch (_) { return; }
-    // Run-event frames carry their stream position as the SSE id; a proxy that
-    // strips Last-Event-ID on reconnect would make the server replay from the
-    // start, so anything at or before the last applied position is dropped
-    // here too. A transport notice (replay_note) has no id of its own — the
-    // browser reports the previous frame's id for it — so it is exempt.
-    if (e.type !== "replay_note") {
-      var sid = Number(m.lastEventId);
-      if (sid > 0) { if (sid <= lastSeq) return; lastSeq = sid; }
-    }
-    handle(e);
-  };
-  es.addEventListener("end", function () {
-    live = false;
-    refreshTail();
-    actions.hidden = true;
-    setConn("grey", stopMode ? "stopped (" + stopMode + ")" : "finished");
-    es.close();
-  });
-  es.onerror = function () {
-    if (es.readyState === EventSource.CLOSED) { live = false; refreshTail(); setConn("red", "disconnected"); }
-  };
+  if (live) {
+    var es = new EventSource(url);
+    es.onopen = function () { live = true; if (!stopMode) setConn("green", "live"); refreshTail(); };
+    var lastSeq = 0;
+    es.onmessage = function (m) {
+      var e;
+      try { e = JSON.parse(m.data); } catch (_) { return; }
+      // Run-event frames carry their stream position as the SSE id; a proxy that
+      // strips Last-Event-ID on reconnect would make the server replay from the
+      // start, so anything at or before the last applied position is dropped
+      // here too. A transport notice (replay_note) has no id of its own — the
+      // browser reports the previous frame's id for it — so it is exempt.
+      if (e.type !== "replay_note") {
+        var sid = Number(m.lastEventId);
+        if (sid > 0) { if (sid <= lastSeq) return; lastSeq = sid; }
+      }
+      handle(e);
+    };
+    es.addEventListener("end", function () {
+      live = false;
+      refreshTail();
+      actions.hidden = true;
+      setConn("grey", stopMode ? "stopped (" + stopMode + ")" : "finished");
+      es.close();
+    });
+    es.onerror = function () {
+      if (es.readyState === EventSource.CLOSED) { live = false; refreshTail(); setConn("red", "disconnected"); }
+    };
+  }
 })();
 </script>
 </body>
@@ -659,83 +689,268 @@ export function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-/** Short, display-only fallback for a run with no label: the first 8 chars of
- *  its (unguessable) id, ellipsized. Kept byte-identical to the client mirror in
- *  `renderRunsIndex` so a server-rendered row and its later live upsert agree. */
-function shortId(id: string): string {
-  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
-}
-
-/** One live-count label for a run's event tally ("1 event" / "N events"). */
-function eventCountLabel(n: number): string {
-  return `${n} event${n === 1 ? "" : "s"}`;
-}
-
-/** Server-rendered markup for one index row, keyed `data-run-id` so the client
- *  can find and update it in place. The run's content is a single `<a>` (full-row
- *  clickable), leading with a colored status dot (green = live, grey = finished)
- *  that carries an accessible label since color alone isn't accessible, and — for
- *  a live run — a SIBLING `<span class="actions">` with the Stop/Kill buttons
- *  (#101; a button may not nest inside an anchor). A requested stop shows as a
- *  `stopping (mode)` / `stopped (mode)` badge inside the anchor. Every dynamic
- *  string is HTML-escaped and the href's id/token URL-encoded — a hostile label
- *  or id can break out of neither the markup nor the attribute. The client
- *  mirrors this exact shape via the DOM (createElement + textContent/setAttribute),
- *  so a row looks the same whether painted here or by an `upsert`. */
-function indexRowHtml(r: RunSummary): string {
-  const href = `/runs/${encodeURIComponent(r.id)}?t=${encodeURIComponent(r.token)}`;
-  const label = escapeHtml(r.label ?? shortId(r.id));
-  const dotClass = r.finished ? "grey" : "green"; // static — safe, not user input
-  const dotWord = r.finished ? "finished" : "live";
-  const badge = r.stop ? `<span class="stopbadge ${r.stop.state}">${escapeHtml(stopLabel(r.stop))}</span>` : "";
-  // Buttons only while the run can still be stopped: live and not already asked.
-  const actions =
-    r.finished || r.stop
-      ? ""
-      : `<span class="actions">` +
-        `<button class="stop soft" data-mode="soft" title="Soft stop: no new steps, the agent writes up what it has">Stop</button>` +
-        `<button class="stop hard" data-mode="hard" title="Hard stop: abort now, no summary, free the sandbox">Kill</button>` +
-        `</span>`;
-  return (
-    `<li data-run-id="${escapeHtml(r.id)}" data-started-at="${r.startedAt}">` +
-    `<a class="row" href="${escapeHtml(href)}">` +
-    `<span class="dot ${dotClass}" role="img" aria-label="${dotWord}" title="${dotWord}"></span>` +
-    `<span class="label">${label}</span>` +
-    `<span class="meta">${escapeHtml(eventCountLabel(r.eventCount))}</span>` +
-    badge +
-    `</a>${actions}</li>`
-  );
+/** The retention sentence the index toggle carries as its tooltip (R11) —
+ *  truthful in both configurations: with history off the registry TTL is all
+ *  there is. */
+export function retentionSentence(retention: { retentionDays: number } | null): string {
+  if (!retention) return "Run history is off; finished runs are kept about a minute.";
+  const n = retention.retentionDays;
+  return `Finished runs are kept for ${n} day${n === 1 ? "" : "s"}, then deleted`;
 }
 
 /**
- * The Access-gated runs index (`GET /runs`): a self-contained, **live** HTML page
- * listing every non-evicted run, each linking to its per-run page WITH that run's
- * capability token in the URL. The initial snapshot is server-rendered (fast
- * first paint); an inline `EventSource("/runs?stream=1")` then keeps it live —
- * rows appear, update (activity/finish), and disappear (eviction) without a
- * refresh, driven by `IndexEvent`s from the shared registry (so runs from every
- * channel show up). Unlike the per-run page/stream, the index has NO token gate —
- * Cloudflare Access is the "who" gate in front of it. Because it renders the
- * capability links, it must ONLY be exposed behind Access; without Access it would
- * leak every live-run link (see features/live-view.md).
- *
- * CSP-safe (inline-only, no external assets). Server-rendered rows escape every
- * dynamic string via `escapeHtml` and URL-encode the href; the client updates
- * exclusively via `textContent`/`setAttribute` (never `innerHTML`), so a hostile
- * label or id cannot inject markup or break out of the link on either path.
+ * One index row, whatever its source: a live registry row (a `RunSummary`, which
+ * carries the capability `token`) or a finished/persisted `RunView` from
+ * `RunsService` (no token). The row renderer derives everything from this shape
+ * — the href in particular: a live row links with its token, a finished row
+ * links `/runs/:id` tokenless (R10) even while the registry still holds one.
  */
-export function renderRunsIndex(runs: RunSummary[], scheduledPanel = ""): string {
+export interface IndexRow extends RunView {
+  token?: string;
+}
+
+/** The slice of the DOM the row renderer touches — what a browser `Element`
+ *  offers and what `staticDocument()` implements on the server. */
+export interface RowElement {
+  className: string;
+  textContent: string;
+  setAttribute(name: string, value: string): void;
+  appendChild(child: RowElement): void;
+}
+export interface RowDocument {
+  createElement(tag: string): RowElement;
+}
+
+/** What the index feed handler does with one `IndexEvent`, given the view mode
+ *  and whether the addressed row is store-confirmed (`data-persisted`). */
+export type FeedAction = { op: "upsert"; run: IndexRow } | { op: "remove"; id: string } | { op: "keep" };
+
+/**
+ * THE index-row renderer, written once as browser-plain JavaScript and used on
+ * both sides: the server inlines it (`String(fn)`, like the markdown renderer)
+ * and runs it against `staticDocument()` to emit the initial HTML; the page runs
+ * the same code against `document` for every `upsert`. A server-rendered row and
+ * its later client repaint are therefore identical by construction, not by
+ * mirror-maintenance. Everything is createElement + textContent/setAttribute —
+ * a hostile label or id is rendered as data on both paths.
+ *
+ * Row shape: `<li data-run-id data-started-at [data-persisted]>` holding one
+ * full-row `<a class="row" href>` — status dot (green live / grey completed or
+ * finished / amber stopped / red failed, with an accessible label), label,
+ * event count, and for a finished row with a known `finishedAt` a status line
+ * (`completed · 12s · finished 2026-08-29 10:00 UTC`), plus a stop badge once a
+ * stop was requested — and, for a stoppable live run, a SIBLING
+ * `<span class="actions">` with the Stop/Kill buttons (#101; a button may not
+ * nest inside an anchor).
+ *
+ * `feedAction` is the `?stream=1` reconciliation rule (R11): the default view
+ * drops a `finished` upsert (the row leaves as the run ends) and honors every
+ * `removed`; `?all=1` keeps finished rows and ignores `removed` only for a row
+ * the store confirmed (`persisted`), so a run the writer lost still disappears
+ * at eviction and no ghost row survives a reload.
+ *
+ * Plain `function`s and `var` only — this source runs unbundled in the browser.
+ */
+export function indexRowRenderer(doc: RowDocument) {
+  function shortId(id: string): string {
+    return id.length > 8 ? id.slice(0, 8) + "…" : id;
+  }
+  function countLabel(n: number): string {
+    return n + (n === 1 ? " event" : " events");
+  }
+  function stopLabel(stop: { state: string; mode: string }): string {
+    return stop.state + " (" + stop.mode + ")";
+  }
+  function statusLabel(status: string): string {
+    return status === "stopped_soft" ? "stopped (soft)" : status === "stopped_hard" ? "stopped (hard)" : status;
+  }
+  function statusWord(run: IndexRow): string {
+    return !run.finished ? "live" : run.status ? statusLabel(run.status) : "finished";
+  }
+  function statusDot(run: IndexRow): string {
+    if (!run.finished) return "green";
+    if (run.status === "failed") return "red";
+    if (run.status === "stopped_soft" || run.status === "stopped_hard") return "amber";
+    return "grey";
+  }
+  function pad(n: number): string {
+    return (n < 10 ? "0" : "") + n;
+  }
+  function fmtDuration(ms: number): string {
+    var s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return s + "s";
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + "m " + pad(s % 60) + "s";
+    return Math.floor(m / 60) + "h " + pad(m % 60) + "m";
+  }
+  function fmtFinishedAt(at: number): string {
+    return new Date(at).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  }
+  // A live row links with its capability token; a finished row never does (R10).
+  function href(run: IndexRow): string {
+    return "/runs/" + encodeURIComponent(run.id) + (!run.finished && run.token ? "?t=" + encodeURIComponent(run.token) : "");
+  }
+  function stopHref(run: IndexRow, mode: string): string {
+    return "/runs/" + encodeURIComponent(run.id) + "/stop?t=" + encodeURIComponent(run.token || "") + "&mode=" + encodeURIComponent(mode);
+  }
+  function stopButton(mode: string, text: string, title: string): RowElement {
+    var b = doc.createElement("button");
+    b.className = "stop " + mode;
+    b.setAttribute("data-mode", mode);
+    b.setAttribute("title", title);
+    b.textContent = text;
+    return b;
+  }
+  function span(cls: string, text: string): RowElement {
+    var el = doc.createElement("span");
+    el.className = cls;
+    el.textContent = text;
+    return el;
+  }
+  function fill(li: RowElement, run: IndexRow): void {
+    li.setAttribute("data-run-id", run.id);
+    li.setAttribute("data-started-at", String(run.startedAt)); // drives sorted insert
+    if (run.persisted) li.setAttribute("data-persisted", "1"); // store-confirmed: survives `removed` in ?all=1
+    li.textContent = ""; // clear any prior children (server-rendered or stale)
+    var a = doc.createElement("a");
+    a.className = "row";
+    a.setAttribute("href", href(run));
+    var word = statusWord(run);
+    var dot = doc.createElement("span");
+    dot.className = "dot " + statusDot(run);
+    dot.setAttribute("role", "img");
+    dot.setAttribute("aria-label", word);
+    dot.setAttribute("title", word);
+    a.appendChild(dot);
+    a.appendChild(span("label", run.label || shortId(run.id)));
+    a.appendChild(span("meta", countLabel(run.eventCount)));
+    if (run.finished && typeof run.finishedAt === "number") {
+      a.appendChild(span("meta status", word + " · " + fmtDuration(run.finishedAt - run.startedAt) + " · finished " + fmtFinishedAt(run.finishedAt)));
+    }
+    if (run.stop) a.appendChild(span("stopbadge " + run.stop.state, stopLabel(run.stop)));
+    li.appendChild(a);
+    if (!run.finished && !run.stop) {
+      var actions = doc.createElement("span");
+      actions.className = "actions";
+      actions.appendChild(stopButton("soft", "Stop", "Soft stop: no new steps, the agent writes up what it has"));
+      actions.appendChild(stopButton("hard", "Kill", "Hard stop: abort now, no summary, free the sandbox"));
+      li.appendChild(actions);
+    }
+  }
+  function feedAction(ev: { type?: string; run?: IndexRow; id?: string }, showAll: boolean, persisted: boolean): FeedAction {
+    if (ev.type === "upsert" && ev.run) return !showAll && ev.run.finished ? { op: "remove", id: ev.run.id } : { op: "upsert", run: ev.run };
+    if (ev.type === "removed" && ev.id) return showAll && persisted ? { op: "keep" } : { op: "remove", id: ev.id };
+    return { op: "keep" };
+  }
+  return { fill: fill, href: href, stopHref: stopHref, feedAction: feedAction, statusLabel: statusLabel };
+}
+
+/** The `__name` shim every inlined `String(fn)` needs (see MARKDOWN_RENDERER_SCRIPT). */
+const NAME_SHIM = "var __name = function (fn) { return fn; };";
+
+/** The row renderer as browser source, for the index page's inline script. */
+export const INDEX_ROW_SCRIPT = `${NAME_SHIM}\n${String(indexRowRenderer)}`;
+
+/**
+ * A server-side `RowDocument`: elements that remember their attributes (in set
+ * order) and children, and a serializer that escapes every attribute value and
+ * text node — so the row renderer's `textContent`/`setAttribute` discipline
+ * becomes `escapeHtml` on the server. Exported for the mirror test.
+ */
+export function staticDocument(): RowDocument & { serialize(el: RowElement): string } {
+  class StaticElement implements RowElement {
+    readonly attrs: Array<[string, string]> = [];
+    children: Array<StaticElement | string> = [];
+    constructor(readonly tag: string) {}
+    get className(): string {
+      return this.attrs.find(([k]) => k === "class")?.[1] ?? "";
+    }
+    set className(v: string) {
+      this.setAttribute("class", v);
+    }
+    get textContent(): string {
+      return this.children.map((c) => (typeof c === "string" ? c : c.textContent)).join("");
+    }
+    set textContent(v: string) {
+      this.children = v === "" ? [] : [v];
+    }
+    setAttribute(name: string, value: string): void {
+      const existing = this.attrs.find(([k]) => k === name);
+      if (existing) existing[1] = value;
+      else this.attrs.push([name, value]);
+    }
+    appendChild(child: RowElement): void {
+      this.children.push(child as StaticElement);
+    }
+  }
+  const serialize = (el: RowElement): string => {
+    const e = el as StaticElement;
+    const attrs = e.attrs.map(([k, v]) => ` ${k}="${escapeHtml(v)}"`).join("");
+    const inner = e.children.map((c) => (typeof c === "string" ? escapeHtml(c) : serialize(c))).join("");
+    return `<${e.tag}${attrs}>${inner}</${e.tag}>`;
+  };
+  return { createElement: (tag) => new StaticElement(tag), serialize };
+}
+
+const serverDoc = staticDocument();
+const serverRows = indexRowRenderer(serverDoc);
+
+/** Server-rendered markup for one index row — the shared renderer against the
+ *  static document. Exported for the mirror test. */
+export function indexRowHtml(row: IndexRow): string {
+  const li = serverDoc.createElement("li");
+  serverRows.fill(li, row);
+  return serverDoc.serialize(li);
+}
+
+export interface RunsIndexOptions {
+  /** `?all=1`: finished and persisted rows included, the feed keeps finished rows. */
+  all: boolean;
+  /** The configured retention, for the toggle tooltip; null when history is off. */
+  retention: { retentionDays: number } | null;
+  /** The rendered "Scheduled" panel (#244), placed under the run list; absent → no panel. */
+  scheduledPanel?: string;
+  /** `?all=1` only: the service degraded to live rows (`ListRunsResult.storeUnavailable`) → a visible banner. */
+  storeUnavailable?: boolean;
+}
+
+/**
+ * The Access-gated runs index (`GET /runs`): a self-contained, **live** HTML page.
+ * By default it lists the active runs (R11 — never a store read); with `?all=1`
+ * it also lists finished and persisted runs, visually distinct (status dot and
+ * word, duration, finished-at). Each live row links to its per-run page WITH the
+ * run's capability token; finished rows link tokenless. The initial snapshot is
+ * server-rendered (fast first paint); an inline `EventSource("/runs?stream=1")`
+ * then keeps it live — rows appear, update (activity/finish), and disappear
+ * (eviction) without a refresh, driven by `IndexEvent`s from the shared registry
+ * (so runs from every channel show up), reconciled per `feedAction`. Unlike the
+ * per-run page/stream, the index has NO token gate — Cloudflare Access is the
+ * "who" gate in front of it. Because it renders the capability links, it must
+ * ONLY be exposed behind Access; without Access it would leak every live-run
+ * link (see features/live-view.md).
+ *
+ * CSP-safe (inline-only, no external assets). Rows are rendered by the ONE
+ * `indexRowRenderer` on both sides (see there), so no `innerHTML` and no
+ * unescaped string ever reaches the markup on either path.
+ */
+export function renderRunsIndex(runs: readonly IndexRow[], opts: RunsIndexOptions = { all: false, retention: null }): string {
   const rows = runs.map(indexRowHtml).join("");
   // The empty-state <li> always exists; it is only visible when the list has no
   // run rows (server-side here, and toggled client-side as rows come and go).
   const emptyHidden = runs.length === 0 ? "" : " hidden";
+  const title = opts.all ? "All runs" : "Live runs";
+  const toggle = opts.all
+    ? `<a class="toggle" href="/runs" title="${escapeHtml(retentionSentence(opts.retention))}">Active only</a>`
+    : `<a class="toggle" href="/runs?all=1" title="${escapeHtml(retentionSentence(opts.retention))}">Show all</a>`;
+  const feedUrl = opts.all ? "/runs?stream=1&all=1" : "/runs?stream=1";
+  const banner = opts.storeUnavailable ? `\n<p class="banner" role="status">${escapeHtml(STORE_UNAVAILABLE_BANNER)}</p>` : "";
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex" />
-<title>Live runs</title>
+<title>${title}</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -744,6 +959,9 @@ export function renderRunsIndex(runs: RunSummary[], scheduledPanel = ""): string
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .75rem;
     border-bottom: 1px solid #2a2f3a; padding-bottom: .5rem; }
   h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  a.toggle { color: #9ecbff; text-decoration: none; font-size: .8rem; border: 1px solid #3b4252;
+    border-radius: 4px; padding: .05rem .5rem; }
+  a.toggle:hover { background: #161b22; }
   .conn { margin-left: auto; display: inline-flex; align-items: center; gap: .35rem; }
   #state { font-size: .8rem; color: #8b93a7; }
   .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%;
@@ -766,6 +984,7 @@ export function renderRunsIndex(runs: RunSummary[], scheduledPanel = ""): string
   #runs a.row:hover { background: #161b22; }
   #runs a.row .label { color: #9ecbff; font-weight: 600; }
   .meta { font-size: .75rem; color: #8b93a7; }
+  .meta.status { margin-left: auto; }
   .stopbadge { font-size: .75rem; color: #d29922; }
   .stopbadge.stopped { color: #8b93a7; }
   .actions { display: inline-flex; gap: .4rem; flex: 0 0 auto; padding-right: .5rem; }
@@ -774,20 +993,25 @@ export function renderRunsIndex(runs: RunSummary[], scheduledPanel = ""): string
   button.stop.hard { border-color: #f85149; color: #ff7b72; }
   button.stop:disabled { opacity: .5; cursor: default; }
   .empty { color: #8b93a7; padding: .45rem .5rem; }
+  .banner { margin: 0 0 .75rem; padding: .45rem .6rem; border: 1px solid #d29922; border-radius: 6px; color: #d29922; font-size: .8rem; }
   [hidden] { display: none; }
   ${SCHEDULED_PANEL_CSS}
 </style>
 </head>
 <body>
 <header>
-  <h1>Live runs</h1>
+  <h1>${title}</h1>
+  ${toggle}
   <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>
   ${renderNav("runs")}
-</header>
-<ul id="runs">${rows}<li class="empty" id="empty"${emptyHidden}>No active runs.</li></ul>
-${scheduledPanel}
+</header>${banner}
+<ul id="runs">${rows}<li class="empty" id="empty"${emptyHidden}>${opts.all ? "No runs." : "No active runs."}</li></ul>
+${opts.scheduledPanel ?? ""}
 <script>
+${INDEX_ROW_SCRIPT}
 (function () {
+  var showAll = ${opts.all ? "true" : "false"};
+  var rowLib = indexRowRenderer(document);
   var list = document.getElementById("runs");
   var empty = document.getElementById("empty");
   var state = document.getElementById("state");
@@ -805,66 +1029,6 @@ ${scheduledPanel}
   var seeded = list.querySelectorAll("li[data-run-id]");
   for (var i = 0; i < seeded.length; i++) rows[seeded[i].getAttribute("data-run-id")] = seeded[i];
 
-  function runHref(run) {
-    return "/runs/" + encodeURIComponent(run.id) + "?t=" + encodeURIComponent(run.token);
-  }
-  function stopHref(run, mode) {
-    return "/runs/" + encodeURIComponent(run.id) + "/stop?t=" + encodeURIComponent(run.token) + "&mode=" + encodeURIComponent(mode);
-  }
-  function shortId(id) { return id.length > 8 ? id.slice(0, 8) + "\\u2026" : id; }
-  function countLabel(n) { return n + (n === 1 ? " event" : " events"); }
-  function stopLabel(stop) { return stop.state + " (" + stop.mode + ")"; }
-  function stopButton(mode, text, title) {
-    var b = document.createElement("button");
-    b.className = "stop " + mode;
-    b.setAttribute("data-mode", mode);
-    b.setAttribute("title", title);
-    b.textContent = text;
-    return b;
-  }
-
-  // Rebuild a row's contents from a run summary using createElement +
-  // textContent/setAttribute only (no raw-markup assignment), so a hostile
-  // label/id is rendered as data. Mirrors the server's shape: one <a class="row">
-  // led by an accessible status dot (+ a stop badge once requested), then — for
-  // a stoppable run — a sibling <span class="actions"> with Stop/Kill.
-  function fill(li, run) {
-    li.setAttribute("data-run-id", run.id);
-    li.setAttribute("data-started-at", String(run.startedAt)); // drives sorted insert
-    li.textContent = ""; // clear any prior children (server-rendered or stale)
-    var a = document.createElement("a");
-    a.className = "row";
-    a.setAttribute("href", runHref(run));
-    var dotWord = run.finished ? "finished" : "live";
-    var dot = document.createElement("span");
-    dot.className = "dot " + (run.finished ? "grey" : "green");
-    dot.setAttribute("role", "img");
-    dot.setAttribute("aria-label", dotWord);
-    dot.setAttribute("title", dotWord);
-    a.appendChild(dot);
-    var label = document.createElement("span");
-    label.className = "label";
-    label.textContent = run.label || shortId(run.id);
-    a.appendChild(label);
-    var meta = document.createElement("span");
-    meta.className = "meta";
-    meta.textContent = countLabel(run.eventCount);
-    a.appendChild(meta);
-    if (run.stop) {
-      var badge = document.createElement("span");
-      badge.className = "stopbadge " + run.stop.state;
-      badge.textContent = stopLabel(run.stop);
-      a.appendChild(badge);
-    }
-    li.appendChild(a);
-    if (!run.finished && !run.stop) {
-      var actions = document.createElement("span");
-      actions.className = "actions";
-      actions.appendChild(stopButton("soft", "Stop", "Soft stop: no new steps, the agent writes up what it has"));
-      actions.appendChild(stopButton("hard", "Kill", "Hard stop: abort now, no summary, free the sandbox"));
-      li.appendChild(actions);
-    }
-  }
   // Stop control (#101), delegated from the list: POST the mode to the row's
   // token-scoped stop route; the registry's index upsert then repaints the row
   // as "stopping". A hard stop is destructive → confirm first.
@@ -877,7 +1041,7 @@ ${scheduledPanel}
     var mode = btn.getAttribute("data-mode");
     if (mode === "hard" && !window.confirm("Hard stop: abort this run now with no summary and free its sandbox?")) return;
     btn.disabled = true;
-    fetch(stopHref(run, mode), { method: "POST", credentials: "same-origin" })
+    fetch(rowLib.stopHref(run, mode), { method: "POST", credentials: "same-origin" })
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); })
       .catch(function () { btn.disabled = false; });
   });
@@ -907,11 +1071,11 @@ ${scheduledPanel}
     runs[run.id] = run;
     var li = rows[run.id];
     if (li) {
-      fill(li, run); // update in place — startedAt is immutable, so position holds
+      rowLib.fill(li, run); // update in place — startedAt is immutable, so position holds
     } else {
       li = document.createElement("li");
       rows[run.id] = li;
-      fill(li, run);
+      rowLib.fill(li, run);
       insertSorted(li, run.startedAt);
     }
     refreshEmpty();
@@ -924,13 +1088,14 @@ ${scheduledPanel}
     refreshEmpty();
   }
 
-  var es = new EventSource("/runs?stream=1");
+  var es = new EventSource(${JSON.stringify(feedUrl)});
   es.onopen = function () { setConn("green", "live"); };
   es.onmessage = function (m) {
     var ev;
     try { ev = JSON.parse(m.data); } catch (_) { return; }
-    if (ev.type === "upsert" && ev.run) upsert(ev.run);
-    else if (ev.type === "removed" && ev.id) remove(ev.id);
+    var li = ev.type === "removed" && ev.id ? rows[ev.id] : null;
+    var act = rowLib.feedAction(ev, showAll, li ? li.getAttribute("data-persisted") === "1" : false);
+    if (act.op === "upsert") upsert(act.run); else if (act.op === "remove") remove(act.id);
   };
   es.onerror = function () {
     if (es.readyState === EventSource.CLOSED) setConn("red", "disconnected");
@@ -1128,6 +1293,70 @@ export function serveIndexEvents(
   onLive?.(); // stream stays open → safe to start the keepalive heartbeat
 }
 
+/**
+ * The stored stream with the truncation made visible (R12 / AE11): when the
+ * record holds fewer events than the run published (`eventCount`), one
+ * `replay_note` — "N events omitted", N = published − stored — is placed at the
+ * first gap in `seq` (a gap at the start puts it first; no gap in the stored
+ * range means the tail was cut, so it goes last). A complete record is returned
+ * as-is. The marker is a transport notice, never a run event (it does not enter
+ * any store).
+ */
+export function withOmittedMarkers(events: readonly RunEvent[], eventCount: number): LiveFrame[] {
+  const omitted = eventCount - events.length;
+  if (omitted <= 0) return [...events];
+  const marker: LiveFrame = { type: "replay_note", summary: `${omitted} event${omitted === 1 ? "" : "s"} omitted` };
+  const out: LiveFrame[] = [];
+  let expected = 1;
+  let placed = false;
+  for (const e of events) {
+    if (!placed && typeof e.seq === "number" && e.seq > expected) {
+      out.push(marker);
+      placed = true;
+    }
+    out.push(e);
+    expected = typeof e.seq === "number" ? e.seq + 1 : expected + 1;
+  }
+  if (!placed) out.push(marker);
+  return out;
+}
+
+/**
+ * Serve a finished run's stored stream (R12): every page of `getRunEvents` is
+ * collected first — the history path knows every event before it writes a head
+ * (KTD6) — then the 200 head, the prelude, each frame (with the AE11 omission
+ * marker in place), and the terminal `end`. A page that is not-found (the run
+ * expired between the caller's lookup and this read) is the same 404 as a live
+ * miss. `eventCount` is the run's published total, for the marker.
+ */
+export async function serveHistoryEvents(
+  page: (afterSeq: number) => Promise<Result<RunEventsPageView>>,
+  eventCount: number,
+  sink: SseSink,
+): Promise<void> {
+  const events: RunEvent[] = [];
+  let afterSeq = 0;
+  for (;;) {
+    const res = await page(afterSeq);
+    if (!res.ok) {
+      sink.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      sink.write("run not found");
+      sink.end();
+      return;
+    }
+    events.push(...res.value.events);
+    if (res.value.nextAfterSeq === undefined || res.value.events.length === 0) break;
+    afterSeq = res.value.nextAfterSeq;
+  }
+  sink.writeHead(200, SSE_HEADERS);
+  sink.write(SSE_PRELUDE);
+  withOmittedMarkers(events, eventCount).forEach((frame, i) => {
+    sink.write(frame.type === "replay_note" ? sseNotice(frame) : sseData(frame, frame.seq ?? i + 1));
+  });
+  sink.write(SSE_END);
+  sink.end();
+}
+
 /** Wrap a node ServerResponse/request pair as an SseSink. */
 function nodeSseSink(req: HttpRequest, res: ServerResponse): SseSink {
   return {
@@ -1138,26 +1367,29 @@ function nodeSseSink(req: HttpRequest, res: ServerResponse): SseSink {
   };
 }
 
-/**
- * node:http handler for the live-view routes. Returns `true` if it owned the
- * request (so the server stops routing), `false` to fall through. Every read
- * route is GET-only and the one write route is POST-only (405 otherwise):
- *   GET  /runs                          → the runs index HTML page (Access-gated, NOT token-gated)
- *   GET  /runs?stream=1                 → the live runs-index SSE feed (Access-gated, NOT token-gated)
- *   GET  /runs/:id?t=…                  → the HTML page (404 on bad/missing token)
- *   GET  /runs/:id/events?t=…           → the SSE stream (404 on bad/missing token)
- *   GET  /runs/:id/friction?t=…         → the friction diagnosis JSON (404 on bad/missing token)
- *   POST /runs/:id/stop?t=…&mode=soft|hard → ask the run to stop (#101): 200 JSON, 400 bad
- *        mode, 404 bad/missing token or unknown run, 409 already finished
- * The per-run routes are token-gated via the registry; the index (page AND
- * feed) is not — Cloudflare Access fronts it, and it renders the per-run
- * capability links. The stop route sits behind BOTH gates: Access at the edge
- * (index.ts gates every method under /runs*) and the run's token here.
- * `?stream=1` (a query flag, not a new path) selects the feed so it never
- * collides with `/runs/<id>` where an id could legitimately be "events" or
- * "stream".
- */
-export interface LiveViewOptions {
+/** One audit line per persisted-run page/events read (R9): who read which run
+ *  on which route — never any content. */
+export interface HistoryReadAudit {
+  route: "page" | "events";
+  runId: string;
+  identity?: string;
+}
+
+export interface LiveViewDeps {
+  /** Every run read and the tokenless stop go through the service (KTD7). */
+  service: RunsService;
+  /** The registry's index face: the live rows (with tokens, for their hrefs) and
+   *  the live feed. The default `/runs` view is served from this alone (R11). */
+  index: Pick<RunRegistry, "listActive" | "subscribeIndex">;
+  /** The configured run-history retention, for the index toggle's tooltip; null
+   *  when history is off (store: null). */
+  retention: { retentionDays: number } | null;
+  /** KTD13: under `ACCESS_DEV_BYPASS`, history reads (`?all=1`, tokenless page /
+   *  events / friction of a finished run) are served only to a loopback client;
+   *  otherwise 403. The token-gated live path is unaffected. Absent → no gate. */
+  devBypass?: { active: () => boolean; isLoopback: (req: HttpRequest) => boolean };
+  /** Receives one entry per persisted-run page/events read. Default: console.log. */
+  audit?: (entry: HistoryReadAudit) => void;
   /** The "Scheduled" panel on the index (#244): the schedule registry to list
    *  and, optionally, the store holding each schedule's firings. Absent → no
    *  panel (tests, the CLI). */
@@ -1170,6 +1402,35 @@ export interface LiveViewOptions {
   now?: () => number;
 }
 
+/** Per-request context the server passes in: the Access identity it verified. */
+export interface LiveViewContext {
+  identity?: string;
+}
+
+const NOT_FOUND = "run not found";
+const TEXT = { "content-type": "text/plain; charset=utf-8" };
+const JSON_NO_STORE = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
+
+/**
+ * node:http handler for the live-view routes. Returns `true` if it owned the
+ * request (so the server stops routing), `false` to fall through. Every read
+ * route is GET-only and the one write route is POST-only (405 otherwise):
+ *   GET  /runs                 → the runs index HTML page: active runs (Access-gated, NOT token-gated)
+ *   GET  /runs?all=1           → the index with finished + persisted runs too (R11)
+ *   GET  /runs?stream=1[&all=1] → the live runs-index SSE feed
+ *   GET  /runs/:id[?t=…]       → the HTML page: a valid token → the live page; no/wrong token →
+ *        history mode for a finished or persisted run (tokenless, Access-gated), 404 for a live run
+ *   GET  /runs/:id/events[?t=…] → the SSE stream: live with a token; the stored replay + `end` otherwise
+ *   GET  /runs/:id/friction[?t=…] → the friction diagnosis JSON (live diagnosis-so-far, or the stored one)
+ *   POST /runs/:id/stop?t=…&mode=soft|hard → ask the run to stop (#101): 200 JSON, 400 bad
+ *        mode, 404 bad/missing token on a live run or unknown run, 409 finished/persisted
+ * The live routes are token-gated via the registry (`authorizeLive`, synchronous
+ * — KTD6); the tokenless history routes and the index are Access-gated at the
+ * edge (index.ts gates every method under /runs*). Unknown, expired, and
+ * wrong-token-on-live lookups share one 404 body (R4/R10). `?stream=1` (a query
+ * flag, not a new path) selects the feed so it never collides with `/runs/<id>`
+ * where an id could legitimately be "events" or "stream".
+ */
 /** Firing history for the panel: the store's answer, or the reason there is
  *  none — a store failure is shown as such, never as "never fired". */
 const NO_STORE_REASON = "schedules.worker is not configured";
@@ -1182,12 +1443,43 @@ async function loadFirings(store: ScheduleStore): Promise<FiringsState> {
   }
 }
 
-export function createLiveViewHandler(
-  registry: RunRegistry,
-  options: LiveViewOptions = {},
-): (req: HttpRequest, res: ServerResponse) => boolean {
-  const now = options.now ?? Date.now;
-  return (req, res) => {
+export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, res: ServerResponse, ctx?: LiveViewContext) => boolean {
+  const { service, index } = deps;
+  const audit = deps.audit ?? ((entry) => console.log(`[runs] history read ${JSON.stringify(entry)}`));
+  const text = (res: ServerResponse, status: number, body: string) => {
+    res.writeHead(status, TEXT);
+    res.end(body);
+  };
+  const historyReadForbidden = (req: HttpRequest): boolean => !!deps.devBypass && deps.devBypass.active() && !deps.devBypass.isLoopback(req);
+  /** Runs the async history path; a throw is a 500, never an unhandled rejection. */
+  const run = (res: ServerResponse, work: () => Promise<void>) => {
+    work().catch((err: unknown) => {
+      console.error(`[runs] ${err instanceof Error ? err.message : String(err)}`);
+      if (!res.headersSent) text(res, 500, "internal error");
+      else res.end();
+    });
+  };
+
+  const now = deps.now ?? Date.now;
+  /** One rendered index page: the rows and the store-degraded flag. */
+  interface IndexPage {
+    rows: readonly IndexRow[];
+    storeUnavailable?: boolean;
+  }
+  /** `?all=1`: the service's live ∪ finished ∪ persisted rows, with the live rows'
+   *  capability tokens re-attached for their hrefs (finished rows stay tokenless). */
+  const mergedRows = async (live: readonly RunSummary[]): Promise<IndexPage> => {
+    const tokens = new Map(live.map((s) => [s.id, s.token]));
+    const { runs, storeUnavailable } = await service.listRuns({ status: "all" });
+    const rows = runs.map((v) => {
+      const token = tokens.get(v.id);
+      return token === undefined ? v : { ...v, token };
+    });
+    // The service degraded to live rows: the page says so (a banner), never a silently short list.
+    return storeUnavailable ? { rows, storeUnavailable: true } : { rows };
+  };
+
+  return (req, res, ctx) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const route = parseRunRoute(url.pathname);
     if (!route) return false;
@@ -1195,126 +1487,180 @@ export function createLiveViewHandler(
     const method = (req.method ?? "GET").toUpperCase();
     const allow = route.kind === "stop" ? "POST" : "GET";
     if (method !== allow) {
-      res.writeHead(405, { "content-type": "text/plain; charset=utf-8", allow });
+      res.writeHead(405, { ...TEXT, allow });
       res.end("method not allowed");
       return true;
     }
 
-    // The bare index has NO token gate — Cloudflare Access is the "who" gate in
-    // front of it. It renders the per-run capability links, so it must only be
-    // exposed behind Access (see features/live-view.md). `?stream=1` selects the
-    // live SSE feed; otherwise the (initial-snapshot) HTML page.
+    // The index has NO token gate — Cloudflare Access is the "who" gate in front
+    // of it. It renders the per-run capability links, so it must only be exposed
+    // behind Access (see features/live-view.md). The default view is the live
+    // registry only (R11: never a store read); `?all=1` merges the service's
+    // finished + persisted rows in, keeping the live rows' token hrefs.
     if (route.kind === "index") {
+      const all = url.searchParams.get("all") === "1";
+      if (all && historyReadForbidden(req)) {
+        text(res, 403, "forbidden");
+        return true;
+      }
       if (url.searchParams.get("stream") === "1") {
-        serveIndexEvents(
-          (onEvent) => registry.subscribeIndex(onEvent),
-          nodeSseSink(req, res),
-          () => startSseHeartbeat(req, res),
-        );
+        serveIndexEvents((onEvent) => index.subscribeIndex(onEvent), nodeSseSink(req, res), () => startSseHeartbeat(req, res));
         return true;
       }
-      // The Scheduled panel (#244) reads the firing store before the page is
-      // written, so the first paint is complete; without a panel the page is
-      // synchronous as before.
-      const scheduled = options.scheduled;
-      if (!scheduled) {
-        res.writeHead(200, HTML_PAGE_HEADERS);
-        res.end(renderRunsIndex(registry.listActive()));
-        return true;
-      }
-      if (!scheduled.store) {
-        // No store to await: render the panel (schedules only, history
-        // "unavailable") synchronously like the plain page.
+      const live = index.listActive();
+      const scheduled = deps.scheduled;
+      // The Scheduled panel (#244) lists the registry's schedules with each one's
+      // last firing; a live firing links with its token, so the panel reads the
+      // live rows, whatever the view. Without a firing store the history is
+      // "unavailable" (never "never fired").
+      const panelFor = (firings: FiringsState): string | undefined => {
+        if (!scheduled) return undefined;
         const t = now();
-        const runs = registry.listActive();
-        const firings: FiringsState = { ok: false, reason: NO_STORE_REASON };
+        return renderScheduledPanel(buildScheduledRows(scheduled.schedules, firings, live, t), firings, t);
+      };
+      const render = (page: IndexPage, firings: FiringsState) => {
         res.writeHead(200, HTML_PAGE_HEADERS);
-        res.end(renderRunsIndex(runs, renderScheduledPanel(buildScheduledRows(scheduled.schedules, firings, runs, t), firings, t)));
+        res.end(
+          renderRunsIndex(page.rows, {
+            all,
+            retention: deps.retention,
+            scheduledPanel: panelFor(firings),
+            ...(page.storeUnavailable ? { storeUnavailable: true } : {}),
+          }),
+        );
+      };
+      const noStore: FiringsState = { ok: false, reason: NO_STORE_REASON };
+      if (!all && !scheduled?.store) {
+        // Nothing to await: the default view is the registry alone (R11 — never a
+        // store read), rendered synchronously as before.
+        render({ rows: live.filter((s) => !s.finished) }, noStore);
         return true;
       }
-      void loadFirings(scheduled.store)
-        .then((firings) => {
-          const t = now();
-          const runs = registry.listActive();
-          const panel = renderScheduledPanel(buildScheduledRows(scheduled.schedules, firings, runs, t), firings, t);
-          res.writeHead(200, HTML_PAGE_HEADERS);
-          res.end(renderRunsIndex(runs, panel));
-        })
-        .catch((err: unknown) => {
-          // A render/socket fault after the store answered must not leave the
-          // response hanging or surface as an unhandled rejection.
-          console.error(`[live-view] runs index failed: ${err instanceof Error ? err.message : String(err)}`);
-          try {
-            if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
-            res.end("internal error");
-          } catch {
-            // the socket is gone; nothing left to end
-          }
-        });
+      run(res, async () => {
+        // Both reads are known before the head is written, so the first paint is
+        // complete (a firing-store failure is shown as such, never as an empty
+        // history).
+        const [page, firings] = await Promise.all([
+          all ? mergedRows(live) : Promise.resolve<IndexPage>({ rows: live.filter((s) => !s.finished) }),
+          scheduled?.store ? loadFirings(scheduled.store) : Promise.resolve(noStore),
+        ]);
+        render(page, firings);
+      });
       return true;
     }
 
     const token = url.searchParams.get("t") ?? "";
+    const access = token ? service.authorizeLive(route.id, token) : null;
 
-    if (route.kind === "page") {
-      if (!registry.has(route.id, token)) {
-        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-        res.end("run not found");
+    // ── Live path: the token checked out. Synchronous and byte-identical to the
+    // pre-history handler (KTD6).
+    if (access) {
+      if (route.kind === "page") {
+        res.writeHead(200, HTML_PAGE_HEADERS);
+        res.end(renderRunPage(route.id, token));
         return true;
       }
-      res.writeHead(200, HTML_PAGE_HEADERS);
-      res.end(renderRunPage(route.id, token));
+      // Read-only friction diagnosis of the run's retained backlog (#84): works
+      // mid-run (a diagnosis so far) and for a finished run still within the TTL.
+      if (route.kind === "friction") {
+        const snap = access.snapshot();
+        if (!snap) {
+          text(res, 404, NOT_FOUND);
+          return true;
+        }
+        const diagnosis = analyzeRunFriction(snap.events, { finished: snap.finished });
+        res.writeHead(200, JSON_NO_STORE);
+        res.end(JSON.stringify({ id: route.id, finished: snap.finished, diagnosis }));
+        return true;
+      }
+      // Run control (#101): the only write. Mode is validated BEFORE anything
+      // else so a malformed request is a plain 400; the registry's token-gated
+      // stop answers 404 for a vanished run and 409 for a finished one. Never
+      // throws: the run loop observes the control on its own schedule — this
+      // request only records the ask.
+      if (route.kind === "stop") {
+        const mode = parseStopMode(url.searchParams.get("mode"));
+        if (!mode) {
+          text(res, 400, "mode must be soft or hard");
+          return true;
+        }
+        const result = access.requestStop(mode);
+        if (!result.ok) {
+          if (result.reason === "finished") text(res, 409, "run already finished");
+          else text(res, 404, NOT_FOUND);
+          return true;
+        }
+        res.writeHead(200, JSON_NO_STORE);
+        res.end(JSON.stringify({ id: route.id, mode: result.mode, state: "stopping" }));
+        return true;
+      }
+      // route.kind === "events"
+      const afterSeq = parseLastEventId(req.headers["last-event-id"]);
+      serveEvents(
+        (onEvent, onFinish) => access.subscribe(onEvent, onFinish, afterSeq),
+        nodeSseSink(req, res),
+        () => startSseHeartbeat(req, res),
+      );
       return true;
     }
 
-    // Read-only friction diagnosis of the run's retained backlog (#84): same
-    // token gate → 404; JSON, never cached. Works mid-run (a diagnosis so far)
-    // and for a finished run still within the TTL.
-    if (route.kind === "friction") {
-      const snap = registry.snapshot(route.id, token);
-      if (!snap) {
-        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-        res.end("run not found");
-        return true;
-      }
-      const diagnosis = analyzeRunFriction(snap.events, { finished: snap.finished });
-      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-      res.end(JSON.stringify({ id: route.id, finished: snap.finished, diagnosis }));
-      return true;
-    }
-
-    // Run control (#101): the only write. Mode is validated BEFORE the token is
-    // checked so a malformed request is a plain 400 with no registry lookup;
-    // the token gate then answers 404 for wrong token AND unknown run alike
-    // (never reveal which), and a finished run is a 409. Never throws: the
-    // registry call is total, and the run loop observes the control on its
-    // own schedule — this request only records the ask.
+    // ── History path: no token, or one the registry refused. Only a FINISHED run
+    // is readable here (R10: a live run keeps requiring its token — a wrong
+    // token on it is the same 404 as an unknown run); a finished run still in
+    // the registry and a persisted one render identically through the service.
     if (route.kind === "stop") {
       const mode = parseStopMode(url.searchParams.get("mode"));
       if (!mode) {
-        res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
-        res.end("mode must be soft or hard");
+        text(res, 400, "mode must be soft or hard");
         return true;
       }
-      const result = registry.requestStop(route.id, token, mode);
-      if (!result.ok) {
-        const [status, body] = result.reason === "finished" ? [409, "run already finished"] : [404, "run not found"];
-        res.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
-        res.end(body);
-        return true;
-      }
-      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-      res.end(JSON.stringify({ id: route.id, mode: result.mode, state: "stopping" }));
+      run(res, async () => {
+        const found = await service.getRun(route.id);
+        if (!found.ok || !found.value.finished) text(res, 404, NOT_FOUND);
+        else text(res, 409, "run already finished");
+      });
       return true;
     }
 
-    // route.kind === "events"
-    const afterSeq = parseLastEventId(req.headers["last-event-id"]);
-    serveEvents(
-      (onEvent, onFinish) => registry.subscribe(route.id, token, onEvent, onFinish, afterSeq),
-      nodeSseSink(req, res),
-      () => startSseHeartbeat(req, res),
-    );
+    if (historyReadForbidden(req)) {
+      text(res, 403, "forbidden");
+      return true;
+    }
+
+    if (route.kind === "friction") {
+      run(res, async () => {
+        const found = await service.getRunFriction(route.id);
+        if (!found.ok || !found.value.finished) {
+          text(res, 404, NOT_FOUND);
+          return;
+        }
+        res.writeHead(200, JSON_NO_STORE);
+        res.end(JSON.stringify(found.value));
+      });
+      return true;
+    }
+
+    run(res, async () => {
+      const found = await service.getRun(route.id, route.kind === "page" ? { include: "messages" } : {});
+      if (!found.ok || !found.value.finished) {
+        if (route.kind === "events") {
+          // the same 404 shape the live stream writes
+          const sink = nodeSseSink(req, res);
+          sink.writeHead(404, TEXT);
+          sink.write(NOT_FOUND);
+          sink.end();
+        } else text(res, 404, NOT_FOUND);
+        return;
+      }
+      const view = found.value;
+      audit({ route: route.kind === "page" ? "page" : "events", runId: route.id, ...(ctx?.identity ? { identity: ctx.identity } : {}) });
+      if (route.kind === "page") {
+        res.writeHead(200, HTML_PAGE_HEADERS);
+        res.end(renderRunPage(route.id, "", view.events ?? [], { status: view.status, eventCount: view.eventCount }));
+        return;
+      }
+      await serveHistoryEvents((afterSeq) => service.getRunEvents(route.id, { afterSeq }), view.eventCount, nodeSseSink(req, res));
+    });
     return true;
   };
 }

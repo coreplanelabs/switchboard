@@ -30,6 +30,7 @@ export const MAX_BODY_BYTES = 1_000_000; // 1 MB
  *  Defined in src/core/ingressTokens.ts (node-free, shared with the Worker
  *  shim); re-exported here so the MCP adapter and tests keep one import site. */
 export type { IngressIdentity };
+export { DEFAULT_INGRESS_SCOPES, parseScopes } from "../core/ingressTokens.js";
 
 /** Ingress auth config: raw bearer token -> identity. An empty map means the
  *  endpoint is DISABLED (fail-closed) — never open. */
@@ -209,9 +210,10 @@ export interface IngressResponse {
  *   1. non-POST                -> 405
  *   2. no tokens configured    -> 503 disabled   (FAIL-CLOSED: never open)
  *   3. missing/unknown token   -> 401 unauthorized
+ *   3b. token lacks `dispatch` -> 403 forbidden (code unauthorized)
  *   4. invalid/bad JSON body   -> 400
  *   5. authed + valid          -> dispatch(), reply collected -> 200
- * Steps 1-3 are header-only (`authorizeRequest`), so the node wrapper runs them
+ * Steps 1-3b are header-only (`authorizeRequest` + `requireDispatchScope`), so the node wrapper runs them
  * BEFORE reading the body — an unauthorized/wrong-method/disabled caller never
  * buffers a body. Body-size enforcement (413) is streamed in `readBody`.
  */
@@ -237,6 +239,24 @@ export function authorizeRequest(
     return { status: 401, body: { error: "unauthorized" } };
   }
   return { identity };
+}
+
+/** The scope that lets a token start an agent run through this endpoint (and
+ *  the MCP `dispatch` tool). Every token held it before scopes existed; a
+ *  token whose entry names `scopes` without it is a registry-only credential. */
+export const DISPATCH_SCOPE = "dispatch";
+
+/** True when the token may start an agent run. */
+export function hasDispatchScope(identity: IngressIdentity): boolean {
+  return identity.scopes.includes(DISPATCH_SCOPE);
+}
+
+/** Header-only, after `authorizeRequest`: a token without the `dispatch` scope
+ *  is refused (403) before its body is read and before `dispatch()` is ever
+ *  reached — fail-closed, the same `code:"unauthorized"` the registry uses. */
+export function requireDispatchScope(identity: IngressIdentity): IngressResponse | null {
+  if (hasDispatchScope(identity)) return null;
+  return { status: 403, body: { error: "forbidden", code: "unauthorized" } };
 }
 
 /** Post-auth handling: validate the (already-read) body and dispatch. */
@@ -268,6 +288,8 @@ export async function handleIngressRequest(
 ): Promise<IngressResponse> {
   const gate = authorizeRequest(req.method, req.headers, options);
   if ("status" in gate) return gate;
+  const scopeRefusal = requireDispatchScope(gate.identity);
+  if (scopeRefusal) return scopeRefusal;
   return handleAuthorized(gate.identity, req.body, deps, options);
 }
 
@@ -318,6 +340,12 @@ export function createIngressHandler(
           req.destroy();
           return;
         }
+        const scopeRefusal = requireDispatchScope(gate.identity);
+        if (scopeRefusal) {
+          write(res, scopeRefusal.status, scopeRefusal.body);
+          req.destroy();
+          return;
+        }
         const read = await readBody(req, maxBytes);
         if (!read.ok) {
           write(res, 413, { error: "request body too large" });
@@ -339,10 +367,15 @@ export function createIngressHandler(
 /**
  * Parse ingress token config from the environment. `SWITCHBOARD_INGRESS_TOKENS`
  * is a JSON object mapping raw bearer token -> identity, e.g.
- *   {"s3cr3t":{"subject":"alice","channel":"ops"},"other":{"subject":"bob"}}
+ *   {"s3cr3t":{"subject":"alice","channel":"ops"},
+ *    "ci-bot":{"subject":"ci","scopes":["dispatch","runs:read"]}}
+ * Each entry: `subject` (required, non-empty), `channel` (optional pin),
+ * `scopes` (optional array of non-empty strings; absent => ["dispatch"], i.e.
+ * the pre-scopes behavior — POST /ingress only, no registry commands).
  * Absent, empty, or malformed => an empty map => the endpoint is DISABLED
  * (fail-closed). A malformed value is logged (without token material) and
- * treated as no tokens rather than silently opening the endpoint.
+ * treated as no tokens rather than silently opening the endpoint. An entry
+ * with malformed `scopes` is skipped entirely — never widened to the default.
  */
 export function parseIngressTokens(env: Record<string, string | undefined>): IngressConfig {
   // One parser for the bot and the Worker shim (src/core/ingressTokens.ts).

@@ -111,10 +111,14 @@ export interface StopRunView {
   state: "stopping";
 }
 
-/** The registry subscription handed to the live SSE path once the token checked out. */
+/** The registry capabilities handed to the live HTML/SSE path once the token
+ *  checked out: the subscription, the backlog, and the token-gated stop (U8 —
+ *  the page's Stop/Kill buttons stay capability-gated, not operator-gated). */
 export interface LiveRunAccess {
-  subscribe(onEvent: RunSubscriber, onFinish?: RunFinishListener): Unsubscribe | null;
+  /** `afterSeq` is the resume cursor (`Last-Event-ID`): only events after it are offered. */
+  subscribe(onEvent: RunSubscriber, onFinish?: RunFinishListener, afterSeq?: number): Unsubscribe | null;
   snapshot(): RunSnapshot | null;
+  requestStop(mode: StopMode): StopRequestResult;
 }
 
 export interface RunsService {
@@ -348,8 +352,9 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     authorizeLive(id, token) {
       if (!registry.has(id, token)) return null;
       return {
-        subscribe: (onEvent, onFinish) => registry.subscribe(id, token, onEvent, onFinish),
+        subscribe: (onEvent, onFinish, afterSeq) => registry.subscribe(id, token, onEvent, onFinish, afterSeq),
         snapshot: () => registry.snapshot(id, token),
+        requestStop: (mode) => registry.requestStop(id, token, mode),
       };
     },
   };
