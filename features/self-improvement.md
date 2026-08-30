@@ -26,7 +26,7 @@ Switchboard turns the run-friction **analysis** ([run-friction.md](run-friction.
 |-----------|----------|
 | Command normalization: prefix/tail stripped, volatile tokens blanked, length capped | `[unit]` `src/core/frictionProposals.test.ts::normalizeCommand::*` |
 | Shell-aware signatures: segment heads, noise/redirections/env/wrappers dropped, capped; the two real chainings of `npm ci` share one install signature; install flags kept minus quiet flags | `[unit]` `::commandSignature::*`, `::installSignature::*`, `::patternSignature::clusters the SAME install chained differently across real runs…` |
-| Signatures: tool findings by category + command (label prefixes dropped), unknown tool by tool name, notes by kind | `[unit]` `::patternSignature::*` |
+| Signatures: tool findings by category + command (label prefixes dropped), unknown tool by tool name, notes by kind, `slow_model_turn` by the single key `model_turn` (a slow think is the agent/model tier's property, not the command's) | `[unit]` `::patternSignature::*` |
 | No patterns for no/clean runs; a one-off (one run) never becomes a pattern; minRuns honored | `[unit]` `::clusterFriction::returns no patterns…`, `::clusters the same finding across DISTINCT runs and ignores one-offs…`, `::honors minRuns` (red-verified: disabling the minRuns filter fails these) |
 | Within-run repeats count once toward recurrence but all occurrences are counted | `[unit]` `::counts a finding repeated within ONE run as one run…` |
 | Ranking total order (runs, severity, time, key) | `[unit]` `::ranks by distinct runs, then peak severity, then attributed time` |

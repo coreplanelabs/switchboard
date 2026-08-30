@@ -19,10 +19,14 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.review.maxMinutes).toBe(25);
   });
 
-  it("coding: full toolset, 60 turns, 45 min", () => {
+  it("coding: full toolset, 60 turns, 45 min, medium effort", () => {
     expect(AGENTS.coding.toolset).toBe("full");
     expect(AGENTS.coding.maxTurns).toBe(60);
     expect(AGENTS.coding.maxMinutes).toBe(45);
+    // Live run 2026-08-30 (30dc0210): default effort spent 97% of a 31-min
+    // run thinking between one-line greps (50 s of tool time) and wrote no
+    // code. Review already runs medium for the same reason.
+    expect(AGENTS.coding.effort).toBe("medium");
   });
 
   it("general's prompt redirects tool-needing requests to the other agents", () => {

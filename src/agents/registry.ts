@@ -194,6 +194,10 @@ export const AGENTS: Record<string, AgentDef> = {
     maxTurns: 60, // scoping is capped at ~5 calls by the prompt; this is implementation room
     maxTokens: 64000,
     maxMinutes: 45,
+    // Default effort spent 97% of a 31-min live run thinking between one-line
+    // greps (50 s of tool time, no code written) — the wall clock is the real
+    // budget, so each turn must be cheap enough to leave room for the work.
+    effort: "medium",
     resources: { repo: "required" },
   },
   review: {

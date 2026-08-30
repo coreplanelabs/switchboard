@@ -12,6 +12,7 @@ import type { RunEvent } from "./runEvents.js";
 
 export type FrictionCategory =
   | "slow_tool"
+  | "slow_model_turn"
   | "failed_tool"
   | "retry"
   | "setup_install"
@@ -21,6 +22,7 @@ export type FrictionCategory =
 
 export const FRICTION_CATEGORIES: readonly FrictionCategory[] = [
   "slow_tool",
+  "slow_model_turn",
   "failed_tool",
   "retry",
   "setup_install",
@@ -32,6 +34,7 @@ export const FRICTION_CATEGORIES: readonly FrictionCategory[] = [
 /** Human labels for the verdict line. */
 const CATEGORY_LABEL: Record<FrictionCategory, string> = {
   slow_tool: "slow tool calls",
+  slow_model_turn: "slow model turns",
   failed_tool: "failed tool calls",
   retry: "retries",
   setup_install: "setup/install",
@@ -71,6 +74,10 @@ export interface FrictionDiagnosis {
   runMs?: number;
   /** Sum of paired tool_call→tool_result durations, when timed. */
   toolTimeMs?: number;
+  /** Sum of model-turn durations (a result, or the request, → the model's next
+   *  event), when timed. `runMs ≈ toolTimeMs + modelTimeMs` for a healthy run;
+   *  a run that is mostly model time is thinking, not working. */
+  modelTimeMs?: number;
   /** Every category present, zeroed when absent. */
   byCategory: Record<FrictionCategory, CategoryTotals>;
   /** In detection order (stream order). */
@@ -82,6 +89,10 @@ export interface FrictionDiagnosis {
 export interface FrictionOptions {
   /** A paired tool call taking at least this long is a `slow_tool`. Default 30s. */
   slowToolMs?: number;
+  /** A model turn — from a tool_result (or the request) to the model's next
+   *  tool_call/assistant/answer — taking at least this long is a
+   *  `slow_model_turn`. Default 60s. */
+  slowModelTurnMs?: number;
   /** Whether the stream is complete (default true). For an in-flight run a
    *  trailing tool_call without a result is simply still running — only in a
    *  finished stream is it evidence the run died mid-tool. */
@@ -89,6 +100,7 @@ export interface FrictionOptions {
 }
 
 const DEFAULT_SLOW_TOOL_MS = 30_000;
+const DEFAULT_SLOW_MODEL_TURN_MS = 60_000;
 
 // Setup/install commands, matched at the START of a shell segment (after `$ `,
 // `&&`, `;`, `|`), so `echo npm install` and `npm test` don't match while
@@ -118,6 +130,7 @@ interface PendingCall {
 /** Analyze a run's event stream. Pure and deterministic; never mutates `events`. */
 export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOptions = {}): FrictionDiagnosis {
   const slowToolMs = opts.slowToolMs ?? DEFAULT_SLOW_TOOL_MS;
+  const slowModelTurnMs = opts.slowModelTurnMs ?? DEFAULT_SLOW_MODEL_TURN_MS;
   const finished = opts.finished ?? true;
   const findings: FrictionFinding[] = [];
   // Pending calls awaiting their result, FIFO per tool name (the runner emits
@@ -127,6 +140,12 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   const failedCalls = new Set<string>();
   let toolCalls = 0;
   let toolTimeMs = 0;
+  let modelTimeMs = 0;
+  // When the model's current turn began: the request, or the latest
+  // tool_result. Cleared once the turn's first event (tool_call / assistant /
+  // answer) lands, so a completion that narrates AND calls tools is one turn.
+  // Runner notes are not the model's doing and never move it.
+  let turnStartAt: number | undefined;
   let firstAt: number | undefined;
   let lastAt: number | undefined;
   let wrapUp: { index: number; at?: number } | undefined;
@@ -134,13 +153,43 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   const durationOf = (start?: number, end?: number) =>
     start !== undefined && end !== undefined ? Math.max(0, end - start) : undefined;
 
+  const endModelTurn = (ev: RunEvent, index: number, produced: string) => {
+    const durationMs = durationOf(turnStartAt, ev.at);
+    turnStartAt = undefined;
+    if (durationMs === undefined) return;
+    modelTimeMs += durationMs;
+    if (durationMs >= slowModelTurnMs) {
+      findings.push({
+        category: "slow_model_turn",
+        severity: durationMs >= 2 * slowModelTurnMs ? "high" : "medium",
+        summary: `model turn took ${formatMs(durationMs)} before: ${produced}`,
+        durationMs,
+        eventIndex: index,
+      });
+    }
+  };
+
   events.forEach((ev, index) => {
     if (ev.at !== undefined) {
       firstAt ??= ev.at;
       lastAt = ev.at;
     }
 
+    if (ev.type === "input") {
+      turnStartAt = ev.at;
+      return;
+    }
+    if (ev.type === "assistant") {
+      endModelTurn(ev, index, "(narration)");
+      return;
+    }
+    if (ev.type === "answer") {
+      endModelTurn(ev, index, "(answer)");
+      return;
+    }
+
     if (ev.type === "tool_call") {
+      endModelTurn(ev, index, typeof ev.summary === "string" ? ev.summary : ev.tool);
       toolCalls++;
       if (failedCalls.has(`${ev.tool} ${ev.summary}`)) {
         findings.push({ category: "retry", severity: "low", summary: `retried after failure: ${ev.summary}`, tool: ev.tool, eventIndex: index });
@@ -157,6 +206,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       const callSummary = callEntry?.event.summary ?? ev.tool;
       const durationMs = durationOf(callEntry?.event.at, ev.at);
       if (durationMs !== undefined) toolTimeMs += durationMs;
+      turnStartAt = ev.at;
       const timed = (f: FrictionFinding): FrictionFinding => (durationMs !== undefined ? { ...f, durationMs } : f);
 
       if (!ev.ok) failedCalls.add(`${ev.tool} ${callSummary}`);
@@ -200,11 +250,6 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       }
       return;
     }
-
-    // The narrative events — the request, the model's prose between tools, the
-    // final answer — are the run's story, not friction: they carry no timing of
-    // their own and never count as a step.
-    if (ev.type === "answer" || ev.type === "input" || ev.type === "assistant") return;
 
     switch (ev.kind) {
       case "wrap_up":
@@ -261,7 +306,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     eventCount: events.length,
     toolCalls,
     hasTimings,
-    ...(firstAt !== undefined && lastAt !== undefined ? { runMs: lastAt - firstAt, toolTimeMs } : {}),
+    ...(firstAt !== undefined && lastAt !== undefined ? { runMs: lastAt - firstAt, toolTimeMs, modelTimeMs } : {}),
     byCategory,
     findings,
     verdict: "",
@@ -272,7 +317,8 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
 
 /** The dominant cause: most attributed time when timed (ties → most findings →
  *  category order), else most findings. Names the share of tool time so the
- *  reader knows whether the cause is the whole story. */
+ *  reader knows whether the cause is the whole story — of RUN time for slow
+ *  model turns, which are the time between tools, not tool time. */
 function verdictOf(d: FrictionDiagnosis): string {
   if (d.findings.length === 0) return "no friction detected";
   const ranked = FRICTION_CATEGORIES.filter((c) => d.byCategory[c].count > 0).sort(
@@ -283,7 +329,8 @@ function verdictOf(d: FrictionDiagnosis): string {
   const t = d.byCategory[top];
   const what = `${CATEGORY_LABEL[top]} dominated: ${t.count} finding${t.count === 1 ? "" : "s"}`;
   if (!d.hasTimings || t.durationMs === 0) return what;
-  const share = d.toolTimeMs ? ` (${Math.round((t.durationMs / d.toolTimeMs) * 100)}% of tool time)` : "";
+  const [denominator, of] = top === "slow_model_turn" ? [d.runMs, "run time"] : [d.toolTimeMs, "tool time"];
+  const share = denominator ? ` (${Math.round((t.durationMs / denominator) * 100)}% of ${of})` : "";
   return `${what}, ${formatMs(t.durationMs)}${share}`;
 }
 
@@ -301,6 +348,7 @@ export function formatFrictionReport(d: FrictionDiagnosis): string {
   const totals = [`events: ${d.eventCount}`, `tool calls: ${d.toolCalls}`];
   if (d.runMs !== undefined) totals.push(`run: ${formatMs(d.runMs)}`);
   if (d.toolTimeMs !== undefined) totals.push(`tool time: ${formatMs(d.toolTimeMs)}`);
+  if (d.modelTimeMs !== undefined) totals.push(`model time: ${formatMs(d.modelTimeMs)}`);
   if (!d.hasTimings) totals.push("(no timestamps — durations unavailable)");
   lines.push(totals.join(" · "), "", "category         count  time");
   for (const c of FRICTION_CATEGORIES) {
