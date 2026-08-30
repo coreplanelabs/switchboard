@@ -79,6 +79,7 @@ import { busyAfterKillReason, planForceDetach } from "../../src/execution/reside
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
 import { shouldRefreshThreadCredentials } from "../../src/execution/residentCredentials.js";
+import { recordFiring, scheduleForCron, watchdogFiring, type ScheduleFiring, type WatchdogSummary } from "../../src/core/schedules.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 import {
   decisivePull,
@@ -119,6 +120,11 @@ interface Env {
   GITHUB_APP_ID: string;
   GITHUB_APP_INSTALLATION_ID: string;
   GITHUB_APP_PRIVATE_KEY: string;
+  // Where the watchdog cron records each firing for the bot's /runs Scheduled
+  // panel (#244): the state Worker's base URL (var) + bearer (secret). Optional:
+  // unset → the pass still runs, the firing is only logged.
+  STATE_WORKER_URL?: string;
+  MEMORY_TOKEN?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -3597,10 +3603,37 @@ export default {
    *  (marking degraded(alarm-missed)) and times out stuck onboarding. Cadence
    *  invariant: this cron (every 10 minutes) stays SHORTER than SLEEP_AFTER
    *  ("20m"). It reads DO storage/schedules only — containers are started by
-   *  the re-armed refresh alarms, not by the watchdog itself. */
-  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    const summary = await runWatchdog(env);
-    console.log(`resident-watchdog: ${JSON.stringify(summary)}`);
+   *  the re-armed refresh alarms, not by the watchdog itself.
+   *
+   *  The cron is the `resident` entry of the schedule registry
+   *  (src/core/schedules.ts — a unit test keeps wrangler.jsonc equal to it);
+   *  each pass is recorded on the state Worker for the bot's /runs Scheduled
+   *  panel (#244), best-effort and off the critical path. */
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    const schedule = scheduleForCron(controller.cron, "resident");
+    if (!schedule) {
+      console.error(`[schedule] cron "${controller.cron}" is not a resident schedule in the registry — nothing fired (wrangler.jsonc and src/core/schedules.ts have drifted)`);
+      return;
+    }
+    if (schedule.action.type !== "watchdog") {
+      console.error(`[schedule] ${schedule.name}: action "${schedule.action.type}" is not something the resident Worker fires — nothing fired`);
+      return;
+    }
+    const firedAt = controller.scheduledTime || Date.now();
+    let firing: ScheduleFiring;
+    try {
+      const summary = await runWatchdog(env);
+      console.log(`resident-watchdog: ${JSON.stringify(summary)}`);
+      firing = watchdogFiring(schedule, firedAt, summary);
+    } catch (err) {
+      firing = watchdogFiring(schedule, firedAt, err instanceof Error ? err : new Error(String(err)));
+      console.error(`resident-watchdog: ${firing.detail}`);
+    }
+    ctx.waitUntil(
+      recordFiring({ url: env.STATE_WORKER_URL, token: env.MEMORY_TOKEN }, firing).then((res) => {
+        if (res.ok === false) console.error(`[schedule] ${schedule.name}: recording the firing failed — ${res.reason}`);
+      }),
+    );
   },
 } satisfies ExportedHandler<Env>;
 
@@ -4290,7 +4323,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
  *  handler and the /debug run-watchdog op. Each check targets a different DO,
  *  so they run concurrently; a failing one becomes its own {error} entry
  *  without touching its neighbors, and the results follow the registry list. */
-async function runWatchdog(env: Env): Promise<Record<string, unknown>> {
+async function runWatchdog(env: Env): Promise<WatchdogSummary> {
   const registry = registryStub(env);
   const residents = await registry.list();
   const settled = await Promise.allSettled(
@@ -4303,7 +4336,7 @@ async function runWatchdog(env: Env): Promise<Record<string, unknown>> {
       return check;
     }),
   );
-  const results: unknown[] = residents.map((record, i) => {
+  const results: WatchdogSummary["results"][number][] = residents.map((record, i) => {
     const s = settled[i];
     return s.status === "fulfilled"
       ? { resource: record.resource, state: s.value.state, reason: s.value.reason, action: s.value.action }

@@ -735,7 +735,8 @@ describe("scheduled panel on the index (#244)", () => {
     expect(body).toContain('<span class="outcome ok">completed</span>');
     expect(body).toContain('<a href="/runs/run-live?t=tok-live">run run-live</a>');
     expect(body).toContain("2026-08-31 14:00 UTC"); // next fire, Monday
-    expect(body).toContain('<tr data-schedule="keep-alive">');
+    expect(body).toContain('<tr data-schedule="resident-watchdog">');
+    expect(body).not.toContain('data-schedule="keep-alive"'); // internal plumbing stays off the dashboard
   });
 
   it("no store → the panel lists the schedules and says history is unavailable (not 'never fired')", async () => {

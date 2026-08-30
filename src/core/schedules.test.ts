@@ -1,15 +1,21 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CRON_IDENTITY,
   interpretIngressResponse,
+  isRunSchedule,
   isScheduleFiring,
   nextFire,
   parseCron,
   planScheduledFiring,
+  recordFiring,
   SCHEDULES,
   scheduleForCron,
+  schedulesFor,
+  watchdogFiring,
   type RunSchedule,
+  type ScheduleFiring,
+  type ScheduleWorker,
 } from "./schedules.js";
 
 // Feature: features/self-improvement.md item 7c + features/live-view.md item 13
@@ -49,27 +55,111 @@ function readJsonc(path: string): unknown {
 
 const selfImprovement = SCHEDULES.find((s) => s.name === "self-improvement") as RunSchedule;
 
+const WRANGLER_BY_WORKER: Record<ScheduleWorker, string> = {
+  bot: "deploy/cloudflare/wrangler.jsonc",
+  resident: "deploy/cloudflare-resident/wrangler.jsonc",
+};
+
 describe("schedule registry", () => {
-  it("is the source of truth for wrangler.jsonc triggers.crons (same set, no drift)", () => {
-    const wrangler = readJsonc("deploy/cloudflare/wrangler.jsonc") as { triggers: { crons: string[] } };
-    expect([...wrangler.triggers.crons].sort()).toEqual(SCHEDULES.map((s) => s.cron).sort());
+  it("is the source of truth for every Worker's wrangler.jsonc triggers.crons (same set per worker, no drift)", () => {
+    for (const worker of Object.keys(WRANGLER_BY_WORKER) as ScheduleWorker[]) {
+      const wrangler = readJsonc(WRANGLER_BY_WORKER[worker]) as { triggers: { crons: string[] } };
+      expect([...wrangler.triggers.crons].sort(), worker).toEqual(
+        schedulesFor(worker)
+          .map((s) => s.cron)
+          .sort(),
+      );
+    }
   });
 
-  it("every schedule has a unique name and a unique, parseable cron expression", () => {
+  it("every schedule has a unique name, a parseable cron, and a cron unique within its worker", () => {
     expect(new Set(SCHEDULES.map((s) => s.name)).size).toBe(SCHEDULES.length);
-    expect(new Set(SCHEDULES.map((s) => s.cron)).size).toBe(SCHEDULES.length);
     for (const s of SCHEDULES) expect(parseCron(s.cron), s.cron).toBeDefined();
+    for (const worker of ["bot", "resident"] as const) {
+      const crons = schedulesFor(worker).map((s) => s.cron);
+      expect(new Set(crons).size, worker).toBe(crons.length);
+    }
   });
 
-  it("the keep-alive is NOT a run; the self-improvement pass runs `friction propose` as the cron identity", () => {
-    const keepAlive = scheduleForCron("* * * * *");
-    expect(keepAlive?.kind).toBe("keep-alive");
-    expect(selfImprovement).toMatchObject({ kind: "run", cron: "0 14 * * 1", command: "friction propose", identity: CRON_IDENTITY });
+  it("catalog: keep-alive is internal (healthz, hidden); self-improvement runs `friction propose` as cron; the resident watchdog is a visible non-run", () => {
+    expect(scheduleForCron("* * * * *", "bot")).toMatchObject({ name: "keep-alive", worker: "bot", internal: true, action: { type: "healthz" } });
+    expect(selfImprovement).toMatchObject({ worker: "bot", cron: "0 14 * * 1", action: { type: "run", command: "friction propose", identity: CRON_IDENTITY } });
+    expect(selfImprovement.internal).toBeUndefined();
+    expect(scheduleForCron("*/10 * * * *", "resident")).toMatchObject({ name: "resident-watchdog", worker: "resident", action: { type: "watchdog" } });
+    expect(scheduleForCron("*/10 * * * *", "resident")?.internal).toBeUndefined();
   });
 
-  it("scheduleForCron: unknown expression → undefined (the shim logs and does nothing)", () => {
-    expect(scheduleForCron("5 4 * * *")).toBeUndefined();
-    expect(scheduleForCron("")).toBeUndefined();
+  it("scheduleForCron is per worker: an expression is looked up only among that worker's schedules", () => {
+    expect(scheduleForCron("* * * * *", "resident")).toBeUndefined();
+    expect(scheduleForCron("*/10 * * * *", "bot")).toBeUndefined();
+    expect(scheduleForCron("5 4 * * *", "bot")).toBeUndefined();
+    expect(scheduleForCron("", "bot")).toBeUndefined();
+  });
+
+  it("isRunSchedule narrows to schedules the shim POSTs to /ingress", () => {
+    expect(SCHEDULES.filter(isRunSchedule).map((s) => s.name)).toEqual(["self-improvement"]);
+  });
+});
+
+describe("watchdogFiring (the resident's firing record)", () => {
+  const watchdog = scheduleForCron("*/10 * * * *", "resident")!;
+
+  it("summarizes a quiet pass as completed with the counts", () => {
+    expect(watchdogFiring(watchdog, T0, { cap: 10, count: 3, results: [{ resource: "a", state: "ready", action: "none" }, { resource: "b" }, { resource: "c" }] })).toEqual({
+      schedule: "resident-watchdog",
+      firedAt: T0,
+      outcome: "completed",
+      detail: "3/10 residents · 0 re-armed · 0 timed out · 0 errors",
+    });
+  });
+
+  it("counts re-armed chains and timed-out onboardings; any per-resident error makes the pass `failed`", () => {
+    const summary = {
+      cap: 10,
+      count: 4,
+      results: [{ resource: "a", action: "re-armed" }, { resource: "b", action: "provision-timed-out" }, { resource: "c", error: "boom" }, { resource: "d" }],
+    };
+    expect(watchdogFiring(watchdog, T0, summary)).toMatchObject({ outcome: "failed", detail: "4/10 residents · 1 re-armed · 1 timed out · 1 errors — c: boom" });
+  });
+
+  it("a thrown watchdog is `failed` with the message; detail stays capped", () => {
+    expect(watchdogFiring(watchdog, T0, new Error("registry unreachable"))).toMatchObject({ outcome: "failed", detail: "watchdog threw: registry unreachable" });
+    const many = { cap: 1, count: 1, results: Array.from({ length: 200 }, (_, i) => ({ resource: `r${i}`, error: "x".repeat(50) })) };
+    expect(watchdogFiring(watchdog, T0, many).detail!.length).toBeLessThanOrEqual(300);
+  });
+});
+
+describe("recordFiring (shared by both shims)", () => {
+  const firing: ScheduleFiring = { schedule: "s", firedAt: T0, outcome: "completed" };
+
+  it("fail-closed on config: no URL or bearer → nothing sent, the reason returned", async () => {
+    const fetchSpy = vi.fn();
+    expect(await recordFiring({ url: undefined, token: "t" }, firing, fetchSpy as never)).toEqual({ ok: false, reason: "STATE_WORKER_URL var is not set" });
+    expect(await recordFiring({ url: "https://state", token: undefined }, firing, fetchSpy as never)).toEqual({ ok: false, reason: "MEMORY_TOKEN secret is not set" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("POSTs {firing} to <url>/schedules/record with the bearer; trailing slashes on the URL are tolerated", async () => {
+    const fetchSpy = vi.fn(async () => new Response("{}", { status: 200 }));
+    expect(await recordFiring({ url: "https://state//", token: "tok" }, firing, fetchSpy as never)).toEqual({ ok: true });
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://state/schedules/record");
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>).authorization).toBe("Bearer tok");
+    expect(JSON.parse(init.body as string)).toEqual({ firing });
+  });
+
+  it("a non-2xx or a thrown fetch is reported, never thrown (best-effort telemetry)", async () => {
+    expect(await recordFiring({ url: "https://state", token: "tok" }, firing, (async () => new Response("", { status: 503 })) as never)).toEqual({ ok: false, reason: "state Worker HTTP 503" });
+    expect(
+      await recordFiring(
+        { url: "https://state", token: "tok" },
+        firing,
+        (async () => {
+          throw new Error("ECONNRESET");
+        }) as never,
+      ),
+    ).toEqual({ ok: false, reason: "ECONNRESET" });
   });
 });
 
