@@ -131,7 +131,7 @@ export default {
   // Worker for the /runs Scheduled panel. Fail-closed: no `cron` token → nothing
   // is sent and the firing is recorded as `misconfigured`; an ingress error
   // (bot down, unknown identity) is recorded as `ingress-error`.
-  async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const schedule = scheduleForCron(controller.cron);
     if (!schedule) {
       console.error(`[schedule] cron "${controller.cron}" is not in the schedule registry — nothing fired (wrangler.jsonc and src/core/schedules.ts have drifted)`);
@@ -147,7 +147,7 @@ export default {
     const plan = planScheduledFiring(schedule, env.SWITCHBOARD_INGRESS_TOKENS, firedAt);
     if (!plan.ok) {
       console.error(`[schedule] ${schedule.name}: not armed — ${plan.reason}; nothing ran`);
-      await recordFiring(env, { schedule: schedule.name, firedAt, outcome: "misconfigured", detail: plan.reason });
+      ctx.waitUntil(recordFiring(env, { schedule: schedule.name, firedAt, outcome: "misconfigured", detail: plan.reason }));
       return;
     }
     let firing: ScheduleFiring;
@@ -165,6 +165,9 @@ export default {
     }
     // Ids, outcome, and the reply's first line only — never a token.
     console.log(`[schedule] ${schedule.name} → ${firing.outcome}${firing.runId ? ` run ${firing.runId}` : ""}${firing.detail ? ` — ${firing.detail}` : ""}`);
-    await recordFiring(env, firing);
+    // Telemetry for the /runs Scheduled panel — best-effort and off the
+    // invocation's critical path: the cron completes when the ingress answered,
+    // not when the state Worker has acknowledged the record.
+    ctx.waitUntil(recordFiring(env, firing));
   },
 } satisfies ExportedHandler<Env>;

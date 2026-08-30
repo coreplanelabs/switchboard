@@ -68,8 +68,6 @@ async function main() {
   const deps: CoreDeps = { config, providers, skills, memory, frictionLedger };
   const app = createSlackApp(deps);
 
-  await app.start();
-
   // Work in flight = agent runs + the background memory reflections they spawn.
   // Read by the graceful drain below and reported on /healthz for the deploy
   // preflight (deploy/cloudflare/preflight.mjs).
@@ -232,6 +230,13 @@ async function main() {
       ),
     );
   }
+
+  // The Slack Socket Mode handshake comes LAST, after the HTTP server above is
+  // listening: /healthz (the platform's readiness probe, the keep-alive cron,
+  // the deploy preflight), /ingress and /mcp (the cron identity's scheduled
+  // runs) have nothing to do with Slack, and a slow or failing Slack handshake
+  // used to hold every one of them dark.
+  await app.start();
 
   console.log(
     `switchboard running (providers: ${providers.names().join(", ")}; default agent: ${config.config.defaults.agent})`,

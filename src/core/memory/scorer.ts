@@ -39,8 +39,8 @@ export function tokenize(text: string): string[] {
  *  keyword set or its text). 0 when the query has no tokens. Whole-token
  *  matching, not raw substring: substring matching lets a one-letter query token
  *  ("a") match inside an unrelated word ("comm-a-nd") and pollute retrieval. */
-export function keywordMatch(record: MemoryRecord, query: string): number {
-  const queryTokens = tokenize(query);
+export function keywordMatch(record: MemoryRecord, query: string | readonly string[]): number {
+  const queryTokens = typeof query === "string" ? tokenize(query) : query;
   if (queryTokens.length === 0) return 0;
   const recordTokens = new Set([...tokenize(record.keywords.join(" ")), ...tokenize(record.text)]);
   let hits = 0;
@@ -60,7 +60,7 @@ export function recencyScore(record: MemoryRecord, now: number, tau: number = RE
 /** score = α·keywordMatch + β·recency. Pure; the caller supplies `now`. */
 export function scoreRecord(
   record: MemoryRecord,
-  query: string,
+  query: string | readonly string[],
   now: number,
   weights: ScoreWeights = DEFAULT_WEIGHTS,
   tau: number = RECENCY_TAU_MS,

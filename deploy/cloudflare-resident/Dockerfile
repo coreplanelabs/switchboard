@@ -14,6 +14,20 @@ FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1
 RUN git config --system user.name "switchboard-resident" \
   && git config --system user.email "switchboard-resident@users.noreply.github.com"
 
+# The container is ONE vCPU (wrangler.jsonc). Node test runners size their
+# worker pools from the CPU count the kernel reports — the HOST's, not the
+# cgroup's — so an unconfigured `vitest`/`jest` run forks a dozen workers onto
+# one core and thrashes (2026-08-29: a resident pinned at 100% CPU, 2.2 GiB).
+# These defaults inherit into every thread's `su … -c` shell (su without `-`
+# keeps the environment) and are the runners' documented env knobs; a repo's
+# own config or CLI flags still win. CI=1 makes runners non-interactive (no
+# watch mode, no TTY progress spinners in captured output). The heap cap keeps
+# one runaway process from taking the whole 4 GiB from its neighbours.
+ENV CI=1 \
+    VITEST_MAX_WORKERS=1 VITEST_MAX_THREADS=1 VITEST_MAX_FORKS=1 VITEST_MIN_THREADS=1 VITEST_MIN_FORKS=1 \
+    UV_THREADPOOL_SIZE=2 \
+    NODE_OPTIONS=--max-old-space-size=1536
+
 # pnpm: the base ships Node 24 + npm + bun but not pnpm, so a pnpm repo can't be
 # provisioned (install → build) when onboarded. corepack is NOT on this base's
 # PATH (unlike the older sandbox base), so install pnpm via npm at build time —
