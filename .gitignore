@@ -7,3 +7,4 @@ workspaces/
 config/config.yaml
 node_modules
 build.json
+.DS_Store
