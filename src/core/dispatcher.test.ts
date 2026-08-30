@@ -3061,6 +3061,12 @@ describe("inline command runs + run receipts (#244)", () => {
     expect(deps.runRegistry.listActive()[0].finished).toBe(true);
     expect(receipts).toEqual([{ id: "fr-1", status: "failed" }]);
     expect(replies.join("\n")).toContain("ledger exploded");
+    // The record explains the `failed` status: the error reply is its answer,
+    // byte-identical to what the channel got (the reply is a projection of it).
+    const snap = deps.runRegistry.snapshot("fr-1", "tok")!;
+    expect(snap.events.map((e) => e.type)).toEqual(["input", "answer"]);
+    expect(snap.events[1]).toMatchObject({ type: "answer", text: "⚠️ ledger exploded" });
+    expect(replies).toEqual(["⚠️ ledger exploded"]);
   });
 
   it("an agent run reports its receipt (`completed`) with the registry's run id, after the run is finished", async () => {

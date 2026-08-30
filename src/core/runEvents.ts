@@ -58,7 +58,9 @@ export type RunEvent =
   /** The run's final answer — the same text the channel reply/PR post is
    *  projected from, redacted like every event (NOT capped: the run record is
    *  the source of truth, the summaries are). Published by the dispatcher once
-   *  per run, before the reply goes out; absent when the run threw. */
+   *  per run, before the reply goes out; absent when an AGENT run threw (the
+   *  card shows ❌). An inline command run that throws still publishes one —
+   *  the `⚠️ <error>` reply — so its record explains the `failed` status. */
   | { type: "answer"; text: string; at?: number }
   /** The request as received (directives stripped, attachments noted as a
    *  one-line suffix), redacted, uncapped. Published by the dispatcher once per
