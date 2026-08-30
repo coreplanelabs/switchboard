@@ -138,8 +138,10 @@ workspaceDir: ./workspaces
 #     baseUrl: https://switchboard-memory.coreplanelabs.dev
 #     tokenEnv: MEMORY_TOKEN   # env var holding the Worker's bearer (default)
 #   # Scopes are derived per request, not configured: every request reads the
-#   # shared org scope (org:coreplanelabs) plus the requesting user's own scope
-#   # (user:slack:U…, #107) — a person's records never surface for anyone else.
+#   # shared org scope (org:coreplanelabs), the channel's scope (channel:slack:C…)
+#   # and — when the run is bound to a repo — that repo's scope (repo:owner/name)
+#   # (#253), plus the requesting user's own scope (user:slack:U…, #107) — a
+#   # person's records never surface for anyone else.
 #   limit: 8            # max records retrieved/injected per request (default 8)
 #   maxTokens: 800      # hard token budget for the injected block (default 800)
 #   maxRecordsPerScope: 500

@@ -126,6 +126,51 @@ describe("handleMemoryCommand", () => {
     expect(empty).toMatch(/no active records/i);
   });
 
+  // #253 — repo / channel scopes in the human controls.
+  it("`memory list repo` needs a bound repo (says so without one); `memory list channel` uses the message's channel", async () => {
+    const store = new InMemoryMemoryStore(
+      [
+        rec({ id: "mem:repo:acme/api:0", scopeKey: "repo:acme/api", text: "acme/api deploys with make release" }),
+        rec({ id: "mem:channel:slack:C1:0", scopeKey: "channel:slack:C1", text: "this channel coordinates deploys" }),
+        rec({ id: "mem:channel:slack:C2:0", scopeKey: "channel:slack:C2", text: "other channel note" }),
+      ],
+      { now: () => NOW },
+    );
+    const noRepo = (await handleMemoryCommand(config(), msg("memory list repo"), store))!;
+    expect(noRepo).toMatch(/no repo/i);
+    expect(noRepo).not.toContain("make release");
+    const repo = (await handleMemoryCommand(config(), msg("memory list repo"), store, undefined, { repo: "acme/api" }))!;
+    expect(repo).toContain("mem:repo:acme/api:0");
+    expect(repo).toContain("repo:acme/api");
+    const chan = (await handleMemoryCommand(config(), msg("memory list channel"), store))!;
+    expect(chan).toContain("mem:channel:slack:C1:0");
+    expect(chan).not.toContain("other channel note");
+    // `memory list` (all) includes repo/channel sections only when they exist for this request.
+    const all = (await handleMemoryCommand(config(), msg("memory list"), store, undefined, { repo: "acme/api" }))!;
+    expect(all).toContain("repo:acme/api");
+    expect(all).toContain("channel:slack:C1");
+    expect(all).not.toContain("slack:C2");
+  });
+
+  it("forgetting a repo or channel record is admin-gated like org (shared scopes)", async () => {
+    const seed = () =>
+      new InMemoryMemoryStore(
+        [
+          rec({ id: "mem:repo:acme/api:0", scopeKey: "repo:acme/api", text: "r" }),
+          rec({ id: "mem:channel:slack:C1:0", scopeKey: "channel:slack:C1", text: "c" }),
+        ],
+        { now: () => NOW },
+      );
+    const store = seed();
+    expect(await handleMemoryCommand(config(), msg("memory forget mem:repo:acme/api:0"), store)).toMatch(/🚫/);
+    expect(await handleMemoryCommand(config(), msg("memory forget mem:channel:slack:C1:0"), store)).toMatch(/🚫/);
+    expect(await store.list("repo:acme/api", 10)).toHaveLength(1);
+    expect(await handleMemoryCommand(config(), msg("memory forget mem:repo:acme/api:0", "slack:UADMIN"), store)).toMatch(/forgot/i);
+    expect(await handleMemoryCommand(config(), msg("memory forget mem:channel:slack:C1:0", "slack:UADMIN"), store)).toMatch(/forgot/i);
+    expect(await store.list("repo:acme/api", 10)).toEqual([]);
+    expect(await store.list("channel:slack:C1", 10)).toEqual([]);
+  });
+
   it("an identity-less request (no userId) gets an explicit 'no personal scope' line instead of an empty reply", async () => {
     const reply = (await handleMemoryCommand(config(), msg("memory list me", ""), seeded()))!;
     expect(reply).toMatch(/no user identity/i);
@@ -143,6 +188,7 @@ describe("handleMemoryCommand", () => {
     const reply = (await handleMemoryCommand(config(), msg("memory list --limit 7 deploy command"), store))!;
     expect(calls).toEqual([
       { scopeKey: "user:slack:U1", limit: 7, query: "deploy command" },
+      { scopeKey: "channel:slack:C1", limit: 7, query: "deploy command" }, // #253: the message's channel scope
       { scopeKey: "org:coreplanelabs", limit: 7, query: "deploy command" },
     ]);
     expect(reply).toContain("mem:org:coreplanelabs:0"); // matches "deploy command"

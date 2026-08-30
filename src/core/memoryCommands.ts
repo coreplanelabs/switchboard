@@ -7,9 +7,10 @@ import type { IncomingMessage } from "./types.js";
 // §24): `memory list [me|org] [--limit <n>] [<words>]` and `memory forget
 // <id>`. Config-family like `friction …`: answered inline from the store, never
 // a model turn, channel-agnostic. Scope gate: a person manages their OWN
-// `user:` scope freely; the shared org scope is admin-gated (the same fail-
-// closed `canManageRepos` gate as repo management); another user's scope is
-// unreachable for everyone — the only scopes a request can name are its own
+// `user:` scope freely; the shared scopes — org, and (#253) the bound repo's
+// and this channel's — are admin-gated (the same fail-closed `canManageRepos`
+// gate as repo management); another user's scope is unreachable for everyone —
+// the only scopes a request can name are its own, its repo's, its channel's,
 // and the org's (invariant 4).
 
 /** Records shown per scope by `memory list` when no `--limit` is given. */
@@ -17,12 +18,23 @@ export const MEMORY_LIST_LIMIT = 20;
 /** Ceiling for `--limit` — the Memory Worker's per-request cap. */
 export const MEMORY_LIST_MAX_LIMIT = 50;
 
+/** The scope words `memory list` accepts (#253 added `repo` and `channel`). */
+export type MemoryListScope = "all" | "me" | "org" | "repo" | "channel";
+const LIST_SCOPES: ReadonlySet<string> = new Set<MemoryListScope>(["me", "org", "repo", "channel"]);
+
 export type MemoryCommand =
-  | { verb: "list"; scope: "all" | "me" | "org"; limit?: number; query?: string }
+  | { verb: "list"; scope: MemoryListScope; limit?: number; query?: string }
   | { verb: "forget"; id: string }
   | { error: string };
 
-const USAGE = "Usage: `memory list [me|org] [--limit <n>] [<words>]` · `memory forget <id>`";
+const USAGE = "Usage: `memory list [me|org|repo|channel] [--limit <n>] [<words>]` · `memory forget <id>`";
+
+/** What the dispatcher knows about the request beyond the message itself:
+ *  the repo the run is bound to (for the `repo` scope), resolved the same way
+ *  a run resolves it. Absent → no repo scope. */
+export interface MemoryCommandContext {
+  repo?: string;
+}
 
 /** Parses a memory command; null when the text is not one (prose mentioning
  *  memory passes through to the model). `memory list` takes an optional scope
@@ -52,8 +64,8 @@ export function parseMemoryCommand(text: string): MemoryCommand | null {
       }
       if (t.startsWith("--")) return { error: `Unknown option \`${t}\`. ${USAGE}` };
       const lower = t.toLowerCase();
-      if (words.length === 0 && cmd.scope === "all" && cmd.limit === undefined && (lower === "me" || lower === "org")) {
-        cmd.scope = lower;
+      if (words.length === 0 && cmd.scope === "all" && cmd.limit === undefined && LIST_SCOPES.has(lower)) {
+        cmd.scope = lower as MemoryListScope;
         continue;
       }
       words.push(t);
@@ -89,27 +101,37 @@ export async function runMemoryCommand(
   msg: IncomingMessage,
   store: MemoryStore | undefined,
   cmd: MemoryCommand,
+  ctx: MemoryCommandContext = {},
 ): Promise<MemoryCommandResult> {
   if ("error" in cmd) return { text: cmd.error, ok: false };
   const cfg = config.config.memory;
   if (!cfg?.enabled) {
     return { text: "Memory is off in this deployment (`memory.enabled` is not set), so there is nothing to list or forget.", ok: false };
   }
-  const keys = requestScopeKeys(msg.userId);
+  const keys = requestScopeKeys(msg.userId, { repo: ctx.repo, channelId: msg.channelId });
   const s = selectMemoryStore(cfg, store);
 
   try {
     if (cmd.verb === "list") {
       const view = { limit: cmd.limit ?? MEMORY_LIST_LIMIT, query: cmd.query };
       const sections: string[] = [];
-      if (cmd.scope !== "org") {
+      const want = (scope: Exclude<MemoryListScope, "all">) => cmd.scope === "all" || cmd.scope === scope;
+      if (want("me")) {
         sections.push(
           keys.user
             ? await renderScope(s, keys.user, "your records", view)
             : "*your records*: this request carries no user identity, so there is no personal scope to show.",
         );
       }
-      if (cmd.scope !== "me") sections.push(await renderScope(s, keys.org, "shared org records", view));
+      if (want("repo")) {
+        if (keys.repo) sections.push(await renderScope(s, keys.repo, "this repo's records", view));
+        else if (cmd.scope === "repo") sections.push("*this repo's records*: no repo is bound here — name one (`owner/name`, a PR link) or ask in a repo thread.");
+      }
+      if (want("channel")) {
+        if (keys.channel) sections.push(await renderScope(s, keys.channel, "this channel's records", view));
+        else if (cmd.scope === "channel") sections.push("*this channel's records*: this request carries no channel identity.");
+      }
+      if (want("org")) sections.push(await renderScope(s, keys.org, "shared org records", view));
       return { text: sections.join("\n\n"), ok: true };
     }
 
@@ -120,10 +142,11 @@ export async function runMemoryCommand(
     }
     if (target === keys.user) {
       // own scope: always allowed
-    } else if (target === keys.org) {
+    } else if (target === keys.org || target.startsWith("repo:") || target.startsWith("channel:")) {
+      // shared scopes: the same fail-closed admin gate as repo management
       if (!config.canManageRepos(msg.userId)) {
         return {
-          text: `🚫 Forgetting shared org memory is restricted. Ask ${config.adminsHint()} — you can always forget records in your own scope (\`memory list me\`).`,
+          text: `🚫 Forgetting shared memory (\`${target}\`) is restricted. Ask ${config.adminsHint()} — you can always forget records in your own scope (\`memory list me\`).`,
           ok: false,
         };
       }
@@ -148,9 +171,10 @@ export async function handleMemoryCommand(
   msg: IncomingMessage,
   store: MemoryStore | undefined,
   cmd: MemoryCommand | null = parseMemoryCommand(msg.text),
+  ctx: MemoryCommandContext = {},
 ): Promise<string | null> {
   if (!cmd) return null;
-  return (await runMemoryCommand(config, msg, store, cmd)).text;
+  return (await runMemoryCommand(config, msg, store, cmd, ctx)).text;
 }
 
 async function renderScope(

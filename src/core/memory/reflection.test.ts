@@ -373,6 +373,112 @@ describe("reflect (one extractor call → store.write)", () => {
 // alongside org records: the extractor tags each fact with an `audience`;
 // `user` facts land in the requesting user's scope, everything else (and the
 // summary) in the org scope; a supersede follows the superseded record's scope.
+// Feature: features/memory.md §23 (#253) — repo/channel audiences route to the
+// run's repo/channel scope when present, else fall back to org; the summary
+// follows user > repo > channel > org.
+describe("reflect — repo / channel routing (#253)", () => {
+  const USER = "user:slack:U1";
+  const REPO = "repo:acme/api";
+  const CHAN = "channel:slack:C1";
+  const base = {
+    scopeKeys: { org: SCOPE, user: USER, repo: REPO, channel: CHAN },
+    model: "cheap-model",
+    history: [] as HistoryItem[],
+    request: "how does acme/api deploy here?",
+    answer: "make release",
+    ...PROVENANCE,
+  };
+  const reply = JSON.stringify({
+    facts: [
+      { text: "acme/api deploys with make release", confidence: 0.9, audience: "repo" },
+      { text: "this channel coordinates deploys", confidence: 0.9, audience: "channel" },
+      { text: "the org standup is at 10am", confidence: 0.9, audience: "org" },
+    ],
+    summary: "Explained how acme/api deploys from this channel.",
+  });
+
+  it("routes repo/channel facts to their scopes and org facts to org; with no user fact the summary follows the repo", async () => {
+    const provider = fakeProvider(reply);
+    const store = new InMemoryMemoryStore();
+    await reflect({ ...base, provider, store });
+    expect(provider.requests).toHaveLength(1);
+    expect((await store.list(REPO, 10)).map((r) => r.text).sort()).toEqual(
+      ["Explained how acme/api deploys from this channel.", "acme/api deploys with make release"].sort(),
+    );
+    expect((await store.list(CHAN, 10)).map((r) => r.text)).toEqual(["this channel coordinates deploys"]);
+    expect((await store.list(SCOPE, 10)).map((r) => r.text)).toEqual(["the org standup is at 10am"]);
+    expect(await store.list(USER, 10)).toEqual([]);
+  });
+
+  it("summary inheritance order is user > repo > channel > org", async () => {
+    const withUser = JSON.stringify({
+      facts: [
+        { text: "acme/api deploys with make release", confidence: 0.9, audience: "repo" },
+        { text: "this user wants terse deploy answers", confidence: 0.9, audience: "user" },
+      ],
+      summary: "S1",
+    });
+    const s1 = new InMemoryMemoryStore();
+    await reflect({ ...base, provider: fakeProvider(withUser), store: s1 });
+    expect((await s1.list(USER, 10)).map((r) => r.text)).toContain("S1");
+    expect((await s1.list(REPO, 10)).map((r) => r.text)).not.toContain("S1");
+
+    const channelOnly = JSON.stringify({ facts: [{ text: "this channel coordinates deploys", confidence: 0.9, audience: "channel" }], summary: "S2" });
+    const s2 = new InMemoryMemoryStore();
+    await reflect({ ...base, provider: fakeProvider(channelOnly), store: s2 });
+    expect((await s2.list(CHAN, 10)).map((r) => r.text)).toContain("S2");
+    expect((await s2.list(SCOPE, 10)).map((r) => r.text)).not.toContain("S2");
+  });
+
+  it("a repo/channel fact on a run without that scope falls back to org (never dropped)", async () => {
+    const provider = fakeProvider(reply);
+    const store = new InMemoryMemoryStore();
+    await reflect({ ...base, scopeKeys: { org: SCOPE, user: USER }, provider, store });
+    const org = (await store.list(SCOPE, 10)).map((r) => r.text);
+    expect(org).toContain("acme/api deploys with make release");
+    expect(org).toContain("this channel coordinates deploys");
+    expect(await store.list(REPO, 10)).toEqual([]);
+    expect(await store.list(CHAN, 10)).toEqual([]);
+  });
+
+  it("shows the extractor existing records from every scope the run has, and a supersede follows the record's scope", async () => {
+    const stale = existing({ id: "mem:repo:acme/api:0", scopeKey: REPO, text: "acme/api deploys with make ship" });
+    const provider = fakeProvider(
+      JSON.stringify({
+        facts: [{ text: "acme/api deploys with make release", confidence: 0.9, audience: "org", supersedes: "mem:repo:acme/api:0" }],
+        summary: "",
+      }),
+    );
+    const store = new InMemoryMemoryStore([stale]);
+    await reflect({ ...base, provider, store });
+    const shown = (provider.requests[0].messages[0].content[0] as { text: string }).text;
+    expect(shown).toContain("mem:repo:acme/api:0");
+    expect((await store.list(REPO, 10)).map((r) => r.text)).toEqual(["acme/api deploys with make release"]);
+    expect(await store.list(SCOPE, 10)).toEqual([]);
+  });
+});
+
+describe("parseReflection — repo / channel audiences (#253)", () => {
+  it("keeps repo and channel audiences; summary inherits user > repo > channel > org", () => {
+    const out = parseReflection(
+      JSON.stringify({
+        facts: [
+          { text: "a", confidence: 0.9, audience: "repo" },
+          { text: "b", confidence: 0.9, audience: "channel" },
+        ],
+        summary: "s",
+      }),
+      PROVENANCE,
+      new Set(),
+    );
+    expect(out.ok && out.candidates.map((c) => [c.text, c.audience])).toEqual([
+      ["a", "repo"],
+      ["b", "channel"],
+      ["s", "repo"],
+    ]);
+  });
+});
+
 describe("reflect — user scope routing (#107 PR B)", () => {
   const USER = "user:slack:U1";
   const base = {

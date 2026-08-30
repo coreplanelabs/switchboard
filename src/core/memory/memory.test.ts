@@ -64,6 +64,44 @@ describe("memoryContextBlock", () => {
 
 // Feature: features/memory.md (#107 PR B) — user-scoped memory on the read
 // path: org + the requesting user's records, never another user's.
+// Feature: features/memory.md §21–22 (#253) — repo and channel scopes join the
+// one ranked pool; repo may arrive late (a promise) because the dispatcher
+// starts the memory read before repo resolution finishes.
+describe("memoryContextBlock — repo + channel scopes (#253)", () => {
+  const orgRec = rec({ id: "mem:org:coreplanelabs:1", text: "deploy is npm run deploy", keywords: ["deploy"] });
+  const repoRec = rec({ id: "mem:repo:acme/api:0", scopeKey: "repo:acme/api", text: "acme/api deploys via make release", keywords: ["deploy", "release"] });
+  const chanRec = rec({ id: "mem:channel:slack:C1:0", scopeKey: "channel:slack:C1", text: "this channel is for deploy coordination", keywords: ["deploy", "channel"] });
+  const otherChan = rec({ id: "mem:channel:slack:C2:0", scopeKey: "channel:slack:C2", text: "deploy chatter for team two", keywords: ["deploy"] });
+  const u1Rec = rec({ id: "mem:user:slack:U1:0", scopeKey: "user:slack:U1", text: "prefers deploy previews", keywords: ["deploy", "preview"] });
+
+  it("reads org + repo + channel + user and names all four in the prefix, in that order", async () => {
+    const store = new InMemoryMemoryStore([orgRec, repoRec, chanRec, otherChan, u1Rec], { now: () => NOW });
+    const block = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", { channelId: "slack:C1", repo: "acme/api" });
+    expect(block!.split("\n")[0]).toBe(
+      "Background memory for org:coreplanelabs + repo:acme/api + channel:slack:C1 + user:slack:U1 (may be outdated — verify before acting):",
+    );
+    for (const t of ["deploy is npm run deploy", "make release", "deploy coordination", "prefers deploy previews"]) expect(block).toContain(t);
+    expect(block).not.toContain("team two"); // another channel's scope is never read
+  });
+
+  it("accepts the repo as a promise (resolved after the other scopes were fetched) and includes it", async () => {
+    const store = new InMemoryMemoryStore([orgRec, repoRec], { now: () => NOW });
+    const repo = new Promise<string | undefined>((r) => setTimeout(() => r("acme/api"), 5));
+    const block = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", { repo });
+    expect(block).toContain("make release");
+    expect(block!.split("\n")[0]).toContain("org:coreplanelabs + repo:acme/api + user:slack:U1");
+  });
+
+  it("a repo promise that resolves to nothing (no repo bound) or rejects leaves the repo scope out, without failing the read", async () => {
+    const store = new InMemoryMemoryStore([orgRec, repoRec], { now: () => NOW });
+    const none = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", { repo: Promise.resolve(undefined) });
+    expect(none).not.toContain("make release");
+    const failed = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", { repo: Promise.reject(new Error("github down")) });
+    expect(failed).toContain("deploy is npm run deploy");
+    expect(failed).not.toContain("make release");
+  });
+});
+
 describe("memoryContextBlock — user scope (#107 PR B)", () => {
   const orgRec = rec({ id: "mem:org:coreplanelabs:1", text: "deploy is npm run deploy", keywords: ["deploy"] });
   const u1Rec = rec({
