@@ -6,6 +6,7 @@ import type { Executor } from "./execution/executor.js";
 import { ExecInfraError } from "./execution/executor.js";
 import type { RunEvent } from "./core/runEvents.js";
 import { runAgent } from "./runner.js";
+import { InMemorySkillStore } from "./skills/index.js";
 
 // Feature: features/run-loop.md — turn/time budgets and forced write-up.
 
@@ -391,6 +392,33 @@ describe("run-visibility events", () => {
       { type: "tool_call", tool: "bash", summary: expect.stringContaining("echo hi"), callId: "t1", at: expect.any(Number) },
       { type: "tool_result", tool: "bash", ok: true, summary: expect.stringContaining("ok"), callId: "t1", exitCode: 0, output: "ok", at: expect.any(Number) },
     ]);
+  });
+
+  // features/skills.md — tools publish through the runner's emitter: a
+  // use_skill load lands in the stream as a stamped `skill_use` event between
+  // its own tool_call and tool_result.
+  it("a tool's ctx.publish reaches onEvent, stamped and ordered with the tool events", async () => {
+    const skills = new InMemorySkillStore([{ name: "tdd", description: "test first", body: "BODY", agents: ["coding"], source: "https://example.com/tdd" }]);
+    const useSkill: CompletionResult = { content: [{ type: "tool_use", id: "s1", name: "use_skill", input: { name: "tdd" } }], stopReason: "tool_use" };
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([useSkill, text("done")]),
+      model: "m",
+      agent: agent({ toolset: "full" }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor, skills, agentName: "coding" },
+      onEvent: (e) => events.push(e),
+    });
+    expect(events.filter((e) => e.type !== "turn").map((e) => e.type)).toEqual(["tool_call", "skill_use", "tool_result"]);
+    expect(events.find((e) => e.type === "skill_use")).toEqual({
+      type: "skill_use",
+      skill: "tdd",
+      description: "test first",
+      agent: "coding",
+      source: "https://example.com/tdd",
+      bodyBytes: 4,
+      at: expect.any(Number),
+    });
   });
 
   it("redacts secrets in tool_result summaries", async () => {

@@ -225,6 +225,17 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
     expect(html).toContain("function formatElapsed("); // inlined for the tail and the group total
   });
 
+  // features/skills.md — a loaded skill is its own row inside the step (📚 skill
+  // <name> · description · source link · bytes into context), never a call card.
+  it("renders a `skill` change as its own row in the step: name, description, http(s) source via setAttribute, context cost", () => {
+    expect(html).toContain('} else if (change.kind === "skill") {');
+    expect(html).toContain("function addSkill(step, skill)");
+    expect(html).toContain('el("span", "skillname", "skill " + skill.name)');
+    expect(html).toContain('a.setAttribute("href", skill.source)');
+    expect(html).toContain('fmtBytes(skill.bodyBytes) + " into context"');
+    expect(html).toContain(".skill { display: flex;");
+  });
+
   it("renders run_meta under the request as agent · model · linked repo / ref / #PR / sha (allow-listed repo, setAttribute only) and leads the source line with a drawn Slack mark (item 19)", () => {
     expect(html).toContain('} else if (change.kind === "meta") {');
     expect(html).toContain('var base = "https://github.com/" + m.repo;');

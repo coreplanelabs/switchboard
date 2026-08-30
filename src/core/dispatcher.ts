@@ -1517,6 +1517,8 @@ function activityLine(e: RunEvent): string {
       return `💭 thought for ${formatTurnDuration(e.durationMs)}`;
     case "run_meta":
       return "run context recorded"; // published straight to the registry too — never arrives here
+    case "skill_use":
+      return `📚 skill ${e.skill} loaded`;
   }
 }
 
