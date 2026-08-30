@@ -85,6 +85,43 @@ describe("renderMarkdownInto — blocks", () => {
     expect(render("# A\n## B\n### C").html).toBe("<h1>A</h1><h2>B</h2><h3>C</h3>");
   });
 
+  it("renders ####/#####/###### headings as h4/h5/h6 — never paragraph text (#209)", () => {
+    expect(render("#### D\n##### E\n###### F").html).toBe("<h4>D</h4><h5>E</h5><h6>F</h6>");
+    // seven+ markers are not a heading — unknown syntax degrades to text
+    expect(render("####### G").html).toBe("<p>####### G</p>");
+  });
+
+  it("renders a GFM table: header row, |---| separator, body rows (#209)", () => {
+    expect(render("| File | Lines |\n|---|---|\n| a.ts | 10 |\n| b.ts | 20 |").html).toBe(
+      "<table><thead><tr><th>File</th><th>Lines</th></tr></thead>" +
+        "<tbody><tr><td>a.ts</td><td>10</td></tr><tr><td>b.ts</td><td>20</td></tr></tbody></table>",
+    );
+  });
+
+  it("table cells run through the inline renderer; alignment colons in the separator are accepted", () => {
+    const { html } = render("| A | B |\n|:---|---:|\n| **x** `c` | [d](https://e.com) |");
+    expect(html).toContain("<th>A</th>");
+    expect(html).toContain("<td><strong>x</strong> <code>c</code></td>");
+    expect(html).toContain('<a href="https://e.com"');
+  });
+
+  it("a pipe row with no |---| separator under it is not a table (stays text)", () => {
+    expect(render("| just | pipes |").html).toBe("<p>| just | pipes |</p>");
+    expect(render("a | b\nplain").html).toBe("<p>a | b\nplain</p>");
+    // a bare --- rule (no pipe) never counts as a table separator
+    expect(render("head\n---").html).toBe("<p>head\n---</p>");
+  });
+
+  it("a table directly after a paragraph line starts a table (the paragraph does not swallow it)", () => {
+    expect(render("intro\n| H |\n|---|\n| v |").html).toBe(
+      "<p>intro</p><table><thead><tr><th>H</th></tr></thead><tbody><tr><td>v</td></tr></tbody></table>",
+    );
+  });
+
+  it("a header-only table (no body rows) renders a thead without a tbody", () => {
+    expect(render("| H1 | H2 |\n|---|---|").html).toBe("<table><thead><tr><th>H1</th><th>H2</th></tr></thead></table>");
+  });
+
   it("renders fenced code blocks verbatim (no inline parsing inside)", () => {
     expect(render("```js\nconst a = **not bold**;\n```").html).toBe("<pre><code>const a = **not bold**;</code></pre>");
   });
@@ -211,6 +248,27 @@ describe("renderMarkdownInto — safety contract", () => {
     const { html, root } = render("```\n</script><script>alert(1)</script>\n```");
     expect(tags(root)).not.toContain("script");
     expect(html).toBe("<pre><code>&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;</code></pre>");
+  });
+
+  it("markup in table cells stays text: <img>/<script>/javascript: never become nodes (#209)", () => {
+    const t = render('| <img src=x onerror="alert(1)"> | </td><script>x</script> |\n|---|---|\n| <svg onload=alert(1)> | [x](javascript:alert(1)) |');
+    expect(tags(t.root)).not.toContain("img");
+    expect(tags(t.root)).not.toContain("script");
+    expect(tags(t.root)).not.toContain("svg");
+    expect(tags(t.root)).not.toContain("a");
+    expect(t.html).toContain("&lt;img src=x onerror=");
+    expect(t.html).toContain("&lt;/td&gt;&lt;script&gt;");
+  });
+
+  it("markup in h4–h6 heading text stays text (#209)", () => {
+    const h = render("#### <script>alert(1)</script>\n##### <img src=x onerror=alert(1)>");
+    expect(tags(h.root)).not.toContain("script");
+    expect(tags(h.root)).not.toContain("img");
+    expect(h.html).toBe("<h4>&lt;script&gt;alert(1)&lt;/script&gt;</h4><h5>&lt;img src=x onerror=alert(1)&gt;</h5>");
+  });
+
+  it("a bare `#### ` marker (no content) terminates and degrades to text — the progress guarantee covers h4–h6", () => {
+    expect(render("before\n#### \nafter").html).toBe("<p>before</p><p>#### </p><p>after</p>");
   });
 
   it("clears the root before rendering (re-render replaces, never appends)", () => {

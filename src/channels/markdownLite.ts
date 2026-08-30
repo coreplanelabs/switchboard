@@ -10,6 +10,10 @@
 //     rel="noopener noreferrer"; every other scheme stays literal text;
 //   - unknown syntax degrades to plain text instead of erroring.
 //
+// Supported blocks: paragraphs, #–###### headings, fenced code, quotes,
+// lists (one nested level), and a GFM table subset (#209: header row +
+// `|---|` separator + body rows, built as table/thead/tbody/tr/th/td).
+//
 // It ships into the page by interpolating `String(renderMarkdownInto)` into the
 // inline <script> (see liveView.ts) — so it must have NO imports, NO closures
 // over module scope, and only ES2022 syntax. The unit tests drive it against a
@@ -39,7 +43,7 @@ export function renderMarkdownInto(root: MdElement, text: string): void {
     .replace(/\r\n?/g, "\n")
     .split("\n");
   const LIST_RE = /^(\s*)([-*]|\d+[.)])\s+(.*)$/;
-  const BLOCK_START_RE = /^(```|#{1,3}\s|>)/;
+  const BLOCK_START_RE = /^(```|#{1,6}\s|>)/;
   // Quote nesting is recursion; bound it (model text is the input, and a wall of
   // `>` must never overflow the stack). Declared inside the function because the
   // whole function is inlined into the page: no module-scope closures allowed.
@@ -52,6 +56,29 @@ export function renderMarkdownInto(root: MdElement, text: string): void {
   }
   function txt(parent: MdNode, s: string): void {
     if (s) parent.appendChild(doc.createTextNode(s));
+  }
+
+  // GFM table subset (#209): a header row, a `|---|` separator (alignment
+  // colons accepted, ignored), then body rows. A table exists only when the
+  // separator sits directly under a pipe-bearing header with the SAME cell
+  // count — anything else stays text. Cells go through the inline renderer;
+  // the DOM is table/thead/tbody/tr/th/td via createElement, cells textContent.
+  function splitCells(line: string): string[] {
+    let t = line.trim();
+    if (t[0] === "|") t = t.slice(1);
+    if (t[t.length - 1] === "|") t = t.slice(0, -1);
+    return t.split("|").map((c) => c.trim());
+  }
+  function isTableSep(line: string): boolean {
+    const t = line.trim();
+    if (t.indexOf("|") < 0 || !/^[\s:|-]+$/.test(t)) return false;
+    return splitCells(t).every((c) => /^:?-+:?$/.test(c));
+  }
+  function isTableStart(src: string[], i: number): boolean {
+    const line = src[i];
+    if (line.indexOf("|") < 0 || isTableSep(line)) return false;
+    if (i + 1 >= src.length || !isTableSep(src[i + 1])) return false;
+    return splitCells(line).length === splitCells(src[i + 1]).length;
   }
 
   // Inline pass: code spans, **bold**, _italic_/*italic*, [text](http(s)://…).
@@ -139,7 +166,7 @@ export function renderMarkdownInto(root: MdElement, text: string): void {
       }
       // Content must start with a non-space: `##  ` (marker + spaces) is not an
       // empty heading, it is text (via the fall-through below).
-      const h = /^(#{1,3})\s+(\S.*?)\s*$/.exec(line);
+      const h = /^(#{1,6})\s+(\S.*?)\s*$/.exec(line);
       if (h) {
         inline(el(parent, "h" + h[1].length), h[2]);
         i++;
@@ -152,6 +179,23 @@ export function renderMarkdownInto(root: MdElement, text: string): void {
         const q: string[] = [];
         while (i < src.length && src[i][0] === ">") q.push(src[i++].replace(/^>\s?/, ""));
         blocks(el(parent, "blockquote"), q, depth + 1);
+        continue;
+      }
+      if (isTableStart(src, i)) {
+        const headers = splitCells(line);
+        const table = el(parent, "table");
+        const headRow = el(el(table, "thead"), "tr");
+        for (const c of headers) inline(el(headRow, "th"), c);
+        i += 2; // the header row and its separator
+        let tbody: MdElement | null = null;
+        while (i < src.length && src[i].indexOf("|") >= 0 && !isTableStart(src, i)) {
+          if (!tbody) tbody = el(table, "tbody");
+          const cells = splitCells(src[i]);
+          const tr = el(tbody, "tr");
+          // Rows are squared to the header width (GFM): short rows pad, long rows truncate.
+          for (let k = 0; k < headers.length; k++) inline(el(tr, "td"), k < cells.length ? cells[k] : "");
+          i++;
+        }
         continue;
       }
       if (LIST_RE.test(line)) {
@@ -178,7 +222,7 @@ export function renderMarkdownInto(root: MdElement, text: string): void {
         continue;
       }
       const p: string[] = [];
-      while (i < src.length && !/^\s*$/.test(src[i]) && !BLOCK_START_RE.test(src[i]) && !LIST_RE.test(src[i])) p.push(src[i++]);
+      while (i < src.length && !/^\s*$/.test(src[i]) && !BLOCK_START_RE.test(src[i]) && !LIST_RE.test(src[i]) && !isTableStart(src, i)) p.push(src[i++]);
       // Progress guarantee: a line that LOOKS like a block start but matched no
       // block above (a bare `# ` heading marker, a `>` past the quote-depth cap)
       // would otherwise leave `p` empty and `i` unmoved — an infinite loop that
