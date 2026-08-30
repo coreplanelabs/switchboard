@@ -73,6 +73,11 @@ export interface HealthState {
   /** Epoch ms of the process start. `deploy restart` (no image build, same
    *  `build.commit`) tells the restarted container from the old one by this. */
   startedAt?: number;
+  /** Epoch ms when the HTTP server's listen() callback fired. With `slack.since`
+   *  it proves the listen-before-Slack ordering (#298) from ONE poll on ONE
+   *  clock: `httpListeningAt < slack.since` — no race against the boot window,
+   *  which the Worker shim's coarse port polling makes externally unobservable. */
+  httpListeningAt?: number;
 }
 
 export interface HealthPayload {
@@ -98,6 +103,9 @@ export interface HealthPayload {
   build?: BuildInfo;
   /** ISO process start; present whenever `HealthState.startedAt` is given (always on the live `/healthz`). */
   startedAt?: string;
+  /** ISO instant the HTTP server began accepting; compare with `slack.since`
+   *  (same clock) for the listen-before-connect receipt. Absent until listen. */
+  httpListeningAt?: string;
 }
 
 export function healthPayload(state: HealthState): HealthPayload {
@@ -124,5 +132,6 @@ export function healthPayload(state: HealthState): HealthPayload {
   }
   if (state.build) payload.build = { commit: state.build.commit, ...(state.build.builtAt !== undefined ? { builtAt: state.build.builtAt } : {}) };
   if (state.startedAt !== undefined) payload.startedAt = new Date(state.startedAt).toISOString();
+  if (state.httpListeningAt !== undefined) payload.httpListeningAt = new Date(state.httpListeningAt).toISOString();
   return payload;
 }
