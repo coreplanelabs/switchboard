@@ -50,6 +50,9 @@ export interface RunRecord {
    *  failed inline run the `⚠️ <error>` reply, so a persisted row can say what
    *  failed (live-view item 20). Optional: records written before it lack it. */
   activity?: string;
+  /** Who started the run, resolved (`IncomingMessage.userName`) — the index's
+   *  source mark says `via Slack · justin`, never a raw member id. */
+  userName?: string;
   /** The thread that started the run (`IncomingMessage.sourceUrl`), for the
    *  index's hover link. Optional as above. */
   sourceUrl?: string;
@@ -226,7 +229,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
   const r = v as Record<string, unknown>;
   if (typeof r.id !== "string" || !RUN_ID_PATTERN.test(r.id)) return false;
   if (!isOptionalString(r.label) || !isOptionalString(r.agent) || !isOptionalString(r.model) || !isOptionalString(r.repo)) return false;
-  if (!isOptionalString(r.activity) || !isOptionalString(r.sourceUrl)) return false;
+  if (!isOptionalString(r.activity) || !isOptionalString(r.sourceUrl) || !isOptionalString(r.userName)) return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   if (!isFiniteNumber(r.startedAt) || !isFiniteNumber(r.finishedAt)) return false;
   if (!RUN_STATUSES.includes(r.status as RunStatus)) return false;

@@ -656,6 +656,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       threadKey: msg.threadKey,
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     });
     // The narrative events the dispatcher itself publishes — the request, the
     // thread context, the final answer — go straight to the registry: redacted
@@ -1228,7 +1229,7 @@ function assembleRunRecord(input: {
   snap: RunSnapshot | null;
   agent: string;
   model?: string;
-  msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey" | "sourceUrl">;
+  msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey" | "sourceUrl" | "userName">;
   repo?: string;
   finishedAt: number;
   status: RunStatus;
@@ -1257,6 +1258,7 @@ function assembleRunRecord(input: {
     // index can say what failed and link the thread without the events (item 20).
     ...(activityOfEvents(events) !== undefined ? { activity: activityOfEvents(events) } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
   });
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
 }

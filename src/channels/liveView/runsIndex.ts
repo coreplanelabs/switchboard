@@ -175,6 +175,7 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
     var id = run.channelId || "";
     var colon = id.indexOf(":");
     var kind = colon === -1 ? "unknown" : id.slice(0, colon);
+    if (run.userName) return { kind: kind, identity: run.userName }; // the resolved name, never a raw member id
     var uid = run.userId || "";
     var ucolon = uid.indexOf(":");
     return { kind: kind, identity: ucolon === -1 ? uid : uid.slice(ucolon + 1) };
@@ -198,13 +199,11 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
     if (run.finished && typeof run.finishedAt === "number") t += "\nfinished " + fmt.formatLocalIso(run.finishedAt);
     return t;
   }
-  // The source mark's tooltip: surface · identity, then what Slack adds.
-  function sourceTip(run: IndexRow, parts: { agent?: string; scope: string; snippet?: string }, linked: boolean): string {
+  // The source mark's tooltip: one line — surface · who. The arrow itself says
+  // "this opens somewhere" (a pointer and a hover state, not a caption).
+  function sourceTip(run: IndexRow): string {
     var s = surfaceOf(run);
-    var t = "via " + (SURFACE_NAME[s.kind] || s.kind) + (s.identity ? " · " + s.identity : "");
-    if (s.kind === "slack" && parts.scope.charAt(0) === "#") t += "\n" + parts.scope;
-    if (linked) t += "\nopen the thread";
-    return t;
+    return "via " + (SURFACE_NAME[s.kind] || s.kind) + (s.identity ? " · " + s.identity : "");
   }
   function fill(li: RowElement, run: IndexRow, now?: number, retentionMs?: number): void {
     li.className = "run " + (run.finished ? "finished" : "live");
@@ -259,20 +258,22 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
     // The stop badge while a stop is in flight — and for a finished row with no
     // record status yet (a registry summary), where it is the outcome.
     if (run.stop && !(run.finished && run.status)) body.appendChild(span("stopbadge " + run.stop.state, stopLabel(run.stop)));
-    // The source mark: where the run came from, linked to the thread when there
-    // is one (Slack). Shown on row hover/focus, like GitHub's row quick actions.
+    // The source mark: where the run came from. With a thread to open it is the
+    // familiar open-in-new-page arrow (a link, pointer cursor, hover state);
+    // without one, the surface's glyph. Revealed on row hover/focus, like
+    // GitHub's row quick actions.
     var src = surfaceOf(run);
     var sourceUrl = run.sourceUrl && /^https?:\/\//.test(run.sourceUrl) ? run.sourceUrl : "";
     var mark = sourceUrl ? doc.createElement("a") : doc.createElement("span");
-    mark.className = "source " + src.kind;
-    mark.textContent = SURFACE_GLYPH[src.kind] || "○";
-    mark.setAttribute("data-tip", sourceTip(run, parts, sourceUrl !== ""));
-    mark.setAttribute("aria-label", "source: " + (SURFACE_NAME[src.kind] || src.kind));
+    mark.className = "source " + src.kind + (sourceUrl ? " linked" : "");
+    mark.textContent = sourceUrl ? "↗" : SURFACE_GLYPH[src.kind] || "○";
+    mark.setAttribute("data-tip", sourceTip(run));
     if (sourceUrl) {
+      mark.setAttribute("aria-label", "open the " + (SURFACE_NAME[src.kind] || src.kind) + " thread (new tab)");
       mark.setAttribute("href", sourceUrl);
       mark.setAttribute("target", "_blank");
       mark.setAttribute("rel", "noopener noreferrer");
-    }
+    } else mark.setAttribute("aria-label", "source: " + (SURFACE_NAME[src.kind] || src.kind));
     body.appendChild(mark);
     // Expiry (item 20): with a known retention, a finished row knows when it
     // leaves; the page groups rows leaving within a day under a divider and each
@@ -533,10 +534,13 @@ function runsShell(current: RunsTab, title: string, body: string, script: string
   .outcome.amber { color: var(--amber); border-color: #d2992244; }
   /* Source mark: the trigger surface's glyph, a link to the thread when there is
      one. Revealed on row hover / focus, like GitHub's row quick actions. */
-  .source { flex: 0 0 auto; width: 1.5em; text-align: center; font-size: .8rem; line-height: 1; color: var(--dim); text-decoration: none; opacity: 0; transition: opacity .12s; }
+  .source { flex: 0 0 auto; width: 1.6em; text-align: center; font-size: .8rem; line-height: 1.4; color: var(--dim); text-decoration: none; opacity: 0; transition: opacity .12s; border-radius: 4px; }
   .source.cli { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .7rem; }
   #runs li.run:hover .source, #runs li.run:focus-within .source, .source:focus-visible { opacity: 1; }
-  a.source:hover, a.source:focus-visible { color: var(--fg); outline: none; }
+  /* The linked mark is a control: the open-in-new-page arrow, a pointer, and a
+     visible hover state (chip background + border), so it reads as clickable. */
+  a.source.linked { cursor: pointer; color: var(--fg-soft); border: 1px solid transparent; }
+  a.source.linked:hover, a.source.linked:focus-visible { color: var(--blue); background: #9ecbff14; border-color: #9ecbff33; outline: none; }
   @media (prefers-reduced-motion: reduce) { .source { transition: none; } }
   /* Right-hand facts: a fixed-width stopwatch (tabular digits so it does not
      jitter as it ticks) and the event count. */
