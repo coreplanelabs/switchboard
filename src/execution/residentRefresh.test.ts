@@ -6,6 +6,7 @@ import {
   classifyRefreshFailure,
   nextRefreshDelayS,
   planRefresh,
+  withTimeout,
   type RefreshDisk,
 } from "./residentRefresh.js";
 
@@ -212,5 +213,33 @@ describe("nextRefreshDelayS (#216: re-arm short after an interruption or an imag
 
   it("omitting the count means 'first interruption' (short)", () => {
     expect(nextRefreshDelayS({ outcome: "interrupted", ...cadence })).toBe(INTERRUPTED_REARM_S);
+  });
+});
+
+describe("withTimeout (#356 item 7a: R2 snapshot/restore calls get an explicit budget)", () => {
+  it("passes a value through when the promise settles in time", async () => {
+    await expect(withTimeout(Promise.resolve(42), 1_000, "mirror backup")).resolves.toBe(42);
+  });
+  it("passes the promise's own rejection through untouched", async () => {
+    await expect(withTimeout(Promise.reject(new Error("boom")), 1_000, "mirror backup")).rejects.toThrow("boom");
+  });
+  it("rejects with a NAMED error when the budget elapses — a hung upload fails the cycle visibly instead of stranding it for the 30-min watchdog", async () => {
+    const never = new Promise<never>(() => {});
+    await expect(withTimeout(never, 5, "checkout restore")).rejects.toThrow("checkout restore timed out after 5ms");
+  });
+  it("a loser that rejects after the timeout never surfaces as an unhandled rejection", async () => {
+    let rejectLate!: (e: Error) => void;
+    const late = new Promise<never>((_, rej) => (rejectLate = rej));
+    await expect(withTimeout(late, 5, "mirror backup")).rejects.toThrow("timed out");
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      rejectLate(new Error("late failure"));
+      await new Promise((r) => setTimeout(r, 10));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });

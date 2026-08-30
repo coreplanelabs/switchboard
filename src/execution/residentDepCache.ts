@@ -17,6 +17,8 @@
  *  fully owned by the thread user, overwritable, and still isolated from the
  *  warm checkout (a copy shares nothing). */
 
+import { shellQuote } from "./shellQuote.js";
+
 export const DEP_CACHE_DIRS = ["node_modules", "dist", "build", "out", ".next"] as const;
 export type DepCacheDir = (typeof DEP_CACHE_DIRS)[number];
 
@@ -92,4 +94,120 @@ export function foldDepsMechanism(
 ): DepCacheMaterialization | "none" {
   if (dir === "node_modules") return used;
   return prev === "none" ? used : prev;
+}
+
+// ---------------------------------------------------------------------------
+// One-fork materialization (#356 item 4)
+// ---------------------------------------------------------------------------
+//
+// materializeThreadDeps used to spawn per dir: `test -d`, `test -e`, the
+// `cp -al`/`cp -R`, a full `find -type d -exec chown` walk, a SECOND full
+// `find -type f -exec chmod` walk, the mutable-cache `find` listing, then
+// rm/cp/chown per mutable path — ~25 container round-trips for five dirs,
+// all while holding the mirror mutex (which every concurrent attach and the
+// refresh cycle queue behind). The same work now runs as TWO forks:
+// `depCacheScript` handles all five dirs (per-dir gating, mechanism,
+// permissions in ONE combined find walk, the mutable-cache listing) and
+// emits one tagged line per materialized dir plus the raw listing; the DO
+// parses with `parseDepCacheScriptOutput`, filters the listing through the
+// unchanged `mutableCachePaths`, and `mutableCacheSwapScript` performs every
+// swap in the second fork. The resulting ownership/permission state is
+// byte-identical to the per-spawn version (KTD5-adjacent — see each block's
+// comment); only the fork count changed.
+
+/** What the DO reads back from one script run. `failedStep` carries the
+ *  `err=` tag a failing block emitted (the old per-spawn StepError names:
+ *  deps-perms — the combined chown+harden walk, formerly deps-chown +
+ *  deps-harden — deps-mutable-list, deps-copy, deps-copy-chown, and the swap
+ *  script's deps-mutable-rm/copy/chown). */
+export interface DepCacheScriptParse {
+  mech: DepCacheMaterialization | "none";
+  /** Raw `find` output for the hardlinked node_modules (the exact
+   *  `mutableCacheFindArgv` shape), for `mutableCachePaths`. */
+  mutableListing: string[];
+  failedStep: string | null;
+}
+
+/** Build the one-fork materialization script over every DEP_CACHE_DIRS entry.
+ *  Per dir, exactly the old per-spawn behavior:
+ *   - src missing or dst present → skip (no line emitted, mechanism unfolded);
+ *   - hardlink dirs (node_modules): `cp -al`, then ONE find walk chowning
+ *     DIRECTORIES to the thread user and stripping group/world write from the
+ *     shared FILE inodes (`( -type d -exec chown … + ) -o ( -type f ( -perm
+ *     -g+w -o -perm -o+w ) -exec chmod go-w … + )` — the -o short-circuits on
+ *     the first alternative's always-true `-exec +`, so dirs get the chown and
+ *     only files reach the perm test: the union of the two old walks, one
+ *     traversal); then the mutable-cache listing (`mutableCacheFindArgv`,
+ *     emitted as `mutable=` lines). `cp -al` failure → rm + plain-copy
+ *     fallback, same as before;
+ *   - copy dirs: `cp -R` + `chown -Rh` (never dereference a planted symlink). */
+export function depCacheScript(checkoutDir: string, worktree: string, user: string): string {
+  const owner = shellQuote(`${user}:${user}`);
+  const blocks = DEP_CACHE_DIRS.map((dir) => {
+    const src = shellQuote(`${checkoutDir}/${dir}`);
+    const dst = shellQuote(`${worktree}/${dir}`);
+    const copyFallback = [
+      `  cp -R ${src} ${dst} || { echo err=deps-copy; exit 1; }`,
+      `  chown -Rh ${owner} ${dst} || { echo err=deps-copy-chown; exit 1; }`,
+      `  echo 'dir:${dir}=copy'`,
+    ];
+    if (depCacheMaterialization(dir) !== "hardlink") {
+      return [`if test -d ${src} && ! test -e ${dst}; then`, ...copyFallback, `fi`].join("\n");
+    }
+    const walk = `find ${dst} \\( -type d -exec chown ${owner} {} + \\) -o \\( -type f \\( -perm -g+w -o -perm -o+w \\) -exec chmod go-w {} + \\)`;
+    const listing = mutableCacheFindArgv(`${worktree}/${dir}`).map(shellQuote).join(" ");
+    return [
+      `if test -d ${src} && ! test -e ${dst}; then`,
+      `  if cp -al ${src} ${dst}; then`,
+      `    ${walk} || { echo err=deps-perms; exit 1; }`,
+      `    if ! mlist=$(${listing}); then echo err=deps-mutable-list; exit 1; fi`,
+      `    if [ -n "$mlist" ]; then printf '%s\\n' "$mlist" | sed 's/^/mutable=/'; fi`,
+      `    echo 'dir:${dir}=hardlink'`,
+      `  else`,
+      `    rm -rf ${dst}`,
+      ...copyFallback,
+      `  fi`,
+      `fi`,
+    ].join("\n");
+  });
+  return blocks.join("\n");
+}
+
+export function parseDepCacheScriptOutput(stdout: string): DepCacheScriptParse {
+  let mech: DepCacheMaterialization | "none" = "none";
+  const mutableListing: string[] = [];
+  let failedStep: string | null = null;
+  for (const raw of stdout.split("\n")) {
+    const line = raw.trim();
+    let m: RegExpExecArray | null;
+    if ((m = /^dir:([^=]+)=(hardlink|copy)$/.exec(line))) {
+      if ((DEP_CACHE_DIRS as readonly string[]).includes(m[1])) {
+        mech = foldDepsMechanism(mech, m[1] as DepCacheDir, m[2] as DepCacheMaterialization);
+      }
+    } else if ((m = /^mutable=(.+)$/.exec(line))) {
+      mutableListing.push(m[1]);
+    } else if ((m = /^err=(.+)$/.exec(line))) {
+      failedStep ??= m[1];
+    }
+  }
+  return { mech, mutableListing, failedStep };
+}
+
+/** The per-path swaps for a hardlinked node_modules' tool-managed entries
+ *  (`mutableCachePaths` output), all in one fork: `rm -rf` the shared
+ *  subtree, `cp -R` the warm checkout's matching subpath (fresh inodes),
+ *  `chown -Rh` to the thread user (-h: a postinstall-planted symlink is
+ *  re-owned as a LINK, never followed to an out-of-tree target). Same steps,
+ *  same order, same flags as the old per-spawn loop. */
+export function mutableCacheSwapScript(srcRoot: string, dstRoot: string, user: string, paths: readonly string[]): string {
+  const owner = shellQuote(`${user}:${user}`);
+  const root = dstRoot.replace(/\/+$/, "");
+  const lines: string[] = [];
+  for (const p of paths) {
+    const rel = p.slice(root.length);
+    lines.push(`rm -rf ${shellQuote(p)} || { echo err=deps-mutable-rm; exit 1; }`);
+    lines.push(`cp -R ${shellQuote(`${srcRoot}${rel}`)} ${shellQuote(p)} || { echo err=deps-mutable-copy; exit 1; }`);
+    lines.push(`chown -Rh ${owner} ${shellQuote(p)} || { echo err=deps-mutable-chown; exit 1; }`);
+  }
+  return lines.join("\n");
 }

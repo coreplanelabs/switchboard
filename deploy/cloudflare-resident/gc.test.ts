@@ -3,6 +3,7 @@ import {
   decisivePull,
   effectiveLimits,
   parsePullsBody,
+  parseRefListing,
   parseTestOverrides,
   pickEvictionCandidate,
   pullsFate,
@@ -227,5 +228,16 @@ describe("pickEvictionCandidate — coldest eligible warm resident", () => {
 
   it("an empty fleet → null (the cap cannot be full, but the function stays total)", () => {
     expect(pickEvictionCandidate([], NOW, HOUR)).toEqual({ candidate: null, rejected: [] });
+  });
+});
+
+describe("parseRefListing — one for-each-ref listing replaces a rev-parse per ref (#356 item 5)", () => {
+  it("parses each line into a branch name, trimming whitespace", () => {
+    const refs = parseRefListing("main\nfeat/x\n  perf/y  \n");
+    expect(refs).toEqual(new Set(["main", "feat/x", "perf/y"]));
+  });
+  it("blank lines and a trailing newline are dropped, an empty listing is an empty set (a fully pruned mirror)", () => {
+    expect(parseRefListing("")).toEqual(new Set());
+    expect(parseRefListing("\n\nmain\n\n")).toEqual(new Set(["main"]));
   });
 });
