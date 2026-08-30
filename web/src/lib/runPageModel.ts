@@ -219,27 +219,20 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     return { bad, infra, running };
   }
 
+  // Groups stay OPEN by default and are never auto-folded (a UX revision over
+  // the string-rendered page, which folded a clean step when the next began:
+  // an all-collapsed page did not read — the group bars ARE the narrative).
+  // Only a viewer's own toggle closes one; a failure or a still-running call
+  // re-opens even that, because it is what they came to see. The cards INSIDE
+  // stay collapsed (except failed/infra, item 13's open-by-default rules).
   function refreshGroup(step: StepVm): void {
     const { bad, infra, running } = tallyOf(step);
     if (bad || infra || running) step.groupOpen = true;
   }
 
-  /** A new step begins (or the answer landed): the previous step is over —
-   *  fold its calls unless something in it failed, the viewer toggled it by
-   *  hand, or everything is expanded. */
-  function foldStep(step: StepVm | undefined): void {
-    if (!step || step.manual || state.allOpen) return;
-    const { bad, infra, running } = tallyOf(step);
-    if (bad || infra || running) return;
-    step.groupOpen = false;
-  }
-
   function addStep(step: TimelineStep): StepVm {
     const previous = stepVms.get(lastStepIndex);
-    if (previous) {
-      foldStep(previous);
-      previous.live = false;
-    }
+    if (previous) previous.live = false;
     lastStepIndex = step.index;
     const turn = pendingTurn;
     pendingTurn = null;
@@ -356,7 +349,6 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         return;
       case "answer":
         flushTurn("wrote the answer below"); // the answer's own thinking has no step to sit on
-        foldStep(stepVms.get(lastStepIndex));
         state.answer = { text: change.text, at: change.at };
         return;
     }

@@ -37,17 +37,17 @@ describe("request / context / answer / placeholder", () => {
     expect(m.state.log).toHaveLength(0);
   });
 
-  it("the answer folds the last clean step and lands below the log", () => {
+  it("the answer lands below the log; the step's group stays open (the tally bars are the narrative)", () => {
     const m = model();
     m.handle(assistant("running tests", 1));
     m.handle(call("c1", "$ npm test", 2));
     m.handle(call("c2", "$ npm run build", 3));
     m.handle(result("c1"));
     m.handle(result("c2"));
-    expect(step(m).groupOpen).toBe(true); // still the live step
+    expect(step(m).groupOpen).toBe(true);
     m.handle({ type: "answer", text: "all done", at: 9 });
     expect(m.state.answer?.text).toBe("all done");
-    expect(step(m).groupOpen).toBe(false); // clean → folded
+    expect(step(m).groupOpen).toBe(true); // never auto-folded
   });
 });
 
@@ -150,7 +150,7 @@ describe("calls, groups, folding", () => {
     expect(acalls[0].kind === "call" && acalls[0].call.open).toBe(true);
   });
 
-  it("a clean previous step folds when the next begins; a failure keeps it open; a manual toggle sticks; allOpen suspends folding", () => {
+  it("groups stay open as new steps begin — they are never auto-folded; only the viewer's toggle closes one, and it sticks", () => {
     const m = model();
     m.handle(assistant("one", 1));
     m.handle(call("c1", "$ a", 2));
@@ -158,16 +158,7 @@ describe("calls, groups, folding", () => {
     m.handle(result("c1"));
     m.handle(result("c2"));
     m.handle(assistant("two", 4));
-    expect(step(m, 0).groupOpen).toBe(false); // clean → folded
-
-    const failed = model();
-    failed.handle(assistant("one", 1));
-    failed.handle(call("c1", "$ a", 2));
-    failed.handle(call("c2", "$ b", 3));
-    failed.handle(result("c1", { ok: false }));
-    failed.handle(result("c2"));
-    failed.handle(assistant("two", 4));
-    expect(step(failed, 0).groupOpen).toBe(true);
+    expect(step(m, 0).groupOpen).toBe(true); // clean AND open — the group bar is the narrative
 
     const manual = model();
     manual.handle(assistant("one", 1));
@@ -176,18 +167,9 @@ describe("calls, groups, folding", () => {
     manual.handle(result("c1"));
     manual.toggleGroup(step(manual, 0)); // viewer closed it by hand mid-run …
     expect(step(manual, 0).groupOpen).toBe(false);
-    manual.handle(result("c2"));
     manual.handle(assistant("two", 4));
-    expect(step(manual, 0).groupOpen).toBe(false); // … and the auto-fold left it alone
+    expect(step(manual, 0).groupOpen).toBe(false); // … and nothing re-opens a clean closed group
     expect(step(manual, 0).manual).toBe(true);
-
-    const open = model();
-    open.handle(assistant("one", 1));
-    open.handle(call("c1", "$ a", 2));
-    open.handle(result("c1"));
-    open.setAllOpen(true);
-    open.handle(assistant("two", 4));
-    expect(step(open, 0).groupOpen).toBe(true); // allOpen suspends the fold
   });
 
   it("a step still running (or failed) forces its group open even after a manual close is superseded by new activity", () => {
