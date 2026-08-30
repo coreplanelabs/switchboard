@@ -46,7 +46,7 @@ This is delivered in stages. **PR1 shipped the seam + the READ path; PR2 the WRI
 
 ## Roadmap (gaps)
 
-- `[gap]` **Remaining derivers + human controls.** `repo` / `channel` derivers (`repo:owner/name`, `channel:slack:C…`); `memory list` / `memory forget <id>` gated chat commands (a user managing their own scope first); per-scope cap/eviction.
+- `[gap]` ([#253](https://github.com/coreplanelabs/switchboard/issues/253)) **Remaining derivers + human controls.** `repo` / `channel` derivers (`repo:owner/name`, `channel:slack:C…`); `memory list` / `memory forget <id>` gated chat commands (a user managing their own scope first); per-scope cap/eviction.
 - **Deferred (later):** vector/embedding retrieval behind the unchanged seam (Vectorize); temporal knowledge graph; background consolidation/decay-sweeper jobs.
 
 ## Validation criteria
