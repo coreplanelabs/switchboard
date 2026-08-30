@@ -32,9 +32,8 @@ import { activeRunCount, setShutdownNotice, type CoreDeps } from "./core/dispatc
 import { buildScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters (#157 U7) ---
-import { CommandRegistry, bindCommands } from "./core/commandRegistry.js";
-import { registerRunsCommands, type RunsCommandDeps } from "./core/commands/runs.js";
-import { createCommandHttpHandler, isCommandPath, isLoopbackAddress, serviceTokenAllowed } from "./channels/commandHttp.js";
+import { buildCoreCommands } from "./commandCli.js";
+import { callerIdFor, createCommandHttpHandler, isCommandPath, isLocalhostBase, isLoopbackAddress, serviceTokenAllowed } from "./channels/commandHttp.js";
 // --- end command registry adapters ---
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
@@ -113,13 +112,23 @@ async function main() {
       .catch((err: unknown) => console.warn(`[run-history] /healthz probe of ${base} failed: ${err instanceof Error ? err.message : String(err)}`));
   }
   const deps: CoreDeps = { config, providers, skills, memory, frictionLedger, runHistoryWriter };
-  // --- command registry (#157 U6/U7): built ONCE; every adapter (HTTP /api/*,
-  // MCP tools, CLI) exposes the same registrations over the same RunsService. ---
-  const commandRegistry = new CommandRegistry<RunsCommandDeps>();
-  registerRunsCommands(commandRegistry);
-  // One RunsService for every surface: the command registry (HTTP/MCP/CLI/chat) and the /runs pages.
+  // --- command registry (#157 U6/U7/U9): the ONE core catalogue (`buildCoreCommands`,
+  // shared with src/cli.ts and src/commandCli.ts), bound ONCE; every adapter
+  // (HTTP /api/*, MCP tools, chat) exposes the same registrations over the same
+  // deps: `runs.*` on one RunsService, `friction.*` on the ledger selected
+  // above (and the same tracker the scheduled trigger uses), `repo.list` on the
+  // resident admin client the config names. ---
+  // One RunsService for every surface: the command registry (HTTP/MCP/chat) and the /runs pages.
   const runsService = createRunsService({ registry: defaultRunRegistry, store: runStore });
-  const commands = bindCommands(commandRegistry, { runs: runsService });
+  const commands = buildCoreCommands(config, runStore, {
+    registry: defaultRunRegistry,
+    env: process.env,
+    dataDir: "./data",
+    warn: (m) => console.warn(m),
+    runs: runsService,
+    frictionLedger,
+    tracker: deps.issueTracker,
+  });
   // The same bound registry serves HTTP, MCP, and the chat fast path (U13): one
   // registration, every surface.
   deps.commands = commands;
@@ -218,15 +227,22 @@ async function main() {
     // token in the URL); finished/persisted runs are served tokenless to the
     // Access-authenticated viewer, so — like the index — they must only be
     // exposed behind Access. KTD13: under the dev bypass, history reads are
-    // served only to a loopback client with no remote PUBLIC_BASE_URL.
-    const publicBaseHost = process.env.PUBLIC_BASE_URL ? new URL(process.env.PUBLIC_BASE_URL).hostname : "localhost";
+    // served only to a loopback client with no remote PUBLIC_BASE_URL. The
+    // bypass is in effect only when Access is NOT configured (the same rule
+    // `requireAccessForRuns` applies and `commandHttp` is wired with below):
+    // with ACCESS_* set, a stray ACCESS_DEV_BYPASS must not turn the
+    // Access-authenticated viewer's history reads into 403s. `isLocalhostBase` is
+    // the ONE localhost rule (shared with commandHttp); a malformed
+    // PUBLIC_BASE_URL is "not localhost", never a boot crash.
+    const publicBaseUrl = process.env.PUBLIC_BASE_URL;
+    const devBypassActive = accessConfig === null && accessDevBypass;
     const liveView = createLiveViewHandler({
       service: runsService,
       index: defaultRunRegistry,
       retention: runStore && runHistoryCfg ? { retentionDays: retentionPolicyOf(runHistoryCfg).retentionDays } : null,
       devBypass: {
-        active: () => accessDevBypass,
-        isLoopback: (req) => isLoopbackAddress(req.socket?.remoteAddress) && (publicBaseHost === "localhost" || publicBaseHost === "127.0.0.1"),
+        active: () => devBypassActive,
+        isLoopback: (req) => isLoopbackAddress(req.socket?.remoteAddress) && isLocalhostBase(publicBaseUrl),
       },
       scheduled: { schedules: SCHEDULES, store: scheduleStore },
     });
@@ -244,11 +260,15 @@ async function main() {
     const commandHttp = createCommandHttpHandler(commands, {
       operatorIdentities: () => config.operatorIdentities(),
       serviceTokenScopes: (cn) => config.serviceTokenScopes(cn),
-      devBypassActive: accessConfig === null && accessDevBypass,
-      publicBaseUrl: process.env.PUBLIC_BASE_URL,
+      devBypassActive,
+      publicBaseUrl,
     });
-    const commandHttpState = `GET|POST /api/<group>.<verb> (${commandRegistry.list().length} commands)`;
+    const commandHttpState = `GET|POST /api/<group>.<verb> (${commands.list().length} commands)`;
     // --- end command registry over HTTP ---
+    // A service token is a command-surface credential only (`serviceTokenAllowed`):
+    // it can never load /runs* (live capability tokens), /residents* or /costs*.
+    // Logged once per process — the fact, never any token material.
+    let serviceTokenRefusalLogged = false;
 
     createServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0];
@@ -275,18 +295,19 @@ async function main() {
               res.end(gate.body);
               return;
             }
-            // --- /api/* (#157 U7): the command handler owns everything under it. ---
-            // A service token is a command-surface credential only (`serviceTokenAllowed`):
-            // it can never load /runs* (live capability tokens), /residents* or /costs*.
             if (!serviceTokenAllowed(path, gate.identity)) {
-              console.warn(`[access] a service token requested ${path}: service tokens are served /api/* only (403)`);
+              if (!serviceTokenRefusalLogged) {
+                serviceTokenRefusalLogged = true;
+                console.warn(`[access] a service token requested ${path}: service tokens are served /api/* only (403)`);
+              }
               res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
               res.end("forbidden");
               return;
             }
+            // --- /api/* (#157 U7): the command handler owns everything under it. ---
             if (isCommandPath(path)) return commandHttp(req, res, gate.identity);
             // --- end /api/* ---
-            if (liveView(req, res, { identity: `access:${gate.identity.sub}` })) return;
+            if (liveView(req, res, { identity: callerIdFor(gate.identity) })) return;
             if (residentsView(req, res)) return;
             if (costsView(req, res)) return;
             res.writeHead(200, { "content-type": "text/plain" });

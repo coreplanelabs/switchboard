@@ -67,6 +67,10 @@ export interface CommandDef<D, S extends z.ZodType = z.ZodType> {
   surfaces?: CommandSurfaces;
   describe: string;
   handler(ctx: CommandContext<z.output<S>, D>): Promise<JsonValue>;
+  /** The command's own plain-text projection for the text surfaces (chat, CLI)
+   *  when generic `key: value` lines would misrepresent the output — a report,
+   *  a list. Absent → `renderCompact`. Still no channel escaping (invariant 1). */
+  render?(output: JsonValue): string;
 }
 
 /** The ONE shape of a command id — `<group>.<verb>`, lowercase — checked at
@@ -87,11 +91,13 @@ export function commandDefiner<D>(): <S extends z.ZodType>(def: CommandDef<D, S>
   return (def) => defineCommand(def);
 }
 
-/** A handler's expected failure: `not_found` (404) or `conflict` (409). Any
+/** A handler's expected failure: `not_found` (404), `conflict` (409), or
+ *  `unavailable` (503 — a dependency the command needs is not configured or
+ *  not reachable; the message says which, and is safe to show the caller). Any
  *  other throw is an `internal` 500 whose message is logged, never returned. */
 export class CommandError extends Error {
   constructor(
-    readonly code: "not_found" | "conflict",
+    readonly code: "not_found" | "conflict" | "unavailable",
     message: string,
   ) {
     super(message);
@@ -99,13 +105,14 @@ export class CommandError extends Error {
   }
 }
 
-export type InvokeErrorCode = "unauthorized" | "invalid_input" | "not_found" | "conflict" | "internal";
+export type InvokeErrorCode = "unauthorized" | "invalid_input" | "not_found" | "conflict" | "unavailable" | "internal";
 
 export const ERROR_STATUS: Readonly<Record<InvokeErrorCode, number>> = {
   unauthorized: 403,
   invalid_input: 400,
   not_found: 404,
   conflict: 409,
+  unavailable: 503,
   internal: 500,
 };
 
@@ -299,8 +306,15 @@ export function wrapUntrusted(text: string): string {
  *  (the text surfaces append it; the `/runs?all=1` page renders it as a banner). */
 export const STORE_UNAVAILABLE_BANNER = "⚠ history store unavailable — showing live runs only";
 
+/** What a text surface prints for `output`: the command's own `render` when it
+ *  declares one (a report, a list), else `renderCompact`. The one entry point
+ *  chat and CLI share, so both print the same text for the same JSON. */
+export function renderText(cmd: Pick<CommandDef<unknown>, "id" | "render">, output: JsonValue, opts: { now?: number } = {}): string {
+  return cmd.render ? cmd.render(output) : renderCompact(cmd.id, output, opts);
+}
+
 /**
- * The ONE plain-text renderer shared by the text surfaces. No Slack or HTML
+ * The generic plain-text renderer shared by the text surfaces. No Slack or HTML
  * escaping here — that is the channel formatter's job (`ChannelIO.formatter`).
  * `runs.list` is special-cased per KTD18: short id, agent, status, duration —
  * never channel, user, thread, or label. Everything else is `key: value` lines.

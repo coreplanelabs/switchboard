@@ -6,7 +6,7 @@ import { z } from "zod";
 import { ConfigStore } from "../config.js";
 import { CommandError, CommandRegistry, commandDefiner } from "./commandRegistry.js";
 import { bindCommands } from "./commandRegistry.js";
-import { handleChatCommand, parseChatCommand, type ChatCommands } from "./commandChat.js";
+import { handleChatCommand, parseChatCommand, RESERVED_CHAT_COMMANDS, type ChatCommands } from "./commandChat.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import type { RunRecord } from "./runRecord.js";
 import { RunRegistry } from "./runRegistry.js";
@@ -16,7 +16,7 @@ import { registerRunsCommands, type RunsCommandDeps } from "./commands/runs.js";
 
 // Feature: features/command-registry.md — the chat adapter (U13, KTD18/KTD19):
 // `<group> <verb> key=value` parsing (registered ids only, whole-message
-// anchored, reserved groups refused) and the plain-text reply built from
+// anchored, reserved `<group> <verb>` forms refused) and the plain-text reply built from
 // `renderCompact` — no Slack escaping in the core.
 
 const NOW = 1_700_000_000_000;
@@ -86,7 +86,7 @@ function demoRegistry() {
   return registry;
 }
 
-const RESERVED = new Set(["config", "repo", "friction"]);
+const RESERVED = new Set(["config show", "repo onboard"]);
 
 function configStore(yaml: string): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-chatcmd-"));
@@ -137,9 +137,19 @@ describe("parseChatCommand", () => {
     expect(parseChatCommand("demo hidden", registry, RESERVED)).toBeNull();
   });
 
-  it("refuses groups a legacy parser still owns (reserved), even when the id is registered", () => {
+  it("refuses `<group> <verb>` forms a legacy parser still owns (reserved), even when the id is registered — per form, not per group", () => {
     expect(parseChatCommand("config show", registry, RESERVED)).toBeNull();
     expect(parseChatCommand("config show", registry, new Set())).toEqual({ id: "config.show", input: {} });
+    // `repo onboard` is reserved; `repo list` in the same group is not.
+    const repo = new CommandRegistry<Deps>({ audit: () => {} });
+    for (const id of ["repo.list", "repo.onboard"]) {
+      repo.register(define({ id, input: z.object({}), scope: "repo:read", chatGate: "open", effect: "read", describe: id, handler: async () => ({}) }));
+    }
+    expect(parseChatCommand("repo list", repo, RESERVED)).toEqual({ id: "repo.list", input: {} });
+    expect(parseChatCommand("repo onboard", repo, RESERVED)).toBeNull();
+    expect(RESERVED_CHAT_COMMANDS.has("repo onboard")).toBe(true);
+    expect(RESERVED_CHAT_COMMANDS.has("repo list")).toBe(false);
+    expect([...RESERVED_CHAT_COMMANDS].some((f) => f.startsWith("friction "))).toBe(false);
   });
 
   it("a malformed argument list is not a command (bare word, missing value)", () => {

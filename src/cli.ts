@@ -16,6 +16,7 @@ import { buildRunStore } from "./core/runStore.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
+import { buildCoreCommands } from "./commandCli.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
@@ -89,9 +90,12 @@ async function main() {
   const runHistoryWriter = runStore
     ? createRunHistoryWriter({ store: runStore, warn: (m) => console.error(m), onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
     : undefined;
+  // The chat fast path (`runs list`, `friction report`, …) answers from the same
+  // catalogue the bot binds — without it those messages would go to the model.
+  const commands = buildCoreCommands(config, runStore, { registry: defaultRunRegistry, env: process.env, dataDir: "./data", warn: (m) => console.error(m) });
 
   await dispatch(
-    { config, providers, skills, runHistoryWriter },
+    { config, providers, skills, runHistoryWriter, commands },
     {
       channelId: "cli:local",
       userId: "cli:local",

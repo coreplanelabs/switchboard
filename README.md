@@ -45,7 +45,7 @@ Runtime overrides persist to `data/overrides.json`. Static defaults for channels
 
 ## Architecture
 
-One long-lived Node process, no inbound server. The Slack adapter opens an **outbound websocket** (Socket Mode), so there is no public URL, webhook endpoint, or signature verification to host. State lives in the channel's own thread history, in the durable run history on the state Worker (every finished run's record survives a restart — see [features/run-history.md](features/run-history.md)), and on disk — a restart loses nothing except in-flight runs.
+One long-lived Node process, no inbound server. The Slack adapter opens an **outbound websocket** (Socket Mode), so there is no public URL, webhook endpoint, or signature verification to host. State lives in the channel's own thread history, on the **state Worker** (memory, the friction ledger, and the run history — every finished run's record — in Durable Objects, see [features/run-history.md](features/run-history.md)), and on disk. A restart loses nothing durable: conversation context rebuilds from the thread, finished runs stay readable from the run history, and only runs that were in flight at the restart end without a record.
 
 ```mermaid
 flowchart LR
@@ -79,6 +79,18 @@ flowchart LR
         R2[("R2<br/>stamped snapshots")]
     end
 
+    subgraph stateplane ["State plane — deploy/cloudflare-memory"]
+        SW["state Worker<br/>bearer-gated routes"]
+        MDO[("memory DOs<br/>per scope, FTS5")]
+        FDO[("FrictionDO<br/>per-run diagnoses")]
+        HDO[("RunHistoryDO<br/>finished runs + events,<br/>retention policy, sweep alarm")]
+    end
+
+    subgraph cmds ["Command registry — one registration, every surface"]
+        CR["commandRegistry.ts<br/>runs.* · friction.* · repo.list"]
+        API["/api/&lt;group&gt;.&lt;verb&gt;<br/>MCP &lt;group&gt;_&lt;verb&gt;<br/>CLI · chat"]
+    end
+
     SL & CLI -->|IncomingMessage + ChannelIO| D
     D --> CC
     D --> R --> RUN
@@ -87,8 +99,16 @@ flowchart LR
     RX -->|attach / exec / read / write| RW
     RW --> RDO
     RDO <--> R2
+    D -->|memory read/write · friction row · run record after the reply| SW
+    SW --> MDO & FDO & HDO
+    API --> CR -->|RunsService: live registry ∪ run history| D
+    CR -.->|reads| SW
     D -->|status + replies via ChannelIO| SL & CLI
 ```
+
+**State plane** (`deploy/cloudflare-memory/`): one Worker, three Durable Object classes behind a constant-time bearer — cross-session memory, the friction ledger, and the run history. Every finished run is built into a record at finish and written after the reply (retried, drain-tracked); the `RunHistoryDO` owns the retention policy (`retentionDays` / `maxRuns` / `maxBytes`, applied identically by the bot and the Worker through one shared module) and sweeps on an alarm. Without a `runHistory` config block, history is off and runs are live-only. Contract: [features/run-history.md](features/run-history.md).
+
+**Commands** ([features/command-registry.md](features/command-registry.md)): an operator command is registered once — id, zod input, scope, chat gate, effect, handler — and generic adapters expose it everywhere with no per-command code: HTTP `GET|POST /api/<group>.<verb>` behind Cloudflare Access (browser session or service token), MCP tool `<group>_<verb>`, CLI `npx tsx src/commandCli.ts <group> <verb> [--key=value] [--json]`, and chat `<group> <verb> key=value`. Registered today: `runs list|get|events|friction|stop`, `friction report|propose`, `repo list`. Authorization is resolved by the adapter (token scopes, Access identity + `permissions.operators` / `permissions.serviceTokens`, Slack admin gates) and checked before the input is parsed; no command ever starts an agent run — that path is `dispatch()` alone.
 
 **Resident repo environments** (`deploy/cloudflare-resident/`): repos an admin onboards (`repo onboard <owner/name>` in chat) each get an always-warm per-repo service — a bare mirror kept fresh by a refresh alarm, a built checkout, and per-thread git worktrees with OS-user isolation — so a coding request on an onboarded repo starts with zero setup (no clone, no install). Any other resident state falls back to the per-thread sandbox with a named reason on the status card. Behavioral contract: [features/resident-repos.md](features/resident-repos.md).
 

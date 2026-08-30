@@ -117,6 +117,7 @@ const RPC_CODE_FOR: Readonly<Record<InvokeErrorCode, number>> = {
   invalid_input: -32602, // INVALID_PARAMS
   not_found: -32002,
   conflict: -32003,
+  unavailable: -32004,
   internal: -32603, // INTERNAL_ERROR
 };
 

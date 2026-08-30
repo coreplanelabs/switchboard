@@ -28,11 +28,33 @@ import { InMemoryRunStore, type RunStore } from "./runStore.js";
 import type { RunRecord } from "./runRecord.js";
 import { createRunHistoryWriter } from "./runHistoryWriter.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
-import { z } from "zod";
-import { CommandRegistry, commandDefiner } from "./commandRegistry.js";
-import { bindCommands } from "./commandRegistry.js";
-import { registerRunsCommands, type RunsCommandDeps } from "./commands/runs.js";
+import { CommandRegistry, bindCommands, type CommandInvoker } from "./commandRegistry.js";
+import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
 import { createRunsService } from "./runsService.js";
+import type { ResidentAdminClient } from "./repoCommands.js";
+
+/** The bound registry src/index.ts hands the dispatcher, built from the same
+ *  CoreDeps slices (ledger, tracker, resident admin, config) plus an invoke
+ *  spy, so a test can assert which registry command a message reached. */
+function wireCommands(deps: CoreDeps, extra: { residentAdmin?: ResidentAdminClient } = {}): { invoked: string[] } {
+  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+  registerCoreCommands(registry);
+  const admin = extra.residentAdmin ?? deps.residentAdmin;
+  const bound: CommandInvoker = bindCommands(registry, {
+    runs: createRunsService({ registry: deps.runRegistry ?? new RunRegistry(), store: null }),
+    friction: { ledger: deps.frictionLedger, tracker: deps.issueTracker, config: () => deps.config.config.selfImprovement },
+    repo: { admin: () => admin ?? { unavailable: "no resident admin in this test" } },
+  });
+  const invoked: string[] = [];
+  deps.commands = {
+    ...bound,
+    invoke: (id, raw, caller) => {
+      invoked.push(id);
+      return bound.invoke(id, raw, caller);
+    },
+  };
+  return { invoked };
+}
 
 // Feature: features/routing-and-config.md — end-to-end dispatch: config
 // commands, permission gates, and thread-sticky agent resolution.
@@ -830,13 +852,15 @@ describe("repo management commands (U8)", () => {
     };
   }
 
-  it("`repo list` is answered inline without a model call", async () => {
+  it("`repo list` is answered inline by the registry (`repo.list`) without a model call, open to a non-admin", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.residentAdmin = mockAdmin();
+    const { invoked } = wireCommands(deps);
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("repo list"), io);
-    expect(replies[0]).toContain("jshttp/vary");
+    await dispatch(deps, msg("repo list", "slack:UX"), io);
+    expect(replies).toEqual(["*Resident repos* (1/8):\n• `jshttp/vary` — *warm* · ref `master`"]);
+    expect(invoked).toEqual(["repo.list"]);
     expect(provider.requests).toHaveLength(0);
   });
 
@@ -2915,26 +2939,28 @@ describe("self-improvement wiring (Area 7b / #84)", () => {
     expect(replies[0]).toContain("mem:org:coreplanelabs:0");
   });
 
-  it("`friction report` is answered inline from the ledger — no model turn, no executor", async () => {
+  it("`friction report` is answered inline from the ledger through the registry — no model turn, no executor", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.frictionLedger = new InMemoryFrictionLedger();
+    const { invoked } = wireCommands(deps);
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("friction report"), io);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("0 runs analyzed");
+    expect(replies).toEqual(["🔍 0 runs analyzed — no recurring friction pattern found (a pattern must recur across ≥2 distinct runs)."]);
+    expect(invoked).toEqual(["friction.report"]);
     expect(provider.requests).toEqual([]);
     expect(makeExecutor).not.toHaveBeenCalled();
   });
 
-  it("`friction propose` is gated (admins only when unconfigured) and files through the injected tracker", async () => {
+  it("`friction propose` is gated (admins only when unconfigured) with the legacy wording and files through the injected tracker", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(`${YAML_FIXTURE}\nselfImprovement:\n  repo: o/r\n`, provider);
     deps.frictionLedger = new InMemoryFrictionLedger();
     deps.issueTracker = new InMemoryIssueTracker();
+    wireCommands(deps);
     const denied = fakeIO();
     await dispatch(deps, msg("friction propose"), denied.io);
-    expect(denied.replies[0]).toMatch(/🚫/);
+    expect(denied.replies).toEqual(["🚫 Filing friction proposals (`friction propose`) is restricted. Ask <@slack:UADMIN>."]);
     const allowed = fakeIO();
     await dispatch(deps, msg("friction propose", "slack:UADMIN"), allowed.io);
     expect(allowed.replies[0]).toContain("0 runs analyzed");
@@ -3178,6 +3204,7 @@ describe("inline command runs + run receipts (#244)", () => {
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     deps.frictionLedger = new InMemoryFrictionLedger();
     deps.runRegistry = sequentialRegistry("fr");
+    wireCommands(deps); // friction.* lives on the registry since U9; bound after the ledger/tracker are set
     const { io, replies, receipts } = receiptIO();
     await dispatch(deps, { ...msg("friction report"), channelName: "cron", userName: "cron" }, io);
 
@@ -3190,10 +3217,25 @@ describe("inline command runs + run receipts (#244)", () => {
     expect(receipts).toEqual([{ id: "fr-1", status: "completed" }]);
   });
 
+  it("the registry form `friction report minRuns=2` is the same run (input + answer, receipt) — a run is about the work, not the syntax", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.frictionLedger = new InMemoryFrictionLedger();
+    deps.runRegistry = sequentialRegistry("fr");
+    const { invoked } = wireCommands(deps);
+    const { io, replies, receipts } = receiptIO();
+    await dispatch(deps, msg("friction report minRuns=2"), io);
+    expect(invoked).toEqual(["friction.report"]);
+    const snap = deps.runRegistry.snapshot("fr-1", "tok")!;
+    expect(snap.finished).toBe(true);
+    expect(snap.events).toEqual([expect.objectContaining({ type: "input", text: "friction report minRuns=2" }), expect.objectContaining({ type: "answer", text: replies[0] })]);
+    expect(receipts).toEqual([{ id: "fr-1", status: "completed" }]);
+  });
+
   it("a refused `friction propose` (non-admin, no repoManagement grant) is a run that finished `failed`; the \ud83d\udeab reply is its answer", async () => {
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     deps.frictionLedger = new InMemoryFrictionLedger();
     deps.runRegistry = sequentialRegistry("fr");
+    wireCommands(deps); // friction.* lives on the registry since U9; bound after the ledger/tracker are set
     const { io, replies, receipts } = receiptIO();
     await dispatch(deps, { ...msg("friction propose"), userId: "http:cron", channelId: "http:cron" }, io);
     expect(replies[0]).toMatch(/^\ud83d\udeab/);
@@ -3206,6 +3248,7 @@ describe("inline command runs + run receipts (#244)", () => {
     deps.frictionLedger = new InMemoryFrictionLedger();
     deps.issueTracker = new InMemoryIssueTracker();
     deps.runRegistry = sequentialRegistry("fr");
+    wireCommands(deps); // friction.* lives on the registry since U9; bound after the ledger/tracker are set
     const { io, replies, receipts } = receiptIO();
     await dispatch(deps, { ...msg("friction propose"), userId: "http:cron", channelId: "http:cron" }, io);
     expect(replies[0]).toContain("0 runs analyzed");
@@ -3224,6 +3267,7 @@ describe("inline command runs + run receipts (#244)", () => {
       },
     };
     deps.runRegistry = sequentialRegistry("fr");
+    wireCommands(deps); // friction.* lives on the registry since U9; bound after the ledger/tracker are set
     const a = receiptIO();
     const b = receiptIO();
     const both = Promise.all([dispatch(deps, msg("friction report"), a.io), dispatch(deps, msg("friction report"), b.io)]);
@@ -3247,6 +3291,7 @@ describe("inline command runs + run receipts (#244)", () => {
       },
     };
     deps.runRegistry = sequentialRegistry("fr");
+    wireCommands(deps); // friction.* lives on the registry since U9; bound after the ledger/tracker are set
     const { io, replies, receipts } = receiptIO();
     await dispatch(deps, msg("friction report"), io);
     expect(deps.runRegistry.listActive()[0].finished).toBe(true);
@@ -3593,6 +3638,7 @@ describe("run history write path (#157 U4)", () => {
     const registry = new RunRegistry({ genId: () => `cmd-${++n}`, genToken: () => "tok" });
     const { deps, store, writer } = wired(capturingProvider(), { registry });
     deps.frictionLedger = new InMemoryFrictionLedger();
+    wireCommands(deps);
     const ok = fakeIO();
     await dispatch(deps, { ...msg("friction report"), channelId: "http:cron", userId: "http:cron", threadKey: "http:cron:1" }, ok.io);
     await writer.settled();
@@ -3818,39 +3864,15 @@ describe("run history write path (#157 U4)", () => {
 
 // Feature: features/command-registry.md (chat adapter) / features/routing-and-config.md
 // item 10 — the registry chat parse is the LAST text-only fast path (KTD19):
-// after config → repo → friction, before io.history()/recognizeOperation.
+// after config → repo (mutating verbs), before io.history()/recognizeOperation.
+// Since U9 the `friction` group and `repo list` are registry-owned; only the
+// forms in RESERVED_CHAT_COMMANDS stay with a legacy parser.
 describe("registry chat commands in the fast-path chain (U13, KTD19)", () => {
-  type Deps = RunsCommandDeps & { hits: string[] };
-  const define = commandDefiner<Deps>();
-  const frictionShadow = define({
-    id: "friction.report",
-    input: z.object({}),
-    scope: "friction:read",
-    chatGate: "open",
-    effect: "read",
-    describe: "registered ahead of U9 — must stay unreachable while `friction` is reserved",
-    handler: async ({ deps }) => {
-      deps.hits.push("friction.report");
-      return { fromRegistry: true };
-    },
-  });
-
   function withCommands(deps: CoreDeps) {
     const reg = new RunRegistry({ genId: () => "live0001", genToken: () => "tok-secret" });
     reg.create("coding · acme/api <!channel>", { agent: "coding", channelId: "slack:D0PRIV", userId: "slack:UOWNER", threadKey: "slack:D0PRIV:t" });
-    const registry = new CommandRegistry<Deps>({ audit: () => {} });
-    registerRunsCommands(registry);
-    registry.register(frictionShadow);
-    const cmdDeps: Deps = { runs: createRunsService({ registry: reg, store: null }), hits: [] };
-    const commands = bindCommands(registry, cmdDeps);
-    const invoked: string[] = [];
-    const rawInvoke = commands.invoke;
-    commands.invoke = async (id, raw, caller) => {
-      invoked.push(id);
-      return rawInvoke(id, raw, caller);
-    };
-    deps.commands = commands;
-    return { invoked, hits: cmdDeps.hits };
+    deps.runRegistry = reg;
+    return wireCommands(deps);
   }
 
   it("`runs list` from an admin replies inline with the compact list — no model turn, no history fetch, no identifying fields", async () => {
@@ -3889,17 +3911,46 @@ describe("registry chat commands in the fast-path chain (U13, KTD19)", () => {
     expect(provider.requests).toHaveLength(1);
   });
 
-  it("`friction report --top 3` stays with the legacy parser while `friction` is reserved: the registry handler is never called", async () => {
+  it("`friction report --top 3` (legacy flag form) and `friction report minRuns=2` (registry form) both reach `friction.report` exactly once, for a non-admin", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.frictionLedger = new InMemoryFrictionLedger();
-    const { invoked, hits } = withCommands(deps);
+    const { invoked } = withCommands(deps);
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("friction report --top 3", "slack:UX"), io);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).not.toContain("fromRegistry");
+    await dispatch(deps, msg("friction report minRuns=2", "slack:UX"), io);
+    expect(replies).toEqual([
+      "🔍 0 runs analyzed — no recurring friction pattern found (a pattern must recur across ≥2 distinct runs).",
+      "🔍 0 runs analyzed — no recurring friction pattern found (a pattern must recur across ≥2 distinct runs).",
+    ]);
+    expect(invoked).toEqual(["friction.report", "friction.report"]);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("`repo onboard x` stays with the legacy parser (reserved form): named parse error, registry never invoked; `repo list` → registry only", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const admin: ResidentAdminClient = {
+      onboard: vi.fn(async () => ({ status: 202, data: {} })),
+      offboard: vi.fn(async () => ({ status: 200, data: {} })),
+      reconfigure: vi.fn(async () => ({ status: 200, data: {} })),
+      rebuild: vi.fn(async () => ({ status: 200, data: {} })),
+      residents: vi.fn(async () => ({ status: 200, data: { cap: 8, count: 0, residents: [] } })),
+    };
+    deps.residentAdmin = admin;
+    const { invoked } = withCommands(deps);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo onboard x", "slack:UADMIN"), io);
+    expect(replies).toEqual(["`repo onboard` needs a GitHub `owner/name` slug, e.g. `repo onboard acme/api`."]);
     expect(invoked).toEqual([]);
-    expect(hits).toEqual([]);
+    expect(admin.onboard).not.toHaveBeenCalled();
+    await dispatch(deps, msg("repo onboard acme/api", "slack:UADMIN"), io);
+    expect(admin.onboard).toHaveBeenCalledTimes(1);
+    expect(invoked).toEqual([]);
+    await dispatch(deps, msg("repo list", "slack:UADMIN"), io);
+    expect(invoked).toEqual(["repo.list"]);
+    expect(admin.residents).toHaveBeenCalledTimes(1);
+    expect(replies[2]).toBe("No repos onboarded (0/8). Onboard one with `repo onboard <owner/name>`.");
     expect(provider.requests).toHaveLength(0);
   });
 

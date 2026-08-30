@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import { CommandRegistry, bindCommands, type Caller, type CommandInvoker } from "../core/commandRegistry.js";
-import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
+import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
 import type { CoreDeps } from "../core/dispatcher.js";
+import { InMemoryIssueTracker } from "../execution/githubIssues.js";
+import { RunStoreFrictionLedger } from "../core/frictionLedger.js";
+import type { ResidentAdminClient } from "../core/repoCommands.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunRecord } from "../core/runRecord.js";
@@ -15,17 +18,33 @@ import { handleMcpRequest } from "./mcp.js";
 
 // Feature: features/command-registry.md — the SHARED ADAPTER CONTRACT (AE3,
 // R7/R10). One fixture (a live run with a `tok-` capability token and a
-// persisted run) is driven through every adapter; each row must hand back the
+// persisted run, the friction ledger served from the same store, and a resident
+// registry stub) is driven through every adapter; each row must hand back the
 // exact JSON object `invoke` produced, and no surface may leak a token. Rows
 // are table-driven so the chat adapter (U13) adds one row, not one test file.
 
 const NOW = 1_700_000_000_000;
 
+const RESIDENTS = {
+  cap: 6,
+  count: 1,
+  residents: [{ resource: "repo:jshttp/vary", defaultRef: "master", live: { state: "warm", reason: "", sha: "0123456789abcdef" } }],
+};
+
+const residentAdmin: ResidentAdminClient = {
+  onboard: async () => ({ status: 500, data: {} }),
+  offboard: async () => ({ status: 500, data: {} }),
+  reconfigure: async () => ({ status: 500, data: {} }),
+  rebuild: async () => ({ status: 500, data: {} }),
+  residents: async () => ({ status: 200, data: RESIDENTS }),
+};
+
 function record(id: string, finishedAt: number): RunRecord {
   const events: RunEvent[] = [
     { type: "input", text: "please do the thing", seq: 1 },
-    { type: "tool_call", tool: "bash", summary: "$ ls", seq: 2 },
-    { type: "answer", text: "all done", seq: 3 },
+    { type: "tool_call", tool: "bash", summary: "$ pnpm install --frozen-lockfile", seq: 2, at: 10 },
+    { type: "tool_result", tool: "bash", ok: false, summary: "ERR_PNPM_OUTDATED_LOCKFILE", seq: 3, at: 45_010 },
+    { type: "answer", text: "all done", seq: 4 },
   ];
   return {
     id,
@@ -54,10 +73,15 @@ async function fixture() {
   reg.publish(live.id, { type: "tool_call", tool: "bash", summary: "$ pwd" });
   const store = new InMemoryRunStore({ now: () => NOW });
   await store.put(record("fin-1", NOW - 1000));
-  const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
-  registerRunsCommands(registry);
-  const commands = bindCommands(registry, { runs: createRunsService({ registry: reg, store }) });
-  return { commands, liveId: live.id, liveToken: live.token, persistedId: "fin-1" };
+  await store.put(record("fin-2", NOW - 2000)); // a second run so the lockfile friction RECURS (≥2 distinct runs)
+  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+  registerCoreCommands(registry);
+  const commands = bindCommands(registry, {
+    runs: createRunsService({ registry: reg, store }),
+    friction: { ledger: new RunStoreFrictionLedger(store), tracker: new InMemoryIssueTracker(), config: () => undefined },
+    repo: { admin: () => residentAdmin },
+  });
+  return { commands, liveId: live.id, liveToken: live.token, persistedIds: ["fin-1", "fin-2"] };
 }
 
 // ---- one row per adapter -----------------------------------------------------
@@ -111,9 +135,11 @@ const httpRow: AdapterRow = {
   },
 };
 
+const MCP_SCOPES = ["runs:read", "friction:read", "repo:read"];
+
 const mcpRow: AdapterRow = {
   name: "mcp",
-  caller: { kind: "mcp", id: "mcp:alice", scopes: new Set(["runs:read"]) },
+  caller: { kind: "mcp", id: "mcp:alice", scopes: new Set(MCP_SCOPES) },
   async call(commands, id, input) {
     const res = await handleMcpRequest(
       {
@@ -122,7 +148,7 @@ const mcpRow: AdapterRow = {
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: id.replace(".", "_"), arguments: input } }),
       },
       {} as CoreDeps,
-      { auth: { tokens: { tok: { subject: "alice", scopes: ["runs:read"] } } }, commands },
+      { auth: { tokens: { tok: { subject: "alice", scopes: MCP_SCOPES } } }, commands },
     );
     const wire = JSON.stringify(res.body);
     const body = res.body as { result?: { content: { text: string }[] } };
@@ -157,14 +183,14 @@ describe.each(rows)("adapter contract — $name", (row) => {
     const got = await row.call(f.commands, "runs.list", { status: "all" });
     expect(got.json).toEqual(reference.ok ? reference.value : null);
     const ids = (got.json as { runs: { id: string }[] }).runs.map((r) => r.id);
-    expect(ids.sort()).toEqual([f.persistedId, f.liveId].sort());
+    expect(ids.sort()).toEqual([...f.persistedIds, f.liveId].sort());
     expect(got.wire).not.toContain("tok-");
     expect(got.wire).not.toContain(f.liveToken);
   });
 
   it("runs.get {id} for the live and the persisted run hands back the exact invoke JSON, no token", async () => {
     const f = await fixture();
-    for (const id of [f.liveId, f.persistedId]) {
+    for (const id of [f.liveId, f.persistedIds[0]]) {
       const reference = await f.commands.invoke("runs.get", { id }, row.caller);
       expect(reference.ok, id).toBe(true);
       const got = await row.call(f.commands, "runs.get", { id });
@@ -176,3 +202,58 @@ describe.each(rows)("adapter contract — $name", (row) => {
 
 // Red-verified: adding `token: s.token` to `liveView()` in runsService.ts fails
 // all six rows above on the `tok-` scan.
+
+// ---- migrated chat commands (U9, R13) ----------------------------------------
+
+describe.each(rows)("adapter contract for migrated commands — $name", (row) => {
+  it("friction.report {limit:5} hands back the exact invoke JSON: the recurring lockfile pattern over the two persisted runs, no token", async () => {
+    const f = await fixture();
+    const reference = await f.commands.invoke("friction.report", { limit: 5 }, row.caller);
+    expect(reference.ok, JSON.stringify(reference)).toBe(true);
+    const got = await row.call(f.commands, "friction.report", { limit: "5" });
+    expect(got.json).toEqual(reference.ok ? reference.value : null);
+    const report = got.json as { runsAnalyzed: number; patterns: { key: string; runIds: string[] }[] };
+    expect(report.runsAnalyzed).toBe(2);
+    expect(report.patterns.map((p) => p.key)).toEqual(["setup_install:pnpm install --frozen-lockfile"]);
+    expect(report.patterns[0].runIds.sort()).toEqual(f.persistedIds.sort());
+    expect(got.wire).not.toContain("tok-");
+    expect(got.wire).not.toContain(f.liveToken);
+  });
+
+  it("repo.list {} hands back the resident registry body exactly as invoke returned it", async () => {
+    const f = await fixture();
+    const reference = await f.commands.invoke("repo.list", {}, row.caller);
+    expect(reference.ok).toBe(true);
+    const got = await row.call(f.commands, "repo.list", {});
+    expect(got.json).toEqual(reference.ok ? reference.value : null);
+    expect(got.json).toEqual(RESIDENTS);
+    expect(got.wire).not.toContain("tok-");
+  });
+});
+
+describe("migrated commands over MCP — scopes (AE12)", () => {
+  async function callAs(commands: CommandInvoker, scopes: string[], name: string, args: Record<string, string> = {}) {
+    const res = await handleMcpRequest(
+      {
+        method: "POST",
+        headers: { authorization: "Bearer tok" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+      },
+      {} as CoreDeps,
+      { auth: { tokens: { tok: { subject: "alice", scopes } } }, commands },
+    );
+    return res.body as { result?: unknown; error?: { code: number; data?: { code: string } } };
+  }
+
+  it("a dispatch-only token is refused on friction_report, repo_list, and friction_propose; runs:write is refused on friction_propose; friction:write runs it", async () => {
+    const f = await fixture();
+    for (const name of ["friction_report", "repo_list", "friction_propose"]) {
+      const body = await callAs(f.commands, ["dispatch"], name);
+      expect(body.error?.data?.code, name).toBe("unauthorized");
+    }
+    expect((await callAs(f.commands, ["runs:write"], "friction_propose")).error?.data?.code).toBe("unauthorized");
+    // friction:write passes the gate; with no `selfImprovement.repo` and no `repo` arg the step is `unavailable`, not unauthorized
+    expect((await callAs(f.commands, ["friction:write"], "friction_propose")).error?.data?.code).toBe("unavailable");
+    expect((await callAs(f.commands, ["friction:write"], "friction_propose", { dryRun: "true", repo: "acme/api" })).result).toBeTruthy();
+  });
+});

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CommandRegistry, UNTRUSTED_OPEN, jsonSchemaFor, type Caller } from "../commandRegistry.js";
 import type { RunEvent } from "../runEvents.js";
 import { analyzeRunFriction } from "../runFriction.js";
@@ -184,6 +184,16 @@ describe("runs.get / runs.events / runs.friction", () => {
       expect(await registry.invoke(cmd, { id: "fin-y" }, readerPinnedX, deps)).toMatchObject({ ok: false, error: "not_found" });
       expect(await registry.invoke(cmd, { id: "fin-x" }, readerPinnedX, deps)).toMatchObject({ ok: true });
     }
+  });
+
+  it("a channel-pinned runs.get fetches the run once — the visibility check reuses the payload's view", async () => {
+    const { registry, deps } = await setup();
+    const getRun = vi.spyOn(deps.runs, "getRun");
+    const out = value<{ id: string; events?: unknown[] }>(await registry.invoke("runs.get", { id: "fin-x", include: "messages" }, readerPinnedX, deps));
+    expect(out.id).toBe("fin-x");
+    expect(out.events).toHaveLength(4);
+    expect(getRun).toHaveBeenCalledTimes(1);
+    expect(getRun).toHaveBeenCalledWith("fin-x", { include: "messages" });
   });
 });
 

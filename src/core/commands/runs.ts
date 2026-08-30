@@ -2,7 +2,7 @@ import { z } from "zod";
 import { CommandError, commandDefiner, wrapUntrusted, type Caller, type CommandDef, type CommandRegistry, type JsonValue } from "../commandRegistry.js";
 import type { RunEvent } from "../runEvents.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../runRecord.js";
-import { MAX_EVENTS_PAGE, type Result, type RunsService } from "../runsService.js";
+import { MAX_EVENTS_PAGE, type Result, type RunRecordView, type RunsService } from "../runsService.js";
 
 // The `runs.*` registrations (#157 R8/R9): thin wrappers that translate a parsed
 // input plus the resolved caller into `RunsService` calls. Everything a surface
@@ -29,11 +29,20 @@ function unwrap<T>(res: Result<T>): T {
   throw new CommandError(res.error, res.error === "not_found" ? "run not found" : "run already finished");
 }
 
-/** The run's channel must equal the caller's pin, else the run does not exist for this caller. */
+/** The run as this caller may see it — ONE fetch serves both the visibility check
+ *  and the payload. A channel-pinned caller's run must sit in its channel; any
+ *  other run (or none) is the same `not_found`, so existence is never revealed. */
+async function getVisibleRun(runs: RunsService, id: string, caller: Caller, opts: { include?: "messages" } = {}): Promise<RunRecordView> {
+  const view = unwrap(await runs.getRun(id, opts));
+  if (caller.channel !== undefined && view.channelId !== caller.channel) throw new CommandError("not_found", "run not found");
+  return view;
+}
+
+/** For the commands whose payload is not the run view (events, friction, stop):
+ *  a pinned caller must be able to see the run before the real read/write; an
+ *  unpinned caller skips the lookup — the payload call's own `not_found` covers it. */
 async function assertVisible(runs: RunsService, id: string, caller: Caller): Promise<void> {
-  if (caller.channel === undefined) return;
-  const view = unwrap(await runs.getRun(id));
-  if (view.channelId !== caller.channel) throw new CommandError("not_found", "run not found");
+  if (caller.channel !== undefined) await getVisibleRun(runs, id, caller);
 }
 
 function wrapEvent(e: RunEvent): RunEvent {
@@ -92,8 +101,7 @@ export const runsGet = defineCommand({
   surfaces: { chat: false },
   describe: "One run's record; `include=messages` adds its events with free text wrapped as untrusted content.",
   handler: async ({ input, caller, deps }) => {
-    await assertVisible(deps.runs, input.id, caller);
-    const view = unwrap(await deps.runs.getRun(input.id, input.include ? { include: input.include } : {}));
+    const view = await getVisibleRun(deps.runs, input.id, caller, input.include ? { include: input.include } : {});
     if (view.events) view.events = view.events.map(wrapEvent);
     return asJson(view);
   },
@@ -143,6 +151,6 @@ export const runsStop = defineCommand({
 
 export const runsCommands: readonly CommandDef<RunsCommandDeps, z.ZodType>[] = [runsList, runsGet, runsEvents, runsFriction, runsStop];
 
-export function registerRunsCommands(registry: CommandRegistry<RunsCommandDeps>): void {
-  for (const cmd of runsCommands) registry.register(cmd);
+export function registerRunsCommands<D extends RunsCommandDeps>(registry: CommandRegistry<D>): void {
+  for (const cmd of runsCommands) registry.register(cmd as unknown as CommandDef<D, z.ZodType>);
 }

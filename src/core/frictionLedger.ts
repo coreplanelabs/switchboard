@@ -23,6 +23,12 @@ export interface LedgerReadOptions {
   limit?: number;
   /** Keep only runs finished at or after this epoch ms. */
   sinceMs?: number;
+  /** Keep only runs of this platform-namespaced channel (a channel-pinned
+   *  caller, KTD10). A `FrictionRunRecord` carries no channel by design, so
+   *  only a ledger that reads the run store can answer this; a ledger of bare
+   *  records (in-memory, file, legacy FrictionDO rows) contributes NOTHING
+   *  under a pin — fail closed, never a run from another channel. */
+  channel?: string;
 }
 
 export interface FrictionLedger {
@@ -40,6 +46,7 @@ export interface LedgerOptions {
 export const DEFAULT_LEDGER_MAX = 500;
 
 function sortAndTrim(records: FrictionRunRecord[], max: number, opts: LedgerReadOptions): FrictionRunRecord[] {
+  if (opts.channel !== undefined) return []; // bare records carry no channel: nothing can match a pin
   let out = [...records].sort((a, b) => a.finishedAt - b.finishedAt || a.runId.localeCompare(b.runId)).slice(-max);
   if (opts.sinceMs !== undefined) out = out.filter((r) => r.finishedAt >= opts.sinceMs!);
   if (opts.limit !== undefined) out = out.slice(-Math.max(0, opts.limit));
@@ -170,7 +177,14 @@ export class RunStoreFrictionLedger implements FrictionLedger {
 
   async recent(opts: LedgerReadOptions = {}): Promise<FrictionRunRecord[]> {
     const max = Math.max(0, opts.limit ?? DEFAULT_LEDGER_MAX);
-    const [legacyRes, storeRes] = await Promise.allSettled([this.legacy ? this.legacy.recent(opts) : [], this.newest(max, opts.sinceMs)]);
+    // Under a channel pin the legacy rows are skipped outright (they carry no
+    // channel — see LedgerReadOptions.channel) and only run-store rows of that
+    // channel are read; the final trim then sees rows that already match.
+    const { channel, ...trim } = opts;
+    const [legacyRes, storeRes] = await Promise.allSettled([
+      this.legacy && channel === undefined ? this.legacy.recent(opts) : [],
+      this.newest(max, opts.sinceMs, channel),
+    ]);
     if (storeRes.status === "rejected" && legacyRes.status === "rejected") throw storeRes.reason;
     const describe = (reason: unknown) => (reason instanceof Error ? reason.message : String(reason));
     if (legacyRes.status === "rejected") this.warn(`[friction] legacy ledger read failed; serving run-store rows only: ${describe(legacyRes.reason)}`);
@@ -178,17 +192,17 @@ export class RunStoreFrictionLedger implements FrictionLedger {
     const byRun = new Map<string, FrictionRunRecord>();
     if (legacyRes.status === "fulfilled") for (const r of legacyRes.value) byRun.set(r.runId, r);
     if (storeRes.status === "fulfilled") for (const item of storeRes.value) byRun.set(item.id, projectFrictionRecord(item));
-    return sortAndTrim([...byRun.values()], max, opts);
+    return sortAndTrim([...byRun.values()], max, trim);
   }
 
   /** The newest `max` runs, newest first, paging by the `{ before, beforeId }`
    *  cursor (the last row's `finishedAt` + `id`, so same-millisecond siblings
    *  are not skipped) since one `list` call returns at most RUN_LIST_MAX_LIMIT rows. */
-  private async newest(max: number, sinceMs: number | undefined): Promise<RunListItem[]> {
+  private async newest(max: number, sinceMs: number | undefined, channel: string | undefined): Promise<RunListItem[]> {
     const out: RunListItem[] = [];
     let cursor: { before: number; beforeId: string } | undefined;
     while (out.length < max) {
-      const page = await this.store.list({ limit: max - out.length, ...cursor, sinceMs });
+      const page = await this.store.list({ limit: max - out.length, ...cursor, sinceMs, channel });
       out.push(...page);
       if (page.length < Math.min(RUN_LIST_MAX_LIMIT, max - out.length + page.length)) break;
       const last = page[page.length - 1];
