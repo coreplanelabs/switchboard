@@ -36,4 +36,37 @@ describe("help.show", () => {
     expect(text).not.toContain("runs get");
     expect(helpShow).toMatchObject({ scope: "help:read", chatGate: "open", effect: "read" });
   });
+
+  it("chat rendering (surface: chat): one bold header per group, one bullet per chat-exposed command, no column padding — the aligned columns collapse in Slack's proportional font", async () => {
+    const registry = new CommandRegistry<HelpCommandDeps>({ audit: () => {} });
+    registerHelpCommands(registry);
+    const catalogue = [
+      { id: "help.show", describe: "help" },
+      { id: "config.show", describe: "show config" },
+      { id: "runs.list", describe: "list runs" },
+      { id: "runs.get", describe: "hidden in chat", surfaces: { chat: false } as const },
+      { id: "config.set", describe: "set config" },
+      { id: "repo.list", describe: "list repos" },
+    ];
+    const commands = bindCommands(registry, { help: { agents: () => [{ name: "general", description: "answers questions" }], commands: () => catalogue } });
+    const res = await commands.invoke("help.show", {}, chat);
+    if (!res.ok) throw new Error("unreachable");
+    const text = renderText(commands.get("help.show")!, res.value, { surface: "chat" });
+    const terminal = renderText(commands.get("help.show")!, res.value);
+    // Both share the frame (agents + directives); only the command list differs.
+    const frame = text.slice(0, text.indexOf("*Commands*"));
+    expect(terminal.startsWith(frame)).toBe(true);
+    expect(frame).toContain("*Switchboard* — send me a request. Agents:\n• `general` — answers questions");
+    expect(frame).toContain("*Per-request directives*");
+    expect(text).not.toMatch(/ {3,}/);
+    expect(terminal).toMatch(/ {3,}/);
+    const list = text.slice(text.indexOf("*Commands*")).split("\n").slice(1);
+    // One header per group, in first-appearance order; the commands of a group under it, registry order.
+    expect(list).toEqual(["*help*", "• `help show` — help", "*config*", "• `config show` — show config", "• `config set` — set config", "*runs*", "• `runs list` — list runs", "*repo*", "• `repo list` — list repos"]);
+    // Every chat-exposed command exactly once, nothing hidden leaks — driven by the catalogue, not a hard-coded list.
+    for (const c of catalogue) {
+      const form = c.id.replace(".", " ");
+      expect(text.split(`\`${form}\``).length - 1, form).toBe(c.surfaces?.chat === false ? 0 : 1);
+    }
+  });
 });

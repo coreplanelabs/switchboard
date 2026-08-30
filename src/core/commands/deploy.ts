@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { DEPLOY_ORDER, formatPlan, planDeploy, type DeployOptions, type DeployPlan, type WorkerName } from "../../deploy/plan.js";
+import { DEPLOY_ORDER, formatPlan, planDeploy, type CheckoutProbe, type DeployOptions, type DeployPlan, type WorkerName } from "../../deploy/plan.js";
 import { formatDeployResults, type DeployRunResult } from "../../deploy/run.js";
 import { CommandError, commandDefiner, flag, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
 
@@ -13,6 +13,8 @@ import { CommandError, commandDefiner, flag, type CommandDef, type CommandRegist
 export interface DeployCommandDeps {
   deploy: {
     run(plan: DeployPlan): Promise<DeployRunResult>;
+    /** The checkout the plan describes — which step dirs lack `node_modules` (`checks.nodeModulesMissing`). */
+    checkout: CheckoutProbe;
   };
 }
 
@@ -56,8 +58,8 @@ export const deployPlan = defineCommand({
   effect: "read",
   describe: "The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed.",
   render: (output) => formatPlan(output as unknown as DeployPlan),
-  handler: async ({ options }) => {
-    const plan = planDeploy(toOptions(options, true));
+  handler: async ({ options, deps }) => {
+    const plan = planDeploy(toOptions(options, true), deps.deploy.checkout);
     if (plan.steps.length === 0) throw new CommandError("invalid_input", "nothing to deploy after --only/--skip filters");
     return planJson(plan);
   },
@@ -70,13 +72,13 @@ export const deployAll = defineCommand({
   chatGate: "operator",
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
-  describe: "Deploy production in the only supported order (memory → bot → resident → sandbox), waiting out preflights and the bot's drain until the new container is live; the former `npm run deploy:all`.",
+  describe: "Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and the bot's drain until the new container is live.",
   render: (output) => {
     const o = output as JsonObject;
     return `deployed and live\n${formatDeployResults(o.results as unknown as Parameters<typeof formatDeployResults>[0], [])}`;
   },
   handler: async ({ options, deps }) => {
-    const plan = planDeploy(toOptions(options, false));
+    const plan = planDeploy(toOptions(options, false), deps.deploy.checkout);
     if (plan.steps.length === 0) throw new CommandError("invalid_input", "nothing to deploy after --only/--skip filters");
     const result = await deps.deploy.run(plan);
     if (result.kind === "refused") throw new CommandError("unavailable", `refusing —\n  - ${result.problems.join("\n  - ")}`);

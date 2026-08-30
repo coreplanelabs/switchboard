@@ -164,7 +164,7 @@ export async function invokeChatCommand({ commands, parsed, msg, config, resolve
   if (parsed.kind === "reply") return { ok: false, text: parsed.text, ...(parsed.error ? { error: parsed.error } : {}) };
   const caller = chatCallerFor(msg, config, resolveRepo);
   const res = await commands.invoke(parsed.id, parsed.input, caller);
-  if (res.ok) return { ok: true, text: renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, now === undefined ? {} : { now }) };
+  if (res.ok) return { ok: true, text: renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, { surface: "chat", ...(now === undefined ? {} : { now }) }) };
   return { ok: false, error: res.error, text: chatErrorLine(parsed.id, res.error, res.message, config, res.decidedBy) };
 }
 

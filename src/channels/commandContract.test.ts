@@ -242,6 +242,16 @@ describe.each(rows)("adapter contract — $name", (row) => {
     expect(got.wire).not.toContain(f.liveToken);
   });
 
+  it("a bare runs.list (no options) defaults to the active runs — the same JSON as {status:'active'}: the live run only", async () => {
+    const f = await fixture();
+    const reference = await f.commands.invoke("runs.list", inputFor(f.commands.get("runs.list")!, { status: "active" }), row.caller);
+    expect(reference.ok).toBe(true);
+    const got = await row.call(f, "runs.list", {});
+    expect(got.json).toEqual(reference.ok ? reference.value : null);
+    expect((got.json as { runs: { id: string }[] }).runs.map((r) => r.id)).toEqual([f.liveId]);
+    expect(got.wire).not.toContain("tok-");
+  });
+
   it("runs.get <id> for the live and the persisted run hands back the exact invoke JSON, no token", async () => {
     const f = await fixture();
     for (const id of [f.liveId, f.persistedIds[0]]) {
@@ -316,6 +326,19 @@ describe("adapter contract — chat", () => {
     expect(JSON.stringify(direct.value)).not.toContain("tok-");
   });
 
+  it("a bare `runs list` in chat lists the active runs (the spec's default) instead of demanding --status", async () => {
+    const f = await fixture();
+    const parsed = parseChatCommand("runs list", f.commands);
+    expect(parsed).toEqual({ kind: "invoke", id: "runs.list", input: { args: [], options: {} } });
+    const direct = await f.commands.invoke("runs.list", { options: { status: "active" } }, caller(f.config, "slack:UADMIN"));
+    if (!direct.ok) throw new Error("unreachable");
+    const reply = await handleChatCommand({ commands: f.commands, parsed: parsed!, msg: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:t" }, config: f.config, now: NOW });
+    expect(reply).toBe(renderText(f.commands.get("runs.list")!, direct.value, { now: NOW }));
+    expect(reply.split("\n")).toHaveLength(1);
+    expect(reply).toContain(f.liveId.slice(0, 8));
+    expect(reply).not.toContain("expected one of");
+  });
+
   it("`friction report --limit 5` and `repo list` reply with the command's own render of the same JSON the machine rows saw", async () => {
     const f = await fixture();
     for (const [text, id, named] of [
@@ -370,7 +393,7 @@ describe("derived naming across surfaces (KTD2/KTD21)", () => {
     expect(byId["runs.events"]).toBe("runs events <id> [--after-seq <integer>] [--limit <integer>]");
     expect(byId["runs.friction"]).toBe("runs friction <id>");
     expect(byId["runs.stop"]).toBe("runs stop <id> --mode <soft|hard>");
-    expect(byId["runs.list"]).toBe("runs list --status <active|finished|all> [--agent <string>] [--channel <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]");
+    expect(byId["runs.list"]).toBe("runs list [--status <active|finished|all>] [--agent <string>] [--channel <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]");
     expect(byId["friction.report"]).toBe("friction report [--since-ms <integer>] [--limit <integer>] [--min-runs <integer>]");
     expect(byId["friction.propose"]).toBe("friction propose [--dry-run] [--top <integer>] [--min-runs <integer>] [--repo <string>]");
     // Phase 4b: every remaining command, derived from its typed definition.

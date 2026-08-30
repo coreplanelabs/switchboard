@@ -313,6 +313,8 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
     deploy: {
       run: async (plan: DeployPlan): Promise<DeployRunResult> =>
         exec(`deploy.run ${plan.steps.map((st) => st.name).join(",")}`, { kind: "ran", ok: true, results: plan.steps.map((st) => ({ name: st.name, script: st.script, versionId: "v1", live: "n/a", status: "deployed" })), notAttempted: [] }),
+      // A probe of the checkout, not an executor: not recorded in `executed`.
+      checkout: { hasNodeModules: () => true },
     },
     env: {
       bootstrap: async (opts, log): Promise<BootstrapResult> => {
@@ -814,7 +816,7 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
           firstJson ??= normalized;
           expect(normalized, `${where}: invoke JSON differs from the first machine surface's (beyond the caller's own id)`).toEqual(firstJson);
         } else {
-          expect(out.text, `${where}: chat reply`).toBe(renderText(cmd, ref.value, { now: NOW }));
+          expect(out.text, `${where}: chat reply`).toBe(renderText(cmd, ref.value, { now: NOW, surface: "chat" }));
         }
         assertNoSecrets(out.wire, f, where);
       }

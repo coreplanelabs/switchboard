@@ -86,7 +86,7 @@ Operator flow:
 # 2) export a READ-ONLY, UAT-vault-scoped service-account token
 export OP_SERVICE_ACCOUNT_TOKEN=ops_...
 # 3) see the plan (nothing read/written)
-deploy/agent-env-bootstrap.sh --env uat --service <name>          # = npx tsx src/cli.ts env bootstrap --env uat --service <name>
+deploy/agent-env-bootstrap.sh --env uat --service <name>          # = npx tsx src/cli.ts env bootstrap --env uat --service <name> (needs no config/config.yaml)
 # 4) materialize into the agent's env
 deploy/agent-env-bootstrap.sh --env uat --service <name> --apply
 # 5) the toolchain sources it

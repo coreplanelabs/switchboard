@@ -116,6 +116,9 @@ export interface CommandDef<D, A extends readonly ArgDef[] = readonly ArgDef[], 
    *  when generic `key: value` lines would misrepresent the output — a report,
    *  a list. Absent → `renderCompact`. Still no channel escaping (invariant 1). */
   render?(output: JsonValue): string;
+  /** Chat's projection when `render` is shaped for a terminal (aligned
+   *  columns collapse in a proportional font). Absent → `render`. */
+  renderChat?(output: JsonValue): string;
 }
 
 /** What every adapter hands `invoke`: parsed-but-untyped positional values and
@@ -427,8 +430,11 @@ export const STORE_UNAVAILABLE_BANNER = "⚠ history store unavailable — showi
 
 /** What a text surface prints for `output`: the command's own `render` when it
  *  declares one (a report, a list), else `renderCompact`. The one entry point
- *  chat and CLI share, so both print the same text for the same JSON. */
-export function renderText(cmd: Pick<CommandDef<unknown>, "id" | "render">, output: JsonValue, opts: { now?: number } = {}): string {
+ *  chat and CLI share, so both print the same text for the same JSON — except
+ *  where a command declares `renderChat` and the caller says `surface: "chat"`
+ *  (the CLI's aligned columns do not survive a proportional font). */
+export function renderText(cmd: Pick<CommandDef<unknown>, "id" | "render" | "renderChat">, output: JsonValue, opts: { now?: number; surface?: "chat" | "text" } = {}): string {
+  if (opts.surface === "chat" && cmd.renderChat) return cmd.renderChat(output);
   return cmd.render ? cmd.render(output) : renderCompact(cmd.id, output, opts);
 }
 

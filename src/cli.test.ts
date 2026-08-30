@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { CommandRegistry, bindCommands, renderCompact, type CommandInvoker } from "./core/commandRegistry.js";
+import { CommandError, CommandRegistry, bindCommands, renderCompact, type CommandInvoker } from "./core/commandRegistry.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./core/commands/runs.js";
 import type { RunEvent } from "./core/runEvents.js";
 import { analyzeRunFriction } from "./core/runFriction.js";
 import { RunRegistry } from "./core/runRegistry.js";
 import { InMemoryRunStore } from "./core/runStore.js";
 import { createRunsService } from "./core/runsService.js";
-import { CLI_CALLER, parseCliArgv, runCli, runCommand } from "./cli.js";
+import { CLI_CALLER, loadBotConfig, parseCliArgv, runCli, runCommand, type CliInvocation } from "./cli.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -241,5 +241,84 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     const shown = await runCommand(commands, command(["config", "show", "--channel", "slack:C1"], commands), CLI_CALLER);
     expect(shown.exitCode).toBe(0);
     expect(shown.stdout).toContain("*Effective for you in this channel:*");
+  });
+
+  it("a bare `runs list` lists the active runs (the spec's default) — no --status needed", async () => {
+    const { commands, live } = await fixture();
+    const parsed = parseCliArgv(["runs", "list"], commands);
+    expect(parsed).toMatchObject({ kind: "command", id: "runs.list", input: { args: [], options: {} } });
+    const out = await runCommand(commands, parsed as Extract<CliInvocation, { kind: "command" }>, CLI_CALLER, { now: NOW });
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout).toContain(live.id.slice(0, 8));
+    expect(out.stdout).not.toContain("fin-1");
+  });
+});
+
+describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", () => {
+  const missing = join(mkdtempSync(join(tmpdir(), "swb-cli-noconfig-")), "config", "config.yaml");
+  /** What `main()` binds: the bot config loaded on first use — here from a path that does not exist. */
+  function bindWithoutConfig() {
+    let hits = 0;
+    const config = () => {
+      hits++;
+      return loadBotConfig(missing, join(missing, "..", "overrides.json"));
+    };
+    // As in `main()`: the run store is derived from the config, so it needs the file too.
+    const store = () => {
+      config();
+      return null;
+    };
+    const commands = buildCoreCommands(config, store, { registry: new RunRegistry({ now: () => NOW }), env: {}, dataDir: join(missing, ".."), warn: () => {} });
+    return { commands, hits: () => hits };
+  }
+  const command = (argv: string[], c: CommandInvoker) => {
+    const parsed = parseCliArgv(argv, c);
+    if (parsed.kind !== "command") throw new Error(JSON.stringify(parsed));
+    return parsed;
+  };
+
+  it("loadBotConfig: a missing file is an `unavailable` CommandError naming the path, SWITCHBOARD_CONFIG, and the commands that need no config — never an ENOENT stack; an existing file loads", () => {
+    let err: unknown;
+    try {
+      loadBotConfig(missing, "/dev/null");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CommandError);
+    expect((err as CommandError).code).toBe("unavailable");
+    expect((err as CommandError).message).toBe(`bot config not found at ${missing} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`);
+    const dir = mkdtempSync(join(tmpdir(), "swb-cli-config-"));
+    writeFileSync(join(dir, "config.yaml"), "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n");
+    expect(loadBotConfig(join(dir, "config.yaml"), join(dir, "overrides.json"))).toBeInstanceOf(ConfigStore);
+  });
+
+  it("(a) `deploy plan` succeeds without ever asking for the bot config; so do `help show` and the catalogue", async () => {
+    const { commands, hits } = bindWithoutConfig();
+    const plan = await runCommand(commands, command(["deploy", "plan", "--only", "memory,bot"], commands), CLI_CALLER);
+    expect(plan.exitCode).toBe(0);
+    expect(plan.stdout).toContain("Checks: wrangler account = ");
+    expect(plan.stdout).toContain("1. memory (switchboard-memory)");
+    const json = await runCommand(commands, command(["deploy", "plan", "--json"], commands), CLI_CALLER);
+    expect(JSON.parse(json.stdout)).toMatchObject({ dryRun: true, steps: [{ name: "memory" }, { name: "bot" }, { name: "resident" }, { name: "sandbox" }] });
+    expect((await runCommand(commands, command(["help", "show"], commands), CLI_CALLER)).exitCode).toBe(0);
+    expect((await runCli(commands, { kind: "catalogue" }, CLI_CALLER)).exitCode).toBe(0);
+    expect(hits()).toBe(0);
+  });
+
+  it("(b) a command that needs the bot config fails with the one clear `unavailable` line on stderr, exit 1, nothing on stdout", async () => {
+    const { commands } = bindWithoutConfig();
+    for (const argv of [
+      ["config", "show", "--channel", "slack:C1"],
+      ["runs", "list"],
+      ["memory", "list"],
+      ["repo", "list"],
+    ]) {
+      const out = await runCommand(commands, command(argv, commands), CLI_CALLER);
+      expect(out, argv.join(" ")).toEqual({
+        exitCode: 1,
+        stdout: "",
+        stderr: `error (unavailable): bot config not found at ${missing} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`,
+      });
+    }
   });
 });
