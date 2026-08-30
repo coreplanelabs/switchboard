@@ -52,33 +52,37 @@ describe("classifyMessage (trigger gating)", () => {
   });
 });
 
-// Feature: features/channel-formatter.md — the status/progress card is Block Kit
-// mrkdwn built from untrusted content (frame.detail carries tool-output summaries
-// and the agent's free-text update_status; frame.title carries the run label), so
-// both are escaped before they land in mrkdwn text fields — otherwise a value like
-// <!channel> would trigger a live @channel broadcast from a status card.
-describe("render (status card mrkdwn escaping)", () => {
-  type Section = { type: string; text?: { type: string; text: string }; elements?: { text: string }[] };
+// Feature: features/channel-formatter.md — the status/progress card is a context
+// headline (mrkdwn, escaped) over a rich_text body. The body must be rich_text,
+// never a section: Slack folds a section's mrkdwn behind "Show more" at five
+// rendered lines and re-renders a folded card expanded-then-collapsed on every
+// edit, so a section-bodied card makes the whole thread jump on each heartbeat
+// (measured live 2026-08-30; see the render() doc comment). rich_text `text`
+// elements are also literal, so untrusted detail cannot smuggle a <!channel>.
+describe("render (status card rich_text body)", () => {
+  type ContextBlock = { type: string; elements: { text: string }[] };
+  type RichText = { type: string; elements: { type: string; elements: { type: string; text?: string; url?: string }[] }[] };
+  const body = (out: { blocks: object[] }) => out.blocks[1] as RichText;
+  const bodyElements = (out: { blocks: object[] }) => body(out).elements[0].elements;
 
-  it("neutralizes injection (<!channel>, <@U…>, <url|label>) in frame.detail", () => {
-    const out = render({
-      title: "run",
-      detail: "<!channel> ping <@U123> see <https://evil.test|click>",
-    });
-    const section = out.blocks[1] as Section;
-    const text = section.text!.text;
-    expect(text).toContain("&lt;!channel&gt;");
-    expect(text).toContain("&lt;@U123&gt;");
-    expect(text).toContain("&lt;https://evil.test|click&gt;");
-    expect(text).not.toContain("<!channel>");
-    expect(text).not.toContain("<@U123>");
+  it("renders the body as a rich_text block, never a foldable section", () => {
+    const out = render({ title: "run", link: { url: "https://b.example/r", label: "Live run" }, detail: "✓ a\n✓ b\n✓ c\n✓ d\n✓ e\n✓ f" });
+    expect(body(out).type).toBe("rich_text");
+    expect(out.blocks.map((b) => (b as { type: string }).type)).not.toContain("section");
+  });
+
+  it("carries untrusted frame.detail verbatim in a literal text element (<!channel> cannot fire)", () => {
+    const detail = "<!channel> ping <@U123> see <https://evil.test|click>";
+    const out = render({ title: "run", detail });
+    const [text] = bodyElements(out);
+    expect(text).toEqual({ type: "text", text: detail });
   });
 
   it("escapes frame.title in both the context block and the top-level text fallback", () => {
     const out = render({ title: "coding <!channel> now" });
-    const context = out.blocks[0] as Section;
-    expect(context.elements![0].text).toContain("&lt;!channel&gt;");
-    expect(context.elements![0].text).not.toContain("<!channel>");
+    const context = out.blocks[0] as ContextBlock;
+    expect(context.elements[0].text).toContain("&lt;!channel&gt;");
+    expect(context.elements[0].text).not.toContain("<!channel>");
     expect(out.text).toContain("&lt;!channel&gt;");
     expect(out.text).not.toContain("<!channel>");
   });
@@ -88,33 +92,43 @@ describe("render (status card mrkdwn escaping)", () => {
     expect(out.text).toBe("*coding* on `claude` · 42s");
   });
 
-  it("renders frame.link as ONE short mrkdwn hyperlink line above the detail, never the bare URL", () => {
-    // A bare 100+-char capability URL wraps to 4 lines and pushes the card past
-    // Slack's "Show more" fold; every edit of a folded card then flashes it
-    // open and shut (the jump in jump.mov). `<url|label>` keeps it to one line.
+  it("renders frame.link as a typed link element whose URL adds no rendered width", () => {
     const url = "https://bot.example/runs/abc?t=" + "f".repeat(64);
     const out = render({ title: "run", link: { url, label: "Live run" }, detail: "✓ step" });
-    const section = out.blocks[1] as Section;
-    expect(section.text!.text).toBe(`<${url}|Live run>\n✓ step`);
+    expect(bodyElements(out)).toEqual([
+      { type: "link", url, text: "Live run" },
+      { type: "text", text: "\n✓ step" },
+    ]);
     expect(out.blocks).toHaveLength(2);
   });
 
-  it("renders a link-only frame (no detail) as a section holding just the hyperlink", () => {
+  it("renders a link-only frame (no detail) as just the link element", () => {
     const out = render({ title: "run", link: { url: "https://bot.example/runs/abc?t=x", label: "Live run" } });
-    const section = out.blocks[1] as Section;
-    expect(section.text!.text).toBe("<https://bot.example/runs/abc?t=x|Live run>");
+    expect(bodyElements(out)).toEqual([{ type: "link", url: "https://bot.example/runs/abc?t=x", text: "Live run" }]);
   });
 
-  it("escapes the link label and url (they are mrkdwn-sensitive) but keeps the hyperlink form", () => {
-    const out = render({ title: "run", link: { url: "https://bot.example/r?a=1&b=<2>", label: "a<b|c" } });
-    const section = out.blocks[1] as Section;
-    expect(section.text!.text).toBe("<https://bot.example/r?a=1&amp;b=&lt;2&gt;|a&lt;b|c>");
+  it("keeps mrkdwn-sensitive characters in the link label/url verbatim (typed fields, no escaping)", () => {
+    const out = render({ title: "run", link: { url: "https://bot.example/r?a=1&b=2", label: "a<b|c" } });
+    expect(bodyElements(out)).toEqual([{ type: "link", url: "https://bot.example/r?a=1&b=2", text: "a<b|c" }]);
   });
 
-  it("keeps the escaped detail under Slack's ~3000-char section cap even for adversarial input", () => {
-    const out = render({ title: "t", detail: "&".repeat(5000) });
-    const section = out.blocks[1] as Section;
-    expect(section.text!.text.length).toBeLessThanOrEqual(2900);
+  it("omits the body block entirely when the frame has no link and no detail", () => {
+    const out = render({ title: "run" });
+    expect(out.blocks).toHaveLength(1);
+  });
+
+  it("caps the detail so the blocks payload stays bounded for adversarial input", () => {
+    const out = render({ title: "t", detail: "x".repeat(5000) });
+    const [text] = bodyElements(out);
+    expect(text.text!.length).toBeLessThanOrEqual(900);
+  });
+
+  it("never leaves a lone surrogate when the cap cuts an astral char in half", () => {
+    // 899 ASCII chars then an emoji: the 900-char slice lands mid-pair.
+    const out = render({ title: "t", detail: "x".repeat(899) + "🎉end" });
+    const [text] = bodyElements(out);
+    expect(text.text!.length).toBe(899);
+    expect(text.text!).not.toMatch(/[\uD800-\uDBFF]$/u);
   });
 });
 

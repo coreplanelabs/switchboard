@@ -763,15 +763,9 @@ export class SlackIO implements ChannelIO {
   }
 }
 
-// Slack's section mrkdwn field caps at ~3000 chars. escapeMrkdwn can expand text
-// up to 5× in the worst case (every char an `&` → `&amp;`), so the raw detail is
-// sliced to a conservative length BEFORE escaping (keeping the truncation intent),
-// then the escaped result is hard-capped as a provable belt-and-suspenders: any
-// input, adversarial mixes included, stays ≤ RENDER_DETAIL_ESCAPED_MAX < 3000. A
-// mid-entity cut only leaves inert text (e.g. `&am`) — escaping already removed
-// every raw `<`/`>`/`&`, so truncation can never re-introduce live mrkdwn syntax.
+// The card body is bounded so the blocks payload stays far under Slack's
+// per-message limits whatever the tools emit.
 const RENDER_DETAIL_RAW_MAX = 900;
-const RENDER_DETAIL_ESCAPED_MAX = 2900;
 
 /** Status cards THIS process is currently driving (channel:ts), added when the
  *  card is posted and removed when it is closed. The reconnect sweep consults
@@ -783,30 +777,42 @@ export function ownsLiveCard(channel: string, ts: string): boolean {
   return liveCards.has(liveCardKey(channel, ts));
 }
 
-/** Status frames render as Block Kit: context headline + preformatted activity.
- *  `frame.title` (the run label) and `frame.detail` (tool-output summaries + the
- *  agent's free-text update_status) are untrusted, so both are escaped before they
- *  land in the `mrkdwn` text fields — otherwise a `<!channel>` in tool output
- *  would fire a live @channel broadcast from a status card. escapeMrkdwn only
- *  neutralizes `&`/`<`/`>`, so the title's intentional `*bold*`/`` `code` ``
- *  markup renders as before. Exported for tests. */
+/** Status frames render as Block Kit: context headline + rich_text activity.
+ *
+ *  The body MUST be a `rich_text` block, never a `section`: Slack's client
+ *  collapses a section's mrkdwn behind "Show more" at FIVE rendered lines
+ *  (measured live, 2026-08-30 — 8/12/16/20-line sections all fold; rich_text
+ *  at 30 lines does not), and a folded card re-renders expanded-then-collapsed
+ *  on every chat.update, shoving the whole thread up and down on each 5s
+ *  heartbeat. The card is link + checklist + activity ≈ 6+ lines, permanently
+ *  past that fold. rich_text has no per-block fold, so the card never folds
+ *  and edits never move the layout.
+ *
+ *  rich_text also neutralizes injection by construction: `text` elements are
+ *  literal (a `<!channel>` in tool output renders as those characters, never a
+ *  live @channel broadcast), so the untrusted `frame.detail` needs no escaping.
+ *  `frame.title` still lands in a `mrkdwn` context field and is escaped;
+ *  escapeMrkdwn only neutralizes `&`/`<`/`>`, so the title's intentional
+ *  `*bold*`/`` `code` `` markup renders as before. Exported for tests. */
 export function render(frame: StatusUpdate): { text: string; blocks: object[] } {
   const title = escapeMrkdwn(frame.title);
   const blocks: object[] = [
     { type: "context", elements: [{ type: "mrkdwn", text: title }] },
   ];
-  const lines: string[] = [];
-  // The run link is ONE hyperlink line, never the bare URL: inlined, the
-  // 100+-char capability URL wrapped to four lines and pushed the card behind
-  // Slack's "Show more" fold, where every edit flashed it open and shut.
-  if (frame.link) lines.push(`<${escapeMrkdwn(frame.link.url)}|${escapeMrkdwn(frame.link.label)}>`);
+  const elements: object[] = [];
+  // The run link is a typed link element: one rendered line, and its 100+-char
+  // capability URL lives in the `url` field where it has no width at all.
+  if (frame.link) elements.push({ type: "link", url: frame.link.url, text: frame.link.label });
   if (frame.detail) {
-    lines.push(escapeMrkdwn(frame.detail.slice(0, RENDER_DETAIL_RAW_MAX)).slice(0, RENDER_DETAIL_ESCAPED_MAX));
+    // The cap cut can land mid-astral-char; a lone high surrogate is invalid
+    // JSON text and Slack rejects the payload, so drop it from the cut edge.
+    const detail = frame.detail.slice(0, RENDER_DETAIL_RAW_MAX).replace(/[\uD800-\uDBFF]$/u, "");
+    elements.push({ type: "text", text: frame.link ? `\n${detail}` : detail });
   }
-  if (lines.length > 0) {
+  if (elements.length > 0) {
     blocks.push({
-      type: "section",
-      text: { type: "mrkdwn", text: lines.join("\n") },
+      type: "rich_text",
+      elements: [{ type: "rich_text_section", elements }],
     });
   }
   return { text: title, blocks };
