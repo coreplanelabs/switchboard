@@ -16,6 +16,7 @@ declare module 'vue' {
     CostChart: typeof import('./src/components/costs/CostChart.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    RunsTabs: typeof import('./src/components/runs/RunsTabs.vue')['default']
     StatusDot: typeof import('./src/components/StatusDot.vue')['default']
     UApp: typeof import('./node_modules/@nuxt/ui/dist/runtime/components/App.vue')['default']
     UTooltip: typeof import('./node_modules/@nuxt/ui/dist/runtime/components/Tooltip.vue')['default']

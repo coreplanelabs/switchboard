@@ -81,13 +81,14 @@ export function formatRelative(ms: number, now: number): string {
   return delta >= 0 ? `in ${span}` : `${span} ago`;
 }
 
-/** The "Runs" cell for non-run actions (a `run` shows its command + identity). */
-const ACTION_LABEL: Record<Exclude<ScheduleAction["type"], "run">, string> = {
+/** The "Runs" cell for non-run actions (a `run` shows its command + identity).
+ *  Exported for the web page, which renders the same vocabulary. */
+export const ACTION_LABEL: Record<Exclude<ScheduleAction["type"], "run">, string> = {
   healthz: "container health check",
   watchdog: "resident watchdog",
 };
 
-const OUTCOME_LABEL: Record<FiringOutcome, string> = {
+export const OUTCOME_LABEL: Record<FiringOutcome, string> = {
   completed: "succeeded",
   failed: "failed",
   stopped_soft: "stopped early",
@@ -97,7 +98,7 @@ const OUTCOME_LABEL: Record<FiringOutcome, string> = {
   misconfigured: "misconfigured — nothing ran",
 };
 
-const OUTCOME_CLASS: Record<FiringOutcome, "ok" | "bad" | "warn"> = {
+export const OUTCOME_CLASS: Record<FiringOutcome, "ok" | "bad" | "warn"> = {
   completed: "ok",
   failed: "bad",
   stopped_soft: "warn",
