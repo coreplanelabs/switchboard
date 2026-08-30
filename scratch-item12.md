@@ -7,3 +7,5 @@ while its head moves.
 - Scenario A: the head is replaced by an equivalent commit mid-review
   (same message, same files) — the review must be carried to the new head.
 - Scenario B: a new commit lands mid-review — the same run must re-review.
+
+Second commit so the PR has more than one commit in its compare lists.
