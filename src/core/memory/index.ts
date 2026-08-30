@@ -37,6 +37,7 @@ export { WorkerMemoryStore, MEMORY_WORKER_TIMEOUT_MS, type WorkerMemoryStoreOpti
 export { buildMemoryStore, DEFAULT_MEMORY_TOKEN_ENV } from "./buildStore.js";
 export {
   REFLECT_MIN_TURNS,
+  NO_REFLECT_AGENTS,
   MAX_REFLECTION_FACTS,
   MIN_REFLECTION_CONFIDENCE,
   REFLECTION_SYSTEM,
