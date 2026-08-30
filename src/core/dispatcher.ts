@@ -36,7 +36,7 @@ import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { invokeChatCommand, parseChatCommand, type ChatCommandResult, type ChatCommands, type ParsedChatCommand } from "./commandChat.js";
 import { cliWords } from "./commandSurface.js";
-import { defaultRunRegistry, type RunHandle, type RunRegistry, type RunSnapshot } from "./runRegistry.js";
+import { activityOfEvents, defaultRunRegistry, type RunHandle, type RunRegistry, type RunSnapshot } from "./runRegistry.js";
 import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
 import { coalesceStatus } from "./statusCoalescer.js";
 import { produceStructured, providerProducer } from "./structuredOutput.js";
@@ -647,6 +647,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       userId: msg.userId,
       threadKey: msg.threadKey,
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+      ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     });
     // The narrative events the dispatcher itself publishes — the request, the
     // thread context, the final answer — go straight to the registry: redacted
@@ -1225,7 +1226,7 @@ function assembleRunRecord(input: {
   snap: RunSnapshot | null;
   agent: string;
   model?: string;
-  msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey">;
+  msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey" | "sourceUrl">;
   repo?: string;
   finishedAt: number;
   status: RunStatus;
@@ -1250,6 +1251,10 @@ function assembleRunRecord(input: {
     truncated: false,
     events,
     diagnosis: input.diagnosis,
+    // What the run was last doing / how it ended, and where it came from — so the
+    // index can say what failed and link the thread without the events (item 20).
+    ...(activityOfEvents(events) !== undefined ? { activity: activityOfEvents(events) } : {}),
+    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
   });
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
 }
@@ -1339,10 +1344,13 @@ export interface RunLabelInput {
   text: string;
 }
 
-/** Max chars in a snippet before it is cut (at a word boundary) and ellipsized. */
-const SNIPPET_MAX = 60;
-/** Hard cap on the whole label so one hostile/huge field can't dominate the index. */
-const RUN_LABEL_MAX = 120;
+/** Max chars in a snippet before it is cut (at a word boundary) and ellipsized —
+ *  a laptop-width index row holds ~100 after the started column, chips and facts
+ *  (live-view item 21; was 60, which left half the row empty). */
+const SNIPPET_MAX = 100;
+/** Hard cap on the whole label so one hostile/huge field can't dominate the index
+ *  (the registry's own cap is 200). */
+const RUN_LABEL_MAX = 160;
 
 /** Drop the platform prefix from a namespaced id (`slack:U0123` → `U0123`) so an
  *  id fallback reads a little better when no display name is available. */

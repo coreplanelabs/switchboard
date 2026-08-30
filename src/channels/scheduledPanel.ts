@@ -90,8 +90,8 @@ const ACTION_LABEL: Record<Exclude<ScheduleAction["type"], "run">, string> = {
 const OUTCOME_LABEL: Record<FiringOutcome, string> = {
   completed: "completed",
   failed: "failed",
-  stopped_soft: "stopped (soft)",
-  stopped_hard: "stopped (hard)",
+  stopped_soft: "stopped early",
+  stopped_hard: "killed",
   "no-run": "no run created",
   "ingress-error": "ingress error",
   misconfigured: "misconfigured — nothing ran",

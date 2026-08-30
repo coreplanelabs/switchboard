@@ -118,7 +118,7 @@ export interface LiveViewDeps {
   /** Injectable clock for the panel's "next fire" / relative times. */
   now?: () => number;
   /** Rows per `?all=1` page. Default `INDEX_PAGE_SIZE` — a full page renders an
-   *  "Older runs" link carrying the service's cursor; a cursor page a "Newest" link. */
+   *  "Older runs" link carrying the service's cursor; a cursor page a "Newest runs" link. */
   indexPageSize?: number;
 }
 
@@ -205,7 +205,7 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
     rows: readonly IndexRow[];
     storeUnavailable?: boolean;
     olderHref?: string;
-    paged?: boolean;
+    olderThan?: number;
   }
   /** `?all=1`: one full page of the service's live ∪ finished ∪ persisted rows
    *  (the service's cap, never its 50-row default), with the live rows'
@@ -214,6 +214,8 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
   const mergedRows = async (live: readonly RunSummary[], cursor?: { before: number; beforeId: string }): Promise<IndexPage> => {
     const tokens = new Map(live.map((s) => [s.id, s.token]));
     const { runs, nextBefore, storeUnavailable } = await service.listRuns({ status: "all", limit: pageSize, ...(cursor ?? {}) });
+    // A cursor page holds finished runs only — the service leaves the live rows
+    // off it (they all sort ahead of any cursor), so the page is a full page.
     const rows = runs.map((v) => {
       const token = tokens.get(v.id);
       return token === undefined ? v : { ...v, token };
@@ -223,7 +225,7 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
       rows,
       ...(storeUnavailable ? { storeUnavailable: true } : {}),
       ...(nextBefore ? { olderHref: olderRunsHref(nextBefore) } : {}),
-      ...(cursor ? { paged: true } : {}),
+      ...(cursor ? { olderThan: cursor.before } : {}),
     };
   };
 
@@ -265,7 +267,7 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
             now: now(),
             ...(page.storeUnavailable ? { storeUnavailable: true } : {}),
             ...(page.olderHref ? { olderHref: page.olderHref } : {}),
-            ...(page.paged ? { paged: true } : {}),
+            ...(page.olderThan !== undefined ? { olderThan: page.olderThan } : {}),
           }),
         );
       };

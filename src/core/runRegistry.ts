@@ -86,6 +86,9 @@ export interface RunMeta {
   threadKey: string;
   /** `owner/name` for repo runs. */
   repo?: string;
+  /** A link back to the message that started the run (`IncomingMessage.sourceUrl`),
+   *  so the index can offer the thread without opening the run (live-view item 20). */
+  sourceUrl?: string;
 }
 
 /** A run's stop status for the index: `stopping` from the request until the run
@@ -134,6 +137,8 @@ export interface RunSummary {
    *  absent until the first such event. The index shows it on the status dot so
    *  a glance answers "what step is it on" without opening the run. */
   activity?: string;
+  /** `RunMeta.sourceUrl`: the thread that started the run, for the index's hover link. */
+  sourceUrl?: string;
   /** Present only once a stop has been requested (#101). */
   stop?: RunStopStatus;
   /** Present (true) once the history writer confirmed the run is in the durable
@@ -249,6 +254,26 @@ interface RunState {
 function oneLine(text: string, max: number): string {
   const line = text.replace(/\s+/g, " ").trim();
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/** The one-line activity an event contributes (live-view item 20): the newest
+ *  narration's first line, a tool call's summary, or the answer's first line —
+ *  for a failed inline run that is the `⚠️ <error>` reply, so the index can
+ *  say WHAT failed. Other events contribute nothing (`undefined`). One rule for
+ *  the live summary (`publish`) and the persisted record (`activityOfEvents`). */
+export function activityOf(event: RunEvent): string | undefined {
+  if (event.type === "assistant" || event.type === "answer") return oneLine(event.text, 120);
+  if (event.type === "tool_call") return oneLine(event.summary, 120);
+  return undefined;
+}
+
+/** The latest activity across a run's events (the record writer's rule). */
+export function activityOfEvents(events: readonly RunEvent[]): string | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const a = activityOf(events[i]);
+    if (a !== undefined) return a;
+  }
+  return undefined;
 }
 
 /** Equal-length constant-time string compare (mirrors channels/http.ts). Guards
@@ -379,9 +404,8 @@ export class RunRegistry {
     run.backlogBytes += bytes;
     // The one-line "what is it doing" the index shows (item 20). Narration wins
     // over the tool call it explains only until the next call arrives.
-    if (event.type === "assistant") run.activity = oneLine(event.text, 120);
-    else if (event.type === "tool_call") run.activity = oneLine(event.summary, 120);
-    else if (event.type === "answer") run.activity = "answering";
+    const activity = activityOf(event);
+    if (activity !== undefined) run.activity = activity;
     while (run.backlog.length > 1 && (run.backlog.length > this.backlogLimit || run.backlogBytes > this.backlogBytes)) {
       run.backlog.shift();
       run.backlogBytes -= run.backlogSizes.shift() ?? 0;
@@ -576,6 +600,7 @@ export class RunRegistry {
       ...(m?.model !== undefined ? { model: m.model } : {}),
       ...(m ? { channelId: m.channelId, userId: m.userId, threadKey: m.threadKey } : {}),
       ...(m?.repo !== undefined ? { repo: m.repo } : {}),
+      ...(m?.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
       finished: run.finished,
       startedAt: run.startedAt,
       ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),

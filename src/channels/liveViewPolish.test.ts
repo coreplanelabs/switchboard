@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { indexRowHtml, renderRunNotFoundPage, renderRunPage, renderRunsIndex, renderScheduledPage, type IndexRow } from "./liveView.js";
 import { formatLocalIso } from "./localIso.js";
+import { formatDateTime } from "./indexFormat.js";
 
 // Feature: features/live-view.md item 18 — UX papercuts: the index shows how long
 // each run has been going / took and reads as agent · scope · request; the runs
@@ -26,11 +27,11 @@ describe("runs index — elapsed, hierarchy, toolbar (item 18)", () => {
 
   it("server-renders the stopwatch: live = since start (from `now`), finished = start to finish (fixed); no clock → empty until the first tick", () => {
     const live = renderRunsIndex([row()], { all: false, retention: null, now: 1_000_000 + 252_000 });
-    expect(live).toContain('<span class="elapsed" title="running for">4m 12s</span>');
+    expect(live).toContain('<span class="elapsed" data-tip="running for">4m 12s</span>');
     const done = indexRowHtml(row({ finished: true, finishedAt: 1_000_000 + 3_780_000, status: "completed" }), 1_000_000 + 9_999_999);
-    expect(done).toContain('<span class="elapsed" title="start to finish">1h 03m</span>');
+    expect(done).toContain('<span class="elapsed" data-tip="start to finish">1h 03m</span>');
     expect(done).toContain('data-finished-at="4780000"');
-    expect(indexRowHtml(row())).toContain('<span class="elapsed" title="running for"></span>');
+    expect(indexRowHtml(row())).toContain('<span class="elapsed" data-tip="running for"></span>');
     expect(indexRowHtml(row())).not.toContain('data-finished-at="');
   });
 
@@ -44,16 +45,18 @@ describe("runs index — elapsed, hierarchy, toolbar (item 18)", () => {
     expect(html).toContain("rowLib.fill(li, rowLib.mergeRow(rowLib.persistedFields(li), run), Date.now(), RETENTION_MS);");
   });
 
-  it("renders the label as agent chip · scope · snippet, with the agent hue allow-listed (a label is data, not a class)", () => {
+  it("renders the label as agent chip · repo tag (name only, linked, full slug on hover) or scope · snippet, with the agent hue allow-listed (a label is data, not a class)", () => {
     const html = renderRunsIndex([row()]);
     expect(html).toContain('<span class="agent agent-review">review</span>');
-    expect(html).toContain('<span class="scope">coreplanelabs/switchboard</span>');
+    expect(html).toContain('<a class="repo" href="https://github.com/coreplanelabs/switchboard" target="_blank" rel="noopener noreferrer" data-tip="coreplanelabs/switchboard">switchboard</a>');
+    expect(html).not.toContain('<span class="scope">coreplanelabs/switchboard</span>');
+    expect(renderRunsIndex([row({ label: "general · #dev · justin" })])).toContain('<span class="scope">#dev · justin</span>');
     expect(html).toContain('<span class="snippet">github.com/coreplanelabs/switchboard/pull/268 — re-review:…</span>');
     expect(html).toContain('<span class="count">17 events</span>');
     const custom = renderRunsIndex([row({ label: 'evil"><b · x · "y"' })]);
     expect(custom).not.toContain("agent-evil");
     expect(custom).toContain('<span class="scope">evil&quot;&gt;&lt;b · x · &quot;y&quot;</span>'); // not agent-shaped → whole label as scope
-    expect(renderRunsIndex([row({ label: "triage · acme/web" })])).toContain('<span class="agent agent-other">triage</span>');
+    expect(renderRunsIndex([row({ label: "triage · acme/web" })])).toContain('<span class="agent agent-other">triage</span><a class="repo" href="https://github.com/acme/web" target="_blank" rel="noopener noreferrer" data-tip="acme/web">web</a>');
   });
 
   it("the dot's hover says the status, when the run was kicked off and, once finished, when it finished (the renderer's zone: the server's on first paint, the viewer's on repaint)", () => {
@@ -104,7 +107,7 @@ describe("runs index — elapsed, hierarchy, toolbar (item 18)", () => {
     expect(html).toContain("Leaving within a day");
     // each leaving row: class, data-expires-at = finishedAt + retention, a "gone <when>" fact with the exact time on hover
     expect(html).toMatch(new RegExp(`<li class="run finished leaving" data-run-id="soon"[^>]*data-expires-at="${soon.finishedAt! + 30 * DAY}"`));
-    expect(html).toContain(`<span class="expires" title="removed at ${formatLocalIso(soon.finishedAt! + 30 * DAY)}">gone ${formatLocalIso(soon.finishedAt! + 30 * DAY).slice(0, 16).replace("T", " ")}</span>`);
+    expect(html).toContain(`<span class="expires" data-tip="removed at ${formatLocalIso(soon.finishedAt! + 30 * DAY)}">gone ${formatDateTime(soon.finishedAt! + 30 * DAY, now)}</span>`);
     const freshRow = html.slice(html.indexOf('data-run-id="fresh"'), html.indexOf("</li>", html.indexOf('data-run-id="fresh"')));
     expect(freshRow).toContain("data-expires-at="); // fresh rows carry the stamp (the page may age them into the window) …
     expect(freshRow).not.toContain('class="expires"'); // … but no fact yet
@@ -121,11 +124,14 @@ describe("runs index — elapsed, hierarchy, toolbar (item 18)", () => {
     expect(html).toContain('if (!k.hasAttribute("data-started-at")) continue;');
   });
 
-  it("pager (item 20): `N shown`, `Older runs →` when the page was full, `← Newest` on a cursor page; nothing on the default view", () => {
+  it("pager (item 20): `Older runs →` when the page was full; `← Newest runs` + what the page holds on a cursor page; nothing on the default view", () => {
     const first = renderRunsIndex([row()], { all: true, retention: null, olderHref: "/runs?all=1&before=5&beforeId=x" });
-    expect(first).toContain('<nav class="pager" aria-label="Completed runs pages"><span></span><span class="shown">1 shown</span><a class="older" href="/runs?all=1&amp;before=5&amp;beforeId=x">Older runs →</a></nav>');
-    const later = renderRunsIndex([row()], { all: true, retention: null, paged: true });
-    expect(later).toContain('<a href="/runs?all=1">← Newest</a><span class="shown">1 shown</span><span></span></nav>');
+    expect(first).toContain('<nav class="pager" aria-label="Completed runs pages"><a class="older" href="/runs?all=1&amp;before=5&amp;beforeId=x">Older runs →</a></nav>');
+    expect(first).not.toContain('class="range"');
+    const at = Date.UTC(2026, 7, 29, 14, 5);
+    const later = renderRunsIndex([row()], { all: true, retention: null, now: at + 1000, olderThan: at });
+    expect(later).toContain(`<a href="/runs?all=1">← Newest runs</a><span class="range">· runs finished before ${formatDateTime(at, at + 1000)}</span></nav>`);
+    expect(formatDateTime(at, at)).toMatch(/^Aug 29, \d{1,2}:\d{2} [AP]M$/); // humans read this, not an ISO stamp
     expect(renderRunsIndex([row()], { all: true, retention: null })).not.toContain('class="pager"');
     expect(renderRunsIndex([row()], { all: false, retention: null, olderHref: "/x" })).not.toContain('class="pager"');
   });
@@ -245,7 +251,7 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
   it("once finished the header says how long the run took (item 20): history pages from the record, live pages from the first→last event stamps; a tool whose summary is just its name shows the chip alone", () => {
     const hist = renderRunPage("run-1", "", [], { status: "completed", eventCount: 3, durationMs: 147_000 });
     expect(hist).toContain('<span id="state">finished · completed · 2m 27s</span>');
-    expect(renderRunPage("run-1", "", [], { status: "stopped_soft", eventCount: 3 })).toContain('<span id="state">finished · stopped (soft)</span>');
+    expect(renderRunPage("run-1", "", [], { status: "stopped_soft", eventCount: 3 })).toContain('<span id="state">finished · stopped early</span>');
     expect(html).toContain('if (e && typeof e.at === "number") { if (firstAt === null || e.at < firstAt) firstAt = e.at; if (lastAt === null || e.at > lastAt) lastAt = e.at; }');
     expect(html).toContain('var took = firstAt !== null && lastAt !== null && lastAt > firstAt ? " \\u00b7 " + formatElapsed(lastAt - firstAt) : "";');
     expect(html).toContain('setConn("grey", (stopMode ? "stopped (" + stopMode + ")" : "finished") + took);');
@@ -256,5 +262,104 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
     expect(html).toContain('<h1>Live run</h1>\n  <span class="conn">');
     expect(html).toContain('setConn("green", "connected")');
     expect(html).not.toContain('setConn("green", "live")');
+  });
+});
+
+// Feature: features/live-view.md item 21 — the index says HOW a run ended and
+// WHERE it came from: an outcome badge (failed / killed / stopped early) with
+// the failure on the dot's hover, a source mark per trigger surface (a link to
+// the Slack thread when there is one, revealed on row hover), the repo as a
+// small linked tag without the org path, and one column grid across live and
+// finished rows (the actions cell is always there).
+describe("runs index — outcome, source, repo tag, alignment (item 21)", () => {
+  const base: IndexRow = {
+    id: "run-1",
+    label: 'coding · acme/web · "fix the build"',
+    channelId: "slack:C1",
+    userId: "slack:U1",
+    threadKey: "slack:C1:1.0",
+    finished: false,
+    startedAt: 1_000_000,
+    eventCount: 4,
+  };
+  const row = (over: Partial<IndexRow> = {}): IndexRow => ({ ...base, ...over });
+  const finished = (status: IndexRow["status"], over: Partial<IndexRow> = {}) => row({ finished: true, finishedAt: 1_000_000 + 63_000, status, ...over });
+
+  it("a finished row that did not complete carries an outcome badge — failed and killed in red, stopped early in amber; a completed row none", () => {
+    expect(indexRowHtml(finished("failed"))).toContain('<span class="outcome red">failed</span>');
+    expect(indexRowHtml(finished("stopped_hard"))).toContain('<span class="outcome red">killed</span>');
+    expect(indexRowHtml(finished("stopped_soft"))).toContain('<span class="outcome amber">stopped early</span>');
+    expect(indexRowHtml(finished("completed"))).not.toContain('class="outcome');
+    // the dot agrees: killed is red, not amber
+    expect(indexRowHtml(finished("stopped_hard"))).toContain('<span class="dot red" role="img" aria-label="killed" data-tip="killed in 1m 03s"></span>');
+    expect(indexRowHtml(finished("stopped_soft"))).toContain('<span class="dot amber" role="img" aria-label="stopped early"');
+  });
+
+  it("the actual failure rides the dot's hover: a non-completed run's last activity (the ⚠️ reply of a failed inline run) under the outcome line; a completed run shows only its outcome + duration", () => {
+    const failed = indexRowHtml(finished("failed", { activity: "⚠️ resident not onboarded: acme/web" }));
+    expect(failed).toContain('data-tip="failed in 1m 03s\n⚠️ resident not onboarded: acme/web"');
+    const killed = indexRowHtml(finished("stopped_hard", { activity: "$ npm test" }));
+    expect(killed).toContain('data-tip="killed in 1m 03s\n$ npm test"');
+    const ok = indexRowHtml(finished("completed", { activity: "done" }));
+    expect(ok).toContain('data-tip="completed in 1m 03s"');
+    expect(ok).not.toContain("\ndone");
+  });
+
+  it("a finished registry summary with no record status yet shows its stop as the outcome word (killed / stopped early); in flight it reads stopping (mode)", () => {
+    expect(indexRowHtml(row({ finished: true, stop: { mode: "hard", state: "stopped" } }))).toContain('<span class="stopbadge stopped">killed</span>');
+    expect(indexRowHtml(row({ finished: true, stop: { mode: "soft", state: "stopped" } }))).toContain('<span class="stopbadge stopped">stopped early</span>');
+    expect(indexRowHtml(row({ stop: { mode: "soft", state: "stopping" } }))).toContain('<span class="stopbadge stopping">stopping (soft)</span>');
+    // once the record's status is known the outcome badge speaks and the stop badge steps aside
+    expect(indexRowHtml(finished("stopped_hard", { stop: { mode: "hard", state: "stopped" } }))).not.toContain('class="stopbadge');
+  });
+
+  it("the repo is a small tag with the NAME only, linked to GitHub, the full slug on hover — from RunView.repo or the label's scope; a chat scope stays a scope", () => {
+    const tag = '<a class="repo" href="https://github.com/acme/web" target="_blank" rel="noopener noreferrer" data-tip="acme/web">web</a>';
+    expect(indexRowHtml(row())).toContain(tag);
+    expect(indexRowHtml(row({ label: 'coding · #dev · justin · "x"', repo: "acme/web" }))).toContain(tag);
+    expect(indexRowHtml(row({ label: 'general · #dev · justin · "hi"' }))).toContain('<span class="scope">#dev · justin</span>');
+    expect(indexRowHtml(row({ label: 'general · #dev · justin · "hi"' }))).not.toContain('class="repo"');
+    // hostile slug shapes never become a link
+    expect(indexRowHtml(row({ label: 'coding · javascript:alert(1)//x · "y"' }))).not.toContain('class="repo"');
+  });
+
+  it("the source mark names the trigger surface (standard metadata: platform prefix + identity) and links to the Slack thread when the run has one", () => {
+    const slack = indexRowHtml(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1" }));
+    expect(slack).toContain(
+      '<a class="source slack" data-tip="via Slack · U1\nopen the thread" aria-label="source: Slack" href="https://acme.slack.com/archives/C1/p1" target="_blank" rel="noopener noreferrer">⁙</a>',
+    );
+    // no thread link → a plain mark, still with the surface on hover; a chat scope adds its channel · user line
+    expect(indexRowHtml(row({ label: 'general · #dev · justin · "hi"' }))).toContain('<span class="source slack" data-tip="via Slack · U1\n#dev · justin" aria-label="source: Slack">⁙</span>');
+    expect(indexRowHtml(row({ channelId: "cli:local", userId: "cli:justin" }))).toContain('<span class="source cli" data-tip="via CLI · justin" aria-label="source: CLI">&gt;_</span>');
+    expect(indexRowHtml(row({ channelId: "http:hooks", userId: "http:svc" }))).toContain('<span class="source http" data-tip="via HTTP ingress · svc" aria-label="source: HTTP ingress">⌁</span>');
+    expect(indexRowHtml(row({ channelId: "mcp:claude", userId: "mcp:justin" }))).toContain('<span class="source mcp" data-tip="via MCP · justin" aria-label="source: MCP">◈</span>');
+    expect(indexRowHtml(row({ channelId: "weird" }))).toContain('<span class="source unknown" data-tip="via unknown · U1" aria-label="source: unknown">○</span>');
+    // a sourceUrl is data: only http(s) becomes a link — a foreign or hand-built record cannot plant a javascript: click target
+    const hostile = indexRowHtml(row({ sourceUrl: "javascript:alert(1)" }));
+    expect(hostile).toContain('<span class="source slack" data-tip="via Slack · U1" aria-label="source: Slack">⁙</span>');
+    expect(hostile).not.toContain("javascript:");
+    // revealed on row hover / focus (GitHub-style quick action), keyboard reachable
+    const page = renderRunsIndex([row()]);
+    expect(page).toContain("#runs li.run:hover .source, #runs li.run:focus-within .source, .source:focus-visible { opacity: 1; }");
+  });
+
+  it("one column grid across live and finished rows: the row is a stretched link under the body; the actions cell is always present at a fixed width; the stop buttons' hints ride the tooltip", () => {
+    const live = indexRowHtml(row({ token: "tok-1" }));
+    expect(live).toContain('<a class="row" href="/runs/run-1?t=tok-1" aria-label="open run coding · acme/web · &quot;fix the build&quot;"></a><div class="body">');
+    expect(live).toContain('<span class="actions"><button class="stop soft" data-mode="soft" data-tip="Soft stop: no new steps, the agent writes up what it has">Stop</button>');
+    expect(live).not.toContain(' title="');
+    expect(indexRowHtml(finished("completed"))).toContain('<span class="facts"><span class="elapsed" data-tip="start to finish">1m 03s</span><span class="count">4 events</span></span><span class="actions"></span></div></li>');
+    const page = renderRunsIndex([row()]);
+    expect(page).toContain(".actions { display: inline-flex; gap: .4rem; flex: 0 0 auto; min-width: 7.6em; white-space: nowrap; justify-content: flex-end; }");
+    expect(page).toContain("#runs .body a, #runs .body button, #runs .body [data-tip] { pointer-events: auto; }");
+    // a click on a tooltip cell (dot / started / elapsed) goes where the row goes
+    expect(page).toContain('var cell = ev.target.closest(".body [data-tip]");');
+    expect(page).toContain('if (link) window.location.assign(link.getAttribute("href"));');
+    // a cursor page only repaints rows it already has — the row is looked up for upserts AND removals
+    expect(renderRunsIndex([row()], { all: true, retention: null, olderThan: 5 })).toContain("var PAGED = true;\n");
+    expect(page).toContain("var PAGED = false;\n");
+    expect(page).toContain('var li = rows[ev.type === "removed" ? ev.id : ev.run && ev.run.id] || null;\n    if (PAGED && !li) return;');
+    // the expiry divider is one dashed line, no doubled border or margin
+    expect(page).toContain("#runs li.divider { display: flex; align-items: baseline; gap: .5rem; padding: .8rem .5rem .35rem; margin: 0; border: 0; border-bottom: 1px dashed #d2992255;");
   });
 });
