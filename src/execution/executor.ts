@@ -23,6 +23,12 @@ export interface Executor {
    *  (read-only agents); "if-clean" — keep the workspace if it has uncommitted
    *  or unpushed work. Best-effort: implementations report, never throw. */
   release?(mode: ReleaseMode): Promise<ReleaseResult>;
+  /** Optional: bring the workspace to `sha` — the PR head that moved while a
+   *  review ran (agent-review.md item 12) — fetching as needed, and answer the
+   *  commit the workspace is now at (which may differ if the ref moved again).
+   *  Absent on executors whose workspace the model manages itself (a sandbox
+   *  clone): the dispatcher then tells the model to check the commit out. */
+  moveTo?(sha: string): Promise<{ sha: string }>;
 }
 
 export interface ExecOptions {

@@ -289,6 +289,18 @@ export class ResidentExecutor implements Executor {
     throw new Error(`resident attach failed for ${this.opts.resource}: ${err}`);
   }
 
+  /** Move the thread's worktree to `sha` (agent-review.md item 12): one more
+   *  `/attach` carrying the new expected head, so the resident fetches its
+   *  mirror (item 51) and recreates the tree at the ref's tip — the same
+   *  mechanism a re-review after a push uses, applied mid-run. Every later
+   *  attach (an eviction recovery) carries the new sha too. Answers the sha the
+   *  worktree is at; throws like attach() on a refusal. */
+  async moveTo(sha: string): Promise<{ sha: string }> {
+    this.opts = { ...this.opts, sha };
+    const binding = await this.attach();
+    return { sha: binding.sha };
+  }
+
   /** POST /detach: return this thread's pool user (and remove its worktree)
    *  now that the run is over, instead of holding both until the inactivity
    *  sweep. `force` (mode "always") skips the resident's clean check; "if-clean"

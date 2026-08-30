@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { repoFromThread, resolveRepoContext } from "./repoContext.js";
+import { prCommitsSince, repoFromThread, resolveRepoContext } from "./repoContext.js";
 
 // Feature: features/resident-repos.md — U7 repo/ref resolution BEFORE the
 // model turn: explicit signals in the current message (owner/name slug,
@@ -593,5 +593,61 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
     await expect(resolveRepoContext(msg("also check acme/other"), h, probe)).resolves.toEqual({
       repo: "acme/api",
     });
+  });
+});
+
+// agent-review.md item 12: the head-moved classifier reads the PR's commits at
+// the reviewed and the current head through GitHub's compare endpoint — one
+// GET per side, never a shell-out. Malformed or failed answers are `undefined`
+// (the classifier then has no verdict), never a partial list.
+describe("prCommitsSince (compare base...sha for the head-moved classifier)", () => {
+  const SHA = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+  const C1 = "1".repeat(40);
+  const C2 = "2".repeat(40);
+
+  it("asks GET /repos/{repo}/compare/{base}...{sha} and answers commits (oldest first, full message) + files", async () => {
+    const { calls } = stubFetch({
+      body: {
+        commits: [
+          { sha: C1, commit: { message: "feat: catalog\n\nbody" } },
+          { sha: C2, commit: { message: "fix: nits" } },
+        ],
+        files: [{ filename: "src/a.ts" }, { filename: "docs/b.md" }],
+      },
+    });
+    await expect(prCommitsSince({ repo: "acme/api", base: "main", sha: SHA })).resolves.toEqual({
+      commits: [
+        { sha: C1, message: "feat: catalog\n\nbody" },
+        { sha: C2, message: "fix: nits" },
+      ],
+      files: ["src/a.ts", "docs/b.md"],
+      filesTruncated: false,
+    });
+    expect(calls[0].url).toBe(`https://api.github.com/repos/acme/api/compare/main...${SHA}`);
+  });
+
+  it("300 files → filesTruncated (GitHub's cap); a base with a slash is URL-encoded", async () => {
+    const { calls } = stubFetch({
+      body: { commits: [], files: Array.from({ length: 300 }, (_, i) => ({ filename: `f${i}` })) },
+    });
+    const r = await prCommitsSince({ repo: "acme/api", base: "release/2", sha: SHA });
+    expect(r?.filesTruncated).toBe(true);
+    expect(r?.files).toHaveLength(300);
+    expect(calls[0].url).toContain("/compare/release%2F2...");
+  });
+
+  it("undefined on a non-2xx, a network failure, a malformed commit, or a malformed base/sha", async () => {
+    stubFetch({ status: 404 });
+    await expect(prCommitsSince({ repo: "acme/api", base: "main", sha: SHA })).resolves.toBeUndefined();
+    stubFetch({ reject: "fetch failed" });
+    await expect(prCommitsSince({ repo: "acme/api", base: "main", sha: SHA })).resolves.toBeUndefined();
+    stubFetch({ body: { commits: [{ sha: "zzz", commit: { message: "x" } }] } });
+    await expect(prCommitsSince({ repo: "acme/api", base: "main", sha: SHA })).resolves.toBeUndefined();
+    stubFetch({ body: { commits: "nope" } });
+    await expect(prCommitsSince({ repo: "acme/api", base: "main", sha: SHA })).resolves.toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(prCommitsSince({ repo: "acme/api", base: "main", sha: "not-a-sha" })).resolves.toBeUndefined();
+    await expect(prCommitsSince({ repo: "acme/api", base: "bad ref", sha: SHA })).resolves.toBeUndefined();
+    expect(fn).not.toHaveBeenCalled();
   });
 });
