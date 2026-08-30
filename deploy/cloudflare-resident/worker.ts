@@ -94,11 +94,12 @@ import {
   type StoredTestOverrides,
 } from "./gc";
 import { checkoutUpdateCommand, planRefresh, type RefreshDisk } from "../../src/execution/residentRefresh.js";
+import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
 
 /** Build marker: answered by GET /healthz (`u`) so a deploy's edge propagation
  *  is provable from outside, and stamped on test overrides so they die with
  *  the build that set them (gc.ts). Bump on every deploy-worthy change. */
-const BUILD_MARKER = "gc51";
+const BUILD_MARKER = "head52";
 
 interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
@@ -1116,6 +1117,15 @@ export class ResidentDO extends Sandbox<Env> {
     return (await this.runOk(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", `refs/heads/${ref}`], "rev-parse")).trim();
   }
 
+  /** Attach's fetch decision (item 51) over the mirror's actual state: the ref
+   *  is missing, or `wantSha` names a commit the ref's tip is not at. The
+   *  decision itself is the pure, tested `mirrorNeedsFetch`. */
+  private async mirrorNeedsFetchFor(ref: string, wantSha: string | null): Promise<boolean> {
+    const refExists = await this.refExists(ref);
+    const mirrorSha = refExists && wantSha !== null ? await this.readMirrorSha(ref) : undefined;
+    return mirrorNeedsFetch({ refExists, mirrorSha, wantSha });
+  }
+
   /** Dependency/build cache key (KTD7): sha256 over the ls-tree lines (mode,
    *  blob oid, name) of the lockfile candidates AS COMMITTED at `sha` in the
    *  bare mirror. Fully determined by the commit — generated/uncommitted
@@ -1928,8 +1938,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  Validated inputs only (the Worker enforces the patterns before this is
    *  ever called). Flow: hydrate → resolve/blind the ref binding → allocate
    *  a pool user → (mirror mutex) verify ref, wipe dirty/stale trees,
-   *  clone → materialize deps (KTD7) → per-attach credential file (KTD12). */
-  async attachThread(threadKey: string, refHint: string | null, readonly = false): Promise<AttachOk | ThreadErr> {
+   *  clone → materialize deps (KTD7) → per-attach credential file (KTD12).
+   *  `wantSha` (item 51): the commit the caller expects the ref to be at — a
+   *  mirror whose ref tip is not that commit is fetched before the clone. */
+  async attachThread(threadKey: string, refHint: string | null, readonly = false, wantSha: string | null = null): Promise<AttachOk | ThreadErr> {
     const t0 = Date.now();
     try {
       await this.ensureHydrated();
@@ -1942,7 +1954,7 @@ export class ResidentDO extends Sandbox<Env> {
       // container under it (and isIdle never parks the alarm mid-attach).
       this.attachesInFlight++;
       try {
-        return await this.attachThreadBody(threadKey, refHint, readonly, resourceId, t0);
+        return await this.attachThreadBody(threadKey, refHint, readonly, wantSha, resourceId, t0);
       } finally {
         this.attachesInFlight--;
       }
@@ -1955,6 +1967,7 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string,
     refHint: string | null,
     readonly: boolean,
+    wantSha: string | null,
     resourceId: string,
     t0: number,
   ): Promise<AttachOk | ThreadErr> {
@@ -2010,14 +2023,20 @@ export class ResidentDO extends Sandbox<Env> {
     } else {
       credentialsError = "github-app-not-configured: GITHUB_APP_* secrets are unset";
     }
-    // The mirror's recovery fetch (a ref pushed since the last refresh cycle)
-    // is the RESIDENT's operation — root, against the mirror, never inside the
-    // tree — so a read-only attach must not lose it: mint a fetch-only token
-    // when the ref is missing and none was minted above. Outside the lock (mint
-    // latency never holds the mutex); the pre-check is a racy read that only
-    // decides whether to mint, the authoritative check runs under the lock.
+    // The mirror's recovery fetch — a ref pushed since the last refresh cycle:
+    // missing from the mirror, or present at a tip that is not the commit the
+    // caller expects (`wantSha`, item 51) — is the RESIDENT's operation: root,
+    // against the mirror, never inside the tree — so a read-only attach must
+    // not lose it: mint a fetch-only token when a fetch is due and none was
+    // minted above. Outside the lock (mint latency never holds the mutex); the
+    // pre-check is a racy read that only decides whether to mint, the
+    // authoritative check runs under the lock.
+    // The expected head applies to the ref it was resolved for; a sticky
+    // binding on another branch drops it (item 51) rather than fetching on
+    // every attach of a thread that can never be at that commit.
+    const want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });
     let fetchToken: string | null = token;
-    if (!fetchToken && githubAppConfigured(this.env) && !(await this.refExists(binding.ref))) {
+    if (!fetchToken && githubAppConfigured(this.env) && (await this.mirrorNeedsFetchFor(binding.ref, want))) {
       fetchToken = await mintRepoScopedToken(this.env, slug).catch(() => null);
     }
 
@@ -2025,7 +2044,7 @@ export class ResidentDO extends Sandbox<Env> {
     try {
       locked = await this.withMirrorLock(async () => {
         await this.ensureGitSetup();
-        if (!(await this.refExists(binding.ref))) {
+        if (await this.mirrorNeedsFetchFor(binding.ref, want)) {
           await this.gitWithCred(fetchToken, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "fetch", GIT_NETWORK_TIMEOUT_MS);
           if (!(await this.refExists(binding.ref))) {
             throw new StepError("unknown-ref", `ref ${JSON.stringify(binding.ref)} does not resolve in the mirror (even after a fetch)`);
@@ -3940,7 +3959,9 @@ async function handleAttach(env: Env, body: Record<string, unknown>): Promise<Re
   }
   const readonly = parseReadonly(body.readonly);
   if ("error" in readonly) return json({ error: readonly.error }, 400);
-  const result = await ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly);
+  const want = parseWantSha(body.sha);
+  if ("error" in want) return json({ error: want.error }, 400);
+  const result = await ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly, want.sha);
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }

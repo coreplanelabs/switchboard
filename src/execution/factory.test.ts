@@ -222,6 +222,19 @@ describe("makeExecutor resident selection", () => {
     expect(bodies[3]).not.toHaveProperty("readonly");
   });
 
+  // features/resident-repos.md item 51: a resolved PR head is passed to /attach
+  // as `sha` so the resident fetches a mirror whose ref tip lags it (the #214
+  // re-review cloned a stale tip); no resolved head → no field (older body).
+  it("a resolved headSha is sent as the attach body's sha; absent headSha sends no sha field", async () => {
+    stubEnvs();
+    const attachOk = { workspace: "/workspace/threads/x/master", ref: "master", sha: "47c4230692cbc5961682532afb822e9c2f1f40b7", user: "worker2", deps: "hardlink" };
+    const { bodies } = stubFetch({ body: { state: "warm", reason: "" } }, { body: attachOk }, { body: { state: "warm", reason: "" } }, { body: attachOk });
+    await makeExecutor(residentOpts(), { ...repoCtx(), agent: AGENTS.review, headSha: "47c4230692cbc5961682532afb822e9c2f1f40b7" });
+    expect(bodies[1]).toMatchObject({ refHint: "master", readonly: true, sha: "47c4230692cbc5961682532afb822e9c2f1f40b7" });
+    await makeExecutor(residentOpts(), repoCtx());
+    expect(bodies[3]).not.toHaveProperty("sha");
+  });
+
   it("not-warm probe → fallback carrying state and reason verbatim; no attach, discriminant NOT set", async () => {
     stubEnvs();
     const { calls } = stubFetch({ body: { state: "restoring", reason: "rehydrating" } });

@@ -434,6 +434,19 @@ describe("executor provisioning by agent resources", () => {
     expect(ctx).toMatchObject({ threadKey: "slack:CX:1.0", agent: { name: "general" } });
   });
 
+  // features/resident-repos.md item 51: the resolved PR head reaches executor
+  // selection (→ the resident's /attach `sha`) so a mirror whose ref tip lags
+  // the push is fetched — the #214 re-review reviewed a stale tip otherwise.
+  it("passes the resolved repo, ref and PR head to executor selection", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "e".repeat(40) });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    const ctx = vi.mocked(makeExecutor).mock.calls[0][1];
+    expect(ctx).toMatchObject({ repo: "acme/api", ref: "patch-1", headSha: "e".repeat(40) });
+  });
+
   it("releases the executor's workspace when the run ends: if-clean for a coding run, always for a read-only agent", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");

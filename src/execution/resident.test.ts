@@ -305,6 +305,17 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[1])).not.toHaveProperty("readonly");
   });
 
+  // features/resident-repos.md item 51: the expected head rides along so the
+  // resident fetches a mirror whose ref tip lags it (the #214 re-review
+  // attached to a stale tip). Sent only when set — older body otherwise.
+  it("sends sha in the attach body when an expected head is known, and omits the field otherwise", async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: ATTACH_OK });
+    await ResidentExecutor.open({ ...OPTS, refHint: "master", sha: "47c4230692cbc5961682532afb822e9c2f1f40b7" });
+    expect(sentBody(calls[0])).toMatchObject({ refHint: "master", sha: "47c4230692cbc5961682532afb822e9c2f1f40b7" });
+    await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(sentBody(calls[1])).not.toHaveProperty("sha");
+  });
+
   it("records the attach result's ref@sha as the thread binding (the positive 'resident' marker's source)", async () => {
     stubFetch({ body: { workspace: "/workspace/threads/t/master", ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", user: "worker2", deps: "hardlink" } });
     const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
