@@ -28,6 +28,11 @@ import { InMemoryRunStore, type RunStore } from "./runStore.js";
 import type { RunRecord } from "./runRecord.js";
 import { createRunHistoryWriter } from "./runHistoryWriter.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
+import { z } from "zod";
+import { CommandRegistry, commandDefiner } from "./commandRegistry.js";
+import { bindCommands } from "./commandRegistry.js";
+import { registerRunsCommands, type RunsCommandDeps } from "./commands/runs.js";
+import { createRunsService } from "./runsService.js";
 
 // Feature: features/routing-and-config.md — end-to-end dispatch: config
 // commands, permission gates, and thread-sticky agent resolution.
@@ -3808,5 +3813,128 @@ describe("run history write path (#157 U4)", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
+  });
+});
+
+// Feature: features/command-registry.md (chat adapter) / features/routing-and-config.md
+// item 10 — the registry chat parse is the LAST text-only fast path (KTD19):
+// after config → repo → friction, before io.history()/recognizeOperation.
+describe("registry chat commands in the fast-path chain (U13, KTD19)", () => {
+  type Deps = RunsCommandDeps & { hits: string[] };
+  const define = commandDefiner<Deps>();
+  const frictionShadow = define({
+    id: "friction.report",
+    input: z.object({}),
+    scope: "friction:read",
+    chatGate: "open",
+    effect: "read",
+    describe: "registered ahead of U9 — must stay unreachable while `friction` is reserved",
+    handler: async ({ deps }) => {
+      deps.hits.push("friction.report");
+      return { fromRegistry: true };
+    },
+  });
+
+  function withCommands(deps: CoreDeps) {
+    const reg = new RunRegistry({ genId: () => "live0001", genToken: () => "tok-secret" });
+    reg.create("coding · acme/api <!channel>", { agent: "coding", channelId: "slack:D0PRIV", userId: "slack:UOWNER", threadKey: "slack:D0PRIV:t" });
+    const registry = new CommandRegistry<Deps>({ audit: () => {} });
+    registerRunsCommands(registry);
+    registry.register(frictionShadow);
+    const cmdDeps: Deps = { runs: createRunsService({ registry: reg, store: null }), hits: [] };
+    const commands = bindCommands(registry, cmdDeps);
+    const invoked: string[] = [];
+    const rawInvoke = commands.invoke;
+    commands.invoke = async (id, raw, caller) => {
+      invoked.push(id);
+      return rawInvoke(id, raw, caller);
+    };
+    deps.commands = commands;
+    return { invoked, hits: cmdDeps.hits };
+  }
+
+  it("`runs list` from an admin replies inline with the compact list — no model turn, no history fetch, no identifying fields", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { invoked } = withCommands(deps);
+    const { io, replies } = fakeIO();
+    const history = vi.fn(io.history);
+    io.history = history;
+    await dispatch(deps, msg("runs list status=active", "slack:UADMIN"), io);
+    expect(invoked).toEqual(["runs.list"]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatch(/^live0001\s+coding\s+active\s+\d+s$/);
+    expect(replies[0]).not.toMatch(/slack:D|UOWNER|<!channel>|tok-secret/);
+    expect(provider.requests).toHaveLength(0);
+    expect(history).not.toHaveBeenCalled();
+  });
+
+  it("`runs list` from a non-admin gets the restricted refusal, never a model turn", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    withCommands(deps);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("runs list status=active", "slack:UX"), io);
+    expect(replies).toEqual(["🚫 `runs list` is restricted. Ask <@slack:UADMIN>."]);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("`runs get id=…` is not a chat command (surfaces.chat false): it falls through to the agent", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { invoked } = withCommands(deps);
+    const { io } = fakeIO();
+    await dispatch(deps, msg("runs get id=live0001", "slack:UADMIN"), io);
+    expect(invoked).toEqual([]);
+    expect(provider.requests).toHaveLength(1);
+  });
+
+  it("`friction report --top 3` stays with the legacy parser while `friction` is reserved: the registry handler is never called", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.frictionLedger = new InMemoryFrictionLedger();
+    const { invoked, hits } = withCommands(deps);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("friction report --top 3", "slack:UX"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).not.toContain("fromRegistry");
+    expect(invoked).toEqual([]);
+    expect(hits).toEqual([]);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("prose that mentions a command mid-sentence is not a command: it goes to the model", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { invoked } = withCommands(deps);
+    const { io } = fakeIO();
+    await dispatch(deps, msg("can you run runs list for me", "slack:UADMIN"), io);
+    expect(invoked).toEqual([]);
+    expect(provider.requests).toHaveLength(1);
+  });
+
+  it("recognizeOperation and the registry never both claim a message: `repo test` → operations, `runs list` → registry", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { invoked } = withCommands(deps);
+    const ops = { calls: [] as string[], async run(op: string) { this.calls.push(op); return { kind: "result", ok: true, summary: "test passed", output: "" } as const; } };
+    deps.operations = ops as unknown as CoreDeps["operations"];
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
+    expect(ops.calls).toEqual(["test"]);
+    expect(invoked).toEqual([]);
+    await dispatch(deps, msg("runs list status=all", "slack:UADMIN"), io);
+    expect(ops.calls).toEqual(["test"]);
+    expect(invoked).toEqual(["runs.list"]);
+    expect(replies).toHaveLength(2);
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("without a bound command set (most deployments before wiring), `runs list` is ordinary prose", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io } = fakeIO();
+    await dispatch(deps, msg("runs list status=all", "slack:UADMIN"), io);
+    expect(provider.requests).toHaveLength(1);
   });
 });

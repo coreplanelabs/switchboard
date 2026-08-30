@@ -10,6 +10,7 @@ import {
   readBody,
   type DispatchFn,
   type IngressConfig,
+  type IngressIdentity,
 } from "./http.js";
 import type { CoreDeps } from "../core/dispatcher.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
@@ -31,7 +32,10 @@ function fakeDispatch(reply = "the answer") {
   return { fn, calls };
 }
 
-const authConfig = (tokens: IngressConfig["tokens"]): IngressConfig => ({ tokens });
+/** Fixture identities carry the parser's default scopes unless a test says otherwise. */
+const authConfig = (tokens: Record<string, Omit<IngressIdentity, "scopes"> & Partial<Pick<IngressIdentity, "scopes">>>): IngressConfig => ({
+  tokens: Object.fromEntries(Object.entries(tokens).map(([t, id]) => [t, { ...id, scopes: id.scopes ?? ["dispatch"] }])),
+});
 const bearer = (token: string): IncomingHttpHeaders => ({ authorization: `Bearer ${token}` });
 
 describe("authenticate (bearer auth, constant-time)", () => {
@@ -42,7 +46,7 @@ describe("authenticate (bearer auth, constant-time)", () => {
   });
 
   it("maps a valid token to its identity", () => {
-    expect(authenticate(bearer("beta"), config)).toEqual({ subject: "bob", channel: "ops" });
+    expect(authenticate(bearer("beta"), config)).toEqual({ subject: "bob", channel: "ops", scopes: ["dispatch"] });
   });
 
   it("returns the right identity regardless of token position (checks all, no early exit)", () => {
@@ -208,6 +212,53 @@ describe("handleIngressRequest (transport gating + dispatch)", () => {
   });
 });
 
+describe("handleIngressRequest — the dispatch scope (fail-closed)", () => {
+  it("a token without the dispatch scope (runs:read only) → 403, dispatch never called", async () => {
+    const d = fakeDispatch();
+    const auth = authConfig({ tok: { subject: "reader", scopes: ["runs:read"] } });
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "start a run" }) },
+      deps,
+      { auth, dispatch: d.fn },
+    );
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "forbidden", code: "unauthorized" });
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it("a default-scoped token (no scopes in the env → ['dispatch']) still dispatches", async () => {
+    const d = fakeDispatch("ok");
+    const auth = parseIngressTokens({ SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ tok: { subject: "alice" } }) });
+    const res = await handleIngressRequest({ method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "hi" }) }, deps, { auth, dispatch: d.fn });
+    expect(res.status).toBe(200);
+    expect(d.calls).toHaveLength(1);
+  });
+
+  it("the node wrapper refuses a dispatch-less token from the headers, without reading the body", async () => {
+    const d = fakeDispatch();
+    const auth = authConfig({ tok: { subject: "reader", scopes: ["runs:read"] } });
+    const handler = createIngressHandler(deps, { auth, dispatch: d.fn });
+    let bodyRead = false;
+    const req = {
+      method: "POST",
+      headers: bearer("tok"),
+      destroy: () => {},
+      async *[Symbol.asyncIterator]() {
+        bodyRead = true;
+        yield Buffer.from(JSON.stringify({ text: "hi" }));
+      },
+    };
+    let status = 0;
+    let out = "";
+    const res = { writeHead: (s: number) => void (status = s), end: (c?: string) => void (out = c ?? "") };
+    handler(req as never, res as never);
+    await vi.waitFor(() => expect(status).toBe(403));
+    expect(JSON.parse(out)).toEqual({ error: "forbidden", code: "unauthorized" });
+    expect(bodyRead).toBe(false);
+    expect(d.calls).toHaveLength(0);
+  });
+});
+
 describe("HttpIO (single-shot ChannelIO)", () => {
   it("collects replies and joins them; status is a no-op; history replays the body's turns", async () => {
     const io = new HttpIO([{ role: "user", text: "prior" }]);
@@ -316,7 +367,7 @@ describe("createIngressHandler (node:http wrapper)", () => {
 });
 
 describe("authorizeRequest (header-only gate)", () => {
-  const opts = (tokens: IngressConfig["tokens"] = { tok: { subject: "alice" } }) => ({ auth: authConfig(tokens) });
+  const opts = (tokens: Parameters<typeof authConfig>[0] = { tok: { subject: "alice" } }) => ({ auth: authConfig(tokens) });
   it("405 on non-POST", () => {
     expect(authorizeRequest("GET", bearer("tok"), opts())).toMatchObject({ status: 405 });
   });
@@ -328,7 +379,7 @@ describe("authorizeRequest (header-only gate)", () => {
     expect(authorizeRequest("POST", bearer("nope"), opts())).toMatchObject({ status: 401 });
   });
   it("returns the identity for a valid token", () => {
-    expect(authorizeRequest("POST", bearer("tok"), opts())).toEqual({ identity: { subject: "alice", channel: undefined } });
+    expect(authorizeRequest("POST", bearer("tok"), opts())).toEqual({ identity: { subject: "alice", channel: undefined, scopes: ["dispatch"] } });
   });
 });
 
@@ -337,7 +388,10 @@ describe("parseIngressTokens (env → config, fail-closed)", () => {
     const cfg = parseIngressTokens({
       SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ s3cr3t: { subject: "alice", channel: "ops" }, t2: { subject: "bob" } }),
     });
-    expect(cfg.tokens).toEqual({ s3cr3t: { subject: "alice", channel: "ops" }, t2: { subject: "bob", channel: undefined } });
+    expect(cfg.tokens).toEqual({
+      s3cr3t: { subject: "alice", channel: "ops", scopes: ["dispatch"] },
+      t2: { subject: "bob", channel: undefined, scopes: ["dispatch"] },
+    });
   });
 
   it("returns an empty (disabled) map when unset, blank, or malformed", () => {
@@ -358,7 +412,37 @@ describe("parseIngressTokens (env → config, fail-closed)", () => {
         "": { subject: "empty-token" },
       }),
     });
-    expect(cfg.tokens).toEqual({ good: { subject: "alice", channel: undefined } });
+    expect(cfg.tokens).toEqual({ good: { subject: "alice", channel: undefined, scopes: ["dispatch"] } });
+  });
+});
+
+// Feature: features/command-registry.md — per-token scopes for the command
+// registry's machine callers. Default `["dispatch"]` keeps every existing token
+// exactly as capable as before: `/ingress` only, no `runs.*`.
+describe("parseIngressTokens (scopes)", () => {
+  it("defaults scopes to ['dispatch'] when absent", () => {
+    const cfg = parseIngressTokens({ SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ t: { subject: "alice" } }) });
+    expect(cfg.tokens.t.scopes).toEqual(["dispatch"]);
+  });
+
+  it("accepts an explicit scopes array of non-empty strings", () => {
+    const cfg = parseIngressTokens({
+      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ t: { subject: "ci", channel: "ops", scopes: ["dispatch", "runs:read"] } }),
+    });
+    expect(cfg.tokens.t).toEqual({ subject: "ci", channel: "ops", scopes: ["dispatch", "runs:read"] });
+  });
+
+  it("skips an entry whose scopes are malformed rather than widening or narrowing it silently", () => {
+    const cfg = parseIngressTokens({
+      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({
+        notArray: { subject: "a", scopes: "runs:read" },
+        nonString: { subject: "b", scopes: ["runs:read", 5] },
+        blank: { subject: "c", scopes: [""] },
+        good: { subject: "d", scopes: [] },
+      }),
+    });
+    expect(Object.keys(cfg.tokens)).toEqual(["good"]);
+    expect(cfg.tokens.good.scopes).toEqual([]);
   });
 });
 

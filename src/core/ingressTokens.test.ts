@@ -7,7 +7,7 @@ import { parseIngressTokenMap, tokenForSubject } from "./ingressTokens.js";
 describe("parseIngressTokenMap", () => {
   it("parses a valid map, keeping `channel` only when present", () => {
     const parsed = parseIngressTokenMap(JSON.stringify({ s3cr3t: { subject: "alice", channel: "ops" }, t2: { subject: "bob" } }));
-    expect(parsed).toEqual({ ok: true, tokens: { s3cr3t: { subject: "alice", channel: "ops" }, t2: { subject: "bob" } } });
+    expect(parsed).toEqual({ ok: true, tokens: { s3cr3t: { subject: "alice", channel: "ops", scopes: ["dispatch"] }, t2: { subject: "bob", scopes: ["dispatch"] } } });
     expect("channel" in parsed.tokens.t2).toBe(false);
   });
 
@@ -33,12 +33,24 @@ describe("parseIngressTokenMap", () => {
         "": { subject: "empty-token" },
       }),
     );
-    expect(parsed).toEqual({ ok: true, tokens: { good: { subject: "alice" } } });
+    expect(parsed).toEqual({ ok: true, tokens: { good: { subject: "alice", scopes: ["dispatch"] } } });
+  });
+
+  it("`scopes`: absent → the dispatch default; explicit array kept (deduped); malformed → the entry is skipped, never widened", () => {
+    const parsed = parseIngressTokenMap(
+      JSON.stringify({
+        plain: { subject: "a" },
+        reader: { subject: "b", scopes: ["dispatch", "runs:read", "runs:read"] },
+        badScopes: { subject: "c", scopes: "runs:write" },
+        emptyScope: { subject: "d", scopes: [""] },
+      }),
+    );
+    expect(parsed).toEqual({ ok: true, tokens: { plain: { subject: "a", scopes: ["dispatch"] }, reader: { subject: "b", scopes: ["dispatch", "runs:read"] } } });
   });
 });
 
 describe("tokenForSubject", () => {
-  const tokens = { a: { subject: "cron", channel: "cron" }, b: { subject: "justin-ingress" } };
+  const tokens = { a: { subject: "cron", channel: "cron", scopes: ["dispatch"] }, b: { subject: "justin-ingress", scopes: ["dispatch"] } };
 
   it("returns the one token mapped to the subject", () => {
     expect(tokenForSubject(tokens, "cron")).toBe("a");
@@ -47,6 +59,6 @@ describe("tokenForSubject", () => {
 
   it("unknown subject → undefined; two tokens for one subject → undefined (ambiguity is refused, not guessed)", () => {
     expect(tokenForSubject(tokens, "nobody")).toBeUndefined();
-    expect(tokenForSubject({ ...tokens, c: { subject: "cron" } }, "cron")).toBeUndefined();
+    expect(tokenForSubject({ ...tokens, c: { subject: "cron", scopes: ["dispatch"] } }, "cron")).toBeUndefined();
   });
 });

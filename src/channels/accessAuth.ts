@@ -41,10 +41,22 @@ export interface AccessConfig {
   aud: string;
 }
 
-/** The identity carried by a verified Access JWT. */
+/**
+ * The identity carried by a verified Access JWT. A browser session has a
+ * non-empty `sub` (+ usually `email`). A Cloudflare Access SERVICE TOKEN — the
+ * machine credential for `/api/*` (KTD13) — carries an EMPTY `sub` and a
+ * non-empty `common_name` (the token's client id), surfaced as `commonName`.
+ * Exactly one of the two forms is ever produced; `isServiceToken` tells them apart.
+ */
 export interface AccessIdentity {
   sub: string;
   email?: string;
+  commonName?: string;
+}
+
+/** True for a service-token identity: empty `sub`, non-empty `commonName`. */
+export function isServiceToken(identity: AccessIdentity): identity is AccessIdentity & { commonName: string } {
+  return identity.sub === "" && typeof identity.commonName === "string" && identity.commonName !== "";
 }
 
 /** A JWK with the `kid` field Access includes (the standard `JsonWebKey` lib
@@ -230,7 +242,16 @@ function claimsValid(claims: Record<string, unknown>, config: AccessConfig, now:
   if (typeof claims.nbf === "number" && claims.nbf > nowSec + SKEW_SECONDS) return false;
   if (typeof claims.iat === "number" && claims.iat > nowSec + SKEW_SECONDS) return false;
 
-  return typeof claims.sub === "string" && claims.sub !== "";
+  return hasSubject(claims);
+}
+
+/** A browser session names a non-empty `sub`; a service token names an empty
+ *  (or absent) `sub` and a non-empty `common_name`. Anything else is not an
+ *  identity we can namespace, so it is refused. */
+function hasSubject(claims: Record<string, unknown>): boolean {
+  if (typeof claims.sub === "string" && claims.sub !== "") return true;
+  const subEmpty = claims.sub === undefined || claims.sub === "";
+  return subEmpty && typeof claims.common_name === "string" && claims.common_name !== "";
 }
 
 /**
@@ -275,8 +296,12 @@ export async function verifyAccessJwt(
 
   if (!claimsValid(payload, config, deps.now())) return null;
 
+  if (typeof payload.sub !== "string" || payload.sub === "") {
+    // claimsValid admitted this only as a service token (empty sub, common_name).
+    return { sub: "", commonName: payload.common_name as string };
+  }
   return {
-    sub: payload.sub as string,
+    sub: payload.sub,
     email: typeof payload.email === "string" ? payload.email : undefined,
   };
 }

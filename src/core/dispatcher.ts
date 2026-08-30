@@ -30,6 +30,7 @@ import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { parseFrictionCommand, runFrictionCommand } from "./frictionCommands.js";
 import { parseMemoryCommand, runMemoryCommand } from "./memoryCommands.js";
+import { handleChatCommand, parseChatCommand, RESERVED_CHAT_GROUPS, type ChatCommands } from "./commandChat.js";
 import { defaultRunRegistry, type RunHandle, type RunRegistry, type RunSnapshot } from "./runRegistry.js";
 import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
 import { coalesceStatus } from "./statusCoalescer.js";
@@ -147,6 +148,15 @@ export interface CoreDeps {
   /** Floor between two status-card edits (default `STATUS_UPDATE_MIN_MS`).
    *  Tests that assert on an individual intermediate frame set 0. */
   statusUpdateMinMs?: number;
+  /**
+   * The command registry bound to its deps (#157 U13, `bindCommands`), for the
+   * chat fast path: `<group> <verb> key=value` messages that name a registered,
+   * chat-exposed command are answered inline through `invoke`, never a model
+   * turn. Absent (most unit tests, or before the surface is wired) → no message
+   * is a registry command. Production binds the `runs.*` registrations over
+   * the `RunsService` (src/index.ts, src/cli.ts).
+   */
+  commands?: ChatCommands;
 }
 
 /** Floor between two edits of a run's status card (see `coalesceStatus`). Below
@@ -255,6 +265,20 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         : await runMemoryCommand(deps.config, msg, deps.memory, memoryCmd, ctx);
       await io.reply(text);
       return;
+    }
+
+    // Registry chat commands (#157 U13, KTD19): the LAST text-only fast path —
+    // after the legacy parsers, which keep their groups (`RESERVED_CHAT_GROUPS`)
+    // until U9 moves them onto the registry, and BEFORE `io.history()`, so a
+    // recognized command costs no history fetch and `recognizeOperation` never
+    // sees it (the two can never both claim one message). Whole-message
+    // `<group> <verb> key=value` only; prose falls through unchanged.
+    if (deps.commands) {
+      const chatCmd = parseChatCommand(msg.text, deps.commands, RESERVED_CHAT_GROUPS);
+      if (chatCmd) {
+        await io.reply(await handleChatCommand({ commands: deps.commands, parsed: chatCmd, msg, config: deps.config }));
+        return;
+      }
     }
 
     const directives = parseDirectives(msg.text);

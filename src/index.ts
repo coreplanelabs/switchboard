@@ -23,13 +23,19 @@ import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js
 import { buildFrictionLedger, WorkerFrictionLedger } from "./core/frictionLedgerWorker.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
 import { selectFrictionLedger } from "./core/frictionLedger.js";
-import { buildRunStore, FileRunStore } from "./core/runStore.js";
+import { buildRunStore, FileRunStore, retentionPolicyOf } from "./core/runStore.js";
+import { createRunsService } from "./core/runsService.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { activeRunCount, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
 import { buildScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
+// --- command registry adapters (#157 U7) ---
+import { CommandRegistry, bindCommands } from "./core/commandRegistry.js";
+import { registerRunsCommands, type RunsCommandDeps } from "./core/commands/runs.js";
+import { createCommandHttpHandler, isCommandPath, isLoopbackAddress, serviceTokenAllowed } from "./channels/commandHttp.js";
+// --- end command registry adapters ---
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
@@ -107,6 +113,17 @@ async function main() {
       .catch((err: unknown) => console.warn(`[run-history] /healthz probe of ${base} failed: ${err instanceof Error ? err.message : String(err)}`));
   }
   const deps: CoreDeps = { config, providers, skills, memory, frictionLedger, runHistoryWriter };
+  // --- command registry (#157 U6/U7): built ONCE; every adapter (HTTP /api/*,
+  // MCP tools, CLI) exposes the same registrations over the same RunsService. ---
+  const commandRegistry = new CommandRegistry<RunsCommandDeps>();
+  registerRunsCommands(commandRegistry);
+  // One RunsService for every surface: the command registry (HTTP/MCP/CLI/chat) and the /runs pages.
+  const runsService = createRunsService({ registry: defaultRunRegistry, store: runStore });
+  const commands = bindCommands(commandRegistry, { runs: runsService });
+  // The same bound registry serves HTTP, MCP, and the chat fast path (U13): one
+  // registration, every surface.
+  deps.commands = commands;
+  // --- end command registry ---
   const app = createSlackApp(deps);
 
   // Work in flight = agent runs + the background memory reflections they spawn
@@ -130,25 +147,18 @@ async function main() {
   if (process.env.PORT) {
     const auth = parseIngressTokens(process.env);
     const ingress = createIngressHandler(deps, { auth });
-    const mcp = createMcpHandler(deps, { auth });
+    const mcp = createMcpHandler(deps, { auth, commands });
     // Scheduled jobs (#244) arrive through /ingress like any other caller: the
     // Worker shim (deploy/cloudflare/worker.ts) POSTs each `run` schedule's
     // command as the `cron` identity — the `cron` entry of the same token map —
     // and the dispatcher makes a normal run of it. Nothing to wire here beyond
-    // the panel below; without a `cron` entry the shim fails closed.
+    // the "Scheduled" panel on the /runs index (created with the live view
+    // below): the schedule registry + each schedule's last firing from the state
+    // Worker's ScheduleDO (`schedules.worker`), or a note that firing history is
+    // unavailable when that is not configured. Without a `cron` entry the shim
+    // fails closed.
     const cronArmed = Object.values(auth.tokens).some((id) => id.subject === "cron");
-    // Live run view (Area 2 / #43): GET /runs (index) + /runs/:id (page) +
-    // /runs/:id/events (SSE). Shares defaultRunRegistry with the dispatcher —
-    // the run created during dispatch() is the run this streams. The per-run
-    // page/stream are token-gated (capability token in the URL, not
-    // SWITCHBOARD_INGRESS_TOKENS); the bare index is instead Access-gated
-    // (Cloudflare Access fronts it) and must only be exposed behind it, since it
-    // renders the per-run capability links. The index also carries the
-    // "Scheduled" panel (#244): the schedule registry + each schedule's last
-    // firing from the state Worker's ScheduleDO (`schedules.worker`), or a note
-    // that firing history is unavailable when that is not configured.
     const scheduleStore = buildScheduleStore(config.config.schedules, process.env, (m) => console.warn(`[schedules] ${m}`));
-    const liveView = createLiveViewHandler(defaultRunRegistry, { scheduled: { schedules: SCHEDULES, store: scheduleStore } });
     const schedulesState = `${SCHEDULES.length} schedule(s) on /runs (${scheduleStore ? `firings from ${config.config.schedules?.worker?.baseUrl}` : "no firing store"}; cron identity ${cronArmed ? "armed" : "NOT in SWITCHBOARD_INGRESS_TOKENS — scheduled runs fail closed"})`;
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin
@@ -199,12 +209,46 @@ async function main() {
     // /runs is DENIED (unless ACCESS_DEV_BYPASS is set for local dev).
     const accessConfig = parseAccessConfig(process.env);
     const accessDevBypass = parseAccessDevBypass(process.env);
+    // ── U8 (#157): live view on RunsService ──────────────────────────────────
+    // Live run view (Area 2 / #43) + run history (#157): GET /runs (index; ?all=1
+    // adds finished/persisted runs) + /runs/:id (page) + /runs/:id/events (SSE).
+    // Reads go through ONE RunsService over the shared defaultRunRegistry (the
+    // run created during dispatch() is the run this streams) and the run store
+    // (null → history off, live-only). Live routes stay token-gated (capability
+    // token in the URL); finished/persisted runs are served tokenless to the
+    // Access-authenticated viewer, so — like the index — they must only be
+    // exposed behind Access. KTD13: under the dev bypass, history reads are
+    // served only to a loopback client with no remote PUBLIC_BASE_URL.
+    const publicBaseHost = process.env.PUBLIC_BASE_URL ? new URL(process.env.PUBLIC_BASE_URL).hostname : "localhost";
+    const liveView = createLiveViewHandler({
+      service: runsService,
+      index: defaultRunRegistry,
+      retention: runStore && runHistoryCfg ? { retentionDays: retentionPolicyOf(runHistoryCfg).retentionDays } : null,
+      devBypass: {
+        active: () => accessDevBypass,
+        isLoopback: (req) => isLoopbackAddress(req.socket?.remoteAddress) && (publicBaseHost === "localhost" || publicBaseHost === "127.0.0.1"),
+      },
+      scheduled: { schedules: SCHEDULES, store: scheduleStore },
+    });
+    // ── end U8 ───────────────────────────────────────────────────────────────
     const accessVerify: VerifyDeps = { fetchJwks: httpJwksFetcher, now: () => Date.now(), cache: new JwksCache() };
     const accessState = accessConfig
       ? `Access SSO configured (${accessConfig.teamDomain})`
       : accessDevBypass
         ? "Access DEV BYPASS (/runs open — LOCAL DEV ONLY)"
         : "Access FAIL-CLOSED (/runs denied — no ACCESS_* configured)";
+    // --- command registry over HTTP (#157 U7): /api/<group>.<verb>, behind the
+    // SAME Access gate as /runs* (gated on `isCommandPath`, KTD13). The handler
+    // claims all of /api/* and answers its own 404. Under the dev bypass it
+    // serves loopback callers on a localhost deployment only. ---
+    const commandHttp = createCommandHttpHandler(commands, {
+      operatorIdentities: () => config.operatorIdentities(),
+      serviceTokenScopes: (cn) => config.serviceTokenScopes(cn),
+      devBypassActive: accessConfig === null && accessDevBypass,
+      publicBaseUrl: process.env.PUBLIC_BASE_URL,
+    });
+    const commandHttpState = `GET|POST /api/<group>.<verb> (${commandRegistry.list().length} commands)`;
+    // --- end command registry over HTTP ---
 
     createServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0];
@@ -223,7 +267,7 @@ async function main() {
       // /runs/:id, and /runs/:id/events, and still applies its own per-run
       // capability-token check — defense in depth). Non-/runs paths below are
       // unchanged and not gated.
-      if (path === "/runs" || path.startsWith("/runs/") || path === "/residents" || path.startsWith("/residents/") || path === "/costs" || path === "/costs.json" || path.startsWith("/costs/")) {
+      if (isCommandPath(path) || path === "/runs" || path.startsWith("/runs/") || path === "/residents" || path.startsWith("/residents/") || path === "/costs" || path === "/costs.json" || path.startsWith("/costs/")) {
         requireAccessForRuns(req.headers, { config: accessConfig, verify: accessVerify, devBypass: accessDevBypass })
           .then((gate) => {
             if (!gate.ok) {
@@ -231,7 +275,18 @@ async function main() {
               res.end(gate.body);
               return;
             }
-            if (liveView(req, res)) return;
+            // --- /api/* (#157 U7): the command handler owns everything under it. ---
+            // A service token is a command-surface credential only (`serviceTokenAllowed`):
+            // it can never load /runs* (live capability tokens), /residents* or /costs*.
+            if (!serviceTokenAllowed(path, gate.identity)) {
+              console.warn(`[access] a service token requested ${path}: service tokens are served /api/* only (403)`);
+              res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+              res.end("forbidden");
+              return;
+            }
+            if (isCommandPath(path)) return commandHttp(req, res, gate.identity);
+            // --- end /api/* ---
+            if (liveView(req, res, { identity: `access:${gate.identity.sub}` })) return;
             if (residentsView(req, res)) return;
             if (costsView(req, res)) return;
             res.writeHead(200, { "content-type": "text/plain" });
@@ -268,7 +323,7 @@ async function main() {
       res.end("ok");
     }).listen(Number(process.env.PORT), () =>
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${commandHttpState}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       ),
     );

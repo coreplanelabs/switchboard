@@ -7,6 +7,7 @@ import type { MemoryConfig } from "./core/memory/types.js";
 import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
+import type { ChatGate } from "./core/commandRegistry.js";
 import { AGENTS } from "./agents/registry.js";
 
 // Configuration is layered. Lowest to highest precedence:
@@ -65,6 +66,20 @@ export interface Permissions {
    * credentials. `repo list` is never gated.
    */
   repoManagement?: string[];
+  /**
+   * Cloudflare Access identities (`access:<sub>`) allowed `*:write` commands
+   * over HTTP (`runs.stop`, …). Browser Access sessions hold every `*:read`
+   * scope implicitly; writes require being listed here (KTD10). Chat
+   * operators are `admins`, not this list.
+   */
+  operators?: string[];
+  /**
+   * Cloudflare Access service tokens (the machine credential for `/api/*`),
+   * keyed by the token's `common_name` claim, each mapped to the exact command
+   * scopes it holds (`runs:read`, `runs:write`, …). No implicit scopes: an
+   * unlisted service token holds nothing (KTD10/KTD13).
+   */
+  serviceTokens?: Record<string, string[]>;
 }
 
 export interface AppConfig {
@@ -286,6 +301,42 @@ export class ConfigStore {
   canManageRepos(userId: string): boolean {
     if (this.isAdmin(userId)) return true;
     return this.config.permissions?.repoManagement?.includes(userId) ?? false;
+  }
+
+  /**
+   * The `operator` chat gate of the command registry (KTD10): FAIL-CLOSED —
+   * true iff `permissions.admins` lists the user; no admins, no operators.
+   * Public on purpose (unlike `isAdmin`) so the registry can name its gate.
+   */
+  isOperator(userId: string): boolean {
+    return this.isAdmin(userId);
+  }
+
+  /** Resolves a command's `ChatGate` for one chat caller: `open` → everyone,
+   *  `operator` → `isOperator`, `repoManager` → `canManageRepos`. */
+  chatGateFor(userId: string): (gate: ChatGate) => boolean {
+    return (gate) => {
+      switch (gate) {
+        case "open":
+          return true;
+        case "operator":
+          return this.isOperator(userId);
+        case "repoManager":
+          return this.canManageRepos(userId);
+      }
+    };
+  }
+
+  /** `permissions.operators`: Access identities granted `*:write` over HTTP. */
+  operatorIdentities(): string[] {
+    return [...(this.config.permissions?.operators ?? [])];
+  }
+
+  /** `permissions.serviceTokens[<common_name>]`: the exact scopes an Access
+   *  service token holds; `[]` (nothing) when it is not listed. */
+  serviceTokenScopes(commonName: string): string[] {
+    const scopes = this.config.permissions?.serviceTokens?.[commonName];
+    return Array.isArray(scopes) ? scopes.filter((s): s is string => typeof s === "string") : [];
   }
 
   /** Who to ask when denied — for actionable error messages. */

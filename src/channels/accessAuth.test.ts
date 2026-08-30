@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync, sign as rsaSign, createHmac, type KeyObject } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
 import {
+  isServiceToken,
   JwksCache,
   parseAccessConfig,
   parseAccessDevBypass,
@@ -413,5 +414,43 @@ describe("requireAccessForRuns", () => {
   it("config null + dev bypass → ok with the dev-bypass identity", async () => {
     const res = await requireAccessForRuns({}, { config: null, verify: deps(), devBypass: true });
     expect(res).toEqual({ ok: true, identity: { sub: "dev-bypass" } });
+  });
+});
+
+// --- Service tokens (KTD13) -------------------------------------------------
+
+describe("verifyAccessJwt — Cloudflare Access service tokens", () => {
+  it("accepts an empty sub + non-empty common_name as a service-token identity", async () => {
+    const token = mint(privateKey, rs256Header(), claims({ sub: "", email: undefined, common_name: "reader-bot.access" }));
+    const identity = await verifyAccessJwt(token, config, deps());
+    expect(identity).toEqual({ sub: "", commonName: "reader-bot.access" });
+    expect(identity && isServiceToken(identity)).toBe(true);
+  });
+
+  it("accepts an absent sub with a common_name; rejects empty sub without one, and an empty or non-string common_name", async () => {
+    const absent = claims({ common_name: "svc-1" }) as Record<string, unknown>;
+    delete absent.sub;
+    expect(await verifyAccessJwt(mint(privateKey, rs256Header(), absent), config, deps())).toEqual({ sub: "", commonName: "svc-1" });
+    expect(await verifyAccessJwt(mint(privateKey, rs256Header(), claims({ sub: "" })), config, deps())).toBeNull();
+    expect(await verifyAccessJwt(mint(privateKey, rs256Header(), claims({ sub: "", common_name: "" })), config, deps())).toBeNull();
+    expect(await verifyAccessJwt(mint(privateKey, rs256Header(), claims({ sub: "", common_name: 42 })), config, deps())).toBeNull();
+  });
+
+  it("a browser token stays a browser identity even when it also carries common_name", async () => {
+    const token = mint(privateKey, rs256Header(), claims({ common_name: "ignored" }));
+    const identity = await verifyAccessJwt(token, config, deps());
+    expect(identity).toEqual({ sub: "user-1", email: "user@example.com" });
+    expect(identity && isServiceToken(identity)).toBe(false);
+  });
+
+  it("service tokens go through the same claim checks (expired → null)", async () => {
+    const token = mint(privateKey, rs256Header(), claims({ sub: "", common_name: "svc-1", exp: NOW_SEC - 1 }));
+    expect(await verifyAccessJwt(token, config, deps())).toBeNull();
+  });
+
+  it("the gate admits a service token in Cf-Access-Jwt-Assertion", async () => {
+    const token = mint(privateKey, rs256Header(), claims({ sub: "", common_name: "svc-1" }));
+    const res = await requireAccessForRuns({ "cf-access-jwt-assertion": token }, { config, verify: deps(), devBypass: false });
+    expect(res).toEqual({ ok: true, identity: { sub: "", commonName: "svc-1" } });
   });
 });

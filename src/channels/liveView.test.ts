@@ -3,20 +3,33 @@ import type { IncomingHttpHeaders } from "node:http";
 import {
   createLiveViewHandler,
   escapeHtml,
+  indexRowHtml,
+  indexRowRenderer,
+  INDEX_ROW_SCRIPT,
   parseLastEventId,
   parseRunRoute,
   renderRunPage,
   RUN_TIMELINE_SCRIPT,
   renderRunsIndex,
+  retentionSentence,
   seedEventsJson,
   serveEvents,
   serveIndexEvents,
+  staticDocument,
+  withOmittedMarkers,
+  type IndexRow,
+  type LiveViewDeps,
   type SseSink,
 } from "./liveView.js";
 import { renderMarkdownInto } from "./markdownLite.js";
 import { createRunTimeline } from "./runTimeline.js";
+import { isLoopbackAddress } from "./commandHttp.js";
 import { RunRegistry } from "../core/runRegistry.js";
+import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
+import type { RunRecord } from "../core/runRecord.js";
+import { InMemoryRunStore } from "../core/runStore.js";
+import { createRunsService } from "../core/runsService.js";
 import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
 import { FIXTURE_SCHEDULES } from "./scheduledPanel.test.js";
 import { InMemoryScheduleStore, type ScheduleStore } from "../core/scheduleStore.js";
@@ -38,6 +51,12 @@ const PRELUDE = "retry: 3000\n\n";
 function fixedRegistry() {
   let n = 0;
   return new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
+}
+
+/** The handler over a registry alone — run history off (store: null), the
+ *  pre-#157 live-only shape every token-path test below exercises. */
+function liveOnlyHandler(registry: RunRegistry) {
+  return createLiveViewHandler({ service: createRunsService({ registry, store: null }), index: registry, retention: null });
 }
 
 /** An SseSink that records everything written, for socket-free assertions. */
@@ -675,9 +694,13 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
 // before the page is written; a missing/failing store is reported as such.
 describe("scheduled panel on the index (#244)", () => {
   const NOW = Date.UTC(2026, 7, 29, 12, 0);
-  function pageFor(options: Parameters<typeof createLiveViewHandler>[1]) {
+  /** A live-only handler (no run store) over `registry`, with the panel options under test. */
+  function panelHandler(registry: RunRegistry, options: Pick<LiveViewDeps, "scheduled">) {
+    return createLiveViewHandler({ service: createRunsService({ registry, store: null }), index: registry, retention: null, now: () => NOW, ...options });
+  }
+  function pageFor(options: Pick<LiveViewDeps, "scheduled">) {
     const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
-    const handler = createLiveViewHandler(registry, { now: () => NOW, ...options });
+    const handler = panelHandler(registry, options);
     let body = "";
     let status = 0;
     const res = {
@@ -703,7 +726,7 @@ describe("scheduled panel on the index (#244)", () => {
     registry.create("friction · #cron · cron");
     const store = new InMemoryScheduleStore();
     await store.record({ schedule: "self-improvement", firedAt: NOW - 60_000, outcome: "completed", runId: "run-live", detail: "🔍 8 runs analyzed" });
-    const handler = createLiveViewHandler(registry, { now: () => NOW, scheduled: { schedules: FIXTURE_SCHEDULES, store } });
+    const handler = panelHandler(registry, { scheduled: { schedules: FIXTURE_SCHEDULES, store } });
     let body = "";
     const res = { writeHead: () => {}, write: () => {}, end: (c?: string) => void (body += c ?? "") };
     expect(handler({ method: "GET", url: "/runs", headers: {}, on: () => {} } as never, res as never)).toBe(true);
@@ -783,7 +806,7 @@ describe("createLiveViewHandler (node:http)", () => {
   }
 
   it("returns false for a non-run path (server falls through to its other routes)", () => {
-    const handler = createLiveViewHandler(fixedRegistry());
+    const handler = liveOnlyHandler(fixedRegistry());
     const t = fakeReqRes("GET", "/ingress");
     expect(handler(t.req, t.res)).toBe(false);
     expect(t.status).toBe(0); // nothing written
@@ -792,7 +815,7 @@ describe("createLiveViewHandler (node:http)", () => {
   it("serves the HTML page for a valid id+token (CSP set, no-store)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", `/runs/${id}?t=${token}`);
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(200);
@@ -804,24 +827,24 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.body()).toContain(`/runs/${id}/events?t=${token}`);
   });
 
-  it("404s the page for a wrong/missing token (never reveals the run exists)", () => {
+  it("404s the page for a wrong/missing token (never reveals the run exists)", async () => {
     const reg = fixedRegistry();
     const { id } = reg.create();
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const wrong = fakeReqRes("GET", `/runs/${id}?t=nope`);
     handler(wrong.req, wrong.res);
-    expect(wrong.status).toBe(404);
+    await vi.waitFor(() => expect(wrong.status).toBe(404)); // the tokenless lookup is async (history path, #157 U8)
     expect(wrong.body()).not.toContain("EventSource"); // no page leaked
 
     const missing = fakeReqRes("GET", `/runs/${id}`);
     handler(missing.req, missing.res);
-    expect(missing.status).toBe(404);
+    await vi.waitFor(() => expect(missing.status).toBe(404));
   });
 
   it("streams SSE for a valid id+token and forwards events", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", `/runs/${id}/events?t=${token}`);
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(200);
@@ -834,20 +857,20 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.body()).not.toContain("after");
   });
 
-  it("404s the SSE stream for a wrong token", () => {
+  it("404s the SSE stream for a wrong token", async () => {
     const reg = fixedRegistry();
     const { id } = reg.create();
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", `/runs/${id}/events?t=nope`);
     handler(t.req, t.res);
-    expect(t.status).toBe(404);
+    await vi.waitFor(() => expect(t.status).toBe(404));
     expect(t.headers["content-type"]).not.toContain("event-stream");
   });
 
   it("405s a non-GET method on a run route", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("POST", `/runs/${id}?t=${token}`);
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(405);
@@ -860,7 +883,7 @@ describe("createLiveViewHandler (node:http)", () => {
   it("serves the HTML index at bare /runs, listing active runs with their token links (CSP + no-store)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create("coding · owner/repo");
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs");
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(200);
@@ -876,7 +899,7 @@ describe("createLiveViewHandler (node:http)", () => {
   it("also serves the index at /runs/ (trailing slash)", () => {
     const reg = fixedRegistry();
     reg.create();
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs/");
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(200);
@@ -885,7 +908,7 @@ describe("createLiveViewHandler (node:http)", () => {
 
   it("renders the empty state when there are no active runs", () => {
     const reg = fixedRegistry();
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs");
     handler(t.req, t.res);
     expect(t.status).toBe(200);
@@ -894,7 +917,7 @@ describe("createLiveViewHandler (node:http)", () => {
 
   it("405s a non-GET method on the index", () => {
     const reg = fixedRegistry();
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("POST", "/runs");
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(405);
@@ -903,7 +926,7 @@ describe("createLiveViewHandler (node:http)", () => {
   it("HTML-escapes a malicious run label in the index instead of injecting markup", () => {
     const reg = new RunRegistry({ genId: () => "run-1", genToken: () => "tok-1" });
     reg.create("<script>alert(1)</script>");
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs");
     handler(t.req, t.res);
     expect(t.body()).not.toContain("<script>alert(1)</script>");
@@ -913,7 +936,7 @@ describe("createLiveViewHandler (node:http)", () => {
   it("routes /runs (no flag) to HTML and /runs?stream=1 to the index SSE feed", () => {
     const reg = fixedRegistry();
     reg.create("coding · owner/repo");
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
 
     const htmlReq = fakeReqRes("GET", "/runs");
     handler(htmlReq.req, htmlReq.res);
@@ -927,7 +950,7 @@ describe("createLiveViewHandler (node:http)", () => {
   it("streams the index SSE feed at /runs?stream=1: replays active runs, forwards new ones, unsubscribes on close", () => {
     const reg = fixedRegistry();
     reg.create("coding · owner/repo"); // active before connect → replayed
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs?stream=1");
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(200);
@@ -944,7 +967,7 @@ describe("createLiveViewHandler (node:http)", () => {
 
   it("405s a non-GET method on the index SSE stream", () => {
     const reg = fixedRegistry();
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("POST", "/runs?stream=1");
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(405);
@@ -958,7 +981,7 @@ describe("createLiveViewHandler (node:http)", () => {
     vi.useFakeTimers();
     try {
       const reg = fixedRegistry();
-      const handler = createLiveViewHandler(reg);
+      const handler = liveOnlyHandler(reg);
       // The index feed with no runs stays open and idle — the exact case the
       // heartbeat exists for (only the prelude, then nothing but heartbeats).
       const t = fakeReqRes("GET", "/runs?stream=1");
@@ -1016,15 +1039,15 @@ describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => 
     expect(parseRunRoute("/runs/abc/friction/extra")).toBeNull();
   });
 
-  it("404s for a wrong or missing token, revealing nothing", () => {
+  it("404s for a wrong or missing token, revealing nothing", async () => {
     const reg = fixedRegistry();
     const { id } = reg.create();
     reg.publish(id, call("$ npm install"));
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     for (const url of [`/runs/${id}/friction?t=nope`, `/runs/${id}/friction`, `/runs/unknown/friction?t=x`]) {
       const t = fakeReqRes("GET", url);
       expect(handler(t.req, t.res)).toBe(true);
-      expect(t.status).toBe(404);
+      await vi.waitFor(() => expect(t.status).toBe(404));
       expect(t.body()).not.toContain("npm install");
     }
   });
@@ -1037,7 +1060,7 @@ describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => 
     reg.publish(id, { type: "tool_call", tool: "bash", summary: "$ npm test", at: 62_000 });
     reg.publish(id, { type: "tool_result", tool: "bash", ok: false, summary: "2 failing", at: 63_000 });
     reg.finish(id);
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", `/runs/${id}/friction?t=${token}`);
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(200);
@@ -1059,7 +1082,7 @@ describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => 
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     reg.publish(id, call("$ ls"));
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", `/runs/${id}/friction?t=${token}`);
     handler(t.req, t.res);
     expect(t.status).toBe(200);
@@ -1113,7 +1136,7 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create();
     const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=soft`);
-    expect(createLiveViewHandler(reg)(t.req, t.res)).toBe(true);
+    expect(liveOnlyHandler(reg)(t.req, t.res)).toBe(true);
     expect(t.status).toBe(200);
     expect(t.headers["content-type"]).toContain("application/json");
     expect(t.headers["cache-control"]).toBe("no-store");
@@ -1126,7 +1149,7 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create();
     const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=hard`);
-    createLiveViewHandler(reg)(t.req, t.res);
+    liveOnlyHandler(reg)(t.req, t.res);
     expect(t.status).toBe(200);
     expect(JSON.parse(t.body()).mode).toBe("hard");
     expect(control.hardSignal.aborted).toBe(true);
@@ -1135,7 +1158,7 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
   it("400s a missing or unknown mode without touching the run", () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create();
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     for (const q of ["", "&mode=", "&mode=nuke"]) {
       const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}${q}`);
       handler(t.req, t.res);
@@ -1144,14 +1167,14 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
     expect(control.requested).toBeUndefined();
   });
 
-  it("404s a wrong/missing token or unknown run (existence never revealed), control untouched", () => {
+  it("404s a wrong/missing token or unknown run (existence never revealed), control untouched", async () => {
     const reg = fixedRegistry();
     const { id, control } = reg.create();
-    const handler = createLiveViewHandler(reg);
+    const handler = liveOnlyHandler(reg);
     for (const url of [`/runs/${id}/stop?t=wrong&mode=hard`, `/runs/${id}/stop?mode=hard`, `/runs/nope/stop?t=tok-1&mode=hard`]) {
       const t = fakeReqRes("POST", url);
       handler(t.req, t.res);
-      expect(t.status).toBe(404);
+      await vi.waitFor(() => expect(t.status).toBe(404));
     }
     expect(control.requested).toBeUndefined();
     expect(control.hardSignal.aborted).toBe(false);
@@ -1162,7 +1185,7 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
     const { id, token } = reg.create();
     reg.finish(id);
     const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=soft`);
-    createLiveViewHandler(reg)(t.req, t.res);
+    liveOnlyHandler(reg)(t.req, t.res);
     expect(t.status).toBe(409);
   });
 
@@ -1170,7 +1193,7 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create();
     const t = fakeReqRes("GET", `/runs/${id}/stop?t=${token}&mode=hard`);
-    createLiveViewHandler(reg)(t.req, t.res);
+    liveOnlyHandler(reg)(t.req, t.res);
     expect(t.status).toBe(405);
     expect(t.headers.allow).toBe("POST");
     expect(control.requested).toBeUndefined();
@@ -1180,7 +1203,7 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     const t = fakeReqRes("POST", `/runs/${id}/events?t=${token}`);
-    createLiveViewHandler(reg)(t.req, t.res);
+    liveOnlyHandler(reg)(t.req, t.res);
     expect(t.status).toBe(405);
     expect(t.headers.allow).toBe("GET");
   });
@@ -1401,5 +1424,507 @@ describe("serveEvents — live replay budget (#157 U11)", () => {
     ]);
     expect(html).toContain('change.kind === "note" || change.kind === "replay_note"');
     expect(html).toContain('(change.kind === "replay_note" ? "\\u2026 " : "\\u23f1 ") + change.text');
+  });
+});
+
+// Feature: features/live-view.md / run-history.md — the live view on
+// `RunsService` (#157 U8): finished/persisted runs render tokenless in history
+// mode through the one `renderRunPage`; the index shows active runs by default
+// (never touching the store) and everything with `?all=1`; live rows keep their
+// capability hrefs, finished rows never carry a token.
+describe("live view on RunsService: history pages + index toggle (#157 U8)", () => {
+  const NOW = 1_700_000_000_000;
+  const text = (type: "input" | "context" | "assistant" | "answer", t: string, seq: number): RunEvent => ({ type, text: t, seq }) as RunEvent;
+
+  function record(id: string, over: Partial<RunRecord> = {}): RunRecord {
+    const events: RunEvent[] = over.events ?? [
+      text("input", "please run it", 1),
+      text("context", "earlier turn", 2),
+      { ...call("$ npm test"), seq: 3 },
+      { ...result(true, "all green"), seq: 4 },
+      text("answer", "done", 5),
+    ];
+    return {
+      id,
+      label: `coding · acme/${id}`,
+      agent: "coding",
+      model: "anthropic/claude",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: `slack:C1:${id}`,
+      startedAt: NOW - 70_000,
+      finishedAt: NOW - 60_000,
+      status: "completed",
+      eventCount: events.length,
+      storedEventCount: events.length,
+      truncated: false,
+      events,
+      diagnosis: analyzeRunFriction(events),
+      ...over,
+    };
+  }
+
+  function fakeReqRes(method: string, url: string, remoteAddress = "203.0.113.9") {
+    const listeners: Record<string, Array<() => void>> = {};
+    const req = { method, url, headers: {}, socket: { remoteAddress }, on: (ev: string, cb: () => void) => void (listeners[ev] ??= []).push(cb) };
+    let status = 0;
+    let outHeaders: Record<string, string> = {};
+    const chunks: string[] = [];
+    let ended = false;
+    const res = {
+      writeHead: (s: number, h?: Record<string, string>) => {
+        status = s;
+        outHeaders = h ?? {};
+      },
+      write: (c: string) => void chunks.push(c),
+      end: (c?: string) => {
+        if (c) chunks.push(c);
+        ended = true;
+      },
+    };
+    return {
+      req: req as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[0],
+      res: res as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[1],
+      get status() {
+        return status;
+      },
+      get headers() {
+        return outHeaders;
+      },
+      body: () => chunks.join(""),
+      get ended() {
+        return ended;
+      },
+    };
+  }
+
+  /** Registry + store + service + handler, with every knob injectable. */
+  function harness(
+    opts: { store?: InMemoryRunStore | null; retention?: { retentionDays: number } | null; devBypass?: LiveViewDeps["devBypass"]; audit?: LiveViewDeps["audit"] } = {},
+  ) {
+    let clock = NOW;
+    const now = () => clock;
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}`, now });
+    const store = opts.store === undefined ? new InMemoryRunStore({ now }) : opts.store;
+    const service = createRunsService({ registry, store });
+    const handler = createLiveViewHandler({
+      service,
+      index: registry,
+      retention: opts.retention === undefined ? { retentionDays: 30 } : opts.retention,
+      ...(opts.devBypass ? { devBypass: opts.devBypass } : {}),
+      ...(opts.audit ? { audit: opts.audit } : {}),
+    });
+    return { registry, store, service, handler, tick: (ms: number) => (clock += ms) };
+  }
+
+  const done = (t: { ended: boolean }) => vi.waitFor(() => expect(t.ended).toBe(true));
+
+  describe("persisted run page (history mode)", () => {
+    it("200s tokenless with request/context/reply/tool rows seeded, no EventSource, stop controls hidden, a grey finished header", async () => {
+      const h = harness();
+      await h.store!.put(record("r1"));
+      const t = fakeReqRes("GET", "/runs/r1");
+      expect(h.handler(t.req, t.res)).toBe(true);
+      await done(t);
+      expect(t.status).toBe(200);
+      expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+      const html = t.body();
+      expect(html).toContain(`var seed = ${seedEventsJson(record("r1").events)};`);
+      expect(html).toContain("var live = false;");
+      expect(html).toMatch(/if \(live\) \{\s*var es = new EventSource\(url\);/); // the stream only opens on a live page
+      expect(html).toContain('<span class="actions" id="actions" hidden>');
+      expect(html).toContain('<span class="dot grey" id="statedot"></span><span id="state">finished · completed</span>');
+      expect(html).not.toContain("?t=");
+      expect(html).not.toContain("tok-");
+    });
+
+    it("a live page still opens the EventSource and shows the stop controls (unchanged live path)", () => {
+      const html = renderRunPage("run-1", "tok-1");
+      expect(html).toContain("var live = true;");
+      expect(html).toContain('var url = "/runs/run-1/events?t=tok-1";');
+      expect(html).toContain('<span class="actions" id="actions">');
+      expect(html).toContain('<span class="dot amber" id="statedot"></span><span id="state">connecting…</span>');
+    });
+
+    it("labels a stopped or failed run's header from its status", async () => {
+      const h = harness();
+      await h.store!.put(record("r1", { status: "stopped_soft" }));
+      await h.store!.put(record("r2", { status: "failed" }));
+      const a = fakeReqRes("GET", "/runs/r1");
+      h.handler(a.req, a.res);
+      await done(a);
+      expect(a.body()).toContain(">finished · stopped (soft)</span>");
+      const b = fakeReqRes("GET", "/runs/r2");
+      h.handler(b.req, b.res);
+      await done(b);
+      expect(b.body()).toContain(">finished · failed</span>");
+    });
+
+    it("a finished run still in the registry is served tokenless in history mode (the card link outlives the TTL either way)", async () => {
+      const h = harness();
+      const run = h.registry.create();
+      h.registry.publish(run.id, text("input", "hi", 0));
+      h.registry.finish(run.id);
+      const t = fakeReqRes("GET", `/runs/${run.id}`);
+      h.handler(t.req, t.res);
+      await done(t);
+      expect(t.status).toBe(200);
+      expect(t.body()).toContain("var live = false;");
+      expect(t.body()).toContain('"text":"hi"');
+      expect(t.body()).not.toContain(run.token);
+    });
+
+    it("AE9: a persisted `</script><script>alert(1)</script>` message is inert on the page", async () => {
+      const h = harness();
+      const payload = "</script><script>alert(1)</script>";
+      await h.store!.put(record("r1", { events: [text("input", payload, 1)], eventCount: 1, storedEventCount: 1 }));
+      const t = fakeReqRes("GET", "/runs/r1");
+      h.handler(t.req, t.res);
+      await done(t);
+      expect(t.body()).not.toContain(payload);
+      expect(t.body()).toContain("\\u003c/script\\u003e\\u003cscript\\u003ealert(1)\\u003c/script\\u003e");
+      expect(t.body().match(/<\/script>/g)).toHaveLength(1);
+    });
+
+    it("emits one audit line per history page/events read with the route, run id and identity — never content", async () => {
+      const audit = vi.fn();
+      const h = harness({ audit });
+      await h.store!.put(record("r1"));
+      const page = fakeReqRes("GET", "/runs/r1");
+      h.handler(page.req, page.res, { identity: "access:alice" });
+      await done(page);
+      const events = fakeReqRes("GET", "/runs/r1/events");
+      h.handler(events.req, events.res);
+      await done(events);
+      expect(audit.mock.calls).toEqual([[{ route: "page", runId: "r1", identity: "access:alice" }], [{ route: "events", runId: "r1" }]]);
+      for (const [entry] of audit.mock.calls) expect(JSON.stringify(entry)).not.toContain("please run it");
+    });
+  });
+
+  describe("AE11: truncated records", () => {
+    it("withOmittedMarkers puts one 'N events omitted' note at the first seq gap, N = eventCount − stored", () => {
+      const events: RunEvent[] = [text("input", "a", 1), { ...call("b"), seq: 2 }, { ...call("c"), seq: 8 }, text("answer", "d", 9)];
+      expect(withOmittedMarkers(events, 9)).toEqual([events[0], events[1], { type: "replay_note", summary: "5 events omitted" }, events[2], events[3]]);
+    });
+
+    it("a gap at the start puts the marker first; a record with nothing missing gets no marker; a gap only at the tail puts it last", () => {
+      const tail: RunEvent[] = [{ ...call("x"), seq: 4 }, { ...call("y"), seq: 5 }];
+      expect(withOmittedMarkers(tail, 5)[0]).toEqual({ type: "replay_note", summary: "3 events omitted" });
+      const full: RunEvent[] = [{ ...call("x"), seq: 1 }, { ...call("y"), seq: 2 }];
+      expect(withOmittedMarkers(full, 2)).toEqual(full);
+      expect(withOmittedMarkers(full, 3).at(-1)).toEqual({ type: "replay_note", summary: "1 event omitted" });
+    });
+
+    it("the persisted page seeds the marker in place and the events replay carries it too", async () => {
+      const h = harness();
+      const events: RunEvent[] = [text("input", "a", 1), { ...call("b"), seq: 2 }, { ...call("c"), seq: 8 }, text("answer", "d", 9)];
+      await h.store!.put(record("r1", { events, eventCount: 9, storedEventCount: 4, truncated: true }));
+      const page = fakeReqRes("GET", "/runs/r1");
+      h.handler(page.req, page.res);
+      await done(page);
+      expect(page.body()).toContain(`var seed = ${seedEventsJson(withOmittedMarkers(events, 9))};`);
+      expect(page.body()).toContain('"summary":"5 events omitted"');
+      const stream = fakeReqRes("GET", "/runs/r1/events");
+      h.handler(stream.req, stream.res);
+      await done(stream);
+      expect(stream.body()).toContain('data: {"type":"replay_note","summary":"5 events omitted"}\n\n');
+    });
+  });
+
+  describe("persisted run events, friction and stop", () => {
+    it("`/runs/:id/events` tokenless replays the stored stream in seq order (paged until exhausted) then ends", async () => {
+      const h = harness();
+      const events: RunEvent[] = Array.from({ length: 1200 }, (_, i) => ({ ...call(`step ${i + 1}`), seq: i + 1 }));
+      await h.store!.put(record("r1", { events, eventCount: 1200, storedEventCount: 1200 }));
+      const spy = vi.spyOn(h.store!, "events");
+      const t = fakeReqRes("GET", "/runs/r1/events");
+      h.handler(t.req, t.res);
+      await done(t);
+      expect(t.status).toBe(200);
+      expect(t.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+      const body = t.body();
+      expect(body.startsWith(PRELUDE)).toBe(true);
+      expect(body.endsWith("event: end\ndata: {}\n\n")).toBe(true);
+      const seqs = [...body.matchAll(/"seq":(\d+)/g)].map((m) => Number(m[1]));
+      expect(seqs).toEqual(events.map((e) => e.seq));
+      expect(spy.mock.calls.length).toBeGreaterThan(1); // the service page (500) is smaller than the record → several pages
+    });
+
+    it("`/runs/:id/friction` tokenless returns the stored diagnosis", async () => {
+      const h = harness();
+      const rec = record("r1");
+      await h.store!.put(rec);
+      const t = fakeReqRes("GET", "/runs/r1/friction");
+      h.handler(t.req, t.res);
+      await done(t);
+      expect(t.status).toBe(200);
+      expect(JSON.parse(t.body())).toEqual({ id: "r1", finished: true, diagnosis: rec.diagnosis });
+    });
+
+    it("`POST /runs/:id/stop` tokenless → 409 for a persisted run, 404 for a live unfinished run (control untouched)", async () => {
+      const h = harness();
+      await h.store!.put(record("r1"));
+      const persisted = fakeReqRes("POST", "/runs/r1/stop?mode=soft");
+      h.handler(persisted.req, persisted.res);
+      await done(persisted);
+      expect(persisted.status).toBe(409);
+      const run = h.registry.create();
+      const live = fakeReqRes("POST", `/runs/${run.id}/stop?mode=hard`);
+      h.handler(live.req, live.res);
+      await done(live);
+      expect(live.status).toBe(404);
+      expect(live.body()).toBe("run not found");
+      expect(run.control.requested).toBeUndefined();
+    });
+
+    it("a valid token still stops a live run (200) and 409s a finished one — the token path is unchanged", () => {
+      const h = harness();
+      const run = h.registry.create();
+      const ok = fakeReqRes("POST", `/runs/${run.id}/stop?t=${run.token}&mode=soft`);
+      h.handler(ok.req, ok.res);
+      expect(ok.status).toBe(200);
+      expect(JSON.parse(ok.body())).toEqual({ id: run.id, mode: "soft", state: "stopping" });
+      h.registry.finish(run.id);
+      const fin = fakeReqRes("POST", `/runs/${run.id}/stop?t=${run.token}&mode=soft`);
+      h.handler(fin.req, fin.res);
+      expect(fin.status).toBe(409);
+    });
+  });
+
+  describe("404 shapes (R4/R10)", () => {
+    it("unknown, expired, and wrong-token-on-live give the identical 404 body; a live run without a token is 404 on page, events and friction", async () => {
+      const h = harness();
+      await h.store!.put(record("old", { finishedAt: NOW - 31 * 86_400_000 }));
+      const live = h.registry.create();
+      const urls = [
+        "/runs/nope",
+        "/runs/old",
+        `/runs/${live.id}?t=wrong`,
+        `/runs/${live.id}`,
+        `/runs/${live.id}/events`,
+        `/runs/${live.id}/friction`,
+        "/runs/nope/events",
+        "/runs/nope/friction",
+      ];
+      for (const url of urls) {
+        const t = fakeReqRes("GET", url);
+        h.handler(t.req, t.res);
+        await done(t);
+        expect([url, t.status, t.body()]).toEqual([url, 404, "run not found"]);
+      }
+    });
+
+    it("with run history off (store null) a finished, evicted run is the same 404", async () => {
+      const h = harness({ store: null });
+      const run = h.registry.create();
+      h.registry.finish(run.id);
+      h.tick(120_000);
+      const t = fakeReqRes("GET", `/runs/${run.id}`);
+      h.handler(t.req, t.res);
+      await done(t);
+      expect([t.status, t.body()]).toEqual([404, "run not found"]);
+    });
+  });
+
+  describe("index: active by default, everything with ?all=1", () => {
+    it("the default view lists only unfinished runs and never calls the store", async () => {
+      const h = harness();
+      await h.store!.put(record("p1"));
+      const active = h.registry.create("active one");
+      const fin = h.registry.create("finished one");
+      h.registry.finish(fin.id);
+      const list = vi.spyOn(h.store!, "list");
+      const get = vi.spyOn(h.store!, "get");
+      const t = fakeReqRes("GET", "/runs");
+      h.handler(t.req, t.res);
+      await done(t);
+      expect(t.status).toBe(200);
+      expect(t.body()).toContain(`href="/runs/${active.id}?t=${active.token}"`);
+      expect(t.body()).not.toContain("finished one");
+      expect(t.body()).not.toContain("p1");
+      expect(list).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+      expect(t.body()).toContain('href="/runs?all=1"');
+      expect(t.body()).toContain('title="Finished runs are kept for 30 days, then deleted"');
+      expect(t.body()).toContain('new EventSource("/runs?stream=1")');
+      expect(t.body()).toContain("var showAll = false;");
+    });
+
+    it("?all=1 lists live rows with token hrefs and finished/persisted rows tokenless, with status, duration and finished-at", async () => {
+      const h = harness();
+      await h.store!.put(record("p1"));
+      await h.store!.put(record("p2", { status: "failed", finishedAt: NOW - 30_000, startedAt: NOW - 30_000 - 3_725_000 }));
+      const active = h.registry.create("active one");
+      const fin = h.registry.create("finished one");
+      h.registry.finish(fin.id);
+      const t = fakeReqRes("GET", "/runs?all=1");
+      h.handler(t.req, t.res);
+      await done(t);
+      const html = t.body();
+      expect(html).toContain(`href="/runs/${active.id}?t=${active.token}"`);
+      expect(html).toContain(`href="/runs/${fin.id}"`);
+      expect(html).not.toContain(fin.token);
+      expect(html).toContain('href="/runs/p1"');
+      expect(html).toContain('href="/runs/p2"');
+      // finished rows: status word + duration + finished-at (UTC), no token anywhere
+      expect(html).toContain('<span class="dot grey" role="img" aria-label="completed" title="completed"></span>');
+      expect(html).toContain('<span class="meta status">completed · 10s · finished 2023-11-14 22:12 UTC</span>');
+      expect(html).toContain('<span class="dot red" role="img" aria-label="failed" title="failed"></span>');
+      expect(html).toContain("failed · 1h 02m · finished 2023-11-14 22:12 UTC");
+      const finishedRows = html.match(/<li data-run-id="(?!run-1")[^]*?<\/li>/g) ?? [];
+      expect(finishedRows.length).toBe(3);
+      for (const row of finishedRows) expect(row).not.toMatch(/tok-|\?t=/);
+      expect(html).toContain('href="/runs"');
+      expect(html).toContain("var showAll = true;");
+      expect(html).toContain('new EventSource("/runs?stream=1&all=1")');
+    });
+
+    it("the toggle tooltip is truthful with run history off", async () => {
+      const h = harness({ store: null, retention: null });
+      const t = fakeReqRes("GET", "/runs");
+      h.handler(t.req, t.res);
+      await done(t);
+      expect(t.body()).toContain('title="Run history is off; finished runs are kept about a minute."');
+      expect(retentionSentence({ retentionDays: 7 })).toBe("Finished runs are kept for 7 days, then deleted");
+      expect(retentionSentence({ retentionDays: 1 })).toBe("Finished runs are kept for 1 day, then deleted");
+    });
+
+    it("AE9: a hostile persisted label is escaped in the index row", async () => {
+      const h = harness();
+      await h.store!.put(record("p1", { label: '<script>alert(1)</script>" onmouseover="x' }));
+      const t = fakeReqRes("GET", "/runs?all=1");
+      h.handler(t.req, t.res);
+      await done(t);
+      expect(t.body()).not.toContain("<script>alert(1)</script>");
+      expect(t.body()).toContain("&lt;script&gt;alert(1)&lt;/script&gt;&quot; onmouseover=&quot;x");
+    });
+
+    it("a persisted row's `data-persisted` attribute is mirrored; the store spy sees exactly one list call for ?all=1", async () => {
+      const h = harness();
+      const run = h.registry.create("both");
+      h.registry.finish(run.id);
+      await h.store!.put(record(run.id));
+      h.registry.markPersisted(run.id);
+      const list = vi.spyOn(h.store!, "list");
+      const t = fakeReqRes("GET", "/runs?all=1");
+      h.handler(t.req, t.res);
+      await done(t);
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(t.body()).toContain(`<li data-run-id="${run.id}" data-started-at="${NOW}" data-persisted="1">`);
+      expect(t.body()).toContain('li.setAttribute("data-persisted", "1")');
+    });
+
+    it("?all=1 renders a visible banner when the history store is unavailable (live rows still listed); the default view never shows it", async () => {
+      const broken = new InMemoryRunStore({ now: () => NOW });
+      broken.list = async () => {
+        throw new Error("store down");
+      };
+      const h = harness({ store: broken });
+      const live = h.registry.create("still live");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const all = fakeReqRes("GET", "/runs?all=1");
+      h.handler(all.req, all.res);
+      await done(all);
+      expect(all.status).toBe(200);
+      expect(all.body()).toContain('<p class="banner" role="status">⚠ history store unavailable — showing live runs only</p>');
+      expect(all.body()).toContain(`data-run-id="${live.id}"`);
+      expect(all.body()).not.toContain("store down");
+      const dflt = fakeReqRes("GET", "/runs");
+      h.handler(dflt.req, dflt.res);
+      await done(dflt);
+      expect(dflt.body()).not.toContain("history store unavailable");
+      warn.mockRestore();
+    });
+  });
+
+  describe("index rows: one projection for the server and the client", () => {
+    /** Evaluate the inlined row library exactly as the browser would. */
+    function clientLib(doc: ReturnType<typeof staticDocument>) {
+      return new Function("doc", `${INDEX_ROW_SCRIPT}; return indexRowRenderer(doc);`)(doc) as ReturnType<typeof indexRowRenderer>;
+    }
+
+    it("the server row equals the client `fill()` of the same row, for live, finished and persisted rows", () => {
+      const rows: IndexRow[] = [
+        { id: "l1", token: "tok-l1", label: "live", finished: false, startedAt: 1000, eventCount: 2 },
+        { id: "s1", token: "tok-s1", label: "stopping", finished: false, startedAt: 1000, eventCount: 2, stop: { mode: "soft", state: "stopping" } },
+        { id: "f1", token: "tok-f1", label: "finished in registry", finished: true, startedAt: 1000, eventCount: 2 },
+        { id: "p1", label: "persisted", finished: true, persisted: true, startedAt: 1000, finishedAt: 61_000, status: "stopped_hard", eventCount: 9, stop: { mode: "hard", state: "stopped" } },
+      ];
+      const doc = staticDocument();
+      const lib = clientLib(doc);
+      for (const row of rows) {
+        const li = doc.createElement("li");
+        lib.fill(li, row);
+        expect(doc.serialize(li)).toBe(indexRowHtml(row));
+      }
+    });
+
+    it("finished rows never carry a token in their HTML, live rows do", () => {
+      expect(indexRowHtml({ id: "f1", token: "tok-f1", finished: true, startedAt: 1, eventCount: 1 })).not.toContain("tok-f1");
+      expect(indexRowHtml({ id: "f1", token: "tok-f1", finished: true, startedAt: 1, eventCount: 1 })).toContain('href="/runs/f1"');
+      expect(indexRowHtml({ id: "l1", token: "tok-l1", finished: false, startedAt: 1, eventCount: 1 })).toContain('href="/runs/l1?t=tok-l1"');
+    });
+
+    it("feed semantics: default view drops a finished upsert; ?all=1 keeps it and suppresses `removed` only for a persisted row", () => {
+      const lib = clientLib(staticDocument());
+      const row = (finished: boolean): IndexRow => ({ id: "a", finished, startedAt: 1, eventCount: 0 });
+      const fin = { type: "upsert", run: row(true) };
+      expect(lib.feedAction(fin, false, false)).toEqual({ op: "remove", id: "a" });
+      expect(lib.feedAction(fin, true, false)).toEqual({ op: "upsert", run: fin.run });
+      expect(lib.feedAction({ type: "upsert", run: row(false) }, false, false)).toEqual({ op: "upsert", run: row(false) });
+      expect(lib.feedAction({ type: "removed", id: "a" }, true, true)).toEqual({ op: "keep" });
+      expect(lib.feedAction({ type: "removed", id: "a" }, true, false)).toEqual({ op: "remove", id: "a" });
+      expect(lib.feedAction({ type: "removed", id: "a" }, false, true)).toEqual({ op: "remove", id: "a" });
+    });
+
+    it("the index page routes every frame through feedAction, reading the row's data-persisted flag", () => {
+      const html = renderRunsIndex([], { all: true, retention: null });
+      expect(html).toContain('var act = rowLib.feedAction(ev, showAll, li ? li.getAttribute("data-persisted") === "1" : false);');
+      expect(html).toContain('if (act.op === "upsert") upsert(act.run); else if (act.op === "remove") remove(act.id);');
+    });
+  });
+
+  describe("KTD13: dev bypass off-loopback", () => {
+    const bypass = (isLoopback: boolean) => ({ active: () => true, isLoopback: () => isLoopback });
+
+    it("403s history reads (persisted page/events/friction, ?all=1) while a live token page still works", async () => {
+      const h = harness({ devBypass: bypass(false) });
+      await h.store!.put(record("r1"));
+      for (const url of ["/runs/r1", "/runs/r1/events", "/runs/r1/friction", "/runs?all=1", "/runs?stream=1&all=1"]) {
+        const t = fakeReqRes("GET", url);
+        h.handler(t.req, t.res);
+        await done(t);
+        expect([url, t.status]).toEqual([url, 403]);
+      }
+      const live = h.registry.create();
+      const ok = fakeReqRes("GET", `/runs/${live.id}?t=${live.token}`);
+      h.handler(ok.req, ok.res);
+      expect(ok.status).toBe(200);
+      const idx = fakeReqRes("GET", "/runs");
+      h.handler(idx.req, idx.res);
+      await done(idx);
+      expect(idx.status).toBe(200);
+    });
+
+    it("serves them on loopback, and always when the bypass is off", async () => {
+      const on = harness({ devBypass: bypass(true) });
+      await on.store!.put(record("r1"));
+      const a = fakeReqRes("GET", "/runs/r1");
+      on.handler(a.req, a.res);
+      await done(a);
+      expect(a.status).toBe(200);
+      const off = harness({ devBypass: { active: () => false, isLoopback: () => false } });
+      await off.store!.put(record("r1"));
+      const b = fakeReqRes("GET", "/runs?all=1");
+      off.handler(b.req, b.res);
+      await done(b);
+      expect(b.status).toBe(200);
+    });
+
+    it("isLoopbackAddress recognizes v4, v6 and mapped loopback only", () => {
+      expect(["127.0.0.1", "::1", "::ffff:127.0.0.1"].map(isLoopbackAddress)).toEqual([true, true, true]);
+      expect(["10.0.0.1", "203.0.113.9", undefined, ""].map(isLoopbackAddress)).toEqual([false, false, false, false]);
+    });
   });
 });
