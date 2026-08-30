@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { COLD_START_ALLOWANCE_MS, DRAIN_DEADLINE_MS, MIN_CATCH_UP_WINDOW_MS } from "../core/drain.js";
-import { decideLive, heartbeatLine, LIVE_GATE_DEADLINE_MS, parseHealthz, sameCommit } from "./liveGate.js";
+import { decideLive, decideRestarted, heartbeatLine, LIVE_GATE_DEADLINE_MS, parseHealthz, sameCommit } from "./liveGate.js";
 
 // features/slack-channel.md item 8 — deployed ≠ live: `deploy:all` exits 0 for
 // the bot only once `/healthz` is answered by the NEW container (not draining,
@@ -61,7 +61,48 @@ describe("decideLive", () => {
   });
 });
 
+// `deploy restart` (item 8): the image is unchanged, so `build.commit` cannot
+// tell the restarted container from the old one — `startedAt` (process start)
+// does. Live only once a non-draining container reports a startedAt that is
+// LATER than the one the operator saw before asking for the restart.
+describe("decideRestarted", () => {
+  const before = "2026-08-30T10:00:00.000Z";
+  const after = "2026-08-30T10:00:41.000Z";
+  const at = (startedAt?: string, extra: Record<string, unknown> = {}) => ({ ok: true, inFlight: 0, draining: false, ...(startedAt ? { startedAt } : {}), ...extra });
+
+  it("live once startedAt is later than the previous one", () => {
+    expect(decideRestarted(at(after), before, 0)).toEqual({ kind: "live", startedAt: after });
+  });
+
+  it("keeps waiting while the OLD startedAt (or an earlier one) is still answering — the same commit is no evidence", () => {
+    expect(decideRestarted(at(before, { build: { commit: "abc1234" } }), before, 0)).toEqual({ kind: "waiting", reason: `old container still answering (started ${before})` });
+    expect(decideRestarted(at("2026-08-30T09:00:00.000Z"), before, 0).kind).toBe("waiting");
+  });
+
+  it("waiting while draining, while not JSON, or while a container without startedAt (predates deploy restart) answers", () => {
+    expect(decideRestarted({ ok: true, inFlight: 1, draining: true, drainStartedAt: before, startedAt: before }, before, 0)).toEqual({ kind: "waiting", reason: `old container still draining — 1 run(s) in flight since ${before}` });
+    expect(decideRestarted(undefined, before, 0)).toEqual({ kind: "waiting", reason: "/healthz not answering with JSON (container restarting, or unreachable)" });
+    expect(decideRestarted(at(), before, 0)).toEqual({ kind: "waiting", reason: "/healthz carries no startedAt — a container that predates `deploy restart` is answering" });
+    expect(decideRestarted(at("not a date"), before, 0).kind).toBe("waiting");
+  });
+
+  it("when the previous startedAt is unknown (old container predated it), any non-draining startedAt counts as restarted", () => {
+    expect(decideRestarted(at(after), undefined, 0)).toEqual({ kind: "live", startedAt: after });
+    expect(decideRestarted(at(), undefined, 0).kind).toBe("waiting");
+  });
+
+  it("the same reason becomes a timeout at the live-gate deadline; live is live regardless of elapsed", () => {
+    expect(decideRestarted(at(before), before, LIVE_GATE_DEADLINE_MS - 1).kind).toBe("waiting");
+    expect(decideRestarted(at(before), before, LIVE_GATE_DEADLINE_MS)).toEqual({ kind: "timeout", reason: `old container still answering (started ${before})` });
+    expect(decideRestarted(at(after), before, LIVE_GATE_DEADLINE_MS * 2).kind).toBe("live");
+  });
+});
+
 describe("heartbeatLine", () => {
+  it("is tagged for the command that waits (deploy:all by default, deploy:restart when asked)", () => {
+    expect(heartbeatLine("bot", { inFlight: 1, draining: false }, 0, 60_000, "deploy:restart")).toBe("[deploy:restart] bot: still waiting — 1 run(s) in flight (draining: no), waited 0m of 1m");
+  });
+
   it("says how many runs are in flight, whether draining, and how long we have waited of the budget", () => {
     expect(heartbeatLine("bot", { inFlight: 2, draining: false }, 3 * 60_000 + 5_000, 30 * 60_000)).toBe(
       "[deploy:all] bot: still waiting — 2 run(s) in flight (draining: no), waited 3m of 30m",

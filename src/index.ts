@@ -39,6 +39,10 @@ import { callerIdFor, createCommandHttpHandler, isCommandPath, isLocalhostBase, 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
 
+// Process start for `/healthz.startedAt` — `deploy restart`'s live gate tells
+// the restarted container (same image, same `build.commit`) from the old one by it.
+const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
+
 async function main() {
   for (const v of ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]) {
     if (!process.env[v]) {
@@ -339,7 +343,7 @@ async function main() {
       // preflight refuses on (features/slack-channel.md item 8).
       if (path === "/healthz") {
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining, drainStartedAt, catchUp: getCatchUpStatus(), build })));
+        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining, drainStartedAt, catchUp: getCatchUpStatus(), build, startedAt: PROCESS_STARTED_AT })));
         return;
       }
       // Unknown paths. The live-view handler only ever owns /runs*, which the

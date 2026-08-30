@@ -416,7 +416,8 @@ describe("derived naming across surfaces (KTD2/KTD21)", () => {
     expect(byId["deploy.all"]).toBe(byId["deploy.plan"].replace("deploy plan", "deploy all"));
     expect(byId["env.bootstrap"]).toBe("env bootstrap --env <string> --service <string> [--apply] [--out <string>] [--manifest <string>]");
     // CLI-only commands never reach chat, MCP, or HTTP.
-    for (const id of ["deploy.all", "env.bootstrap", "friction.analyze"]) expect(f.commands.get(id)!.surfaces, id).toEqual({ chat: false, mcp: false, http: false });
+    expect(byId["deploy.restart"]).toBe("deploy restart [--only <bot>] [--force] [--wait-max <integer>] [--poll <integer>]");
+    for (const id of ["deploy.all", "deploy.restart", "env.bootstrap", "friction.analyze"]) expect(f.commands.get(id)!.surfaces, id).toEqual({ chat: false, mcp: false, http: false });
     expect(byId["repo.list"]).toBe("repo list");
   });
 });

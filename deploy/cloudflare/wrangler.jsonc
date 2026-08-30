@@ -48,7 +48,8 @@
   // Every cron here IS a schedule in src/core/schedules.ts (the registry; a unit
   // test fails when the two sets differ) and worker.ts looks each firing up there.
   // "* * * * *": keep-alive (/healthz) — also what RESTARTS the container after a
-  // deploy rollout or platform maintenance; the interval bounds the deaf window
+  // deploy rollout, a `deploy restart` (POST /admin/restart → DO stop()), or
+  // platform maintenance; the interval bounds the deaf window
   // (Socket Mode events during downtime are lost, never redelivered). Not a run.
   // "0 14 * * 1": the weekly self-improvement pass (#84) — POST /ingress as the
   // `cron` identity with `friction propose`; an ordinary run on /runs (#244).

@@ -3,12 +3,15 @@
 // coreplanelabs/infrastructure `terrateam/` (long-lived server in a container,
 // singleton DO, cron keep-alive).
 //
-// The Worker exists to (re)start the container, run health checks, and fire
+// The Worker exists to (re)start the container, run health checks, restart the
+// container on request (`POST /admin/restart` — `deploy restart`), and fire
 // the scheduled jobs — all Slack traffic is the container's own outbound Socket
 // Mode websocket, so nothing user-facing flows through here. Scheduled jobs are
 // NOT special: a `run` schedule is POSTed to the bot's generic /ingress as the
 // `cron` identity, so it becomes an ordinary run (#244).
 import { Container, getContainer } from "@cloudflare/containers";
+import { parseHealthz } from "../../src/deploy/liveGate.ts";
+import { authorizeRestart, decideRestart, parseRestartRequest, restartResponse, type RestartOutcome } from "../../src/deploy/restart.ts";
 import {
   interpretIngressResponse,
   isRunSchedule,
@@ -36,7 +39,7 @@ interface Env {
   PUBLIC_BASE_URL?: string; // live-view: base for /runs/<id>?t=… links on the status card
   ACCESS_TEAM_DOMAIN?: string; // live-view SSO gate: Cloudflare Access team domain (JWKS + iss)
   ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
-  SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map); the `cron` entry is what scheduled runs present
+  SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map); the `cron` entry is what scheduled runs present; an entry with `deploy:write` may POST /admin/restart
   BRAVE_SEARCH_API_KEY?: string; // web_search backend (Brave); web_fetch works without it
   CF_ANALYTICS_TOKEN?: string; // costs dash: Cloudflare API token, Account Analytics:Read only
   ANTHROPIC_ADMIN_KEY?: string; // costs dash (optional): Anthropic Admin API key for the LLM cost report
@@ -44,57 +47,127 @@ interface Env {
   STATE_WORKER_URL?: string; // var: the state Worker's base URL — where this shim records each scheduled firing (#244)
 }
 
+/** Every secret/var the Worker forwards into the container. Optional entries
+ *  are forwarded only when set, so the bot sees "not configured" as absence. */
+const FORWARDED_OPTIONAL = [
+  "OPENAI_API_KEY",
+  "E2B_API_KEY",
+  "SANDBOX_TOKEN",
+  "RESIDENT_OPERATOR_TOKEN",
+  "RESIDENT_ADMIN_TOKEN",
+  "GH_TOKEN",
+  "GITHUB_APP_ID",
+  "GITHUB_APP_INSTALLATION_ID",
+  "GITHUB_APP_PRIVATE_KEY",
+  "PUBLIC_BASE_URL",
+  "ACCESS_TEAM_DOMAIN",
+  "ACCESS_AUD",
+  "CF_ANALYTICS_TOKEN",
+  "ANTHROPIC_ADMIN_KEY",
+  "SWITCHBOARD_INGRESS_TOKENS",
+  "BRAVE_SEARCH_API_KEY",
+  "MEMORY_TOKEN",
+] as const satisfies readonly (keyof Env)[];
+
+/** The container's environment, computed from the Worker env AT START TIME.
+ *  A running container keeps the env it started with, whatever `wrangler
+ *  secret put` has since changed on the Worker — so this is read on every
+ *  (re)start rather than once in the constructor: after `deploy restart`
+ *  stops the container, the next start carries the current secrets. */
+function containerEnv(env: Env): Record<string, string> {
+  const vars: Record<string, string> = {
+    SWITCHBOARD_CONFIG: "./config/config.production.yaml",
+    SLACK_BOT_TOKEN: env.SLACK_BOT_TOKEN,
+    SLACK_APP_TOKEN: env.SLACK_APP_TOKEN,
+    ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
+  };
+  for (const name of FORWARDED_OPTIONAL) {
+    const value = env[name];
+    if (value) vars[name] = value;
+  }
+  return vars;
+}
+
+const INSTANCE = "singleton";
+const INTERNAL = "https://switchboard-keepalive.internal";
+
 export class SwitchboardServer extends Container<Env> {
   defaultPort = 8080; // the bot's health endpoint (PORT=8080 in the image)
   // Never let this scale to zero: the Slack websocket must stay connected and
   // Slack does not redeliver missed Socket Mode events. Cron pings every 5m.
   sleepAfter = "2h";
 
-  constructor(ctx: ConstructorParameters<typeof Container>[0], env: Env) {
-    super(ctx, env);
-    this.envVars = {
-      SWITCHBOARD_CONFIG: "./config/config.production.yaml",
-      SLACK_BOT_TOKEN: env.SLACK_BOT_TOKEN,
-      SLACK_APP_TOKEN: env.SLACK_APP_TOKEN,
-      ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
-      ...(env.OPENAI_API_KEY ? { OPENAI_API_KEY: env.OPENAI_API_KEY } : {}),
-      ...(env.E2B_API_KEY ? { E2B_API_KEY: env.E2B_API_KEY } : {}),
-      ...(env.SANDBOX_TOKEN ? { SANDBOX_TOKEN: env.SANDBOX_TOKEN } : {}),
-      ...(env.RESIDENT_OPERATOR_TOKEN
-        ? { RESIDENT_OPERATOR_TOKEN: env.RESIDENT_OPERATOR_TOKEN }
-        : {}),
-      ...(env.RESIDENT_ADMIN_TOKEN ? { RESIDENT_ADMIN_TOKEN: env.RESIDENT_ADMIN_TOKEN } : {}),
-      ...(env.GH_TOKEN ? { GH_TOKEN: env.GH_TOKEN } : {}),
-      ...(env.GITHUB_APP_ID ? { GITHUB_APP_ID: env.GITHUB_APP_ID } : {}),
-      ...(env.GITHUB_APP_INSTALLATION_ID
-        ? { GITHUB_APP_INSTALLATION_ID: env.GITHUB_APP_INSTALLATION_ID }
-        : {}),
-      ...(env.GITHUB_APP_PRIVATE_KEY
-        ? { GITHUB_APP_PRIVATE_KEY: env.GITHUB_APP_PRIVATE_KEY }
-        : {}),
-      ...(env.PUBLIC_BASE_URL ? { PUBLIC_BASE_URL: env.PUBLIC_BASE_URL } : {}),
-      ...(env.ACCESS_TEAM_DOMAIN ? { ACCESS_TEAM_DOMAIN: env.ACCESS_TEAM_DOMAIN } : {}),
-      ...(env.ACCESS_AUD ? { ACCESS_AUD: env.ACCESS_AUD } : {}),
-      ...(env.CF_ANALYTICS_TOKEN ? { CF_ANALYTICS_TOKEN: env.CF_ANALYTICS_TOKEN } : {}),
-      ...(env.ANTHROPIC_ADMIN_KEY ? { ANTHROPIC_ADMIN_KEY: env.ANTHROPIC_ADMIN_KEY } : {}),
-      ...(env.SWITCHBOARD_INGRESS_TOKENS
-        ? { SWITCHBOARD_INGRESS_TOKENS: env.SWITCHBOARD_INGRESS_TOKENS }
-        : {}),
-      ...(env.BRAVE_SEARCH_API_KEY ? { BRAVE_SEARCH_API_KEY: env.BRAVE_SEARCH_API_KEY } : {}),
-      ...(env.MEMORY_TOKEN ? { MEMORY_TOKEN: env.MEMORY_TOKEN } : {}),
-    };
+  /** Start the container if it is not running, with the env computed now.
+   *  Default port-ready timeout is 20s; first boot (npm-less image, but cold
+   *  pull + Slack connect) can exceed it. Already running → a no-op (the
+   *  start options are not applied to a live container). */
+  private startBot(): Promise<void> {
+    return this.startAndWaitForPorts(this.defaultPort, { portReadyTimeoutMS: 120_000 }, { envVars: containerEnv(this.env) });
   }
 
-  // Default port-ready timeout is 20s; first boot (npm-less image, but cold
-  // pull + Slack connect) can exceed it.
   override async fetch(request: Request): Promise<Response> {
-    await this.startAndWaitForPorts(this.defaultPort, { portReadyTimeoutMS: 120_000 });
+    await this.startBot();
     return super.fetch(request);
+  }
+
+  /**
+   * `deploy restart`: stop the container WITHOUT an image build so it comes
+   * back on the Worker's current secrets. Cloudflare's idiom — `stop()` sends
+   * SIGTERM, the bot's graceful drain (src/index.ts) finishes in-flight runs
+   * and exits, and the NEXT request through `fetch` starts the container again
+   * (`startBot`, env computed then). The keep-alive cron GETs /healthz every
+   * minute and the CLI's live gate polls it every 15 s, so the next request is
+   * never more than seconds away. Refuses (the deploy preflight's rules) while
+   * runs are in flight or a drain is already under way unless `force`.
+   */
+  async restart(opts: { force: boolean }): Promise<RestartOutcome> {
+    if (!this.ctx.container?.running) return { kind: "not-running" };
+    const health = await this.containerFetch(new Request(`${INTERNAL}/healthz`), this.defaultPort);
+    const body = parseHealthz(await health.text().catch(() => ""));
+    const verdict = decideRestart(body, opts);
+    if (!verdict.allow) return { kind: "refused", problems: verdict.problems };
+    const inFlight = typeof body?.inFlight === "number" ? body.inFlight : 0;
+    const previousStartedAt = typeof body?.startedAt === "string" ? body.startedAt : undefined;
+    console.log(`[restart] SIGTERM → container (started ${previousStartedAt ?? "unknown"}, ${inFlight} in flight${verdict.forced ? ", FORCED" : ""})`);
+    await this.stop();
+    return { kind: "stopping", forced: verdict.forced, inFlight, previousStartedAt };
+  }
+
+  override onStop(params: { exitCode: number; reason: string }): void {
+    // The next fetch (cron keep-alive within a minute, or the CLI's poll) starts it again with the current env.
+    console.log(`[restart] container stopped (exit ${params.exitCode}, ${params.reason}) — restarts with the current env on the next request`);
   }
 }
 
-const INSTANCE = "singleton";
-const INTERNAL = "https://switchboard-keepalive.internal";
+/** `POST /admin/restart` — the operator surface behind `deploy restart`
+ *  (src/deploy/restart.ts documents the authorization choice: a
+ *  SWITCHBOARD_INGRESS_TOKENS bearer whose identity carries `deploy:write`).
+ *  Body `{ "force": true }` bypasses the in-flight/draining refusal. */
+async function handleAdminRestart(request: Request, env: Env): Promise<Response> {
+  const json = (status: number, body: Record<string, unknown>) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  if (request.method !== "POST") return json(405, { ok: false, error: "method not allowed: POST /admin/restart" });
+  const auth = authorizeRestart(request.headers.get("authorization") ?? undefined, env.SWITCHBOARD_INGRESS_TOKENS);
+  if (!auth.ok) {
+    console.warn(`[restart] ${auth.status} — ${auth.reason}`);
+    return json(auth.status, { ok: false, error: auth.reason });
+  }
+  const parsed = parseRestartRequest(await request.text().catch(() => ""));
+  if (!parsed.ok) return json(400, { ok: false, error: parsed.reason });
+  let outcome: RestartOutcome;
+  try {
+    outcome = await getContainer(env.SWITCHBOARD, INSTANCE).restart({ force: parsed.force });
+  } catch (err) {
+    // The container's /healthz probe or the DO call threw (container mid-transition,
+    // port not answering): fail closed in the route's own JSON shape so the CLI reads
+    // a reason instead of the platform's HTML 500. Nothing was stopped.
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`[restart] ${auth.subject} → error before stop: ${reason}`);
+    return json(500, { ok: false, error: `restart failed before stopping anything: ${reason}` });
+  }
+  console.log(`[restart] ${auth.subject} → ${outcome.kind}${outcome.kind === "refused" ? `: ${outcome.problems.join("; ")}` : ""}`);
+  const res = restartResponse(outcome);
+  return json(res.status, res.body);
+}
 
 /** Record a firing on the state Worker's ScheduleDO (the /runs Scheduled panel
  *  reads it). Best-effort: a failure here is a log line — the run itself (if
@@ -106,6 +179,8 @@ async function recordFiring(env: Env, firing: ScheduleFiring): Promise<void> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // The one route the Worker answers itself; everything else is the container's.
+    if (new URL(request.url).pathname === "/admin/restart") return handleAdminRestart(request, env);
     return getContainer(env.SWITCHBOARD, INSTANCE).fetch(request);
   },
 

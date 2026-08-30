@@ -42,9 +42,10 @@ describe("WORKERS / DEPLOY_ORDER", () => {
     expect(formatPlan(p)).toContain("then wait until live (https://switchboard.coreplanelabs.dev/healthz not draining + build.commit == HEAD)");
   });
 
-  it("the bot step says a rotated secret goes live only through it — `wrangler secret put` alone leaves the running container on its old env", () => {
+  it("the bot step says how a rotated secret goes live — `wrangler secret put` alone leaves the running container on its old env; `deploy restart` (no build) restarts it", () => {
     const bot = WORKERS.find((w) => w.name === "bot")!;
     expect(bot.why).toContain("wrangler secret put");
+    expect(bot.why).toContain("deploy restart");
     expect(formatPlan(plan())).toContain("rotated bot secret");
   });
 });
