@@ -85,3 +85,80 @@ export function checkoutUpdateCommand(sha: string, clean: CleanScope): string {
   const sweep = `find . -path '*/node_modules/*' -type d \\( ${names} \\) -prune -exec rm -rf {} +`;
   return `${base} && git clean -fdx -e node_modules && ${sweep}`;
 }
+
+// -- interruption vs. failure (#216) -----------------------------------------
+
+/** How a refresh-cycle step failed. `interrupted` is the one outcome that says
+ *  NOTHING about the repository: the step was killed from outside (a Worker
+ *  deploy swapping the container mid-cycle — SIGTERM, exit 143, the shell's
+ *  "Session terminated"). Everything else is the repo's own build failing. */
+export interface RefreshFailure {
+  /** The `degraded` reason to record. Interruptions are prefixed
+   *  `refresh-interrupted:` so the park-streak gate can exclude them by prefix,
+   *  exactly like the watchdog's stamps; real failures keep `<step>-failed:`. */
+  reason: string;
+  interrupted: boolean;
+}
+
+/** Signature of a step killed from OUTSIDE its own budget: the exit status of
+ *  SIGTERM (128 + 15), bash's "Session terminated" on a killed login shell, or
+ *  a tool naming the signal. A bare "killed" is NOT enough — compilers and
+ *  OOM messages say it too — and a step the cycle itself timed out is a real
+ *  failure however it died. */
+const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM/;
+
+export function classifyRefreshFailure(input: { step: string; message: string }): RefreshFailure {
+  const { step, message } = input;
+  const timedOut = /\(timed out\)/.test(message);
+  if (!timedOut && INTERRUPTION_SIGNATURE.test(message)) {
+    return { interrupted: true, reason: `refresh-interrupted: ${step} ${message}` };
+  }
+  return { interrupted: false, reason: `${step}-failed: ${message}` };
+}
+
+/** Re-arm delay after a cycle that did not run to completion for a reason
+ *  outside the repo — an interrupted step, or an image-stale container stop.
+ *  45 s: comfortably longer than a container restart plus rehydration
+ *  (~10–20 s observed), so the retry finds a live runtime, and an order of
+ *  magnitude under the 600 s cadence that previously left the resident
+ *  `degraded` (every run falling back cold) until the next regular alarm
+ *  (#216, live 2026-08-29: 22:31 → 22:42). */
+export const INTERRUPTED_REARM_S = 45;
+
+export type RefreshOutcome =
+  /** Cycle ran (warm, or a real failure): regular cadence. */
+  | "normal"
+  /** A step was killed from outside (see classifyRefreshFailure). */
+  | "interrupted"
+  /** `reconcileImage` stopped the container so it restarts on the new image. */
+  | "image-stale-restart"
+  /** Idle gate parked the resident. */
+  | "idle";
+
+/** How many CONSECUTIVE interrupted cycles still re-arm short. A real deploy
+ *  interrupts once, maybe twice (a deploy train); a step whose own output
+ *  happens to carry the kill signature every cycle (a test supervisor printing
+ *  `signal SIGTERM`) would otherwise retry at 45 s forever — never parking
+ *  (it is excluded from the streak) AND at 13× the cadence. Past the cap the
+ *  regular interval returns; the classification (and the streak exclusion)
+ *  stand, matching the watchdog's accepted "never parks, but at cadence". */
+export const INTERRUPTED_REARM_MAX_CONSECUTIVE = 3;
+
+export function nextRefreshDelayS(input: {
+  outcome: RefreshOutcome;
+  intervalS: number;
+  idleIntervalS: number;
+  /** Consecutive cycles (this one included) that ended `interrupted`; omitted = 1. */
+  consecutiveInterrupted?: number;
+}): number {
+  switch (input.outcome) {
+    case "idle":
+      return input.idleIntervalS;
+    case "interrupted":
+      return (input.consecutiveInterrupted ?? 1) > INTERRUPTED_REARM_MAX_CONSECUTIVE ? input.intervalS : INTERRUPTED_REARM_S;
+    case "image-stale-restart":
+      return INTERRUPTED_REARM_S;
+    default:
+      return input.intervalS;
+  }
+}

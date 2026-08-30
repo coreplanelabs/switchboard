@@ -96,7 +96,14 @@ import {
   type ResidentView,
   type StoredTestOverrides,
 } from "./gc";
-import { checkoutUpdateCommand, planRefresh, type RefreshDisk } from "../../src/execution/residentRefresh.js";
+import {
+  checkoutUpdateCommand,
+  classifyRefreshFailure,
+  nextRefreshDelayS,
+  planRefresh,
+  type RefreshDisk,
+  type RefreshOutcome,
+} from "../../src/execution/residentRefresh.js";
 import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
 
 /** Build marker: answered by GET /healthz (`u`) so a deploy's edge propagation
@@ -281,9 +288,15 @@ const DEGRADED_STREAK_KEY = "resident:degradedStreak";
  *  chronically broken repo. Accepted: a watchdog stamp means the previous
  *  "same reason" observation is not trustworthy, and preserving the streak
  *  across it would re-open the parked-degraded hole this fixes. */
-const WATCHDOG_REASON = /^(?:alarm-missed|stale-mid-flight):/;
-function isWatchdogReason(reason: string): boolean {
-  return WATCHDOG_REASON.test(reason);
+/** Plus (#216) a cycle whose step was killed from OUTSIDE by a deploy
+ *  (`refresh-interrupted: …`, classified by `classifyRefreshFailure`): equally
+ *  not evidence about the repository, equally never counted. */
+const NON_EVIDENCE_REASON = /^(?:alarm-missed|stale-mid-flight|refresh-interrupted):/;
+/** Consecutive cycles that ended `refresh-interrupted` (#216): feeds the
+ *  short-re-arm cap in `nextRefreshDelayS`; cleared by any other outcome. */
+const INTERRUPTED_STREAK_KEY = "resident:interruptedStreak";
+function isNonEvidenceReason(reason: string): boolean {
+  return NON_EVIDENCE_REASON.test(reason);
 }
 
 /** Attach waits on the mirror mutex under this named timeout; expiry answers
@@ -1480,7 +1493,13 @@ export class ResidentDO extends Sandbox<Env> {
       // RUNNING container keeps the old one, so new Worker code can name pool
       // users the image lacks. Reconcile here (every cycle, cheap) — see
       // reconcileImage — so a rollout self-applies within one refresh.
-      if (await this.reconcileImage("refresh")) return; // container stopping; finally re-arms
+      if (await this.reconcileImage("refresh")) {
+        // Container stopping; it restarts on the new image in seconds. Re-arm
+        // SHORT (#216) so the resident is re-warmed within a minute instead of
+        // sitting on the old cadence for a full 600 s.
+        this.rearmOutcome = "image-stale-restart";
+        return; // finally re-arms
+      }
 
       // Idle sleep: nobody has attached for IDLE_AFTER_S and no live tree is
       // dirty → skip this fetch and park the alarm far out so SLEEP_AFTER can
@@ -1498,7 +1517,7 @@ export class ResidentDO extends Sandbox<Env> {
       // every other state decision in this file.
       const entry = await this.getStatus();
       let settled = entry.state === "warm";
-      if (entry.state === "degraded" && !isWatchdogReason(entry.reason)) {
+      if (entry.state === "degraded" && !isNonEvidenceReason(entry.reason)) {
         // Count consecutive cycles that found the same REFRESH-PRODUCED degraded
         // reason (github-unreachable, <step>-failed); a stable streak means
         // retrying is not going to help and parking is the right cost behavior.
@@ -1509,8 +1528,11 @@ export class ResidentDO extends Sandbox<Env> {
         settled = streak.count >= DEGRADED_PARK_AFTER_CYCLES;
       } else {
         // Warm, or a degraded stamped by the WATCHDOG (alarm-missed /
-        // stale-mid-flight): the watchdog pulled this cycle to +5s precisely so
-        // a refresh RUNS. Counting those toward the streak was self-fulfilling —
+        // stale-mid-flight) or by an INTERRUPTED cycle (refresh-interrupted, #216 —
+        // a deploy killed the step; it says nothing about the repo): the
+        // watchdog pulled this cycle to +5s precisely so a refresh RUNS, and the
+        // interrupted cycle re-armed short for the same reason.
+        // Counting those toward the streak was self-fulfilling —
         // each cycle that found the reason parked without attempting anything,
         // and after three the resident sat parked-degraded for 6h at a time
         // (live 2026-08-29: repo:jshttp/vary, #177). Never settled; streak reset.
@@ -1520,7 +1542,7 @@ export class ResidentDO extends Sandbox<Env> {
         // isIdle awaited (git status per live tree) — re-read before writing.
         const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
         if (!now.idleSince) await this.ctx.storage.put(FACTS_KEY, { ...now, idleSince: new Date().toISOString() } satisfies RepoFacts);
-        this.idleRearm = true;
+        this.rearmOutcome = "idle";
         return; // finally re-arms at IDLE_REFRESH_INTERVAL_S
       }
       if (facts.idleSince) {
@@ -1667,19 +1689,54 @@ export class ResidentDO extends Sandbox<Env> {
       }
     } catch (err) {
       if (err instanceof ResidentDownError) return; // already down with reason; chain stops below
-      const reason = err instanceof StepError ? `${err.step}-failed: ${err.message}` : `refresh-failed: ${errMsg(err)}`;
+      // A step killed from OUTSIDE (a Worker deploy swapping the container
+      // mid-build: SIGTERM / exit 143) is `refresh-interrupted` (#216): it is not
+      // evidence about the repo — it never counts toward the park streak (the
+      // entry gate above) — and the chain re-arms SHORT so the resident is warm
+      // again within a minute instead of after the full cadence (live
+      // 2026-08-29: `degraded(build-failed: exit 143 …)` 22:31 → warm 22:42,
+      // every switchboard run in between fell back cold). Any other failure is
+      // the repo's own: `<step>-failed: …` / `refresh-failed: …` as before.
+      let reason: string;
+      if (err instanceof StepError) {
+        const failure = classifyRefreshFailure({ step: err.step, message: err.message });
+        reason = failure.reason;
+        // Set BEFORE the state write on purpose: if that write throws, the
+        // finally still re-arms short — the safe direction for an interruption.
+        if (failure.interrupted) this.rearmOutcome = "interrupted";
+      } else {
+        reason = `refresh-failed: ${errMsg(err)}`;
+      }
       await this.setResidentState("degraded", reason); // last snapshot keeps serving
     } finally {
       if (refreshCounted) this.refreshesInFlight--;
       const state = await this.ctx.storage.get<ResidentState>(STATE_KEY);
-      const interval = this.idleRearm ? IDLE_REFRESH_INTERVAL_S : REFRESH_INTERVAL_S;
-      this.idleRearm = false;
+      // Consecutive-interruption count (#216 review): bounds the short re-arm so
+      // a step whose output chronically carries the kill signature falls back to
+      // the cadence after INTERRUPTED_REARM_MAX_CONSECUTIVE instead of hot-looping.
+      let consecutiveInterrupted: number | undefined;
+      if (this.rearmOutcome === "interrupted") {
+        consecutiveInterrupted = ((await this.ctx.storage.get<number>(INTERRUPTED_STREAK_KEY)) ?? 0) + 1;
+        await this.ctx.storage.put(INTERRUPTED_STREAK_KEY, consecutiveInterrupted);
+      } else {
+        await this.ctx.storage.delete(INTERRUPTED_STREAK_KEY);
+      }
+      const interval = nextRefreshDelayS({
+        outcome: this.rearmOutcome,
+        intervalS: REFRESH_INTERVAL_S,
+        idleIntervalS: IDLE_REFRESH_INTERVAL_S,
+        consecutiveInterrupted,
+      });
+      this.rearmOutcome = "normal";
       if (state && state !== "down" && state !== "onboarding") await this.armRefresh(resource, interval);
     }
   }
 
-  /** Set by the idle gate for the duration of one alarm so `finally` re-arms far out. */
-  private idleRearm = false;
+  /** Set during one alarm by the idle gate (`idle`), an image-stale container
+   *  stop (`image-stale-restart`) or an interrupted step (`interrupted`) so
+   *  `finally` picks the matching re-arm delay (`nextRefreshDelayS`); reset to
+   *  `normal` after every arm. */
+  private rearmOutcome: RefreshOutcome = "normal";
 
   /** Idle = no live binding attached within IDLE_AFTER_S AND (when the
    *  runtime is up) no live tree is dirty. Bindings are storage; dirtiness
