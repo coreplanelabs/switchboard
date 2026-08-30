@@ -14,12 +14,13 @@ import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
 // touch the user reply. Pure pieces (gate, input builder, parser) are exported
 // for unit tests; `reflect` composes them around a Provider.
 //
-// User scope (#107 PR B): the extractor tags each fact with an `audience` —
-// `user` for knowledge about the requesting person (preferences, habits, their
-// own setup), `org` for shared knowledge. `user` facts are written to the
-// requesting user's own scope, `org` facts to the org scope; the summary
-// follows the user scope whenever the run yielded a `user` fact (#205), else
-// org. Still ONE extractor call per run.
+// Scoped routing (#107 PR B, #253): the extractor tags each fact with an
+// `audience` — `user` for knowledge about the requesting person (preferences,
+// habits, their own setup), `repo` for knowledge specific to the repository the
+// run worked in, `channel` for what this channel is for, `org` for shared
+// knowledge. Each fact is written to its audience's scope when the run has it
+// (else org); the summary follows the narrowest scope that got a fact — user >
+// repo > channel > org (#205). Still ONE extractor call per run.
 
 /** Toolless threads shorter than this many prior turns are not worth an
  *  extractor call (a one-shot Q&A rarely yields a durable fact). */
@@ -73,13 +74,14 @@ export function shouldReflect(input: ReflectGateInput): boolean {
 export const REFLECTION_SYSTEM = [
   "You distill a finished assistant thread into durable, reusable memory for the resource it concerns.",
   "Return ONLY a JSON object of the form:",
-  '{"facts":[{"text":"...","keywords":["..."],"confidence":0.0-1.0,"audience":"org"|"user","supersedes":"<existing id, optional>"}],"summary":"..."}',
+  '{"facts":[{"text":"...","keywords":["..."],"confidence":0.0-1.0,"audience":"org"|"user"|"repo"|"channel","supersedes":"<existing id, optional>"}],"summary":"..."}',
   `Rules: at most ${MAX_REFLECTION_FACTS} facts. Each fact is ONE self-contained sentence that will still be true and useful in a future, unrelated thread`,
   "(commands, conventions, decisions, preferences, architecture). Ignore ephemeral or one-off details (timestamps, transient errors, chit-chat).",
   "PR-specific state is ephemeral by definition — PR numbers, commit SHAs, test counts, CI results, review verdicts, \"approved at …\", what a given PR changes — and must never become a fact; only a convention or decision that outlives the PR may.",
   "Never include secrets, tokens, passwords, or keys — omit the fact instead.",
   '`audience` is "user" when the fact is about the requesting person specifically (their preferences, habits, personal conventions, their own setup — write it as "this user …"),',
-  'and "org" (the default) when it is shared knowledge about the codebase, tooling, or team. Only the requesting user will ever see "user" facts.',
+  '"repo" when the fact is specific to the repository this thread worked in (its code, conventions, commands, layout), "channel" when it is about what this channel is for or how it works,',
+  'and "org" (the default) when it is shared knowledge about the wider organization, tooling, or team. Only the requesting user will ever see "user" facts; "repo"/"channel" facts are shared with everyone who works in that repo/channel.',
   "`confidence` is how sure you are the fact is durable and correct. If a fact contradicts one of the EXISTING records you were shown, set `supersedes` to that record's id.",
   "`summary` is one or two impersonal sentences: what was asked and what was concluded about the shared subject. Keep the requesting person's preferences, habits, and other personal details OUT of the summary — they belong in `user` facts.",
   "Output raw JSON with no code fence and no prose.",
@@ -118,7 +120,16 @@ export interface ReflectionProvenance {
 
 /** Who a distilled fact is for: the shared org scope, or the requesting user's
  *  own scope (#107 PR B). Decided by the extractor, defaulting to `org`. */
-export type MemoryAudience = "org" | "user";
+export type MemoryAudience = "org" | "user" | "repo" | "channel";
+
+/** Summary inheritance order (#205, #253): the narrowest scope that received
+ *  a fact wins, so a thread that yielded personal knowledge keeps its summary
+ *  personal, a repo-specific thread keeps it in the repo, and so on. */
+const SUMMARY_INHERITANCE: readonly MemoryAudience[] = ["user", "repo", "channel"];
+
+function parseAudience(v: unknown): MemoryAudience {
+  return v === "user" || v === "repo" || v === "channel" ? v : "org";
+}
 
 /** A validated candidate plus its routing tag. The tag is reflection-internal:
  *  `reflect` resolves it to a scope key and strips it before `store.write`, so
@@ -131,10 +142,11 @@ export type ParsedReflection = { ok: true; candidates: RoutedCandidate[] } | { o
  *  Lenient on shape inside the object (bad facts are dropped, not fatal), strict
  *  on the envelope (non-JSON / non-object → error). Every text field is
  *  redacted; `supersedes` survives only when it names a record the extractor was
- *  shown; `audience` is `user` only when it says exactly that, else `org`. The
- *  summary inherits `user` when ANY fact is `user` (#205): a thread that
- *  yielded personal knowledge is a personal thread, and its summary restates
- *  that knowledge — routing it to org would leak it to everyone. */
+ *  shown; `audience` is `user`/`repo`/`channel` only when it says exactly that,
+ *  else `org`. The summary inherits the narrowest audience any fact carried —
+ *  user > repo > channel > org (#205, #253): a thread that yielded personal (or
+ *  repo-/channel-specific) knowledge has a summary that restates it, and
+ *  routing that to org would leak it to everyone. */
 export function parseReflection(raw: string, prov: ReflectionProvenance, knownIds: Set<string>): ParsedReflection {
   let value: unknown;
   try {
@@ -156,7 +168,7 @@ export function parseReflection(raw: string, prov: ReflectionProvenance, knownId
   }
   const summary = cleanText(obj.summary);
   if (summary) {
-    const audience: MemoryAudience = candidates.some((c) => c.audience === "user") ? "user" : "org";
+    const audience = SUMMARY_INHERITANCE.find((a) => candidates.some((c) => c.audience === a)) ?? "org";
     candidates.push({ kind: "summary", text: summary, audience, ...prov });
   }
   return { ok: true, candidates };
@@ -178,7 +190,7 @@ function parseFact(raw: unknown, prov: ReflectionProvenance, knownIds: Set<strin
     text,
     ...(keywords ? { keywords } : {}),
     confidence,
-    audience: f.audience === "user" ? "user" : "org",
+    audience: parseAudience(f.audience),
     ...(supersedes ? { supersedes } : {}),
     ...prov,
   };
@@ -211,7 +223,8 @@ export interface ReflectDeps extends ReflectionProvenance {
    *  from `memory.model` (AGENTS.md invariant 7: never hardcoded here). */
   model: string;
   store: MemoryStore;
-  /** The run's scopes: the org's, plus the requesting user's own when known. */
+  /** The run's scopes: the org's, plus the repo's / channel's / the requesting
+   *  user's own when the run has them. */
   scopeKeys: RequestScopeKeys;
   history: HistoryItem[];
   request: string;
@@ -221,13 +234,15 @@ export interface ReflectDeps extends ReflectionProvenance {
 
 /** Which scope a routed candidate lands in: a supersede follows the record it
  *  corrects (the id was validated against the shown records, whose scopes we
- *  know); otherwise `user` facts go to the user's scope when the run has one,
- *  and everything else to the org scope. A `user` fact with no user scope falls
- *  back to org rather than being dropped. */
+ *  know); otherwise the audience's scope when the run has it (`user` → the
+ *  requester's own, `repo` → the bound repo's, `channel` → the message's), and
+ *  org for everything else. An audience whose scope this run lacks falls back
+ *  to org rather than being dropped. */
 function routeCandidate(cand: RoutedCandidate, keys: RequestScopeKeys, scopeOf: Map<string, string>): string {
   const superseded = cand.supersedes ? scopeOf.get(cand.supersedes) : undefined;
   if (superseded) return superseded;
-  return cand.audience === "user" && keys.user ? keys.user : keys.org;
+  if (cand.audience === "org") return keys.org;
+  return keys[cand.audience] ?? keys.org;
 }
 
 /** One extractor call → validate → `store.write` per scope. Never throws and

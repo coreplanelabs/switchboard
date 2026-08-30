@@ -65,8 +65,9 @@ export {
  * → returns without doing anything (zero behavior change). The model comes from
  * `memory.model`, falling back to the run's own resolved ref — both are config-
  * resolved `<provider>/<model>` strings (AGENTS.md invariant 7). Records are
- * written to the org scope and — for `user`-audience facts — the requesting
- * user's own scope (#107 PR B).
+ * written to the org scope and — per the extractor's `audience` — the
+ * requesting user's own scope (#107 PR B) or the run's repo / channel scope
+ * (#253).
  */
 export function scheduleReflection(input: {
   cfg: MemoryConfig | undefined;
@@ -79,6 +80,10 @@ export function scheduleReflection(input: {
   runId: string;
   /** The requesting user's namespaced id (`slack:U…`) → their memory scope. */
   userId?: string;
+  /** The message's namespaced channel id (`slack:C…`) → the channel scope (#253). */
+  channelId?: string;
+  /** The run's resolved repo slug (`owner/name`) → the repo scope (#253). */
+  repo?: string;
   history: HistoryItem[];
   request: string;
   answer: string;
@@ -100,7 +105,7 @@ export function scheduleReflection(input: {
       provider,
       model,
       store: selectMemoryStore(input.cfg, input.store),
-      scopeKeys: requestScopeKeys(input.userId),
+      scopeKeys: requestScopeKeys(input.userId, { channelId: input.channelId, repo: input.repo }),
       history: input.history,
       request: input.request,
       answer: input.answer,
@@ -109,6 +114,13 @@ export function scheduleReflection(input: {
       onWarn: warn,
     }),
   );
+}
+
+/** The shared scopes a request may carry beyond org + user (#253): the
+ *  message's channel, and the run's repo — which may still be resolving. */
+export interface MemoryScopeInputs {
+  channelId?: string;
+  repo?: string | Promise<string | undefined>;
 }
 
 /**
@@ -127,11 +139,23 @@ export async function memoryContextBlock(
   injected: MemoryStore | undefined,
   query: string,
   userId?: string,
+  scopes: MemoryScopeInputs = {},
 ): Promise<string | undefined> {
   const store = selectMemoryStore(cfg, injected);
-  const scopeKeys = listScopeKeys(requestScopeKeys(userId));
   const limit = cfg?.limit ?? DEFAULT_MEMORY_LIMIT;
-  const perScope = await Promise.all(scopeKeys.map((scopeKey) => store.retrieve({ scopeKey, query, limit })));
+  // Org/channel/user are known up front and fetched immediately; the repo may
+  // still be resolving (the dispatcher starts this read before its GitHub
+  // round trip finishes), so that scope is fetched once the promise settles.
+  // A repo resolution failure is the run's problem to report, not memory's:
+  // here it just means no repo scope.
+  const immediate = requestScopeKeys(userId, { channelId: scopes.channelId });
+  const immediateKeys = listScopeKeys(immediate);
+  const immediateP = Promise.all(immediateKeys.map((scopeKey) => store.retrieve({ scopeKey, query, limit })));
+  const repo = await Promise.resolve(scopes.repo).catch(() => undefined);
+  const keys = requestScopeKeys(userId, { channelId: scopes.channelId, repo });
+  const scopeKeys = listScopeKeys(keys);
+  const repoRecords = keys.repo ? await store.retrieve({ scopeKey: keys.repo, query, limit }) : [];
+  const perScope = [...(await immediateP), repoRecords];
   // Each store call returns its scope's top `limit`, already ranked; re-scoring
   // the union with the same pure scorer gives one cross-scope order so the
   // budget applies to the pool, not per scope. Because `retrieve` has just

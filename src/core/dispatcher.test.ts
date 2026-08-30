@@ -2150,7 +2150,7 @@ describe("cross-session memory (Area 7c, #85)", () => {
     expect(sys).toBeDefined();
     // The block names every scope read: the org, then the requesting user's.
     expect(
-      sys!.startsWith("Background memory for org:coreplanelabs + user:slack:UX (may be outdated — verify before acting):"),
+      sys!.startsWith("Background memory for org:coreplanelabs + channel:slack:CX + user:slack:UX (may be outdated — verify before acting):"),
     ).toBe(true);
     expect(sys).toContain("the deploy command is npm run deploy");
     expect(sys).toContain("You are Switchboard"); // the general agent's own prompt is still there
@@ -2473,16 +2473,63 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     requests.length = 0;
     await dispatch(deps, msg("deploy preview link?", "slack:U1"), fakeIO().io);
     const u1System = requests[0].system!;
-    expect(u1System).toContain("Background memory for org:coreplanelabs + user:slack:U1");
+    expect(u1System).toContain("Background memory for org:coreplanelabs + channel:slack:CX + user:slack:U1");
     expect(u1System).toContain("this user wants a preview link before every deploy");
     expect(u1System).toContain("the deploy command is npm run deploy");
 
     requests.length = 0;
     await dispatch(deps, msg("deploy preview link?", "slack:U2"), fakeIO().io);
     const u2System = requests[0].system!;
-    expect(u2System).toContain("Background memory for org:coreplanelabs + user:slack:U2");
+    expect(u2System).toContain("Background memory for org:coreplanelabs + channel:slack:CX + user:slack:U2");
     expect(u2System).not.toContain("preview link before every deploy");
     expect(u2System).toContain("the deploy command is npm run deploy");
+  });
+
+  // Feature: features/memory.md §21–23 (#253) — repo + channel scopes end to end:
+  // a repo-bound coding run writes a `repo` fact into `repo:acme/api` and a
+  // `channel` fact into this channel's scope; a request from another channel
+  // still gets the org fact but not the channel fact.
+  it("repo/channel-scoped memory: a repo-bound run writes into repo + channel scopes; another channel never sees the channel fact", async () => {
+    const reply = JSON.stringify({
+      facts: [
+        { text: "the deploy command is npm run deploy", confidence: 0.9, audience: "org" },
+        { text: "acme/api deploys with make release", confidence: 0.9, audience: "repo" },
+        { text: "this channel coordinates acme deploys", confidence: 0.9, audience: "channel" },
+      ],
+      summary: "",
+    });
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        if (req.system === REFLECTION_SYSTEM) return { content: [{ type: "text", text: reply }], stopReason: "end_turn" };
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const store = new InMemoryMemoryStore();
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+
+    await dispatch(deps, msg("agent:coding how do we deploy?", "slack:UADMIN"), fakeIO(longHistory).io);
+    await drainReflections();
+    expect((await store.list("repo:acme/api", 10)).map((r) => r.text)).toEqual(["acme/api deploys with make release"]);
+    expect((await store.list("channel:slack:CX", 10)).map((r) => r.text)).toEqual(["this channel coordinates acme deploys"]);
+    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
+
+    requests.length = 0;
+    await dispatch(deps, msg("acme deploy release?", "slack:U2"), fakeIO().io); // same channel (slack:CX), toolless general
+    const sameChannel = requests[0].system!;
+    expect(sameChannel).toContain("Background memory for org:coreplanelabs + channel:slack:CX + user:slack:U2");
+    expect(sameChannel).toContain("this channel coordinates acme deploys");
+    expect(sameChannel).not.toContain("make release"); // no repo bound on a toolless general run
+
+    requests.length = 0;
+    await dispatch(deps, { ...msg("acme deploy release?", "slack:U2"), channelId: "slack:CY", threadKey: "slack:CY:1.0" }, fakeIO().io);
+    const otherChannel = requests[0].system!;
+    expect(otherChannel).toContain("Background memory for org:coreplanelabs + channel:slack:CY + user:slack:U2");
+    expect(otherChannel).not.toContain("coordinates acme deploys");
+    expect(otherChannel).toContain("the deploy command is npm run deploy");
   });
 
   it("memory disabled → no reflection even on a qualifying run (zero behavior change)", async () => {

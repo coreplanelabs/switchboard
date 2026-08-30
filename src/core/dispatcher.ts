@@ -209,9 +209,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const memoryCmd = parseMemoryCommand(msg.text);
     if (memoryCmd) {
       const mutates = "verb" in memoryCmd && memoryCmd.verb === "forget";
+      // The repo scope (#253) needs the repo this thread is bound to — resolved
+      // the same way a run resolves it, only when a list actually asks for it.
+      // Skipped when memory is off — no GitHub round trip for a reply that only says so.
+      const wantsRepo =
+        deps.config.config.memory?.enabled === true &&
+        "verb" in memoryCmd &&
+        memoryCmd.verb === "list" &&
+        (memoryCmd.scope === "repo" || memoryCmd.scope === "all");
+      const ctx = wantsRepo ? { repo: (await resolveRepoForCommand(deps, msg, await io.history())).repo } : {};
       const { text } = mutates
-        ? await runInlineCommandRun(deps, msg, "memory", io, () => runMemoryCommand(deps.config, msg, deps.memory, memoryCmd))
-        : await runMemoryCommand(deps.config, msg, deps.memory, memoryCmd);
+        ? await runInlineCommandRun(deps, msg, "memory", io, () => runMemoryCommand(deps.config, msg, deps.memory, memoryCmd, ctx))
+        : await runMemoryCommand(deps.config, msg, deps.memory, memoryCmd, ctx);
       await io.reply(text);
       return;
     }
@@ -274,18 +283,45 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
     const provider = deps.providers.get(providerName);
 
+    // Target repo/ref for resident environments, resolved BEFORE the model
+    // turn (U7): explicit signals in the message, else the repo this thread
+    // already established (from history — restart-safe, never stored). The
+    // gate belongs with the resource declaration: an agent that declares no
+    // repo (e.g. the toolless general default) never resolves or gates one, so
+    // a toolless follow-up in a repo-mentioning thread is not wrongly refused
+    // and a PR-URL never triggers a wasted GitHub REST call for it.
+    // The production resolver vets bare `owner/name` tokens against the
+    // resident registry (an onboarded-resource probe from the resident
+    // config) so prose shaped like a slug can never bind a repo; an injected
+    // resolver (tests) is called as before. STARTED here (a promise) so the
+    // GitHub round trip overlaps the memory read below; awaited after the ack.
+    const needsRepo = agent.resources?.repo === "required";
+    const repoCtxP: Promise<RepoContext> = needsRepo
+      ? Promise.resolve(
+          deps.resolveRepoContext
+            ? deps.resolveRepoContext(msg, history)
+            : resolveRepoContext(msg, history, residentOnboardedProbe(deps.config.config.execution?.resident)),
+        ).then((ctx) => ctx ?? {})
+      : Promise.resolve({});
+    repoCtxP.catch(() => {});
+
     // Cross-session memory (Area 7c, #85) — READ path, STARTED here and awaited
     // below, so the memory Worker round trip (up to 5 s) overlaps the repo/PR
-    // resolution and the executor attach instead of adding to them. It needs
-    // only the request text and the user, and it is scope-isolated to the org
-    // + this user, so nothing it reads depends on the repo gate. Started after
-    // the agent gate, never before: a refused request must not touch memory
-    // (retrieval bumps usage counters). Flag-gated: with memory disabled
-    // (default) this resolves to undefined via a NullMemoryStore, leaving
-    // `messages` and `system` byte-identical to memory-off. The no-op catch
-    // keeps an early return (repo refusal, ask-once) from leaving the rejection
-    // unhandled; the real await below still surfaces a failure where it did.
-    const memoryBlockP = memoryContextBlock(deps.config.config.memory, deps.memory, directives.text, msg.userId);
+    // resolution and the executor attach instead of adding to them. Its scopes
+    // are the org, this channel, this user, and — once resolution settles —
+    // the bound repo (#253); the read never depends on the repo GATE, only on
+    // the repo NAME, and a failed resolution simply means no repo scope.
+    // Started after the agent gate, never before: a refused request must not
+    // touch memory (retrieval bumps usage counters). Flag-gated: with memory
+    // disabled (default) this resolves to undefined via a NullMemoryStore,
+    // leaving `messages` and `system` byte-identical to memory-off. The no-op
+    // catch keeps an early return (repo refusal, ask-once) from leaving the
+    // rejection unhandled; the real await below still surfaces a failure where
+    // it did.
+    const memoryBlockP = memoryContextBlock(deps.config.config.memory, deps.memory, directives.text, msg.userId, {
+      channelId: msg.channelId,
+      repo: repoCtxP.then((ctx) => ctx.repo),
+    });
     memoryBlockP.catch(() => {});
 
     // Acknowledge NOW, before anything slow. Everything between here and the
@@ -308,23 +344,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     );
     setupCard = card;
 
-    // Target repo/ref for resident environments, resolved BEFORE the model
-    // turn (U7): explicit signals in the message, else the repo this thread
-    // already established (from history — restart-safe, never stored). The
-    // gate belongs with the resource declaration: an agent that declares no
-    // repo (e.g. the toolless general default) never resolves or gates one, so
-    // a toolless follow-up in a repo-mentioning thread is not wrongly refused
-    // and a PR-URL never triggers a wasted GitHub REST call for it.
-    // The production resolver vets bare `owner/name` tokens against the
-    // resident registry (an onboarded-resource probe from the resident
-    // config) so prose shaped like a slug can never bind a repo; an injected
-    // resolver (tests) is called as before.
-    const needsRepo = agent.resources?.repo === "required";
-    const repoCtx: RepoContext = needsRepo
-      ? ((await (deps.resolveRepoContext
-          ? deps.resolveRepoContext(msg, history)
-          : resolveRepoContext(msg, history, residentOnboardedProbe(deps.config.config.execution?.resident)))) ?? {})
-      : {};
+    // The repo/ref resolution started above (before the ack) lands here; the
+    // gate below runs against it exactly as before.
+    const repoCtx: RepoContext = await repoCtxP;
 
     // Per-repo access gate (KD7): open when permissions.repos is absent or
     // the repo is unlisted; a configured allowlist refuses BY NAME — a
@@ -720,6 +742,8 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       threadKey: msg.threadKey,
       runId: run.id,
       userId: msg.userId,
+      channelId: msg.channelId,
+      repo: repoCtx.repo,
       history,
       request: directives.text,
       answer,
@@ -1255,6 +1279,21 @@ function normalizeAlternation(messages: ChatMessage[]): ChatMessage[] {
   return out;
 }
 
+/** Repo resolution for a memory command (#253): the injected resolver in tests,
+ *  the production resolver (registry-vetted slugs, PR → repo) otherwise; a
+ *  failure means "no repo bound", never an error reply. */
+async function resolveRepoForCommand(deps: CoreDeps, msg: IncomingMessage, history: HistoryItem[]): Promise<RepoContext> {
+  try {
+    return (
+      (await (deps.resolveRepoContext
+        ? deps.resolveRepoContext(msg, history)
+        : resolveRepoContext(msg, history, residentOnboardedProbe(deps.config.config.execution?.resident)))) ?? {}
+    );
+  } catch {
+    return {};
+  }
+}
+
 // ---- config commands --------------------------------------------------------
 // "config show" | "config set channel k=v ..." | "config set me k=v ..."
 // "config clear channel|me" | "help"
@@ -1419,7 +1458,7 @@ function helpText(): string {
     "`friction propose [--dry-run] [--top <n>] [--min-runs <n>]` — file the top patterns as labeled, deduped GitHub issues for a human to triage",
     "",
     "*Memory* (what I've learned across threads; your own records are visible only to you):",
-    "`memory list [me|org] [--limit <n>] [<words>]` — your records and the shared org records, with ids; words filter, `--limit` up to 50",
+    "`memory list [me|org|repo|channel] [--limit <n>] [<words>]` — your records, this repo's / this channel's, and the shared org records, with ids; words filter, `--limit` up to 50",
     "`memory forget <id>` — drop one record (yours freely; shared org records are admin-gated)",
   ].join("\n");
 }

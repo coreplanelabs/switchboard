@@ -86,10 +86,11 @@ export interface MemoryStore {
 
 /** The resources memory is scoped to. `org` is the shared resource every
  *  request reads; `user` is the requesting person's own records (#107 PR B),
- *  read and written only for that person. `repo`/`channel` remain a gap
- *  (features/memory.md). Tighter scope prevents cross-context poisoning
- *  (mirrors Claude's compartmentalization). */
-export type MemoryScope = "org" | "user";
+ *  read and written only for that person; `repo` (the run's bound repository)
+ *  and `channel` (the message's channel) are shared by everyone who runs there
+ *  (#253). Tighter scope prevents cross-context poisoning (mirrors Claude's
+ *  compartmentalization). */
+export type MemoryScope = "org" | "user" | "repo" | "channel";
 
 /** The `memory` config section (all optional; default OFF). */
 export interface MemoryConfig {
