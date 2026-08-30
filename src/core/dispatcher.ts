@@ -663,16 +663,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // landed, distill this run into memory records: fire-and-forget (tracked
     // only for the shutdown drain), so its latency/failures never reach the
     // user; gated on memory.enabled (default off → nothing happens) and on the
-    // run having done real work (tools used, or a long thread). Fast paths
-    // above returned before this point and never reflect. A HARD-stopped run
-    // has no summary to distill (its answer is the abort line), so it is
-    // skipped too; a soft stop wrote a real finale and reflects normally.
+    // run having done real work (tools used, or a long thread) and not being a
+    // `review` run (#292: findings live on the PR; distilling them floods org
+    // memory with per-PR ephemera). Fast paths above returned before this
+    // point and never reflect. A HARD-stopped run has no summary to distill
+    // (its answer is the abort line), so it is skipped too; a soft stop wrote
+    // a real finale and reflects normally.
     if (stopped !== "hard") scheduleReflection({
       cfg: deps.config.config.memory,
       store: deps.memory,
       providers: deps.providers,
       runModelRef: resolved.modelRef,
-      gate: { toolCalls, historyTurns: history.length },
+      gate: { toolCalls, historyTurns: history.length, agentName: resolved.agentName },
       threadKey: msg.threadKey,
       runId: run.id,
       userId: msg.userId,

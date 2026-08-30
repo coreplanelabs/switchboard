@@ -51,12 +51,22 @@ export interface ReflectGateInput {
   toolCalls: number;
   /** Prior turns in the thread (`io.history().length`). */
   historyTurns: number;
+  /** The resolved agent. `review` runs never reflect (#292). Absent → the
+   *  work-based gate alone. */
+  agentName?: string;
 }
 
+/** Agents whose runs are never distilled. A review's findings already land on
+ *  the PR and describe one PR at one moment — distilling them floods the org
+ *  scope with "PR #N approved at <sha>, 1616 tests pass" ephemera (#292). */
+export const NO_REFLECT_AGENTS: ReadonlySet<string> = new Set(["review"]);
+
 /** Only runs that did real work reflect: used a tool, or sit in a thread that
- *  already carries some back-and-forth. Config/deterministic fast-paths never
- *  reach this — they return before the run. */
+ *  already carries some back-and-forth — and never a `review` run, however
+ *  much work it did. Config/deterministic fast-paths never reach this — they
+ *  return before the run. */
 export function shouldReflect(input: ReflectGateInput): boolean {
+  if (input.agentName !== undefined && NO_REFLECT_AGENTS.has(input.agentName)) return false;
   return input.toolCalls > 0 || input.historyTurns >= REFLECT_MIN_TURNS;
 }
 
@@ -66,6 +76,7 @@ export const REFLECTION_SYSTEM = [
   '{"facts":[{"text":"...","keywords":["..."],"confidence":0.0-1.0,"audience":"org"|"user","supersedes":"<existing id, optional>"}],"summary":"..."}',
   `Rules: at most ${MAX_REFLECTION_FACTS} facts. Each fact is ONE self-contained sentence that will still be true and useful in a future, unrelated thread`,
   "(commands, conventions, decisions, preferences, architecture). Ignore ephemeral or one-off details (timestamps, transient errors, chit-chat).",
+  "PR-specific state is ephemeral by definition — PR numbers, commit SHAs, test counts, CI results, review verdicts, \"approved at …\", what a given PR changes — and must never become a fact; only a convention or decision that outlives the PR may.",
   "Never include secrets, tokens, passwords, or keys — omit the fact instead.",
   '`audience` is "user" when the fact is about the requesting person specifically (their preferences, habits, personal conventions, their own setup — write it as "this user …"),',
   'and "org" (the default) when it is shared knowledge about the codebase, tooling, or team. Only the requesting user will ever see "user" facts.',

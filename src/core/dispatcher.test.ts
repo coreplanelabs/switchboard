@@ -2334,6 +2334,28 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     expect(written.every((r) => typeof r.sourceRunId === "string" && r.sourceRunId.length > 0)).toBe(true);
   });
 
+  // Feature: features/memory.md §10 (#292) — a `review` run never reflects: its
+  // findings land on the PR, and distilling them floods org memory with
+  // per-PR ephemera. Other agents keep the work-based gate.
+  it("a `review` run that used tools in a long thread does NOT reflect — no extra model call, nothing written (#292)", async () => {
+    const { provider, requests } = runThenReflect({ toolFirst: true });
+    const store = new InMemoryMemoryStore();
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    await dispatch(deps, msg("agent:review how do we deploy?"), fakeIO(longHistory).io);
+    await drainReflections();
+    expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(0);
+    expect(await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy command", limit: 10 })).toEqual([]);
+  });
+
+  it("a `coding` run that used tools still reflects (#292)", async () => {
+    const { provider, requests } = runThenReflect({ toolFirst: true });
+    const store = new InMemoryMemoryStore();
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    await dispatch(deps, msg("agent:coding how do we deploy?", "slack:UADMIN"), fakeIO().io);
+    await drainReflections();
+    expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(1);
+  });
+
   it("a long toolless thread qualifies too", async () => {
     const { requests, written } = await run(MEMORY_WRITE_YAML, longHistory);
     expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(1);

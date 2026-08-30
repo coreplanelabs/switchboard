@@ -64,6 +64,26 @@ describe("shouldReflect", () => {
     expect(shouldReflect({ toolCalls: 0, historyTurns: REFLECT_MIN_TURNS - 1 })).toBe(false);
     expect(shouldReflect({ toolCalls: 0, historyTurns: 0 })).toBe(false);
   });
+
+  // #292: a review run's output already lands on the PR; distilling it floods
+  // the org scope with per-PR ephemera ("PR #285 approved at c233364 …").
+  it("never qualifies a `review` run, however much work it did (#292)", () => {
+    expect(shouldReflect({ toolCalls: 9, historyTurns: 9, agentName: "review" })).toBe(false);
+  });
+
+  it("other agents (and an unnamed agent) keep the work-based gate (#292)", () => {
+    expect(shouldReflect({ toolCalls: 1, historyTurns: 0, agentName: "coding" })).toBe(true);
+    expect(shouldReflect({ toolCalls: 1, historyTurns: 0, agentName: "general" })).toBe(true);
+    expect(shouldReflect({ toolCalls: 0, historyTurns: 0, agentName: "coding" })).toBe(false);
+  });
+});
+
+describe("REFLECTION_SYSTEM — ephemera (#292)", () => {
+  it("tells the extractor that PR-specific state is ephemeral and must not become facts", () => {
+    expect(REFLECTION_SYSTEM).toMatch(/PR[^\n]*ephemeral|ephemeral[^\n]*PR/i);
+    expect(REFLECTION_SYSTEM).toMatch(/SHA/);
+    expect(REFLECTION_SYSTEM).toMatch(/test counts?/i);
+  });
 });
 
 describe("buildReflectionInput", () => {
