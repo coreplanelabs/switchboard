@@ -305,7 +305,7 @@ function stamp(at: number | undefined): string {
       </details>
 
       <!-- The log's own toolbar: one ghost toggle, right-aligned above the timeline. -->
-      <div class="logbar mb-1.5 flex justify-end pl-[9.5rem] pr-3">
+      <div class="logbar mb-1.5 flex justify-end pl-3 pr-3 sm:pl-[9.5rem]">
         <UButton
           id="fold"
           size="xs"
@@ -325,8 +325,8 @@ function stamp(at: number | undefined): string {
         <li v-if="state.placeholder && !tailVisible" id="placeholder" class="empty text-muted">Waiting for activity…</li>
         <template v-for="item in state.log" :key="item.key">
           <StepBlock v-if="item.kind === 'step'" :step="item" class="mt-5 first:mt-0" @toggle-group="model.toggleGroup(item)" />
-          <li v-else-if="item.kind === 'turn'" class="turn relative mt-5 border-l-2 border-(--ui-border-accented)/50 pb-3 pl-[9.5rem] pt-2">
-            <span v-if="item.turn.at !== undefined" class="ts absolute left-3 top-2.5 select-none text-xs text-dimmed" :title="formatLocalIso(item.turn.at)">{{
+          <li v-else-if="item.kind === 'turn'" class="turn relative mt-5 border-l-2 border-(--ui-border-accented)/50 pb-3 pl-3 pt-2 sm:pl-[9.5rem]">
+            <span v-if="item.turn.at !== undefined" class="ts absolute left-3 top-2.5 hidden select-none text-xs text-dimmed sm:block" :title="formatLocalIso(item.turn.at)">{{
               stamp(item.turn.at)
             }}</span>
             <div class="narration flex items-baseline gap-3 pr-3">

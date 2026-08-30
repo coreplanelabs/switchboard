@@ -47,14 +47,18 @@ function stamp(at: number | undefined): string {
 
 <template>
   <li
-    class="step relative border-l-2 pb-3 pl-[9.5rem] pt-2"
+    class="step relative border-l-2 pb-3 pl-3 pt-2 sm:pl-[9.5rem]"
     :class="step.live ? 'border-ok/40' : 'border-(--ui-border-accented)/50'"
     :data-live="step.live ? '1' : undefined"
   >
-    <!-- The gutter stamp: the short local clock, the full ISO on hover. -->
-    <span v-if="step.at !== undefined" class="ts absolute left-3 top-2.5 select-none text-xs text-dimmed" :title="formatLocalIso(step.at)">{{
-      stamp(step.at)
-    }}</span>
+    <!-- The gutter stamp: the short local clock, the full ISO on hover. The
+         gutter is a wide-screen luxury — on a phone the stamp is hidden. -->
+    <span
+      v-if="step.at !== undefined"
+      class="ts absolute left-3 top-2.5 hidden select-none text-xs text-dimmed sm:block"
+      :title="formatLocalIso(step.at)"
+      >{{ stamp(step.at) }}</span
+    >
 
     <!-- Above the prose: the turn's token facts as a small tight metadata line (item 21). -->
     <div

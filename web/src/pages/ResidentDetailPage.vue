@@ -90,42 +90,42 @@ const lastRestore = computed(() => {
 
     <section class="mt-4 first:mt-0">
       <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Lifecycle</h2>
-      <table class="w-full border-collapse text-[13px]">
+      <table class="w-full border-collapse text-[0.8125rem]">
         <tbody>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">state</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">state</td>
             <td class="px-2 py-1 align-top">
               <StatusDot :tone="residentStateTone(live.state)" :label="live.state" />
               <span class="ml-1.5 font-semibold">{{ live.state }}</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">reason</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">reason</td>
             <td class="break-all px-2 py-1 align-top">
               <span v-if="live.reason">{{ live.reason }}</span><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">last refresh error</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">last refresh error</td>
             <td class="break-all px-2 py-1 align-top">
               <span v-if="str(live.lastRefreshError)">{{ str(live.lastRefreshError) }}</span
               ><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">last restore</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">last restore</td>
             <td class="break-all px-2 py-1 align-top">
               <span v-if="lastRestore">{{ lastRestore }}</span><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">state updated</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">state updated</td>
             <td class="break-all px-2 py-1 align-top">
               <span v-if="str(live.updatedAt)">{{ str(live.updatedAt) }}</span><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">idle since</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">idle since</td>
             <td class="break-all px-2 py-1 align-top">
               <template v-if="str(live.idleSince)">
                 {{ str(live.idleSince) }} <span class="text-xs text-muted">(refresh parked; container may sleep)</span>
@@ -139,21 +139,21 @@ const lastRestore = computed(() => {
 
     <section class="mt-4">
       <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Pinned facts</h2>
-      <table class="w-full border-collapse text-[13px]">
+      <table class="w-full border-collapse text-[0.8125rem]">
         <tbody>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">repository</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">repository</td>
             <td class="break-all px-2 py-1 align-top">
               <a v-if="ghRepo" class="text-primary" :href="ghRepo">{{ ghRepo }}</a>
               <span v-else>{{ str(record.resource) || "—" }}</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">default ref</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">default ref</td>
             <td class="break-all px-2 py-1 align-top">{{ str(live.defaultRef) || str(record.defaultRef) || "—" }}</td>
           </tr>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">pinned sha</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">pinned sha</td>
             <td class="break-all px-2 py-1 align-top">
               <a v-if="ghCommit" class="text-primary" :href="ghCommit">{{ sha }}</a>
               <span v-else-if="sha">{{ sha }}</span>
@@ -161,19 +161,19 @@ const lastRestore = computed(() => {
             </td>
           </tr>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">lockfile hash</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">lockfile hash</td>
             <td class="break-all px-2 py-1 align-top">
               <span v-if="str(live.lockfileHash)">{{ str(live.lockfileHash) }}</span><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">provisioned</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">provisioned</td>
             <td class="break-all px-2 py-1 align-top">
               <span v-if="str(live.provisionedAt)">{{ str(live.provisionedAt) }}</span><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">last refresh</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">last refresh</td>
             <td class="break-all px-2 py-1 align-top">
               <span v-if="str(live.lastRefreshAt)">{{ str(live.lastRefreshAt) }}</span><span v-else class="text-dimmed">—</span>
             </td>
@@ -184,10 +184,10 @@ const lastRestore = computed(() => {
 
     <section class="mt-4">
       <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Snapshot stamp</h2>
-      <table v-if="snapshot" class="w-full border-collapse text-[13px]">
+      <table v-if="snapshot" class="w-full border-collapse text-[0.8125rem]">
         <tbody>
           <tr v-for="k in ['ref', 'sha', 'lockfileHash', 'createdAt', 'mirrorBackupId', 'checkoutBackupId']" :key="k" class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">{{ k }}</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">{{ k }}</td>
             <td class="break-all px-2 py-1 align-top">
               <span v-if="str(snapshot[k])">{{ str(snapshot[k]) }}</span><span v-else class="text-dimmed">—</span>
             </td>
@@ -201,7 +201,8 @@ const lastRestore = computed(() => {
       <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Thread worktrees</h2>
       <template v-if="threads.length > 0">
         <p class="mb-1 text-xs text-muted">{{ liveThreads }} live · {{ threads.length - liveThreads }} evicted</p>
-        <table class="w-full border-collapse text-[13px]">
+        <div class="overflow-x-auto">
+        <table class="w-full border-collapse text-[0.8125rem]">
           <tbody>
             <tr class="text-xs text-muted">
               <td class="px-2 py-1">thread</td>
@@ -234,16 +235,17 @@ const lastRestore = computed(() => {
             </tr>
           </tbody>
         </table>
+        </div>
       </template>
       <p v-else class="text-xs text-muted">no thread worktrees</p>
     </section>
 
     <section class="mt-4">
       <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Pending schedules</h2>
-      <table class="w-full border-collapse text-[13px]">
+      <table class="w-full border-collapse text-[0.8125rem]">
         <tbody>
           <tr v-for="[label, key] in [['refresh', 'refresh'], ['provision run', 'provisionRun'], ['provision deadline', 'provisionDeadline']]" :key="key" class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">{{ label }}</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">{{ label }}</td>
             <td class="px-2 py-1 align-top">{{ str(schedules[key] ?? 0) || "0" }}</td>
           </tr>
         </tbody>
@@ -252,10 +254,10 @@ const lastRestore = computed(() => {
 
     <section class="mt-4">
       <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Command table</h2>
-      <table v-if="commands.length > 0" class="w-full border-collapse text-[13px]">
+      <table v-if="commands.length > 0" class="w-full border-collapse text-[0.8125rem]">
         <tbody>
           <tr v-for="c in commands" :key="c.name" class="border-t border-muted">
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">{{ c.name }}</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">{{ c.name }}</td>
             <td class="break-all px-2 py-1 align-top">
               <code>{{ c.command }}</code> <span class="text-xs text-muted">{{ c.effect }}</span>
             </td>
@@ -267,7 +269,7 @@ const lastRestore = computed(() => {
 
     <section class="mt-4">
       <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Registry settings</h2>
-      <table class="w-full border-collapse text-[13px]">
+      <table class="w-full border-collapse text-[0.8125rem]">
         <tbody>
           <tr
             v-for="[label, value] in [
@@ -280,7 +282,7 @@ const lastRestore = computed(() => {
             :key="label"
             class="border-t border-muted"
           >
-            <td class="w-48 whitespace-nowrap px-2 py-1 align-top text-muted">{{ label }}</td>
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">{{ label }}</td>
             <td class="break-all px-2 py-1 align-top">
               <span v-if="value">{{ value }}</span><span v-else class="text-dimmed">—</span>
             </td>

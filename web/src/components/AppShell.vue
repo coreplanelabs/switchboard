@@ -11,7 +11,7 @@ defineProps<{ title: string; nav: NavSection }>();
 </script>
 
 <template>
-  <div class="mx-auto max-w-[80rem] px-5 pb-16 pt-4">
+  <div class="mx-auto max-w-[80rem] px-3 pb-16 pt-4 sm:px-5">
     <header class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-default pb-3">
       <slot name="leading" />
       <h1 class="text-base font-semibold text-highlighted">{{ title }}</h1>

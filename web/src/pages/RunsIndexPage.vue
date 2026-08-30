@@ -157,8 +157,8 @@ onUnmounted(() => {
         role="separator"
       >
         <span aria-hidden="true" class="text-sm tracking-normal">⏳</span>
-        <span>Leaving within a day</span>
-        <span class="normal-case tracking-normal text-dimmed">— each row says when it is removed</span>
+        <span class="whitespace-nowrap">Leaving within a day</span>
+        <span class="normal-case tracking-normal text-dimmed max-sm:hidden">— each row says when it is removed</span>
       </li>
       <RunRow v-for="run in afterDivider" :key="run.id" :run="run" :now="now" :retention-ms="retentionMs" />
       <li v-if="ordered.length === 0" id="empty" class="empty px-2 py-2 text-muted">{{ showAll ? "No runs." : "No active runs." }}</li>

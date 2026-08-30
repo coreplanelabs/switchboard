@@ -66,7 +66,19 @@
 }
 
 @layer base {
+  /* ONE scaling knob: phones render ~10% larger. Every font size and spacing
+   * utility in the app is rem-based, so text AND whitespace scale together —
+   * no per-component mobile sizing. (Media queries resolve rem against the
+   * browser's initial size, so the breakpoints themselves do not move.) */
+  html {
+    font-size: 17.5px;
+  }
+  @media (min-width: 640px) {
+    html {
+      font-size: 16px;
+    }
+  }
   body {
-    @apply bg-default text-default font-mono text-[13px] leading-normal antialiased;
+    @apply bg-default text-default font-mono text-[0.8125rem] leading-normal antialiased;
   }
 }

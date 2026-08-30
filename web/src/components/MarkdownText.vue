@@ -28,6 +28,6 @@ watch(() => props.text, render);
 <template>
   <div
     ref="root"
-    class="md prose prose-sm dark:prose-invert min-w-0 max-w-none flex-1 whitespace-pre-wrap break-words font-sans text-[15px] leading-relaxed [&_li]:whitespace-pre-wrap [&_ol]:whitespace-normal [&_pre]:whitespace-pre [&_table]:whitespace-normal [&_ul]:whitespace-normal"
+    class="md prose prose-sm dark:prose-invert min-w-0 max-w-none flex-1 whitespace-pre-wrap break-words font-sans text-[0.9375rem] leading-relaxed [&_li]:whitespace-pre-wrap [&_ol]:whitespace-normal [&_pre]:whitespace-pre [&_table]:whitespace-normal [&_ul]:whitespace-normal"
   />
 </template>

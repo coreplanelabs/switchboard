@@ -22,8 +22,10 @@ function toggle(): void {
     :title="typeof call.startedAt === 'number' ? `started ${formatLocalIso(call.startedAt)}` : undefined"
     :data-status="call.status"
   >
+    <!-- Open on a phone, the full command takes its own line under the glyph
+         row (an inline pre-wrap column would wrap character by character). -->
     <summary
-      class="flex min-w-0 cursor-pointer list-none items-baseline gap-3 rounded-md px-3 py-2 hover:bg-accented/60 focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
+      class="flex min-w-0 cursor-pointer list-none items-baseline gap-3 rounded-md px-3 py-2 hover:bg-accented/60 focus-visible:outline-2 focus-visible:outline-primary max-sm:flex-wrap [&::-webkit-details-marker]:hidden"
       :class="call.open ? 'rounded-b-none border-b border-default' : ''"
       @click.prevent="toggle"
     >
@@ -44,7 +46,7 @@ function toggle(): void {
       <template v-if="!call.chipOnly">
         <!-- Collapsed: the command's first line only (ellipsized); open: all of it. -->
         <code v-if="!call.open" class="cmd brief min-w-0 flex-1 truncate text-info">{{ call.headline }}</code>
-        <code v-else class="cmd full min-w-0 flex-1 whitespace-pre-wrap break-words text-info">{{ call.title }}</code>
+        <code v-else class="cmd full min-w-0 flex-1 whitespace-pre-wrap break-words text-info max-sm:order-last max-sm:basis-full">{{ call.title }}</code>
       </template>
       <span v-else class="cmd min-w-0 flex-1" />
       <span class="facts ml-auto flex shrink-0 gap-2.5 text-xs tabular-nums text-muted">

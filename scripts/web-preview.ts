@@ -210,12 +210,25 @@ createServer((req, res) => {
     res.end();
     return;
   }
+  // Phone-viewport harness (preview only): fixed-width iframes so responsive
+  // layouts can be screenshotted regardless of the browser window/zoom.
+  if (url.pathname === "/preview") {
+    const w = Number(url.searchParams.get("w") ?? 390);
+    const pages = (url.searchParams.get("pages") ?? "/runs?all=1,/runs/hist-1").split(",");
+    const frames = pages.map((p) => `<iframe src="${p.replace(/"/g, "")}" style="width:${w}px;height:800px;border:1px solid #666;margin:8px;vertical-align:top;background:#0b0d12"></iframe>`).join("");
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><body style="background:#333;margin:0">${frames}</body></html>`);
+    return;
+  }
   const p = page(url.pathname, url.searchParams.get("all") === "1");
   if (!p) {
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not a preview route");
     return;
   }
-  res.writeHead(p.status ?? 200, WEB_HTML_HEADERS);
+  // Preview-only: framing allowed so a fixed-width <iframe> can emulate a
+  // phone viewport for screenshots. Production keeps frame-ancestors 'none'.
+  const { "x-frame-options": _xfo, ...headers } = WEB_HTML_HEADERS;
+  res.writeHead(p.status ?? 200, { ...headers, "content-security-policy": headers["content-security-policy"].replace("frame-ancestors 'none'", "frame-ancestors 'self'") });
   res.end(shell(p.title, p.seed));
 }).listen(PORT, () => console.log(`web preview on http://localhost:${PORT}/runs (fixtures only, no bot)`));
