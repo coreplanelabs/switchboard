@@ -72,6 +72,8 @@ describe("RunPage — history mode", () => {
     expect(w.find("#answer").text()).toContain("gave up");
     expect(w.find("#actions").exists()).toBe(false);
     expect(w.find("h1").text()).toBe("Run");
+    // the way back to the token-less, Access-gated index — never with a token
+    expect(w.find("a.back").attributes("href")).toBe("/runs");
   });
 
   it("heads with the outcome chip + duration (item 22): ✓ for success, red failed/killed, amber stopped early, grey ended for a status-less record", () => {
