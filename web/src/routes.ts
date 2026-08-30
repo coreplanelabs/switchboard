@@ -9,7 +9,9 @@ import type { RouteRecordRaw } from "vue-router";
 export const routes: RouteRecordRaw[] = [
   { path: "/runs", component: () => import("./pages/RunsIndexPage.vue") },
   { path: "/runs/scheduled", component: () => import("./pages/ScheduledPage.vue") },
-  { path: "/runs/:id", component: () => import("./pages/RunPage.vue") },
+  // The seed decides between the run page and the non-revealing 404 (the
+  // server serves both from this path — see RunRoutePage).
+  { path: "/runs/:id", component: () => import("./pages/RunRoutePage.vue") },
   { path: "/residents", component: () => import("./pages/ResidentsIndexPage.vue") },
   {
     path: "/residents/:owner/:name",

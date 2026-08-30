@@ -36,4 +36,9 @@ describe("AppShell", () => {
     expect(wrapper.find("nav.site").exists()).toBe(true);
     expect(wrapper.find("#body").text()).toBe("hello");
   });
+
+  it("offers the phone hamburger (nav + theme in one touch menu) beside the sm+ inline nav", () => {
+    const wrapper = mountApp(AppShell, { props: { title: "Live runs", nav: "runs" } });
+    expect(wrapper.find('button[aria-label="Menu"]').exists()).toBe(true);
+  });
 });
