@@ -28,6 +28,7 @@ import { createRunsService } from "./core/runsService.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
+import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { activeRunCount, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
 import { buildScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
@@ -352,7 +353,7 @@ async function main() {
       // preflight refuses on (features/slack-channel.md item 8).
       if (path === "/healthz") {
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining, drainStartedAt, catchUp: getCatchUpStatus(), build, startedAt: PROCESS_STARTED_AT })));
+        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining, drainStartedAt, catchUp: getCatchUpStatus(), slack: getSocketStatus(), build, startedAt: PROCESS_STARTED_AT })));
         return;
       }
       // Unknown paths. The live-view handler only ever owns /runs*, which the

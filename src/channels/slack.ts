@@ -8,6 +8,7 @@ import { SlackFormatter } from "./slackFormatter.js";
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 import { ACK_EMOJI, botRepliedAfter, catchUpMissedMentions, fetchReplies, type CatchUpClient, type SlackHistoryMessage } from "./slackCatchUp.js";
 import { missingBotScopes, recordCatchUpOutcome, recordMissingScopes } from "./slackCatchUpStatus.js";
+import { recordSocketConnected, recordSocketDisconnected } from "./slackSocketStatus.js";
 export { classifyMessage, threadIncludesBot, type MessageDecision } from "./slackTriggers.js";
 import type {
   ChannelIO,
@@ -243,7 +244,12 @@ export function createSlackApp(deps: CoreDeps) {
     // full-length deploy blackout (#272). Warn, keep the operator's value.
     const windowWarning = catchUpWindowWarning(catchUp?.windowMinutes);
     if (windowWarning) console.warn(`[catch-up] ${windowWarning}`);
+    // Socket-state record for /healthz: connected/disconnected transitions, so
+    // the cold-start window (HTTP up, Slack not yet connected) and a silently
+    // dead socket are both visible off-box (slackSocketStatus.ts).
+    receiver.client.on("disconnected", () => recordSocketDisconnected());
     receiver.client.on("connected", () => {
+      recordSocketConnected();
       void (async () => {
         // `botUserId` is retried on EVERY connect until it resolves (an
         // auth.test that answers without user_id must not no-op the catch-up
