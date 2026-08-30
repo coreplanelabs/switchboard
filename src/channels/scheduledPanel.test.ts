@@ -25,7 +25,7 @@ describe("buildScheduledRows", () => {
     const [keepAlive, si] = rows;
     expect(keepAlive).toMatchObject({ kind: "keep-alive", cron: "* * * * *", nextFireAt: Date.UTC(2026, 7, 29, 12, 35) });
     expect(keepAlive.command).toBeUndefined();
-    expect(si).toMatchObject({ kind: "run", cron: "0 14 * * 1", command: "friction propose", identity: "cron", nextFireAt: Date.UTC(2026, 7, 31, 14, 0) });
+    expect(si).toMatchObject({ kind: "run", cron: "0 * * * *", command: "friction propose", identity: "cron", nextFireAt: Date.UTC(2026, 7, 29, 13, 0) });
     expect(si.last).toBeUndefined();
   });
 
@@ -78,8 +78,8 @@ describe("renderScheduledPanel", () => {
     expect(html).toContain('<tr data-schedule="self-improvement">');
     expect(html).toContain("<code>friction propose</code>");
     expect(html).toContain("<code>cron</code>");
-    expect(html).toContain("2026-08-31 14:00 UTC");
-    expect(html).toContain("(in 2d 1h)");
+    expect(html).toContain("2026-08-29 13:00 UTC");
+    expect(html).toContain("(in 25m)");
     expect(html).toContain("2026-08-24 14:00 UTC");
     expect(html).toContain('<span class="outcome ok">completed</span>');
     expect(html).toContain('<a href="/runs/run-abc12345">run run-abc1</a>');

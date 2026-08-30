@@ -64,7 +64,7 @@ describe("schedule registry", () => {
   it("the keep-alive is NOT a run; the self-improvement pass runs `friction propose` as the cron identity", () => {
     const keepAlive = scheduleForCron("* * * * *");
     expect(keepAlive?.kind).toBe("keep-alive");
-    expect(selfImprovement).toMatchObject({ kind: "run", cron: "0 14 * * 1", command: "friction propose", identity: CRON_IDENTITY });
+    expect(selfImprovement).toMatchObject({ kind: "run", cron: "0 * * * *", command: "friction propose", identity: CRON_IDENTITY });
   });
 
   it("scheduleForCron: unknown expression → undefined (the shim logs and does nothing)", () => {

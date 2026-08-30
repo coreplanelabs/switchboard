@@ -50,7 +50,7 @@ export const SCHEDULES: readonly ScheduleDef[] = [
   },
   {
     name: "self-improvement",
-    cron: "0 14 * * 1",
+    cron: "0 * * * *", // TEMPORARY e2e firing receipt for #264 — revert to "0 14 * * 1"
     kind: "run",
     description: "Weekly self-improvement pass (#84): cluster the friction ledger and file deduped `self-improvement` issues. Proposals only.",
     command: "friction propose",
