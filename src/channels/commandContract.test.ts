@@ -1,27 +1,35 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
-import { CommandRegistry, bindCommands, type Caller, type CommandInvoker } from "../core/commandRegistry.js";
-import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
+import { ConfigStore } from "../config.js";
+import { CLI_CALLER, parseCliArgv, runCommand } from "../cli.js";
+import { handleChatCommand, parseChatCommand } from "../core/commandChat.js";
+import { renderText, type Caller, type CommandDef, type CommandInvoker } from "../core/commandRegistry.js";
+import { buildCoreCommands } from "../core/commandCatalogue.js";
+import { camelToKebab, cliFlag, httpPath, jsonSchemaFor, mcpToolName, toSurfaceNames } from "../core/commandSurface.js";
 import type { CoreDeps } from "../core/dispatcher.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { RunStoreFrictionLedger } from "../core/frictionLedger.js";
-import type { ResidentAdminClient } from "../core/repoCommands.js";
+import type { ResidentAdminClient } from "../core/residentAdmin.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunRecord } from "../core/runRecord.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { createRunsService } from "../core/runsService.js";
-import { CLI_CALLER, parseCommandArgs, runCommand } from "../commandCli.js";
 import { createCommandHttpHandler } from "./commandHttp.js";
 import { handleMcpRequest } from "./mcp.js";
 
 // Feature: features/command-registry.md — the SHARED ADAPTER CONTRACT (AE3,
-// R7/R10). One fixture (a live run with a `tok-` capability token and a
+// R7/R10, KTD21). One fixture (a live run with a `tok-` capability token and a
 // persisted run, the friction ledger served from the same store, and a resident
 // registry stub) is driven through every adapter; each row must hand back the
-// exact JSON object `invoke` produced, and no surface may leak a token. Rows
-// are table-driven so the chat adapter (U13) adds one row, not one test file.
+// exact JSON object `invoke` produced, and no surface may leak a token. Every
+// row receives the SAME by-name input and spells it the way its surface does —
+// kebab-case query keys (HTTP GET), camelCase JSON (MCP), `--kebab` flags with
+// positionals (CLI argv and chat text) — all derived from the definition.
 
 const NOW = 1_700_000_000_000;
 
@@ -38,6 +46,19 @@ const residentAdmin: ResidentAdminClient = {
   rebuild: async () => ({ status: 500, data: {} }),
   residents: async () => ({ status: 200, data: RESIDENTS }),
 };
+
+const CONFIG_YAML = `
+providers:
+  anthropic:
+    type: anthropic
+    apiKeyEnv: ANTHROPIC_API_KEY
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+permissions:
+  admins: ["slack:UADMIN"]
+`;
 
 function record(id: string, finishedAt: number): RunRecord {
   const events: RunEvent[] = [
@@ -74,17 +95,29 @@ async function fixture() {
   const store = new InMemoryRunStore({ now: () => NOW });
   await store.put(record("fin-1", NOW - 1000));
   await store.put(record("fin-2", NOW - 2000)); // a second run so the lockfile friction RECURS (≥2 distinct runs)
-  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
-  registerCoreCommands(registry);
-  const commands = bindCommands(registry, {
+  const dir = mkdtempSync(join(tmpdir(), "swb-contract-"));
+  writeFileSync(join(dir, "config.yaml"), CONFIG_YAML);
+  const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"));
+  // The ONE catalogue every real process binds (`buildCoreCommands`), over this fixture's stores.
+  const commands = buildCoreCommands(config, store, {
+    registry: reg,
+    env: {},
+    dataDir: dir,
+    warn: () => {},
+    audit: () => {},
     runs: createRunsService({ registry: reg, store }),
-    friction: { ledger: new RunStoreFrictionLedger(store), tracker: new InMemoryIssueTracker(), config: () => undefined },
-    repo: { admin: () => residentAdmin },
+    frictionLedger: new RunStoreFrictionLedger(store),
+    tracker: new InMemoryIssueTracker(),
+    residentAdmin: () => residentAdmin,
+    now: () => NOW,
   });
-  return { commands, liveId: live.id, liveToken: live.token, persistedIds: ["fin-1", "fin-2"] };
+  return { commands, config, liveId: live.id, liveToken: live.token, persistedIds: ["fin-1", "fin-2"] };
 }
 
 // ---- one row per adapter -----------------------------------------------------
+
+/** A by-name input, as every surface addresses it: declared argument names and camelCase option keys. */
+type Named = Record<string, string>;
 
 /** What every adapter row must produce for a command: the JSON object it handed
  *  back to its caller (parsed out of its own wire format) and the full wire
@@ -99,7 +132,27 @@ interface AdapterRow {
   /** The Caller the adapter is expected to resolve — `invoke` is called with it
    *  directly to produce the reference object. */
   caller: Caller;
-  call(commands: CommandInvoker, id: string, input: Record<string, string>): Promise<SurfaceResult>;
+  call(f: Awaited<ReturnType<typeof fixture>>, id: string, named: Named): Promise<SurfaceResult>;
+}
+
+/** The registry's `{ args, options }` for a by-name input — what the reference `invoke` receives. */
+function inputFor(cmd: CommandDef<unknown>, named: Named) {
+  const argNames = new Set((cmd.args ?? []).map((a) => a.name));
+  return {
+    args: (cmd.args ?? []).map((a) => named[a.name]),
+    options: Object.fromEntries(Object.entries(named).filter(([k]) => !argNames.has(k))),
+  };
+}
+
+/** The CLI/chat spelling of a by-name input: positionals in declared order, then `--kebab value`. */
+function wordsFor(cmd: CommandDef<unknown>, named: Named): string[] {
+  const argNames = new Set((cmd.args ?? []).map((a) => a.name));
+  return [
+    ...(cmd.args ?? []).flatMap((a) => (named[a.name] === undefined ? [] : [named[a.name]])),
+    ...Object.entries(named)
+      .filter(([k]) => !argNames.has(k))
+      .flatMap(([k, v]) => [cliFlag(k), v]),
+  ];
 }
 
 function fakeReqRes(method: string, url: string, headers: IncomingHttpHeaders = {}) {
@@ -126,11 +179,13 @@ function fakeReqRes(method: string, url: string, headers: IncomingHttpHeaders = 
 const httpRow: AdapterRow = {
   name: "http",
   caller: { kind: "access", id: "access:user-1", scopes: new Set() },
-  async call(commands, id, input) {
-    const handler = createCommandHttpHandler(commands, { operatorIdentities: () => [], serviceTokenScopes: () => [], devBypassActive: false });
-    const t = fakeReqRes("GET", `/api/${id}?${new URLSearchParams(input).toString()}`);
+  async call(f, id, named) {
+    const handler = createCommandHttpHandler(f.commands, { operatorIdentities: () => [], serviceTokenScopes: () => [], devBypassActive: false });
+    // A query string spells option keys in kebab-case (`?since-ms=…`); argument names are what they are.
+    const query = new URLSearchParams(Object.entries(named).map(([k, v]) => [camelToKebab(k), v]));
+    const t = fakeReqRes("GET", `${httpPath(id)}?${query.toString()}`);
     await handler(t.req, t.res, { sub: "user-1" });
-    expect(t.status()).toBe(200);
+    expect(t.status(), t.text()).toBe(200);
     return { json: JSON.parse(t.text()), wire: t.text() };
   },
 };
@@ -140,32 +195,31 @@ const MCP_SCOPES = ["runs:read", "friction:read", "repo:read"];
 const mcpRow: AdapterRow = {
   name: "mcp",
   caller: { kind: "mcp", id: "mcp:alice", scopes: new Set(MCP_SCOPES) },
-  async call(commands, id, input) {
+  async call(f, id, named) {
     const res = await handleMcpRequest(
       {
         method: "POST",
         headers: { authorization: "Bearer tok" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: id.replace(".", "_"), arguments: input } }),
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: mcpToolName(id), arguments: named } }),
       },
       {} as CoreDeps,
-      { auth: { tokens: { tok: { subject: "alice", scopes: MCP_SCOPES } } }, commands },
+      { auth: { tokens: { tok: { subject: "alice", scopes: MCP_SCOPES } } }, commands: f.commands },
     );
-    const wire = JSON.stringify(res.body);
-    const body = res.body as { result?: { content: { text: string }[] } };
-    expect(body.result, wire).toBeTruthy();
+    const body = res.body as { result?: { content: { text: string }[] }; error?: unknown };
+    expect(body.error, JSON.stringify(body)).toBeUndefined();
     const text = body.result!.content[0].text;
-    return { json: JSON.parse(text.slice(text.indexOf("\n") + 1)), wire };
+    return { json: JSON.parse(text.slice(text.indexOf("\n") + 1)), wire: JSON.stringify(res.body) };
   },
 };
 
 const cliRow: AdapterRow = {
   name: "cli",
   caller: CLI_CALLER,
-  async call(commands, id, input) {
-    const [group, verb] = id.split(".");
-    const parsed = parseCommandArgs([group, verb, ...Object.entries(input).map(([k, v]) => `--${k}=${v}`), "--json"]);
-    if (!parsed.ok) throw new Error(parsed.error);
-    const out = await runCommand(commands, parsed, CLI_CALLER);
+  async call(f, id, named) {
+    const cmd = f.commands.get(id)!;
+    const parsed = parseCliArgv([...toSurfaceNames(id).cli, ...wordsFor(cmd, named), "--json"], f.commands);
+    if (parsed.kind !== "command") throw new Error(JSON.stringify(parsed));
+    const out = await runCommand(f.commands, parsed, CLI_CALLER);
     expect(out.exitCode, out.stderr).toBe(0);
     return { json: JSON.parse(out.stdout), wire: out.stdout + out.stderr };
   },
@@ -178,9 +232,9 @@ const rows: AdapterRow[] = [httpRow, mcpRow, cliRow];
 describe.each(rows)("adapter contract — $name", (row) => {
   it("runs.list {status:'all'} hands back the exact invoke JSON: both runs once, no token", async () => {
     const f = await fixture();
-    const reference = await f.commands.invoke("runs.list", { status: "all" }, row.caller);
+    const reference = await f.commands.invoke("runs.list", inputFor(f.commands.get("runs.list")!, { status: "all" }), row.caller);
     expect(reference.ok).toBe(true);
-    const got = await row.call(f.commands, "runs.list", { status: "all" });
+    const got = await row.call(f, "runs.list", { status: "all" });
     expect(got.json).toEqual(reference.ok ? reference.value : null);
     const ids = (got.json as { runs: { id: string }[] }).runs.map((r) => r.id);
     expect(ids.sort()).toEqual([...f.persistedIds, f.liveId].sort());
@@ -188,29 +242,41 @@ describe.each(rows)("adapter contract — $name", (row) => {
     expect(got.wire).not.toContain(f.liveToken);
   });
 
-  it("runs.get {id} for the live and the persisted run hands back the exact invoke JSON, no token", async () => {
+  it("runs.get <id> for the live and the persisted run hands back the exact invoke JSON, no token", async () => {
     const f = await fixture();
     for (const id of [f.liveId, f.persistedIds[0]]) {
-      const reference = await f.commands.invoke("runs.get", { id }, row.caller);
+      const reference = await f.commands.invoke("runs.get", inputFor(f.commands.get("runs.get")!, { id }), row.caller);
       expect(reference.ok, id).toBe(true);
-      const got = await row.call(f.commands, "runs.get", { id });
+      const got = await row.call(f, "runs.get", { id });
       expect(got.json, id).toEqual(reference.ok ? reference.value : null);
       expect(got.wire).not.toContain("tok-");
     }
   });
+
+  it("runs.events <id> --after-seq 1 --limit 2: a positional argument plus two kebab↔camel options bind identically on every surface", async () => {
+    const f = await fixture();
+    const named = { id: f.persistedIds[0], afterSeq: "1", limit: "2" };
+    const reference = await f.commands.invoke("runs.events", inputFor(f.commands.get("runs.events")!, named), row.caller);
+    expect(reference.ok, JSON.stringify(reference)).toBe(true);
+    const got = await row.call(f, "runs.events", named);
+    expect(got.json).toEqual(reference.ok ? reference.value : null);
+    const page = got.json as { events: { seq: number }[] };
+    expect(page.events.map((e) => e.seq)).toEqual([2, 3]);
+    expect(got.wire).not.toContain("tok-");
+  });
 });
 
 // Red-verified: adding `token: s.token` to `liveView()` in runsService.ts fails
-// all six rows above on the `tok-` scan.
+// the rows above on the `tok-` scan.
 
 // ---- migrated chat commands (U9, R13) ----------------------------------------
 
 describe.each(rows)("adapter contract for migrated commands — $name", (row) => {
-  it("friction.report {limit:5} hands back the exact invoke JSON: the recurring lockfile pattern over the two persisted runs, no token", async () => {
+  it("friction.report --limit 5 hands back the exact invoke JSON: the recurring lockfile pattern over the two persisted runs, no token", async () => {
     const f = await fixture();
-    const reference = await f.commands.invoke("friction.report", { limit: 5 }, row.caller);
+    const reference = await f.commands.invoke("friction.report", { options: { limit: 5 } }, row.caller);
     expect(reference.ok, JSON.stringify(reference)).toBe(true);
-    const got = await row.call(f.commands, "friction.report", { limit: "5" });
+    const got = await row.call(f, "friction.report", { limit: "5" });
     expect(got.json).toEqual(reference.ok ? reference.value : null);
     const report = got.json as { runsAnalyzed: number; patterns: { key: string; runIds: string[] }[] };
     expect(report.runsAnalyzed).toBe(2);
@@ -220,14 +286,115 @@ describe.each(rows)("adapter contract for migrated commands — $name", (row) =>
     expect(got.wire).not.toContain(f.liveToken);
   });
 
-  it("repo.list {} hands back the resident registry body exactly as invoke returned it", async () => {
+  it("repo.list hands back the resident registry body exactly as invoke returned it", async () => {
     const f = await fixture();
     const reference = await f.commands.invoke("repo.list", {}, row.caller);
     expect(reference.ok).toBe(true);
-    const got = await row.call(f.commands, "repo.list", {});
+    const got = await row.call(f, "repo.list", {});
     expect(got.json).toEqual(reference.ok ? reference.value : null);
     expect(got.json).toEqual(RESIDENTS);
     expect(got.wire).not.toContain("tok-");
+  });
+});
+
+// ---- the chat row ------------------------------------------------------------
+
+describe("adapter contract — chat", () => {
+  const caller = (config: ConfigStore, userId: string): Caller => ({ kind: "chat", id: userId, scopes: new Set(), chatGate: config.chatGateFor(userId) });
+
+  it("`runs list --status all` renders renderText(invoke JSON) for the same caller; no token anywhere", async () => {
+    const f = await fixture();
+    const parsed = parseChatCommand("runs list --status all", f.commands);
+    expect(parsed).toEqual({ kind: "invoke", id: "runs.list", input: { args: [], options: { status: "all" } } });
+    const direct = await f.commands.invoke("runs.list", { options: { status: "all" } }, caller(f.config, "slack:UADMIN"));
+    expect(direct.ok).toBe(true);
+    if (!direct.ok) throw new Error("unreachable");
+    const reply = await handleChatCommand({ commands: f.commands, parsed: parsed!, msg: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:t" }, config: f.config, now: NOW });
+    expect(reply).toBe(renderText(f.commands.get("runs.list")!, direct.value, { now: NOW }));
+    expect(reply.split("\n")).toHaveLength(3);
+    expect(reply).not.toContain("tok-");
+    expect(JSON.stringify(direct.value)).not.toContain("tok-");
+  });
+
+  it("`friction report --limit 5` and `repo list` reply with the command's own render of the same JSON the machine rows saw", async () => {
+    const f = await fixture();
+    for (const [text, id, named] of [
+      ["friction report --limit 5", "friction.report", { limit: "5" }],
+      ["repo list", "repo.list", {}],
+    ] as const) {
+      const parsed = parseChatCommand(text, f.commands)!;
+      expect(parsed.kind).toBe("invoke");
+      const direct = await f.commands.invoke(id, inputFor(f.commands.get(id)!, named), caller(f.config, "slack:UX"));
+      expect(direct.ok, id).toBe(true);
+      const reply = await handleChatCommand({ commands: f.commands, parsed, msg: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:t" }, config: f.config });
+      expect(reply).toBe(renderText(f.commands.get(id)!, direct.ok ? direct.value : null));
+      expect(reply).not.toContain("tok-");
+    }
+  });
+
+  it("error mapping mirrors invoke: unauthorized → restricted line; invalid input → option line without the value", async () => {
+    const f = await fixture();
+    const parsed = parseChatCommand("runs list --status bogus", f.commands)!;
+    expect(await handleChatCommand({ commands: f.commands, parsed, msg: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:t" }, config: f.config })).toBe("🚫 `runs list` is restricted. Ask <@slack:UADMIN>.");
+    const admin = await handleChatCommand({ commands: f.commands, parsed, msg: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:t" }, config: f.config });
+    expect(admin).toBe('⚠️ `runs list`: status: expected one of "active", "finished", "all"');
+    expect(admin).not.toContain("bogus");
+  });
+});
+
+// ---- naming: one definition, four spellings ---------------------------------------
+
+describe("derived naming across surfaces (KTD2/KTD21)", () => {
+  it("every registered option key is camelCase in TypeScript/MCP/JSON and kebab-case on the CLI/chat; every id is snake_case as an MCP tool and /api/<id> over HTTP", async () => {
+    const f = await fixture();
+    const seen: Record<string, string> = {};
+    for (const cmd of f.commands.list()) {
+      expect(mcpToolName(cmd.id)).toBe(cmd.id.replace(".", "_"));
+      expect(httpPath(cmd.id)).toBe(`/api/${cmd.id}`);
+      const schema = jsonSchemaFor(cmd) as { properties: Record<string, unknown> };
+      for (const key of Object.keys(cmd.options?.shape ?? {})) {
+        expect(key, `${cmd.id} option ${key}`).toMatch(/^[a-z][A-Za-z0-9]*$/);
+        expect(schema.properties, `${cmd.id} MCP schema has ${key}`).toHaveProperty(key);
+        seen[key] = cliFlag(key);
+      }
+      for (const arg of cmd.args ?? []) expect(schema.properties, `${cmd.id} MCP schema has argument ${arg.name}`).toHaveProperty(arg.name);
+    }
+    expect(seen).toMatchObject({ sinceMs: "--since-ms", beforeId: "--before-id", afterSeq: "--after-seq", minRuns: "--min-runs", dryRun: "--dry-run", limit: "--limit", mode: "--mode" });
+  });
+
+  it("the migrated forms read as specified: runs get <id> [--include], runs events <id> [--after-seq] [--limit], runs stop <id> --mode, friction propose [--dry-run] …", async () => {
+    const f = await fixture();
+    const { usageLine } = await import("../core/commandSurface.js");
+    const byId = Object.fromEntries(f.commands.list().map((c) => [c.id, usageLine(c)]));
+    expect(byId["runs.get"]).toBe("runs get <id> [--include <messages>]");
+    expect(byId["runs.events"]).toBe("runs events <id> [--after-seq <integer>] [--limit <integer>]");
+    expect(byId["runs.friction"]).toBe("runs friction <id>");
+    expect(byId["runs.stop"]).toBe("runs stop <id> --mode <soft|hard>");
+    expect(byId["runs.list"]).toBe("runs list --status <active|finished|all> [--agent <string>] [--channel <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]");
+    expect(byId["friction.report"]).toBe("friction report [--since-ms <integer>] [--limit <integer>] [--min-runs <integer>]");
+    expect(byId["friction.propose"]).toBe("friction propose [--dry-run] [--top <integer>] [--min-runs <integer>] [--repo <string>]");
+    // Phase 4b: every remaining command, derived from its typed definition.
+    expect(byId["help.show"]).toBe("help show");
+    expect(byId["config.show"]).toBe("config show [--channel <string>]");
+    expect(byId["config.set"]).toBe("config set <scope> [--agent <string>] [--model <string>] [--models <object>] [--effort <low|medium|high|xhigh|max>] [--efforts <object>] [--channel <string>]");
+    expect(byId["config.clear"]).toBe("config clear <scope> [--channel <string>]");
+    expect(byId["config.instructions"]).toBe("config instructions <scope> [text…] [--channel <string>]");
+    expect(byId["memory.list"]).toBe("memory list [query…] [--scope <me|org|repo|channel|all>] [--limit <integer>] [--repo <string>]");
+    expect(byId["memory.forget"]).toBe("memory forget <id>");
+    expect(byId["repo.onboard"]).toBe("repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--evict-coldest]");
+    expect(byId["repo.offboard"]).toBe("repo offboard <slug> [--dry-run]");
+    expect(byId["repo.reconfigure"]).toBe("repo reconfigure <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>]");
+    expect(byId["repo.rebuild"]).toBe("repo rebuild <slug> [--dry-run]");
+    expect(byId["repo.test"]).toBe("repo test <slug> [ref]");
+    expect(byId["repo.build"]).toBe("repo build <slug> [ref]");
+    expect(byId["schedule.list"]).toBe("schedule list");
+    expect(byId["friction.analyze"]).toBe("friction analyze [source] [--slow-ms <number>] [--in-progress]");
+    expect(byId["deploy.plan"]).toBe("deploy plan [--only <string>] [--skip <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]");
+    expect(byId["deploy.all"]).toBe(byId["deploy.plan"].replace("deploy plan", "deploy all"));
+    expect(byId["env.bootstrap"]).toBe("env bootstrap --env <string> --service <string> [--apply] [--out <string>] [--manifest <string>]");
+    // CLI-only commands never reach chat, MCP, or HTTP.
+    for (const id of ["deploy.all", "env.bootstrap", "friction.analyze"]) expect(f.commands.get(id)!.surfaces, id).toEqual({ chat: false, mcp: false, http: false });
+    expect(byId["repo.list"]).toBe("repo list");
   });
 });
 

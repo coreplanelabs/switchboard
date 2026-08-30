@@ -1,10 +1,10 @@
-import { parseRepoCommand, parseSlug, validRef, type RepoCommand } from "./repoCommands.js";
 import { repoFromThread } from "./repoContext.js";
+import { parseSlug, validRef } from "./residentAdmin.js";
 
-// Deterministic operations (U6, KTD8): the seam behind the dispatcher's
-// modelless fast-path. The 3-method Executor cannot express a named op with a
-// structured result, so this is a separate capability: a name from a FIXED
-// enum → {ok, summary, output}. Two implementations exist per the
+// Deterministic operations (U6, KTD8): the seam behind the registry's
+// `repo.test` / `repo.build` commands. The 3-method Executor cannot express a
+// named op with a structured result, so this is a separate capability: a name
+// from a FIXED enum → {ok, summary, output}. Two implementations exist per the
 // ≥2-implementations invariant — resident-backed (ResidentOperations in
 // src/execution/resident.ts, POST /op resolving ONLY through the onboard-time
 // command table in a disposable per-op checkout) and local (LocalOperations
@@ -15,15 +15,19 @@ import { repoFromThread } from "./repoContext.js";
 // OP_NAMES; ref arguments must pass the resident's strict pattern (and later
 // resolve in the resident's mirror); request text is NEVER interpolated into
 // a shell command — the command STRING always comes from the admin-written
-// command table (resident) or a fixed convention (local). Anything ambiguous
-// or non-matching is null → the dispatcher falls through to the agent (KD3).
+// command table (resident) or a fixed convention (local). The explicit forms
+// (`repo test <owner/name> [ref]`) are registry commands bound by the shared
+// grammar (src/core/commands/repo.ts); `recognizeOperation` below covers ONLY
+// the conservative natural-language forms and translates them into the same
+// registry invocation — anything ambiguous is null → the dispatcher falls
+// through to the agent (KD3).
 
 export const OP_NAMES = ["test", "build", "status"] as const;
 export type OpName = (typeof OP_NAMES)[number];
 
 /** Structured outcome of one op. `result` covers BOTH passing and failing
  *  runs (a failing test run is a result, not an error path); the other kinds
- *  are the named non-run outcomes the dispatcher must route differently. */
+ *  are the named non-run outcomes the command maps to registry errors. */
 export type OperationResult =
   | { kind: "result"; ok: boolean; summary: string; output?: string }
   /** the backend refused by policy (e.g. a mutating command-table entry) */
@@ -37,14 +41,11 @@ export interface Operations {
   run(op: OpName, req: { repo: string; ref?: string }): Promise<OperationResult>;
 }
 
-/** A recognized deterministic ask. `explicit` distinguishes the command form
- *  (`repo test …` — config-family, always answered) from natural language
- *  (an accelerator that falls through silently when the op cannot serve). */
+/** A natural-language deterministic ask, recognized conservatively. */
 export interface RecognizedOp {
   op: "test" | "build";
   repo: string;
-  ref?: string;
-  explicit: boolean;
+  ref: string;
 }
 
 // Conservative natural-language forms (KTD8): whole-message anchoring, one
@@ -54,33 +55,14 @@ const NL_TEST_RE = /^run\s+(?:the\s+)?tests?\s+on\s+(\S+)(?:\s+in\s+(\S+))?$/i;
 const NL_BUILD_RE = /^build\s+(\S+)(?:\s+in\s+(\S+))?$/i;
 
 /**
- * Pure, sync recognition of a deterministic op ask. Explicit `repo test/build`
- * commands are always recognized (their malformed variants are named errors
- * owned by handleRepoCommand, so they return null here). Natural language is
- * recognized only when `allowNatural` (the dispatcher disables it when the
- * message carries explicit agent:/model: directives — the user picked a model
- * path) and only when BOTH the ref and the repo are unambiguous: the repo
- * comes from the "in <owner/name>" tail or the thread's established repo
- * (message or history — the same sources as repoContext). Anything else → null.
- *
- * The dispatcher parses the message as a repo command ONCE and threads the
- * result in as `cmd`; callers that omit it get the parse done here.
+ * Pure, sync recognition of a natural-language deterministic ask. Recognized
+ * only when `allowNatural` (the dispatcher disables it when the message carries
+ * explicit agent:/model: directives — the user picked a model path) and only
+ * when BOTH the ref and the repo are unambiguous: the repo comes from the "in
+ * <owner/name>" tail or the thread's established repo (message or history —
+ * the same sources as repoContext). Anything else → null.
  */
-export function recognizeOperation(
-  text: string,
-  history: Array<{ role: string; text: string }>,
-  opts: { allowNatural: boolean },
-  cmd: RepoCommand | null = parseRepoCommand(text),
-): RecognizedOp | null {
-  // Explicit command form first: it IS the deterministic invocation.
-  if (cmd) {
-    if ("error" in cmd) return null; // named error already owned by handleRepoCommand
-    if (cmd.verb === "test" || cmd.verb === "build") {
-      return { op: cmd.verb, repo: cmd.slug, ...(cmd.ref ? { ref: cmd.ref } : {}), explicit: true };
-    }
-    return null; // an admin repo command, not an op
-  }
-
+export function recognizeOperation(text: string, history: Array<{ role: string; text: string }>, opts: { allowNatural: boolean }): RecognizedOp | null {
   if (!opts.allowNatural) return null;
 
   // Trailing "." / "!" are stripped; a trailing "?" is a question → no match.
@@ -106,5 +88,5 @@ export function recognizeOperation(
   }
   if (!repo) return null;
 
-  return { op, repo, ref, explicit: false };
+  return { op, repo, ref };
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ResidentAdminClient, ResidentAdminResponse } from "../core/repoCommands.js";
+import type { ResidentAdminClient, ResidentAdminResponse } from "../core/residentAdmin.js";
 import {
   createResidentsViewHandler,
   parseResidentsRoute,

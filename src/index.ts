@@ -8,7 +8,7 @@ import { createLiveViewHandler } from "./channels/liveView.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
 import { AnthropicCostReportSource, CloudflareGraphqlUsageSource, NullLlmCostSource, createCostsService, parseCostsConfig } from "./core/costs.js";
-import { makeResidentAdminClient } from "./core/repoCommands.js";
+import { makeResidentAdminClient } from "./core/residentAdmin.js";
 import {
   httpJwksFetcher,
   JwksCache,
@@ -32,7 +32,7 @@ import { activeRunCount, setShutdownNotice, type CoreDeps } from "./core/dispatc
 import { buildScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters (#157 U7) ---
-import { buildCoreCommands } from "./commandCli.js";
+import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { callerIdFor, createCommandHttpHandler, isCommandPath, isLocalhostBase, isLoopbackAddress, serviceTokenAllowed } from "./channels/commandHttp.js";
 // --- end command registry adapters ---
 
@@ -113,13 +113,16 @@ async function main() {
   }
   const deps: CoreDeps = { config, providers, skills, memory, frictionLedger, runHistoryWriter };
   // --- command registry (#157 U6/U7/U9): the ONE core catalogue (`buildCoreCommands`,
-  // shared with src/cli.ts and src/commandCli.ts), bound ONCE; every adapter
+  // shared with src/cli.ts), bound ONCE; every adapter
   // (HTTP /api/*, MCP tools, chat) exposes the same registrations over the same
   // deps: `runs.*` on one RunsService, `friction.*` on the ledger selected
   // above (and the same tracker the scheduled trigger uses), `repo.list` on the
   // resident admin client the config names. ---
   // One RunsService for every surface: the command registry (HTTP/MCP/chat) and the /runs pages.
   const runsService = createRunsService({ registry: defaultRunRegistry, store: runStore });
+  // Scheduled firings (#244) are recorded on the state Worker's ScheduleDO;
+  // `schedule list` and the /runs "Scheduled" panel read the same store.
+  const scheduleStore = buildScheduleStore(config.config.schedules, process.env, (m) => console.warn(`[schedules] ${m}`));
   const commands = buildCoreCommands(config, runStore, {
     registry: defaultRunRegistry,
     env: process.env,
@@ -128,6 +131,8 @@ async function main() {
     runs: runsService,
     frictionLedger,
     tracker: deps.issueTracker,
+    memory: () => memory,
+    scheduleStore,
   });
   // The same bound registry serves HTTP, MCP, and the chat fast path (U13): one
   // registration, every surface.
@@ -167,7 +172,6 @@ async function main() {
     // unavailable when that is not configured. Without a `cron` entry the shim
     // fails closed.
     const cronArmed = Object.values(auth.tokens).some((id) => id.subject === "cron");
-    const scheduleStore = buildScheduleStore(config.config.schedules, process.env, (m) => console.warn(`[schedules] ${m}`));
     const schedulesState = `${SCHEDULES.length} schedule(s) on /runs (${scheduleStore ? `firings from ${config.config.schedules?.worker?.baseUrl}` : "no firing store"}; cron identity ${cronArmed ? "armed" : "NOT in SWITCHBOARD_INGRESS_TOKENS — scheduled runs fail closed"})`;
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin

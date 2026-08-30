@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { CommandRegistry, UNTRUSTED_OPEN, jsonSchemaFor, type Caller } from "../commandRegistry.js";
+import { CommandRegistry, UNTRUSTED_OPEN, type Caller } from "../commandRegistry.js";
+import { jsonSchemaFor } from "../commandSurface.js";
 import type { RunEvent } from "../runEvents.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import type { RunRecord } from "../runRecord.js";
@@ -84,16 +85,16 @@ describe("runs.* registrations", () => {
 
   it("a dispatch-only MCP caller is refused on runs.list and runs.stop", async () => {
     const { registry, deps } = await setup();
-    expect(await registry.invoke("runs.list", { status: "all" }, dispatchOnly, deps)).toMatchObject({ ok: false, error: "unauthorized" });
-    expect(await registry.invoke("runs.stop", { id: "fin-x", mode: "soft" }, dispatchOnly, deps)).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("runs.list", { options: { status: "all" } }, dispatchOnly, deps)).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, dispatchOnly, deps)).toMatchObject({ ok: false, error: "unauthorized" });
   });
 
   it("chat callers can list but not get/events/friction (surface opt-out)", async () => {
     const { registry, deps } = await setup();
-    expect(await registry.invoke("runs.list", { status: "all" }, chatOperator, deps)).toMatchObject({ ok: true });
-    expect(await registry.invoke("runs.get", { id: "fin-x" }, chatOperator, deps)).toMatchObject({ ok: false, error: "not_found" });
-    expect(await registry.invoke("runs.events", { id: "fin-x" }, chatOperator, deps)).toMatchObject({ ok: false, error: "not_found" });
-    expect(await registry.invoke("runs.friction", { id: "fin-x" }, chatOperator, deps)).toMatchObject({ ok: false, error: "not_found" });
+    expect(await registry.invoke("runs.list", { options: { status: "all" } }, chatOperator, deps)).toMatchObject({ ok: true });
+    expect(await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, chatOperator, deps)).toMatchObject({ ok: false, error: "not_found" });
+    expect(await registry.invoke("runs.events", { args: ["fin-x"], options: {} }, chatOperator, deps)).toMatchObject({ ok: false, error: "not_found" });
+    expect(await registry.invoke("runs.friction", { args: ["fin-x"], options: {} }, chatOperator, deps)).toMatchObject({ ok: false, error: "not_found" });
   });
 });
 
@@ -102,7 +103,7 @@ describe("runs.list", () => {
     const { reg, registry, deps } = await setup();
     const { id } = reg.create("coding · acme/live", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t" });
     reg.publish(id, { type: "input", text: "live secret request" });
-    const out = value<{ runs: { id: string }[] }>(await registry.invoke("runs.list", { status: "all" }, reader, deps));
+    const out = value<{ runs: { id: string }[] }>(await registry.invoke("runs.list", { options: { status: "all" } }, reader, deps));
     expect(out.runs.map((r) => r.id)).toEqual([id, "fin-x", "fin-y"]);
     const json = JSON.stringify(out);
     expect(json).not.toMatch(/please do the thing|all done|live secret request/);
@@ -112,15 +113,15 @@ describe("runs.list", () => {
 
   it("limit:'10' (string) and limit:10 yield the same result", async () => {
     const { registry, deps } = await setup();
-    const a = await registry.invoke("runs.list", { status: "finished", limit: "10", sinceMs: String(NOW - 5000) }, reader, deps);
-    const b = await registry.invoke("runs.list", { status: "finished", limit: 10, sinceMs: NOW - 5000 }, reader, deps);
+    const a = await registry.invoke("runs.list", { options: { status: "finished", limit: "10", sinceMs: String(NOW - 5000) } }, reader, deps);
+    const b = await registry.invoke("runs.list", { options: { status: "finished", limit: 10, sinceMs: NOW - 5000 } }, reader, deps);
     expect(a).toEqual(b);
     expect(value<{ runs: unknown[] }>(a).runs).toHaveLength(2);
   });
 
   it("{status:'bogus'} → invalid_input naming status without echoing the value", async () => {
     const { registry, deps } = await setup();
-    const res = await registry.invoke("runs.list", { status: "bogus" }, reader, deps);
+    const res = await registry.invoke("runs.list", { options: { status: "bogus" } }, reader, deps);
     expect(res).toMatchObject({ ok: false, error: "invalid_input" });
     if (res.ok) throw new Error("unreachable");
     expect(res.message).toMatch(/status/);
@@ -129,11 +130,11 @@ describe("runs.list", () => {
 
   it("a channel-pinned caller sees only its channel's runs, even when asking for another", async () => {
     const { registry, deps } = await setup();
-    const pinned = value<{ runs: { id: string }[] }>(await registry.invoke("runs.list", { status: "all" }, readerPinnedX, deps));
+    const pinned = value<{ runs: { id: string }[] }>(await registry.invoke("runs.list", { options: { status: "all" } }, readerPinnedX, deps));
     expect(pinned.runs.map((r) => r.id)).toEqual(["fin-x"]);
-    const other = value<{ runs: { id: string }[] }>(await registry.invoke("runs.list", { status: "all", channel: "http:Y" }, readerPinnedX, deps));
+    const other = value<{ runs: { id: string }[] }>(await registry.invoke("runs.list", { options: { status: "all", channel: "http:Y" } }, readerPinnedX, deps));
     expect(other.runs).toEqual([]);
-    const unpinned = value<{ runs: { id: string }[] }>(await registry.invoke("runs.list", { status: "all", channel: "http:Y" }, reader, deps));
+    const unpinned = value<{ runs: { id: string }[] }>(await registry.invoke("runs.list", { options: { status: "all", channel: "http:Y" } }, reader, deps));
     expect(unpinned.runs.map((r) => r.id)).toEqual(["fin-y"]);
   });
 });
@@ -141,8 +142,8 @@ describe("runs.list", () => {
 describe("runs.get / runs.events / runs.friction", () => {
   it("unknown id → not_found; malformed id → invalid_input naming id", async () => {
     const { registry, deps } = await setup();
-    expect(await registry.invoke("runs.get", { id: "nope" }, reader, deps)).toMatchObject({ ok: false, error: "not_found", status: 404 });
-    const bad = await registry.invoke("runs.get", { id: "has spaces!" }, reader, deps);
+    expect(await registry.invoke("runs.get", { args: ["nope"], options: {} }, reader, deps)).toMatchObject({ ok: false, error: "not_found", status: 404 });
+    const bad = await registry.invoke("runs.get", { args: ["has spaces!"], options: {} }, reader, deps);
     expect(bad).toMatchObject({ ok: false, error: "invalid_input" });
     if (bad.ok) throw new Error("unreachable");
     expect(bad.message).toMatch(/\bid\b/);
@@ -151,9 +152,9 @@ describe("runs.get / runs.events / runs.friction", () => {
 
   it("runs.get without include returns no events; include=messages wraps every text field as untrusted", async () => {
     const { registry, deps } = await setup();
-    const bare = value<{ events?: unknown }>(await registry.invoke("runs.get", { id: "fin-x" }, reader, deps));
+    const bare = value<{ events?: unknown }>(await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, reader, deps));
     expect(bare.events).toBeUndefined();
-    const full = value<{ events: RunEvent[] }>(await registry.invoke("runs.get", { id: "fin-x", include: "messages" }, reader, deps));
+    const full = value<{ events: RunEvent[] }>(await registry.invoke("runs.get", { args: ["fin-x"], options: { include: "messages" } }, reader, deps));
     expect(full.events).toHaveLength(4);
     for (const e of full.events) {
       if (e.type === "input" || e.type === "context" || e.type === "answer" || e.type === "assistant") expect(e.text).toContain(UNTRUSTED_OPEN);
@@ -165,7 +166,7 @@ describe("runs.get / runs.events / runs.friction", () => {
 
   it("runs.events pages with afterSeq/limit (coerced) and wraps text", async () => {
     const { registry, deps } = await setup();
-    const page = value<{ events: RunEvent[]; nextAfterSeq?: number }>(await registry.invoke("runs.events", { id: "fin-x", afterSeq: "1", limit: "2" }, reader, deps));
+    const page = value<{ events: RunEvent[]; nextAfterSeq?: number }>(await registry.invoke("runs.events", { args: ["fin-x"], options: { afterSeq: "1", limit: "2" } }, reader, deps));
     expect(page.events.map((e) => e.seq)).toEqual([2, 3]);
     expect(page.nextAfterSeq).toBe(3);
     expect((page.events[0] as { summary: string }).summary).toContain(UNTRUSTED_OPEN);
@@ -173,7 +174,7 @@ describe("runs.get / runs.events / runs.friction", () => {
 
   it("runs.friction returns the stored diagnosis", async () => {
     const { registry, deps } = await setup();
-    const out = value<{ id: string; finished: boolean; diagnosis: { verdict: string } }>(await registry.invoke("runs.friction", { id: "fin-x" }, reader, deps));
+    const out = value<{ id: string; finished: boolean; diagnosis: { verdict: string } }>(await registry.invoke("runs.friction", { args: ["fin-x"], options: {} }, reader, deps));
     expect(out).toMatchObject({ id: "fin-x", finished: true });
     expect(typeof out.diagnosis.verdict).toBe("string");
   });
@@ -181,15 +182,15 @@ describe("runs.get / runs.events / runs.friction", () => {
   it("a channel-pinned caller gets not_found for another channel's run on get/events/friction", async () => {
     const { registry, deps } = await setup();
     for (const cmd of ["runs.get", "runs.events", "runs.friction"]) {
-      expect(await registry.invoke(cmd, { id: "fin-y" }, readerPinnedX, deps)).toMatchObject({ ok: false, error: "not_found" });
-      expect(await registry.invoke(cmd, { id: "fin-x" }, readerPinnedX, deps)).toMatchObject({ ok: true });
+      expect(await registry.invoke(cmd, { args: ["fin-y"], options: {} }, readerPinnedX, deps)).toMatchObject({ ok: false, error: "not_found" });
+      expect(await registry.invoke(cmd, { args: ["fin-x"], options: {} }, readerPinnedX, deps)).toMatchObject({ ok: true });
     }
   });
 
   it("a channel-pinned runs.get fetches the run once — the visibility check reuses the payload's view", async () => {
     const { registry, deps } = await setup();
     const getRun = vi.spyOn(deps.runs, "getRun");
-    const out = value<{ id: string; events?: unknown[] }>(await registry.invoke("runs.get", { id: "fin-x", include: "messages" }, readerPinnedX, deps));
+    const out = value<{ id: string; events?: unknown[] }>(await registry.invoke("runs.get", { args: ["fin-x"], options: { include: "messages" } }, readerPinnedX, deps));
     expect(out.id).toBe("fin-x");
     expect(out.events).toHaveLength(4);
     expect(getRun).toHaveBeenCalledTimes(1);
@@ -200,14 +201,14 @@ describe("runs.get / runs.events / runs.friction", () => {
 describe("runs.stop", () => {
   it("finished run → conflict; unknown → not_found", async () => {
     const { registry, deps } = await setup();
-    expect(await registry.invoke("runs.stop", { id: "fin-x", mode: "soft" }, cli, deps)).toMatchObject({ ok: false, error: "conflict", status: 409 });
-    expect(await registry.invoke("runs.stop", { id: "nope", mode: "soft" }, cli, deps)).toMatchObject({ ok: false, error: "not_found", status: 404 });
+    expect(await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, cli, deps)).toMatchObject({ ok: false, error: "conflict", status: 409 });
+    expect(await registry.invoke("runs.stop", { args: ["nope"], options: { mode: "soft" } }, cli, deps)).toMatchObject({ ok: false, error: "not_found", status: 404 });
   });
 
   it("stops a live run and records the caller as the structured actor", async () => {
     const { reg, registry, deps } = await setup();
     const { id, token } = reg.create("coding · acme/live", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t" });
-    const res = await registry.invoke("runs.stop", { id, mode: "hard" }, reader, deps);
+    const res = await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps);
     expect(res).toEqual({ ok: true, value: { id, mode: "hard", state: "stopping" } });
     const snap = reg.snapshot(id, token)!;
     const note = snap.events.find((e) => e.type === "run_note" && e.kind === "stop_requested") as Extract<RunEvent, { type: "run_note" }>;
@@ -217,12 +218,12 @@ describe("runs.stop", () => {
   it("a channel-pinned caller cannot stop another channel's run", async () => {
     const { reg, registry, deps } = await setup();
     const { id } = reg.create("x", { channelId: "http:Y", userId: "http:u", threadKey: "http:Y:t" });
-    expect(await registry.invoke("runs.stop", { id, mode: "soft" }, readerPinnedX, deps)).toMatchObject({ ok: false, error: "not_found" });
+    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, readerPinnedX, deps)).toMatchObject({ ok: false, error: "not_found" });
   });
 
   it("mode is required and must be soft|hard", async () => {
     const { registry, deps } = await setup();
-    const res = await registry.invoke("runs.stop", { id: "fin-x", mode: "nuke" }, cli, deps);
+    const res = await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "nuke" } }, cli, deps);
     expect(res).toMatchObject({ ok: false, error: "invalid_input" });
     if (res.ok) throw new Error("unreachable");
     expect(res.message).toMatch(/mode/);

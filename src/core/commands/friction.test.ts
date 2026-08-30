@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { InMemoryIssueTracker } from "../../execution/githubIssues.js";
-import { CommandRegistry, bindCommands, jsonSchemaFor, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
+import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
+import { jsonSchemaFor } from "../commandSurface.js";
 import { InMemoryFrictionLedger, RunStoreFrictionLedger } from "../frictionLedger.js";
 import type { FrictionRunRecord } from "../frictionProposals.js";
 import type { RunRecord } from "../runRecord.js";
@@ -44,7 +45,7 @@ function bind(deps: Partial<FrictionCommandDeps["friction"]> = {}): { commands: 
   const tracker = new InMemoryIssueTracker();
   const registry = new CommandRegistry<FrictionCommandDeps>({ audit: () => {} });
   registerFrictionCommands(registry);
-  const commands = bindCommands(registry, { friction: { tracker, config: () => CONFIG, ...deps } });
+  const commands = bindCommands(registry, { friction: { tracker, config: () => CONFIG, readSource: async () => "", ...deps } });
   return { commands, tracker };
 }
 
@@ -91,7 +92,7 @@ describe("friction.report", () => {
 
   it("returns the structured report as JSON (runsAnalyzed, ranked patterns, nothing filed) and coerces string inputs", async () => {
     const { commands } = bind({ ledger: await seededLedger() });
-    const res = await commands.invoke("friction.report", { limit: "1", minRuns: "1" }, mcp("friction:read"));
+    const res = await commands.invoke("friction.report", { options: { limit: "1", minRuns: "1" } }, mcp("friction:read"));
     expect(res.ok).toBe(true);
     const report = reportOf(res);
     expect(report.runsAnalyzed).toBe(1);
@@ -105,7 +106,7 @@ describe("friction.report", () => {
     const { commands } = bind();
     const res = await commands.invoke("friction.report", {}, mcp("friction:read"));
     expect(res).toMatchObject({ ok: false, error: "unavailable", status: 503, message: NO_LEDGER_MESSAGE });
-    const bad = await commands.invoke("friction.report", { limit: "zero" }, mcp("friction:read"));
+    const bad = await commands.invoke("friction.report", { options: { limit: "zero" } }, mcp("friction:read"));
     expect(bad).toMatchObject({ ok: false, error: "invalid_input" });
     expect((bad as { message: string }).message).toMatch(/^limit: /);
     expect((bad as { message: string }).message).not.toContain("zero");
@@ -139,7 +140,7 @@ describe("friction.report", () => {
     const legacy = await seededLedger(); // legacy rows carry no channel → excluded under a pin
     const { commands } = bind({ ledger: new RunStoreFrictionLedger(store, legacy) });
 
-    const pinned = await commands.invoke("friction.report", { minRuns: "1" }, { ...mcp("friction:read"), channel: "http:x" });
+    const pinned = await commands.invoke("friction.report", { options: { minRuns: "1" } }, { ...mcp("friction:read"), channel: "http:x" });
     expect(pinned.ok).toBe(true);
     const report = reportOf(pinned);
     expect(report.runsAnalyzed).toBe(2);
@@ -148,7 +149,7 @@ describe("friction.report", () => {
     expect(JSON.stringify(report)).not.toContain("y-repo");
     expect(JSON.stringify(report)).not.toContain("acme/r1");
 
-    const unpinned = await commands.invoke("friction.report", { minRuns: "1" }, mcp("friction:read"));
+    const unpinned = await commands.invoke("friction.report", { options: { minRuns: "1" } }, mcp("friction:read"));
     expect(reportOf(unpinned).runsAnalyzed).toBe(6);
   });
 });
@@ -156,17 +157,17 @@ describe("friction.report", () => {
 describe("friction.propose", () => {
   it("a repoManager chat caller files through the tracker with the exact pre-migration reply; a plain user is refused (R13)", async () => {
     const { commands, tracker } = bind({ ledger: await seededLedger() });
-    const refused = await commands.invoke("friction.propose", { top: "3" }, chat("slack:UNOBODY", { repoManager: false }));
+    const refused = await commands.invoke("friction.propose", { options: { top: "3" } }, chat("slack:UNOBODY", { repoManager: false }));
     expect(refused).toMatchObject({ ok: false, error: "unauthorized", status: 403 });
     expect(tracker.calls).toEqual([]);
 
-    const filed = await commands.invoke("friction.propose", { top: "3" }, chat("slack:UDEV", { repoManager: true }));
+    const filed = await commands.invoke("friction.propose", { options: { top: "3" } }, chat("slack:UDEV", { repoManager: true }));
     expect(text(commands, "friction.propose", filed)).toBe(
       "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Filed:*\n• https://github.com/coreplanelabs/switchboard/issues/1 — [friction] setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
     );
     expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
 
-    const again = await commands.invoke("friction.propose", { top: "3" }, chat("slack:UADMIN", { repoManager: true }));
+    const again = await commands.invoke("friction.propose", { options: { top: "3" } }, chat("slack:UADMIN", { repoManager: true }));
     expect(text(commands, "friction.propose", again)).toBe(
       "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Already open (not refiled):*\n• https://github.com/coreplanelabs/switchboard/issues/1 — `setup_install:pnpm install --frozen-lockfile`",
     );
@@ -175,24 +176,24 @@ describe("friction.propose", () => {
 
   it("`dryRun` is a real boolean on text surfaces: \"false\" files, \"true\" files nothing", async () => {
     const { commands, tracker } = bind({ ledger: await seededLedger() });
-    const dry = await commands.invoke("friction.propose", { dryRun: "true", top: "3" }, mcp("friction:write"));
+    const dry = await commands.invoke("friction.propose", { options: { dryRun: "true", top: "3" } }, mcp("friction:write"));
     expect(text(commands, "friction.propose", dry)).toBe(
       "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · dry run (nothing filed)\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Would file (dry run):*\n• [friction] setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
     );
     expect(tracker.issues("coreplanelabs/switchboard")).toEqual([]);
-    const wet = await commands.invoke("friction.propose", { dryRun: "false" }, mcp("friction:write"));
+    const wet = await commands.invoke("friction.propose", { options: { dryRun: "false" } }, mcp("friction:write"));
     expect(wet.ok).toBe(true);
     expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
-    expect(await commands.invoke("friction.propose", { dryRun: "yes" }, mcp("friction:write"))).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(await commands.invoke("friction.propose", { options: { dryRun: "yes" } }, mcp("friction:write"))).toMatchObject({ ok: false, error: "invalid_input" });
   });
 
   it("`repo` overrides the configured target; without either it is `unavailable` with the legacy hint", async () => {
     const { commands, tracker } = bind({ ledger: await seededLedger(), config: () => undefined });
     expect(await commands.invoke("friction.propose", {}, mcp("friction:write"))).toMatchObject({ ok: false, error: "unavailable", message: NO_REPO_MESSAGE });
-    const res = await commands.invoke("friction.propose", { repo: "acme/other" }, mcp("friction:write"));
+    const res = await commands.invoke("friction.propose", { options: { repo: "acme/other" } }, mcp("friction:write"));
     expect(res.ok).toBe(true);
     expect(tracker.issues("acme/other")).toHaveLength(1);
-    expect(await commands.invoke("friction.propose", { repo: "not a slug" }, mcp("friction:write"))).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(await commands.invoke("friction.propose", { options: { repo: "not a slug" } }, mcp("friction:write"))).toMatchObject({ ok: false, error: "invalid_input" });
   });
 
   it("a tracker failure is `unavailable` carrying its message, not a 500", async () => {
@@ -202,7 +203,7 @@ describe("friction.propose", () => {
     };
     const registry = new CommandRegistry<FrictionCommandDeps>({ audit: () => {} });
     registerFrictionCommands(registry);
-    const commands = bindCommands(registry, { friction: { ledger: await seededLedger(), tracker, config: () => CONFIG } });
+    const commands = bindCommands(registry, { friction: { ledger: await seededLedger(), tracker, config: () => CONFIG, readSource: async () => "" } });
     expect(await commands.invoke("friction.propose", {}, mcp("friction:write"))).toMatchObject({ ok: false, error: "unavailable", message: "GitHub App credentials missing" });
   });
 });
@@ -216,7 +217,7 @@ describe("scopes on machine surfaces (AE12)", () => {
     expect(await commands.invoke("friction.propose", {}, mcp("runs:write"))).toMatchObject({ ok: false, error: "unauthorized" });
     expect(await commands.invoke("friction.report", {}, mcp("friction:write"))).toMatchObject({ ok: false, error: "unauthorized" });
     expect((await commands.invoke("friction.report", {}, mcp("friction:read"))).ok).toBe(true);
-    expect((await commands.invoke("friction.propose", { dryRun: "true" }, mcp("friction:write"))).ok).toBe(true);
+    expect((await commands.invoke("friction.propose", { options: { dryRun: "true" } }, mcp("friction:write"))).ok).toBe(true);
     expect(tracker.issues("coreplanelabs/switchboard")).toEqual([]);
   });
 
@@ -227,6 +228,58 @@ describe("scopes on machine surfaces (AE12)", () => {
     const schema = jsonSchemaFor(byId["friction.propose"]) as { properties: Record<string, unknown> };
     expect(Object.keys(schema.properties).sort()).toEqual(["dryRun", "minRuns", "repo", "top"]);
     expect(JSON.stringify(schema.properties.dryRun)).toContain('"boolean"');
+  });
+});
+
+describe("friction.analyze (CLI only) — the former frictionCli", () => {
+  const CAPTURE = [
+    "retry: 3000",
+    'data: {"type":"tool_call","tool":"bash","summary":"$ npm test","at":1}',
+    'data: {"type":"tool_result","tool":"bash","ok":false,"summary":"boom","at":30000}',
+    "garbage",
+    "event: end",
+    "data: {}",
+  ].join("\n");
+  const cli: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
+
+  function bindAnalyze(files: Record<string, string>) {
+    return bind({
+      readSource: async (source) => {
+        if (!(source in files)) throw new Error("ENOENT: no such file");
+        return files[source];
+      },
+    }).commands;
+  }
+
+  it("reads a file (or stdin as `-`), diagnoses it, counts skipped lines, and renders the report", async () => {
+    const commands = bindAnalyze({ "run.sse": CAPTURE, "-": CAPTURE });
+    const res = await commands.invoke("friction.analyze", { args: ["run.sse"] }, cli);
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("unreachable");
+    expect(res.value).toMatchObject({ source: "run.sse", events: 2, skipped: 1 });
+    const text = renderText(commands.get("friction.analyze")!, res.value);
+    expect(text).toMatch(/verdict:/);
+    expect(text).toContain("(skipped 1 unparseable line)");
+    expect((await commands.invoke("friction.analyze", {}, cli)).ok).toBe(true); // stdin default
+  });
+
+  it("--slow-ms and --in-progress reach the analyzer; a trailing unpaired call under the default hints at --in-progress, never with it", async () => {
+    const trailing = 'data: {"type":"tool_call","tool":"bash","summary":"$ npm test","at":1}';
+    const commands = bindAnalyze({ live: trailing, "run.sse": CAPTURE });
+    const hinted = await commands.invoke("friction.analyze", { args: ["live"] }, cli);
+    expect(hinted.ok && (hinted.value as { hint?: string }).hint).toMatch(/--in-progress/);
+    const quiet = await commands.invoke("friction.analyze", { args: ["live"], options: { inProgress: "true" } }, cli);
+    expect(quiet.ok && (quiet.value as { hint?: string }).hint).toBeUndefined();
+    const slow = await commands.invoke("friction.analyze", { args: ["run.sse"], options: { slowMs: "10" } }, cli);
+    expect(slow.ok && JSON.stringify(slow.value)).toContain("slow_tool");
+  });
+
+  it("a missing file is `not_found`, a stream without events is `invalid_input` (never a crash); the command is CLI-only", async () => {
+    const commands = bindAnalyze({ empty: "not json\n" });
+    expect(await commands.invoke("friction.analyze", { args: ["missing.jsonl"] }, cli)).toMatchObject({ ok: false, error: "not_found", message: expect.stringContaining("missing.jsonl") });
+    expect(await commands.invoke("friction.analyze", { args: ["empty"] }, cli)).toMatchObject({ ok: false, error: "invalid_input", message: "no run events found in empty (1 unparseable lines)" });
+    expect(await commands.invoke("friction.analyze", { args: ["empty"] }, chat("slack:UX", { repoManager: false }))).toMatchObject({ ok: false, error: "not_found" });
+    expect(await commands.invoke("friction.analyze", { args: ["empty"] }, mcp("friction:read"))).toMatchObject({ ok: false, error: "not_found" });
   });
 });
 

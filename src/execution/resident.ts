@@ -1,5 +1,5 @@
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
-import { repoResourceId } from "../core/repoCommands.js";
+import { repoResourceId } from "../core/residentAdmin.js";
 import {
   BASH_TIMEOUT_MS,
   ExecInfraError,

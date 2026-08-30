@@ -1,5 +1,5 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
-import type { ResidentAdminClient } from "../core/repoCommands.js";
+import type { ResidentAdminClient } from "../core/residentAdmin.js";
 import { escapeHtml, HTML_PAGE_HEADERS } from "./liveView.js";
 import { NAV_CSS, renderNav } from "./nav.js";
 

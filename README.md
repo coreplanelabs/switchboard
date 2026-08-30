@@ -34,14 +34,14 @@ Resolution order (highest wins):
 
 1. **Per-request** — inline directives in the message: `agent:review model:openai/gpt-5 effort:low look at PR #42`
 2. **Per-thread (sticky)** — a follow-up without directives stays on the agent/model/effort this thread last used (derived from the thread's history, never stored)
-3. **Per-user** — `config set me model=openai/gpt-5 effort=medium`
-4. **Per-channel** — `config set channel agent=review efforts.coding=medium`
+3. **Per-user** — `config set me --model openai/gpt-5 --effort medium`
+4. **Per-channel** — `config set channel --agent review --efforts.coding medium`
 5. **Defaults** — `config/config.yaml` (`defaults.agent`, per-agent `defaults.models` / `defaults.efforts`)
 6. **Agent definition** — an agent's built-in `effort` in `src/agents/registry.ts` (review: `medium`), then the provider's own default
 
 Runtime overrides persist to `data/overrides.json`. Static defaults for channels/users can also live in `config.yaml`. **Effort** (`low | medium | high`, how hard the model thinks per turn) is a first-class dimension with the same ladder as model — forced (`effort=`) or per agent (`efforts.<agent>=`) at every scope — because the wall clock is an agent's real budget and effort decides how much of it goes to thinking rather than work.
 
-**Custom instructions** (per user / per channel, [#107](https://github.com/coreplanelabs/switchboard/issues/107)): `config set me instructions "Always reply in bullet points"` and `config set channel instructions "This channel is about billing"` store free text (≤2000 chars) on the same scopes. The dispatcher folds it into the system prompt as a clearly labeled advisory block — channel text on every run in that channel, a user's text only on runs that user requests; user wins on conflict. Instructions are prompt content only: they never change agent/model resolution or permission gates. A bare `config set me instructions` shows the current text; an explicit empty value (`config set me instructions ""`) clears it (any static `config.yaml` text then applies again, and the reply says so); `config show` displays them.
+**Custom instructions** (per user / per channel, [#107](https://github.com/coreplanelabs/switchboard/issues/107)): `config instructions me "Always reply in bullet points"` and `config instructions channel "This channel is about billing"` store free text (≤2000 chars) on the same scopes. The dispatcher folds it into the system prompt as a clearly labeled advisory block — channel text on every run in that channel, a user's text only on runs that user requests; user wins on conflict. Instructions are prompt content only: they never change agent/model resolution or permission gates. A bare `config set me instructions` shows the current text; an explicit empty value (`config set me instructions ""`) clears it (any static `config.yaml` text then applies again, and the reply says so); `config show` displays them.
 
 ## Architecture
 
@@ -108,7 +108,7 @@ flowchart LR
 
 **State plane** (`deploy/cloudflare-memory/`): one Worker, three Durable Object classes behind a constant-time bearer — cross-session memory, the friction ledger, and the run history. Every finished run is built into a record at finish and written after the reply (retried, drain-tracked); the `RunHistoryDO` owns the retention policy (`retentionDays` / `maxRuns` / `maxBytes`, applied identically by the bot and the Worker through one shared module) and sweeps on an alarm. Without a `runHistory` config block, history is off and runs are live-only. Contract: [features/run-history.md](features/run-history.md).
 
-**Commands** ([features/command-registry.md](features/command-registry.md)): an operator command is registered once — id, zod input, scope, chat gate, effect, handler — and generic adapters expose it everywhere with no per-command code: HTTP `GET|POST /api/<group>.<verb>` behind Cloudflare Access (browser session or service token), MCP tool `<group>_<verb>`, CLI `npx tsx src/commandCli.ts <group> <verb> [--key=value] [--json]`, and chat `<group> <verb> key=value`. Registered today: `runs list|get|events|friction|stop`, `friction report|propose`, `repo list`. Authorization is resolved by the adapter (token scopes, Access identity + `permissions.operators` / `permissions.serviceTokens`, Slack admin gates) and checked before the input is parsed; no command ever starts an agent run — that path is `dispatch()` alone.
+**Commands** ([features/command-registry.md](features/command-registry.md)): an operator command is a typed TypeScript method registered once — id, positional `args` and camelCase `options` declared with zod (and inferred into the handler), scope, chat gate, effect, handler — and every surface is derived from that definition with no per-command code: HTTP `GET|POST /api/<group>.<verb>` (arguments and options by name; kebab-case query keys, camelCase JSON) behind Cloudflare Access (browser session or service token), MCP tool `<group>_<verb>` with a derived `inputSchema`, CLI `npx tsx src/cli.ts <group> <verb> <args…> [--kebab-option value…] [--json]`, and chat — the same grammar as a message (`runs stop <id> --mode soft`, `friction propose --dry-run --top 3`, `config set me --effort low`), with `--help`, `<group> help` and the bare `help` derived too. Every operator command is one of these — there is no other kind: `help show`, `config show|set|clear|instructions`, `runs list|get|events|friction|stop`, `friction report|propose|analyze`, `repo list|onboard|offboard|reconfigure|rebuild|test|build`, `memory list|forget`, `schedule list`, `deploy plan|all`, `env bootstrap` (the last three that spawn processes — `deploy all`, `env bootstrap`, `friction analyze` — are CLI-only). Authorization is resolved by the adapter (token scopes, Access identity + `permissions.operators` / `permissions.serviceTokens`, Slack admin gates) and checked before the input is parsed; no command ever starts an agent run — that path is `dispatch()` alone, reached from the CLI's `ask` built-in (`npx tsx src/cli.ts ask "…"`) and MCP's `dispatch` tool, which are channels, not commands.
 
 **Resident repo environments** (`deploy/cloudflare-resident/`): repos an admin onboards (`repo onboard <owner/name>` in chat) each get an always-warm per-repo service — a bare mirror kept fresh by a refresh alarm, a built checkout, and per-thread git worktrees with OS-user isolation — so a coding request on an onboarded repo starts with zero setup (no clone, no install). Any other resident state falls back to the per-thread sandbox with a named reason on the status card. Behavioral contract: [features/resident-repos.md](features/resident-repos.md).
 
@@ -195,7 +195,7 @@ Four Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastruc
 **Routine production deploy = one command, from a clean checkout of `origin/main`:**
 
 ```bash
-RESIDENT_ADMIN_TOKEN=… npm run deploy:all          # add -- --dry-run to see the plan
+RESIDENT_ADMIN_TOKEN=… npx tsx src/cli.ts deploy all   # `npx tsx src/cli.ts deploy plan` shows the plan first
 ```
 
 It runs the four `npm run deploy`s in the **only supported order — memory (state Worker) → bot → resident → sandbox** — after checking that wrangler is on the coreplane-infra account, the tree is clean and at `origin/main`, and each dir has `node_modules`. The state Worker goes first because its Durable Object migrations must exist before the bot writes to them; the bot and resident steps are preflighted and the script **waits and retries** (every 60 s, up to 30 min) while runs are in flight instead of killing them — `-- --force` is the only way to bypass, and it says what it will kill. `-- --only bot,resident` / `-- --skip sandbox` keep the order; `-- --allow-branch` relaxes only the `origin/main` check. Ambient `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` are stripped from every step (a set `CLOUDFLARE_ACCOUNT_ID` would override the pinned account). The wait is never silent — every retry prints `bot: still waiting — N run(s) in flight (draining: yes/no), waited Xm of 30m`. **Deployed ≠ live:** `wrangler deploy` uploads the bot's Worker version, but the *old* container keeps answering while it drains in-flight runs (up to 15 min), so the bot step is finished only when `GET /healthz` is answered by a container that is not draining and reports the deployed commit as its `build.commit` (stamped into the image by `deploy/cloudflare/write-build.mjs` → `build.json`, gitignored). The script exits 0 only then; if the old container is still draining at the deadline it prints what is in flight and exits 4 — never "success" while the old code is serving. Plan + gating live in `src/deploy/plan.ts` and `src/deploy/liveGate.ts` (unit-tested); the runner is `src/deploy/deployAllCli.ts`.
@@ -288,9 +288,9 @@ fly deploy && fly logs   # set workspaceDir: ./data/workspaces in config.yaml fi
 @switchboard agent:coding ship a PR to github.com/acme/api that adds retry to the webhook sender
 @switchboard agent:review model:anthropic/claude-opus-5 review acme/api#123
 @switchboard config show
-@switchboard config set channel agent=review
-@switchboard config set me models.coding=openai/gpt-5
-@switchboard config set me instructions "Always reply in bullet points and sign off as Dan"
+@switchboard config set channel --agent review
+@switchboard config set me --models.coding openai/gpt-5
+@switchboard config instructions me "Always reply in bullet points and sign off as Dan"
 ```
 
 DMs to the bot work the same way (no mention needed). In channels, only the first message of a conversation needs the mention: once the bot is part of a thread (it replied, or was mentioned anywhere in it), every follow-up reply in that thread reaches it without re-mentioning.
@@ -349,7 +349,7 @@ permissions:
      with `RESIDENT_OPERATOR_TOKEN` (runtime tool calls) and `RESIDENT_ADMIN_TOKEN` (repo-management commands) in the bot's env. Set the `GITHUB_APP_*` secrets on the **resident Worker** too — it self-mints repo-scoped tokens (trust model above); without them, clones are anonymous (public repos only) and pushes from resident threads are unavailable.
    - Onboard repos from chat (admin-gated, fail-closed via `permissions.repoManagement`):
      ```
-     @switchboard repo onboard acme/api ref=main test="npm test" build="npm run build" install="npm ci"
+     @switchboard repo onboard acme/api --ref main --test "npm test" --build "npm run build" --install "npm ci"
      @switchboard repo list                      # lifecycle: onboarding → warm
      @switchboard repo reconfigure acme/api test="npm run test:unit"
      @switchboard repo offboard acme/api --dry-run   # itemized plan, nothing executed

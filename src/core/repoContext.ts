@@ -1,5 +1,5 @@
 import { resolveGithubToken } from "../execution/githubApp.js";
-import { validRef } from "./repoCommands.js";
+import { validRef } from "./residentAdmin.js";
 
 // Repo/ref resolution for resident environments (U7, KD7/KTD11): the
 // dispatcher resolves the target repo and ref BEFORE the model turn, from
@@ -79,7 +79,7 @@ const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 // Repo name: word chars, dots, hyphens (GitHub's charset).
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 // Ref candidates are validated with validRef (the resident's strict ref
-// pattern, shared with repoCommands.ts) so a hostile or malformed phrase
+// pattern, shared with residentAdmin.ts) so a hostile or malformed phrase
 // never becomes a refHint.
 const WELL_KNOWN_REFS = new Set(["main", "master", "develop", "trunk"]);
 // Code: fenced blocks (```…```, multi-line) and inline spans (`…` on one line) —

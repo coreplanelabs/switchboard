@@ -1,13 +1,6 @@
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
-import {
-  CommandRegistry,
-  jsonSchemaFor,
-  toSurfaceNames,
-  type Caller,
-  type CommandDef,
-  type CommandInvoker,
-  type InvokeErrorCode,
-} from "../core/commandRegistry.js";
+import { CommandRegistry, type Caller, type CommandDef, type CommandInvoker, type InvokeErrorCode } from "../core/commandRegistry.js";
+import { jsonSchemaFor, mcpToolName, namedToInput } from "../core/commandSurface.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import { PlainTextFormatter } from "../core/structuredMessage.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
@@ -35,7 +28,8 @@ import {
 //
 // Tools: the hand-written `dispatch` (starts an agent run through dispatch())
 // PLUS every command registry entry exposed to MCP (#157 U7, KTD2/KTD11): tool
-// `runs_list` ↔ command `runs.list`, `inputSchema` derived from the zod input,
+// `runs_list` ↔ command `runs.list`, `inputSchema` derived from the typed
+// arguments + options (all addressed by name, camelCase — KTD21),
 // result text = one header line + the JSON object `invoke` returned, errors as
 // JSON-RPC errors carrying `data.code`. No per-command code lives here; the
 // registry authorizes from the token's `scopes` (default `dispatch` only).
@@ -90,9 +84,10 @@ export interface McpOptions {
   commands?: CommandInvoker;
 }
 
-/** KTD2/KTD11: `runs.list` → tool `runs_list` with a zod-derived inputSchema. */
+/** KTD2/KTD11: `runs.list` → tool `runs_list`; `inputSchema` = the command's
+ *  arguments (by name) + options (camelCase keys), derived from the definition. */
 function toMcpTool(cmd: CommandDef<unknown>): { name: string; description: string; inputSchema: Record<string, unknown> } {
-  return { name: toSurfaceNames(cmd.id).mcp, description: cmd.describe, inputSchema: jsonSchemaFor(cmd) };
+  return { name: mcpToolName(cmd.id), description: cmd.describe, inputSchema: jsonSchemaFor(cmd) };
 }
 
 function mcpExposed(commands: CommandInvoker | undefined): CommandDef<unknown>[] {
@@ -251,11 +246,14 @@ async function route(
       const name = req.params.name;
       const rawArgs = req.params.arguments;
       const args = typeof rawArgs === "object" && rawArgs !== null ? (rawArgs as Record<string, unknown>) : {};
-      const command = options.commands && mcpExposed(options.commands).find((c) => toSurfaceNames(c.id).mcp === name);
+      const command = options.commands && mcpExposed(options.commands).find((c) => mcpToolName(c.id) === name);
       if (command) {
-        // Registry tool: raw arguments straight to invoke (KTD10 authorization
-        // and the schema live there), the returned object straight back out.
-        const result = await options.commands!.invoke(command.id, args, toCaller(identity));
+        // Registry tool: the by-name arguments split onto the definition's
+        // `{ args, options }` and handed to invoke (KTD10 authorization and the
+        // schemas live there), the returned object straight back out.
+        const input = namedToInput(command, args, "camel");
+        if ("error" in input) return err(id, INVALID_PARAMS, input.error, { code: "invalid_input" });
+        const result = await options.commands!.invoke(command.id, input, toCaller(identity));
         if (!result.ok) return err(id, RPC_CODE_FOR[result.error], result.message, { code: result.error });
         return ok(id, { content: [{ type: "text", text: `${command.id}: ok\n${JSON.stringify(result.value)}` }] });
       }

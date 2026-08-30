@@ -1,56 +1,151 @@
-// Local test harness — implemented as a second channel adapter over the same
-// core dispatcher the Slack adapter uses, which is also the proof that the
-// core is channel-agnostic.
-//   npx tsx src/cli.ts "what is 2+2"
-//   npx tsx src/cli.ts "agent:review review acme/api#123"
-//   npx tsx src/cli.ts "agent:coding model:openai/gpt-5 ship a PR that ..."
-//   npx tsx src/cli.ts --thread cli:mywork "agent:coding continue where we left off"
+// The Switchboard CLI — a THIN wrapper over the command registry (#157 KTD20/
+// KTD21): every registered command as `npx tsx src/cli.ts <group> <verb>
+// [args…] [--option value…] [--json]`, with the words, positionals, flags,
+// usage and help all DERIVED from the typed definition by commandSurface.ts.
+//   npx tsx src/cli.ts runs list --status all
+//   npx tsx src/cli.ts runs get <run id> --include messages --json
+//   npx tsx src/cli.ts runs stop <run id> --mode soft
+//   npx tsx src/cli.ts friction propose --dry-run --top 3
+//   npx tsx src/cli.ts runs get --help          # derived help
+//   npx tsx src/cli.ts help                     # the catalogue
+// Plus ONE built-in that is not a registry command (KTD22): `ask` sends a
+// message through the channel-agnostic dispatcher — the local test harness and
+// the proof that the core is channel-agnostic. It is a CHANNEL (ConsoleIO),
+// not a command: starting an agent run stays with `dispatch()` (KTD16), the
+// way mcp.ts keeps its hand-written `dispatch` tool beside the registry tools.
+//   npx tsx src/cli.ts ask "what is 2+2"
+//   npx tsx src/cli.ts ask "agent:coding model:openai/gpt-5 ship a PR that ..."
+//   npx tsx src/cli.ts ask --thread cli:mywork "agent:coding continue where we left off"
+// Parsing is pure and unit-tested; `main()` only wires in-process deps. Exit
+// codes: 0 ok, 1 the command (or dispatch) failed, 2 usage. The caller is
+// `cli:local` holding every scope (KTD10) — whoever can run this process can
+// already read the config and the data directory.
 
 import { pathToFileURL } from "node:url";
 import { ConfigStore } from "./config.js";
-import { ProviderRegistry } from "./providers/registry.js";
+import { buildCoreCommands } from "./core/commandCatalogue.js";
+import { CommandRegistry, renderText, type Caller, type CommandInput, type CommandInvoker } from "./core/commandRegistry.js";
+import { catalogueText, chatForm, helpText, parseInvocation } from "./core/commandSurface.js";
 import { dispatch } from "./core/dispatcher.js";
-import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
-import { PlainTextFormatter } from "./core/structuredMessage.js";
-import { buildRunStore } from "./core/runStore.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
+import { buildRunStore } from "./core/runStore.js";
+import { PlainTextFormatter } from "./core/structuredMessage.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
-import { buildCoreCommands } from "./commandCli.js";
+import { ProviderRegistry } from "./providers/registry.js";
+import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
-export interface CliInvocation {
-  threadKey: string;
-  text: string;
+export const CLI_CALLER: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
+
+export const USAGE = [
+  "usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]",
+  "       npx tsx src/cli.ts <group> <verb> --help",
+  '       npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"',
+  "       npx tsx src/cli.ts help",
+].join("\n");
+
+export type CliInvocation =
+  /** A registry command, bound by the shared grammar. */
+  | { kind: "command"; id: string; input: CommandInput; json: boolean }
+  /** `<group> <verb> --help`: the command's derived help. */
+  | { kind: "command-help"; id: string }
+  /** `help` / `--help` / no arguments: the catalogue. */
+  | { kind: "catalogue" }
+  /** The built-in harness: dispatch `text` on `threadKey`. */
+  | { kind: "ask"; threadKey: string; text: string }
+  | { kind: "usage"; error: string };
+
+const WORD = /^[a-z][a-z0-9]*$/;
+
+/**
+ * argv → what to do. `--json` (anywhere) is the CLI's one output switch — a
+ * transport concern, not grammar. `ask` is parsed here because it is the CLI's
+ * own built-in; everything else goes to `parseInvocation` unchanged.
+ */
+export function parseCliArgv(argv: readonly string[], commands: Pick<CommandInvoker, "list" | "get">, now: () => number = Date.now): CliInvocation {
+  if (argv.length === 0 || argv[0] === "help" || argv[0] === "--help" || argv[0] === "-h") return { kind: "catalogue" };
+  if (argv[0] === "ask") return parseAsk(argv.slice(1), now);
+  const json = argv.includes("--json");
+  const rest = argv.filter((a) => a !== "--json");
+  const [group, verb, ...tail] = rest;
+  if (!group || !verb || !WORD.test(group) || !WORD.test(verb)) return { kind: "usage", error: `${USAGE}\n  expected <group> <verb>` };
+  const id = `${group}.${verb}`;
+  const cmd = commands.get(id);
+  if (!cmd || !CommandRegistry.exposedTo(cmd, "cli")) return { kind: "usage", error: `${USAGE}\n  unknown command: ${group} ${verb}\n\ncommands:\n${cliCatalogue(commands)}` };
+  const bound = parseInvocation(cmd, tail);
+  switch (bound.kind) {
+    case "help":
+      return { kind: "command-help", id };
+    case "usage":
+      return { kind: "usage", error: bound.error };
+    case "invoke":
+      return { kind: "command", id, input: bound.input, json };
+  }
 }
 
-/** Thread key precedence: `--thread <key>` / `--thread=<key>` flag >
- *  SWITCHBOARD_THREAD env > ephemeral `cli:<timestamp>`. A stable key lets
- *  repeated CLI invocations act as ONE thread (workspace reuse, resident
+/** `ask [--thread <key> | --thread=<key>] <words…>`: the text is the remaining
+ *  words joined; the thread key defaults to an ephemeral `cli:<now>`. A stable
+ *  key lets repeated invocations act as ONE thread (workspace reuse, resident
  *  re-attach / binding persistence). */
-export function parseCliInvocation(
-  argv: string[],
-  env: Record<string, string | undefined> = process.env,
-): CliInvocation {
-  const rest: string[] = [];
+function parseAsk(argv: readonly string[], now: () => number): CliInvocation {
+  const words: string[] = [];
   let thread: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--thread") {
       thread = argv[++i];
-    } else if (a.startsWith("--thread=")) {
-      thread = a.slice("--thread=".length);
-    } else {
-      rest.push(a);
-    }
+      if (thread === undefined) return { kind: "usage", error: `${USAGE}\n  --thread needs a value` };
+    } else if (a.startsWith("--thread=")) thread = a.slice("--thread=".length);
+    else words.push(a);
   }
-  return {
-    threadKey: thread || env.SWITCHBOARD_THREAD || `cli:${Date.now()}`,
-    text: rest.join(" ").trim(),
-  };
+  const text = words.join(" ").trim();
+  if (!text) return { kind: "usage", error: `${USAGE}\n  ask needs a request` };
+  return { kind: "ask", threadKey: thread || `cli:${now()}`, text };
 }
 
+/** The list a usage error and `help` print: every command this surface exposes. */
+export function cliCatalogue(commands: Pick<CommandInvoker, "list">): string {
+  return catalogueText(commands.list().filter((c) => CommandRegistry.exposedTo(c, "cli")));
+}
+
+export interface CommandRunOutput {
+  exitCode: 0 | 1 | 2;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Run one bound registry command. Transport-free so the contract test drives
+ * the very path `main()` uses: a command that ran and failed is exit 1
+ * (`error (<code>): <message>` on stderr, nothing on stdout); success prints
+ * the exact `invoke` JSON (`--json`) or `renderText` of it.
+ */
+export async function runCommand(commands: CommandInvoker, parsed: Extract<CliInvocation, { kind: "command" }>, caller: Caller, opts: { now?: number } = {}): Promise<CommandRunOutput> {
+  const cmd = commands.get(parsed.id);
+  const result = await commands.invoke(parsed.id, parsed.input, caller);
+  if (!result.ok) return { exitCode: 1, stdout: "", stderr: `error (${result.error}): ${result.message}` };
+  return { exitCode: 0, stdout: parsed.json ? JSON.stringify(result.value, null, 2) : renderText(cmd ?? { id: parsed.id }, result.value, opts), stderr: "" };
+}
+
+/** What every non-`ask` invocation prints — the pure half `main()` and the tests share. */
+export async function runCli(commands: CommandInvoker, parsed: Exclude<CliInvocation, { kind: "ask" }>, caller: Caller, opts: { now?: number } = {}): Promise<CommandRunOutput> {
+  switch (parsed.kind) {
+    case "usage":
+      return { exitCode: 2, stdout: "", stderr: parsed.error };
+    case "catalogue":
+      return { exitCode: 0, stdout: `${USAGE}\n\ncommands:\n${cliCatalogue(commands)}`, stderr: "" };
+    case "command-help": {
+      const cmd = commands.get(parsed.id);
+      return { exitCode: 0, stdout: cmd ? helpText(cmd) : `unknown command: ${chatForm(parsed.id)}`, stderr: "" };
+    }
+    case "command":
+      return runCommand(commands, parsed, caller, opts);
+  }
+}
+
+/** The harness channel: replies to stdout, status lines to stderr, no history (one-shot). */
 class ConsoleIO implements ChannelIO {
   /** Structured output renders as plain text for the terminal. */
   readonly formatter = new PlainTextFormatter();
@@ -66,49 +161,42 @@ class ConsoleIO implements ChannelIO {
     };
   }
   async history(): Promise<[]> {
-    return []; // one-shot harness; no prior turns
+    return [];
   }
 }
 
-async function main() {
-  const { threadKey, text } = parseCliInvocation(process.argv.slice(2));
-  if (!text) {
-    console.error(
-      'Usage: npx tsx src/cli.ts [--thread <key>] "[agent:name] [model:provider/model] your request"\n' +
-        "  --thread <key> (or SWITCHBOARD_THREAD env): stable thread key so repeated runs act as one thread",
-    );
-    process.exit(1);
+async function main(): Promise<void> {
+  const config = new ConfigStore(CONFIG_PATH, "./data/cli-overrides.json");
+  const warn = (m: string) => console.error(m);
+  // Run history (#157): a CLI `ask` persists exactly like a bot run when
+  // `runHistory` is configured (null store → history off); the registry
+  // commands read the same store. A fresh process holds no live runs, so
+  // `runs list` here is persisted history.
+  const runStore = buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => warn(`[run-history] ${m}`) });
+  const commands = buildCoreCommands(config, runStore, { registry: defaultRunRegistry, env: process.env, dataDir: "./data", warn, audit: () => {} });
+
+  const parsed = parseCliArgv(process.argv.slice(2), commands);
+  if (parsed.kind !== "ask") {
+    const out = await runCli(commands, parsed, CLI_CALLER);
+    if (out.stdout) console.log(out.stdout);
+    if (out.stderr) console.error(out.stderr);
+    process.exit(out.exitCode);
   }
 
-  const config = new ConfigStore(CONFIG_PATH, "./data/cli-overrides.json");
   const providers = new ProviderRegistry(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
-  // Run history (#157): a CLI run persists exactly like a bot run when
-  // `runHistory` is configured (null store → history off), and the process
-  // waits for the write to settle before exiting rather than dropping it.
-  const runStore = buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => console.error(`[run-history] ${m}`) });
   const runHistoryWriter = runStore
-    ? createRunHistoryWriter({ store: runStore, warn: (m) => console.error(m), onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
+    ? createRunHistoryWriter({ store: runStore, warn, onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
     : undefined;
   // The chat fast path (`runs list`, `friction report`, …) answers from the same
   // catalogue the bot binds — without it those messages would go to the model.
-  const commands = buildCoreCommands(config, runStore, { registry: defaultRunRegistry, env: process.env, dataDir: "./data", warn: (m) => console.error(m) });
-
-  await dispatch(
-    { config, providers, skills, runHistoryWriter, commands },
-    {
-      channelId: "cli:local",
-      userId: "cli:local",
-      threadKey,
-      text,
-    },
-    new ConsoleIO(),
-  );
+  await dispatch({ config, providers, skills, runHistoryWriter, commands }, { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text }, new ConsoleIO());
+  // Wait for the record write to settle before exiting rather than dropping it.
   await runHistoryWriter?.settled();
 }
 
 // Run only when invoked as a script (tsx/node src/cli.ts), never on import
-// (the parsing helper above is unit-tested).
+// (the parsing helpers above are unit-tested).
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error(err);

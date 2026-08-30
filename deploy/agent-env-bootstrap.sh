@@ -12,8 +12,8 @@
 # service-account token) from the environment and writes a chmod-600 env file
 # (default .agent-env/<service>.<env>.env) the toolchain sources:
 #   set -a; . .agent-env/<service>.uat.env; set +a
-# Equivalent: `npm run agent-env-bootstrap -- --env uat --service <name>`.
+# Equivalent: `npx tsx src/cli.ts env bootstrap --env uat --service <name>` (the registry command).
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
-exec npx tsx src/agentEnv/bootstrapCli.ts "$@"
+exec npx tsx src/cli.ts env bootstrap "$@"

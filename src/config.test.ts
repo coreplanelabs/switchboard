@@ -276,6 +276,17 @@ describe("operator gate (isOperator, chatGateFor)", () => {
     expect([admin("repoManager"), dev("repoManager"), rando("repoManager")]).toEqual([true, true, false]);
   });
 
+  it("chatGateFor resolves channelConfig → canEditChannelConfig (open when unconfigured) and agentRun → canRunAgent(user, coding)", () => {
+    const open = store(YAML_FIXTURE.replace("  channelConfig: []\n", ""));
+    expect([open.chatGateFor("slack:UADMIN")("channelConfig"), open.chatGateFor("slack:URANDOM")("channelConfig")]).toEqual([true, true]);
+    const closed = store(YAML_FIXTURE.replace("  channelConfig: []\n", `  channelConfig: ["slack:UDEV"]\n`));
+    expect([closed.chatGateFor("slack:UADMIN")("channelConfig"), closed.chatGateFor("slack:UDEV")("channelConfig"), closed.chatGateFor("slack:URANDOM")("channelConfig")]).toEqual([true, true, false]);
+    // the fixture restricts `coding` to UDEV (admins always pass)
+    expect([open.chatGateFor("slack:UADMIN")("agentRun"), open.chatGateFor("slack:UDEV")("agentRun"), open.chatGateFor("slack:URANDOM")("agentRun")]).toEqual([true, true, false]);
+    const unrestricted = store(YAML_FIXTURE.replace(`  agents:\n    coding: ["slack:UDEV"]\n`, ""));
+    expect(unrestricted.chatGateFor("slack:URANDOM")("agentRun")).toBe(true); // no allowlist → the agent is open
+  });
+
   it("permissions.operators is parsed as the Access-identity write allowlist", () => {
     const s = store(YAML_FIXTURE + `  operators: ["access:alice@example.com"]\n`);
     expect(s.operatorIdentities()).toEqual(["access:alice@example.com"]);

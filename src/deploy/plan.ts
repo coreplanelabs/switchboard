@@ -1,5 +1,5 @@
 // The production deploy order for Switchboard's four Cloudflare Workers, as a
-// pure plan. `npm run deploy:all` (deployAllCli.ts) executes exactly what
+// pure plan. `npx tsx src/cli.ts deploy all` (src/deploy/run.ts) executes exactly what
 // `planDeploy` returns, so the order, the filters, and the force gating are
 // unit-tested here and cannot be bypassed by hand-ordering four `npm run deploy`s.
 //

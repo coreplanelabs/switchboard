@@ -12,7 +12,7 @@ import {
 
 // The one production deploy order, as a pure plan (README "Deploying on
 // Cloudflare Containers", AGENTS.md "Deploy order"). The runner
-// (deployAllCli.ts) only executes what this module plans, so the order, the
+// (src/deploy/run.ts, behind the registry's `deploy all`) only executes what this module plans, so the order, the
 // filters, and the force gating are provable here without touching wrangler.
 
 describe("WORKERS / DEPLOY_ORDER", () => {

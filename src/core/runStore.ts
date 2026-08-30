@@ -242,7 +242,7 @@ export class FileRunStore implements RunStore {
 
   /** Atomic replace: write `<path>.tmp-<n>` with the file mode, then rename over.
    *  A chmod/rename failure removes the temp file so a failed write never leaves
-   *  an orphan behind (the same discipline as `bootstrapCli.ts`). */
+   *  an orphan behind (the same discipline as `src/agentEnv/host.ts`). */
   private writeAtomic(path: string, content: string): void {
     const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
     writeFileSync(tmp, content, { mode: FILE_MODE });
