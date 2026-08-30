@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { APP_NAME, decide } from "./preflight.mjs";
+import { APP_NAME, catchUpWarnings, decide } from "./preflight.mjs";
 
 // Feature: features/slack-channel.md item 8 — the bot deploy preflight. Live
 // 2026-08-29: two `wrangler deploy`s 90 s apart (23:49:45Z, 23:51:15Z) landed on
@@ -74,5 +74,41 @@ describe("bot deploy preflight — decide()", () => {
     const d = decide({ health: health(3, false), apps: apps("updating") });
     expect(d.message).toContain("3 run(s) in flight");
     expect(d.message).toContain("state=updating");
+  });
+});
+
+// #271 — a catch-up that is silently failing (missing scopes, listing error) is
+// surfaced as a WARNING at deploy time; never a refusal, the deploy may be the fix.
+describe("bot deploy preflight — catchUpWarnings()", () => {
+  it("nothing to say when the catch-up is healthy or the payload predates the field", () => {
+    expect(catchUpWarnings({ ok: true, inFlight: 0, draining: false, catchUp: { lastRunAt: "x", channels: 3, missed: 0, skippedChannels: 0 } })).toEqual([]);
+    expect(catchUpWarnings({ ok: true, inFlight: 0, draining: false })).toEqual([]);
+    expect(catchUpWarnings("ok")).toEqual([]);
+  });
+
+  it("names a whole-scan error and the missing scopes", () => {
+    const w = catchUpWarnings({ ok: true, inFlight: 0, draining: false, catchUp: { error: "missing_scope", missingScopes: ["channels:read", "groups:read"] } });
+    expect(w).toHaveLength(2);
+    expect(w[0]).toContain("missing_scope");
+    expect(w[1]).toContain("channels:read, groups:read");
+  });
+
+  it("an empty missingScopes list is not a warning", () => {
+    expect(catchUpWarnings({ ok: true, inFlight: 0, draining: false, catchUp: { missingScopes: [] } })).toEqual([]);
+  });
+
+  it("decide() carries the warnings in an allowed message without refusing", () => {
+    const d = decide({ health: { ok: true, payload: { ok: true, inFlight: 0, draining: false, catchUp: { error: "missing_scope" } } }, apps: apps("active") });
+    expect(d.allow).toBe(true);
+    expect(d.forced).toBe(false);
+    expect(d.warnings).toHaveLength(1);
+    expect(d.message).toMatch(/WARNING/);
+    expect(d.message).toContain("missing_scope");
+  });
+
+  it("a refusal still lists the catch-up warnings", () => {
+    const d = decide({ health: { ok: true, payload: { ok: true, inFlight: 1, draining: false, catchUp: { missingScopes: ["groups:read"] } } }, apps: apps("active") });
+    expect(d.allow).toBe(false);
+    expect(d.message).toContain("groups:read");
   });
 });

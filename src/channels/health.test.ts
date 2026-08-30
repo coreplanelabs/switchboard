@@ -29,3 +29,27 @@ describe("healthPayload", () => {
     expect(healthPayload({ inFlight: 0, draining: false, drainStartedAt: startedAt })).not.toHaveProperty("drainStartedAt");
   });
 });
+
+// Feature: features/slack-channel.md item 7 (#271) — /healthz also carries the
+// reconnect catch-up's last outcome and the bot token's missing scopes, so a
+// silent catch-up is visible without container logs.
+describe("healthPayload — catchUp", () => {
+  it("includes the catch-up status with undefined fields omitted", () => {
+    const p = healthPayload({
+      inFlight: 0,
+      draining: false,
+      catchUp: { lastRunAt: "2026-08-29T22:00:00.000Z", channels: 3, missed: 0, skippedChannels: 0, error: undefined, missingScopes: undefined },
+    });
+    expect(p.catchUp).toEqual({ lastRunAt: "2026-08-29T22:00:00.000Z", channels: 3, missed: 0, skippedChannels: 0 });
+    expect(Object.keys(p.catchUp ?? {})).toEqual(["lastRunAt", "channels", "missed", "skippedChannels"]);
+  });
+
+  it("carries error and missingScopes when set", () => {
+    const p = healthPayload({ inFlight: 0, draining: false, catchUp: { error: "missing_scope", missingScopes: ["channels:read"] } });
+    expect(p.catchUp).toEqual({ error: "missing_scope", missingScopes: ["channels:read"] });
+  });
+
+  it("a bot that has not scanned yet reports an empty catchUp object", () => {
+    expect(healthPayload({ inFlight: 0, draining: false, catchUp: {} }).catchUp).toEqual({});
+  });
+});

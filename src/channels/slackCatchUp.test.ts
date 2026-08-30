@@ -170,7 +170,7 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     const onMissed = vi.fn();
     const log = vi.fn();
     const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, log });
-    expect(out).toEqual({ channels: 2, missed: 2, orphans: 0 });
+    expect(out).toEqual({ channels: 2, missed: 2, orphans: 0, skippedChannels: 0 });
     expect(onMissed.mock.calls.map(([m]) => [m.channel, m.ts])).toEqual([[ "C1", a.ts ], [ "C2", c.ts ]]);
     expect(client.users.conversations).toHaveBeenCalledWith(
       expect.objectContaining({ types: "public_channel,private_channel", exclude_archived: true }),
@@ -197,7 +197,7 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     const client = mockClient({ history: { C1: [mention({ reactions: [{ name: "eyes", users: [BOT], count: 1 }] })] } });
     const onMissed = vi.fn();
     const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed });
-    expect(out).toEqual({ channels: 1, missed: 0, orphans: 0 });
+    expect(out).toEqual({ channels: 1, missed: 0, orphans: 0, skippedChannels: 0 });
     expect(onMissed).not.toHaveBeenCalled();
   });
 
@@ -205,7 +205,7 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     const client = mockClient({ historyError: "missing_scope" });
     const log = vi.fn();
     const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), log });
-    expect(out).toEqual({ channels: 1, missed: 0, orphans: 0 });
+    expect(out).toEqual({ channels: 1, missed: 0, orphans: 0, skippedChannels: 1 });
     expect(log).toHaveBeenCalledWith(expect.stringContaining("missing_scope"));
   });
 
@@ -333,7 +333,7 @@ describe("catchUpMissedMentions — orphaned-card sweep", () => {
     const onOrphanedCard = vi.fn(async () => {});
     const log = vi.fn();
     const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, ownedHere: () => false, onOrphanedCard, log });
-    expect(out).toEqual({ channels: 1, missed: 0, orphans: 1 });
+    expect(out).toEqual({ channels: 1, missed: 0, orphans: 1, skippedChannels: 0 });
     expect(client.conversations.replies).toHaveBeenCalledTimes(1);
     expect(onMissed).not.toHaveBeenCalled();
     expect(onOrphanedCard).toHaveBeenCalledWith(
@@ -346,7 +346,7 @@ describe("catchUpMissedMentions — orphaned-card sweep", () => {
   it("without an onOrphanedCard hook the sweep is off: no wider fetch, no closes", async () => {
     const client = mockClient({ history: { C1: [parent] }, replies: { [`C1:${parent.ts}`]: [parent, frozen] } });
     const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn() });
-    expect(out).toEqual({ channels: 1, missed: 0, orphans: 0 });
+    expect(out).toEqual({ channels: 1, missed: 0, orphans: 0, skippedChannels: 0 });
     expect(client.conversations.replies).not.toHaveBeenCalled();
   });
 
@@ -364,5 +364,33 @@ describe("catchUpMissedMentions — orphaned-card sweep", () => {
     expect(out.orphans).toBe(1);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("message_not_found"));
     expect(log).toHaveBeenCalledWith(expect.stringContaining("1 of 2 orphaned status card(s) closed"));
+  });
+});
+
+// #271 — the runner records its outcome so /healthz can show it.
+describe("catchUpMissedMentions — outcome record", () => {
+  it("records channels/missed and zero skipped after a clean scan", async () => {
+    const client = mockClient({ channels: [{ id: "C1" }, { id: "C2" }], history: { C1: [mention()], C2: [] } });
+    const record = vi.fn();
+    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), record });
+    expect(out).toEqual({ channels: 2, missed: 1, orphans: 0, skippedChannels: 0 });
+    expect(record).toHaveBeenCalledWith({ at: NOW, channels: 2, missed: 1, skippedChannels: 0 });
+  });
+
+  it("records the channel-listing failure as `error` (the 2026-08-30 missing_scope silence)", async () => {
+    const client = mockClient();
+    client.users.conversations.mockRejectedValue(new Error("An API error occurred: missing_scope"));
+    const record = vi.fn();
+    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), record });
+    expect(out).toEqual({ channels: 0, missed: 0, orphans: 0, skippedChannels: 0 });
+    expect(record).toHaveBeenCalledWith({ at: NOW, channels: 0, missed: 0, skippedChannels: 0, error: "An API error occurred: missing_scope" });
+  });
+
+  it("counts per-channel scan failures as skippedChannels, without an error", async () => {
+    const client = mockClient({ channels: [{ id: "C1" }, { id: "C2" }], historyError: "not_in_channel" });
+    const record = vi.fn();
+    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), record });
+    expect(out.skippedChannels).toBe(2);
+    expect(record).toHaveBeenCalledWith({ at: NOW, channels: 2, missed: 0, skippedChannels: 2 });
   });
 });
