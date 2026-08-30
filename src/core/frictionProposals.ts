@@ -54,7 +54,11 @@ function isDiagnosis(v: unknown): boolean {
   if (!Array.isArray(d.findings) || typeof d.eventCount !== "number" || typeof d.verdict !== "string") return false;
   if (typeof d.byCategory !== "object" || d.byCategory === null) return false;
   if (d.runMs !== undefined && typeof d.runMs !== "number") return false;
-  return FRICTION_CATEGORIES.every((c) => typeof (d.byCategory as Record<string, unknown>)[c] === "object");
+  // Every category PRESENT must be a totals object; categories the analyzer
+  // gained after a record was written are simply absent (= zero). Requiring
+  // the current list would make every older record in the durable ledger
+  // unreadable the moment a category is added.
+  return Object.values(d.byCategory as Record<string, unknown>).every((t) => typeof t === "object" && t !== null);
 }
 
 /** A pattern kind is an analyzer category, plus the one cross-run kind. */
@@ -104,6 +108,7 @@ const SEVERITY_RANK: Record<FrictionSeverity, number> = { low: 0, medium: 1, hig
 
 const KIND_LABEL: Record<PatternKind, string> = {
   slow_tool: "slow tool call",
+  slow_model_turn: "slow model turn",
   failed_tool: "failing tool call",
   retry: "retry",
   setup_install: "setup/install",
@@ -240,6 +245,10 @@ export function patternSignature(f: FrictionFinding): string {
     }
     case "wrap_up":
       return "wrap_up:wrap_up";
+    case "slow_model_turn":
+      // A slow think is a property of the agent/model tier, not of the command
+      // the model eventually issued — one key, so it clusters across runs.
+      return "slow_model_turn:model_turn";
     case "infra_failure": {
       if (summary.startsWith("sandbox dead")) return "infra_failure:sandbox_dead";
       const mid = /^no result for tool call \(run ended mid-tool\):\s*/.exec(summary);
@@ -507,6 +516,8 @@ function suggestedFix(p: FrictionPattern): string {
       return `Runs keep retrying \`${p.signature}\` after it fails once — the agent recovers by hand each time, and the first attempt's failure plus the retry are both paid. Make the first attempt succeed: encode the working invocation (flags, prerequisites) in the target repo's AGENTS.md or the resident command table, and check the paired \`failed_tool\` proposal for the root cause.`;
     case "slow_tool":
       return `\`${p.signature}\` is the slow step. Cut its wall time: cache its inputs (a dependency cache in the sandbox image, or a resident worktree), narrow the command (targeted tests instead of the whole suite when the task is local), or move the affected agent to a larger sandbox tier if the step is CPU/RAM-bound (AGENTS.md → container sizing).`;
+    case "slow_model_turn":
+      return `The model itself is the slow step: ${p.occurrences} turns across ${p.runIds.length} runs spent ${formatMs(p.durationMs)} thinking between one tool result and the next call. Lower the affected agent's \`effort\` (\`src/agents/registry.ts\`; review runs \`medium\` for this reason), or make each turn do more — prompt for batched gathering (several files / commands per call) so the same work takes fewer, cheaper thinks. The evidence rows show what each slow turn produced: a one-line grep after minutes of thought is the signature of the wrong effort tier.`;
     case "wrap_up":
       return `Runs keep reaching the wrap-up warning (${p.runIds.length} runs; ${formatMs(p.durationMs)} spent winding down). Either the affected agent's \`maxMinutes\` (\`src/agents/registry.ts\`) is too tight for this shape of work, or the prompt should push batching (fewer, larger tool calls) — the evidence rows say which agent and how close to the deadline each run got.`;
     case "budget_hit":

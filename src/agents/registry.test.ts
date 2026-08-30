@@ -19,10 +19,11 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.review.maxMinutes).toBe(25);
   });
 
-  it("coding: full toolset, 60 turns, 45 min", () => {
+  it("coding: full toolset, 60 turns, 45 min, no built-in effort (config layers decide)", () => {
     expect(AGENTS.coding.toolset).toBe("full");
     expect(AGENTS.coding.maxTurns).toBe(60);
     expect(AGENTS.coding.maxMinutes).toBe(45);
+    expect(AGENTS.coding.effort).toBeUndefined();
   });
 
   it("general's prompt redirects tool-needing requests to the other agents", () => {

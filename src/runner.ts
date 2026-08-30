@@ -1,4 +1,5 @@
 import type { AgentDef } from "./agents/registry.js";
+import type { Effort } from "./effort.js";
 import { toolResultText, type ChatMessage, type ContentPart, type Provider } from "./providers/types.js";
 import { parseExitPrefix, prepareToolOutput, redactAndCap, redactSecrets, summarizeToolResult, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
 import type { RunControl } from "./core/runRegistry.js";
@@ -30,6 +31,11 @@ export interface RunOptions {
    *  here, never by mutating the shared AgentDef (concurrent dispatches share
    *  it). Absent → `agent.system`. */
   system?: string;
+  /** Effort resolved through the config layers for this run (directive >
+   *  thread > user > channel > defaults). Same rule as `system`: flows here,
+   *  never by mutating the AgentDef. Absent → `agent.effort`, else the
+   *  provider's default. */
+  effort?: Effort;
   /** called with short progress notes (wrap-up warnings, budget notices) */
   onProgress?: (note: string) => void;
   /** structured run-visibility events (tool calls + redacted result summaries),
@@ -169,7 +175,7 @@ async function runLoop(
       messages,
       tools: tools.length > 0 ? tools : undefined,
       maxTokens: opts.agent.maxTokens,
-      effort: opts.agent.effort,
+      effort: opts.effort ?? opts.agent.effort,
     });
 
     if (result.stopReason === "refusal") {

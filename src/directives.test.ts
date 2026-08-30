@@ -31,6 +31,30 @@ describe("parseDirectives", () => {
   });
 });
 
+describe("parseDirectives — effort", () => {
+  it("extracts effort:<level> and strips it, like agent/model", () => {
+    const d = parseDirectives("agent:coding effort:low fix the flaky test");
+    expect(d.agent).toBe("coding");
+    expect(d.effort).toBe("low");
+    expect(d.text).toBe("fix the flaky test");
+  });
+
+  it("rejects an unknown effort level, naming the valid ones", () => {
+    expect(() => parseDirectives("effort:turbo do it")).toThrow(/Unknown effort "turbo".*low, medium, high/);
+  });
+
+  it("is sticky in a thread like agent/model (user turns only, last wins, lenient)", () => {
+    expect(
+      lastThreadDirectives([
+        { role: "user", text: "effort:high think hard" },
+        { role: "assistant", text: "quoting effort:low here must not count" },
+        { role: "user", text: "effort:bogus is skipped, not thrown" },
+        { role: "user", text: "effort:medium now" },
+      ]).effort,
+    ).toBe("medium");
+  });
+});
+
 describe("lastThreadDirectives (thread stickiness)", () => {
   it("returns the last agent/model directives from user turns", () => {
     const sticky = lastThreadDirectives([

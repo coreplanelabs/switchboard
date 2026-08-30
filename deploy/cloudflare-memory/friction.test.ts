@@ -24,6 +24,9 @@ async function post(path: string, body: unknown, headers: Record<string, string>
 }
 
 const ZERO = { count: 0, durationMs: 0 };
+// Deliberately the ORIGINAL seven categories, not the analyzer's current list:
+// this is the shape of records already in the prod ledger, and the DO must keep
+// accepting them as categories are added (`slow_model_turn`, 2026-08-30).
 const diagnosis = (verdict = "no friction detected") => ({
   eventCount: 0,
   toolCalls: 0,

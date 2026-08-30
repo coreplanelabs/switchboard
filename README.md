@@ -32,13 +32,14 @@ Onboarded repos run in an always-warm **resident worktree** ([features/resident-
 
 Resolution order (highest wins):
 
-1. **Per-request** — inline directives in the message: `agent:review model:openai/gpt-5 look at PR #42`
-2. **Per-thread (sticky)** — a follow-up without directives stays on the agent/model this thread last used (derived from the thread's history, never stored)
-3. **Per-user** — `config set me model=openai/gpt-5`
-4. **Per-channel** — `config set channel agent=review`
-5. **Defaults** — `config/config.yaml` (`defaults.agent`, per-agent `defaults.models`)
+1. **Per-request** — inline directives in the message: `agent:review model:openai/gpt-5 effort:low look at PR #42`
+2. **Per-thread (sticky)** — a follow-up without directives stays on the agent/model/effort this thread last used (derived from the thread's history, never stored)
+3. **Per-user** — `config set me model=openai/gpt-5 effort=medium`
+4. **Per-channel** — `config set channel agent=review efforts.coding=medium`
+5. **Defaults** — `config/config.yaml` (`defaults.agent`, per-agent `defaults.models` / `defaults.efforts`)
+6. **Agent definition** — an agent's built-in `effort` in `src/agents/registry.ts` (review: `medium`), then the provider's own default
 
-Runtime overrides persist to `data/overrides.json`. Static defaults for channels/users can also live in `config.yaml`.
+Runtime overrides persist to `data/overrides.json`. Static defaults for channels/users can also live in `config.yaml`. **Effort** (`low | medium | high`, how hard the model thinks per turn) is a first-class dimension with the same ladder as model — forced (`effort=`) or per agent (`efforts.<agent>=`) at every scope — because the wall clock is an agent's real budget and effort decides how much of it goes to thinking rather than work.
 
 **Custom instructions** (per user / per channel, [#107](https://github.com/coreplanelabs/switchboard/issues/107)): `config set me instructions "Always reply in bullet points"` and `config set channel instructions "This channel is about billing"` store free text (≤2000 chars) on the same scopes. The dispatcher folds it into the system prompt as a clearly labeled advisory block — channel text on every run in that channel, a user's text only on runs that user requests; user wins on conflict. Instructions are prompt content only: they never change agent/model resolution or permission gates. A bare `config set me instructions` shows the current text; an explicit empty value (`config set me instructions ""`) clears it (any static `config.yaml` text then applies again, and the reply says so); `config show` displays them.
 

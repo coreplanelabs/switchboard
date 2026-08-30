@@ -1,3 +1,5 @@
+import type { Effort } from "../effort.js";
+
 // Provider-neutral chat types. Each provider adapter maps these to its own
 // wire format, so agents and the runner never depend on a specific vendor.
 
@@ -54,7 +56,7 @@ export interface CompletionRequest {
   tools?: ToolDef[];
   maxTokens: number;
   /** model effort hint; providers apply it only where the model supports it */
-  effort?: "low" | "medium" | "high";
+  effort?: Effort;
   /** Cancellation for a hard run stop (#101): providers pass it to their HTTP
    *  call so an aborted run stops billing/streaming now. Absent → never aborts. */
   signal?: AbortSignal;

@@ -92,6 +92,79 @@ describe("layered resolution", () => {
   });
 });
 
+describe("effort resolution (the same layers as model)", () => {
+  const EFFORT_YAML = `
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+    coding: anthropic/coding-model
+    review: anthropic/review-model
+  efforts:
+    coding: medium
+channels:
+  "slack:CLOW":
+    effort: low
+  "slack:CPERAGENT":
+    efforts:
+      coding: high
+users:
+  "slack:UHIGH":
+    effort: high
+  "slack:UPERAGENT":
+    efforts:
+      coding: low
+`;
+  let s: ConfigStore;
+  beforeEach(() => {
+    s = store(EFFORT_YAML);
+  });
+
+  it("unset everywhere → undefined (the agent definition / provider default decides)", () => {
+    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: { agent: "review" } }).effort).toBeUndefined();
+  });
+
+  it("defaults.efforts.<agent> is the floor layer", () => {
+    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: { agent: "coding" } }).effort).toBe("medium");
+  });
+
+  it("per-agent precedence: user efforts > channel efforts > defaults", () => {
+    expect(s.resolve({ channelId: "slack:CPERAGENT", userId: "slack:UX", request: { agent: "coding" } }).effort).toBe("high");
+    expect(s.resolve({ channelId: "slack:CPERAGENT", userId: "slack:UPERAGENT", request: { agent: "coding" } }).effort).toBe("low");
+  });
+
+  it("a forced effort (user > channel) beats per-agent efforts, and the request directive beats everything", () => {
+    expect(s.resolve({ channelId: "slack:CLOW", userId: "slack:UPERAGENT", request: { agent: "coding" } }).effort).toBe("low");
+    expect(s.resolve({ channelId: "slack:CLOW", userId: "slack:UHIGH", request: { agent: "coding" } }).effort).toBe("high");
+    expect(s.resolve({ channelId: "slack:CLOW", userId: "slack:UHIGH", request: { agent: "coding", effort: "medium" } }).effort).toBe("medium");
+  });
+
+  it("runtime overrides set effort per scope and per agent, persist through the store, and clear", () => {
+    s.setUserOverride("slack:UX", { effort: "low" });
+    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).effort).toBe("low");
+    s.setChannelOverride("slack:CX", { efforts: { review: "high" } });
+    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UY", request: { agent: "review" } }).effort).toBe("high");
+    s.clearUserOverride("slack:UX");
+    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).effort).toBeUndefined();
+  });
+
+  it("an invalid effort level in static config is rejected at load, naming the valid ones", () => {
+    expect(() => store(EFFORT_YAML.replace("effort: low", "effort: turbo"))).toThrow(/channels\.slack:CLOW\.effort.*turbo.*low, medium, high/);
+    expect(() => store(EFFORT_YAML.replace("    coding: medium", "    coding: max"))).toThrow(/defaults\.efforts\.coding.*max/);
+  });
+
+  it("config show renders effort where it is set: effective, defaults, and scopes", () => {
+    const text = s.describe("slack:CLOW", "slack:UPERAGENT");
+    expect(text).toMatch(/\*Effective for you in this channel:\*.*effort `low`/);
+    expect(text).toMatch(/\*Defaults:\*.*efforts `coding=medium`/);
+    expect(text).toMatch(/\*Channel scope:\*.*effort `low`/);
+    expect(text).toMatch(/\*Your scope:\*.*efforts `coding=low`/);
+  });
+});
+
 describe("permission gates", () => {
   const s = store();
 

@@ -1,4 +1,5 @@
 // Agent definitions. An agent is a system prompt + toolset + turn budget.
+import type { Effort } from "../effort.js";
 // Which model runs it is resolved separately by the config layers, so any
 // agent can run on any configured provider/model.
 
@@ -14,9 +15,10 @@ export interface AgentDef {
   /** hard wall-clock budget for the tool loop; at the deadline the agent is
    *  cut off and forced to write up findings so far */
   maxMinutes: number;
-  /** model effort (Anthropic output_config.effort); omit for model default.
-   *  Lower effort = much faster turns. Skipped for models without support. */
-  effort?: "low" | "medium" | "high";
+  /** The agent's built-in effort, the layer just above the provider default —
+   *  every config layer (directive, thread, user, channel, `defaults.efforts`)
+   *  beats it; see `src/effort.ts`. Omit to leave it to config / the model. */
+  effort?: Effort;
   /** Resources the agent needs (KD2: declared per agent, resolved by the
    *  executor factory). No `repo` declared → no workspace/sandbox is ever
    *  provisioned for this agent's runs. */
@@ -194,6 +196,8 @@ export const AGENTS: Record<string, AgentDef> = {
     maxTurns: 60, // scoping is capped at ~5 calls by the prompt; this is implementation room
     maxTokens: 64000,
     maxMinutes: 45,
+    // No built-in effort: the deployment decides (`defaults.efforts.coding`,
+    // `config set channel efforts.coding=…`, or `effort:` per request).
     resources: { repo: "required" },
   },
   review: {

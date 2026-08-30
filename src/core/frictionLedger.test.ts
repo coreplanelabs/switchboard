@@ -126,4 +126,19 @@ describe("isFrictionRunRecord", () => {
     expect(isFrictionRunRecord(null)).toBe(false);
     expect(isFrictionRunRecord("x")).toBe(false);
   });
+
+  it("accepts a record written by an OLDER analyzer whose byCategory lacks categories added since (absent = zero)", () => {
+    // The durable ledger holds records for months; a new FrictionCategory
+    // (`slow_model_turn`, 2026-08-30) must not make every existing record
+    // unreadable — `WorkerFrictionLedger.recent` filters through this guard.
+    const old = rec("a", 1);
+    const { slow_model_turn: _dropped, ...legacy } = old.diagnosis.byCategory;
+    expect(isFrictionRunRecord({ ...old, diagnosis: { ...old.diagnosis, byCategory: legacy } })).toBe(true);
+  });
+
+  it("still rejects a byCategory whose entries are not totals objects", () => {
+    const bad = rec("a", 1);
+    expect(isFrictionRunRecord({ ...bad, diagnosis: { ...bad.diagnosis, byCategory: { slow_tool: 3 } } })).toBe(false);
+    expect(isFrictionRunRecord({ ...bad, diagnosis: { ...bad.diagnosis, byCategory: null } })).toBe(false);
+  });
 });

@@ -1,4 +1,5 @@
 import { MAX_INSTRUCTIONS_LENGTH, type ConfigStore, type Scope } from "../config.js";
+import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
 import { configAwarenessBlock } from "./configAwareness.js";
 import { customInstructionsBlock } from "./customInstructions.js";
 import { AGENTS, getAgent } from "../agents/registry.js";
@@ -217,6 +218,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       request: {
         agent: directives.agent ?? sticky.agent,
         model: directives.model ?? sticky.model,
+        effort: directives.effort ?? sticky.effort,
       },
     });
 
@@ -374,10 +376,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const configBlock = configAwarenessBlock({
       agentName: agent.name,
       modelRef: resolved.modelRef,
+      effort: resolved.effort,
       channel: scopes.channel,
       user: scopes.user,
-      messageDirective: { agent: directives.agent, model: directives.model },
-      threadDirective: { agent: sticky.agent, model: sticky.model },
+      messageDirective: { agent: directives.agent, model: directives.model, effort: directives.effort },
+      threadDirective: { agent: sticky.agent, model: sticky.model, effort: sticky.effort },
       canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
     });
 
@@ -519,6 +522,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         agent,
         messages,
         system,
+        effort: resolved.effort,
         toolContext: { executor, reportProgress, web: makeWebCapability(process.env), skills: deps.skills, agentName: agent.name, onVerdict },
         onProgress,
         onEvent,
@@ -1195,8 +1199,16 @@ function handleConfigCommand(config: ConfigStore, msg: IncomingMessage): string 
       const agentName = key.slice("models.".length);
       if (!AGENTS[agentName]) return `Unknown agent \`${agentName}\` in \`${key}\`.`;
       patch.models = { ...patch.models, [agentName]: value };
+    } else if (key === "effort") {
+      if (!isEffort(value)) return `Unknown effort \`${value}\`. Valid: ${EFFORT_LEVELS_HINT}`;
+      patch.effort = value;
+    } else if (key.startsWith("efforts.")) {
+      const agentName = key.slice("efforts.".length);
+      if (!AGENTS[agentName]) return `Unknown agent \`${agentName}\` in \`${key}\`.`;
+      if (!isEffort(value)) return `Unknown effort \`${value}\`. Valid: ${EFFORT_LEVELS_HINT}`;
+      patch.efforts = { ...patch.efforts, [agentName]: value };
     } else {
-      return `Unknown key \`${key}\`. Valid: agent, model, models.<agent>, instructions`;
+      return `Unknown key \`${key}\`. Valid: agent, model, models.<agent>, effort, efforts.<agent>, instructions`;
     }
   }
   if (Object.keys(patch).length === 0) return `Nothing to set. Example: \`config set channel agent=review\``;
@@ -1243,13 +1255,14 @@ function helpText(): string {
     agents,
     "",
     "*Per-request directives* (anywhere in the message):",
-    "`agent:review model:anthropic/claude-opus-5 look at PR #42`",
+    "`agent:review model:anthropic/claude-opus-5 effort:low look at PR #42` (effort: low | medium | high — lower = faster turns)",
     "",
     "*Config commands:*",
     "`config show` — effective settings here",
     "`config set channel agent=review` — channel default agent",
     "`config set me model=openai/gpt-5` — your personal model",
     "`config set channel models.coding=anthropic/claude-opus-5` — per-agent model for this channel",
+    "`config set me effort=low` / `config set channel efforts.coding=medium` — model effort, forced or per agent (same layers as model)",
     '`config set me instructions "Always reply in bullet points"` — your custom instructions (advisory; apply only to runs you request; no value shows the current text, `""` clears)',
     '`config set channel instructions "This channel is about billing"` — channel-wide instructions (same gate as other channel config)',
     "`config clear channel` / `config clear me`",

@@ -4,7 +4,7 @@ Reviews a PR with the full change in context and reports ranked, evidence-anchor
 
 - **Code**: `src/agents/registry.ts` (`REVIEW_SYSTEM`; resident-path variant `REVIEW_SYSTEM_RESIDENT`); post-step in `src/core/dispatcher.ts` + `src/core/reviewPost.ts` + `src/core/reviewVerdict.ts` + `src/execution/githubComments.ts`; verdict tool `submit_verdict` in `src/tools/workspace.ts`
 - **Docs**: [README — Agents](../README.md#agents)
-- **Budgets**: 30 turns (backstop) / 25 min / 64k tokens · effort `medium` · toolset `readonly` (bash + read; read-only by convention)
+- **Budgets**: 30 turns (backstop) / 25 min / 64k tokens · built-in effort `medium` (a floor — every config layer overrides it, [routing-and-config.md](routing-and-config.md) item 2) · toolset `readonly` (bash + read; read-only by convention)
 - **Receipts**: https://github.com/coreplanelabs/switchboard/issues/225
 
 ## Behavior

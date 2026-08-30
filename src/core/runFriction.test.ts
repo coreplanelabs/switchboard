@@ -233,6 +233,83 @@ describe("analyzeRunFriction — per-category classification", () => {
   });
 });
 
+describe("analyzeRunFriction — slow_model_turn (the time between a result and the model's next move)", () => {
+  // Live run 2026-08-30 (30dc0210): 1850 s wall clock, 50 s of tool time, 35
+  // tool calls, verdict "no friction detected" — every gap was the model
+  // thinking for 2–4 min between one-line greps. The analyzer must see it.
+  const input: RunEvent = { type: "input", text: "fix the thing", at: T0 };
+
+  it("flags a model turn (tool_result → next tool_call) at or past the threshold; under it is not flagged", () => {
+    const d = analyzeRunFriction([
+      input,
+      ...bash("ls", T0 + 5_000, 1_000), // first turn: 5 s of thinking
+      ...bash("cat a.ts", T0 + 6_000 + 60_000, 1_000), // 60 s gap → flagged at the default threshold
+      ...bash("cat b.ts", T0 + 67_000 + 59_999, 1_000), // just under → not flagged
+    ]);
+    expect(categories(d)).toEqual(["slow_model_turn"]);
+    const [f] = d.findings;
+    expect(f.severity).toBe("medium");
+    expect(f.durationMs).toBe(60_000);
+    expect(f.summary).toMatch(/1m 0s/);
+    expect(f.summary).toContain("$ cat a.ts"); // anchored to the call the turn produced
+    expect(f.eventIndex).toBe(3);
+    expect(d.modelTimeMs).toBe(5_000 + 60_000 + 59_999);
+  });
+
+  it("≥2× the threshold is high severity; the threshold is configurable", () => {
+    const d = analyzeRunFriction(
+      [input, ...bash("ls", T0 + 20_000, 1_000), ...bash("pwd", T0 + 21_000 + 9_000, 1_000)],
+      { slowModelTurnMs: 10_000 },
+    );
+    expect(d.findings.map((f) => [f.category, f.severity])).toEqual([
+      ["slow_model_turn", "high"], // 20 s ≥ 2 × 10 s
+    ]);
+  });
+
+  it("narration ends the turn: a slow think that produces `assistant` text is one finding, not one per following tool row", () => {
+    const d = analyzeRunFriction([
+      input,
+      ...bash("ls", T0 + 1_000, 1_000),
+      { type: "assistant", text: "Now I understand. Let me check more.", at: T0 + 2_000 + 90_000 },
+      ...bash("cat a.ts", T0 + 92_000 + 10, 1_000), // the call rides the same completion (10 ms later)
+      ...bash("cat b.ts", T0 + 93_010 + 10, 1_000),
+    ]);
+    expect(categories(d)).toEqual(["slow_model_turn"]);
+    expect(d.findings[0].eventIndex).toBe(3);
+    expect(d.findings[0].durationMs).toBe(90_000);
+  });
+
+  it("the final answer is the last model turn; runner notes between a result and the next call do not split the turn", () => {
+    const d = analyzeRunFriction([
+      input,
+      ...bash("ls", T0 + 1_000, 1_000),
+      note("wrap_up", "3 min left", T0 + 30_000),
+      { type: "answer", text: "done", at: T0 + 2_000 + 120_000 },
+    ]);
+    const slow = d.findings.filter((f) => f.category === "slow_model_turn");
+    expect(slow).toHaveLength(1);
+    expect(slow[0].durationMs).toBe(120_000);
+    expect(slow[0].summary).toMatch(/answer/);
+  });
+
+  it("untimed streams never produce slow_model_turn and carry no modelTimeMs", () => {
+    const d = analyzeRunFriction([call("bash", "$ ls"), result("bash", true, "ok"), call("bash", "$ pwd"), result("bash", true, "ok")]);
+    expect(categories(d)).toEqual([]);
+    expect(d.modelTimeMs).toBeUndefined();
+  });
+
+  it("the verdict for dominant model time is a share of RUN time (tool time would exceed 100%)", () => {
+    const d = analyzeRunFriction([
+      input,
+      ...bash("ls", T0 + 1_000, 1_000),
+      ...bash("cat a.ts", T0 + 2_000 + 180_000, 2_000), // 3 min think, 2 s tool
+    ]);
+    expect(d.verdict).toMatch(/slow model turns dominated: 1 finding, 3m 0s/);
+    expect(d.verdict).toMatch(/of run time/);
+    expect(d.verdict).not.toMatch(/tool time/);
+  });
+});
+
 describe("analyzeRunFriction — aggregation and verdict", () => {
   it("runMs spans first→last timestamp; toolTimeMs sums paired call→result durations", () => {
     const d = analyzeRunFriction([...bash("a", T0, 1_000), ...bash("b", T0 + 5_000, 2_000), note("wrap_up", "w", T0 + 10_000)]);
@@ -276,7 +353,7 @@ describe("analyzeRunFriction — aggregation and verdict", () => {
   it("byCategory always lists every category (zeroed when absent), so consumers need no undefined checks", () => {
     const d = analyzeRunFriction([]);
     expect(Object.keys(d.byCategory).sort()).toEqual(
-      ["budget_hit", "failed_tool", "infra_failure", "retry", "setup_install", "slow_tool", "wrap_up"],
+      ["budget_hit", "failed_tool", "infra_failure", "retry", "setup_install", "slow_model_turn", "slow_tool", "wrap_up"],
     );
     for (const v of Object.values(d.byCategory)) expect(v).toEqual({ count: 0, durationMs: 0 });
   });
@@ -294,6 +371,8 @@ describe("formatFrictionReport", () => {
     expect(text).toMatch(/events: 6/);
     expect(text).toMatch(/tool calls: 3/);
     expect(text).toMatch(/run: 1m 18s/);
+    expect(text).toMatch(/tool time: 1m 16s · model time: 2s/); // 1 s + 1 s between the paired calls
+    expect(text).toMatch(/slow_model_turn\s+0\s+-/);
     expect(text).toMatch(/setup_install\s+1\s+1m 10s/);
     expect(text).toMatch(/\[setup_install\].*pnpm install/);
     expect(text).toMatch(/\[failed_tool\].*2 failing/);

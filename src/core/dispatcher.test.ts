@@ -2372,6 +2372,51 @@ channels:
     expect(sys).not.toMatch(/using defaults/i);
   });
 
+  it("effort resolves like model: `effort:` directive → provider request + awareness block; `config set me effort=` sticks per user", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await dispatch(deps, msg("effort:low quick answer please"), fakeIO().io);
+    expect(provider.requests[0].effort).toBe("low");
+    expect(JSON.stringify(provider.requests[0].messages.at(-1)?.content)).not.toMatch(/effort:low/); // stripped from the text the model sees
+    expect(provider.requests[0].system).toContain("at effort `low`");
+    expect(provider.requests[0].system).toContain("This message's `effort:low` directive");
+
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("config set me effort=medium"), io);
+    expect(replies[0]).toMatch(/Updated your scope.*"effort":"medium"/);
+    await dispatch(deps, msg("and now?"), fakeIO().io);
+    expect(provider.requests[1].effort).toBe("medium");
+    expect(provider.requests[1].system).toContain("user override: effort `medium`");
+
+    await dispatch(deps, msg("config set me efforts.general=high"), fakeIO().io);
+    await dispatch(deps, msg("config set me effort=low"), fakeIO().io);
+    await dispatch(deps, msg("forced wins over per-agent"), fakeIO().io);
+    expect(provider.requests[2].effort).toBe("low");
+  });
+
+  it("effort is thread-sticky: a directive-free follow-up keeps the thread's effort and says so", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await dispatch(deps, msg("continue"), fakeIO([{ role: "user", text: "effort:low start here" }]).io);
+    expect(provider.requests[0].effort).toBe("low");
+    expect(provider.requests[0].system).toContain("A `effort:low` directive earlier in this thread");
+  });
+
+  it("an unset effort leaves the provider request without one (the agent/provider default), and bad values are refused inline", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await dispatch(deps, msg("hello"), fakeIO().io);
+    expect(provider.requests[0].effort).toBeUndefined();
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("config set me effort=turbo"), io);
+    expect(replies[0]).toMatch(/Unknown effort `turbo`.*low, medium, high/);
+    await dispatch(deps, msg("config set me efforts.nope=low"), io);
+    expect(replies[1]).toMatch(/Unknown agent `nope`/);
+    await dispatch(deps, msg("effort:turbo hi"), io);
+    expect(replies[2]).toMatch(/Unknown effort "turbo"/);
+    expect(provider.requests).toHaveLength(1);
+  });
+
   it("a channel-forced agent is reported as a channel override with the agent that actually ran", async () => {
     const provider = capturingProvider();
     await dispatch(makeDeps(CHANNEL_FORCED_YAML, provider), msg("hello"), fakeIO().io);

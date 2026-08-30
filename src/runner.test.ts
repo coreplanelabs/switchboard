@@ -208,6 +208,30 @@ describe("runAgent budgets", () => {
     });
     expect(provider.requests[0].system).toBe("base prompt");
   });
+});
+
+describe("effort (features/routing-and-config.md: resolved per run, like model)", () => {
+  const run = (provider: Provider, effort?: "low" | "medium" | "high") =>
+    runAgent({
+      provider,
+      model: "m",
+      agent: agent({ effort: "high" }),
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      toolContext: { executor: fakeExecutor },
+      ...(effort ? { effort } : {}),
+    });
+
+  it("a resolved effort on RunOptions overrides the agent definition's effort in the provider call", async () => {
+    const provider = scripted([text("ok")]);
+    await run(provider, "low");
+    expect(provider.requests[0].effort).toBe("low");
+  });
+
+  it("without a resolved effort the agent definition's effort applies (unchanged behavior)", async () => {
+    const provider = scripted([text("ok")]);
+    await run(provider);
+    expect(provider.requests[0].effort).toBe("high");
+  });
 
   it("marks truncated answers when the token limit was hit", async () => {
     const provider = scripted([text("half an ans", "max_tokens")]);

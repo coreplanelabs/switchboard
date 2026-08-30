@@ -144,6 +144,11 @@ describe("patternSignature", () => {
       "setup_install:pnpm install --frozen-lockfile",
     );
     expect(patternSignature(f({ category: "slow_tool", summary: "took 46s: $ npm test" }))).toBe("slow_tool:npm test");
+    // A slow think is a property of the agent/model, not of the command it
+    // eventually issued — one key, so the pattern clusters across runs.
+    expect(patternSignature(f({ category: "slow_model_turn", summary: "model turn took 3m 42s before: $ grep -n foo src" }))).toBe(
+      "slow_model_turn:model_turn",
+    );
     expect(patternSignature(f({ category: "retry", summary: "retried after failure: $ npm test" }))).toBe("retry:npm test");
     expect(patternSignature(f({ category: "failed_tool", summary: "$ npm test → sh: vitest: command not found" }))).toBe(
       "failed_tool:npm test",
@@ -330,7 +335,7 @@ describe("proposeImprovements", () => {
   });
 
   it("has a fix template for every pattern kind", () => {
-    const kinds = ["slow_tool", "failed_tool", "retry", "setup_install", "wrap_up", "budget_hit", "infra_failure", "long_run"] as const;
+    const kinds = ["slow_tool", "slow_model_turn", "failed_tool", "retry", "setup_install", "wrap_up", "budget_hit", "infra_failure", "long_run"] as const;
     for (const kind of kinds) {
       const [p] = proposeImprovements(
         [

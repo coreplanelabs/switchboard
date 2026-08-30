@@ -85,6 +85,38 @@ describe("configAwarenessBlock", () => {
   });
 });
 
+describe("configAwarenessBlock — effort", () => {
+  const base = {
+    agentName: "coding",
+    modelRef: "anthropic/m",
+    channel: {},
+    user: {},
+    messageDirective: {},
+    threadDirective: {},
+    canEditChannelConfig: true,
+  };
+
+  it("names the resolved effort on the header line, and the provider default when none resolved", () => {
+    expect(configAwarenessBlock({ ...base, effort: "medium" })).toMatch(/agent `coding` on model `anthropic\/m` at effort `medium`\./);
+    expect(configAwarenessBlock(base)).toMatch(/agent `coding` on model `anthropic\/m` at the model's default effort\./);
+  });
+
+  it("reports effort overrides by scope and attributes an effort directive, and tells the model how effort is tuned", () => {
+    const text = configAwarenessBlock({
+      ...base,
+      effort: "low",
+      channel: { efforts: { coding: "medium" } },
+      user: { effort: "low" },
+      messageDirective: { effort: "low" },
+    });
+    expect(text).toContain("channel override: efforts coding=`medium`");
+    expect(text).toContain("user override: effort `low`");
+    expect(text).toContain("This message's `effort:low` directive");
+    expect(text).toContain("effort=<low|medium|high>");
+    expect(text).toContain("`effort:<low|medium|high>` directives");
+  });
+});
+
 describe("configAwarenessBlock — custom instructions (#107 phase 2)", () => {
   const base = {
     agentName: "general",

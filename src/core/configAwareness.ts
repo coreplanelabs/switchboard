@@ -1,4 +1,5 @@
 import type { Scope } from "../config.js";
+import type { Effort } from "../effort.js";
 
 // Config awareness (features/routing-and-config.md behavior 8). The config
 // system — per-user / per-channel / per-agent layers, runtime overrides,
@@ -16,17 +17,22 @@ export interface ConfigAwarenessInput {
   agentName: string;
   /** The `<provider>/<model>` ref that is actually running. */
   modelRef: string;
+  /** The effort the config layers resolved for this run; undefined = none set
+   *  (the agent definition / provider default applies). */
+  effort?: Effort;
   /** Effective channel scope (static config merged with runtime overrides). */
   channel: Scope;
   /** Effective user scope (static config merged with runtime overrides). */
   user: Scope;
-  /** `agent:`/`model:` parsed from THIS message. */
-  messageDirective: { agent?: string; model?: string };
-  /** `agent:`/`model:` carried from an earlier message in the thread (stickiness). */
-  threadDirective: { agent?: string; model?: string };
+  /** `agent:`/`model:`/`effort:` parsed from THIS message. */
+  messageDirective: DirectiveSet;
+  /** `agent:`/`model:`/`effort:` carried from an earlier message in the thread (stickiness). */
+  threadDirective: DirectiveSet;
   /** Whether the invoking user may run `config set channel`. */
   canEditChannelConfig: boolean;
 }
+
+type DirectiveSet = { agent?: string; model?: string; effort?: Effort };
 
 export const CONFIG_AWARENESS_HEADER = "Switchboard runtime config for this run:";
 
@@ -40,17 +46,15 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
       ? `Scope: ${overrides.join("; ")}.`
       : "Scope: using defaults — no channel or user overrides are set.";
 
-  const lines = [
-    `${CONFIG_AWARENESS_HEADER} agent \`${i.agentName}\` on model \`${i.modelRef}\`.`,
-    scopeLine,
-  ];
+  const effort = i.effort ? `at effort \`${i.effort}\`` : "at the model's default effort";
+  const lines = [`${CONFIG_AWARENESS_HEADER} agent \`${i.agentName}\` on model \`${i.modelRef}\` ${effort}.`, scopeLine];
 
   const fromMessage = fmtDirective(i.messageDirective);
   const fromThread = fmtDirective(i.threadDirective);
   if (fromMessage) {
-    lines.push(`This message's \`${fromMessage}\` directive set the agent/model for this run.`);
+    lines.push(`This message's \`${fromMessage}\` directive set the agent/model/effort for this run.`);
   } else if (fromThread) {
-    lines.push(`A \`${fromThread}\` directive earlier in this thread set the agent/model for this run (thread stickiness).`);
+    lines.push(`A \`${fromThread}\` directive earlier in this thread set the agent/model/effort for this run (thread stickiness).`);
   }
 
   // Custom instructions (#107 phase 2): name WHICH scopes carry them, never
@@ -67,11 +71,11 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
     ? "per-channel"
     : "per-channel; restricted for this user — ask an admin";
   lines.push(
-    "Settings are inspectable and tunable by users: `config show` (effective settings here), " +
-      "`config set me agent=<name> model=<provider>/<model>` (per-user), " +
+    "Users inspect and tune settings: `config show`, " +
+      "`config set me agent=<name> model=<provider>/<model> effort=<low|medium|high>` (per-user; `models.<agent>=` / `efforts.<agent>=` per agent), " +
       `\`config set channel …\` (${channelGate}), \`config set me instructions "<free text>"\` ` +
-      "(per-user custom instructions; `config set channel instructions …` for channel-wide), `config clear me|channel`, " +
-      "and per-message `agent:<name>` / `model:<provider>/<model>` directives.",
+      "(custom instructions; `config set channel instructions …` channel-wide), `config clear me|channel`, " +
+      "and per-message `agent:<name>` / `model:<provider>/<model>` / `effort:<low|medium|high>` directives.",
     "When asked about your settings or tuning, answer from this block — you are not stateless or untunable.",
   );
   return lines.join("\n");
@@ -85,12 +89,18 @@ function fmtScopeOverride(label: "channel" | "user", s: Scope): string | undefin
   if (perAgent.length > 0) {
     parts.push(`models ${perAgent.map(([agent, ref]) => `${agent}=\`${ref}\``).join(", ")}`);
   }
+  if (s.effort) parts.push(`effort \`${s.effort}\``);
+  const perAgentEffort = Object.entries(s.efforts ?? {});
+  if (perAgentEffort.length > 0) {
+    parts.push(`efforts ${perAgentEffort.map(([agent, e]) => `${agent}=\`${e}\``).join(", ")}`);
+  }
   return parts.length > 0 ? `${label} override: ${parts.join(", ")}` : undefined;
 }
 
-function fmtDirective(d: { agent?: string; model?: string }): string | undefined {
+function fmtDirective(d: DirectiveSet): string | undefined {
   const parts: string[] = [];
   if (d.agent) parts.push(`agent:${d.agent}`);
   if (d.model) parts.push(`model:${d.model}`);
+  if (d.effort) parts.push(`effort:${d.effort}`);
   return parts.length > 0 ? parts.join(" ") : undefined;
 }

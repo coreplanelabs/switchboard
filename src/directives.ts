@@ -1,17 +1,26 @@
 import { AGENTS } from "./agents/registry.js";
+import { EFFORT_LEVELS_HINT, isEffort, type Effort } from "./effort.js";
 
 // Per-request directives are inline tokens at the start (or anywhere) in the
-// message:  "@switchboard agent:review model:openai/gpt-5 look at PR #42"
-// Recognized keys: agent, model. Unknown keys are left in the text untouched.
+// message:  "@switchboard agent:review model:openai/gpt-5 effort:low look at PR #42"
+// Recognized keys: agent, model, effort. Unknown keys are left in the text untouched.
 
 export interface RequestDirectives {
   agent?: string;
   model?: string;
+  effort?: Effort;
   /** message text with directive tokens removed */
   text: string;
 }
 
-const DIRECTIVE_RE = /(?:^|\s)(agent|model)[:=](\S+)/g;
+/** The directive values a thread can carry forward (stickiness). */
+export interface ThreadDirectives {
+  agent?: string;
+  model?: string;
+  effort?: Effort;
+}
+
+const DIRECTIVE_RE = /(?:^|\s)(agent|model|effort)[:=](\S+)/g;
 
 /**
  * Last agent/model directives mentioned in earlier thread messages (user turns
@@ -21,15 +30,14 @@ const DIRECTIVE_RE = /(?:^|\s)(agent|model)[:=](\S+)/g;
  * command being executed, so malformed or unknown values are skipped, never
  * thrown.
  */
-export function lastThreadDirectives(
-  history: Array<{ role: string; text: string }>,
-): { agent?: string; model?: string } {
-  const out: { agent?: string; model?: string } = {};
+export function lastThreadDirectives(history: Array<{ role: string; text: string }>): ThreadDirectives {
+  const out: ThreadDirectives = {};
   for (const h of history) {
     if (h.role !== "user") continue;
     for (const m of h.text.matchAll(DIRECTIVE_RE)) {
       if (m[1] === "agent" && AGENTS[m[2]]) out.agent = m[2];
       else if (m[1] === "model") out.model = m[2];
+      else if (m[1] === "effort" && isEffort(m[2])) out.effort = m[2];
     }
   }
   return out;
@@ -54,6 +62,11 @@ export function parseDirectives(input: string): RequestDirectives {
       out.agent = f.value;
     } else if (f.key === "model") {
       out.model = f.value;
+    } else if (f.key === "effort") {
+      if (!isEffort(f.value)) {
+        throw new Error(`Unknown effort "${f.value}". Valid: ${EFFORT_LEVELS_HINT}`);
+      }
+      out.effort = f.value;
     }
     text = text.replace(f.match, " ");
   }

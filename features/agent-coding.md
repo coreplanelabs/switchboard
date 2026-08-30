@@ -4,7 +4,7 @@ Takes a task from Slack, scopes fast, implements the change in its sandbox, and 
 
 - **Code**: `src/agents/registry.ts` (`CODING_SYSTEM`; resident-path variant `CODING_SYSTEM_RESIDENT`)
 - **Docs**: [README — Agents](../README.md#agents)
-- **Budgets**: 60 turns / 45 min / 64k tokens · toolset `full`
+- **Budgets**: 60 turns / 45 min / 64k tokens · no built-in effort — set it per deployment/channel/user/thread/message through the config layers ([routing-and-config.md](routing-and-config.md) item 2; e.g. `config set channel efforts.coding=medium` — the wall clock is the real budget, and a 31-min live run at the model's default effort spent 97 % of it thinking between one-line greps) · toolset `full`
 - **Receipts**: https://github.com/coreplanelabs/switchboard/issues/222
 
 ## Behavior
@@ -21,7 +21,7 @@ Takes a task from Slack, scopes fast, implements the change in its sandbox, and 
 
 | Criterion | Proof |
 |---|---|
-| Budgets and toolset as specified | `[unit]` `src/agents/registry.test.ts::coding`; budget mechanics in `src/runner.test.ts`. |
+| Budgets and toolset as specified; no built-in effort | `[unit]` `src/agents/registry.test.ts::coding: full toolset, 60 turns, 45 min, no built-in effort (config layers decide)`; budget mechanics in `src/runner.test.ts`. |
 | Resident variant: ready worktree, no clone/install/gh instructions, honest PR fallback; fallback prompt unchanged | `[unit]` `src/agents/registry.test.ts::resident prompt variants`; selection wiring in `src/core/dispatcher.test.ts::repo/ref resolution + resident prompt selection (U7)`. |
 | Templated PR description by default (both prompts) | `[unit]` `src/agents/registry.test.ts::coding prompts: templated PR description by default` — both prompts carry every section and the honesty rules (default for every PR, unwrapped prose, hyperlinked issue, no fabricated validation). `[agent]` `agent:coding fix <issue URL>` with NO description ask → the opened PR's body has all seven sections, the issue hyperlinked, and validation matching what actually ran. |
 | End-to-end: issue → PR | `[agent]` `@switchboard agent:coding investigate and fix <issue URL>` on a small real issue. Expect: it reads the issue itself (no 403, no asking you to paste it), one repo cloned (cold path) / attached to the warm resident worktree (resident path), a PR opened whose diff addresses the issue, final message = outcome + PR link. |
