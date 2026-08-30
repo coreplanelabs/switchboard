@@ -2,7 +2,7 @@ import { NAV_CSS, renderNav } from "../nav.js";
 import type { RunView } from "../../core/runsService.js";
 import { STORE_UNAVAILABLE_BANNER } from "../../core/commandRegistry.js";
 import { SCHEDULED_PANEL_CSS } from "../scheduledPanel.js";
-import { formatElapsed, formatRelative, splitRunLabel } from "../indexFormat.js";
+import { formatDateTime, formatElapsed, formatRelative, splitRunLabel } from "../indexFormat.js";
 import { formatLocalIso } from "../localIso.js";
 import { escapeHtml, NAME_SHIM, TOOLTIP_CSS, TOOLTIP_SCRIPT } from "./html.js";
 
@@ -62,17 +62,22 @@ export type FeedAction = { op: "upsert"; run: IndexRow } | { op: "remove"; id: s
  *
  * Row shape (live-view item 18): `<li class="run live|finished" data-run-id
  * data-started-at [data-persisted] [data-finished-at] [data-status]>` holding
- * one full-row `<a class="row" href>` — status dot (green live / grey completed
- * or finished / amber stopped / red failed; its accessible label is the status
- * word, its hover adds when the run was kicked off and, once known, finished),
- * the label split by `splitRunLabel` into an **agent chip** (hue per built-in
- * agent; the class is allow-listed, never the raw name), the **scope** and the
- * request **snippet**, a stop badge once a stop was requested, and the
- * right-hand **facts**: the stopwatch (a live row's elapsed since start, painted
- * from `now` and ticked by the page; a finished row's start→finish, fixed) and
- * the event count — and, for a stoppable live run, a SIBLING
- * `<span class="actions">` with the Stop/Kill buttons (#101; a button may not
- * nest inside an anchor).
+ * a "stretched" `<a class="row" href>` covering the whole row (so the row is
+ * the link) under a `<div class="body">` with: the status dot (green live /
+ * grey completed / amber stopped early / red failed or killed; its label is the
+ * status word, its hover the live run's current step or the finished run's
+ * outcome + duration + what it was last doing), the **started** column, the
+ * label split by `splitRunLabel` into an **agent chip** (hue per built-in agent;
+ * the class is allow-listed, never the raw name), the **repo tag** (name only,
+ * linked to GitHub, full slug on hover) or the chat **scope**, the request
+ * **snippet**, an **outcome** badge when the run did not complete, a stop badge
+ * while a stop is in flight, the **source mark** (the trigger surface's glyph,
+ * a link to the Slack thread when there is one, revealed on hover), the
+ * right-hand **facts** (the stopwatch: a live row's elapsed since start, ticked
+ * by the page; a finished row's start→finish, fixed — and the event count) and
+ * an always-present `<span class="actions">` cell holding the Stop/Kill buttons
+ * while the run is stoppable (#101; a button may not nest inside an anchor, and
+ * a fixed cell keeps the facts aligned across live and finished rows).
  *
  * `feedAction` is the `?stream=1` reconciliation rule (R11): the default view
  * drops a `finished` upsert (the row leaves as the run ends) and honors every
@@ -99,6 +104,7 @@ export type FeedAction = { op: "upsert"; run: IndexRow } | { op: "remove"; id: s
 export interface RowFormatters {
   formatElapsed: (ms: number) => string;
   formatRelative: (startedAt: number, now: number) => string;
+  formatDateTime: (at: number, now: number) => string;
   splitRunLabel: (label: string) => { agent?: string; scope: string; snippet?: string };
   formatLocalIso: (at: number) => string;
 }
@@ -109,19 +115,21 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
   function countLabel(n: number): string {
     return n + (n === 1 ? " event" : " events");
   }
-  function stopLabel(stop: { state: string; mode: string }): string {
-    return stop.state + " (" + stop.mode + ")";
-  }
   function statusLabel(status: string): string {
-    return status === "stopped_soft" ? "stopped (soft)" : status === "stopped_hard" ? "stopped (hard)" : status;
+    return status === "stopped_soft" ? "stopped early" : status === "stopped_hard" ? "killed" : status;
+  }
+  // The stop badge: "stopping (soft)" while in flight; once stopped, the same
+  // word the outcome badge would use (killed / stopped early).
+  function stopLabel(stop: { state: string; mode: string }): string {
+    return stop.state === "stopped" ? statusLabel("stopped_" + stop.mode) : stop.state + " (" + stop.mode + ")";
   }
   function statusWord(run: IndexRow): string {
     return !run.finished ? "live" : run.status ? statusLabel(run.status) : "finished";
   }
   function statusDot(run: IndexRow): string {
     if (!run.finished) return "green";
-    if (run.status === "failed") return "red";
-    if (run.status === "stopped_soft" || run.status === "stopped_hard") return "amber";
+    if (run.status === "failed" || run.status === "stopped_hard") return "red";
+    if (run.status === "stopped_soft") return "amber";
     return "grey";
   }
   // The chip class for an agent name: one of the four built-in agents gets its
@@ -141,7 +149,7 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
     var b = doc.createElement("button");
     b.className = "stop " + mode;
     b.setAttribute("data-mode", mode);
-    b.setAttribute("title", title);
+    b.setAttribute("data-tip", title);
     b.textContent = text;
     return b;
   }
@@ -159,12 +167,28 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
     if (run.finished) return typeof run.finishedAt === "number" ? fmt.formatElapsed(run.finishedAt - run.startedAt) : "";
     return typeof now === "number" ? fmt.formatElapsed(now - run.startedAt) : "";
   }
+  // The trigger surface (item 20): the platform prefix of the ids (AGENTS.md
+  // invariant 4) and the identity behind it — the STANDARD metadata every run
+  // has, whatever started it. Slack adds its extended set (channel name, user
+  // name, thread link) through the label and `sourceUrl`.
+  function surfaceOf(run: IndexRow): { kind: string; identity: string } {
+    var id = run.channelId || "";
+    var colon = id.indexOf(":");
+    var kind = colon === -1 ? "unknown" : id.slice(0, colon);
+    var uid = run.userId || "";
+    var ucolon = uid.indexOf(":");
+    return { kind: kind, identity: ucolon === -1 ? uid : uid.slice(ucolon + 1) };
+  }
+  var SURFACE_GLYPH: Record<string, string> = { slack: "⁙", http: "⌁", mcp: "◈", cli: ">_" };
+  var SURFACE_NAME: Record<string, string> = { slack: "Slack", http: "HTTP ingress", mcp: "MCP", cli: "CLI" };
   // The dot's tooltip: a live run's latest activity (or "starting…" before its
-  // first event); a finished run's outcome and how long it took.
+  // first event); a finished run's outcome, how long it took and — when it did
+  // not complete — what it was last doing (for a failed inline run, the reply).
   function dotTip(run: IndexRow): string {
     if (!run.finished) return run.activity ? "now: " + run.activity : "starting…";
     var t = statusWord(run);
     if (typeof run.finishedAt === "number") t += " in " + fmt.formatElapsed(run.finishedAt - run.startedAt);
+    if (run.status && run.status !== "completed" && run.activity) t += "\n" + run.activity;
     return t;
   }
   // The started column's tooltip: the exact stamps, one per line, in the
@@ -172,6 +196,14 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
   function whenTip(run: IndexRow): string {
     var t = "started " + fmt.formatLocalIso(run.startedAt);
     if (run.finished && typeof run.finishedAt === "number") t += "\nfinished " + fmt.formatLocalIso(run.finishedAt);
+    return t;
+  }
+  // The source mark's tooltip: surface · identity, then what Slack adds.
+  function sourceTip(run: IndexRow, parts: { agent?: string; scope: string; snippet?: string }, linked: boolean): string {
+    var s = surfaceOf(run);
+    var t = "via " + (SURFACE_NAME[s.kind] || s.kind) + (s.identity ? " · " + s.identity : "");
+    if (s.kind === "slack" && parts.scope.charAt(0) === "#") t += "\n" + parts.scope;
+    if (linked) t += "\nopen the thread";
     return t;
   }
   function fill(li: RowElement, run: IndexRow, now?: number, retentionMs?: number): void {
@@ -185,57 +217,95 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
     if (run.finished && run.status) li.setAttribute("data-status", run.status);
     else li.removeAttribute("data-status");
     li.textContent = ""; // clear any prior children (server-rendered or stale)
+    // The row is a "stretched link": one <a class="row"> covers the whole <li>
+    // (so the row stays fully clickable) while the repo tag and the source mark
+    // are their own links layered above it — a link may not nest in a link.
     var a = doc.createElement("a");
     a.className = "row";
     a.setAttribute("href", href(run));
+    a.setAttribute("aria-label", "open run " + (run.label || shortId(run.id)));
+    li.appendChild(a);
+    var body = doc.createElement("div");
+    body.className = "body";
     var word = statusWord(run);
     var dot = doc.createElement("span");
     dot.className = "dot " + statusDot(run);
     dot.setAttribute("role", "img");
     dot.setAttribute("aria-label", word);
-    // The dot's hover is what the run is DOING (item 20) — its latest activity —
-    // so a glance answers "what step is it on" without opening the run; a
-    // finished row's says how it ended and how long it took.
     dot.setAttribute("data-tip", dotTip(run));
-    a.appendChild(dot);
-    // When it started, the way GitHub says it (`3 hours ago`), ticked by the
-    // page every minute; the exact started/finished stamps are its hover.
+    body.appendChild(dot);
     var when = span("when", typeof now === "number" ? fmt.formatRelative(run.startedAt, now) : "");
     when.setAttribute("data-tip", whenTip(run));
-    a.appendChild(when);
+    body.appendChild(when);
     var parts = fmt.splitRunLabel(run.label || shortId(run.id));
-    if (parts.agent) a.appendChild(span("agent " + agentClass(parts.agent), parts.agent));
-    a.appendChild(span("scope", parts.scope));
-    if (parts.snippet !== undefined) a.appendChild(span("snippet", parts.snippet));
-    if (run.stop) a.appendChild(span("stopbadge " + run.stop.state, stopLabel(run.stop)));
-    var facts = doc.createElement("span");
-    facts.className = "facts";
-    var elapsed = span("elapsed", elapsedText(run, now));
-    elapsed.setAttribute("title", run.finished ? "start to finish" : "running for");
-    facts.appendChild(elapsed);
-    facts.appendChild(span("count", countLabel(run.eventCount)));
+    if (parts.agent) body.appendChild(span("agent " + agentClass(parts.agent), parts.agent));
+    // Scope: a repo run shows the repo NAME as a tag linked to GitHub (the org
+    // is noise on a one-org dashboard; the full slug is the tooltip); a chat run
+    // shows `#channel · user` as before.
+    var repo = run.repo || (/^[\w.-]+\/[\w.-]+$/.test(parts.scope) ? parts.scope : "");
+    if (repo) {
+      var tag = doc.createElement("a");
+      tag.className = "repo";
+      tag.setAttribute("href", "https://github.com/" + repo);
+      tag.setAttribute("target", "_blank");
+      tag.setAttribute("rel", "noopener noreferrer");
+      tag.setAttribute("data-tip", repo);
+      tag.textContent = repo.slice(repo.indexOf("/") + 1);
+      body.appendChild(tag);
+    } else body.appendChild(span("scope", parts.scope));
+    if (parts.snippet !== undefined) body.appendChild(span("snippet", parts.snippet));
+    // How a finished run ended, when not "completed": failed / killed / stopped early.
+    if (run.finished && run.status && run.status !== "completed") body.appendChild(span("outcome " + statusDot(run), statusLabel(run.status)));
+    // The stop badge while a stop is in flight — and for a finished row with no
+    // record status yet (a registry summary), where it is the outcome.
+    if (run.stop && !(run.finished && run.status)) body.appendChild(span("stopbadge " + run.stop.state, stopLabel(run.stop)));
+    // The source mark: where the run came from, linked to the thread when there
+    // is one (Slack). Shown on row hover/focus, like GitHub's row quick actions.
+    var src = surfaceOf(run);
+    var sourceUrl = run.sourceUrl && /^https?:\/\//.test(run.sourceUrl) ? run.sourceUrl : "";
+    var mark = sourceUrl ? doc.createElement("a") : doc.createElement("span");
+    mark.className = "source " + src.kind;
+    mark.textContent = SURFACE_GLYPH[src.kind] || "○";
+    mark.setAttribute("data-tip", sourceTip(run, parts, sourceUrl !== ""));
+    mark.setAttribute("aria-label", "source: " + (SURFACE_NAME[src.kind] || src.kind));
+    if (sourceUrl) {
+      mark.setAttribute("href", sourceUrl);
+      mark.setAttribute("target", "_blank");
+      mark.setAttribute("rel", "noopener noreferrer");
+    }
+    body.appendChild(mark);
     // Expiry (item 20): with a known retention, a finished row knows when it
     // leaves; the page groups rows leaving within a day under a divider and each
     // such row says when, in the renderer's zone (the viewer's, once repainted).
+    // It sits before the facts (in the outcome column) so elapsed / count keep
+    // their columns (item 21).
     if (run.finished && typeof run.finishedAt === "number" && typeof retentionMs === "number") {
       var expiresAt = run.finishedAt + retentionMs;
       li.setAttribute("data-expires-at", String(expiresAt));
       if (typeof now === "number" && expiresAt - now <= 86400000) {
         li.className += " leaving";
-        var gone = span("expires", "gone " + fmt.formatLocalIso(expiresAt).slice(0, 16).replace("T", " "));
-        gone.setAttribute("title", "removed at " + fmt.formatLocalIso(expiresAt));
-        facts.appendChild(gone);
+        var gone = span("expires", "gone " + fmt.formatDateTime(expiresAt, now));
+        gone.setAttribute("data-tip", "removed at " + fmt.formatLocalIso(expiresAt));
+        body.appendChild(gone);
       }
     } else li.removeAttribute("data-expires-at");
-    a.appendChild(facts);
-    li.appendChild(a);
+    var facts = doc.createElement("span");
+    facts.className = "facts";
+    var elapsed = span("elapsed", elapsedText(run, now));
+    elapsed.setAttribute("data-tip", run.finished ? "start to finish" : "running for");
+    facts.appendChild(elapsed);
+    facts.appendChild(span("count", countLabel(run.eventCount)));
+    body.appendChild(facts);
+    // The actions cell is ALWAYS there (fixed width) so the facts line up across
+    // live and finished rows; the buttons appear only while the run is stoppable.
+    var actions = doc.createElement("span");
+    actions.className = "actions";
     if (!run.finished && !run.stop) {
-      var actions = doc.createElement("span");
-      actions.className = "actions";
       actions.appendChild(stopButton("soft", "Stop", "Soft stop: no new steps, the agent writes up what it has"));
       actions.appendChild(stopButton("hard", "Kill", "Hard stop: abort now, no summary, free the sandbox"));
-      li.appendChild(actions);
     }
+    body.appendChild(actions);
+    li.appendChild(body);
   }
   function feedAction(ev: { type?: string; run?: IndexRow; id?: string }, showAll: boolean, persisted: boolean): FeedAction {
     if (ev.type === "upsert" && ev.run) return !showAll && ev.run.finished ? { op: "remove", id: ev.run.id } : { op: "upsert", run: ev.run };
@@ -265,7 +335,7 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
  *  behind the `__name` shim and the helpers it calls (the index has no markdown
  *  script to bring the shim; seen locally 2026-08-29: every row emptied when an
  *  inlined helper threw `__name is not defined`). */
-export const INDEX_ROW_SCRIPT = `${NAME_SHIM}\n${String(formatElapsed)}\n${String(formatRelative)}\n${String(splitRunLabel)}\n${String(formatLocalIso)}\n${String(indexRowRenderer)}`;
+export const INDEX_ROW_SCRIPT = `${NAME_SHIM}\n${String(formatElapsed)}\n${String(formatRelative)}\n${String(formatDateTime)}\n${String(splitRunLabel)}\n${String(formatLocalIso)}\n${String(indexRowRenderer)}`;
 
 /**
  * A server-side `RowDocument`: elements that remember their attributes (in set
@@ -317,7 +387,7 @@ export function staticDocument(): RowDocument & { serialize(el: RowElement): str
 
 const serverDoc = staticDocument();
 /** The formatters, as the server passes them (the page passes the inlined copies). */
-export const ROW_FORMATTERS: RowFormatters = { formatElapsed, formatRelative, splitRunLabel, formatLocalIso };
+export const ROW_FORMATTERS: RowFormatters = { formatElapsed, formatRelative, formatDateTime, splitRunLabel, formatLocalIso };
 const serverRows = indexRowRenderer(serverDoc, ROW_FORMATTERS);
 
 /** Server-rendered markup for one index row — the shared renderer against the
@@ -342,8 +412,9 @@ export interface RunsIndexOptions {
   storeUnavailable?: boolean;
   /** `?all=1` only: the next page's href when this page was full; absent → no link. */
   olderHref?: string;
-  /** `?all=1` only: this page was reached through a cursor (not the newest page) → a "Newest" link. */
-  paged?: boolean;
+  /** `?all=1` only: this page was reached through a cursor — it holds the runs
+   *  finished before this stamp (the cursor's) → the pager says so and links "Newest runs". */
+  olderThan?: number;
   /** The server clock the live rows' stopwatches are painted from; default `Date.now()`. */
   now?: number;
 }
@@ -418,21 +489,24 @@ function runsShell(current: RunsTab, title: string, body: string, script: string
   #runs li.finished .when { color: var(--dim); }
   ${TOOLTIP_CSS}
   #runs { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
-  #runs li.run { border-radius: 6px; display: flex; align-items: center; gap: .5rem; border-bottom: 1px solid var(--line); }
+  #runs li.run { position: relative; border-radius: 6px; border-bottom: 1px solid var(--line); }
+  #runs li.run:hover, #runs li.run:focus-within { background: var(--row-hover); }
   /* The empty sentinel is an <li> too: this must outrank the flex rule above,
      or "No active runs." shows beside live rows (seen live 2026-08-29). */
   #runs li[hidden] { display: none; }
-  /* The run's row is the link (full-row clickable), with a clear hover bg; the
-     stop buttons sit beside it as a sibling (a button can't live in an anchor). */
-  #runs a.row { display: flex; align-items: baseline; gap: .6rem; flex: 1 1 auto; min-width: 0;
-    padding: .55rem .5rem; border-radius: 6px; color: inherit; text-decoration: none; }
-  #runs a.row:hover { background: var(--row-hover); }
-  #runs a.row .dot { align-self: center; }
+  /* The stretched link: <a class="row"> is the whole row's click target; the
+     body sits above it and lets clicks fall through, except on its own links,
+     buttons and tooltip cells (the page routes a click on a tooltip cell to
+     the row's href). A button can't live in an anchor, a link can't either. */
+  #runs a.row { position: absolute; inset: 0; border-radius: 6px; }
+  #runs a.row:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+  #runs .body { position: relative; z-index: 1; pointer-events: none; display: flex; align-items: center; gap: .6rem; padding: .55rem .5rem; min-width: 0; }
+  #runs .body a, #runs .body button, #runs .body [data-tip] { pointer-events: auto; }
   /* Live rows breathe; finished rows sit back — the eye lands on what is running. */
   #runs li.live .dot.green { animation: breathe 2s ease-in-out infinite; }
   @keyframes breathe { 0%, 100% { box-shadow: 0 0 0 2px #2ea04322; } 50% { box-shadow: 0 0 0 4px #2ea04344; } }
   @media (prefers-reduced-motion: reduce) { #runs li.live .dot.green { animation: none; box-shadow: 0 0 0 3px #2ea04333; } }
-  #runs li.finished a.row { color: var(--muted); }
+  #runs li.finished .body { color: var(--muted); }
   #runs li.finished .agent { opacity: .55; }
   #runs li.finished .scope { color: var(--fg-soft); font-weight: 500; }
   /* Agent chip: small caps, hue per built-in agent. */
@@ -447,6 +521,23 @@ function runsShell(current: RunsTab, title: string, body: string, script: string
      was asked — one line, ellipsized, quieter. */
   .scope { flex: 0 0 auto; color: var(--fg); font-weight: 600; }
   .snippet { flex: 1 1 auto; min-width: 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Repo tag: the repo NAME as a small linked label (the org is noise on a
+     one-org dashboard; the full slug is its tooltip). */
+  .repo { flex: 0 0 auto; font-size: .72rem; font-weight: 600; line-height: 1.5; padding: .05em .45em; border-radius: 4px;
+    color: var(--fg-soft); background: #b6bcc814; border: 1px solid #b6bcc826; text-decoration: none; }
+  .repo:hover, .repo:focus-visible { color: var(--fg); border-color: #5f677a; outline: none; }
+  /* Outcome badge: how a finished run ended when it did not complete — red for
+     failed / killed, amber for stopped early. Its hover (the dot's) has the detail. */
+  .outcome { flex: 0 0 auto; font-size: .7rem; border-radius: 4px; padding: 0 .4em; border: 1px solid; }
+  .outcome.red { color: var(--red); border-color: #f8514944; }
+  .outcome.amber { color: var(--amber); border-color: #d2992244; }
+  /* Source mark: the trigger surface's glyph, a link to the thread when there is
+     one. Revealed on row hover / focus, like GitHub's row quick actions. */
+  .source { flex: 0 0 auto; width: 1.5em; text-align: center; font-size: .8rem; line-height: 1; color: var(--dim); text-decoration: none; opacity: 0; transition: opacity .12s; }
+  .source.cli { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .7rem; }
+  #runs li.run:hover .source, #runs li.run:focus-within .source, .source:focus-visible { opacity: 1; }
+  a.source:hover, a.source:focus-visible { color: var(--fg); outline: none; }
+  @media (prefers-reduced-motion: reduce) { .source { transition: none; } }
   /* Right-hand facts: a fixed-width stopwatch (tabular digits so it does not
      jitter as it ticks) and the event count. */
   .facts { flex: 0 0 auto; margin-left: auto; display: inline-flex; gap: 1rem; font-size: .75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -456,27 +547,30 @@ function runsShell(current: RunsTab, title: string, body: string, script: string
   .count { min-width: 6em; text-align: right; }
   .stopbadge { flex: 0 0 auto; font-size: .7rem; color: var(--amber); border: 1px solid #d2992244; border-radius: 4px; padding: 0 .4em; }
   .stopbadge.stopped { color: var(--muted); border-color: #3b4252; }
-  .actions { display: inline-flex; gap: .4rem; flex: 0 0 auto; padding-right: .5rem; }
+  /* The actions cell is always there at a fixed width, so the facts line up
+     across live rows (Stop · Kill) and finished rows (empty). */
+  .actions { display: inline-flex; gap: .4rem; flex: 0 0 auto; min-width: 7.6em; white-space: nowrap; justify-content: flex-end; }
   button.stop { font: inherit; font-size: .75rem; padding: .1rem .5rem; border-radius: 4px; cursor: pointer;
     border: 1px solid #3b4252; background: #161b22; color: var(--fg); }
   button.stop.hard { border-color: #f85149; color: var(--red); }
   button.stop:disabled { opacity: .5; cursor: default; }
   .empty { color: var(--muted); padding: .6rem .5rem; }
   .banner { margin: 0 0 .75rem; padding: .45rem .6rem; border: 1px solid var(--amber); border-radius: 6px; color: var(--amber); font-size: .8rem; }
-  /* Pager: newest · N shown · older, one quiet line under the list. */
-  nav.pager { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; margin: .75rem .5rem 0; font-size: .8rem; color: var(--muted); }
+  /* Pager: newest · what this page holds · older, one quiet line under the list. */
+  nav.pager { display: flex; align-items: baseline; gap: .5rem; margin: .75rem .5rem 0; font-size: .8rem; color: var(--muted); }
+  nav.pager a.older { margin-left: auto; }
   nav.pager a { color: var(--blue); text-decoration: none; }
   nav.pager a:hover { text-decoration: underline; }
-  nav.pager .shown { font-variant-numeric: tabular-nums; color: var(--dim); }
+  nav.pager .range { font-variant-numeric: tabular-nums; color: var(--dim); }
   /* The expiry cut: the rows under it leave within a day. Warm, not alarming —
      an hourglass, a label, and each row's own "gone <when>" fact. */
-  #runs li.divider { display: flex; align-items: baseline; gap: .5rem; padding: .9rem .5rem .4rem; margin-top: .5rem; border-top: 1px dashed #d2992255; border-bottom: 0;
+  #runs li.divider { display: flex; align-items: baseline; gap: .5rem; padding: .8rem .5rem .35rem; margin: 0; border: 0; border-bottom: 1px dashed #d2992255;
     font-size: .72rem; letter-spacing: .05em; text-transform: uppercase; color: var(--amber); }
   #runs li.divider .hourglass { font-size: .9rem; letter-spacing: 0; }
   #runs li.divider .muted { text-transform: none; letter-spacing: 0; color: var(--dim); }
   #runs li.divider[hidden] { display: none; }
-  #runs li.leaving a.row { opacity: .85; }
-  .expires { color: var(--amber); min-width: 11em; text-align: right; }
+  #runs li.leaving .body { opacity: .85; }
+  .expires { flex: 0 0 auto; color: var(--amber); font-size: .75rem; font-variant-numeric: tabular-nums; }
   [hidden] { display: none; }
   /* The run page's 404: quiet, centered, the way back as the one action. */
   .notfound { max-width: 34rem; margin: 3rem auto; text-align: center; color: var(--fg-soft); }
@@ -548,12 +642,13 @@ export function renderRunsIndex(runs: readonly IndexRow[], opts: RunsIndexOption
       : runs.slice(0, firstLeaving).map((r) => indexRowHtml(r, now, retentionMs)).join("") +
         EXPIRY_DIVIDER_HTML +
         runs.slice(firstLeaving).map((r) => indexRowHtml(r, now, retentionMs)).join("");
-  // Pager (item 20): `?all=1` is paged by the service cursor — "Older runs" when
-  // this page was full, "Newest" when this is not the first page.
+  // Pager (item 20): `?all=1` is paged by the service cursor — "Older runs →"
+  // when this page was full; on a cursor page, "← Newest runs" and what the page
+  // holds ("runs finished before <stamp>", in the renderer's zone).
   const pager =
-    opts.all && (opts.olderHref || opts.paged)
-      ? `\n<nav class="pager" aria-label="Completed runs pages">${opts.paged ? `<a href="/runs?all=1">← Newest</a>` : `<span></span>`}<span class="shown">${runs.length} shown</span>${
-          opts.olderHref ? `<a class="older" href="${escapeHtml(opts.olderHref)}">Older runs →</a>` : `<span></span>`
+    opts.all && (opts.olderHref || opts.olderThan !== undefined)
+      ? `\n<nav class="pager" aria-label="Completed runs pages">${opts.olderThan !== undefined ? `<a href="/runs?all=1">← Newest runs</a><span class="range">· runs finished before ${escapeHtml(formatDateTime(opts.olderThan, now))}</span>` : ""}${
+          opts.olderHref ? `<a class="older" href="${escapeHtml(opts.olderHref)}">Older runs →</a>` : ""
         }</nav>`
       : "";
   const body = `<div class="toolbar">
@@ -568,7 +663,8 @@ ${TOOLTIP_SCRIPT}
 (function () {
   var showAll = ${opts.all ? "true" : "false"};
   var RETENTION_MS = ${retentionMs === undefined ? "undefined" : String(retentionMs)};
-  var rowLib = indexRowRenderer(document, { formatElapsed: formatElapsed, formatRelative: formatRelative, splitRunLabel: splitRunLabel, formatLocalIso: formatLocalIso });
+  var PAGED = ${opts.olderThan !== undefined};
+  var rowLib = indexRowRenderer(document, { formatElapsed: formatElapsed, formatRelative: formatRelative, formatDateTime: formatDateTime, splitRunLabel: splitRunLabel, formatLocalIso: formatLocalIso });
   var list = document.getElementById("runs");
   var empty = document.getElementById("empty");
   var liveCount = document.getElementById("livecount");
@@ -621,7 +717,17 @@ ${TOOLTIP_SCRIPT}
   // token-scoped stop route; the registry's index upsert then repaints the row
   // as "stopping". A hard stop is destructive → confirm first.
   list.addEventListener("click", function (ev) {
-    var btn = ev.target.closest ? ev.target.closest("button[data-mode]") : null;
+    if (!ev.target.closest) return;
+    // A tooltip cell inside the body takes pointer events (for its hover), so a
+    // click on it would otherwise go nowhere: send it where the row goes.
+    var cell = ev.target.closest(".body [data-tip]");
+    if (cell && !cell.closest("a, button")) {
+      var row = cell.closest("li.run");
+      var link = row && row.querySelector("a.row");
+      if (link) window.location.assign(link.getAttribute("href"));
+      return;
+    }
+    var btn = ev.target.closest("button[data-mode]");
     if (!btn) return;
     var li = btn.closest("li[data-run-id]");
     var run = li && runs[li.getAttribute("data-run-id")];
@@ -713,7 +819,8 @@ ${TOOLTIP_SCRIPT}
   es.onmessage = function (m) {
     var ev;
     try { ev = JSON.parse(m.data); } catch (_) { return; }
-    var li = ev.type === "removed" && ev.id ? rows[ev.id] : null;
+    var li = rows[ev.type === "removed" ? ev.id : ev.run && ev.run.id] || null;
+    if (PAGED && !li) return; // a cursor page only repaints rows it already has — a run starting or finishing now belongs on the newest page
     var act = rowLib.feedAction(ev, showAll, li ? li.getAttribute("data-persisted") === "1" : false);
     if (act.op === "upsert") upsert(act.run); else if (act.op === "remove") remove(act.id);
   };

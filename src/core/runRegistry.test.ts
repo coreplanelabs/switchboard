@@ -213,10 +213,11 @@ describe("RunRegistry.listActive", () => {
       userId: "slack:U1",
       threadKey: "slack:C1:1",
       repo: "acme/x",
+      sourceUrl: "https://acme.slack.com/archives/C1/p1",
     });
     expect(handle.label).toBe('coding · acme/x · "token «redacted-github-token»"');
     const [row] = reg.listActive();
-    expect(row).toMatchObject({ label: handle.label, agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1", repo: "acme/x" });
+    expect(row).toMatchObject({ label: handle.label, agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1", repo: "acme/x", sourceUrl: "https://acme.slack.com/archives/C1/p1" }); // sourceUrl: live-view item 21, the index's thread link
     expect(reg.getById(handle.id)).toMatchObject({ agent: "coding", repo: "acme/x" });
     const bare = reg.create();
     const bareRow = reg.listActive().find((r) => r.id === bare.id)!;
@@ -224,6 +225,7 @@ describe("RunRegistry.listActive", () => {
     expect(Object.keys(bareRow).sort()).toEqual(["eventCount", "finished", "id", "startedAt", "token"]);
     const chat = reg.create("general · #ch", { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:2" });
     expect(reg.getById(chat.id)).not.toHaveProperty("repo");
+    expect(reg.getById(chat.id)).not.toHaveProperty("sourceUrl");
     expect(reg.getById(chat.id)).not.toHaveProperty("agent");
   });
 
@@ -694,7 +696,7 @@ describe("RunRegistry — token-free operator reads (#157 U5, KTD7)", () => {
 });
 
 describe("RunRegistry — `activity` on the summary (live-view item 20)", () => {
-  it("is the latest narration line / tool-call summary / `answering`, one line, capped; absent before the first such event", () => {
+  it("is the latest narration line / tool-call summary / the answer's first line, one line, capped; absent before the first such event", () => {
     const reg = new RunRegistry({ genId: () => "a1", genToken: () => "t" });
     const { id } = reg.create("x");
     expect("activity" in reg.listActive()[0]).toBe(false);
@@ -709,8 +711,8 @@ describe("RunRegistry — `activity` on the summary (live-view item 20)", () => 
     reg.publish(id, { type: "assistant", text: "x".repeat(300) });
     expect(reg.listActive()[0].activity).toHaveLength(120);
     expect(reg.listActive()[0].activity!.endsWith("…")).toBe(true);
-    reg.publish(id, { type: "answer", text: "done" });
-    expect(reg.listActive()[0].activity).toBe("answering");
+    reg.publish(id, { type: "answer", text: "⚠️ resident not onboarded: acme/web\nsecond line" });
+    expect(reg.listActive()[0].activity).toBe("⚠️ resident not onboarded: acme/web second line"); // a failed inline run's reply IS the failure
   });
 });
 

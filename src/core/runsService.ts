@@ -52,8 +52,10 @@ export interface RunView {
   diagnosis?: FrictionDiagnosis;
   bytes?: number;
   stop?: RunStopStatus;
-  /** Live rows only: the run's latest one-line activity (`RunSummary.activity`). */
+  /** The run's latest one-line activity (`RunSummary.activity` live; `RunRecord.activity` persisted). */
   activity?: string;
+  /** The thread that started the run (`RunMeta.sourceUrl` / `RunRecord.sourceUrl`). */
+  sourceUrl?: string;
   /** True once the durable store holds this run (registry flag or store row). */
   persisted?: boolean;
 }
@@ -171,6 +173,7 @@ function liveView(s: RunSummary): RunView {
     eventCount: s.eventCount,
     ...(s.stop ? { stop: s.stop } : {}),
     ...(s.activity !== undefined ? { activity: s.activity } : {}),
+    ...(s.sourceUrl !== undefined ? { sourceUrl: s.sourceUrl } : {}),
     ...(s.persisted ? { persisted: true } : {}),
   };
 }

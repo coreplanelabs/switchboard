@@ -15,7 +15,7 @@ import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.j
 import { activeRunCount, attachmentSuffix, composeRunLabel, dispatch, setShutdownNotice, turnContent, type CoreDeps } from "./dispatcher.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { MAX_STRUCTURE_RETRIES, STRUCTURING_SYSTEM } from "./structuredOutput.js";
-import { RunControl, RunRegistry } from "./runRegistry.js";
+import { RunControl, RunRegistry, activityOfEvents } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
@@ -25,7 +25,7 @@ import { InMemoryFrictionLedger, RunStoreFrictionLedger } from "./frictionLedger
 import { analyzeRunFriction } from "./runFriction.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { InMemoryRunStore, type RunStore } from "./runStore.js";
-import type { RunRecord } from "./runRecord.js";
+import { isRunRecord, type RunRecord } from "./runRecord.js";
 import { createRunHistoryWriter } from "./runHistoryWriter.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
@@ -222,9 +222,10 @@ describe("composeRunLabel", () => {
       ...base,
       channelName: "c",
       userName: "u",
-      text: "please run all of the integration tests and then report the results back to me thanks",
+      text: "please run all of the integration tests and then report the results back to me thanks, and while you are at it check the deploy logs too",
     });
     expect(label.startsWith('review · #c · u · "please run all of the ')).toBe(true);
+    expect(label.length).toBeLessThan(140); // ~100 chars of snippet (live-view item 21): a laptop-width row, not half of one
     expect(label.endsWith('…"')).toBe(true);
     expect(label).not.toContain("  "); // no doubled whitespace leaks through
     expect(label).not.toMatch(/ …"$/); // cut on a word boundary — no trailing space before the ellipsis
@@ -259,19 +260,19 @@ describe("composeRunLabel", () => {
     const label = composeRunLabel({
       ...base,
       repo: "o/r",
-      text: "please look at https://example.com/a/very/long/path/that/keeps/going/and/going/forever/more/and/more",
+      text: "please look at https://example.com/a/very/long/path/that/keeps/going/and/going/forever/more/and/more/and/more/and/more/still",
     });
     expect(label).not.toMatch(/https?:/);
     expect(label.endsWith('…"')).toBe(true);
   });
 
   it("a dot at the snippet budget edge inside a token is not a sentence end", () => {
-    // 60 chars of prose, then a hostname whose first '.' lands exactly at index 60.
-    const lead = "x".repeat(56) + " api";
-    expect(lead.length).toBe(60);
+    // 100 chars of prose, then a hostname whose first '.' lands exactly at index 100 (the snippet budget).
+    const lead = "x".repeat(96) + " api";
+    expect(lead.length).toBe(100);
     const label = composeRunLabel({ ...base, repo: "o/r", text: `${lead}.example.com is down please look` });
     expect(label).not.toContain('api…"');
-    expect(label.startsWith(`review · o/r · "${"x".repeat(56)}`)).toBe(true);
+    expect(label.startsWith(`review · o/r · "${"x".repeat(96)}`)).toBe(true);
   });
 
   it("trailing punctuation after a URL stays in the prose", () => {
@@ -302,7 +303,7 @@ describe("composeRunLabel", () => {
       userName: "u".repeat(200),
       text: "hello there",
     });
-    expect(label.length).toBeLessThanOrEqual(120);
+    expect(label.length).toBeLessThanOrEqual(160);
     expect(label.endsWith("…")).toBe(true);
   });
 });
@@ -4051,6 +4052,22 @@ describe("run history write path (#157 U4)", () => {
     deps.runHistoryWriter = writer;
     return { deps, registry, store, writer, warnings };
   }
+
+  it("the record carries where the run came from and what it was last doing (live-view item 21): sourceUrl from the message, activity from the stored events; neither when absent", async () => {
+    const { deps, store, writer } = wired(capturingProvider());
+    await dispatch(deps, { ...msg("hello there"), sourceUrl: "https://acme.slack.com/archives/CX/p10" }, fakeIO().io);
+    await writer.settled();
+    const rec = (await store.get("run-h"))!;
+    expect(rec.sourceUrl).toBe("https://acme.slack.com/archives/CX/p10");
+    expect(rec.activity).toBe(activityOfEvents(rec.events));
+    expect(rec.activity).toEqual(expect.any(String));
+    expect(isRunRecord(rec)).toBe(true);
+
+    const bare = wired(capturingProvider(), { registry: new RunRegistry({ genId: () => "run-b", genToken: () => "tok" }) });
+    await dispatch(bare.deps, msg("hello there"), fakeIO().io);
+    await bare.writer.settled();
+    expect(await bare.store.get("run-b")).not.toHaveProperty("sourceUrl");
+  });
 
   it("a completed run is one put: status completed, eventCount = published count, events include the user and assistant messages, identity fields set", async () => {
     const { deps, store, writer, registry } = wired(capturingProvider());

@@ -140,7 +140,7 @@ describe("renderRunsIndex", () => {
   it("lists each run as a link carrying its per-run token", () => {
     const html = renderRunsIndex([summary()]);
     expect(html).toContain('href="/runs/run-1?t=tok-1"');
-    expect(html).toContain('<span class="agent agent-coding">coding</span><span class="scope">owner/repo</span>'); // item 18: agent chip · scope
+    expect(html).toContain('<span class="agent agent-coding">coding</span><a class="repo" href="https://github.com/owner/repo" target="_blank" rel="noopener noreferrer" data-tip="owner/repo">repo</a>'); // item 18: agent chip · scope
   });
 
   it("shows an empty-state message when there are no active runs", () => {
@@ -149,9 +149,14 @@ describe("renderRunsIndex", () => {
 
   it("is self-contained (no external/CDN assets — CSP-safe)", () => {
     const html = renderRunsIndex([summary()]);
-    expect(html).not.toMatch(/src\s*=\s*["']https?:/i);
-    expect(html).not.toMatch(/href\s*=\s*["']https?:/i);
-    expect(html).not.toContain("//cdn");
+    // outbound NAVIGATION links (the repo tag, a thread link) are fine; nothing is LOADED from elsewhere
+    const withThread = renderRunsIndex([summary({ sourceUrl: "https://acme.slack.com/archives/C1/p1" })]);
+    for (const page of [html, withThread]) {
+      expect(page).not.toMatch(/<(?:script|link|img|iframe|source|video|audio|object|embed)\b[^>]*\b(?:src|href)\s*=\s*["']https?:/i);
+      expect(page).not.toMatch(/@import|url\(\s*["']?https?:/i);
+      expect(page).not.toContain("//cdn");
+    }
+    expect(withThread).toContain('href="https://acme.slack.com/archives/C1/p1"');
   });
 
   it("HTML-escapes a malicious label instead of injecting it", () => {
@@ -213,19 +218,19 @@ describe("renderRunsIndex", () => {
     expect(html).not.toContain("list.firstChild"); // the old blind-prepend is gone
   });
 
-  it("makes the ENTIRE row a link (full-row clickable), with the label inside the anchor", () => {
+  it("makes the ENTIRE row a link (a stretched anchor under the body, named after the run), with the label in the body beside it", () => {
     const html = renderRunsIndex([summary()]);
-    // the whole row content sits inside a single anchor carrying the token URL
-    expect(html).toContain('<a class="row" href="/runs/run-1?t=tok-1">');
-    // the label lives inside that anchor (not a bare text node beside it)
-    expect(html).toMatch(/<a class="row"[^>]*>[\s\S]*>coding<[\s\S]*>owner\/repo<[\s\S]*<\/a>/);
+    // one anchor carrying the token URL covers the row; the body is its sibling (links and buttons may not nest in a link)
+    expect(html).toContain('<a class="row" href="/runs/run-1?t=tok-1" aria-label="open run coding · owner/repo"></a><div class="body">');
+    expect(html).toMatch(/<\/a><div class="body">[\s\S]*>coding<[\s\S]*>repo<[\s\S]*<\/div><\/li>/);
+    expect(html).toMatch(/#runs a\.row \{ position: absolute; inset: 0;/);
     // the data attrs the client reconciles on stay on the <li>, not the <a>
     expect(html).toContain('<li class="run live" data-run-id="run-1" data-started-at="1000">');
   });
 
   it("has a :hover background so the row reads as clickable", () => {
     const html = renderRunsIndex([summary()]);
-    expect(html).toMatch(/\.row:hover\s*\{[^}]*background/);
+    expect(html).toMatch(/li\.run:hover[^{]*\{[^}]*background/);
   });
 
   it("renders a per-row status dot: green for live, grey for finished, with an accessible label", () => {
@@ -921,7 +926,7 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.headers["x-frame-options"]).toBe("DENY");
     expect(t.headers["cache-control"]).toBe("no-store");
     expect(t.body()).toContain(`/runs/${id}?t=${token}`);
-    expect(t.body()).toContain('<span class="agent agent-coding">coding</span><span class="scope">owner/repo</span>');
+    expect(t.body()).toContain('<span class="agent agent-coding">coding</span><a class="repo" href="https://github.com/owner/repo" target="_blank" rel="noopener noreferrer" data-tip="owner/repo">repo</a>');
   });
 
   it("also serves the index at /runs/ (trailing slash)", () => {
@@ -1249,8 +1254,9 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
   describe("index UI", () => {
     it("renders Stop (soft) and Kill (hard) buttons OUTSIDE the row anchor for a live run", () => {
       const html = renderRunsIndex([summary()]);
-      // buttons are siblings of the <a class="row">, never nested inside it (invalid HTML)
-      expect(html).toMatch(/<\/a><span class="actions">.*data-mode="soft".*data-mode="hard".*<\/span><\/li>/);
+      // buttons live in the body's always-present actions cell, never inside the <a class="row"> (invalid HTML)
+      expect(html).toMatch(/<span class="actions"><button class="stop soft" data-mode="soft" data-tip="[^"]+">Stop<\/button><button class="stop hard" data-mode="hard" data-tip="[^"]+">Kill<\/button><\/span><\/div><\/li>/);
+      expect(renderRunsIndex([summary({ finished: true })])).toContain('<span class="actions"></span></div></li>'); // the empty cell keeps the facts aligned
       expect(html).not.toMatch(/<a class="row"[^>]*>[^]*?<button[^]*?<\/a>/);
     });
 
@@ -1265,7 +1271,7 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
         '<span class="stopbadge stopping">stopping (soft)</span>',
       );
       expect(renderRunsIndex([summary({ finished: true, stop: { mode: "hard", state: "stopped" } })])).toContain(
-        '<span class="stopbadge stopped">stopped (hard)</span>',
+        '<span class="stopbadge stopped">killed</span>',
       );
       expect(renderRunsIndex([summary()])).not.toContain('class="stopbadge');
       // a run already asked to stop offers no second set of buttons
@@ -1589,7 +1595,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const a = fakeReqRes("GET", "/runs/r1");
       h.handler(a.req, a.res);
       await done(a);
-      expect(a.body()).toMatch(/>finished · stopped \(soft\)( · [^<]+)?<\/span>/);
+      expect(a.body()).toMatch(/>finished · stopped early( · [^<]+)?<\/span>/);
       const b = fakeReqRes("GET", "/runs/r2");
       h.handler(b.req, b.res);
       await done(b);
@@ -1846,9 +1852,9 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       // item 20: the dot's tooltip is the outcome + how long; the started column's is the exact stamps
       expect(html).toContain('<span class="dot grey" role="img" aria-label="completed" data-tip="completed in 10s"></span>');
       expect(html).toMatch(/<span class="when" data-tip="started [^"\n]+\nfinished [^"\n]+">[^<]*<\/span>/);
-      expect(html).toContain('<span class="elapsed" title="start to finish">10s</span>');
+      expect(html).toContain('<span class="elapsed" data-tip="start to finish">10s</span>');
       expect(html).toContain('<span class="dot red" role="img" aria-label="failed" data-tip="failed in 1h 02m"></span>');
-      expect(html).toContain('<span class="elapsed" title="start to finish">1h 02m</span>');
+      expect(html).toContain('<span class="elapsed" data-tip="start to finish">1h 02m</span>');
       const finishedRows = html.match(/<li class="run finished(?: leaving)?" data-run-id="[^]*?<\/li>/g) ?? []; // fixture dates are 2023 → "leaving" under the real clock
       expect(finishedRows.length).toBe(3);
       for (const row of finishedRows) expect(row).not.toMatch(/tok-|\?t=/);
@@ -1946,9 +1952,28 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(second.body()).not.toContain('href="/runs/p2"');
       expect(second.body()).not.toContain("Older runs");
       // item 20: a cursor page offers the way back; the first page does not
-      expect(second.body()).toContain('<nav class="pager" aria-label="Completed runs pages"><a href="/runs?all=1">← Newest</a><span class="shown">1 shown</span><span></span></nav>');
+      expect(second.body()).toMatch(
+        /<nav class="pager" aria-label="Completed runs pages"><a href="\/runs\?all=1">← Newest runs<\/a><span class="range">· runs finished before [A-Z][a-z]{2} \d{1,2}(, \d{4})?, \d{1,2}:\d{2} [AP]M<\/span><\/nav>/,
+      );
       expect(html).not.toContain("← Newest");
-      expect(html).toContain('<span class="shown">2 shown</span>');
+      expect(html).not.toContain('class="range"');
+    });
+
+    it("a cursor page holds finished runs only — the live rows are on the newest page (item 21)", async () => {
+      const h = harness({ indexPageSize: 2 });
+      const live = h.registry.create("still live");
+      await h.store!.put(record("p1", { finishedAt: NOW - 10_000 }));
+      await h.store!.put(record("p2", { finishedAt: NOW - 20_000 }));
+      await h.store!.put(record("p3", { finishedAt: NOW - 30_000 }));
+      const first = fakeReqRes("GET", "/runs?all=1");
+      h.handler(first.req, first.res);
+      await done(first);
+      expect(first.body()).toContain(`data-run-id="${live.id}"`);
+      const second = fakeReqRes("GET", `/runs?all=1&before=${NOW - 20_000}&beforeId=p2`);
+      h.handler(second.req, second.res);
+      await done(second);
+      expect(second.body()).toContain('href="/runs/p3"');
+      expect(second.body()).not.toContain(`data-run-id="${live.id}"`);
     });
 
     it("a short page has no older link; a malformed cursor is ignored (first page)", async () => {
@@ -2016,13 +2041,13 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const merged: IndexRow = { id: "b1", label: "both", finished: true, persisted: true, startedAt: 1000, finishedAt: 61_000, status: "completed", eventCount: 9 };
       const li = doc.createElement("li");
       lib.fill(li, merged);
-      expect(doc.serialize(li)).toContain('<span class="elapsed" title="start to finish">1m 00s</span>');
+      expect(doc.serialize(li)).toContain('<span class="elapsed" data-tip="start to finish">1m 00s</span>');
       // The `?all=1` feed then replays the registry's RunSummary for the same run: no finishedAt/status,
       // but the current eventCount / label / persisted flag.
       const summary: IndexRow = { id: "b1", token: "tok-b1", label: "both", finished: true, persisted: true, startedAt: 1000, eventCount: 10 };
       lib.fill(li, lib.mergeRow(lib.persistedFields(li), summary));
       const repaint = doc.serialize(li);
-      expect(repaint).toContain('<span class="elapsed" title="start to finish">1m 00s</span>');
+      expect(repaint).toContain('<span class="elapsed" data-tip="start to finish">1m 00s</span>');
       expect(repaint).toContain('class="dot grey"');
       expect(repaint).toContain("10 events");
       expect(repaint).not.toContain("tok-b1");

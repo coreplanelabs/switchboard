@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatElapsed, formatRelative, splitRunLabel } from "./indexFormat.js";
+import { formatDateTime, formatElapsed, formatRelative, splitRunLabel } from "./indexFormat.js";
 
 // Feature: features/live-view.md item 16 — the runs index shows how long each
 // run has been going (live) or took (finished), and renders the run label as
@@ -18,6 +18,16 @@ describe("formatElapsed", () => {
   it("clamps garbage (negative, NaN) to 0s instead of printing nonsense", () => {
     expect(formatElapsed(-5000)).toBe("0s");
     expect(formatElapsed(NaN)).toBe("0s");
+  });
+});
+
+describe("formatDateTime (live-view item 21)", () => {
+  it("reads Aug 30, 9:12 PM in the runtime's zone; noon and midnight are 12; the year only when it differs from now's", () => {
+    const at = new Date(2026, 7, 30, 21, 12).getTime();
+    expect(formatDateTime(at, at)).toBe("Aug 30, 9:12 PM");
+    expect(formatDateTime(new Date(2026, 0, 5, 0, 3).getTime(), at)).toBe("Jan 5, 12:03 AM");
+    expect(formatDateTime(new Date(2026, 0, 5, 12, 0).getTime(), at)).toBe("Jan 5, 12:00 PM");
+    expect(formatDateTime(new Date(2025, 11, 31, 8, 30).getTime(), at)).toBe("Dec 31, 2025, 8:30 AM");
   });
 });
 

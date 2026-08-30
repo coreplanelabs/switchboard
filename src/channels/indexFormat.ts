@@ -38,6 +38,20 @@ export function formatRelative(startedAt: number, now: number): string {
   return dt.getFullYear() === new Date(now).getFullYear() ? label : label + ", " + dt.getFullYear();
 }
 
+/** A moment for humans — `Aug 30, 9:12 PM` (`Aug 30, 2025, 9:12 PM` in another
+ *  year than `now`'s) — in the runtime's zone (the viewer's in the browser).
+ *  Used where a row states a time rather than a distance: when a leaving row is
+ *  removed, which runs an older page holds (live-view item 21). */
+export function formatDateTime(at: number, now: number): string {
+  var dt = new Date(at);
+  var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var h = dt.getHours();
+  var min = dt.getMinutes();
+  var time = (h % 12 === 0 ? 12 : h % 12) + ":" + (min < 10 ? "0" : "") + min + (h < 12 ? " AM" : " PM");
+  var day = months[dt.getMonth()] + " " + dt.getDate();
+  return (dt.getFullYear() === new Date(now).getFullYear() ? day : day + ", " + dt.getFullYear()) + ", " + time;
+}
+
 /** The dispatcher's run label (`composeRunLabel`: `agent · scope · "snippet"`)
  *  split into what the row styles differently: the agent (a chip), the scope
  *  (repo or `#channel · user`) and the quoted request snippet. Anything that is
