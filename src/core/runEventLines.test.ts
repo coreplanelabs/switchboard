@@ -55,6 +55,10 @@ describe("parseRunEventLines", () => {
     const turns = parseRunEventLines(['{"type":"turn","startedAt":1,"durationMs":5000,"stopReason":"tool_use","at":5001}', '{"type":"turn","startedAt":"x","at":2}'].join("\n"));
     expect(turns.events.map((e) => e.type)).toEqual(["turn"]);
     expect(turns.skipped).toBe(1);
+    // `run_meta` (live-view item 19) needs its agent and model; the repo fields are optional
+    const metas = parseRunEventLines(['{"type":"run_meta","agent":"review","model":"anthropic/claude-fable-5","repo":"acme/web","pr":281,"at":1}', '{"type":"run_meta","agent":"review"}'].join("\n"));
+    expect(metas.events.map((e) => e.type)).toEqual(["run_meta"]);
+    expect(metas.skipped).toBe(1);
   });
 
   it("empty input yields no events", () => {

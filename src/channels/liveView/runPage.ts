@@ -110,9 +110,10 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   const stopPath = `/runs/${encodeURIComponent(id)}/stop?t=${encodeURIComponent(token)}`;
   const seed: readonly LiveFrame[] = history ? withOmittedMarkers(events, history.eventCount) : events;
   const title = history ? "Run" : "Live run";
+  // The connection mark is the pulse glyph (∿), colored by state; the tail reuses it.
   const conn = history
-    ? `<span class="dot grey" id="statedot"></span><span id="state">${escapeHtml(finishedLabel(history.status))}</span>`
-    : `<span class="dot amber" id="statedot"></span><span id="state">connecting…</span>`;
+    ? `<span class="pulse grey" id="statedot">∿</span><span id="state">${escapeHtml(finishedLabel(history.status))}</span>`
+    : `<span class="pulse amber" id="statedot">∿</span><span id="state">connecting…</span>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -123,6 +124,7 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
 <style>
   :root { color-scheme: dark;
     --bg: #0b0d12; --panel: #0f1218; --card: #12151c; --card-open: #141821; --line: #232836; --rail: #1f2430;
+    --gutter: 9.5rem; /* the step timestamp column: rail → .75rem → [HH:MM:SS] → content */
     --fg: #e6e6e6; --fg-soft: #b6bcc8; --muted: #8b93a7; --dim: #5f677a;
     --blue: #9ecbff; --green: #7ee787; --red: #ff7b72; --amber: #d29922;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -130,22 +132,25 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   * { box-sizing: border-box; }
   body { margin: 0; font: 13px/1.5 var(--mono); background: var(--bg); color: var(--fg);
     padding: 1.25rem 1.25rem 8rem; max-width: 72rem; margin-inline: auto; }
-  header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: 1rem;
-    border-bottom: 1px solid var(--line); padding-bottom: .6rem; }
-  h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  /* The header is a full-width band: back link · title · connection, the run
+     controls in the middle, the site nav at the right. */
+  header { display: flex; align-items: center; gap: 1rem; margin: -1.25rem -1.25rem 1.5rem; padding: .9rem 1.5rem;
+    background: var(--panel); border-bottom: 1px solid var(--line); }
+  h1 { font-size: 1.15rem; margin: 0; font-weight: 600; letter-spacing: -.01em; }
+  header .actions { margin-left: auto; }
+  header nav.site { margin-left: auto; }
   a.back { color: var(--blue); text-decoration: none; font-size: .8rem; }
   a.back:hover { text-decoration: underline; }
   ${NAV_CSS}
   /* The connection indicator sits beside the title and says what IT is —
      connected / connecting… / disconnected — never "live", which is a run state. */
-  .conn { display: inline-flex; align-items: center; gap: .35rem; }
-  header nav.site { margin-left: auto; }
+  .conn { display: inline-flex; align-items: center; gap: .4rem; }
   #state { font-size: .8rem; color: var(--muted); }
-  .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%; background: #6e7681; flex: 0 0 auto; }
-  .dot.green { background: #2ea043; }
-  .dot.amber { background: var(--amber); }
-  .dot.red { background: #f85149; }
-  .dot.grey { background: #6e7681; }
+  /* State colors for the pulse mark: green connected, amber connecting/stopping, red disconnected, grey finished. */
+  .pulse.green { color: var(--green); }
+  .pulse.amber { color: var(--amber); }
+  .pulse.red { color: var(--red); }
+  .pulse.grey { color: var(--dim); animation: none; }
   /* Timestamps: a small gray local-zone ISO stamp leading every row and both blocks. */
   .ts { color: var(--dim); font-size: .75rem; font-family: var(--mono); flex: 0 0 auto; user-select: none; }
   /* Request / Answer: headed blocks, proportional type, above and below the log. */
@@ -153,9 +158,20 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   section.block > h2 { display: flex; align-items: baseline; gap: .6rem; font-size: .75rem; margin: 0 0 .5rem;
     color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
   /* Where the request came from: channel · user · a link to the thread. */
-  .source { margin-left: auto; display: inline-flex; gap: .6rem; font-weight: 400; text-transform: none; letter-spacing: 0; }
-  .source a { color: var(--blue); text-decoration: none; }
-  .source a:hover { text-decoration: underline; }
+  .source { margin-left: auto; display: inline-flex; align-items: center; gap: .5rem; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--muted); }
+  .source a { color: var(--fg-soft); text-decoration: none; }
+  .source a:hover { color: var(--blue); text-decoration: underline; }
+  .source > span + span::before, .source > a + span::before { content: "\\00b7"; color: var(--dim); margin-right: .5rem; }
+  .slackmark { width: 1em; height: 1em; flex: 0 0 auto; }
+  /* What the run is about: agent · model · owner/repo · ref · #PR · sha, each a
+     link where GitHub has a page for it. Under the request, quiet, dotted. */
+  .runmeta { display: flex; flex-wrap: wrap; align-items: baseline; gap: .55rem; margin-top: .6rem; padding-top: .5rem; border-top: 1px solid var(--line);
+    font-size: .75rem; color: var(--muted); }
+  .runmeta > * + *::before { content: "\\00b7"; color: var(--dim); margin-right: .55rem; }
+  .runmeta .agent { color: var(--fg-soft); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; font-size: .68rem; }
+  .runmeta a { color: var(--blue); text-decoration: none; }
+  .runmeta a:hover { text-decoration: underline; }
+  .runmeta[hidden] { display: none; }
   #request { margin-bottom: 1.25rem; }
   /* Context: the thread turns the model was given, collapsed by default (secondary to the request). */
   details#context { margin-bottom: 1.25rem; }
@@ -184,34 +200,41 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
      pad .75rem inside their border — so a card's timestamp lands in the same
      column as the head's, and the right-hand facts end on the same line (text
      rows leave room for a card's chevron). */
-  li.step, #log > li.turn { border-left: 2px solid var(--rail); padding: .35rem 0 .45rem 0; }
+  /* Gutter layout: the step's timestamp lives in a fixed left gutter beside the
+     rail (padded off it), everything else in the content column. */
+  #log > li.step, #log > li.turn { position: relative; border-left: 2px solid var(--rail); padding: .5rem 0 .75rem var(--gutter); } /* #log > li resets padding at (1,0,1) — match it */
   li.step.live { border-left-color: #2ea04366; }
-  li.step > .narration, #log > li.turn { display: flex; gap: .75rem; align-items: baseline; padding: .15rem 2rem .5rem 1.5rem; color: var(--fg); }
-  .think { flex: 0 0 auto; color: var(--muted); font-size: .75rem; background: #1b1f28; border-radius: 4px; padding: 0 .4em; line-height: 1.6; white-space: nowrap; }
-  .think.long { color: var(--amber); }
-  .nonar { flex: 1 1 auto; color: var(--dim); font: italic .8rem/1.5 var(--sans); }
-  .narration > .facts, #log > li.turn > .facts { margin-left: 0; flex: 0 0 auto; }
-  li.step > .calls { display: flex; flex-direction: column; gap: .5rem; padding-left: .75rem; }
+  li.step > .narration, #log > li.turn > .narration { display: flex; gap: .75rem; align-items: baseline; padding: 0 .75rem .35rem 0; color: var(--fg); }
+  .narration > .ts { position: absolute; left: .75rem; top: .6rem; }
+  .think { flex: 0 0 auto; color: var(--amber); font-size: .8rem; background: #d2992214; border-radius: 4px; padding: .05em .5em; line-height: 1.6; white-space: nowrap; }
+  .think.quick { color: var(--muted); background: #1b1f28; }
+  .nonar { flex: 1 1 auto; color: var(--dim); font: italic .9rem/1.5 var(--sans); }
+  /* The turn's token facts: their own quiet line under the prose. */
+  .turnfacts { display: flex; gap: .6rem; padding: 0 .75rem .6rem 0; font-size: .75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .turnfacts .fact + .fact::before { content: "\\00b7"; color: var(--dim); margin-right: .6rem; }
+  .turnfacts:empty { display: none; }
+  li.step > .calls { display: flex; flex-direction: column; gap: .5rem; padding-right: .75rem; }
   li.step > .calls:empty { display: none; }
   /* Two or more calls under one narration fold into ONE group row — "[when]
      ❯ 7 calls · ✓ 6 · ✗ 1 · 9.4s" — so a step reads as a sentence, not a wall
      of cards. Open while any call is still running or after a failure; a clean
      step folds when the next one begins (a manual toggle sticks). */
-  details.group { margin-left: -.75rem; } /* back out the .calls inset: a tally is a text row, not a card */
-  details.group > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: .75rem; padding: .3rem 2rem .3rem 1.5rem;
-    color: var(--muted); font-size: .8rem; border-radius: 6px; }
+  /* The tally is a bordered bar like the cards under it: count · ✓ n · ✗ n … total time. */
+  details.group > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: 1rem; padding: .5rem .75rem;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); font-size: .85rem; }
   details.group > summary::-webkit-details-marker { display: none; }
-  details.group > summary:hover { background: #12151c; color: var(--fg-soft); }
+  details.group > summary:hover { background: #181d27; }
   details.group > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
-  details.group > summary .gchev { flex: 0 0 auto; color: var(--dim); font-size: .7rem; transition: transform .12s; }
+  details.group > summary .gchev { flex: 0 0 auto; color: var(--dim); font-size: .7rem; transition: transform .12s; order: 9; }
   details.group[open] > summary .gchev { transform: rotate(90deg); }
-  details.group > summary .gcount { color: var(--fg-soft); }
+  details.group > summary .gcount { color: var(--fg); font-weight: 600; }
   details.group > summary .gok { color: var(--green); }
   details.group > summary .gbad { color: var(--red); }
   details.group > summary .ginfra { color: var(--amber); }
   details.group > summary .grun { color: var(--blue); }
-  details.group > summary .facts { margin-left: auto; }
-  details.group > .gbody { display: flex; flex-direction: column; gap: .5rem; padding: .25rem 0 .35rem .75rem; } /* cards back on the card inset */
+  details.group > summary .gtime { margin-left: auto; color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
+  details.group > summary > span:empty { display: none; }
+  details.group > .gbody { display: flex; flex-direction: column; gap: .5rem; padding: .5rem 0 .25rem; }
   /* A call card: <details> — header row is the <summary>, output inside. */
   details.call { border: 1px solid var(--line); border-radius: 6px; background: var(--card); }
   details.call[open] { background: var(--card-open); }
@@ -238,7 +261,8 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   details.call:not([open]) > summary .cmd.full { display: none; }
   details.call[open] > summary .cmd.brief { display: none; }
   details.call:not([open]) > summary .cmd.brief { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .facts { flex: 0 0 auto; display: inline-flex; gap: .75rem; font-size: .75rem; color: var(--muted); margin-left: auto; }
+  .facts { flex: 0 0 auto; display: inline-flex; gap: .6rem; font-size: .75rem; color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .facts .fact + .fact::before { content: "\\00b7"; color: var(--dim); margin-right: .6rem; }
   .fact.bad { color: var(--red); }
   .chev { flex: 0 0 auto; color: var(--dim); font-size: .7rem; transition: transform .12s; }
   details.call[open] > summary .chev { transform: rotate(90deg); }
@@ -262,11 +286,13 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
      the tail needs its own hidden rule — or a finished run keeps "thinking…"
      (seen live 2026-08-29 on the first post-deploy run). */
   #log > li.tail[hidden] { display: none; }
-  li.tail .pulse { width: .55em; height: .55em; border-radius: 50%; background: var(--blue); animation: pulse 1.4s ease-in-out infinite; }
+  /* The pulse glyph (∿): the same mark as the header's connection indicator. */
+  .pulse { color: var(--blue); font-size: 1.1em; line-height: 1; animation: pulse 1.4s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { .pulse, .spin { animation: none; } }
   @keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
   .empty { color: var(--muted); }
   /* Markdown surfaces: proportional type, tight vertical rhythm. */
-  .md { font: 14px/1.55 var(--sans); white-space: pre-wrap; word-break: break-word; min-width: 0; flex: 1 1 auto; }
+  .md { font: 15px/1.55 var(--sans); white-space: pre-wrap; word-break: break-word; min-width: 0; flex: 1 1 auto; }
   .md p, .md ul, .md ol, .md pre, .md blockquote, .md table, .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 0 0 .5rem; }
   .md > :last-child { margin-bottom: 0; }
   .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { font-size: 1rem; font-weight: 600; color: var(--fg); text-transform: none; letter-spacing: 0; display: block; }
@@ -291,9 +317,16 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
     border: 1px solid #3b4252; background: #161b22; color: var(--fg); }
   button.stop.hard { border-color: #f85149; color: var(--red); }
   button.stop:disabled { opacity: .5; cursor: default; }
-  button.fold { font: inherit; font-size: .75rem; padding: .1rem .5rem; border-radius: 4px; cursor: pointer;
-    border: 1px solid var(--line); background: transparent; color: var(--muted); }
-  button.fold:hover { color: var(--fg); border-color: #3b4252; }
+  /* The log's own toolbar: one ghost toggle, right-aligned above the timeline —
+     a view control, not a run control, so it does not sit with Stop/Kill. Its
+     icon flips with its state: ⊞ Expand all ↔ ⊟ Collapse all. */
+  .logbar { display: flex; justify-content: flex-end; margin: 0 0 .35rem; padding: 0 .75rem 0 var(--gutter); }
+  button.fold { font: inherit; font-size: .75rem; padding: .15rem .55rem; border-radius: 4px; cursor: pointer;
+    border: 1px solid transparent; background: transparent; color: var(--muted); display: inline-flex; align-items: center; gap: .4rem; }
+  button.fold::before { content: "\\229e"; font-size: .95rem; line-height: 1; color: var(--dim); }
+  button.fold[data-open="1"]::before { content: "\\229f"; }
+  button.fold:hover, button.fold:focus-visible { color: var(--fg); border-color: var(--line); background: var(--card); }
+  button.fold:hover::before { color: var(--fg-soft); }
   [hidden] { display: none; }
 </style>
 </head>
@@ -306,11 +339,11 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
     <button class="stop soft" data-mode="soft" title="Soft stop: no new steps, the agent writes up what it has">Stop</button>
     <button class="stop hard" data-mode="hard" title="Hard stop: abort now, no summary, free the sandbox">Kill</button>
   </span>
-  <button class="fold" id="fold" data-open="0" title="Open every call card">Expand all</button>
   ${renderNav("runs")}
 </header>
-<section class="block" id="request" hidden><h2><span>Request</span><span class="ts" id="requestts"></span><span class="source" id="source"></span></h2><div class="md" id="requesttext"></div></section>
+<section class="block" id="request" hidden><h2><span>Request</span><span class="ts" id="requestts"></span><span class="source" id="source"></span></h2><div class="md" id="requesttext"></div><div class="runmeta" id="runmeta" hidden></div></section>
 <details class="block" id="context" hidden><summary>Context <span class="count" id="contextcount"></span></summary><div id="contextturns"></div></details>
+<div class="logbar"><button class="fold" id="fold" data-open="0" title="Open every call card" aria-pressed="false">Expand all</button></div>
 <ol id="log"><li class="empty" id="placeholder">Waiting for activity…</li></ol>
 <section class="block" id="answer" hidden><h2><span>Answer</span><span class="ts" id="answerts"></span></h2><div class="md" id="answertext"></div></section>
 <script>
@@ -366,7 +399,7 @@ ${ELAPSED_SCRIPT}
   // (never via raw markup). green = live, amber = connecting, red = disconnected,
   // grey = finished.
   function setConn(color, text) {
-    stateDot.className = "dot " + color;
+    stateDot.className = "pulse " + color;
     state.textContent = text;
   }
   // ISO timestamp for an event's \`at\` in the viewer's own zone (with its
@@ -379,20 +412,70 @@ ${ELAPSED_SCRIPT}
     if (text !== undefined) n.textContent = text;
     return n;
   }
-  function stamp(at) { return el("span", "ts", fmtTime(at)); }
+  // A row's gutter stamp: the short local clock (\`[23:33:45]\`) with the full
+  // ISO-with-offset on hover — the Request block already dates the run.
+  function stamp(at) {
+    var s = el("span", "ts", typeof at === "number" ? "[" + formatLocalIso(at).slice(11, 19) + "]" : "");
+    if (typeof at === "number") s.setAttribute("title", formatLocalIso(at));
+    return s;
+  }
   // The request's origin: channel · user · a link to the thread that started
   // the run. Only http(s) URLs become links (setAttribute, never markup).
   function showSource(src) {
     source.textContent = "";
     if (!src) return;
-    if (src.channel) source.appendChild(el("span", "", "#" + src.channel));
-    if (src.user) source.appendChild(el("span", "", src.user));
-    if (typeof src.url === "string" && /^https?:\\/\\//.test(src.url)) {
-      var a = el("a", "", "open thread \\u2197");
-      a.setAttribute("href", src.url);
-      a.setAttribute("rel", "noopener noreferrer");
-      source.appendChild(a);
+    // The Slack mark (four bars, drawn — no external asset under this CSP) says
+    // where the request came from; the channel name is the link to the thread.
+    if (src.channel) {
+      source.appendChild(slackMark());
+      if (typeof src.url === "string" && /^https?:\\/\\//.test(src.url)) {
+        var a = el("a", "", "#" + src.channel);
+        a.setAttribute("href", src.url);
+        a.setAttribute("rel", "noopener noreferrer");
+        a.setAttribute("title", "open the thread");
+        source.appendChild(a);
+      } else source.appendChild(el("span", "", "#" + src.channel));
     }
+    if (src.user) source.appendChild(el("span", "", src.user));
+  }
+  function slackMark() {
+    var ns = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "slackmark");
+    svg.setAttribute("aria-label", "Slack");
+    svg.setAttribute("role", "img");
+    // Slack's four lozenges, one per quadrant.
+    var bars = [["2", "13", "9", "3"], ["13", "2", "3", "9"], ["13", "13", "9", "3"], ["9", "13", "3", "9"]];
+    var colors = ["#e01e5a", "#36c5f0", "#ecb22e", "#2eb67d"];
+    for (var i = 0; i < bars.length; i++) {
+      var r = document.createElementNS(ns, "rect");
+      r.setAttribute("x", bars[i][0]); r.setAttribute("y", bars[i][1]); r.setAttribute("width", bars[i][2]); r.setAttribute("height", bars[i][3]);
+      r.setAttribute("rx", "1.5"); r.setAttribute("fill", colors[i]);
+      svg.appendChild(r);
+    }
+    return svg;
+  }
+  // What the run is about (item 19): agent · model, then — for a repo run —
+  // owner/repo · ref · #PR · head, each a GitHub link (setAttribute, never markup).
+  var runMeta = document.getElementById("runmeta");
+  function showMeta(m) {
+    runMeta.textContent = "";
+    runMeta.appendChild(el("span", "agent", m.agent));
+    runMeta.appendChild(el("span", "model", m.model));
+    if (!m.repo || !/^[\\w.-]+\\/[\\w.-]+$/.test(m.repo)) { runMeta.hidden = false; return; }
+    var base = "https://github.com/" + m.repo;
+    runMeta.appendChild(link(m.repo, base));
+    if (m.ref) runMeta.appendChild(link(m.ref, base + "/tree/" + encodeURIComponent(m.ref)));
+    if (m.pr) runMeta.appendChild(link("#" + m.pr, base + "/pull/" + m.pr));
+    if (m.headSha) runMeta.appendChild(link(m.headSha.slice(0, 7), m.pr ? base + "/pull/" + m.pr + "/commits/" + m.headSha : base + "/commit/" + m.headSha));
+    runMeta.hidden = false;
+  }
+  function link(text, href) {
+    var a = el("a", "", text);
+    a.setAttribute("href", href);
+    a.setAttribute("rel", "noopener noreferrer");
+    return a;
   }
   // Every markdown surface renders through this guard: a renderer bug must cost
   // at most the formatting of ONE event, never the event or the stream — on any
@@ -414,7 +497,7 @@ ${ELAPSED_SCRIPT}
   // against the runner's stamps) and turns amber past two minutes — a slow model
   // turn and a dead stream no longer look the same.
   var tail = el("li", "tail");
-  var tailDot = el("span", "pulse");
+  var tailDot = el("span", "pulse", "\\u223f");
   var tailVerb = el("span", "verb", "");
   var tailSince = el("span", "since", "");
   tail.appendChild(tailDot);
@@ -469,11 +552,15 @@ ${ELAPSED_SCRIPT}
   // thinking produced, so they share one line — · the turn's token facts.
   // \`turn\` may be null (a stream from before turns existed); \`narration\` may be
   // null (a tool-only completion) — then a muted note fills the slot.
-  function headRow(cls, at, turn, narration, note) {
-    var row = el("div", cls);
+  // Appends to \`li\`: the head row (gutter timestamp · 💭 chip · narration) and,
+  // under it, the turn's token facts as their own quiet line.
+  function appendHead(li, at, turn, narration, note) {
+    var row = el("div", "narration");
     row.appendChild(stamp(at));
     if (turn) {
-      var chip = el("span", "think" + (turn.durationMs >= 120000 ? " long" : ""), "\\ud83d\\udcad " + turn.label.replace(/^Thought for /, ""));
+      // Amber by default — thinking time is the thing to notice; a sub-minute
+      // turn is quiet.
+      var chip = el("span", "think" + (turn.durationMs < 60000 ? " quick" : ""), turn.label.replace(/^Thought for /, ""));
       chip.setAttribute("title", turn.label);
       row.appendChild(chip);
     }
@@ -484,10 +571,10 @@ ${ELAPSED_SCRIPT}
     } else {
       row.appendChild(el("span", "nonar", note));
     }
-    var facts = el("span", "facts");
+    li.appendChild(row);
+    var facts = el("div", "turnfacts");
     if (turn) for (var i = 0; i < turn.facts.length; i++) facts.appendChild(el("span", "fact", turn.facts[i]));
-    row.appendChild(facts);
-    return row;
+    li.appendChild(facts);
   }
   function addStep(step) {
     // A new step begins: the previous step is over — fold its calls unless
@@ -498,7 +585,7 @@ ${ELAPSED_SCRIPT}
     var turn = pendingTurn;
     pendingTurn = null;
     var at = step.narration ? step.narration.at : turn ? turn.at : undefined;
-    li.appendChild(headRow("narration", at, turn, step.narration || null, "went straight to tools"));
+    appendHead(li, at, turn, step.narration || null, "went straight to tools");
     var calls = el("div", "calls");
     li.appendChild(calls);
     log.insertBefore(li, tail);
@@ -514,11 +601,11 @@ ${ELAPSED_SCRIPT}
     var g = el("details", "group");
     g.open = true;
     var s = el("summary");
-    s.appendChild(stamp(node.step.calls[0] ? node.step.calls[0].startedAt : undefined)); // when the calls began
+    if (node.step.calls[0] && typeof node.step.calls[0].startedAt === "number") s.setAttribute("title", "calls began " + formatLocalIso(node.step.calls[0].startedAt));
     s.appendChild(el("span", "gchev", "\\u276f"));
     // The tally cells, kept by name on the node so refreshGroup never depends
     // on their order here.
-    node.tally = { count: el("span", "gcount", ""), ok: el("span", "gok", ""), bad: el("span", "gbad", ""), infra: el("span", "ginfra", ""), running: el("span", "grun", ""), time: el("span", "facts", "") };
+    node.tally = { count: el("span", "gcount", ""), ok: el("span", "gok", ""), bad: el("span", "gbad", ""), infra: el("span", "ginfra", ""), running: el("span", "grun", ""), time: el("span", "gtime", "") };
     s.appendChild(node.tally.count);
     s.appendChild(node.tally.ok);
     s.appendChild(node.tally.bad);
@@ -605,8 +692,10 @@ ${ELAPSED_SCRIPT}
       return q;
     }
     var details = el("details", "call " + call.status);
+    // The call's start time is pacing information, not a headline: it rides on
+    // the card's hover (the step's gutter carries the timestamp that matters).
+    if (typeof call.startedAt === "number") details.setAttribute("title", "started " + formatLocalIso(call.startedAt));
     var summary = el("summary");
-    summary.appendChild(stamp(call.startedAt));
     var glyph = glyphFor(call);
     summary.appendChild(glyph);
     summary.appendChild(call.shell ? el("span", "dollar", "$") : el("span", "tool", call.tool));
@@ -651,8 +740,7 @@ ${ELAPSED_SCRIPT}
   function flushTurn(note) {
     if (!pendingTurn) return null;
     var li = el("li", "turn");
-    var row = headRow("", pendingTurn.at, pendingTurn, null, note || "");
-    while (row.firstChild) li.appendChild(row.firstChild);
+    appendHead(li, pendingTurn.at, pendingTurn, null, note || "");
     pendingTurn = null;
     log.insertBefore(li, tail);
     return li;
@@ -672,6 +760,8 @@ ${ELAPSED_SCRIPT}
     allOpen = !allOpen;
     fold.textContent = allOpen ? "Collapse all" : "Expand all";
     fold.setAttribute("data-open", allOpen ? "1" : "0");
+    fold.setAttribute("aria-pressed", allOpen ? "true" : "false");
+    fold.setAttribute("title", allOpen ? "Close every call card" : "Open every call card");
     var cards = log.querySelectorAll("details.call");
     for (var i = 0; i < cards.length; i++) cards[i].open = allOpen;
   });
@@ -708,6 +798,8 @@ ${ELAPSED_SCRIPT}
       follow(settleCall(change.step, change.call), wasAtTail);
     } else if (change.kind === "turn") {
       addTurn(change); // painted with the step that follows (or flushed before the answer)
+    } else if (change.kind === "meta") {
+      showMeta(change);
     } else if (change.kind === "context") {
       contextTurn(change);
     } else if (change.kind === "note" || change.kind === "replay_note") {

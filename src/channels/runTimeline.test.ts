@@ -272,6 +272,19 @@ describe("createRunTimeline — inlinable into the run page", () => {
   });
 });
 
+describe("createRunTimeline — run_meta (item 19)", () => {
+  it("folds `run_meta` into a `meta` change carrying only the well-typed fields; a meta without agent/model is ignored", () => {
+    const t = createRunTimeline();
+    expect(t.push({ type: "run_meta", agent: "review", model: "anthropic/claude-fable-5", repo: "acme/web", ref: "main", pr: 281, headSha: "c211fd0abc1234", at: 5 })).toEqual([
+      { kind: "meta", agent: "review", model: "anthropic/claude-fable-5", repo: "acme/web", ref: "main", pr: 281, headSha: "c211fd0abc1234", at: 5 },
+    ]);
+    // no repo context → just agent · model; junk fields never make it through
+    expect(t.push({ type: "run_meta", agent: "general", model: "openai/gpt", pr: -1, headSha: "not a sha", ref: "" })).toEqual([{ kind: "meta", agent: "general", model: "openai/gpt", at: undefined }]);
+    expect(t.push({ type: "run_meta", agent: "", model: "x" })).toEqual([]);
+    expect(t.steps()).toEqual([]); // not a step
+  });
+});
+
 describe("createRunTimeline — model turns (item 15)", () => {
   const turn = (over: Record<string, unknown> = {}) => ({ type: "turn", startedAt: 1_000, durationMs: 304_000, stopReason: "tool_use", at: 305_000, ...over });
 

@@ -652,6 +652,19 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     };
     const request = humanize ? humanizeMessageText(directives.text) : directives.text;
     publishText("input", attachments ? `${request} ${attachments}` : request, Object.keys(source).length > 0 ? source : undefined);
+    // What the run is about (live-view item 19): agent, model, and the repo
+    // context resolved above — so the page can head the record with linked
+    // owner/repo · ref · #PR · sha. Once per run, straight after the request.
+    registry.publish(run.id, {
+      type: "run_meta",
+      agent: agent.name,
+      model: resolved.modelRef,
+      ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+      ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
+      ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
+      ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
+      at: Date.now(),
+    });
     const liveLink = liveViewLink(run.id, run.token);
     // The thread context fed to the model follows the request as `context`
     // events (#157, KD1) — text only, attachments as metadata lines, bounded to
@@ -1467,6 +1480,8 @@ function activityLine(e: RunEvent): string {
       return "answer ready";
     case "turn":
       return `💭 thought for ${formatTurnDuration(e.durationMs)}`;
+    case "run_meta":
+      return "run context recorded"; // published straight to the registry too — never arrives here
   }
 }
 

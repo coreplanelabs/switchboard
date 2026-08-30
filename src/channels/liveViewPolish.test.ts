@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { indexRowHtml, renderRunPage, renderRunsIndex, renderScheduledPage, type IndexRow } from "./liveView.js";
+import { indexRowHtml, renderRunNotFoundPage, renderRunPage, renderRunsIndex, renderScheduledPage, type IndexRow } from "./liveView.js";
 import { formatLocalIso } from "./localIso.js";
 
 // Feature: features/live-view.md item 18 — UX papercuts: the index shows how long
@@ -77,6 +77,18 @@ describe("runs index — elapsed, hierarchy, toolbar (item 18)", () => {
     expect(html).not.toContain('setConn("green", "live")');
   });
 
+  it("the 404 page: the runs shell without a connection indicator, the non-revealing sentence, the retention sentence, the way back (item 19)", () => {
+    const page = renderRunNotFoundPage({ retentionDays: 7 });
+    expect(page).toContain("<title>Run not found</title>");
+    expect(page).toContain('<p class="code">404</p>');
+    expect(page).toContain("<h2>That run isn't here.</h2>");
+    expect(page).toContain("Finished runs are kept for 7 days, then deleted");
+    expect(page).toContain('<a class="back" href="/runs">← All runs</a>');
+    expect(page).toContain('<span class="conn"></span>'); // no stream here
+    expect(page).not.toContain("new EventSource");
+    expect(renderRunNotFoundPage(null)).toContain("Run history is off; finished runs are kept about a minute.");
+  });
+
   it("the two tabs: Runs is current on the index, Scheduled on its own page (same shell, no feed, no connection indicator)", () => {
     const index = renderRunsIndex([]);
     expect(index).toContain('<nav class="tabs" aria-label="Runs views"><a href="/runs" aria-current="page">Runs</a><a href="/runs/scheduled">Scheduled</a></nav>');
@@ -95,26 +107,34 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
 
   it("holds a `turn` for the step it produced and paints it in that step's head row (💭 chip beside the narration); a turn with no step is flushed as its own row", () => {
     expect(html).toContain("var pendingTurn = null;");
-    expect(html).toContain('li.appendChild(headRow("narration", at, turn, step.narration || null, "went straight to tools"));');
+    expect(html).toContain('appendHead(li, at, turn, step.narration || null, "went straight to tools");');
     expect(html).toContain('flushTurn("wrote the answer below");');
     expect(html).toContain('flushTurn("the run ended here");');
-    expect(html).toContain('turn.label.replace(/^Thought for /, "")'); // the chip reads "💭 5m 04s"
-    expect(html).toContain('"think" + (turn.durationMs >= 120000 ? " long" : "")'); // amber past 2 min
-    expect(html).toContain("li.step, #log > li.turn { border-left: 2px solid var(--rail);"); // the rail marks where a step starts and ends
+    expect(html).toContain('turn.label.replace(/^Thought for /, "")'); // the chip reads "5m 04s"
+    expect(html).toContain('"think" + (turn.durationMs < 60000 ? " quick" : "")'); // amber by default, quiet under a minute
+    expect(html).toContain('var facts = el("div", "turnfacts");'); // token facts on their own line under the prose
+    expect(html).toContain("#log > li.step, #log > li.turn { position: relative; border-left: 2px solid var(--rail);"); // the rail marks where a step starts and ends
     expect(html).toContain('el("li", "step live")');
   });
 
-  it("every row inside a step shares one column grid: text rows pad 1.5rem, cards sit .75rem in and pad .75rem, the tally backs out the card inset", () => {
-    expect(html).toContain("li.step > .narration, #log > li.turn { display: flex; gap: .75rem; align-items: baseline; padding: .15rem 2rem .5rem 1.5rem;");
-    expect(html).toContain("li.step > .calls { display: flex; flex-direction: column; gap: .5rem; padding-left: .75rem; }");
-    expect(html).toContain("details.group { margin-left: -.75rem; }");
-    expect(html).toContain("details.group > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: .75rem; padding: .3rem 2rem .3rem 1.5rem;");
+  it("gutter layout: the step timestamp sits in a fixed left gutter, padded off the rail; prose, facts, tally bar and cards share the content column", () => {
+    expect(html).toContain("--gutter: 9.5rem;");
+    expect(html).toContain("#log > li.step, #log > li.turn { position: relative; border-left: 2px solid var(--rail); padding: .5rem 0 .75rem var(--gutter); }");
+    expect(html).toContain(".narration > .ts { position: absolute; left: .75rem; top: .6rem; }"); // .75rem off the rail, never against it
+    expect(html).toContain("li.step > .calls { display: flex; flex-direction: column; gap: .5rem; padding-right: .75rem; }");
+    // the tally is a bordered bar like the cards; the card header carries no timestamp (it rides on the card's title)
+    expect(html).toContain("details.group > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: 1rem; padding: .5rem .75rem;\n    border: 1px solid var(--line);");
+    expect(html).toContain('details.setAttribute("title", "started " + formatLocalIso(call.startedAt));');
+    expect(html).not.toContain("summary.appendChild(stamp(call.startedAt));");
     expect(html).toContain("#log > li.tail { display: flex; gap: .75rem; align-items: center; padding: 1rem 2rem .75rem 1.5rem; margin-top: 2.5rem;");
+    // facts read as dotted lists, the header is a band with the controls centered
+    expect(html).toContain('.facts .fact + .fact::before { content: "\\00b7"; color: var(--dim); margin-right: .6rem; }'); // a CSS escape, not a JS one
+    expect(html).toContain("header .actions { margin-left: auto; }");
   });
 
-  it('folds a step\'s cards (from the 2nd on) into one <details class="group"> whose timestamped summary tallies calls / ✓ / ✗ / ⚠ / running / total time by named cells', () => {
+  it('folds a step\'s cards (from the 2nd on) into one <details class="group"> whose summary bar tallies calls / ✓ / ✗ / ⚠ / running / total time by named cells (calls-began time on hover)', () => {
     expect(html).toContain('el("details", "group")');
-    expect(html).toContain("s.appendChild(stamp(node.step.calls[0] ? node.step.calls[0].startedAt : undefined));");
+    expect(html).toContain('s.setAttribute("title", "calls began " + formatLocalIso(node.step.calls[0].startedAt));');
     expect(html).toContain("return cards >= 2 ? groupFor(node).lastChild : node.calls;");
     expect(html).toContain('t.count.textContent = n + (n === 1 ? " call" : " calls");');
     expect(html).toContain('t.ok.textContent = ok ? "\\u2713 " + ok : "";');
@@ -144,6 +164,29 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
     expect(html).toContain("window.setInterval(refreshTail, 1000)");
     expect(html).toContain("li.tail .since.slow { color: var(--amber); }");
     expect(html).toContain("function formatElapsed("); // inlined for the tail and the group total
+  });
+
+  it("renders run_meta under the request as agent · model · linked repo / ref / #PR / sha (allow-listed repo, setAttribute only) and leads the source line with a drawn Slack mark (item 19)", () => {
+    expect(html).toContain('} else if (change.kind === "meta") {');
+    expect(html).toContain('var base = "https://github.com/" + m.repo;');
+    expect(html).toContain('if (!m.repo || !/^[\\w.-]+\\/[\\w.-]+$/.test(m.repo)) { runMeta.hidden = false; return; }');
+    expect(html).toContain('link(m.ref, base + "/tree/" + encodeURIComponent(m.ref))');
+    expect(html).toContain('link("#" + m.pr, base + "/pull/" + m.pr)');
+    expect(html).toContain('base + "/pull/" + m.pr + "/commits/" + m.headSha : base + "/commit/" + m.headSha');
+    expect(html).toContain('<div class="runmeta" id="runmeta" hidden></div>');
+    expect(html).toContain('document.createElementNS(ns, "svg")'); // the Slack mark is drawn, not fetched (CSP)
+    expect(html).toContain('a.setAttribute("title", "open the thread");'); // the channel name is the link
+    expect(html).not.toContain("innerHTML");
+  });
+
+  it("the fold toggle is a view control above the log (not in the Stop/Kill cluster) whose icon flips with its state", () => {
+    expect(html).toContain('<div class="logbar"><button class="fold" id="fold" data-open="0" title="Open every call card" aria-pressed="false">Expand all</button></div>');
+    const header = html.slice(html.indexOf("<header>"), html.indexOf("</header>"));
+    expect(header).toContain('id="actions"');
+    expect(header).not.toContain('class="fold"'); // the toggle left the header
+    expect(html).toContain('button.fold::before { content: "\\229e";');
+    expect(html).toContain('button.fold[data-open="1"]::before { content: "\\229f"; }');
+    expect(html).toContain('fold.setAttribute("aria-pressed", allOpen ? "true" : "false");');
   });
 
   it("the header reads `connected` beside the title, not `live`", () => {

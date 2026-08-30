@@ -133,7 +133,14 @@ export type RunEvent =
    *  `at - startedAt === durationMs`. `usage` rides only when the provider
    *  reported token counts. Shape follows the OTel GenAI `chat` span (duration,
    *  stop reason, input/output tokens) so it exports without translation. */
-    | { type: "turn"; startedAt: number; durationMs: number; stopReason: CompletionResult["stopReason"]; usage?: TokenUsage; seq?: number; at?: number };
+    | { type: "turn"; startedAt: number; durationMs: number; stopReason: CompletionResult["stopReason"]; usage?: TokenUsage; seq?: number; at?: number }
+  /** What the run is about (live-view item 19): the resolved agent and model,
+   *  and — for a repo run — the repo, ref, PR number and PR head as resolved
+   *  BEFORE the first model turn (`RepoContext`). Published by the dispatcher
+   *  right after `input`, once per run, so the run page can head its Request
+   *  block with linked `owner/repo · ref · #PR · sha`. Additive: every
+   *  consumer that only knows the other types keeps working. */
+  | { type: "run_meta"; agent: string; model: string; repo?: string; ref?: string; pr?: number; headSha?: string; seq?: number; at?: number };
 
 // Credential shapes we must never surface in a run-visibility stream (which may
 // be shown in-channel or on a shared page). Two layers: (1) specific known
