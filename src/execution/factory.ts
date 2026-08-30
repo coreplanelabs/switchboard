@@ -237,6 +237,26 @@ async function openResident(
   };
 }
 
+/** The repo resolver's "is this slug an onboarded resident?" probe (U7, the
+ *  2026-08-29 prose-slug guard): one operator `GET /status` per candidate,
+ *  through the same negative cache as executor selection. `true` for any
+ *  lifecycle state of an onboarded resource — even `down` is a real repo;
+ *  `not-onboarded` and every unreachable/error answer are `false`
+ *  (fail-closed: a bare token never binds a repo on the strength of an error).
+ *  Undefined when the resident is not configured or its bearer is unset —
+ *  the resolver then binds weak tokens unvetted, as in local/dev. */
+export function residentOnboardedProbe(
+  cfg: ResidentExecutionConfig | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): ((slug: string) => Promise<boolean>) | undefined {
+  const token = cfg?.baseUrl ? env[cfg.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN"] : undefined;
+  if (!cfg?.baseUrl || !token) return undefined;
+  return async (slug) => {
+    const probe = await probeResident(cfg, token, repoResourceId(slug));
+    return probe.kind === "status" && probe.state !== "not-onboarded";
+  };
+}
+
 /** /status probe through the negative cache: inside an outage window the
  *  cached transport failure answers without a fetch. */
 async function probeResident(

@@ -347,8 +347,13 @@ describe("resolveRepoContext: thread history inheritance", () => {
     await expect(resolveRepoContext(msg("on fix/x"), history)).resolves.toEqual({ repo: "acme/api", ref: "fix/x" });
   });
 
-  it("an explicit repo in the current message beats the thread's", async () => {
-    await expect(resolveRepoContext(msg("also check acme/other"), history)).resolves.toEqual({ repo: "acme/other" });
+  it("a STRONG repo signal in the current message beats the thread's; a bare slug does not", async () => {
+    // URL form: unambiguously a repository → it rebinds.
+    await expect(resolveRepoContext(msg("also check https://github.com/acme/other"), history)).resolves.toEqual({
+      repo: "acme/other",
+    });
+    // Bare token: the thread's established repo stays (2026-08-29 guard).
+    await expect(resolveRepoContext(msg("also check acme/other"), history)).resolves.toEqual({ repo: "acme/api" });
   });
 
   // Regression (found validating #138): a review follow-up saying "the
@@ -415,11 +420,18 @@ describe("resolveRepoContext: thread history inheritance", () => {
     expect(fn).not.toHaveBeenCalled();
   });
 
-  it("repoFromThread: bare slugs still bind a thread that has no strong signal (last wins)", () => {
+  it("repoFromThread: a bare slug binds a thread that has no strong signal — first bind wins, a later bare slug never overrides", () => {
     expect(
       repoFromThread([
         { role: "user", text: "agent:coding fix login in acme/api" },
         { role: "user", text: "actually do it in acme/web" },
+      ]),
+    ).toBe("acme/api");
+    // Redirecting a thread takes a STRONG signal.
+    expect(
+      repoFromThread([
+        { role: "user", text: "agent:coding fix login in acme/api" },
+        { role: "user", text: "actually do it in https://github.com/acme/web" },
       ]),
     ).toBe("acme/web");
   });
@@ -481,5 +493,75 @@ describe("PR head SHA for review pinning", () => {
     const ctx = await resolveRepoContext({ text: "https://github.com/acme/api/pull/7" });
     expect(ctx.headSha).toBeUndefined();
     expect(ctx.pr).toBe(7);
+  });
+});
+
+// Regression (2026-08-29): three Slack replies in a thread whose real repo was
+// coreplanelabs/switchboard each contained an un-backticked prose token shaped
+// like an owner/name slug — `reflection/review-post`, `try/catch`,
+// `comment/spec` — and each rebound the thread's repo, sending a review into a
+// cold sandbox for a repo that does not exist. #142 excluded code-spanned
+// tokens and #167 made STRONG bindings sticky, but a weakly-bound thread (a
+// bare `in coreplanelabs/switchboard` opener) was still hijacked by the next
+// prose slug. The guard: a bare token NEVER overrides a repo the thread
+// already established (any strength), and in an unbound thread it binds only
+// when the injectable resident probe confirms an onboarded resource (no probe
+// configured → binds as before: there is no registry to consult).
+describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () => {
+  const PAYLOADS = [
+    "the reflection/review-post step is deduped now — one verdict per head SHA. please re-review",
+    "good catch — wrapped the resolver in try/catch so a probe failure degrades to repo-only",
+    "renamed per the comment/spec mismatch you flagged; criteria only, no receipts",
+  ];
+  const boundHistory = [
+    { role: "user" as const, text: "agent:coding in coreplanelabs/switchboard: the resolver reads prose as a repo slug — fix it" },
+    { role: "assistant" as const, text: "on it — branch pushed" },
+  ];
+
+  for (const payload of PAYLOADS) {
+    it(`resolveRepoContext keeps the weakly-bound thread repo: ${JSON.stringify(payload.slice(0, 40))}…`, async () => {
+      const { fn } = stubFetch();
+      const probe = vi.fn(async (slug: string) => slug === "coreplanelabs/switchboard");
+      await expect(resolveRepoContext(msg(payload), boundHistory, probe)).resolves.toEqual({
+        repo: "coreplanelabs/switchboard",
+      });
+      // The payload slug is never even a candidate: the override guard is
+      // absolute, not probe-dependent — only the thread's repo is vetted.
+      expect(probe).toHaveBeenCalledWith("coreplanelabs/switchboard");
+      expect(probe).not.toHaveBeenCalledWith(expect.stringMatching(/review-post|catch|spec/));
+      expect(fn).not.toHaveBeenCalled();
+    });
+
+    it(`resolveRepoContext in a FRESH thread refuses the not-onboarded slug: ${JSON.stringify(payload.slice(0, 40))}…`, async () => {
+      const probe = vi.fn(async () => false);
+      await expect(resolveRepoContext(msg(payload), [], probe)).resolves.toEqual({});
+      expect(probe).toHaveBeenCalledTimes(1);
+    });
+
+    it(`repoFromThread keeps the weakly-bound thread repo: ${JSON.stringify(payload.slice(0, 40))}…`, () => {
+      const h = [...boundHistory, { role: "user" as const, text: payload }];
+      expect(repoFromThread(h, (slug) => slug === "coreplanelabs/switchboard")).toBe("coreplanelabs/switchboard");
+      // The no-override rule holds even without a probe (sync callers may have none).
+      expect(repoFromThread(h)).toBe("coreplanelabs/switchboard");
+    });
+
+    it(`repoFromThread in a FRESH thread refuses the not-onboarded slug: ${JSON.stringify(payload.slice(0, 40))}…`, () => {
+      expect(repoFromThread([{ role: "user", text: payload }], () => false)).toBeUndefined();
+    });
+  }
+
+  it("a bare slug binds an UNBOUND thread when the probe confirms it is onboarded", async () => {
+    const probe = vi.fn(async (slug: string) => slug === "acme/api");
+    await expect(resolveRepoContext(msg("agent:coding fix login in acme/api"), [], probe)).resolves.toEqual({
+      repo: "acme/api",
+    });
+  });
+
+  it("a bare slug never overrides even a weakly-established thread repo — probe-independent", async () => {
+    const probe = vi.fn(async () => true); // everything onboarded — override still refused
+    const h = [{ role: "user" as const, text: "agent:coding fix the login bug in acme/api" }];
+    await expect(resolveRepoContext(msg("also check acme/other"), h, probe)).resolves.toEqual({
+      repo: "acme/api",
+    });
   });
 });
