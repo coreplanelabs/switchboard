@@ -137,8 +137,10 @@ export function isAckedByBot(m: SlackHistoryMessage, botUserId: string): boolean
 const isFromBot = (m: SlackHistoryMessage, botUserId: string): boolean =>
   Boolean(m.bot_id) || m.user === botUserId;
 
-/** Has the bot posted in this thread after `m` — a status card or a reply? */
-function botRepliedAfter(thread: SlackHistoryMessage[], m: SlackHistoryMessage, botUserId: string): boolean {
+/** Has the bot posted in this thread after `m` — a status card or a reply?
+ *  Exported for the adapter's redelivery guard (#346), which asks the same
+ *  question about a stale delivered event before starting a run. */
+export function botRepliedAfter(thread: SlackHistoryMessage[], m: Pick<SlackHistoryMessage, "ts">, botUserId: string): boolean {
   return thread.some((r) => isFromBot(r, botUserId) && tsNum(r.ts) > tsNum(m.ts));
 }
 
@@ -416,8 +418,9 @@ async function fetchParents(client: CatchUpClient, channel: string, oldestSec: n
 /** The whole thread, paged oldest-first. Slack returns replies oldest-first, so a
  *  single page of a long thread would drop exactly the newest — in-window —
  *  messages; the full thread is also what `threadIncludesBot` / `botRepliedAfter`
- *  need to judge participation. */
-async function fetchReplies(client: CatchUpClient, channel: string, ts: string): Promise<SlackHistoryMessage[]> {
+ *  need to judge participation. Exported for the adapter's redelivery guard
+ *  (#346), which reads one thread the same way. */
+export async function fetchReplies(client: Pick<CatchUpClient, "conversations">, channel: string, ts: string): Promise<SlackHistoryMessage[]> {
   const out: SlackHistoryMessage[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < MAX_REPLIES_PAGES; page++) {
