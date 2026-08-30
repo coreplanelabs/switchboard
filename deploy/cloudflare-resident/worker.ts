@@ -79,6 +79,7 @@ import { busyAfterKillReason, planForceDetach } from "../../src/execution/reside
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
 import { depCacheScript, mutableCachePaths, mutableCacheSwapScript, parseDepCacheScriptOutput } from "../../src/execution/residentDepCache.js";
 import { parseWorktreeCleanliness, worktreeCleanlinessScript } from "../../src/execution/residentCleanliness.js";
+import { capBytesFor, capWrappedCommand, execCapFiles, recoverCapturedOutput } from "../../src/execution/residentExecWrap.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
 import { shouldRefreshThreadCredentials } from "../../src/execution/residentCredentials.js";
 import { recordFiring, scheduleForCron, watchdogFiring, type ScheduleFiring, type WatchdogSummary } from "../../src/core/schedules.js";
@@ -2036,19 +2037,55 @@ export class ResidentDO extends Sandbox<Env> {
    *  worktree as cwd (KTD5). Never root, never a token in env or argv — the
    *  only injected env var is GIT_TERMINAL_PROMPT, validated like every
    *  injection. The worktree path is built from slugged components, so
-   *  embedding it in the -c string is shell-safe. */
+   *  embedding it in the -c string is shell-safe.
+   *
+   *  `capBytes` (#356 item 8): when set, the command's streams are bounded
+   *  INSIDE the container (`capWrappedCommand` — full output to container-disk
+   *  temp files, only the capped head crosses the RPC), so a verbose test/build
+   *  run can no longer materialize tens of MB inside this 128 MB DO isolate
+   *  before the char-cap slice. Exit code, stream separation, and the DO-side
+   *  `truncated` logic are preserved exactly (`capBytesFor`). Unset for the
+   *  engine's own small probes — their outputs are parsed, never user-sized. */
   private async threadRun(
     user: string,
     worktreePath: string,
     command: string,
     timeoutMs: number,
+    capBytes?: number,
+    capFiles?: { out: string; err: string },
   ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
     const injected = { GIT_TERMINAL_PROMPT: "0" };
     validateEnvNames(injected);
-    return this.run(["su", "-s", "/bin/bash", user, "-c", `cd ${worktreePath} && ${command}`], {
+    const body = capBytes ? capWrappedCommand(worktreePath, command, capBytes, capFiles) : `cd ${worktreePath} && ${command}`;
+    return this.run(["su", "-s", "/bin/bash", user, "-c", body], {
       timeoutMs,
       env: injected,
     });
+  }
+
+  /** Capped thread run with hung-run salvage: a timeout kill skips the
+   *  wrapper's own head/cleanup lines, so what the command wrote before dying
+   *  is recovered — the same capped heads — with one follow-up command that
+   *  also removes the files. Recovery is best-effort; its failure leaves the
+   *  timeout result exactly as the kill left it (empty streams). */
+  private async threadRunCapped(
+    user: string,
+    worktreePath: string,
+    command: string,
+    timeoutMs: number,
+    charCap: number,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
+    const capBytes = capBytesFor(charCap);
+    const files = execCapFiles();
+    const r = await this.threadRun(user, worktreePath, command, timeoutMs, capBytes, files);
+    if (!r.timedOut) return r;
+    try {
+      const rec = await this.threadRun(user, worktreePath, recoverCapturedOutput(files, capBytes), DEFAULT_EXEC_TIMEOUT_MS);
+      return { ...r, stdout: rec.stdout, stderr: rec.stderr };
+    } catch (err) {
+      console.log(`exec: timeout-output recovery failed (${errMsg(err)}) — returning the bare timeout result`);
+      return r;
+    }
   }
 
   private async threadRunOk(user: string, worktreePath: string, command: string, step: string, timeoutMs: number): Promise<string> {
@@ -2605,7 +2642,7 @@ export class ResidentDO extends Sandbox<Env> {
 
     let r: Awaited<ReturnType<ResidentDO["threadRun"]>>;
     try {
-      r = await this.threadRun(binding.user, binding.worktreePath, command, timeoutMs);
+      r = await this.threadRunCapped(binding.user, binding.worktreePath, command, timeoutMs, EXEC_OUTPUT_CAP);
     } catch (err) {
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       throw err;
@@ -2636,7 +2673,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (!resolved) return { error: `path-escape: ${JSON.stringify(path)} does not stay inside the thread worktree`, status: 400 };
     let r: Awaited<ReturnType<ResidentDO["threadRun"]>>;
     try {
-      r = await this.threadRun(pre.binding.user, pre.binding.worktreePath, `cat -- ${resolved}`, DEFAULT_EXEC_TIMEOUT_MS);
+      r = await this.threadRun(pre.binding.user, pre.binding.worktreePath, `cat -- ${resolved}`, DEFAULT_EXEC_TIMEOUT_MS, capBytesFor(READ_CONTENT_CAP));
     } catch (err) {
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       throw err;
@@ -3004,7 +3041,7 @@ export class ResidentDO extends Sandbox<Env> {
         record.commands.install ?? "npm install --no-audit --no-fund",
       );
 
-      const r = await this.threadRun(user, checkout, command, MAX_THREAD_EXEC_TIMEOUT_MS);
+      const r = await this.threadRunCapped(user, checkout, command, MAX_THREAD_EXEC_TIMEOUT_MS, EXEC_OUTPUT_CAP);
       const ok = r.exitCode === 0 && !r.timedOut;
       const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP;
       const notes: string[] = [];
