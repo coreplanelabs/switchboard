@@ -1,3 +1,5 @@
+import type { CompletionResult, TokenUsage } from "../providers/types.js";
+
 // Run visibility (Area 2 / R12): a typed stream of what an agent is doing —
 // tool calls and their (redacted, summarized) results — emitted by the runner.
 // Today the in-channel status card consumes it live; the external live-view
@@ -74,7 +76,16 @@ export type RunEvent =
   /** The model's prose BETWEEN tool calls — text content that rode alongside
    *  tool_use in one completion. Emitted by the runner, redacted, uncapped. The
    *  final text-only completion is NOT one of these (that is the `answer`). */
-  | { type: "assistant"; text: string; at?: number };
+  | { type: "assistant"; text: string; at?: number }
+  /** One model call, as the runner saw it (live-view item 15): emitted when the
+   *  provider returns, BEFORE the `assistant`/`tool_call` events that call
+   *  produced — so a reader sees "thought for 5m 04s" above what the thinking
+   *  led to, the way Claude Code / ChatGPT / Cursor show it. `at` is when the
+   *  call returned; `startedAt` + `durationMs` are from the runner's clock, so
+   *  `at - startedAt === durationMs`. `usage` rides only when the provider
+   *  reported token counts. Shape follows the OTel GenAI `chat` span (duration,
+   *  stop reason, input/output tokens) so it exports without translation. */
+  | { type: "turn"; startedAt: number; durationMs: number; stopReason: CompletionResult["stopReason"]; usage?: TokenUsage; at?: number };
 
 // Credential shapes we must never surface in a run-visibility stream (which may
 // be shown in-channel or on a shared page). Two layers: (1) specific known
@@ -198,4 +209,15 @@ export function prepareToolOutput(output: string): string {
   const text = redactSecrets(stripAnsi(output)).trim();
   if (text.length <= TOOL_OUTPUT_CAP) return text;
   return `${text.slice(0, TOOL_OUTPUT_CAP)}…[${text.length - TOOL_OUTPUT_CAP} more chars]`;
+}
+
+/** `5m 04s` / `1.3s` / `800ms` — the one duration format every surface that
+ *  names a model turn uses (status card, CLI; the page's inlined timeline has
+ *  its own copy because it cannot import). */
+export function formatTurnDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(Math.round(ms / 100) / 10).toFixed(1)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms - m * 60_000) / 1000);
+  return `${m}m ${s < 10 ? "0" : ""}${s}s`;
 }

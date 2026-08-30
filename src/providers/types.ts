@@ -62,10 +62,21 @@ export interface CompletionRequest {
   signal?: AbortSignal;
 }
 
+/** Token accounting for ONE model call, normalized across providers. Cache
+ *  counters are present only when the provider reports them. */
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}
+
 export interface CompletionResult {
   // assistant content parts in order (text and tool_use)
   content: ContentPart[];
   stopReason: "end_turn" | "tool_use" | "max_tokens" | "refusal" | "other";
+  /** Absent when the provider did not report usage (or reported it malformed). */
+  usage?: TokenUsage;
 }
 
 export interface Provider {

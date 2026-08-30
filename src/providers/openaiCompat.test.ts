@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toOAIMessages } from "./openaiCompat.js";
+import { toOAIMessages, usageFromOpenAI } from "./openaiCompat.js";
 import type { ChatMessage } from "./types.js";
 
 // Feature: features/slack-channel.md — attachments seam. OpenAI-compatible chat
@@ -70,5 +70,20 @@ describe("toOAIMessages (content-part mapping)", () => {
     expect(user[0]).toEqual({ type: "image_url", image_url: { url: "data:image/png;base64,aGk=" } });
     expect(user[1].type).toBe("text");
     expect(user[1].text).toContain("spec.pdf");
+  });
+});
+
+describe("usageFromOpenAI (token usage → TokenUsage)", () => {
+  it("maps prompt/completion tokens and the cached-prompt detail when present", () => {
+    expect(usageFromOpenAI({ prompt_tokens: 20, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 16 } })).toEqual({
+      inputTokens: 20,
+      outputTokens: 4,
+      cacheReadTokens: 16,
+    });
+    expect(usageFromOpenAI({ prompt_tokens: 20, completion_tokens: 4 })).toEqual({ inputTokens: 20, outputTokens: 4 });
+  });
+  it("returns undefined when usage is absent or malformed", () => {
+    expect(usageFromOpenAI(undefined)).toBeUndefined();
+    expect(usageFromOpenAI({ prompt_tokens: 1 })).toBeUndefined();
   });
 });

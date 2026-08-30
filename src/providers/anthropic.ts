@@ -6,6 +6,7 @@ import type {
   ContentPart,
   Provider,
   ProviderConfig,
+  TokenUsage,
 } from "./types.js";
 
 export class AnthropicProvider implements Provider {
@@ -76,7 +77,8 @@ export class AnthropicProvider implements Provider {
       default:
         stopReason = "other";
     }
-    return { content, stopReason };
+    const usage = usageFromAnthropic(msg.usage);
+    return { content, stopReason, ...(usage ? { usage } : {}) };
   }
 }
 
@@ -153,4 +155,16 @@ function documentBlock(part: Extract<ContentPart, { type: "document" }>): Anthro
     },
     ...(part.name ? { title: part.name } : {}),
   };
+}
+
+/** Anthropic `message.usage` → TokenUsage. Undefined unless both core counts
+ *  are numbers (a malformed/absent usage never fails the completion). */
+export function usageFromAnthropic(u: unknown): TokenUsage | undefined {
+  if (typeof u !== "object" || u === null) return undefined;
+  const o = u as Record<string, unknown>;
+  if (typeof o.input_tokens !== "number" || typeof o.output_tokens !== "number") return undefined;
+  const usage: TokenUsage = { inputTokens: o.input_tokens, outputTokens: o.output_tokens };
+  if (typeof o.cache_read_input_tokens === "number") usage.cacheReadTokens = o.cache_read_input_tokens;
+  if (typeof o.cache_creation_input_tokens === "number") usage.cacheWriteTokens = o.cache_creation_input_tokens;
+  return usage;
 }

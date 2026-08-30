@@ -21,7 +21,7 @@ import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from ".
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
-import { redactSecrets, type RunEvent } from "./runEvents.js";
+import { formatTurnDuration, redactSecrets, type RunEvent } from "./runEvents.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -989,6 +989,8 @@ function activityLine(e: RunEvent): string {
       return "request received";
     case "answer":
       return "answer ready";
+    case "turn":
+      return `💭 thought for ${formatTurnDuration(e.durationMs)}`;
   }
 }
 

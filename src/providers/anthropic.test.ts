@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toAnthropicMessage } from "./anthropic.js";
+import { toAnthropicMessage, usageFromAnthropic } from "./anthropic.js";
 import type { ChatMessage } from "./types.js";
 
 // Feature: features/slack-channel.md — attachments seam. A PDF attachment must
@@ -91,5 +91,21 @@ describe("toAnthropicMessage (content-part mapping)", () => {
     const msg: ChatMessage = { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "ok", isError: true }] };
     const blocks = toAnthropicMessage(msg).content as unknown as Array<Record<string, unknown>>;
     expect(blocks[0]).toEqual({ type: "tool_result", tool_use_id: "t1", content: "ok", is_error: true });
+  });
+});
+
+describe("usageFromAnthropic (token usage → TokenUsage)", () => {
+  it("maps input/output and both cache counters", () => {
+    expect(usageFromAnthropic({ input_tokens: 12, output_tokens: 3, cache_read_input_tokens: 1000, cache_creation_input_tokens: 40 })).toEqual({
+      inputTokens: 12,
+      outputTokens: 3,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: 40,
+    });
+  });
+  it("omits absent/null cache counters and returns undefined when there is no usage or the core counts are missing", () => {
+    expect(usageFromAnthropic({ input_tokens: 5, output_tokens: 1, cache_read_input_tokens: null, cache_creation_input_tokens: null })).toEqual({ inputTokens: 5, outputTokens: 1 });
+    expect(usageFromAnthropic(undefined)).toBeUndefined();
+    expect(usageFromAnthropic({ input_tokens: "x", output_tokens: 1 })).toBeUndefined();
   });
 });

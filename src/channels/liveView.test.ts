@@ -1204,3 +1204,13 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
     });
   });
 });
+
+describe("run page model-turn rows (item 15)", () => {
+  it("renders a `turn` change as a muted 💭 row with its facts, built with createElement/textContent only", () => {
+    const html = renderRunPage("run-1", "tok-1");
+    expect(html).toContain('change.kind === "turn"');
+    expect(html).toContain('el("li", "turn")');
+    expect(html).toContain("#log > li.turn {"); // #log > li { padding: 0 } outranks a bare li.turn rule
+    expect(html).not.toContain("innerHTML");
+  });
+});

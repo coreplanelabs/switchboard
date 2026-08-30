@@ -111,3 +111,14 @@ describe("parseFrictionArgs", () => {
     expect(() => parseFrictionArgs(["--slow-ms", "soon"])).toThrow(/slow-ms/);
   });
 });
+
+describe("parseRunEventLines — `turn` events", () => {
+  it("accepts a turn with numeric startedAt/durationMs, skips a malformed one", () => {
+    const out = parseRunEventLines([
+      '{"type":"turn","startedAt":1,"durationMs":5000,"stopReason":"tool_use","at":5001}',
+      '{"type":"turn","startedAt":"x","at":2}',
+    ].join("\n"));
+    expect(out.events.map((e) => e.type)).toEqual(["turn"]);
+    expect(out.skipped).toBe(1);
+  });
+});

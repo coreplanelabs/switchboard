@@ -75,6 +75,9 @@ export type TimelineChange =
   | { kind: "call"; step: TimelineStep; call: TimelineCall }
   | { kind: "result"; step: TimelineStep; call: TimelineCall }
   | { kind: "note"; text: string; noteKind: string; mode?: string; at?: number }
+  /** One model call: `label` is "Thought for 5m 04s"; `facts` the token counts
+   *  ("12.3k in", "800 out", "11.2k cached") when the event carries usage. */
+  | { kind: "turn"; label: string; facts: string[]; durationMs: number; at?: number }
   | { kind: "answer"; text: string; at?: number };
 
 export interface RunTimeline {
@@ -112,6 +115,12 @@ export function createRunTimeline(): RunTimeline {
     const m = Math.floor(ms / 60_000);
     const s = Math.round((ms - m * 60_000) / 1000);
     return m + "m " + (s < 10 ? "0" : "") + s + "s";
+  }
+
+  function fmtTokens(n: number): string {
+    if (n < 1000) return String(n);
+    if (n < 1_000_000) return (Math.round(n / 100) / 10).toFixed(1) + "k";
+    return (Math.round(n / 100_000) / 10).toFixed(1) + "M";
   }
 
   // The summary's size note is computed over the FULL output upstream (the
@@ -243,6 +252,23 @@ export function createRunTimeline(): RunTimeline {
         return [{ kind: "note", text: str(e.summary), noteKind: str(e.kind), mode: str(e.mode) || undefined, at: num(e.at) }];
       case "assistant":
         return [{ kind: "step", step: openStep({ text: str(e.text), at: num(e.at) }) }];
+      case "turn": {
+        // A model call is a step boundary: whatever it produced starts a new
+        // step (an un-narrated one if it went straight to tools), so the row
+        // sits ABOVE its output in the log and never inside the previous step.
+        const durationMs = num(e.durationMs);
+        if (durationMs === undefined) return [];
+        current = null;
+        const facts: string[] = [];
+        const u = typeof e.usage === "object" && e.usage !== null ? (e.usage as Record<string, unknown>) : undefined;
+        const inTok = u ? num(u.inputTokens) : undefined;
+        const outTok = u ? num(u.outputTokens) : undefined;
+        const cached = u ? num(u.cacheReadTokens) : undefined;
+        if (inTok !== undefined) facts.push(fmtTokens(inTok) + " in");
+        if (outTok !== undefined) facts.push(fmtTokens(outTok) + " out");
+        if (cached !== undefined) facts.push(fmtTokens(cached) + " cached");
+        return [{ kind: "turn", label: "Thought for " + fmtDuration(durationMs), facts, durationMs, at: num(e.at) }];
+      }
       case "tool_call": {
         const changes: TimelineChange[] = [];
         if (!current) changes.push({ kind: "step", step: openStep() });

@@ -1697,7 +1697,7 @@ describe("live run-view wiring (Area 2)", () => {
     // …and the record is bookended by the request (`input`, live-view item 12)
     // and the final answer (the run record is the source of truth; Slack is a
     // projection of it), the latter before the run finishes.
-    expect(events.map((e) => e.type)).toEqual(["input", "tool_call", "tool_result", "run_note", "answer"]);
+    expect(events.map((e) => e.type)).toEqual(["input", "turn", "tool_call", "tool_result", "run_note", "turn", "answer"]);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
 
@@ -1785,7 +1785,7 @@ describe("live run-view wiring (Area 2)", () => {
       },
       fakeIO().io,
     );
-    expect(events.map((e) => e.type)).toEqual(["input", "tool_call", "tool_result", "run_note", "answer"]);
+    expect(events.map((e) => e.type)).toEqual(["input", "turn", "tool_call", "tool_result", "run_note", "turn", "answer"]);
     const input = events[0];
     if (input.type !== "input") throw new Error("unreachable");
     expect(input.text).toBe("please rotate «redacted-github-token» now [+2 images, 1 document]"); // directives stripped, redacted
@@ -2517,7 +2517,7 @@ describe("self-improvement wiring (Area 7b / #84)", () => {
     expect(rec.runId).toBe("run-friction-1");
     expect(rec.agent).toBe("general");
     expect(rec.label).toContain("general");
-    expect(rec.diagnosis.eventCount).toBe(3); // tool_call + tool_result + the turn-budget note
+    expect(rec.diagnosis.eventCount).toBe(5); // turn + tool_call + tool_result + the turn-budget note + the finale's turn
     // The toolless general agent's `bash` call is an unknown tool → a failed_tool finding.
     expect(rec.diagnosis.byCategory.failed_tool.count).toBe(1);
   });

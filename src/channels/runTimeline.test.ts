@@ -271,3 +271,34 @@ describe("createRunTimeline — inlinable into the run page", () => {
     expect(t.steps()[0].calls[0]).toMatchObject({ title: "ls", status: "ok", facts: ["exit 0", "2 lines", "1ms"] });
   });
 });
+
+describe("createRunTimeline — model turns (item 15)", () => {
+  const turn = (over: Record<string, unknown> = {}) => ({ type: "turn", startedAt: 1_000, durationMs: 304_000, stopReason: "tool_use", at: 305_000, ...over });
+
+  it("a `turn` becomes its own change, labelled like the products people already know", () => {
+    const t = createRunTimeline();
+    const [c] = t.push(turn());
+    expect(c).toEqual({ kind: "turn", label: "Thought for 5m 04s", facts: [], durationMs: 304_000, at: 305_000 });
+  });
+
+  it("token usage shows as compact facts: in, out, cached (cached only when present)", () => {
+    const t = createRunTimeline();
+    const [c] = t.push(turn({ durationMs: 1_300, usage: { inputTokens: 12_345, outputTokens: 800, cacheReadTokens: 11_200 } }));
+    expect(c).toMatchObject({ kind: "turn", label: "Thought for 1.3s", facts: ["12.3k in", "800 out", "11.2k cached"] });
+    const [d] = t.push(turn({ usage: { inputTokens: 1_250_000, outputTokens: 0 } }));
+    expect(d).toMatchObject({ facts: ["1.3M in", "0 out"] });
+  });
+
+  it("a turn is a step boundary: the next tool_call opens a new step instead of joining the previous one", () => {
+    const t = createRunTimeline();
+    t.push(call("a", "ls"));
+    t.push(turn());
+    expect(kinds(t.push(call("b", "pwd")))).toEqual(["step", "call"]);
+    expect(t.steps().map((s) => s.calls.map((c) => c.title))).toEqual([["ls"], ["pwd"]]);
+  });
+
+  it("a malformed turn (no numeric duration) is ignored, never thrown on", () => {
+    const t = createRunTimeline();
+    expect(t.push({ type: "turn", startedAt: "x" })).toEqual([]);
+  });
+});
