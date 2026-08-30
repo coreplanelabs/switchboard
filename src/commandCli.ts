@@ -10,22 +10,27 @@
 //
 // No command logic lives here (features/command-registry.md §10): raw `--key=value`
 // strings go to `invoke` unchanged (the schema coerces), and output is either the
-// JSON object `invoke` returned or `renderCompact` of that same object.
+// JSON object `invoke` returned or `renderText` of that same object.
 
 import { pathToFileURL } from "node:url";
 import { ConfigStore } from "./config.js";
 import {
   CommandRegistry,
   bindCommands,
-  renderCompact,
+  renderText,
   toSurfaceNames,
   type Caller,
   type CommandInvoker,
+  type CommandRegistryOptions,
 } from "./core/commandRegistry.js";
-import { registerRunsCommands, type RunsCommandDeps } from "./core/commands/runs.js";
-import { defaultRunRegistry } from "./core/runRegistry.js";
-import { buildRunStore } from "./core/runStore.js";
-import { createRunsService } from "./core/runsService.js";
+import { registerCoreCommands, type CoreCommandDeps } from "./core/commands/all.js";
+import { selectFrictionLedger, type FrictionLedger } from "./core/frictionLedger.js";
+import type { IssueTracker } from "./execution/githubIssues.js";
+import { buildFrictionLedger } from "./core/frictionLedgerWorker.js";
+import { residentAdminFromConfig } from "./core/repoCommands.js";
+import { defaultRunRegistry, type RunRegistry } from "./core/runRegistry.js";
+import { buildRunStore, type RunStore } from "./core/runStore.js";
+import { createRunsService, type RunsService } from "./core/runsService.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
@@ -99,29 +104,59 @@ export async function runCommand(commands: CommandInvoker, parsed: ParsedCommand
   }
   const result = await commands.invoke(parsed.id, parsed.input, caller);
   if (!result.ok) return { exitCode: 1, stdout: "", stderr: `error (${result.error}): ${result.message}` };
-  return { exitCode: 0, stdout: parsed.json ? JSON.stringify(result.value, null, 2) : renderCompact(parsed.id, result.value, opts), stderr: "" };
+  return { exitCode: 0, stdout: parsed.json ? JSON.stringify(result.value, null, 2) : renderText(cmd, result.value, opts), stderr: "" };
 }
 
-/** In-process deps, mirroring cli.ts: the run store from `runHistory` config
- *  (null → live-only; this fresh process holds no live runs, so persisted
- *  history is what the CLI sees) and the same `defaultRunRegistry`. */
-function buildDeps(): RunsCommandDeps {
-  const config = new ConfigStore(CONFIG_PATH, "./data/cli-overrides.json");
-  const store = buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => console.error(`[run-history] ${m}`) });
-  return { runs: createRunsService({ registry: defaultRunRegistry, store }) };
+/** How an in-process binding reaches the catalogue's deps. */
+export interface CoreCommandWiring {
+  /** The live registry — `defaultRunRegistry` in every real process, so the
+   *  commands see the runs the dispatcher creates. */
+  registry: RunRegistry;
+  env: Record<string, string | undefined>;
+  /** Where the host-disk fallbacks (friction JSONL) live. */
+  dataDir: string;
+  warn: (message: string) => void;
+  /** Reuse an already-built service (index.ts shares ONE RunsService with the /runs pages). */
+  runs?: RunsService;
+  /** Reuse an already-selected ledger (index.ts shares it with `record()`). */
+  frictionLedger?: FrictionLedger;
+  /** Where `friction.propose` files (index.ts passes the dispatcher's `issueTracker`); default: GitHub REST. */
+  tracker?: IssueTracker;
+  /** The registry's audit sink; default: the registry's console line. */
+  audit?: CommandRegistryOptions["audit"];
 }
 
-/** The registry needs no config, so the catalogue (and a usage error for an
- *  unknown command) never depends on one; deps are built on the first invoke. */
+/**
+ * THE one catalogue every in-process binding shares — src/index.ts (bot),
+ * src/cli.ts (chat harness) and this CLI: `registerCoreCommands` bound over
+ * the run store from `runHistory` config (null → live-only), the same
+ * `RunRegistry`, the friction ledger selected the way the bot selects it (run
+ * store when configured, legacy rows unioned), and the resident admin client
+ * from `execution.resident` + its bearer. A surface that binds anything else
+ * would answer `runs list` differently from the others.
+ */
+export function buildCoreCommands(config: ConfigStore, store: RunStore | null, wiring: CoreCommandWiring): CommandInvoker {
+  const registry = new CommandRegistry<CoreCommandDeps>(wiring.audit ? { audit: wiring.audit } : {});
+  registerCoreCommands(registry);
+  const warn = (prefix: string) => (m: string) => wiring.warn(`[${prefix}] ${m}`);
+  const ledger =
+    wiring.frictionLedger ??
+    selectFrictionLedger(store, buildFrictionLedger(config.config.selfImprovement, wiring.env, { dataDir: wiring.dataDir, warn: warn("friction") }), warn("friction"));
+  return bindCommands(registry, {
+    runs: wiring.runs ?? createRunsService({ registry: wiring.registry, store }),
+    friction: { ledger, tracker: wiring.tracker, config: () => config.config.selfImprovement },
+    repo: { admin: () => residentAdminFromConfig(config) },
+  });
+}
+
+/** This process's binding: the config file, the run store it names, the shared
+ *  registry (empty here — a fresh process holds no live runs, so persisted
+ *  history is what the CLI sees), a silent audit (the output IS the audit). */
 function buildCommands(): CommandInvoker {
-  const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
-  registerRunsCommands(registry);
-  let bound: CommandInvoker | undefined;
-  return {
-    list: () => registry.list(),
-    get: (id) => registry.get(id),
-    invoke: (id, rawInput, caller) => (bound ??= bindCommands(registry, buildDeps())).invoke(id, rawInput, caller),
-  };
+  const config = new ConfigStore(CONFIG_PATH, "./data/cli-overrides.json");
+  const warn = (m: string) => console.error(m);
+  const store = buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => warn(`[run-history] ${m}`) });
+  return buildCoreCommands(config, store, { registry: defaultRunRegistry, env: process.env, dataDir: "./data", warn, audit: () => {} });
 }
 
 async function main(): Promise<void> {

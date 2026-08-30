@@ -2,12 +2,17 @@ import type { ConfigStore } from "../config.js";
 import type { IncomingMessage } from "./types.js";
 
 // Repo-management chat commands (U8): `repo onboard/offboard/reconfigure/
-// rebuild/list` in the config-command family — answered inline, never sent to
-// a model. All but `list` are gated by canManageRepos (KTD9: FAIL-CLOSED —
-// admins only when no repo-management permission is configured, because these
-// commands provision/destroy billable always-on compute and bind GitHub
-// credentials). The commands talk to the resident Worker's admin routes with
-// the RESIDENT_ADMIN_TOKEN bearer; the registry (command table included) is
+// rebuild` in the config-command family — answered inline, never sent to a
+// model, all gated by canManageRepos (KTD9: FAIL-CLOSED — admins only when no
+// repo-management permission is configured, because these commands
+// provision/destroy billable always-on compute and bind GitHub credentials).
+// `repo list` is a command-registry command (`repo.list`, src/core/commands/
+// repo.ts — #157 R13): the parser still recognizes the verb, but
+// `handleRepoCommand` yields it to the registry; only its text projection
+// (`renderResidentList`) and the admin-client resolution
+// (`residentAdminFromConfig`) live here, shared with the mutating verbs. The
+// commands talk to the resident Worker's admin routes with the
+// RESIDENT_ADMIN_TOKEN bearer; the registry (command table included) is
 // writable ONLY through those admin routes, and the bot never caches
 // membership — `repo list` reads the live registry every time.
 //
@@ -221,10 +226,25 @@ export function parseRepoCommand(text: string): RepoCommand | null {
 
 // ---- handling -----------------------------------------------------------------
 
-/** Handles a repo command, or returns null when `text` is not one. Replies
- *  are strings in the handleConfigCommand convention. The dispatcher parses
- *  the message ONCE and threads the result in as `cmd`; callers that omit it
- *  get the parse done here. */
+/** The admin client the config names, or the operator-facing reason there is
+ *  none: no `execution.resident.baseUrl`, or its bearer env var unset. Shared by
+ *  the mutating chat verbs here and the registry's `repo.list`. */
+export function residentAdminFromConfig(config: ConfigStore): ResidentAdminClient | { unavailable: string } {
+  const resident = config.config.execution?.resident;
+  if (!resident?.baseUrl) {
+    return { unavailable: "Resident repo environments aren't configured — set `execution.resident.baseUrl` in config.yaml." };
+  }
+  const tokenEnv = resident.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN";
+  const token = process.env[tokenEnv];
+  if (!token) return { unavailable: `Repo management needs the resident admin bearer — \`${tokenEnv}\` is not set.` };
+  return makeResidentAdminClient(resident.baseUrl, token);
+}
+
+/** Handles a mutating repo command, or returns null when `text` is not one —
+ *  including `repo list` (the registry's `repo.list`) and `repo test/build`
+ *  (the operations fast path). Replies are strings in the handleConfigCommand
+ *  convention. The dispatcher parses the message ONCE and threads the result
+ *  in as `cmd`; callers that omit it get the parse done here. */
 export async function handleRepoCommand(
   config: ConfigStore,
   msg: IncomingMessage,
@@ -234,33 +254,30 @@ export async function handleRepoCommand(
   if (!cmd) return null;
   if ("error" in cmd) return cmd.error;
 
+  // `repo list` is registry-owned (`repo.list`): the dispatcher's registry
+  // stage answers it, open to everyone, with the same text as ever.
+  if (cmd.verb === "list") return null;
+
   // U6 op verbs are OPERATOR-level and dispatcher-owned: the deterministic
   // ops fast-path gates them with canRunAgent(coding) + canUseRepo (KD7) and
   // executes them modelless — never the admin client, never canManageRepos.
   if (cmd.verb === "test" || cmd.verb === "build") return null;
 
-  // KTD9 fail-closed gate: everything but `list` provisions or destroys
+  // KTD9 fail-closed gate: every remaining verb provisions or destroys
   // billable always-on compute — admins (+ permissions.repoManagement) only.
-  if (cmd.verb !== "list" && !config.canManageRepos(msg.userId)) {
+  if (!config.canManageRepos(msg.userId)) {
     return `🚫 Repo management (\`repo ${cmd.verb}\`) is restricted. Ask ${config.adminsHint()}.`;
   }
 
   let api = client;
   if (!api) {
-    const resident = config.config.execution?.resident;
-    if (!resident?.baseUrl) {
-      return "Resident repo environments aren't configured — set `execution.resident.baseUrl` in config.yaml.";
-    }
-    const tokenEnv = resident.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN";
-    const token = process.env[tokenEnv];
-    if (!token) return `Repo management needs the resident admin bearer — \`${tokenEnv}\` is not set.`;
-    api = makeResidentAdminClient(resident.baseUrl, token);
+    const resolved = residentAdminFromConfig(config);
+    if ("unavailable" in resolved) return resolved.unavailable;
+    api = resolved;
   }
 
   try {
     switch (cmd.verb) {
-      case "list":
-        return renderList(await api.residents());
       case "onboard":
         return renderOnboard(cmd, await api.onboard({
           resource: repoResourceId(cmd.slug),
@@ -285,10 +302,11 @@ const fail = (what: string, r: ResidentAdminResponse): string =>
 
 const n = (v: unknown): string => String(typeof v === "number" ? v : (v ?? "?"));
 
-function renderList(r: ResidentAdminResponse): string {
-  if (r.status !== 200) return fail("repo list", r);
-  const residents = (r.data.residents as Array<Record<string, unknown>> | undefined) ?? [];
-  if (residents.length === 0) return `No repos onboarded (0/${n(r.data.cap)}). Onboard one with \`repo onboard <owner/name>\`.`;
+/** The `repo list` reply, rendered from the resident Worker's `/residents`
+ *  body — the registry's `repo.list` output (`render` of that command). */
+export function renderResidentList(data: Record<string, unknown>): string {
+  const residents = (data.residents as Array<Record<string, unknown>> | undefined) ?? [];
+  if (residents.length === 0) return `No repos onboarded (0/${n(data.cap)}). Onboard one with \`repo onboard <owner/name>\`.`;
   const lines = residents.map((rec) => {
     const live = (rec.live as Record<string, unknown> | undefined) ?? {};
     const slug = String(rec.resource ?? "").replace(/^repo:/, "");
@@ -298,13 +316,13 @@ function renderList(r: ResidentAdminResponse): string {
     const refreshed = typeof live.lastRefreshAt === "string" && live.lastRefreshAt ? ` · refreshed ${live.lastRefreshAt}` : "";
     return `• \`${slug}\` — *${state}*${reason ? ` (${reason})` : ""} · ref \`${String(rec.defaultRef ?? "?")}\`${sha}${refreshed}`;
   });
-  const out = [`*Resident repos* (${n(r.data.count)}/${n(r.data.cap)}):`, ...lines];
+  const out = [`*Resident repos* (${n(data.count)}/${n(data.cap)}):`, ...lines];
   // Item 49: a test override lowers the enforced cap/floor for live checks —
   // say so, or the count above reads as the real cap.
-  const t = r.data.testOverrides as Record<string, unknown> | undefined;
+  const t = data.testOverrides as Record<string, unknown> | undefined;
   if (t && typeof t === "object") {
     out.push(
-      `⚠️ test overrides active (set ${String(t.setAt ?? "?")}): cap ${n(r.data.cap)} (default ${n(r.data.capDefault)}), ` +
+      `⚠️ test overrides active (set ${String(t.setAt ?? "?")}): cap ${n(data.cap)} (default ${n(data.capDefault)}), ` +
         `LRU floor ${n(t.floorS)}s (default ${n(t.floorDefaultS)}s) — clear with \`POST /debug {"op":"set-test-overrides"}\`.`,
     );
   }

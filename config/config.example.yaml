@@ -68,6 +68,20 @@ defaults:
 #                                   # absent OR empty = ADMINS ONLY — these
 #                                   # commands provision billable always-on
 #                                   # compute and bind GitHub credentials
+#   # Command registry over HTTP (/api/<group>.<verb>, features/command-registry.md).
+#   # Chat callers are gated by `admins` (operator commands) and `repoManagement`
+#   # (friction propose); these two keys cover the machine surfaces:
+#   operators: [access:<sub>]       # Cloudflare Access browser identities granted
+#                                   # every `*:write` scope (runs stop, friction
+#                                   # propose) over /api. Every Access identity
+#                                   # holds `*:read` implicitly; absent = nobody
+#                                   # may write from a browser session.
+#   serviceTokens:                  # Access service tokens (their `common_name`
+#     reader-bot: [runs:read]       # claim) → the exact scopes they hold; unlisted
+#     ops-bot: [runs:read, runs:write, friction:read]   # = no scopes at all.
+#   # MCP / HTTP-ingress bearer tokens live in the SWITCHBOARD_INGRESS_TOKENS env
+#   # var (JSON `{ "<token>": { "subject", "channel"?, "scopes"? } }`); `scopes`
+#   # defaults to ["dispatch"] — the ingress endpoint only, no registry command.
 
 # Where agent tools execute. "local" runs them on the bot host (dev/CLI);
 # "e2b" runs each thread's tools in its own E2B micro-VM — the repo checkout

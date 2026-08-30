@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigStore } from "../config.js";
 import { bindCommands } from "./commandRegistry.js";
-import { handleChatCommand, parseChatCommand, RESERVED_CHAT_GROUPS } from "./commandChat.js";
+import { handleChatCommand, parseChatCommand, RESERVED_CHAT_COMMANDS } from "./commandChat.js";
 import { CommandRegistry, renderCompact, type Caller } from "./commandRegistry.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import type { RunRecord } from "./runRecord.js";
@@ -77,7 +77,7 @@ describe("command contract — chat row", () => {
   it("chat `runs list status=all` renders renderCompact(invoke JSON) for the same caller; no token anywhere", async () => {
     const { registry, deps, config, commands } = await fixture();
     const text = "runs list status=all";
-    const parsed = parseChatCommand(text, commands, RESERVED_CHAT_GROUPS);
+    const parsed = parseChatCommand(text, commands, RESERVED_CHAT_COMMANDS);
     expect(parsed).toEqual({ id: "runs.list", input: { status: "all" } });
 
     const caller: Caller = { kind: "chat", id: "slack:UADMIN", scopes: new Set(), chatGate: config.chatGateFor("slack:UADMIN") };
@@ -94,7 +94,7 @@ describe("command contract — chat row", () => {
 
   it("chat error mapping mirrors invoke: unauthorized → restricted line; invalid input → field line", async () => {
     const { config, commands } = await fixture();
-    const parsed = parseChatCommand("runs list status=bogus", commands, RESERVED_CHAT_GROUPS)!;
+    const parsed = parseChatCommand("runs list status=bogus", commands, RESERVED_CHAT_COMMANDS)!;
     expect(await handleChatCommand({ commands, parsed, msg: { channelId: "slack:CX", userId: "slack:UX" }, config })).toBe("🚫 `runs list` is restricted. Ask <@slack:UADMIN>.");
     const admin = await handleChatCommand({ commands, parsed, msg: { channelId: "slack:CX", userId: "slack:UADMIN" }, config });
     expect(admin).toBe('⚠️ `runs list`: status: expected one of "active", "finished", "all"');

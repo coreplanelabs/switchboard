@@ -27,7 +27,7 @@ import { isLoopbackAddress } from "./commandHttp.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
-import type { RunRecord } from "../core/runRecord.js";
+import { RUN_LIST_MAX_LIMIT, type RunRecord } from "../core/runRecord.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { createRunsService } from "../core/runsService.js";
 import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
@@ -1500,7 +1500,13 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
 
   /** Registry + store + service + handler, with every knob injectable. */
   function harness(
-    opts: { store?: InMemoryRunStore | null; retention?: { retentionDays: number } | null; devBypass?: LiveViewDeps["devBypass"]; audit?: LiveViewDeps["audit"] } = {},
+    opts: {
+      store?: InMemoryRunStore | null;
+      retention?: { retentionDays: number } | null;
+      devBypass?: LiveViewDeps["devBypass"];
+      audit?: LiveViewDeps["audit"];
+      indexPageSize?: number;
+    } = {},
   ) {
     let clock = NOW;
     const now = () => clock;
@@ -1514,6 +1520,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       retention: opts.retention === undefined ? { retentionDays: 30 } : opts.retention,
       ...(opts.devBypass ? { devBypass: opts.devBypass } : {}),
       ...(opts.audit ? { audit: opts.audit } : {}),
+      ...(opts.indexPageSize !== undefined ? { indexPageSize: opts.indexPageSize } : {}),
     });
     return { registry, store, service, handler, tick: (ms: number) => (clock += ms) };
   }
@@ -1603,7 +1610,24 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
   });
 
   describe("AE11: truncated records", () => {
-    it("withOmittedMarkers puts one 'N events omitted' note at the first seq gap, N = eventCount − stored", () => {
+    it("withOmittedMarkers marks every seq gap with its own count; the unaccounted remainder is a tail marker", () => {
+      const events: RunEvent[] = [text("input", "a", 1), { ...call("b"), seq: 4 }, { ...call("c"), seq: 5 }, { ...call("d"), seq: 9 }];
+      // 12 published, 4 stored → 8 omitted: 2 (seq 2–3) + 3 (seq 6–8) + 3 cut from the tail
+      expect(withOmittedMarkers(events, 12)).toEqual([
+        events[0],
+        { type: "replay_note", summary: "2 events omitted" },
+        events[1],
+        events[2],
+        { type: "replay_note", summary: "3 events omitted" },
+        events[3],
+        { type: "replay_note", summary: "3 events omitted" },
+      ]);
+      // counts never exceed published − stored, even when seq numbering is odd
+      const odd: RunEvent[] = [{ ...call("x"), seq: 1 }, { ...call("y"), seq: 50 }];
+      expect(withOmittedMarkers(odd, 3)).toEqual([odd[0], { type: "replay_note", summary: "1 event omitted" }, odd[1]]);
+    });
+
+    it("withOmittedMarkers puts one 'N events omitted' note at a single seq gap, N = eventCount − stored", () => {
       const events: RunEvent[] = [text("input", "a", 1), { ...call("b"), seq: 2 }, { ...call("c"), seq: 8 }, text("answer", "d", 9)];
       expect(withOmittedMarkers(events, 9)).toEqual([events[0], events[1], { type: "replay_note", summary: "5 events omitted" }, events[2], events[3]]);
     });
@@ -1633,11 +1657,12 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
   });
 
   describe("persisted run events, friction and stop", () => {
-    it("`/runs/:id/events` tokenless replays the stored stream in seq order (paged until exhausted) then ends", async () => {
+    it("`/runs/:id/events` tokenless replays the stored stream in seq order from ONE record read (no per-page re-reads) then ends", async () => {
       const h = harness();
       const events: RunEvent[] = Array.from({ length: 1200 }, (_, i) => ({ ...call(`step ${i + 1}`), seq: i + 1 }));
       await h.store!.put(record("r1", { events, eventCount: 1200, storedEventCount: 1200 }));
-      const spy = vi.spyOn(h.store!, "events");
+      const get = vi.spyOn(h.store!, "get");
+      const pages = vi.spyOn(h.store!, "events");
       const t = fakeReqRes("GET", "/runs/r1/events");
       h.handler(t.req, t.res);
       await done(t);
@@ -1648,7 +1673,9 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(body.endsWith("event: end\ndata: {}\n\n")).toBe(true);
       const seqs = [...body.matchAll(/"seq":(\d+)/g)].map((m) => Number(m[1]));
       expect(seqs).toEqual(events.map((e) => e.seq));
-      expect(spy.mock.calls.length).toBeGreaterThan(1); // the service page (500) is smaller than the record → several pages
+      // `getRun({ include: "messages" })` already holds every event: one record read, zero event pages.
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(pages).not.toHaveBeenCalled();
     });
 
     it("`/runs/:id/friction` tokenless returns the stored diagnosis", async () => {
@@ -1811,7 +1838,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       h.handler(t.req, t.res);
       await done(t);
       expect(list).toHaveBeenCalledTimes(1);
-      expect(t.body()).toContain(`<li data-run-id="${run.id}" data-started-at="${NOW}" data-persisted="1">`);
+      expect(t.body()).toContain(`<li data-run-id="${run.id}" data-started-at="${NOW}" data-persisted="1" data-finished-at="${NOW - 60_000}" data-status="completed">`);
       expect(t.body()).toContain('li.setAttribute("data-persisted", "1")');
     });
 
@@ -1835,6 +1862,53 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       await done(dflt);
       expect(dflt.body()).not.toContain("history store unavailable");
       warn.mockRestore();
+    });
+
+    it("?all=1 asks the service for a full page (RUN_LIST_MAX_LIMIT), never the 50-row default", async () => {
+      const h = harness();
+      const list = vi.spyOn(h.service, "listRuns");
+      const t = fakeReqRes("GET", "/runs?all=1");
+      h.handler(t.req, t.res);
+      await done(t);
+      expect(list).toHaveBeenCalledWith({ status: "all", limit: RUN_LIST_MAX_LIMIT });
+    });
+
+    it("a full page renders an `Older runs →` link carrying the service's cursor; following it yields the next page", async () => {
+      const h = harness({ indexPageSize: 2 });
+      await h.store!.put(record("p1", { finishedAt: NOW - 10_000 }));
+      await h.store!.put(record("p2", { finishedAt: NOW - 20_000 }));
+      await h.store!.put(record("p3", { finishedAt: NOW - 30_000 }));
+      const first = fakeReqRes("GET", "/runs?all=1");
+      h.handler(first.req, first.res);
+      await done(first);
+      const html = first.body();
+      expect(html).toContain('href="/runs/p1"');
+      expect(html).toContain('href="/runs/p2"');
+      expect(html).not.toContain('href="/runs/p3"');
+      const older = `/runs?all=1&before=${NOW - 20_000}&beforeId=p2`;
+      expect(html).toContain(`<a class="older" href="${escapeHtml(older)}">Older runs →</a>`);
+
+      const second = fakeReqRes("GET", older);
+      h.handler(second.req, second.res);
+      await done(second);
+      expect(second.status).toBe(200);
+      expect(second.body()).toContain('href="/runs/p3"');
+      expect(second.body()).not.toContain('href="/runs/p2"');
+      expect(second.body()).not.toContain("Older runs");
+    });
+
+    it("a short page has no older link; a malformed cursor is ignored (first page)", async () => {
+      const h = harness({ indexPageSize: 2 });
+      await h.store!.put(record("p1"));
+      const t = fakeReqRes("GET", "/runs?all=1");
+      h.handler(t.req, t.res);
+      await done(t);
+      expect(t.body()).not.toContain("Older runs");
+      const bad = fakeReqRes("GET", "/runs?all=1&before=abc&beforeId=p1");
+      h.handler(bad.req, bad.res);
+      await done(bad);
+      expect(bad.status).toBe(200);
+      expect(bad.body()).toContain('href="/runs/p1"');
     });
   });
 
@@ -1876,6 +1950,32 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(lib.feedAction({ type: "removed", id: "a" }, true, true)).toEqual({ op: "keep" });
       expect(lib.feedAction({ type: "removed", id: "a" }, true, false)).toEqual({ op: "remove", id: "a" });
       expect(lib.feedAction({ type: "removed", id: "a" }, false, true)).toEqual({ op: "remove", id: "a" });
+    });
+
+    it("a registry upsert of a finished, persisted row keeps its status/duration (merge, never a wipe) — server and client agree", () => {
+      const doc = staticDocument();
+      const lib = clientLib(doc);
+      // The server rendered the store-merged row: finished with status + finishedAt.
+      const merged: IndexRow = { id: "b1", label: "both", finished: true, persisted: true, startedAt: 1000, finishedAt: 61_000, status: "completed", eventCount: 9 };
+      const li = doc.createElement("li");
+      lib.fill(li, merged);
+      expect(doc.serialize(li)).toContain("completed · 1m 00s");
+      // The `?all=1` feed then replays the registry's RunSummary for the same run: no finishedAt/status,
+      // but the current eventCount / label / persisted flag.
+      const summary: IndexRow = { id: "b1", token: "tok-b1", label: "both", finished: true, persisted: true, startedAt: 1000, eventCount: 10 };
+      lib.fill(li, lib.mergeRow(lib.persistedFields(li), summary));
+      const repaint = doc.serialize(li);
+      expect(repaint).toContain("completed · 1m 00s");
+      expect(repaint).toContain('class="dot grey"');
+      expect(repaint).toContain("10 events");
+      expect(repaint).not.toContain("tok-b1");
+      expect(repaint).toBe(indexRowHtml({ ...summary, finishedAt: 61_000, status: "completed" }));
+      // A live row has nothing to keep: the summary is painted as-is.
+      const live = doc.createElement("li");
+      lib.fill(live, { id: "l1", token: "t", finished: false, startedAt: 1, eventCount: 1 });
+      expect(lib.mergeRow(lib.persistedFields(live), { id: "l1", token: "t", finished: false, startedAt: 1, eventCount: 2 })).toEqual({ id: "l1", token: "t", finished: false, startedAt: 1, eventCount: 2 });
+      // The page's upsert goes through the same merge.
+      expect(renderRunsIndex([], { all: true, retention: null })).toContain("rowLib.fill(li, rowLib.mergeRow(rowLib.persistedFields(li), run));");
     });
 
     it("the index page routes every frame through feedAction, reading the row's data-persisted flag", () => {

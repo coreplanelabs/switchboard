@@ -1,38 +1,76 @@
 import type { ConfigStore } from "../config.js";
-import { GithubIssueTracker, type IssueTracker } from "../execution/githubIssues.js";
-import type { FrictionLedger } from "./frictionLedger.js";
-import { clusterFriction } from "./frictionProposals.js";
-import { formatSelfImprovementReport, runSelfImprovement } from "./selfImprovement.js";
+import { invokeChatCommand, type ChatCommandResult, type ChatCommands } from "./commandChat.js";
 import type { IncomingMessage } from "./types.js";
 
-// The on-demand trigger of the self-improvement step (Area 7b / #84): the
-// `friction report` / `friction propose [--dry-run] [--top N] [--min-runs N]`
-// chat commands. Config-family: answered inline from the ledger, never a model
-// turn, and channel-agnostic (Slack, CLI, HTTP, MCP all reach dispatch()).
-// `report` is read-only and open to everyone (like `repo list`). `propose`
-// writes to GitHub, so it sits behind the same FAIL-CLOSED gate as repo
-// management (admins only when nothing is configured).
+// The LEGACY chat form of the self-improvement trigger (Area 7b / #84):
+// `friction report [--min-runs N]` / `friction propose [--dry-run] [--top N]
+// [--min-runs N] [--repo owner/name]`. Since #157 R13 the commands themselves
+// live on the command registry (`friction.report` / `friction.propose`,
+// src/core/commands/friction.ts); this module only translates the flag syntax
+// into a registry invocation so the syntax people already type — and the
+// exact replies they get — stay unchanged. It contains no command logic: the
+// registry authorizes (chat gate `open` / `repoManager`), parses, runs, and
+// renders; this adapter only keeps the historical wording of two error
+// replies (the 🚫 refusal and the ⚠️ precondition line). The registry's own
+// `friction report minRuns=3` form works too, through parseChatCommand — and
+// the friction path claims EVERY message whose first word is `friction`, so a
+// mixed or misspelled command is a usage line, never a model turn.
 
 export type FrictionCommand =
-  | { verb: "report" | "propose"; dryRun: boolean; top?: number; minRuns?: number }
+  | { verb: "report" | "propose"; dryRun: boolean; top?: number; minRuns?: number; repo?: string }
   | { error: string };
 
-/** Parses `friction report|propose [flags]`; null when the text is not a
- *  friction command (prose mentioning friction passes through to the model). */
+const REPO_SLUG = /^[\w.-]+\/[\w.-]+$/;
+
+const KEY_VALUE = /^[A-Za-z][A-Za-z0-9_]*=/;
+
+/**
+ * Parses a message whose first word is `friction`. The friction path CLAIMS
+ * every such message — a command that is almost right must get a usage error,
+ * never a model turn (which would also bypass the repo-manager gate on
+ * `propose`). Three outcomes:
+ *   - `friction report|propose [--flags]` → the parsed legacy command;
+ *   - `friction report|propose key=value …` (EVERY argument in the registry's
+ *     own form) → null: parseChatCommand takes it next and names a bad key;
+ *   - anything else starting with `friction` — an unknown verb, a bare
+ *     `friction`, a `--flag`/`key=value` mix, a stray word — → `{ error }`, the
+ *     deterministic usage line.
+ * Text that merely mentions friction (`what friction did we see?`,
+ * `frictionless`) is not a friction command and passes through.
+ */
 export function parseFrictionCommand(text: string): FrictionCommand | null {
-  const m = text.trim().match(/^friction\s+(report|propose)\b\s*(.*)$/is);
-  if (!m) return null;
-  const verb = m[1].toLowerCase() as "report" | "propose";
+  const words = text.trim().split(/\s+/);
+  if (words.length === 0 || words[0].toLowerCase() !== "friction") return null;
+  const verbWord = words[1];
+  const verb = verbWord?.toLowerCase();
+  if (verb !== "report" && verb !== "propose") {
+    const got = verbWord === undefined ? "`friction`" : `\`friction ${verbWord}\``;
+    return { error: `${got} is not a friction command — use \`friction report [--min-runs <n>]\` or \`friction propose [--dry-run] [--top <n>] [--min-runs <n>] [--repo <owner/name>]\`.` };
+  }
   const cmd: Extract<FrictionCommand, { verb: string }> = { verb, dryRun: false };
-  const tokens = m[2].split(/\s+/).filter(Boolean);
+  const tokens = words.slice(2);
+  // Every argument in the registry's `key=value` form → parseChatCommand's message, not this parser's.
+  if (tokens.length > 0 && tokens.every((t) => KEY_VALUE.test(t))) return null;
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (t === "--dry-run") {
       cmd.dryRun = true;
       continue;
     }
+    const repoFlag = /^--repo(?:=(.*))?$/.exec(t);
+    if (repoFlag) {
+      const raw = repoFlag[1] ?? tokens[++i];
+      if (!raw || !REPO_SLUG.test(raw)) return { error: `\`--repo\` expects an \`owner/name\` slug, got \`${raw ?? ""}\`.` };
+      cmd.repo = raw;
+      continue;
+    }
     const flag = /^--(top|min-runs)(?:=(.*))?$/.exec(t);
-    if (!flag) return { error: `Unknown option \`${t}\` — \`friction ${verb}\` accepts \`--dry-run\`, \`--top <n>\`, \`--min-runs <n>\`.` };
+    if (!flag) {
+      const accepts = `\`friction ${verb}\` accepts \`--dry-run\`, \`--top <n>\`, \`--min-runs <n>\`, \`--repo <owner/name>\``;
+      // A `key=value` here means the two syntaxes were mixed: say so, naming both forms.
+      const mixed = KEY_VALUE.test(t) ? `, or the \`key=value\` form alone (\`friction ${verb} minRuns=2\`); the two cannot be mixed` : "";
+      return { error: `Unknown option \`${t}\` — ${accepts}${mixed}.` };
+    }
     const raw = flag[2] ?? tokens[++i];
     const n = Number(raw);
     if (!Number.isInteger(n) || n < 1) return { error: `\`--${flag[1]}\` expects a positive integer, got \`${raw ?? ""}\`.` };
@@ -42,76 +80,54 @@ export function parseFrictionCommand(text: string): FrictionCommand | null {
   return cmd;
 }
 
-export interface FrictionCommandDeps {
-  ledger?: FrictionLedger;
-  /** Defaults to the GitHub REST tracker with the App token. */
-  tracker?: IssueTracker;
+/** The registry invocation a parsed legacy command stands for: id + raw string
+ *  inputs (the command's schema coerces them, exactly as a chat `key=value`
+ *  would). `report` takes only `minRuns` — `--top`/`--dry-run` never affected
+ *  it and are still accepted silently, as they always were. */
+export function toRegistryInvocation(cmd: Extract<FrictionCommand, { verb: string }>): { id: string; input: Record<string, string> } {
+  const input: Record<string, string> = {};
+  if (cmd.minRuns !== undefined) input.minRuns = String(cmd.minRuns);
+  if (cmd.verb === "report") return { id: "friction.report", input };
+  if (cmd.dryRun) input.dryRun = "true";
+  if (cmd.top !== undefined) input.top = String(cmd.top);
+  if (cmd.repo !== undefined) input.repo = cmd.repo;
+  return { id: "friction.propose", input };
 }
 
 /** The outcome of a friction command: the reply text plus whether the step
  *  actually ran (`ok`) or was refused/misconfigured/failed — the run record
  *  (and a scheduled firing's outcome) is derived from `ok`, not from the text. */
-export interface FrictionCommandResult {
-  text: string;
-  ok: boolean;
-}
+export type FrictionCommandResult = ChatCommandResult;
 
-/** Runs an already-parsed friction command. */
-export async function runFrictionCommand(config: ConfigStore, msg: IncomingMessage, deps: FrictionCommandDeps, cmd: FrictionCommand): Promise<FrictionCommandResult> {
-  if ("error" in cmd) return { text: cmd.error, ok: false };
-  if (!deps.ledger) return { text: "⚠️ The friction ledger isn't wired in this process, so there are no recent runs to analyze.", ok: false };
-
-  const cfg = config.config.selfImprovement;
-  const minRuns = cmd.minRuns ?? cfg?.minRuns;
-  const top = cmd.top ?? cfg?.top;
-
-  if (cmd.verb === "report") {
-    const records = await deps.ledger.recent();
-    return {
-      ok: true,
-      text: formatSelfImprovementReport({
-        runsAnalyzed: records.length,
-        patterns: clusterFriction(records, { minRuns }),
-        proposals: [],
-        filed: [],
-        duplicates: [],
-        failed: [],
-        dryRun: false,
-      }),
-    };
-  }
-
-  // propose: the fail-closed gate FIRST (a refused user must see why), then config.
-  if (!config.canManageRepos(msg.userId)) {
-    return { text: `🚫 Filing friction proposals (\`friction propose\`) is restricted. Ask ${config.adminsHint()}.`, ok: false };
-  }
-  if (!cfg?.repo) {
-    return { text: "⚠️ Set `selfImprovement.repo` (an `owner/name`) in config.yaml to tell `friction propose` where to file issues.", ok: false };
-  }
-  try {
-    const report = await runSelfImprovement({
-      records: await deps.ledger.recent(),
-      tracker: deps.tracker ?? new GithubIssueTracker(),
-      repo: cfg.repo,
-      label: cfg.label,
-      top,
-      minRuns,
-      dryRun: cmd.dryRun,
-    });
-    return { text: formatSelfImprovementReport(report), ok: true };
-  } catch (err) {
-    return { text: `⚠️ ${err instanceof Error ? err.message : String(err)}`, ok: false };
-  }
-}
-
-/** Handles a friction command, or returns null when `text` is not one. Text-only
- *  view of `runFrictionCommand` for callers that need just the reply. */
-export async function handleFrictionCommand(
-  config: ConfigStore,
+/** Runs an already-parsed legacy-form friction command through the registry. */
+export async function runFrictionCommand(
+  config: Pick<ConfigStore, "chatGateFor" | "adminsHint">,
   msg: IncomingMessage,
-  deps: FrictionCommandDeps,
+  commands: ChatCommands,
+  cmd: FrictionCommand,
+): Promise<FrictionCommandResult> {
+  if ("error" in cmd) return { text: cmd.error, ok: false };
+  return invokeChatCommand({
+    commands,
+    parsed: toRegistryInvocation(cmd),
+    msg,
+    config,
+    wording: {
+      unauthorized: () => `🚫 Filing friction proposals (\`friction propose\`) is restricted. Ask ${config.adminsHint()}.`,
+      unavailable: (message) => `⚠️ ${message}`,
+    },
+  });
+}
+
+/** Handles a legacy-form friction command through the registry, or returns
+ *  null when `text` is not one. Text-only view of `runFrictionCommand`. */
+export async function handleFrictionCommand(
+  config: Pick<ConfigStore, "chatGateFor" | "adminsHint">,
+  msg: IncomingMessage,
+  commands: ChatCommands,
   cmd: FrictionCommand | null = parseFrictionCommand(msg.text),
 ): Promise<string | null> {
   if (!cmd) return null;
-  return (await runFrictionCommand(config, msg, deps, cmd)).text;
+  return (await runFrictionCommand(config, msg, commands, cmd)).text;
 }
+

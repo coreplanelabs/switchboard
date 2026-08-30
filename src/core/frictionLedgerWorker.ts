@@ -50,6 +50,7 @@ export class WorkerFrictionLedger implements FrictionLedger {
 
   /** Throws on any failure: the friction commands turn it into a ⚠️ reply. */
   async recent(opts: LedgerReadOptions = {}): Promise<FrictionRunRecord[]> {
+    if (opts.channel !== undefined) return []; // FrictionDO rows carry no channel: nothing can match a pin
     const res = await this.post("/friction/recent", { ledgerKey: this.opts.ledgerKey, ...opts });
     if (!res.ok) throw new Error(`friction worker /recent HTTP ${res.status}${await errorSuffix(res)}`);
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;

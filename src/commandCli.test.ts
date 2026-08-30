@@ -6,7 +6,12 @@ import { analyzeRunFriction } from "./core/runFriction.js";
 import { RunRegistry } from "./core/runRegistry.js";
 import { InMemoryRunStore } from "./core/runStore.js";
 import { createRunsService } from "./core/runsService.js";
-import { CLI_CALLER, parseCommandArgs, runCommand } from "./commandCli.js";
+import { buildCoreCommands, CLI_CALLER, parseCommandArgs, runCommand } from "./commandCli.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ConfigStore } from "./config.js";
+import { registerCoreCommands, type CoreCommandDeps } from "./core/commands/all.js";
 
 // Feature: features/command-registry.md — the generic CLI adapter
 // (`npx tsx src/commandCli.ts <group> <verb> [--key=value …] [--json]`). Pure
@@ -125,5 +130,38 @@ describe("runCommand", () => {
     expect(out.exitCode).toBe(0);
     const note = reg.snapshotById(live.id)!.events.find((e) => e.type === "run_note" && e.kind === "stop_requested") as { actor?: unknown };
     expect(note.actor).toEqual({ kind: "cli", id: "cli:local" });
+  });
+});
+
+describe("buildCoreCommands — the one catalogue every in-process binding shares (index.ts, cli.ts, commandCli.ts)", () => {
+  it("registers the full catalogue and serves runs.list from the given store", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-cli-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n");
+    const config = new ConfigStore(cfg, join(dir, "overrides.json"));
+    const store = new InMemoryRunStore({ now: () => NOW });
+    await store.put({
+      id: "fin-9",
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:fin-9",
+      startedAt: NOW - 11_000,
+      finishedAt: NOW - 1000,
+      status: "completed",
+      eventCount: 0,
+      storedEventCount: 0,
+      truncated: false,
+      events: [],
+      diagnosis: analyzeRunFriction([]),
+    });
+    const commands = buildCoreCommands(config, store, { registry: new RunRegistry({ now: () => NOW }), env: {}, dataDir: dir, warn: () => {} });
+    const expected = new CommandRegistry<CoreCommandDeps>();
+    registerCoreCommands(expected);
+    expect(commands.list().map((c) => c.id)).toEqual(expected.list().map((c) => c.id));
+    const res = await commands.invoke("runs.list", { status: "all" }, CLI_CALLER);
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("unreachable");
+    expect((res.value as { runs: { id: string }[] }).runs.map((r) => r.id)).toEqual(["fin-9"]);
   });
 });

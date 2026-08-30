@@ -7,15 +7,19 @@ import {
   handleRepoCommand,
   makeResidentAdminClient,
   parseRepoCommand,
+  renderResidentList,
+  residentAdminFromConfig,
   type ResidentAdminClient,
   type ResidentAdminResponse,
 } from "./repoCommands.js";
 
 // Feature: features/resident-repos.md — U8 repo-management chat commands:
-// `repo onboard/offboard/reconfigure/rebuild/list` in the config-command
-// family. All but `list` are gated by canManageRepos (KTD9 fail-closed);
-// destructive commands accept --dry-run and render the resident's itemized
-// plan; parsing is key="value" tokens with sensible Node defaults.
+// `repo onboard/offboard/reconfigure/rebuild` in the config-command family,
+// gated by canManageRepos (KTD9 fail-closed); destructive commands accept
+// --dry-run and render the resident's itemized plan; parsing is key="value"
+// tokens with sensible Node defaults. `repo list` is the registry's `repo.list`
+// (src/core/commands/repo.test.ts): the parser still recognizes it, the
+// handler yields it.
 
 const YAML_FIXTURE = `
 providers:
@@ -172,13 +176,12 @@ describe("KTD9 fail-closed gate", () => {
     expect(c.rebuild).not.toHaveBeenCalled();
   });
 
-  it("`repo list` stays open to non-admins", async () => {
+  it("`repo list` is parsed but yielded to the registry (`repo.list`): null, no gate, no resident call", async () => {
     const s = store();
     const c = mockClient();
-    const reply = await handleRepoCommand(s, msg("repo list", "slack:URANDOM"), c);
-    expect(c.residents).toHaveBeenCalledTimes(1);
-    expect(reply).toContain("jshttp/vary");
-    expect(reply).toContain("warm");
+    expect(parseRepoCommand("repo list")).toEqual({ verb: "list" });
+    expect(await handleRepoCommand(s, msg("repo list", "slack:URANDOM"), c)).toBeNull();
+    expect(c.residents).not.toHaveBeenCalled();
   });
 
   it("a permissions.repoManagement member may manage repos", async () => {
@@ -263,32 +266,22 @@ describe("onboard parsing", () => {
     expect(reply).toContain("429");
   });
 
-  it("`repo list` names an active test override (cap/floor lowered for live checks) so nobody mistakes it for the real cap", async () => {
-    const s = store();
-    const c = mockClient({
-      residents: ok({
-        cap: 2,
-        capDefault: 6,
-        testOverrides: { cap: 2, floorS: 600, floorDefaultS: 3600, setAt: "2026-08-29T23:00:00.000Z", build: "gc51" },
-        count: 1,
-        residents: [{ resource: "repo:acme/api", defaultRef: "main", live: { state: "warm" } }],
-      }),
+  it("`renderResidentList` names an active test override (cap/floor lowered for live checks) so nobody mistakes it for the real cap; none → no warning", () => {
+    const reply = renderResidentList({
+      cap: 2,
+      capDefault: 6,
+      testOverrides: { cap: 2, floorS: 600, floorDefaultS: 3600, setAt: "2026-08-29T23:00:00.000Z", build: "gc51" },
+      count: 1,
+      residents: [{ resource: "repo:acme/api", defaultRef: "main", live: { state: "warm" } }],
     });
-    const reply = await handleRepoCommand(s, msg("repo list"), c);
     expect(reply).toContain("(1/2)");
     expect(reply).toContain("⚠️ test overrides active");
     expect(reply).toContain("cap 2 (default 6)");
     expect(reply).toContain("LRU floor 600s (default 3600s)");
     expect(reply).toContain("2026-08-29T23:00:00.000Z");
-  });
-
-  it("`repo list` without an override carries no warning", async () => {
-    const s = store();
-    const c = mockClient({
-      residents: ok({ cap: 6, capDefault: 6, count: 1, residents: [{ resource: "repo:acme/api", defaultRef: "main", live: { state: "warm" } }] }),
-    });
-    const reply = await handleRepoCommand(s, msg("repo list"), c);
-    expect(reply).not.toContain("test overrides");
+    expect(
+      renderResidentList({ cap: 6, capDefault: 6, count: 1, residents: [{ resource: "repo:acme/api", defaultRef: "main", live: { state: "warm" } }] }),
+    ).not.toContain("test overrides");
   });
 
   it("`--evict-coldest` opts the onboard into LRU eviction (#50): the body carries evictColdest:true", async () => {
@@ -470,11 +463,14 @@ describe("reconfigure", () => {
 });
 
 describe("configuration preconditions", () => {
-  it("without execution.resident (and no injected client) the reply names the missing config", async () => {
+  it("without execution.resident (and no injected client) the reply names the missing config; without the bearer, the env var", async () => {
     const NO_RESIDENT = YAML_FIXTURE.replace(/  resident:[\s\S]*$/m, "");
     const s = store(NO_RESIDENT);
-    const reply = await handleRepoCommand(s, msg("repo list"));
-    expect(reply).toContain("execution.resident");
+    expect(residentAdminFromConfig(s)).toEqual({ unavailable: expect.stringContaining("execution.resident") });
+    expect(await handleRepoCommand(s, msg("repo rebuild acme/api"))).toContain("execution.resident");
+    vi.stubEnv("RESIDENT_ADMIN_TOKEN", "");
+    expect(residentAdminFromConfig(store())).toEqual({ unavailable: expect.stringContaining("RESIDENT_ADMIN_TOKEN") });
+    vi.unstubAllEnvs();
   });
 });
 
@@ -552,13 +548,14 @@ describe("makeResidentAdminClient (real fetch client)", () => {
     expect(reply).toMatch(/not set/i);
   });
 
-  it("the default-client path constructs the real client and hits /residents when the admin token IS set", async () => {
+  it("the default-client path (residentAdminFromConfig) constructs the real client with the admin bearer when the token IS set", async () => {
     vi.stubEnv("RESIDENT_ADMIN_TOKEN", "admin-tok");
     const { calls } = stubFetch({ body: { cap: 8, count: 0, residents: [] } });
-    const s = store();
-    const reply = await handleRepoCommand(s, msg("repo list", "slack:URANDOM"));
+    const api = residentAdminFromConfig(store());
+    expect("unavailable" in api).toBe(false);
+    const res = await (api as ResidentAdminClient).residents();
     expect(route(calls[0])).toBe("/residents");
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer admin-tok");
-    expect(reply).toContain("No repos onboarded");
+    expect(renderResidentList(res.data)).toContain("No repos onboarded");
   });
 });

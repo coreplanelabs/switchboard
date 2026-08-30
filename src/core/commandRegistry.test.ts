@@ -9,6 +9,7 @@ import {
   commandDefiner,
   jsonSchemaFor,
   renderCompact,
+  renderText,
   toSurfaceNames,
   wrapUntrusted,
   type AuditEntry,
@@ -35,7 +36,7 @@ const echo = defineCommand({
 
 const fail = defineCommand({
   id: "demo.fail",
-  input: z.object({ code: z.enum(["not_found", "conflict", "boom"]) }),
+  input: z.object({ code: z.enum(["not_found", "conflict", "unavailable", "boom"]) }),
   scope: "demo:write",
   chatGate: "operator",
   effect: "write",
@@ -214,12 +215,13 @@ describe("CommandRegistry.invoke — parse and error mapping", () => {
     expect(a).toEqual({ ok: true, value: { status: "all", limit: 10 } });
   });
 
-  it("maps CommandError codes to not_found/conflict and swallows unexpected throws as internal", async () => {
+  it("maps CommandError codes to not_found/conflict/unavailable and swallows unexpected throws as internal", async () => {
     const { registry, deps } = setup();
     const errors: unknown[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((...a) => void errors.push(a));
     expect(await registry.invoke("demo.fail", { code: "not_found" }, cli, deps)).toMatchObject({ ok: false, error: "not_found", status: 404, message: "demo says no" });
     expect(await registry.invoke("demo.fail", { code: "conflict" }, cli, deps)).toMatchObject({ ok: false, error: "conflict", status: 409 });
+    expect(await registry.invoke("demo.fail", { code: "unavailable" }, cli, deps)).toMatchObject({ ok: false, error: "unavailable", status: 503, message: "demo says no" });
     const internal = await registry.invoke("demo.fail", { code: "boom" }, cli, deps);
     expect(internal).toMatchObject({ ok: false, error: "internal", status: 500 });
     if (internal.ok) throw new Error("unreachable");
@@ -313,5 +315,11 @@ describe("name mapping, schema derivation, rendering", () => {
     expect(renderCompact("runs.list", { runs: [] })).toBe("(no runs)");
     expect(renderCompact("runs.stop", { id: "r1", mode: "soft", state: "stopping" })).toBe("id: r1\nmode: soft\nstate: stopping");
     expect(renderCompact("x.y", { nested: { a: 1 }, list: [1, 2] })).toBe('nested: {"a":1}\nlist: [1,2]');
+  });
+
+  it("renderText prefers a command's own `render` (a report, a list) and falls back to renderCompact", () => {
+    expect(renderText({ id: "x.y", render: (o) => `custom:${JSON.stringify(o)}` }, { a: 1 })).toBe('custom:{"a":1}');
+    expect(renderText({ id: "x.y" }, { a: 1 })).toBe("a: 1");
+    expect(renderText({ id: "runs.list" }, { runs: [] })).toBe("(no runs)");
   });
 });

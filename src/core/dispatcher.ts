@@ -30,7 +30,7 @@ import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { parseFrictionCommand, runFrictionCommand } from "./frictionCommands.js";
 import { parseMemoryCommand, runMemoryCommand } from "./memoryCommands.js";
-import { handleChatCommand, parseChatCommand, RESERVED_CHAT_GROUPS, type ChatCommands } from "./commandChat.js";
+import { invokeChatCommand, parseChatCommand, RESERVED_CHAT_COMMANDS, type ChatCommands } from "./commandChat.js";
 import { defaultRunRegistry, type RunHandle, type RunRegistry, type RunSnapshot } from "./runRegistry.js";
 import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
 import { coalesceStatus } from "./statusCoalescer.js";
@@ -153,8 +153,9 @@ export interface CoreDeps {
    * chat fast path: `<group> <verb> key=value` messages that name a registered,
    * chat-exposed command are answered inline through `invoke`, never a model
    * turn. Absent (most unit tests, or before the surface is wired) → no message
-   * is a registry command. Production binds the `runs.*` registrations over
-   * the `RunsService` (src/index.ts, src/cli.ts).
+   * is a registry command. Every real process binds the one core catalogue
+   * through `buildCoreCommands` (src/commandCli.ts): the bot (src/index.ts)
+   * and the CLI harness (src/cli.ts).
    */
   commands?: ChatCommands;
 }
@@ -217,29 +218,14 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     }
 
     // Repo-management commands (U8) are config-family too: answered inline,
-    // never a model turn. Gated inside — canManageRepos is KTD9 fail-closed
-    // for everything but `repo list`. The message is parsed as a repo command
-    // ONCE per dispatch; the op recognizer below reuses the same result.
+    // never a model turn. Gated inside — canManageRepos is KTD9 fail-closed.
+    // `repo list` is null here (it is the registry's `repo.list`, answered by
+    // the registry stage below). The message is parsed as a repo command ONCE
+    // per dispatch; the op recognizer below reuses the same result.
     const repoCmd = parseRepoCommand(msg.text);
     const repoReply = await handleRepoCommand(deps.config, msg, deps.residentAdmin, repoCmd);
     if (repoReply) {
       await io.reply(repoReply);
-      return;
-    }
-
-    // Self-improvement commands (Area 7b, #84): `friction report` reads the
-    // ledger; `friction propose` files deduped issue proposals (gated inside:
-    // canManageRepos, fail-closed). Never a model turn — but unlike the config
-    // replies above they DO real work (GitHub writes), so each is a run (#244):
-    // a registry record with the request and the reply, on /runs like any
-    // other, and a receipt to the channel. The weekly cron reaches this path
-    // through /ingress as `http:cron`, so a scheduled firing is a run too.
-    const frictionCmd = parseFrictionCommand(msg.text);
-    if (frictionCmd) {
-      const { text } = await runInlineCommandRun(deps, msg, "friction", io, () =>
-        runFrictionCommand(deps.config, msg, { ledger: deps.frictionLedger, tracker: deps.issueTracker }, frictionCmd),
-      );
-      await io.reply(text);
       return;
     }
 
@@ -267,16 +253,36 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       return;
     }
 
-    // Registry chat commands (#157 U13, KTD19): the LAST text-only fast path —
-    // after the legacy parsers, which keep their groups (`RESERVED_CHAT_GROUPS`)
-    // until U9 moves them onto the registry, and BEFORE `io.history()`, so a
-    // recognized command costs no history fetch and `recognizeOperation` never
-    // sees it (the two can never both claim one message). Whole-message
-    // `<group> <verb> key=value` only; prose falls through unchanged.
+    // Registry chat commands (#157 U13/U9, KTD19): the LAST text-only fast path,
+    // after the legacy parsers (which keep only the forms in
+    // `RESERVED_CHAT_COMMANDS`) and BEFORE `io.history()`, so a recognized
+    // command costs no history fetch and `recognizeOperation` never sees it
+    // (the two can never both claim one message). Two forms reach the same
+    // registry: the legacy `friction report|propose --flags` syntax
+    // (`runFrictionCommand` translates it, keeping its historical replies)
+    // and the generic whole-message `<group> <verb> key=value`. Prose falls
+    // through unchanged.
+    //
+    // The `friction.*` commands (Area 7b, #84) DO real work (ledger reads,
+    // GitHub writes), unlike the config replies above, so each is a run
+    // (#244) in either form: a registry record with the request and the
+    // reply, on /runs like any other, and a receipt to the channel. The weekly
+    // cron reaches this path through /ingress as `http:cron`, so a scheduled
+    // firing is a run too. The outcome comes from the command's `ok`, never
+    // from the reply text.
     if (deps.commands) {
-      const chatCmd = parseChatCommand(msg.text, deps.commands, RESERVED_CHAT_GROUPS);
+      const commands = deps.commands;
+      const frictionCmd = parseFrictionCommand(msg.text);
+      if (frictionCmd) {
+        const { text } = await runInlineCommandRun(deps, msg, "friction", io, () => runFrictionCommand(deps.config, msg, commands, frictionCmd));
+        await io.reply(text);
+        return;
+      }
+      const chatCmd = parseChatCommand(msg.text, commands, RESERVED_CHAT_COMMANDS);
       if (chatCmd) {
-        await io.reply(await handleChatCommand({ commands: deps.commands, parsed: chatCmd, msg, config: deps.config }));
+        const invoke = () => invokeChatCommand({ commands, parsed: chatCmd, msg, config: deps.config });
+        const { text } = chatCmd.id.startsWith("friction.") ? await runInlineCommandRun(deps, msg, "friction", io, invoke) : await invoke();
+        await io.reply(text);
         return;
       }
     }

@@ -174,6 +174,24 @@ describe("RunStoreFrictionLedger", () => {
     expect((await new RunStoreFrictionLedger(store).recent({ sinceMs: NOW - 100 })).map((r) => r.runId)).toEqual(["c", "d"]);
   });
 
+  it("a channel pin (KTD10) keeps only that channel's run-store rows; legacy rows carry no channel and are excluded, and a bare-record ledger yields nothing", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    await store.put(runRecord("x1", NOW - 300, { channelId: "http:x" }));
+    await store.put(runRecord("x2", NOW - 100, { channelId: "http:x" }));
+    await store.put(runRecord("y1", NOW - 200, { channelId: "http:y" }));
+    const legacy = new InMemoryFrictionLedger();
+    await legacy.record(rec("legacy-1", NOW - 150));
+    const ledger = new RunStoreFrictionLedger(store, legacy);
+    expect((await ledger.recent({ channel: "http:x" })).map((r) => r.runId)).toEqual(["x1", "x2"]);
+    expect((await ledger.recent({ channel: "http:x", limit: 1 })).map((r) => r.runId)).toEqual(["x2"]);
+    expect(await ledger.recent({ channel: "http:nowhere" })).toEqual([]);
+    expect((await ledger.recent()).map((r) => r.runId)).toEqual(["x1", "y1", "legacy-1", "x2"]);
+    expect(await legacy.recent({ channel: "http:x" })).toEqual([]);
+    const file = new FileFrictionLedger(tmpPath());
+    await file.record(rec("f1", NOW));
+    expect(await file.recent({ channel: "http:x" })).toEqual([]);
+  });
+
   it("projects only { runId, label, agent, finishedAt, diagnosis } — no message text, no ids beyond the run id", async () => {
     const store = new InMemoryRunStore({ now: () => NOW });
     await store.put(runRecord("a", NOW));
