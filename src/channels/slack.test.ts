@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  catchUpDelayNote,
   slackPermalink,
   classifyDocument,
   classifyMessage,
@@ -643,5 +644,23 @@ describe("slackPermalink (the Request block's link back to the thread)", () => {
     expect(slackPermalink("https://acme.slack.com", "C1", "1788045099.000100", "1788045076.113369")).toBe(
       "https://acme.slack.com/archives/C1/p1788045099000100?thread_ts=1788045076.113369&cid=C1",
     );
+  });
+});
+
+// Feature: features/slack-channel.md item 7 — a message the reconnect catch-up
+// replays tells the thread how late the pickup was (2026-08-30: PR #300's
+// re-review sat 7.5 min with no 👀 through a deploy drain; the caller could not
+// tell "ignored" from "bot restarting").
+describe("catchUpDelayNote", () => {
+  it("names the delay in whole minutes and says not to re-send", () => {
+    const posted = 1788066592.040859; // 05:09:52Z
+    const note = catchUpDelayNote(String(posted), (posted + 449) * 1000); // picked up 05:17:21Z
+    expect(note).toContain("7 min after it was posted");
+    expect(note).toMatch(/restarting/);
+    expect(note).toMatch(/no need to re-send/i);
+  });
+  it("sub-minute and clock-skewed (negative) delays render as 'under a minute'", () => {
+    expect(catchUpDelayNote("1000.5", 1000_500 + 20_000)).toContain("under a minute");
+    expect(catchUpDelayNote("1000.5", 900_000)).toContain("under a minute");
   });
 });

@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { decideReviewPost, reviewPostOptedOut } from "./reviewPost.js";
+import { decideReviewPost, reviewPostIntended, reviewPostOptedOut } from "./reviewPost.js";
+
+// One predicate for "is this verdict meant to be posted": the post-step
+// (`decideReviewPost`) and the dispatcher's unknown-head refusal (agent-review.md
+// item 11) both branch on it, so they can never disagree about which agent
+// posts or what an opt-out looks like.
+describe("reviewPostIntended", () => {
+  it("true only for a review run that did not opt out", () => {
+    expect(reviewPostIntended({ agentName: "review", requestText: "review https://github.com/a/b/pull/1" })).toBe(true);
+    expect(reviewPostIntended({ agentName: "review", requestText: "review a/b#1 — slack only" })).toBe(false);
+    expect(reviewPostIntended({ agentName: "coding", requestText: "review a/b#1" })).toBe(false);
+  });
+  it("decideReviewPost agrees with it: intended + resolved PR → target; not intended → null even with a PR", () => {
+    expect(decideReviewPost({ agentName: "review", repo: "a/b", pr: 1, requestText: "review" })).toEqual({ repo: "a/b", number: 1 });
+    expect(decideReviewPost({ agentName: "review", repo: "a/b", pr: 1, requestText: "review, don't post" })).toBeNull();
+    expect(decideReviewPost({ agentName: "general", repo: "a/b", pr: 1, requestText: "review" })).toBeNull();
+  });
+});
 
 // Feature: features/agent-review.md — posting a review back to the PR is the
 // DEFAULT for a review run against a resolved PR. These pin the pure decision

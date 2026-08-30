@@ -13,7 +13,7 @@ import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/
 import type { ProviderRegistry } from "../providers/registry.js";
 import { currentPrHeadSha, resolveRepoContext, type RepoContext } from "./repoContext.js";
 import { headMovedNote } from "./headMoved.js";
-import { decideReviewPost, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
+import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
 import { checkReviewedHead, normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
@@ -365,6 +365,36 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // decide whether anything is provisioned at all (general gets nothing),
     // and repo/ref carry resident-repo inference. A resident fallback comes
     // back with a named note (KTD10) that rides on every status frame below.
+    // Unknown-head check (features/agent-review.md item 11): a review whose PR
+    // head could not be resolved — the message named a PR but the GitHub fetch
+    // failed, or the thread's inherited PR was unreachable — is a guaranteed
+    // refusal downstream: the resident cannot be told which commit to attach,
+    // the model finds a stale worktree, and the reviewed-head guard (item 8)
+    // refuses the post. Live 2026-08-30 (PR #300): 75 s and a model turn spent
+    // to produce a `request_changes` "cannot review" verdict that was then
+    // Slack-only. Not started instead — before any attach, one named reply.
+    // An explicit "slack only" opt-out wants no post anyway, so an unpinned
+    // review is exactly what was asked for — no refusal (`reviewPostIntended`
+    // is the same predicate the post-step decides by).
+    if (repoCtx.repo && reviewPostIntended({ agentName: resolved.agentName, requestText: directives.text })) {
+      const unknownHead =
+        repoCtx.pr !== undefined && !repoCtx.headSha
+          ? repoCtx.pr
+          : repoCtx.prUnpostable?.reason === "unreachable"
+            ? repoCtx.prUnpostable.number
+            : undefined;
+      if (unknownHead !== undefined) {
+        const where = `${repoCtx.repo}#${unknownHead}`;
+        console.log(`[review] ${msg.threadKey} not started: PR head unknown (${where})`);
+        await card.done({ title: `🔀 ${label} · not started (PR head unknown)` });
+        await io.reply(
+          `🔀 Review of ${where} not started: GitHub did not give me a usable head commit for the PR (the lookup failed, or answered without a well-formed SHA), ` +
+            `so I cannot pin a review to it. Re-send the request in a moment; if it keeps failing, look at the PR on GitHub and at the bot's GitHub App credentials.`,
+        );
+        return;
+      }
+    }
+
     let selection: Awaited<ReturnType<typeof makeExecutor>>;
     try {
       selection = await makeExecutor(
@@ -767,10 +797,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       if (!postTarget && resolved.agentName === "review") {
         // Never a silent skip: a review that lands only in Slack says why, so a
         // re-review that failed to resolve its PR is visible in the logs — and,
-        // when the thread HAD a bound PR that turned out unusable (closed, or
-        // its head could not be verified), in the thread itself: a Slack-only
-        // verdict must never be mistaken for a posted one. An explicit opt-out
-        // is the one case where the user already knows: log it, no note.
+        // when the thread HAD a bound PR that turned out closed, in the thread
+        // itself: a Slack-only verdict must never be mistaken for a posted one.
+        // (An UNREACHABLE bound PR never gets this far — the unknown-head check
+        // above refuses the run before any model turn.) An explicit opt-out is
+        // the one case where the user already knows: log it, no note.
         const optedOut = reviewPostOptedOut(directives.text);
         const unpostable = optedOut ? undefined : repoCtx.prUnpostable;
         const why = optedOut
@@ -780,8 +811,6 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
             : "no PR resolved";
         console.log(`[review-post] ${msg.threadKey} skipped: ${why} (repo ${repoCtx.repo ?? "none"})`);
         if (unpostable && repoCtx.repo) {
-          // `unreachable` also covers a malformed head SHA or unknown state on
-          // a successful fetch — the pin was unusable, not necessarily GitHub.
           const detail =
             unpostable.reason === "closed" ? "the PR is closed" : "the PR's head could not be verified on GitHub";
           await io

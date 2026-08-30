@@ -43,8 +43,18 @@ export function decideReviewPost(input: {
   pr?: number;
   requestText: string;
 }): ReviewPostTarget | null {
-  if (input.agentName !== "review") return null;
+  if (!reviewPostIntended(input)) return null;
   if (!input.repo || input.pr === undefined) return null;
-  if (reviewPostOptedOut(input.requestText)) return null;
   return { repo: input.repo, number: input.pr };
+}
+
+/**
+ * Is this a run whose verdict is MEANT to be posted to a PR — a `review` run
+ * the request did not opt out of? The one place that knows which agent posts
+ * and what an opt-out looks like: `decideReviewPost` (after the run) and the
+ * dispatcher's unknown-head refusal (before it, agent-review.md item 11) both
+ * ask here, so a review-like agent or a new opt-out phrasing changes both at once.
+ */
+export function reviewPostIntended(input: { agentName: string; requestText: string }): boolean {
+  return input.agentName === "review" && !reviewPostOptedOut(input.requestText);
 }
