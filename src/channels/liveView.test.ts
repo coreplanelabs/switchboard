@@ -16,6 +16,8 @@ import { createRunTimeline } from "./runTimeline.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
+import { SCHEDULES } from "../core/schedules.js";
+import { InMemoryScheduleStore, type ScheduleStore } from "../core/scheduleStore.js";
 
 // Feature: features/live-view.md — the external live-view page + SSE stream.
 // Auth is a per-run capability token (in the URL, not a header); a wrong/missing
@@ -614,6 +616,74 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
     expect(rec.body()).toContain('"type":"upsert"');
     expect(rec.body()).toContain('"id":"run-1"');
     expect(rec.body()).toContain('"label":"coding · owner/repo"');
+  });
+});
+
+// Feature: features/live-view.md item 14 (#244) — the Scheduled panel on the
+// index: built from the schedule registry + the ScheduleStore's latest firings
+// before the page is written; a missing/failing store is reported as such.
+describe("scheduled panel on the index (#244)", () => {
+  const NOW = Date.UTC(2026, 7, 29, 12, 0);
+  function pageFor(options: Parameters<typeof createLiveViewHandler>[1]) {
+    const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
+    const handler = createLiveViewHandler(registry, { now: () => NOW, ...options });
+    let body = "";
+    let status = 0;
+    const res = {
+      writeHead: (s: number) => void (status = s),
+      write: (c: string) => void (body += c),
+      end: (c?: string) => void (body += c ?? ""),
+    };
+    const req = { method: "GET", url: "/runs", headers: {}, on: () => {} };
+    const owned = handler(req as never, res as never);
+    return { registry, owned, get body() { return body; }, get status() { return status; } };
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+
+  it("without `scheduled` the index has no panel (unchanged page)", () => {
+    const t = pageFor({});
+    expect(t.owned).toBe(true);
+    expect(t.status).toBe(200);
+    expect(t.body).not.toContain('id="scheduled"');
+  });
+
+  it("renders the panel from the registry + the store's latest firings, linking a live run with its token", async () => {
+    const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
+    registry.create("friction · #cron · cron");
+    const store = new InMemoryScheduleStore();
+    await store.record({ schedule: "self-improvement", firedAt: NOW - 60_000, outcome: "completed", runId: "run-live", detail: "🔍 8 runs analyzed" });
+    const handler = createLiveViewHandler(registry, { now: () => NOW, scheduled: { schedules: SCHEDULES, store } });
+    let body = "";
+    const res = { writeHead: () => {}, write: () => {}, end: (c?: string) => void (body += c ?? "") };
+    expect(handler({ method: "GET", url: "/runs", headers: {}, on: () => {} } as never, res as never)).toBe(true);
+    await tick();
+    expect(body).toContain('<tr data-schedule="self-improvement">');
+    expect(body).toContain('<span class="outcome ok">completed</span>');
+    expect(body).toContain('<a href="/runs/run-live?t=tok-live">run run-live</a>');
+    expect(body).toContain("2026-08-31 14:00 UTC"); // next fire, Monday
+    expect(body).toContain('<tr data-schedule="keep-alive">');
+  });
+
+  it("no store → the panel lists the schedules and says history is unavailable (not 'never fired')", async () => {
+    const t = pageFor({ scheduled: { schedules: SCHEDULES } });
+    await tick();
+    expect(t.status).toBe(200);
+    expect(t.body).toContain("Firing history unavailable: schedules.worker is not configured");
+    expect(t.body).not.toContain("never fired");
+  });
+
+  it("a failing store → the page still renders, with the failure as the reason", async () => {
+    const store: ScheduleStore = {
+      record: async () => {},
+      latest: async () => {
+        throw new Error("schedule worker /latest HTTP 503");
+      },
+    };
+    const t = pageFor({ scheduled: { schedules: SCHEDULES, store } });
+    await tick();
+    expect(t.status).toBe(200);
+    expect(t.body).toContain("Firing history unavailable: schedule worker /latest HTTP 503");
+    expect(t.body).toContain('<tr data-schedule="self-improvement">');
   });
 });
 

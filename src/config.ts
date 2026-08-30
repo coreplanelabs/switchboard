@@ -4,6 +4,7 @@ import YAML from "yaml";
 import type { ProviderConfig } from "./providers/types.js";
 import type { MemoryConfig } from "./core/memory/types.js";
 import type { SelfImprovementConfig } from "./core/selfImprovement.js";
+import type { SchedulesConfig } from "./core/scheduleStore.js";
 import { AGENTS } from "./agents/registry.js";
 
 // Configuration is layered. Lowest to highest precedence:
@@ -88,6 +89,13 @@ export interface AppConfig {
    * See features/self-improvement.md.
    */
   selfImprovement?: SelfImprovementConfig;
+  /**
+   * Scheduled jobs (#244): where the Worker shim's cron firings are recorded
+   * (the state Worker's ScheduleDO) so the /runs "Scheduled" panel can show last
+   * fire / outcome / run. Absent → the panel lists the schedules without firing
+   * history. See features/live-view.md item 14.
+   */
+  schedules?: SchedulesConfig;
   /**
    * Spend reporting (`GET /costs`): which Cloudflare Workers / container apps
    * / Anthropic workspace make up each named group. Validated at startup by

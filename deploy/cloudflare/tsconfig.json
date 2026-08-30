@@ -1,0 +1,18 @@
+{
+  // Scoped config so `npm run typecheck` here checks worker.ts AND the shared
+  // src/core/schedules.ts it imports by relative path (the schedule registry +
+  // the pure firing helpers). Strict, like the bot — the shared module is
+  // written for strict narrowing.
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2022"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["worker.ts"]
+}

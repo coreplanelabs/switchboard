@@ -361,3 +361,41 @@ describe("parseIngressTokens (env → config, fail-closed)", () => {
     expect(cfg.tokens).toEqual({ good: { subject: "alice", channel: undefined } });
   });
 });
+
+describe("run receipt in the response (#244)", () => {
+  const options = (dispatch: DispatchFn) => ({ auth: authConfig({ tok: { subject: "cron", channel: "cron" } }), dispatch });
+  const request = { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "friction propose" }) };
+
+  it("carries `run: {id, status}` when the core finished a run for the request — never the view token", async () => {
+    const dispatch: DispatchFn = async (_deps, _msg, io) => {
+      io.runFinished?.({ id: "run-1", status: "completed" });
+      await io.reply("🔍 8 runs analyzed");
+    };
+    const res = await handleIngressRequest(request, deps, options(dispatch));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ reply: "🔍 8 runs analyzed", run: { id: "run-1", status: "completed" } });
+    expect(JSON.stringify(res.body)).not.toContain("token");
+  });
+
+  it("reports a failed / stopped run's status truthfully", async () => {
+    const dispatch: DispatchFn = async (_deps, _msg, io) => {
+      io.runFinished?.({ id: "run-2", status: "failed" });
+      await io.reply("🚫 restricted");
+    };
+    expect((await handleIngressRequest(request, deps, options(dispatch))).body).toEqual({ reply: "🚫 restricted", run: { id: "run-2", status: "failed" } });
+  });
+
+  it("omits `run` entirely when the request produced no run (a config reply)", async () => {
+    const { fn } = fakeDispatch("Usage: …");
+    const res = await handleIngressRequest(request, deps, options(fn));
+    expect(res.body).toEqual({ reply: "Usage: …" });
+    expect("run" in (res.body as object)).toBe(false);
+  });
+
+  it("HttpIO.run() is undefined until runFinished is called, then the receipt", () => {
+    const io = new HttpIO();
+    expect(io.run()).toBeUndefined();
+    io.runFinished({ id: "r", status: "stopped_soft" });
+    expect(io.run()).toEqual({ id: "r", status: "stopped_soft" });
+  });
+});

@@ -11,7 +11,7 @@ import { AGENTS } from "../agents/registry.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
-import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
+import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
 import { activeRunCount, attachmentSuffix, composeRunLabel, dispatch, setShutdownNotice, turnContent, type CoreDeps } from "./dispatcher.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { MAX_STRUCTURE_RETRIES, STRUCTURING_SYSTEM } from "./structuredOutput.js";
@@ -2728,5 +2728,131 @@ describe("shutdown notice on the live status card", () => {
     await dispatch(deps, msg("hello there"), io);
     expect(statuses.some((s) => /^[\u25d0\u25d3\u25d1\u25d2] /u.test(s.title))).toBe(true);
     expect(statuses.every((s) => !s.title.includes("deploy in progress"))).toBe(true);
+  });
+});
+
+// Feature: features/self-improvement.md item 7 + features/live-view.md item 13
+// (#244): `friction report|propose` are RUNS \u2014 a registry record (input \u2192
+// answer), listed on /runs, with a receipt to the channel \u2014 so a scheduled
+// firing arriving through /ingress as `http:cron` leaves the same trace as
+// any other run. Agent runs report a receipt too. Config replies do not.
+describe("inline command runs + run receipts (#244)", () => {
+  afterEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  function receiptIO() {
+    const base = fakeIO();
+    const receipts: RunReceipt[] = [];
+    base.io.runFinished = (r) => void receipts.push(r);
+    return { ...base, receipts };
+  }
+
+  function sequentialRegistry(prefix: string) {
+    let i = 0;
+    return new RunRegistry({ genId: () => `${prefix}-${++i}`, genToken: () => "tok" });
+  }
+
+  it("`friction report` is a run: input + answer events, finished, labeled, receipt `completed`", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.frictionLedger = new InMemoryFrictionLedger();
+    deps.runRegistry = sequentialRegistry("fr");
+    const { io, replies, receipts } = receiptIO();
+    await dispatch(deps, { ...msg("friction report"), channelName: "cron", userName: "cron" }, io);
+
+    const snap = deps.runRegistry.snapshot("fr-1", "tok")!;
+    expect(snap.finished).toBe(true);
+    expect(snap.events.map((e) => e.type)).toEqual(["input", "answer"]);
+    expect(snap.events[0]).toMatchObject({ type: "input", text: "friction report" });
+    expect(snap.events[1]).toMatchObject({ type: "answer", text: replies[0] });
+    expect(deps.runRegistry.listActive()[0].label).toBe('friction \u00b7 #cron \u00b7 cron \u00b7 "friction report"');
+    expect(receipts).toEqual([{ id: "fr-1", status: "completed" }]);
+  });
+
+  it("a refused `friction propose` (non-admin, no repoManagement grant) is a run that finished `failed`; the \ud83d\udeab reply is its answer", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.frictionLedger = new InMemoryFrictionLedger();
+    deps.runRegistry = sequentialRegistry("fr");
+    const { io, replies, receipts } = receiptIO();
+    await dispatch(deps, { ...msg("friction propose"), userId: "http:cron", channelId: "http:cron" }, io);
+    expect(replies[0]).toMatch(/^\ud83d\udeab/);
+    expect(receipts).toEqual([{ id: "fr-1", status: "failed" }]);
+    expect(deps.runRegistry.snapshot("fr-1", "tok")!.events[1]).toMatchObject({ type: "answer", text: replies[0] });
+  });
+
+  it("`http:cron` listed in permissions.repoManagement may `friction propose` \u2014 the run completes", async () => {
+    const deps = makeDeps(YAML_FIXTURE.replace("permissions:\n", "selfImprovement:\n  repo: o/r\npermissions:\n  repoManagement: [\"http:cron\"]\n"), capturingProvider());
+    deps.frictionLedger = new InMemoryFrictionLedger();
+    deps.issueTracker = new InMemoryIssueTracker();
+    deps.runRegistry = sequentialRegistry("fr");
+    const { io, replies, receipts } = receiptIO();
+    await dispatch(deps, { ...msg("friction propose"), userId: "http:cron", channelId: "http:cron" }, io);
+    expect(replies[0]).toContain("0 runs analyzed");
+    expect(receipts).toEqual([{ id: "fr-1", status: "completed" }]);
+  });
+
+  it("a firing while a previous firing is still in flight: two concurrent commands \u2192 two distinct runs, two receipts", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    deps.frictionLedger = {
+      record: async () => {},
+      recent: async () => {
+        await gate;
+        return [];
+      },
+    };
+    deps.runRegistry = sequentialRegistry("fr");
+    const a = receiptIO();
+    const b = receiptIO();
+    const both = Promise.all([dispatch(deps, msg("friction report"), a.io), dispatch(deps, msg("friction report"), b.io)]);
+    await new Promise((r) => setTimeout(r, 0)); // let both dispatches reach the ledger read (each awaits the repo-command check first)
+    expect(deps.runRegistry.listActive().map((r) => [r.id, r.finished])).toEqual([
+      ["fr-2", false],
+      ["fr-1", false],
+    ]);
+    release();
+    await both;
+    expect(a.receipts).toEqual([{ id: "fr-1", status: "completed" }]);
+    expect(b.receipts).toEqual([{ id: "fr-2", status: "completed" }]);
+  });
+
+  it("a command that throws still finishes its run as `failed`, then the error reaches the dispatcher's handler", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.frictionLedger = {
+      record: async () => {},
+      recent: async () => {
+        throw new Error("ledger exploded");
+      },
+    };
+    deps.runRegistry = sequentialRegistry("fr");
+    const { io, replies, receipts } = receiptIO();
+    await dispatch(deps, msg("friction report"), io);
+    expect(deps.runRegistry.listActive()[0].finished).toBe(true);
+    expect(receipts).toEqual([{ id: "fr-1", status: "failed" }]);
+    expect(replies.join("\n")).toContain("ledger exploded");
+  });
+
+  it("an agent run reports its receipt (`completed`) with the registry's run id, after the run is finished", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.runRegistry = sequentialRegistry("agent");
+    const { io, receipts } = receiptIO();
+    let finishedAtReceipt: boolean | undefined;
+    io.runFinished = (r) => {
+      receipts.push(r);
+      finishedAtReceipt = deps.runRegistry!.listActive()[0].finished;
+    };
+    await dispatch(deps, msg("hello there"), io);
+    expect(receipts).toEqual([{ id: "agent-1", status: "completed" }]);
+    expect(finishedAtReceipt).toBe(true);
+  });
+
+  it("a config reply (`help`) creates no run and no receipt", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.runRegistry = sequentialRegistry("cfg");
+    const { io, receipts } = receiptIO();
+    await dispatch(deps, msg("help"), io);
+    expect(deps.runRegistry.listActive()).toEqual([]);
+    expect(receipts).toEqual([]);
   });
 });

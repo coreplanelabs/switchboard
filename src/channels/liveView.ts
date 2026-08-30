@@ -7,6 +7,9 @@ import type { StopMode } from "../core/runEvents.js";
 import { renderMarkdownInto } from "./markdownLite.js";
 import { createRunTimeline } from "./runTimeline.js";
 import { formatLocalIso } from "./localIso.js";
+import { buildScheduledRows, renderScheduledPanel, SCHEDULED_PANEL_CSS, type FiringsState } from "./scheduledPanel.js";
+import type { ScheduleDef } from "../core/schedules.js";
+import type { ScheduleStore } from "../core/scheduleStore.js";
 
 // Live-view channel: the external, browser-facing surface for a live agent run
 // (Area 2 / #43). It streams the SAME redacted RunEvents the in-channel status
@@ -630,7 +633,7 @@ function indexRowHtml(r: RunSummary): string {
  * exclusively via `textContent`/`setAttribute` (never `innerHTML`), so a hostile
  * label or id cannot inject markup or break out of the link on either path.
  */
-export function renderRunsIndex(runs: RunSummary[]): string {
+export function renderRunsIndex(runs: RunSummary[], scheduledPanel = ""): string {
   const rows = runs.map(indexRowHtml).join("");
   // The empty-state <li> always exists; it is only visible when the list has no
   // run rows (server-side here, and toggled client-side as rows come and go).
@@ -681,6 +684,7 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   button.stop:disabled { opacity: .5; cursor: default; }
   .empty { color: #8b93a7; padding: .45rem .5rem; }
   [hidden] { display: none; }
+  ${SCHEDULED_PANEL_CSS}
 </style>
 </head>
 <body>
@@ -690,6 +694,7 @@ export function renderRunsIndex(runs: RunSummary[]): string {
   ${renderNav("runs")}
 </header>
 <ul id="runs">${rows}<li class="empty" id="empty"${emptyHidden}>No active runs.</li></ul>
+${scheduledPanel}
 <script>
 (function () {
   var list = document.getElementById("runs");
@@ -1012,9 +1017,36 @@ function nodeSseSink(req: HttpRequest, res: ServerResponse): SseSink {
  * collides with `/runs/<id>` where an id could legitimately be "events" or
  * "stream".
  */
+export interface LiveViewOptions {
+  /** The "Scheduled" panel on the index (#244): the schedule registry to list
+   *  and, optionally, the store holding each schedule's firings. Absent → no
+   *  panel (tests, the CLI). */
+  scheduled?: {
+    schedules: readonly ScheduleDef[];
+    /** undefined → the panel says firing history is unavailable. */
+    store?: ScheduleStore;
+  };
+  /** Injectable clock for the panel's "next fire" / relative times. */
+  now?: () => number;
+}
+
+/** Firing history for the panel: the store's answer, or the reason there is
+ *  none — a store failure is shown as such, never as "never fired". */
+const NO_STORE_REASON = "schedules.worker is not configured";
+
+async function loadFirings(store: ScheduleStore): Promise<FiringsState> {
+  try {
+    return { ok: true, firings: await store.latest() };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export function createLiveViewHandler(
   registry: RunRegistry,
+  options: LiveViewOptions = {},
 ): (req: HttpRequest, res: ServerResponse) => boolean {
+  const now = options.now ?? Date.now;
   return (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const route = parseRunRoute(url.pathname);
@@ -1041,8 +1073,44 @@ export function createLiveViewHandler(
         );
         return true;
       }
-      res.writeHead(200, HTML_PAGE_HEADERS);
-      res.end(renderRunsIndex(registry.listActive()));
+      // The Scheduled panel (#244) reads the firing store before the page is
+      // written, so the first paint is complete; without a panel the page is
+      // synchronous as before.
+      const scheduled = options.scheduled;
+      if (!scheduled) {
+        res.writeHead(200, HTML_PAGE_HEADERS);
+        res.end(renderRunsIndex(registry.listActive()));
+        return true;
+      }
+      if (!scheduled.store) {
+        // No store to await: render the panel (schedules only, history
+        // "unavailable") synchronously like the plain page.
+        const t = now();
+        const runs = registry.listActive();
+        const firings: FiringsState = { ok: false, reason: NO_STORE_REASON };
+        res.writeHead(200, HTML_PAGE_HEADERS);
+        res.end(renderRunsIndex(runs, renderScheduledPanel(buildScheduledRows(scheduled.schedules, firings, runs, t), firings, t)));
+        return true;
+      }
+      void loadFirings(scheduled.store)
+        .then((firings) => {
+          const t = now();
+          const runs = registry.listActive();
+          const panel = renderScheduledPanel(buildScheduledRows(scheduled.schedules, firings, runs, t), firings, t);
+          res.writeHead(200, HTML_PAGE_HEADERS);
+          res.end(renderRunsIndex(runs, panel));
+        })
+        .catch((err: unknown) => {
+          // A render/socket fault after the store answered must not leave the
+          // response hanging or surface as an unhandled rejection.
+          console.error(`[live-view] runs index failed: ${err instanceof Error ? err.message : String(err)}`);
+          try {
+            if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+            res.end("internal error");
+          } catch {
+            // the socket is gone; nothing left to end
+          }
+        });
       return true;
     }
 

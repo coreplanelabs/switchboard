@@ -3,6 +3,7 @@ import type { MemoryCandidate, MemoryRecord } from "../../src/core/memory/types.
 import { mintRecord, normalizeText, planWrite, rankRecords } from "../../src/core/memory/engine.ts";
 import { tokenize } from "../../src/core/memory/scorer.ts";
 import { isFrictionRunRecord, type FrictionRunRecord } from "../../src/core/frictionProposals.ts";
+import { FIRING_DETAIL_MAX, isScheduleFiring, type ScheduleFiring } from "../../src/core/schedules.ts";
 
 // Memory Worker: the durable backend behind the bot's WorkerMemoryStore
 // (src/core/memory/workerStore.ts) — cross-session memory PR3 (#85). One
@@ -25,6 +26,11 @@ import { isFrictionRunRecord, type FrictionRunRecord } from "../../src/core/fric
 // ledger key, a bounded table of run diagnoses. Same bearer, same body fence.
 //   POST /friction/record {ledgerKey, record: FrictionRunRecord} → {ok:true, retained}
 //   POST /friction/recent {ledgerKey, limit?, sinceMs?} → {records: FrictionRunRecord[]} (oldest first)
+// Scheduled-firing routes (#244 — the record behind the /runs Scheduled panel;
+// written by the bot's Worker shim after every cron firing, read by the bot's
+// WorkerScheduleStore, src/core/scheduleStore.ts): ONE ScheduleDO, bounded per schedule.
+//   POST /schedules/record {firing: ScheduleFiring} → {ok:true, retained}
+//   POST /schedules/latest {}                       → {firings: ScheduleFiring[]} (newest per schedule)
 //
 // SECURITY: bearer comparison is constant-time (same helper as the resident
 // Worker); an unset/empty secret grants nothing (fail closed); every body field
@@ -34,8 +40,13 @@ export interface Env {
   MEMORY: DurableObjectNamespace<MemoryDO>;
   /** Friction ledgers (#84): one FrictionDO per ledger key (`friction:<repo>`). */
   FRICTION: DurableObjectNamespace<FrictionDO>;
+  /** Scheduled firings (#244): ONE ScheduleDO (named "schedules") — the record behind the /runs Scheduled panel. */
+  SCHEDULES: DurableObjectNamespace<ScheduleDO>;
   MEMORY_TOKEN?: string;
 }
+
+/** The single ScheduleDO's name — every schedule's firings live in one object. */
+const SCHEDULES_OBJECT = "schedules";
 
 /** Retrieval limit ceiling (the bot's default is 8). */
 const MAX_LIMIT = 50;
@@ -300,6 +311,92 @@ export class FrictionDO extends DurableObject<Env> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Scheduled firings (#244) — the durable record behind the /runs Scheduled panel
+// ---------------------------------------------------------------------------
+
+/** Firings kept per schedule; the oldest fall off. A weekly job needs ~2 years. */
+const SCHEDULE_MAX_FIRINGS = 100;
+
+type FiringRow = {
+  record: string;
+}
+
+/**
+ * ScheduleDO: one SQLite Durable Object holding every schedule's firings. The
+ * Worker shim (deploy/cloudflare/worker.ts) appends one `ScheduleFiring` per
+ * cron firing — including firings that produced NO run (misconfigured, ingress
+ * error) — and the bot's /runs page reads the newest per schedule. Append-only
+ * per firing (two firings at one instant are two rows; the later write is the
+ * later id), bounded per schedule.
+ */
+export class ScheduleDO extends DurableObject<Env> {
+  private readonly sql: SqlStorage;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS firings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        schedule TEXT NOT NULL,
+        fired_at INTEGER NOT NULL,
+        record TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS firings_schedule_time ON firings(schedule, fired_at DESC, id DESC);
+    `);
+  }
+
+  /** Append one firing, then trim that schedule to the newest SCHEDULE_MAX_FIRINGS.
+   *  One sync transaction. Returns how many firings the schedule retains. */
+  async record(firing: ScheduleFiring): Promise<number> {
+    let retained = 0;
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(`INSERT INTO firings (schedule, fired_at, record) VALUES (?, ?, ?)`, firing.schedule, firing.firedAt, JSON.stringify(firing));
+      this.sql.exec(
+        `DELETE FROM firings WHERE schedule = ? AND id NOT IN (
+           SELECT id FROM firings WHERE schedule = ? ORDER BY fired_at DESC, id DESC LIMIT ?)`,
+        firing.schedule,
+        firing.schedule,
+        SCHEDULE_MAX_FIRINGS,
+      );
+      retained = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM firings WHERE schedule = ?`, firing.schedule).one().n;
+    });
+    return retained;
+  }
+
+  /** The newest firing of every schedule (by fired_at, then insertion order). */
+  async latest(): Promise<ScheduleFiring[]> {
+    const rows = this.sql
+      .exec<FiringRow>(
+        `SELECT f.record AS record FROM firings f
+          WHERE f.id = (SELECT g.id FROM firings g WHERE g.schedule = f.schedule ORDER BY g.fired_at DESC, g.id DESC LIMIT 1)
+          ORDER BY f.schedule`,
+      )
+      .toArray();
+    const out: ScheduleFiring[] = [];
+    for (const row of rows) {
+      try {
+        const parsed: unknown = JSON.parse(row.record);
+        if (isScheduleFiring(parsed)) out.push(parsed);
+      } catch {
+        // a corrupt row is skipped, never fatal
+      }
+    }
+    return out;
+  }
+}
+
+function parseScheduleFiring(body: unknown): Validated<ScheduleFiring> {
+  if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
+  const f = (body as Record<string, unknown>).firing;
+  if (!isScheduleFiring(f)) return invalid("firing must be a ScheduleFiring (schedule, firedAt, outcome[, runId, detail])");
+  if (f.schedule.length > MAX_KEY_CHARS) return invalid(`firing.schedule must be at most ${MAX_KEY_CHARS} characters`);
+  if (f.runId !== undefined && f.runId.length > MAX_KEY_CHARS) return invalid(`firing.runId must be at most ${MAX_KEY_CHARS} characters`);
+  if (f.detail !== undefined && f.detail.length > FIRING_DETAIL_MAX) return invalid(`firing.detail must be at most ${FIRING_DETAIL_MAX} characters`);
+  return { ok: true, value: f };
+}
+
 function parseFrictionRecord(body: unknown): Validated<{ ledgerKey: string; record: FrictionRunRecord }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const b = body as Record<string, unknown>;
@@ -457,7 +554,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true });
-    const ROUTES = new Set(["/retrieve", "/write", "/friction/record", "/friction/recent"]);
+    const ROUTES = new Set(["/retrieve", "/write", "/friction/record", "/friction/recent", "/schedules/record", "/schedules/latest"]);
     if (!ROUTES.has(url.pathname)) return json({ error: "not found" }, 404);
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
     if (!authorized(env, request)) return json({ error: "unauthorized" }, 401);
@@ -482,6 +579,20 @@ export default {
       body = await request.json();
     } catch {
       return json({ error: "body must be valid JSON" }, 400);
+    }
+
+    if (url.pathname === "/schedules/record") {
+      const parsed = parseScheduleFiring(body);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      const firing = parsed.value;
+      const retained = await env.SCHEDULES.get(env.SCHEDULES.idFromName(SCHEDULES_OBJECT)).record(firing);
+      console.log(`[schedules/record] ${firing.schedule} ${firing.outcome}${firing.runId ? ` run ${firing.runId}` : ""} (${retained} retained)`);
+      return json({ ok: true, retained });
+    }
+    if (url.pathname === "/schedules/latest") {
+      const firings = await env.SCHEDULES.get(env.SCHEDULES.idFromName(SCHEDULES_OBJECT)).latest();
+      console.log(`[schedules/latest] -> ${firings.length} schedules`);
+      return json({ firings });
     }
 
     if (url.pathname === "/friction/record") {

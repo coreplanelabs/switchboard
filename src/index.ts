@@ -5,7 +5,6 @@ import { createSlackApp } from "./channels/slack.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
 import { createLiveViewHandler } from "./channels/liveView.js";
-import { createFrictionTriggerHandler, parseFrictionTriggerToken } from "./channels/frictionTrigger.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
 import { AnthropicCostReportSource, CloudflareGraphqlUsageSource, NullLlmCostSource, createCostsService, parseCostsConfig } from "./core/costs.js";
@@ -24,6 +23,8 @@ import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js
 import { buildFrictionLedger, WorkerFrictionLedger } from "./core/frictionLedgerWorker.js";
 import { healthPayload } from "./channels/health.js";
 import { activeRunCount, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
+import { buildScheduleStore } from "./core/scheduleStore.js";
+import { SCHEDULES } from "./core/schedules.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
@@ -86,21 +87,25 @@ async function main() {
     const auth = parseIngressTokens(process.env);
     const ingress = createIngressHandler(deps, { auth });
     const mcp = createMcpHandler(deps, { auth });
-    // Scheduled self-improvement (Area 7b, #84): POST /friction/propose runs the
-    // same step as the `friction propose` chat command, behind a dedicated
-    // bearer the Worker shim's weekly cron presents (FRICTION_TRIGGER_TOKEN).
-    // Fail-closed: no token → 503, nothing runs.
-    const frictionTriggerToken = parseFrictionTriggerToken(process.env);
-    const frictionTrigger = createFrictionTriggerHandler(deps, { token: frictionTriggerToken });
-    const frictionTriggerState = frictionTriggerToken ? "POST /friction/propose (scheduled trigger)" : "POST /friction/propose DISABLED — no FRICTION_TRIGGER_TOKEN";
+    // Scheduled jobs (#244) arrive through /ingress like any other caller: the
+    // Worker shim (deploy/cloudflare/worker.ts) POSTs each `run` schedule's
+    // command as the `cron` identity — the `cron` entry of the same token map —
+    // and the dispatcher makes a normal run of it. Nothing to wire here beyond
+    // the panel below; without a `cron` entry the shim fails closed.
+    const cronArmed = Object.values(auth.tokens).some((id) => id.subject === "cron");
     // Live run view (Area 2 / #43): GET /runs (index) + /runs/:id (page) +
     // /runs/:id/events (SSE). Shares defaultRunRegistry with the dispatcher —
     // the run created during dispatch() is the run this streams. The per-run
     // page/stream are token-gated (capability token in the URL, not
     // SWITCHBOARD_INGRESS_TOKENS); the bare index is instead Access-gated
     // (Cloudflare Access fronts it) and must only be exposed behind it, since it
-    // renders the per-run capability links.
-    const liveView = createLiveViewHandler(defaultRunRegistry);
+    // renders the per-run capability links. The index also carries the
+    // "Scheduled" panel (#244): the schedule registry + each schedule's last
+    // firing from the state Worker's ScheduleDO (`schedules.worker`), or a note
+    // that firing history is unavailable when that is not configured.
+    const scheduleStore = buildScheduleStore(config.config.schedules, process.env, (m) => console.warn(`[schedules] ${m}`));
+    const liveView = createLiveViewHandler(defaultRunRegistry, { scheduled: { schedules: SCHEDULES, store: scheduleStore } });
+    const schedulesState = `${SCHEDULES.length} schedule(s) on /runs (${scheduleStore ? `firings from ${config.config.schedules?.worker?.baseUrl}` : "no firing store"}; cron identity ${cronArmed ? "armed" : "NOT in SWITCHBOARD_INGRESS_TOKENS — scheduled runs fail closed"})`;
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin
     // /residents route live on every request with the same bearer the chat
@@ -167,10 +172,6 @@ async function main() {
         mcp(req, res);
         return;
       }
-      if (path === "/friction/propose") {
-        frictionTrigger(req, res);
-        return;
-      }
       // /runs* + /residents* + /costs* SSO gate: identity FIRST (fail-closed), before the view
       // dispatch. The gate is async (it may fetch the JWKS), so we resolve the
       // promise here; a rejection is a 403, never a 500 that serves the page.
@@ -223,7 +224,7 @@ async function main() {
       res.end("ok");
     }).listen(Number(process.env.PORT), () =>
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${frictionTriggerState} + ${liveViewState} + ${residentsState} + ${costsState}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       ),
     );

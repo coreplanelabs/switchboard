@@ -10,7 +10,7 @@
     "preflight": "node preflight.mjs",
     "test": "vitest run",
     "dev": "wrangler dev",
-    "typecheck": "tsc --noEmit worker.ts --skipLibCheck --target es2022 --module es2022 --moduleResolution bundler --types ./node_modules/@cloudflare/workers-types",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "typegen": "wrangler types",
     "tail": "wrangler tail switchboard",
     "secrets": "while read -r name; do [ -z \"$name\" ] && continue; echo \"--- $name ---\"; wrangler secret put \"$name\"; done < secrets.txt",
