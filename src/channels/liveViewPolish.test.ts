@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { indexRowHtml, renderRunNotFoundPage, renderRunPage, renderRunsIndex, renderScheduledPage, type IndexRow } from "./liveView.js";
+import { FAVICON_IDLE, FAVICON_LIVE, indexRowHtml, renderRunNotFoundPage, renderRunPage, renderRunsIndex, renderScheduledPage, type IndexRow } from "./liveView.js";
 import { formatLocalIso } from "./localIso.js";
 import { formatDateTime } from "./indexFormat.js";
 
@@ -173,8 +173,10 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
     // the chip's text (.4rem = the chip's .5em pad at .8rem).
     expect(html).toContain("} else if (turn && turn.facts.length) {");
     expect(html).toContain("row.appendChild(turnFacts(turn));");
-    expect(html).toContain(".turnfacts { display: flex; gap: .6rem; padding: 0 .75rem .6rem .4rem;");
-    expect(html).toContain(".narration .turnfacts { padding: 0; align-self: center; }");
+    // under prose the facts sit ABOVE the head row — a small tight metadata line
+    expect(html).toContain("li.appendChild(turnFacts(turn)); // above the prose");
+    expect(html).toContain(".turnfacts { display: flex; gap: .6rem; padding: 0 .75rem 0 .45rem; margin-bottom: -.1rem; font-size: .7rem;");
+    expect(html).toContain(".narration .turnfacts { padding: 0; margin: 0; align-self: center;");
     expect(html).toContain('flushTurn("wrote the answer below");');
     expect(html).toContain('flushTurn("the run ended here");');
     expect(html).toContain('turn.label.replace(/^Thought for /, "")'); // the chip reads "5m 04s"
@@ -244,13 +246,16 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
     expect(html).toContain(".skill { display: flex;");
   });
 
-  it("renders run_meta under the request as agent · model · linked repo / ref / #PR / sha (allow-listed repo, setAttribute only) and leads the source line with a drawn Slack mark (item 19)", () => {
+  it("renders run_meta under the request as agent · model · effort · linked repo · branch tag · GitHub-marked #PR (allow-listed repo, setAttribute only; no ref/sha links — nobody clicks those) and leads the source line with a drawn Slack mark (item 19/21)", () => {
     expect(html).toContain('} else if (change.kind === "meta") {');
     expect(html).toContain('var base = "https://github.com/" + m.repo;');
     expect(html).toContain('if (!m.repo || !/^[\\w.-]+\\/[\\w.-]+$/.test(m.repo)) { runMeta.hidden = false; return; }');
-    expect(html).toContain('link(m.ref, base + "/tree/" + encodeURIComponent(m.ref))');
+    expect(html).toContain('if (m.effort) runMeta.appendChild(el("span", "effort", m.effort + " effort"));');
+    expect(html).toContain('if (m.ref) runMeta.appendChild(el("span", "reftag", m.ref));'); // a tag, not a link
+    expect(html).toContain("pr.insertBefore(githubMark(), pr.firstChild);");
+    expect(html).not.toContain('"/tree/"');
     expect(html).toContain('link("#" + m.pr, base + "/pull/" + m.pr)');
-    expect(html).toContain('base + "/pull/" + m.pr + "/commits/" + m.headSha : base + "/commit/" + m.headSha');
+    expect(html).not.toContain("m.headSha"); // the sha is gone from the meta line
     expect(html).toContain('<div class="runmeta" id="runmeta" hidden></div>');
     expect(html).toContain('document.createElementNS(ns, "svg")'); // the Slack mark is drawn, not fetched (CSP)
     expect(html).toContain('a.setAttribute("title", "open the thread");'); // the channel name is the link
@@ -292,6 +297,30 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
 // the Slack thread when there is one, revealed on row hover), the repo as a
 // small linked tag without the org path, and one column grid across live and
 // finished rows (the actions cell is always there).
+describe("runs index — tab title and favicon carry the live count (item 21)", () => {
+  const live = (id: string): IndexRow => ({ id, label: "coding · a/b", finished: false, startedAt: 1, eventCount: 1 });
+  const done = (id: string): IndexRow => ({ id, label: "coding · a/b", finished: true, finishedAt: 2, status: "completed", startedAt: 1, eventCount: 1 });
+  it("server-renders '(n) ' in the title and the green dot favicon with live rows; bare title and the gray dot without; the client re-derives both on every change", () => {
+    const busy = renderRunsIndex([live("a"), live("b"), done("c")]);
+    expect(busy).toContain("<title>(2) Live runs</title>");
+    expect(busy).toContain(`<link rel="icon" id="favicon" href="${FAVICON_LIVE}" />`);
+    const idle = renderRunsIndex([done("c")], { all: true, retention: null });
+    expect(idle).toContain("<title>All runs</title>");
+    expect(idle).toContain(`<link rel="icon" id="favicon" href="${FAVICON_IDLE}" />`);
+    // the client keeps both current from the same count the toolbar shows
+    expect(busy).toContain('document.title = (live > 0 ? "(" + live + ") " : "") + BASE_TITLE;');
+    expect(busy).toContain('if (favicon) favicon.setAttribute("href", live > 0 ? FAVICON_BY_STATE.live : FAVICON_BY_STATE.idle);');
+    // a re-connect means the backend may have restarted → reload for a fresh
+    // snapshot; rows the new backend never knew would otherwise pin the count
+    expect(busy).toContain("if (everOpened) { window.location.reload(); return; }");
+    // the emitted title-strip regex keeps its backslashes (a template-literal
+    // escape once ate them and the tab read "(2) (2) All runs")
+    expect(busy).toContain("var BASE_TITLE = document.title.replace(/^\\((\\d+)\\) /");
+    // the Scheduled tab and the 404 page carry the idle dot (no live list there)
+    expect(renderScheduledPage("<section></section>")).toContain(`href="${FAVICON_IDLE}"`);
+  });
+});
+
 describe("runs index — outcome, source, repo tag, alignment (item 21)", () => {
   const base: IndexRow = {
     id: "run-1",
@@ -348,19 +377,19 @@ describe("runs index — outcome, source, repo tag, alignment (item 21)", () => 
     // linked: the familiar ↗ control, one-line tip with the resolved NAME (never a raw member id), opens a new tab
     const slack = indexRowHtml(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1", userName: "justin" }));
     expect(slack).toContain(
-      '<a class="source slack linked" data-tip="via Slack · justin" aria-label="open the Slack thread (new tab)" href="https://acme.slack.com/archives/C1/p1" target="_blank" rel="noopener noreferrer">↗</a>',
+      '<a class="source slack linked" data-tip="via Slack · justin" data-tip-icon="slack" aria-label="open the Slack thread (new tab)" href="https://acme.slack.com/archives/C1/p1" target="_blank" rel="noopener noreferrer">↗</a>',
     );
     // no resolved name → the id suffix still identifies the sender
     expect(indexRowHtml(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1" }))).toContain('data-tip="via Slack · U1"');
     // no thread link → a plain mark with the surface glyph
-    expect(indexRowHtml(row({ label: 'general · #dev · justin · "hi"' }))).toContain('<span class="source slack" data-tip="via Slack · U1" aria-label="source: Slack">⁙</span>');
-    expect(indexRowHtml(row({ channelId: "cli:local", userId: "cli:justin" }))).toContain('<span class="source cli" data-tip="via CLI · justin" aria-label="source: CLI">&gt;_</span>');
-    expect(indexRowHtml(row({ channelId: "http:hooks", userId: "http:svc" }))).toContain('<span class="source http" data-tip="via HTTP ingress · svc" aria-label="source: HTTP ingress">⌁</span>');
-    expect(indexRowHtml(row({ channelId: "mcp:claude", userId: "mcp:justin" }))).toContain('<span class="source mcp" data-tip="via MCP · justin" aria-label="source: MCP">◈</span>');
-    expect(indexRowHtml(row({ channelId: "weird" }))).toContain('<span class="source unknown" data-tip="via unknown · U1" aria-label="source: unknown">○</span>');
+    expect(indexRowHtml(row({ label: 'general · #dev · justin · "hi"' }))).toContain('<span class="source slack" data-tip="via Slack · U1" data-tip-icon="slack" aria-label="source: Slack">⁙</span>');
+    expect(indexRowHtml(row({ channelId: "cli:local", userId: "cli:justin" }))).toContain('<span class="source cli" data-tip="via CLI · justin" data-tip-icon="cli" aria-label="source: CLI">&gt;_</span>');
+    expect(indexRowHtml(row({ channelId: "http:hooks", userId: "http:svc" }))).toContain('<span class="source http" data-tip="via HTTP ingress · svc" data-tip-icon="http" aria-label="source: HTTP ingress">⌁</span>');
+    expect(indexRowHtml(row({ channelId: "mcp:claude", userId: "mcp:justin" }))).toContain('<span class="source mcp" data-tip="via MCP · justin" data-tip-icon="mcp" aria-label="source: MCP">◈</span>');
+    expect(indexRowHtml(row({ channelId: "weird" }))).toContain('<span class="source unknown" data-tip="via unknown · U1" data-tip-icon="unknown" aria-label="source: unknown">○</span>');
     // a sourceUrl is data: only http(s) becomes a link — a foreign or hand-built record cannot plant a javascript: click target
     const hostile = indexRowHtml(row({ sourceUrl: "javascript:alert(1)" }));
-    expect(hostile).toContain('<span class="source slack" data-tip="via Slack · U1" aria-label="source: Slack">⁙</span>');
+    expect(hostile).toContain('<span class="source slack" data-tip="via Slack · U1" data-tip-icon="slack" aria-label="source: Slack">⁙</span>');
     expect(hostile).not.toContain("javascript:");
     // revealed on row hover / focus (GitHub-style quick action), keyboard reachable; the linked mark reads as clickable
     const page = renderRunsIndex([row()]);

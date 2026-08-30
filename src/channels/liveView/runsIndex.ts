@@ -268,6 +268,7 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
     mark.className = "source " + src.kind + (sourceUrl ? " linked" : "");
     mark.textContent = sourceUrl ? "↗" : SURFACE_GLYPH[src.kind] || "○";
     mark.setAttribute("data-tip", sourceTip(run));
+    mark.setAttribute("data-tip-icon", src.kind); // the overlay leads with the surface's icon (allow-listed in the tooltip component)
     if (sourceUrl) {
       mark.setAttribute("aria-label", "open the " + (SURFACE_NAME[src.kind] || src.kind) + " thread (new tab)");
       mark.setAttribute("href", sourceUrl);
@@ -404,6 +405,12 @@ export function indexRowHtml(row: IndexRow, now?: number, retentionMs?: number):
 /** The cut in the `?all=1` list under which the rows leaving within a day sit (item 20). */
 export const EXPIRY_DIVIDER_HTML = `<li class="divider" id="leaving" role="separator"><span class="hourglass" aria-hidden="true">⏳</span><span>Leaving within a day</span><span class="muted">— each row says when it is removed</span></li>`;
 
+/** The tab's dot: green while anything runs, gray when idle (item 21). Inline
+ *  `data:` SVGs — the page loads no external asset; CSP allows `img-src data:`
+ *  for exactly this. */
+export const FAVICON_LIVE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%232ea043'/%3E%3C/svg%3E";
+export const FAVICON_IDLE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%236e7681'/%3E%3C/svg%3E";
+
 export interface RunsIndexOptions {
   /** `?all=1`: finished and persisted rows included, the feed keeps finished rows. */
   all: boolean;
@@ -434,7 +441,7 @@ function runsTabs(current: RunsTab): string {
  * then the tab body and its script. One shell so the two tabs are provably the
  * same page. CSP-safe: inline-only, no external assets.
  */
-function runsShell(current: RunsTab, title: string, body: string, script: string, live: boolean = current === "runs"): string {
+function runsShell(current: RunsTab, title: string, body: string, script: string, live: boolean = current === "runs", liveRuns: number = 0): string {
   // The connection indicator only where a feed is opened (the index); the
   // Scheduled tab and the 404 page have no stream to report on.
   const conn = live ? `<span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>` : `<span class="conn"></span>`;
@@ -444,7 +451,8 @@ function runsShell(current: RunsTab, title: string, body: string, script: string
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex" />
-<title>${escapeHtml(title)}</title>
+<title>${liveRuns > 0 ? `(${liveRuns}) ` : ""}${escapeHtml(title)}</title>
+<link rel="icon" id="favicon" href="${liveRuns > 0 ? FAVICON_LIVE : FAVICON_IDLE}" />
 <style>
   :root { color-scheme: dark;
     --bg: #0b0d12; --row-hover: #12151c; --line: #1b1f28;
@@ -743,12 +751,19 @@ ${TOOLTIP_SCRIPT}
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); })
       .catch(function () { btn.disabled = false; });
   });
-  // The empty sentinel shows when nothing is listed; the toolbar counts the live rows.
+  // The empty sentinel shows when nothing is listed; the toolbar counts the
+  // live rows — and so do the TAB's title ("(n) Live runs") and favicon (green
+  // while anything runs, gray when idle), so the count reads from the tab bar.
+  var BASE_TITLE = document.title.replace(/^\\((\\d+)\\) /, ""); // the emitted client regex strips a "(n) " prefix
+  var favicon = document.getElementById("favicon");
+  var FAVICON_BY_STATE = { live: ${JSON.stringify(FAVICON_LIVE)}, idle: ${JSON.stringify(FAVICON_IDLE)} };
   function refreshEmpty() {
     var has = false, live = 0;
     for (var k in rows) { has = true; if (rows[k].classList.contains("live")) live++; }
     empty.hidden = has;
     liveCount.textContent = live + " running";
+    document.title = (live > 0 ? "(" + live + ") " : "") + BASE_TITLE;
+    if (favicon) favicon.setAttribute("href", live > 0 ? FAVICON_BY_STATE.live : FAVICON_BY_STATE.idle);
   }
   // The stopwatch: once a second, every LIVE row's elapsed cell is recomputed
   // from its start stamp (server-rendered rows included — the stamp is on the
@@ -819,7 +834,15 @@ ${TOOLTIP_SCRIPT}
   window.setInterval(placeDivider, 60000); // a row can age into the last day while the page is open
 
   var es = new EventSource(${JSON.stringify(feedUrl)});
-  es.onopen = function () { setConn("green", "connected"); };
+  // A RE-connect means the backend may have restarted: rows this page holds may
+  // no longer exist there, and nothing will ever send their \`removed\` events.
+  // Reload for a fresh server snapshot instead of drifting (stale live counts).
+  var everOpened = false;
+  es.onopen = function () {
+    if (everOpened) { window.location.reload(); return; }
+    everOpened = true;
+    setConn("green", "connected");
+  };
   es.onmessage = function (m) {
     var ev;
     try { ev = JSON.parse(m.data); } catch (_) { return; }
@@ -834,7 +857,7 @@ ${TOOLTIP_SCRIPT}
   };
 })();
 </script>`;
-  return runsShell("runs", title, body, script);
+  return runsShell("runs", title, body, script, undefined, liveCount);
 }
 
 /** `GET /runs/scheduled`: the Scheduled tab — the jobs that run without a human

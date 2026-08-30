@@ -140,7 +140,7 @@ export type RunEvent =
    *  right after `input`, once per run, so the run page can head its Request
    *  block with linked `owner/repo · ref · #PR · sha`. Additive: every
    *  consumer that only knows the other types keeps working. */
-  | { type: "run_meta"; agent: string; model: string; repo?: string; ref?: string; pr?: number; headSha?: string; seq?: number; at?: number }
+  | { type: "run_meta"; agent: string; model: string; effort?: string; repo?: string; ref?: string; pr?: number; headSha?: string; seq?: number; at?: number }
   /** A skill was loaded into the model's context (features/skills.md). Emitted
    *  by the `use_skill` tool on a successful load — alongside, not instead of,
    *  its `tool_call`/`tool_result` pair — so skill use is a first-class fact in
