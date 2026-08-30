@@ -26,6 +26,7 @@ import { analyzeRunFriction } from "./runFriction.js";
 import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { parseFrictionCommand, runFrictionCommand } from "./frictionCommands.js";
+import { parseMemoryCommand, runMemoryCommand } from "./memoryCommands.js";
 import { defaultRunRegistry, type RunRegistry } from "./runRegistry.js";
 import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
 import { produceStructured, providerProducer } from "./structuredOutput.js";
@@ -173,6 +174,21 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       const { text } = await runInlineCommandRun(deps, msg, "friction", io, () =>
         runFrictionCommand(deps.config, msg, { ledger: deps.frictionLedger, tracker: deps.issueTracker }, frictionCmd),
       );
+      await io.reply(text);
+      return;
+    }
+
+    // Memory human controls (#278): `memory list` is a read-only inline reply
+    // (like `repo list`); `memory forget <id>` mutates durable memory, so it is
+    // a run (#244) with a registry record and a receipt. Gated inside: own
+    // scope free, org scope admin-only (fail-closed), other users' scopes
+    // unreachable. Never a model turn.
+    const memoryCmd = parseMemoryCommand(msg.text);
+    if (memoryCmd) {
+      const mutates = "verb" in memoryCmd && memoryCmd.verb === "forget";
+      const { text } = mutates
+        ? await runInlineCommandRun(deps, msg, "memory", io, () => runMemoryCommand(deps.config, msg, deps.memory, memoryCmd))
+        : await runMemoryCommand(deps.config, msg, deps.memory, memoryCmd);
       await io.reply(text);
       return;
     }
@@ -1277,5 +1293,9 @@ function helpText(): string {
     "*Self-improvement* (friction across my own recent runs; `propose` is admin-gated):",
     "`friction report` — recurring friction patterns across recent runs",
     "`friction propose [--dry-run] [--top <n>] [--min-runs <n>]` — file the top patterns as labeled, deduped GitHub issues for a human to triage",
+    "",
+    "*Memory* (what I've learned across threads; your own records are visible only to you):",
+    "`memory list [me|org]` — your records and the shared org records, with ids",
+    "`memory forget <id>` — drop one record (yours freely; shared org records are admin-gated)",
   ].join("\n");
 }

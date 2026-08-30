@@ -32,7 +32,10 @@ export interface MemoryRecord {
   confidence?: number;
   /** id this record replaces (conflict resolution / supersession). */
   supersedes?: string;
-  status: "active" | "superseded";
+  /** `superseded`: replaced by a newer record; `forgotten`: removed by a human
+   *  via `memory forget` (#278). Both are soft deletes — the row stays for
+   *  provenance but is invisible to retrieval, list, and dedup. */
+  status: "active" | "superseded" | "forgotten";
 }
 
 /** What the reflection extractor emits. The store assigns id/timestamps/useCount/
@@ -67,6 +70,14 @@ export interface MemoryStore {
    *  `useCount`) and supersede (`supersedes` id → old record soft-deleted) live
    *  inside the store. Driven by the post-run reflection pass (reflection.ts). */
   write(scopeKey: string, records: MemoryCandidate[]): Promise<void>;
+  /** Human view (#278): a scope's ACTIVE records, newest first, at most
+   *  `limit`. Unlike `retrieve` this never bumps usage. */
+  list(scopeKey: string, limit: number): Promise<MemoryRecord[]>;
+  /** Human control (#278): soft-delete one ACTIVE record of this scope
+   *  (`status: "forgotten"`, row kept for provenance). Resolves true when a
+   *  record was forgotten, false when the id names nothing active in this
+   *  scope — a foreign-scope id can never be forgotten through another scope. */
+  forget(scopeKey: string, id: string): Promise<boolean>;
 }
 
 /** The resources memory is scoped to. `org` is the shared resource every
