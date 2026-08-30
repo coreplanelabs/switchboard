@@ -6,6 +6,7 @@ import type { IndexEvent, RunRegistry, RunSummary, Unsubscribe } from "../core/r
 import type { StopMode } from "../core/runEvents.js";
 import { renderMarkdownInto } from "./markdownLite.js";
 import { createRunTimeline } from "./runTimeline.js";
+import { formatLocalIso } from "./localIso.js";
 
 // Live-view channel: the external, browser-facing surface for a live agent run
 // (Area 2 / #43). It streams the SAME redacted RunEvents the in-channel status
@@ -109,6 +110,9 @@ export const MARKDOWN_RENDERER_SCRIPT = `var __name = function (fn) { return fn;
  */
 export const RUN_TIMELINE_SCRIPT = String(createRunTimeline);
 
+/** The timestamp formatter as browser source (localIso.ts), inlined the same way. */
+export const LOCAL_ISO_SCRIPT = String(formatLocalIso);
+
 /**
  * The self-contained HTML page for one run: a readable timeline of the whole
  * run, grouped the way a person reads it (features/live-view.md item 13).
@@ -122,7 +126,7 @@ export const RUN_TIMELINE_SCRIPT = String(createRunTimeline);
  * default, everything else collapsed; `update_status` as one muted line;
  * `run_note` as a notice; a live **tail** row naming what is running or that the
  * agent is thinking, removed at `end`; and the **Answer** block under the log.
- * Every row leads with a gray UTC `[HH:MM:SS]` from the event's `at`.
+ * Every row leads with a gray local-zone ISO timestamp (e.g. `[2026-08-29T17:47:44-07:00]`) from the event's `at`.
  *
  * All inline (CSP-safe): DOM is built with createElement/textContent only, the
  * markdown surfaces go through `renderMarkdownInto` (markdownLite.ts), and
@@ -164,7 +168,7 @@ export function renderRunPage(id: string, token: string): string {
   .dot.amber { background: var(--amber); }
   .dot.red { background: #f85149; }
   .dot.grey { background: #6e7681; }
-  /* Timestamps: a small gray [HH:MM:SS] leading every row and both blocks. */
+  /* Timestamps: a small gray local-zone ISO stamp leading every row and both blocks. */
   .ts { color: var(--dim); font-size: .75rem; font-family: var(--mono); flex: 0 0 auto; user-select: none; }
   /* Request / Answer: headed blocks, proportional type, above and below the log. */
   section.block { border: 1px solid var(--line); border-radius: 8px; padding: .6rem .75rem; background: var(--panel); }
@@ -280,6 +284,7 @@ export function renderRunPage(id: string, token: string): string {
 <script>
 ${MARKDOWN_RENDERER_SCRIPT}
 ${RUN_TIMELINE_SCRIPT}
+${LOCAL_ISO_SCRIPT}
 (function () {
   var url = ${JSON.stringify(eventsPath)};
   var stopUrl = ${JSON.stringify(stopPath)};
@@ -323,8 +328,9 @@ ${RUN_TIMELINE_SCRIPT}
     stateDot.className = "dot " + color;
     state.textContent = text;
   }
-  // UTC wall-clock label for an event's \`at\`; "" when the event carries none.
-  function fmtTime(at) { return typeof at === "number" ? "[" + new Date(at).toISOString().slice(11, 19) + "]" : ""; }
+  // ISO timestamp for an event's \`at\` in the viewer's own zone (with its
+  // offset, so a pasted line stays unambiguous); "" when the event carries none.
+  function fmtTime(at) { return typeof at === "number" ? "[" + formatLocalIso(at) + "]" : ""; }
   // Every node is createElement + textContent — event text is rendered as data.
   function el(tag, cls, text) {
     var n = document.createElement(tag);
