@@ -26,15 +26,20 @@ export interface ManifestSource {
   commit?: string;
 }
 
-export interface ManifestSkill {
-  name: string;
-  /** Key into `sources`. */
-  source: string;
-  /** Path of the SKILL.md inside the upstream repo. */
-  path: string;
-  /** Our scoping — which agents may list/load it (frontmatter `agents`). */
-  agents: string[];
-}
+export type ManifestSkill =
+  | {
+      name: string;
+      local?: undefined;
+      /** Key into `sources`. */
+      source: string;
+      /** Path of the SKILL.md inside the upstream repo. */
+      path: string;
+      /** Our scoping — which agents may list/load it (frontmatter `agents`). */
+      agents: string[];
+    }
+  /** A first-party skill (features/skills.md item 11): authored in this repo,
+   *  never synced — git is its integrity. No source/path/upstream. */
+  | { name: string; local: true; source?: undefined; path?: undefined; agents: string[] };
 
 export interface SkillsManifest {
   sources: Record<string, ManifestSource>;
@@ -93,14 +98,24 @@ export function parseManifest(raw: string): SkillsManifest {
     if (!NAME_RE.test(name)) throw new Error(`skill "${name}": name must be a lowercase slug ([a-z0-9-]) — it is the vendored directory name`);
     if (seen.has(name)) throw new Error(`duplicate skill "${name}" in manifest`);
     seen.add(name);
-    const source = asString(rec.source, `skill "${name}" source`);
-    if (!sources[source]) throw new Error(`skill "${name}": source "${source}" is not declared under sources`);
-    const path = asString(rec.path, `skill "${name}" path`);
     const agents = rec.agents;
     if (!Array.isArray(agents) || agents.length === 0 || !agents.every((a) => typeof a === "string" && a.trim() !== "")) {
       throw new Error(`skill "${name}": agents must be a non-empty list of agent names`);
     }
-    skills.push({ name, source, path, agents: (agents as string[]).map((a) => a.trim()) });
+    const cleanAgents = (agents as string[]).map((a) => a.trim());
+    if (rec.local === true) {
+      // First-party: `local` and vendoring coordinates are mutually exclusive —
+      // a local entry naming a source is confused about what it is.
+      if (rec.source !== undefined || rec.path !== undefined) {
+        throw new Error(`skill "${name}": a local entry must not name a source or path`);
+      }
+      skills.push({ name, local: true, agents: cleanAgents });
+      continue;
+    }
+    const source = asString(rec.source, `skill "${name}" source`);
+    if (!sources[source]) throw new Error(`skill "${name}": source "${source}" is not declared under sources`);
+    const path = asString(rec.path, `skill "${name}" path`);
+    skills.push({ name, source, path, agents: cleanAgents });
   }
   return { sources, skills };
 }
@@ -133,6 +148,7 @@ export function upstreamRawUrl(src: ManifestSource, path: string): string {
  *  mismatch means the skill moved or was renamed upstream, which is a manifest
  *  edit, not something to paper over. */
 export function renderVendoredSkill(upstreamRaw: string, entry: ManifestSkill, src: ManifestSource): string {
+  if (entry.local) throw new Error(`skill "${entry.name}" is local — authored here, never rendered from an upstream`);
   const commit = pinned(src);
   const up = parseUpstreamSkill(upstreamRaw);
   if (up.name !== entry.name) throw new Error(`upstream skill is named "${up.name}", manifest entry is "${entry.name}" (${entry.path})`);
@@ -194,6 +210,15 @@ export function checkVendoredSkills(dir: string): string[] {
     const m = byName.get(skill.name);
     if (!m) {
       problems.push(`${file}: skill "${skill.name}" is not in manifest.yaml (hand-copied? add a manifest entry and run skills:sync)`);
+      continue;
+    }
+    if (m.local) {
+      // First-party: presence + agents are the contract; an upstream block on a
+      // local skill claims a provenance it does not have.
+      if (skill.upstream) problems.push(`${file}: a local skill must not carry an \`upstream\` block`);
+      if (JSON.stringify(skill.agents) !== JSON.stringify(m.agents)) {
+        problems.push(`${file}: agents [${skill.agents.join(", ")}] but manifest says [${m.agents.join(", ")}]`);
+      }
       continue;
     }
     const want = manifest.sources[m.source].commit;

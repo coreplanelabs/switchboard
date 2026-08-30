@@ -170,11 +170,19 @@ describe("coding prompts: templated PR description by default", () => {
     }
   });
 
-  it("Tour steps are anchored to head-sha line permalinks in reading order, with a catch-all step", () => {
+  // The Tour's craft moved into the first-party `pr-tour` skill (pinned by
+  // src/skills/prTourSkill.test.ts); the template keeps the section and makes
+  // loading the skill mandatory, so every coding run's Tour is a visible
+  // skill_use event and the rules live in one place.
+  it("the Tour section requires loading the pr-tour skill before writing the body", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
-      expect(sys).toMatch(/blob\/<head sha>\/<path>#L<from>-L<to>/); // the permalink shape GitHub embeds as code
-      expect(sys).toMatch(/reading order/i);
-      expect(sys).toMatch(/Remaining changes/);
+      expect(sys).toMatch(/\*\*Tour\*\*/);
+      expect(sys).toMatch(/use_skill/);
+      expect(sys).toMatch(/`pr-tour` skill/);
+      expect(sys).toMatch(/BEFORE writing the body/i);
+      // the craft is in the skill, not duplicated in the template
+      expect(sys).not.toMatch(/blob\/<head sha>\/<path>#L<from>-L<to>/);
+      expect(sys).not.toMatch(/### N\. <what this change is>/);
     }
   });
 
@@ -188,23 +196,6 @@ describe("coding prompts: templated PR description by default", () => {
     }
   });
 
-  it("each Tour step is heading → description → optional Look-for → permalink last", () => {
-    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
-      expect(sys).toMatch(/### N\. <what this change is>/);
-      expect(sys).toMatch(/\*\*Look for:\*\*/);
-      expect(sys).toMatch(/permalink to the hunk LAST/);
-      expect(sys).toMatch(/headings for steps, bold labels/);
-    }
-  });
-
-  // A permalink pins a sha, so after a repush every anchor points at a commit
-  // that is no longer the PR head — a Tour that is not regenerated is lying.
-  it("both prompts require regenerating the Tour after any push that moves the head", () => {
-    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
-      expect(sys).toMatch(/git rev-parse HEAD/); // where the sha comes from
-      expect(sys).toMatch(/every push that changes the head/i);
-    }
-  });
 
   it("both prompts state the rules that keep the description honest", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {

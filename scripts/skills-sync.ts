@@ -67,6 +67,10 @@ async function sync(): Promise<number> {
   }
 
   for (const entry of manifest.skills) {
+    if (entry.local) {
+      console.log(`${entry.name}: local (authored here, not synced)`);
+      continue;
+    }
     const src = manifest.sources[entry.source];
     const url = upstreamRawUrl(src, entry.path);
     const res = await fetch(url, { headers: { "user-agent": "switchboard-skills-sync" } });

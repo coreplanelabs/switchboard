@@ -40,6 +40,24 @@ Body line one.
 Body line two.
 `;
 
+// A first-party skill: authored in this repo, listed in the manifest as
+// `local: true` — no source, no upstream block, no sync; git is its integrity.
+const LOCAL_MANIFEST = `${MANIFEST}  - name: pr-tour
+    local: true
+    agents: [coding]
+`;
+
+const LOCAL_SKILL = `---
+name: pr-tour
+description: How to write the PR body Tour.
+agents: [coding]
+---
+
+# PR Tour
+
+Step shape and rules.
+`;
+
 describe("parseManifest", () => {
   it("parses sources and skills, resolving each skill's source", () => {
     const m = parseManifest(MANIFEST);
@@ -72,6 +90,15 @@ describe("parseManifest", () => {
     expect(() => parseManifest("skills: []")).toThrow(/sources/);
   });
 
+  // First-party skills (features/skills.md item 11): `local: true` replaces
+  // source/path — the file is authored here, never synced.
+  it("parses a local entry (no source/path); rejects a local entry that also names a source or path, and a non-local entry missing them", () => {
+    const m = parseManifest(LOCAL_MANIFEST);
+    expect(m.skills.find((s) => s.name === "pr-tour")).toEqual({ name: "pr-tour", local: true, agents: ["coding"] });
+    expect(() => parseManifest(LOCAL_MANIFEST.replace("local: true", "local: true\n    source: addyosmani/agent-skills"))).toThrow(/pr-tour.*local.*source/);
+    expect(() => parseManifest(MANIFEST.replace("    source: addyosmani/agent-skills\n    path: skills/test-driven-development/SKILL.md\n", ""))).toThrow(/test-driven-development.*source/);
+  });
+
   // The name is the vendored directory name: a path-shaped name would make the
   // sync write outside skills/ (review nit on #331).
   it("rejects a skill name that is not a plain slug (a path, `..`, uppercase)", () => {
@@ -92,6 +119,7 @@ describe("upstream URLs", () => {
 describe("renderVendoredSkill", () => {
   const m = parseManifest(MANIFEST);
   const entry = m.skills[0];
+  if (entry.local) throw new Error("fixture: MANIFEST's first skill must be a vendored entry");
   const src = m.sources[entry.source];
 
   it("keeps the upstream body byte-for-byte and overlays our frontmatter (agents, pinned source, upstream)", () => {
@@ -175,6 +203,22 @@ describe("checkVendoredSkills (the offline drift check)", () => {
   it("a body that is byte-identical after a round trip (trailing newline only) is NOT drift", () => {
     const dir = fixture(MANIFEST, { "code-review-and-quality": crq.trimEnd() + "\n\n\n", "test-driven-development": tdd });
     expect(checkVendoredSkills(dir)).toEqual([]);
+  });
+
+  it("a local skill passes with no upstream block; is reported when missing, agents-drifted, or carrying an upstream block it must not have", () => {
+    const clean = fixture(LOCAL_MANIFEST, { "code-review-and-quality": crq, "test-driven-development": tdd, "pr-tour": LOCAL_SKILL });
+    expect(checkVendoredSkills(clean)).toEqual([]);
+    const missing = fixture(LOCAL_MANIFEST, { "code-review-and-quality": crq, "test-driven-development": tdd });
+    expect(checkVendoredSkills(missing)).toEqual([expect.stringMatching(/pr-tour.*missing/)]);
+    const rescoped = fixture(LOCAL_MANIFEST, { "code-review-and-quality": crq, "test-driven-development": tdd, "pr-tour": LOCAL_SKILL.replace("agents: [coding]", "agents: [review]") });
+    expect(checkVendoredSkills(rescoped)).toEqual([expect.stringMatching(/pr-tour.*agents \[review\].*manifest says \[coding\]/)]);
+    const vendoredish = LOCAL_SKILL.replace(
+      "agents: [coding]\n",
+      // hex-looking values with letters: an all-digit scalar parses as a YAML number, not a string
+      "agents: [coding]\nupstream:\n  repo: https://github.com/x/y\n  commit: " + "a".repeat(40) + "\n  path: p\n  bodySha256: " + "a".repeat(64) + "\n",
+    );
+    const confused = fixture(LOCAL_MANIFEST, { "code-review-and-quality": crq, "test-driven-development": tdd, "pr-tour": vendoredish });
+    expect(checkVendoredSkills(confused)).toEqual([expect.stringMatching(/pr-tour.*local skill.*upstream/)]);
   });
 
   it("reports a vendored file whose directory name differs from its skill name (and the manifest entry it leaves unvendored)", () => {
