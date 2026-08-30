@@ -27,7 +27,7 @@
 //
 // The module is dep-injected (OpReader + EnvSink + log) so the whole flow is
 // unit-testable with mocks and no real `op` ever runs. The thin CLI wrapper
-// (bootstrapCli.ts) wires the real implementations.
+// (src/agentEnv/host.ts, behind the registry's `env bootstrap`) wires the real implementations.
 
 import { shellQuote } from "../execution/shellQuote.js";
 
@@ -387,88 +387,6 @@ export async function buildAgentEnv(input: {
   return resolveEnvMap(entries, { env, opReader: input.opReader });
 }
 
-// ---------------------------------------------------------------------------
-// CLI argument parsing
-// ---------------------------------------------------------------------------
-
-export interface ParsedArgs {
-  env: string;
-  service: string;
-  apply: boolean;
-  /** explicit --out; undefined means the CLI computes the default path. */
-  out?: string;
-  manifest: string;
-}
-
+/** Where the manifest lives unless `env bootstrap --manifest` names another file. */
 export const DEFAULT_MANIFEST_PATH = "deploy/agent-env.jsonc";
 
-export const USAGE = `Usage: agent-env-bootstrap --env uat --service <name> [--apply] [--out <file>] [--manifest <file>]
-
-Populate the agent's execution environment with a DOWNSTREAM service's UAT env
-vars, resolved from 1Password via a READ-ONLY, UAT-vault-scoped service account.
-
-  --env uat            environment to materialize (UAT only; anything else is refused)
-  --service <name>     which downstream service's toolchain env to fill
-  --apply              resolve refs and WRITE the chmod-600 env file (default: dry-run)
-  --out <file>         env-file path (default: .agent-env/<service>.<env>.env)
-  --manifest <file>    manifest path (default: ${DEFAULT_MANIFEST_PATH})
-
-Dry-run (the default) prints env-var NAMES + their op:// refs; it reads nothing
-and writes nothing. Apply requires OP_SERVICE_ACCOUNT_TOKEN in the environment.`;
-
-/** Parse argv (without node/script prefix) into ParsedArgs. Pure + total:
- *  returns { error } instead of throwing so the CLI controls exit + usage. */
-export function parseArgs(argv: string[]): ParsedArgs | { error: string } {
-  let env: string | undefined;
-  let service: string | undefined;
-  let apply = false;
-  let out: string | undefined;
-  let manifest = DEFAULT_MANIFEST_PATH;
-
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    const eq = arg.indexOf("=");
-    const flag = eq >= 0 ? arg.slice(0, eq) : arg;
-    const inlineVal = eq >= 0 ? arg.slice(eq + 1) : undefined;
-    const takeVal = (): string | undefined => (inlineVal !== undefined ? inlineVal : argv[++i]);
-
-    switch (flag) {
-      case "--env": {
-        const v = takeVal();
-        if (!v) return { error: "--env requires a value (e.g. --env uat)" };
-        env = v;
-        break;
-      }
-      case "--service": {
-        const v = takeVal();
-        if (!v) return { error: "--service requires a value (the downstream service name)" };
-        service = v;
-        break;
-      }
-      case "--out": {
-        const v = takeVal();
-        if (!v) return { error: "--out requires a path" };
-        out = v;
-        break;
-      }
-      case "--manifest": {
-        const v = takeVal();
-        if (!v) return { error: "--manifest requires a path" };
-        manifest = v;
-        break;
-      }
-      case "--apply":
-        apply = true;
-        break;
-      case "--dry-run":
-        apply = false;
-        break;
-      default:
-        return { error: `unknown argument "${arg}"` };
-    }
-  }
-
-  if (!env) return { error: "--env is required (e.g. --env uat)" };
-  if (!service) return { error: "--service is required (the downstream service name)" };
-  return { env, service, apply, out, manifest };
-}

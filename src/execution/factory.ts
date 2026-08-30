@@ -5,7 +5,7 @@ import { LocalExecutor, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ResidentExecutor, ResidentNeedsRefError, type ResidentBinding, type ResidentStatusProbe } from "./resident.js";
-import { repoResourceId } from "../core/repoCommands.js";
+import { repoResourceId } from "../core/residentAdmin.js";
 import { resolveGithubToken } from "./githubApp.js";
 import { isServiceable } from "./residentState.js";
 

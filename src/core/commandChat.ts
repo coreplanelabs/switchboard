@@ -1,32 +1,41 @@
 import type { ConfigStore } from "../config.js";
-import { renderText, toSurfaceNames, type Caller, type CommandSurfaces, type CommandInvoker, type InvokeErrorCode } from "./commandRegistry.js";
+import { renderText, type Caller, type CommandInput, type CommandInvoker, type CommandSurfaces, type InvokeErrorCode } from "./commandRegistry.js";
+import { catalogueText, chatForm, commandsInGroup, helpText, parseInvocation, tokenize, type CommandShape } from "./commandSurface.js";
 import type { IncomingMessage } from "./types.js";
 
-// The chat adapter for the command registry (#157 U13 — R7, KTD18, KTD19).
-// Chat is the one surface where a command shares its namespace with prose, so
-// recognition is deliberately narrow: a message IS a command only when the
-// whole message is `<group> <verb> [key=value …]` for an id that is registered
-// AND exposed to chat AND whose `<group> <verb>` form no legacy parser still
-// owns. Everything else — prose, an unknown verb, a mid-sentence mention, a
-// reserved form — is null, and the dispatcher carries on to the next stage.
-// Natural language is never recognized here (KD3: never guess); that stays
-// with `recognizeOperation`.
+// The chat adapter for the command registry (#157 U13 — R7, KTD18, KTD19,
+// KTD21, KTD25). Chat is the one surface where a command shares its namespace
+// with prose, so recognition is deliberately narrow: a message IS a command
+// only when it starts with `<group> <verb>` for an id that is registered AND
+// exposed to chat (plus the one word `help`, the chat spelling of `help show`).
+// Everything else — prose, an unknown verb, a mid-sentence mention — is null,
+// and the dispatcher carries on. Since phase 4b there is no legacy chat parser
+// left: this is the ONLY thing that turns chat text into a command. Natural
+// language is never recognized here (KD3: never guess); the dispatcher's
+// `recognizeOperation` translates its few conservative forms INTO a registry
+// invocation (`repo.test` / `repo.build`) instead of executing anything itself.
+//
+// The rest of the message is bound by the SAME grammar the CLI uses
+// (`parseInvocation`): positionals, `--kebab-case` flags, quoted values. A
+// recognized command with a malformed tail is a usage reply, never a model
+// turn — a command that is almost right must be corrected, not guessed at.
+// `<group> help` and `<group> <verb> --help` reply with derived help.
 //
 // Like every adapter it holds no command logic: it builds the `Caller`, hands
-// the raw string arguments to `invoke` (the zod schema coerces them), renders
-// the JSON result through the shared `renderText`, and maps the error code
-// to one line. The reply is PLAIN TEXT — Slack escaping is the channel's job
+// the untyped `{ args, options }` to `invoke` (the schemas coerce), renders the
+// JSON result through the shared `renderText`, and maps the error code to one
+// line. The reply is PLAIN TEXT — Slack escaping is the channel's job
 // (`SlackIO.reply` → `mdToMrkdwn`), never the core's (invariant 1).
 
-export interface ParsedChatCommand {
-  id: string;
-  /** Raw `key=value` arguments, values unquoted but otherwise untouched. */
-  input: Record<string, string>;
-}
+export type ParsedChatCommand =
+  /** A well-formed command: invoke it. */
+  | { kind: "invoke"; id: string; input: CommandInput }
+  /** Help or a usage error for a recognized command form: reply, never invoke. */
+  | { kind: "reply"; text: string };
 
-/** The slice of a registry the parser needs: ids and their surface opt-outs. */
+/** The slice of a registry the parser needs: ids, descriptions, arguments, options, surface opt-outs. */
 export interface ChatCommandCatalog {
-  list(): ReadonlyArray<{ id: string; surfaces?: CommandSurfaces }>;
+  list(): ReadonlyArray<CommandShape & { surfaces?: CommandSurfaces }>;
 }
 
 /** A registry bound to its deps — the same `CommandInvoker` every adapter
@@ -34,60 +43,63 @@ export interface ChatCommandCatalog {
  *  as `CoreDeps.commands` and never learns the deps type. */
 export type ChatCommands = CommandInvoker;
 
-/** `<group> <verb>` chat forms a legacy parser still owns (KTD19): the config
- *  verbs (dispatcher `handleConfigCommand`), the mutating repo verbs
- *  (`handleRepoCommand`, behind `canManageRepos`), and the `repo test/build`
- *  ops (`recognizeOperation`). Reservation is per form, not per group, so
- *  `repo list` (registry `repo.list`) shares its group with `repo onboard`.
- *  Migrating a verb onto the registry removes its form here. */
-export const RESERVED_CHAT_COMMANDS: ReadonlySet<string> = new Set([
-  "config show",
-  "config set",
-  "config clear",
-  "repo onboard",
-  "repo offboard",
-  "repo reconfigure",
-  "repo rebuild",
-  "repo test",
-  "repo build",
-]);
+/** The one-word chat spelling of `help show` (KTD25): what a person types first. */
+export const HELP_COMMAND_ID = "help.show";
 
-// Whole-message anchored: `<group> <verb>` then zero or more `key=value` pairs
-// (value: double-quoted, single-quoted, or one unbroken token), nothing else.
-const CHAT_COMMAND = /^\s*([a-z][a-z0-9]*)\s+([a-z][a-z0-9]*)((?:\s+[A-Za-z][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']+))*)\s*$/;
-const CHAT_ARG = /([A-Za-z][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^\s"']+))/g;
+const WORD = /^[a-z][a-z0-9]*$/;
+
+function chatExposed(cmd: { surfaces?: CommandSurfaces }): boolean {
+  return cmd.surfaces?.chat !== false;
+}
 
 /**
- * `<group> <verb> key=value …` → the command id and its raw arguments, or null
- * when the message is not a chat command: prose, an id that is not registered,
- * one that opted out of chat (`surfaces.chat: false`), or a reserved
- * `<group> <verb>` form.
+ * `<group> <verb> …` → the command id and its bound input, a help/usage reply,
+ * or null when the message is not a chat command: prose, an id that is not
+ * registered, or one that opted out of chat (`surfaces.chat: false`). The bare
+ * word `help` is `help show`; `<group> help` lists the group's chat commands.
  */
-export function parseChatCommand(text: string, catalog: ChatCommandCatalog, reserved: ReadonlySet<string>): ParsedChatCommand | null {
-  const m = CHAT_COMMAND.exec(text);
-  if (!m) return null;
-  const [, group, verb, args] = m;
-  if (reserved.has(`${group} ${verb}`)) return null;
+export function parseChatCommand(text: string, catalog: ChatCommandCatalog): ParsedChatCommand | null {
+  const trimmed = text.trim();
+  const exposed = catalog.list().filter(chatExposed);
+  if (/^help$/i.test(trimmed)) return exposed.some((c) => c.id === HELP_COMMAND_ID) ? { kind: "invoke", id: HELP_COMMAND_ID, input: { args: [], options: {} } } : null;
+  const head = trimmed.split(/\s+/, 2);
+  if (head.length < 2 || !WORD.test(head[0]) || !WORD.test(head[1])) return null;
+  const [group, verb] = head;
+  if (verb === "help") {
+    const inGroup = commandsInGroup(exposed, group);
+    if (inGroup.length === 0) return null;
+    return { kind: "reply", text: `${group} commands:\n${catalogueText(inGroup)}` };
+  }
   const id = `${group}.${verb}`;
-  const cmd = catalog.list().find((c) => c.id === id);
-  if (!cmd || cmd.surfaces?.chat === false) return null;
-  const input: Record<string, string> = {};
-  for (const arg of args.matchAll(CHAT_ARG)) input[arg[1]] = arg[2] ?? arg[3] ?? arg[4] ?? "";
-  return { id, input };
+  const cmd = exposed.find((c) => c.id === id);
+  if (!cmd) return null;
+  const tokens = tokenize(text);
+  if (!tokens.ok) return { kind: "reply", text: `⚠️ \`${chatForm(id)}\`: ${tokens.error}` };
+  const bound = parseInvocation(cmd, tokens.tokens.slice(2));
+  switch (bound.kind) {
+    case "help":
+      return { kind: "reply", text: helpText(cmd) };
+    case "usage":
+      return { kind: "reply", text: `⚠️ \`${chatForm(id)}\`: ${bound.error}` };
+    case "invoke":
+      return { kind: "invoke", id, input: bound.input };
+  }
 }
 
 export interface HandleChatCommandArgs {
   commands: ChatCommands;
   parsed: ParsedChatCommand;
   /** The message's identity: `userId` becomes the caller id; `channelId` pins a
-   *  machine caller (`http:`/`mcp:`) to its channel (see `chatCallerFor`). */
-  msg: Pick<IncomingMessage, "userId" | "channelId">;
+   *  machine caller (`http:`/`mcp:`) to its channel (see `chatCallerFor`);
+   *  channel + thread are the caller's `origin`. */
+  msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">;
   config: Pick<ConfigStore, "chatGateFor" | "adminsHint">;
+  /** Resolves the repo this thread is bound to, lazily — `Caller.origin.repo`
+   *  for the commands that ask (the dispatcher supplies history + the
+   *  production resolver). Absent → no repo scope. */
+  resolveRepo?: () => Promise<string | undefined>;
   /** Clock for live-run durations; defaults to `Date.now()`. */
   now?: number;
-  /** Per-error reply overrides for a legacy chat form that keeps its historical
-   *  wording (frictionCommands.ts). Absent → the shared wording below. */
-  wording?: Partial<Record<InvokeErrorCode, (message: string) => string>>;
 }
 
 /** Channels whose messages come from a machine credential — an ingress token
@@ -101,13 +113,15 @@ export function isMachineChannel(channelId: string): boolean {
 }
 
 /** The `Caller` a chat message resolves to: the message's user as the id, the
- *  config's chat gates, and — for a machine channel — the channel pin. */
-export function chatCallerFor(msg: Pick<IncomingMessage, "userId" | "channelId">, config: Pick<ConfigStore, "chatGateFor">): Caller {
+ *  config's chat gates, the channel + thread it came from (`origin`), and — for
+ *  a machine channel — the channel pin. */
+export function chatCallerFor(msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">, config: Pick<ConfigStore, "chatGateFor">, resolveRepo?: () => Promise<string | undefined>): Caller {
   return {
     kind: "chat",
     id: msg.userId,
     scopes: new Set(),
     chatGate: config.chatGateFor(msg.userId),
+    origin: { channelId: msg.channelId, threadKey: msg.threadKey, ...(resolveRepo ? { repo: resolveRepo } : {}) },
     ...(isMachineChannel(msg.channelId) ? { channel: msg.channelId } : {}),
   };
 }
@@ -118,24 +132,33 @@ export function chatCallerFor(msg: Pick<IncomingMessage, "userId" | "channelId">
 export interface ChatCommandResult {
   text: string;
   ok: boolean;
+  /** The registry's error code when the invocation failed (a help/usage reply has none). */
+  error?: InvokeErrorCode;
 }
 
-/** Invoke a parsed chat command as the message's user. */
-export async function invokeChatCommand({ commands, parsed, msg, config, now, wording = {} }: HandleChatCommandArgs): Promise<ChatCommandResult> {
-  const caller = chatCallerFor(msg, config);
-  const res = await commands.invoke(parsed.id, parsed.input, caller);
-  const name = toSurfaceNames(parsed.id).chat;
-  if (res.ok) return { ok: true, text: renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, now === undefined ? {} : { now }) };
-  const custom = wording[res.error];
-  if (custom) return { ok: false, text: custom(res.message) };
-  switch (res.error) {
+/** One line per error code; the shared wording every chat command uses. A
+ *  refusal the registry decided (the caller failed the command's gate) is the
+ *  fixed "is restricted" line; one the command decided about the request (the
+ *  channel scope, another user's memory, a repo allowlist) carries its reason. */
+export function chatErrorLine(id: string, error: InvokeErrorCode, message: string, config: Pick<ConfigStore, "adminsHint">, decidedBy: "registry" | "handler" = "registry"): string {
+  const name = chatForm(id);
+  switch (error) {
     case "unauthorized":
-      return { ok: false, text: `🚫 \`${name}\` is restricted. Ask ${config.adminsHint()}.` };
+      return decidedBy === "handler" ? `🚫 \`${name}\`: ${message} Ask ${config.adminsHint()}.` : `🚫 \`${name}\` is restricted. Ask ${config.adminsHint()}.`;
     case "internal":
-      return { ok: false, text: `⚠️ \`${name}\` failed: ${res.message}` };
+      return `⚠️ \`${name}\` failed: ${message}`;
     default:
-      return { ok: false, text: `⚠️ \`${name}\`: ${res.message}` };
+      return `⚠️ \`${name}\`: ${message}`;
   }
+}
+
+/** Invoke a parsed chat command as the message's user (a help/usage parse is replied as-is, `ok: false`). */
+export async function invokeChatCommand({ commands, parsed, msg, config, resolveRepo, now }: HandleChatCommandArgs): Promise<ChatCommandResult> {
+  if (parsed.kind === "reply") return { ok: false, text: parsed.text };
+  const caller = chatCallerFor(msg, config, resolveRepo);
+  const res = await commands.invoke(parsed.id, parsed.input, caller);
+  if (res.ok) return { ok: true, text: renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, now === undefined ? {} : { now }) };
+  return { ok: false, error: res.error, text: chatErrorLine(parsed.id, res.error, res.message, config, res.decidedBy) };
 }
 
 /** Text-only view of `invokeChatCommand` for callers that need just the reply. */

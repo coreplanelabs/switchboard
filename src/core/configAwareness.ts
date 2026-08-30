@@ -72,9 +72,9 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
     : "per-channel; restricted for this user — ask an admin";
   lines.push(
     "Users inspect and tune settings: `config show`, " +
-      "`config set me agent=<name> model=<provider>/<model> effort=<low|medium|high>` (per-user; `models.<agent>=` / `efforts.<agent>=` per agent), " +
-      `\`config set channel …\` (${channelGate}), \`config set me instructions "<free text>"\` ` +
-      "(custom instructions; `config set channel instructions …` channel-wide), `config clear me|channel`, " +
+      "`config set me --agent <name> --model <provider>/<model> --effort <low|medium|high>` (per-user; `--models.<agent>` / `--efforts.<agent>` per agent), " +
+      `\`config set channel …\` (${channelGate}), \`config instructions me "<free text>"\` ` +
+      "(custom instructions; `config instructions channel …` channel-wide), `config clear me|channel`, " +
       "and per-message `agent:<name>` / `model:<provider>/<model>` / `effort:<low|medium|high>` directives.",
     "When asked about your settings or tuning, answer from this block — you are not stateless or untunable.",
   );

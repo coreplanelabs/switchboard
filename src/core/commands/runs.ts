@@ -4,16 +4,19 @@ import type { RunEvent } from "../runEvents.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../runRecord.js";
 import { MAX_EVENTS_PAGE, type Result, type RunRecordView, type RunsService } from "../runsService.js";
 
-// The `runs.*` registrations (#157 R8/R9): thin wrappers that translate a parsed
-// input plus the resolved caller into `RunsService` calls. Everything a surface
-// can learn about a run comes through here. Two rules the service does not
-// enforce because they are about the CALLER, not the run:
+// The `runs.*` registrations (#157 R8/R9): thin wrappers that translate typed
+// arguments/options plus the resolved caller into `RunsService` calls.
+// Everything a surface can learn about a run comes through here. Two rules the
+// service does not enforce because they are about the CALLER, not the run:
 //   - a channel-pinned caller (`caller.channel`, a namespaced id such as
 //     `http:ops`) sees only runs whose `channelId` equals the pin — other runs
 //     are `not_found`, never revealed (KTD10);
 //   - stored free text (message bodies, tool summaries) leaves wrapped as
 //     untrusted content (KTD17). `runs.list` carries none of it by construction.
 // None of these commands starts a run (KTD16); `runs.stop` only ends one.
+// Surface forms (derived): `runs get <id> [--include messages]`,
+// `runs events <id> [--after-seq n] [--limit n]`, `runs friction <id>`,
+// `runs stop <id> --mode soft|hard`, `runs list [--status …] [--agent …] …`.
 
 export interface RunsCommandDeps {
   runs: RunsService;
@@ -23,6 +26,7 @@ const defineCommand = commandDefiner<RunsCommandDeps>();
 
 const runId = z.string().regex(RUN_ID_PATTERN);
 const positiveInt = z.coerce.number().int().positive();
+const idArg = { name: "id", schema: runId, describe: "run id" } as const;
 
 function unwrap<T>(res: Result<T>): T {
   if (res.ok) return res.value;
@@ -66,42 +70,42 @@ const asJson = (v: unknown): JsonValue => v as JsonValue;
 
 export const runsList = defineCommand({
   id: "runs.list",
-  input: z.object({
-    status: z.enum(["active", "finished", "all"]),
-    agent: z.string().min(1).optional(),
-    /** Platform-namespaced channel id (`slack:C0123`, `http:ops`). */
-    channel: z.string().min(1).optional(),
-    sinceMs: z.coerce.number().int().nonnegative().optional(),
-    limit: positiveInt.max(RUN_LIST_MAX_LIMIT).optional(),
-    before: z.coerce.number().int().nonnegative().optional(),
-    beforeId: runId.optional(),
+  options: z.object({
+    status: z.enum(["active", "finished", "all"]).describe("which runs: live, persisted, or both"),
+    agent: z.string().min(1).optional().describe("only runs of this agent"),
+    channel: z.string().min(1).optional().describe("only runs in this platform-namespaced channel (`slack:C0123`, `http:ops`)"),
+    sinceMs: z.coerce.number().int().nonnegative().optional().describe("only runs started at or after this epoch ms"),
+    limit: positiveInt.max(RUN_LIST_MAX_LIMIT).optional().describe(`page size (max ${RUN_LIST_MAX_LIMIT})`),
+    before: z.coerce.number().int().nonnegative().optional().describe("page cursor: runs finished before this epoch ms"),
+    beforeId: runId.optional().describe("page cursor tie-breaker: the last id of the previous page"),
   }),
   scope: "runs:read",
   chatGate: "operator",
   effect: "read",
   describe: "List runs (live and persisted, newest first) — metadata only, never message text.",
-  handler: async ({ input, caller, deps }) => {
-    let channel = input.channel;
+  handler: async ({ options, caller, deps }) => {
+    let channel = options.channel;
     if (caller.channel !== undefined) {
       // Pinned callers may only ever ask about their own channel.
       if (channel !== undefined && channel !== caller.channel) return { runs: [] };
       channel = caller.channel;
     }
-    const { channel: _ignored, ...rest } = input;
+    const { channel: _ignored, ...rest } = options;
     return asJson(await deps.runs.listRuns({ ...rest, ...(channel !== undefined ? { channel } : {}) }));
   },
 });
 
 export const runsGet = defineCommand({
   id: "runs.get",
-  input: z.object({ id: runId, include: z.enum(["messages"]).optional() }),
+  args: [idArg],
+  options: z.object({ include: z.enum(["messages"]).optional().describe("add the run's events, free text wrapped as untrusted content") }),
   scope: "runs:read",
   chatGate: "operator",
   effect: "read",
   surfaces: { chat: false },
-  describe: "One run's record; `include=messages` adds its events with free text wrapped as untrusted content.",
-  handler: async ({ input, caller, deps }) => {
-    const view = await getVisibleRun(deps.runs, input.id, caller, input.include ? { include: input.include } : {});
+  describe: "One run's record; `--include messages` adds its events with free text wrapped as untrusted content.",
+  handler: async ({ args, options, caller, deps }) => {
+    const view = await getVisibleRun(deps.runs, args.id, caller, options.include ? { include: options.include } : {});
     if (view.events) view.events = view.events.map(wrapEvent);
     return asJson(view);
   },
@@ -109,48 +113,53 @@ export const runsGet = defineCommand({
 
 export const runsEvents = defineCommand({
   id: "runs.events",
-  input: z.object({ id: runId, afterSeq: z.coerce.number().int().nonnegative().optional(), limit: positiveInt.max(MAX_EVENTS_PAGE).optional() }),
+  args: [idArg],
+  options: z.object({
+    afterSeq: z.coerce.number().int().nonnegative().optional().describe("events with seq greater than this"),
+    limit: positiveInt.max(MAX_EVENTS_PAGE).optional().describe(`page size (max ${MAX_EVENTS_PAGE})`),
+  }),
   scope: "runs:read",
   chatGate: "operator",
   effect: "read",
   surfaces: { chat: false },
-  describe: "A page of one run's events after `afterSeq` (server-capped); free text wrapped as untrusted content.",
-  handler: async ({ input, caller, deps }) => {
-    await assertVisible(deps.runs, input.id, caller);
-    const page = unwrap(await deps.runs.getRunEvents(input.id, { afterSeq: input.afterSeq, limit: input.limit }));
+  describe: "A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content.",
+  handler: async ({ args, options, caller, deps }) => {
+    await assertVisible(deps.runs, args.id, caller);
+    const page = unwrap(await deps.runs.getRunEvents(args.id, { afterSeq: options.afterSeq, limit: options.limit }));
     return asJson({ ...page, events: page.events.map(wrapEvent) });
   },
 });
 
 export const runsFriction = defineCommand({
   id: "runs.friction",
-  input: z.object({ id: runId }),
+  args: [idArg],
   scope: "runs:read",
   chatGate: "operator",
   effect: "read",
   surfaces: { chat: false },
   describe: "One run's friction diagnosis (live: computed now; persisted: as stored).",
-  handler: async ({ input, caller, deps }) => {
-    await assertVisible(deps.runs, input.id, caller);
-    return asJson(unwrap(await deps.runs.getRunFriction(input.id)));
+  handler: async ({ args, caller, deps }) => {
+    await assertVisible(deps.runs, args.id, caller);
+    return asJson(unwrap(await deps.runs.getRunFriction(args.id)));
   },
 });
 
 export const runsStop = defineCommand({
   id: "runs.stop",
-  input: z.object({ id: runId, mode: z.enum(["soft", "hard"]) }),
+  args: [idArg],
+  options: z.object({ mode: z.enum(["soft", "hard"]).describe("soft = finish the current step; hard = abort now") }),
   scope: "runs:write",
   chatGate: "operator",
   effect: "write",
-  describe: "Request a live run to stop (`soft` = finish the current step; `hard` = abort now). Records the caller as the actor.",
-  handler: async ({ input, caller, deps }) => {
-    await assertVisible(deps.runs, input.id, caller);
-    return asJson(unwrap(await deps.runs.stopRun(input.id, input.mode, { kind: caller.kind, id: caller.id })));
+  describe: "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor.",
+  handler: async ({ args, options, caller, deps }) => {
+    await assertVisible(deps.runs, args.id, caller);
+    return asJson(unwrap(await deps.runs.stopRun(args.id, options.mode, { kind: caller.kind, id: caller.id })));
   },
 });
 
-export const runsCommands: readonly CommandDef<RunsCommandDeps, z.ZodType>[] = [runsList, runsGet, runsEvents, runsFriction, runsStop];
+export const runsCommands: readonly CommandDef<RunsCommandDeps>[] = [runsList, runsGet, runsEvents, runsFriction, runsStop] as unknown as CommandDef<RunsCommandDeps>[];
 
 export function registerRunsCommands<D extends RunsCommandDeps>(registry: CommandRegistry<D>): void {
-  for (const cmd of runsCommands) registry.register(cmd as unknown as CommandDef<D, z.ZodType>);
+  for (const cmd of runsCommands) registry.register(cmd as unknown as CommandDef<D>);
 }

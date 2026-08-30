@@ -112,7 +112,7 @@ describe("configAwarenessBlock — effort", () => {
     expect(text).toContain("channel override: efforts coding=`medium`");
     expect(text).toContain("user override: effort `low`");
     expect(text).toContain("This message's `effort:low` directive");
-    expect(text).toContain("effort=<low|medium|high>");
+    expect(text).toContain("--effort <low|medium|high>");
     expect(text).toContain("`effort:<low|medium|high>` directives");
   });
 });
@@ -136,7 +136,7 @@ describe("configAwarenessBlock — custom instructions (#107 phase 2)", () => {
     });
     expect(both).toMatch(/Custom instructions are active for this run \(channel, user\)/);
     expect(both).toMatch(/advisory/i);
-    expect(both).toContain("`config set me instructions");
+    expect(both).toContain("`config instructions me");
     const channelOnly = configAwarenessBlock({ ...base, channel: { instructions: "Channel rules." } });
     expect(channelOnly).toMatch(/active for this run \(channel\)/);
     expect(channelOnly).not.toContain("Channel rules.");

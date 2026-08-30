@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
-import { CommandRegistry, bindCommands, toSurfaceNames, type CommandInvoker } from "../core/commandRegistry.js";
+import { CommandRegistry, bindCommands, type CommandInvoker } from "../core/commandRegistry.js";
+import { toSurfaceNames } from "../core/commandSurface.js";
 import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
@@ -163,7 +164,7 @@ describe("createCommandHttpHandler — read commands", () => {
     expect(body.runs.map((r) => r.id).sort()).toEqual(["fin-1", "live-1"]);
     expect(t.text()).not.toContain("tok-");
     // The adapter passes `invoke`'s object through untouched.
-    const direct = await commands.invoke("runs.list", { status: "all" }, { kind: "access", id: "access:user-1", scopes: new Set() });
+    const direct = await commands.invoke("runs.list", { options: { status: "all" } }, { kind: "access", id: "access:user-1", scopes: new Set() });
     expect(body).toEqual(direct.ok ? direct.value : null);
   });
 

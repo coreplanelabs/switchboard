@@ -4,9 +4,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { ConfigStore } from "../config.js";
-import { CommandError, CommandRegistry, commandDefiner } from "./commandRegistry.js";
-import { bindCommands } from "./commandRegistry.js";
-import { handleChatCommand, parseChatCommand, RESERVED_CHAT_COMMANDS, type ChatCommands } from "./commandChat.js";
+import { CommandError, CommandRegistry, bindCommands, commandDefiner, type CommandDef } from "./commandRegistry.js";
+import { handleChatCommand, HELP_COMMAND_ID, parseChatCommand, type ChatCommands } from "./commandChat.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import type { RunRecord } from "./runRecord.js";
 import { RunRegistry } from "./runRegistry.js";
@@ -14,10 +13,11 @@ import { InMemoryRunStore } from "./runStore.js";
 import { createRunsService } from "./runsService.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./commands/runs.js";
 
-// Feature: features/command-registry.md — the chat adapter (U13, KTD18/KTD19):
-// `<group> <verb> key=value` parsing (registered ids only, whole-message
-// anchored, reserved `<group> <verb>` forms refused) and the plain-text reply built from
-// `renderCompact` — no Slack escaping in the core.
+// Feature: features/command-registry.md — the chat adapter (U13, KTD18/KTD19/
+// KTD21): `<group> <verb> <args…> [--kebab-flag value…]` recognized for
+// registered, chat-exposed, non-reserved ids and bound by the SAME grammar the
+// CLI uses; a recognized form with a malformed tail is a usage reply; help is
+// derived; the plain-text reply is `renderText` — no Slack escaping in the core.
 
 const NOW = 1_700_000_000_000;
 
@@ -26,20 +26,19 @@ const define = commandDefiner<Deps>();
 
 const echo = define({
   id: "demo.echo",
-  input: z.object({ status: z.enum(["active", "finished", "all"]), limit: z.coerce.number().int().positive().optional() }),
+  options: z.object({ status: z.enum(["active", "finished", "all"]).describe("which"), limit: z.coerce.number().int().positive().optional().describe("how many") }),
   scope: "demo:read",
   chatGate: "operator",
   effect: "read",
-  describe: "echoes its parsed input",
-  handler: async ({ input, deps }) => {
+  describe: "echoes its parsed options",
+  handler: async ({ options, deps }) => {
     deps.hits.push("echo");
-    return { status: input.status, limit: input.limit ?? null };
+    return { status: options.status, limit: options.limit ?? null };
   },
 });
 
 const hidden = define({
   id: "demo.hidden",
-  input: z.object({}),
   scope: "demo:read",
   chatGate: "open",
   effect: "read",
@@ -50,7 +49,7 @@ const hidden = define({
 
 const missing = define({
   id: "demo.missing",
-  input: z.object({ id: z.string() }),
+  args: [{ name: "id", schema: z.string(), describe: "an id" }],
   scope: "demo:read",
   chatGate: "open",
   effect: "read",
@@ -62,7 +61,6 @@ const missing = define({
 
 const config = define({
   id: "config.show",
-  input: z.object({}),
   scope: "config:read",
   chatGate: "open",
   effect: "read",
@@ -72,7 +70,6 @@ const config = define({
 
 const whoami = define({
   id: "demo.whoami",
-  input: z.object({}),
   scope: "demo:read",
   chatGate: "open",
   effect: "read",
@@ -80,13 +77,25 @@ const whoami = define({
   handler: async ({ caller }) => ({ kind: caller.kind, id: caller.id, channel: caller.channel ?? null }),
 });
 
+const say = define({
+  id: "demo.say",
+  args: [
+    { name: "scope", schema: z.enum(["me", "channel"]), describe: "scope" },
+    { name: "text", schema: z.string().optional(), describe: "free text", rest: true },
+  ],
+  scope: "demo:read",
+  chatGate: "open",
+  effect: "read",
+  describe: "echoes free text",
+  handler: async ({ args }) => ({ scope: args.scope, text: args.text ?? null }),
+});
+
 function demoRegistry() {
   const registry = new CommandRegistry<Deps>({ audit: () => {} });
-  for (const cmd of [echo, hidden, missing, config, whoami]) registry.register(cmd);
+  for (const cmd of [echo, hidden, missing, config, whoami, say] as CommandDef<Deps>[]) registry.register(cmd);
   return registry;
 }
 
-const RESERVED = new Set(["config show", "repo onboard"]);
 
 function configStore(yaml: string): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-chatcmd-"));
@@ -113,48 +122,82 @@ const msg = (text: string, userId = "slack:UX") => ({ channelId: "slack:CX", use
 describe("parseChatCommand", () => {
   const registry = demoRegistry();
 
-  it("recognizes a registered `<group> <verb>` with key=value args (quoted values allowed)", () => {
-    expect(parseChatCommand("demo echo status=all limit=5", registry, RESERVED)).toEqual({ id: "demo.echo", input: { status: "all", limit: "5" } });
-    expect(parseChatCommand('  demo echo status="all"  ', registry, RESERVED)).toEqual({ id: "demo.echo", input: { status: "all" } });
-    expect(parseChatCommand("demo echo status='all'", registry, RESERVED)).toEqual({ id: "demo.echo", input: { status: "all" } });
-    expect(parseChatCommand("demo echo", registry, RESERVED)).toEqual({ id: "demo.echo", input: {} });
+  it("recognizes a registered `<group> <verb>` and binds --kebab flags (value, =value, quoted) into camelCase options", () => {
+    expect(parseChatCommand("demo echo --status all --limit 5", registry)).toEqual({ kind: "invoke", id: "demo.echo", input: { args: [], options: { status: "all", limit: "5" } } });
+    expect(parseChatCommand('  demo echo --status="all"  ', registry)).toEqual({ kind: "invoke", id: "demo.echo", input: { args: [], options: { status: "all" } } });
+    expect(parseChatCommand("demo echo --status 'all'", registry)).toEqual({ kind: "invoke", id: "demo.echo", input: { args: [], options: { status: "all" } } });
+    expect(parseChatCommand("demo echo", registry)).toEqual({ kind: "invoke", id: "demo.echo", input: { args: [], options: {} } });
   });
 
-  it("is whole-message anchored: prose containing the command mid-sentence is not a command", () => {
-    expect(parseChatCommand("can you run demo echo for me", registry, RESERVED)).toBeNull();
-    expect(parseChatCommand("demo echo please", registry, RESERVED)).toBeNull();
-    expect(parseChatCommand("demo echo status=all and then tell me", registry, RESERVED)).toBeNull();
-    expect(parseChatCommand("what does demo echo do?", registry, RESERVED)).toBeNull();
+  it("binds positionals, including free text with Slack smart quotes", () => {
+    expect(parseChatCommand("demo say me be terse, always", registry)).toEqual({ kind: "invoke", id: "demo.say", input: { args: ["me", "be terse, always"], options: {} } });
+    expect(parseChatCommand("demo say channel “quoted  text”", registry)).toEqual({ kind: "invoke", id: "demo.say", input: { args: ["channel", "quoted  text"], options: {} } });
+    expect(parseChatCommand("demo missing abc", registry)).toEqual({ kind: "invoke", id: "demo.missing", input: { args: ["abc"], options: {} } });
   });
 
-  it("recognizes registered ids only — an unknown verb or group is prose", () => {
-    expect(parseChatCommand("demo nope", registry, RESERVED)).toBeNull();
-    expect(parseChatCommand("other echo", registry, RESERVED)).toBeNull();
-    expect(parseChatCommand("hello there", registry, RESERVED)).toBeNull();
+  it("prose is never a command: a mid-sentence mention, an unknown verb or group, a chat-hidden id → null; no form is reserved for a legacy parser any more", () => {
+    expect(parseChatCommand("can you run demo echo for me", registry)).toBeNull();
+    expect(parseChatCommand("what does demo echo do?", registry)).toBeNull();
+    expect(parseChatCommand("demo nope", registry)).toBeNull();
+    expect(parseChatCommand("other echo", registry)).toBeNull();
+    expect(parseChatCommand("hello there", registry)).toBeNull();
+    expect(parseChatCommand("demo hidden", registry)).toBeNull();
+    expect(parseChatCommand("config show", registry)).toEqual({ kind: "invoke", id: "config.show", input: { args: [], options: {} } });
   });
 
-  it("does not recognize a command that opted out of chat (surfaces.chat: false)", () => {
-    expect(parseChatCommand("demo hidden", registry, RESERVED)).toBeNull();
+  it("the bare word `help` is `help show` when it is registered and chat-exposed — else prose (KTD25)", () => {
+    expect(parseChatCommand("help", registry)).toBeNull();
+    expect(parseChatCommand("help me", registry)).toBeNull();
+    const withHelp = demoRegistry();
+    withHelp.register(define({ id: HELP_COMMAND_ID, scope: "help:read", chatGate: "open", effect: "read", describe: "help", handler: async () => ({}) }));
+    expect(parseChatCommand("help", withHelp)).toEqual({ kind: "invoke", id: "help.show", input: { args: [], options: {} } });
+    expect(parseChatCommand("  Help  ", withHelp)).toEqual({ kind: "invoke", id: "help.show", input: { args: [], options: {} } });
+    expect(parseChatCommand("help show", withHelp)).toEqual({ kind: "invoke", id: "help.show", input: { args: [], options: {} } });
+    expect(parseChatCommand("help me", withHelp)).toBeNull();
+    const hiddenHelp = demoRegistry();
+    hiddenHelp.register(define({ id: HELP_COMMAND_ID, scope: "help:read", chatGate: "open", effect: "read", surfaces: { chat: false }, describe: "help", handler: async () => ({}) }));
+    expect(parseChatCommand("help", hiddenHelp)).toBeNull();
   });
 
-  it("refuses `<group> <verb>` forms a legacy parser still owns (reserved), even when the id is registered — per form, not per group", () => {
-    expect(parseChatCommand("config show", registry, RESERVED)).toBeNull();
-    expect(parseChatCommand("config show", registry, new Set())).toEqual({ id: "config.show", input: {} });
-    // `repo onboard` is reserved; `repo list` in the same group is not.
+  it("a recognized command with a malformed tail is a usage reply naming the flag/argument — never a model turn, never the value", () => {
+    expect(parseChatCommand("demo echo please", registry)).toEqual({ kind: "reply", text: "⚠️ `demo echo`: demo echo takes no arguments\nusage: demo echo --status <active|finished|all> [--limit <integer>]" });
+    expect(parseChatCommand("demo echo --status", registry)).toMatchObject({ kind: "reply", text: expect.stringContaining("option --status needs a value") });
+    expect(parseChatCommand("demo echo --bogus s3cret", registry)).toMatchObject({ kind: "reply", text: expect.stringContaining("unknown option --bogus") });
+    expect(JSON.stringify(parseChatCommand("demo echo --bogus s3cret", registry))).not.toContain("s3cret");
+    expect(parseChatCommand("demo echo status=all", registry)).toMatchObject({ kind: "reply", text: expect.stringContaining("takes no arguments") });
+    expect(parseChatCommand("demo missing", registry)).toMatchObject({ kind: "reply", text: expect.stringContaining("missing argument <id>") });
+    expect(parseChatCommand('demo say me "open quote', registry)).toEqual({ kind: "reply", text: "⚠️ `demo say`: unterminated quote" });
+  });
+
+  it("help is derived: `<group> <verb> --help` gives the command's help, `<group> help` lists the group's chat commands", () => {
+    expect(parseChatCommand("demo echo --help", registry)).toEqual({
+      kind: "reply",
+      text: ["echoes its parsed options", "usage: demo echo --status <active|finished|all> [--limit <integer>]", "options:", "  --status <active|finished|all>  which (required)", "  --limit <integer>               how many"].join("\n"),
+    });
+    const group = parseChatCommand("demo help", registry);
+    expect(group).toMatchObject({ kind: "reply", text: expect.stringMatching(/^demo commands:\n/) });
+    expect((group as { text: string }).text).toContain("demo echo");
+    expect((group as { text: string }).text).not.toContain("demo hidden");
+    expect(parseChatCommand("nothing help", registry)).toBeNull();
+  });
+
+  it("a group's verbs are recognized independently: a registered verb binds, an unregistered sibling is prose", () => {
     const repo = new CommandRegistry<Deps>({ audit: () => {} });
-    for (const id of ["repo.list", "repo.onboard"]) {
-      repo.register(define({ id, input: z.object({}), scope: "repo:read", chatGate: "open", effect: "read", describe: id, handler: async () => ({}) }));
-    }
-    expect(parseChatCommand("repo list", repo, RESERVED)).toEqual({ id: "repo.list", input: {} });
-    expect(parseChatCommand("repo onboard", repo, RESERVED)).toBeNull();
-    expect(RESERVED_CHAT_COMMANDS.has("repo onboard")).toBe(true);
-    expect(RESERVED_CHAT_COMMANDS.has("repo list")).toBe(false);
-    expect([...RESERVED_CHAT_COMMANDS].some((f) => f.startsWith("friction "))).toBe(false);
+    repo.register(define({ id: "repo.list", scope: "repo:read", chatGate: "open", effect: "read", describe: "list", handler: async () => ({}) }));
+    expect(parseChatCommand("repo list", repo)).toEqual({ kind: "invoke", id: "repo.list", input: { args: [], options: {} } });
+    expect(parseChatCommand("repo onboard acme/api", repo)).toBeNull();
   });
+});
 
-  it("a malformed argument list is not a command (bare word, missing value)", () => {
-    expect(parseChatCommand("demo echo status", registry, RESERVED)).toBeNull();
-    expect(parseChatCommand("demo echo status=", registry, RESERVED)).toBeNull();
+describe("chatCallerFor", () => {
+  it("carries the message's channel + thread as `origin` (never as the pin) and the lazy repo resolver when given", async () => {
+    const { chatCallerFor } = await import("./commandChat.js");
+    const config = configStore(ADMIN_YAML);
+    const c = chatCallerFor(msg("x", "slack:UX"), config);
+    expect(c.origin).toEqual({ channelId: "slack:CX", threadKey: "slack:CX:1.0" });
+    expect(c.channel).toBeUndefined();
+    const resolve = async () => "acme/api";
+    expect(chatCallerFor(msg("x"), config, resolve).origin?.repo).toBe(resolve);
   });
 });
 
@@ -167,41 +210,64 @@ describe("handleChatCommand", () => {
   }
 
   async function run(commands: ChatCommands, config: ConfigStore, text: string, userId: string) {
-    const parsed = parseChatCommand(text, commands, RESERVED);
+    const parsed = parseChatCommand(text, commands);
     if (!parsed) throw new Error(`not a command: ${text}`);
     return handleChatCommand({ commands, parsed, msg: msg(text, userId), config });
   }
 
   it("a non-admin gets the restricted wording other commands use; the handler never runs", async () => {
     const { commands, deps, config } = setup();
-    const reply = await run(commands, config, "demo echo status=all", "slack:UX");
+    const reply = await run(commands, config, "demo echo --status all", "slack:UX");
     expect(reply).toBe("🚫 `demo echo` is restricted. Ask <@slack:UADMIN>.");
     expect(deps.hits).toEqual([]);
   });
 
   it("an admin's command is coerced, invoked, and rendered through renderCompact as plain key: value lines", async () => {
     const { commands, deps, config } = setup();
-    const reply = await run(commands, config, "demo echo status=all limit=5", "slack:UADMIN");
+    const reply = await run(commands, config, "demo echo --status all --limit 5", "slack:UADMIN");
     expect(reply).toBe("status: all\nlimit: 5");
     expect(deps.hits).toEqual(["echo"]);
   });
 
-  it("invalid input → one line naming the field, never echoing the value", async () => {
+  it("invalid input → one line naming the option, never echoing the value", async () => {
     const { commands, config } = setup();
-    const reply = await run(commands, config, "demo echo status=bogus", "slack:UADMIN");
+    const reply = await run(commands, config, "demo echo --status bogus", "slack:UADMIN");
     expect(reply).toBe('⚠️ `demo echo`: status: expected one of "active", "finished", "all"');
     expect(reply).not.toContain("bogus");
   });
 
-  it("not_found → one line with the handler's message", async () => {
-    const { commands, config } = setup();
-    expect(await run(commands, config, "demo missing id=x", "slack:UADMIN")).toBe("⚠️ `demo missing`: thing not found");
+  it("a refusal the HANDLER decided carries its reason; one the registry decided is the fixed restricted line", async () => {
+    const registry = demoRegistry();
+    registry.register(
+      define({
+        id: "demo.mine",
+        scope: "demo:read",
+        chatGate: "open",
+        effect: "read",
+        describe: "refuses on data",
+        handler: async () => {
+          throw new CommandError("unauthorized", "You're not on the allowlist for the `acme/api` repo environment.");
+        },
+      }),
+    );
+    const commands = bindCommands(registry, { hits: [] });
+    const config = configStore(ADMIN_YAML);
+    expect(await run(commands, config, "demo mine", "slack:UX")).toBe("🚫 `demo mine`: You're not on the allowlist for the `acme/api` repo environment. Ask <@slack:UADMIN>.");
+    expect(await run(commands, config, "demo echo --status all", "slack:UX")).toBe("🚫 `demo echo` is restricted. Ask <@slack:UADMIN>.");
+  });
+
+  it("not_found → one line with the handler's message; a usage/help parse is replied as-is without invoking", async () => {
+    const { commands, deps, config } = setup();
+    expect(await run(commands, config, "demo missing x", "slack:UADMIN")).toBe("⚠️ `demo missing`: thing not found");
+    expect(await run(commands, config, "demo echo please", "slack:UX")).toContain("takes no arguments");
+    expect(await run(commands, config, "demo echo --help", "slack:UX")).toContain("usage: demo echo");
+    expect(deps.hits).toEqual([]);
   });
 
   it("a machine caller's chat command is channel-pinned: an `http:`/`mcp:` message pins `caller.channel` to its channelId; a Slack human stays unpinned", async () => {
     const { commands, config } = setup();
-    const parsed = parseChatCommand("demo whoami", commands, RESERVED)!;
-    const via = (channelId: string, userId: string) => handleChatCommand({ commands, parsed, msg: { channelId, userId }, config });
+    const parsed = parseChatCommand("demo whoami", commands)!;
+    const via = (channelId: string, userId: string) => handleChatCommand({ commands, parsed, msg: { channelId, userId, threadKey: `${channelId}:t` }, config });
     expect(await via("http:ops", "http:ops")).toBe("kind: chat\nid: http:ops\nchannel: http:ops");
     expect(await via("mcp:alice", "mcp:alice")).toBe("kind: chat\nid: mcp:alice\nchannel: mcp:alice");
     expect(await via("slack:CX", "slack:UX")).toBe("kind: chat\nid: slack:UX\nchannel: null");
@@ -210,7 +276,7 @@ describe("handleChatCommand", () => {
 
   it("a caller with no admins configured is refused (isOperator is fail-closed)", async () => {
     const { commands, deps, config } = setup(ADMIN_YAML.replace('  admins: ["slack:UADMIN"]\n', ""));
-    const reply = await run(commands, config, "demo echo status=all", "slack:UX");
+    const reply = await run(commands, config, "demo echo --status all", "slack:UX");
     expect(reply).toContain("🚫");
     expect(reply).toContain("Ask an admin");
     expect(deps.hits).toEqual([]);
@@ -254,26 +320,26 @@ describe("runs list on chat (KTD18)", () => {
     return { commands, config: configStore(ADMIN_YAML) };
   }
 
-  it("an admin's `runs list status=all` renders short id · agent · status · duration only — no channel, user, thread, label, or token", async () => {
+  it("an admin's `runs list --status all` renders short id · agent · status · duration only — no channel, user, thread, label, or token", async () => {
     const { commands, config } = await setup();
-    const parsed = parseChatCommand("runs list status=all", commands, RESERVED);
-    expect(parsed).toEqual({ id: "runs.list", input: { status: "all" } });
-    const reply = await handleChatCommand({ commands, parsed: parsed!, msg: msg("runs list status=all", "slack:UADMIN"), config, now: NOW });
+    const parsed = parseChatCommand("runs list --status all", commands);
+    expect(parsed).toEqual({ kind: "invoke", id: "runs.list", input: { args: [], options: { status: "all" } } });
+    const reply = await handleChatCommand({ commands, parsed: parsed!, msg: msg("runs list --status all", "slack:UADMIN"), config, now: NOW });
     expect(reply.split("\n")).toEqual(["live0001  review    active        0s", "fin00001  coding    completed     1m 5s"]);
     expect(reply).not.toMatch(/slack:D|UOWNER|threadKey|acme|<!channel>|tok-secret|please do/);
   });
 
   it("a non-admin's `runs list` is refused", async () => {
     const { commands, config } = await setup();
-    const parsed = parseChatCommand("runs list status=all", commands, RESERVED)!;
-    expect(await handleChatCommand({ commands, parsed, msg: msg("runs list status=all", "slack:UX"), config })).toBe("🚫 `runs list` is restricted. Ask <@slack:UADMIN>.");
+    const parsed = parseChatCommand("runs list --status all", commands)!;
+    expect(await handleChatCommand({ commands, parsed, msg: msg("runs list --status all", "slack:UX"), config })).toBe("🚫 `runs list` is restricted. Ask <@slack:UADMIN>.");
   });
 
-  it("`runs get`/`events`/`friction`/`stop` are not chat commands (opt-out) except stop, which is", async () => {
+  it("`runs get/events/friction <id>` are not chat commands (opt-out); `runs stop <id> --mode soft` is", async () => {
     const { commands } = await setup();
-    expect(parseChatCommand("runs get id=fin00001", commands, RESERVED)).toBeNull();
-    expect(parseChatCommand("runs events id=fin00001", commands, RESERVED)).toBeNull();
-    expect(parseChatCommand("runs friction id=fin00001", commands, RESERVED)).toBeNull();
-    expect(parseChatCommand("runs stop id=live0001 mode=soft", commands, RESERVED)).toEqual({ id: "runs.stop", input: { id: "live0001", mode: "soft" } });
+    expect(parseChatCommand("runs get fin00001", commands)).toBeNull();
+    expect(parseChatCommand("runs events fin00001", commands)).toBeNull();
+    expect(parseChatCommand("runs friction fin00001", commands)).toBeNull();
+    expect(parseChatCommand("runs stop live0001 --mode soft", commands)).toEqual({ kind: "invoke", id: "runs.stop", input: { args: ["live0001"], options: { mode: "soft" } } });
   });
 });

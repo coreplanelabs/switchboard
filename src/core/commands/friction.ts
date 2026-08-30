@@ -1,8 +1,10 @@
 import { z } from "zod";
 import { GithubIssueTracker, type IssueTracker } from "../../execution/githubIssues.js";
-import { CommandError, commandDefiner, type CommandDef, type CommandRegistry, type JsonValue } from "../commandRegistry.js";
+import { CommandError, commandDefiner, flag, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
 import type { FrictionLedger } from "../frictionLedger.js";
 import { clusterFriction, type FrictionRunRecord } from "../frictionProposals.js";
+import { parseRunEventLines } from "../runEventLines.js";
+import { analyzeRunFriction, formatFrictionReport, type FrictionDiagnosis } from "../runFriction.js";
 import { countTruncatedInputs, formatSelfImprovementReport, runSelfImprovement, type SelfImprovementConfig, type SelfImprovementReport } from "../selfImprovement.js";
 
 // The `friction.*` registrations (#157 R13 — Area 7b's on-demand trigger, re-homed
@@ -11,8 +13,15 @@ import { countTruncatedInputs, formatSelfImprovementReport, runSelfImprovement, 
 // step (cluster → propose → dedupe → file labeled issues). Both delegate to the
 // pure step in selfImprovement.ts / frictionProposals.ts; nothing about a
 // pattern or a proposal is decided here. The JSON output is the
-// `SelfImprovementReport`; `render` is the very text the chat command has always
-// replied with (`formatSelfImprovementReport`), so migrating changed no reply.
+// `SelfImprovementReport`; `render` is the text the chat command has always
+// replied with (`formatSelfImprovementReport`).
+//
+// Surface forms (derived from the options): `friction report [--since-ms n]
+// [--limit n] [--min-runs n]`, `friction propose [--dry-run] [--top n]
+// [--min-runs n] [--repo owner/name]` — the very flags the pre-registry chat
+// command took, now ONE grammar shared with the CLI (KTD21). `friction analyze
+// [source] [--slow-ms n] [--in-progress]` (CLI only) is the read-only diagnosis
+// of a SAVED run stream — the former standalone frictionCli (phase 4b).
 //
 // Gates (R13, unchanged): `report` is open in chat and needs `friction:read`
 // elsewhere; `propose` files to GitHub, so chat keeps the fail-closed
@@ -32,15 +41,15 @@ export interface FrictionCommandDeps {
     tracker?: IssueTracker;
     /** The live `selfImprovement` config section (read per call: config reloads). */
     config(): SelfImprovementConfig | undefined;
+    /** `friction analyze`'s input: the text at a path, or stdin for `-`. */
+    readSource(source: string): Promise<string>;
   };
 }
 
 const defineCommand = commandDefiner<FrictionCommandDeps>();
 
 const positiveInt = z.coerce.number().int().positive();
-/** `z.coerce.boolean()` would read the string "false" as true; text surfaces send strings. */
-const flag = z.union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")]);
-const repoSlug = z.string().regex(/^[\w.-]+\/[\w.-]+$/, "owner/name");
+const repoSlug = z.string().refine((s) => /^[\w.-]+\/[\w.-]+$/.test(s), "expected an owner/name slug");
 
 export const NO_LEDGER_MESSAGE = "The friction ledger isn't wired in this process, so there are no recent runs to analyze.";
 export const NO_REPO_MESSAGE = "Set `selfImprovement.repo` (an `owner/name`) in config.yaml to tell `friction propose` where to file issues.";
@@ -62,24 +71,21 @@ const render = (output: JsonValue): string => formatSelfImprovementReport(output
 
 export const frictionReport = defineCommand({
   id: "friction.report",
-  input: z.object({
-    /** Only runs finished at or after this epoch ms. */
-    sinceMs: z.coerce.number().int().nonnegative().optional(),
-    /** Newest n runs (default: the ledger's retained window). */
-    limit: positiveInt.optional(),
-    /** Distinct runs a pattern must recur in (default `selfImprovement.minRuns`, else 2). */
-    minRuns: positiveInt.optional(),
+  options: z.object({
+    sinceMs: z.coerce.number().int().nonnegative().optional().describe("only runs finished at or after this epoch ms"),
+    limit: positiveInt.optional().describe("newest n runs (default: the ledger's retained window)"),
+    minRuns: positiveInt.optional().describe("distinct runs a pattern must recur in (default selfImprovement.minRuns, else 2)"),
   }),
   scope: "friction:read",
   chatGate: "open",
   effect: "read",
   describe: "Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.",
   render,
-  handler: async ({ input, caller, deps }) => {
-    const records = await recentRecords(deps, { sinceMs: input.sinceMs, limit: input.limit, channel: caller.channel });
+  handler: async ({ options, caller, deps }) => {
+    const records = await recentRecords(deps, { sinceMs: options.sinceMs, limit: options.limit, channel: caller.channel });
     return asJson({
       runsAnalyzed: records.length,
-      patterns: clusterFriction(records, { minRuns: input.minRuns ?? deps.friction.config()?.minRuns }),
+      patterns: clusterFriction(records, { minRuns: options.minRuns ?? deps.friction.config()?.minRuns }),
       proposals: [],
       filed: [],
       duplicates: [],
@@ -92,24 +98,21 @@ export const frictionReport = defineCommand({
 
 export const frictionPropose = defineCommand({
   id: "friction.propose",
-  input: z.object({
-    /** Compute and report everything, file nothing. */
-    dryRun: flag.optional(),
-    /** Proposals filed per pass (default `selfImprovement.top`, else 3). */
-    top: positiveInt.optional(),
-    minRuns: positiveInt.optional(),
-    /** `owner/name` to dedupe against and file into (default `selfImprovement.repo`). */
-    repo: repoSlug.optional(),
+  options: z.object({
+    dryRun: flag.optional().describe("compute and report everything, file nothing"),
+    top: positiveInt.optional().describe("proposals filed per pass (default selfImprovement.top, else 3)"),
+    minRuns: positiveInt.optional().describe("distinct runs a pattern must recur in (default selfImprovement.minRuns, else 2)"),
+    repo: repoSlug.optional().describe("owner/name to dedupe against and file into (default selfImprovement.repo)"),
   }),
   scope: "friction:write",
   chatGate: "repoManager",
   effect: "write",
   describe: "Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.",
   render,
-  handler: async ({ input, caller, deps }) => {
+  handler: async ({ options, caller, deps }) => {
     if (!deps.friction.ledger) throw new CommandError("unavailable", NO_LEDGER_MESSAGE);
     const cfg = deps.friction.config();
-    const repo = input.repo ?? cfg?.repo;
+    const repo = options.repo ?? cfg?.repo;
     if (!repo) throw new CommandError("unavailable", NO_REPO_MESSAGE);
     try {
       return asJson(
@@ -118,9 +121,9 @@ export const frictionPropose = defineCommand({
           tracker: deps.friction.tracker ?? new GithubIssueTracker(),
           repo,
           label: cfg?.label,
-          top: input.top ?? cfg?.top,
-          minRuns: input.minRuns ?? cfg?.minRuns,
-          dryRun: input.dryRun ?? false,
+          top: options.top ?? cfg?.top,
+          minRuns: options.minRuns ?? cfg?.minRuns,
+          dryRun: options.dryRun ?? false,
         }),
       );
     } catch (err) {
@@ -132,8 +135,57 @@ export const frictionPropose = defineCommand({
   },
 });
 
-export const frictionCommands: readonly CommandDef<FrictionCommandDeps, z.ZodType>[] = [frictionReport, frictionPropose];
+// ---- friction analyze (CLI only) ---------------------------------------------------
+
+/** The stderr hint for the most likely misuse: a live `curl` capture analyzed
+ *  with the default `finished:true`, so its trailing in-flight call is blamed
+ *  as a dead run. Only when that specific finding is present and the flag was
+ *  not given; `undefined` otherwise. */
+export function inProgressHint(diagnosis: FrictionDiagnosis, finished: boolean): string | undefined {
+  if (!finished) return undefined;
+  const midTool = diagnosis.findings.some((f) => f.category === "infra_failure" && f.summary.includes("run ended mid-tool"));
+  return midTool ? "(hint: the stream ends on a tool call with no result — if this capture was taken mid-run, pass --in-progress)" : undefined;
+}
+
+export const frictionAnalyze = defineCommand({
+  id: "friction.analyze",
+  args: [{ name: "source", schema: z.string().optional(), describe: "a saved run stream: JSON lines of run events or a curl'ed /runs/:id/events SSE capture (default: stdin)" }],
+  options: z.object({
+    slowMs: z.coerce.number().nonnegative().optional().describe("a tool call slower than this many ms is a slow-tool finding"),
+    inProgress: flag.optional().describe("the capture was taken mid-run: a trailing call without a result is still executing, not a dead run"),
+  }),
+  scope: "friction:read",
+  chatGate: "open",
+  effect: "read",
+  surfaces: { chat: false, mcp: false, http: false },
+  describe: "Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.",
+  render: (output) => {
+    const o = output as JsonObject;
+    const lines = [formatFrictionReport(o.diagnosis as unknown as FrictionDiagnosis)];
+    const skipped = typeof o.skipped === "number" ? o.skipped : 0;
+    if (skipped > 0) lines.push(`(skipped ${skipped} unparseable line${skipped === 1 ? "" : "s"})`);
+    if (typeof o.hint === "string") lines.push(o.hint);
+    return lines.join("\n");
+  },
+  handler: async ({ args, options, deps }) => {
+    const source = args.source ?? "-";
+    let text: string;
+    try {
+      text = await deps.friction.readSource(source);
+    } catch (err) {
+      throw new CommandError("not_found", `${source === "-" ? "stdin" : source}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const { events, skipped } = parseRunEventLines(text);
+    if (events.length === 0) throw new CommandError("invalid_input", `no run events found in ${source === "-" ? "stdin" : source}${skipped ? ` (${skipped} unparseable lines)` : ""}`);
+    const finished = !(options.inProgress ?? false);
+    const diagnosis = analyzeRunFriction(events, { slowToolMs: options.slowMs, finished });
+    const hint = inProgressHint(diagnosis, finished);
+    return { source, events: events.length, skipped, diagnosis: diagnosis as unknown as JsonValue, ...(hint !== undefined ? { hint } : {}) };
+  },
+});
+
+export const frictionCommands: readonly CommandDef<FrictionCommandDeps>[] = [frictionReport, frictionPropose, frictionAnalyze] as unknown as CommandDef<FrictionCommandDeps>[];
 
 export function registerFrictionCommands<D extends FrictionCommandDeps>(registry: CommandRegistry<D>): void {
-  for (const cmd of frictionCommands) registry.register(cmd as unknown as CommandDef<D, z.ZodType>);
+  for (const cmd of frictionCommands) registry.register(cmd as unknown as CommandDef<D>);
 }

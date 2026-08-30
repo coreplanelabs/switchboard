@@ -18,7 +18,7 @@ import { formatMs } from "./runFriction.js";
 // `tracker.create`, and `dryRun` removes even that. Human-gated by
 // construction: it opens labeled issues for a person to triage and never
 // opens PRs or merges anything. Reached from the `friction propose` chat
-// command (frictionCommands.ts) and the frictionProposeCli.
+// commands (`friction report` / `friction propose`, src/core/commands/friction.ts).
 
 /** The `selfImprovement` config section. */
 export interface SelfImprovementConfig {

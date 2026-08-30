@@ -423,7 +423,6 @@ describe("handleMcpRequest — registry commands as tools", () => {
     const registry = new CommandRegistry<unknown>({ audit: () => {} });
     registry.register({
       id: "hidden.cmd",
-      input: z.object({}),
       scope: "hidden:read",
       chatGate: "open",
       effect: "read",
@@ -442,7 +441,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
     const body = toolJson(res) as { runs: { id: string }[] };
     expect(body.runs.map((r) => r.id).sort()).toEqual(["fin-1", "live-1"]);
     expect(JSON.stringify(res.body)).not.toContain("tok-");
-    const direct = await commands.invoke("runs.list", { status: "all" }, { kind: "mcp", id: "mcp:alice", scopes: new Set(["runs:read"]) });
+    const direct = await commands.invoke("runs.list", { options: { status: "all" } }, { kind: "mcp", id: "mcp:alice", scopes: new Set(["runs:read"]) });
     expect(body).toEqual(direct.ok ? direct.value : null);
   });
 

@@ -4,7 +4,6 @@ import {
   assertAllowedEnv,
   buildAgentEnv,
   buildPlan,
-  parseArgs,
   parseManifest,
   parseOpRef,
   renderEnvFile,
@@ -328,32 +327,5 @@ describe("buildAgentEnv — integration hook", () => {
       buildAgentEnv({ manifest: MANIFEST, env: "uat", service: "checkout", opReader: reader, processEnv: {} }),
     ).rejects.toThrow(/OP_SERVICE_ACCOUNT_TOKEN is not set/);
     expect(reader.read).not.toHaveBeenCalled();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// parseArgs.
-// ---------------------------------------------------------------------------
-
-describe("parseArgs", () => {
-  it("parses --env, --service and defaults to dry-run", () => {
-    const r = parseArgs(["--env", "uat", "--service", "billing"]);
-    expect(r).toMatchObject({ env: "uat", service: "billing", apply: false });
-  });
-
-  it("--apply sets the apply flag; --out and --manifest override paths", () => {
-    const r = parseArgs(["--env=uat", "--service=billing", "--apply", "--out=/secure/b.env", "--manifest=m.jsonc"]);
-    expect(r).toMatchObject({ apply: true, out: "/secure/b.env", manifest: "m.jsonc" });
-  });
-
-  it("requires --env and --service", () => {
-    expect(parseArgs(["--service", "billing"])).toEqual({ error: expect.stringMatching(/--env is required/) });
-    expect(parseArgs(["--env", "uat"])).toEqual({ error: expect.stringMatching(/--service is required/) });
-  });
-
-  it("rejects unknown args", () => {
-    expect(parseArgs(["--env", "uat", "--service", "billing", "--wat"])).toEqual({
-      error: expect.stringMatching(/unknown argument/),
-    });
   });
 });

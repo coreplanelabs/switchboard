@@ -6,7 +6,7 @@ When the switchboard agent works on a **downstream service**, its execution envi
 
 Switchboard itself runs in prod, which is fine — the safety is not where switchboard runs, it is that the service account is **read-only and UAT-vault-scoped**, so the only creds reachable are downstream **UAT** creds. The env-name allowlist (`["uat"]`) is defense-in-depth on top of that operational guard.
 
-- **Code**: `src/agentEnv/bootstrap.ts` (dependency-injected core: `stripJsonc` + `parseManifest` JSONC parsing, `parseOpRef`, `ALLOWED_ENVS` + `assertAllowedEnv` allowlist, `buildPlan`, `renderPlan`, `renderEnvFile`, `runBootstrap`, the `buildAgentEnv` integration hook, `parseArgs` — `OpReader`/`EnvSink`/`log` injected, no real `op` ever runs). `src/agentEnv/bootstrapCli.ts` (thin CLI: real `op read`, real chmod-600 file sink, argv/exit/usage). `deploy/agent-env.jsonc` (operator-filled manifest template with `REPLACE-ME` placeholders). `deploy/agent-env-bootstrap.sh` + the `agent-env-bootstrap` npm script.
+- **Code**: `src/agentEnv/bootstrap.ts` (dependency-injected core: `stripJsonc` + `parseManifest` JSONC parsing, `parseOpRef`, `ALLOWED_ENVS` + `assertAllowedEnv` allowlist, `buildPlan`, `renderPlan`, `renderEnvFile`, `runBootstrap`, the `buildAgentEnv` integration hook — `OpReader`/`EnvSink`/`log` injected, no real `op` ever runs). `src/agentEnv/host.ts` (the host half: real `op read`, real chmod-600 file sink, manifest + path defaults) behind the registry command `env bootstrap` (`src/core/commands/env.ts`, CLI only — [command-registry.md](command-registry.md) item 20; the option grammar, exit codes and usage are the registry's). `deploy/agent-env.jsonc` (operator-filled manifest template with `REPLACE-ME` placeholders). `deploy/agent-env-bootstrap.sh` + the `agent-env-bootstrap` npm script.
 - **Tests**: `src/agentEnv/bootstrap.test.ts`.
 - **Receipts**: https://github.com/coreplanelabs/switchboard/issues/223
 
@@ -86,7 +86,7 @@ Operator flow:
 # 2) export a READ-ONLY, UAT-vault-scoped service-account token
 export OP_SERVICE_ACCOUNT_TOKEN=ops_...
 # 3) see the plan (nothing read/written)
-deploy/agent-env-bootstrap.sh --env uat --service <name>
+deploy/agent-env-bootstrap.sh --env uat --service <name>          # = npx tsx src/cli.ts env bootstrap --env uat --service <name>
 # 4) materialize into the agent's env
 deploy/agent-env-bootstrap.sh --env uat --service <name> --apply
 # 5) the toolchain sources it
@@ -120,6 +120,6 @@ The decision (mechanism, where the service name comes from, whether the resident
 | Apply fails closed when `OP_SERVICE_ACCOUNT_TOKEN` is unset — before any resolve or write | `[unit]` `::runBootstrap — apply::fails closed when OP_SERVICE_ACCOUNT_TOKEN is unset — before any resolve or write` |
 | Apply refuses a non-uat env before resolving or writing | `[unit]` `::runBootstrap — apply::refuses apply for a non-uat env before resolving or writing` |
 | Integration hook returns the resolved UAT env map; enforces allowlist + fail-closed token | `[unit]` `::buildAgentEnv — integration hook::returns the resolved downstream UAT env map for injection into the sandbox env`, `::enforces the UAT-only allowlist`, `::fails closed with no service-account token` |
-| CLI arg parsing: `--env`/`--service` required, dry-run default, `--apply`/`--out`/`--manifest`, unknown args rejected | `[unit]` `::parseArgs::parses --env, --service and defaults to dry-run`, `::--apply sets the apply flag; --out and --manifest override paths`, `::requires --env and --service`, `::rejects unknown args` |
+| `env bootstrap`: `--env`/`--service` required, dry-run default, `--apply`/`--out`/`--manifest` reach the host half (manifest default), unknown options are usage errors; the output is plan lines + names/refs and never a value; anything the host half throws is `unavailable`; CLI-only | `[unit]` `src/core/commands/env.test.ts::*` |
 | CLI end-to-end (dry-run prints plan; prod refused; apply with a real read-only UAT token writes the 600 file the toolchain sources) | `[gap]` ([#47](https://github.com/coreplanelabs/switchboard/issues/47)) a full live apply needs the operator's read-only, UAT-vault-scoped service account + real refs (human-gated: an org-admin creates the account per *Setup* above; then one dry-run + apply round). |
 | Integration into the deployed resident/executor | `[gap]` ([#47](https://github.com/coreplanelabs/switchboard/issues/47)) intentionally not wired in v1; the owner's integration decision (see above). |

@@ -7,7 +7,7 @@ import type { RunEvent } from "./runEvents.js";
 // observe→diagnose half of the self-improvement loop; proposing fix PRs from a
 // diagnosis is a later piece and deliberately NOT here. No clock, no I/O: the
 // same events always yield the same diagnosis, so it runs identically over a
-// live backlog (`/runs/:id/friction`), a saved JSONL stream (`frictionCli.ts`),
+// live backlog (`/runs/:id/friction`), a saved JSONL stream (`friction analyze`),
 // or a test fixture.
 
 export type FrictionCategory =

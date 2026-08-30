@@ -313,7 +313,9 @@ export class ConfigStore {
   }
 
   /** Resolves a command's `ChatGate` for one chat caller: `open` → everyone,
-   *  `operator` → `isOperator`, `repoManager` → `canManageRepos`. */
+   *  `operator` → `isOperator`, `repoManager` → `canManageRepos`, `channelConfig`
+   *  → `canEditChannelConfig` (open when unconfigured), `agentRun` →
+   *  `canRunAgent(userId, "coding")`. */
   chatGateFor(userId: string): (gate: ChatGate) => boolean {
     return (gate) => {
       switch (gate) {
@@ -323,6 +325,10 @@ export class ConfigStore {
           return this.isOperator(userId);
         case "repoManager":
           return this.canManageRepos(userId);
+        case "channelConfig":
+          return this.canEditChannelConfig(userId);
+        case "agentRun":
+          return this.canRunAgent(userId, "coding");
       }
     };
   }
@@ -379,31 +385,24 @@ export class ConfigStore {
     this.save();
   }
 
-  describe(channelId: string, userId: string): string {
+  /** What `config show` reports for one user in one channel — structured; the
+   *  text surfaces render it with `formatConfigDescription`. */
+  describeConfig(channelId: string, userId: string): ConfigDescription {
     const resolved = this.resolve({ channelId, userId, request: {} });
-    const effective = `agent \`${resolved.agentName}\`, model \`${resolved.modelRef}\`${resolved.effort ? `, effort \`${resolved.effort}\`` : ""}`;
-    const defaultEfforts = this.config.defaults.efforts;
-    const defaults =
-      `agent \`${this.config.defaults.agent}\`, models ${fmtModels(this.config.defaults.models)}` +
-      (defaultEfforts && Object.keys(defaultEfforts).length > 0 ? `, efforts ${fmtModels(defaultEfforts)}` : "");
-    const lines = [
-      `*Effective for you in this channel:* ${effective}`,
-      `*Defaults:* ${defaults}`,
-      `*Channel scope:* ${fmtScope(this.channelScope(channelId))}`,
-      `*Your scope:* ${fmtScope(this.userScope(userId))}`,
-    ];
-    const channelInstructions = this.channelScope(channelId).instructions?.trim();
-    if (channelInstructions) lines.push(`*Channel instructions:* ${channelInstructions}`);
-    const userInstructions = this.userScope(userId).instructions?.trim();
-    if (userInstructions) lines.push(`*Your instructions:* ${userInstructions}`);
-    const denied = this.restrictedAgentsFor(userId);
-    if (denied.length > 0) {
-      lines.push(`*Not available to you:* ${denied.map((a) => `\`${a}\``).join(", ")} (ask ${this.adminsHint()})`);
-    }
-    if (!this.canEditChannelConfig(userId)) {
-      lines.push(`*Note:* channel config changes are restricted (ask ${this.adminsHint()})`);
-    }
-    return lines.join("\n");
+    return {
+      effective: { agent: resolved.agentName, model: resolved.modelRef, ...(resolved.effort ? { effort: resolved.effort } : {}) },
+      defaults: { agent: this.config.defaults.agent, models: this.config.defaults.models, ...(this.config.defaults.efforts ? { efforts: this.config.defaults.efforts } : {}) },
+      channel: this.channelScope(channelId),
+      user: this.userScope(userId),
+      restrictedAgents: this.restrictedAgentsFor(userId),
+      channelConfigRestricted: !this.canEditChannelConfig(userId),
+      adminsHint: this.adminsHint(),
+    };
+  }
+
+  /** `config show` as text. */
+  describe(channelId: string, userId: string): string {
+    return formatConfigDescription(this.describeConfig(channelId, userId));
   }
 
   private save(): void {
@@ -430,6 +429,32 @@ function mergeScope(current: Scope | undefined, patch: Scope): Scope {
   const merged: Record<string, unknown> = { ...current, ...patch };
   for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key];
   return merged as Scope;
+}
+
+export interface ConfigDescription {
+  effective: { agent: string; model: string; effort?: Effort };
+  defaults: { agent: string; models: Record<string, string>; efforts?: Record<string, Effort> };
+  channel: Scope;
+  user: Scope;
+  restrictedAgents: string[];
+  channelConfigRestricted: boolean;
+  adminsHint: string;
+}
+
+/** The `config show` text (chat + CLI) for a `ConfigDescription`. */
+export function formatConfigDescription(d: ConfigDescription): string {
+  const effective = `agent \`${d.effective.agent}\`, model \`${d.effective.model}\`${d.effective.effort ? `, effort \`${d.effective.effort}\`` : ""}`;
+  const defaults =
+    `agent \`${d.defaults.agent}\`, models ${fmtModels(d.defaults.models)}` +
+    (d.defaults.efforts && Object.keys(d.defaults.efforts).length > 0 ? `, efforts ${fmtModels(d.defaults.efforts)}` : "");
+  const lines = [`*Effective for you in this channel:* ${effective}`, `*Defaults:* ${defaults}`, `*Channel scope:* ${fmtScope(d.channel)}`, `*Your scope:* ${fmtScope(d.user)}`];
+  const channelInstructions = d.channel.instructions?.trim();
+  if (channelInstructions) lines.push(`*Channel instructions:* ${channelInstructions}`);
+  const userInstructions = d.user.instructions?.trim();
+  if (userInstructions) lines.push(`*Your instructions:* ${userInstructions}`);
+  if (d.restrictedAgents.length > 0) lines.push(`*Not available to you:* ${d.restrictedAgents.map((a) => `\`${a}\``).join(", ")} (ask ${d.adminsHint})`);
+  if (d.channelConfigRestricted) lines.push(`*Note:* channel config changes are restricted (ask ${d.adminsHint})`);
+  return lines.join("\n");
 }
 
 function fmtScope(s: Scope): string {

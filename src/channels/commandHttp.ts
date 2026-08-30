@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { COMMAND_ID, CommandRegistry, ERROR_STATUS, type Caller, type CommandDef, type CommandInvoker, type InvokeErrorCode } from "../core/commandRegistry.js";
+import { namedToInput } from "../core/commandSurface.js";
 import { isServiceToken, type AccessIdentity } from "./accessAuth.js";
 import { MAX_BODY_BYTES, readBody } from "./http.js";
 
@@ -7,7 +8,9 @@ import { MAX_BODY_BYTES, readBody } from "./http.js";
 // KTD15): `/api/<group>.<verb>` for every registered command, with NO
 // per-command code. Its only logic is transport: resolve the Caller from the
 // Access identity the gate in index.ts already verified, enforce write safety,
-// pass the raw input to `invoke`, and write the JSON it returns.
+// map the by-name query/body onto the definition's `{ args, options }`
+// (`namedToInput` — kebab-case query keys, camelCase JSON keys), pass it to
+// `invoke`, and write the JSON it returns.
 //
 // KTD13 — ONE route predicate. `isCommandPath` is what index.ts gates on, and
 // the handler claims ALL of `/api/*`, answering its own 404 so no `/api` spelling
@@ -247,9 +250,15 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
       return;
     }
 
-    let rawInput: unknown;
+    // Arguments and options are addressed BY NAME in one flat object (KTD21):
+    // a GET query string in kebab-case (`?id=…&after-seq=3`, coerced by the
+    // schemas), a POST body in camelCase JSON (`{"id":…,"afterSeq":3}`). The
+    // split into positional `args` and `options` is the definition's, not ours.
+    let named: Record<string, unknown>;
+    let keys: "kebab" | "camel";
     if (method === "GET") {
-      rawInput = Object.fromEntries(url.searchParams);
+      named = Object.fromEntries(url.searchParams);
+      keys = "kebab";
     } else {
       const read = await readBody(req, maxBytes);
       if (!read.ok) {
@@ -257,19 +266,27 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
         req.destroy();
         return;
       }
+      let body: unknown;
       try {
-        rawInput = read.body.trim() === "" ? {} : JSON.parse(read.body);
+        body = read.body.trim() === "" ? {} : JSON.parse(read.body);
       } catch {
         refuse(res, ERROR_STATUS.invalid_input, "invalid_input", "body must be a JSON object");
         return;
       }
-      if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) {
+      if (typeof body !== "object" || body === null || Array.isArray(body)) {
         refuse(res, ERROR_STATUS.invalid_input, "invalid_input", "body must be a JSON object");
         return;
       }
+      named = body as Record<string, unknown>;
+      keys = "camel";
+    }
+    const input = namedToInput(cmd, named, keys);
+    if ("error" in input) {
+      refuse(res, ERROR_STATUS.invalid_input, "invalid_input", input.error);
+      return;
     }
 
-    const result = await commands.invoke(cmd.id, rawInput, caller);
+    const result = await commands.invoke(cmd.id, input, caller);
     if (!result.ok) {
       refuse(res, result.status, result.error, result.message);
       return;
