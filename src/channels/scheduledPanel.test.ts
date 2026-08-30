@@ -96,11 +96,11 @@ describe("renderScheduledPanel", () => {
     expect(html).toContain("<code>resident</code>");
     expect(html).toContain("<b>2026-08-31 14:00 UTC</b>");
     expect(html).toContain("(in 2d 1h)");
-    expect(html).toContain('<span class="outcome ok">completed</span>');
+    expect(html).toContain('<span class="outcome ok">succeeded</span>');
     expect(html).toContain('<a href="/runs/run-abc12345">run run-abc1</a>');
     // Line 2 is ONE line: outcome · how long ago (exact UTC on hover) · run · the reply's facts (emoji dropped)
     expect(html).toContain(
-      '<div class="fire"><span class="lbl">last</span> <span class="outcome ok">completed</span><span class="sep">·</span><span class="when" title="2026-08-24 14:00 UTC">4d 22h ago</span><span class="sep">·</span><a href="/runs/run-abc12345">run run-abc1</a><span class="sep">·</span><span class="detail" title="🔍 109 runs analyzed — filed 2">109 runs analyzed — filed 2</span></div>',
+      '<div class="fire"><span class="lbl">last</span> <span class="outcome ok">succeeded</span><span class="sep">·</span><span class="when" title="2026-08-24 14:00 UTC">4d 22h ago</span><span class="sep">·</span><a href="/runs/run-abc12345">run run-abc1</a><span class="sep">·</span><span class="detail" title="🔍 109 runs analyzed — filed 2">109 runs analyzed — filed 2</span></div>',
     );
     expect(html).not.toContain("<table");
     expect(html).not.toContain("Firing history unavailable");
