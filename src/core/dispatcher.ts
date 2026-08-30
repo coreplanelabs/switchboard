@@ -1375,7 +1375,7 @@ function helpText(): string {
     "`friction propose [--dry-run] [--top <n>] [--min-runs <n>]` — file the top patterns as labeled, deduped GitHub issues for a human to triage",
     "",
     "*Memory* (what I've learned across threads; your own records are visible only to you):",
-    "`memory list [me|org]` — your records and the shared org records, with ids",
+    "`memory list [me|org] [--limit <n>] [<words>]` — your records and the shared org records, with ids; words filter, `--limit` up to 50",
     "`memory forget <id>` — drop one record (yours freely; shared org records are admin-gated)",
   ].join("\n");
 }

@@ -72,7 +72,10 @@ export interface MemoryStore {
   write(scopeKey: string, records: MemoryCandidate[]): Promise<void>;
   /** Human view (#278): a scope's ACTIVE records, newest first, at most
    *  `limit`. Unlike `retrieve` this never bumps usage. */
-  list(scopeKey: string, limit: number): Promise<MemoryRecord[]>;
+  /** `query` (#293): when given, only records that a query token hits
+   *  (whole-token, text or keywords) are listed — the filter narrows, it
+   *  never ranks or bumps usage. */
+  list(scopeKey: string, limit: number, query?: string): Promise<MemoryRecord[]>;
   /** Human control (#278): soft-delete one ACTIVE record of this scope
    *  (`status: "forgotten"`, row kept for provenance). Resolves true when a
    *  record was forgotten, false when the id names nothing active in this

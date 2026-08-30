@@ -43,7 +43,7 @@ function rec(over: Partial<MemoryRecord>): MemoryRecord {
 // Built fresh per store: `forget` mutates records in place, so sharing them
 // across tests would leak one test's forget into the next.
 const ORG = () => rec({});
-const MINE = () => rec({ id: "mem:user:slack:U1:0", scopeKey: "user:slack:U1", text: "this user likes TL;DR lines", kind: "fact" });
+const MINE = () => rec({ id: "mem:user:slack:U1:0", scopeKey: "user:slack:U1", text: "this user likes TL;DR lines", keywords: ["tldr"], kind: "fact" });
 const THEIRS = () => rec({ id: "mem:user:slack:U2:0", scopeKey: "user:slack:U2", text: "that user likes bullet points" });
 
 const msg = (text: string, userId = "slack:U1") => ({ channelId: "slack:C1", userId, threadKey: "slack:C1:1.0", text });
@@ -64,9 +64,32 @@ describe("parseMemoryCommand", () => {
     expect(parseMemoryCommand("remember this for me")).toBeNull();
   });
 
+  // #293 — `--limit <n>` and a word filter, in any order after the optional scope word.
+  it("parses --limit and free words as a text filter (#293)", () => {
+    expect(parseMemoryCommand("memory list --limit 5")).toEqual({ verb: "list", scope: "all", limit: 5 });
+    expect(parseMemoryCommand("memory list org --limit 50 deploy command")).toEqual({
+      verb: "list",
+      scope: "org",
+      limit: 50,
+      query: "deploy command",
+    });
+    expect(parseMemoryCommand("memory list deploy")).toEqual({ verb: "list", scope: "all", query: "deploy" });
+    expect(parseMemoryCommand("memory list me TL;DR preference --limit=3")).toEqual({
+      verb: "list",
+      scope: "me",
+      limit: 3,
+      query: "TL;DR preference",
+    });
+  });
+
+  it("refuses a bad --limit (#293)", () => {
+    for (const bad of ["memory list --limit 0", "memory list --limit 51", "memory list --limit x", "memory list --limit"]) {
+      expect(parseMemoryCommand(bad)).toEqual({ error: expect.stringContaining("--limit") });
+    }
+  });
+
   it("reports usage errors instead of guessing", () => {
     expect(parseMemoryCommand("memory forget")).toEqual({ error: expect.stringContaining("memory forget <id>") });
-    expect(parseMemoryCommand("memory list everything")).toEqual({ error: expect.stringContaining("me") });
     expect(parseMemoryCommand("memory purge")).toEqual({ error: expect.stringContaining("memory list") });
   });
 });
@@ -107,6 +130,26 @@ describe("handleMemoryCommand", () => {
     const reply = (await handleMemoryCommand(config(), msg("memory list me", ""), seeded()))!;
     expect(reply).toMatch(/no user identity/i);
     expect(reply).not.toContain("mem:");
+  });
+
+  it("`memory list <words>` filters each scope to matching records and passes --limit through; source renders as a code span (#293)", async () => {
+    const calls: Array<{ scopeKey: string; limit: number; query?: string }> = [];
+    const store = seeded();
+    const real = store.list.bind(store);
+    store.list = async (scopeKey, limit, query) => {
+      calls.push({ scopeKey, limit, ...(query !== undefined ? { query } : {}) });
+      return real(scopeKey, limit, query);
+    };
+    const reply = (await handleMemoryCommand(config(), msg("memory list --limit 7 deploy command"), store))!;
+    expect(calls).toEqual([
+      { scopeKey: "user:slack:U1", limit: 7, query: "deploy command" },
+      { scopeKey: "org:coreplanelabs", limit: 7, query: "deploy command" },
+    ]);
+    expect(reply).toContain("mem:org:coreplanelabs:0"); // matches "deploy command"
+    expect(reply).not.toContain("mem:user:slack:U1:0"); // "this user likes TL;DR lines" does not
+    expect(reply).toMatch(/matching `deploy command`/);
+    expect(reply).toContain("(source: `slack:C1:1.0`)");
+    expect(reply).not.toContain("_(source:");
   });
 
   it("a user can forget a record in their OWN scope", async () => {

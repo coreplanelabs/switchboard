@@ -212,10 +212,30 @@ export class MemoryDO extends DurableObject<Env> {
     return counts;
   }
 
-  /** Human view (#278): the scope's ACTIVE rows, newest first, no usage bump. */
-  async list(_scopeKey: string, limit: number): Promise<MemoryRecord[]> {
+  /** Human view (#278/#293): the scope's ACTIVE rows, newest first, no usage
+   *  bump. With `query`, only rows an FTS token hits (the same quoted-OR MATCH
+   *  as retrieve, so user text never reaches the FTS parser as syntax); a
+   *  query with no tokens lists nothing. */
+  async list(_scopeKey: string, limit: number, query?: string): Promise<MemoryRecord[]> {
+    if (query === undefined) {
+      return this.sql
+        .exec<Row>(`SELECT * FROM records WHERE status = 'active' ORDER BY seq DESC LIMIT ?`, limit)
+        .toArray()
+        .map(toRecord);
+    }
+    const tokens = [...new Set(tokenize(query))];
+    if (tokens.length === 0) return [];
+    const match = tokens.map((t) => `"${t}"`).join(" OR ");
     return this.sql
-      .exec<Row>(`SELECT * FROM records WHERE status = 'active' ORDER BY seq DESC LIMIT ?`, limit)
+      .exec<Row>(
+        `SELECT r.* FROM records r
+           JOIN records_fts f ON f.id = r.id
+          WHERE r.status = 'active' AND records_fts MATCH ?
+          ORDER BY r.seq DESC
+          LIMIT ?`,
+        match,
+        limit,
+      )
       .toArray()
       .map(toRecord);
   }
@@ -498,15 +518,22 @@ function parseLimit(v: unknown): Validated<number> {
   return { ok: true, value: v };
 }
 
-/** `POST /list {scopeKey, limit}` (#278). */
-function parseList(body: unknown): Validated<{ scopeKey: string; limit: number }> {
+/** `POST /list {scopeKey, limit, query?}` (#278, #293). */
+function parseList(body: unknown): Validated<{ scopeKey: string; limit: number; query?: string }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const b = body as Record<string, unknown>;
   const scope = parseScopeKey(b.scopeKey);
   if (!scope.ok) return scope;
   const limit = parseLimit(b.limit);
   if (!limit.ok) return limit;
-  return { ok: true, value: { scopeKey: scope.value, limit: limit.value } };
+  if (b.query !== undefined) {
+    if (typeof b.query !== "string") return invalid("query must be a string");
+    if (b.query.length > MAX_QUERY_CHARS) return invalid(`query must be at most ${MAX_QUERY_CHARS} characters`);
+  }
+  return {
+    ok: true,
+    value: { scopeKey: scope.value, limit: limit.value, ...(typeof b.query === "string" ? { query: b.query } : {}) },
+  };
 }
 
 /** `POST /forget {scopeKey, id}` (#278): the id is an opaque key, same caps as scopeKey. */
@@ -674,8 +701,8 @@ export default {
     if (url.pathname === "/list") {
       const parsed = parseList(body);
       if (!parsed.ok) return json({ error: parsed.error }, 400);
-      const { scopeKey, limit } = parsed.value;
-      const records = await env.MEMORY.get(env.MEMORY.idFromName(scopeKey)).list(scopeKey, limit);
+      const { scopeKey, limit, query } = parsed.value;
+      const records = await env.MEMORY.get(env.MEMORY.idFromName(scopeKey)).list(scopeKey, limit, query);
       console.log(`[list] ${scopeKey} -> ${records.length} records`);
       return json({ records });
     }

@@ -239,6 +239,27 @@ describe("list / forget (#278 human controls)", () => {
     expect((await post("/list", { scopeKey: scope(), limit: 10 })).data).toEqual({ records: [] });
   });
 
+  it("/list with `query` prefilters by whole token (text or keywords), newest first, limit after filter, no usage bump; forgotten rows excluded (#293)", async () => {
+    const s = scope();
+    await post("/write", {
+      scopeKey: s,
+      records: [cand("deploy uses npm run deploy", { keywords: ["deploy", "npm"] }), cand("vacation policy is 20 days"), cand("redeploy after a merge", { keywords: ["release"] })],
+    });
+    const hits = (await post("/list", { scopeKey: s, limit: 10, query: "deploy release" })).data.records as Array<Record<string, unknown>>;
+    expect(hits.map((r) => r.text)).toEqual(["redeploy after a merge", "deploy uses npm run deploy"]);
+    expect(hits.every((r) => r.useCount === 0 && r.lastUsedAt === undefined)).toBe(true);
+    expect(((await post("/list", { scopeKey: s, limit: 1, query: "deploy release" })).data.records as unknown[]).length).toBe(1);
+    expect((await post("/list", { scopeKey: s, limit: 10, query: "deplo" })).data).toEqual({ records: [] }); // substring ≠ token
+    expect((await post("/list", { scopeKey: s, limit: 10, query: "!!!" })).data).toEqual({ records: [] }); // no tokens
+    expect((await post("/list", { scopeKey: s, limit: 10, query: 'deploy" OR 1=1 --' })).status).toBe(200); // FTS syntax inert
+    await post("/forget", { scopeKey: s, id: `mem:${s}:2` });
+    expect(((await post("/list", { scopeKey: s, limit: 10, query: "deploy release" })).data.records as Array<Record<string, unknown>>).map((r) => r.text)).toEqual([
+      "deploy uses npm run deploy",
+    ]);
+    expect((await post("/list", { scopeKey: s, limit: 10, query: 5 })).status).toBe(400);
+    expect((await post("/list", { scopeKey: s, limit: 10, query: "x".repeat(4001) })).status).toBe(400);
+  });
+
   it("/forget soft-deletes one active record: hidden from /list, /retrieve, and dedup; row kept; second call → false", async () => {
     const s = scope();
     await post("/write", { scopeKey: s, records: [cand("keep this fact"), cand("drop this fact")] });
