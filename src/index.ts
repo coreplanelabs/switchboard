@@ -4,7 +4,10 @@ import { ProviderRegistry } from "./providers/registry.js";
 import { createSlackApp } from "./channels/slack.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
+import { join } from "node:path";
 import { FAVICON_ICO_SVG, createLiveViewHandler } from "./channels/liveView.js";
+import { loadWebAssets } from "./channels/webAssets.js";
+import { makeShellRenderer } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
 import { AnthropicCostReportSource, CloudflareGraphqlUsageSource, NullLlmCostSource, createCostsService, parseCostsConfig } from "./core/costs.js";
@@ -177,6 +180,13 @@ async function main() {
     // fails closed.
     const cronArmed = Object.values(auth.tokens).some((id) => id.subject === "cron");
     const schedulesState = `${SCHEDULES.length} schedule(s) on /runs (${scheduleStore ? `firings from ${config.config.schedules?.worker?.baseUrl}` : "no firing store"}; cron identity ${cronArmed ? "armed" : "NOT in SWITCHBOARD_INGRESS_TOKENS — scheduled runs fail closed"})`;
+    // The web app (web/): every HTML page is the shared shell + a JSON seed,
+    // painted client-side by the Vue bundle served as hashed assets under
+    // /assets/*. The build is loaded once at startup — a missing build is a
+    // boot error (the Docker image builds it; local dev runs `npm run build`
+    // in web/ once, or points SWITCHBOARD_WEB_DIST elsewhere).
+    const webAssets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"));
+    const shell = makeShellRenderer(webAssets.entry);
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin
     // /residents route live on every request with the same bearer the chat
@@ -187,6 +197,7 @@ async function main() {
     const residentAdminToken = residentCfg?.baseUrl ? process.env[residentCfg.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN"] : undefined;
     const residentsView = createResidentsViewHandler(
       residentCfg?.baseUrl && residentAdminToken ? makeResidentAdminClient(residentCfg.baseUrl, residentAdminToken) : undefined,
+      shell,
     );
     const residentsState = residentCfg?.baseUrl && residentAdminToken
       ? `GET /residents (dash → ${residentCfg.baseUrl})`
@@ -207,7 +218,7 @@ async function main() {
             anthropicAdminKey ? new AnthropicCostReportSource({ adminKey: anthropicAdminKey }) : new NullLlmCostSource(),
           )
         : undefined;
-    const costsView = createCostsViewHandler(costsService);
+    const costsView = createCostsViewHandler(costsService, shell);
     const costsState = costsService
       ? `GET /costs (${Object.keys(costsCfg!.groups).join(",")}; LLM ${anthropicAdminKey ? "on" : "off"})`
       : costsCfg
@@ -245,6 +256,7 @@ async function main() {
     const publicBaseUrl = process.env.PUBLIC_BASE_URL;
     const devBypassActive = accessConfig === null && accessDevBypass;
     const liveView = createLiveViewHandler({
+      shell,
       service: runsService,
       index: defaultRunRegistry,
       retention: runStore && runHistoryCfg ? { retentionDays: retentionPolicyOf(runHistoryCfg).retentionDays } : null,
@@ -288,6 +300,11 @@ async function main() {
         mcp(req, res);
         return;
       }
+      // The web app's hashed static assets (js/css). Code only — no data, no
+      // tokens — and referenced by pages a capability-token viewer can load,
+      // so served without the in-process Access gate (the edge policy still
+      // applies to whatever it covers). Immutable-cacheable by content hash.
+      if (webAssets.serve(req, res)) return;
       // /runs* + /residents* + /costs* SSO gate: identity FIRST (fail-closed), before the view
       // dispatch. The gate is async (it may fetch the JWKS), so we resolve the
       // promise here; a rejection is a 403, never a 500 that serves the page.
