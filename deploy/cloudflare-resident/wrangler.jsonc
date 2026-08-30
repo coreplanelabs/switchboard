@@ -14,6 +14,12 @@
   "workers_dev": false,
   "routes": [{ "pattern": "switchboard-resident.coreplanelabs.dev", "custom_domain": true }],
   "observability": { "enabled": true },
+  "vars": {
+    // The state Worker (deploy/cloudflare-memory/): where scheduled() records
+    // each resident-watchdog firing (#244/#307). Public URL — a var, not a
+    // secret; the bearer is the MEMORY_TOKEN secret (deploy/secrets.manifest.json).
+    "STATE_WORKER_URL": "https://switchboard-memory.coreplanelabs.dev"
+  },
   "containers": [
     {
       "class_name": "ResidentDO",
