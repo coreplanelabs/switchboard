@@ -22,7 +22,8 @@ import { defaultRunRegistry } from "./core/runRegistry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { buildFrictionLedger, WorkerFrictionLedger } from "./core/frictionLedgerWorker.js";
-import type { CoreDeps } from "./core/dispatcher.js";
+import { healthPayload } from "./channels/health.js";
+import { activeRunCount, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
@@ -65,6 +66,12 @@ async function main() {
   const app = createSlackApp(deps);
 
   await app.start();
+
+  // Work in flight = agent runs + the background memory reflections they spawn.
+  // Read by the graceful drain below and reported on /healthz for the deploy
+  // preflight (deploy/cloudflare/preflight.mjs).
+  const inFlight = () => activeRunCount() + pendingReflectionCount();
+  let draining = false;
 
   // Optional HTTP server. Slack traffic arrives over the outbound Socket Mode
   // websocket, so this port serves (a) a health probe for container platforms
@@ -196,16 +203,22 @@ async function main() {
       // is public — but it leaks nothing (just "go to /runs"), and /runs itself
       // stays behind Cloudflare Access. This fixes the bare-domain landing (was
       // a plain "ok"). It is an EXACT-path match, so /healthz and everything
-      // else still fall through to the health "ok" below — the deploy wake and
-      // cron keep-alive hit /healthz, so health probing is unaffected.
+      // else still fall through to the probes below.
       if (path === "/") {
         res.writeHead(302, { location: "/runs" });
         res.end();
         return;
       }
-      // Non-/runs paths (health probe, unknown paths). The live-view handler
-      // only ever owns /runs*, which the gate above already handled, so there is
-      // nothing else for it to serve here.
+      // Health probe: liveness for the Worker's keep-alive cron and the deploy
+      // `wake` (status only), plus the in-flight/draining facts the bot deploy
+      // preflight refuses on (features/slack-channel.md item 8).
+      if (path === "/healthz") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining })));
+        return;
+      }
+      // Unknown paths. The live-view handler only ever owns /runs*, which the
+      // gate above already handled, so there is nothing else for it to serve.
       res.writeHead(200, { "content-type": "text/plain" });
       res.end("ok");
     }).listen(Number(process.env.PORT), () =>
@@ -223,16 +236,18 @@ async function main() {
   // Graceful drain: close the Slack socket (no new events), let in-flight
   // agent runs — and the background memory reflections they spawn — finish (up
   // to 15 min), then exit. A plain kill mid-run loses the run and leaves a
-  // frozen status card in the thread.
-  const { activeRunCount } = await import("./core/dispatcher.js");
-  const inFlight = () => activeRunCount() + pendingReflectionCount();
-  let draining = false;
+  // frozen status card in the thread. Cloudflare's rollout sends SIGTERM and
+  // waits up to 15 min before SIGKILL — but a SECOND deploy on top of a
+  // draining instance replaces it at once (live 2026-08-29 23:51Z, a review
+  // killed at 153 s). The deploy preflight refuses while `draining` is true;
+  // the live cards say what is happening meanwhile.
   const drain = async (signal: string) => {
     if (draining) return;
     draining = true;
     console.log(
       `[drain] ${signal}: closing Slack socket, ${activeRunCount()} run(s) + ${pendingReflectionCount()} reflection(s) in flight`,
     );
+    setShutdownNotice("⏸ deploy in progress — finishing this run before the bot restarts");
     await app.stop().catch(() => {});
     const deadline = Date.now() + 15 * 60_000;
     while (inFlight() > 0 && Date.now() < deadline) {

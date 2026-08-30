@@ -238,10 +238,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // leaving a spinner behind.
     let label = `*${agent.name}* on \`${resolved.modelRef}\``;
     const startedAt = Date.now();
-    const spinner = ["◐", "◓", "◑", "◒"];
     let frame = 0;
     const title = (icon?: string) =>
-      `${icon ?? spinner[frame++ % spinner.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
+      `${icon ?? SPINNER_GLYPHS[frame++ % SPINNER_GLYPHS.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
     const card = await io.status({ title: `👀 ${label} · preparing workspace…` });
     setupCard = card;
 
@@ -447,7 +446,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       const quiet = Date.now() - lastActivityAt;
       const thinking = quiet > 20_000 ? ` — thinking (${Math.round(quiet / 1000)}s since last tool)` : "";
       const detail = [liveLink, checklist, lastActivity].filter(Boolean).join("\n");
-      return { title: title() + thinking, detail: detail || undefined };
+      // The shutdown notice rides on the LIVE frame only: the closed card is
+      // built from title()/finalDetail() and never mentions the restart.
+      return { title: title() + thinking + (shutdownNotice ? ` · ${shutdownNotice}` : ""), detail: detail || undefined };
     };
     // The closed card keeps the run link (the run page outlives the run and
     // shows the final answer) and the agent's checklist; only the transient
@@ -983,6 +984,27 @@ export function composeRunLabel(input: RunLabelInput): string {
 /** Prefixes the core stamps on status text — adapters use this to filter their
  *  own status noise out of history. */
 export const STATUS_PREFIXES = ["⏳", "✅", "◐", "◓", "◑", "◒"];
+
+/** The live card's rotating glyph (one step per heartbeat/event frame). */
+const SPINNER_GLYPHS = ["◐", "◓", "◑", "◒"];
+
+/** Prefixes that mean "this card's run is still in flight": the spinner, and
+ *  the 👀 setup card posted before the run loop owns it. A card that still
+ *  starts with one of these after its process is gone is an orphan — the
+ *  Slack adapter's reconnect sweep closes it as interrupted (features/
+ *  slack-channel.md item 8). Kept next to the glyphs it derives from so the
+ *  two cannot drift apart. */
+export const LIVE_CARD_PREFIXES = [...SPINNER_GLYPHS, "👀"];
+
+/** Set by the process-wide drain (SIGTERM from a deploy rollout) and appended to
+ *  every live card's heartbeat frame, so a reader can tell "finishing this run
+ *  before the bot restarts" from a run that is merely slow. `undefined` clears
+ *  it (tests). A plain module-level value: the drain is process-wide by nature
+ *  and every in-flight run must show it, not only runs started after it. */
+let shutdownNotice: string | undefined;
+export function setShutdownNotice(notice: string | undefined): void {
+  shutdownNotice = notice;
+}
 
 function buildMessages(
   history: HistoryItem[],

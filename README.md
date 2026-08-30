@@ -213,7 +213,12 @@ cd ../cloudflare && npm install
 npm run secrets   # prompts through secrets.txt (Slack, Anthropic, SANDBOX_TOKEN,
                   # RESIDENT_OPERATOR_TOKEN, RESIDENT_ADMIN_TOKEN, MEMORY_TOKEN, GitHub App)
                   # + CF_ANALYTICS_TOKEN (costs dash) and optional ANTHROPIC_ADMIN_KEY (LLM spend)
-npm run deploy
+env -u CLOUDFLARE_API_TOKEN npm run deploy
+                  # preflight first: refuses while the bot has runs in flight, is still
+                  # draining from an earlier deploy, or the container app is mid-rollout
+                  # (a second rollout on a draining instance kills the run — #250).
+                  # No token needed (/healthz). SWITCHBOARD_DEPLOY_FORCE=1 bypasses.
+                  # Ends with a wake ping: /healthz 200
 npm run tail      # watch it connect: "switchboard running (providers: anthropic...)"
 ```
 

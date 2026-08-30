@@ -12,7 +12,7 @@ import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, StatusUpdate } from "./types.js";
-import { activeRunCount, attachmentSuffix, composeRunLabel, dispatch, turnContent, type CoreDeps } from "./dispatcher.js";
+import { activeRunCount, attachmentSuffix, composeRunLabel, dispatch, setShutdownNotice, turnContent, type CoreDeps } from "./dispatcher.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { MAX_STRUCTURE_RETRIES, STRUCTURING_SYSTEM } from "./structuredOutput.js";
 import { RunControl, RunRegistry } from "./runRegistry.js";
@@ -2679,5 +2679,54 @@ describe("custom instructions in the system prompt", () => {
     expect(deps.config.scopes("slack:CX", "slack:UX").user.instructions).toBe('"a" or "b"');
     await dispatch(deps, msg("config set me instructions \u201cSmart quoted.\u201d"), fakeIO().io);
     expect(deps.config.scopes("slack:CX", "slack:UX").user.instructions).toBe("Smart quoted.");
+  });
+});
+
+// Feature: features/slack-channel.md item 8 \u2014 a run that is still in flight when
+// the process is told to shut down (SIGTERM from a deploy rollout) says so on
+// its live card, so a reader can tell "finishing before a restart" from a run
+// that is simply slow. The closed card never carries the notice.
+describe("shutdown notice on the live status card", () => {
+  afterEach(() => {
+    setShutdownNotice(undefined);
+    vi.useRealTimers();
+  });
+
+  it("the heartbeat frame carries the notice once set; the closed card does not", async () => {
+    vi.useFakeTimers();
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        // Mid-run: the drain announces the restart, then a heartbeat tick passes.
+        setShutdownNotice("\u23f8 deploy in progress \u2014 finishing this run before the bot restarts");
+        await vi.advanceTimersByTimeAsync(5_000);
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    const live = statuses.filter((s) => s.title.includes("deploy in progress"));
+    expect(live.length).toBeGreaterThan(0);
+    expect(live[0].title).toMatch(/^[\u25d0\u25d3\u25d1\u25d2] .* \u00b7 \u23f8 deploy in progress/u);
+    const closed = statuses.at(-1)!;
+    expect(closed.title).toMatch(/^\u2705/);
+    expect(closed.title).not.toContain("deploy in progress");
+  });
+
+  it("no notice set (the normal case): heartbeat frames are unchanged", async () => {
+    vi.useFakeTimers();
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        await vi.advanceTimersByTimeAsync(5_000);
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    expect(statuses.some((s) => /^[\u25d0\u25d3\u25d1\u25d2] /u.test(s.title))).toBe(true);
+    expect(statuses.every((s) => !s.title.includes("deploy in progress"))).toBe(true);
   });
 });
