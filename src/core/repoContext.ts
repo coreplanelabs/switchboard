@@ -322,6 +322,14 @@ async function openPrHeadSha(
   return { reason: "unreachable" };
 }
 
+/** The PR's head SHA as GitHub reports it NOW (40-hex), or undefined when the
+ *  fetch fails or the SHA is malformed. Never throws — the review post-step's
+ *  head-moved note (agent-review.md item 10) degrades to silence on unknown. */
+export async function currentPrHeadSha(pr: { repo: string; number: number }): Promise<string | undefined> {
+  const head = await prHead(pr).catch(() => undefined);
+  return head?.sha;
+}
+
 /** GET /repos/{owner}/{repo}/pulls/{n} → { head.ref, head.sha, state }. Cross-fork
  *  head REFS are NOT returned (they don't resolve in the resident's mirror);
  *  the SHA is, since it only pins the review post. Never throws to the
