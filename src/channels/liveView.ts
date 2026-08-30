@@ -1,6 +1,6 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { NAV_CSS, renderNav } from "./nav.js";
-import type { RunEvent } from "../core/runEvents.js";
+import { serializedOnce, type RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { IndexEvent, RunRegistry, RunSummary, Unsubscribe } from "../core/runRegistry.js";
 import type { StopMode } from "../core/runEvents.js";
@@ -108,6 +108,17 @@ const SSE_HEADERS: Record<string, string> = {
 export const MARKDOWN_RENDERER_SCRIPT = `var __name = function (fn) { return fn; };\n${String(renderMarkdownInto)}`;
 
 /**
+ * The seeded events as a JSON literal safe inside an inline `<script>`: every
+ * `<`, `>` and `&` is `\uXXXX`-escaped (so no `</script>` — or any tag — can
+ * appear, whatever the event text holds), as are U+2028/U+2029 (line
+ * terminators JSON allows but JavaScript string literals do not). Exported for
+ * the tests that pin the contract.
+ */
+export function seedEventsJson(events: readonly RunEvent[]): string {
+  return JSON.stringify(events).replace(/[<>&\u2028\u2029]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/**
  * The run timeline as browser source, inlined like the markdown renderer (same
  * `__name` shim rationale — see MARKDOWN_RENDERER_SCRIPT).
  */
@@ -131,13 +142,26 @@ export const LOCAL_ISO_SCRIPT = String(formatLocalIso);
  * agent is thinking, removed at `end`; and the **Answer** block under the log.
  * Every row leads with a gray local-zone ISO timestamp (e.g. `[2026-08-29T17:47:44-07:00]`) from the event's `at`.
  *
+ * `context` events — the thread turns the model was given — render like the
+ * request, inside a collapsed **Context** block between the Request block and
+ * the log.
+ *
+ * `events` seeds the page for a run that has no stream to replay from — the
+ * history page. The seed rides as a JSON island (`seedEventsJson`) and is fed
+ * through the SAME `handle(e)` the EventSource frames go through (one
+ * `timeline.push` → `apply` fold), so a seeded page and a live page render
+ * identically by construction. The LIVE page passes none: its SSE replay paints
+ * the backlog, so seeding would duplicate rows.
+ *
  * All inline (CSP-safe): DOM is built with createElement/textContent only, the
  * markdown surfaces go through `renderMarkdownInto` (markdownLite.ts), and
- * nothing on this page ever assigns raw markup. `id`/`token` are JSON-encoded
- * into the script — the only dynamic values; JSON.stringify neutralizes any
- * `</script>`/quote breakout.
+ * nothing on this page ever assigns raw markup. `id`/`token` are percent-encoded
+ * before they are JSON-quoted into the script, so they carry no `<`, `"` or `'`
+ * that could break out of the string or the script element. Event text is the
+ * one other thing inside the script, and it is only ever there as the
+ * `\u003c`-escaped JSON seed.
  */
-export function renderRunPage(id: string, token: string): string {
+export function renderRunPage(id: string, token: string, events: readonly RunEvent[] = []): string {
   const eventsPath = `/runs/${encodeURIComponent(id)}/events?t=${encodeURIComponent(token)}`;
   // Stop control (#101): same token, POST-only; `&mode=` is appended client-side.
   const stopPath = `/runs/${encodeURIComponent(id)}/stop?t=${encodeURIComponent(token)}`;
@@ -182,6 +206,16 @@ export function renderRunPage(id: string, token: string): string {
   .source a { color: var(--blue); text-decoration: none; }
   .source a:hover { text-decoration: underline; }
   #request { margin-bottom: 1.25rem; }
+  /* Context: the thread turns the model was given, collapsed by default (secondary to the request). */
+  details#context { margin-bottom: 1.25rem; }
+  details#context > summary { cursor: pointer; font-size: .75rem; color: var(--muted); font-weight: 600;
+    text-transform: uppercase; letter-spacing: .04em; list-style: none; }
+  details#context > summary::-webkit-details-marker { display: none; }
+  details#context > summary::before { content: "\\25B8 "; }
+  details#context[open] > summary::before { content: "\\25BE "; }
+  details#context > summary > .count { font-weight: 400; text-transform: none; letter-spacing: 0; }
+  details#context .turn { display: flex; gap: .75rem; align-items: baseline; padding: .4rem 0; border-top: 1px solid var(--line); opacity: .85; }
+  details#context .turn:first-of-type { border-top: 0; }
   #answer { margin-top: 1.5rem; border-color: #2ea04366; }
   #answer > h2 { color: var(--green); }
   /* The timeline: steps, each = optional narration + its calls. One left edge
@@ -287,6 +321,7 @@ export function renderRunPage(id: string, token: string): string {
   ${renderNav("runs")}
 </header>
 <section class="block" id="request" hidden><h2><span>Request</span><span class="ts" id="requestts"></span><span class="source" id="source"></span></h2><div class="md" id="requesttext"></div></section>
+<details class="block" id="context" hidden><summary>Context <span class="count" id="contextcount"></span></summary><div id="contextturns"></div></details>
 <ol id="log"><li class="empty" id="placeholder">Waiting for activity…</li></ol>
 <section class="block" id="answer" hidden><h2><span>Answer</span><span class="ts" id="answerts"></span></h2><div class="md" id="answertext"></div></section>
 <script>
@@ -300,6 +335,10 @@ ${LOCAL_ISO_SCRIPT}
   var requestBox = document.getElementById("request");
   var requestText = document.getElementById("requesttext");
   var requestTs = document.getElementById("requestts");
+  var contextBox = document.getElementById("context");
+  var contextTurns = document.getElementById("contextturns");
+  var contextCount = document.getElementById("contextcount");
+  var contextN = 0;
   var answerBox = document.getElementById("answer");
   var answerText = document.getElementById("answertext");
   var answerTs = document.getElementById("answerts");
@@ -387,6 +426,19 @@ ${LOCAL_ISO_SCRIPT}
     var p = timeline.pending();
     tailText.textContent = p ? "running \\u00b7 " + (p.headline.length > 80 ? p.headline.slice(0, 80) + "\\u2026" : p.headline) : "thinking\\u2026";
     tail.hidden = false;
+  }
+  // A thread turn the model was given: rendered like the request (markdown via
+  // the same guard), inside the collapsed Context block. Never in the log.
+  function contextTurn(change) {
+    var turn = el("div", "turn");
+    turn.appendChild(stamp(change.at));
+    var box = el("div", "md");
+    turn.appendChild(box);
+    md(box, change.text);
+    contextTurns.appendChild(turn);
+    contextN++;
+    contextCount.textContent = "(" + contextN + " turn" + (contextN === 1 ? "" : "s") + ")";
+    contextBox.hidden = false;
   }
 
   // --- steps ---------------------------------------------------------------
@@ -486,7 +538,7 @@ ${LOCAL_ISO_SCRIPT}
   function addNote(change) {
     var li = el("li", "note");
     li.appendChild(stamp(change.at));
-    li.appendChild(el("span", "", "\\u23f1 " + change.text));
+    li.appendChild(el("span", "", (change.kind === "replay_note" ? "\\u2026 " : "\\u23f1 ") + change.text));
     log.insertBefore(li, tail);
     return li;
   }
@@ -534,7 +586,9 @@ ${LOCAL_ISO_SCRIPT}
       follow(settleCall(change.step, change.call), wasAtTail);
     } else if (change.kind === "turn") {
       follow(addTurn(change), wasAtTail);
-    } else if (change.kind === "note") {
+    } else if (change.kind === "context") {
+      contextTurn(change);
+    } else if (change.kind === "note" || change.kind === "replay_note") {
       follow(addNote(change), wasAtTail);
       if ((change.noteKind === "stop_requested" || change.noteKind === "stopped") && change.mode) markStopping(change.mode);
     } else if (change.kind === "answer") {
@@ -545,22 +599,34 @@ ${LOCAL_ISO_SCRIPT}
       follow(answerBox, wasAtTail);
     }
   }
-  var es = new EventSource(url);
-  es.onopen = function () { live = true; if (!stopMode) setConn("green", "live"); refreshTail(); };
-  var lastSeq = 0;
-  es.onmessage = function (m) {
-    // Frames carry their stream position as the SSE id; a proxy that strips
-    // Last-Event-ID on reconnect would make the server replay from the start,
-    // so anything at or before the last applied position is dropped here too.
-    var sid = Number(m.lastEventId);
-    if (sid > 0) { if (sid <= lastSeq) return; lastSeq = sid; }
-    var e;
-    try { e = JSON.parse(m.data); } catch (_) { return; }
+  // ONE fold for every frame — the seeded history and the live stream go
+  // through the same push → apply path, so the two pages can never drift apart.
+  // \`wasAtTail\` is sampled once per event, BEFORE anything is added.
+  function handle(e) {
     var wasAtTail = atTail();
     var changes = timeline.push(e);
     for (var i = 0; i < changes.length; i++) apply(changes[i], wasAtTail);
     refreshTail();
     if (wasAtTail && !tail.hidden) tail.scrollIntoView({ block: "nearest" });
+  }
+  var seed = ${seedEventsJson(events)};
+  for (var i = 0; i < seed.length; i++) handle(seed[i]);
+  var es = new EventSource(url);
+  es.onopen = function () { live = true; if (!stopMode) setConn("green", "live"); refreshTail(); };
+  var lastSeq = 0;
+  es.onmessage = function (m) {
+    var e;
+    try { e = JSON.parse(m.data); } catch (_) { return; }
+    // Run-event frames carry their stream position as the SSE id; a proxy that
+    // strips Last-Event-ID on reconnect would make the server replay from the
+    // start, so anything at or before the last applied position is dropped
+    // here too. A transport notice (replay_note) has no id of its own — the
+    // browser reports the previous frame's id for it — so it is exempt.
+    if (e.type !== "replay_note") {
+      var sid = Number(m.lastEventId);
+      if (sid > 0) { if (sid <= lastSeq) return; lastSeq = sid; }
+    }
+    handle(e);
   };
   es.addEventListener("end", function () {
     live = false;
@@ -886,26 +952,30 @@ export interface SseSink {
   onClose(cb: () => void): void;
 }
 
-/** One SSE frame for a run event: `id:` is its position in the run's stream, so
- *  a browser that reconnects (proxy drop, deploy, laptop sleep) sends it back as
- *  `Last-Event-ID` and the server replays only what it missed — instead of the
- *  whole backlog again, which the page would have appended as duplicates. */
+/** A frame on the per-run stream: a run event, or a notice from the transport
+ *  itself. `replay_note` is emitted once, first, when a late subscriber's replay
+ *  was capped — it is NOT a run event and never enters the registry or the run
+ *  record (the full stream stays readable via `snapshot` / the history page). */
+export type LiveFrame = RunEvent | { type: "replay_note"; summary: string };
+
+/** Most backlog frames a late subscriber is replayed (#157 KTD9); the newest
+ *  win. The registry keeps up to 5000 — the browser does not need them all to
+ *  follow a live run, and the page must not stall on a 4 MiB burst. */
+export const REPLAY_LIMIT = 1000;
+
+/** One SSE frame for a run event: `id:` is its position in the run's stream (the
+ *  registry's `seq`), so a browser that reconnects (proxy drop, deploy, laptop
+ *  sleep) sends it back as `Last-Event-ID` and the server replays only what it
+ *  missed — instead of the whole backlog again, which the page would have
+ *  appended as duplicates. */
 function sseData(event: RunEvent, seq: number): string {
   return `id: ${seq}\ndata: ${serializedOnce(event)}\n\n`;
 }
 
-/** `JSON.stringify(event)`, computed once per event object no matter how many
- *  viewers a run has: the registry hands every subscriber the SAME event object
- *  (and the same backlog entries on replay), so with k open tabs on one run
- *  each tool_result (up to 8 KB of output) was serialized k times. */
-const serialized = new WeakMap<object, string>();
-function serializedOnce(event: object): string {
-  let s = serialized.get(event);
-  if (s === undefined) {
-    s = JSON.stringify(event);
-    serialized.set(event, s);
-  }
-  return s;
+/** One SSE `data:` frame for a transport notice (`replay_note`). No `id:` — a
+ *  notice has no stream position, so it must not move the client's cursor. */
+function sseNotice(frame: Exclude<LiveFrame, RunEvent>): string {
+  return `data: ${JSON.stringify(frame)}\n\n`;
 }
 
 /** The `Last-Event-ID` a reconnecting EventSource sends, as the stream position
@@ -957,26 +1027,41 @@ function startSseHeartbeat(req: HttpRequest, res: ServerResponse): void {
  * during `subscribe`, before we've decided the status code, so those frames are
  * buffered and flushed only after a 200 head is written. A `null` subscribe
  * result (unknown run or bad token) is a 404 — existence is never revealed.
+ *
+ * The replay is capped at the newest `REPLAY_LIMIT` events; when the backlog
+ * held more, a leading `replay_note` frame says how many of how many were
+ * replayed. Live events after the replay are never capped. The buffer is a
+ * bounded ring — the oldest event is shifted out once it holds `REPLAY_LIMIT`
+ * — and `replayed` counts everything the backlog offered, for the note. With a
+ * resume cursor (`Last-Event-ID` → `subscribe(…, afterSeq)`) the registry
+ * offers only the events after it, so the ring and the note both count from
+ * the cursor — the two mechanisms compose rather than overlap.
  */
 export function serveEvents(
   subscribe: (onEvent: (e: RunEvent, seq: number) => void, onFinish: () => void) => Unsubscribe | null,
   sink: SseSink,
   onLive?: () => void,
 ): void {
-  const buffered: string[] = [];
+  const replay: Array<{ event: RunEvent; seq: number }> = [];
+  let replayed = 0;
   let live = false;
   let endedDuringReplay = false;
-  const send = (chunk: string) => {
-    if (live) sink.write(chunk);
-    else buffered.push(chunk);
-  };
   const onFinish = () => {
-    send(SSE_END);
-    if (live) sink.end();
-    else endedDuringReplay = true;
+    if (live) {
+      sink.write(SSE_END);
+      sink.end();
+    } else endedDuringReplay = true;
   };
 
-  const unsubscribe = subscribe((e, seq) => send(sseData(e, seq)), onFinish);
+  const unsubscribe = subscribe((e, seq) => {
+    if (live) {
+      sink.write(sseData(e, seq));
+      return;
+    }
+    replayed++;
+    if (replay.length === REPLAY_LIMIT) replay.shift();
+    replay.push({ event: e, seq });
+  }, onFinish);
   if (!unsubscribe) {
     sink.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     sink.write("run not found");
@@ -987,9 +1072,13 @@ export function serveEvents(
   sink.writeHead(200, SSE_HEADERS);
   live = true;
   sink.write(SSE_PRELUDE); // flush the head immediately (a run with no events yet has an empty backlog)
-  for (const chunk of buffered) sink.write(chunk);
-  buffered.length = 0;
+  if (replayed > REPLAY_LIMIT) {
+    sink.write(sseNotice({ type: "replay_note", summary: `replaying last ${REPLAY_LIMIT} of ${replayed} events` }));
+  }
+  for (const { event, seq } of replay) sink.write(sseData(event, seq));
+  replay.length = 0;
   if (endedDuringReplay) {
+    sink.write(SSE_END);
     sink.end();
     return;
   }

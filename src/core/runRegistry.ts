@@ -1,19 +1,28 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { RunEvent, StopMode } from "./runEvents.js";
+import { redactAndCap, sanitizeActor, serializedOnce, type RunActor, type RunEvent, type StopMode } from "./runEvents.js";
+import type { RunStatus } from "./runRecord.js";
+import { utf8ByteLength } from "./runRecord.js";
 
 // The run registry is the unit-testable core of the external live-view page
-// (Area 2 / #43). It is deliberately **in-memory and live-only**: a run's
-// events live here only while the run is active, plus a bounded backlog so a
-// viewer who opens the capability link mid-run sees what already happened, and
-// finished runs are evicted after a short TTL. Persisting/replaying past runs
-// is out of scope (Area 7). Per AGENTS.md invariant 6 this ephemeral state is
-// intentional — nothing durable is lost on restart: a restart ends the runs it
-// was streaming, and their (already-visible) events simply stop.
+// (Area 2 / #43) and the ONE per-run event store while a run is live (#157
+// KTD9): a run's events (tool steps and the `message` events carrying the
+// exchange) live here in a bounded backlog — so a viewer who opens the
+// capability link mid-run sees what already happened, and the finish-time
+// snapshot feeds the friction diagnosis and the persisted run record — and
+// finished runs are evicted after a short TTL. Durability is the run store's
+// job (features/run-history.md); per AGENTS.md invariant 6 the eviction here
+// is intentional: a restart ends the runs it was streaming, and their
+// (already-visible) events simply stop.
 //
-// Access is a capability model: create() mints a random run id AND a random
-// view token; every read (subscribe/has) requires the correct token for that
-// id, compared in constant time. The token is the gate — an unguessable,
-// per-run secret carried in the live URL.
+// Access is "capability OR operator" (#157 KTD7). The capability: create()
+// mints a random run id AND a random view token; the token-gated reads
+// (subscribe/has/snapshot/requestStop) require the correct token for that id,
+// compared in constant time — the gate behind the live URL, kept as defense in
+// depth for the HTML/SSE routes. The operator: the token-free `getById` /
+// `snapshotById` / `requestStopById` grant the same reads to `RunsService`,
+// whose callers are authorized ONE LAYER UP (the command registry's scopes and
+// chat gates plus the Cloudflare Access gate). Nothing in this file decides who
+// an operator is; it only trusts that its token-free callers already did.
 
 /**
  * Per-run stop control (#101). One per run, minted by `RunRegistry.create()` and
@@ -58,6 +67,25 @@ export interface RunHandle {
   token: string;
   /** This run's stop control — the dispatcher hands it to the runner. */
   control: RunControl;
+  /** The label as stored: redacted then capped (`RUN_LABEL_MAX`). The ONLY
+   *  label a record or a friction row may carry — never the raw input. */
+  label?: string;
+}
+
+/** What the dispatcher knows about a run at `create()` beyond its label: the
+ *  same identity fields the persisted record carries, so a live row projects
+ *  like a persisted one (`RunsService.listRuns` filters on them, F8). */
+export interface RunMeta {
+  /** Resolved agent name. */
+  agent?: string;
+  /** `<provider>/<model>` the run resolved to. */
+  model?: string;
+  /** Platform-namespaced ids (AGENTS.md invariant 4). */
+  channelId: string;
+  userId: string;
+  threadKey: string;
+  /** `owner/name` for repo runs. */
+  repo?: string;
 }
 
 /** A run's stop status for the index: `stopping` from the request until the run
@@ -86,11 +114,41 @@ export interface RunSummary {
   token: string;
   /** Short human label set at create() (e.g. "coding · owner/repo"); optional. */
   label?: string;
+  /** The identity `RunMeta` given at create(); absent fields are omitted. */
+  agent?: string;
+  model?: string;
+  channelId?: string;
+  userId?: string;
+  threadKey?: string;
+  repo?: string;
   finished: boolean;
   startedAt: number;
+  /** The clock time at `finish()`; absent while the run is live. */
+  finishedAt?: number;
+  /** The terminal status the dispatcher computed and handed to `finish()`;
+   *  absent while live, and for a finish that reported none. */
+  status?: RunStatus;
   eventCount: number;
   /** Present only once a stop has been requested (#101). */
   stop?: RunStopStatus;
+  /** Present (true) once the history writer confirmed the run is in the durable
+   *  store (#157 KTD9) — how an index client learns a row outlives eviction. */
+  persisted?: boolean;
+}
+
+/** What `snapshot`/`snapshotById` return: a COPY of the retained backlog plus the
+ *  two record fields not derivable from the events. */
+export interface RunSnapshot {
+  events: RunEvent[];
+  finished: boolean;
+  startedAt: number;
+  /** The clock time at `finish()`; absent while the run is live. The record's
+   *  `finishedAt` is this value, so the registry row and the record agree. */
+  finishedAt?: number;
+  eventCount: number;
+  /** True when the bounded backlog dropped events (`eventCount > events.length`):
+   *  a consumer analyzing `events` is looking at a head-truncated stream. */
+  truncated: boolean;
 }
 
 /** `seq` is the event's 1-based position in the run's stream (the registry's
@@ -114,9 +172,24 @@ export type IndexEvent = { type: "upsert"; run: RunSummary } | { type: "removed"
 /** A live subscriber to the runs-index feed. */
 export type IndexSubscriber = (event: IndexEvent) => void;
 
+/** Longest label kept on a run summary (redacted first — see `create()`). Wider
+ *  than the dispatcher's own composed-label cap, so this is a safety net, not
+ *  the display truncation. */
+export const RUN_LABEL_MAX = 200;
+
+/** Default per-run backlog bounds (#157 KTD9): count and bytes. The registry
+ *  backlog is the ONLY per-run event store — the friction diagnosis and the run
+ *  record are built from it — so it is bounded generously and by both axes. */
+export const DEFAULT_BACKLOG_LIMIT = 5000;
+export const DEFAULT_BACKLOG_BYTES = 4 * 1024 * 1024;
+
 export interface RunRegistryOptions {
-  /** Max events retained per run for late-subscriber replay. Default 1000. */
+  /** Max events retained per run (oldest dropped past it). Default 5000. */
   backlogLimit?: number;
+  /** Max bytes retained per run, measured as each event's UTF-8 JSON size; the
+   *  oldest events are dropped until under budget (the newest always stays).
+   *  Default 4 MiB. */
+  backlogBytes?: number;
   /** How long a finished run stays subscribable before eviction. Default 60s. */
   ttlMs?: number;
   /** Injectable id generator (tests); default `crypto.randomUUID`. */
@@ -135,14 +208,23 @@ interface Subscription {
 interface RunState {
   id: string;
   token: string;
-  /** The newest `backlogLimit` events with their stream positions. */
-  backlog: Array<{ seq: number; event: RunEvent }>;
+  /** The newest events, each carrying its `seq` (stream position). Bounded by
+   *  count and bytes — see `publish()`. */
+  backlog: RunEvent[];
+  /** UTF-8 JSON size of each backlog entry, index-aligned with `backlog`. */
+  backlogSizes: number[];
+  /** Sum of `backlogSizes`; compared against the byte budget on publish. */
+  backlogBytes: number;
   subscribers: Set<Subscription>;
   finished: boolean;
   /** Wall-clock finish time; drives TTL eviction. */
   finishedAt?: number;
+  /** Terminal status given to `finish()`, projected onto the summary. */
+  status?: RunStatus;
   /** Short human label for the runs index; set at create(). */
   label?: string;
+  /** Identity fields given at create(); projected onto every summary. */
+  meta?: RunMeta;
   /** Clock time at create() — the index sorts newest-first on this. */
   startedAt: number;
   /** Monotonic creation order; a stable tiebreak when two runs share a clock. */
@@ -151,6 +233,8 @@ interface RunState {
   eventCount: number;
   /** Stop control handed to the runner at create(); driven by requestStop(). */
   control: RunControl;
+  /** Set by markPersisted() once the durable store confirmed the record. */
+  persisted: boolean;
 }
 
 /** Equal-length constant-time string compare (mirrors channels/http.ts). Guards
@@ -169,6 +253,7 @@ export class RunRegistry {
    *  per-run `subscribers`: these get every run's lifecycle, not one run's events. */
   private readonly indexSubscribers = new Set<IndexSubscriber>();
   private readonly backlogLimit: number;
+  private readonly backlogBytes: number;
   private readonly ttlMs: number;
   private readonly genId: () => string;
   private readonly genToken: () => string;
@@ -177,7 +262,8 @@ export class RunRegistry {
   private seq = 0;
 
   constructor(opts: RunRegistryOptions = {}) {
-    this.backlogLimit = opts.backlogLimit ?? 1000;
+    this.backlogLimit = opts.backlogLimit ?? DEFAULT_BACKLOG_LIMIT;
+    this.backlogBytes = opts.backlogBytes ?? DEFAULT_BACKLOG_BYTES;
     this.ttlMs = opts.ttlMs ?? 60_000;
     this.genId = opts.genId ?? (() => randomUUID());
     this.genToken = opts.genToken ?? (() => randomBytes(32).toString("hex"));
@@ -186,26 +272,35 @@ export class RunRegistry {
 
   /** Register a new run; returns its capability handle (id + view token). An
    *  optional short human `label` (e.g. the agent + repo/thread) is stored for
-   *  the runs index and is otherwise inert. */
-  create(label?: string): RunHandle {
+   *  the runs index and is otherwise inert. The label derives from the request
+   *  text, so it is redacted (then capped) here — a pasted secret never reaches
+   *  a `RunSummary`, the index, or the run record; the handle carries the
+   *  redacted label so callers persist that one. `meta` (identity fields) is
+   *  stored as given and projected onto every summary. */
+  create(label?: string, meta?: RunMeta): RunHandle {
     this.sweep();
     const id = this.genId();
     const token = this.genToken();
+    const stored = label === undefined ? undefined : redactAndCap(label, RUN_LABEL_MAX);
     const run: RunState = {
       id,
       token,
       backlog: [],
+      backlogSizes: [],
+      backlogBytes: 0,
       subscribers: new Set(),
       finished: false,
-      label,
+      label: stored,
+      meta,
       startedAt: this.now(),
       seq: ++this.seq,
       eventCount: 0,
       control: new RunControl(),
+      persisted: false,
     };
     this.runs.set(id, run);
     this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
-    return { id, token, control: run.control };
+    return { id, token, control: run.control, ...(stored !== undefined ? { label: stored } : {}) };
   }
 
   /**
@@ -221,27 +316,65 @@ export class RunRegistry {
     this.sweep();
     const run = this.validate(id, token);
     if (!run) return { ok: false, reason: "not-found" };
+    return this.stopRun(run, mode);
+  }
+
+  /**
+   * Token-free stop for an authorized operator (#157 KTD7) — `RunsService.stopRun`
+   * after the command layer authorized the caller. Same outcomes as
+   * `requestStop`; additionally the `stop_requested` note carries the structured
+   * `actor` (sanitized: `ACTOR_ID_PATTERN` charset, ≤ 128 chars) so the stream
+   * records who asked. Never throws.
+   */
+  requestStopById(id: string, mode: StopMode, actor: RunActor): StopRequestResult {
+    this.sweep();
+    const run = this.runs.get(id);
+    if (!run) return { ok: false, reason: "not-found" };
+    return this.stopRun(run, mode, sanitizeActor(actor));
+  }
+
+  private stopRun(run: RunState, mode: StopMode, actor?: RunActor): StopRequestResult {
     if (run.finished) return { ok: false, reason: "finished" };
     const effective = run.control.requestStop(mode);
-    this.publish(id, {
+    this.publish(run.id, {
       type: "run_note",
       kind: "stop_requested",
       mode: effective,
+      ...(actor ? { actor } : {}),
       summary: effective === "hard" ? "hard stop requested — aborting now" : "soft stop requested — wrapping up",
       at: this.now(),
     });
     return { ok: true, mode: effective };
   }
 
-  /** Append an event to a run's backlog and fan it out to live subscribers.
-   *  A no-op for an unknown or already-finished run — never throws. */
+  /** Stamp an event with the run's next `seq`, append it to the backlog (dropping
+   *  the oldest past the count or byte bound — the newest always survives), and
+   *  fan it out to live subscribers. A no-op for an unknown or already-finished
+   *  run — never throws, and a throwing subscriber is isolated like an index
+   *  sink: it can neither stop the other subscribers nor reach the publisher. */
   publish(id: string, event: RunEvent): void {
     const run = this.runs.get(id);
     if (!run || run.finished) return;
+    // ONE counter: `eventCount` is the monotonic published total AND the `seq`
+    // stamped on the event — the SSE `id:` a client resumes from.
     const seq = ++run.eventCount;
-    run.backlog.push({ seq, event });
-    if (run.backlog.length > this.backlogLimit) run.backlog.shift();
-    for (const sub of run.subscribers) sub.onEvent(event, seq);
+    const stamped: RunEvent = { ...event, seq };
+    const bytes = utf8ByteLength(serializedOnce(stamped)); // memoized: the SSE frame reuses this string
+    run.backlog.push(stamped);
+    run.backlogSizes.push(bytes);
+    run.backlogBytes += bytes;
+    while (run.backlog.length > 1 && (run.backlog.length > this.backlogLimit || run.backlogBytes > this.backlogBytes)) {
+      run.backlog.shift();
+      run.backlogBytes -= run.backlogSizes.shift() ?? 0;
+    }
+    for (const sub of run.subscribers) {
+      try {
+        sub.onEvent(stamped, seq);
+      } catch {
+        // A dead sink (e.g. a closed SSE response) must not break this publish
+        // for the remaining subscribers or throw into the runner.
+      }
+    }
     // Index rows show live activity (event count + running state). Agent tool
     // events are seconds apart, so one upsert per event is not chatty; the
     // summary is built cheaply from the run we already hold.
@@ -249,17 +382,35 @@ export class RunRegistry {
   }
 
   /** Mark a run finished: notify live subscribers, stop forwarding, and start
-   *  the eviction TTL. Idempotent; a no-op for an unknown run. */
-  finish(id: string): void {
+   *  the eviction TTL. `status` is the terminal status the caller computed
+   *  (the dispatcher's), stored so every summary projects it — consumers never
+   *  re-derive it. Idempotent; a no-op for an unknown run. */
+  finish(id: string, status?: RunStatus): void {
     const run = this.runs.get(id);
     if (!run || run.finished) return;
     run.finished = true;
     run.finishedAt = this.now();
+    if (status !== undefined) run.status = status;
     const subs = [...run.subscribers];
     run.subscribers.clear();
     for (const sub of subs) sub.onFinish?.();
     // A finished run stays on the index (marked finished) until the TTL evicts
     // it — so finish is an upsert, not a removal. Eviction emits the removal.
+    this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+  }
+
+  /**
+   * Record that the durable run store confirmed this run's record (#157 KTD9):
+   * the history writer calls this on a successful put. The summary gains
+   * `persisted: true` and the index is upserted, so an `?all=1` client can keep
+   * the row when eviction fires. A no-op for an unknown or already-evicted run
+   * (the write may land after the TTL — that is fine, the store has it). Not
+   * token-gated: it grants nothing and is only reachable from bot code.
+   */
+  markPersisted(id: string): void {
+    const run = this.runs.get(id);
+    if (!run) return;
+    run.persisted = true;
     this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
   }
 
@@ -290,7 +441,7 @@ export class RunRegistry {
     const run = this.validate(id, token);
     if (!run) return null;
 
-    for (const { seq, event } of run.backlog) if (seq > afterSeq) onEvent(event, seq);
+    for (const event of run.backlog) if ((event.seq ?? 0) > afterSeq) onEvent(event, event.seq ?? 0);
 
     if (run.finished) {
       onFinish?.();
@@ -324,16 +475,50 @@ export class RunRegistry {
 
   /**
    * Token-gated, read-only snapshot of a run's retained backlog plus whether it
-   * has finished — the input to the run-friction analyzer (#84) for a run that
-   * is still in the registry (live, or finished within the TTL). A COPY of the
-   * backlog, so callers can't reach the live array. Same constant-time gate as
-   * subscribe(); `null` for an unknown run or wrong token (caller → 404).
+   * has finished — the input to the run-friction analyzer (#84) and the run
+   * record (#157) for a run that is still in the registry (live, or finished
+   * within the TTL). `eventCount` is the monotonic published total (the backlog
+   * is bounded, so `events.length` may be smaller) and `startedAt` the create()
+   * clock time — the two record fields not derivable from the events. A COPY of
+   * the backlog, so callers can't reach the live array. Same constant-time gate
+   * as subscribe(); `null` for an unknown run or wrong token (caller → 404).
    */
-  snapshot(id: string, token: string): { events: RunEvent[]; finished: boolean } | null {
+  snapshot(id: string, token: string): RunSnapshot | null {
     this.sweep();
     const run = this.validate(id, token);
     if (!run) return null;
-    return { events: run.backlog.map((entry) => entry.event), finished: run.finished };
+    return RunRegistry.snapshotOf(run);
+  }
+
+  /** Token-free summary of one non-evicted run for `RunsService` (#157 KTD7),
+   *  or null when unknown/evicted. Carries the token like every `RunSummary` —
+   *  the service projects it out before anything leaves the core. */
+  getById(id: string): RunSummary | null {
+    this.sweep();
+    const run = this.runs.get(id);
+    return run ? this.summaryOf(run) : null;
+  }
+
+  /** Token-free `snapshot` for `RunsService` (#157 KTD7): the same copied
+   *  backlog + finished/startedAt/eventCount, null when unknown/evicted. */
+  snapshotById(id: string): RunSnapshot | null {
+    this.sweep();
+    const run = this.runs.get(id);
+    if (!run) return null;
+    return RunRegistry.snapshotOf(run);
+  }
+
+  /** The snapshot shape: a COPY of the backlog plus the record fields not
+   *  derivable from it. `truncated` says the bounded backlog dropped events. */
+  private static snapshotOf(run: RunState): RunSnapshot {
+    return {
+      events: [...run.backlog],
+      finished: run.finished,
+      startedAt: run.startedAt,
+      ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
+      eventCount: run.eventCount,
+      truncated: run.eventCount > run.backlog.length,
+    };
   }
 
   /** Live + finished-but-unevicted run count (observability / tests). */
@@ -363,16 +548,24 @@ export class RunRegistry {
    *  mapping, shared by `listActive()` and the `subscribeIndex` feed so the two
    *  can never drift. `label` is omitted (not set to `undefined`) when absent. */
   private summaryOf(run: RunState): RunSummary {
+    const m = run.meta;
     return {
       id: run.id,
       token: run.token,
       ...(run.label !== undefined ? { label: run.label } : {}),
+      ...(m?.agent !== undefined ? { agent: m.agent } : {}),
+      ...(m?.model !== undefined ? { model: m.model } : {}),
+      ...(m ? { channelId: m.channelId, userId: m.userId, threadKey: m.threadKey } : {}),
+      ...(m?.repo !== undefined ? { repo: m.repo } : {}),
       finished: run.finished,
       startedAt: run.startedAt,
+      ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
+      ...(run.status !== undefined ? { status: run.status } : {}),
       eventCount: run.eventCount,
       ...(run.control.requested !== undefined
         ? { stop: { mode: run.control.requested, state: run.finished ? ("stopped" as const) : ("stopping" as const) } }
         : {}),
+      ...(run.persisted ? { persisted: true } : {}),
     };
   }
 

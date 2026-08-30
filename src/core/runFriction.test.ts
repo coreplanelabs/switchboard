@@ -383,3 +383,77 @@ describe("formatFrictionReport", () => {
     expect(formatFrictionReport(analyzeRunFriction([]))).toMatch(/no friction/i);
   });
 });
+
+// Feature: features/run-visibility.md — the narrative events (#157 U1: `input`,
+// `context`, `assistant`, `answer`) are the run's story, not its steps: none of
+// them counts toward `eventCount`. `input`/`assistant`/`answer` still drive the
+// model-turn clock (run-friction.md, slow_model_turn); `context` — replayed
+// thread history published at run start, with timestamps of its own — is
+// invisible to timing as well, so `runMs` never stretches back to an old turn.
+describe("analyzeRunFriction — narrative events are not steps; `context` is invisible to timing", () => {
+  it("eventCount excludes every narrative event; steps, categories and findings are unchanged", () => {
+    const steps: RunEvent[] = [...bash("npm test", T0 + 1000, 2000), note("wrap_up", "wrapping up", T0 + 5000)];
+    const withMessages: RunEvent[] = [
+      { type: "input", text: "please run the tests", at: T0, seq: 1 },
+      { type: "context", text: "earlier thread turn", at: T0 - 60_000, seq: 2 },
+      ...steps,
+      { type: "assistant", text: "one more check", at: T0 + 4000, seq: 6 },
+      { type: "answer", text: "done", at: T0 + 9000, seq: 7 },
+    ];
+    const plain = analyzeRunFriction(steps);
+    const mixed = analyzeRunFriction(withMessages);
+    expect(mixed.eventCount).toBe(plain.eventCount);
+    expect(mixed.toolCalls).toBe(plain.toolCalls);
+    // Counts match; durations may not — the `answer` legitimately extends the
+    // stream's end (a wrap-up that took until the answer took that long).
+    const counts = (d: FrictionDiagnosis) => Object.fromEntries(Object.entries(d.byCategory).map(([c, t]) => [c, t.count]));
+    expect(counts(mixed)).toEqual(counts(plain));
+    expect(mixed.findings.map((f) => f.category)).toEqual(plain.findings.map((f) => f.category));
+  });
+
+  it("`context` timestamps never move firstAt/lastAt: runMs spans the request → the answer, not the replayed history", () => {
+    const events: RunEvent[] = [
+      { type: "input", text: "please run the tests", at: T0 },
+      { type: "context", text: "user: an hour-old turn", at: T0 - 3_600_000 },
+      { type: "context", text: "assistant: its reply", at: T0 - 3_500_000 },
+      ...bash("npm test", T0 + 1000, 2000),
+      { type: "answer", text: "done", at: T0 + 9000 },
+    ];
+    const d = analyzeRunFriction(events);
+    expect(d.runMs).toBe(9000);
+    expect(d.eventCount).toBe(2);
+    expect(analyzeRunFriction(events.filter((e) => e.type !== "context"))).toEqual(d);
+  });
+
+  it("a `turn` (the model call's receipt) is not a step: excluded from eventCount, but its timestamp still bounds the run like `answer` does", () => {
+    const events: RunEvent[] = [
+      { type: "input", text: "please run the tests", at: T0 },
+      { type: "turn", startedAt: T0, durationMs: 900, stopReason: "tool_use", at: T0 + 900 },
+      ...bash("npm test", T0 + 1000, 2000),
+      { type: "turn", startedAt: T0 + 3000, durationMs: 6000, stopReason: "end_turn", usage: { inputTokens: 10, outputTokens: 2 }, at: T0 + 9000 },
+    ];
+    const d = analyzeRunFriction(events);
+    expect(d.eventCount).toBe(2);
+    expect(d.runMs).toBe(9000);
+    expect(d.toolCalls).toBe(1);
+  });
+
+  it("a stream of only `context` events has no timings and zero events", () => {
+    const d = analyzeRunFriction([{ type: "context", text: "user: hi", at: T0 }, { type: "context", text: "assistant: hello", at: T0 + 100 }]);
+    expect(d.eventCount).toBe(0);
+    expect(d.hasTimings).toBe(false);
+    expect(d.runMs).toBeUndefined();
+  });
+});
+
+describe("analyzeRunFriction — truncated input (the registry backlog dropped events)", () => {
+  it("`truncated: true` marks the diagnosis `truncatedInput: true`; the report says so; absent otherwise", () => {
+    const events = [...bash("npm test", T0, 3_000)];
+    const full = analyzeRunFriction(events, { finished: true });
+    expect("truncatedInput" in full).toBe(false);
+    const cut = analyzeRunFriction(events, { finished: true, truncated: true });
+    expect(cut.truncatedInput).toBe(true);
+    expect(formatFrictionReport(cut)).toMatch(/input truncated/i);
+    expect(formatFrictionReport(full)).not.toMatch(/truncated/i);
+  });
+});

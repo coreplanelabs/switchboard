@@ -48,7 +48,10 @@ export function isFrictionRunRecord(v: unknown): v is FrictionRunRecord {
   return isDiagnosis(r.diagnosis);
 }
 
-function isDiagnosis(v: unknown): boolean {
+/** Structural check on a `FrictionDiagnosis` from outside the process: the
+ *  fields the clusterer relies on, with every category present in `byCategory`.
+ *  Shared by the ledger record check and the run-history record check. */
+export function isDiagnosis(v: unknown): v is FrictionDiagnosis {
   if (typeof v !== "object" || v === null) return false;
   const d = v as Record<string, unknown>;
   if (!Array.isArray(d.findings) || typeof d.eventCount !== "number" || typeof d.verdict !== "string") return false;

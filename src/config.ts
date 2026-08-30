@@ -6,6 +6,7 @@ import type { ProviderConfig } from "./providers/types.js";
 import type { MemoryConfig } from "./core/memory/types.js";
 import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
+import type { RunHistoryConfig } from "./core/runStore.js";
 import { AGENTS } from "./agents/registry.js";
 
 // Configuration is layered. Lowest to highest precedence:
@@ -112,6 +113,13 @@ export interface AppConfig {
   costs?: unknown;
   /** Slack adapter behavior that is not pure transport. */
   slack?: SlackConfig;
+  /**
+   * Persistent run history (#157). Absent → history is OFF: finished runs stay
+   * live-only, as before. `store: "file"` is an explicit host-disk opt-in;
+   * otherwise `worker` names the RunHistoryDO on the state Worker. Retention
+   * is `retentionDays` / `maxRuns` / `maxBytes`. See features/run-history.md.
+   */
+  runHistory?: RunHistoryConfig;
 }
 
 export interface SlackConfig {
@@ -162,10 +170,11 @@ export class ConfigStore {
   private overrides: Overrides;
   private overridesPath: string;
 
-  constructor(configPath: string, overridesPath: string) {
+  /** `warn` receives non-fatal config findings (default: console.warn). */
+  constructor(configPath: string, overridesPath: string, warn: (message: string) => void = (m) => console.warn(m)) {
     const raw = readFileSync(resolve(configPath), "utf8");
     this.config = YAML.parse(raw) as AppConfig;
-    validateConfig(this.config);
+    validateConfig(this.config, warn);
 
     this.overridesPath = resolve(overridesPath);
     this.overrides = existsSync(this.overridesPath)
@@ -409,7 +418,7 @@ function fmtModels(m: Record<string, string>): string {
     .join(" ");
 }
 
-function validateConfig(cfg: AppConfig): void {
+function validateConfig(cfg: AppConfig, warn: (message: string) => void): void {
   validateScopeEfforts(cfg, "config.yaml");
   if (!cfg.providers || Object.keys(cfg.providers).length === 0) {
     throw new Error("config.yaml must define at least one provider");
@@ -430,6 +439,35 @@ function validateConfig(cfg: AppConfig): void {
   if (cfg.permissions?.repos) {
     cfg.permissions.repos = Object.fromEntries(
       Object.entries(cfg.permissions.repos).map(([slug, users]) => [slug.toLowerCase(), users]),
+    );
+  }
+  if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory, cfg.selfImprovement, warn);
+}
+
+/** `runHistory` (features/run-history.md, KTD14): retention bounds are enforced
+ *  at load so a typo cannot silently become "keep nothing"; the Worker URL must
+ *  be https: because the bearer rides every request. */
+function validateRunHistory(rh: RunHistoryConfig, si: SelfImprovementConfig | undefined, warn: (message: string) => void): void {
+  if (typeof rh !== "object" || rh === null) throw new Error("config.yaml: runHistory must be a mapping");
+  for (const key of ["retentionDays", "maxRuns"] as const) {
+    const v = rh[key];
+    if (v !== undefined && (!Number.isInteger(v) || (v as number) < 1)) throw new Error(`config.yaml: runHistory.${key} must be an integer >= 1`);
+  }
+  if (rh.maxBytes !== undefined && (!Number.isInteger(rh.maxBytes) || rh.maxBytes < 1)) throw new Error("config.yaml: runHistory.maxBytes must be an integer >= 1");
+  if (rh.store !== undefined && rh.store !== "worker" && rh.store !== "file") throw new Error('config.yaml: runHistory.store must be "worker" or "file"');
+  if (rh.worker !== undefined) {
+    let url: URL | undefined;
+    try {
+      url = new URL(String(rh.worker.baseUrl));
+    } catch {
+      url = undefined;
+    }
+    if (!url || url.protocol !== "https:") throw new Error("config.yaml: runHistory.worker.baseUrl must be an https: URL");
+  }
+  if (si?.ledgerMax !== undefined) {
+    warn(
+      "config.yaml: selfImprovement.ledgerMax is set alongside runHistory — the friction ledger is now read from the run store, " +
+        "so runHistory.retentionDays/maxRuns bound the friction population; ledgerMax only affects the legacy FrictionDO writes.",
     );
   }
 }

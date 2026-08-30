@@ -23,12 +23,14 @@ import { recognizeOperation, type Operations, type RecognizedOp } from "./operat
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import { formatTurnDuration, redactSecrets, type RunEvent } from "./runEvents.js";
-import { analyzeRunFriction } from "./runFriction.js";
+import { fitRecordToBudget, utf8ByteLength, type RunRecord, type RunStatus } from "./runRecord.js";
+import type { RunHistoryWriter } from "./runHistoryWriter.js";
+import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
 import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { parseFrictionCommand, runFrictionCommand } from "./frictionCommands.js";
 import { parseMemoryCommand, runMemoryCommand } from "./memoryCommands.js";
-import { defaultRunRegistry, type RunRegistry } from "./runRegistry.js";
+import { defaultRunRegistry, type RunHandle, type RunRegistry, type RunSnapshot } from "./runRegistry.js";
 import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
 import { coalesceStatus } from "./statusCoalescer.js";
 import { produceStructured, providerProducer } from "./structuredOutput.js";
@@ -128,6 +130,14 @@ export interface CoreDeps {
    */
   frictionLedger?: FrictionLedger;
   /**
+   * The write path onto `runStore` (#157 KTD4): after every run the dispatcher
+   * builds the `RunRecord` at finish and hands it here AFTER the reply is sent —
+   * fire-and-forget with bounded retries, drain-counted via `pending()`. Absent
+   * (most unit tests, or history off) → nothing is written. Production wires
+   * `createRunHistoryWriter` over the selected store (src/index.ts, src/cli.ts).
+   */
+  runHistoryWriter?: RunHistoryWriter;
+  /**
    * Where `friction propose` files its proposals. Default: the GitHub REST
    * tracker with the App installation token (App `issues:write`; never a `gh`
    * shell-out — AGENTS.md invariant 5). Injectable so tests assert filing
@@ -142,8 +152,12 @@ export interface CoreDeps {
 /** Floor between two edits of a run's status card (see `coalesceStatus`). Below
  *  the 5 s heartbeat so a heartbeat frame is never held back by it. */
 const STATUS_UPDATE_MIN_MS = 3000;
-/** Max run events kept per run for the post-run friction diagnosis (#84); the newest are kept. */
-const RUN_EVENTS_CAP = 5000;
+
+/** Bounds on the thread context recorded into a run's stream as `context`
+ *  events (#157 KTD8): the newest turns win, at most this many, within this
+ *  many bytes of redacted text in total. */
+const CONTEXT_MAX_ITEMS = 20;
+const CONTEXT_MAX_BYTES = 256 * 1024;
 
 /** The web capability (undici Agent with the SSRF-checking connector + the
  *  search adapter) is built ONCE per process, not per run: the Agent owns the
@@ -162,6 +176,24 @@ export function activeRunCount(): number {
 
 export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO): Promise<void> {
   let counted = false; // whether this dispatch holds an activeRuns slot
+  // The run record (#157 KTD4): its inputs — the registry snapshot and the
+  // diagnosis — are captured synchronously when the run finishes, inside the
+  // run's try/catch, so a failed run has them too. The record itself is
+  // assembled and byte-budgeted (`fitRecordToBudget`) here, only AFTER the
+  // reply went out (success path: after `sendAnswer`; failure path: after the
+  // error reply in the outer catch), so neither persistence nor the budgeting
+  // pass can delay the user. Undefined until a run finished, or when no writer
+  // is configured.
+  // `failedAfterFinish` is set by the outer catch: a run whose loop completed
+  // but whose post-run steps (card close, reply) threw is a FAILED run, not a
+  // completed one — a stop that already ended it keeps its `stopped_*` status.
+  let buildHistoryRecord: ((failedAfterFinish: boolean) => RunRecord) | undefined;
+  const writeHistory = (failedAfterFinish = false) => {
+    if (!buildHistoryRecord || !deps.runHistoryWriter) return;
+    const build = buildHistoryRecord;
+    buildHistoryRecord = undefined; // exactly one write per run
+    deps.runHistoryWriter.write(build(failedAfterFinish));
+  };
   // The ack card while setup is still in progress. Cleared the moment it
   // becomes the run card, so the outer catch closes ONLY a card that setup
   // left open — a run failure is closed (with its checklist) by the run loop.
@@ -566,24 +598,52 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       userName: msg.userName,
       text: directives.text,
     });
-    const run = registry.create(runLabel);
+    // The registry redacts and caps the label; `run.label` is the one the record
+    // and the friction row carry (never `runLabel`, which may hold a pasted secret).
+    const run = registry.create(runLabel, {
+      agent: agent.name,
+      model: resolved.modelRef,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      threadKey: msg.threadKey,
+      ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+    });
+    // The narrative events the dispatcher itself publishes — the request, the
+    // thread context, the final answer — go straight to the registry: redacted
+    // like every event, uncapped (the run record is the source of truth; the
+    // registry's byte-bounded backlog and the record's per-event budget bound
+    // persistence), never through onEvent (no card refresh, no friction input),
+    // and logged as ONE line of type + byte-length — never the text, which may
+    // span lines or carry what redaction missed.
+    const publishText = (type: "input" | "context" | "answer", text: string, source?: { url?: string; channel?: string; user?: string }) => {
+      const redacted = redactSecrets(text);
+      registry.publish(run.id, { type, text: redacted, ...(source ? { source } : {}), at: Date.now() });
+      console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
+    };
     // The request is the first event of the run record (live-view item 12): the
-    // directive-stripped text (+ an attachment count), redacted like every event,
-    // uncapped like `answer`. Published directly — it is not runner activity, so
-    // it never goes through onEvent (no card refresh, no friction input).
+    // directive-stripped text, humanized (Slack `<url|label>`/mention markup
+    // unwrapped, entities unescaped — it is channel-authored mrkdwn, not prose)
+    // + an attachment count.
+    // Slack-authored text is humanized (`<url>`/mention markup unwrapped,
+    // entities unescaped — it is mrkdwn, not prose); every other channel's text
+    // is recorded exactly as it was dispatched to the model, so the record never
+    // diverges from the input.
+    const humanize = isMrkdwnChannel(msg.channelId);
     const attachments = attachmentSuffix(msg.images, msg.documents);
     const source = {
       ...(msg.sourceUrl ? { url: msg.sourceUrl } : {}),
       ...(msg.channelName ? { channel: msg.channelName } : {}),
       ...(msg.userName ? { user: msg.userName } : {}),
     };
-    registry.publish(run.id, {
-      type: "input",
-      text: redactSecrets(attachments ? `${directives.text} ${attachments}` : directives.text),
-      ...(Object.keys(source).length > 0 ? { source } : {}),
-      at: Date.now(),
-    });
+    const request = humanize ? humanizeMessageText(directives.text) : directives.text;
+    publishText("input", attachments ? `${request} ${attachments}` : request, Object.keys(source).length > 0 ? source : undefined);
     const liveLink = liveViewLink(run.id, run.token);
+    // The thread context fed to the model follows the request as `context`
+    // events (#157, KD1) — text only, attachments as metadata lines, bounded to
+    // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
+    if (deps.config.config.runHistory?.includeContext !== false) {
+      for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
+    }
     // The card body is the agent's own checklist (via the update_status tool)
     // plus a live one-line activity trace (current tool call + redacted result
     // summary) so the card reflects progress per tool event, not only on the
@@ -609,27 +669,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // Live run-visibility (Area 2): each tool call/result refreshes the card
     // immediately, so activity is visible without waiting for the heartbeat.
     let toolCalls = 0; // "did real work" signal for the memory reflection gate
-    // The run's own copy of its event stream, for the post-run friction
-    // diagnosis (#84): needs no capability token to read back. Bounded as a
-    // ring that keeps the NEWEST events, so a pathological run cannot grow it
-    // without limit and its terminal signals (budget/infra notes at the very
-    // end — the ones most worth diagnosing) are never the part that is lost.
-    // Dropping the oldest can only orphan a tool_result, which the analyzer
-    // ignores; it can never fabricate a "run ended mid-tool" finding. The
-    // analyzer never reads `tool_result.output` (up to 8 KB each — 40 MB per
-    // run at the cap), so the copy kept here drops it; the registry backlog
-    // keeps the full event for the page. Over the cap the oldest are dropped
-    // in blocks: a per-event `shift()` moves the whole array each time.
-    const runEvents: RunEvent[] = [];
+    // The registry backlog is the run's ONE event store (#157 KTD9): the live
+    // page, the post-run friction diagnosis and the run record all read it back
+    // via `registry.snapshot` — there is no second copy to drift from it.
     const onEvent = (e: RunEvent) => {
       registry.publish(run.id, e); // feed the external live-view stream
-      if (e.type === "tool_result" && e.output !== undefined) {
-        const { output: _output, ...lean } = e;
-        runEvents.push(lean);
-      } else {
-        runEvents.push(e);
-      }
-      if (runEvents.length > RUN_EVENTS_CAP) runEvents.splice(0, RUN_EVENTS_CAP >> 2);
       if (e.type === "tool_call") toolCalls++;
       lastActivityAt = Date.now();
       lastActivity = activityLine(e);
@@ -664,7 +708,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // finished — read by us, not reported by the model — for the reviewed-head
     // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
     let observedHead: string | undefined;
-    let runThrew = false;
+    let runFailed = false; // the runner threw → terminal status `failed`
     // Give the workspace back now rather than at the inactivity sweep: a
     // resident's pool user is a scarce slot (features/resident-repos.md item
     // 16a). Read-only agents hold nothing worth keeping; a coding run keeps
@@ -701,9 +745,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       });
       // The run record is the source of truth and Slack/GitHub are projections
       // of it: publish the final answer into the stream FIRST (redacted like
-      // every event, uncapped — a soft stop's "findings so far" included), then
-      // the finally below finishes the run, and only after that is it sent.
-      registry.publish(run.id, { type: "answer", text: redactSecrets(answer), at: Date.now() });
+      // every event, uncapped — a soft stop's "findings so far" included). It
+      // MUST precede the finally below: `finish()` runs there, and a publish on
+      // a finished run is a silent no-op. Only after that is the reply sent.
+      publishText("answer", answer);
       // Reviewed-head probe (features/agent-review.md item 8): for a PR review,
       // read the workspace HEAD NOW — after the model is done, BEFORE the
       // finally below releases the workspace. Post-release a resident would
@@ -714,25 +759,62 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         observedHead = parseRevParseOutput(await executor.exec("git rev-parse HEAD").catch(() => ""));
       }
     } catch (err) {
-      runThrew = true;
+      runFailed = true;
       await card.done({ title: title("❌"), detail: finalDetail() });
       await releaseWorkspace();
       throw err;
     } finally {
       clearInterval(heartbeat);
-      registry.finish(run.id); // close the live-view stream; start its TTL
+      const stopped = run.control.requested;
+      const status: RunStatus = runFailed ? "failed" : stopped === "hard" ? "stopped_hard" : stopped === "soft" ? "stopped_soft" : "completed";
+      // Close the live-view stream and start the TTL, handing the registry the
+      // terminal status so every summary projects it (the index, `runs list`)
+      // instead of re-deriving it. The one status the registry cannot know is
+      // `failedAfterFinish` (a reply that throws AFTER the loop): the record
+      // says `failed`, the registry row keeps `completed` for its TTL.
+      registry.finish(run.id, status);
+      // The registry backlog is read back ONCE here, synchronously at finish
+      // (#157 KTD4/KTD9): it feeds both the friction diagnosis and the run
+      // record. Reading it now, not after the reply, is what makes a slow reply
+      // safe — the registry evicts a finished run after its TTL, and the record
+      // must not depend on winning that race. Skipped entirely when neither
+      // consumer is wired (nothing to diagnose for, nothing to persist). The
+      // backlog is byte-bounded (oldest evicted), so the diagnosis is told when
+      // it is looking at a head-truncated stream.
+      const snap = deps.frictionLedger || deps.runHistoryWriter ? registry.snapshot(run.id, run.token) : null;
+      const events = snap?.events ?? [];
+      const diagnosis = analyzeRunFriction(events, { finished: true, truncated: snap?.truncated ?? false });
+      const finishedAt = snap?.finishedAt ?? Date.now(); // the registry's finish clock: row and record agree
       // The channel's receipt (id + terminal status, never the token): a
       // single-shot channel hands it to its caller — the Worker shim records a
       // scheduled firing's run from it (#244).
-      io.runFinished?.({ id: run.id, status: runThrew ? "failed" : run.control.requested === "hard" ? "stopped_hard" : run.control.requested === "soft" ? "stopped_soft" : "completed" });
-      // Friction ledger (#84): diagnose this run's stream and keep the result
-      // for the cross-run proposer. Best-effort and fire-and-forget — a ledger
-      // failure is a warning line, never a failed run or a delayed reply.
+      io.runFinished?.({ id: run.id, status });
+      if (deps.runHistoryWriter) {
+        // Everything the record needs is captured now; assembly + budgeting
+        // run in `writeHistory()`, after the reply.
+        buildHistoryRecord = (failedAfterFinish) =>
+          assembleRunRecord({
+            run,
+            snap,
+            agent: agent.name,
+            model: resolved.modelRef,
+            msg,
+            repo: repoCtx.repo,
+            finishedAt,
+            status: failedAfterFinish && status === "completed" ? "failed" : status,
+            diagnosis,
+          });
+      }
+      // Friction ledger (#84): keep this run's diagnosis for the cross-run
+      // proposer. Best-effort and fire-and-forget — a ledger failure is a
+      // warning line, never a failed run or a delayed reply. With run history
+      // on, the ledger is READ from the run store and `record()` only forwards
+      // to the legacy FrictionDO until its decommission (KD3 call-out) — so this
+      // write stays regardless of what the history writer does.
       if (deps.frictionLedger) {
         const ledger = deps.frictionLedger;
-        const diagnosis = analyzeRunFriction(runEvents);
         void ledger
-          .record({ runId: run.id, label: runLabel, agent: agent.name, finishedAt: Date.now(), diagnosis })
+          .record({ runId: run.id, ...(run.label !== undefined ? { label: run.label } : {}), agent: agent.name, finishedAt, diagnosis })
           .catch((err: unknown) =>
             console.warn(`[friction] ${msg.threadKey} ledger write failed: ${err instanceof Error ? err.message : String(err)}`),
           );
@@ -752,6 +834,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     } finally {
       await releaseWorkspace();
     }
+    // Run history (#157 KTD4): the record built at finish goes to the store now
+    // that the reply has landed (a reply that threw lands in the outer catch and
+    // is written as `failed` there). Fire-and-forget; the writer's `pending()`
+    // is incremented here, BEFORE the outer finally's `activeRuns--`, so the
+    // shutdown drain never observes "0 runs, 0 writes" between the two.
+    writeHistory();
 
     // Cross-session memory (Area 7c, #85) — WRITE path. AFTER the reply has
     // landed, distill this run into memory records: fire-and-forget (tracked
@@ -873,20 +961,33 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // loop with its checklist, and must not be relabeled here.
     await setupCard?.done({ title: `❌ setup failed · ${errMsg.slice(0, 120)}` }).catch(() => {});
     await io.reply(errorReply(err)).catch(() => {});
+    // A run that threw still has its record (status `failed`, built at finish);
+    // a setup failure before the run started has none — nothing to write. A run
+    // whose loop completed but whose card close or reply threw lands here too:
+    // its record is written as `failed`, never `completed`.
+    writeHistory(true);
   } finally {
     if (counted) activeRuns--;
   }
 }
 
+/** The agent name an inline (no-model) command run carries in its `RunMeta` and
+ *  record — the one value `runs list agent=command` selects on. */
+export const COMMAND_RUN_AGENT = "command";
+
 /**
  * Run an inline (no-model) command AS a run (#244): register it in the run
- * registry under a `<command> · #channel · user · "…"` label, publish the
- * request as the `input` event and the reply as the `answer` event, finish it,
- * and hand the channel its receipt — `completed` when the command did its work,
- * `failed` when it was refused, misconfigured, or threw. The run record is the
- * canonical trace (command-registry principle, #157); the channel reply is a
- * projection of it. A thrown command still finishes its run (as `failed`) and
- * the error propagates to the dispatcher's outer handler.
+ * registry under a `<command> · #channel · user · "…"` label with the caller's
+ * identity as its `RunMeta` (agent `command`), publish the request as the
+ * `input` event and the reply as the `answer` event, finish it with its status,
+ * hand the channel its receipt — `completed` when the command did its work,
+ * `failed` when it was refused, misconfigured, or threw — and persist it through
+ * the same `runHistoryWriter` path as an agent run, so a scheduled firing
+ * outlives the registry TTL. The run record is the canonical trace
+ * (command-registry principle, #157); the channel reply is a projection of it.
+ * A thrown command still finishes its run (as `failed`, with the `⚠️ <error>`
+ * reply as its `answer`) and the error propagates to the dispatcher's outer
+ * handler.
  */
 async function runInlineCommandRun(
   deps: CoreDeps,
@@ -898,6 +999,7 @@ async function runInlineCommandRun(
   const registry = deps.runRegistry ?? defaultRunRegistry;
   const run = registry.create(
     composeRunLabel({ agent: command, channelId: msg.channelId, userId: msg.userId, channelName: msg.channelName, userName: msg.userName, text: msg.text }),
+    { agent: COMMAND_RUN_AGENT, channelId: msg.channelId, userId: msg.userId, threadKey: msg.threadKey },
   );
   registry.publish(run.id, { type: "input", text: redactSecrets(msg.text), at: Date.now() });
   let result: { text: string; ok: boolean } | undefined;
@@ -912,8 +1014,17 @@ async function runInlineCommandRun(
     registry.publish(run.id, { type: "answer", text: redactSecrets(errorReply(err)), at: Date.now() });
     throw err;
   } finally {
-    registry.finish(run.id);
-    io.runFinished?.({ id: run.id, status: result?.ok ? "completed" : "failed" });
+    const status: RunStatus = result?.ok ? "completed" : "failed";
+    registry.finish(run.id, status);
+    io.runFinished?.({ id: run.id, status });
+    if (deps.runHistoryWriter) {
+      // Two events and no tool output: assembling the record here is cheap, and
+      // `write` is fire-and-forget, so the reply is not delayed.
+      const snap = registry.snapshot(run.id, run.token);
+      const finishedAt = snap?.finishedAt ?? Date.now();
+      const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
+      deps.runHistoryWriter.write(assembleRunRecord({ run, snap, agent: COMMAND_RUN_AGENT, msg, finishedAt, status, diagnosis }));
+    }
   }
 }
 
@@ -921,6 +1032,50 @@ async function runInlineCommandRun(
  *  and a failed inline run's `answer` are built from it, so they cannot drift. */
 function errorReply(err: unknown): string {
   return `⚠️ ${err instanceof Error ? err.message : String(err)}`;
+}
+
+/**
+ * The persisted `RunRecord` for a finished run — the ONE assembly both an agent
+ * run and an inline command run go through: the registry's redacted label and
+ * finish-time snapshot, the caller's identity from the message, the terminal
+ * status, and the diagnosis; then `fitRecordToBudget`. `repo`/`model` are omitted
+ * (not set undefined) when absent, so the record's JSON is exactly what the
+ * store measures and `isRunRecord` re-validates. The backlog is bounded (count +
+ * bytes) while `eventCount` is the published total: a run that outgrew it is
+ * `truncated` before the byte budget is even considered.
+ */
+function assembleRunRecord(input: {
+  run: RunHandle;
+  snap: RunSnapshot | null;
+  agent: string;
+  model?: string;
+  msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey">;
+  repo?: string;
+  finishedAt: number;
+  status: RunStatus;
+  diagnosis: FrictionDiagnosis;
+}): RunRecord {
+  const { run, snap, msg } = input;
+  const events = snap?.events ?? [];
+  const fitted = fitRecordToBudget({
+    id: run.id,
+    ...(run.label !== undefined ? { label: run.label } : {}),
+    agent: input.agent,
+    ...(input.model !== undefined ? { model: input.model } : {}),
+    channelId: msg.channelId,
+    userId: msg.userId,
+    threadKey: msg.threadKey,
+    ...(input.repo !== undefined ? { repo: input.repo } : {}),
+    startedAt: snap?.startedAt ?? input.finishedAt,
+    finishedAt: input.finishedAt,
+    status: input.status,
+    eventCount: snap?.eventCount ?? events.length,
+    storedEventCount: events.length,
+    truncated: false,
+    events,
+    diagnosis: input.diagnosis,
+  });
+  return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
 }
 
 // ---- channel-agnostic output (channel-formatter feature, #76) ---------------
@@ -1100,11 +1255,24 @@ function compactUrl(url: string): string {
   return url.replace(/^https?:\/\/(?:www\.)?/, "");
 }
 
-/** Make request text readable as a label: Slack's `<url|label>` renders as its
- *  label and `<url>` as the url; every remaining bare URL is compacted. The raw
- *  mrkdwn a Slack review request carries (`<https://github.com/…/pull/41|…>`)
- *  would otherwise be sliced mid-URL by the snippet budget. */
-function humanizeLinks(text: string): string {
+/** Make request text readable: Slack's `<url|label>` renders as its label,
+ *  `<url>` as the url, mentions/channels as `@name`/`#name`. With `compact`
+ *  (the run-label snippet) every URL also loses its scheme/`www.` and GitHub
+ *  PR/issue URLs become `owner/repo#N` — the raw mrkdwn a Slack review request
+ *  carries (`<https://github.com/…/pull/41|…>`) would otherwise be sliced
+ *  mid-URL by the snippet budget. Without it (message events) URLs stay whole
+ *  so the run page can render them as links. */
+function humanizeLinks(text: string, compact = true): string {
+  const show = (url: string) => (compact ? compactUrl(url) : url);
+  // `<url|label>`: the label alone for the compact snippet. For message text the
+  // url must survive so the run page can link it — Slack's auto-link form (label
+  // = the url, or the url minus scheme/`www.`/trailing slash) becomes the bare
+  // url; a genuine custom label becomes `label (url)`.
+  const labelled = (url: string, label: string) => {
+    if (!label.trim()) return show(url);
+    if (compact) return label;
+    return isAutoLinkLabel(url, label) ? url : `${label} (${url})`;
+  };
   return (
     text
       // Slack mentions: `<@U…|name>` / `<#C…|name>` / `<!subteam^S…|@eng>` keep
@@ -1117,15 +1285,47 @@ function humanizeLinks(text: string): string {
       .replace(/<!subteam\^[^<>|\s]+\|([^<>]*)>/g, (_m, label: string) => `@${label.replace(/^@/, "")}`)
       .replace(/<!subteam\^[^<>\s]+>/g, "@group")
       // Slack links: `<url|label>` → label (or the compacted url when empty), `<url>` → url.
-      .replace(/<([^<>|\s]+)\|([^<>]*)>/g, (_m, url: string, label: string) => (label.trim() ? label : compactUrl(url)))
-      .replace(/<([a-z][a-z0-9+.-]*:\/\/[^<>\s]+)>/gi, (_m, url: string) => compactUrl(url))
+      .replace(/<([^<>|\s]+)\|([^<>]*)>/g, (_m, url: string, label: string) => labelled(url, label))
+      .replace(/<([a-z][a-z0-9+.-]*:\/\/[^<>\s]+)>/gi, (_m, url: string) => show(url))
       // Bare URLs: trailing sentence punctuation (`…/pull/12,` / `…/a).`) belongs
       // to the prose, not the url, so it is left in place.
       .replace(/\bhttps?:\/\/[^\s<>"']+/gi, (url) => {
         const trail = /[)\].,;:!?'"]+$/.exec(url)?.[0] ?? "";
-        return compactUrl(url.slice(0, url.length - trail.length)) + trail;
+        return show(url.slice(0, url.length - trail.length)) + trail;
       })
   );
+}
+
+/** Slack auto-links a pasted URL as `<url|label>` where the label is the url
+ *  itself, often without its scheme, `www.` or trailing slash. */
+function isAutoLinkLabel(url: string, label: string): boolean {
+  const strip = (s: string) => s.trim().replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/+$/, "");
+  return strip(url) === strip(label);
+}
+
+/** Slack delivers message text with `&`, `<`, `>` as `&amp;`/`&lt;`/`&gt;` (the
+ *  mrkdwn structural characters — the inverse of `escapeMrkdwn`). Undo that
+ *  ONCE, after the `<…>` markup has been unwrapped so a literal `&lt;` never
+ *  becomes structural. Pure string work: the core stays free of Slack imports. */
+function unescapeSlackEntities(text: string): string {
+  return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+}
+
+/** The human-readable form of a Slack-authored turn for the run record: link,
+ *  mention and channel markup unwrapped — `<url>` and auto-link `<url|url>` →
+ *  the whole url, custom `<url|label>` → `label (url)`, never compacted — and
+ *  entities unescaped. Only for text that came in through a channel — model
+ *  output is not mrkdwn and must not pass through here. */
+export function humanizeMessageText(text: string): string {
+  return unescapeSlackEntities(humanizeLinks(text, false));
+}
+
+/** Whether a channel's text is Slack mrkdwn (AGENTS.md invariant 4: the id
+ *  prefix names the platform) — the ONE gate on `humanizeMessageText` for the
+ *  run record. HTTP, MCP, CLI and cron text is not mrkdwn and is recorded raw,
+ *  exactly as the model received it. */
+export function isMrkdwnChannel(channelId: string): boolean {
+  return channelId.startsWith("slack:");
 }
 
 /** A short, quoted snippet of the request text for a run label: links
@@ -1160,9 +1360,9 @@ const ASSISTANT_TRACE_CAP = 80;
  * The one-line activity trace the status card shows for a run event (the card
  * is a digest; the run page is the record). An `assistant` turn becomes a short
  * `💬` excerpt — one line, replaced by the next event, so the model's prose is
- * visible in-channel without ever growing the card. `input` and `answer` are
- * published straight to the registry and never arrive here; the fallback only
- * keeps the switch total.
+ * visible in-channel without ever growing the card. `input`, `context` and
+ * `answer` are published straight to the registry and never arrive here; the
+ * fallbacks only keep the switch total.
  */
 function activityLine(e: RunEvent): string {
   switch (e.type) {
@@ -1178,6 +1378,8 @@ function activityLine(e: RunEvent): string {
     }
     case "input":
       return "request received";
+    case "context":
+      return "context recorded";
     case "answer":
       return "answer ready";
     case "turn":
@@ -1286,6 +1488,50 @@ export function turnContent(
   if (text) parts.push({ type: "text", text });
   if (parts.length === 0) parts.push({ type: "text", text: "(empty message)" });
   return parts;
+}
+
+/**
+ * The text recorded for one turn in the run stream (#157 R1): the turn's text
+ * plus one metadata line per attachment — name, media type, decoded size — and
+ * NEVER the attachment itself (no base64, no file body). Images and PDFs carry
+ * base64 (size = decoded bytes); text/code documents carry their decoded text.
+ * The text is humanized (`humanizeMessageText`: Slack link/mention markup
+ * unwrapped, entities unescaped) — every caller feeds channel-authored turns.
+ * Redaction happens at publish, not here.
+ */
+function messageText(text: string, humanize: boolean, images?: ImageAttachment[], documents?: DocumentAttachment[]): string {
+  const lines = [(humanize ? humanizeMessageText(text) : text).trim()];
+  for (const img of images ?? []) lines.push(attachmentLine(img.name, img.mediaType, Buffer.byteLength(img.data, "base64")));
+  for (const doc of documents ?? []) {
+    const bytes = Buffer.byteLength(doc.data, doc.mediaType === "application/pdf" ? "base64" : "utf8");
+    lines.push(attachmentLine(doc.name, doc.mediaType, bytes));
+  }
+  return lines.filter((l) => l.length > 0).join("\n");
+}
+
+function attachmentLine(name: string | undefined, mime: string, bytes: number): string {
+  return `[attachment: ${name ?? "attachment"} · ${mime} · ${bytes} bytes]`;
+}
+
+/**
+ * The thread-context turns to record as `context` events (#157 KTD8): the
+ * NEWEST turns first, at most `CONTEXT_MAX_ITEMS`, until the redacted texts
+ * together exceed `CONTEXT_MAX_BYTES` — then returned in thread order. Each turn is prefixed with its role so a context row reads as
+ * the conversation did; attachments are metadata lines (see `messageText`).
+ */
+function contextMessageTexts(history: readonly HistoryItem[], humanize: boolean): string[] {
+  const kept: string[] = [];
+  let bytes = 0;
+  for (let i = history.length - 1; i >= 0 && kept.length < CONTEXT_MAX_ITEMS; i--) {
+    const h = history[i];
+    const text = `${h.role}: ${messageText(h.text, humanize, h.images, h.documents)}`;
+    // Budget what will actually be published (publishText redacts).
+    const size = utf8ByteLength(redactSecrets(text));
+    if (bytes + size > CONTEXT_MAX_BYTES) break;
+    bytes += size;
+    kept.push(text);
+  }
+  return kept.reverse();
 }
 
 /** Inline a text/code file's content, fenced and labeled with its name. */

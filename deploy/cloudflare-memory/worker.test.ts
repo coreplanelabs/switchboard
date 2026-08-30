@@ -36,7 +36,8 @@ describe("auth + routing", () => {
   it("GET /healthz is open", async () => {
     const res = await SELF.fetch(`${BASE}/healthz`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    // `features` lets the bot's boot probe see which routes this deploy carries (#157).
+    expect(await res.json()).toEqual({ ok: true, features: ["memory", "friction", "schedules", "runs"] });
   });
 
   it("refuses a missing, malformed, or wrong bearer with 401 and touches no data", async () => {

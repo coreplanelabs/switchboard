@@ -4,7 +4,7 @@ import type { RunEvent } from "./runEvents.js";
 import { InMemoryFrictionLedger } from "./frictionLedger.js";
 import type { FrictionRunRecord } from "./frictionProposals.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
-import { formatSelfImprovementReport, runSelfImprovement } from "./selfImprovement.js";
+import { countTruncatedInputs, formatSelfImprovementReport, runSelfImprovement } from "./selfImprovement.js";
 
 // Feature: features/self-improvement.md — the orchestrated step: ledger →
 // cluster → propose → dedupe against open proposals → file issues (or not, in
@@ -174,6 +174,18 @@ describe("formatSelfImprovementReport", () => {
     expect(text).toMatch(/already open/i);
     expect(text).toMatch(/filed/);
     expect(text).toContain(tracker.issues(REPO)[0].url);
+  });
+
+  it("counts runs diagnosed on a truncated event stream and says so", async () => {
+    const records = await (await seeded()).recent();
+    records[0] = { ...records[0], diagnosis: { ...records[0].diagnosis, truncatedInput: true } };
+    const report = await runSelfImprovement({ records, tracker: new InMemoryIssueTracker(), dryRun: true });
+    expect(report.truncatedRuns).toBe(1);
+    expect(countTruncatedInputs(records)).toBe(1);
+    expect(formatSelfImprovementReport(report)).toMatch(/1 run diagnosed on a truncated event stream/);
+    const clean = await runSelfImprovement({ records: await (await seeded()).recent(), tracker: new InMemoryIssueTracker(), dryRun: true });
+    expect(clean.truncatedRuns).toBe(0);
+    expect(formatSelfImprovementReport(clean)).not.toMatch(/truncated/);
   });
 
   it("says so plainly when nothing recurs", () => {

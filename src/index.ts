@@ -22,6 +22,9 @@ import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { buildFrictionLedger, WorkerFrictionLedger } from "./core/frictionLedgerWorker.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
+import { selectFrictionLedger } from "./core/frictionLedger.js";
+import { buildRunStore, FileRunStore } from "./core/runStore.js";
+import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { activeRunCount, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
@@ -61,21 +64,57 @@ async function main() {
   // bearer are set; otherwise the host-disk JSONL file with a loud warning (an
   // ephemeral-disk deploy loses it on redeploy).
   const selfImprovement = config.config.selfImprovement;
-  const frictionLedger = buildFrictionLedger(selfImprovement, process.env, {
+  const legacyFrictionLedger = buildFrictionLedger(selfImprovement, process.env, {
     dataDir: "./data",
     warn: (m) => console.warn(`[friction] ${m}`),
   });
+  // Run history (#157): the durable store every finished run's record lands in.
+  // `null` when `runHistory` is unconfigured (or misconfigured — buildRunStore
+  // warned) → history off, live-only as before. With a store, the friction
+  // ledger is READ from it (legacy FrictionDO rows unioned for the rollout
+  // window) while `record()` keeps writing the legacy ledger (KD3 call-out).
+  const runHistoryCfg = config.config.runHistory;
+  const runStore = buildRunStore(runHistoryCfg, process.env, { dataDir: "./data", warn: (m) => console.warn(`[run-history] ${m}`) });
+  const runHistoryWriter = runStore
+    ? createRunHistoryWriter({ store: runStore, warn: (m) => console.warn(m), onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
+    : undefined;
   console.log(
-    `[friction] ledger: ${frictionLedger instanceof WorkerFrictionLedger ? `durable (${selfImprovement?.worker?.baseUrl})` : "host-disk file"}; ` +
+    runStore
+      ? `[run-history] store: ${runStore instanceof FileRunStore ? "host-disk file (data/runs)" : `durable Worker (${runHistoryCfg?.worker?.baseUrl})`}`
+      : "[run-history] off (no runHistory config) — runs are live-only",
+  );
+  const frictionLedger = selectFrictionLedger(runStore, legacyFrictionLedger);
+  console.log(
+    `[friction] ledger: ${runStore ? "run store (legacy rows unioned); legacy write: " : ""}${legacyFrictionLedger instanceof WorkerFrictionLedger ? `durable (${selfImprovement?.worker?.baseUrl})` : "host-disk file"}; ` +
       (selfImprovement?.repo ? `\`friction propose\` files to ${selfImprovement.repo}` : "`friction propose` disabled until selfImprovement.repo is set"),
   );
-  const deps: CoreDeps = { config, providers, skills, memory, frictionLedger };
+  // Deploy-ordering probe (best-effort, never blocks startup): the state Worker
+  // must carry the `v3` run-history routes before this bot version writes to
+  // them. A Worker whose /healthz lacks `runs` would 404 every put (the writer
+  // then logs once and degrades) — say so at boot instead of at the first run.
+  if (runStore && !(runStore instanceof FileRunStore) && runHistoryCfg?.worker?.baseUrl) {
+    const base = runHistoryCfg.worker.baseUrl.replace(/\/+$/, "");
+    fetch(`${base}/healthz`, { signal: AbortSignal.timeout(5000) })
+      .then(async (res) => {
+        const body = (await res.json().catch(() => null)) as { features?: unknown } | null;
+        const features = Array.isArray(body?.features) ? (body!.features as unknown[]) : [];
+        if (!features.includes("runs")) {
+          console.error(`[run-history] ORDERING ERROR: ${base}/healthz lists features ${JSON.stringify(features)} without "runs" — deploy the state Worker with run-history routes before this bot version; every run write will fail until then`);
+        } else {
+          console.log(`[run-history] state Worker ${base} reports runs support`);
+        }
+      })
+      .catch((err: unknown) => console.warn(`[run-history] /healthz probe of ${base} failed: ${err instanceof Error ? err.message : String(err)}`));
+  }
+  const deps: CoreDeps = { config, providers, skills, memory, frictionLedger, runHistoryWriter };
   const app = createSlackApp(deps);
 
-  // Work in flight = agent runs + the background memory reflections they spawn.
-  // Read by the graceful drain below and reported on /healthz for the deploy
-  // preflight (deploy/cloudflare/preflight.mjs).
-  const inFlight = () => activeRunCount() + pendingReflectionCount();
+  // Work in flight = agent runs + the background memory reflections they spawn
+  // + run-history writes still retrying (#157 KTD4: a record lost at SIGTERM is
+  // a run that vanishes at eviction). Read by the graceful drain below and
+  // reported on /healthz for the deploy preflight (deploy/cloudflare/preflight.mjs).
+  const pendingHistoryWrites = () => runHistoryWriter?.pending() ?? 0;
+  const inFlight = () => activeRunCount() + pendingReflectionCount() + pendingHistoryWrites();
   let draining = false;
   let drainStartedAt: number | undefined;
 
@@ -253,7 +292,8 @@ async function main() {
   // SIGTERM and waits up to 15 min before SIGKILL — but a SECOND deploy on top
   // of a draining instance replaces it at once (live 2026-08-29 23:51Z, a
   // review killed at 153 s). The deploy preflight refuses while `draining` is
-  // true; the live cards say what is happening meanwhile.
+  // true; the live cards say what is happening meanwhile. Run-history writes
+  // drain here too (see `inFlight` above).
   //
   // The socket is closed at the START of the drain, and Cloudflare boots the
   // replacement only after this process exits, so a deploy over a run blacks
@@ -268,7 +308,7 @@ async function main() {
     draining = true;
     drainStartedAt = Date.now();
     console.log(
-      `[drain] ${signal}: closing Slack socket, ${activeRunCount()} run(s) + ${pendingReflectionCount()} reflection(s) in flight`,
+      `[drain] ${signal}: closing Slack socket, ${activeRunCount()} run(s) + ${pendingReflectionCount()} reflection(s) + ${pendingHistoryWrites()} history write(s) in flight`,
     );
     setShutdownNotice("⏸ deploy in progress — finishing this run before the bot restarts");
     await app.stop().catch(() => {});
@@ -276,7 +316,10 @@ async function main() {
     while (inFlight() > 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 2000));
     }
-    console.log(`[drain] exiting (${activeRunCount()} run(s), ${pendingReflectionCount()} reflection(s) abandoned)`);
+    console.log(
+      `[drain] exiting (${activeRunCount()} run(s), ${pendingReflectionCount()} reflection(s), ${pendingHistoryWrites()} history write(s) abandoned` +
+        (runHistoryWriter ? `; ${runHistoryWriter.failures()} history write(s) lost this process)` : ")"),
+    );
     process.exit(0);
   };
   process.on("SIGTERM", () => void drain("SIGTERM"));

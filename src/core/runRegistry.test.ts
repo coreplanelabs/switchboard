@@ -11,6 +11,8 @@ import type { RunEvent } from "./runEvents.js";
 
 const call = (summary: string): RunEvent => ({ type: "tool_call", tool: "bash", summary });
 const result = (ok: boolean, summary: string): RunEvent => ({ type: "tool_result", tool: "bash", ok, summary });
+/** What `publish` hands back: the input event stamped with its per-run `seq` (#157). */
+const seq = (n: number, e: RunEvent): RunEvent => ({ ...e, seq: n });
 
 /** A registry with deterministic ids/tokens/clock for tests. */
 function testRegistry(over: Partial<RunRegistryOptions> = {}) {
@@ -57,7 +59,7 @@ describe("RunRegistry.subscribe — token gate (constant-time capability)", () =
     expect(unsub).not.toBeNull();
     reg.publish(id, call("$ echo hi"));
     reg.publish(id, result(true, "hi"));
-    expect(seen).toEqual([call("$ echo hi"), result(true, "hi")]);
+    expect(seen).toEqual([seq(1, call("$ echo hi")), seq(2, result(true, "hi"))]);
   });
 
   it("rejects a wrong token (returns null; nothing delivered)", () => {
@@ -101,10 +103,10 @@ describe("RunRegistry — backlog replay for a late subscriber", () => {
 
     const seen: RunEvent[] = [];
     reg.subscribe(id, token, (e) => seen.push(e)); // subscribes AFTER two events
-    expect(seen).toEqual([call("first"), result(true, "first done")]); // replayed
+    expect(seen).toEqual([seq(1, call("first")), seq(2, result(true, "first done"))]); // replayed
 
     reg.publish(id, call("second"));
-    expect(seen).toEqual([call("first"), result(true, "first done"), call("second")]); // + live
+    expect(seen).toEqual([seq(1, call("first")), seq(2, result(true, "first done")), seq(3, call("second"))]); // + live
   });
 
   it("bounds the backlog: only the most recent N events are retained for replay", () => {
@@ -113,7 +115,7 @@ describe("RunRegistry — backlog replay for a late subscriber", () => {
     for (let i = 1; i <= 5; i++) reg.publish(id, call(`e${i}`));
     const seen: RunEvent[] = [];
     reg.subscribe(id, token, (e) => seen.push(e));
-    expect(seen).toEqual([call("e3"), call("e4"), call("e5")]); // oldest two evicted
+    expect(seen).toEqual([seq(3, call("e3")), seq(4, call("e4")), seq(5, call("e5"))]); // oldest two evicted
   });
 });
 
@@ -126,7 +128,7 @@ describe("RunRegistry.unsubscribe", () => {
     reg.publish(id, call("before"));
     unsub();
     reg.publish(id, call("after"));
-    expect(seen).toEqual([call("before")]);
+    expect(seen).toEqual([seq(1, call("before"))]);
   });
 });
 
@@ -141,7 +143,7 @@ describe("RunRegistry.finish", () => {
     reg.finish(id);
     expect(finished).toBe(true);
     reg.publish(id, call("after-finish")); // no-op after finish
-    expect(seen).toEqual([call("during")]);
+    expect(seen).toEqual([seq(1, call("during"))]);
   });
 
   it("a subscriber that arrives after finish (within TTL) replays the backlog then gets onFinish immediately", () => {
@@ -153,7 +155,7 @@ describe("RunRegistry.finish", () => {
     let finished = false;
     const unsub = reg.subscribe(id, token, (e) => seen.push(e), () => (finished = true));
     expect(unsub).not.toBeNull();
-    expect(seen).toEqual([call("happened")]);
+    expect(seen).toEqual([seq(1, call("happened"))]);
     expect(finished).toBe(true);
   });
 
@@ -198,6 +200,29 @@ describe("RunRegistry.listActive", () => {
     reg.create();
     const [only] = reg.listActive();
     expect(only.label).toBeUndefined();
+  });
+
+  it("carries the RunMeta given at create() on every summary (absent fields omitted) and hands back the redacted label", () => {
+    const { reg } = testRegistry();
+    const handle = reg.create('coding · acme/x · "token ghp_abcdefghijklmnopqrstuvwxyz0123"', {
+      agent: "coding",
+      model: "anthropic/claude",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:1",
+      repo: "acme/x",
+    });
+    expect(handle.label).toBe('coding · acme/x · "token «redacted-github-token»"');
+    const [row] = reg.listActive();
+    expect(row).toMatchObject({ label: handle.label, agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1", repo: "acme/x" });
+    expect(reg.getById(handle.id)).toMatchObject({ agent: "coding", repo: "acme/x" });
+    const bare = reg.create();
+    const bareRow = reg.listActive().find((r) => r.id === bare.id)!;
+    expect(bare.label).toBeUndefined();
+    expect(Object.keys(bareRow).sort()).toEqual(["eventCount", "finished", "id", "startedAt", "token"]);
+    const chat = reg.create("general · #ch", { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:2" });
+    expect(reg.getById(chat.id)).not.toHaveProperty("repo");
+    expect(reg.getById(chat.id)).not.toHaveProperty("agent");
   });
 
   it("includes a recently-finished run (until TTL) marked finished, then excludes it once evicted", () => {
@@ -246,7 +271,7 @@ describe("RunRegistry — finished-run eviction after TTL", () => {
     const seen: RunEvent[] = [];
     reg.subscribe(id, token, (e) => seen.push(e));
     reg.publish(id, call("still going"));
-    expect(seen).toEqual([call("still going")]);
+    expect(seen).toEqual([seq(1, call("still going"))]);
   });
 });
 
@@ -309,7 +334,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     events.length = 0;
     reg.finish(id);
     expect(events).toEqual([
-      { type: "upsert", run: { id: "id-1", token: "tok-1", label: "done-run", finished: true, startedAt: 1000, eventCount: 0 } },
+      { type: "upsert", run: { id: "id-1", token: "tok-1", label: "done-run", finished: true, startedAt: 1000, finishedAt: 1000, eventCount: 0 } },
     ]);
   });
 
@@ -363,15 +388,68 @@ describe("snapshot — token-gated read of a run's backlog (#84)", () => {
     const ev = { type: "tool_call", tool: "bash", summary: "$ ls", at: 5 } as const;
     reg.publish(id, ev);
     const live = reg.snapshot(id, token);
-    expect(live).toEqual({ events: [ev], finished: false });
+    expect(live).toEqual({ events: [seq(1, ev)], finished: false, startedAt: expect.any(Number), eventCount: 1, truncated: false });
+    expect("finishedAt" in live!).toBe(false);
     // A copy: mutating it does not touch the registry's backlog.
     live!.events.push({ type: "tool_call", tool: "bash", summary: "$ rm -rf", at: 6 });
     expect(reg.snapshot(id, token)!.events).toHaveLength(1);
 
     reg.finish(id);
-    expect(reg.snapshot(id, token)).toEqual({ events: [ev], finished: true });
+    expect(reg.snapshot(id, token)).toEqual({ events: [seq(1, ev)], finished: true, startedAt: expect.any(Number), finishedAt: expect.any(Number), eventCount: 1, truncated: false });
     expect(reg.snapshot(id, "wrong")).toBeNull();
     expect(reg.snapshot("nope", token)).toBeNull();
+  });
+});
+
+// Feature: features/run-history.md — `markPersisted` (#157 KTD9): the history
+// writer confirms a run is in the durable store; the index learns it through
+// an upsert whose summary carries `persisted: true`.
+describe("RunRegistry.markPersisted", () => {
+  it("sets persisted on the summary and emits one index upsert", () => {
+    const { reg } = testRegistry();
+    const { id } = reg.create("x");
+    reg.finish(id);
+    const events: IndexEvent[] = [];
+    reg.subscribeIndex((ev) => events.push(ev));
+    events.length = 0; // drop the replay upsert
+    reg.markPersisted(id);
+    expect(events).toEqual([
+      { type: "upsert", run: { id: "id-1", token: "tok-1", label: "x", finished: true, startedAt: 1000, finishedAt: 1000, eventCount: 0, persisted: true } },
+    ]);
+    expect(reg.listActive()[0].persisted).toBe(true);
+  });
+
+  it("is a no-op for an unknown or evicted run (no upsert, no throw)", () => {
+    const { reg, tick } = testRegistry({ ttlMs: 10 });
+    const { id } = reg.create();
+    reg.finish(id);
+    tick(20);
+    reg.listActive(); // sweep → evicted
+    const events: IndexEvent[] = [];
+    reg.subscribeIndex((ev) => events.push(ev));
+    expect(() => reg.markPersisted(id)).not.toThrow();
+    expect(() => reg.markPersisted("never-existed")).not.toThrow();
+    expect(events).toEqual([]);
+  });
+
+  it("an unpersisted run's summary has no persisted key at all", () => {
+    const { reg } = testRegistry();
+    reg.create();
+    expect("persisted" in reg.listActive()[0]).toBe(false);
+  });
+});
+
+describe("RunRegistry.snapshot — record inputs (#157 U4)", () => {
+  it("carries the run's startedAt and the monotonic eventCount alongside the (bounded) backlog", () => {
+    const { reg } = testRegistry({ backlogLimit: 2 });
+    const { id, token } = reg.create();
+    reg.publish(id, call("a"));
+    reg.publish(id, call("b"));
+    reg.publish(id, call("c"));
+    const snap = reg.snapshot(id, token);
+    expect(snap?.startedAt).toBe(1000);
+    expect(snap?.eventCount).toBe(3);
+    expect(snap?.events).toHaveLength(2);
   });
 });
 
@@ -464,5 +542,189 @@ describe("RunRegistry.requestStop — run control (#101)", () => {
     const { id } = reg.create();
     reg.finish(id);
     expect("stop" in reg.listActive()[0]).toBe(false);
+  });
+});
+
+// Feature: features/run-visibility.md — the exchange in the stream (#157 U1): every
+// published event is stamped with a monotonic per-run `seq`, an event published
+// after finish() is dropped (the dispatcher must publish the answer BEFORE finishing),
+// and the label is redacted at create() so a secret in the request snippet never
+// reaches the index.
+describe("RunRegistry — text events, seq, label redaction (#157 U1)", () => {
+  const text = (type: "input" | "context" | "answer", text: string): RunEvent => ({ type, text });
+
+  it("stamps every published event with a monotonic per-run seq (1, 2, 3…)", () => {
+    const { reg } = testRegistry();
+    const a = reg.create();
+    const b = reg.create();
+    reg.publish(a.id, text("input", "hi"));
+    reg.publish(a.id, call("$ ls"));
+    reg.publish(b.id, text("input", "other run"));
+    reg.publish(a.id, result(true, "ok"));
+    expect(reg.snapshot(a.id, a.token)?.events.map((e) => e.seq)).toEqual([1, 2, 3]);
+    expect(reg.snapshot(b.id, b.token)?.events.map((e) => e.seq)).toEqual([1]); // per run, not global
+  });
+
+  it("an event published after finish() is a silent no-op — not in the snapshot, not delivered", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    const seen: RunEvent[] = [];
+    reg.subscribe(id, token, (e) => seen.push(e));
+    reg.publish(id, text("input", "request"));
+    reg.finish(id);
+    reg.publish(id, text("answer", "too late"));
+    const snap = reg.snapshot(id, token);
+    expect(snap?.events.map((e) => e.type)).toEqual(["input"]);
+    expect(seen).toHaveLength(1);
+  });
+
+  it("redacts a secret in the label at create(), so listActive() and the index feed never see it", () => {
+    const { reg } = testRegistry();
+    const seen: IndexEvent[] = [];
+    reg.subscribeIndex((e) => seen.push(e));
+    reg.create('coding · owner/repo · "use ghp_abcdefghijklmnopqrstuvwxyz0123 to push"');
+    const label = reg.listActive()[0]?.label ?? "";
+    expect(label).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
+    expect(label).toContain("«redacted-github-token»");
+    expect(JSON.stringify(seen)).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
+  });
+});
+
+// Feature: features/live-view.md — one backlog bounded by count AND bytes (#157
+// U11): the registry backlog is the only per-run event store (the dispatcher's
+// separate ring is gone), so its bounds are what the friction diagnosis and the
+// live replay see. A throwing per-run subscriber is isolated like index sinks.
+describe("RunRegistry — backlog bounds and subscriber isolation (#157 U11)", () => {
+  it("defaults to a 5000-event backlog: the 5001st event drops the oldest one; eventCount keeps counting", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 5001; i++) reg.publish(id, call(`$ step ${i}`));
+    const snap = reg.snapshot(id, token);
+    expect(snap?.events).toHaveLength(5000);
+    expect(snap?.events[0]).toMatchObject({ type: "tool_call", summary: "$ step 2", seq: 2 });
+    expect(snap?.events[4999]).toMatchObject({ summary: "$ step 5001", seq: 5001 });
+    expect(reg.listActive()[0]?.eventCount).toBe(5001);
+  });
+
+  const bytesOf = (e: RunEvent) => Buffer.byteLength(JSON.stringify(e), "utf8");
+  const filler = (n: number): RunEvent => ({ type: "context", text: "x".repeat(n) });
+
+  it("bounds the backlog by bytes (default 4 MiB, measured as each event's JSON): 4 × 1 MiB context events exceed it, so the oldest is dropped", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    for (let i = 0; i < 4; i++) reg.publish(id, filler(1024 * 1024));
+    const events = reg.snapshot(id, token)!.events;
+    expect(events.reduce((n, e) => n + bytesOf(e), 0)).toBeLessThanOrEqual(4 * 1024 * 1024);
+    expect(events.map((e) => e.seq)).toEqual([2, 3, 4]); // seq 1 dropped; the newest always survives
+    expect(reg.listActive()[0]?.eventCount).toBe(4);
+  });
+
+  it("budget + 1 byte drops the oldest until under budget (explicit backlogBytes; exact boundary)", () => {
+    // Budget = exactly three stamped events: all three fit; the fourth (one byte
+    // over) evicts the first; a fifth, larger one evicts two more.
+    const stampedSize = bytesOf({ ...filler(100), seq: 1 });
+    const { reg } = testRegistry({ backlogBytes: 3 * stampedSize });
+    const { id, token } = reg.create();
+    for (let i = 0; i < 3; i++) reg.publish(id, filler(100));
+    expect(reg.snapshot(id, token)!.events.map((e) => e.seq)).toEqual([1, 2, 3]);
+    reg.publish(id, filler(101)); // +1 byte over budget: dropping seq 1 alone still leaves 3S+1 → seq 2 goes too
+    expect(reg.snapshot(id, token)!.events.map((e) => e.seq)).toEqual([3, 4]);
+    reg.publish(id, filler(100 + stampedSize)); // a 2S event → only it fits beside nothing older
+    expect(reg.snapshot(id, token)!.events.map((e) => e.seq)).toEqual([5]);
+    const used = reg.snapshot(id, token)!.events.reduce((n, e) => n + bytesOf(e), 0);
+    expect(used).toBeLessThanOrEqual(3 * stampedSize);
+  });
+
+  it("a throwing per-run subscriber does not break publish for other subscribers or the publisher", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    const seen: RunEvent[] = [];
+    reg.subscribe(id, token, () => {
+      throw new Error("dead sink");
+    });
+    reg.subscribe(id, token, (e) => seen.push(e));
+    expect(() => reg.publish(id, call("$ ls"))).not.toThrow();
+    expect(seen).toHaveLength(1);
+    expect(reg.snapshot(id, token)?.events).toHaveLength(1); // still recorded
+  });
+});
+
+describe("RunRegistry — token-free operator reads (#157 U5, KTD7)", () => {
+  it("getById/snapshotById mirror the token-gated reads and are null for unknown or evicted runs", () => {
+    const { reg, tick } = testRegistry({ ttlMs: 60_000 });
+    const { id, token } = reg.create("lbl");
+    reg.publish(id, call("$ ls"));
+    expect(reg.getById(id)).toEqual(reg.listActive()[0]);
+    expect(reg.snapshotById(id)).toEqual(reg.snapshot(id, token));
+    expect(reg.getById("nope")).toBeNull();
+    expect(reg.snapshotById("nope")).toBeNull();
+    reg.finish(id);
+    tick(60_001);
+    expect(reg.getById(id)).toBeNull();
+    expect(reg.snapshotById(id)).toBeNull();
+  });
+
+  it("requestStopById drives the control, publishes stop_requested with a sanitized actor, and refuses finished/unknown runs", () => {
+    const { reg } = testRegistry();
+    const { id, token, control } = reg.create();
+    const seen: RunEvent[] = [];
+    reg.subscribe(id, token, (e) => seen.push(e));
+    expect(reg.requestStopById(id, "soft", { kind: "mcp", id: "mcp:agent one!" })).toEqual({ ok: true, mode: "soft" });
+    expect(control.requested).toBe("soft");
+    expect(seen.at(-1)).toMatchObject({ type: "run_note", kind: "stop_requested", mode: "soft", actor: { kind: "mcp", id: "mcp:agentone" } });
+    // The token-gated path publishes no actor: the capability, not a person, asked.
+    reg.requestStop(id, token, "hard");
+    expect(seen.at(-1)).toMatchObject({ kind: "stop_requested", mode: "hard" });
+    expect(seen.at(-1)).not.toHaveProperty("actor");
+    reg.finish(id);
+    expect(reg.requestStopById(id, "soft", { kind: "cli", id: "cli:local" })).toEqual({ ok: false, reason: "finished" });
+    expect(reg.requestStopById("nope", "soft", { kind: "cli", id: "cli:local" })).toEqual({ ok: false, reason: "not-found" });
+  });
+
+  it("an actor id with nothing allowed in it becomes `unknown`", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    const seen: RunEvent[] = [];
+    reg.subscribe(id, token, (e) => seen.push(e));
+    reg.requestStopById(id, "soft", { kind: "chat", id: "   " });
+    expect(seen.at(-1)).toMatchObject({ actor: { kind: "chat", id: "unknown" } });
+  });
+});
+
+describe("RunRegistry — terminal status + finishedAt on the summary; truncated on the snapshot (review)", () => {
+  it("finish(id, status) stores the status: the summary and the index upsert carry `status` and `finishedAt`; a live run has neither", () => {
+    const { reg, tick } = testRegistry();
+    const run = reg.create("l", { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1" });
+    const live = reg.getById(run.id)!;
+    expect("status" in live).toBe(false);
+    expect("finishedAt" in live).toBe(false);
+    const events: IndexEvent[] = [];
+    reg.subscribeIndex((e) => events.push(e));
+    tick(5000);
+    reg.finish(run.id, "stopped_soft");
+    const done = reg.getById(run.id)!;
+    expect(done).toMatchObject({ finished: true, status: "stopped_soft", finishedAt: 6000 });
+    const upsert = events.find((e) => e.type === "upsert" && e.run.finished);
+    expect(upsert).toMatchObject({ type: "upsert", run: { id: run.id, status: "stopped_soft", finishedAt: 6000 } });
+  });
+
+  it("finish(id) without a status records finishedAt but no status (an inline run that reports its outcome elsewhere)", () => {
+    const { reg } = testRegistry();
+    const run = reg.create("l");
+    reg.finish(run.id);
+    const s = reg.getById(run.id)!;
+    expect(s.finishedAt).toBe(1000);
+    expect("status" in s).toBe(false);
+  });
+
+  it("snapshot/snapshotById report `truncated` when the bounded backlog dropped events (eventCount > events.length)", () => {
+    const { reg } = testRegistry({ backlogLimit: 3 });
+    const run = reg.create("l");
+    for (let i = 0; i < 2; i++) reg.publish(run.id, call(`$ step ${i}`));
+    expect(reg.snapshot(run.id, run.token)).toMatchObject({ truncated: false, eventCount: 2 });
+    for (let i = 2; i < 5; i++) reg.publish(run.id, call(`$ step ${i}`));
+    const snap = reg.snapshotById(run.id)!;
+    expect(snap.events).toHaveLength(3);
+    expect(snap).toMatchObject({ truncated: true, eventCount: 5 });
   });
 });

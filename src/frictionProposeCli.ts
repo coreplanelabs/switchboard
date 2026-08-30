@@ -17,6 +17,7 @@ import { pathToFileURL } from "node:url";
 import { isFrictionRunRecord } from "./core/frictionLedger.js";
 import type { FrictionRunRecord } from "./core/frictionProposals.js";
 import { analyzeRunFriction } from "./core/runFriction.js";
+import { isRunRecord } from "./core/runRecord.js";
 import { formatSelfImprovementReport, runSelfImprovement } from "./core/selfImprovement.js";
 import { GithubIssueTracker } from "./execution/githubIssues.js";
 import { parseRunEventLines } from "./frictionCli.js";
@@ -87,10 +88,15 @@ export interface LoadOptions {
  * thrown — one bad capture must not sink a pass over fifty good ones. Records
  * are deduped by run id (the same run captured twice is one run).
  */
-export function loadFrictionRecords(sources: string[], opts: LoadOptions = {}): { records: FrictionRunRecord[]; skipped: string[] } {
+export function loadFrictionRecords(
+  sources: string[],
+  opts: LoadOptions = {},
+): { records: FrictionRunRecord[]; skipped: string[]; reasons: Record<string, string> } {
   const mtime = opts.mtime ?? ((p: string) => statSync(p).mtimeMs);
   const records = new Map<string, FrictionRunRecord>();
   const skipped: string[] = [];
+  /** A specific reason for a skipped path, when the generic "not recognized" would mislead. */
+  const reasons: Record<string, string> = {};
   for (const path of expand(sources, skipped)) {
     let text: string;
     try {
@@ -100,11 +106,23 @@ export function loadFrictionRecords(sources: string[], opts: LoadOptions = {}): 
       continue;
     }
     const loaded = recordsFromText(text, path, mtime);
+    if (loaded === "run-record") {
+      skipped.push(path);
+      reasons[path] = RUN_RECORD_REASON;
+      continue;
+    }
     if (loaded.length === 0) skipped.push(path);
     for (const r of loaded) if (!records.has(r.runId)) records.set(r.runId, r);
   }
-  return { records: [...records.values()], skipped };
+  return { records: [...records.values()], skipped, reasons };
 }
+
+/** Run-history records (features/run-history.md) look like a friction capture
+ *  (`id` + `diagnosis`) but are a different contract; the friction ledger is
+ *  served from the run store in-process, so the CLI refuses them by name rather
+ *  than half-reading them as captures. */
+const RUN_RECORD_REASON =
+  "run-history RunRecord (field `id` + `events`), not a friction capture or ledger line — the friction ledger reads the run store directly; use `runs list` for history";
 
 /** Directories expand to their (non-recursive) files, sorted; files pass through. */
 function expand(sources: string[], skipped: string[]): string[] {
@@ -123,7 +141,7 @@ function expand(sources: string[], skipped: string[]): string[] {
   return out;
 }
 
-function recordsFromText(text: string, path: string, mtime: (p: string) => number): FrictionRunRecord[] {
+function recordsFromText(text: string, path: string, mtime: (p: string) => number): FrictionRunRecord[] | "run-record" {
   const trimmed = text.trim();
   if (!trimmed) return [];
   const fallbackId = basename(path, extname(path));
@@ -131,6 +149,7 @@ function recordsFromText(text: string, path: string, mtime: (p: string) => numbe
   // One JSON document: a `/runs/:id/friction` response or a single ledger record.
   const doc = tryJson(trimmed);
   if (doc && typeof doc === "object" && !Array.isArray(doc)) {
+    if (isRunRecord(doc)) return "run-record";
     const rec = recordFromObject(doc as Record<string, unknown>, fallbackId, () => mtime(path));
     return rec ? [rec] : [];
   }
@@ -140,6 +159,7 @@ function recordsFromText(text: string, path: string, mtime: (p: string) => numbe
   const ledger: FrictionRunRecord[] = [];
   for (const line of lines) {
     const v = tryJson(line);
+    if (isRunRecord(v)) return "run-record";
     if (isFrictionRunRecord(v)) ledger.push(v);
   }
   if (ledger.length > 0) return ledger;
@@ -181,8 +201,8 @@ async function main(): Promise<void> {
     console.error("usage: frictionProposeCli <file|dir>... [--repo owner/name] [--label L] [--top N] [--min-runs N] [--file] [--json]");
     process.exit(2);
   }
-  const { records, skipped } = loadFrictionRecords(args.sources);
-  for (const s of skipped) console.error(`(skipped ${s}: not a friction capture, ledger, or run-event stream)`);
+  const { records, skipped, reasons } = loadFrictionRecords(args.sources);
+  for (const s of skipped) console.error(`(skipped ${s}: ${reasons[s] ?? "not a friction capture, ledger, or run-event stream"})`);
   if (records.length === 0) {
     console.error("no runs loaded");
     process.exit(1);

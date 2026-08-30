@@ -32,10 +32,43 @@ export type RunNoteKind =
  *  finale, tear the workspace down. */
 export type StopMode = "soft" | "hard";
 
+/** Who asked a run to stop (#157 R9): the caller's surface and its platform-
+ *  namespaced identity (`slack:U…`, `access:<sub>`, `mcp:<subject>`,
+ *  `cli:local`). Recorded on the `stop_requested` note so the stream itself says
+ *  who stopped the run; `id` is charset-restricted to `ACTOR_ID_PATTERN` and
+ *  capped by `sanitizeActor` before it is published. Absent on notes published
+ *  through the token-gated HTML path (the capability, not a person, is the actor). */
+export interface RunActor {
+  kind: "access" | "mcp" | "cli" | "chat";
+  id: string;
+}
+
+/** The character class an `actor.id` may carry (regex body, no brackets) — the
+ *  ONE source both the validating pattern and the sanitizer are built from. */
+const ACTOR_ID_CHARS = "A-Za-z0-9:@._-";
+const ACTOR_ID_MAX = 128;
+/** The characters an `actor.id` may carry; anything else is dropped. */
+export const ACTOR_ID_PATTERN = new RegExp(`^[${ACTOR_ID_CHARS}]{1,${ACTOR_ID_MAX}}$`);
+const ACTOR_ID_FORBIDDEN = new RegExp(`[^${ACTOR_ID_CHARS}]`, "g");
+
+/** Coerce an actor into the published shape: strip every character outside the
+ *  allowed set, cap at 128, and fall back to `unknown` when nothing survives —
+ *  a hostile id is neutered, never a reason to refuse the stop. */
+export function sanitizeActor(actor: RunActor): RunActor {
+  const id = actor.id.replace(ACTOR_ID_FORBIDDEN, "").slice(0, ACTOR_ID_MAX);
+  return { kind: actor.kind, id: id.length > 0 ? id : "unknown" };
+}
+
+/**
+ * One event in a run's stream. `seq` is stamped by `RunRegistry.publish` — a
+ * monotonic, per-run 1-based position (optional on the way in, present on every
+ * event read back from the registry) so replays and history pages can resume
+ * from a point without comparing payloads.
+ */
 export type RunEvent =
   /** `callId` is the provider's tool_use id — the explicit pair key between a
    *  call and its result (live-view item 13); absent only on legacy captures. */
-  | { type: "tool_call"; tool: string; summary: string; callId?: string; at?: number }
+  | { type: "tool_call"; tool: string; summary: string; callId?: string; seq?: number; at?: number }
   /** `ok` is "the tool succeeded": false when it threw AND (bash) when the
    *  command exited nonzero. `exitCode` rides on bash results (parsed from the
    *  executors' shared `exit N:` prefix, 0 for a clean run; absent when the code
@@ -51,21 +84,24 @@ export type RunEvent =
       exitCode?: number;
       output?: string;
       infra?: true;
+      seq?: number;
       at?: number;
     }
-  /** `mode` rides only on the stop notes (`stop_requested` / `stopped`). */
-  | { type: "run_note"; kind: RunNoteKind; summary: string; mode?: StopMode; at?: number }
+  /** `mode` rides only on the stop notes (`stop_requested` / `stopped`); `actor`
+   *  only on a `stop_requested` published through `RunsService.stopRun`. */
+  | { type: "run_note"; kind: RunNoteKind; summary: string; mode?: StopMode; actor?: RunActor; seq?: number; at?: number }
   /** The run's final answer — the same text the channel reply/PR post is
    *  projected from, redacted like every event (NOT capped: the run record is
    *  the source of truth, the summaries are). Published by the dispatcher once
-   *  per run, before the reply goes out; absent when an AGENT run threw (the
-   *  card shows ❌). An inline command run that throws still publishes one —
-   *  the `⚠️ <error>` reply — so its record explains the `failed` status. */
-  | { type: "answer"; text: string; at?: number }
+   *  per run, before `finish()` and before the reply goes out; absent when an
+   *  AGENT run threw (the card shows ❌). An inline command run that throws
+   *  still publishes one — the `⚠️ <error>` reply — so its record explains the
+   *  `failed` status. */
+  | { type: "answer"; text: string; seq?: number; at?: number }
   /** The request as received (directives stripped, attachments noted as a
-   *  one-line suffix), redacted, uncapped. Published by the dispatcher once per
-   *  run, right after the run is registered — the first event of the record, so
-   *  the run page can lead with what was asked (features/live-view.md item 12). */
+   *  one-line count suffix — never bytes or file bodies), redacted, uncapped. Published by the dispatcher once
+   *  per run, right after the run is registered — the first event of the record,
+   *  so the run page can lead with what was asked (features/live-view.md item 12). */
   | {
       type: "input";
       text: string;
@@ -73,12 +109,19 @@ export type RunEvent =
        *  user display names and a link back to the triggering message —
        *  whatever the adapter supplied (all optional). */
       source?: { url?: string; channel?: string; user?: string };
+      seq?: number;
       at?: number;
     }
+  /** One prior thread turn fed to the model (#157, KD1), prefixed with its role
+   *  (`user: …` / `assistant: …`), humanized and redacted like `input`, with
+   *  attachments as metadata lines. Published by the dispatcher right after
+   *  `input`, bounded (newest 20 turns / 256 KiB) and gated by
+   *  `runHistory.includeContext`. */
+  | { type: "context"; text: string; seq?: number; at?: number }
   /** The model's prose BETWEEN tool calls — text content that rode alongside
    *  tool_use in one completion. Emitted by the runner, redacted, uncapped. The
    *  final text-only completion is NOT one of these (that is the `answer`). */
-  | { type: "assistant"; text: string; at?: number }
+  | { type: "assistant"; text: string; seq?: number; at?: number }
   /** One model call, as the runner saw it (live-view item 15): emitted when the
    *  provider returns, BEFORE the `assistant`/`tool_call` events that call
    *  produced — so a reader sees "thought for 5m 04s" above what the thinking
@@ -87,7 +130,7 @@ export type RunEvent =
    *  `at - startedAt === durationMs`. `usage` rides only when the provider
    *  reported token counts. Shape follows the OTel GenAI `chat` span (duration,
    *  stop reason, input/output tokens) so it exports without translation. */
-  | { type: "turn"; startedAt: number; durationMs: number; stopReason: CompletionResult["stopReason"]; usage?: TokenUsage; at?: number };
+    | { type: "turn"; startedAt: number; durationMs: number; stopReason: CompletionResult["stopReason"]; usage?: TokenUsage; seq?: number; at?: number };
 
 // Credential shapes we must never surface in a run-visibility stream (which may
 // be shown in-channel or on a shared page). Two layers: (1) specific known
@@ -100,7 +143,9 @@ const REDACT: Array<{ re: RegExp; replace: string }> = [
   { re: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g, replace: "«redacted-private-key»" },
   { re: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g, replace: "«redacted-private-key»" },
   // URL / connection-string basic-auth: scheme://user:password@host
-  { re: /([a-z][a-z0-9+.\-]*:\/\/)([^\s:/@]+):([^\s:/@]+)@/gi, replace: "$1$2:«redacted»@" },
+  // Anchored to the start of a scheme-character run (not `\b`): one attempt per
+  // run keeps a long pasted token linear, and `1https://u:p@h` still redacts.
+  { re: /(?<![a-z0-9+.\-])([a-z0-9+.\-]+:\/\/)([^\s:/@]+):([^\s:/@]+)@/gi, replace: "$1$2:«redacted»@" },
   // curl -u user:pass
   { re: /(^|\s)(-u|--user)(\s+|=)\S+:\S+/g, replace: "$1$2$3«redacted»" },
   // HTTP auth headers (Bearer / Basic / token) and bare Bearer tokens
@@ -127,15 +172,26 @@ const REDACT: Array<{ re: RegExp; replace: string }> = [
 const SECRET_COMPONENT = /^(secret|token|password|passwd|pwd|credential|credentials|key|apikey|auth|session|sessionid|cookie)$/i;
 
 /** Redact the VALUE of any `<name> = value` / `<name>: value` where the name has
- *  a secret-marking component. Handles quoted values (with spaces) and unquoted.
- *  Name-gated so ordinary config assignments are untouched. */
+ *  a secret-marking component. Handles quoted values (with spaces) and unquoted,
+ *  and a quoted NAME (`"password": "…"` in pasted JSON — the closing quote sits
+ *  between the name and the separator). Name-gated so ordinary config
+ *  assignments are untouched. */
 function redactNamedAssignments(text: string): string {
   return text.replace(
-    /([A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)*)(\s*[=:]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s]{4,})/g,
-    (whole, id: string, sep: string, val: string) => {
+    // The identifier is the WHOLE `[A-Za-z0-9_-]` run, anchored to its start by
+    // the lookbehind: without an anchor a long unbroken token (pasted base64, a
+    // minified line) is retried from every offset and each attempt backtracks
+    // the whole tail — O(n²), ~0.5 s per 20 KB. A `\b` anchor is not enough:
+    // it skips `_SECRET=`, `self._password =`, `2fa_token=` (a letter run
+    // preceded by `_`/digit), and a letter-start id (`[A-Za-z][A-Za-z0-9]*`)
+    // is still retried at every letter of a mixed alphanumeric run. Taking the
+    // maximal run means one attempt per run; the component check below still
+    // decides whether it names a secret (`_SECRET` → ["", "SECRET"]).
+    /(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)("?)(\s*[=:]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s]{4,})/g,
+    (whole, id: string, close: string, sep: string, val: string) => {
       if (!id.split(/[_-]/).some((p) => SECRET_COMPONENT.test(p))) return whole;
       const quote = val[0] === '"' || val[0] === "'" ? val[0] : "";
-      return `${id}${sep}${quote}«redacted»${quote}`;
+      return `${id}${close}${sep}${quote}«redacted»${quote}`;
     },
   );
 }
@@ -205,8 +261,10 @@ export function parseExitPrefix(output: string): { failed: boolean; exitCode?: n
 }
 
 /** Upper bound on a `tool_result.output` — large enough for a test run or a
- *  diff to read in full on the run page, small enough that the registry's
- *  1000-event backlog stays in the low megabytes worst case. */
+ *  diff to read in full on the run page, small enough that a run of ordinary
+ *  length fits the registry's backlog whole (the backlog is bounded by count AND
+ *  bytes — `RunRegistry`, 5000 events / 4 MiB — so an output-heavy run trims its
+ *  oldest events rather than growing without bound). */
 export const TOOL_OUTPUT_CAP = 8_000;
 
 /** The full tool output as it may leave the process: control-stripped, then
@@ -241,4 +299,19 @@ export function formatTurnDuration(ms: number): string {
   const m = Math.floor(ms / 60_000);
   const s = Math.round((ms - m * 60_000) / 1000);
   return `${m}m ${s < 10 ? "0" : ""}${s}s`;
+}
+
+/** `JSON.stringify(event)`, computed once per event object however many readers
+ *  it has: the registry measures each event's byte size at publish, then hands
+ *  the SAME object to every subscriber (and replays the same backlog entries),
+ *  so with k open tabs on one run each tool_result (up to 8 KB of output) would
+ *  otherwise be serialized k+1 times. */
+const serialized = new WeakMap<object, string>();
+export function serializedOnce(event: object): string {
+  let s = serialized.get(event);
+  if (s === undefined) {
+    s = JSON.stringify(event);
+    serialized.set(event, s);
+  }
+  return s;
 }

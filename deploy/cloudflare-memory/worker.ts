@@ -4,6 +4,26 @@ import { DEFAULT_SCOPE_CAP, mintRecord, normalizeText, planEviction, planWrite, 
 import { tokenize } from "../../src/core/memory/scorer.ts";
 import { isFrictionRunRecord, type FrictionRunRecord } from "../../src/core/frictionProposals.ts";
 import { FIRING_DETAIL_MAX, isScheduleFiring, type ScheduleFiring } from "../../src/core/schedules.ts";
+import {
+  applyRetention,
+  clampRetentionPolicy,
+  isRunRecord,
+  normalizeStored,
+  RUN_EVENTS_DEFAULT_PAGE,
+  RUN_EVENTS_MAX_PAGE,
+  RUN_ID_PATTERN,
+  clampListLimit,
+  RUN_LIST_MAX_LIMIT,
+  sameStoredVersion,
+  storedEventSeqs,
+  utf8ByteLength,
+  type RetentionPolicy,
+  type RunListItem,
+  type RunListOptions,
+  type RunRecord,
+  type StoredRunEvent,
+} from "../../src/core/runRecord.ts";
+import type { RunEvent } from "../../src/core/runEvents.ts";
 
 // Memory Worker: the durable backend behind the bot's WorkerMemoryStore
 // (src/core/memory/workerStore.ts) — cross-session memory PR3 (#85). One
@@ -31,6 +51,19 @@ import { FIRING_DETAIL_MAX, isScheduleFiring, type ScheduleFiring } from "../../
 // WorkerScheduleStore, src/core/scheduleStore.ts): ONE ScheduleDO, bounded per schedule.
 //   POST /schedules/record {firing: ScheduleFiring} → {ok:true, retained}
 //   POST /schedules/latest {}                       → {firings: ScheduleFiring[]} (newest per schedule)
+// Run history routes (#157 — the durable RunStore behind the bot's
+// WorkerRunStore, src/core/runStoreWorker.ts): one RunHistoryDO per store key,
+// owning the retention policy (KTD5). Same bearer; /runs/put has its own 2 MiB
+// body fence (a record is budgeted to 1.5 MiB upstream), every other route
+// keeps the 512 KB one.
+//   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?} → {ok, retained, stored, rewritten}
+//   POST /runs/get    {storeKey, id} → {record: RunRecord | null}      (unknown/expired: null, 200)
+//   POST /runs/list   {storeKey, limit?, before?, beforeId?, sinceMs?, agent?, channel?}
+//                       → {items: RunListItem[], nextBefore?: {finishedAt, id}}   (cursor = the last row's list key)
+//   POST /runs/events {storeKey, id, afterSeq?, limit?} → {events: (RunEvent & {seq})[] | null, nextAfterSeq?}
+//                       (`events: null` when the run is unknown or hidden by retention; `seq` is the registry's stamp)
+//   POST /runs/delete {storeKey, id} → {ok: true, deleted}
+//   GET  /healthz → {ok: true, features: ["memory", "friction", "schedules", "runs"]}
 //
 // SECURITY: bearer comparison is constant-time (same helper as the resident
 // Worker); an unset/empty secret grants nothing (fail closed); every body field
@@ -42,6 +75,8 @@ export interface Env {
   FRICTION: DurableObjectNamespace<FrictionDO>;
   /** Scheduled firings (#244): ONE ScheduleDO (named "schedules") — the record behind the /runs Scheduled panel. */
   SCHEDULES: DurableObjectNamespace<ScheduleDO>;
+  /** Run history (#157): one RunHistoryDO per store key (`runs:default`). */
+  RUNS: DurableObjectNamespace<RunHistoryDO>;
   MEMORY_TOKEN?: string;
 }
 
@@ -444,8 +479,8 @@ function parseScheduleFiring(body: unknown): Validated<ScheduleFiring> {
 function parseFrictionRecord(body: unknown): Validated<{ ledgerKey: string; record: FrictionRunRecord }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const b = body as Record<string, unknown>;
-  const key = parseScopeKey(b.ledgerKey);
-  if (!key.ok) return invalid(key.error.replace("scopeKey", "ledgerKey"));
+  const key = parseScopeKey(b.ledgerKey, "ledgerKey");
+  if (!key.ok) return key;
   if (!isFrictionRunRecord(b.record)) return invalid("record must be a FrictionRunRecord (runId, finishedAt, diagnosis)");
   if (b.record.runId.length > MAX_KEY_CHARS) return invalid(`record.runId must be at most ${MAX_KEY_CHARS} characters`);
   if (JSON.stringify(b.record).length > MAX_FRICTION_RECORD_CHARS) {
@@ -457,8 +492,8 @@ function parseFrictionRecord(body: unknown): Validated<{ ledgerKey: string; reco
 function parseFrictionRecent(body: unknown): Validated<{ ledgerKey: string; limit?: number; sinceMs?: number }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const b = body as Record<string, unknown>;
-  const key = parseScopeKey(b.ledgerKey);
-  if (!key.ok) return invalid(key.error.replace("scopeKey", "ledgerKey"));
+  const key = parseScopeKey(b.ledgerKey, "ledgerKey");
+  if (!key.ok) return key;
   const out: { ledgerKey: string; limit?: number; sinceMs?: number } = { ledgerKey: key.value };
   if (b.limit !== undefined) {
     if (typeof b.limit !== "number" || !Number.isInteger(b.limit) || b.limit < 1 || b.limit > MAX_FRICTION_LIMIT) {
@@ -471,6 +506,536 @@ function parseFrictionRecent(body: unknown): Validated<{ ledgerKey: string; limi
     out.sinceMs = b.sinceMs;
   }
   return { ok: true, value: out };
+}
+
+// ---------------------------------------------------------------------------
+// Durable Object: one run history per store key (#157)
+// ---------------------------------------------------------------------------
+
+// Cloudflare Durable Object SQLite limits (developers.cloudflare.com/durable-objects/platform/limits/,
+// read 2026-08-29): 100 bound parameters per query; 100 KB per SQL statement;
+// 2 MB per string/BLOB/row; 100 columns per table; 10 GB storage per object
+// (Workers Paid). Consequences here: event inserts carry 3 parameters per row,
+// so a batch is 33 rows (99 parameters); deletions by id list are batched at
+// 100 ids; an event is capped to 64 KiB upstream (MAX_EVENT_BYTES) so no row
+// nears 2 MB; and `maxBytes` is clamped to 8 GiB (RETENTION_BOUNDS), under the
+// 10 GB per-object ceiling.
+const DO_MAX_BOUND_PARAMETERS = 100;
+/** Rows per `INSERT INTO run_events` statement: floor(100 / 3 parameters). */
+export const RUN_EVENT_INSERT_BATCH = Math.floor(DO_MAX_BOUND_PARAMETERS / 3);
+/** Ids per `DELETE ... WHERE run_id IN (...)` statement. */
+const RUN_DELETE_BATCH = DO_MAX_BOUND_PARAMETERS;
+/** Rows a single `put` may delete while trimming (deletion fence, KTD5): a
+ *  policy shrink dropping thousands of runs is spread over successive puts and
+ *  the 6 h alarm, so no single write stalls. Reads hide them immediately. */
+const RUN_TRIM_FENCE = 500;
+/** How often `alarm()` sweeps everything outside policy (KTD5). */
+const RUN_SWEEP_INTERVAL_MS = 6 * 3600_000;
+/** `finishedAt` further ahead of the DO clock than this is clamped (a skewed bot clock). */
+const RUN_MAX_FUTURE_MS = 24 * 3600_000;
+/** Request body ceiling for `/runs/put` (a record is budgeted to 1.5 MiB upstream). */
+const MAX_RUN_PUT_BODY_BYTES = 2 * 1024 * 1024;
+const POLICY_KEY = "policy";
+
+type RunRow = {
+  run_id: string;
+  agent: string | null;
+  channel_id: string | null;
+  finished_at: number;
+  bytes: number;
+  event_count: number;
+  summary_json: string;
+};
+
+interface StoredPolicy {
+  policy: RetentionPolicy;
+  policyUpdatedAt: number;
+}
+
+export interface RunPolicyProposal {
+  policy: Partial<RetentionPolicy>;
+  policyUpdatedAt: number;
+}
+
+/** What retention needs from a `runs` row. */
+type RetentionRow = { run_id: string; finished_at: number; bytes: number };
+
+export class RunHistoryDO extends DurableObject<Env> {
+  private readonly sql: SqlStorage;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    // Idempotent schema. `runs` carries the listing columns plus the record
+    // minus its events as JSON (`summary_json`, what `list` returns); events
+    // live one per row keyed (run_id, seq) so a 5000-event run is paged, never
+    // loaded whole to answer a listing. `meta` holds the persisted policy.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS runs (
+        run_id TEXT PRIMARY KEY,
+        label TEXT,
+        agent TEXT,
+        model TEXT,
+        channel_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        thread_key TEXT NOT NULL,
+        repo TEXT,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER NOT NULL,
+        stored_at INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        event_count INTEGER NOT NULL,
+        stored_event_count INTEGER NOT NULL,
+        truncated INTEGER NOT NULL,
+        bytes INTEGER NOT NULL,
+        diagnosis_json TEXT NOT NULL,
+        summary_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS runs_finished ON runs(finished_at);
+      CREATE TABLE IF NOT EXISTS run_events (
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        json TEXT NOT NULL,
+        PRIMARY KEY (run_id, seq)
+      );
+      CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+  }
+
+  // ---- policy ---------------------------------------------------------------
+
+  /** The persisted policy (defaults until the first proposal lands). */
+  policyState(): StoredPolicy {
+    const row = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, POLICY_KEY).toArray()[0];
+    if (!row) return { policy: clampRetentionPolicy({}), policyUpdatedAt: 0 };
+    try {
+      const parsed = JSON.parse(row.value) as Partial<RetentionPolicy> & { policyUpdatedAt?: number };
+      const at = typeof parsed.policyUpdatedAt === "number" && Number.isFinite(parsed.policyUpdatedAt) ? parsed.policyUpdatedAt : 0;
+      return { policy: clampRetentionPolicy(parsed), policyUpdatedAt: at };
+    } catch {
+      return { policy: clampRetentionPolicy({}), policyUpdatedAt: 0 };
+    }
+  }
+
+  /** Accept a proposal only when strictly newer than the stored one; its stamp
+   *  is clamped to the DO clock so a skewed proposer cannot lock the policy. */
+  private applyProposal(proposal: RunPolicyProposal, now: number): StoredPolicy {
+    const current = this.policyState();
+    const stamp = Math.min(proposal.policyUpdatedAt, now);
+    if (stamp <= current.policyUpdatedAt) return current;
+    const next: StoredPolicy = { policy: clampRetentionPolicy(proposal.policy), policyUpdatedAt: stamp };
+    this.sql.exec(
+      `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      POLICY_KEY,
+      JSON.stringify({ ...next.policy, policyUpdatedAt: next.policyUpdatedAt }),
+    );
+    return next;
+  }
+
+  // ---- retention ------------------------------------------------------------
+
+  /** The ids the policy keeps among `rows`, computed by the ONE shared
+   *  retention function over each row's (id, finishedAt, bytes). */
+  private static keptIds(rows: readonly RetentionRow[], policy: RetentionPolicy, now: number): Set<string> {
+    const kept = applyRetention(
+      rows.map((r) => ({ id: r.run_id, finishedAt: r.finished_at, bytes: r.bytes })),
+      policy,
+      now,
+    );
+    return new Set(kept.map((r) => r.id));
+  }
+
+  /** Every row, oldest first (`finished_at ASC, run_id ASC`) — the deletion order. */
+  private retentionRows(): RetentionRow[] {
+    return this.sql.exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs ORDER BY finished_at ASC, run_id ASC`).toArray();
+  }
+
+  /**
+   * Whether ONE row is kept, without materializing the table — the same answer
+   * `applyRetention` gives for it, decided in its order: (1) finished before
+   * the `retentionDays` cutoff → out; (2) rows ranked ahead of it (newest
+   * first: `finished_at DESC, run_id DESC`, among those inside the cutoff) must
+   * number fewer than `maxRuns`; (3) their bytes plus its own must fit
+   * `maxBytes` (bytes are non-negative, so the cumulative total is monotone and
+   * "the first row over the budget and everything after it" reduces to this one
+   * inequality). Ids are ASCII (`RUN_ID_PATTERN`), so SQLite's binary `run_id`
+   * order is the JS string order `newestFirst` uses.
+   */
+  private isKept(row: RetentionRow, policy: RetentionPolicy, now: number): boolean {
+    const cutoff = now - policy.retentionDays * 86_400_000;
+    if (row.finished_at < cutoff) return false;
+    const ahead = this.sql
+      .exec<{ n: number; b: number }>(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b FROM runs
+          WHERE finished_at >= ? AND (finished_at > ? OR (finished_at = ? AND run_id > ?))`,
+        cutoff,
+        row.finished_at,
+        row.finished_at,
+        row.run_id,
+      )
+      .one();
+    return ahead.n < policy.maxRuns && ahead.b + row.bytes <= policy.maxBytes;
+  }
+
+  private deleteRuns(ids: readonly string[]): void {
+    for (let i = 0; i < ids.length; i += RUN_DELETE_BATCH) {
+      const batch = ids.slice(i, i + RUN_DELETE_BATCH);
+      const marks = batch.map(() => "?").join(",");
+      this.sql.exec(`DELETE FROM run_events WHERE run_id IN (${marks})`, ...batch);
+      this.sql.exec(`DELETE FROM runs WHERE run_id IN (${marks})`, ...batch);
+    }
+  }
+
+  /** Delete rows outside policy, oldest first, at most `fence` of them (all
+   *  when `fence` is undefined). `first`, when outside policy, is always
+   *  deleted — the record just written must not survive its own put as a
+   *  hidden row. One scan of `runs` feeds both the kept set and the deletion
+   *  order. Returns how many rows were deleted and the kept ids — which are
+   *  exactly the rows retained after the delete: the kept set is the newest
+   *  prefix of the age-filtered order, and only rows outside it were removed,
+   *  so re-running retention on what remains selects the same rows. */
+  private trim(policy: RetentionPolicy, now: number, fence: number | undefined, first?: string): { deleted: number; kept: Set<string> } {
+    const rows = this.retentionRows();
+    const kept = RunHistoryDO.keptIds(rows, policy, now);
+    const outside = rows.map((r) => r.run_id).filter((id) => !kept.has(id) && id !== first);
+    const firstDoomed = first !== undefined && !kept.has(first);
+    const doomed = firstDoomed ? [first, ...outside] : outside;
+    const victims = fence === undefined ? doomed : doomed.slice(0, Math.max(fence, firstDoomed ? 1 : 0));
+    this.deleteRuns(victims);
+    if (victims.length < doomed.length) console.log(`[runs/trim] deletion fence: ${victims.length} of ${doomed.length} rows outside policy deleted this put`);
+    return { deleted: victims.length, kept };
+  }
+
+  // ---- writes ---------------------------------------------------------------
+
+  /** Upsert one record and trim, in ONE sync transaction (see MemoryDO.write for
+   *  why this is atomic and un-interleavable). Event rows are rewritten only
+   *  when the stored version changed (`event_count`, `finished_at`, `bytes`) —
+   *  an identical retry is a no-op on `run_events`. `stored: false` when the
+   *  record itself fell outside the (possibly just-updated) policy: it was
+   *  written and deleted in the same transaction, so nothing of it remains. */
+  async put(record: RunRecord, proposal?: RunPolicyProposal): Promise<{ ok: true; retained: number; stored: boolean; rewritten: boolean }> {
+    let result = { ok: true as const, retained: 0, stored: false, rewritten: false };
+    this.ctx.storage.transactionSync(() => {
+      const now = Date.now();
+      const policy = proposal ? this.applyProposal(proposal, now).policy : this.policyState().policy;
+      const finishedAt = Math.min(record.finishedAt, now + RUN_MAX_FUTURE_MS);
+      const stored: RunRecord = { ...record, finishedAt };
+      const { events, ...summary } = stored;
+      const bytes = utf8ByteLength(JSON.stringify(stored));
+      const existing = this.sql
+        .exec<{ event_count: number; finished_at: number; bytes: number }>(`SELECT event_count, finished_at, bytes FROM runs WHERE run_id = ?`, record.id)
+        .toArray()[0];
+      const unchanged =
+        existing !== undefined &&
+        sameStoredVersion({ eventCount: existing.event_count, finishedAt: existing.finished_at, bytes: existing.bytes }, { eventCount: stored.eventCount, finishedAt, bytes });
+      this.sql.exec(
+        `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, repo, started_at, finished_at, stored_at, status,
+                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(run_id) DO UPDATE SET
+           label = excluded.label, agent = excluded.agent, model = excluded.model, channel_id = excluded.channel_id,
+           user_id = excluded.user_id, thread_key = excluded.thread_key, repo = excluded.repo, started_at = excluded.started_at,
+           finished_at = excluded.finished_at, stored_at = excluded.stored_at, status = excluded.status,
+           event_count = excluded.event_count, stored_event_count = excluded.stored_event_count, truncated = excluded.truncated,
+           bytes = excluded.bytes, diagnosis_json = excluded.diagnosis_json, summary_json = excluded.summary_json`,
+        stored.id,
+        stored.label ?? null,
+        stored.agent ?? null,
+        stored.model ?? null,
+        stored.channelId,
+        stored.userId,
+        stored.threadKey,
+        stored.repo ?? null,
+        stored.startedAt,
+        finishedAt,
+        now,
+        stored.status,
+        stored.eventCount,
+        stored.storedEventCount,
+        stored.truncated ? 1 : 0,
+        bytes,
+        JSON.stringify(stored.diagnosis),
+        JSON.stringify(summary),
+      );
+      if (!unchanged) {
+        this.sql.exec(`DELETE FROM run_events WHERE run_id = ?`, record.id);
+        const seqs = storedEventSeqs(events); // the registry's stamps (see runRecord.ts)
+        for (let i = 0; i < events.length; i += RUN_EVENT_INSERT_BATCH) {
+          const batch = events.slice(i, i + RUN_EVENT_INSERT_BATCH);
+          const params: (string | number)[] = [];
+          batch.forEach((e, j) => params.push(record.id, seqs[i + j], JSON.stringify(e)));
+          this.sql.exec(`INSERT INTO run_events (run_id, seq, json) VALUES ${batch.map(() => "(?, ?, ?)").join(",")}`, ...params);
+        }
+      }
+      // The just-written row is either kept or was deleted by the trim (it is
+      // always `first`), so kept membership IS whether it is still stored.
+      const { kept } = this.trim(policy, now, RUN_TRIM_FENCE, record.id);
+      result = { ok: true, retained: kept.size, stored: kept.has(record.id), rewritten: existing !== undefined && !unchanged };
+    });
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + RUN_SWEEP_INTERVAL_MS);
+    return result;
+  }
+
+  /** Remove a run and its events. Returns whether a run row existed. */
+  async delete(id: string): Promise<boolean> {
+    let deleted = false;
+    this.ctx.storage.transactionSync(() => {
+      deleted = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs WHERE run_id = ?`, id).one().n === 1;
+      this.deleteRuns([id]);
+    });
+    return deleted;
+  }
+
+  /** Every 6 h: delete everything outside policy (no fence — this is where a
+   *  large shrink finishes), sweep orphaned events, then re-arm. */
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    const { policy } = this.policyState();
+    let deleted = 0;
+    this.ctx.storage.transactionSync(() => {
+      deleted = this.trim(policy, now, undefined).deleted;
+      // Orphan sweep: events whose run is gone (defensive — `deleteRuns` pairs
+      // the two deletes, so this is a periodic check, not a per-put cost).
+      this.sql.exec(`DELETE FROM run_events WHERE run_id NOT IN (SELECT run_id FROM runs)`);
+    });
+    console.log(`[runs/alarm] swept ${deleted} rows outside policy`);
+    await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
+  }
+
+  // ---- reads ----------------------------------------------------------------
+
+  /** The record with its events in seq order, each carrying the `seq` it is
+   *  stored under (the registry's stamp — see `eventSeqs`), or null when
+   *  unknown or outside policy — one not-found shape. A corrupt event row is skipped. */
+  async get(id: string): Promise<RunRecord | null> {
+    const now = Date.now();
+    const row = this.sql.exec<RunRow>(`SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE run_id = ?`, id).toArray()[0];
+    if (!row || !this.isKept(row, this.policyState().policy, now)) return null;
+    const summary = parseSummary(row);
+    if (!summary) return null;
+    const events: RunEvent[] = parseEventRows(this.eventRows(id, 0, Number.MAX_SAFE_INTEGER));
+    return { ...summary, events };
+  }
+
+  private eventRows(id: string, afterSeq: number, limit: number): EventRow[] {
+    return this.sql.exec<EventRow>(`SELECT seq, json FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`, id, afterSeq, limit).toArray();
+  }
+
+  /** A page of events with seq > afterSeq. `nextAfterSeq` is set when more
+   *  rows follow (the cursor is the last seq READ, so a skipped corrupt row
+   *  never stalls paging). Unknown or expired run → null (the same not-found
+   *  as `get`); a run with nothing past `afterSeq` → an empty page. One query
+   *  reads `limit + 1` rows: the page is the first `limit`, the extra row only
+   *  says that more follow. */
+  async events(id: string, afterSeq: number, limit: number): Promise<{ events: StoredRunEvent[]; nextAfterSeq?: number } | null> {
+    const row = this.sql.exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs WHERE run_id = ?`, id).toArray()[0];
+    if (!row || !this.isKept(row, this.policyState().policy, Date.now())) return null;
+    const rows = this.eventRows(id, afterSeq, limit + 1);
+    const page = rows.slice(0, limit);
+    const out: { events: StoredRunEvent[]; nextAfterSeq?: number } = { events: parseEventRows(page) };
+    if (rows.length > limit) out.nextAfterSeq = page[page.length - 1].seq;
+    return out;
+  }
+
+  /** The record minus its events (the listing row, `bytes` included), or null
+   *  when unknown or outside policy — the same not-found as `get`. No event row
+   *  is touched: the read for callers that need identity, status, or the
+   *  diagnosis but not the event set. */
+  async summary(id: string): Promise<RunListItem | null> {
+    const row = this.sql.exec<RunRow>(`SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE run_id = ?`, id).toArray()[0];
+    if (!row || !this.isKept(row, this.policyState().policy, Date.now())) return null;
+    const summary = parseSummary(row);
+    return summary ? { ...summary, bytes: row.bytes } : null;
+  }
+
+  /**
+   * Newest first (finished_at desc, run_id desc) among the rows the policy
+   * keeps, filtered, capped at RUN_LIST_MAX_LIMIT. The `before`/`beforeId`
+   * cursor is the previous page's last row: rows strictly after it in the list
+   * order (`finished_at < before`, or equal with `run_id < beforeId`), so
+   * same-millisecond siblings are never skipped; `before` alone falls back to
+   * `finished_at < before`. `nextBefore` is the last row's key when this page
+   * was full.
+   *
+   * Two paths, decided by ONE aggregate over the in-policy rows (`COUNT(*)`,
+   * `SUM(bytes)` where `finished_at >= cutoff`): when both are within
+   * `maxRuns`/`maxBytes` every in-cutoff row is kept, so the page is ONE indexed
+   * query (age cutoff, filters, cursor, order, `LIMIT`) — no table scan. Only
+   * when a bound is exceeded is the kept set computed (`retentionRows` +
+   * `applyRetention`, the same function `put`/`alarm` trim with) and the rows
+   * walked until the page fills; the kept set is the newest prefix of the
+   * in-cutoff order, so the walk stops at the first row outside it.
+   */
+  async list(q: RunListOptions): Promise<{ items: RunListItem[]; nextBefore?: { finishedAt: number; id: string } }> {
+    const now = Date.now();
+    const limit = clampListLimit(q.limit);
+    const { policy } = this.policyState();
+    const cutoff = now - policy.retentionDays * 86_400_000;
+    const inPolicy = this.sql.exec<{ n: number; b: number }>(`SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b FROM runs WHERE finished_at >= ?`, cutoff).one();
+    const boundExceeded = inPolicy.n > policy.maxRuns || inPolicy.b > policy.maxBytes;
+    const kept = boundExceeded ? RunHistoryDO.keptIds(this.retentionRows(), policy, now) : null;
+    const before = q.before ?? Number.MAX_SAFE_INTEGER;
+    const where = [`(finished_at < ? OR (finished_at = ? AND run_id < ?))`, `finished_at >= ?`];
+    // no beforeId → no row satisfies `run_id < ''`: the equality branch is inert
+    const params: (string | number)[] = [before, before, q.beforeId ?? "", Math.max(q.sinceMs ?? 0, cutoff)];
+    if (q.agent !== undefined) {
+      where.push(`agent = ?`);
+      params.push(q.agent);
+    }
+    if (q.channel !== undefined) {
+      where.push(`channel_id = ?`);
+      params.push(q.channel);
+    }
+    const select = `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE ${where.join(" AND ")} ORDER BY finished_at DESC, run_id DESC`;
+    // `LIMIT` holds on the over-bound path too: the kept set is the newest
+    // prefix of this same ordering, so the first `limit` rows are the page (or
+    // the walk stops early at the first evicted row) — never a full table load.
+    const rows = this.sql.exec<RunRow>(`${select} LIMIT ?`, ...params, limit).toArray();
+    const items: RunListItem[] = [];
+    for (const row of rows) {
+      if (items.length >= limit) break;
+      if (kept !== null && !kept.has(row.run_id)) break; // kept is a newest-first prefix: nothing older is kept either
+      const summary = parseSummary(row);
+      if (summary) items.push({ ...summary, bytes: row.bytes });
+    }
+    const out: { items: RunListItem[]; nextBefore?: { finishedAt: number; id: string } } = { items };
+    if (items.length === limit) {
+      const last = items[items.length - 1];
+      out.nextBefore = { finishedAt: last.finishedAt, id: last.id };
+    }
+    return out;
+  }
+}
+
+type EventRow = { seq: number; json: string };
+
+/** Event rows → stored events. A corrupt row is skipped, never fatal — the rest of the run still reads. */
+function parseEventRows(rows: readonly EventRow[]): StoredRunEvent[] {
+  const out: StoredRunEvent[] = [];
+  for (const r of rows) {
+    try {
+      const parsed: unknown = JSON.parse(r.json);
+      if (typeof parsed === "object" && parsed !== null && typeof (parsed as { type?: unknown }).type === "string") {
+        out.push({ ...(parsed as RunEvent), seq: r.seq });
+      }
+    } catch {
+      // skipped
+    }
+  }
+  return out;
+}
+
+/** The stored summary (record minus events); null when the row is unreadable. */
+function parseSummary(row: RunRow): Omit<RunRecord, "events"> | null {
+  try {
+    const parsed: unknown = JSON.parse(row.summary_json);
+    return isRunRecord({ ...(parsed as object), events: [] }) ? normalizeStored(parsed as Omit<RunRecord, "events">) : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseRunId(v: unknown): Validated<string> {
+  if (typeof v !== "string" || !RUN_ID_PATTERN.test(v)) return invalid("id must match ^[A-Za-z0-9_-]{1,64}$");
+  return { ok: true, value: v };
+}
+
+function parseStoreKey(b: Record<string, unknown>): Validated<string> {
+  return parseScopeKey(b.storeKey, "storeKey");
+}
+
+function parsePositiveInt(v: unknown, name: string, max: number): Validated<number> {
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > max) return invalid(`${name} must be an integer between 1 and ${max}`);
+  return { ok: true, value: v };
+}
+
+function parseRunPut(body: unknown): Validated<{ storeKey: string; record: RunRecord; proposal?: RunPolicyProposal }> {
+  if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
+  const b = body as Record<string, unknown>;
+  const key = parseStoreKey(b);
+  if (!key.ok) return key;
+  if (!isRunRecord(b.record)) return invalid("record must be a RunRecord");
+  const out: { storeKey: string; record: RunRecord; proposal?: RunPolicyProposal } = { storeKey: key.value, record: b.record };
+  if (b.policy !== undefined) {
+    if (typeof b.policy !== "object" || b.policy === null) return invalid("policy must be an object");
+    const p = b.policy as Record<string, unknown>;
+    const policy: Partial<RetentionPolicy> = {};
+    for (const field of ["retentionDays", "maxRuns", "maxBytes"] as const) {
+      const v = p[field];
+      if (v === undefined) continue;
+      if (typeof v !== "number" || !Number.isInteger(v) || v < 1) return invalid(`policy.${field} must be an integer >= 1`);
+      policy[field] = v;
+    }
+    if (typeof b.policyUpdatedAt !== "number" || !Number.isFinite(b.policyUpdatedAt) || b.policyUpdatedAt < 0) {
+      return invalid("policyUpdatedAt must be a non-negative number when a policy is proposed");
+    }
+    out.proposal = { policy, policyUpdatedAt: b.policyUpdatedAt };
+  }
+  return { ok: true, value: out };
+}
+
+/** `{storeKey, id}` — the body of /runs/get, /runs/summary and /runs/delete, and the base of /runs/events. */
+function parseRunTarget(body: unknown): Validated<{ storeKey: string; id: string }> {
+  if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
+  const b = body as Record<string, unknown>;
+  const key = parseStoreKey(b);
+  if (!key.ok) return key;
+  const id = parseRunId(b.id);
+  if (!id.ok) return id;
+  return { ok: true, value: { storeKey: key.value, id: id.value } };
+}
+
+function parseRunEvents(body: unknown): Validated<{ storeKey: string; id: string; afterSeq: number; limit: number }> {
+  const base = parseRunTarget(body);
+  if (!base.ok) return base;
+  const b = body as Record<string, unknown>;
+  let afterSeq = 0;
+  if (b.afterSeq !== undefined) {
+    if (typeof b.afterSeq !== "number" || !Number.isInteger(b.afterSeq) || b.afterSeq < 0) return invalid("afterSeq must be a non-negative integer");
+    afterSeq = b.afterSeq;
+  }
+  let limit = RUN_EVENTS_DEFAULT_PAGE;
+  if (b.limit !== undefined) {
+    const l = parsePositiveInt(b.limit, "limit", RUN_EVENTS_MAX_PAGE);
+    if (!l.ok) return l;
+    limit = l.value;
+  }
+  return { ok: true, value: { ...base.value, afterSeq, limit } };
+}
+
+function parseRunList(body: unknown): Validated<{ storeKey: string; query: RunListOptions }> {
+  if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
+  const b = body as Record<string, unknown>;
+  const key = parseStoreKey(b);
+  if (!key.ok) return key;
+  const query: RunListOptions = {};
+  if (b.limit !== undefined) {
+    // Over-asking is not an error: the cap is the contract (`limit: 1000` → 200 rows).
+    if (typeof b.limit !== "number" || !Number.isInteger(b.limit) || b.limit < 1) return invalid("limit must be a positive integer");
+    query.limit = Math.min(b.limit, RUN_LIST_MAX_LIMIT);
+  }
+  for (const field of ["before", "sinceMs"] as const) {
+    const v = b[field];
+    if (v === undefined) continue;
+    if (typeof v !== "number" || !Number.isFinite(v)) return invalid(`${field} must be a number`);
+    query[field] = v;
+  }
+  if (b.beforeId !== undefined) {
+    const id = parseRunId(b.beforeId);
+    if (!id.ok) return invalid("beforeId must match ^[A-Za-z0-9_-]{1,64}$");
+    query.beforeId = id.value;
+  }
+  for (const field of ["agent", "channel"] as const) {
+    const v = b[field];
+    if (v === undefined) continue;
+    if (typeof v !== "string" || v.length > MAX_KEY_CHARS) return invalid(`${field} must be a string of at most ${MAX_KEY_CHARS} characters`);
+    query[field] = v;
+  }
+  return { ok: true, value: { storeKey: key.value, query } };
 }
 
 // ---------------------------------------------------------------------------
@@ -511,11 +1076,13 @@ function invalid<T>(error: string): Validated<T> {
 }
 
 /** A scope key is an opaque namespaced id (`org:coreplanelabs`): non-empty,
- *  bounded, no whitespace or control characters. */
-function parseScopeKey(v: unknown): Validated<string> {
-  if (typeof v !== "string" || v.length === 0) return invalid("scopeKey must be a non-empty string");
-  if (v.length > MAX_KEY_CHARS) return invalid(`scopeKey must be at most ${MAX_KEY_CHARS} characters`);
-  if (/[\s\p{C}]/u.test(v)) return invalid("scopeKey must not contain whitespace or control characters");
+ *  bounded, no whitespace or control characters. `fieldName` names the body
+ *  field in the error (the friction and run routes call theirs `ledgerKey` /
+ *  `storeKey`). */
+function parseScopeKey(v: unknown, fieldName = "scopeKey"): Validated<string> {
+  if (typeof v !== "string" || v.length === 0) return invalid(`${fieldName} must be a non-empty string`);
+  if (v.length > MAX_KEY_CHARS) return invalid(`${fieldName} must be at most ${MAX_KEY_CHARS} characters`);
+  if (/[\s\p{C}]/u.test(v)) return invalid(`${fieldName} must not contain whitespace or control characters`);
   return { ok: true, value: v };
 }
 
@@ -641,11 +1208,75 @@ function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 }
 
+/** The `/runs/*` routes (#157). Observability lines carry ids + counts only —
+ *  never event text. A bad `id` is 400 before any DO call (R4). */
+async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Response> {
+  const stub = (key: string) => env.RUNS.get(env.RUNS.idFromName(key));
+  if (pathname === "/runs/put") {
+    const parsed = parseRunPut(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const { storeKey, record, proposal } = parsed.value;
+    const result = await stub(storeKey).put(record, proposal);
+    console.log(`[runs/put] ${storeKey} <- ${record.id} (${record.storedEventCount} events, stored=${result.stored}, ${result.retained} retained)`);
+    return json(result);
+  }
+  if (pathname === "/runs/get") {
+    const parsed = parseRunTarget(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const record = await stub(parsed.value.storeKey).get(parsed.value.id);
+    console.log(`[runs/get] ${parsed.value.storeKey} ${parsed.value.id} -> ${record ? `${record.events.length} events` : "not found"}`);
+    return json({ record });
+  }
+  if (pathname === "/runs/summary") {
+    const parsed = parseRunTarget(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const summary = await stub(parsed.value.storeKey).summary(parsed.value.id);
+    console.log(`[runs/summary] ${parsed.value.storeKey} ${parsed.value.id} -> ${summary ? "found" : "not found"}`);
+    return json({ summary });
+  }
+  if (pathname === "/runs/list") {
+    const parsed = parseRunList(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const result = await stub(parsed.value.storeKey).list(parsed.value.query);
+    console.log(`[runs/list] ${parsed.value.storeKey} -> ${result.items.length} runs`);
+    return json(result);
+  }
+  if (pathname === "/runs/events") {
+    const parsed = parseRunEvents(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const { storeKey, id, afterSeq, limit } = parsed.value;
+    const result = await stub(storeKey).events(id, afterSeq, limit);
+    console.log(`[runs/events] ${storeKey} ${id} after ${afterSeq} -> ${result ? `${result.events.length} events` : "not found"}`);
+    return json(result ?? { events: null });
+  }
+  // /runs/delete
+  const parsed = parseRunTarget(body);
+  if (!parsed.ok) return json({ error: parsed.error }, 400);
+  const deleted = await stub(parsed.value.storeKey).delete(parsed.value.id);
+  console.log(`[runs/delete] ${parsed.value.storeKey} ${parsed.value.id} -> deleted=${deleted}`);
+  return json({ ok: true, deleted });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true });
-    const ROUTES = new Set(["/retrieve", "/write", "/list", "/forget", "/friction/record", "/friction/recent", "/schedules/record", "/schedules/latest"]);
+    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, features: ["memory", "friction", "schedules", "runs"] });
+    const ROUTES = new Set([
+      "/retrieve",
+      "/write",
+      "/list",
+      "/forget",
+      "/friction/record",
+      "/friction/recent",
+      "/schedules/record",
+      "/schedules/latest",
+      "/runs/put",
+      "/runs/get",
+      "/runs/summary",
+      "/runs/list",
+      "/runs/events",
+      "/runs/delete",
+    ]);
     if (!ROUTES.has(url.pathname)) return json({ error: "not found" }, 404);
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
     if (!authorized(env, request)) return json({ error: "unauthorized" }, 401);
@@ -656,13 +1287,17 @@ export default {
     // rules out the absent header of a chunked/streamed body, a blank value,
     // and forms `Number()` would accept ("0x1000", "5e2", "12.5"); each is
     // 411 Length Required. A well-formed length over the cap is 413. Every
-    // legitimate client (WorkerMemoryStore) sends a sized JSON body.
+    // legitimate client (WorkerMemoryStore) sends a sized JSON body. The cap
+    // is per route — decided AFTER routing and before the parse: /runs/put
+    // carries a whole run record (budgeted to 1.5 MiB upstream) and gets 2 MiB;
+    // every other route keeps the 512 KB fence.
     const header = request.headers.get("content-length");
     if (header === null || !/^\d+$/.test(header.trim())) {
       return json({ error: "body must declare a numeric Content-Length" }, 411);
     }
-    if (Number(header) > MAX_BODY_BYTES) {
-      return json({ error: `body must be at most ${MAX_BODY_BYTES} bytes` }, 413);
+    const maxBodyBytes = url.pathname === "/runs/put" ? MAX_RUN_PUT_BODY_BYTES : MAX_BODY_BYTES;
+    if (Number(header) > maxBodyBytes) {
+      return json({ error: `body must be at most ${maxBodyBytes} bytes` }, 413);
     }
 
     let body: unknown;
@@ -685,6 +1320,7 @@ export default {
       console.log(`[schedules/latest] -> ${firings.length} schedules`);
       return json({ firings });
     }
+    if (url.pathname.startsWith("/runs/")) return handleRuns(url.pathname, body, env);
 
     if (url.pathname === "/friction/record") {
       const parsed = parseFrictionRecord(body);
