@@ -1,5 +1,6 @@
-import { SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { MemoryDO } from "./worker.ts";
 
 // Feature: features/memory.md — the Memory Worker (PR3, #85): the durable
 // backend behind WorkerMemoryStore. Runs in workerd against the real
@@ -393,5 +394,264 @@ describe("per-scope cap (#253)", () => {
     expect((await post("/write", { scopeKey: s, records: [cand("x")], cap: 0 })).status).toBe(400);
     expect((await post("/write", { scopeKey: s, records: [cand("x")], cap: 10001 })).status).toBe(400);
     expect((await post("/write", { scopeKey: s, records: [cand("x")], cap: "5" })).status).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feature: features/memory.md §15/§17/§18 (#356 item 10) — SQL/FTS efficiency.
+// These tests reach inside the DO (runInDurableObject) to observe what the
+// route surface cannot: FTS row counts, index presence, and the exact SQL
+// statements a call runs (the spySql pattern shared with runs.test.ts).
+// ---------------------------------------------------------------------------
+
+const memStub = (s: string) => env.MEMORY.get(env.MEMORY.idFromName(s));
+
+/** Record the SQL text of every statement the instance runs from now on. */
+function spySql(inst: MemoryDO): string[] {
+  const seen: string[] = [];
+  const real = (inst as unknown as { sql: SqlStorage }).sql;
+  Object.defineProperty(inst, "sql", {
+    value: { exec: (q: string, ...p: unknown[]) => (seen.push(q), real.exec(q, ...p)) },
+  });
+  return seen;
+}
+
+const ftsCount = (s: string) =>
+  runInDurableObject(memStub(s), async (_i: MemoryDO, state) =>
+    state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM records_fts`).one().n,
+  );
+
+const recordCount = (s: string) =>
+  runInDurableObject(memStub(s), async (_i: MemoryDO, state) =>
+    state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM records`).one().n,
+  );
+
+type SeedRow = { seq: number; text: string; createdAt: number; lastUsedAt?: number };
+
+/** Seed rows straight into the DO's SQLite (bypassing /write) so tests control
+ *  `created_at`/`last_used_at` exactly — the levers recency ordering keys on. */
+const seed = (s: string, rows: SeedRow[]) =>
+  runInDurableObject(memStub(s), async (_i: MemoryDO, state) => {
+    for (const r of rows) {
+      const id = `mem:${s}:${r.seq}`;
+      state.storage.sql.exec(
+        `INSERT INTO records (id, seq, scope_key, kind, text, norm, keywords, source_thread_key, source_run_id,
+                              created_at, last_used_at, use_count, confidence, supersedes, status)
+         VALUES (?, ?, ?, 'fact', ?, ?, '[]', 'slack:C1:1.0', NULL, ?, ?, 0, NULL, NULL, 'active')`,
+        id,
+        r.seq,
+        s,
+        r.text,
+        r.text.trim().toLowerCase().replace(/\s+/g, " "),
+        r.createdAt,
+        r.lastUsedAt ?? null,
+      );
+      state.storage.sql.exec(`INSERT INTO records_fts (id, body) VALUES (?, ?)`, id, r.text);
+    }
+  });
+
+describe("retrieval + write efficiency (#356)", () => {
+  it("bm25 candidate ordering rescues a relevant-but-old record that recency ordering dropped", async () => {
+    const s = scope();
+    const now = Date.now();
+    // One strong old match (both query tokens, one of them nowhere else) plus
+    // 505 recent weak matches ("deploy" only). Recency-ordered candidates at
+    // any cap ≤505 never include the strong record; bm25 puts it first.
+    const strong = "vibranium deploy pipeline uses vibranium keys";
+    await seed(s, [{ seq: 0, text: strong, createdAt: now - 30 * 24 * 60 * 60 * 1000 }]);
+    await seed(
+      s,
+      Array.from({ length: 505 }, (_, i) => ({
+        seq: i + 1,
+        text: `deploy filler note ${i} about pipelines rollouts and other routine chatter`,
+        createdAt: now,
+      })),
+    );
+    const r = await post("/retrieve", { scopeKey: s, query: "vibranium deploy", limit: 8 });
+    expect(r.status).toBe(200);
+    const texts = (r.data.records as Array<{ text: string }>).map((x) => x.text);
+    expect(texts).toContain(strong);
+    expect(texts[0]).toBe(strong); // the engine ranks it first once it is a candidate
+  }, 30_000);
+
+  it("the 50-candidate floor hands the engine every match in a small scope (bm25 decides nothing)", async () => {
+    const s = scope();
+    const now = Date.now();
+    // 39 old, short, term-dense rows (bm25-best) + 1 new long row (bm25-worst).
+    // All match "gamma" equally for the engine, whose recency term picks the
+    // NEW row. With limit 1 a bare 5×limit cap would keep only bm25 favorites
+    // and lose it; the floor (50) lets the whole scope through to the engine.
+    const target = `gamma ${Array.from({ length: 40 }, (_, i) => `pad${i}`).join(" ")}`;
+    await seed(
+      s,
+      Array.from({ length: 39 }, (_, i) => ({
+        seq: i,
+        text: `gamma gamma gamma gamma ${i}`,
+        createdAt: now - 20 * 24 * 60 * 60 * 1000,
+      })),
+    );
+    await seed(s, [{ seq: 39, text: target, createdAt: now }]);
+    const r = await post("/retrieve", { scopeKey: s, query: "gamma", limit: 1 });
+    expect((r.data.records as Array<{ text: string }>).map((x) => x.text)).toEqual([target]);
+  });
+
+  it("the FTS MATCH is capped at the 24 longest distinct tokens of a degenerate query", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("zzqx protocol notes")] });
+    const junk = (len: number) => Array.from({ length: 29 }, (_, i) => `j${String(i).padStart(len - 1, "x")}`);
+    // 29 unmatched 3-char tokens + the 8-char matching token: kept (longest) → found.
+    const kept = await post("/retrieve", { scopeKey: s, query: `${junk(3).join(" ")} zzqxzzqx protocol`, limit: 8 });
+    expect((kept.data.records as unknown[]).length).toBe(1);
+    // 29 unmatched 6-char tokens + the 4-char matching token: dropped (shortest
+    // of 30 distinct) → not a candidate. The documented trade for degenerate
+    // queries; realistic queries stay under 24 distinct tokens.
+    const dropped = await post("/retrieve", { scopeKey: s, query: `${junk(6).join(" ")} zzqx`, limit: 8 });
+    expect(dropped.status).toBe(200);
+    expect(dropped.data.records).toEqual([]);
+  });
+
+  it("the usage bump is one batched UPDATE … WHERE id IN (…), not one statement per row", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("deploy variant one"), cand("deploy variant two"), cand("deploy variant three")] });
+    const { seen, returned } = await runInDurableObject(memStub(s), async (inst: MemoryDO) => {
+      const statements = spySql(inst);
+      const records = await inst.retrieve(s, "deploy variant", 8);
+      return { seen: statements, returned: records.length };
+    });
+    expect(returned).toBe(3);
+    const bumps = seen.filter((q) => /UPDATE records SET last_used_at/.test(q));
+    expect(bumps).toHaveLength(1);
+    expect(bumps[0]).toMatch(/WHERE id IN \(\?, \?, \?\)/);
+  });
+
+  it("the batched bump works at MAX_LIMIT (50 ids in one statement), every returned row bumped", async () => {
+    const s = scope();
+    const now = Date.now();
+    await seed(
+      s,
+      Array.from({ length: 55 }, (_, i) => ({ seq: i, text: `deploy fact ${i}`, createdAt: now - i * 1000 })),
+    );
+    const r = await post("/retrieve", { scopeKey: s, query: "deploy fact", limit: 50 });
+    const records = r.data.records as Array<{ useCount: number; lastUsedAt?: number }>;
+    expect(records).toHaveLength(50);
+    expect(records.every((x) => x.useCount === 1 && typeof x.lastUsedAt === "number")).toBe(true);
+  });
+
+  it("write plans from targeted lookups (norm + supersede id), never a full-active scan under the cap", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("existing deploy fact")] });
+    const { seen, counts } = await runInDurableObject(memStub(s), async (inst: MemoryDO) => {
+      const statements = spySql(inst);
+      const result = await inst.write(s, [
+        { kind: "fact", text: "a brand new fact", sourceThreadKey: "slack:C1:1.0" },
+        { kind: "fact", text: "Existing DEPLOY fact", sourceThreadKey: "slack:C1:1.0" },
+        { kind: "fact", text: "a correction", sourceThreadKey: "slack:C1:1.0", supersedes: `mem:${s}:0` },
+      ]);
+      return { seen: statements, counts: result };
+    });
+    expect(counts).toMatchObject({ inserted: 2, deduped: 1, superseded: 1 });
+    // The old shape loaded every active row into JS per batch; the new shape
+    // reads only the rows planWrite can act on.
+    const fullScans = seen.filter((q) => /SELECT \* FROM records WHERE status = 'active'\s*$/.test(q.trim()));
+    expect(fullScans).toEqual([]);
+    expect(seen.some((q) => /norm = \?/.test(q))).toBe(true);
+    expect(seen.some((q) => /WHERE id = \? AND status = 'active'/.test(q))).toBe(true);
+  });
+
+  it("a batch's later candidate dedups against its own earlier insert", async () => {
+    const s = scope();
+    const w = await post("/write", { scopeKey: s, records: [cand("same fact twice"), cand("  Same   FACT twice ")] });
+    expect(w.data).toMatchObject({ ok: true, inserted: 1, deduped: 1 });
+    const listed = (await post("/list", { scopeKey: s, limit: 10 })).data.records as Array<Record<string, unknown>>;
+    expect(listed).toHaveLength(1);
+    expect(listed[0].useCount).toBe(1); // the dedup bump
+  });
+
+  it("dedup against duplicate-norm actives bumps the earliest (seq order), deterministically", async () => {
+    const s = scope();
+    // The §8 collision path is the one legitimate way two ACTIVE rows share a
+    // norm: a targeted supersede whose text collides with an unrelated record.
+    await post("/write", { scopeKey: s, records: [cand("stale fact"), cand("the deploy command is npm run ship")] });
+    await post("/write", { scopeKey: s, records: [cand("the deploy command is npm run ship", { supersedes: `mem:${s}:0` })] });
+    const w = await post("/write", { scopeKey: s, records: [cand("the deploy command is npm run ship")] });
+    expect(w.data).toMatchObject({ inserted: 0, deduped: 1 });
+    const listed = (await post("/list", { scopeKey: s, limit: 10 })).data.records as Array<{ id: string; useCount: number }>;
+    expect(listed.find((r) => r.id === `mem:${s}:1`)?.useCount).toBe(1); // earliest duplicate took the bump
+    expect(listed.find((r) => r.id === `mem:${s}:2`)?.useCount).toBe(0);
+  });
+
+  it("the schema migration adds the status-prefixed indexes (idempotent over live data)", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("any fact")] });
+    const names = await runInDurableObject(memStub(s), async (_i: MemoryDO, state) =>
+      state.storage.sql
+        .exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'records'`)
+        .toArray()
+        .map((r) => r.name),
+    );
+    expect(names).toContain("records_status_norm");
+    expect(names).toContain("records_active_seq");
+    expect(names).toContain("records_active_used");
+  });
+});
+
+describe("FTS hygiene (#356)", () => {
+  it("forget deletes the FTS row; the record row stays (soft delete)", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("keep this fact"), cand("drop this fact")] });
+    expect(await ftsCount(s)).toBe(2);
+    expect((await post("/forget", { scopeKey: s, id: `mem:${s}:1` })).data).toEqual({ ok: true, forgotten: true });
+    expect(await ftsCount(s)).toBe(1);
+    expect(await recordCount(s)).toBe(2);
+    // Forgetting a non-active row again deletes nothing more.
+    await post("/forget", { scopeKey: s, id: `mem:${s}:1` });
+    expect(await ftsCount(s)).toBe(1);
+  });
+
+  it("supersede deletes the superseded row's FTS entry; the record row stays", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("the deploy command is npm run deploy")] });
+    await post("/write", { scopeKey: s, records: [cand("the deploy command is now npm run ship", { supersedes: `mem:${s}:0` })] });
+    expect(await ftsCount(s)).toBe(1);
+    expect(await recordCount(s)).toBe(2);
+  });
+
+  it("eviction deletes evicted rows' FTS entries; the record rows stay", async () => {
+    const s = scope();
+    const w1 = await post("/write", { scopeKey: s, records: [cand("alpha note"), cand("beta note"), cand("gamma note")], cap: 3 });
+    expect(w1.data).toMatchObject({ evicted: 0 });
+    const w2 = await post("/write", { scopeKey: s, records: [cand("delta note"), cand("epsilon note")], cap: 3 });
+    expect(w2.data).toMatchObject({ inserted: 2, evicted: 2 });
+    expect(await ftsCount(s)).toBe(3);
+    expect(await recordCount(s)).toBe(5);
+  });
+
+  it("reconciliation removes dead FTS rows (non-active or missing records) and keeps active ones", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("live deploy fact")] });
+    // Simulate pre-#356 state: a forgotten record whose FTS row survived, plus
+    // an orphan FTS row with no record at all.
+    await runInDurableObject(memStub(s), async (_i: MemoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO records (id, seq, scope_key, kind, text, norm, keywords, source_thread_key, source_run_id,
+                              created_at, last_used_at, use_count, confidence, supersedes, status)
+         VALUES (?, 90, ?, 'fact', 'dead deploy fact', 'dead deploy fact', '[]', 'slack:C1:1.0', NULL, ?, NULL, 0, NULL, NULL, 'forgotten')`,
+        `mem:${s}:90`,
+        s,
+        Date.now(),
+      );
+      state.storage.sql.exec(`INSERT INTO records_fts (id, body) VALUES (?, 'dead deploy fact')`, `mem:${s}:90`);
+      state.storage.sql.exec(`INSERT INTO records_fts (id, body) VALUES (?, 'orphan deploy fact')`, `mem:${s}:91`);
+    });
+    expect(await ftsCount(s)).toBe(3);
+    // The constructor runs this on every DO start; here we invoke it directly
+    // (the test harness cannot re-construct a live instance).
+    const removed = await runInDurableObject(memStub(s), (inst: MemoryDO) => inst.reconcileFts());
+    expect(removed).toBe(2);
+    expect(await ftsCount(s)).toBe(1);
+    // Idempotent, and the live row still matches.
+    expect(await runInDurableObject(memStub(s), (inst: MemoryDO) => inst.reconcileFts())).toBe(0);
+    const r = await post("/retrieve", { scopeKey: s, query: "deploy", limit: 8 });
+    expect((r.data.records as Array<{ text: string }>).map((x) => x.text)).toEqual(["live deploy fact"]);
   });
 });
