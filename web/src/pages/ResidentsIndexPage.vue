@@ -11,6 +11,7 @@ import {
   str,
   type ResidentRecordView,
 } from "@core/channels/residentsModel.js";
+import { formatRelative } from "../lib/format";
 
 // The residents index: every onboarded repo, its lifecycle state and why,
 // what it is warm on, each row linking to its detail page. The seed is the
@@ -18,12 +19,17 @@ import {
 
 const seed = useSeed("residents");
 
+const now = Date.now(); // a snapshot page — one clock reading is the honest one
+
 const rows = computed(() =>
   (seed?.residents ?? []).map((raw, i) => {
     const record = raw as ResidentRecordView;
     const slug = residentSlug(record);
     const live = residentLive(record);
     const sha = str(live.sha);
+    const refreshed = str(live.lastRefreshAt);
+    // "refreshed 3 hours ago" reads in a second; the exact stamp rides the hover.
+    const refreshedAt = refreshed ? Date.parse(refreshed) : Number.NaN;
     return {
       key: `${slug || "?"}-${i}`,
       display: slug || str(record.resource) || "?",
@@ -32,7 +38,8 @@ const rows = computed(() =>
       reason: live.reason,
       ref: str(record.defaultRef) || "?",
       sha: sha ? sha.slice(0, 8) : "",
-      refreshed: str(live.lastRefreshAt),
+      refreshed,
+      refreshedLabel: Number.isFinite(refreshedAt) ? formatRelative(refreshedAt, now) : refreshed,
       href: RESIDENT_SLUG_RE.test(slug) ? `/residents/${slug}` : null,
     };
   }),
@@ -57,9 +64,11 @@ const count = computed(() => str(seed?.count) || String(rows.value.length));
             <StatusDot :tone="row.tone" :label="row.state" :tip="row.state" />
             <span class="font-semibold text-primary">{{ row.display }}</span>
             <span class="font-semibold">{{ row.state }}</span>
-            <span class="text-xs text-muted">
+            <!-- The facts wrap to their own indented line on a phone instead of
+                 breaking mid-token at the left edge. -->
+            <span class="text-xs text-muted max-sm:basis-full max-sm:pl-5" :title="row.refreshed || undefined">
               ref {{ row.ref }}<template v-if="row.sha"> · sha {{ row.sha }}</template
-              ><template v-if="row.refreshed"> · refreshed {{ row.refreshed }}</template>
+              ><template v-if="row.refreshedLabel"> · refreshed {{ row.refreshedLabel }}</template>
             </span>
             <span v-if="row.reason" class="basis-full pl-5 text-xs text-warning">{{ row.reason }}</span>
           </component>

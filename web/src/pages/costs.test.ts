@@ -66,11 +66,12 @@ describe("CostsPage", () => {
     expect(titles).toContain("2026-08-28 · LLM (Anthropic) · $12.50");
   });
 
-  it("includes a legend and a table view so identity is never color-alone", () => {
+  it("includes a legend and a table view so identity is never color-alone; dates read human with the ISO on hover", () => {
     const w = mountApp(CostsPage, { seed: seed() });
     expect(w.find(".legend").text()).toContain("LLM (Anthropic)");
     expect(w.find("table.data").exists()).toBe(true);
-    expect(w.find("table.data").text()).toContain("2026-08-27");
+    expect(w.find("table.data").text()).toContain("Aug 27");
+    expect(w.find('table.data td[title="2026-08-27"]').exists()).toBe(true);
   });
 
   it("marks the partial day and states the method", () => {

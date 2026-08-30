@@ -15,6 +15,12 @@ import {
 // The Scheduled tab (#244): the registry's schedules with each one's last
 // firing — a snapshot per load, no feed. The rows arrive prebuilt from the
 // server (buildScheduledRows), including token'd run hrefs for live firings.
+//
+// One DOM, two readings: from sm each schedule is two flowing ·-separated
+// lines (definition, then the last firing); below sm the SAME cells stack into
+// labeled lines (`sm:contents` wrappers group them, the separators are
+// desktop-only, and the absolute next-fire stamp yields to its relative form
+// — the exact UTC stays on the hover title).
 
 const seed = useSeed("scheduled");
 const now = computed(() => seed?.now ?? Date.now());
@@ -34,46 +40,62 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
     <section v-else id="scheduled" aria-label="Scheduled jobs">
       <ul class="m-0 list-none p-0">
         <li v-for="r in rows" :key="r.name" class="border-b border-muted px-2 pb-3 pt-2.5" :data-schedule="r.name">
-          <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[0.8rem] text-toned">
+          <div class="def flex flex-wrap items-baseline gap-x-2 gap-y-1.5 text-[0.8rem] text-toned">
             <UTooltip :text="r.description">
-              <span class="font-semibold text-highlighted">{{ r.name }}</span>
+              <span class="name font-semibold text-highlighted max-sm:text-[0.9rem]">{{ r.name }}</span>
             </UTooltip>
-            <span class="text-accented">·</span>
-            <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.cron }}</code>
-            <span class="text-dimmed">UTC</span>
-            <span class="text-accented">·</span>
-            <span><span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">on</span> <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.worker }}</code></span>
-            <span class="text-accented">·</span>
-            <template v-if="r.action.type === 'run'">
-              <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.action.command }}</code>
-              <span class="text-dimmed">as</span>
-              <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.action.identity }}</code>
-            </template>
-            <span v-else class="text-dimmed">{{ ACTION_LABEL[r.action.type] }} — not a run</span>
-            <span class="text-accented">·</span>
-            <span class="tabular-nums">
-              <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">next</span>
-              <template v-if="r.nextFireAt !== undefined">
-                <b class="font-medium text-highlighted">{{ formatUtc(r.nextFireAt) }}</b>
-                <span class="text-dimmed"> ({{ formatRelative(r.nextFireAt, now) }})</span>
+            <span class="hidden text-accented sm:inline" aria-hidden="true">·</span>
+            <span class="max-sm:ml-auto">
+              <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">on</span>
+              <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.worker }}</code>
+            </span>
+            <span class="hidden text-accented sm:inline" aria-hidden="true">·</span>
+            <span class="max-sm:flex max-sm:basis-full max-sm:flex-wrap max-sm:items-baseline max-sm:gap-2 sm:contents">
+              <template v-if="r.action.type === 'run'">
+                <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.action.command }}</code>
+                <span class="text-dimmed">as</span>
+                <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.action.identity }}</code>
               </template>
-              <span v-else class="text-dimmed">never</span>
+              <span v-else class="text-dimmed">{{ ACTION_LABEL[r.action.type] }} — not a run</span>
+            </span>
+            <span class="hidden text-accented sm:inline" aria-hidden="true">·</span>
+            <span class="max-sm:flex max-sm:basis-full max-sm:flex-wrap max-sm:items-baseline max-sm:gap-2 sm:contents">
+              <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.cron }}</code>
+              <span class="text-dimmed">UTC</span>
+              <span class="hidden text-accented sm:inline" aria-hidden="true">·</span>
+              <span class="next tabular-nums max-sm:ml-auto" :title="r.nextFireAt !== undefined ? formatUtc(r.nextFireAt) : undefined">
+                <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">next</span>
+                <template v-if="r.nextFireAt !== undefined">
+                  <!-- The absolute stamp is a wide-screen luxury; the phone reads the relative form (exact UTC on the title). -->
+                  <span class="max-sm:hidden">
+                    <b class="font-medium text-highlighted">{{ formatUtc(r.nextFireAt) }}</b>
+                    <span class="text-dimmed"> ({{ formatRelative(r.nextFireAt, now) }})</span>
+                  </span>
+                  <span class="text-toned sm:hidden">{{ formatRelative(r.nextFireAt, now) }}</span>
+                </template>
+                <span v-else class="text-dimmed">never</span>
+              </span>
             </span>
           </div>
-          <div class="mt-1.5 overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted">
+          <div
+            class="fire mt-1.5 text-xs text-muted max-sm:flex max-sm:flex-wrap max-sm:items-baseline max-sm:gap-x-1.5 max-sm:gap-y-1 sm:overflow-hidden sm:text-ellipsis sm:whitespace-nowrap"
+          >
             <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">last</span>
             <template v-if="r.last">
               <span class="outcome" :class="OUTCOME_TONE[OUTCOME_CLASS[r.last.outcome]]">{{ OUTCOME_LABEL[r.last.outcome] }}</span>
-              <span class="mx-1.5 text-accented">·</span>
+              <span class="mx-1.5 text-accented max-sm:mx-0" aria-hidden="true">·</span>
               <span class="text-toned" :title="formatUtc(r.last.firedAt)">{{ formatRelative(r.last.firedAt, now) }}</span>
               <template v-if="r.last.runId">
-                <span class="mx-1.5 text-accented">·</span>
+                <span class="mx-1.5 text-accented max-sm:mx-0" aria-hidden="true">·</span>
                 <a v-if="r.last.runHref" class="text-primary hover:underline" :href="r.last.runHref">run {{ r.last.runId.slice(0, 8) }}</a>
                 <template v-else>run {{ r.last.runId.slice(0, 8) }}</template>
               </template>
               <template v-if="r.last.detail && firingDetailSummary(r.last.detail)">
-                <span class="mx-1.5 text-accented">·</span>
-                <span class="detail" :title="r.last.detail">{{ firingDetailSummary(r.last.detail) }}</span>
+                <span class="mx-1.5 text-accented max-sm:hidden" aria-hidden="true">·</span>
+                <!-- The reply's facts: one ellipsized line on desktop, a clamped block of its own on phones. -->
+                <span class="detail max-sm:line-clamp-2 max-sm:basis-full max-sm:whitespace-normal" :title="r.last.detail">{{
+                  firingDetailSummary(r.last.detail)
+                }}</span>
               </template>
             </template>
             <span v-else class="text-dimmed">{{ seed?.firingsUnavailable ? "unknown" : "never fired" }}</span>

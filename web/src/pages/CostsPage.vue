@@ -15,8 +15,15 @@ const groups = computed(() => seed?.groups ?? []);
 const series = computed(() => (report.value ? seriesOf(report.value) : []));
 const tiles = computed(() => (report.value ? tilesOf(report.value) : null));
 const split = computed(() => (report.value ? resourceSplitOf(report.value) : []));
-const siblings = computed(() => groups.value.filter((g) => g !== report.value?.group));
 const ranges = [7, 30, 90];
+
+/** `2026-08-01` → `Aug 1` — the range line and the table read at a glance. */
+function monthDay(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return date;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[d.getUTCMonth()]} ${d.getUTCDate()}`;
+}
 </script>
 
 <template>
@@ -31,18 +38,30 @@ const ranges = [7, 30, 90];
       </span>
     </template>
 
-    <p class="mb-4 text-sm text-muted">
-      Cost per day by component · {{ report.range.days }} days · {{ report.range.from }} → {{ report.range.to
-      }}<template v-if="report.range.partialLastDay"> (today is a partial day)</template>
-    </p>
-
-    <nav v-if="siblings.length" class="mb-4 text-sm text-muted" aria-label="Other groups">
-      Other groups:
-      <template v-for="(g, i) in siblings" :key="g">
-        <template v-if="i > 0"> · </template>
-        <a class="text-primary hover:underline" :href="`/costs/${g}`">{{ g }}</a>
-      </template>
-    </nav>
+    <!-- One glance: which group, which window. Groups are a pill switcher (the
+         current one solid), the range a short human line. -->
+    <div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+      <nav v-if="groups.length > 1" class="flex items-center gap-1" aria-label="Cost groups">
+        <template v-for="g in groups" :key="g">
+          <span
+            v-if="g === report.group"
+            class="rounded-md bg-accented px-2.5 py-1 text-xs font-semibold text-highlighted"
+            aria-current="page"
+            >{{ g }}</span
+          >
+          <a v-else class="rounded-md px-2.5 py-1 text-xs text-muted no-underline hover:bg-elevated hover:text-highlighted" :href="`/costs/${g}`">{{
+            g
+          }}</a>
+        </template>
+      </nav>
+      <p class="text-sm tabular-nums text-muted">
+        {{ monthDay(report.range.from) }} → {{ monthDay(report.range.to) }} · {{ report.range.days }}d<template
+          v-if="report.range.partialLastDay"
+        >
+          · today partial</template
+        >
+      </p>
+    </div>
 
     <section class="mb-5 grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3">
       <div class="grid gap-0.5 rounded-md border border-default bg-elevated px-4 py-3.5">
@@ -71,7 +90,7 @@ const ranges = [7, 30, 90];
       <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
         <div>
           <h2 class="text-[0.9375rem] font-semibold">Daily cost</h2>
-          <p class="text-sm text-muted">Stacked by component · USD at list price · read live from both billing sources</p>
+          <p class="text-sm text-muted">Stacked by component · USD list price</p>
         </div>
         <div class="legend flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted">
           <span v-for="(s, i) in series" :key="s" class="inline-flex items-center gap-1.5">
@@ -80,23 +99,17 @@ const ranges = [7, 30, 90];
         </div>
       </div>
       <CostChart :report="report" :series="series" />
-      <p class="text-xs text-muted">
-        Cloudflare bills vCPU on active use only; memory and disk bill on the provisioned size for every second a container is
-        awake.
-        <template v-if="report.llmAvailable">
-          LLM spend is the Anthropic Admin API cost report for this group's workspace (gross, USD).
-        </template>
-        <template v-else>
-          LLM spend not configured — set <code>ANTHROPIC_ADMIN_KEY</code> and the group's <code>anthropicWorkspaceId</code> to
-          layer it in.
-        </template>
+      <!-- The billing-method prose lives in the collapsed footer; only an
+           actionable gap stays on the card. -->
+      <p v-if="!report.llmAvailable" class="text-xs text-warn">
+        LLM spend not configured — set <code>ANTHROPIC_ADMIN_KEY</code> and the group's <code>anthropicWorkspaceId</code> to
+        layer it in.
       </p>
     </section>
 
     <section class="mb-5 grid gap-3 rounded-md border border-default bg-elevated px-5 py-4">
       <div>
         <h2 class="text-[0.9375rem] font-semibold">What each cloud dollar buys</h2>
-        <p class="text-sm text-muted">Cloudflare spend in range, split by billed resource</p>
       </div>
       <table class="w-full border-collapse text-[0.8125rem] tabular-nums">
         <tbody>
@@ -115,8 +128,10 @@ const ranges = [7, 30, 90];
     <section class="mb-5 grid gap-3 rounded-md border border-default bg-elevated px-5 py-4">
       <details open>
         <summary class="cursor-pointer text-sm text-muted">Table view — daily cost by component (USD)</summary>
+        <!-- The table scrolls sideways on a narrow screen instead of squishing
+             into wrapped headers and split dates. -->
         <div class="mt-2.5 overflow-x-auto">
-          <table class="data w-full border-collapse text-[0.8125rem] tabular-nums">
+          <table class="data w-full min-w-[38rem] border-collapse whitespace-nowrap text-[0.8125rem] tabular-nums">
             <thead>
               <tr>
                 <th class="border-b border-muted px-2.5 py-1.5 text-left text-xs font-medium text-muted">Date</th>
@@ -128,8 +143,8 @@ const ranges = [7, 30, 90];
             </thead>
             <tbody>
               <tr v-for="d in report.days" :key="d.date">
-                <td class="border-b border-muted px-2.5 py-1.5">
-                  {{ d.date }}
+                <td class="border-b border-muted px-2.5 py-1.5" :title="d.date">
+                  {{ monthDay(d.date) }}
                   <span v-if="report.range.partialLastDay && d.date === report.range.to" class="text-xs text-dimmed">(partial day)</span>
                 </td>
                 <td v-for="s in series" :key="s" class="border-b border-muted px-2.5 py-1.5 text-right">{{ usd(valueOf(d, s), 3) }}</td>
@@ -145,19 +160,31 @@ const ranges = [7, 30, 90];
       </p>
     </section>
 
-    <footer class="grid gap-1 border-t border-default pt-3.5 text-xs text-dimmed">
-      <div>
-        <b>Method.</b> Cloudflare GraphQL Analytics <code>containersUsageAdaptiveGroups</code> (cpuTimeSec, allocatedMemory,
-        allocatedDisk per app per UTC day), <code>durableObjectsPeriodicGroups</code> (billable <code>duration</code> GB-s per
-        namespace) and <code>durableObjectsInvocationsAdaptiveGroups</code> (requests per Worker). Prices: vCPU $0.000020/s,
-        memory $0.0000025/GiB-s, disk $0.00000007/GB-s, DO duration $12.50 per million GB-s, DO requests $0.15/M. Gross list
-        price — plan fees and included allowances are not subtracted.
-      </div>
-      <div>
-        <b>Scope.</b> Only the container apps, DO namespaces and Workers mapped to this group in
-        <code>costs.groups.{{ report.group }}</code>; everything else in the account is excluded. Not included: R2 (resident
-        snapshots), DO SQLite storage, Workers requests, Access — each is cents a month at current volume.
-      </div>
+    <!-- The methodology matters and stays — one click away instead of two
+         paragraphs of standing prose. -->
+    <footer class="border-t border-default pt-3.5 text-xs text-dimmed">
+      <details>
+        <summary class="cursor-pointer text-muted">How these numbers are computed</summary>
+        <div class="mt-2 grid gap-1.5">
+          <div>
+            <b>Live.</b> Both billing sources are read live from this page — nothing cached, nothing stored. Cloudflare bills
+            vCPU on active use only; memory and disk bill on the provisioned size for every second a container is awake. LLM
+            spend is the Anthropic Admin API cost report for this group's workspace (gross, USD).
+          </div>
+          <div>
+            <b>Method.</b> Cloudflare GraphQL Analytics <code>containersUsageAdaptiveGroups</code> (cpuTimeSec, allocatedMemory,
+            allocatedDisk per app per UTC day), <code>durableObjectsPeriodicGroups</code> (billable <code>duration</code> GB-s per
+            namespace) and <code>durableObjectsInvocationsAdaptiveGroups</code> (requests per Worker). Prices: vCPU $0.000020/s,
+            memory $0.0000025/GiB-s, disk $0.00000007/GB-s, DO duration $12.50 per million GB-s, DO requests $0.15/M. Gross list
+            price — plan fees and included allowances are not subtracted.
+          </div>
+          <div>
+            <b>Scope.</b> Only the container apps, DO namespaces and Workers mapped to this group in
+            <code>costs.groups.{{ report.group }}</code>; everything else in the account is excluded. Not included: R2 (resident
+            snapshots), DO SQLite storage, Workers requests, Access — each is cents a month at current volume.
+          </div>
+        </div>
+      </details>
     </footer>
   </AppShell>
 </template>
