@@ -359,6 +359,40 @@ describe("interruptedCardFrame", () => {
     const f = interruptedCardFrame("◓ *general* · &amp;lt;tag&amp;gt; · 3s");
     expect(f.title).toBe("❌ interrupted · *general* · &lt;tag&gt; · 3s");
   });
+
+  // #357 (live 2026-08-30 22:06Z): a card frozen mid-drain carries the shutdown
+  // notice; the interrupted title must not keep the stale "finishing this run"
+  // clause — the run was NOT finished.
+  it("drops the trailing drain notice (unicode ⏸ form), keeping label and elapsed", () => {
+    const f = interruptedCardFrame(
+      "◐ *coding* on `anthropic/claude-fable-5` · resident · main@7f13a94 · 323s · ⏸ deploy in progress — finishing this run before the bot restarts",
+    );
+    expect(f.title).toBe("❌ interrupted · *coding* on `anthropic/claude-fable-5` · resident · main@7f13a94 · 323s");
+  });
+
+  it("drops the drain notice when Slack history returns the glyph as a :shortcode:", () => {
+    const f = interruptedCardFrame(
+      "◐ *coding* on `m` · 323s · :double_vertical_bar: deploy in progress — finishing this run before the bot restarts",
+    );
+    expect(f.title).toBe("❌ interrupted · *coding* on `m` · 323s");
+  });
+
+  it("drops both the thinking suffix and the drain notice when the card carries both", () => {
+    const f = interruptedCardFrame(
+      "◓ *review* on `m` · 153s — thinking (88s since last tool) · ⏸ deploy in progress — finishing this run before the bot restarts",
+    );
+    expect(f.title).toBe("❌ interrupted · *review* on `m` · 153s");
+  });
+
+  it("drops the drain notice even when the glyph token is missing entirely", () => {
+    const f = interruptedCardFrame("◐ *coding* on `m` · 323s · deploy in progress — finishing this run before the bot restarts");
+    expect(f.title).toBe("❌ interrupted · *coding* on `m` · 323s");
+  });
+
+  it("leaves a label alone that merely mentions a deploy mid-text", () => {
+    const f = interruptedCardFrame("◓ *coding* · \"fix the deploy in progress banner\" · 42s");
+    expect(f.title).toBe('❌ interrupted · *coding* · "fix the deploy in progress banner" · 42s');
+  });
 });
 
 describe("catchUpMissedMentions — orphaned-card sweep", () => {
