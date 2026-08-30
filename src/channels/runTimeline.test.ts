@@ -272,6 +272,48 @@ describe("createRunTimeline — inlinable into the run page", () => {
   });
 });
 
+// features/skills.md — a `skill_use` event becomes a `skill` change inside the
+// current step (the step whose use_skill call it belongs to), never a call.
+describe("createRunTimeline — skill_use", () => {
+  it("folds `skill_use` into a `skill` change on the current step, keeping only an http(s) source", () => {
+    const t = createRunTimeline();
+    t.push({ type: "assistant", text: "Loading the review skill.", at: 1 });
+    t.push(call("use_skill", "use_skill code-review-and-quality"));
+    const changes = t.push({
+      type: "skill_use",
+      skill: "code-review-and-quality",
+      description: "Conducts multi-axis code review.",
+      agent: "review",
+      source: "https://github.com/addyosmani/agent-skills/blob/d2c37ef/skills/code-review-and-quality/SKILL.md",
+      bodyBytes: 4321,
+      at: 7,
+    });
+    expect(changes).toEqual([
+      {
+        kind: "skill",
+        step: expect.objectContaining({ index: 0 }),
+        skill: {
+          name: "code-review-and-quality",
+          description: "Conducts multi-axis code review.",
+          agent: "review",
+          source: "https://github.com/addyosmani/agent-skills/blob/d2c37ef/skills/code-review-and-quality/SKILL.md",
+          bodyBytes: 4321,
+          at: 7,
+        },
+      },
+    ]);
+    expect(t.steps()[0].calls).toHaveLength(1); // the skill is not a call
+  });
+
+  it("a skill_use before any step opens one; a non-http source is dropped; a nameless event is ignored", () => {
+    const t = createRunTimeline();
+    const changes = t.push({ type: "skill_use", skill: "tdd", description: "", agent: "coding", source: "javascript:alert(1)", bodyBytes: 10 });
+    expect(kinds(changes)).toEqual(["step", "skill"]);
+    expect(changes[1].kind === "skill" && changes[1].skill.source).toBeUndefined();
+    expect(t.push({ type: "skill_use", skill: "", agent: "coding", bodyBytes: 1 })).toEqual([]);
+  });
+});
+
 describe("createRunTimeline — run_meta (item 19)", () => {
   it("folds `run_meta` into a `meta` change carrying only the well-typed fields; a meta without agent/model is ignored", () => {
     const t = createRunTimeline();

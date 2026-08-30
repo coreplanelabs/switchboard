@@ -89,7 +89,21 @@ export type TimelineChange =
   /** A notice from the transport itself (the SSE replay was capped) — rendered
    *  like a note; it is not a run event and never reaches the run record. */
   | { kind: "replay_note"; text: string }
-  | { kind: "answer"; text: string; at?: number };
+  | { kind: "answer"; text: string; at?: number }
+  /** A skill loaded into context (a `skill_use` event): rendered inside the
+   *  step whose `use_skill` call it belongs to, as its own row — not a call
+   *  card (the call card is the tool's; this is what the tool loaded). */
+  | { kind: "skill"; step: TimelineStep; skill: TimelineSkill };
+
+export interface TimelineSkill {
+  name: string;
+  description: string;
+  agent: string;
+  /** Only an http(s) URL is kept — the page turns it into a link with setAttribute. */
+  source?: string;
+  bodyBytes: number;
+  at?: number;
+}
 
 export interface RunTimeline {
   /** Fold one stream event; returns the changes the view must apply (possibly
@@ -302,6 +316,23 @@ export function createRunTimeline(): RunTimeline {
         if (outTok !== undefined) facts.push(fmtTokens(outTok) + " out");
         if (cached !== undefined) facts.push(fmtTokens(cached) + " cached");
         return [{ kind: "turn", label: "Thought for " + fmtDuration(durationMs), facts, durationMs, at: num(e.at) }];
+      }
+      case "skill_use": {
+        const name = str(e.skill);
+        if (!name) return [];
+        const changes: TimelineChange[] = [];
+        if (!current) changes.push({ kind: "step", step: openStep() });
+        const source = str(e.source);
+        const skill: TimelineSkill = {
+          name,
+          description: str(e.description),
+          agent: str(e.agent),
+          bodyBytes: num(e.bodyBytes) ?? 0,
+          at: num(e.at),
+        };
+        if (/^https?:\/\//.test(source)) skill.source = source;
+        changes.push({ kind: "skill", step: current as TimelineStep, skill });
+        return changes;
       }
       case "tool_call": {
         const changes: TimelineChange[] = [];

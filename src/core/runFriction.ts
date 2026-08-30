@@ -193,6 +193,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   // `context` is replayed thread history published at run start with timestamps
   // of its own, so it is invisible to timing as well.
   let narrativeEvents = 0;
+  let skillEvents = 0; // skill_use facts ride alongside their tool pair; not steps
   events.forEach((ev, index) => {
     if (isNarrative(ev)) narrativeEvents++;
     if (ev.type === "context") return;
@@ -217,6 +218,12 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     // the source of truth here (it also covers captures from before turns
     // existed), so the event neither starts nor ends a model turn.
     if (ev.type === "turn" || ev.type === "run_meta") return; // run_meta: what the run is about, not a step
+    // skill_use: a fact about the use_skill call that already produced its own
+    // tool_call/tool_result pair — counting it would double-count the step.
+    if (ev.type === "skill_use") {
+      skillEvents++;
+      return;
+    }
 
     if (ev.type === "tool_call") {
       endModelTurn(ev, index, typeof ev.summary === "string" ? ev.summary : ev.tool);
@@ -333,7 +340,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   }
 
   const diagnosis: FrictionDiagnosis = {
-    eventCount: events.length - narrativeEvents,
+    eventCount: events.length - narrativeEvents - skillEvents,
     toolCalls,
     hasTimings,
     ...(firstAt !== undefined && lastAt !== undefined ? { runMs: lastAt - firstAt, toolTimeMs, modelTimeMs } : {}),

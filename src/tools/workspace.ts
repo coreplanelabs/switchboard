@@ -6,6 +6,7 @@ import { distillDiff } from "../core/diffDigest.js";
 import { webFetchTool, webSearchTool, type WebCapability } from "./web.js";
 import { listSkillsTool, useSkillTool } from "./skills.js";
 import type { SkillStore } from "../skills/index.js";
+import type { RunEvent } from "../core/runEvents.js";
 
 // Tools are thin declarations over the Executor seam. Where the command
 // actually runs (local host vs per-thread sandbox) is the Executor's concern —
@@ -30,6 +31,12 @@ export interface ToolContext {
   /** The calling agent's name — scopes list_skills/use_skill so an agent only
    *  sees and loads skills declared for it. */
   agentName?: string;
+  /** Publish a typed event into the run's visibility stream (the same stream
+   *  the runner's `tool_call`/`tool_result` go to). For facts a tool knows
+   *  that the runner cannot see — which skill was loaded, later which artifact
+   *  was produced. Wired by the runner to its `onEvent`; absent (CLI, most
+   *  unit tests) → the tool simply does not publish. */
+  publish?: (event: RunEvent) => void;
   /** Receives the review agent's structured verdict from `submit_verdict`.
    *  Injected by the dispatcher for review runs; the last call wins. The
    *  dispatcher turns it into the deterministic first line of the GitHub post

@@ -61,6 +61,8 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.startedAt === "number" && typeof o.durationMs === "number";
     case "run_meta":
       return typeof o.agent === "string" && typeof o.model === "string";
+    case "skill_use":
+      return typeof o.skill === "string" && typeof o.agent === "string" && typeof o.bodyBytes === "number";
     default:
       return false;
   }

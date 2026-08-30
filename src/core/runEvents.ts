@@ -140,7 +140,27 @@ export type RunEvent =
    *  right after `input`, once per run, so the run page can head its Request
    *  block with linked `owner/repo · ref · #PR · sha`. Additive: every
    *  consumer that only knows the other types keeps working. */
-  | { type: "run_meta"; agent: string; model: string; repo?: string; ref?: string; pr?: number; headSha?: string; seq?: number; at?: number };
+  | { type: "run_meta"; agent: string; model: string; repo?: string; ref?: string; pr?: number; headSha?: string; seq?: number; at?: number }
+  /** A skill was loaded into the model's context (features/skills.md). Emitted
+   *  by the `use_skill` tool on a successful load — alongside, not instead of,
+   *  its `tool_call`/`tool_result` pair — so skill use is a first-class fact in
+   *  the run data with its own metadata: which skill, for which agent, from
+   *  where (`source`, the pinned upstream URL when vendored), and how much
+   *  context it cost (`bodyBytes`). Additive: consumers that only know the
+   *  other types keep working; the friction analyzer ignores it. */
+  | {
+      type: "skill_use";
+      skill: string;
+      description: string;
+      agent: string;
+      /** The pinned upstream file URL for a vendored skill (features/skills.md item 9). */
+      source?: string;
+      /** Structured vendoring provenance (`Skill.upstream`, recorded by skills:sync). */
+      upstream?: { repo: string; commit: string };
+      bodyBytes: number;
+      seq?: number;
+      at?: number;
+    };
 
 // Credential shapes we must never surface in a run-visibility stream (which may
 // be shown in-channel or on a shared page). Two layers: (1) specific known

@@ -275,6 +275,14 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   .none { padding: .4rem .75rem; color: var(--dim); font-style: italic; font-size: .8rem; }
   /* Bookkeeping (update_status): one muted line, no card. */
   .quiet { display: flex; gap: .75rem; align-items: baseline; padding: .2rem .75rem; color: var(--dim); font-size: .8rem; }
+  /* A skill loaded into context: its own row, set apart from call cards by a violet mark. */
+  .skill { display: flex; gap: .6rem; align-items: baseline; padding: .3rem .75rem; font-size: .85rem; border-left: 2px solid #a78bfa; border-radius: 0 6px 6px 0; background: #a78bfa12; }
+  .skill .skillmark { flex: 0 0 auto; }
+  .skill .skillname { color: var(--fg); font-weight: 600; white-space: nowrap; }
+  .skill .skilldesc { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
+  .skill .facts { margin-left: auto; flex: 0 0 auto; }
+  .skill a.fact { color: var(--blue); text-decoration: none; }
+  .skill a.fact:hover { text-decoration: underline; }
   /* Runner notices (wrap-up, budget, stop). */
   li.note { display: flex; gap: .75rem; align-items: baseline; padding: .4rem .75rem; margin-top: 1rem; border-radius: 6px;
     color: var(--amber); background: #d2992214; }
@@ -760,6 +768,39 @@ ${ELAPSED_SCRIPT}
     log.insertBefore(li, tail);
     return li;
   }
+  // A skill loaded into context (features/skills.md): its own row inside the
+  // step, distinct from the use_skill call card above it — \`📚 skill <name>\`,
+  // the description, the source as a link (http(s) only, setAttribute — never
+  // markup), and the context cost.
+  function addSkill(step, skill) {
+    if (!stepNodes[step.index]) addStep(step);
+    var node = stepNodes[step.index];
+    var parent = cardParent(node);
+    var row = el("div", "skill");
+    row.appendChild(stamp(skill.at));
+    row.appendChild(el("span", "skillmark", "\\ud83d\\udcda"));
+    row.appendChild(el("span", "skillname", "skill " + skill.name));
+    if (skill.description) row.appendChild(el("span", "skilldesc", skill.description));
+    var facts = el("span", "facts");
+    if (skill.source) {
+      var a = el("a", "fact", "source");
+      a.setAttribute("href", skill.source);
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+      facts.appendChild(a);
+    }
+    facts.appendChild(el("span", "fact", fmtBytes(skill.bodyBytes) + " into context"));
+    row.appendChild(facts);
+    parent.appendChild(row);
+    refreshGroup(node);
+    return row;
+  }
+  function fmtBytes(n) {
+    if (!(n > 0)) return "0 B";
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (Math.round(n / 102.4) / 10).toFixed(1) + " KB";
+    return (Math.round(n / 104857.6) / 10).toFixed(1) + " MB";
+  }
   // Expand all / Collapse all: flips every card, and every card added later
   // while "expanded" starts open (a viewer who opened everything wants it all).
   var fold = document.getElementById("fold");
@@ -808,6 +849,8 @@ ${ELAPSED_SCRIPT}
       addTurn(change); // painted with the step that follows (or flushed before the answer)
     } else if (change.kind === "meta") {
       showMeta(change);
+    } else if (change.kind === "skill") {
+      follow(addSkill(change.step, change.skill), wasAtTail);
     } else if (change.kind === "context") {
       contextTurn(change);
     } else if (change.kind === "note" || change.kind === "replay_note") {

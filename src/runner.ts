@@ -118,6 +118,10 @@ async function runLoop(
     ...opts.toolContext,
     executor: execTracker,
     ...(hardSignal ? { signal: hardSignal } : {}),
+    // Tools publish through the same emitter as the runner's own events, so a
+    // tool-known fact (a skill load) lands in the stream stamped and ordered
+    // like everything else.
+    publish: emit,
   };
 
   // Every await inside the loop goes through here: the promise is raced against

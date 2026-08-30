@@ -61,6 +61,14 @@ describe("parseRunEventLines", () => {
     expect(metas.skipped).toBe(1);
   });
 
+  it("accepts `skill_use` when it carries skill + agent + numeric bodyBytes, skips it otherwise", () => {
+    const ok = { type: "skill_use", skill: "code-review-and-quality", description: "d", agent: "review", bodyBytes: 1200, at: 1 };
+    const bad = { type: "skill_use", skill: "x", agent: "review" }; // no bodyBytes
+    const { events, skipped } = parseRunEventLines([JSON.stringify(ok), JSON.stringify(bad)].join("\n"));
+    expect(events).toEqual([ok]);
+    expect(skipped).toBe(1);
+  });
+
   it("empty input yields no events", () => {
     expect(parseRunEventLines("")).toEqual({ events: [], skipped: 0 });
   });
