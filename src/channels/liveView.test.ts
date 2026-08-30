@@ -419,6 +419,32 @@ describe("run page call cards (grouped timeline, item 13)", () => {
   });
 });
 
+// Feature: features/live-view.md item 12 polish (#209): the "Waiting for
+// activity…" placeholder must disappear on ANY first event — a no-tool run
+// (input → answer, no rows) previously kept it forever — and the page styles
+// the renderer's new tables and h4–h6 headings.
+describe("run page placeholder + table/heading polish (#209)", () => {
+  const html = renderRunPage("run-1", "tok-1");
+
+  it("clears the placeholder on ANY painted change (input/answer too), not only call cards", () => {
+    // one named helper, so every clearing site is the same code
+    expect(html).toMatch(/function clearPlaceholder\(\) \{ if \(placeholder\) \{ placeholder\.remove\(\); placeholder = null; \} \}/);
+    // apply() is the single paint dispatcher — clearing there covers input,
+    // step, call, result, note AND answer (a no-tool run never keeps the sentinel)
+    expect(html).toMatch(/function apply\(change, wasAtTail\) \{\s*clearPlaceholder\(\);/);
+    // the live tail also clears it (it pins a row into the log)
+    expect(html).toMatch(/function refreshTail\(\) \{[\s\S]{0,80}clearPlaceholder\(\);/);
+    // no clearing site bypasses the helper
+    expect(html.match(/placeholder\.remove\(\)/g)).toHaveLength(1);
+  });
+
+  it("styles markdown tables (bordered, collapsed) and h4\u2013h6 headings", () => {
+    expect(html).toMatch(/\.md table\s*\{[^}]*border-collapse:\s*collapse/);
+    expect(html).toMatch(/\.md th, \.md td\s*\{[^}]*border:/);
+    expect(html).toMatch(/\.md h1, \.md h2, \.md h3, \.md h4, \.md h5, \.md h6/);
+  });
+});
+
 describe("renderRunPage", () => {
   const html = renderRunPage("run-1", "tok-secret");
 

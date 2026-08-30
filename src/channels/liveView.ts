@@ -232,10 +232,15 @@ export function renderRunPage(id: string, token: string): string {
   .empty { color: var(--muted); }
   /* Markdown surfaces: proportional type, tight vertical rhythm. */
   .md { font: 14px/1.55 var(--sans); white-space: pre-wrap; word-break: break-word; min-width: 0; flex: 1 1 auto; }
-  .md p, .md ul, .md ol, .md pre, .md blockquote, .md h1, .md h2, .md h3 { margin: 0 0 .5rem; }
+  .md p, .md ul, .md ol, .md pre, .md blockquote, .md table, .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 0 0 .5rem; }
   .md > :last-child { margin-bottom: 0; }
-  .md h1, .md h2, .md h3 { font-size: 1rem; font-weight: 600; color: var(--fg); text-transform: none; letter-spacing: 0; display: block; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { font-size: 1rem; font-weight: 600; color: var(--fg); text-transform: none; letter-spacing: 0; display: block; }
   .md h1 { font-size: 1.1rem; }
+  .md h4, .md h5, .md h6 { font-size: .9rem; color: var(--fg-soft); }
+  /* GFM table subset (#209): bordered, collapsed, header row set off. */
+  .md table { border-collapse: collapse; white-space: normal; font-size: .95em; }
+  .md th, .md td { border: 1px solid var(--line); padding: .25rem .55rem; text-align: left; vertical-align: top; }
+  .md th { background: #161b22; font-weight: 600; }
   .md ul, .md ol { padding-left: 1.4rem; white-space: normal; }
   .md ul { list-style: disc; }
   .md ul ul { list-style: circle; }
@@ -289,6 +294,10 @@ ${RUN_TIMELINE_SCRIPT}
   var stateDot = document.getElementById("statedot");
   var actions = document.getElementById("actions");
   var placeholder = document.getElementById("placeholder");
+  // The empty-state sentinel goes away on the FIRST painted change of any kind
+  // — a no-tool run (input → answer, no cards) must not keep "Waiting for
+  // activity…" forever (#209). One helper; apply() and the tail both call it.
+  function clearPlaceholder() { if (placeholder) { placeholder.remove(); placeholder = null; } }
   var source = document.getElementById("source");
   var timeline = createRunTimeline();
   // Which calls start open. Failures and sandbox errors are what you came to
@@ -360,7 +369,7 @@ ${RUN_TIMELINE_SCRIPT}
   log.appendChild(tail);
   function refreshTail() {
     if (!live) { tail.hidden = true; return; }
-    if (placeholder) { placeholder.remove(); placeholder = null; }
+    clearPlaceholder();
     var p = timeline.pending();
     tailText.textContent = p ? "running \\u00b7 " + (p.headline.length > 80 ? p.headline.slice(0, 80) + "\\u2026" : p.headline) : "thinking\\u2026";
     tail.hidden = false;
@@ -370,7 +379,6 @@ ${RUN_TIMELINE_SCRIPT}
   var stepNodes = {}; // step.index -> { li, calls }
   var callNodes = {}; // call.id -> { details, glyph, facts, body }
   function addStep(step) {
-    if (placeholder) { placeholder.remove(); placeholder = null; }
     var li = el("li", "step");
     if (step.narration) {
       var nar = el("div", "narration");
@@ -486,6 +494,7 @@ ${RUN_TIMELINE_SCRIPT}
   });
 
   function apply(change, wasAtTail) {
+    clearPlaceholder(); // every change paints — input and answer clear it too (#209)
     if (change.kind === "input") {
       requestTs.textContent = fmtTime(change.at);
       md(requestText, change.text);
