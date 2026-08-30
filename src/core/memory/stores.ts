@@ -1,5 +1,6 @@
 import type { MemoryCandidate, MemoryConfig, MemoryQuery, MemoryRecord, MemoryStore } from "./types.js";
 import { mintRecord, planWrite, rankRecords } from "./engine.js";
+import { keywordMatch, tokenize } from "./scorer.js";
 
 // Three implementations of the MemoryStore seam (AGENTS.md invariant 2): the
 // disabled `NullMemoryStore`, the in-process `InMemoryMemoryStore` (tests/dev),
@@ -19,7 +20,7 @@ export class NullMemoryStore implements MemoryStore {
   async write(_scopeKey: string, _records: MemoryCandidate[]): Promise<void> {
     // intentionally nothing
   }
-  async list(_scopeKey: string, _limit: number): Promise<MemoryRecord[]> {
+  async list(_scopeKey: string, _limit: number, _query?: string): Promise<MemoryRecord[]> {
     return [];
   }
   async forget(_scopeKey: string, _id: string): Promise<boolean> {
@@ -77,9 +78,13 @@ export class InMemoryMemoryStore implements MemoryStore {
     }
   }
 
-  async list(scopeKey: string, limit: number): Promise<MemoryRecord[]> {
+  async list(scopeKey: string, limit: number, query?: string): Promise<MemoryRecord[]> {
+    // A query narrows to records some token hits (whole-token, text or
+    // keywords — the same test as retrieval's relevance gate); a query with no
+    // tokens matches nothing. Never bumps usage: this is a human view.
+    const hasTokens = query !== undefined && tokenize(query).length > 0;
     return this.bucket(scopeKey)
-      .filter((r) => r.status === "active")
+      .filter((r) => r.status === "active" && (query === undefined || (hasTokens && keywordMatch(r, query) > 0)))
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, limit);
   }

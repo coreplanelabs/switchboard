@@ -120,6 +120,14 @@ describe("WorkerMemoryStore.list / forget (#278)", () => {
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer secret-token");
   });
 
+  it("list sends `query` only when a filter is given (#293)", async () => {
+    const { fetch, calls } = fakeFetch(() => jsonRes({ records: [] }));
+    await store(fetch).list("org:coreplanelabs", 20, "deploy command");
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ scopeKey: "org:coreplanelabs", limit: 20, query: "deploy command" });
+    await store(fetch).list("org:coreplanelabs", 20);
+    expect(JSON.parse(String(calls[1].init.body))).toEqual({ scopeKey: "org:coreplanelabs", limit: 20 });
+  });
+
   it("list is a human command, so a failure THROWS (never silently shows an empty list)", async () => {
     const { fetch } = fakeFetch(() => jsonRes({ error: "boom" }, 500));
     await expect(store(fetch).list("org:coreplanelabs", 20)).rejects.toThrow(/\/list HTTP 500: boom/);

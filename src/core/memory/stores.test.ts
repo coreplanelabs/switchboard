@@ -62,6 +62,18 @@ describe("InMemoryMemoryStore.list / forget (#278)", () => {
     expect(await store.list("user:slack:U2", 10)).toEqual([]);
   });
 
+  it("list with a query keeps only records a query token hits (whole-token, text or keywords), newest first, no usage bump (#293)", async () => {
+    const store = seed();
+    const hits = await store.list("org:coreplanelabs", 10, "newest oldest");
+    expect(hits.map((r) => r.id)).toEqual(["c", "a"]);
+    expect(hits.every((r) => r.useCount === 0 && r.lastUsedAt === undefined)).toBe(true);
+    expect((await store.list("org:coreplanelabs", 10, "npm")).map((r) => r.id)).toEqual(["c", "b", "a"]); // keyword hit
+    expect(await store.list("org:coreplanelabs", 10, "new")).toEqual([]); // substring is not a token
+    expect(await store.list("org:coreplanelabs", 10, "!!!")).toEqual([]); // no tokens → nothing
+    expect((await store.list("org:coreplanelabs", 1, "deploy")).map((r) => r.id)).toEqual(["c"]); // limit applies after the filter
+    expect(await new NullMemoryStore().list("org:coreplanelabs", 10, "deploy")).toEqual([]);
+  });
+
   it("list does not bump usage (it is a human view, not a retrieval)", async () => {
     const store = seed();
     const [first] = await store.list("org:coreplanelabs", 1);
