@@ -37,7 +37,7 @@ const positiveInt = z.coerce.number().int().positive();
 const deployOptions = z.object({
   only: workerList.optional().describe(`deploy only these Workers (comma list of ${DEPLOY_ORDER.join(", ")})`),
   skip: workerList.optional().describe("skip these Workers (comma list)"),
-  force: flag.optional().describe("bypass the bot/resident preflights — in-flight runs WILL be killed"),
+  force: flag.optional().describe("bypass the bot/resident preflights — in-flight runs are SIGTERM-drained and killed only at the drain deadline"),
   allowBranch: flag.optional().describe("deploy from a branch other than origin/main (deliberately)"),
   waitMax: positiveInt.optional().describe("minutes to wait out a refusing preflight (default 30)"),
   poll: positiveInt.optional().describe("seconds between preflight retries (default 60)"),

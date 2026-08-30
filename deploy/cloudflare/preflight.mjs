@@ -143,7 +143,7 @@ export function decide({ health, apps }, { force = false } = {}) {
       forced: true,
       problems,
       warnings,
-      message: `preflight WARNING: deploying by force despite —\n${detail}\n  in-flight runs WILL be killed and their status cards left for the next connect's sweep to close${warningText}`,
+      message: `preflight WARNING: deploying by force despite —\n${detail}\n  in-flight runs are SIGTERM-drained — they finish if they can, else are killed at the drain deadline — and their status cards left for the next connect's sweep to close${warningText}`,
     };
   }
   return {

@@ -271,7 +271,7 @@ export async function runBotRestart(plan: RestartPlan, io: Pick<DeployRunnerIO, 
   const tag = "deploy:restart";
   const started = deps.now();
   const deadline = started + plan.waitMaxMs;
-  if (plan.force) io.warn(`[${tag}] WARNING --force: the preflight is bypassed — in-flight runs on ${plan.target} WILL be killed`);
+  if (plan.force) io.warn(`[${tag}] WARNING --force: the preflight is bypassed — in-flight runs on ${plan.target} are SIGTERM-drained (finish if they can, else killed at the drain deadline)`);
 
   let previousStartedAt: string | undefined;
   for (;;) {
