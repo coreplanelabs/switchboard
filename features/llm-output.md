@@ -5,6 +5,7 @@ Every LLM call's output is an assumption the system made — this feature makes 
 - **Code**: `src/core/llmOutput/` — `types.ts` (the `OutputType` seam + `acceptOutput` control loop), `markdown.ts` (prose canonicalization), `json.ts` (fence-strip + `JSON.parse` + zod)
 - **Consumers**: `src/core/dispatcher.ts` (the answer boundary), `src/core/memory/reflection.ts` (the reflection envelope)
 - **Tests**: `src/core/llmOutput/markdown.test.ts`, `src/core/llmOutput/json.test.ts`, `src/core/llmOutput/types.test.ts`, `src/core/dispatcher.test.ts::typed answer output`
+- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/371
 
 ## Behavior
 
@@ -26,5 +27,3 @@ Every LLM call's output is an assumption the system made — this feature makes 
 | Control loop: ok passes through; retryable failure re-asks with `observed` up to `maxRetries`; non-retryable or no-callback returns the failure without throwing | `[unit]` `src/core/llmOutput/types.test.ts` |
 | The answer event, channel reply, and GitHub post body all carry the canonical text; `raw` on the event iff normalization changed it; `raw` is redacted; oversized `raw` dropped | `[unit]` `src/core/dispatcher.test.ts::typed answer output (features/llm-output.md)` (red-verified) |
 | Reflection envelope via the JSON type: fenced JSON accepted, non-JSON → error, non-object → error, missing `facts` → error; fact-level leniency unchanged | `[unit]` `src/core/memory/reflection.test.ts` (existing suite, error text updated) |
-
-Receipts issue: tracked on the [Golden Product project](https://github.com/orgs/coreplanelabs/projects/1).
