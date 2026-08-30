@@ -48,16 +48,18 @@ export interface FrictionCommandDeps {
   tracker?: IssueTracker;
 }
 
-/** Handles a friction command, or returns null when `text` is not one. */
-export async function handleFrictionCommand(
-  config: ConfigStore,
-  msg: IncomingMessage,
-  deps: FrictionCommandDeps,
-  cmd: FrictionCommand | null = parseFrictionCommand(msg.text),
-): Promise<string | null> {
-  if (!cmd) return null;
-  if ("error" in cmd) return cmd.error;
-  if (!deps.ledger) return "⚠️ The friction ledger isn't wired in this process, so there are no recent runs to analyze.";
+/** The outcome of a friction command: the reply text plus whether the step
+ *  actually ran (`ok`) or was refused/misconfigured/failed — the run record
+ *  (and a scheduled firing's outcome) is derived from `ok`, not from the text. */
+export interface FrictionCommandResult {
+  text: string;
+  ok: boolean;
+}
+
+/** Runs an already-parsed friction command. */
+export async function runFrictionCommand(config: ConfigStore, msg: IncomingMessage, deps: FrictionCommandDeps, cmd: FrictionCommand): Promise<FrictionCommandResult> {
+  if ("error" in cmd) return { text: cmd.error, ok: false };
+  if (!deps.ledger) return { text: "⚠️ The friction ledger isn't wired in this process, so there are no recent runs to analyze.", ok: false };
 
   const cfg = config.config.selfImprovement;
   const minRuns = cmd.minRuns ?? cfg?.minRuns;
@@ -65,23 +67,26 @@ export async function handleFrictionCommand(
 
   if (cmd.verb === "report") {
     const records = await deps.ledger.recent();
-    return formatSelfImprovementReport({
-      runsAnalyzed: records.length,
-      patterns: clusterFriction(records, { minRuns }),
-      proposals: [],
-      filed: [],
-      duplicates: [],
-      failed: [],
-      dryRun: false,
-    });
+    return {
+      ok: true,
+      text: formatSelfImprovementReport({
+        runsAnalyzed: records.length,
+        patterns: clusterFriction(records, { minRuns }),
+        proposals: [],
+        filed: [],
+        duplicates: [],
+        failed: [],
+        dryRun: false,
+      }),
+    };
   }
 
   // propose: the fail-closed gate FIRST (a refused user must see why), then config.
   if (!config.canManageRepos(msg.userId)) {
-    return `🚫 Filing friction proposals (\`friction propose\`) is restricted. Ask ${config.adminsHint()}.`;
+    return { text: `🚫 Filing friction proposals (\`friction propose\`) is restricted. Ask ${config.adminsHint()}.`, ok: false };
   }
   if (!cfg?.repo) {
-    return "⚠️ Set `selfImprovement.repo` (an `owner/name`) in config.yaml to tell `friction propose` where to file issues.";
+    return { text: "⚠️ Set `selfImprovement.repo` (an `owner/name`) in config.yaml to tell `friction propose` where to file issues.", ok: false };
   }
   try {
     const report = await runSelfImprovement({
@@ -93,8 +98,20 @@ export async function handleFrictionCommand(
       minRuns,
       dryRun: cmd.dryRun,
     });
-    return formatSelfImprovementReport(report);
+    return { text: formatSelfImprovementReport(report), ok: true };
   } catch (err) {
-    return `⚠️ ${err instanceof Error ? err.message : String(err)}`;
+    return { text: `⚠️ ${err instanceof Error ? err.message : String(err)}`, ok: false };
   }
+}
+
+/** Handles a friction command, or returns null when `text` is not one. Text-only
+ *  view of `runFrictionCommand` for callers that need just the reply. */
+export async function handleFrictionCommand(
+  config: ConfigStore,
+  msg: IncomingMessage,
+  deps: FrictionCommandDeps,
+  cmd: FrictionCommand | null = parseFrictionCommand(msg.text),
+): Promise<string | null> {
+  if (!cmd) return null;
+  return (await runFrictionCommand(config, msg, deps, cmd)).text;
 }

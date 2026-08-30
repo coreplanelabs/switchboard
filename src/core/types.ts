@@ -91,6 +91,17 @@ export interface StatusHandle {
   done(frame: StatusUpdate): Promise<void>;
 }
 
+/** How a run ended, as reported to the channel once its record is closed. */
+export type RunFinalStatus = "completed" | "failed" | "stopped_soft" | "stopped_hard";
+
+/** The receipt a channel gets when the run behind its request finishes: the
+ *  run id (the `/runs/:id` record) and its terminal status. Never the view
+ *  token — a receipt names the run, it does not grant access to it. */
+export interface RunReceipt {
+  id: string;
+  status: RunFinalStatus;
+}
+
 /** What the core needs from a channel to serve one request. */
 export interface ChannelIO {
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
@@ -117,4 +128,12 @@ export interface ChannelIO {
    * `reply` when a channel declares none.
    */
   sendFormatted?(payload: string): Promise<void>;
+  /**
+   * Called once by the core when the run created for this request has been
+   * finished in the registry (agent runs AND inline command runs), before the
+   * reply goes out. Single-shot channels (HTTP) hand the receipt back to their
+   * caller so a machine client — e.g. the Worker shim firing a scheduled job —
+   * can name the run it caused. Optional: Slack/CLI need nothing from it.
+   */
+  runFinished?(receipt: RunReceipt): void;
 }

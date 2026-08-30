@@ -16,6 +16,13 @@ defaults:
 
 permissions:
   admins: [slack:U0BMRFRLT1P] # justin
+  # The scheduled-run identity (#244): the Worker shim fires `friction propose`
+  # through /ingress as the `cron` entry of SWITCHBOARD_INGRESS_TOKENS, which the
+  # dispatcher sees as `http:cron`. `friction propose` sits behind the fail-closed
+  # repo-management gate, so the identity is granted here — this also lets it run
+  # `repo onboard/offboard/rebuild`, which only the shim can trigger (it holds the
+  # token) and only with the registry's command text.
+  repoManagement: [http:cron]
   # No agents block: every agent is open to the whole workspace (an absent
   # allowlist key means unrestricted, enforced in ConfigService.canRunAgent).
   channelConfig: [] # admins only
@@ -59,6 +66,13 @@ memory:
 # features/self-improvement.md.
 selfImprovement:
   repo: coreplanelabs/switchboard
+  worker:
+    baseUrl: https://switchboard-memory.coreplanelabs.dev
+    tokenEnv: MEMORY_TOKEN
+
+# Scheduled jobs (#244): the Worker shim records every cron firing on the state
+# Worker's ScheduleDO; the /runs "Scheduled" panel reads the latest per schedule.
+schedules:
   worker:
     baseUrl: https://switchboard-memory.coreplanelabs.dev
     tokenEnv: MEMORY_TOKEN

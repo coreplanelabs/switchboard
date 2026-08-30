@@ -159,6 +159,19 @@ workspaceDir: ./workspaces
 #     tokenEnv: MEMORY_TOKEN    # env var holding the Worker's bearer (default)
 #   ledgerPath: ./data/friction.jsonl   # host-disk ledger path when no worker
 
+# Scheduled jobs (#244). The schedule registry (src/core/schedules.ts) lists every
+# cron the Cloudflare Worker shim runs; a `run` schedule fires as an ordinary run
+# through /ingress as the `cron` identity — give that identity a token in
+# SWITCHBOARD_INGRESS_TOKENS ({"…": {"subject": "cron", "channel": "cron"}}) and
+# grant it what its command needs (`friction propose` → permissions.repoManagement
+# must list `http:cron`). The shim records each firing on the state Worker's
+# ScheduleDO; this block tells the /runs "Scheduled" panel where to read them.
+# Without it the panel lists the schedules with no firing history.
+# schedules:
+#   worker:
+#     baseUrl: https://switchboard-memory.coreplanelabs.dev
+#     tokenEnv: MEMORY_TOKEN    # env var holding the Worker's bearer (default)
+
 # Spend reporting: GET /costs (Access-gated). Optional. See features/costs.md.
 # costs:
 #   cloudflareAccountId: <32-hex account id>

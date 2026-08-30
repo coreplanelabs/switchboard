@@ -1,8 +1,9 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
+import { parseIngressTokenMap, type IngressIdentity } from "../core/ingressTokens.js";
 import { PlainTextFormatter } from "../core/structuredMessage.js";
-import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
+import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusHandle, StatusUpdate } from "../core/types.js";
 
 // HTTP channel adapter: adapter #3. Like Slack and the CLI, it is pure
 // transport — it turns an inbound HTTP POST into an IncomingMessage, calls the
@@ -24,13 +25,11 @@ const DEFAULT_THREAD = "default";
 /** Reject bodies larger than this before buffering them fully. */
 export const MAX_BODY_BYTES = 1_000_000; // 1 MB
 
-/** The identity a token maps to. `subject` becomes `userId` "http:<subject>";
- *  an optional `channel` pins the config scope regardless of the request body
- *  (a token can be locked to one channel scope). */
-export interface IngressIdentity {
-  subject: string;
-  channel?: string;
-}
+/** The identity a token maps to (`subject` → `userId` "http:<subject>"; an
+ *  optional `channel` pins the config scope regardless of the request body).
+ *  Defined in src/core/ingressTokens.ts (node-free, shared with the Worker
+ *  shim); re-exported here so the MCP adapter and tests keep one import site. */
+export type { IngressIdentity };
 
 /** Ingress auth config: raw bearer token -> identity. An empty map means the
  *  endpoint is DISABLED (fail-closed) — never open. */
@@ -107,15 +106,26 @@ function toIncomingMessage(identity: IngressIdentity, body: IngressBody): Incomi
 }
 
 /** ChannelIO for a single-shot HTTP request: reply() collects, status() is a
- *  no-op, history() replays what the body supplied. */
+ *  no-op, history() replays what the body supplied, runFinished() keeps the run
+ *  receipt for the response body. */
 export class HttpIO implements ChannelIO {
   /** Structured output renders as plain text for a machine HTTP consumer. */
   readonly formatter = new PlainTextFormatter();
   private replies: string[] = [];
+  private receipt: RunReceipt | undefined;
   constructor(private readonly priorTurns: HistoryItem[] = []) {}
 
   async reply(text: string): Promise<void> {
     this.replies.push(text);
+  }
+
+  runFinished(receipt: RunReceipt): void {
+    this.receipt = receipt;
+  }
+
+  /** The run this request produced (id + terminal status), if the core made one. */
+  run(): RunReceipt | undefined {
+    return this.receipt;
   }
 
   async status(_initial: StatusUpdate): Promise<StatusHandle> {
@@ -244,7 +254,11 @@ async function handleAuthorized(
   const io = new HttpIO(parsed.body.history);
   const dispatchFn = options.dispatch ?? realDispatch;
   await dispatchFn(deps, msg, io);
-  return { status: 200, body: { reply: io.collected() } };
+  // `run` is present only when the core created a run for this request (agent
+  // runs, inline command runs); a config reply has none. Id + status only —
+  // never the view token.
+  const run = io.run();
+  return { status: 200, body: { reply: io.collected(), ...(run ? { run } : {}) } };
 }
 
 export async function handleIngressRequest(
@@ -331,27 +345,8 @@ export function createIngressHandler(
  * treated as no tokens rather than silently opening the endpoint.
  */
 export function parseIngressTokens(env: Record<string, string | undefined>): IngressConfig {
-  const raw = env.SWITCHBOARD_INGRESS_TOKENS;
-  if (!raw || raw.trim() === "") return { tokens: {} };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    console.error("[ingress] SWITCHBOARD_INGRESS_TOKENS is not valid JSON — ingress disabled");
-    return { tokens: {} };
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    console.error("[ingress] SWITCHBOARD_INGRESS_TOKENS must be a JSON object — ingress disabled");
-    return { tokens: {} };
-  }
-  const tokens: Record<string, IngressIdentity> = {};
-  for (const [token, value] of Object.entries(parsed as Record<string, unknown>)) {
-    if (typeof value !== "object" || value === null) continue;
-    const v = value as Record<string, unknown>;
-    if (typeof v.subject !== "string" || v.subject === "") continue;
-    if (v.channel !== undefined && typeof v.channel !== "string") continue;
-    if (token === "") continue;
-    tokens[token] = { subject: v.subject, channel: v.channel as string | undefined };
-  }
-  return { tokens };
+  // One parser for the bot and the Worker shim (src/core/ingressTokens.ts).
+  const parsed = parseIngressTokenMap(env.SWITCHBOARD_INGRESS_TOKENS);
+  if (!parsed.ok) console.error(`[ingress] SWITCHBOARD_INGRESS_TOKENS is ${parsed.reason} — ingress disabled`);
+  return { tokens: parsed.tokens };
 }

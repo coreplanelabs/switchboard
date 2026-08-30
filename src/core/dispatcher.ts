@@ -24,7 +24,7 @@ import { redactSecrets, type RunEvent } from "./runEvents.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
-import { handleFrictionCommand } from "./frictionCommands.js";
+import { parseFrictionCommand, runFrictionCommand } from "./frictionCommands.js";
 import { defaultRunRegistry, type RunRegistry } from "./runRegistry.js";
 import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
 import { produceStructured, providerProducer } from "./structuredOutput.js";
@@ -160,15 +160,19 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       return;
     }
 
-    // Self-improvement commands (Area 7b, #84) are config-family too: `friction
-    // report` reads the ledger; `friction propose` files deduped issue
-    // proposals (gated inside: canManageRepos, fail-closed). Never a model turn.
-    const frictionReply = await handleFrictionCommand(deps.config, msg, {
-      ledger: deps.frictionLedger,
-      tracker: deps.issueTracker,
-    });
-    if (frictionReply) {
-      await io.reply(frictionReply);
+    // Self-improvement commands (Area 7b, #84): `friction report` reads the
+    // ledger; `friction propose` files deduped issue proposals (gated inside:
+    // canManageRepos, fail-closed). Never a model turn — but unlike the config
+    // replies above they DO real work (GitHub writes), so each is a run (#244):
+    // a registry record with the request and the reply, on /runs like any
+    // other, and a receipt to the channel. The weekly cron reaches this path
+    // through /ingress as `http:cron`, so a scheduled firing is a run too.
+    const frictionCmd = parseFrictionCommand(msg.text);
+    if (frictionCmd) {
+      const { text } = await runInlineCommandRun(deps, msg, "friction", io, () =>
+        runFrictionCommand(deps.config, msg, { ledger: deps.frictionLedger, tracker: deps.issueTracker }, frictionCmd),
+      );
+      await io.reply(text);
       return;
     }
 
@@ -507,6 +511,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // finished — read by us, not reported by the model — for the reviewed-head
     // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
     let observedHead: string | undefined;
+    let runThrew = false;
     try {
       answer = await runAgent({
         provider,
@@ -534,11 +539,16 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         observedHead = parseRevParseOutput(await executor.exec("git rev-parse HEAD").catch(() => ""));
       }
     } catch (err) {
+      runThrew = true;
       await card.done({ title: title("❌"), detail: finalDetail() });
       throw err;
     } finally {
       clearInterval(heartbeat);
       registry.finish(run.id); // close the live-view stream; start its TTL
+      // The channel's receipt (id + terminal status, never the token): a
+      // single-shot channel hands it to its caller — the Worker shim records a
+      // scheduled firing's run from it (#244).
+      io.runFinished?.({ id: run.id, status: runThrew ? "failed" : run.control.requested === "hard" ? "stopped_hard" : run.control.requested === "soft" ? "stopped_soft" : "completed" });
       // Friction ledger (#84): diagnose this run's stream and keep the result
       // for the cross-run proposer. Best-effort and fire-and-forget — a ledger
       // failure is a warning line, never a failed run or a delayed reply.
@@ -682,6 +692,39 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     await io.reply(`⚠️ ${errMsg}`).catch(() => {});
   } finally {
     if (counted) activeRuns--;
+  }
+}
+
+/**
+ * Run an inline (no-model) command AS a run (#244): register it in the run
+ * registry under a `<command> · #channel · user · "…"` label, publish the
+ * request as the `input` event and the reply as the `answer` event, finish it,
+ * and hand the channel its receipt — `completed` when the command did its work,
+ * `failed` when it was refused, misconfigured, or threw. The run record is the
+ * canonical trace (command-registry principle, #157); the channel reply is a
+ * projection of it. A thrown command still finishes its run (as `failed`) and
+ * the error propagates to the dispatcher's outer handler.
+ */
+async function runInlineCommandRun(
+  deps: CoreDeps,
+  msg: IncomingMessage,
+  command: string,
+  io: ChannelIO,
+  execute: () => Promise<{ text: string; ok: boolean }>,
+): Promise<{ text: string; ok: boolean }> {
+  const registry = deps.runRegistry ?? defaultRunRegistry;
+  const run = registry.create(
+    composeRunLabel({ agent: command, channelId: msg.channelId, userId: msg.userId, channelName: msg.channelName, userName: msg.userName, text: msg.text }),
+  );
+  registry.publish(run.id, { type: "input", text: redactSecrets(msg.text), at: Date.now() });
+  let result: { text: string; ok: boolean } | undefined;
+  try {
+    result = await execute();
+    registry.publish(run.id, { type: "answer", text: redactSecrets(result.text), at: Date.now() });
+    return result;
+  } finally {
+    registry.finish(run.id);
+    io.runFinished?.({ id: run.id, status: result?.ok ? "completed" : "failed" });
   }
 }
 

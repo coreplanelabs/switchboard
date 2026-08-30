@@ -29,7 +29,7 @@ Nothing else goes on a criterion: no dates, no receipt links, no "observed live"
 | [slack-channel.md](slack-channel.md) | Triggers (mention/DM/follow-up), ack reaction, status cards, formatting, attachments |
 | [channel-formatter.md](channel-formatter.md) | Channel-agnostic structured output (zod schema), `ChannelFormatter` seam (Slack + plain), fixed-retry self-heal, flag-gated (#76) |
 | [run-visibility.md](run-visibility.md) | Typed run-event stream (tool calls + redacted result summaries); live in-channel status card |
-| [live-view.md](live-view.md) | External live run page: per-run capability token, SSE stream, in-memory live-only registry (#43) |
+| [live-view.md](live-view.md) | External live run page: per-run capability token, SSE stream, in-memory live-only registry (#43); the `/runs` "Scheduled" panel — schedule registry, next fire, last firing + run link (#244) |
 | [run-loop.md](run-loop.md) | Turn/time budgets, wrap-up behavior, forced write-up, refusal/truncation handling |
 | [run-friction.md](run-friction.md) | Run-friction analyzer (#84, Area 7b first piece): pure deterministic diagnosis of delay causes from the run-event stream (slow/failed tools, retries, setup/install, wrap-up, budget hits, infra failures); `at`/`infra`/`run_note` stream extensions; read-only `GET /runs/:id/friction` + `frictionCli` |
 | [self-improvement.md](self-improvement.md) | Self-improvement proposals (#84, Area 7b second piece): friction ledger of every run's diagnosis; pure cross-run clustering/ranking of recurring patterns (+ `long_run` cost-spike proxy); `friction report` / `friction propose` chat commands and `frictionProposeCli` that file labeled, marker-deduped GitHub issues with evidence + suggested fix — proposals only, human-gated |

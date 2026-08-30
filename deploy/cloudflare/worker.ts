@@ -3,10 +3,18 @@
 // coreplanelabs/infrastructure `terrateam/` (long-lived server in a container,
 // singleton DO, cron keep-alive).
 //
-// The Worker exists only to (re)start the container and run health checks —
-// all Slack traffic is the container's own outbound Socket Mode websocket, so
-// no routes are needed and nothing user-facing flows through here.
+// The Worker exists to (re)start the container, run health checks, and fire
+// the scheduled jobs — all Slack traffic is the container's own outbound Socket
+// Mode websocket, so nothing user-facing flows through here. Scheduled jobs are
+// NOT special: a `run` schedule is POSTed to the bot's generic /ingress as the
+// `cron` identity, so it becomes an ordinary run (#244).
 import { Container, getContainer } from "@cloudflare/containers";
+import {
+  interpretIngressResponse,
+  planScheduledFiring,
+  scheduleForCron,
+  type ScheduleFiring,
+} from "../../src/core/schedules.ts";
 
 interface Env {
   SWITCHBOARD: DurableObjectNamespace<SwitchboardServer>;
@@ -26,16 +34,13 @@ interface Env {
   PUBLIC_BASE_URL?: string; // live-view: base for /runs/<id>?t=… links on the status card
   ACCESS_TEAM_DOMAIN?: string; // live-view SSO gate: Cloudflare Access team domain (JWKS + iss)
   ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
-  SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map)
+  SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map); the `cron` entry is what scheduled runs present
   BRAVE_SEARCH_API_KEY?: string; // web_search backend (Brave); web_fetch works without it
   CF_ANALYTICS_TOKEN?: string; // costs dash: Cloudflare API token, Account Analytics:Read only
   ANTHROPIC_ADMIN_KEY?: string; // costs dash (optional): Anthropic Admin API key for the LLM cost report
-  MEMORY_TOKEN?: string; // durable memory: bearer for the memory service (else in-process store)
-  FRICTION_TRIGGER_TOKEN?: string; // self-improvement (#84): bearer the weekly cron presents to POST /friction/propose
+  MEMORY_TOKEN?: string; // durable memory + friction ledger + schedule firings: bearer for the state Worker
+  STATE_WORKER_URL?: string; // var: the state Worker's base URL — where this shim records each scheduled firing (#244)
 }
-
-/** The weekly self-improvement cron (Mondays 14:00 UTC) — must match wrangler.jsonc `triggers.crons`. */
-const FRICTION_CRON = "0 14 * * 1";
 
 export class SwitchboardServer extends Container<Env> {
   defaultPort = 8080; // the bot's health endpoint (PORT=8080 in the image)
@@ -75,7 +80,6 @@ export class SwitchboardServer extends Container<Env> {
         : {}),
       ...(env.BRAVE_SEARCH_API_KEY ? { BRAVE_SEARCH_API_KEY: env.BRAVE_SEARCH_API_KEY } : {}),
       ...(env.MEMORY_TOKEN ? { MEMORY_TOKEN: env.MEMORY_TOKEN } : {}),
-      ...(env.FRICTION_TRIGGER_TOKEN ? { FRICTION_TRIGGER_TOKEN: env.FRICTION_TRIGGER_TOKEN } : {}),
     };
   }
 
@@ -88,41 +92,79 @@ export class SwitchboardServer extends Container<Env> {
 }
 
 const INSTANCE = "singleton";
+const INTERNAL = "https://switchboard-keepalive.internal";
+
+/** Record a firing on the state Worker's ScheduleDO (the /runs Scheduled panel
+ *  reads it). Best-effort: a failure here is a log line — the run itself (if
+ *  any) already happened and is its own record. Fail-closed on config: no URL
+ *  or bearer → logged, nothing sent. */
+async function recordFiring(env: Env, firing: ScheduleFiring): Promise<void> {
+  if (!env.STATE_WORKER_URL || !env.MEMORY_TOKEN) {
+    console.error(`[schedule] ${firing.schedule}: cannot record firing — ${!env.STATE_WORKER_URL ? "STATE_WORKER_URL var" : "MEMORY_TOKEN secret"} is not set`);
+    return;
+  }
+  try {
+    const res = await fetch(`${env.STATE_WORKER_URL.replace(/\/+$/, "")}/schedules/record`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${env.MEMORY_TOKEN}` },
+      body: JSON.stringify({ firing }),
+    });
+    if (!res.ok) console.error(`[schedule] ${firing.schedule}: recording the firing failed — state Worker HTTP ${res.status}`);
+  } catch (err) {
+    console.error(`[schedule] ${firing.schedule}: recording the firing failed — ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     return getContainer(env.SWITCHBOARD, INSTANCE).fetch(request);
   },
 
-  // Two crons. Every minute: keep-alive + revive after platform maintenance —
-  // any touch starts the container if stopped and renews the activity timeout.
-  // Weekly (FRICTION_CRON): the self-improvement pass (#84) — POST the bot's
-  // /friction/propose with the dedicated bearer; the bot clusters the friction
-  // ledger and files deduped `self-improvement` issues. Proposals only; the
-  // issues are the notification. Without the secret the bot answers 503 and
-  // nothing runs (fail-closed) — logged here so a misconfiguration is visible.
+  // Every cron trigger in wrangler.jsonc is a schedule in the registry
+  // (src/core/schedules.ts — a unit test keeps the two equal). The keep-alive
+  // touches /healthz: any touch starts the container if stopped and renews the
+  // activity timeout, which is also what revives it after platform maintenance.
+  // A `run` schedule POSTs the bot's generic /ingress as the `cron` identity
+  // (its bearer is the `cron` entry of SWITCHBOARD_INGRESS_TOKENS — no extra
+  // secret) with the schedule's command text; the bot dispatches it as a normal
+  // run and answers with the run's id + status, which is recorded on the state
+  // Worker for the /runs Scheduled panel. Fail-closed: no `cron` token → nothing
+  // is sent and the firing is recorded as `misconfigured`; an ingress error
+  // (bot down, unknown identity) is recorded as `ingress-error`.
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
-    if (controller.cron === FRICTION_CRON) {
-      const res = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
-        new Request("https://switchboard-keepalive.internal/friction/propose", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            ...(env.FRICTION_TRIGGER_TOKEN ? { authorization: `Bearer ${env.FRICTION_TRIGGER_TOKEN}` } : {}),
-          },
-          body: "{}",
-        }),
-      );
-      const text = await res.text().catch(() => "");
-      // Counts and issue links only — the report never carries secrets, but keep the log a summary.
-      console.log(`[friction] weekly propose → HTTP ${res.status} ${text.slice(0, 600)}`);
+    const schedule = scheduleForCron(controller.cron);
+    if (!schedule) {
+      console.error(`[schedule] cron "${controller.cron}" is not in the schedule registry — nothing fired (wrangler.jsonc and src/core/schedules.ts have drifted)`);
       return;
     }
-    const res = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
-      new Request("https://switchboard-keepalive.internal/healthz"),
-    );
-    if (!res.ok) {
-      console.error(`switchboard health check failed: ${res.status}`);
+    if (schedule.kind === "keep-alive") {
+      const res = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(new Request(`${INTERNAL}/healthz`));
+      if (!res.ok) console.error(`switchboard health check failed: ${res.status}`);
+      return;
     }
+
+    const firedAt = controller.scheduledTime || Date.now();
+    const plan = planScheduledFiring(schedule, env.SWITCHBOARD_INGRESS_TOKENS, firedAt);
+    if (!plan.ok) {
+      console.error(`[schedule] ${schedule.name}: not armed — ${plan.reason}; nothing ran`);
+      await recordFiring(env, { schedule: schedule.name, firedAt, outcome: "misconfigured", detail: plan.reason });
+      return;
+    }
+    let firing: ScheduleFiring;
+    try {
+      const res = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
+        new Request(`${INTERNAL}/ingress`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${plan.token}` },
+          body: JSON.stringify(plan.body),
+        }),
+      );
+      firing = interpretIngressResponse(schedule, firedAt, res.status, await res.text().catch(() => ""));
+    } catch (err) {
+      firing = { schedule: schedule.name, firedAt, outcome: "ingress-error", detail: `fetch failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300) };
+    }
+    // Ids, outcome, and the reply's first line only — never a token.
+    console.log(`[schedule] ${schedule.name} → ${firing.outcome}${firing.runId ? ` run ${firing.runId}` : ""}${firing.detail ? ` — ${firing.detail}` : ""}`);
+    await recordFiring(env, firing);
   },
 } satisfies ExportedHandler<Env>;

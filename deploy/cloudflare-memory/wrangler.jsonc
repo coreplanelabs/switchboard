@@ -20,12 +20,16 @@
       { "name": "MEMORY", "class_name": "MemoryDO" },
       // One FrictionDO per ledger key (`friction:<repo>`): the durable friction
       // ledger behind `friction propose` (#84, features/self-improvement.md).
-      { "name": "FRICTION", "class_name": "FrictionDO" }
+      { "name": "FRICTION", "class_name": "FrictionDO" },
+      // ONE ScheduleDO (named "schedules"): every cron firing the bot's Worker
+      // shim makes, for the /runs Scheduled panel (#244, features/live-view.md).
+      { "name": "SCHEDULES", "class_name": "ScheduleDO" }
     ]
   },
   // SQLite-backed DOs (durable across restarts — AGENTS.md invariant 6).
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["MemoryDO"] },
-    { "tag": "v2", "new_sqlite_classes": ["FrictionDO"] }
+    { "tag": "v2", "new_sqlite_classes": ["FrictionDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["ScheduleDO"] }
   ]
 }

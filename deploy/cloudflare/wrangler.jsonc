@@ -26,7 +26,10 @@
   "vars": {
     "PUBLIC_BASE_URL": "https://switchboard.coreplanelabs.dev",
     "ACCESS_TEAM_DOMAIN": "coreplane.cloudflareaccess.com",
-    "ACCESS_AUD": "3886ef9ed724728da863bbeb96d09f79e53c0832f2fdabc1534f155dca9a4f5c"
+    "ACCESS_AUD": "3886ef9ed724728da863bbeb96d09f79e53c0832f2fdabc1534f155dca9a4f5c",
+    // The state Worker (deploy/cloudflare-memory/): where worker.ts records each
+    // scheduled firing for the /runs Scheduled panel (#244), with MEMORY_TOKEN.
+    "STATE_WORKER_URL": "https://switchboard-memory.coreplanelabs.dev"
   },
   "observability": { "enabled": true, "traces": { "enabled": true } },
   "containers": [
@@ -42,11 +45,12 @@
     "bindings": [{ "name": "SWITCHBOARD", "class_name": "SwitchboardServer" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SwitchboardServer"] }],
-  // Keep-alive every minute: this is also what RESTARTS the container after
-  // a deploy rollout or platform maintenance — the interval bounds the deaf
-  // window (Socket Mode events during downtime are lost, never redelivered).
-  // Every minute: container keep-alive (/healthz). Mondays 14:00 UTC: the weekly
-  // self-improvement pass (#84) — POST /friction/propose; must match
-  // FRICTION_CRON in worker.ts.
+  // Every cron here IS a schedule in src/core/schedules.ts (the registry; a unit
+  // test fails when the two sets differ) and worker.ts looks each firing up there.
+  // "* * * * *": keep-alive (/healthz) — also what RESTARTS the container after a
+  // deploy rollout or platform maintenance; the interval bounds the deaf window
+  // (Socket Mode events during downtime are lost, never redelivered). Not a run.
+  // "0 14 * * 1": the weekly self-improvement pass (#84) — POST /ingress as the
+  // `cron` identity with `friction propose`; an ordinary run on /runs (#244).
   "triggers": { "crons": ["* * * * *", "0 14 * * 1"] }
 }
