@@ -151,19 +151,58 @@ describe("review post-step: prompts defer posting to the system (issue #69)", ()
 // rich, templated description BY DEFAULT (not on request). Both prompts must
 // contain the template's sections plus the rules that keep it honest.
 describe("coding prompts: templated PR description by default", () => {
-  const SECTIONS = [
-    "**TL;DR**",
-    "**What & why**",
-    "**Changes**",
-    "**Decisions**",
-    "**Risks & implications**",
-    "**Validation**",
-    "**How to review**",
-  ];
+  const SECTIONS = ["**TL;DR**", "**What & why**", "**Tour**", "**Decisions**", "**Risks & implications**", "**Validation**"];
 
   it("both coding prompts include every PR-description section", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
       for (const section of SECTIONS) expect(sys, section).toContain(section);
+    }
+  });
+
+  // The Tour replaced the prose "Changes" + "How to review" sections: a
+  // walkthrough that never points at code is what made PR bodies hard to
+  // consume. Its steps are anchored to line permalinks that GitHub renders as
+  // embedded code, so the reader sees the hunk beside the explanation.
+  it("the Tour supersedes the prose Changes / How-to-review sections", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).not.toContain("**Changes**");
+      expect(sys).not.toContain("**How to review**");
+    }
+  });
+
+  it("Tour steps are anchored to head-sha line permalinks in reading order, with a catch-all step", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).toMatch(/blob\/<head sha>\/<path>#L<from>-L<to>/); // the permalink shape GitHub embeds as code
+      expect(sys).toMatch(/reading order/i);
+      expect(sys).toMatch(/Remaining changes/);
+    }
+  });
+
+  // Reader-first ordering: a heading naming the change, the explanation, then
+  // the code — never code first (the reader must know what they are looking at
+  // before the hunk appears). Markdown structure, not a wall of prose.
+  it("every section is a `##` heading, the TL;DR included (no headingless opening paragraph)", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).toMatch(/## <Section>/);
+      expect(sys).toMatch(/## TL;DR/);
+    }
+  });
+
+  it("each Tour step is heading → description → optional Look-for → permalink last", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).toMatch(/### N\. <what this change is>/);
+      expect(sys).toMatch(/\*\*Look for:\*\*/);
+      expect(sys).toMatch(/permalink to the hunk LAST/);
+      expect(sys).toMatch(/headings for steps, bold labels/);
+    }
+  });
+
+  // A permalink pins a sha, so after a repush every anchor points at a commit
+  // that is no longer the PR head — a Tour that is not regenerated is lying.
+  it("both prompts require regenerating the Tour after any push that moves the head", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).toMatch(/git rev-parse HEAD/); // where the sha comes from
+      expect(sys).toMatch(/every push that changes the head/i);
     }
   });
 
