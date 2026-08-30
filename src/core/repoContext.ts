@@ -314,13 +314,19 @@ export async function resolveRepoContext(
     }
   }
 
-  // PR head ref — one REST call, only when nothing more explicit bound a ref
-  // and the PR belongs to the resolved repo. Failure degrades to repo-only.
+  // PR head — one REST call whenever the CURRENT message names a PR of the
+  // resolved repo, regardless of any ref phrasing beside it. The PR is the
+  // explicit target: its head branch is the ref, and its head SHA pins the
+  // review post (agent-review.md item 8). A prose "on X" in the same message
+  // ("re-review: rebuilt on main after #298 landed…", PR #300, 2026-08-30) used
+  // to bind `ref` and thereby SKIP this fetch — leaving the head unknown, the
+  // resident's worktree stale and the post refused. Now the phrase is only a
+  // fallback for when the fetch fails (repo-only otherwise).
   let headSha: string | undefined;
   let baseRef: string | undefined;
-  if (!ref && s.pr && repo === s.pr.repo) {
+  if (s.pr && repo === s.pr.repo) {
     const head = await prHead(s.pr).catch(() => undefined);
-    ref = head?.ref;
+    if (head?.ref) ref = head.ref;
     headSha = head?.sha;
     baseRef = head?.base;
   }

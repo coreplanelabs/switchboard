@@ -1365,6 +1365,62 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     expect(calls[2]?.body).toMatchObject({ force: true });
   });
 
+  // 2026-08-30, PR #300: the PR head went unresolved at resolution time, the
+  // run still started, the resident attached the stale worktree, the model
+  // spent 75 s discovering the new head was not there and wrote a
+  // `request_changes` "cannot review" verdict, and the reviewed-head guard then
+  // refused the post. Every step downstream of an unknown head is a guaranteed
+  // refusal, so the run is not started: one named reply, no attach, no model turn.
+  it("a review of a PR whose head could not be resolved is not started: named reply, no attach, no model turn", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const { calls } = residentFetchStub({});
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 42 }); // fetch failed: pr named, no headSha
+    const post = vi.fn(async () => {});
+    deps.postReviewComment = post;
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    expect(provider.requests).toHaveLength(0);
+    expect(post).not.toHaveBeenCalled();
+    expect(calls.filter((c) => c.path === "/attach")).toHaveLength(0);
+    const reply = replies.find((r) => /not started/i.test(r)) ?? "";
+    expect(reply).toContain("acme/api#42");
+    expect(reply).toMatch(/head/i);
+    expect(reply).toMatch(/re-send/i);
+    expect(statuses[statuses.length - 1].title).toMatch(/not started/);
+  });
+
+  it("a review whose INHERITED PR head is unreachable is not started the same way", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    residentFetchStub({});
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", prUnpostable: { number: 42, reason: "unreachable" } });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review re-review please", "slack:UADMIN"), io);
+    expect(provider.requests).toHaveLength(0);
+    expect(replies.find((r) => /not started/i.test(r)) ?? "").toContain("acme/api#42");
+  });
+
+  it("a review whose inherited PR is CLOSED still runs (Slack-only, as before) — only an unknown head refuses", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    residentFetchStub({});
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", prUnpostable: { number: 42, reason: "closed" } });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review re-review please", "slack:UADMIN"), io);
+    expect(provider.requests).toHaveLength(1);
+    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+  });
+
   it("a coding run attached at a commit other than the PR head still runs — the pre-run head check is review-only", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
@@ -1574,7 +1630,7 @@ describe("review post-step (issue #69)", () => {
     };
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.runRegistry = registry;
-    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "e".repeat(40) });
     const spy = postSpy();
     deps.postReviewComment = spy.fn;
     const { io, replies } = fakeIO();
@@ -1699,15 +1755,30 @@ describe("review post-step (issue #69)", () => {
     log.mockRestore();
   });
 
-  it("the unreachable note does not claim GitHub was down — a malformed head counts as unreachable too", async () => {
-    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+  it("an unreachable bound PR never reaches the post-step: the run is refused up front, with no model turn", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api", prUnpostable: { number: 42, reason: "unreachable" } });
     deps.postReviewComment = postSpy().fn;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review re-review"), io);
-    const note = replies.find((r) => /not posted to acme\/api#42/.test(r));
-    expect(note).toMatch(/head could not be verified/);
-    expect(note).not.toMatch(/could not be reached/);
+    expect(provider.requests).toHaveLength(0);
+    const reply = replies.find((r) => /not started/i.test(r)) ?? "";
+    expect(reply).toContain("acme/api#42");
+    expect(reply).not.toMatch(/GitHub was down|could not be reached/); // never claims an outage it cannot prove
+  });
+
+  it("an unknown head with an explicit 'slack only' opt-out still runs — the user asked for an unpinned, Slack-only verdict", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
+    const spy = postSpy();
+    deps.postReviewComment = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review acme/api#42 — slack only"), io);
+    expect(provider.requests).toHaveLength(1);
+    expect(spy.fn).not.toHaveBeenCalled();
+    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
   });
 
   // Feature: features/agent-review.md item 8 — the reviewed-head guard.
@@ -1748,16 +1819,18 @@ describe("review post-step (issue #69)", () => {
       expect(rel).toBeGreaterThan(rev);
     });
 
-    it("the PR head is unknown (resolution-time fetch failed) → no post, said in the thread", async () => {
-      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok"));
+    it("the PR head is unknown (resolution-time fetch failed) → the run is not started at all; nothing posted", async () => {
+      const provider = verdictThenAnswer("approve", "ok");
+      const deps = makeDeps(YAML_FIXTURE, provider);
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 }); // no headSha
-      headExecutor(PR_HEAD);
+      vi.mocked(makeExecutor).mockClear();
       const spy = postSpy();
       deps.postReviewComment = spy.fn;
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(spy.fn).not.toHaveBeenCalled();
-      expect(replies.some((r) => /not posted to acme\/api#42/.test(r) && /PR head unknown/.test(r))).toBe(true);
+      expect(makeExecutor).not.toHaveBeenCalled(); // no workspace provisioned, no head probe
+      expect(replies.some((r) => /not started/i.test(r) && /acme\/api#42/.test(r) && /head/i.test(r))).toBe(true);
     });
 
     it("no git in the workspace cwd (cold sandbox root) → the agent-reported head decides: match posts, pinned", async () => {

@@ -158,12 +158,42 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     });
   });
 
-  it("an explicit branch phrase wins over the PR head (no fetch happens)", async () => {
-    const { fn } = stubFetch();
+  // 2026-08-30, PR #300: a re-review reading "re-review: rebuilt on main after
+  // #298 landed …" bound `ref: "main"` from the prose "on main", which skipped
+  // the PR head fetch entirely → no headSha → the resident kept the stale
+  // worktree, the agent could not find the new head, and the reviewed-head
+  // guard refused the post ("PR head unknown at resolution time"). A PR named
+  // in the message is the explicit target: its head is ALWAYS fetched, and its
+  // branch is the ref — prose "on X" in the same message never redirects it.
+  const SHA = "5".repeat(40);
+  it("a PR URL plus a prose 'on main' in the same message: the head is still fetched, the PR's branch is the ref", async () => {
+    const { calls } = stubFetch({
+      body: { state: "open", head: { ref: "feat/prompt-caching", sha: SHA, repo: { full_name: "acme/api" } }, base: { ref: "main" } },
+    });
+    await expect(
+      resolveRepoContext(
+        msg("agent:review https://github.com/acme/api/pull/300 — re-review: rebuilt on main after #298 landed the same caching. Head 517cfeb."),
+        [],
+      ),
+    ).resolves.toEqual({ repo: "acme/api", ref: "feat/prompt-caching", pr: 300, headSha: SHA, baseRef: "main" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/300");
+  });
+
+  it("an explicit 'on branch X' beside a PR URL does not redirect the review either — the PR head is fetched and its branch bound", async () => {
+    stubFetch({ body: { state: "open", head: { ref: "patch-1", sha: SHA, repo: { full_name: "jshttp/vary" } } } });
     await expect(
       resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42 on branch main"), []),
-    ).resolves.toEqual({ repo: "jshttp/vary", ref: "main", pr: 42 });
-    expect(fn).not.toHaveBeenCalled();
+    ).resolves.toEqual({ repo: "jshttp/vary", ref: "patch-1", pr: 42, headSha: SHA });
+  });
+
+  it("a PR URL whose head fetch fails, with a prose ref beside it: the prose ref binds as a fallback, the head stays unknown", async () => {
+    stubFetch({ reject: "fetch failed" });
+    await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42 on main"), [])).resolves.toEqual({
+      repo: "jshttp/vary",
+      ref: "main",
+      pr: 42,
+    });
   });
 
   // The PR number carries the deterministic review post-step (issue #69): set

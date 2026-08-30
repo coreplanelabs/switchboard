@@ -289,6 +289,7 @@ export function createSlackApp(deps: CoreDeps) {
               threadTs: m.threadTs,
               files: m.files as SlackFile[] | undefined,
               botUserId: id,
+              caughtUp: true,
             }).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
           },
         });
@@ -369,6 +370,20 @@ interface SlackEvent {
   /** The thread's messages when the handler has already fetched them (the
    *  follow-up path's bot-in-thread check); `history()` reuses them. */
   thread?: SlackThreadMessage[];
+  /** Set when the reconnect catch-up replayed this message (it arrived while
+   *  the socket was down); the thread is told how late the pickup was. */
+  caughtUp?: true;
+}
+
+/** The one-line thread note a replayed message gets, so a caller who waited
+ *  through a deploy blackout (2026-08-30: 7.5 min with no 👀 on PR #300's
+ *  re-review) learns the delay was the bot restarting — not the request being
+ *  ignored, and not something to re-send. Pure; exported for tests. */
+export function catchUpDelayNote(messageTs: string, nowMs: number): string {
+  const lateMs = Math.max(0, nowMs - Number(messageTs) * 1000);
+  const mins = Math.round(lateMs / 60_000);
+  const late = mins < 1 ? "under a minute" : `${mins} min`;
+  return `⏱ Picked up ${late} after it was posted: the bot was restarting (a deploy or platform move) and Slack does not queue events while it is down. Handling it now — no need to re-send.`;
 }
 
 /** One message as `conversations.replies` returns it — the fields history() reads. */
@@ -422,10 +437,19 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
     .catch((err: Error) => {
       if (!err.message.includes("already_reacted")) console.error(`[ack] ${err.message}`);
     });
+  // A replayed message says how late the pickup was — best-effort, like the
+  // ack, and overlapped with the file downloads (one Slack round-trip, not a
+  // serial one). Awaited before dispatch so the note precedes the run card.
+  const delayNote = ev.caughtUp
+    ? new SlackIO(client, ev).reply(catchUpDelayNote(ev.ts, Date.now())).catch((err: Error) => {
+        console.error(`[catch-up] ${ev.channel}:${ev.ts} delay note failed: ${err.message}`);
+      })
+    : Promise.resolve();
   // Independent budgets, independent downloads — the two passes overlap.
   const [{ images, skipped: skippedImages }, { documents, skipped: skippedDocs }] = await Promise.all([
     fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE),
     fetchDocuments(ev.files, MAX_DOCS_PER_MESSAGE),
+    delayNote,
   ]);
   // A file is genuinely unsupported only when BOTH passes rejected it — the
   // image pass skips every non-image (PDFs, text) and the document pass skips
