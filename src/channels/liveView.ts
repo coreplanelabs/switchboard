@@ -9,7 +9,7 @@ import { buildScheduledRows, renderScheduledPanel, type FiringsState } from "./s
 import { HTML_PAGE_HEADERS } from "./liveView/html.js";
 import { renderRunPage } from "./liveView/runPage.js";
 import { renderRunNotFoundPage, renderRunsIndex, renderScheduledPage, type IndexRow, type RunsIndexOptions } from "./liveView/runsIndex.js";
-export { FAVICON_IDLE, FAVICON_LIVE } from "./liveView/runsIndex.js";
+export { FAVICON_ICO_SVG, FAVICON_IDLE, FAVICON_LIVE, faviconSvg } from "./liveView/runsIndex.js";
 import { nodeSseSink, parseLastEventId, serveEvents, serveHistoryEvents, serveIndexEvents, startSseHeartbeat } from "./liveView/sse.js";
 
 // Live-view channel: the external, browser-facing surface for a live agent run

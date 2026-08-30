@@ -4,7 +4,7 @@ import { ProviderRegistry } from "./providers/registry.js";
 import { createSlackApp } from "./channels/slack.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
-import { createLiveViewHandler } from "./channels/liveView.js";
+import { FAVICON_ICO_SVG, createLiveViewHandler } from "./channels/liveView.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
 import { AnthropicCostReportSource, CloudflareGraphqlUsageSource, NullLlmCostSource, createCostsService, parseCostsConfig } from "./core/costs.js";
@@ -336,6 +336,15 @@ async function main() {
       if (path === "/") {
         res.writeHead(302, { location: "/runs" });
         res.end();
+        return;
+      }
+      // The favicon fallback (live-view item 21): the runs index carries its own
+      // inline data: icon, but every other page — and any bookmark — asks here,
+      // and the catch-all used to answer with a text/plain "ok". Public like /:
+      // it is one gray dot, it leaks nothing. Exact path, cacheable.
+      if (path === "/favicon.ico") {
+        res.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" });
+        res.end(FAVICON_ICO_SVG);
         return;
       }
       // Health probe: liveness for the Worker's keep-alive cron and the deploy
