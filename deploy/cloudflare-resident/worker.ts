@@ -77,7 +77,7 @@ import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
-import { DEP_CACHE_DIRS, depCacheMaterialization, foldDepsMechanism } from "../../src/execution/residentDepCache.js";
+import { DEP_CACHE_DIRS, depCacheMaterialization, foldDepsMechanism, mutableCacheFindArgv, mutableCachePaths } from "../../src/execution/residentDepCache.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
 import { shouldRefreshThreadCredentials } from "../../src/execution/residentCredentials.js";
 import { recordFiring, scheduleForCron, watchdogFiring, type ScheduleFiring, type WatchdogSummary } from "../../src/core/schedules.js";
@@ -2218,7 +2218,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  the thread user: file inodes stay worker1-owned and read-only to the
    *  thread, so a thread can delete or replace entries in its own tree but
    *  can never mutate the inodes shared with the warm checkout (cp -al
-   *  failing, e.g. cross-device, falls back to the plain copy). Build output
+   *  failing, e.g. cross-device, falls back to the plain copy) — except the
+   *  tool-managed paths named by `mutableCachePaths` (top-level dot entries
+   *  such as .cache/.vite/.prisma/.bin, nested .cache dirs), which builds and
+   *  test runs rewrite in place and so are swapped for real copies. Build output
    *  dirs (dist/build/out/.next) are plain-copied — fresh inodes, fully
    *  chowned — because the review agent and `/op build` rebuild them IN
    *  PLACE, which a shared read-only inode refuses with EACCES (#315 review).
@@ -2270,6 +2273,22 @@ export class ResidentDO extends Sandbox<Env> {
                 ["sh", "-c", `find ${dst} -type f \\( -perm -g+w -o -perm -o+w \\) -exec chmod go-w {} +`],
                 "deps-harden",
               );
+              // Tool-managed paths inside node_modules (top-level dot entries
+              // like .cache/.vite/.prisma/.bin, nested .cache dirs) are
+              // rewritten in place by builds and test runs — the same EACCES
+              // the build dirs hit. Swap each shared subtree for a real copy
+              // (fresh thread-owned inodes); the packages stay hardlinked.
+              const listing = await this.runOk(mutableCacheFindArgv(dst), "deps-mutable-list", { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
+              for (const path of mutableCachePaths(dst, listing.split("\n"))) {
+                const rel = path.slice(dst.length);
+                await this.runOk(["rm", "-rf", path], "deps-mutable-rm");
+                await this.runOk(["cp", "-R", `${src}${rel}`, path], "deps-mutable-copy", { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
+                // -h: never dereference. A postinstall could plant one of these
+                // entries as a symlink (cp -R re-copies it as a link); a plain
+                // chown running as root would follow it and hand an out-of-tree
+                // target (warm checkout, mirror) to the thread user.
+                await this.runOk(["chown", "-Rh", `${binding.user}:${binding.user}`, path], "deps-mutable-chown");
+              }
               used = "hardlink";
             } else {
               await this.run(["rm", "-rf", dst]);
@@ -2277,7 +2296,7 @@ export class ResidentDO extends Sandbox<Env> {
           }
           if (used === "copy") {
             await this.runOk(["cp", "-R", src, dst], "deps-copy", { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
-            await this.runOk(["chown", "-R", `${binding.user}:${binding.user}`, dst], "deps-copy-chown");
+            await this.runOk(["chown", "-Rh", `${binding.user}:${binding.user}`, dst], "deps-copy-chown");
           }
           mech = foldDepsMechanism(mech, dir, used);
         }
