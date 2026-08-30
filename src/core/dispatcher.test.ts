@@ -3,7 +3,7 @@ import { reviewTargetBlock } from "./reviewTarget.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore, MAX_INSTRUCTIONS_LENGTH } from "../config.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import type { CompletionRequest, CompletionResult, Provider } from "../providers/types.js";
@@ -141,6 +141,14 @@ const msg = (text: string, user = "slack:UX") => ({
   userId: user,
   threadKey: "slack:CX:1.0",
   text,
+});
+
+// The bot host sets PUBLIC_BASE_URL in prod; tests must not inherit it from the
+// ambient env — a set value puts the run link on every card AND on review
+// verdict replies. Tests that want the link stub their own value, which wins
+// over this default.
+beforeEach(() => {
+  vi.stubEnv("PUBLIC_BASE_URL", "");
 });
 
 // Feature: features/live-view.md — the human-readable run label the dispatcher
@@ -2599,6 +2607,141 @@ describe("live run-view wiring (Area 2)", () => {
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
     expect(statuses.some((s) => s.detail?.includes("/runs/"))).toBe(false);
     expect(statuses.some((s) => s.link)).toBe(false);
+  });
+});
+
+// Feature: features/run-visibility.md item 2 — the closed ✅ card keeps the
+// checklist with EVERY item checked off (the run completing is the proof they
+// happened), and an empty update_status never erases progress.
+// Feature: features/agent-review.md item 13 — the review verdict reply carries
+// the run link at the projection layer only: never in the `answer` event or
+// the GitHub post body.
+describe("closed-card checklist and review verdict run link", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  const PR_HEAD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
+
+  /** An executor at a checkout of the PR head, so the reviewed-head guard and
+   *  the reading-diff baseline both pass without touching the host. */
+  function prHeadExecutor() {
+    const executor = {
+      exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${PR_HEAD}\n` : ""),
+      readFile: async () => "",
+      writeFile: async () => "",
+      release: async () => ({ released: true }),
+    };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
+  }
+
+  /** A review provider that walks its checklist through update_status turns
+   *  (each entry = one checklist payload) and then answers. */
+  function checklistProvider(updates: string[], answer = "answer"): Provider {
+    let n = 0;
+    return {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        const i = n++;
+        if (i < updates.length) {
+          return {
+            content: [{ type: "tool_use", id: `t${i}`, name: "update_status", input: { checklist: updates[i] } }],
+            stopReason: "tool_use",
+          };
+        }
+        return { content: [{ type: "text", text: answer }], stopReason: "end_turn" };
+      },
+    };
+  }
+
+  function reviewDeps(provider: Provider) {
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+    prHeadExecutor();
+    deps.postReviewComment = vi.fn(async () => {});
+    deps.fetchPrHead = async () => PR_HEAD;
+    return deps;
+  }
+
+  it("the ✅ close checks every checklist item off — ✱/○ become ✓, ✓ stays", async () => {
+    const deps = reviewDeps(checklistProvider(["○ Read the diff\n○ Run tests", "✓ Read the diff\n✱ Run tests"]));
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    const last = statuses[statuses.length - 1];
+    expect(last.title).toContain("✅");
+    expect(last.detail).toBe("✓ Read the diff\n✓ Run tests");
+  });
+
+  it("an empty update_status never erases the checklist — the closed card keeps the last real one", async () => {
+    const deps = reviewDeps(checklistProvider(["✱ Read the diff\n○ Run tests", "  "]));
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    const last = statuses[statuses.length - 1];
+    expect(last.title).toContain("✅");
+    expect(last.detail).toBe("✓ Read the diff\n✓ Run tests");
+  });
+
+  it("a failed run keeps the honest partial checklist — nothing is checked off", async () => {
+    let n = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (n++ === 0) {
+          return {
+            content: [{ type: "tool_use", id: "t0", name: "update_status", input: { checklist: "✱ Read the diff\n○ Run tests" } }],
+            stopReason: "tool_use",
+          };
+        }
+        throw new Error("model exploded");
+      },
+    };
+    const deps = reviewDeps(provider);
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    const last = statuses[statuses.length - 1];
+    expect(last.title).toContain("❌");
+    expect(last.detail).toBe("✱ Read the diff\n○ Run tests");
+  });
+
+  it("appends the run link to the review verdict reply — and ONLY to the projection: the answer event and the PR post stay link-free", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
+    const events: RunEvent[] = [];
+    const spy = {
+      create: () => ({ id: "run-x", token: "tok-x", control: new RunControl() }),
+      publish: (_id: string, e: RunEvent) => void events.push(e),
+      finish: () => {},
+      has: () => true,
+      subscribe: () => () => {},
+      size: () => 1,
+    } as unknown as RunRegistry;
+    const deps = reviewDeps(capturingProvider());
+    deps.runRegistry = spy;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    expect(replies).toContain("answer\n\n[Live run](https://bot.example/runs/run-x?t=tok-x)");
+    const answerEvent = events.find((e) => e.type === "answer");
+    if (answerEvent?.type !== "answer") throw new Error("unreachable");
+    expect(answerEvent.text).toBe("answer"); // the run record is the source of truth, link-free
+    const posted = vi.mocked(deps.postReviewComment!).mock.calls.map((c) => c[1]);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).not.toContain("Live run");
+  });
+
+  it("a non-review answer gets no run link even with PUBLIC_BASE_URL set — the card already carries it", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    expect(replies).toContain("answer");
+    expect(replies.some((r) => r.includes("Live run"))).toBe(false);
+  });
+
+  it("a review with no PUBLIC_BASE_URL replies the bare answer (graceful degradation)", async () => {
+    const deps = reviewDeps(capturingProvider());
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    expect(replies).toContain("answer");
   });
 });
 

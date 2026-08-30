@@ -5,13 +5,26 @@ import { mdToMrkdwn } from "./mrkdwn.js";
 // Slack adapter converts to mrkdwn without ever touching code content.
 
 describe("mdToMrkdwn", () => {
-  it("converts bold, italic, strikethrough, headers, links, bullets", () => {
+  it("converts bold, strikethrough, headers, links, bullets", () => {
     expect(mdToMrkdwn("**bold**")).toBe("*bold*");
-    expect(mdToMrkdwn("a *italic* b")).toBe("a _italic_ b");
     expect(mdToMrkdwn("~~gone~~")).toBe("~gone~");
     expect(mdToMrkdwn("## Header line")).toBe("*Header line*");
     expect(mdToMrkdwn("[text](https://x.test)")).toBe("<https://x.test|text>");
     expect(mdToMrkdwn("- item")).toBe("• item");
+  });
+
+  // Asterisk emphasis renders BOLD whichever dialect the model wrote. Mapping
+  // `*x*` to italic (standard-Markdown semantics) made the same verdict line
+  // arrive bold or italic depending on the model's dialect of the moment —
+  // seen live 2026-08-30 on back-to-back review verdicts. Italic is `_x_` only.
+  it("normalizes both emphasis dialects to bold — `*x*` and `**x**` render identically", () => {
+    expect(mdToMrkdwn("*Verdict: approve* — fine")).toBe("*Verdict: approve* — fine");
+    expect(mdToMrkdwn("**Verdict: approve** — fine")).toBe("*Verdict: approve* — fine");
+  });
+
+  it("keeps `_x_` as the one italic form and `***x***` as bold-italic", () => {
+    expect(mdToMrkdwn("a _italic_ b")).toBe("a _italic_ b");
+    expect(mdToMrkdwn("***both***")).toBe("_*both*_");
   });
 
   it("never rewrites fenced code blocks", () => {

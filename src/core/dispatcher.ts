@@ -726,8 +726,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     };
     // The closed card keeps the run link (the run page outlives the run and
     // shows the final answer) and the agent's checklist; only the transient
-    // activity trace is dropped.
+    // activity trace is dropped. On a clean ✅ finish every item is marked ✓ —
+    // the run completing IS the proof they happened, and the model rarely
+    // re-posts the checklist after its last step; a stop/failure keeps the
+    // honest partial state.
     const finalDetail = () => checklist;
+    const checkedOffDetail = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
     const onProgress = (note: string) => {
       console.log(`[note] ${msg.threadKey} ${note}`);
       lastActivityAt = Date.now();
@@ -747,7 +751,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       card.update(currentFrame());
     };
     const reportProgress = (list: string) => {
-      checklist = list.trim() || undefined;
+      const trimmed = list.trim();
+      // An empty update never erases the checklist: the closed card is the
+      // run's durable progress record, and an agent "clearing" its status as
+      // it wraps up would blank it (seen live 2026-08-30 on a review card).
+      if (!trimmed) return;
+      checklist = trimmed;
       card.update(currentFrame());
     };
     // Heartbeat: the card ticks every 5s no matter what. A ticking timer means
@@ -1009,8 +1018,14 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // unchunkable line) must still give the pool user back, or it is held
     // until the hourly sweep — the toil 16a exists to avoid.
     try {
-      await card.done({ title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"), detail: finalDetail(), link: liveLink });
-      await sendAnswer(deps, io, msg.threadKey, { provider, model, maxTokens: agent.maxTokens }, answer);
+      await card.done({ title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"), detail: stopped ? finalDetail() : checkedOffDetail(), link: liveLink });
+      // A review verdict carries its run link (as standard Markdown — each
+      // adapter renders its own dialect): the verdict message is what gets
+      // scanned in the review loop, and the card above scrolls away. Projection
+      // only — the `answer` event published above and the GitHub post body stay
+      // link-free.
+      const channelAnswer = agent.name === "review" && liveUrl ? `${answer}\n\n[Live run](${liveUrl})` : answer;
+      await sendAnswer(deps, io, msg.threadKey, { provider, model, maxTokens: agent.maxTokens }, channelAnswer);
     } finally {
       await releaseWorkspace();
     }

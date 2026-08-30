@@ -2,9 +2,11 @@ import { encodeMrkdwnUrl, escapeMrkdwn } from "./slackEscape.js";
 
 // Standard Markdown -> Slack mrkdwn. Agents write normal Markdown (the
 // contract for every channel); each adapter converts to its native dialect.
-// Slack differences handled: bold, italic, strikethrough, headers, links,
-// bullets, blockquotes. Code fences and inline code keep their markers but
-// their content is escaped like all other text.
+// Slack differences handled: bold, strikethrough, headers, links, bullets,
+// blockquotes. Asterisk emphasis (`*x*` and `**x**`) always renders bold —
+// deterministic whichever dialect the model wrote; `_x_` is the one italic
+// form. Code fences and inline code keep their markers but their content is
+// escaped like all other text.
 //
 // Injection safety: mrkdwn gives `&`, `<`, `>` special meaning — `<…>` is
 // Slack's link/mention/broadcast syntax (`<url|label>`, `<@U…>`, `<!channel>`).
@@ -100,9 +102,11 @@ function convert(text: string): string {
   // introduce `&`/`<`/`>`, so escaping first can't break or double-escape them.
   out = escapeMrkdwn(out);
 
-  // ORDER MATTERS below: italic (single *) runs first so the bold and header
-  // passes — which *produce* single-asterisk output — can't be re-eaten by it.
-  out = out.replace(/(^|[\s(])\*(?!\*)([^*\s][^*]*?)\*(?!\*)(?=[\s).,;:!?]|$)/gm, "$1_$2_");
+  // Asterisk emphasis is normalized to BOLD, whichever dialect the model wrote:
+  // `**x**` collapses to `*x*` and a single `*x*` is already mrkdwn bold, so both
+  // render identically. Mapping `*x*` to italic (standard-Markdown semantics) made
+  // the rendering depend on which dialect the model happened to emit — the same
+  // verdict line arrived bold or italic run to run. Italic is `_x_` only.
   // bold-italic ***x*** -> _*x*_
   out = out.replace(/\*\*\*([^*]+)\*\*\*/g, "_*$1*_");
   // bold **x** -> *x*
