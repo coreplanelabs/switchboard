@@ -1,8 +1,17 @@
 ---
 name: code-review-and-quality
-description: Conducts multi-axis code review. Use before merging any change. Use when reviewing code written by yourself, another agent, or a human. Use when you need to assess code quality across multiple dimensions before it enters the main branch.
-agents: [review]
-source: https://github.com/addyosmani/agent-skills/blob/main/skills/code-review-and-quality/SKILL.md
+description: Conducts multi-axis code review. Use before merging any change. Use
+  when reviewing code written by yourself, another agent, or a human. Use when
+  you need to assess code quality across multiple dimensions before it enters
+  the main branch.
+agents:
+  - review
+source: https://github.com/addyosmani/agent-skills/blob/d2c37ef6225dd8726cdd369a8030307f48592d26/skills/code-review-and-quality/SKILL.md
+upstream:
+  repo: https://github.com/addyosmani/agent-skills
+  commit: d2c37ef6225dd8726cdd369a8030307f48592d26
+  path: skills/code-review-and-quality/SKILL.md
+  bodySha256: 2d86c0a85f1b223db964134fd62e8808f06c9e6717e50f28970bc1b6484e3d72
 ---
 
 # Code Review and Quality

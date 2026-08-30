@@ -1,8 +1,18 @@
 ---
 name: security-and-hardening
-description: Hardens code against vulnerabilities. Use when handling user input, authentication, data storage, or external integrations. Use when building any feature that accepts untrusted data, manages user sessions, or interacts with third-party services. Use when personal data or privacy compliance (GDPR, CCPA) is involved.
-agents: [review]
-source: https://github.com/addyosmani/agent-skills/blob/main/skills/security-and-hardening/SKILL.md
+description: Hardens code against vulnerabilities. Use when handling user input,
+  authentication, data storage, or external integrations. Use when building any
+  feature that accepts untrusted data, manages user sessions, or interacts with
+  third-party services. Use when personal data or privacy compliance (GDPR,
+  CCPA) is involved.
+agents:
+  - review
+source: https://github.com/addyosmani/agent-skills/blob/d2c37ef6225dd8726cdd369a8030307f48592d26/skills/security-and-hardening/SKILL.md
+upstream:
+  repo: https://github.com/addyosmani/agent-skills
+  commit: d2c37ef6225dd8726cdd369a8030307f48592d26
+  path: skills/security-and-hardening/SKILL.md
+  bodySha256: 6695a96b770e7269efce4f19f1b7bb3d9577c62d7fd8aafe26186b8dfdaf7ded
 ---
 
 # Security and Hardening

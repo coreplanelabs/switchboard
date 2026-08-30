@@ -41,12 +41,34 @@ export function parseSkillMarkdown(raw: string): Skill {
     throw new Error(`skill "${name}" frontmatter needs a non-empty \`agents\` array of strings (e.g. [review])`);
   }
   const source = typeof record.source === "string" ? record.source.trim() : undefined;
+  const upstream = parseUpstream(record.upstream, name);
 
   return {
     name: name.trim(),
     description: description.trim(),
     agents: (agents as string[]).map((a) => a.trim()),
     source,
+    ...(upstream ? { upstream } : {}),
     body: raw.slice(m[0].length).trim(),
+  };
+}
+
+/** `upstream` is optional, but when present it must be complete: a vendored
+ *  skill that names its repo but not the commit it came from cannot be checked
+ *  against the manifest, so that is a malformed file, not a partial fact. */
+function parseUpstream(v: unknown, skillName: string): Skill["upstream"] | undefined {
+  if (v === undefined) return undefined;
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error(`skill "${skillName}" frontmatter \`upstream\` must be a mapping`);
+  const rec = v as Record<string, unknown>;
+  for (const key of ["repo", "commit", "path", "bodySha256"] as const) {
+    if (typeof rec[key] !== "string" || (rec[key] as string).trim() === "") {
+      throw new Error(`skill "${skillName}" frontmatter \`upstream\` is missing a non-empty string \`${key}\``);
+    }
+  }
+  return {
+    repo: (rec.repo as string).trim(),
+    commit: (rec.commit as string).trim(),
+    path: (rec.path as string).trim(),
+    bodySha256: (rec.bodySha256 as string).trim(),
   };
 }

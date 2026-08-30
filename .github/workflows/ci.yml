@@ -30,6 +30,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # Vendored skills must match skills/manifest.yaml (features/skills.md item 10).
+      - run: npm run skills:check
       # dist/ must never ship test files (see PR #35's review finding).
       - name: build excludes tests
         run: |
