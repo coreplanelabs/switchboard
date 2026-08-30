@@ -1,5 +1,7 @@
 import { resolveGithubToken } from "../execution/githubApp.js";
 import { validRef } from "./residentAdmin.js";
+import type { PrCommitList } from "./headMoved.js";
+import { normalizeHead } from "./reviewedHead.js";
 
 // Repo/ref resolution for resident environments (U7, KD7/KTD11): the
 // dispatcher resolves the target repo and ref BEFORE the model turn, from
@@ -384,6 +386,52 @@ export async function currentPrHeadSha(pr: { repo: string; number: number }): Pr
   const head = await prHead(pr).catch(() => undefined);
   return head?.sha;
 }
+
+/** The commits a PR head carries over its base — `GET /repos/{repo}/compare/{base}...{sha}`
+ *  — as the head-moved classifier consumes them (agent-review.md item 12):
+ *  the head-side commits oldest first with full messages, the touched files,
+ *  and whether GitHub capped the file list (300). Works for a head that a
+ *  force-push has since replaced: GitHub keeps serving the commit object by
+ *  sha. Never throws; undefined on any failure or malformed answer (the
+ *  classifier then has no verdict and the dispatcher falls back to the pinned
+ *  post + note). */
+export async function prCommitsSince(input: { repo: string; base: string; sha: string }): Promise<PrCommitList | undefined> {
+  const sha = normalizeHead(input.sha);
+  const base = validRef(input.base);
+  if (!sha || !base) return undefined;
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "user-agent": "switchboard",
+  };
+  const token = await resolveGithubToken().catch(() => null);
+  if (token) headers.authorization = `Bearer ${token}`;
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${input.repo}/compare/${encodeURIComponent(base)}...${sha}`, {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as {
+    commits?: Array<{ sha?: string; commit?: { message?: string } }>;
+    files?: Array<{ filename?: string }>;
+  } | null;
+  if (!data || !Array.isArray(data.commits)) return undefined;
+  const commits: PrCommitList["commits"] = [];
+  for (const c of data.commits) {
+    const csha = normalizeHead(c?.sha);
+    if (!csha || typeof c.commit?.message !== "string") return undefined;
+    commits.push({ sha: csha, message: c.commit.message });
+  }
+  const files = Array.isArray(data.files) ? data.files.map((f) => f.filename).filter((f): f is string => typeof f === "string") : [];
+  return { commits, files, filesTruncated: files.length >= COMPARE_FILES_CAP };
+}
+
+/** GitHub's compare endpoint lists at most this many files. */
+const COMPARE_FILES_CAP = 300;
 
 /** GET /repos/{owner}/{repo}/pulls/{n} → { head.ref, head.sha, state }. Cross-fork
  *  head REFS are NOT returned (they don't resolve in the resident's mirror);

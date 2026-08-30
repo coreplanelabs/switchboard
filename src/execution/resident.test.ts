@@ -510,3 +510,25 @@ describe("ResidentExecutor.release — return the thread's pool user when a run 
     expect(r.reason).toContain("fetch failed");
   });
 });
+
+// agent-review.md item 12: a mid-run move of the worktree to the PR's new head
+// is one more /attach carrying that sha — the resident's own fetch-on-attach
+// (item 51) does the rest. The new sha sticks for every later attach.
+describe("ResidentExecutor.moveTo", () => {
+  it("re-attaches with the new sha and answers the sha the worktree is now at", async () => {
+    const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+    const OLD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
+    const { calls } = stubFetch({ body: { ...ATTACH_OK, sha: OLD } }, { body: { ...ATTACH_OK, sha: NEW, recreated: true } });
+    const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master", readonly: true, sha: OLD });
+    await expect(ex.moveTo(NEW)).resolves.toEqual({ sha: NEW });
+    expect(calls.map(route)).toEqual(["/attach", "/attach"]);
+    expect(sentBody(calls[1])).toMatchObject({ sha: NEW, refHint: "master", readonly: true });
+    expect(ex.binding?.sha).toBe(NEW);
+  });
+
+  it("a refused re-attach throws like attach() — the caller falls back to telling the model", async () => {
+    stubFetch({ body: ATTACH_OK }, { status: 503, body: { error: "not-serviceable: refreshing" } });
+    const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    await expect(ex.moveTo("d75b5a51aba97d43c64a42c96e580dd9abbfd78e")).rejects.toThrow(/not-serviceable/);
+  });
+});

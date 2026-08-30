@@ -9,8 +9,17 @@ import { makeExecutor, residentOnboardedProbe } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
-import { currentPrHeadSha, resolveRepoContext, type RepoContext } from "./repoContext.js";
-import { headMovedNote } from "./headMoved.js";
+import { currentPrHeadSha, prCommitsSince, resolveRepoContext, type RepoContext } from "./repoContext.js";
+import {
+  carriedFooter,
+  classifyHeadMove,
+  headCarriedNote,
+  headMovedNote,
+  headRereviewNote,
+  rereviewFollowUp,
+  type HeadMove,
+  type PrCommitList,
+} from "./headMoved.js";
 import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
@@ -84,6 +93,15 @@ export interface CoreDeps {
    * Injectable so tests assert the note without a network call.
    */
   fetchPrHead?: (pr: { repo: string; number: number }) => Promise<string | undefined>;
+  /**
+   * The commits a PR head carries over its base (agent-review.md item 12):
+   * asked once for the reviewed head and once for the current one when the
+   * head moved during a review run, to tell a rebase of the same commits from
+   * a real change. Default: one REST GET per side via repoContext's
+   * `prCommitsSince`; undefined (or a throw) → the move is unclassified and
+   * the post-step falls back to item 10 (pinned post + note).
+   */
+  fetchPrCommits?: (q: { repo: string; base: string; sha: string }) => Promise<PrCommitList | undefined>;
   /**
    * Cross-session memory store (Area 7c, #85). When `config.memory.enabled`
    * is true the dispatcher retrieves scope-relevant records from this store
@@ -348,7 +366,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
 
     // The repo/ref resolution started above (before the ack) lands here; the
     // gate below runs against it exactly as before.
-    const repoCtx: RepoContext = await repoCtxP;
+    // `let`: the attach-head check below may adopt the PR's current head when
+    // the branch moved between resolution and attach (item 12).
+    let repoCtx: RepoContext = await repoCtxP;
 
     // Per-repo access gate (KD7): open when permissions.repos is absent or
     // the repo is unlisted; a configured allowlist refuses BY NAME — a
@@ -433,18 +453,32 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // at is compared with the PR head resolved above — before any model turn.
     // A well-formed, different sha means the branch moved between resolution
     // and attach (a push or force-push racing the request): the reviewed-head
-    // guard (item 8) would refuse the post anyway, so the run is not started —
-    // one named reply, the pool user released, no provider call. Equal shas
-    // are told to the model as a verified fact, so it has no reason to go and
-    // look. A malformed/absent attach sha proves nothing either way: the run
-    // proceeds unverified, exactly as before.
+    // guard (item 8) would refuse the post anyway — UNLESS the attached sha is
+    // the PR's head NOW (item 12: the resident's attach fetched the mirror to
+    // the ref's tip, which is exactly where a push that raced the request
+    // landed). One GET decides: attached = current → the run reviews the
+    // current head (RepoContext adopts it, the block says it was verified);
+    // otherwise not started — one named reply, the pool user released, no
+    // provider call. Equal shas are told to the model as a verified fact, so it
+    // has no reason to go and look. A malformed/absent attach sha proves
+    // nothing either way: the run proceeds unverified, exactly as before.
     let verifiedAtAttach = false;
     if (resolved.agentName === "review" && resident && repoCtx.pr !== undefined && repoCtx.repo) {
       const expected = normalizeHead(repoCtx.headSha);
       const attached = normalizeHead(binding?.sha);
-      if (expected && attached) {
-        if (!sameCommit(expected, attached)) {
-          const where = `${repoCtx.repo}#${repoCtx.pr}`;
+      if (expected && attached && sameCommit(expected, attached)) {
+        verifiedAtAttach = true;
+      } else if (expected && attached) {
+        const where = `${repoCtx.repo}#${repoCtx.pr}`;
+        const fetchHead = deps.fetchPrHead ?? currentPrHeadSha;
+        const current = normalizeHead(await fetchHead({ repo: repoCtx.repo, number: repoCtx.pr }).catch(() => undefined));
+        if (current && sameCommit(attached, current)) {
+          console.log(
+            `[review] ${msg.threadKey} PR head moved since resolution: ${expected.slice(0, 7)} → ${current.slice(0, 7)}; the worktree is attached at the current head — reviewing it (${where})`,
+          );
+          repoCtx = { ...repoCtx, headSha: current };
+          verifiedAtAttach = true;
+        } else {
           console.log(`[review] ${msg.threadKey} not started: worktree attached at ${attached.slice(0, 7)}, PR head ${expected.slice(0, 7)} (${where})`);
           if (executor.release) await executor.release("always").catch(() => {});
           await card.done({ title: `🔀 ${label} · not started (branch moved)` });
@@ -454,7 +488,6 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
           );
           return;
         }
-        verifiedAtAttach = true;
       }
     }
 
@@ -481,20 +514,22 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // (item 8) later checks against. Both paths; the block is path-aware
     // (ready worktree vs. clone + `gh pr checkout`). Nothing to tell for a
     // coding run or a PR-less review, so those prompts stay byte-identical.
-    const target =
-      resolved.agentName === "review" && repoCtx.repo && repoCtx.pr !== undefined
+    // The head is a parameter: a re-review at a moved head (item 12) recomposes
+    // the prompt with the new commit instead of contradicting the old one.
+    const isPrReview = resolved.agentName === "review" && repoCtx.repo !== undefined && repoCtx.pr !== undefined;
+    const targetBlock = (head: { sha: string | undefined; verified: boolean }): string | undefined =>
+      isPrReview && repoCtx.repo && repoCtx.pr !== undefined
         ? reviewTargetBlock({
             repo: repoCtx.repo,
             pr: repoCtx.pr,
             ref: repoCtx.ref,
-            headSha: repoCtx.headSha,
+            headSha: head.sha,
             baseRef: repoCtx.baseRef,
             resident: resident === true,
             ...(binding?.workspace ? { workspace: binding.workspace } : {}),
-            ...(verifiedAtAttach ? { verifiedAtAttach: true } : {}),
+            ...(head.verified ? { verifiedAtAttach: true } : {}),
           })
         : undefined;
-    const baseSystem = target ? `${residentSystem ?? agent.system}\n\n${target}` : residentSystem;
 
     // Progressive disclosure (#100): append the calling agent's scoped skill
     // name+description list AFTER the agent's own instructions (it is guidance
@@ -505,7 +540,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // preserving the byte-identical path (and the runner's `agent.system`
     // fallback when `system` is undefined).
     const skillsBlock = deps.skills ? skillGuidanceBlock(deps.skills, agent.name) : undefined;
-    const withSkills = skillsBlock ? `${baseSystem ?? agent.system}\n\n${skillsBlock}` : baseSystem;
+    const agentSystem = (head: { sha: string | undefined; verified: boolean }): string | undefined => {
+      const target = targetBlock(head);
+      const baseSystem = target ? `${residentSystem ?? agent.system}\n\n${target}` : residentSystem;
+      return skillsBlock ? `${baseSystem ?? agent.system}\n\n${skillsBlock}` : baseSystem;
+    };
 
     // Config awareness (routing-and-config behavior 8): tell the model the
     // RESOLVED agent/model/scope of this very run and how users tune it, so no
@@ -539,9 +578,15 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // NullMemoryStore run. Retrieval was started before the repo resolution and
     // executor selection above; by now it has usually landed.
     const memoryBlock = await memoryBlockP;
-    const system = [memoryBlock, configBlock, instructionsBlock, withSkills ?? agent.system]
-      .filter((part): part is string => Boolean(part))
-      .join("\n\n");
+    const composeSystem = (head: { sha: string | undefined; verified: boolean }): string =>
+      [memoryBlock, configBlock, instructionsBlock, agentSystem(head) ?? agent.system]
+        .filter((part): part is string => Boolean(part))
+        .join("\n\n");
+    // The PR head this run reviews — the resolved head, or the one adopted at
+    // attach; a re-review at a moved head (item 12) advances it. The post-step
+    // pins to it and the reviewed-head guard checks against it.
+    let reviewHead = repoCtx.headSha;
+    let system = composeSystem({ sha: reviewHead, verified: verifiedAtAttach });
 
     if (note) label = `${label} · ${note}`;
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
@@ -678,6 +723,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // finished — read by us, not reported by the model — for the reviewed-head
     // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
     let observedHead: string | undefined;
+    // Set when the head moved during the run by a rebase of the same commits
+    // (item 12): the post is pinned to `current` with a footer, and the thread
+    // is told the review was carried forward.
+    let carried: { reviewed: string; current: string; commits: number } | undefined;
     let runFailed = false; // the runner threw → terminal status `failed`
     // Give the workspace back now rather than at the inactivity sweep: a
     // resident's pool user is a scarce slot (features/resident-repos.md item
@@ -713,21 +762,107 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         onEvent,
         control: run.control, // operator stop from /runs (#101)
       });
-      // The run record is the source of truth and Slack/GitHub are projections
-      // of it: publish the final answer into the stream FIRST (redacted like
-      // every event, uncapped — a soft stop's "findings so far" included). It
-      // MUST precede the finally below: `finish()` runs there, and a publish on
-      // a finished run is a silent no-op. Only after that is the reply sent.
-      publishText("answer", answer);
       // Reviewed-head probe (features/agent-review.md item 8): for a PR review,
       // read the workspace HEAD NOW — after the model is done, BEFORE the
       // finally below releases the workspace. Post-release a resident would
       // re-attach a fresh tree at the ref's CURRENT tip, which is not evidence
       // of what was reviewed. Best-effort: a failed probe leaves it undefined
       // and the guard falls back to the verdict's reported head.
-      if (resolved.agentName === "review" && repoCtx.pr !== undefined && run.control.requested !== "hard") {
-        observedHead = parseRevParseOutput(await executor.exec("git rev-parse HEAD").catch(() => ""));
+      const probeHead = async () => parseRevParseOutput(await executor.exec("git rev-parse HEAD").catch(() => ""));
+      if (isPrReview && repoCtx.repo && repoCtx.pr !== undefined && run.control.requested !== "hard") {
+        observedHead = await probeHead();
+        // Head moved during the run (item 12): the PR head is fetched NOW, before
+        // anything is posted, and compared with the head the agent reviewed
+        // (observed, else reported — the guard's own authority order).
+        //   reviewed = current ≠ resolved → the agent reviewed the PR's current
+        //     head (a mid-run re-attach landed on a newer tip): adopt it.
+        //   reviewed = resolved ≠ current → the PR moved under the review:
+        //     classify the move from GitHub's compare lists. A rebase of the same
+        //     commits carries the review to the new head (post pinned there, footer
+        //     + note); a substantive move makes THIS run re-review at the new
+        //     head — worktree moved, prompt recomposed, one more model turn —
+        //     before posting. Unclassifiable → item 10 (pinned to the reviewed
+        //     head + re-request note). Once: a head that moves again after the
+        //     re-review gets item 10's note, never a third turn.
+        //   reviewed ≠ both → the agent strayed (item 8); the guard refuses below.
+        const pr = { repo: repoCtx.repo, number: repoCtx.pr };
+        const where = `${pr.repo}#${pr.number}`;
+        const fetchHead = deps.fetchPrHead ?? currentPrHeadSha;
+        const currentHead = async () => normalizeHead(await fetchHead(pr).catch(() => undefined));
+        const expected = normalizeHead(reviewHead);
+        const reviewed = normalizeHead(observedHead) ?? normalizeHead(verdict?.head);
+        if (expected && reviewed) {
+          const current = await currentHead();
+          if (current && !sameCommit(current, expected) && sameCommit(reviewed, current)) {
+            console.log(`[review] ${msg.threadKey} reviewed the PR's current head ${current.slice(0, 7)} (resolved ${expected.slice(0, 7)} was superseded mid-run) (${where})`);
+            reviewHead = current;
+          } else if (current && !sameCommit(current, expected) && sameCommit(reviewed, expected)) {
+            const classified = await classifyMove(deps, { repo: pr.repo, base: repoCtx.baseRef, from: expected, to: current });
+            const move = classified?.move;
+            if (move?.kind === "rebase") {
+              console.log(`[review] ${msg.threadKey} head moved during run: ${expected.slice(0, 7)} → ${current.slice(0, 7)} — rebase of the same ${move.commits} commit(s); review carried to ${current.slice(0, 7)} (${where})`);
+              carried = { reviewed: expected, current, commits: move.commits };
+            } else if (classified && move?.kind === "substantive") {
+              const summary = `head moved ${expected.slice(0, 7)} → ${current.slice(0, 7)} — re-reviewing at ${current.slice(0, 7)}`;
+              console.log(`[review] ${msg.threadKey} ${summary} (${where})`);
+              onEvent({ type: "run_note", kind: "head_moved", summary, at: Date.now() });
+              label = `${label} · head moved → ${current.slice(0, 7)}`;
+              card.update(currentFrame());
+              await io.reply(headRereviewNote({ where, reviewed: expected, current, move })).catch(() => {});
+              // Resident: move the worktree ourselves (one re-attach at the new
+              // head). Anything else — no moveTo, a refusal, a tip that moved
+              // again under the re-attach — leaves the model to check it out.
+              let worktreeMoved = false;
+              if (executor.moveTo) {
+                try {
+                  const at = normalizeHead((await executor.moveTo(current)).sha);
+                  worktreeMoved = at !== undefined && sameCommit(at, current);
+                  console.log(`[review] ${msg.threadKey} worktree moved to ${at?.slice(0, 7) ?? "?"}${worktreeMoved ? "" : " (not the expected head)"}`);
+                } catch (err) {
+                  console.warn(`[review] ${msg.threadKey} worktree move failed: ${err instanceof Error ? err.message : String(err)}`);
+                }
+              }
+              verdict = undefined; // the earlier verdict is void; the re-review must submit its own
+              reviewHead = current;
+              system = composeSystem({ sha: current, verified: worktreeMoved });
+              messages.push(
+                { role: "assistant", content: [{ type: "text", text: answer }] },
+                {
+                  role: "user",
+                  content: [
+                    {
+                      type: "text",
+                      text: rereviewFollowUp({ where, reviewed: expected, current, move, before: classified.before, after: classified.after, worktreeMoved }),
+                    },
+                  ],
+                },
+              );
+              answer = await runAgent({
+                provider,
+                model,
+                agent,
+                messages,
+                system,
+                effort: resolved.effort,
+                toolContext: { executor, reportProgress, web: webCapability(), skills: deps.skills, agentName: agent.name, onVerdict },
+                onProgress,
+                onEvent,
+                control: run.control,
+              });
+              // Re-read, not narrowed: the stop may have been requested during the turn.
+              if (!run.control.hardSignal.aborted) observedHead = await probeHead();
+            }
+          }
+        }
       }
+      // The run record is the source of truth and Slack/GitHub are projections
+      // of it: publish the final answer into the stream FIRST (redacted like
+      // every event, uncapped — a soft stop's "findings so far" included; a
+      // re-review's answer supersedes the first one, which is not the run's
+      // answer). It MUST precede the finally below: `finish()` runs there, and a
+      // publish on a finished run is a silent no-op. Only after that is the
+      // reply sent.
+      publishText("answer", answer);
     } catch (err) {
       runFailed = true;
       await card.done({ title: title("❌"), detail: finalDetail() });
@@ -885,37 +1020,41 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // fallback; unknown either way → no post (fail-closed). Found live on
       // PR #182 (2026-08-29): the agent reviewed another PR's branch and its
       // LGTM was posted — and auto-approved — on the wrong PR.
-      const head = checkReviewedHead({ expected: repoCtx.headSha, observed: observedHead, reported: verdict?.head });
+      const head = checkReviewedHead({ expected: reviewHead, observed: observedHead, reported: verdict?.head });
       if (!head.ok) {
         console.log(`[review-post] ${msg.threadKey} skipped: ${head.reason} (${where})`);
         await io.reply(`ℹ️ Review not posted to ${where}: ${head.reason} — this verdict is Slack-only.`).catch(() => {});
         postTarget = null;
       }
     }
-    if (postTarget && repoCtx.headSha) { // headSha narrowing only — the guard above already required it
+    if (postTarget && reviewHead) { // narrowing only — the guard above already required it
       const post = deps.postReviewComment ?? postReviewComment;
-      // Pinned to the PR head the guard just verified was reviewed, so the
-      // org's auto-approve stale-review check can bite on a later push.
-      const target: ReviewCommentTarget = { ...postTarget, commitId: repoCtx.headSha };
+      // Pinned to the PR head the guard just verified was reviewed — or, for a
+      // review carried across a rebase (item 12), to the new head it applies
+      // to — so the org's auto-approve stale-review check bites on a later push
+      // and not on this one.
+      const pinned = carried?.current ?? reviewHead;
+      const target: ReviewCommentTarget = { ...postTarget, commitId: pinned };
       // The verdict line is built here, by code — the model's prose never
       // decides whether the body starts with "LGTM:" (auto-approve contract).
-      const body = buildReviewPostBody(answer, verdict);
+      const body = carried ? `${buildReviewPostBody(answer, verdict)}\n\n${carriedFooter(carried)}` : buildReviewPostBody(answer, verdict);
       const where = `${postTarget.repo}#${postTarget.number}`;
       try {
         await post(target, body);
-        console.log(`[review-post] ${msg.threadKey} → ${where} (${verdict?.verdict ?? "no verdict"})`);
-        // Head-moved note (item 10): a push that landed mid-run makes this a
-        // review of an outdated commit — pinned, so it will not auto-approve
-        // (correct) but silent in the thread (not). One best-effort GET after
-        // the post; unknown current head → no note, never a false alarm. The
-        // default `currentPrHeadSha` never throws; the `.catch` guards an
-        // injected `deps.fetchPrHead` (the seam's contract is "undefined or a
-        // throw both mean unknown").
+        console.log(`[review-post] ${msg.threadKey} → ${where} (${verdict?.verdict ?? "no verdict"})${carried ? ` carried ${carried.reviewed.slice(0, 7)} → ${pinned.slice(0, 7)}` : ""}`);
+        if (carried) await io.reply(headCarriedNote({ where, ...carried })).catch(() => {});
+        // Head-moved note (item 10): a push that landed after the head was last
+        // checked makes this a review of an outdated commit — pinned, so it
+        // will not auto-approve (correct) but silent in the thread (not). One
+        // best-effort GET after the post; unknown current head → no note, never
+        // a false alarm. The default `currentPrHeadSha` never throws; the
+        // `.catch` guards an injected `deps.fetchPrHead` (the seam's contract
+        // is "undefined or a throw both mean unknown").
         const fetchHead = deps.fetchPrHead ?? currentPrHeadSha;
         const current = await fetchHead({ repo: postTarget.repo, number: postTarget.number }).catch(() => undefined);
-        const moved = headMovedNote({ where, reviewed: repoCtx.headSha, current });
+        const moved = headMovedNote({ where, reviewed: pinned, current });
         if (moved) {
-          console.log(`[review-post] ${msg.threadKey} head moved during run: ${repoCtx.headSha.slice(0, 7)} → ${current?.slice(0, 7)} (${where})`);
+          console.log(`[review-post] ${msg.threadKey} head moved after review: ${pinned.slice(0, 7)} → ${current?.slice(0, 7)} (${where})`);
           await io.reply(moved).catch(() => {});
         }
       } catch (err: unknown) {
@@ -939,6 +1078,24 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
   } finally {
     if (counted) activeRuns--;
   }
+}
+
+/** Item 12: the PR's commits over its base at the reviewed head and at the
+ *  current one (two compare GETs, in parallel), classified. Undefined — no
+ *  verdict — when the base branch is unknown or either list could not be
+ *  fetched; the caller then falls back to item 10. */
+async function classifyMove(
+  deps: CoreDeps,
+  q: { repo: string; base: string | undefined; from: string; to: string },
+): Promise<{ move: HeadMove; before: PrCommitList; after: PrCommitList } | undefined> {
+  if (!q.base) return undefined;
+  const fetchCommits = deps.fetchPrCommits ?? prCommitsSince;
+  const [before, after] = await Promise.all([
+    fetchCommits({ repo: q.repo, base: q.base, sha: q.from }).catch(() => undefined),
+    fetchCommits({ repo: q.repo, base: q.base, sha: q.to }).catch(() => undefined),
+  ]);
+  if (!before || !after) return undefined;
+  return { move: classifyHeadMove(before, after), before, after };
 }
 
 /** The agent name an inline (no-model) command run carries in its `RunMeta` and

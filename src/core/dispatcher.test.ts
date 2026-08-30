@@ -1409,8 +1409,49 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     expect(reply).toMatch(/re-send/i);
     const last = statuses[statuses.length - 1];
     expect(last.title).toMatch(/not started/);
-    expect(calls.map((c) => c.path)).toEqual(["/status", "/attach", "/detach"]); // the pool user goes back
-    expect(calls[2]?.body).toMatchObject({ force: true });
+    // Before refusing, the PR's current head is asked once (item 12) — here the
+    // GET fails (unknown) — then the pool user goes back.
+    expect(calls.map((c) => c.path)).toEqual(["/status", "/attach", "/repos/acme/api/pulls/42", "/detach"]);
+    expect(calls[3]?.body).toMatchObject({ force: true });
+  });
+
+  // agent-review.md item 12: the resident's attach fetches the mirror to the
+  // ref's tip, so "attached ≠ resolved" is usually "a push raced the request
+  // and the worktree is at the PR's head NOW". One GET decides: attached = the
+  // current head → the run reviews it (the block names it as verified) instead
+  // of refusing and asking the user to re-send.
+  it("a resident review attached at a commit that IS the PR's current head (moved since resolution) runs, reviewing the attached head", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const resolvedHead = "e".repeat(40);
+    const attached = "4dd3832099140ee5c76022a525bbc5e7629d5ada";
+    residentFetchStub({
+      attach: () =>
+        new Response(JSON.stringify({ workspace: "/workspace/threads/t-9f/patch-1", ref: "patch-1", sha: attached, user: "worker3" }), {
+          status: 200,
+        }),
+    });
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const ctx = { repo: "acme/api", ref: "patch-1", pr: 42, headSha: resolvedHead, baseRef: "main" };
+    deps.resolveRepoContext = () => ctx;
+    deps.fetchPrHead = async () => attached;
+    const post = vi.fn(async () => {});
+    deps.postReviewComment = post;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    expect(provider.requests).toHaveLength(1); // the review ran
+    const system = provider.requests[0].system ?? "";
+    expect(system).toContain(
+      reviewTargetBlock({ ...ctx, headSha: attached, resident: true, workspace: "/workspace/threads/t-9f/patch-1", verifiedAtAttach: true }),
+    );
+    expect(system).not.toContain(`Head commit: ${resolvedHead}`);
+    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+    // The shared stub has no /exec route, so the workspace HEAD is unobservable
+    // and no head was reported: the guard fails closed as always.
+    expect(replies.some((r) => r.includes("reviewed head unknown"))).toBe(true);
+    expect(post).not.toHaveBeenCalled();
   });
 
   // 2026-08-30, PR #300: the PR head went unresolved at resolution time, the
@@ -1557,6 +1598,7 @@ describe("review post-step (issue #69)", () => {
 
   const PR_HEAD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
   const OTHER_HEAD = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+  const THIRD_HEAD = "0123456789abcdef0123456789abcdef01234567";
 
   /** An executor whose workspace is a checkout at `head` (`git rev-parse HEAD`
    *  answers it); `head` undefined = a cwd that is not a git repo (the cold
@@ -1624,7 +1666,11 @@ describe("review post-step (issue #69)", () => {
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(spy.calls.map((c) => c.target.commitId)).toEqual([PR_HEAD]);
-      expect(asked).toEqual([{ repo: "acme/api", number: 42 }]);
+      // Asked twice: at detection (item 12 — unclassifiable here, no fetchPrCommits answer) and after the post.
+      expect(asked).toEqual([
+        { repo: "acme/api", number: 42 },
+        { repo: "acme/api", number: 42 },
+      ]);
       expect(replies).toContain(MOVED_NOTE);
     });
 
@@ -1647,19 +1693,292 @@ describe("review post-step (issue #69)", () => {
       }
     });
 
-    it("no fetch at all when nothing was posted (guard refused)", async () => {
+    it("guard refused (reviewed head is neither the resolved nor the current PR head) → nothing posted, no note; the current head was asked once, before refusing", async () => {
       const asked: unknown[] = [];
       const { deps, spy } = reviewDeps(async (pr) => {
         asked.push(pr);
-        return OTHER_HEAD;
+        return THIRD_HEAD;
       });
       vi.mocked(makeExecutor).mockReset();
       headExecutor(OTHER_HEAD); // workspace HEAD is not the PR head → guard skips the post
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(spy.calls).toHaveLength(0);
-      expect(asked).toHaveLength(0);
+      expect(asked).toHaveLength(1);
       expect(replies.some((r) => r.includes("moved during the run"))).toBe(false);
+      expect(replies.some((r) => r.includes("reviewed head d75b5a5 is not the PR head e8e43f4"))).toBe(true);
+    });
+  });
+
+  // features/agent-review.md item 12: a head that moved while the review ran
+  // is classified from GitHub's compare lists — a rebase of the same commits
+  // carries the review to the new head; anything else makes the SAME run
+  // re-review at the new head before posting. Unknown → item 10's pinned post
+  // + note. Before either guard refuses, the current head is consulted.
+  describe("head moved during the run (item 12)", () => {
+    const THIRD = THIRD_HEAD;
+    const MOVED_NOTE =
+      "ℹ️ acme/api#42 moved during the run: reviewed e8e43f4, head is now d75b5a5. " +
+      "The review was posted pinned to e8e43f4 and will not auto-approve — re-request to review d75b5a5.";
+    const list = (msgs: string[], files: string[]) => ({
+      commits: msgs.map((message, i) => ({ sha: `${(i + 1).toString(16)}`.repeat(40).slice(0, 40), message })),
+      files,
+      filesTruncated: false,
+    });
+    const SAME = { [PR_HEAD]: list(["feat: catalog", "fix: nits"], ["src/a.ts"]), [OTHER_HEAD]: list(["feat: catalog", "fix: nits"], ["src/a.ts"]) };
+    const CHANGED = { [PR_HEAD]: list(["feat: catalog"], ["src/a.ts"]), [OTHER_HEAD]: list(["feat: catalog", "fix: review nits"], ["src/a.ts", "src/a.test.ts"]) };
+
+    /** A review-agent provider answering a sequence of turns: each entry is
+     *  either a plain answer or a verdict call followed by an answer. */
+    function turnsProvider(turns: Array<{ verdict?: { verdict: string; head: string }; answer: string }>) {
+      const requests: CompletionRequest[] = [];
+      let i = 0;
+      let pendingAnswer: string | undefined;
+      const provider: Provider & { requests: CompletionRequest[] } = {
+        name: "fake",
+        requests,
+        async complete(req): Promise<CompletionResult> {
+          // Snapshot: the runner keeps appending to the same messages array.
+          requests.push({ ...req, messages: [...req.messages] });
+          if (pendingAnswer !== undefined) {
+            const a = pendingAnswer;
+            pendingAnswer = undefined;
+            return { content: [{ type: "text", text: a }], stopReason: "end_turn" };
+          }
+          const t = turns[i++];
+          if (!t) throw new Error("provider asked for more turns than scripted");
+          if (t.verdict) {
+            pendingAnswer = t.answer;
+            return {
+              content: [{ type: "tool_use", id: `v${i}`, name: "submit_verdict", input: { ...t.verdict, summary: "ok" } }],
+              stopReason: "tool_use",
+            };
+          }
+          return { content: [{ type: "text", text: t.answer }], stopReason: "end_turn" };
+        },
+      };
+      return provider;
+    }
+
+    /** The provider requests that open a review turn: the last message is a
+     *  user TEXT message (the request, or the re-review follow-up) — tool_result
+     *  continuations within a turn are not counted. */
+    const reviewTurns = (provider: { requests: CompletionRequest[] }) =>
+      provider.requests.filter((r) => {
+        const last = r.messages.at(-1);
+        return last?.role === "user" && last.content.every((p) => p.type === "text");
+      });
+
+    /** An executor whose HEAD is a mutable cell; `moveTo` (when present) sets it. */
+    function movableExecutor(initial: string, opts: { moveTo?: boolean; moveLandsAt?: string } = { moveTo: true }) {
+      const state = { head: initial, moves: [] as string[], released: 0 };
+      const executor: Record<string, unknown> = {
+        exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${state.head}\n` : ""),
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => {
+          state.released++;
+          return { released: true };
+        },
+      };
+      if (opts.moveTo) {
+        executor.moveTo = async (sha: string) => {
+          state.moves.push(sha);
+          state.head = opts.moveLandsAt ?? sha;
+          return { sha: state.head };
+        };
+      }
+      vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: executor as never });
+      return state;
+    }
+
+    function setup(input: {
+      provider: Provider;
+      heads: string[]; // successive answers of fetchPrHead
+      commits?: Record<string, ReturnType<typeof list>>;
+      executor?: ReturnType<typeof movableExecutor>;
+    }) {
+      const deps = makeDeps(YAML_FIXTURE, input.provider);
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD, baseRef: "main" });
+      const spy = postSpy();
+      deps.postReviewComment = spy.fn;
+      const heads = [...input.heads];
+      const headAsks: number[] = [];
+      deps.fetchPrHead = async () => {
+        headAsks.push(1);
+        return heads.length > 1 ? heads.shift() : heads[0];
+      };
+      const commitAsks: Array<{ base: string; sha: string }> = [];
+      deps.fetchPrCommits = async (q) => {
+        commitAsks.push({ base: q.base, sha: q.sha });
+        return input.commits?.[q.sha];
+      };
+      return { deps, spy, headAsks, commitAsks };
+    }
+
+    it("rebase-only move → ONE model turn, review posted pinned to the NEW head with the carried footer, thread told, no worktree move", async () => {
+      const provider = turnsProvider([{ verdict: { verdict: "approve", head: PR_HEAD }, answer: "Looks solid." }]);
+      const ex = movableExecutor(PR_HEAD);
+      const { deps, spy, commitAsks } = setup({ provider, heads: [OTHER_HEAD], commits: SAME });
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(reviewTurns(provider)).toHaveLength(1); // no re-review
+      expect(ex.moves).toEqual([]);
+      expect(spy.calls).toHaveLength(1);
+      expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
+      expect(spy.calls[0].body).toMatch(/^LGTM: ok\n\nLooks solid\.\n\n_Reviewed at e8e43f4; the head moved to d75b5a5 during the review — a rebase of the same 2 commits — so this review is posted against d75b5a5\._$/);
+      expect(commitAsks).toEqual([
+        { base: "main", sha: PR_HEAD },
+        { base: "main", sha: OTHER_HEAD },
+      ]);
+      expect(replies).toContain(
+        "ℹ️ acme/api#42 moved during the run: reviewed e8e43f4, head is now d75b5a5 — a rebase of the same 2 commits (same messages, same files). The review applies unchanged and was posted pinned to d75b5a5.",
+      );
+      expect(replies.some((r) => r.includes("re-request"))).toBe(false);
+    });
+
+    it("substantive move → the same run re-reviews: note + card, worktree moved, second turn sees the new head and the follow-up, post pinned to the new head with the NEW verdict", async () => {
+      const provider = turnsProvider([
+        { verdict: { verdict: "approve", head: PR_HEAD }, answer: "First review: approve." },
+        { verdict: { verdict: "request_changes", head: OTHER_HEAD }, answer: "Second review: the new test is wrong." },
+      ]);
+      const ex = movableExecutor(PR_HEAD);
+      const { deps, spy, headAsks } = setup({ provider, heads: [OTHER_HEAD], commits: CHANGED });
+      const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+      deps.runRegistry = registry;
+      const { io, replies, statuses } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      // Two review turns (each: verdict call + answer) in ONE run.
+      expect(ex.moves).toEqual([OTHER_HEAD]);
+      const userTurns = reviewTurns(provider);
+      expect(userTurns).toHaveLength(2);
+      const second = userTurns[1];
+      // The follow-up rides as a new user turn after the first review, in the same conversation.
+      const last = second.messages.at(-1)!;
+      const followUp = last.content.map((p) => (p.type === "text" ? p.text : "")).join("");
+      expect(followUp).toContain("moved from e8e43f4 to d75b5a5 while you were reviewing");
+      expect(followUp).toContain("Switchboard has already moved your worktree to d75b5a5");
+      expect(followUp).toContain("- 2222222 fix: review nits");
+      expect(second.messages.at(-2)).toEqual({ role: "assistant", content: [{ type: "text", text: "First review: approve." }] });
+      // The system prompt's REVIEW TARGET now names the new head (and no longer claims an attach-time verification).
+      expect(second.system).toContain(`Head commit: ${OTHER_HEAD}`);
+      expect(second.system).not.toContain(`Head commit: ${PR_HEAD}`);
+      // Posted once, pinned to the new head, with the SECOND verdict and answer — the first approve is void.
+      expect(spy.calls).toHaveLength(1);
+      expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
+      expect(spy.calls[0].body).toBe("Changes requested: ok\n\nSecond review: the new test is wrong.");
+      // The thread: the 🔀 note at detection, the second answer as the reply, no stale-pin note.
+      expect(replies).toContain(
+        "🔀 acme/api#42 moved during the run: reviewed e8e43f4, head is now d75b5a5 — 1 → 2 commits (+ “fix: review nits”). Re-reviewing at d75b5a5 before posting.",
+      );
+      expect(replies).toContain("Second review: the new test is wrong.");
+      expect(replies).not.toContain("First review: approve.");
+      expect(replies.some((r) => r.includes("re-request"))).toBe(false);
+      // The card said so while it happened, and the run stream carries the note.
+      expect(statuses.some((s) => /head moved → d75b5a5/.test(s.title))).toBe(true);
+      const snap = registry.snapshot("r1", "t1");
+      expect(snap?.events.some((e) => e.type === "run_note" && e.kind === "head_moved" && /d75b5a5/.test(e.summary))).toBe(true);
+      // Only the final answer is the run's answer.
+      expect(snap?.events.filter((e) => e.type === "answer").map((e) => (e as { text: string }).text)).toEqual(["Second review: the new test is wrong."]);
+      // Head asked: once at detection, once after the re-review (still d75b5a5), once after the post.
+      expect(headAsks.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("substantive move on an executor without moveTo (sandbox clone): the follow-up tells the model to fetch + check out the new head", async () => {
+      const provider = turnsProvider([{ answer: "first" }, { verdict: { verdict: "approve", head: OTHER_HEAD }, answer: "second" }]);
+      const ex = movableExecutor(PR_HEAD, { moveTo: false });
+      const { deps, spy } = setup({ provider, heads: [OTHER_HEAD], commits: CHANGED });
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(ex.moves).toEqual([]);
+      const userTurns = reviewTurns(provider);
+      expect(userTurns).toHaveLength(2);
+      const followUp = userTurns[1].messages.at(-1)!.content.map((p) => (p.type === "text" ? p.text : "")).join("");
+      expect(followUp).toContain(`git fetch origin ${OTHER_HEAD} && git checkout ${OTHER_HEAD}`);
+      // The workspace HEAD is still the old commit (this fake model never ran the checkout), but the
+      // verdict reports the new head: observed wins → the post is refused, said in the thread.
+      expect(spy.calls).toHaveLength(0);
+    });
+
+    it("compare unavailable (classifier has no verdict) → item 10 behaviour: pinned to the reviewed head, re-request note, one turn", async () => {
+      const provider = turnsProvider([{ verdict: { verdict: "approve", head: PR_HEAD }, answer: "ok" }]);
+      const ex = movableExecutor(PR_HEAD);
+      const { deps, spy } = setup({ provider, heads: [OTHER_HEAD] }); // fetchPrCommits → undefined
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(ex.moves).toEqual([]);
+      expect(spy.calls.map((c) => c.target.commitId)).toEqual([PR_HEAD]);
+      expect(replies).toContain(MOVED_NOTE);
+    });
+
+    it("the head moves AGAIN after the re-review → re-reviewed once only; posted pinned to the re-reviewed head with the re-request note for the newest", async () => {
+      const provider = turnsProvider([{ answer: "first" }, { verdict: { verdict: "approve", head: OTHER_HEAD }, answer: "second" }]);
+      const ex = movableExecutor(PR_HEAD);
+      const { deps, spy } = setup({ provider, heads: [OTHER_HEAD, THIRD, THIRD], commits: CHANGED });
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(ex.moves).toEqual([OTHER_HEAD]);
+      expect(reviewTurns(provider)).toHaveLength(2);
+      expect(spy.calls.map((c) => c.target.commitId)).toEqual([OTHER_HEAD]);
+      expect(replies.some((r) => r.includes("reviewed d75b5a5, head is now 0123456") && r.includes("re-request"))).toBe(true);
+    });
+
+    it("worktree move fails (resident refuses) → the model is told to check the new head out itself; the run continues", async () => {
+      const provider = turnsProvider([{ answer: "first" }, { answer: "second" }]);
+      const state = { head: PR_HEAD };
+      vi.mocked(makeExecutor).mockResolvedValueOnce({
+        executor: {
+          exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${state.head}\n` : ""),
+          readFile: async () => "",
+          writeFile: async () => "",
+          moveTo: async () => {
+            throw new Error("not-serviceable: refreshing");
+          },
+        } as never,
+      });
+      const { deps } = setup({ provider, heads: [OTHER_HEAD], commits: CHANGED });
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      const userTurns = reviewTurns(provider);
+      const followUp = userTurns[1].messages.at(-1)!.content.map((p) => (p.type === "text" ? p.text : "")).join("");
+      expect(followUp).toContain("git fetch origin");
+    });
+
+    it("reviewed head ≠ resolved head but = the PR's CURRENT head (the resident re-attached at a newer tip) → posted, pinned to it, no refusal", async () => {
+      const provider = turnsProvider([{ verdict: { verdict: "approve", head: OTHER_HEAD }, answer: "ok" }]);
+      movableExecutor(OTHER_HEAD);
+      const { deps, spy } = setup({ provider, heads: [OTHER_HEAD] });
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.calls.map((c) => c.target.commitId)).toEqual([OTHER_HEAD]);
+      expect(spy.calls[0].body.startsWith("LGTM:")).toBe(true);
+      expect(replies.some((r) => r.includes("not posted"))).toBe(false);
+      expect(replies.some((r) => r.includes("moved during the run"))).toBe(false);
+    });
+
+    it("a hard-stopped review never classifies, moves or re-reviews", async () => {
+      const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+      let signal: AbortSignal | undefined;
+      const provider: Provider = {
+        name: "hang",
+        complete: (req) =>
+          new Promise((resolve) => {
+            signal = req.signal;
+            req.signal?.addEventListener("abort", () => resolve({ content: [{ type: "text", text: "late" }], stopReason: "end_turn" }));
+          }),
+      };
+      const ex = movableExecutor(PR_HEAD);
+      const { deps, spy, headAsks, commitAsks } = setup({ provider, heads: [OTHER_HEAD], commits: CHANGED });
+      deps.runRegistry = registry;
+      const { io } = fakeIO();
+      const run = dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      while (!signal) await new Promise((r) => setTimeout(r, 5));
+      registry.requestStop("r1", "t1", "hard");
+      await run;
+      expect(spy.calls).toEqual([]);
+      expect(ex.moves).toEqual([]);
+      expect(headAsks).toEqual([]);
+      expect(commitAsks).toEqual([]);
     });
   });
 

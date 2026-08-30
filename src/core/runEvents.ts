@@ -25,7 +25,10 @@ export type RunNoteKind =
   | "turn_budget_exhausted"
   | "sandbox_dead"
   | "stop_requested"
-  | "stopped";
+  | "stopped"
+  /** The PR head moved while a review ran and the same run is re-reviewing at
+   *  the new head (agent-review.md item 12). Published by the dispatcher. */
+  | "head_moved";
 
 /** How an operator asked a run to stop (#101): `soft` — take no new steps and
  *  wrap up through the normal finale; `hard` — abort the in-flight call now, no
