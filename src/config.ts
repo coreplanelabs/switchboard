@@ -119,11 +119,16 @@ export interface SlackConfig {
    * Reconnect catch-up (#184): on every Socket Mode (re)connect, re-read
    * recent history of every channel the bot is in and dispatch mentions /
    * follow-ups that carry no receipt from us (no 👀, no bot reply after them).
-   * Absent = enabled with a 20-minute window.
+   * Absent = enabled with a 30-minute window.
    */
   catchUp?: {
     enabled?: boolean;
-    /** Messages older than this are left alone even if unanswered. */
+    /**
+     * Messages older than this are left alone even if unanswered. Must cover
+     * the worst deploy blackout — the 15-min graceful-drain deadline plus a
+     * cold start (`MIN_CATCH_UP_WINDOW_MS`, 20 min; #272). A smaller value is
+     * kept as configured but warned about at startup.
+     */
     windowMinutes?: number;
   };
 }

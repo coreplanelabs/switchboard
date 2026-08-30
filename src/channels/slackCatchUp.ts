@@ -1,4 +1,5 @@
 import { LIVE_CARD_PREFIXES } from "../core/dispatcher.js";
+import { MIN_CATCH_UP_WINDOW_MS } from "../core/drain.js";
 import type { StatusUpdate } from "../core/types.js";
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 
@@ -36,10 +37,18 @@ export const ACK_EMOJI = "eyes";
 export const ORPHAN_CARD_WINDOW_MS = 2 * 3_600_000;
 
 /** Messages posted inside this window with no receipt from us are re-run. Must
- *  cover the worst blackout: the 15 min graceful-drain deadline plus a cold
- *  start. Older un-acked mentions are left alone — re-running a request from
- *  an hour ago is worse than the human re-posting it. */
-export const DEFAULT_WINDOW_MS = 20 * 60_000;
+ *  cover the worst blackout: the drain closes the socket on SIGTERM and the
+ *  next container starts only after this one exits, so a deploy over a run in
+ *  flight blacks Slack out for up to DRAIN_DEADLINE_MS plus a cold start (#272)
+ *  — `MIN_CATCH_UP_WINDOW_MS`, pinned by `src/core/drain.test.ts`. Older
+ *  un-acked mentions are left alone — re-running a request from an hour ago is
+ *  worse than the human re-posting it. */
+export const DEFAULT_WINDOW_MS = 30 * 60_000;
+if (DEFAULT_WINDOW_MS < MIN_CATCH_UP_WINDOW_MS) {
+  throw new Error(
+    `DEFAULT_WINDOW_MS (${DEFAULT_WINDOW_MS} ms) must cover the drain deadline + cold start (${MIN_CATCH_UP_WINDOW_MS} ms)`,
+  );
+}
 /** How far back to scan for thread PARENTS whose threads had activity inside
  *  the window — a follow-up can land in a days-old PR thread. */
 export const DEFAULT_PARENT_LOOKBACK_MS = 7 * 86_400_000;
