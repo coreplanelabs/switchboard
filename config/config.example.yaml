@@ -200,10 +200,13 @@ workspaceDir: ./workspaces
 # posted while the websocket is down (each bot deploy = drain + cold start).
 # On every (re)connect the bot re-reads recent history of the channels it is in
 # and runs whatever has no receipt from it (no :eyes:, no bot reply after it).
-# Defaults: enabled, 20-minute window (the 15-minute graceful drain + a cold
-# start). Needs channels:read + groups:read (channel listing) on top of the
-# history scopes.
+# Defaults: enabled, 30-minute window. The drain closes the socket on SIGTERM
+# and the next container starts only after this one exits, so a deploy over a
+# run in flight blacks Slack out for up to the 15-minute drain deadline plus a
+# cold start (#272) — the window must be >= 20 minutes to cover that; a smaller
+# value is kept but warned about at startup. Needs channels:read + groups:read
+# (channel listing) on top of the history scopes.
 # slack:
 #   catchUp:
 #     enabled: true
-#     windowMinutes: 20
+#     windowMinutes: 30

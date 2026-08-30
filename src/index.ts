@@ -22,6 +22,7 @@ import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { buildFrictionLedger, WorkerFrictionLedger } from "./core/frictionLedgerWorker.js";
 import { healthPayload } from "./channels/health.js";
+import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { activeRunCount, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
 import { buildScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
@@ -73,6 +74,7 @@ async function main() {
   // preflight (deploy/cloudflare/preflight.mjs).
   const inFlight = () => activeRunCount() + pendingReflectionCount();
   let draining = false;
+  let drainStartedAt: number | undefined;
 
   // Optional HTTP server. Slack traffic arrives over the outbound Socket Mode
   // websocket, so this port serves (a) a health probe for container platforms
@@ -215,7 +217,7 @@ async function main() {
       // preflight refuses on (features/slack-channel.md item 8).
       if (path === "/healthz") {
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining })));
+        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining, drainStartedAt })));
         return;
       }
       // Unknown paths. The live-view handler only ever owns /runs*, which the
@@ -236,21 +238,31 @@ async function main() {
 
   // Graceful drain: close the Slack socket (no new events), let in-flight
   // agent runs — and the background memory reflections they spawn — finish (up
-  // to 15 min), then exit. A plain kill mid-run loses the run and leaves a
-  // frozen status card in the thread. Cloudflare's rollout sends SIGTERM and
-  // waits up to 15 min before SIGKILL — but a SECOND deploy on top of a
-  // draining instance replaces it at once (live 2026-08-29 23:51Z, a review
-  // killed at 153 s). The deploy preflight refuses while `draining` is true;
-  // the live cards say what is happening meanwhile.
+  // to DRAIN_DEADLINE_MS), then exit. A plain kill mid-run loses the run and
+  // leaves a frozen status card in the thread. Cloudflare's rollout sends
+  // SIGTERM and waits up to 15 min before SIGKILL — but a SECOND deploy on top
+  // of a draining instance replaces it at once (live 2026-08-29 23:51Z, a
+  // review killed at 153 s). The deploy preflight refuses while `draining` is
+  // true; the live cards say what is happening meanwhile.
+  //
+  // The socket is closed at the START of the drain, and Cloudflare boots the
+  // replacement only after this process exits, so a deploy over a run blacks
+  // Slack out for the run's remaining duration (#272; 7.5 min observed). That
+  // gap is covered by the reconnect catch-up, whose default window is derived
+  // from DRAIN_DEADLINE_MS (src/core/drain.ts). Keeping the socket open while
+  // draining was rejected: a mention accepted at minute 14 would start a run
+  // the deadline kills a minute later — a dead run with a frozen card — where
+  // the catch-up re-runs it intact on the next container.
   const drain = async (signal: string) => {
     if (draining) return;
     draining = true;
+    drainStartedAt = Date.now();
     console.log(
       `[drain] ${signal}: closing Slack socket, ${activeRunCount()} run(s) + ${pendingReflectionCount()} reflection(s) in flight`,
     );
     setShutdownNotice("⏸ deploy in progress — finishing this run before the bot restarts");
     await app.stop().catch(() => {});
-    const deadline = Date.now() + 15 * 60_000;
+    const deadline = drainStartedAt + DRAIN_DEADLINE_MS;
     while (inFlight() > 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 2000));
     }

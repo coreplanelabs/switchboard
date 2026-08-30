@@ -1,6 +1,7 @@
 import { extname } from "node:path";
 import bolt from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
+import { catchUpWindowWarning } from "../core/drain.js";
 import { mdToMrkdwn } from "./mrkdwn.js";
 import { escapeMrkdwn } from "./slackEscape.js";
 import { SlackFormatter } from "./slackFormatter.js";
@@ -235,6 +236,10 @@ export function createSlackApp(deps: CoreDeps) {
 
   const catchUp = deps.config.config.slack?.catchUp;
   if (catchUp?.enabled !== false) {
+    // A window shorter than the drain deadline + cold start cannot cover a
+    // full-length deploy blackout (#272). Warn, keep the operator's value.
+    const windowWarning = catchUpWindowWarning(catchUp?.windowMinutes);
+    if (windowWarning) console.warn(`[catch-up] ${windowWarning}`);
     receiver.client.on("connected", () => {
       void (async () => {
         botUserId ??= (await app.client.auth.test()).user_id ?? undefined;
