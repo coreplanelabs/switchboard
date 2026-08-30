@@ -70,6 +70,18 @@ selfImprovement:
     baseUrl: https://switchboard-memory.coreplanelabs.dev
     tokenEnv: MEMORY_TOKEN
 
+# Run history (#157): every finished run becomes a durable record on the state
+# Worker's RunHistoryDO (switchboard-memory, same MEMORY_TOKEN bearer), so
+# /runs/<id> keeps rendering after the 60 s live window, `runs list` /
+# `runs get` read it on every surface, and the friction ledger's "recent runs"
+# come from it. Retention: the defaults (30 days, 5000 runs, 2 GiB); the DO
+# owns the policy and sweeps every 6 h. See features/run-history.md.
+runHistory:
+  store: worker
+  worker:
+    baseUrl: https://switchboard-memory.coreplanelabs.dev
+    tokenEnv: MEMORY_TOKEN
+
 # Scheduled jobs (#244): the Worker shim records every cron firing on the state
 # Worker's ScheduleDO; the /runs "Scheduled" panel reads the latest per schedule.
 schedules:
