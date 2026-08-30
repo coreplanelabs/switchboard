@@ -698,7 +698,8 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
       at: Date.now(),
     });
-    const liveLink = liveViewLink(run.id, run.token);
+    const liveUrl = liveViewLink(run.id, run.token);
+    const liveLink = liveUrl ? { url: liveUrl, label: "Live run" } : undefined;
     // The thread context fed to the model follows the request as `context`
     // events (#157, KD1) — text only, attachments as metadata lines, bounded to
     // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
@@ -714,15 +715,15 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const currentFrame = () => {
       const quiet = Date.now() - lastActivityAt;
       const thinking = quiet > 20_000 ? ` — thinking (${Math.round(quiet / 1000)}s since last tool)` : "";
-      const detail = [liveLink, checklist, lastActivity].filter(Boolean).join("\n");
+      const detail = [checklist, lastActivity].filter(Boolean).join("\n");
       // The shutdown notice rides on the LIVE frame only: the closed card is
       // built from title()/finalDetail() and never mentions the restart.
-      return { title: title() + thinking + (shutdownNotice ? ` · ${shutdownNotice}` : ""), detail: detail || undefined };
+      return { title: title() + thinking + (shutdownNotice ? ` · ${shutdownNotice}` : ""), detail: detail || undefined, link: liveLink };
     };
     // The closed card keeps the run link (the run page outlives the run and
     // shows the final answer) and the agent's checklist; only the transient
     // activity trace is dropped.
-    const finalDetail = () => [liveLink, checklist].filter(Boolean).join("\n") || undefined;
+    const finalDetail = () => checklist;
     const onProgress = (note: string) => {
       console.log(`[note] ${msg.threadKey} ${note}`);
       lastActivityAt = Date.now();
@@ -904,7 +905,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       publishText("answer", answer);
     } catch (err) {
       runFailed = true;
-      await card.done({ title: title("❌"), detail: finalDetail() });
+      await card.done({ title: title("❌"), detail: finalDetail(), link: liveLink });
       await releaseWorkspace();
       throw err;
     } finally {
@@ -973,7 +974,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // unchunkable line) must still give the pool user back, or it is held
     // until the hourly sweep — the toil 16a exists to avoid.
     try {
-      await card.done({ title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"), detail: finalDetail() });
+      await card.done({ title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"), detail: finalDetail(), link: liveLink });
       await sendAnswer(deps, io, msg.threadKey, { provider, model, maxTokens: agent.maxTokens }, answer);
     } finally {
       await releaseWorkspace();

@@ -2573,12 +2573,19 @@ describe("live run-view wiring (Area 2)", () => {
     const { io, statuses } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
     // Trailing slash is trimmed; id/token are the capability URL's path/query.
-    expect(statuses.some((s) => s.detail?.includes("https://bot.example/runs/abc?t=secret"))).toBe(true);
+    // The link rides on the structured `link` field (each channel renders it
+    // its own way — Slack as a one-line hyperlink), NEVER inline in `detail`:
+    // the bare URL wrapped to 4 lines and pushed the Slack card past the
+    // "Show more" fold, where every edit flashed it open and shut.
+    const withLink = statuses.filter((s) => s.link);
+    expect(withLink.length).toBeGreaterThan(0);
+    for (const s of withLink) expect(s.link).toEqual({ url: "https://bot.example/runs/abc?t=secret", label: "Live run" });
+    expect(statuses.some((s) => s.detail?.includes("/runs/"))).toBe(false);
     // The FINAL ✅ frame keeps the link too — the run page outlives the run
     // (it shows the final answer), so the closed card must still lead to it.
     const last = statuses[statuses.length - 1];
     expect(last.title).toContain("✅");
-    expect(last.detail).toContain("https://bot.example/runs/abc?t=secret");
+    expect(last.link?.url).toBe("https://bot.example/runs/abc?t=secret");
   });
 
   it("omits the link entirely when PUBLIC_BASE_URL is unset (graceful degradation, no crash)", async () => {
@@ -2590,6 +2597,7 @@ describe("live run-view wiring (Area 2)", () => {
     await dispatch(deps, msg("hello there"), io);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
     expect(statuses.some((s) => s.detail?.includes("/runs/"))).toBe(false);
+    expect(statuses.some((s) => s.link)).toBe(false);
   });
 });
 

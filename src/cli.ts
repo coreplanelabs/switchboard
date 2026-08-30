@@ -175,7 +175,7 @@ class ConsoleIO implements ChannelIO {
   async status(initial: StatusUpdate): Promise<StatusHandle> {
     console.error(initial.title);
     return {
-      update: (f) => console.error([f.title, f.detail].filter(Boolean).join(" | ").split("\n").join(" | ")),
+      update: (f) => console.error([f.title, f.link?.url, f.detail].filter(Boolean).join(" | ").split("\n").join(" | ")),
       done: async (f) => console.error(f.title),
     };
   }

@@ -88,6 +88,29 @@ describe("render (status card mrkdwn escaping)", () => {
     expect(out.text).toBe("*coding* on `claude` · 42s");
   });
 
+  it("renders frame.link as ONE short mrkdwn hyperlink line above the detail, never the bare URL", () => {
+    // A bare 100+-char capability URL wraps to 4 lines and pushes the card past
+    // Slack's "Show more" fold; every edit of a folded card then flashes it
+    // open and shut (the jump in jump.mov). `<url|label>` keeps it to one line.
+    const url = "https://bot.example/runs/abc?t=" + "f".repeat(64);
+    const out = render({ title: "run", link: { url, label: "Live run" }, detail: "✓ step" });
+    const section = out.blocks[1] as Section;
+    expect(section.text!.text).toBe(`<${url}|Live run>\n✓ step`);
+    expect(out.blocks).toHaveLength(2);
+  });
+
+  it("renders a link-only frame (no detail) as a section holding just the hyperlink", () => {
+    const out = render({ title: "run", link: { url: "https://bot.example/runs/abc?t=x", label: "Live run" } });
+    const section = out.blocks[1] as Section;
+    expect(section.text!.text).toBe("<https://bot.example/runs/abc?t=x|Live run>");
+  });
+
+  it("escapes the link label and url (they are mrkdwn-sensitive) but keeps the hyperlink form", () => {
+    const out = render({ title: "run", link: { url: "https://bot.example/r?a=1&b=<2>", label: "a<b|c" } });
+    const section = out.blocks[1] as Section;
+    expect(section.text!.text).toBe("<https://bot.example/r?a=1&amp;b=&lt;2&gt;|a&lt;b|c>");
+  });
+
   it("keeps the escaped detail under Slack's ~3000-char section cap even for adversarial input", () => {
     const out = render({ title: "t", detail: "&".repeat(5000) });
     const section = out.blocks[1] as Section;

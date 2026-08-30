@@ -68,6 +68,14 @@ describe("coalesceStatus", () => {
     ]);
   });
 
+  it("a frame whose only change is the link is NOT skipped as identical", () => {
+    const h = harness();
+    h.handle.update({ title: "same", detail: "d" });
+    h.advance(5000);
+    h.handle.update({ title: "same", detail: "d", link: { url: "https://x/runs/1?t=a", label: "Live run" } });
+    expect(h.sent).toHaveLength(2);
+  });
+
   it("done writes its frame immediately and a stale trailing flush never follows it", async () => {
     const h = harness();
     h.handle.update({ title: "1" });
