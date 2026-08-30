@@ -167,6 +167,14 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
   it("holds a `turn` for the step it produced and paints it in that step's head row (💭 chip beside the narration); a turn with no step is flushed as its own row", () => {
     expect(html).toContain("var pendingTurn = null;");
     expect(html).toContain('appendHead(li, at, turn, step.narration || null, "no commentary");'); // item 20: the calls are the rows below, so no "tools" word
+    // item 21: a no-prose head with facts is ONE row — the facts sit beside the
+    // chip and no "no commentary" filler draws the eye; the filler survives only
+    // for a turn with no facts at all. Under prose, the facts row aligns with
+    // the chip's text (.4rem = the chip's .5em pad at .8rem).
+    expect(html).toContain("} else if (turn && turn.facts.length) {");
+    expect(html).toContain("row.appendChild(turnFacts(turn));");
+    expect(html).toContain(".turnfacts { display: flex; gap: .6rem; padding: 0 .75rem .6rem .4rem;");
+    expect(html).toContain(".narration .turnfacts { padding: 0; align-self: center; }");
     expect(html).toContain('flushTurn("wrote the answer below");');
     expect(html).toContain('flushTurn("the run ended here");');
     expect(html).toContain('turn.label.replace(/^Thought for /, "")'); // the chip reads "5m 04s"
@@ -246,6 +254,8 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
     expect(html).toContain('<div class="runmeta" id="runmeta" hidden></div>');
     expect(html).toContain('document.createElementNS(ns, "svg")'); // the Slack mark is drawn, not fetched (CSP)
     expect(html).toContain('a.setAttribute("title", "open the thread");'); // the channel name is the link
+    expect(html).toContain('a.setAttribute("target", "_blank"); // outbound links never take the operator off the dashboard'); // thread opens a new tab
+    expect(html).toContain('a.setAttribute("target", "_blank"); // outbound: a new tab, the run stays put'); // GitHub meta links too
     expect(html).not.toContain("innerHTML");
   });
 
@@ -334,13 +344,16 @@ describe("runs index — outcome, source, repo tag, alignment (item 21)", () => 
     expect(indexRowHtml(row({ label: 'coding · javascript:alert(1)//x · "y"' }))).not.toContain('class="repo"');
   });
 
-  it("the source mark names the trigger surface (standard metadata: platform prefix + identity) and links to the Slack thread when the run has one", () => {
-    const slack = indexRowHtml(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1" }));
+  it("the source mark names the trigger surface (standard metadata: platform prefix + resolved identity) and is the open-in-new-page arrow when the run has a thread", () => {
+    // linked: the familiar ↗ control, one-line tip with the resolved NAME (never a raw member id), opens a new tab
+    const slack = indexRowHtml(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1", userName: "justin" }));
     expect(slack).toContain(
-      '<a class="source slack" data-tip="via Slack · U1\nopen the thread" aria-label="source: Slack" href="https://acme.slack.com/archives/C1/p1" target="_blank" rel="noopener noreferrer">⁙</a>',
+      '<a class="source slack linked" data-tip="via Slack · justin" aria-label="open the Slack thread (new tab)" href="https://acme.slack.com/archives/C1/p1" target="_blank" rel="noopener noreferrer">↗</a>',
     );
-    // no thread link → a plain mark, still with the surface on hover; a chat scope adds its channel · user line
-    expect(indexRowHtml(row({ label: 'general · #dev · justin · "hi"' }))).toContain('<span class="source slack" data-tip="via Slack · U1\n#dev · justin" aria-label="source: Slack">⁙</span>');
+    // no resolved name → the id suffix still identifies the sender
+    expect(indexRowHtml(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1" }))).toContain('data-tip="via Slack · U1"');
+    // no thread link → a plain mark with the surface glyph
+    expect(indexRowHtml(row({ label: 'general · #dev · justin · "hi"' }))).toContain('<span class="source slack" data-tip="via Slack · U1" aria-label="source: Slack">⁙</span>');
     expect(indexRowHtml(row({ channelId: "cli:local", userId: "cli:justin" }))).toContain('<span class="source cli" data-tip="via CLI · justin" aria-label="source: CLI">&gt;_</span>');
     expect(indexRowHtml(row({ channelId: "http:hooks", userId: "http:svc" }))).toContain('<span class="source http" data-tip="via HTTP ingress · svc" aria-label="source: HTTP ingress">⌁</span>');
     expect(indexRowHtml(row({ channelId: "mcp:claude", userId: "mcp:justin" }))).toContain('<span class="source mcp" data-tip="via MCP · justin" aria-label="source: MCP">◈</span>');
@@ -349,9 +362,10 @@ describe("runs index — outcome, source, repo tag, alignment (item 21)", () => 
     const hostile = indexRowHtml(row({ sourceUrl: "javascript:alert(1)" }));
     expect(hostile).toContain('<span class="source slack" data-tip="via Slack · U1" aria-label="source: Slack">⁙</span>');
     expect(hostile).not.toContain("javascript:");
-    // revealed on row hover / focus (GitHub-style quick action), keyboard reachable
+    // revealed on row hover / focus (GitHub-style quick action), keyboard reachable; the linked mark reads as clickable
     const page = renderRunsIndex([row()]);
     expect(page).toContain("#runs li.run:hover .source, #runs li.run:focus-within .source, .source:focus-visible { opacity: 1; }");
+    expect(page).toContain("a.source.linked { cursor: pointer;");
   });
 
   it("one column grid across live and finished rows: the row is a stretched link under the body; the actions cell is always present at a fixed width; the stop buttons' hints ride the tooltip", () => {

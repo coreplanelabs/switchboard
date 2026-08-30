@@ -213,7 +213,11 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   .think.quick { color: var(--muted); background: #1b1f28; }
   .nonar { flex: 1 1 auto; color: var(--dim); font: italic .9rem/1.5 var(--sans); }
   /* The turn's token facts: their own quiet line under the prose. */
-  .turnfacts { display: flex; gap: .6rem; padding: 0 .75rem .6rem 0; font-size: .75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* Under prose: its own row, left edge aligned with the duration chip's TEXT
+     (the chip pads .5em at .8rem = .4rem). Inline (a no-prose head): part of the
+     head row, no padding of its own. */
+  .turnfacts { display: flex; gap: .6rem; padding: 0 .75rem .6rem .4rem; font-size: .75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .narration .turnfacts { padding: 0; align-self: center; }
   .turnfacts .fact + .fact::before { content: "\\00b7"; color: var(--dim); margin-right: .6rem; }
   .turnfacts:empty { display: none; }
   li.step > .calls { display: flex; flex-direction: column; gap: .5rem; padding-right: .75rem; }
@@ -442,6 +446,7 @@ ${ELAPSED_SCRIPT}
       if (typeof src.url === "string" && /^https?:\\/\\//.test(src.url)) {
         var a = el("a", "", "#" + src.channel);
         a.setAttribute("href", src.url);
+        a.setAttribute("target", "_blank"); // outbound links never take the operator off the dashboard
         a.setAttribute("rel", "noopener noreferrer");
         a.setAttribute("title", "open the thread");
         source.appendChild(a);
@@ -485,6 +490,7 @@ ${ELAPSED_SCRIPT}
   function link(text, href) {
     var a = el("a", "", text);
     a.setAttribute("href", href);
+    a.setAttribute("target", "_blank"); // outbound: a new tab, the run stays put
     a.setAttribute("rel", "noopener noreferrer");
     return a;
   }
@@ -565,6 +571,11 @@ ${ELAPSED_SCRIPT}
   // null (a tool-only completion) — then a muted note fills the slot.
   // Appends to \`li\`: the head row (gutter timestamp · 💭 chip · narration) and,
   // under it, the turn's token facts as their own quiet line.
+  function turnFacts(turn) {
+    var facts = el("div", "turnfacts");
+    if (turn) for (var i = 0; i < turn.facts.length; i++) facts.appendChild(el("span", "fact", turn.facts[i]));
+    return facts;
+  }
   function appendHead(li, at, turn, narration, note) {
     var row = el("div", "narration");
     row.appendChild(stamp(at));
@@ -579,13 +590,18 @@ ${ELAPSED_SCRIPT}
       var box = el("div", "md");
       md(box, narration.text);
       row.appendChild(box);
+      li.appendChild(row);
+      li.appendChild(turnFacts(turn)); // its own row, under the prose
+    } else if (turn && turn.facts.length) {
+      // No prose to head the step: the facts ARE the head — one row, no filler
+      // text for the eye to land on (the calls below say what happened).
+      row.appendChild(turnFacts(turn));
+      li.appendChild(row);
     } else {
       row.appendChild(el("span", "nonar", note));
+      li.appendChild(row);
+      li.appendChild(turnFacts(turn));
     }
-    li.appendChild(row);
-    var facts = el("div", "turnfacts");
-    if (turn) for (var i = 0; i < turn.facts.length; i++) facts.appendChild(el("span", "fact", turn.facts[i]));
-    li.appendChild(facts);
   }
   function addStep(step) {
     // A new step begins: the previous step is over — fold its calls unless

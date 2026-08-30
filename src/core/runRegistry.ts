@@ -89,6 +89,9 @@ export interface RunMeta {
   /** A link back to the message that started the run (`IncomingMessage.sourceUrl`),
    *  so the index can offer the thread without opening the run (live-view item 20). */
   sourceUrl?: string;
+  /** Resolved display name of who started it (`IncomingMessage.userName`) — the
+   *  source mark's hover says `via Slack · justin`, never a raw member id. */
+  userName?: string;
 }
 
 /** A run's stop status for the index: `stopping` from the request until the run
@@ -139,6 +142,8 @@ export interface RunSummary {
   activity?: string;
   /** `RunMeta.sourceUrl`: the thread that started the run, for the index's hover link. */
   sourceUrl?: string;
+  /** `RunMeta.userName`: who started it, resolved. */
+  userName?: string;
   /** Present only once a stop has been requested (#101). */
   stop?: RunStopStatus;
   /** Present (true) once the history writer confirmed the run is in the durable
@@ -601,6 +606,7 @@ export class RunRegistry {
       ...(m ? { channelId: m.channelId, userId: m.userId, threadKey: m.threadKey } : {}),
       ...(m?.repo !== undefined ? { repo: m.repo } : {}),
       ...(m?.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
+      ...(m?.userName !== undefined ? { userName: m.userName } : {}),
       finished: run.finished,
       startedAt: run.startedAt,
       ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),

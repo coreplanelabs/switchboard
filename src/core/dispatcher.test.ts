@@ -4063,10 +4063,11 @@ describe("run history write path (#157 U4)", () => {
 
   it("the record carries where the run came from and what it was last doing (live-view item 21): sourceUrl from the message, activity from the stored events; neither when absent", async () => {
     const { deps, store, writer } = wired(capturingProvider());
-    await dispatch(deps, { ...msg("hello there"), sourceUrl: "https://acme.slack.com/archives/CX/p10" }, fakeIO().io);
+    await dispatch(deps, { ...msg("hello there"), sourceUrl: "https://acme.slack.com/archives/CX/p10", userName: "justin" }, fakeIO().io);
     await writer.settled();
     const rec = (await store.get("run-h"))!;
     expect(rec.sourceUrl).toBe("https://acme.slack.com/archives/CX/p10");
+    expect(rec.userName).toBe("justin");
     expect(rec.activity).toBe(activityOfEvents(rec.events));
     expect(rec.activity).toEqual(expect.any(String));
     expect(isRunRecord(rec)).toBe(true);
@@ -4074,7 +4075,9 @@ describe("run history write path (#157 U4)", () => {
     const bare = wired(capturingProvider(), { registry: new RunRegistry({ genId: () => "run-b", genToken: () => "tok" }) });
     await dispatch(bare.deps, msg("hello there"), fakeIO().io);
     await bare.writer.settled();
-    expect(await bare.store.get("run-b")).not.toHaveProperty("sourceUrl");
+    const bareRec = await bare.store.get("run-b");
+    expect(bareRec).not.toHaveProperty("sourceUrl");
+    expect(bareRec).not.toHaveProperty("userName");
   });
 
   it("a completed run is one put: status completed, eventCount = published count, events include the user and assistant messages, identity fields set", async () => {

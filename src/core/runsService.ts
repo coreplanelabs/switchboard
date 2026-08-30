@@ -56,6 +56,8 @@ export interface RunView {
   activity?: string;
   /** The thread that started the run (`RunMeta.sourceUrl` / `RunRecord.sourceUrl`). */
   sourceUrl?: string;
+  /** Who started it, resolved (`RunMeta.userName` / `RunRecord.userName`). */
+  userName?: string;
   /** True once the durable store holds this run (registry flag or store row). */
   persisted?: boolean;
 }
@@ -174,6 +176,7 @@ function liveView(s: RunSummary): RunView {
     ...(s.stop ? { stop: s.stop } : {}),
     ...(s.activity !== undefined ? { activity: s.activity } : {}),
     ...(s.sourceUrl !== undefined ? { sourceUrl: s.sourceUrl } : {}),
+    ...(s.userName !== undefined ? { userName: s.userName } : {}),
     ...(s.persisted ? { persisted: true } : {}),
   };
 }

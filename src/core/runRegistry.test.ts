@@ -214,10 +214,11 @@ describe("RunRegistry.listActive", () => {
       threadKey: "slack:C1:1",
       repo: "acme/x",
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
+      userName: "justin",
     });
     expect(handle.label).toBe('coding · acme/x · "token «redacted-github-token»"');
     const [row] = reg.listActive();
-    expect(row).toMatchObject({ label: handle.label, agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1", repo: "acme/x", sourceUrl: "https://acme.slack.com/archives/C1/p1" }); // sourceUrl: live-view item 21, the index's thread link
+    expect(row).toMatchObject({ label: handle.label, agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1", repo: "acme/x", sourceUrl: "https://acme.slack.com/archives/C1/p1", userName: "justin" }); // sourceUrl + userName: live-view item 21, the index's thread link and its hover identity
     expect(reg.getById(handle.id)).toMatchObject({ agent: "coding", repo: "acme/x" });
     const bare = reg.create();
     const bareRow = reg.listActive().find((r) => r.id === bare.id)!;
