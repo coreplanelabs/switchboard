@@ -1195,3 +1195,31 @@ describe("runAgent tool concurrency", () => {
     }
   });
 });
+
+describe("model-call hygiene (features/run-loop.md item 11)", () => {
+  it("passes the agent's cacheTtl on every provider request, including the final one", async () => {
+    const provider = scripted([bashUse("t1"), text("done")]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ cacheTtl: "1h" }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+    });
+    expect(provider.requests.map((r) => r.cacheTtl)).toEqual(["1h", "1h"]);
+  });
+  it("omits cacheTtl when the agent does not set one (provider default)", async () => {
+    const provider = scripted([text("done")]);
+    await runAgent({ provider, model: "m", agent: agent(), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor } });
+    expect(provider.requests[0]).not.toHaveProperty("cacheTtl");
+  });
+  it("echoes the model's thinking blocks back in the assistant turn, unchanged and in order", async () => {
+    const provider = scripted([
+      { content: [{ type: "thinking", thinking: "", signature: "sig" }, { type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } }], stopReason: "tool_use" },
+      text("done"),
+    ]);
+    await runAgent({ provider, model: "m", agent: agent(), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor } });
+    const assistant = provider.requests[1].messages.find((m) => m.role === "assistant");
+    expect(assistant?.content[0]).toEqual({ type: "thinking", thinking: "", signature: "sig" });
+  });
+});

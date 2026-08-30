@@ -87,3 +87,15 @@ describe("usageFromOpenAI (token usage → TokenUsage)", () => {
     expect(usageFromOpenAI({ prompt_tokens: 1 })).toBeUndefined();
   });
 });
+
+describe("toOAIMessages — thinking parts", () => {
+  it("drops Anthropic thinking blocks from an assistant turn (no OpenAI equivalent; text and tool calls survive)", () => {
+    const [m] = toOAIMessages({ role: "assistant", content: [
+      { type: "thinking", thinking: "", signature: "s" },
+      { type: "text", text: "hello" },
+      { type: "tool_use", id: "t", name: "bash", input: { command: "ls" } },
+    ] });
+    expect(m.content).toBe("hello");
+    expect((m as { tool_calls?: unknown[] }).tool_calls).toHaveLength(1);
+  });
+});

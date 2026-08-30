@@ -152,8 +152,8 @@ users:
   });
 
   it("an invalid effort level in static config is rejected at load, naming the valid ones", () => {
-    expect(() => store(EFFORT_YAML.replace("effort: low", "effort: turbo"))).toThrow(/channels\.slack:CLOW\.effort.*turbo.*low, medium, high/);
-    expect(() => store(EFFORT_YAML.replace("    coding: medium", "    coding: max"))).toThrow(/defaults\.efforts\.coding.*max/);
+    expect(() => store(EFFORT_YAML.replace("effort: low", "effort: turbo"))).toThrow(/channels\.slack:CLOW\.effort.*turbo.*low, medium, high, xhigh, max/);
+    expect(() => store(EFFORT_YAML.replace("    coding: medium", "    coding: turbo"))).toThrow(/defaults\.efforts\.coding.*turbo/);
   });
 
   it("config show renders effort where it is set: effective, defaults, and scopes", () => {

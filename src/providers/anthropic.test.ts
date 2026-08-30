@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAnthropicParams, toAnthropicMessage, usageFromAnthropic } from "./anthropic.js";
+import { AnthropicProvider, buildAnthropicParams, effortFor, toAnthropicMessage, usageFromAnthropic } from "./anthropic.js";
 import type { ChatMessage, CompletionRequest } from "./types.js";
 
 // Feature: features/run-loop.md — prompt caching: the static prefix (tools +
@@ -184,5 +184,127 @@ describe("usageFromAnthropic (token usage → TokenUsage)", () => {
     expect(usageFromAnthropic({ input_tokens: 5, output_tokens: 1, cache_read_input_tokens: null, cache_creation_input_tokens: null })).toEqual({ inputTokens: 5, outputTokens: 1 });
     expect(usageFromAnthropic(undefined)).toBeUndefined();
     expect(usageFromAnthropic({ input_tokens: "x", output_tokens: 1 })).toBeUndefined();
+  });
+});
+
+// Feature: features/run-loop.md item 11 — cache TTL per agent, thinking blocks
+// replayed unchanged, effort sent only where the model accepts it.
+type Captured = { params: Record<string, unknown>; opts: unknown };
+function fakeClient(msg: Record<string, unknown>, captured: Captured[]) {
+  return {
+    messages: {
+      stream: (params: Record<string, unknown>, opts: unknown) => {
+        captured.push({ params, opts });
+        return { finalMessage: async () => msg };
+      },
+    },
+  } as unknown as ConstructorParameters<typeof AnthropicProvider>[2];
+}
+const TEXT_MSG = { content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } };
+const ttlReq = (over: Partial<CompletionRequest> = {}): CompletionRequest => ({
+  model: "claude-fable-5",
+  system: "SYSTEM PROMPT",
+  maxTokens: 100,
+  messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+  tools: [{ name: "a", description: "A", inputSchema: { type: "object" } }],
+  ...over,
+});
+const marks = (p: unknown) => JSON.stringify(p).split('"cache_control"').length - 1;
+
+describe("buildAnthropicParams — cache TTL and breakpoint placement (item 11)", () => {
+  it("cacheTtl 1h rides on EVERY breakpoint (system, last tool, rolling); absent → plain ephemeral", () => {
+    const p = buildAnthropicParams(ttlReq({ cacheTtl: "1h" })) as unknown as Record<string, any>;
+    const oneHour = { type: "ephemeral", ttl: "1h" };
+    expect(p.system[0].cache_control).toEqual(oneHour);
+    expect(p.tools[0].cache_control).toEqual(oneHour);
+    expect(p.messages[0].content[0].cache_control).toEqual(oneHour);
+    expect(marks(p)).toBe(3);
+    const q = buildAnthropicParams(ttlReq({ cacheTtl: "5m" })) as unknown as Record<string, any>;
+    expect(q.system[0].cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("a rolling breakpoint skips a trailing thinking block (cache_control is rejected there) and lands on the last cacheable block", () => {
+    const p = buildAnthropicParams(ttlReq({ messages: [
+      { role: "user", content: [{ type: "text", text: "go" }] },
+      { role: "assistant", content: [{ type: "text", text: "hm" }, { type: "thinking", thinking: "", signature: "s" }] },
+    ] })) as unknown as Record<string, any>;
+    const [text, thinking] = p.messages[1].content;
+    expect(text).toHaveProperty("cache_control");
+    expect(thinking).not.toHaveProperty("cache_control");
+    expect(marks(p)).toBe(4); // system + tool + both messages
+  });
+
+  it("a turn made only of thinking blocks gets no breakpoint rather than an invalid one", () => {
+    const p = buildAnthropicParams(ttlReq({ messages: [
+      { role: "user", content: [{ type: "text", text: "go" }] },
+      { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "s" }] },
+    ] })) as unknown as Record<string, any>;
+    expect(JSON.stringify(p.messages[1])).not.toContain("cache_control");
+    expect(marks(p)).toBe(3);
+  });
+});
+
+describe("AnthropicProvider — thinking blocks are replayed unchanged (item 11)", () => {
+  it("keeps thinking / redacted_thinking blocks in the normalized result, in order", async () => {
+    const msg = {
+      content: [
+        { type: "thinking", thinking: "", signature: "sig1" },
+        { type: "redacted_thinking", data: "opaque" },
+        { type: "text", text: "Looking." },
+        { type: "tool_use", id: "t1", name: "bash", input: { command: "ls" } },
+      ],
+      stop_reason: "tool_use",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const p = new AnthropicProvider("a", { type: "anthropic" }, fakeClient(msg, []));
+    const r = await p.complete(ttlReq());
+    expect(r.content).toEqual([
+      { type: "thinking", thinking: "", signature: "sig1" },
+      { type: "redacted_thinking", data: "opaque" },
+      { type: "text", text: "Looking." },
+      { type: "tool_use", id: "t1", name: "bash", input: { command: "ls" } },
+    ]);
+  });
+
+  it("maps thinking parts back to the wire shape byte-for-byte (a modified block is a 400)", () => {
+    const out = toAnthropicMessage({ role: "assistant", content: [
+      { type: "thinking", thinking: "", signature: "sig1" },
+      { type: "redacted_thinking", data: "opaque" },
+      { type: "text", text: "ok" },
+    ] });
+    expect(out.content).toEqual([
+      { type: "thinking", thinking: "", signature: "sig1" },
+      { type: "redacted_thinking", data: "opaque" },
+      { type: "text", text: "ok" },
+    ]);
+  });
+});
+
+describe("effortFor — effort is sent only where the model accepts it (item 11)", () => {
+  it("passes every level through on Fable 5 / Opus 5 / Sonnet 5 / Opus 4.7+", () => {
+    for (const m of ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-7-20261101"]) {
+      expect(effortFor(m, "xhigh")).toBe("xhigh");
+      expect(effortFor(m, "max")).toBe("max");
+    }
+  });
+  it("clamps xhigh/max to high on 4.6 and earlier Opus/Sonnet, dated ids included; low..high pass through", () => {
+    for (const m of ["claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5", "claude-sonnet-4-5-20250929", "claude-opus-4-1", "claude-sonnet-4", "claude-sonnet-4-20250514", "claude-opus-4-20250514"]) {
+      expect(effortFor(m, "xhigh")).toBe("high");
+      expect(effortFor(m, "max")).toBe("high");
+      expect(effortFor(m, "medium")).toBe("medium");
+    }
+  });
+  it("drops effort entirely on Haiku and pre-4 models (no effort parameter)", () => {
+    expect(effortFor("claude-haiku-4-5", "high")).toBeUndefined();
+    expect(effortFor("claude-3-5-sonnet-20241022", "low")).toBeUndefined();
+    expect(effortFor("claude-fable-5", undefined)).toBeUndefined();
+  });
+  it("the request carries the clamped value", async () => {
+    const captured: Captured[] = [];
+    const p = new AnthropicProvider("a", { type: "anthropic" }, fakeClient(TEXT_MSG, captured));
+    await p.complete(ttlReq({ model: "claude-sonnet-4-6", effort: "max" }));
+    expect(captured[0].params.output_config).toEqual({ effort: "high" });
+    await p.complete(ttlReq({ model: "claude-haiku-4-5", effort: "max" }));
+    expect(captured[1].params).not.toHaveProperty("output_config");
   });
 });

@@ -1,5 +1,6 @@
 // Agent definitions. An agent is a system prompt + toolset + turn budget.
 import type { Effort } from "../effort.js";
+import type { CacheTtl } from "../providers/types.js";
 // Which model runs it is resolved separately by the config layers, so any
 // agent can run on any configured provider/model.
 
@@ -19,6 +20,11 @@ export interface AgentDef {
    *  every config layer (directive, thread, user, channel, `defaults.efforts`)
    *  beats it; see `src/effort.ts`. Omit to leave it to config / the model. */
   effort?: Effort;
+  /** Prompt-cache TTL for this agent's model calls (features/run-loop.md item
+   *  11). Omit for the provider default (`5m`); set `1h` where one step (a long
+   *  model turn plus its tool run) can exceed 5 minutes, or the cache written
+   *  by each call expires before the next call can read it. */
+  cacheTtl?: CacheTtl;
   /** Resources the agent needs (KD2: declared per agent, resolved by the
    *  executor factory). No `repo` declared → no workspace/sandbox is ever
    *  provisioned for this agent's runs. */
@@ -196,6 +202,10 @@ export const AGENTS: Record<string, AgentDef> = {
     maxTurns: 60, // scoping is capped at ~5 calls by the prompt; this is implementation room
     maxTokens: 64000,
     maxMinutes: 45,
+    // Coding steps run long: 5-6 min model turns were observed on 2026-08-30
+    // (switchboard#294), and installs/tests add more — a 5m cache entry would
+    // expire between requests, so the 2× write buys reads for the whole run.
+    cacheTtl: "1h",
     // No built-in effort: the deployment decides (`defaults.efforts.coding`,
     // `config set channel efforts.coding=…`, or `effort:` per request).
     resources: { repo: "required" },

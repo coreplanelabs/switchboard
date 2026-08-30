@@ -6,12 +6,12 @@
 // provider's own default. Lower effort = much faster turns; the wall clock is
 // the real budget, so effort is what decides how much of it goes to thinking.
 
-export const EFFORT_LEVELS = ["low", "medium", "high"] as const;
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type Effort = (typeof EFFORT_LEVELS)[number];
 
 export function isEffort(value: unknown): value is Effort {
   return typeof value === "string" && (EFFORT_LEVELS as readonly string[]).includes(value);
 }
 
-/** The valid levels, for error messages: `low, medium, high`. */
+/** The valid levels, for error messages: `low, medium, high, xhigh, max`. */
 export const EFFORT_LEVELS_HINT = EFFORT_LEVELS.join(", ");

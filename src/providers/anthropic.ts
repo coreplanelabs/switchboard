@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import type { Effort } from "../effort.js";
 import type {
   ChatMessage,
   CompletionRequest,
@@ -9,21 +10,22 @@ import type {
   TokenUsage,
 } from "./types.js";
 
+/** The slice of the SDK client the provider uses — injectable for tests. */
+export type AnthropicClientLike = Pick<Anthropic, "messages">;
+
 export class AnthropicProvider implements Provider {
   readonly name: string;
-  private client: Anthropic;
+  private client: AnthropicClientLike;
 
-  constructor(name: string, cfg: ProviderConfig) {
+  constructor(name: string, cfg: ProviderConfig, client?: AnthropicClientLike) {
     this.name = name;
     const apiKey = cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined;
     // Falls back to ANTHROPIC_API_KEY / ambient credentials when apiKeyEnv is unset.
-    this.client = new Anthropic(apiKey ? { apiKey } : {});
+    this.client = client ?? new Anthropic(apiKey ? { apiKey } : {});
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {
     // Stream to avoid HTTP timeouts on large max_tokens; collect the final message.
-    // effort is supported on Opus 4.5+/Sonnet 4.6+/Fable; it 400s on Haiku —
-    // apply only where safe, since per-request model overrides can be anything.
     const stream = this.client.messages.stream(
       buildAnthropicParams(req),
       // A hard run stop (#101) aborts the stream mid-flight instead of letting
@@ -38,8 +40,14 @@ export class AnthropicProvider implements Provider {
         content.push({ type: "text", text: block.text });
       } else if (block.type === "tool_use") {
         content.push({ type: "tool_use", id: block.id, name: block.name, input: block.input });
+      } else if (block.type === "thinking") {
+        // Kept, opaque, for replay (run-loop.md item 11): the API verifies the
+        // signature and rejects a modified block; dropping them breaks the turn
+        // on Claude Fable 5.
+        content.push({ type: "thinking", thinking: block.thinking, signature: block.signature });
+      } else if (block.type === "redacted_thinking") {
+        content.push({ type: "redacted_thinking", data: block.data });
       }
-      // thinking blocks are intentionally dropped from the normalized result
     }
 
     let stopReason: CompletionResult["stopReason"];
@@ -87,33 +95,65 @@ const EPHEMERAL: Anthropic.CacheControlEphemeral = { type: "ephemeral" };
  *    Without any of this a 20-turn coding run re-bills every earlier turn's
  *    tool output in full, 20 times over.
  *
- * `effort` is supported on Opus 4.5+/Sonnet 4.6+/Fable; it 400s on Haiku —
- * applied only where safe, since per-request model overrides can be anything.
+ * Every breakpoint carries the request's `cacheTtl` (item 11): `5m` unless
+ * the agent asked for `1h`. A rolling breakpoint lands on the last block that
+ * CAN carry `cache_control` — thinking blocks cannot, and an assistant turn may
+ * end in one — never on a block the API would reject it on.
+ *
+ * `effort` goes through `effortFor`: omitted where the model has no effort
+ * parameter, clamped where it rejects `xhigh`/`max`.
  */
 export function buildAnthropicParams(req: CompletionRequest): Anthropic.MessageCreateParamsStreaming {
-  const effortSupported = req.effort && !/haiku|claude-3|claude-2/.test(req.model);
+  const effort = effortFor(req.model, req.effort);
+  const cache: Anthropic.CacheControlEphemeral =
+    req.cacheTtl && req.cacheTtl !== "5m" ? { type: "ephemeral", ttl: req.cacheTtl } : EPHEMERAL;
   const messages = req.messages.map(toAnthropicMessage);
   for (const m of [messages.at(-1), messages.at(-2)]) {
     const content = m?.content;
-    if (!Array.isArray(content) || content.length === 0) continue;
-    const block = content[content.length - 1];
-    content[content.length - 1] = { ...block, cache_control: EPHEMERAL } as typeof block;
+    if (!Array.isArray(content)) continue;
+    for (let j = content.length - 1; j >= 0; j--) {
+      if (!CACHEABLE_BLOCKS.has(content[j].type)) continue;
+      content[j] = { ...content[j], cache_control: cache } as (typeof content)[number];
+      break;
+    }
   }
   const tools = (req.tools ?? []).map((t, i, all) => ({
     name: t.name,
     description: t.description,
     input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
-    ...(i === all.length - 1 ? { cache_control: EPHEMERAL } : {}),
+    ...(i === all.length - 1 ? { cache_control: cache } : {}),
   }));
   return {
     model: req.model,
     max_tokens: req.maxTokens,
     stream: true,
-    ...(req.system ? { system: [{ type: "text", text: req.system, cache_control: EPHEMERAL }] } : {}),
+    ...(req.system ? { system: [{ type: "text", text: req.system, cache_control: cache }] } : {}),
     messages,
-    ...(effortSupported ? { output_config: { effort: req.effort } } : {}),
+    ...(effort ? { output_config: { effort } } : {}),
     ...(tools.length > 0 ? { tools } : {}),
   } as Anthropic.MessageCreateParamsStreaming;
+}
+
+/** Block types `cache_control` may ride on (thinking blocks are not among them). */
+const CACHEABLE_BLOCKS = new Set(["text", "image", "document", "tool_use", "tool_result"]);
+
+/** The effort to send for `model`, or undefined to omit the parameter. Effort
+ *  400s on Haiku and pre-4 models; `xhigh`/`max` 400 on Opus/Sonnet 4.6 and
+ *  earlier (Opus 4.5 knows low/medium/high only), where they clamp to `high`
+ *  — the strongest level the model accepts — rather than fail the run because
+ *  a per-request `model:` override paired a level with an older model. */
+export function effortFor(model: string, effort: Effort | undefined): Effort | undefined {
+  if (!effort) return undefined;
+  if (/haiku|claude-3|claude-2|claude-instant/.test(model)) return undefined;
+  if (effort === "xhigh" || effort === "max") {
+    // `claude-<family>-<major>[-<minor>][-<yyyymmdd>]`: a second group of 8+
+    // digits is a date on a bare-major id (`claude-sonnet-4-20250514`), not a
+    // minor version.
+    const m = /claude-(?:opus|sonnet)-(\d+)(?:-(\d+))?/.exec(model);
+    const minor = m?.[2] !== undefined && m[2].length < 8 ? Number(m[2]) : undefined;
+    if (m && Number(m[1]) === 4 && (minor === undefined || minor <= 6)) return "high";
+  }
+  return effort;
 }
 
 /** Exported for tests. */
@@ -139,6 +179,10 @@ export function toAnthropicMessage(m: ChatMessage): Anthropic.MessageParam {
           name: part.name,
           input: part.input as Record<string, unknown>,
         };
+      case "thinking":
+        return { type: "thinking", thinking: part.thinking, signature: part.signature };
+      case "redacted_thinking":
+        return { type: "redacted_thinking", data: part.data };
       case "tool_result": {
         const inner: Anthropic.ToolResultBlockParam["content"] =
           typeof part.content === "string"
