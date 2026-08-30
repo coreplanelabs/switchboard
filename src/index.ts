@@ -29,7 +29,7 @@ import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
-import { activeRunCount, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
+import { activeRunCount, DEPLOY_RESTART_NOTICE, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
 import { buildScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters (#157 U7) ---
@@ -413,7 +413,7 @@ async function main() {
     console.log(
       `[drain] ${signal}: closing Slack socket, ${activeRunCount()} run(s) + ${pendingReflectionCount()} reflection(s) + ${pendingHistoryWrites()} history write(s) in flight`,
     );
-    setShutdownNotice("⏸ deploy in progress — finishing this run before the bot restarts");
+    setShutdownNotice(DEPLOY_RESTART_NOTICE);
     await app.stop().catch(() => {});
     const deadline = drainStartedAt + DRAIN_DEADLINE_MS;
     while (inFlight() > 0 && Date.now() < deadline) {

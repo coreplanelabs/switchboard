@@ -1625,6 +1625,13 @@ const SPINNER_GLYPHS = ["◐", "◓", "◑", "◒"];
  *  two cannot drift apart. */
 export const LIVE_CARD_PREFIXES = [...SPINNER_GLYPHS, "👀"];
 
+/** The notice the drain (src/index.ts) sets on SIGTERM from a deploy rollout.
+ *  Exported so the Slack adapter's orphan sweep can strip it from a frozen
+ *  card's title (#357) — an interrupted card must not keep the stale
+ *  "finishing this run" clause. Shared like LIVE_CARD_PREFIXES, so the text
+ *  the drain appends and the text the sweep strips cannot drift apart. */
+export const DEPLOY_RESTART_NOTICE = "⏸ deploy in progress — finishing this run before the bot restarts";
+
 /** Set by the process-wide drain (SIGTERM from a deploy rollout) and appended to
  *  every live card's heartbeat frame, so a reader can tell "finishing this run
  *  before the bot restarts" from a run that is merely slow. `undefined` clears

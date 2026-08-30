@@ -1,4 +1,4 @@
-import { LIVE_CARD_PREFIXES } from "../core/dispatcher.js";
+import { DEPLOY_RESTART_NOTICE, LIVE_CARD_PREFIXES } from "../core/dispatcher.js";
 import { MIN_CATCH_UP_WINDOW_MS } from "../core/drain.js";
 import { mapLimit } from "../core/mapLimit.js";
 import type { StatusUpdate } from "../core/types.js";
@@ -238,18 +238,34 @@ export function findOrphanedCards(input: FindOrphanedInput): OrphanedCard[] {
   return out;
 }
 
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const THINKING_SUFFIX = / — thinking \(\d+s since last tool\)$/u;
-const LIVE_GLYPH_PREFIX = new RegExp(`^(?:${LIVE_CARD_PREFIXES.map((g) => g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\s*`, "u");
+const LIVE_GLYPH_PREFIX = new RegExp(`^(?:${LIVE_CARD_PREFIXES.map(escapeRegExp).join("|")})\\s*`, "u");
+// The drain notice the dispatcher appends after the thinking suffix (#357).
+// Slack history can return the leading ⏸ either as the unicode char or as its
+// :shortcode:, so the pattern anchors on the notice's WORDS and accepts one
+// optional token where the glyph was; the ` · ` separator keeps it from ever
+// matching notice-like words inside a run label. The glyph is dropped only if
+// the constant actually starts with a non-word token — a reworded notice that
+// leads with a word keeps its first word and still matches (glyph optional).
+const SHUTDOWN_NOTICE_SUFFIX = new RegExp(
+  ` · (?:\\S+ )?${escapeRegExp(DEPLOY_RESTART_NOTICE.replace(/^[^\w\s]\S*\s+/u, ""))}$`,
+  "u",
+);
 
 /** The closed frame for an orphaned card: the run label and elapsed time it
- *  reached are kept (they are the only record of how far it got), the spinner
- *  and the transient "thinking" suffix go, and the detail says what happened
- *  and what to do. History text comes back mrkdwn-escaped; un-escape so the
- *  adapter's render() does not double-escape `&amp;` → `&amp;amp;`. */
+ *  reached are kept (they are the only record of how far it got); the spinner,
+ *  the transient "thinking" suffix, and the drain notice go (an interrupted
+ *  card must not claim the bot is "finishing this run" — it did not, #357);
+ *  the detail says what happened and what to do. History text comes back
+ *  mrkdwn-escaped; un-escape so the adapter's render() does not double-escape
+ *  `&amp;` → `&amp;amp;`. */
 export function interruptedCardFrame(cardText: string): StatusUpdate {
-  // `&amp;` last, so a literal `&amp;lt;` in the label un-escapes once (to `&lt;`), not twice.
+  // Notice before thinking (it is appended after it); `&amp;` last, so a
+  // literal `&amp;lt;` in the label un-escapes once (to `&lt;`), not twice.
   const label = cardText
     .replace(LIVE_GLYPH_PREFIX, "")
+    .replace(SHUTDOWN_NOTICE_SUFFIX, "")
     .replace(THINKING_SUFFIX, "")
     .replaceAll("&lt;", "<")
     .replaceAll("&gt;", ">")
