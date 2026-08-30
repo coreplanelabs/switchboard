@@ -14,7 +14,9 @@
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "cli": "tsx src/cli.ts"
+    "cli": "tsx src/cli.ts",
+    "skills:sync": "tsx scripts/skills-sync.ts",
+    "skills:check": "tsx scripts/skills-sync.ts --check"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.122.0",

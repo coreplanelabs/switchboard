@@ -53,6 +53,28 @@ describe("parseSkillMarkdown", () => {
 
   it("source is optional", () => {
     expect(parseSkillMarkdown(CODING_SKILL).source).toBeUndefined();
+    expect(parseSkillMarkdown(CODING_SKILL).upstream).toBeUndefined();
+  });
+
+  // Vendoring provenance (features/skills.md item 10): optional, but complete when present.
+  it("parses the `upstream` block written by skills:sync", () => {
+    const raw = REVIEW_SKILL.replace(
+      "source: https://example.com/code-review\n",
+      "source: https://example.com/code-review\nupstream:\n  repo: https://github.com/addyosmani/agent-skills\n  commit: d2c37ef6225dd8726cdd369a8030307f48592d26\n  path: skills/code-review-and-quality/SKILL.md\n  bodySha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+    );
+    expect(parseSkillMarkdown(raw).upstream).toEqual({
+      repo: "https://github.com/addyosmani/agent-skills",
+      commit: "d2c37ef6225dd8726cdd369a8030307f48592d26",
+      path: "skills/code-review-and-quality/SKILL.md",
+      bodySha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    });
+  });
+
+  it("throws on a partial `upstream` block (a repo without the commit or the body digest cannot be checked against the manifest)", () => {
+    const noCommit = REVIEW_SKILL.replace("source: https://example.com/code-review\n", "upstream:\n  repo: https://github.com/x/y\n");
+    expect(() => parseSkillMarkdown(noCommit)).toThrow(/upstream.*commit/);
+    const noDigest = REVIEW_SKILL.replace("source: https://example.com/code-review\n", "upstream:\n  repo: https://github.com/x/y\n  commit: abc\n  path: p\n");
+    expect(() => parseSkillMarkdown(noDigest)).toThrow(/upstream.*bodySha256/);
   });
 
   it("throws when there is no frontmatter", () => {

@@ -1,8 +1,18 @@
 ---
 name: performance-optimization
-description: Optimizes application performance across frontend, backend, queries, and databases. Use when performance requirements exist, when you suspect performance regressions, when Core Web Vitals or load times need improvement, when N+1 query patterns need fixing, or when profiling reveals bottlenecks.
-agents: [review]
-source: https://github.com/addyosmani/agent-skills/blob/main/skills/performance-optimization/SKILL.md
+description: Optimizes application performance across frontend, backend,
+  queries, and databases. Use when performance requirements exist, when you
+  suspect performance regressions, when Core Web Vitals or load times need
+  improvement, when N+1 query patterns need fixing, or when profiling reveals
+  bottlenecks.
+agents:
+  - review
+source: https://github.com/addyosmani/agent-skills/blob/d2c37ef6225dd8726cdd369a8030307f48592d26/skills/performance-optimization/SKILL.md
+upstream:
+  repo: https://github.com/addyosmani/agent-skills
+  commit: d2c37ef6225dd8726cdd369a8030307f48592d26
+  path: skills/performance-optimization/SKILL.md
+  bodySha256: 117b15fcfa1e98cfca963e5d15ad6f0ecfd5170e60f24974e7e20310066262d3
 ---
 
 # Performance Optimization
@@ -402,9 +412,24 @@ Reverted work leaves no trace in git history, which is exactly why the same dead
 
 A section in the PR description or a `PERF.md` in the repo both work. What matters is that the next person (or the next agent) reads it before proposing an experiment, and doesn't re-run one that already failed.
 
-## Performance Budget
+### Step 5: Guard Against Regression
 
-Set budgets and enforce them:
+Guard the metric the user actually feels, not every available number. Use the
+same LCP, INP, p95 latency, or other primary metric that justified the fix.
+
+Use two complementary layers when the surface is user-facing:
+
+- **Synthetic CI gate:** Catch reproducible regressions before merge with a
+  performance budget. Repeat noisy measurements or compare a median/trend so
+  normal run-to-run variance does not turn the gate into a flaky check.
+- **Field monitoring:** Alert on a meaningful p75 movement in RUM data. Use
+  attributed `web-vitals` data to locate the cause; treat CrUX's rolling window
+  as confirmation rather than an immediate alert.
+
+When either guard fires, return to Step 1 and establish a fresh baseline before
+proposing another fix.
+
+**Set budgets and enforce them:**
 
 ```
 JavaScript bundle: < 200KB gzipped (initial load)
@@ -479,5 +504,5 @@ After any performance-related change:
 - [ ] No N+1 queries in new data fetching code
 - [ ] Any new index is justified by a query plan before and after, and its write cost was considered
 - [ ] Any new cache states what it keys on and how it goes stale
-- [ ] Performance budget passes in CI (if configured)
+- [ ] The measured user-facing metric has a synthetic budget or field monitor that can detect regression
 - [ ] Existing tests still pass (optimization didn't break behavior)

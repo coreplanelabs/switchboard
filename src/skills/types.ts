@@ -18,8 +18,23 @@ export interface Skill {
   /** Which agents this skill is scoped to (frontmatter `agents`, e.g. `[review]`
    *  or `[coding]`). A store lists/serves a skill only to an agent in this set. */
   agents: string[];
-  /** Provenance (frontmatter `source`) — where the skill was authored/fetched. */
+  /** Provenance (frontmatter `source`) — where the skill was authored/fetched;
+   *  for a vendored skill, the upstream file URL at the pinned commit. */
   source?: string;
+  /** Vendoring provenance (frontmatter `upstream`, written by `skills:sync`):
+   *  the upstream repo, the commit the body was fetched at, and the file's path
+   *  there. Absent on a skill that was not vendored through the manifest. */
+  upstream?: SkillUpstream;
+}
+
+export interface SkillUpstream {
+  repo: string;
+  commit: string;
+  path: string;
+  /** sha-256 (hex) of the vendored body as written by the sync — the offline
+   *  drift check recomputes it, so a hand-edited body is caught without a
+   *  network call. */
+  bodySha256: string;
 }
 
 /** The name+description pair surfaced to an agent (list_skills result + the
