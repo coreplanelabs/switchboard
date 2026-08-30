@@ -94,6 +94,32 @@ describe("memory.list", () => {
     expect(await commands.invoke("memory.list", { options: { scope: "everyone" } }, chat("slack:U1"))).toMatchObject({ ok: false, error: "invalid_input", message: 'scope: expected one of "me", "org", "repo", "channel", "all"' });
   });
 
+  // #344: `memory list org deploy` — the documented "scope word first" chat
+  // syntax. A leading bare scope word is consumed as --scope when --scope is
+  // absent; with --scope given it stays an ordinary filter word.
+  it("consumes a leading bare scope word from the query when --scope is absent (#344)", async () => {
+    const commands = bind();
+    const narrowed = await list(commands, chat("slack:U1"), { args: ["org deploy"] });
+    expect(narrowed.value.scopes.map((s) => s.key)).toEqual(["org:coreplanelabs"]);
+    expect(narrowed.text).toContain("matching `deploy`");
+    expect(narrowed.text).not.toContain("matching `org deploy`");
+    const alone = await list(commands, chat("slack:U1"), { args: ["me"] });
+    expect(alone.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1"]);
+    expect(alone.text).not.toContain("matching");
+    const explicitAll = await list(commands, chat("slack:U1"), { args: ["all"] });
+    expect(explicitAll.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1", "channel:slack:C1", "org:coreplanelabs"]);
+  });
+
+  it("a leading scope word stays a filter word when --scope IS given; a non-scope first word is never consumed (#344)", async () => {
+    const commands = bind();
+    const kept = await list(commands, chat("slack:U1"), { args: ["org deploy"], options: { scope: "all" } });
+    expect(kept.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1", "channel:slack:C1", "org:coreplanelabs"]);
+    expect(kept.text).toContain("matching `org deploy`");
+    const plain = await list(commands, chat("slack:U1"), { args: ["deploy"] });
+    expect(plain.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1", "channel:slack:C1", "org:coreplanelabs"]);
+    expect(plain.text).toContain("matching `deploy`");
+  });
+
   it("a query filters every listed scope and --limit is passed through and capped; a full page says there may be more", async () => {
     const store = seeded();
     const seen: Array<[string, number, string | undefined]> = [];

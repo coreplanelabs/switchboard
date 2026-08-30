@@ -134,7 +134,19 @@ export const memoryList = defineCommand({
   handler: async ({ args, options, caller, deps }) => {
     const store = storeOf(deps);
     const keys = requestScopeKeys(caller.id);
-    const scope = options.scope ?? "all";
+    // #344: the chat-documented "scope word first" form (`memory list org
+    // deploy`). A leading bare scope word is the scope when --scope is absent;
+    // an explicit --scope keeps every query word as filter text. A first word
+    // that is not a scope name is never consumed.
+    let query = args.query;
+    let scope: (typeof LIST_SCOPES)[number] = options.scope ?? "all";
+    if (options.scope === undefined && query !== undefined) {
+      const [first, ...rest] = query.split(/\s+/).filter(Boolean);
+      if ((LIST_SCOPES as readonly string[]).includes(first)) {
+        scope = first as (typeof LIST_SCOPES)[number];
+        query = rest.length > 0 ? rest.join(" ") : undefined;
+      }
+    }
     const limit = options.limit ?? MEMORY_LIST_LIMIT;
     const want = (s: (typeof LIST_SCOPES)[number]) => scope === "all" || scope === s;
     const wanted: Array<{ key: string; label: string }> = [];
@@ -156,13 +168,13 @@ export const memoryList = defineCommand({
     if (want("org")) wanted.push({ key: keys.org, label: "shared org records" });
     const scopes: ListedScope[] = [];
     for (const w of wanted) {
-      const records = await viaStore(() => store.list(w.key, limit, args.query));
+      const records = await viaStore(() => store.list(w.key, limit, query));
       scopes.push({ ...w, records, limitReached: records.length === limit });
     }
     // Stored free text leaves machine surfaces wrapped (KTD17); chat renders it as the person's own records.
     const wrap = caller.kind === "chat" ? (t: string) => t : wrapUntrusted;
     return {
-      ...(args.query !== undefined ? { query: args.query } : {}),
+      ...(query !== undefined ? { query } : {}),
       limit,
       ...(missing.length > 0 ? { missing } : {}),
       scopes: scopes.map((s) => ({ ...s, records: s.records.map((r) => ({ ...r, text: wrap(r.text) })) })) as unknown as JsonValue,
