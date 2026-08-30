@@ -64,6 +64,10 @@ export interface ResidentExecutorOptions {
 export interface ResidentBinding {
   ref: string;
   sha: string;
+  /** Absolute path of the thread's worktree inside the resident — the cwd of
+   *  every /exec. Advisory (named to the model so it never goes looking for
+   *  the repository, #282); undefined if the attach answer lacked it. */
+  workspace?: string;
 }
 
 /** 409 needs:"ref" from /attach — the thread has no ref binding yet (KTD6:
@@ -268,7 +272,10 @@ export class ResidentExecutor implements Executor {
       if (typeof data.ref !== "string" || typeof data.sha !== "string") {
         throw new Error(`resident attach: malformed answer for ${this.opts.resource} (missing ref/sha)`);
       }
-      this.lastBinding = { ref: data.ref, sha: data.sha };
+      this.lastBinding =
+        typeof data.workspace === "string" && data.workspace
+          ? { ref: data.ref, sha: data.sha, workspace: data.workspace }
+          : { ref: data.ref, sha: data.sha };
       return this.lastBinding;
     }
     const err = String(data.error ?? `HTTP ${status}`);

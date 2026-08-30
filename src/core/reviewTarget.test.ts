@@ -54,6 +54,35 @@ describe("reviewTargetBlock", () => {
     expect(b).toContain("`head` to submit_verdict");
   });
 
+  // Incident 2026-08-30 (PR #279, issue #282): the resident attached the
+  // worktree at the PR head, but the agent's first command was `cd /workspace`,
+  // it then found the resident's warm default-branch checkout with `find`,
+  // read `main`'s HEAD there and reported a mismatch. The block now names the
+  // worktree and forbids leaving it.
+  it("resident path with the worktree path: names it, pins every command to it, forbids cd/find", () => {
+    const b = reviewTargetBlock({ ...full, resident: true, workspace: "/workspace/threads/slack-C1-9.0-ab12cd34/patch-1" });
+    expect(b).toContain("`/workspace/threads/slack-C1-9.0-ab12cd34/patch-1`");
+    expect(b).toMatch(/never `cd` out of it/i);
+    expect(b).toMatch(/search the filesystem/i);
+    expect(b).toMatch(/any other checkout on this host/i);
+    expect(b).toMatch(/FIRST command: `git rev-parse HEAD` \(from the current directory, no `cd`\)/);
+  });
+
+  it("resident path without a worktree path: no path is invented, the no-cd rule still stands", () => {
+    const b = reviewTargetBlock({ ...full, resident: true });
+    expect(b).not.toMatch(/\/workspace\//);
+    expect(b).toMatch(/no `cd`/);
+  });
+
+  it("verifiedAtAttach: says Switchboard already checked the attached commit; absent otherwise", () => {
+    const verified = reviewTargetBlock({ ...full, resident: true, verifiedAtAttach: true });
+    expect(verified).toMatch(/Switchboard attached this worktree at that commit and verified it before this run/);
+    expect(verified).toMatch(/STOP/); // the model-side check stays as the backstop for drift after attach
+    expect(reviewTargetBlock({ ...full, resident: true })).not.toMatch(/verified it before this run/);
+    // Never claimed on the sandbox path — nothing was attached there.
+    expect(reviewTargetBlock({ ...full, resident: false, verifiedAtAttach: true })).not.toMatch(/verified it before this run/);
+  });
+
   it("is deterministic (same input, same text)", () => {
     expect(reviewTargetBlock({ ...full, resident: true })).toBe(reviewTargetBlock({ ...full, resident: true }));
   });

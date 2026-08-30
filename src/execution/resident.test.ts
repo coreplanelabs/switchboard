@@ -319,7 +319,14 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
   it("records the attach result's ref@sha as the thread binding (the positive 'resident' marker's source)", async () => {
     stubFetch({ body: { workspace: "/workspace/threads/t/master", ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", user: "worker2", deps: "hardlink" } });
     const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(ex.binding).toEqual({ ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", workspace: "/workspace/threads/t/master" });
+  });
+
+  it("a 200 attach answer without a string `workspace` still binds — the path is just unknown (#282: the path is advisory for the prompt)", async () => {
+    stubFetch({ body: { ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", user: "worker2" } });
+    const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
     expect(ex.binding).toEqual({ ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05" });
+    expect(ex.binding?.workspace).toBeUndefined();
   });
 
   it("a 200 attach answer missing ref/sha is a legible error, never a half-bound executor", async () => {

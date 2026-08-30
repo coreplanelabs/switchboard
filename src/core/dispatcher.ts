@@ -16,7 +16,7 @@ import { headMovedNote } from "./headMoved.js";
 import { decideReviewPost, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
-import { checkReviewedHead, parseRevParseOutput } from "./reviewedHead.js";
+import { checkReviewedHead, normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { handleRepoCommand, parseRepoCommand, type ResidentAdminClient } from "./repoCommands.js";
 import { recognizeOperation, type Operations, type RecognizedOp } from "./operations.js";
@@ -347,19 +347,54 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       }
       throw err;
     }
-    const { executor, note, resident } = selection;
+    const { executor, note, resident, binding } = selection;
+
+    // Attach-head check (features/agent-review.md item 10, #282): for a PR
+    // review on the resident path, the sha the resident ATTACHED the worktree
+    // at is compared with the PR head resolved above — before any model turn.
+    // A well-formed, different sha means the branch moved between resolution
+    // and attach (a push or force-push racing the request): the reviewed-head
+    // guard (item 8) would refuse the post anyway, so the run is not started —
+    // one named reply, the pool user released, no provider call. Equal shas
+    // are told to the model as a verified fact, so it has no reason to go and
+    // look. A malformed/absent attach sha proves nothing either way: the run
+    // proceeds unverified, exactly as before.
+    let verifiedAtAttach = false;
+    if (resolved.agentName === "review" && resident && repoCtx.pr !== undefined && repoCtx.repo) {
+      const expected = normalizeHead(repoCtx.headSha);
+      const attached = normalizeHead(binding?.sha);
+      if (expected && attached) {
+        if (!sameCommit(expected, attached)) {
+          const where = `${repoCtx.repo}#${repoCtx.pr}`;
+          console.log(`[review] ${msg.threadKey} not started: worktree attached at ${attached.slice(0, 7)}, PR head ${expected.slice(0, 7)} (${where})`);
+          if (executor.release) await executor.release("always").catch(() => {});
+          await card.done({ title: `🔀 ${label} · not started (branch moved)` });
+          await io.reply(
+            `🔀 Review of ${where} not started: the resident attached \`${binding?.ref ?? repoCtx.ref ?? "the branch"}\` at \`${attached.slice(0, 7)}\`, ` +
+              `but the PR head is \`${expected.slice(0, 7)}\` — the branch moved while the worktree was being attached (a push or force-push). Re-send the request to review the new head.`,
+          );
+          return;
+        }
+        verifiedAtAttach = true;
+      }
+    }
 
     // Effective system prompt, composed AFTER executor resolution (via
     // RunOptions.system, U1): a resident-path run swaps in the agent's
     // resident variant — the workspace is a ready worktree, no cloning, no
-    // installs — with the resolved repo named. Every other path keeps the
+    // installs — with the resolved repo named, and the worktree path when the
+    // attach answered it (#282: a model that knows where it is has no reason
+    // to `cd` off looking for the repository). Every other path keeps the
     // agent's own prompt. Selection reports the resident backend via a
     // discriminant (not an executor `instanceof`), keeping the executor
     // implementation out of the channel-agnostic core. The shared AgentDef is
     // never mutated (concurrent dispatches share it).
     const residentSystem =
       resident && agent.residentSystem
-        ? `${agent.residentSystem}\n\nTarget repository: ${repoCtx.repo}. The worktree is already on this thread's bound branch (confirm with \`git branch --show-current\`).`
+        ? `${agent.residentSystem}\n\nTarget repository: ${repoCtx.repo}. ` +
+          (binding?.workspace
+            ? `Your shell starts in the worktree \`${binding.workspace}\` on every bash call; it is already on this thread's bound branch (confirm with \`git branch --show-current\` from there — no \`cd\`).`
+            : "The worktree is already on this thread's bound branch (confirm with `git branch --show-current`).")
         : undefined;
     // REVIEW TARGET (features/agent-review.md item 9): a review run whose repo
     // resolution found a PR is TOLD what it is reviewing — repo, PR, head
@@ -376,6 +411,8 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
             headSha: repoCtx.headSha,
             baseRef: repoCtx.baseRef,
             resident: resident === true,
+            ...(binding?.workspace ? { workspace: binding.workspace } : {}),
+            ...(verifiedAtAttach ? { verifiedAtAttach: true } : {}),
           })
         : undefined;
     const baseSystem = target ? `${residentSystem ?? agent.system}\n\n${target}` : residentSystem;

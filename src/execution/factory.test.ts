@@ -169,9 +169,10 @@ describe("makeExecutor resident selection", () => {
   it("ctx.repo undefined → per-thread path with ZERO probe calls (total input contract)", async () => {
     stubEnvs();
     const { fn } = stubFetch();
-    const { executor, note } = await makeExecutor(residentOpts(), { threadKey: "slack:CX:1.0", agent: AGENTS.coding });
+    const { executor, note, binding } = await makeExecutor(residentOpts(), { threadKey: "slack:CX:1.0", agent: AGENTS.coding });
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(note).toBeUndefined();
+    expect(binding).toBeUndefined(); // nothing attached on the per-thread path
     expect(fn).not.toHaveBeenCalled();
   });
 
@@ -181,11 +182,14 @@ describe("makeExecutor resident selection", () => {
       { body: { state: "warm", reason: "" } },
       { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2", deps: "hardlink" } },
     );
-    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+    const { executor, note, resident, binding } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(ResidentExecutor);
     // The warm path is POSITIVELY named (never inferable only from the absence
     // of a fallback note): ref@short-sha of the attached worktree.
     expect(note).toBe("resident · master@abc");
+    // The attach answer rides along for the dispatcher (#282): the worktree
+    // path for the prompt, the attached sha for the pre-run head check.
+    expect(binding).toEqual({ ref: "master", sha: "abc", workspace: "/workspace/threads/x/master" });
     // The discriminant is the backend signal the dispatcher branches its
     // resident system-prompt on (never an executor `instanceof`): true ONLY on
     // the warm-resident branch.
