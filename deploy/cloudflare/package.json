@@ -2,6 +2,9 @@
   "name": "@coreplane/switchboard-worker",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "deploy": "wrangler deploy && npm run wake",
     "dev": "wrangler dev",

@@ -4,6 +4,9 @@
   "private": true,
   "description": "Configurable Slack bot that routes requests to agents (coding, review, general) across pluggable inference providers",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
