@@ -77,7 +77,8 @@ import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
-import { DEP_CACHE_DIRS, depCacheMaterialization, foldDepsMechanism, mutableCacheFindArgv, mutableCachePaths } from "../../src/execution/residentDepCache.js";
+import { depCacheScript, mutableCachePaths, mutableCacheSwapScript, parseDepCacheScriptOutput } from "../../src/execution/residentDepCache.js";
+import { parseWorktreeCleanliness, worktreeCleanlinessScript } from "../../src/execution/residentCleanliness.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
 import { shouldRefreshThreadCredentials } from "../../src/execution/residentCredentials.js";
 import { recordFiring, scheduleForCron, watchdogFiring, type ScheduleFiring, type WatchdogSummary } from "../../src/core/schedules.js";
@@ -86,6 +87,7 @@ import {
   decisivePull,
   effectiveLimits,
   parsePullsBody,
+  parseRefListing,
   parseTestOverrides,
   pickEvictionCandidate,
   pullsFate,
@@ -102,6 +104,7 @@ import {
   nextRefreshDelayS,
   planRefresh,
   RUNTIME_REPLACEMENT_WORDING,
+  withTimeout,
   type RefreshDisk,
   type RefreshOutcome,
 } from "../../src/execution/residentRefresh.js";
@@ -110,7 +113,7 @@ import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/exe
 /** Build marker: answered by GET /healthz (`u`) so a deploy's edge propagation
  *  is provable from outside, and stamped on test overrides so they die with
  *  the build that set them (gc.ts). Bump on every deploy-worthy change. */
-const BUILD_MARKER = "head52";
+const BUILD_MARKER = "perf53";
 
 interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
@@ -179,6 +182,14 @@ const MAX_PROVISIONING_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 const GIT_NETWORK_TIMEOUT_MS = 5 * 60_000;
 const REFRESH_BUILD_TIMEOUT_MS = 5 * 60_000;
+/** Budget per R2 snapshot/restore transfer (#356 item 7a). The SDK's
+ *  createBackup/restoreBackup accept no timeout or AbortSignal, so each call
+ *  is raced against this (withTimeout): a hung upload/download fails the
+ *  cycle into the existing degrade/goDown handling with a named error,
+ *  instead of stranding `refreshing`/`restoring` until the 30-min watchdog.
+ *  Same class as the other network budgets (observed live transfers run
+ *  seconds, recorded in `lastRestore.ms`). */
+const R2_TRANSFER_TIMEOUT_MS = 5 * 60_000;
 
 /** On-disk layout inside the resident container (disk is cache, never truth —
  *  KTD3). U4's worktrees hang off the same mirror; keep these paths stable. */
@@ -1247,21 +1258,25 @@ export class ResidentDO extends Sandbox<Env> {
   /** Snapshot mirror + checkout to R2 (localBucket: the SDK resolves the
    *  BACKUP_BUCKET binding from this DO's env; objects land under
    *  backups/<uuid>/). gitignore stays false: node_modules and build output
-   *  in the checkout ARE the cache being persisted (KTD3). */
+   *  in the checkout ARE the cache being persisted (KTD3). The pair runs
+   *  concurrently — disjoint directories, independent uploads — and each is
+   *  bounded by R2_TRANSFER_TIMEOUT_MS (#356 item 7a): a hang becomes this
+   *  StepError, which the cycle's existing failure handling degrades with
+   *  the step named. */
   private async takeSnapshot(resource: string, ref: string, sha: string, lockfileHash: string): Promise<SnapshotRecord> {
     try {
-      const mirror = await this.createBackup({
-        dir: MIRROR_DIR,
-        localBucket: true,
-        ttl: SNAPSHOT_TTL_S,
-        name: `${resource} mirror`,
-      });
-      const checkout = await this.createBackup({
-        dir: CHECKOUT_DIR,
-        localBucket: true,
-        ttl: SNAPSHOT_TTL_S,
-        name: `${resource} checkout`,
-      });
+      const [mirror, checkout] = await Promise.all([
+        withTimeout(
+          this.createBackup({ dir: MIRROR_DIR, localBucket: true, ttl: SNAPSHOT_TTL_S, name: `${resource} mirror` }),
+          R2_TRANSFER_TIMEOUT_MS,
+          "mirror backup",
+        ),
+        withTimeout(
+          this.createBackup({ dir: CHECKOUT_DIR, localBucket: true, ttl: SNAPSHOT_TTL_S, name: `${resource} checkout` }),
+          R2_TRANSFER_TIMEOUT_MS,
+          "checkout backup",
+        ),
+      ]);
       return { ref, sha, lockfileHash, createdAt: new Date().toISOString(), mirror, checkout };
     } catch (err) {
       throw new StepError("snapshot", errMsg(err));
@@ -1270,19 +1285,18 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Delete the R2 objects behind SDK backup handles (backups/<id>/ lives
    *  OUTSIDE the resident/<resource>/ prefix, so offboard's prefix sweep
-   *  cannot reach it — this is the only cleanup path). */
+   *  cannot reach it — this is the only cleanup path). The ids' prefixes are
+   *  disjoint, so the sweeps run concurrently. */
   private async deleteBackupObjects(ids: string[]): Promise<number> {
-    let deleted = 0;
-    for (const id of ids) deleted += await deleteR2Prefix(this.env.BACKUP_BUCKET, `backups/${id}/`);
-    return deleted;
+    const deleted = await Promise.all(ids.map((id) => deleteR2Prefix(this.env.BACKUP_BUCKET, `backups/${id}/`)));
+    return deleted.reduce((a, n) => a + n, 0);
   }
 
   /** Count (never delete) the R2 objects behind SDK backup handles — the
    *  read-only twin of deleteBackupObjects, for the dry-run itemizations. */
   private async countBackupObjects(ids: string[]): Promise<number> {
-    let count = 0;
-    for (const id of ids) count += await countR2Prefix(this.env.BACKUP_BUCKET, `backups/${id}/`);
-    return count;
+    const counts = await Promise.all(ids.map((id) => countR2Prefix(this.env.BACKUP_BUCKET, `backups/${id}/`)));
+    return counts.reduce((a, n) => a + n, 0);
   }
 
   private async armRefresh(resource: string, intervalS = REFRESH_INTERVAL_S): Promise<void> {
@@ -1492,8 +1506,14 @@ export class ResidentDO extends Sandbox<Env> {
     const t0 = Date.now();
     await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-before-restore");
     try {
-      await this.restoreBackup(snap.mirror);
-      await this.restoreBackup(snap.checkout);
+      // The restore pair IS the cold-wake critical path: disjoint target
+      // directories, so both downloads run concurrently, each bounded by
+      // R2_TRANSFER_TIMEOUT_MS (#356 item 7a) — a hang goes down with the
+      // transfer named instead of stranding `restoring` for the watchdog.
+      await Promise.all([
+        withTimeout(this.restoreBackup(snap.mirror), R2_TRANSFER_TIMEOUT_MS, "mirror restore"),
+        withTimeout(this.restoreBackup(snap.checkout), R2_TRANSFER_TIMEOUT_MS, "checkout restore"),
+      ]);
     } catch (err) {
       throw await this.goDown(`r2-restore-failed: ${errMsg(err)}`);
     }
@@ -1817,11 +1837,11 @@ export class ResidentDO extends Sandbox<Env> {
     if (live.some((b) => Date.parse(b.lastAttachAt) >= recent)) return false;
     if (this.inFlightCount() > 0) return false;
     if (!(await this.isRuntimeActive().catch(() => false))) return true;
-    for (const b of live) {
-      const c = await this.worktreeCleanliness(b);
-      if (!c.clean) return false; // dirty or unknown → stay awake
-    }
-    return true;
+    // Concurrent: each check touches only its own (disjoint) tree, and one
+    // spawn each (#356 item 6) — the idle gate no longer pays a serial
+    // 3-probe round-trip per live binding.
+    const checks = await Promise.all(live.map((b) => this.worktreeCleanliness(b)));
+    return checks.every((c) => c.clean); // any dirty or unknown → stay awake
   }
 
   /** Refresh-on-attach, BOUNDED: if the resident was idle (or the last
@@ -2359,6 +2379,23 @@ export class ResidentDO extends Sandbox<Env> {
     );
   }
 
+  /** Run one dep-cache script (`depCacheScript` / `mutableCacheSwapScript`)
+   *  and parse its tagged output. A failure throws the StepError the old
+   *  per-spawn code would have thrown: the step comes from the script's
+   *  `err=` tag (falling back to `fallbackStep` when the script died before
+   *  tagging), the message from stderr, exactly like assertOk. */
+  private async runDepScript(script: string, fallbackStep: string, timeoutMs: number) {
+    const r = await this.run(["sh", "-c", script], { timeoutMs });
+    const parsed = parseDepCacheScriptOutput(r.stdout);
+    if (r.exitCode !== 0 || r.timedOut) {
+      throw new StepError(
+        parsed.failedStep ?? fallbackStep,
+        `exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}: ${tail(r.stderr || r.stdout)}`,
+      );
+    }
+    return parsed;
+  }
+
   /** Materialize the dep/build cache (KTD7). Same committed-lockfile key as
    *  the warm checkout → per-dir mechanism from `depCacheMaterialization`:
    *  node_modules is hardlink-copied (cp -al), chowning only DIRECTORIES to
@@ -2372,6 +2409,11 @@ export class ResidentDO extends Sandbox<Env> {
    *  dirs (dist/build/out/.next) are plain-copied — fresh inodes, fully
    *  chowned — because the review agent and `/op build` rebuild them IN
    *  PLACE, which a shared read-only inode refuses with EACCES (#315 review).
+   *  The whole per-dir mechanism runs as TWO container forks (#356 item 4):
+   *  `depCacheScript` handles all five dirs and emits tagged mechanism +
+   *  mutable-listing lines, `mutableCacheSwapScript` performs the swaps —
+   *  instead of the old ~25 sequential spawns, all of which held the mirror
+   *  mutex. Ownership/permission results are identical (residentDepCache.ts).
    *  A differing key runs the repo's install command in the worktree,
    *  token-free, as the thread user. */
   private async materializeThreadDeps(
@@ -2393,59 +2435,30 @@ export class ResidentDO extends Sandbox<Env> {
       // rebuild, else MirrorBusyError → 503 mirror-busy (the bot-side fallback
       // retries). Callers invoke materializeThreadDeps OUTSIDE their own mirror
       // lock, so this fresh acquire is not a re-entrant double-lock.
+      //
+      // The mechanism itself — per-dir src/dst gating, `cp -al` with the
+      // dirs-only chown plus the group/world-write strip on the shared FILE
+      // inodes (one combined walk), the plain-copy fallback and the copy-dir
+      // path, and the swap of the tool-managed paths inside a hardlinked
+      // node_modules for real copies — is the pure `depCacheScript` /
+      // `mutableCacheSwapScript` (residentDepCache.ts, where the WHY of every
+      // ownership/permission rule is documented): two forks total, tagged
+      // lines back, instead of a spawn per probe/walk/path (#356 item 4).
       await this.withMirrorLock(async () => {
-        for (const dir of DEP_CACHE_DIRS) {
-          const src = `${CHECKOUT_DIR}/${dir}`;
-          const dst = `${wt}/${dir}`;
-          if ((await this.run(["test", "-d", src])).exitCode !== 0) continue;
-          if ((await this.run(["test", "-e", dst])).exitCode === 0) continue;
-          let used: "hardlink" | "copy" = "copy";
-          if (depCacheMaterialization(dir) === "hardlink") {
-            const hard = await this.run(["cp", "-al", src, dst], { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
-            if (hard.exitCode === 0) {
-              await this.runOk(
-                ["sh", "-c", `find ${dst} -type d -exec chown ${binding.user}:${binding.user} {} +`],
-                "deps-chown",
-              );
-              // The hardlinked FILE inodes stay owned by the warm-checkout user
-              // and are shared with the warm checkout and every peer worktree.
-              // Dirs-only chown lets the thread delete/replace entries in its own
-              // tree, but an unusual world/group-writable file (an odd dependency
-              // file under node_modules) would still be mutable THROUGH the
-              // shared inode → cross-thread tamper / cache poisoning the next
-              // snapshot could capture. Strip group/world write from the shared
-              // file inodes (read stays intact, so the thread can still consume
-              // the cache).
-              await this.runOk(
-                ["sh", "-c", `find ${dst} -type f \\( -perm -g+w -o -perm -o+w \\) -exec chmod go-w {} +`],
-                "deps-harden",
-              );
-              // Tool-managed paths inside node_modules (top-level dot entries
-              // like .cache/.vite/.prisma/.bin, nested .cache dirs) are
-              // rewritten in place by builds and test runs — the same EACCES
-              // the build dirs hit. Swap each shared subtree for a real copy
-              // (fresh thread-owned inodes); the packages stay hardlinked.
-              const listing = await this.runOk(mutableCacheFindArgv(dst), "deps-mutable-list", { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
-              for (const path of mutableCachePaths(dst, listing.split("\n"))) {
-                const rel = path.slice(dst.length);
-                await this.runOk(["rm", "-rf", path], "deps-mutable-rm");
-                await this.runOk(["cp", "-R", `${src}${rel}`, path], "deps-mutable-copy", { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
-                // -h: never dereference. A postinstall could plant one of these
-                // entries as a symlink (cp -R re-copies it as a link); a plain
-                // chown running as root would follow it and hand an out-of-tree
-                // target (warm checkout, mirror) to the thread user.
-                await this.runOk(["chown", "-Rh", `${binding.user}:${binding.user}`, path], "deps-mutable-chown");
-              }
-              used = "hardlink";
-            } else {
-              await this.run(["rm", "-rf", dst]);
-            }
-          }
-          if (used === "copy") {
-            await this.runOk(["cp", "-R", src, dst], "deps-copy", { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
-            await this.runOk(["chown", "-Rh", `${binding.user}:${binding.user}`, dst], "deps-copy-chown");
-          }
-          mech = foldDepsMechanism(mech, dir, used);
+        const parsed = await this.runDepScript(
+          depCacheScript(CHECKOUT_DIR, wt, binding.user),
+          "deps-materialize",
+          REFRESH_BUILD_TIMEOUT_MS,
+        );
+        mech = parsed.mech;
+        const nmDst = `${wt}/node_modules`;
+        const paths = mutableCachePaths(nmDst, parsed.mutableListing);
+        if (paths.length > 0) {
+          await this.runDepScript(
+            mutableCacheSwapScript(`${CHECKOUT_DIR}/node_modules`, nmDst, binding.user, paths),
+            "deps-mutable-swap",
+            GIT_NETWORK_TIMEOUT_MS,
+          );
         }
       }, ATTACH_MUTEX_WAIT_MS);
       return { deps: mech, reconciled: false };
@@ -2788,27 +2801,27 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  /** Is this thread's tree safe to destroy? Runs AS THE THREAD USER (threadRun
-   *  → su), never as root: the worktree is thread-owned, so root git in it
-   *  would be refused by safe.directory and would be the exact repo-local-
+  /** Is this thread's tree safe to destroy? The git probes run AS THE THREAD
+   *  USER (su), never as root: the worktree is thread-owned, so root git in
+   *  it would be refused by safe.directory and would be the exact repo-local-
    *  config execution vector safe.directory exists to block. Unknown (git
-   *  failed) counts as NOT clean — never destroy work on a guess. */
+   *  failed) counts as NOT clean — never destroy work on a guess. A tree
+   *  that no longer exists (disk recycled by a sleep/wake) has nothing to
+   *  preserve: releasable, so a post-wake binding does not hold a pool user
+   *  for 7 days on behalf of files that are already gone.
+   *
+   *  ONE spawn (#356 item 6): the presence test and both git probes fold
+   *  into the pure `worktreeCleanlinessScript` (test -d as root, both git
+   *  commands inside a single privilege-dropped `su`, tagged lines out);
+   *  `parseWorktreeCleanliness` encodes the exact decision table above. */
   private async worktreeCleanliness(binding: ThreadBinding): Promise<{ clean: boolean; reason?: string }> {
-    // A tree that no longer exists (disk recycled by a sleep/wake) has nothing
-    // to preserve: releasable, so a post-wake binding does not hold a pool
-    // user for 7 days on behalf of files that are already gone.
-    const present = await this.run(["test", "-d", `${binding.worktreePath}/.git`]);
-    if (present.exitCode !== 0) return { clean: true, reason: "worktree missing (disk recycled)" };
-    const status = await this.threadRun(binding.user, binding.worktreePath, "git status --porcelain", DEFAULT_EXEC_TIMEOUT_MS);
-    const ahead = await this.threadRun(binding.user, binding.worktreePath, "git rev-list --count HEAD --not --remotes", DEFAULT_EXEC_TIMEOUT_MS);
-    if (status.exitCode !== 0 || ahead.exitCode !== 0) {
-      const why = (status.stderr || ahead.stderr || "git exited non-zero").trim().split("\n")[0];
-      return { clean: false, reason: `clean-check failed: ${why}` };
-    }
-    const changes = status.stdout.trim() ? status.stdout.trim().split("\n").length : 0;
-    const unpushed = Number(ahead.stdout.trim()) || 0;
-    if (changes > 0 || unpushed > 0) return { clean: false, reason: `dirty: ${changes} uncommitted change(s), ${unpushed} unpushed commit(s)` };
-    return { clean: true };
+    const injected = { GIT_TERMINAL_PROMPT: "0" }; // same injection as threadRun — fail fast, never prompt
+    validateEnvNames(injected);
+    const r = await this.run(["sh", "-c", worktreeCleanlinessScript(binding.worktreePath, binding.user)], {
+      timeoutMs: DEFAULT_EXEC_TIMEOUT_MS,
+      env: injected,
+    });
+    return parseWorktreeCleanliness(r);
   }
 
   /** Anything that must not be interrupted by a container stop or counted
@@ -3103,31 +3116,41 @@ export class ResidentDO extends Sandbox<Env> {
     if (live.length === 0) return { reclaimed, kept };
     const slug = resource.slice("repo:".length);
     const active = await this.isRuntimeActive().catch(() => false);
+    // Fate pre-pass (#356 item 5): resolve every distinct non-default ref's
+    // fate up front — ONE `for-each-ref` listing answers the "branch gone?"
+    // membership test for the whole pass (instead of a rev-parse container
+    // spawn per ref), and the PR lookups (independent 10 s REST calls) run
+    // concurrently. The eviction loop below stays SERIAL: its re-read guards
+    // (binding, op counter, runtime) depend on ordering.
+    const distinctRefs = [...new Set(live.map((b) => b.ref).filter((ref) => ref !== defaultRef))];
+    // Branch existence is read from the MIRROR (the cycle's fetch --prune
+    // just ran). A sleeping container has no mirror on disk, so `run` would
+    // wake it and read an empty disk as "every branch gone" — when the
+    // runtime is down only the PR lookup can speak. An unreadable listing
+    // likewise must not read as "every branch gone": membership stays
+    // unknown (null) and the PR lookup decides — keep on a guess, never evict.
+    let mirrorRefs: Set<string> | null = null;
+    if (active && distinctRefs.length > 0) {
+      const listing = await this.run(["git", "-C", MIRROR_DIR, "for-each-ref", "--format=%(refname:short)", "refs/heads/"]);
+      mirrorRefs = listing.exitCode === 0 ? parseRefListing(listing.stdout) : null;
+    }
     const fates = new Map<string, { fate: RefFate; detail: string }>();
+    await Promise.all(
+      distinctRefs.map(async (ref) => {
+        if (mirrorRefs && !mirrorRefs.has(ref)) {
+          fates.set(ref, { fate: "gone", detail: "" });
+          return;
+        }
+        const looked = await this.lookupPullFate(slug, ref, token);
+        const detail = looked.pr !== null && (looked.fate === "merged" || looked.fate === "closed") ? ` #${looked.pr}` : "";
+        fates.set(ref, { fate: looked.fate, detail });
+      }),
+    );
     for (const binding of live) {
       const isDefaultRef = binding.ref === defaultRef;
-      let fate: RefFate = "unknown";
-      let detail = "";
-      if (!isDefaultRef) {
-        const cached = fates.get(binding.ref);
-        if (cached) ({ fate, detail } = cached);
-        else {
-          // Branch existence is read from the MIRROR (the cycle's fetch --prune
-          // just ran). A sleeping container has no mirror on disk, so `run`
-          // would wake it and read an empty disk as "every branch gone" — when
-          // the runtime is down only the PR lookup can speak.
-          const exists = active
-            ? await this.run(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", "--quiet", `refs/heads/${binding.ref}`])
-            : { exitCode: 0 };
-          if (exists.exitCode !== 0) fate = "gone";
-          else {
-            const looked = await this.lookupPullFate(slug, binding.ref, token);
-            fate = looked.fate;
-            if (looked.pr !== null && (fate === "merged" || fate === "closed")) detail = ` #${looked.pr}`;
-          }
-          fates.set(binding.ref, { fate, detail });
-        }
-      }
+      // The default branch is never a finished ref (reclaimDecision keeps it
+      // by name), so its fate is never looked up.
+      const { fate, detail } = (!isDefaultRef && fates.get(binding.ref)) || { fate: "unknown" as RefFate, detail: "" };
       const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
       // The clean check runs as the thread user and only when it can decide
       // anything: a finished ref, nothing running, runtime up (down → the tree

@@ -51,6 +51,19 @@ export function parsePullsBody(body: unknown): PullSummary[] | null {
   return out;
 }
 
+/** Parse `git for-each-ref --format='%(refname:short)' refs/heads/` output
+ *  into the set of branches the mirror holds — ONE spawn feeding every
+ *  binding's "branch gone?" membership test in the reclamation pass, instead
+ *  of a `rev-parse --verify` container round-trip per ref (#356 item 5). */
+export function parseRefListing(stdout: string): Set<string> {
+  return new Set(
+    stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== ""),
+  );
+}
+
 /** Collapse a head's PR list into one fate. An open PR always wins (the
  *  branch is still in play); otherwise merged beats closed. */
 export function pullsFate(pulls: readonly PullSummary[]): Extract<RefFate, "merged" | "closed" | "open" | "no-pr"> {

@@ -181,3 +181,30 @@ export function nextRefreshDelayS(input: {
       return input.intervalS;
   }
 }
+
+/** Bound a promise that offers no timeout of its own (#356 item 7a: the
+ *  Sandbox SDK's createBackup/restoreBackup take neither a timeout nor an
+ *  AbortSignal). On expiry, rejects with an error naming `what` and the
+ *  budget, so a hung R2 transfer fails the refresh cycle into its existing
+ *  degrade/goDown handling instead of stranding `refreshing`/`restoring`
+ *  until the 30-min watchdog. The losing promise keeps running (nothing can
+ *  cancel it) — its eventual rejection is swallowed so it never surfaces as
+ *  an unhandled rejection. */
+export function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      promise.catch(() => {});
+      reject(new Error(`${what} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(e as Error);
+      },
+    );
+  });
+}

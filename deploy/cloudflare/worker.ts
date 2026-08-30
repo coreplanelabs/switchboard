@@ -94,7 +94,10 @@ const INTERNAL = "https://switchboard-keepalive.internal";
 export class SwitchboardServer extends Container<Env> {
   defaultPort = 8080; // the bot's health endpoint (PORT=8080 in the image)
   // Never let this scale to zero: the Slack websocket must stay connected and
-  // Slack does not redeliver missed Socket Mode events. Cron pings every 5m.
+  // Slack does not redeliver missed Socket Mode events. The keep-alive cron
+  // pings /healthz every MINUTE (wrangler.jsonc `* * * * *`, deliberate: it
+  // bounds the Slack deaf window after a stop/rollover — the sooner a touch
+  // restarts the container, the sooner the reconnect catch-up can run).
   sleepAfter = "2h";
 
   /** Start the container if it is not running, with the env computed now.
