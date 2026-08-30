@@ -411,13 +411,10 @@ export const EXPIRY_DIVIDER_HTML = `<li class="divider" id="leaving" role="separ
  *  asset; CSP allows `img-src data:` for exactly this) and the raw idle SVG at
  *  `GET /favicon.ico` — the fallback every page WITHOUT an inline icon link gets
  *  (the catch-all used to answer it with a text/plain "ok"). */
-export function faviconSvg(fill: string): string {
-  return `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='${fill}'/></svg>`;
-}
-export const FAVICON_ICO_SVG = faviconSvg("#6e7681");
-const dataUri = (svg: string): string => `data:image/svg+xml,${encodeURIComponent(svg)}`;
-export const FAVICON_LIVE = dataUri(faviconSvg("#2ea043"));
-export const FAVICON_IDLE = dataUri(FAVICON_ICO_SVG);
+// (The SVG/data-URI definitions moved to ../favicon.ts — node-free, shared
+// with the web bundle. Re-exported so existing importers keep one entry point.)
+export { FAVICON_ICO_SVG, FAVICON_IDLE, FAVICON_LIVE, faviconSvg } from "../favicon.js";
+import { FAVICON_IDLE, FAVICON_LIVE } from "../favicon.js";
 
 export interface RunsIndexOptions {
   /** `?all=1`: finished and persisted rows included, the feed keeps finished rows. */

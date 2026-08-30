@@ -27,7 +27,9 @@ interface Recorded {
   ended: boolean;
 }
 
-function fakeRes(): Recorded & { writeHead(s: number, h: Record<string, string>): void; end(b?: unknown): void } {
+type FakeRes = Recorded & import("node:http").ServerResponse;
+
+function fakeRes(): FakeRes {
   const r = {
     body: "",
     ended: false,
@@ -40,7 +42,7 @@ function fakeRes(): Recorded & { writeHead(s: number, h: Record<string, string>)
       r.ended = true;
     },
   } as Recorded & { writeHead(s: number, h: Record<string, string>): void; end(b?: unknown): void };
-  return r;
+  return r as unknown as FakeRes;
 }
 
 const req = (url: string, method = "GET") => ({ url, method }) as import("node:http").IncomingMessage;

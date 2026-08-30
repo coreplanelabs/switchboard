@@ -29,8 +29,10 @@ export interface RunsIndexSeed {
   /** The server clock the initial relative times/stopwatches paint from. */
   now: number;
   rows: RunIndexRowSeed[];
-  /** `?all=1` only: the service degraded to live rows → a visible banner. */
-  storeUnavailable?: boolean;
+  /** `?all=1` only: the service degraded to live rows → the banner text to
+   *  show (the one message every surface uses, STORE_UNAVAILABLE_BANNER —
+   *  passed as text so the web bundle never imports the command registry). */
+  storeUnavailable?: string;
   /** `?all=1` only: next page's href when this page was full. */
   olderHref?: string;
   /** `?all=1` only: reached via cursor — the page holds runs finished before this stamp. */

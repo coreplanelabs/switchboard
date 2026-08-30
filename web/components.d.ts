@@ -16,9 +16,13 @@ declare module 'vue' {
     CostChart: typeof import('./src/components/costs/CostChart.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    RunRow: typeof import('./src/components/runs/RunRow.vue')['default']
     RunsTabs: typeof import('./src/components/runs/RunsTabs.vue')['default']
+    SlackMark: typeof import('./src/components/SlackMark.vue')['default']
+    SourceMark: typeof import('./src/components/runs/SourceMark.vue')['default']
     StatusDot: typeof import('./src/components/StatusDot.vue')['default']
     UApp: typeof import('./node_modules/@nuxt/ui/dist/runtime/components/App.vue')['default']
+    UButton: typeof import('./node_modules/@nuxt/ui/dist/runtime/components/Button.vue')['default']
     UTooltip: typeof import('./node_modules/@nuxt/ui/dist/runtime/components/Tooltip.vue')['default']
   }
 }
