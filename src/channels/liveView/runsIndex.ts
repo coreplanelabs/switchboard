@@ -2,9 +2,9 @@ import { NAV_CSS, renderNav } from "../nav.js";
 import type { RunView } from "../../core/runsService.js";
 import { STORE_UNAVAILABLE_BANNER } from "../../core/commandRegistry.js";
 import { SCHEDULED_PANEL_CSS } from "../scheduledPanel.js";
-import { formatElapsed, splitRunLabel } from "../indexFormat.js";
+import { formatElapsed, formatRelative, splitRunLabel } from "../indexFormat.js";
 import { formatLocalIso } from "../localIso.js";
-import { escapeHtml, NAME_SHIM } from "./html.js";
+import { escapeHtml, NAME_SHIM, TOOLTIP_CSS, TOOLTIP_SCRIPT } from "./html.js";
 
 // The runs page: two tabs of one shell (`runsShell`) — the runs index (`GET
 // /runs`, `?all=1`: the server-rendered snapshot and the inline client that
@@ -98,6 +98,7 @@ export type FeedAction = { op: "upsert"; run: IndexRow } | { op: "remove"; id: s
  */
 export interface RowFormatters {
   formatElapsed: (ms: number) => string;
+  formatRelative: (startedAt: number, now: number) => string;
   splitRunLabel: (label: string) => { agent?: string; scope: string; snippet?: string };
   formatLocalIso: (at: number) => string;
 }
@@ -158,14 +159,22 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
     if (run.finished) return typeof run.finishedAt === "number" ? fmt.formatElapsed(run.finishedAt - run.startedAt) : "";
     return typeof now === "number" ? fmt.formatElapsed(now - run.startedAt) : "";
   }
-  // The dot's hover: the status word, when the run was kicked off, and — for a
-  // finished row — when it finished, in the viewer's zone.
-  function dotTitle(run: IndexRow): string {
-    var t = statusWord(run) + " · started " + fmt.formatLocalIso(run.startedAt);
-    if (run.finished && typeof run.finishedAt === "number") t += " · finished " + fmt.formatLocalIso(run.finishedAt);
+  // The dot's tooltip: a live run's latest activity (or "starting…" before its
+  // first event); a finished run's outcome and how long it took.
+  function dotTip(run: IndexRow): string {
+    if (!run.finished) return run.activity ? "now: " + run.activity : "starting…";
+    var t = statusWord(run);
+    if (typeof run.finishedAt === "number") t += " in " + fmt.formatElapsed(run.finishedAt - run.startedAt);
     return t;
   }
-  function fill(li: RowElement, run: IndexRow, now?: number): void {
+  // The started column's tooltip: the exact stamps, one per line, in the
+  // renderer's zone (the viewer's once repainted by the feed).
+  function whenTip(run: IndexRow): string {
+    var t = "started " + fmt.formatLocalIso(run.startedAt);
+    if (run.finished && typeof run.finishedAt === "number") t += "\nfinished " + fmt.formatLocalIso(run.finishedAt);
+    return t;
+  }
+  function fill(li: RowElement, run: IndexRow, now?: number, retentionMs?: number): void {
     li.className = "run " + (run.finished ? "finished" : "live");
     li.setAttribute("data-run-id", run.id);
     li.setAttribute("data-started-at", String(run.startedAt)); // drives sorted insert + the live stopwatch tick
@@ -184,8 +193,16 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
     dot.className = "dot " + statusDot(run);
     dot.setAttribute("role", "img");
     dot.setAttribute("aria-label", word);
-    dot.setAttribute("title", dotTitle(run));
+    // The dot's hover is what the run is DOING (item 20) — its latest activity —
+    // so a glance answers "what step is it on" without opening the run; a
+    // finished row's says how it ended and how long it took.
+    dot.setAttribute("data-tip", dotTip(run));
     a.appendChild(dot);
+    // When it started, the way GitHub says it (`3 hours ago`), ticked by the
+    // page every minute; the exact started/finished stamps are its hover.
+    var when = span("when", typeof now === "number" ? fmt.formatRelative(run.startedAt, now) : "");
+    when.setAttribute("data-tip", whenTip(run));
+    a.appendChild(when);
     var parts = fmt.splitRunLabel(run.label || shortId(run.id));
     if (parts.agent) a.appendChild(span("agent " + agentClass(parts.agent), parts.agent));
     a.appendChild(span("scope", parts.scope));
@@ -197,6 +214,19 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
     elapsed.setAttribute("title", run.finished ? "start to finish" : "running for");
     facts.appendChild(elapsed);
     facts.appendChild(span("count", countLabel(run.eventCount)));
+    // Expiry (item 20): with a known retention, a finished row knows when it
+    // leaves; the page groups rows leaving within a day under a divider and each
+    // such row says when, in the renderer's zone (the viewer's, once repainted).
+    if (run.finished && typeof run.finishedAt === "number" && typeof retentionMs === "number") {
+      var expiresAt = run.finishedAt + retentionMs;
+      li.setAttribute("data-expires-at", String(expiresAt));
+      if (typeof now === "number" && expiresAt - now <= 86400000) {
+        li.className += " leaving";
+        var gone = span("expires", "gone " + fmt.formatLocalIso(expiresAt).slice(0, 16).replace("T", " "));
+        gone.setAttribute("title", "removed at " + fmt.formatLocalIso(expiresAt));
+        facts.appendChild(gone);
+      }
+    } else li.removeAttribute("data-expires-at");
     a.appendChild(facts);
     li.appendChild(a);
     if (!run.finished && !run.stop) {
@@ -235,7 +265,7 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
  *  behind the `__name` shim and the helpers it calls (the index has no markdown
  *  script to bring the shim; seen locally 2026-08-29: every row emptied when an
  *  inlined helper threw `__name is not defined`). */
-export const INDEX_ROW_SCRIPT = `${NAME_SHIM}\n${String(formatElapsed)}\n${String(splitRunLabel)}\n${String(formatLocalIso)}\n${String(indexRowRenderer)}`;
+export const INDEX_ROW_SCRIPT = `${NAME_SHIM}\n${String(formatElapsed)}\n${String(formatRelative)}\n${String(splitRunLabel)}\n${String(formatLocalIso)}\n${String(indexRowRenderer)}`;
 
 /**
  * A server-side `RowDocument`: elements that remember their attributes (in set
@@ -287,18 +317,21 @@ export function staticDocument(): RowDocument & { serialize(el: RowElement): str
 
 const serverDoc = staticDocument();
 /** The formatters, as the server passes them (the page passes the inlined copies). */
-export const ROW_FORMATTERS: RowFormatters = { formatElapsed, splitRunLabel, formatLocalIso };
+export const ROW_FORMATTERS: RowFormatters = { formatElapsed, formatRelative, splitRunLabel, formatLocalIso };
 const serverRows = indexRowRenderer(serverDoc, ROW_FORMATTERS);
 
 /** Server-rendered markup for one index row — the shared renderer against the
  *  static document. `now` paints a live row's stopwatch; without it the cell is
  *  empty until the page's first tick (the mirror test compares clock-free rows).
  *  Exported for the mirror test. */
-export function indexRowHtml(row: IndexRow, now?: number): string {
+export function indexRowHtml(row: IndexRow, now?: number, retentionMs?: number): string {
   const li = serverDoc.createElement("li");
-  serverRows.fill(li, row, now);
+  serverRows.fill(li, row, now, retentionMs);
   return serverDoc.serialize(li);
 }
+
+/** The cut in the `?all=1` list under which the rows leaving within a day sit (item 20). */
+export const EXPIRY_DIVIDER_HTML = `<li class="divider" id="leaving" role="separator"><span class="hourglass" aria-hidden="true">⏳</span><span>Leaving within a day</span><span class="muted">— each row says when it is removed</span></li>`;
 
 export interface RunsIndexOptions {
   /** `?all=1`: finished and persisted rows included, the feed keeps finished rows. */
@@ -309,6 +342,8 @@ export interface RunsIndexOptions {
   storeUnavailable?: boolean;
   /** `?all=1` only: the next page's href when this page was full; absent → no link. */
   olderHref?: string;
+  /** `?all=1` only: this page was reached through a cursor (not the newest page) → a "Newest" link. */
+  paged?: boolean;
   /** The server clock the live rows' stopwatches are painted from; default `Date.now()`. */
   now?: number;
 }
@@ -370,15 +405,18 @@ function runsShell(current: RunsTab, title: string, body: string, script: string
   .toolbar { display: flex; align-items: center; gap: 1rem; margin: 0 0 .35rem; padding: 0 .5rem; font-size: .75rem; color: var(--muted); }
   .toolbar .count { font-variant-numeric: tabular-nums; }
   .toolbar .filter { margin-left: auto; position: relative; display: inline-flex; align-items: center; gap: .4rem; }
-  .toolbar a.toggle { color: var(--fg-soft); text-decoration: none; border: 1px solid #3b4252; border-radius: 4px; padding: .05rem .5rem; }
-  .toolbar a.toggle:hover, .toolbar a.toggle:focus-visible { color: var(--fg); background: #161b22; }
+  .toolbar label.toggle { display: inline-flex; align-items: center; gap: .4rem; cursor: pointer; user-select: none; color: var(--fg-soft); }
+  .toolbar label.toggle:hover { color: var(--fg); }
+  .toolbar label.toggle input { margin: 0; accent-color: #2ea043; }
   .toolbar .help { display: inline-flex; align-items: center; justify-content: center; width: 1.1em; height: 1.1em; border-radius: 50%;
     border: 1px solid #3b4252; color: var(--dim); font-size: .7rem; line-height: 1; cursor: help; }
-  .toolbar .filter:hover .help { color: var(--fg-soft); border-color: #5f677a; }
-  .toolbar .tip { display: none; position: absolute; right: 0; top: calc(100% + .45rem); z-index: 2; width: 22rem; padding: .55rem .7rem;
-    border-radius: 6px; border: 1px solid #2a2f3a; background: #161b22; color: var(--fg-soft); font-size: .75rem; line-height: 1.45;
-    white-space: normal; text-align: left; box-shadow: 0 8px 24px #0009; }
-  .toolbar .filter:hover .tip, .toolbar .filter:focus-within .tip { display: block; }
+  .toolbar .help:hover, .toolbar .help:focus-visible { color: var(--fg-soft); border-color: #5f677a; outline: none; }
+  /* Screen-reader text (the checkbox's aria-describedby target); the visible tooltip is the shared component. */
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  /* Started column (item 20): a fixed-width relative time, ticked every minute; exact stamps on hover. */
+  .when { flex: 0 0 auto; min-width: 8.5em; color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
+  #runs li.finished .when { color: var(--dim); }
+  ${TOOLTIP_CSS}
   #runs { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
   #runs li.run { border-radius: 6px; display: flex; align-items: center; gap: .5rem; border-bottom: 1px solid var(--line); }
   /* The empty sentinel is an <li> too: this must outrank the flex rule above,
@@ -425,8 +463,20 @@ function runsShell(current: RunsTab, title: string, body: string, script: string
   button.stop:disabled { opacity: .5; cursor: default; }
   .empty { color: var(--muted); padding: .6rem .5rem; }
   .banner { margin: 0 0 .75rem; padding: .45rem .6rem; border: 1px solid var(--amber); border-radius: 6px; color: var(--amber); font-size: .8rem; }
-  a.older { display: inline-block; margin: .75rem .5rem; color: var(--blue); text-decoration: none; font-size: .8rem; }
-  a.older:hover { text-decoration: underline; }
+  /* Pager: newest · N shown · older, one quiet line under the list. */
+  nav.pager { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; margin: .75rem .5rem 0; font-size: .8rem; color: var(--muted); }
+  nav.pager a { color: var(--blue); text-decoration: none; }
+  nav.pager a:hover { text-decoration: underline; }
+  nav.pager .shown { font-variant-numeric: tabular-nums; color: var(--dim); }
+  /* The expiry cut: the rows under it leave within a day. Warm, not alarming —
+     an hourglass, a label, and each row's own "gone <when>" fact. */
+  #runs li.divider { display: flex; align-items: baseline; gap: .5rem; padding: .9rem .5rem .4rem; margin-top: .5rem; border-top: 1px dashed #d2992255; border-bottom: 0;
+    font-size: .72rem; letter-spacing: .05em; text-transform: uppercase; color: var(--amber); }
+  #runs li.divider .hourglass { font-size: .9rem; letter-spacing: 0; }
+  #runs li.divider .muted { text-transform: none; letter-spacing: 0; color: var(--dim); }
+  #runs li.divider[hidden] { display: none; }
+  #runs li.leaving a.row { opacity: .85; }
+  .expires { color: var(--amber); min-width: 11em; text-align: right; }
   [hidden] { display: none; }
   /* The run page's 404: quiet, centered, the way back as the one action. */
   .notfound { max-width: 34rem; margin: 3rem auto; text-align: center; color: var(--fg-soft); }
@@ -480,24 +530,78 @@ export function renderRunsIndex(runs: readonly IndexRow[], opts: RunsIndexOption
   const liveCount = runs.filter((r) => !r.finished).length;
   const title = opts.all ? "All runs" : "Live runs";
   const retention = escapeHtml(retentionSentence(opts.retention));
-  const toggle = opts.all ? `<a class="toggle" href="/runs">Active only</a>` : `<a class="toggle" href="/runs?all=1">Show completed</a>`;
+  // The completed toggle is a checkbox (item 20): checked = the `?all=1` view.
+  // Changing it navigates — the view is a server mode (R11), not a client filter.
+  const toggle = `<label class="toggle"><input type="checkbox" id="showdone"${opts.all ? " checked" : ""} aria-describedby="retention" /> Show completed</label>`;
   const feedUrl = opts.all ? "/runs?stream=1&all=1" : "/runs?stream=1";
   const banner = opts.storeUnavailable ? `\n<p class="banner" role="status">${escapeHtml(STORE_UNAVAILABLE_BANNER)}</p>` : "";
-  const older = opts.olderHref ? `\n<a class="older" href="${escapeHtml(opts.olderHref)}">Older runs →</a>` : "";
+  // The expiry divider (item 20): finished rows that leave within a day sit
+  // under it, oldest last — they are the oldest rows, so it is one cut in the
+  // newest-first list. Only with run history on (a known retention); with
+  // history off every finished row leaves within a minute and the tooltip says so.
+  const retentionMs = opts.retention ? opts.retention.retentionDays * 86_400_000 : undefined;
+  const leaving = (r: IndexRow) => retentionMs !== undefined && r.finished && typeof r.finishedAt === "number" && r.finishedAt + retentionMs - now <= 86_400_000;
+  const firstLeaving = runs.findIndex(leaving);
+  const rowsHtml =
+    firstLeaving === -1
+      ? runs.map((r) => indexRowHtml(r, now, retentionMs)).join("")
+      : runs.slice(0, firstLeaving).map((r) => indexRowHtml(r, now, retentionMs)).join("") +
+        EXPIRY_DIVIDER_HTML +
+        runs.slice(firstLeaving).map((r) => indexRowHtml(r, now, retentionMs)).join("");
+  // Pager (item 20): `?all=1` is paged by the service cursor — "Older runs" when
+  // this page was full, "Newest" when this is not the first page.
+  const pager =
+    opts.all && (opts.olderHref || opts.paged)
+      ? `\n<nav class="pager" aria-label="Completed runs pages">${opts.paged ? `<a href="/runs?all=1">← Newest</a>` : `<span></span>`}<span class="shown">${runs.length} shown</span>${
+          opts.olderHref ? `<a class="older" href="${escapeHtml(opts.olderHref)}">Older runs →</a>` : `<span></span>`
+        }</nav>`
+      : "";
   const body = `<div class="toolbar">
   <span class="count" id="livecount">${liveCount} running</span>
-  <span class="filter">${toggle} <span class="help" aria-hidden="true">?</span><span class="tip" role="tooltip" id="retention">${retention}</span></span>
+  <span class="filter">${toggle} <span class="help" tabindex="0" data-tip="${retention}">?</span><span class="sr" id="retention">${retention}</span></span>
 </div>${banner}
-<ul id="runs">${rows}<li class="empty" id="empty"${emptyHidden}>${opts.all ? "No runs." : "No active runs."}</li></ul>${older}
+<ul id="runs">${rowsHtml}<li class="empty" id="empty"${emptyHidden}>${opts.all ? "No runs." : "No active runs."}</li></ul>${pager}
 `;
   const script = `<script>
 ${INDEX_ROW_SCRIPT}
+${TOOLTIP_SCRIPT}
 (function () {
   var showAll = ${opts.all ? "true" : "false"};
-  var rowLib = indexRowRenderer(document, { formatElapsed: formatElapsed, splitRunLabel: splitRunLabel, formatLocalIso: formatLocalIso });
+  var RETENTION_MS = ${retentionMs === undefined ? "undefined" : String(retentionMs)};
+  var rowLib = indexRowRenderer(document, { formatElapsed: formatElapsed, formatRelative: formatRelative, splitRunLabel: splitRunLabel, formatLocalIso: formatLocalIso });
   var list = document.getElementById("runs");
   var empty = document.getElementById("empty");
   var liveCount = document.getElementById("livecount");
+  // The completed toggle switches the server view (R11): a change navigates.
+  document.getElementById("showdone").addEventListener("change", function (ev) {
+    window.location.assign(ev.target.checked ? "/runs?all=1" : "/runs");
+  });
+  // The expiry divider (item 20): one cut before the first row leaving within a
+  // day — rows are newest-first, so everything under it leaves too. Re-placed
+  // after every change; removed when nothing is leaving. The divider is created
+  // here when the server rendered none (a row can age into the window while the
+  // page is open).
+  function placeDivider() {
+    var divider = document.getElementById("leaving");
+    var now = Date.now(), first = null;
+    var kids = list.querySelectorAll("li.run");
+    for (var i = 0; i < kids.length; i++) {
+      var exp = kids[i].getAttribute("data-expires-at");
+      if (exp !== null && Number(exp) - now <= 86400000) { first = kids[i]; break; }
+    }
+    if (!first) { if (divider) divider.remove(); return; }
+    if (!divider) {
+      divider = document.createElement("li");
+      divider.className = "divider";
+      divider.id = "leaving";
+      divider.setAttribute("role", "separator");
+      var hg = document.createElement("span"); hg.className = "hourglass"; hg.setAttribute("aria-hidden", "true"); hg.textContent = "\\u23f3";
+      var label = document.createElement("span"); label.textContent = "Leaving within a day";
+      var note = document.createElement("span"); note.className = "muted"; note.textContent = "\\u2014 each row says when it is removed";
+      divider.appendChild(hg); divider.appendChild(label); divider.appendChild(note);
+    }
+    if (divider.nextSibling !== first) list.insertBefore(divider, first);
+  }
   var state = document.getElementById("state");
   var stateDot = document.getElementById("statedot");
   // Connection indicator: color the dot + set its label via classList/textContent
@@ -548,6 +652,18 @@ ${INDEX_ROW_SCRIPT}
     }
   }
   window.setInterval(tick, 1000);
+  // The started column: every row's relative time, once a minute (item 20).
+  function tickWhen() {
+    var now = Date.now();
+    var all = list.querySelectorAll("li.run");
+    for (var i = 0; i < all.length; i++) {
+      var w = all[i].querySelector(".when");
+      if (w) w.textContent = formatRelative(Number(all[i].getAttribute("data-started-at")), now);
+    }
+  }
+  tickWhen();
+  window.setInterval(tickWhen, 60000);
+  installTooltips();
   // Insert a new row in newest-first position by startedAt, so rows land
   // correctly whether they arrive via the replay (newest-first) or as live new
   // runs — a blind prepend would invert any batch that isn't server-seeded.
@@ -558,6 +674,7 @@ ${INDEX_ROW_SCRIPT}
     for (var i = 0; i < kids.length; i++) {
       var k = kids[i];
       if (k === empty) break; // real rows sit above the empty sentinel
+      if (!k.hasAttribute("data-started-at")) continue; // the expiry divider is not a row
       if (startedAt >= Number(k.getAttribute("data-started-at"))) {
         list.insertBefore(li, k);
         return;
@@ -571,14 +688,15 @@ ${INDEX_ROW_SCRIPT}
     if (li) {
       // Update in place — startedAt is immutable, so position holds. A finished
       // row keeps its record fields (status, finishedAt) under the summary.
-      rowLib.fill(li, rowLib.mergeRow(rowLib.persistedFields(li), run), Date.now());
+      rowLib.fill(li, rowLib.mergeRow(rowLib.persistedFields(li), run), Date.now(), RETENTION_MS);
     } else {
       li = document.createElement("li");
       rows[run.id] = li;
-      rowLib.fill(li, run, Date.now());
+      rowLib.fill(li, run, Date.now(), RETENTION_MS);
       insertSorted(li, run.startedAt);
     }
     refreshEmpty();
+    placeDivider();
   }
   function remove(id) {
     var li = rows[id];
@@ -586,7 +704,9 @@ ${INDEX_ROW_SCRIPT}
     delete rows[id];
     delete runs[id];
     refreshEmpty();
+    placeDivider();
   }
+  window.setInterval(placeDivider, 60000); // a row can age into the last day while the page is open
 
   var es = new EventSource(${JSON.stringify(feedUrl)});
   es.onopen = function () { setConn("green", "connected"); };

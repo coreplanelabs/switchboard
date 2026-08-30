@@ -184,6 +184,7 @@ describe("RunRegistry.listActive", () => {
       finished: false,
       startedAt: 1010, // clock at create()
       eventCount: 2,
+      activity: "x", // the latest tool call (item 20)
     });
     expect(list[1]).toEqual({
       id: "id-1",
@@ -323,7 +324,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     events.length = 0; // drop the create-replay upsert
     reg.publish(id, call("x"));
     expect(events).toEqual([
-      { type: "upsert", run: { id: "id-1", token: "tok-1", finished: false, startedAt: 1000, eventCount: 1 } },
+      { type: "upsert", run: { id: "id-1", token: "tok-1", finished: false, startedAt: 1000, eventCount: 1, activity: "x" } },
     ]);
   });
 
@@ -689,6 +690,27 @@ describe("RunRegistry — token-free operator reads (#157 U5, KTD7)", () => {
     reg.subscribe(id, token, (e) => seen.push(e));
     reg.requestStopById(id, "soft", { kind: "chat", id: "   " });
     expect(seen.at(-1)).toMatchObject({ actor: { kind: "chat", id: "unknown" } });
+  });
+});
+
+describe("RunRegistry — `activity` on the summary (live-view item 20)", () => {
+  it("is the latest narration line / tool-call summary / `answering`, one line, capped; absent before the first such event", () => {
+    const reg = new RunRegistry({ genId: () => "a1", genToken: () => "t" });
+    const { id } = reg.create("x");
+    expect("activity" in reg.listActive()[0]).toBe(false);
+    reg.publish(id, { type: "input", text: "hello" }); // not an activity
+    expect("activity" in reg.listActive()[0]).toBe(false);
+    reg.publish(id, { type: "assistant", text: "Checking the\n  remaining   touchpoints." });
+    expect(reg.listActive()[0].activity).toBe("Checking the remaining touchpoints.");
+    reg.publish(id, { type: "tool_call", tool: "bash", summary: "$ npm test" });
+    expect(reg.listActive()[0].activity).toBe("$ npm test");
+    reg.publish(id, { type: "tool_result", tool: "bash", ok: true, summary: "exit 0" }); // results do not change it
+    expect(reg.listActive()[0].activity).toBe("$ npm test");
+    reg.publish(id, { type: "assistant", text: "x".repeat(300) });
+    expect(reg.listActive()[0].activity).toHaveLength(120);
+    expect(reg.listActive()[0].activity!.endsWith("…")).toBe(true);
+    reg.publish(id, { type: "answer", text: "done" });
+    expect(reg.listActive()[0].activity).toBe("answering");
   });
 });
 

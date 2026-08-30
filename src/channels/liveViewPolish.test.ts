@@ -41,7 +41,7 @@ describe("runs index — elapsed, hierarchy, toolbar (item 18)", () => {
     expect(html.indexOf("var __name = function (fn) { return fn; };")).toBeLessThan(html.indexOf("function formatElapsed("));
     expect(html).toContain("function splitRunLabel(");
     expect(html).toContain("function formatLocalIso(");
-    expect(html).toContain("rowLib.fill(li, rowLib.mergeRow(rowLib.persistedFields(li), run), Date.now());");
+    expect(html).toContain("rowLib.fill(li, rowLib.mergeRow(rowLib.persistedFields(li), run), Date.now(), RETENTION_MS);");
   });
 
   it("renders the label as agent chip · scope · snippet, with the agent hue allow-listed (a label is data, not a class)", () => {
@@ -59,22 +59,75 @@ describe("runs index — elapsed, hierarchy, toolbar (item 18)", () => {
   it("the dot's hover says the status, when the run was kicked off and, once finished, when it finished (the renderer's zone: the server's on first paint, the viewer's on repaint)", () => {
     const s = Date.UTC(2026, 7, 30, 5, 0, 0);
     const f = Date.UTC(2026, 7, 30, 5, 2, 0);
-    expect(indexRowHtml(row({ startedAt: s }), 1)).toContain(`aria-label="live" title="live · started ${formatLocalIso(s)}"`);
-    const done = indexRowHtml(row({ finished: true, status: "failed", startedAt: s, finishedAt: f }));
-    expect(done).toContain(`<span class="dot red" role="img" aria-label="failed" title="failed · started ${formatLocalIso(s)} · finished ${formatLocalIso(f)}"></span>`);
+    // item 20: the started column is GitHub-style relative time from `now` with the exact stamps on its tooltip;
+    // the dot's tooltip is what the run is doing (or its outcome + duration); no native titles remain on either
+    const live = indexRowHtml(row({ startedAt: s, activity: "$ npm test" }), s + 3 * 3_600_000);
+    expect(live).toContain(`<span class="dot green" role="img" aria-label="live" data-tip="now: $ npm test"></span><span class="when" data-tip="started ${formatLocalIso(s)}">3 hours ago</span>`);
+    expect(indexRowHtml(row({ startedAt: s }), s + 1000)).toContain('data-tip="starting…"'); // before the first event
+    const done = indexRowHtml(row({ finished: true, status: "failed", startedAt: s, finishedAt: f }), f + 60_000);
+    expect(done).toContain('<span class="dot red" role="img" aria-label="failed" data-tip="failed in 2m 00s"></span>');
+    expect(done).toContain(`<span class="when" data-tip="started ${formatLocalIso(s)}\nfinished ${formatLocalIso(f)}">3 minutes ago</span>`);
+    expect(done).not.toContain(' title="live');
+    expect(indexRowHtml(row())).toMatch(/<span class="when" data-tip="started [^"]*"><\/span>/); // no clock → empty until the first tick
     expect(done).toContain('<li class="run finished"');
   });
 
-  it("toolbar: `N running`, the show-all toggle as a link with a real tooltip (hover / focus-within), the connection label beside the title", () => {
-    const html = renderRunsIndex([row(), row({ id: "run-2", finished: true, finishedAt: 1_000_500 })], { all: true, retention: { retentionDays: 30 } });
+  it("toolbar: `N running`, a `Show completed` checkbox (checked on ?all=1, navigates on change) with a real tooltip, the connection label beside the title", () => {
+    const html = renderRunsIndex([row(), row({ id: "run-2", finished: true, finishedAt: 1_000_500 })], { all: true, retention: { retentionDays: 30 }, now: 1_000_000 });
     expect(html).toContain('<span class="count" id="livecount">1 running</span>');
-    expect(html).toContain('<a class="toggle" href="/runs">Active only</a>');
-    expect(html).toContain('<span class="tip" role="tooltip" id="retention">Finished runs are kept for 30 days, then deleted</span>');
-    expect(html).toContain(".toolbar .filter:hover .tip, .toolbar .filter:focus-within .tip { display: block; }");
-    expect(renderRunsIndex([row()])).toContain('<a class="toggle" href="/runs?all=1">Show completed</a>');
+    expect(html).toContain('<label class="toggle"><input type="checkbox" id="showdone" checked aria-describedby="retention" /> Show completed</label>');
+    // the retention note rides the shared tooltip component (item 20) — one #tooltip per page, viewport-aware, keyboard-reachable
+    expect(html).toContain('<span class="help" tabindex="0" data-tip="Finished runs are kept for 30 days, then deleted">?</span><span class="sr" id="retention">Finished runs are kept for 30 days, then deleted</span>');
+    expect(html).toContain("function installTooltips(");
+    expect(html).toContain("installTooltips();");
+    expect(html).toContain('tip.setAttribute("data-placement", top === below ? "below" : "above");'); // flips above when there is no room below
+    expect(html).toContain("#tooltip { position: fixed;");
+    expect(html).toContain('window.location.assign(ev.target.checked ? "/runs?all=1" : "/runs");');
+    expect(renderRunsIndex([row()])).toContain('<input type="checkbox" id="showdone" aria-describedby="retention" /> Show completed');
+    expect(renderRunsIndex([row()])).not.toContain("Active only");
     expect(html).toContain('<h1>All runs</h1>\n  <span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>');
     expect(html).toContain('setConn("green", "connected")');
     expect(html).not.toContain('setConn("green", "live")');
+  });
+
+  it("expiry divider (item 20): finished rows leaving within a day sit under one cut, each saying when it is removed; nothing without a known retention", () => {
+    const DAY = 86_400_000;
+    const now = 100 * DAY;
+    const fresh = row({ id: "fresh", finished: true, status: "completed", startedAt: now - 2 * DAY, finishedAt: now - 2 * DAY + 5_000 });
+    const soon = row({ id: "soon", finished: true, status: "completed", startedAt: now - 29.5 * DAY, finishedAt: now - 29.5 * DAY + 5_000 });
+    const gone = row({ id: "gone", finished: true, status: "failed", startedAt: now - 29.9 * DAY, finishedAt: now - 29.9 * DAY + 5_000 });
+    const html = renderRunsIndex([row(), fresh, soon, gone], { all: true, retention: { retentionDays: 30 }, now });
+    // one divider, before the first leaving row, after the fresh ones
+    expect(html.match(/<li class="divider" id="leaving" role="separator">/g)?.length).toBe(1);
+    expect(html.indexOf('data-run-id="fresh"')).toBeLessThan(html.indexOf('id="leaving"'));
+    expect(html.indexOf('id="leaving"')).toBeLessThan(html.indexOf('data-run-id="soon"'));
+    expect(html).toContain("Leaving within a day");
+    // each leaving row: class, data-expires-at = finishedAt + retention, a "gone <when>" fact with the exact time on hover
+    expect(html).toMatch(new RegExp(`<li class="run finished leaving" data-run-id="soon"[^>]*data-expires-at="${soon.finishedAt! + 30 * DAY}"`));
+    expect(html).toContain(`<span class="expires" title="removed at ${formatLocalIso(soon.finishedAt! + 30 * DAY)}">gone ${formatLocalIso(soon.finishedAt! + 30 * DAY).slice(0, 16).replace("T", " ")}</span>`);
+    const freshRow = html.slice(html.indexOf('data-run-id="fresh"'), html.indexOf("</li>", html.indexOf('data-run-id="fresh"')));
+    expect(freshRow).toContain("data-expires-at="); // fresh rows carry the stamp (the page may age them into the window) …
+    expect(freshRow).not.toContain('class="expires"'); // … but no fact yet
+    // the page re-places the divider as rows come and go, and ages rows into the window
+    expect(html).toContain("function placeDivider()");
+    expect(html).toContain("window.setInterval(placeDivider, 60000)");
+    expect(html).toContain("var RETENTION_MS = 2592000000;");
+    // no retention → no divider, no stamps, RETENTION_MS undefined
+    const off = renderRunsIndex([soon, gone], { all: true, retention: null, now });
+    expect(off).not.toContain('id="leaving"');
+    expect(off).not.toContain('data-expires-at="'); // (the attribute name appears in the page script; no row carries it)
+    expect(off).toContain("var RETENTION_MS = undefined;");
+    // the sorted insert skips the divider (it has no start stamp)
+    expect(html).toContain('if (!k.hasAttribute("data-started-at")) continue;');
+  });
+
+  it("pager (item 20): `N shown`, `Older runs →` when the page was full, `← Newest` on a cursor page; nothing on the default view", () => {
+    const first = renderRunsIndex([row()], { all: true, retention: null, olderHref: "/runs?all=1&before=5&beforeId=x" });
+    expect(first).toContain('<nav class="pager" aria-label="Completed runs pages"><span></span><span class="shown">1 shown</span><a class="older" href="/runs?all=1&amp;before=5&amp;beforeId=x">Older runs →</a></nav>');
+    const later = renderRunsIndex([row()], { all: true, retention: null, paged: true });
+    expect(later).toContain('<a href="/runs?all=1">← Newest</a><span class="shown">1 shown</span><span></span></nav>');
+    expect(renderRunsIndex([row()], { all: true, retention: null })).not.toContain('class="pager"');
+    expect(renderRunsIndex([row()], { all: false, retention: null, olderHref: "/x" })).not.toContain('class="pager"');
   });
 
   it("the 404 page: the runs shell without a connection indicator, the non-revealing sentence, the retention sentence, the way back (item 19)", () => {
@@ -107,7 +160,7 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
 
   it("holds a `turn` for the step it produced and paints it in that step's head row (💭 chip beside the narration); a turn with no step is flushed as its own row", () => {
     expect(html).toContain("var pendingTurn = null;");
-    expect(html).toContain('appendHead(li, at, turn, step.narration || null, "went straight to tools");');
+    expect(html).toContain('appendHead(li, at, turn, step.narration || null, "no commentary");'); // item 20: the calls are the rows below, so no "tools" word
     expect(html).toContain('flushTurn("wrote the answer below");');
     expect(html).toContain('flushTurn("the run ended here");');
     expect(html).toContain('turn.label.replace(/^Thought for /, "")'); // the chip reads "5m 04s"
@@ -187,6 +240,16 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
     expect(html).toContain('button.fold::before { content: "\\229e";');
     expect(html).toContain('button.fold[data-open="1"]::before { content: "\\229f"; }');
     expect(html).toContain('fold.setAttribute("aria-pressed", allOpen ? "true" : "false");');
+  });
+
+  it("once finished the header says how long the run took (item 20): history pages from the record, live pages from the first→last event stamps; a tool whose summary is just its name shows the chip alone", () => {
+    const hist = renderRunPage("run-1", "", [], { status: "completed", eventCount: 3, durationMs: 147_000 });
+    expect(hist).toContain('<span id="state">finished · completed · 2m 27s</span>');
+    expect(renderRunPage("run-1", "", [], { status: "stopped_soft", eventCount: 3 })).toContain('<span id="state">finished · stopped (soft)</span>');
+    expect(html).toContain('if (e && typeof e.at === "number") { if (firstAt === null || e.at < firstAt) firstAt = e.at; if (lastAt === null || e.at > lastAt) lastAt = e.at; }');
+    expect(html).toContain('var took = firstAt !== null && lastAt !== null && lastAt > firstAt ? " \\u00b7 " + formatElapsed(lastAt - firstAt) : "";');
+    expect(html).toContain('setConn("grey", (stopMode ? "stopped (" + stopMode + ")" : "finished") + took);');
+    expect(html).toContain("if (call.shell || call.title !== call.tool) {"); // no `submit_verdict submit_verdict`
   });
 
   it("the header reads `connected` beside the title, not `live`", () => {
