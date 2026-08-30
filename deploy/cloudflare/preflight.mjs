@@ -27,7 +27,7 @@
 // unit-tested (preflight.test.mjs); `main()` only does I/O around it.
 import { execFile } from "node:child_process";
 import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const DEFAULT_BASE_URL = "https://switchboard.coreplanelabs.dev";
 /** The Containers application `wrangler deploy` creates for `SwitchboardServer` in wrangler.jsonc. */
@@ -165,6 +165,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 }
 
 // Run only when executed directly (`node preflight.mjs`), not when imported by tests.
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+// pathToFileURL, not `file://${argv[1]}`, so the guard also holds on Windows paths.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   process.exitCode = await main();
 }
