@@ -254,7 +254,7 @@ describe("repo onboard", () => {
 
   it("--evict-coldest is an onboard-only flag: reconfigure refuses it as an unknown option", () => {
     const commands = bind();
-    expect(parseInvocation(commands.get("repo.reconfigure")!, ["acme/api", "--evict-coldest"])).toMatchObject({ kind: "usage", error: expect.stringContaining("unknown option --evict-coldest") });
+    expect(parseInvocation(commands.get("repo.reconfigure")!, ["acme/api", "--evict-coldest"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("unknown option --evict-coldest") });
   });
 
   it("an onboard warning field (App unconfigured) surfaces in the reply", async () => {
@@ -306,10 +306,10 @@ describe("repo offboard / rebuild (--dry-run)", () => {
     expect(text).toBe("🔄 Rebuilding `acme/api`: discarded 4 backup object(s); reprovisioning from scratch on `master` (state `onboarding` — watch `repo list` until it reaches `warm`).");
   });
 
-  it("an unknown flag is a usage error naming the flag, never a resident call; a 404 from the resident is `not_found`", async () => {
+  it("an unknown flag is `invalid_input` naming the flag, never a resident call; a 404 from the resident is `not_found`", async () => {
     const c = mockClient({ rebuild: ok({ error: "unknown resource" }, 404) });
     const commands = bind({ admin: c });
-    expect(parseInvocation(commands.get("repo.offboard")!, ["acme/api", "--force"])).toMatchObject({ kind: "usage", error: expect.stringContaining("unknown option --force") });
+    expect(parseInvocation(commands.get("repo.offboard")!, ["acme/api", "--force"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("unknown option --force") });
     expect(c.offboard).not.toHaveBeenCalled();
     expect(await commands.invoke("repo.rebuild", { args: ["acme/api"] }, admin)).toMatchObject({ ok: false, error: "not_found", message: "HTTP 404: unknown resource" });
   });

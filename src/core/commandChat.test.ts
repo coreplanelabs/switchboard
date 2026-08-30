@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { ConfigStore } from "../config.js";
 import { CommandError, CommandRegistry, bindCommands, commandDefiner, type CommandDef } from "./commandRegistry.js";
-import { handleChatCommand, HELP_COMMAND_ID, parseChatCommand, type ChatCommands } from "./commandChat.js";
+import { handleChatCommand, HELP_COMMAND_ID, invokeChatCommand, parseChatCommand, type ChatCommands } from "./commandChat.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import type { RunRecord } from "./runRecord.js";
 import { RunRegistry } from "./runRegistry.js";
@@ -159,14 +159,16 @@ describe("parseChatCommand", () => {
     expect(parseChatCommand("help", hiddenHelp)).toBeNull();
   });
 
-  it("a recognized command with a malformed tail is a usage reply naming the flag/argument — never a model turn, never the value", () => {
-    expect(parseChatCommand("demo echo please", registry)).toEqual({ kind: "reply", text: "⚠️ `demo echo`: demo echo takes no arguments\nusage: demo echo --status <active|finished|all> [--limit <integer>]" });
-    expect(parseChatCommand("demo echo --status", registry)).toMatchObject({ kind: "reply", text: expect.stringContaining("option --status needs a value") });
-    expect(parseChatCommand("demo echo --bogus s3cret", registry)).toMatchObject({ kind: "reply", text: expect.stringContaining("unknown option --bogus") });
+  it("a recognized command with a malformed tail is an `invalid_input` reply (the registry's own code, one vocabulary) naming the flag/argument — never a model turn, never the value", () => {
+    expect(parseChatCommand("demo echo please", registry)).toEqual({ kind: "reply", error: "invalid_input", text: "⚠️ `demo echo`: demo echo takes no arguments\nusage: demo echo --status <active|finished|all> [--limit <integer>]" });
+    expect(parseChatCommand("demo echo --status", registry)).toMatchObject({ kind: "reply", error: "invalid_input", text: expect.stringContaining("option --status needs a value") });
+    expect(parseChatCommand("demo echo --bogus s3cret", registry)).toMatchObject({ kind: "reply", error: "invalid_input", text: expect.stringContaining("unknown option --bogus") });
     expect(JSON.stringify(parseChatCommand("demo echo --bogus s3cret", registry))).not.toContain("s3cret");
-    expect(parseChatCommand("demo echo status=all", registry)).toMatchObject({ kind: "reply", text: expect.stringContaining("takes no arguments") });
-    expect(parseChatCommand("demo missing", registry)).toMatchObject({ kind: "reply", text: expect.stringContaining("missing argument <id>") });
-    expect(parseChatCommand('demo say me "open quote', registry)).toEqual({ kind: "reply", text: "⚠️ `demo say`: unterminated quote" });
+    expect(parseChatCommand("demo echo status=all", registry)).toMatchObject({ kind: "reply", error: "invalid_input", text: expect.stringContaining("takes no arguments") });
+    expect(parseChatCommand("demo missing", registry)).toMatchObject({ kind: "reply", error: "invalid_input", text: expect.stringContaining("missing argument <id>") });
+    expect(parseChatCommand('demo say me "open quote', registry)).toEqual({ kind: "reply", error: "invalid_input", text: "⚠️ `demo say`: unterminated quote" });
+    // A help reply carries no code.
+    expect(parseChatCommand("demo echo --help", registry)).not.toHaveProperty("error");
   });
 
   it("help is derived: `<group> <verb> --help` gives the command's help, `<group> help` lists the group's chat commands", () => {
@@ -256,11 +258,16 @@ describe("handleChatCommand", () => {
     expect(await run(commands, config, "demo echo --status all", "slack:UX")).toBe("🚫 `demo echo` is restricted. Ask <@slack:UADMIN>.");
   });
 
-  it("not_found → one line with the handler's message; a usage/help parse is replied as-is without invoking", async () => {
+  it("not_found → one line with the handler's message; a rejected/help parse is replied as-is without invoking, the rejection carrying `invalid_input` like a registry refusal would", async () => {
     const { commands, deps, config } = setup();
     expect(await run(commands, config, "demo missing x", "slack:UADMIN")).toBe("⚠️ `demo missing`: thing not found");
     expect(await run(commands, config, "demo echo please", "slack:UX")).toContain("takes no arguments");
     expect(await run(commands, config, "demo echo --help", "slack:UX")).toContain("usage: demo echo");
+    const rejected = await invokeChatCommand({ commands, parsed: parseChatCommand("demo echo please", commands)!, msg: msg("demo echo please", "slack:UX"), config });
+    expect(rejected).toMatchObject({ ok: false, error: "invalid_input", text: expect.stringContaining("takes no arguments") });
+    const help = await invokeChatCommand({ commands, parsed: parseChatCommand("demo echo --help", commands)!, msg: msg("demo echo --help", "slack:UX"), config });
+    expect(help.ok).toBe(false);
+    expect(help).not.toHaveProperty("error");
     expect(deps.hits).toEqual([]);
   });
 

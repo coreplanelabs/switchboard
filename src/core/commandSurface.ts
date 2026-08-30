@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { acceptsUndefined, type ArgDef, type CommandDef, type CommandInput } from "./commandRegistry.js";
+import { acceptsUndefined, type ArgDef, type CommandDef, type CommandInput, type InvokeErrorCode } from "./commandRegistry.js";
 
 // Everything a surface shows for a command, DERIVED from its definition (#157
 // KTD20/KTD21). This is the only place a surface name or a grammar exists:
@@ -9,8 +9,12 @@ import { acceptsUndefined, type ArgDef, type CommandDef, type CommandInput } fro
 //   grammar  — ONE tokenizer + binder for CLI argv and chat text:
 //              `<group> <verb> <positional…> [--flag value | --flag=value |
 //              --bool | --no-bool]…`, quoted values, kebab→camel into `options`,
-//              positionals → `args`. Usage errors are structured and never echo
-//              a submitted value (it may be a secret).
+//              positionals → `args`. A grammar rejection is the registry's own
+//              `invalid_input` (ONE error vocabulary across surfaces: the same
+//              fault — unknown option, missing argument, bad flag — carries the
+//              same machine code whether a query string, a JSON body, argv or
+//              chat text spelled it); the message is the human usage hint and
+//              never echoes a submitted value (it may be a secret).
 //   schema   — `jsonSchemaFor(cmd)` merges arguments (by name) and options into
 //              the MCP `inputSchema`; the HTTP adapter addresses the same names.
 //   help     — `usageLine` / `helpText` / `catalogueText` from the definition
@@ -71,7 +75,8 @@ export function normalizeQuotes(text: string): string {
 /**
  * Whitespace-separated tokens with `"double"` and `'single'` quoting (a quoted
  * span may sit inside a token: `--repo="acme/api"`). An unterminated quote is
- * a usage error. Smart quotes are normalized first.
+ * an error the adapters report as `invalid_input`, like any malformed tail.
+ * Smart quotes are normalized first.
  */
 export function tokenize(text: string): { ok: true; tokens: string[] } | { ok: false; error: string } {
   const src = normalizeQuotes(text);
@@ -162,7 +167,11 @@ export function jsonSchemaFor(cmd: CommandShape): Record<string, unknown> {
 
 // ---- grammar (CLI argv + chat text) ----------------------------------------------
 
-export type GrammarResult = { kind: "invoke"; input: CommandInput } | { kind: "help" } | { kind: "usage"; error: string };
+/** A fault the registry's own `parseInput` would refuse as `invalid_input` —
+ *  the grammar just sees it first — so it carries that very code; `error` is
+ *  the usage hint (the fault, then the derived usage line). */
+export type GrammarRejection = { kind: "invalid"; code: Extract<InvokeErrorCode, "invalid_input">; error: string };
+export type GrammarResult = { kind: "invoke"; input: CommandInput } | { kind: "help" } | GrammarRejection;
 
 const FLAG_KEY = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$/i;
 
@@ -194,11 +203,12 @@ export function setDotted(target: Record<string, unknown>, path: string[], value
  * (dotted keys nest); kebab-case flags map to the camelCase option keys; `--`
  * ends option parsing; `--help`/`-h` asks for help. Positional tokens fill the
  * declared arguments in order; a trailing `rest` argument takes every remaining
- * token joined by single spaces. Errors name the flag or the argument, never a
- * value, and end with the usage line.
+ * token joined by single spaces. A rejection is `invalid` (code
+ * `invalid_input`); its message names the flag or the argument, never a value,
+ * and ends with the usage line.
  */
 export function parseInvocation(cmd: CommandShape, tokens: readonly string[]): GrammarResult {
-  const usage = (error: string): GrammarResult => ({ kind: "usage", error: `${error}\nusage: ${usageLine(cmd)}` });
+  const invalid = (error: string): GrammarRejection => ({ kind: "invalid", code: "invalid_input", error: `${error}\nusage: ${usageLine(cmd)}` });
   const shape = cmd.options?.shape ?? {};
   const positional: string[] = [];
   const options: Record<string, unknown> = {};
@@ -214,12 +224,12 @@ export function parseInvocation(cmd: CommandShape, tokens: readonly string[]): G
       optionsEnded = true;
       continue;
     }
-    if (!t.startsWith("--")) return usage(`unknown option ${t} (options are --kebab-case)`);
+    if (!t.startsWith("--")) return invalid(`unknown option ${t} (options are --kebab-case)`);
     const body = t.slice(2);
     const eq = body.indexOf("=");
     const rawKey = eq < 0 ? body : body.slice(0, eq);
     const inline = eq < 0 ? undefined : body.slice(eq + 1);
-    if (!FLAG_KEY.test(rawKey)) return usage(`bad option --${rawKey}`);
+    if (!FLAG_KEY.test(rawKey)) return invalid(`bad option --${rawKey}`);
     let path = rawKey.split(".").map(kebabToCamel);
     let negated = false;
     if (!(path[0] in shape) && path.length === 1 && path[0].startsWith("no") && /^no[A-Z]/.test(path[0])) {
@@ -230,19 +240,19 @@ export function parseInvocation(cmd: CommandShape, tokens: readonly string[]): G
       }
     }
     const schema = shape[path[0]] as z.ZodType | undefined;
-    if (!schema) return usage(`unknown option --${rawKey}`);
+    if (!schema) return invalid(`unknown option --${rawKey}`);
     const boolean = path.length === 1 && isBooleanSchema(schema);
     let value: unknown;
     if (negated) {
-      if (inline !== undefined) return usage(`--${rawKey} takes no value`);
+      if (inline !== undefined) return invalid(`--${rawKey} takes no value`);
       value = false;
     } else if (boolean) {
       value = inline === undefined ? true : inline;
     } else {
       value = inline ?? tokens[++i];
-      if (value === undefined) return usage(`option --${rawKey} needs a value`);
+      if (value === undefined) return invalid(`option --${rawKey} needs a value`);
     }
-    if (!setDotted(options, path, value)) return usage(`option --${rawKey} given twice`);
+    if (!setDotted(options, path, value)) return invalid(`option --${rawKey} given twice`);
   }
 
   const declared = cmd.args ?? [];
@@ -252,10 +262,10 @@ export function parseInvocation(cmd: CommandShape, tokens: readonly string[]): G
   if (rest) {
     if (positional.length > fixed.length) args.push(positional.slice(fixed.length).join(" "));
   } else if (positional.length > declared.length) {
-    return usage(declared.length === 0 ? `${chatForm(cmd.id)} takes no arguments` : `unexpected argument: ${chatForm(cmd.id)} takes at most ${declared.length}`);
+    return invalid(declared.length === 0 ? `${chatForm(cmd.id)} takes no arguments` : `unexpected argument: ${chatForm(cmd.id)} takes at most ${declared.length}`);
   }
   const missing = declared.find((a, i) => args[i] === undefined && !acceptsUndefined(a.schema));
-  if (missing) return usage(`missing argument <${missing.name}>`);
+  if (missing) return invalid(`missing argument <${missing.name}>`);
   return { kind: "invoke", input: { args, options } };
 }
 
