@@ -957,6 +957,32 @@ export class ResidentDO extends Sandbox<Env> {
    *  survives, so hydration state is always probed from disk. */
   private hydration: Promise<void> | null = null;
 
+  // -- per-incarnation memos ---------------------------------------------------
+  // Facts about the CURRENT container incarnation that are expensive to
+  // re-derive (a storage multi-get + a runtime probe + a container fork for
+  // hydration; a fork rewriting /etc/gitconfig for git setup; a fork creating
+  // a per-user staging dir) and were, before these memos, re-derived on EVERY
+  // /exec /read /write — the hottest path in the system. Safe to memoize
+  // because every way the fact can stop being true is observable and clears
+  // the memos: a runtime replacement surfaces as RuntimeReplacedError at the
+  // ONE exec choke point (`run()`), a deliberate stop/teardown/rebuild calls
+  // `clearIncarnationMemos()` at its site, every lifecycle transition
+  // (`setResidentState`) clears too, and a sleep cannot race the TTL — the
+  // container sleeps only after SLEEP_AFTER (20 min) of idleness, while the
+  // hydration memo lives `hydrationMemoTtlMs` (60 s) past the last activity
+  // that set it. KTD3 still holds: the memo caches a verdict PROBED from
+  // disk, never assumes one.
+  private hydratedVerdictAt = 0;
+  private readonly hydrationMemoTtlMs = 60_000;
+  private gitSetupDone = false;
+  private stageDirsReady = new Set<string>();
+
+  private clearIncarnationMemos(): void {
+    this.hydratedVerdictAt = 0;
+    this.gitSetupDone = false;
+    this.stageDirsReady.clear();
+  }
+
   /** Mirror mutex (KTD5): a DO yields at every await, so two in-flight
    *  requests CAN interleave mid-handler — every mirror mutation (fetch,
    *  worktree add/remove) runs under this explicit promise-chain lock. The
@@ -1042,7 +1068,10 @@ export class ResidentDO extends Sandbox<Env> {
       // site hardcodes `retryable:false`, so a replacement currently always
       // takes the throw below. It exists so that if a future SDK vouches "never
       // started" we retry then — and only then — without a change here.
-      if (!(err instanceof OperationInterruptedError && err.retryable === true)) throw new RuntimeReplacedError("spawn", err);
+      if (!(err instanceof OperationInterruptedError && err.retryable === true)) {
+        this.clearIncarnationMemos(); // the container this incarnation's memos described is gone
+        throw new RuntimeReplacedError("spawn", err);
+      }
       console.log(`exec: runtime replaced before the process started (SDK says retryable) — retrying once: ${errMsg(err)}`);
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     }
@@ -1050,7 +1079,10 @@ export class ResidentDO extends Sandbox<Env> {
       const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
       return { stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, timedOut: out.timedOut };
     } catch (err) {
-      if (isRuntimeReplacement(err)) throw new RuntimeReplacedError("collect", err);
+      if (isRuntimeReplacement(err)) {
+        this.clearIncarnationMemos(); // the container this incarnation's memos described is gone
+        throw new RuntimeReplacedError("collect", err);
+      }
       throw err;
     }
   }
@@ -1118,19 +1150,29 @@ export class ResidentDO extends Sandbox<Env> {
    *  users can fetch from the root-owned mirror without git's
    *  dubious-ownership refusal (scoped to the mirror — NOT '*'). */
   private async ensureGitSetup(): Promise<void> {
-    await this.runOk(["install", "-d", "-m", "700", "-o", "root", "-g", "root", RESIDENT_STATE_DIR], "state-dir");
-    await this.runOk(["git", "config", "--system", "safe.directory", MIRROR_DIR], "git-config");
-    // U4 isolation: thread users must not read the mirror directly (its
-    // config/refs are engine plumbing; repo content reaches threads only
-    // through their own worktrees). worker1 still needs read access — the
-    // warm checkout fetches from the mirror during refresh — so the mirror
-    // top dir is root:worker1 750, denying worker2..worker17 at traversal.
-    // Conditional: the dir does not exist before provisioning's clone
-    // creates it (runProvisioning re-runs this right after the clone).
+    // Memoized per incarnation: this used to be three container forks
+    // (rewriting /etc/gitconfig among them) on EVERY attach and /op — inside
+    // the mirror mutex, extending every peer's wait. One fork now, and only
+    // when the incarnation hasn't run it yet (cleared with the other memos).
+    if (this.gitSetupDone) return;
+    // U4 isolation (the chown/chmod half): thread users must not read the
+    // mirror directly (its config/refs are engine plumbing; repo content
+    // reaches threads only through their own worktrees). worker1 still needs
+    // read access — the warm checkout fetches from the mirror during refresh —
+    // so the mirror top dir is root:worker1 750, denying worker2..worker17 at
+    // traversal. Conditional: the dir does not exist before provisioning's
+    // clone creates it (runProvisioning re-runs this right after the clone).
     await this.runOk(
-      ["sh", "-c", `if [ -d ${MIRROR_DIR} ]; then chown root:${BUILD_USER} ${MIRROR_DIR} && chmod 750 ${MIRROR_DIR}; fi`],
-      "mirror-perms",
+      [
+        "sh",
+        "-c",
+        `install -d -m 700 -o root -g root ${RESIDENT_STATE_DIR} && ` +
+          `git config --system safe.directory ${MIRROR_DIR} && ` +
+          `if [ -d ${MIRROR_DIR} ]; then chown root:${BUILD_USER} ${MIRROR_DIR} && chmod 750 ${MIRROR_DIR}; fi`,
+      ],
+      "git-setup",
     );
+    this.gitSetupDone = true;
   }
 
   private async refExists(ref: string): Promise<boolean> {
@@ -1395,8 +1437,14 @@ export class ResidentDO extends Sandbox<Env> {
    *  down(r2-restore-failed). Throws ResidentDownError after those
    *  transitions. Called by the refresh alarm (and U4's attach path). */
   async ensureHydrated(): Promise<void> {
+    // Fresh positive verdict for this incarnation → nothing to probe. See the
+    // per-incarnation memo block for why this is safe; the refresh alarm's
+    // 10-min cadence always outlives the TTL, so a cycle re-probes for real.
+    if (this.hydratedVerdictAt !== 0 && Date.now() - this.hydratedVerdictAt < this.hydrationMemoTtlMs) return;
     if (this.hydration) return this.hydration;
-    const p = this.doHydrate().finally(() => {
+    const p = this.doHydrate().then(() => {
+      this.hydratedVerdictAt = Date.now();
+    }).finally(() => {
       if (this.hydration === p) this.hydration = null;
     });
     this.hydration = p;
@@ -1411,10 +1459,12 @@ export class ResidentDO extends Sandbox<Env> {
   private hydrationStartedAt = 0;
 
   private async doHydrate(): Promise<void> {
-    const state = await this.ctx.storage.get<ResidentState>(STATE_KEY);
+    // One storage round trip for the three facts, not three.
+    const stored = await this.ctx.storage.get<ResidentState | SnapshotRecord | RepoFacts>([STATE_KEY, SNAPSHOT_KEY, FACTS_KEY]);
+    const state = stored.get(STATE_KEY) as ResidentState | undefined;
     if (!state || state === "onboarding") throw new Error("resident is not provisioned yet — nothing to hydrate");
-    const snap = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
-    const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
+    const snap = stored.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
+    const facts = stored.get(FACTS_KEY) as RepoFacts | undefined;
     if (!snap || !facts) {
       throw await this.goDown("no-snapshot: resident has no recorded snapshot to rehydrate from");
     }
@@ -1829,6 +1879,7 @@ export class ResidentDO extends Sandbox<Env> {
       return false;
     }
     console.log(`image-stale (${where}): ${last} missing in the running container — stopping so it restarts on the current image`);
+    this.clearIncarnationMemos(); // deliberate incarnation swap
     await this.stop().catch((err) => console.log(`image-stale: stop failed: ${errMsg(err)}`));
     return true;
   }
@@ -2039,7 +2090,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  clone → materialize deps (KTD7) → per-attach credential file (KTD12).
    *  `wantSha` (item 51): the commit the caller expects the ref to be at — a
    *  mirror whose ref tip is not that commit is fetched before the clone. */
-  async attachThread(threadKey: string, refHint: string | null, readonly = false, wantSha: string | null = null): Promise<AttachOk | ThreadErr> {
+  async attachThread(threadKey: string, refHint: string | null, readonly = false, wantSha: string | null = null, record?: ResidentRecord): Promise<AttachOk | ThreadErr> {
     const t0 = Date.now();
     try {
       await this.ensureHydrated();
@@ -2052,7 +2103,7 @@ export class ResidentDO extends Sandbox<Env> {
       // container under it (and isIdle never parks the alarm mid-attach).
       this.attachesInFlight++;
       try {
-        return await this.attachThreadBody(threadKey, refHint, readonly, wantSha, resourceId, t0);
+        return await this.attachThreadBody(threadKey, refHint, readonly, wantSha, resourceId, t0, record);
       } finally {
         this.attachesInFlight--;
       }
@@ -2068,6 +2119,7 @@ export class ResidentDO extends Sandbox<Env> {
     wantSha: string | null,
     resourceId: string,
     t0: number,
+    recordFromRoute?: ResidentRecord,
   ): Promise<AttachOk | ThreadErr> {
     try {
       await this.refreshIfStale(resourceId);
@@ -2075,13 +2127,19 @@ export class ResidentDO extends Sandbox<Env> {
       const s = await this.getStatus();
       return { error: `not-serviceable: ${errMsg(err)}`, status: 503, state: s.state, reason: s.reason };
     }
-    const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+    // `resourceId` was read by the caller a moment ago (item 15 of the audit:
+    // this used to re-read the same key), the registry record rides in from
+    // the route's own onboarded check (same read, milliseconds earlier — the
+    // fallback lookup keeps any other caller working), and the two remaining
+    // storage reads go in ONE round trip.
+    const resource = resourceId;
     const slug = resource.slice("repo:".length);
-    const record = await this.registry().getRecord(resource);
-    const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
+    const stored = await this.ctx.storage.get<RepoFacts | ThreadBinding>([FACTS_KEY, threadBindingKey(threadKey)]);
+    const facts = stored.get(FACTS_KEY) as RepoFacts | undefined;
+    const record = recordFromRoute ?? (await this.registry().getRecord(resource));
     if (!record || !facts) return { error: "not-serviceable: registry record or repo facts missing", status: 503 };
 
-    const prior = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+    const prior = stored.get(threadBindingKey(threadKey)) as ThreadBinding | undefined;
     const ref = prior?.ref ?? refHint; // KTD6: the binding's ref wins for the thread's whole life
     if (!ref) {
       // Name the default branch so the bot can bind to it (loudly) instead of
@@ -2399,6 +2457,15 @@ export class ResidentDO extends Sandbox<Env> {
     return { deps: "install", reconciled: true };
   }
 
+  /** The per-user 700 staging dir (`install -d` is idempotent), memoized per
+   *  incarnation — the write/credential paths used to fork for it on every
+   *  call. Cleared with the other memos; a fresh disk simply re-creates it. */
+  private async ensureStageDir(user: string, stageDir: string): Promise<void> {
+    if (this.stageDirsReady.has(user)) return;
+    await this.runOk(["install", "-d", "-m", "700", "-o", user, "-g", user, stageDir], "stage-dir");
+    this.stageDirsReady.add(user);
+  }
+
   /** Per-attach credential file (KTD12): the minted token reaches the
    *  worktree via the SDK file API into a 700 per-user staging dir, then a
    *  privilege-dropped `cat` into `.git/github-credentials` (0600, owned by
@@ -2409,10 +2476,9 @@ export class ResidentDO extends Sandbox<Env> {
   private async writeThreadCredentials(binding: ThreadBinding, token: string): Promise<number> {
     const stageDir = `/workspace/.stage-${binding.user}`;
     const stage = `${stageDir}/cred`;
-    await this.runOk(["install", "-d", "-m", "700", "-o", binding.user, "-g", binding.user, stageDir], "stage-dir");
+    await this.ensureStageDir(binding.user, stageDir);
     await this.writeFile(stage, `https://x-access-token:${token}@github.com\n`);
-    await this.runOk(["chown", `${binding.user}:${binding.user}`, stage], "stage-chown");
-    await this.runOk(["chmod", "600", stage], "stage-chmod");
+    await this.runOk(["sh", "-c", `chown ${binding.user}:${binding.user} ${stage} && chmod 600 ${stage}`], "stage-perms");
     const cred = `${binding.worktreePath}/.git/github-credentials`;
     await this.threadRunOk(
       binding.user,
@@ -2585,10 +2651,9 @@ export class ResidentDO extends Sandbox<Env> {
     const stageDir = `/workspace/.stage-${binding.user}`;
     const stage = `${stageDir}/put`;
     try {
-      await this.runOk(["install", "-d", "-m", "700", "-o", binding.user, "-g", binding.user, stageDir], "stage-dir");
+      await this.ensureStageDir(binding.user, stageDir);
       await this.writeFile(stage, content);
-      await this.runOk(["chown", `${binding.user}:${binding.user}`, stage], "stage-chown");
-      await this.runOk(["chmod", "600", stage], "stage-chmod");
+      await this.runOk(["sh", "-c", `chown ${binding.user}:${binding.user} ${stage} && chmod 600 ${stage}`], "stage-perms");
       await this.threadRunOk(
         binding.user,
         binding.worktreePath,
@@ -2871,9 +2936,12 @@ export class ResidentDO extends Sandbox<Env> {
       const s = await this.getStatus();
       return { error: `not-serviceable: ${errMsg(err)}`, status: 503, state: s.state, reason: s.reason };
     }
-    const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+    // One storage round trip for the two facts; the registry lookup stays (an
+    // op resolves ONLY through the onboard-time command table — KTD8).
+    const stored = await this.ctx.storage.get<string | RepoFacts>([RESOURCE_KEY, FACTS_KEY]);
+    const resource = (stored.get(RESOURCE_KEY) as string | undefined) ?? "";
+    const facts = stored.get(FACTS_KEY) as RepoFacts | undefined;
     const record = await this.registry().getRecord(resource);
-    const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
     if (!record || !facts) return { error: "not-serviceable: registry record or repo facts missing", status: 503 };
     const command = record.commands[op];
     if (!command) return { error: `op-unavailable: the command table has no "${op}" entry`, status: 400 };
@@ -3120,11 +3188,15 @@ export class ResidentDO extends Sandbox<Env> {
 
   // -- state + introspection ---------------------------------------------------
 
-  /** Persist a lifecycle transition. degraded/down always carry a reason. */
+  /** Persist a lifecycle transition. degraded/down always carry a reason.
+   *  Every transition clears the per-incarnation memos: whatever made the
+   *  state move (a restore starting, a refresh, a down) may invalidate the
+   *  cached hydration/git-setup verdicts, and re-deriving them costs one probe. */
   async setResidentState(state: ResidentState, reason = ""): Promise<void> {
     if ((state === "degraded" || state === "down") && !reason) {
       throw new Error(`state "${state}" requires a reason`);
     }
+    this.clearIncarnationMemos();
     await this.ctx.storage.put({
       [STATE_KEY]: state,
       [REASON_KEY]: reason,
@@ -3231,6 +3303,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  next refresh must take the restoring→warm wake path). */
   async debugStopContainer(): Promise<{ stopped: boolean; error?: string }> {
     try {
+      this.clearIncarnationMemos(); // deliberate incarnation swap
       await this.stop();
       return { stopped: true };
     } catch (err) {
@@ -3396,6 +3469,7 @@ export class ResidentDO extends Sandbox<Env> {
     }
     // Retired DO: clear the alarm the Container base may have armed for its
     // schedules, then wipe storage so nothing ever wakes this object again.
+    this.clearIncarnationMemos(); // retired object, retired memos
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     return { schedulesCancelled: true, containerStopped, storageCleared: true, backupObjectsDeleted, errors };
@@ -4108,36 +4182,52 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   const resource = parseResource(url.searchParams.get("resource"));
   if ("error" in resource) return json({ error: resource.error }, 400);
 
-  const record = await registryStub(env).getRecord(resource.resource);
-  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
-
   // Body deliberately limited to { state, reason, inFlight } — operator scope
   // sees lifecycle and activity, not config.
-  // Two RPCs, not one atomic snapshot: getStatus() awaits storage, and the DO
-  // may run other work in that gap, so `state`/`reason` and `inFlight` can be
-  // a hair apart (and differ slightly from a /residents sample taken alongside).
-  // Both are best-effort current-state reads; the deploy gate reads /residents.
+  // Three RPCs in one flight, not one atomic snapshot: getStatus() awaits
+  // storage, and the DO may run other work in that gap, so `state`/`reason`
+  // and `inFlight` can be a hair apart (and differ slightly from a /residents
+  // sample taken alongside). All are best-effort current-state reads; the
+  // deploy gate reads /residents. The registry check rides in the same flight
+  // (its 404 is judged first, the probes' results discarded then).
   const stub = residentStub(env, resource.resource);
-  const [status, inFlight] = await Promise.all([stub.getStatus(), stub.getInFlightCount()]);
+  const [record, status, inFlight] = await Promise.all([
+    registryStub(env).getRecord(resource.resource),
+    stub.getStatus(),
+    stub.getInFlightCount(),
+  ]);
+  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
   return json({ state: status.state, reason: status.reason, inFlight });
 }
 
 // -- U4 thread data plane handlers --------------------------------------------
 
-/** Shared front half of /attach /exec /read /write: validate resource +
- *  threadKey (P1: BEFORE anything derives a path or a git argument), check
- *  the resource is onboarded (404 like /status), and hand back the stub. */
+/** Shared front half of the thread routes: validate resource + threadKey (P1:
+ *  BEFORE anything derives a path or a git argument) and hand back the stub.
+ *
+ *  Only /attach checks the registry (`requireOnboarded`) — attach is where a
+ *  binding is created, so "is this resource onboarded" is its question, and
+ *  the 404 names it (plus the record rides on to the DO, saving its re-read).
+ *  /exec /read /write /detach used to round-trip the SINGLETON registry DO per
+ *  request too — a fleet-wide serialization point that bought nothing: those
+ *  routes fail closed anyway (no binding → `not-attached`/`no-binding`; a
+ *  never-onboarded resource's DO has no state → 503 `not-serviceable`), and a
+ *  binding can only exist because an attach passed the real check. */
 async function resolveThreadRoute(
   env: Env,
   body: Record<string, unknown>,
-): Promise<{ stub: ReturnType<typeof residentStub>; resource: string; threadKey: string } | Response> {
+  requireOnboarded = false,
+): Promise<{ stub: ReturnType<typeof residentStub>; resource: string; threadKey: string; record?: ResidentRecord } | Response> {
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
   const threadKey = parseThreadKey(body.threadKey);
   if ("error" in threadKey) return json({ error: threadKey.error }, 400);
+  if (!requireOnboarded) {
+    return { stub: residentStub(env, resource.resource), resource: resource.resource, threadKey: threadKey.threadKey };
+  }
   const record = await registryStub(env).getRecord(resource.resource);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
-  return { stub: residentStub(env, resource.resource), resource: resource.resource, threadKey: threadKey.threadKey };
+  return { stub: residentStub(env, resource.resource), resource: resource.resource, threadKey: threadKey.threadKey, record };
 }
 
 /** Map a ThreadErr union member to its HTTP response (status leaves the body). */
@@ -4147,7 +4237,7 @@ function threadErrResponse(result: ThreadErr): Response {
 }
 
 async function handleAttach(env: Env, body: Record<string, unknown>): Promise<Response> {
-  const ctx = await resolveThreadRoute(env, body);
+  const ctx = await resolveThreadRoute(env, body, true);
   if (ctx instanceof Response) return ctx;
   let refHint: string | null = null;
   if (body.refHint !== undefined) {
@@ -4159,7 +4249,7 @@ async function handleAttach(env: Env, body: Record<string, unknown>): Promise<Re
   if ("error" in readonly) return json({ error: readonly.error }, 400);
   const want = parseWantSha(body.sha);
   if ("error" in want) return json({ error: want.error }, 400);
-  const result = await ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly, want.sha);
+  const result = await ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly, want.sha, ctx.record);
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }
