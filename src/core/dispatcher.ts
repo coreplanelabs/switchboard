@@ -775,7 +775,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // Only a card still in setup — a run failure was already closed by the run
     // loop with its checklist, and must not be relabeled here.
     await setupCard?.done({ title: `❌ setup failed · ${errMsg.slice(0, 120)}` }).catch(() => {});
-    await io.reply(`⚠️ ${errMsg}`).catch(() => {});
+    await io.reply(errorReply(err)).catch(() => {});
   } finally {
     if (counted) activeRuns--;
   }
@@ -808,10 +808,22 @@ async function runInlineCommandRun(
     result = await execute();
     registry.publish(run.id, { type: "answer", text: redactSecrets(result.text), at: Date.now() });
     return result;
+  } catch (err) {
+    // A thrown command still gets an `answer`: the same `⚠️ <error>` line the
+    // dispatcher's outer handler replies with, so the record explains its
+    // `failed` status and the channel reply stays a projection of it.
+    registry.publish(run.id, { type: "answer", text: redactSecrets(errorReply(err)), at: Date.now() });
+    throw err;
   } finally {
     registry.finish(run.id);
     io.runFinished?.({ id: run.id, status: result?.ok ? "completed" : "failed" });
   }
+}
+
+/** The one shape a dispatch failure is reported in — the outer handler's reply
+ *  and a failed inline run's `answer` are built from it, so they cannot drift. */
+function errorReply(err: unknown): string {
+  return `⚠️ ${err instanceof Error ? err.message : String(err)}`;
 }
 
 // ---- channel-agnostic output (channel-formatter feature, #76) ---------------
