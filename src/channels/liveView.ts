@@ -2,7 +2,6 @@ import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { StopMode } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunRegistry, RunSummary } from "../core/runRegistry.js";
-import { RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 import type { RunListCursor, RunsService } from "../core/runsService.js";
 import type { ScheduleDef } from "../core/schedules.js";
 import type { ScheduleStore } from "../core/scheduleStore.js";
@@ -118,10 +117,14 @@ export interface LiveViewDeps {
   };
   /** Injectable clock for the panel's "next fire" / relative times. */
   now?: () => number;
-  /** Rows per `?all=1` page. Default `RUN_LIST_MAX_LIMIT` (the service's cap) —
-   *  a full page renders an "Older runs" link carrying the service's cursor. */
+  /** Rows per `?all=1` page. Default `INDEX_PAGE_SIZE` — a full page renders an
+   *  "Older runs" link carrying the service's cursor; a cursor page a "Newest" link. */
   indexPageSize?: number;
 }
+
+/** Completed runs per `?all=1` page (item 20): a screen's worth, paged by the
+ *  service cursor — never the service's 200-row cap in one scroll. */
+export const INDEX_PAGE_SIZE = 25;
 
 /** The `?all=1` page cursor from the query (`before=<finishedAt>&beforeId=<id>`),
  *  or undefined for the first page — a malformed pair is ignored, never a 400. */
@@ -196,12 +199,13 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
   };
 
   const now = deps.now ?? Date.now;
-  const pageSize = deps.indexPageSize ?? RUN_LIST_MAX_LIMIT;
-  /** One rendered index page: the rows, the store-degraded flag and the "Older runs" href. */
+  const pageSize = deps.indexPageSize ?? INDEX_PAGE_SIZE;
+  /** One rendered index page: the rows, the store-degraded flag, the "Older runs" href and whether a cursor got us here. */
   interface IndexPage {
     rows: readonly IndexRow[];
     storeUnavailable?: boolean;
     olderHref?: string;
+    paged?: boolean;
   }
   /** `?all=1`: one full page of the service's live ∪ finished ∪ persisted rows
    *  (the service's cap, never its 50-row default), with the live rows'
@@ -219,6 +223,7 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
       rows,
       ...(storeUnavailable ? { storeUnavailable: true } : {}),
       ...(nextBefore ? { olderHref: olderRunsHref(nextBefore) } : {}),
+      ...(cursor ? { paged: true } : {}),
     };
   };
 
@@ -260,6 +265,7 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
             now: now(),
             ...(page.storeUnavailable ? { storeUnavailable: true } : {}),
             ...(page.olderHref ? { olderHref: page.olderHref } : {}),
+            ...(page.paged ? { paged: true } : {}),
           }),
         );
       };
@@ -416,7 +422,13 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
       audit({ route: route.kind === "page" ? "page" : "events", runId: route.id, ...(ctx?.identity ? { identity: ctx.identity } : {}) });
       if (route.kind === "page") {
         res.writeHead(200, HTML_PAGE_HEADERS);
-        res.end(renderRunPage(route.id, "", view.events ?? [], { status: view.status, eventCount: view.eventCount }));
+        res.end(
+          renderRunPage(route.id, "", view.events ?? [], {
+            status: view.status,
+            eventCount: view.eventCount,
+            ...(typeof view.finishedAt === "number" ? { durationMs: view.finishedAt - view.startedAt } : {}),
+          }),
+        );
         return;
       }
       serveHistoryEvents(view.events ?? [], view.eventCount, nodeSseSink(req, res));

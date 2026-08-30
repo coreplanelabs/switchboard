@@ -129,6 +129,11 @@ export interface RunSummary {
    *  absent while live, and for a finish that reported none. */
   status?: RunStatus;
   eventCount: number;
+  /** What the run is doing right now, one line (live-view item 20): the latest
+   *  narration's first line, the latest tool call's summary, or `answering`;
+   *  absent until the first such event. The index shows it on the status dot so
+   *  a glance answers "what step is it on" without opening the run. */
+  activity?: string;
   /** Present only once a stop has been requested (#101). */
   stop?: RunStopStatus;
   /** Present (true) once the history writer confirmed the run is in the durable
@@ -229,12 +234,21 @@ interface RunState {
   startedAt: number;
   /** Monotonic creation order; a stable tiebreak when two runs share a clock. */
   seq: number;
+  /** The latest one-line activity (see `RunSummary.activity`); set by `publish()`. */
+  activity?: string;
   /** Total events published (monotonic; unlike backlog, never trimmed). */
   eventCount: number;
   /** Stop control handed to the runner at create(); driven by requestStop(). */
   control: RunControl;
   /** Set by markPersisted() once the durable store confirmed the record. */
   persisted: boolean;
+}
+
+/** First line of `text`, whitespace collapsed, cut at `max` with an ellipsis —
+ *  the index's one-line activity (events are already redacted upstream). */
+function oneLine(text: string, max: number): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
 /** Equal-length constant-time string compare (mirrors channels/http.ts). Guards
@@ -363,6 +377,11 @@ export class RunRegistry {
     run.backlog.push(stamped);
     run.backlogSizes.push(bytes);
     run.backlogBytes += bytes;
+    // The one-line "what is it doing" the index shows (item 20). Narration wins
+    // over the tool call it explains only until the next call arrives.
+    if (event.type === "assistant") run.activity = oneLine(event.text, 120);
+    else if (event.type === "tool_call") run.activity = oneLine(event.summary, 120);
+    else if (event.type === "answer") run.activity = "answering";
     while (run.backlog.length > 1 && (run.backlog.length > this.backlogLimit || run.backlogBytes > this.backlogBytes)) {
       run.backlog.shift();
       run.backlogBytes -= run.backlogSizes.shift() ?? 0;
@@ -562,6 +581,7 @@ export class RunRegistry {
       ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
       ...(run.status !== undefined ? { status: run.status } : {}),
       eventCount: run.eventCount,
+      ...(run.activity !== undefined ? { activity: run.activity } : {}),
       ...(run.control.requested !== undefined
         ? { stop: { mode: run.control.requested, state: run.finished ? ("stopped" as const) : ("stopping" as const) } }
         : {}),

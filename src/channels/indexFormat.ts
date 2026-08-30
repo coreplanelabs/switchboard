@@ -16,6 +16,28 @@ export function formatElapsed(ms: number): string {
   return h + "h " + (m % 60 < 10 ? "0" : "") + (m % 60) + "m";
 }
 
+/** When a run started, the way GitHub and Linear say it (live-view item 20):
+ *  `just now` (< 45 s), `1 minute ago` … `59 minutes ago`, `1 hour ago` … `23
+ *  hours ago`, `yesterday`, `2 days ago` … `6 days ago`, then the date — `Aug 28`
+ *  in the current year, `Aug 28, 2025` otherwise. A future or non-finite
+ *  `startedAt` reads `just now`. Date parts come from the runtime's zone (the
+ *  viewer's in the browser); `now` is passed so the server and a test are
+ *  deterministic. */
+export function formatRelative(startedAt: number, now: number): string {
+  var delta = now - startedAt;
+  if (!(delta > 45000)) return "just now";
+  var m = Math.floor(delta / 60000);
+  if (m < 60) return m <= 1 ? "1 minute ago" : m + " minutes ago";
+  var h = Math.floor(m / 60);
+  if (h < 24) return h === 1 ? "1 hour ago" : h + " hours ago";
+  var d = Math.floor(h / 24);
+  if (d < 7) return d === 1 ? "yesterday" : d + " days ago";
+  var dt = new Date(startedAt);
+  var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var label = months[dt.getMonth()] + " " + dt.getDate();
+  return dt.getFullYear() === new Date(now).getFullYear() ? label : label + ", " + dt.getFullYear();
+}
+
 /** The dispatcher's run label (`composeRunLabel`: `agent · scope · "snippet"`)
  *  split into what the row styles differently: the agent (a chip), the scope
  *  (repo or `#channel · user`) and the quoted request snippet. Anything that is

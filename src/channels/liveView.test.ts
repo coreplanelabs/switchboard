@@ -27,7 +27,8 @@ import { isLoopbackAddress } from "./commandHttp.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
-import { RUN_LIST_MAX_LIMIT, type RunRecord } from "../core/runRecord.js";
+import type { RunRecord } from "../core/runRecord.js";
+import { INDEX_PAGE_SIZE } from "./liveView.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { createRunsService } from "../core/runsService.js";
 import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
@@ -1346,7 +1347,7 @@ describe("context events + seeded history on the run page (#157 U1)", () => {
     // The live frame is parsed, deduped on its SSE id (run events only), then goes through the same `handle`.
     expect(html).toMatch(/es\.onmessage = function \(m\) \{\s*var e;\s*try \{ e = JSON\.parse\(m\.data\); \} catch \(_\) \{ return; \}[\s\S]*?\n\s*handle\(e\);\s*\};/);
     // ONE fold: handle() is the only caller of timeline.push, and both the seed loop and onmessage go through it.
-    expect(html).toMatch(/function handle\(e\) \{\s*lastEventAt = Date\.now\(\);\s*var wasAtTail = atTail\(\);\s*var changes = timeline\.push\(e\);/);
+    expect(html).toMatch(/function handle\(e\) \{\s*lastEventAt = Date\.now\(\);\s*if \(e && typeof e\.at === "number"\)[^\n]*\n\s*var wasAtTail = atTail\(\);\s*var changes = timeline\.push\(e\);/);
     expect(html.match(/timeline\.push\(/g)).toHaveLength(1);
     // The seed is the events verbatim once the JSON escapes are undone.
     expect(JSON.parse(seedEventsJson(events))).toEqual(events);
@@ -1568,7 +1569,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(html).toContain("var live = false;");
       expect(html).toMatch(/if \(live\) \{\s*var es = new EventSource\(url\);/); // the stream only opens on a live page
       expect(html).toContain('<span class="actions" id="actions" hidden>');
-      expect(html).toContain('<span class="pulse grey" id="statedot">∿</span><span id="state">finished · completed</span>');
+      expect(html).toMatch(/<span class="pulse grey" id="statedot">∿<\/span><span id="state">finished · completed · \d+[smh][^<]*<\/span>/); // item 20: how long the run took
       expect(html).not.toContain("?t=");
       expect(html).not.toContain("tok-");
     });
@@ -1588,11 +1589,11 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const a = fakeReqRes("GET", "/runs/r1");
       h.handler(a.req, a.res);
       await done(a);
-      expect(a.body()).toContain(">finished · stopped (soft)</span>");
+      expect(a.body()).toMatch(/>finished · stopped \(soft\)( · [^<]+)?<\/span>/);
       const b = fakeReqRes("GET", "/runs/r2");
       h.handler(b.req, b.res);
       await done(b);
-      expect(b.body()).toContain(">finished · failed</span>");
+      expect(b.body()).toMatch(/>finished · failed( · [^<]+)?<\/span>/);
     });
 
     it("a finished run still in the registry is served tokenless in history mode (the card link outlives the TTL either way)", async () => {
@@ -1816,8 +1817,11 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(t.body()).not.toContain("p1");
       expect(list).not.toHaveBeenCalled();
       expect(get).not.toHaveBeenCalled();
-      expect(t.body()).toContain('href="/runs?all=1"');
-      expect(t.body()).toContain('<span class="tip" role="tooltip" id="retention">Finished runs are kept for 30 days, then deleted</span>'); // item 18: a real tooltip, not a title
+      // item 20: the completed toggle is a checkbox that navigates to the ?all=1 view
+      expect(t.body()).toContain('<input type="checkbox" id="showdone" aria-describedby="retention" /> Show completed');
+      expect(t.body()).toContain('window.location.assign(ev.target.checked ? "/runs?all=1" : "/runs");');
+      // item 20: the shared tooltip component (data-tip) + a screen-reader copy the checkbox describes itself by
+      expect(t.body()).toContain('<span class="help" tabindex="0" data-tip="Finished runs are kept for 30 days, then deleted">?</span><span class="sr" id="retention">Finished runs are kept for 30 days, then deleted</span>');
       expect(t.body()).toContain('new EventSource("/runs?stream=1")');
       expect(t.body()).toContain("var showAll = false;");
     });
@@ -1839,11 +1843,13 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(html).toContain('href="/runs/p1"');
       expect(html).toContain('href="/runs/p2"');
       // finished rows (item 18): status word on the dot (started/finished on its hover), duration in the facts, no token anywhere
-      expect(html).toMatch(/<span class="dot grey" role="img" aria-label="completed" title="completed · started [^"]+ · finished [^"]+"><\/span>/);
+      // item 20: the dot's tooltip is the outcome + how long; the started column's is the exact stamps
+      expect(html).toContain('<span class="dot grey" role="img" aria-label="completed" data-tip="completed in 10s"></span>');
+      expect(html).toMatch(/<span class="when" data-tip="started [^"\n]+\nfinished [^"\n]+">[^<]*<\/span>/);
       expect(html).toContain('<span class="elapsed" title="start to finish">10s</span>');
-      expect(html).toMatch(/<span class="dot red" role="img" aria-label="failed" title="failed · started [^"]+ · finished [^"]+"><\/span>/);
+      expect(html).toContain('<span class="dot red" role="img" aria-label="failed" data-tip="failed in 1h 02m"></span>');
       expect(html).toContain('<span class="elapsed" title="start to finish">1h 02m</span>');
-      const finishedRows = html.match(/<li class="run finished" data-run-id="[^]*?<\/li>/g) ?? [];
+      const finishedRows = html.match(/<li class="run finished(?: leaving)?" data-run-id="[^]*?<\/li>/g) ?? []; // fixture dates are 2023 → "leaving" under the real clock
       expect(finishedRows.length).toBe(3);
       for (const row of finishedRows) expect(row).not.toMatch(/tok-|\?t=/);
       expect(html).toContain('href="/runs"');
@@ -1856,7 +1862,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const t = fakeReqRes("GET", "/runs");
       h.handler(t.req, t.res);
       await done(t);
-      expect(t.body()).toContain('<span class="tip" role="tooltip" id="retention">Run history is off; finished runs are kept about a minute.</span>');
+      expect(t.body()).toContain('data-tip="Run history is off; finished runs are kept about a minute."');
       expect(retentionSentence({ retentionDays: 7 })).toBe("Finished runs are kept for 7 days, then deleted");
       expect(retentionSentence({ retentionDays: 1 })).toBe("Finished runs are kept for 1 day, then deleted");
     });
@@ -1882,7 +1888,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       h.handler(t.req, t.res);
       await done(t);
       expect(list).toHaveBeenCalledTimes(1);
-      expect(t.body()).toContain(`<li class="run finished" data-run-id="${run.id}" data-started-at="${NOW}" data-persisted="1" data-finished-at="${NOW - 60_000}" data-status="completed">`);
+      expect(t.body()).toMatch(new RegExp(`<li class="run finished(?: leaving)?" data-run-id="${run.id}" data-started-at="${NOW}" data-persisted="1" data-finished-at="${NOW - 60_000}" data-status="completed"`));
       expect(t.body()).toContain('li.setAttribute("data-persisted", "1")');
     });
 
@@ -1908,13 +1914,13 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       warn.mockRestore();
     });
 
-    it("?all=1 asks the service for a full page (RUN_LIST_MAX_LIMIT), never the 50-row default", async () => {
+    it("?all=1 asks the service for one index page (INDEX_PAGE_SIZE), never the 50-row default", async () => {
       const h = harness();
       const list = vi.spyOn(h.service, "listRuns");
       const t = fakeReqRes("GET", "/runs?all=1");
       h.handler(t.req, t.res);
       await done(t);
-      expect(list).toHaveBeenCalledWith({ status: "all", limit: RUN_LIST_MAX_LIMIT });
+      expect(list).toHaveBeenCalledWith({ status: "all", limit: INDEX_PAGE_SIZE }); // item 20: a screen's worth per page, paged by cursor
     });
 
     it("a full page renders an `Older runs →` link carrying the service's cursor; following it yields the next page", async () => {
@@ -1939,6 +1945,10 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(second.body()).toContain('href="/runs/p3"');
       expect(second.body()).not.toContain('href="/runs/p2"');
       expect(second.body()).not.toContain("Older runs");
+      // item 20: a cursor page offers the way back; the first page does not
+      expect(second.body()).toContain('<nav class="pager" aria-label="Completed runs pages"><a href="/runs?all=1">← Newest</a><span class="shown">1 shown</span><span></span></nav>');
+      expect(html).not.toContain("← Newest");
+      expect(html).toContain('<span class="shown">2 shown</span>');
     });
 
     it("a short page has no older link; a malformed cursor is ignored (first page)", async () => {
@@ -1960,7 +1970,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     /** Evaluate the inlined row library exactly as the browser would. */
     function clientLib(doc: ReturnType<typeof staticDocument>) {
       // The formatters are the inlined globals, exactly as the page passes them.
-      return new Function("doc", `${INDEX_ROW_SCRIPT}; return indexRowRenderer(doc, { formatElapsed: formatElapsed, splitRunLabel: splitRunLabel, formatLocalIso: formatLocalIso });`)(doc) as ReturnType<
+      return new Function("doc", `${INDEX_ROW_SCRIPT}; return indexRowRenderer(doc, { formatElapsed: formatElapsed, formatRelative: formatRelative, splitRunLabel: splitRunLabel, formatLocalIso: formatLocalIso });`)(doc) as ReturnType<
         typeof indexRowRenderer
       >;
     }
@@ -2022,7 +2032,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       lib.fill(live, { id: "l1", token: "t", finished: false, startedAt: 1, eventCount: 1 });
       expect(lib.mergeRow(lib.persistedFields(live), { id: "l1", token: "t", finished: false, startedAt: 1, eventCount: 2 })).toEqual({ id: "l1", token: "t", finished: false, startedAt: 1, eventCount: 2 });
       // The page's upsert goes through the same merge.
-      expect(renderRunsIndex([], { all: true, retention: null })).toContain("rowLib.fill(li, rowLib.mergeRow(rowLib.persistedFields(li), run), Date.now());");
+      expect(renderRunsIndex([], { all: true, retention: null })).toContain("rowLib.fill(li, rowLib.mergeRow(rowLib.persistedFields(li), run), Date.now(), RETENTION_MS);");
     });
 
     it("the index page routes every frame through feedAction, reading the row's data-persisted flag", () => {

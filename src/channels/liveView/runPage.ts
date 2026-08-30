@@ -44,11 +44,14 @@ export function seedEventsJson(events: readonly LiveFrame[]): string {
 export interface HistoryPage {
   status?: RunStatus;
   eventCount: number;
+  /** `finishedAt - startedAt` when the record knows both (item 20): the header reads `finished · completed · 2m 27s`. */
+  durationMs?: number;
 }
 
-/** The history page's header label: `finished · completed`, `finished · stopped (soft)`, …, or bare `finished`. */
-function finishedLabel(status: RunStatus | undefined): string {
-  return status ? `finished · ${indexStatusLabel(status)}` : "finished";
+/** The history page's header label: `finished · completed · 2m 27s`, `finished · stopped (soft)`, …, or bare `finished`. */
+function finishedLabel(status: RunStatus | undefined, durationMs?: number): string {
+  const parts = ["finished", ...(status ? [indexStatusLabel(status)] : []), ...(durationMs !== undefined ? [formatElapsed(durationMs)] : [])];
+  return parts.join(" · ");
 }
 
 /**
@@ -112,7 +115,7 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   const title = history ? "Run" : "Live run";
   // The connection mark is the pulse glyph (∿), colored by state; the tail reuses it.
   const conn = history
-    ? `<span class="pulse grey" id="statedot">∿</span><span id="state">${escapeHtml(finishedLabel(history.status))}</span>`
+    ? `<span class="pulse grey" id="statedot">∿</span><span id="state">${escapeHtml(finishedLabel(history.status, history.durationMs))}</span>`
     : `<span class="pulse amber" id="statedot">∿</span><span id="state">connecting…</span>`;
   return `<!doctype html>
 <html lang="en">
@@ -585,7 +588,7 @@ ${ELAPSED_SCRIPT}
     var turn = pendingTurn;
     pendingTurn = null;
     var at = step.narration ? step.narration.at : turn ? turn.at : undefined;
-    appendHead(li, at, turn, step.narration || null, "went straight to tools");
+    appendHead(li, at, turn, step.narration || null, "no commentary"); // the turn produced calls only — they are the rows below
     var calls = el("div", "calls");
     li.appendChild(calls);
     log.insertBefore(li, tail);
@@ -698,9 +701,14 @@ ${ELAPSED_SCRIPT}
     var summary = el("summary");
     var glyph = glyphFor(call);
     summary.appendChild(glyph);
+    // Shell: a dim $ then the command. Other tools: the tool-name chip then the
+    // target (web_fetch <url>); a call whose summary is only the tool name
+    // (submit_verdict) shows the chip alone — no duplicated word.
     summary.appendChild(call.shell ? el("span", "dollar", "$") : el("span", "tool", call.tool));
-    summary.appendChild(el("code", "cmd brief", call.headline));
-    summary.appendChild(el("code", "cmd full", call.title));
+    if (call.shell || call.title !== call.tool) {
+      summary.appendChild(el("code", "cmd brief", call.headline));
+      summary.appendChild(el("code", "cmd full", call.title));
+    } else summary.appendChild(el("span", "cmd", ""));
     var facts = el("span", "facts");
     fillFacts(facts, call);
     summary.appendChild(facts);
@@ -818,8 +826,12 @@ ${ELAPSED_SCRIPT}
   // ONE fold for every frame — the seeded history and the live stream go
   // through the same push → apply path, so the two pages can never drift apart.
   // \`wasAtTail\` is sampled once per event, BEFORE anything is added.
+  // The run's span on the runner clock (first event's \`at\` → last event's), for
+  // the finished header: \`finished · 2m 27s\` (item 20).
+  var firstAt = null, lastAt = null;
   function handle(e) {
     lastEventAt = Date.now();
+    if (e && typeof e.at === "number") { if (firstAt === null || e.at < firstAt) firstAt = e.at; if (lastAt === null || e.at > lastAt) lastAt = e.at; }
     var wasAtTail = atTail();
     var changes = timeline.push(e);
     for (var i = 0; i < changes.length; i++) apply(changes[i], wasAtTail);
@@ -851,7 +863,8 @@ ${ELAPSED_SCRIPT}
       flushTurn("the run ended here"); // a run that ended without an answer still shows its last turn
       refreshTail();
       actions.hidden = true;
-      setConn("grey", stopMode ? "stopped (" + stopMode + ")" : "finished");
+      var took = firstAt !== null && lastAt !== null && lastAt > firstAt ? " \\u00b7 " + formatElapsed(lastAt - firstAt) : "";
+      setConn("grey", (stopMode ? "stopped (" + stopMode + ")" : "finished") + took);
       es.close();
     });
     es.onerror = function () {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatElapsed, splitRunLabel } from "./indexFormat.js";
+import { formatElapsed, formatRelative, splitRunLabel } from "./indexFormat.js";
 
 // Feature: features/live-view.md item 16 — the runs index shows how long each
 // run has been going (live) or took (finished), and renders the run label as
@@ -18,6 +18,31 @@ describe("formatElapsed", () => {
   it("clamps garbage (negative, NaN) to 0s instead of printing nonsense", () => {
     expect(formatElapsed(-5000)).toBe("0s");
     expect(formatElapsed(NaN)).toBe("0s");
+  });
+});
+
+describe("formatRelative", () => {
+  const now = Date.UTC(2026, 7, 30, 18, 0, 0);
+  it("reads like GitHub: just now → minutes → hours → yesterday/days → a date", () => {
+    expect(formatRelative(now - 10_000, now)).toBe("just now");
+    expect(formatRelative(now - 44_000, now)).toBe("just now");
+    expect(formatRelative(now - 46_000, now)).toBe("1 minute ago");
+    expect(formatRelative(now - 5 * 60_000, now)).toBe("5 minutes ago");
+    expect(formatRelative(now - 60 * 60_000, now)).toBe("1 hour ago");
+    expect(formatRelative(now - 3 * 3_600_000, now)).toBe("3 hours ago");
+    expect(formatRelative(now - 24 * 3_600_000, now)).toBe("yesterday");
+    expect(formatRelative(now - 3 * 86_400_000, now)).toBe("3 days ago");
+    expect(formatRelative(now - 8 * 86_400_000, now)).toMatch(/^Aug 2[12]$/); // the runtime's zone decides the day
+    expect(formatRelative(Date.UTC(2025, 11, 25, 12), now)).toMatch(/^Dec 2[45], 2025$/); // another year keeps its year
+  });
+
+  it("never says a negative or NaN age", () => {
+    expect(formatRelative(now + 60_000, now)).toBe("just now");
+    expect(formatRelative(NaN, now)).toBe("just now");
+  });
+
+  it("is inlinable (no imports)", () => {
+    expect(String(formatRelative)).not.toMatch(/\brequire\(|\bimport\b/);
   });
 });
 

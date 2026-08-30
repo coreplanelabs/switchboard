@@ -52,6 +52,8 @@ export interface RunView {
   diagnosis?: FrictionDiagnosis;
   bytes?: number;
   stop?: RunStopStatus;
+  /** Live rows only: the run's latest one-line activity (`RunSummary.activity`). */
+  activity?: string;
   /** True once the durable store holds this run (registry flag or store row). */
   persisted?: boolean;
 }
@@ -168,6 +170,7 @@ function liveView(s: RunSummary): RunView {
     ...(s.status !== undefined ? { status: s.status } : {}),
     eventCount: s.eventCount,
     ...(s.stop ? { stop: s.stop } : {}),
+    ...(s.activity !== undefined ? { activity: s.activity } : {}),
     ...(s.persisted ? { persisted: true } : {}),
   };
 }
