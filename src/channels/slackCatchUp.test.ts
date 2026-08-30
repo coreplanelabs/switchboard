@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  ACK_GRACE_MS,
   catchUpMissedMentions,
   findMissed,
   findOrphanedCards,
@@ -36,7 +37,7 @@ describe("isAckedByBot", () => {
 
 describe("findMissed (pure selection over fetched history)", () => {
   const cutoff = NOW - 20 * 60_000;
-  const base = { botUserId: BOT, cutoffMs: cutoff, alreadyHandled: () => false };
+  const base = { botUserId: BOT, cutoffMs: cutoff, nowMs: NOW, alreadyHandled: () => false };
 
   it("picks an un-acked top-level mention inside the window, threaded to itself", () => {
     const m = mention();
@@ -46,9 +47,29 @@ describe("findMissed (pure selection over fetched history)", () => {
     ]);
   });
 
-  it("skips a mention the bot already 👀-acked", () => {
-    const m = mention({ reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+  it("skips a 👀-acked mention younger than ACK_GRACE_MS — its card is on the way", () => {
+    const m = mention({ ts: ts(ACK_GRACE_MS / 1000 - 1), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
     expect(findMissed({ ...base, channel: "C1", parents: [m], threads: new Map() })).toEqual([]);
+  });
+
+  // #317 (2026-08-30 16:33Z): the process acked a thread reply, a deploy
+  // rollover killed it 8 s later — before the status card — and the next
+  // process's scan skipped the reply as "acked". 👀 alone is not "handled".
+  it("re-runs a 👀-acked message older than ACK_GRACE_MS when the bot never replied after it (#317)", () => {
+    const parent = mention({ ts: ts(ACK_GRACE_MS / 1000 + 1), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+    expect(findMissed({ ...base, channel: "C1", parents: [parent], threads: new Map() }).map((x) => x.ts)).toEqual([parent.ts]);
+
+    const root = mention({ ts: ts(800), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+    const rootCard = { type: "message", user: BOT, bot_id: "B1", text: "✅ coding · 4s", ts: ts(799), thread_ts: root.ts };
+    const follow = mention({ ts: ts(31), thread_ts: root.ts, text: `<@${BOT}> run git remote -v`, reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+    const threads = new Map([[root.ts, [root, rootCard, follow]]]);
+    expect(findMissed({ ...base, channel: "C1", parents: [root], threads }).map((x) => x.ts)).toEqual([follow.ts]);
+  });
+
+  it("skips a 👀-acked message of any age once the bot replied after it", () => {
+    const m = mention({ ts: ts(800), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+    const threads = new Map([[m.ts, [m, { type: "message", user: BOT, bot_id: "B1", text: "✅ done", ts: ts(790), thread_ts: m.ts }]]]);
+    expect(findMissed({ ...base, channel: "C1", parents: [m], threads })).toEqual([]);
   });
 
   it("skips a mention the bot already replied to in-thread (ack lost, but a status card/reply exists)", () => {
@@ -164,7 +185,7 @@ function mockClient(over: {
 describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
   it("scans every channel the bot is in and re-dispatches un-acked mentions, oldest first", async () => {
     const a = mention({ ts: ts(70) });
-    const b = mention({ ts: ts(50), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+    const b = mention({ ts: ts(10), reactions: [{ name: "eyes", users: [BOT], count: 1 }] }); // acked 10 s ago: card on the way
     const c = mention({ ts: ts(90) });
     const client = mockClient({ channels: [{ id: "C1" }, { id: "C2" }], history: { C1: [b, a], C2: [c] } });
     const onMissed = vi.fn();
@@ -220,7 +241,7 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
   });
 
   it("does nothing when everything was handled (the common reconnect)", async () => {
-    const client = mockClient({ history: { C1: [mention({ reactions: [{ name: "eyes", users: [BOT], count: 1 }] })] } });
+    const client = mockClient({ history: { C1: [mention({ ts: ts(10), reactions: [{ name: "eyes", users: [BOT], count: 1 }] })] } });
     const onMissed = vi.fn();
     const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed });
     expect(out).toEqual({ channels: 1, missed: 0, orphans: 0, skippedChannels: 0 });
@@ -269,7 +290,7 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     const client = mockClient();
     client.conversations.history
       .mockResolvedValueOnce({ messages: [mention({ ts: ts(100) })], response_metadata: { next_cursor: "c2" } })
-      .mockResolvedValueOnce({ messages: [mention({ ts: ts(200), reactions: [{ name: "eyes", users: [BOT], count: 1 }] })], response_metadata: { next_cursor: "" } });
+      .mockResolvedValueOnce({ messages: [mention({ ts: ts(5), reactions: [{ name: "eyes", users: [BOT], count: 1 }] })], response_metadata: { next_cursor: "" } });
     const onMissed = vi.fn();
     await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, parentLookbackMs: 86_400_000 });
     expect(client.conversations.history).toHaveBeenCalledTimes(2);

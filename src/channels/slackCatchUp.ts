@@ -46,6 +46,14 @@ export const ORPHAN_CARD_WINDOW_MS = 2 * 3_600_000;
  *  un-acked mentions are left alone — re-running a request from an hour ago is
  *  worse than the human re-posting it. */
 export const DEFAULT_WINDOW_MS = 30 * 60_000;
+/** A 👀-acked message with NO bot reply after it is a run that died between
+ *  the ack and its status card (2026-08-30 16:33Z, #317: a deploy rollover
+ *  killed the process 8 s after it acked a thread reply; the reply never got a
+ *  card and the old scan skipped it as "acked"). Re-run it — unless it is
+ *  younger than this, in which case the ack may belong to a process that is
+ *  about to post its card (the ack and the card are ~1 s apart live), and
+ *  re-running would double-run. */
+export const ACK_GRACE_MS = 30_000;
 if (DEFAULT_WINDOW_MS < MIN_CATCH_UP_WINDOW_MS) {
   throw new Error(
     `DEFAULT_WINDOW_MS (${DEFAULT_WINDOW_MS} ms) must cover the drain deadline + cold start (${MIN_CATCH_UP_WINDOW_MS} ms)`,
@@ -139,6 +147,9 @@ export interface FindMissedInput {
   botUserId: string;
   /** Messages at or after this instant are eligible (epoch ms). */
   cutoffMs: number;
+  /** Scan time (epoch ms) — an acked-but-unanswered message younger than
+   *  `ACK_GRACE_MS` is left alone. */
+  nowMs: number;
   /** Top-level channel messages (what conversations.history returns). */
   parents: SlackHistoryMessage[];
   /** Full replies (parent first) for each thread that had activity in the window, by parent ts. */
@@ -150,9 +161,13 @@ export interface FindMissedInput {
 /** Pure selection: which fetched messages should have started a run and did
  *  not. Mirrors the live triggers exactly — a top-level message needs a
  *  mention; a thread reply needs a mention OR a bot-participating thread;
- *  bot/subtyped (non-file_share) messages never count. Oldest first. */
+ *  bot/subtyped (non-file_share) messages never count. A message counts as
+ *  handled when the bot replied after it (card or answer), or when it carries
+ *  the bot's 👀 and is younger than `ACK_GRACE_MS` (its card is on the way);
+ *  a 👀 alone on an older message is a run that died before its card.
+ *  Oldest first. */
 export function findMissed(input: FindMissedInput): MissedMessage[] {
-  const { channel, botUserId, cutoffMs, alreadyHandled } = input;
+  const { channel, botUserId, cutoffMs, nowMs, alreadyHandled } = input;
   const out: MissedMessage[] = [];
   const mentionsBot = (m: SlackHistoryMessage) => (m.text ?? "").includes(`<@${botUserId}>`);
   const eligible = (m: SlackHistoryMessage): m is SlackHistoryMessage & { ts: string } =>
@@ -160,15 +175,16 @@ export function findMissed(input: FindMissedInput): MissedMessage[] {
     tsMs(m.ts) >= cutoffMs &&
     !isFromBot(m, botUserId) &&
     (!m.subtype || m.subtype === "file_share") &&
-    !isAckedByBot(m, botUserId) &&
     !alreadyHandled(channel, m.ts);
+  const handled = (m: SlackHistoryMessage & { ts: string }, thread: SlackHistoryMessage[]) =>
+    botRepliedAfter(thread, m, botUserId) || (isAckedByBot(m, botUserId) && nowMs - tsMs(m.ts) < ACK_GRACE_MS);
   const push = (m: SlackHistoryMessage & { ts: string }, threadTs: string) =>
     out.push({ channel, user: m.user ?? "unknown", text: m.text ?? "", ts: m.ts, threadTs, files: m.files });
 
   for (const p of input.parents) {
     if (!p.ts || (p.thread_ts && p.thread_ts !== p.ts)) continue; // a broadcast reply; handled via its thread
     const thread = input.threads.get(p.ts) ?? [];
-    if (eligible(p) && mentionsBot(p) && !botRepliedAfter(thread, p, botUserId)) push(p, p.ts);
+    if (eligible(p) && mentionsBot(p) && !handled(p, thread)) push(p, p.ts);
   }
   for (const [parentTs, thread] of input.threads) {
     const botInThread = threadIncludesBot(thread, botUserId);
@@ -176,7 +192,7 @@ export function findMissed(input: FindMissedInput): MissedMessage[] {
       if (r.ts === parentTs || !eligible(r)) continue;
       const decision = mentionsBot(r) ? "handle" : classifyMessage(r, botUserId);
       const wanted = decision === "handle" || (decision === "handle-if-bot-in-thread" && botInThread);
-      if (wanted && !botRepliedAfter(thread, r, botUserId)) push(r, parentTs);
+      if (wanted && !handled(r, thread)) push(r, parentTs);
     }
   }
   return out.sort((a, b) => tsNum(a.ts) - tsNum(b.ts));
@@ -318,7 +334,7 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<Catch
       );
       const replies = await mapLimit(active, CATCH_UP_THREAD_CONCURRENCY, (p) => fetchReplies(client, channel, p.ts!));
       const threads = new Map<string, SlackHistoryMessage[]>(active.map((p, i) => [p.ts!, replies[i]]));
-      const found = findMissed({ channel, botUserId, cutoffMs, parents, threads, alreadyHandled: opts.alreadyHandled });
+      const found = findMissed({ channel, botUserId, cutoffMs, nowMs: now, parents, threads, alreadyHandled: opts.alreadyHandled });
       const orphaned = sweep ? findOrphanedCards({ channel, botUserId, cutoffMs: orphanCutoffMs, threads, ownedHere: sweep.ownedHere }) : [];
       return { found, orphaned };
     } catch (err) {
