@@ -97,4 +97,28 @@ describe("loadFrictionRecords", () => {
     expect(skipped.sort()).toEqual([join(dir, "empty.json"), join(dir, "notes.txt")]);
     expect(loadFrictionRecords([join(dir, "missing.json")]).skipped).toEqual([join(dir, "missing.json")]);
   });
+
+  it("rejects RunRecord-shaped input (run history, field `id` + `events`) by name with a clear reason — as a document and as JSONL", () => {
+    const dir = tmp();
+    const runRecord = {
+      id: "run1",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:1",
+      startedAt: 1,
+      finishedAt: 2,
+      status: "completed",
+      eventCount: 0,
+      storedEventCount: 0,
+      truncated: false,
+      events: [],
+      diagnosis: diag,
+    };
+    writeFileSync(join(dir, "history.json"), JSON.stringify(runRecord));
+    writeFileSync(join(dir, "history.jsonl"), `${JSON.stringify({ ...runRecord, id: "run2" })}\n${JSON.stringify(runRecord)}\n`);
+    const { records, skipped, reasons } = loadFrictionRecords([dir], { mtime: () => 1 });
+    expect(records).toEqual([]);
+    expect(skipped.sort()).toEqual([join(dir, "history.json"), join(dir, "history.jsonl")]);
+    for (const p of skipped) expect(reasons[p]).toMatch(/run-history RunRecord/);
+  });
 });

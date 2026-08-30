@@ -14,7 +14,10 @@
 //   - a `tool_result` attaches to its call by `callId`; a legacy result with no
 //     id attaches to the oldest still-running call of the current step; a
 //     result whose call was never seen (backlog trimmed mid-pair) becomes a
-//     call of its own, so nothing is dropped.
+//     call of its own, so nothing is dropped;
+//   - `context` (a thread turn the model was given) and `replay_note` (the
+//     stream's own capped-replay notice) pass through as their own change
+//     kinds — neither opens or joins a step.
 //
 // Like markdownLite.ts, this ships into the page as `String(createRunTimeline)`
 // inlined into the inline <script>: ONE self-contained function, no imports, no
@@ -78,6 +81,12 @@ export type TimelineChange =
   /** One model call: `label` is "Thought for 5m 04s"; `facts` the token counts
    *  ("12.3k in", "800 out", "11.2k cached") when the event carries usage. */
   | { kind: "turn"; label: string; facts: string[]; durationMs: number; at?: number }
+  /** One thread turn the model was given (a `context` event) — the page's
+   *  collapsed Context block, never a step. */
+  | { kind: "context"; text: string; at?: number }
+  /** A notice from the transport itself (the SSE replay was capped) — rendered
+   *  like a note; it is not a run event and never reaches the run record. */
+  | { kind: "replay_note"; text: string }
   | { kind: "answer"; text: string; at?: number };
 
 export interface RunTimeline {
@@ -256,6 +265,10 @@ export function createRunTimeline(): RunTimeline {
       }
       case "answer":
         return [{ kind: "answer", text: str(e.text), at: num(e.at) }];
+      case "context":
+        return [{ kind: "context", text: str(e.text), at: num(e.at) }];
+      case "replay_note":
+        return [{ kind: "replay_note", text: str(e.summary) }];
       case "run_note":
         return [{ kind: "note", text: str(e.summary), noteKind: str(e.kind), mode: str(e.mode) || undefined, at: num(e.at) }];
       case "assistant":

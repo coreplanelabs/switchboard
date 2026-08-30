@@ -216,3 +216,23 @@ workspaceDir: ./workspaces
 #   catchUp:
 #     enabled: true
 #     windowMinutes: 30
+
+# Persistent run history (#157, features/run-history.md). Every finished run's
+# record — identity, timing, terminal status, the redacted event stream, the
+# friction diagnosis — is kept for a retention window instead of evicted 60 s
+# after finish, and the friction ledger's "recent runs" are read from it.
+# Without this block history is OFF (runs stay live-only, as before).
+# runHistory:
+#   retentionDays: 30    # days a finished run stays readable (1–365; default 30)
+#   maxRuns: 5000        # newest runs kept (1–20000; default 5000)
+#   maxBytes: 2147483648 # total stored bytes kept (16 MiB–8 GiB; default 2 GiB)
+#   includeContext: true # include the thread-context turns fed to the model in the
+#                        # run stream — live page and persisted record (default true)
+#   store: worker        # `worker` (default when `worker` is set) or `file` — an
+#                        # explicit opt-in that writes data/runs/<id>.json on the
+#                        # host disk (ephemeral on Cloudflare Containers)
+#   # The durable store: a RunHistoryDO on the state Worker (deploy/cloudflare-memory/,
+#   # the same Worker + bearer as memory and the friction ledger). Must be https:.
+#   worker:
+#     baseUrl: https://switchboard-memory.coreplanelabs.dev
+#     tokenEnv: MEMORY_TOKEN   # env var holding the Worker's bearer (default)

@@ -69,6 +69,16 @@ export interface SelfImprovementReport {
   /** Proposals whose create call failed (reported, never thrown). */
   failed: Array<{ proposal: ImprovementProposal; error: string }>;
   dryRun: boolean;
+  /** Runs whose diagnosis ran on a head-truncated event stream
+   *  (`FrictionDiagnosis.truncatedInput`): their patterns may be incomplete.
+   *  Optional so a report built before this field reads as 0. */
+  truncatedRuns?: number;
+}
+
+/** How many records were diagnosed on a truncated stream (`countTruncatedInputs`
+ *  is what every report builder stamps into `truncatedRuns`). */
+export function countTruncatedInputs(records: readonly FrictionRunRecord[]): number {
+  return records.filter((r) => r.diagnosis.truncatedInput === true).length;
 }
 
 export async function runSelfImprovement(opts: RunSelfImprovementOptions): Promise<SelfImprovementReport> {
@@ -83,6 +93,7 @@ export async function runSelfImprovement(opts: RunSelfImprovementOptions): Promi
     duplicates: [],
     failed: [],
     dryRun: opts.dryRun,
+    truncatedRuns: countTruncatedInputs(opts.records),
   };
   if (report.patterns.length === 0) return report; // nothing to propose → GitHub is never consulted
 
@@ -113,10 +124,12 @@ export async function runSelfImprovement(opts: RunSelfImprovementOptions): Promi
  *  ranked patterns, and exactly what was filed, already open, or failed. */
 export function formatSelfImprovementReport(r: SelfImprovementReport): string {
   const runs = `${r.runsAnalyzed} run${r.runsAnalyzed === 1 ? "" : "s"} analyzed`;
+  const truncated = r.truncatedRuns ?? 0;
+  const truncatedNote = truncated > 0 ? ` (${truncated} run${truncated === 1 ? "" : "s"} diagnosed on a truncated event stream — patterns may be incomplete)` : "";
   if (r.patterns.length === 0) {
-    return `🔍 ${runs} — no recurring friction pattern found (a pattern must recur across ≥2 distinct runs).`;
+    return `🔍 ${runs}${truncatedNote} — no recurring friction pattern found (a pattern must recur across ≥2 distinct runs).`;
   }
-  const head = `🔍 *Friction proposals* — ${runs} · ${r.patterns.length} recurring pattern${r.patterns.length === 1 ? "" : "s"}${r.dryRun ? " · dry run (nothing filed)" : ""}`;
+  const head = `🔍 *Friction proposals* — ${runs}${truncatedNote} · ${r.patterns.length} recurring pattern${r.patterns.length === 1 ? "" : "s"}${r.dryRun ? " · dry run (nothing filed)" : ""}`;
   const lines = [head, ""];
   r.patterns.forEach((p, i) => {
     const time = p.durationMs > 0 ? ` · ${formatMs(p.durationMs)}` : "";

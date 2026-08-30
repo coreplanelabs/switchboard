@@ -315,3 +315,39 @@ describe("custom instructions (Scope.instructions)", () => {
     expect(s.describe("slack:CY", "slack:UX")).not.toMatch(/instructions/);
   });
 });
+
+// Feature: features/run-history.md — the `runHistory` section (KTD14).
+describe("runHistory config", () => {
+  const withRunHistory = (block: string, extra = "") => `${YAML_FIXTURE}\n${extra}\nrunHistory:\n${block}\n`;
+  const load = (yaml: string, warn?: (m: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, yaml);
+    return new ConfigStore(cfg, join(dir, "overrides.json"), warn);
+  };
+
+  it("accepts a well-formed section and exposes it", () => {
+    const s = load(withRunHistory("  retentionDays: 14\n  maxRuns: 100\n  worker:\n    baseUrl: https://state.example\n"));
+    expect(s.config.runHistory).toEqual({ retentionDays: 14, maxRuns: 100, worker: { baseUrl: "https://state.example" } });
+  });
+
+  it("rejects retentionDays 0 and maxRuns 0", () => {
+    expect(() => load(withRunHistory("  retentionDays: 0\n"))).toThrow(/runHistory\.retentionDays must be an integer >= 1/);
+    expect(() => load(withRunHistory("  maxRuns: 0\n"))).toThrow(/runHistory\.maxRuns must be an integer >= 1/);
+  });
+
+  it("rejects an http:// worker baseUrl and an unknown store", () => {
+    expect(() => load(withRunHistory("  worker:\n    baseUrl: http://state.example\n"))).toThrow(/runHistory\.worker\.baseUrl must be an https: URL/);
+    expect(() => load(withRunHistory("  store: disk\n"))).toThrow(/runHistory\.store must be "worker" or "file"/);
+  });
+
+  it("warns when selfImprovement.ledgerMax is set alongside runHistory (the ledger is served from the run store)", () => {
+    const warnings: string[] = [];
+    load(withRunHistory("  retentionDays: 30\n", "selfImprovement:\n  repo: o/r\n  ledgerMax: 500\n"), (m) => warnings.push(m));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/selfImprovement\.ledgerMax.*runHistory/);
+    warnings.length = 0;
+    load(`${YAML_FIXTURE}\nselfImprovement:\n  repo: o/r\n  ledgerMax: 500\n`, (m) => warnings.push(m));
+    expect(warnings).toEqual([]);
+  });
+});

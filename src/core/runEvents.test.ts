@@ -65,6 +65,15 @@ describe("redactSecrets", () => {
     ];
     for (const s of safe) expect(redactSecrets(s), s).toBe(s);
   });
+
+  // #157 U1: message events carry pasted user text, where a secret most often
+  // arrives as a JSON member — the name is quoted, so the assignment pass must
+  // see through the closing quote.
+  it("redacts the value of a quoted JSON member whose name marks it secret", () => {
+    expect(redactSecrets(`{"password":"correct-horse-battery"}`)).toBe(`{"password":"«redacted»"}`);
+    expect(redactSecrets(`{"api_key": "abcd1234efgh", "port": 3000}`)).toBe(`{"api_key": "«redacted»", "port": 3000}`);
+    expect(redactSecrets(`{"username":"alice"}`)).toBe(`{"username":"alice"}`); // not a secret name
+  });
 });
 
 describe("redactAndCap", () => {
@@ -182,5 +191,50 @@ describe("prepareToolResult", () => {
     expect(prepareToolResult(raw).summary).toContain("«redacted»");
     expect(prepareToolResult(raw).output).not.toContain("abcd1234efgh");
     expect(prepareToolResult("")).toEqual({ summary: "(no output)", output: "" });
+  });
+});
+
+describe("redactSecrets — linear on long unbroken tokens (#213 CI timeout)", () => {
+  it("a 200 KB single token redacts in well under a second (unanchored patterns were O(n²): ~0.5 s per 20 KB)", () => {
+    const token = "x".repeat(200_000);
+    const started = performance.now();
+    const out = redactSecrets("turn 5 " + token);
+    const ms = performance.now() - started;
+    expect(out).toBe("turn 5 " + token);
+    expect(ms).toBeLessThan(1000);
+  });
+
+  // The `\b` anchors that first fixed the quadratic scan skipped identifiers
+  // preceded by `_`, a digit or `.` — shapes main redacted. The anchor is now a
+  // run-start lookbehind, so these redact AND the scan stays linear.
+  it("redacts identifiers preceded by `_`, a digit or `.` (regression: the `\\b` anchor let these leak)", () => {
+    const cases: Array<[string, string]> = [
+      ["_SECRET=hunter2", "hunter2"],
+      ['self._password = "hunter2hunter2"', "hunter2hunter2"],
+      ["2fa_token=abc123", "abc123"],
+      ["1https://user:pw@host/", ":pw@"],
+    ];
+    for (const [input, leaked] of cases) {
+      const out = redactSecrets(input);
+      expect(out, input).toContain("«redacted");
+      expect(out, input).not.toContain(leaked);
+    }
+  });
+
+  it("a 200 KB mixed alphanumeric token (base64-like) and `a1a1…`/`a.a.…` runs redact in well under a second", () => {
+    const alnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mixed = "";
+    for (let i = 0; i < 200_000; i++) mixed += alnum[(i * 7919) % 62];
+    for (const s of [mixed, "a1".repeat(100_000), "a.".repeat(100_000)]) {
+      const started = performance.now();
+      expect(redactSecrets(s)).toBe(s);
+      expect(performance.now() - started).toBeLessThan(1000);
+    }
+  });
+
+  it("still redacts a name-gated assignment and a basic-auth URL that follow a long token", () => {
+    const out = redactSecrets("x".repeat(20_000) + " api_key=abcdef123456 https://user:pw@host/x");
+    expect(out).toContain("api_key=«redacted»");
+    expect(out).toContain("https://user:«redacted»@host/x");
   });
 });

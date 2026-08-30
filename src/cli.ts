@@ -12,6 +12,9 @@ import { ProviderRegistry } from "./providers/registry.js";
 import { dispatch } from "./core/dispatcher.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { PlainTextFormatter } from "./core/structuredMessage.js";
+import { buildRunStore } from "./core/runStore.js";
+import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
+import { defaultRunRegistry } from "./core/runRegistry.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
@@ -79,9 +82,16 @@ async function main() {
   const config = new ConfigStore(CONFIG_PATH, "./data/cli-overrides.json");
   const providers = new ProviderRegistry(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
+  // Run history (#157): a CLI run persists exactly like a bot run when
+  // `runHistory` is configured (null store → history off), and the process
+  // waits for the write to settle before exiting rather than dropping it.
+  const runStore = buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => console.error(`[run-history] ${m}`) });
+  const runHistoryWriter = runStore
+    ? createRunHistoryWriter({ store: runStore, warn: (m) => console.error(m), onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
+    : undefined;
 
   await dispatch(
-    { config, providers, skills },
+    { config, providers, skills, runHistoryWriter },
     {
       channelId: "cli:local",
       userId: "cli:local",
@@ -90,6 +100,7 @@ async function main() {
     },
     new ConsoleIO(),
   );
+  await runHistoryWriter?.settled();
 }
 
 // Run only when invoked as a script (tsx/node src/cli.ts), never on import

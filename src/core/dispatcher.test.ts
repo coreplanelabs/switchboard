@@ -21,8 +21,13 @@ import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
 import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
-import { InMemoryFrictionLedger } from "./frictionLedger.js";
+import { InMemoryFrictionLedger, RunStoreFrictionLedger } from "./frictionLedger.js";
+import { analyzeRunFriction } from "./runFriction.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
+import { InMemoryRunStore, type RunStore } from "./runStore.js";
+import type { RunRecord } from "./runRecord.js";
+import { createRunHistoryWriter } from "./runHistoryWriter.js";
+import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 
 // Feature: features/routing-and-config.md — end-to-end dispatch: config
 // commands, permission gates, and thread-sticky agent resolution.
@@ -63,14 +68,14 @@ permissions:
 workspaceDir: __WORKDIR__
 `;
 
-function capturingProvider(): Provider & { requests: CompletionRequest[] } {
+function capturingProvider(answer = "answer"): Provider & { requests: CompletionRequest[] } {
   const requests: CompletionRequest[] = [];
   return {
     name: "fake",
     requests,
     async complete(req): Promise<CompletionResult> {
       requests.push(req);
-      return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      return { content: [{ type: "text", text: answer }], stopReason: "end_turn" };
     },
   };
 }
@@ -2870,7 +2875,7 @@ describe("self-improvement wiring (Area 7b / #84)", () => {
     expect(rec.runId).toBe("run-friction-1");
     expect(rec.agent).toBe("general");
     expect(rec.label).toContain("general");
-    expect(rec.diagnosis.eventCount).toBe(5); // turn + tool_call + tool_result + the turn-budget note + the finale's turn
+    expect(rec.diagnosis.eventCount).toBe(3); // tool_call + tool_result + the turn-budget note (the two `turn` receipts are narrative, not steps)
     // The toolless general agent's `bash` call is an unknown tool → a failed_tool finding.
     expect(rec.diagnosis.byCategory.failed_tool.count).toBe(1);
   });
@@ -3271,5 +3276,537 @@ describe("inline command runs + run receipts (#244)", () => {
     await dispatch(deps, msg("help"), io);
     expect(deps.runRegistry.listActive()).toEqual([]);
     expect(receipts).toEqual([]);
+  });
+});
+
+// Feature: features/run-visibility.md \u2014 the exchange in the run stream (#157 U1):
+// the stream carries the full exchange \u2014 the request (`input`), the thread
+// context fed to the model (`context`), the reply (`answer`) \u2014 as redacted,
+// uncapped events, so the live page and the run record show what the model saw
+// and said, never a secret, never an attachment body.
+describe("input / context / answer events in the run stream (#157 U1)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  type TextEvent = Extract<RunEvent, { type: "input" | "context" | "answer" }>;
+  const textEventsOf = (events: RunEvent[]) =>
+    events.filter((e): e is TextEvent => e.type === "input" || e.type === "context" || e.type === "answer");
+  const contextOf = (events: RunEvent[]) => textEventsOf(events).filter((m) => m.type === "context");
+  const inputOf = (events: RunEvent[]) => textEventsOf(events).find((m) => m.type === "input");
+
+  function registryFor(id = "run-m") {
+    return new RunRegistry({ genId: () => id, genToken: () => "tok" });
+  }
+  async function runWith(text: string, opts: { history?: HistoryItem[]; yaml?: string; message?: Partial<Parameters<typeof dispatch>[1]> } = {}) {
+    const registry = registryFor();
+    const deps = makeDeps(opts.yaml ?? YAML_FIXTURE, capturingProvider());
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO(opts.history ?? []);
+    await dispatch(deps, { ...msg(text), ...opts.message }, io);
+    const snap = registry.snapshot("run-m", "tok");
+    if (!snap) throw new Error("run not in registry");
+    return { events: snap.events, replies, snap };
+  }
+
+  it("the answer is in the registry snapshot (published BEFORE finish \u2014 a post-finish publish would be dropped), after the request", async () => {
+    const { events, snap } = await runWith("hello there");
+    expect(snap.finished).toBe(true);
+    const types = textEventsOf(events).map((m) => m.type);
+    expect(types).toEqual(["input", "answer"]);
+    expect(textEventsOf(events)[0].text).toBe("hello there");
+    expect(textEventsOf(events)[1].text).toBe("answer");
+    // every event is seq-stamped in publish order
+    expect(events.map((e) => e.seq)).toEqual(events.map((_, i) => i + 1));
+  });
+
+  it("a 20 KB request is published whole \u2014 the record is the source of truth, no publish-time cap", async () => {
+    const { events } = await runWith("a".repeat(20_000));
+    expect(inputOf(events)?.text).toBe("a".repeat(20_000));
+  });
+
+  it("a PEM block, a multi-line .env paste and a JSON password inside a 16 KB message never reach the stream", async () => {
+    const pem = `-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA7\nabcdef\n-----END RSA PRIVATE KEY-----`;
+    const env = `PORT=3000\nDATABASE_PASSWORD=hunter2hunter2\nSLACK_TOKEN=xoxb-1234567890-abcdefghij\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCY`;
+    const json = `{"password":"correct-horse-battery"}`;
+    const pad = "lorem ipsum ".repeat(1300); // \u2248 15.6 KB of filler so the secrets sit inside a near-cap message
+    const { events } = await runWith(`${pem}\n${env}\n${json}\n${pad}`);
+    const dump = JSON.stringify(events);
+    for (const leak of ["MIIEowIBAAKCAQEA7", "hunter2hunter2", "xoxb-1234567890-abcdefghij", "wJalrXUtnFEMIK7MDENGbPxRfiCY", "correct-horse-battery"]) {
+      expect(dump).not.toContain(leak);
+    }
+    expect(dump).toContain("\u00abredacted-private-key\u00bb");
+    expect(dump).toContain("PORT=3000"); // ordinary config survives
+  });
+
+  it("attachments become metadata (name/mime/size lines in context, a count suffix on the request): no base64 and no file body in any event", async () => {
+    const base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk";
+    const body = "SELECT * FROM secrets_table_contents;";
+    const history: HistoryItem[] = [
+      { role: "user", text: "look at this", images: [{ mediaType: "image/png", data: base64, name: "shot.png" }] },
+      { role: "assistant", text: "I see a chart." },
+    ];
+    const { events } = await runWith("and this file", {
+      history,
+      message: { documents: [{ mediaType: "text/plain", data: body, name: "query.sql" }] },
+    });
+    const dump = JSON.stringify(events);
+    expect(dump).not.toContain(base64);
+    expect(dump).not.toContain(body);
+    const ctx = contextOf(events);
+    expect(ctx).toHaveLength(2);
+    expect(ctx[0].text).toContain("look at this");
+    expect(ctx[0].text).toMatch(/shot\.png.*image\/png.*\d+ bytes/);
+    expect(ctx[1].text).toContain("I see a chart.");
+    expect(inputOf(events)?.text).toBe("and this file [+1 document]");
+  });
+
+  it("a 50-message thread yields at most 20 context events (the newest) within 256 KB total", async () => {
+    const history: HistoryItem[] = Array.from({ length: 50 }, (_, i) => ({
+      role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      text: `turn ${i} ` + "x".repeat(20_000),
+    }));
+    const { events } = await runWith("now", { history });
+    const ctx = contextOf(events);
+    expect(ctx.length).toBeGreaterThan(0);
+    expect(ctx.length).toBeLessThanOrEqual(20);
+    const total = ctx.reduce((n, m) => n + Buffer.byteLength(m.text, "utf8"), 0);
+    expect(total).toBeLessThanOrEqual(256 * 1024);
+    // The newest turns are the ones kept, in thread order, each prefixed with its role.
+    expect(ctx[ctx.length - 1].text.startsWith("assistant: turn 49 ")).toBe(true);
+    const nums = ctx.map((m) => Number(/^(?:user|assistant): turn (\d+) /.exec(m.text)?.[1]));
+    expect(nums).toEqual([...nums].sort((a, b) => a - b));
+  }, 20_000);
+
+  it("`runHistory.includeContext: false` suppresses context events; the request and answer still flow", async () => {
+    const history: HistoryItem[] = [{ role: "user", text: "earlier" }, { role: "assistant", text: "reply" }];
+    const off = await runWith("now", { history, yaml: `${YAML_FIXTURE}\nrunHistory:\n  includeContext: false\n` });
+    expect(textEventsOf(off.events).map((m) => m.type)).toEqual(["input", "answer"]);
+    const on = await runWith("now", { history });
+    // The request leads the record; the context it was asked against follows it.
+    expect(textEventsOf(on.events).map((m) => m.type)).toEqual(["input", "context", "context", "answer"]);
+  });
+
+  it("input and context text is humanized before publish: Slack `<url|label>`/`<url>`/mention/channel markup unwrapped and `&amp; &lt; &gt;` unescaped once; the answer is untouched", async () => {
+    const history: HistoryItem[] = [{ role: "user", text: "earlier: 1 &lt; 2 &amp;&amp; <@U777|dana> in <#C9|dev>" }];
+    const { events } = await runWith(
+      "<https://github.com/o/r/pull/1|github.com/o/r/pull/1> please review &amp; fix <@U123> in <#C1|general>, see <https://example.com/x> &lt;now&gt;",
+      { history },
+    );
+    const [input, context, answer] = textEventsOf(events);
+    expect(input.type).toBe("input");
+    expect(context.type).toBe("context");
+    expect(answer.type).toBe("answer");
+    expect(context.text).toBe("user: earlier: 1 < 2 && @dana in #dev");
+    expect(input.text).toBe("https://github.com/o/r/pull/1 please review & fix @user in #general, see https://example.com/x <now>");
+    expect(input.text).not.toMatch(/<[^ ]+\|/);
+    expect(input.text).not.toMatch(/&(amp|lt|gt);/);
+    expect(answer.text).toBe("answer");
+  });
+
+  it("humanizing is Slack-only: an `http:` caller's request and context are recorded exactly as dispatched (mrkdwn markup and entities untouched)", async () => {
+    const raw = "<https://github.com/o/r/pull/1|github.com/o/r/pull/1> please review &amp; fix <@U123> &lt;now&gt;";
+    const history: HistoryItem[] = [{ role: "user", text: "earlier: 1 &lt; 2 <@U777|dana>" }];
+    const { events } = await runWith(raw, { history, message: { channelId: "http:ops", userId: "http:ops", threadKey: "http:ops:1" } });
+    const [input, context] = textEventsOf(events);
+    expect(input.type).toBe("input");
+    expect(input.text).toBe(raw);
+    expect(context.type).toBe("context");
+    expect(context.text).toBe("user: earlier: 1 &lt; 2 <@U777|dana>");
+  });
+
+  it("`<url|label>`: Slack's auto-link label (url minus scheme/www./trailing slash) collapses to the full url; a custom label keeps both as `label (url)`", async () => {
+    const { events } = await runWith(
+      "<https://www.example.com/docs/|example.com/docs> vs <https://example.com/docs|the docs> vs <https://example.com/x|https://example.com/x>",
+    );
+    expect(inputOf(events)?.text).toBe("https://www.example.com/docs/ vs the docs (https://example.com/docs) vs https://example.com/x");
+  });
+
+  it("the model's own answer is never entity-unescaped (it is not Slack mrkdwn)", async () => {
+    const registry = registryFor();
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider("code: `a &amp;&amp; b`"));
+    deps.runRegistry = registry;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("go"), io);
+    const snap = registry.snapshot("run-m", "tok")!;
+    expect(snap.events.find((e) => e.type === "answer")?.text).toBe("code: `a &amp;&amp; b`");
+  });
+
+  it("a multi-line request produces exactly one log line (type/bytes only \u2014 no text), and never touches the card trace", async () => {
+
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const registry = registryFor();
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.runRegistry = registry;
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("line one\nline two\nline three SECRET_LINE_MARKER"), io);
+    const eventLines = log.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("[event]"));
+    expect(eventLines.filter((l) => l.includes("type=input"))).toHaveLength(1);
+    for (const line of eventLines) {
+      expect(line).not.toContain("\n");
+      expect(line).not.toContain("SECRET_LINE_MARKER");
+      expect(line).toMatch(/bytes=\d+/);
+    }
+    expect(statuses.some((s) => s.detail?.includes("line one"))).toBe(false);
+  });
+});
+
+// Feature: features/live-view.md \u2014 one backlog (#157 U11): the dispatcher's
+// friction diagnosis is computed from the registry snapshot, not a second ring.
+describe("friction diagnosis reads the registry backlog (#157 U11)", () => {
+  afterEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  it("the ledger's diagnosis equals analyzeRunFriction(registry.snapshot(...).events)", async () => {
+    let n = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (n++ === 0) {
+          return { content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } }], stopReason: "tool_use" };
+        }
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const ledger = new InMemoryFrictionLedger();
+    const registry = new RunRegistry({ genId: () => "run-f", genToken: () => "tok" });
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.frictionLedger = ledger;
+    deps.runRegistry = registry;
+    await dispatch(deps, msg("hello there"), fakeIO().io);
+    const [rec] = await ledger.recent();
+    const snap = registry.snapshot("run-f", "tok");
+    expect(snap).not.toBeNull();
+    expect(rec.diagnosis).toEqual(analyzeRunFriction(snap!.events, { finished: true }));
+    expect(rec.diagnosis.eventCount).toBe(3); // the narrative events (input/answer) do not count
+  });
+});
+
+// Feature: features/run-history.md — the dispatcher write path (#157 U4, KTD4):
+// the run record is built synchronously at finish (inside the run's try/catch,
+// so failed runs take the same path) and handed to the history writer only
+// AFTER the reply is sent; the write never delays or fails the reply.
+describe("run history write path (#157 U4)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  type TextEvent = Extract<RunEvent, { type: "input" | "context" | "answer" }>;
+  const textEventsOf = (events: RunEvent[]) =>
+    events.filter((e): e is TextEvent => e.type === "input" || e.type === "context" || e.type === "answer");
+
+  function toolThenAnswer(onFirst?: () => void): Provider {
+    let n = 0;
+    return {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (n++ === 0) {
+          onFirst?.();
+          return { content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } }], stopReason: "tool_use" };
+        }
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+  }
+
+  function wired(provider: Provider, over: { registry?: RunRegistry; store?: RunStore; sleep?: (ms: number) => Promise<void> } = {}) {
+    const registry = over.registry ?? new RunRegistry({ genId: () => "run-h", genToken: () => "tok" });
+    const store = over.store ?? new InMemoryRunStore();
+    const warnings: string[] = [];
+    const writer = createRunHistoryWriter({
+      store,
+      warn: (m) => warnings.push(m),
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: over.sleep ?? (async () => {}),
+    });
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    return { deps, registry, store, writer, warnings };
+  }
+
+  it("a completed run is one put: status completed, eventCount = published count, events include the user and assistant messages, identity fields set", async () => {
+    const { deps, store, writer, registry } = wired(capturingProvider());
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    await writer.settled();
+    const all = await store.list({});
+    expect(all).toHaveLength(1);
+    const rec = await store.get("run-h");
+    expect(rec).not.toBeNull();
+    expect(rec!.status).toBe("completed");
+    expect(rec!.eventCount).toBe(registry.snapshot("run-h", "tok")!.eventCount);
+    expect(rec!.storedEventCount).toBe(rec!.events.length);
+    expect(rec!.eventCount).toBe(rec!.events.length);
+    expect(rec!.truncated).toBe(false);
+    expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input", "answer"]);
+    expect(textEventsOf(rec!.events)[1].text).toBe("answer");
+    expect(rec!.channelId).toBe("slack:CX");
+    expect(rec!.userId).toBe("slack:UX");
+    expect(rec!.threadKey).toBe("slack:CX:1.0");
+    expect(rec!.agent).toBe("general");
+    expect(rec!.model).toBe("anthropic/general-model");
+    expect(rec!.label).toContain("general");
+    expect(rec!.finishedAt).toBeGreaterThanOrEqual(rec!.startedAt);
+    expect(rec!.diagnosis).toEqual(analyzeRunFriction(rec!.events, { finished: true }));
+    expect(replies.some((r) => r.includes("answer"))).toBe(true);
+    expect(registry.listActive()[0].persisted).toBe(true);
+    expect(writer.pending()).toBe(0);
+  });
+
+  it("a soft-stopped run is stored as stopped_soft, and the registry summary carries the same status (finish() is handed it)", async () => {
+    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok" });
+    const { deps, store, writer } = wired(toolThenAnswer(() => registry.requestStop("run-h", "tok", "soft")), { registry });
+    await dispatch(deps, msg("hello there"), fakeIO().io);
+    await writer.settled();
+    expect((await store.get("run-h"))?.status).toBe("stopped_soft");
+    expect(registry.getById("run-h")).toMatchObject({ finished: true, status: "stopped_soft", finishedAt: expect.any(Number) });
+  });
+
+  it("a completed run's registry summary says `completed`; a truncated backlog stamps the diagnosis `truncatedInput` (a full one does not)", async () => {
+    const full = wired(capturingProvider());
+    await dispatch(full.deps, msg("hello there"), fakeIO().io);
+    await full.writer.settled();
+    expect(full.registry.getById("run-h")?.status).toBe("completed");
+    expect("truncatedInput" in (await full.store.get("run-h"))!.diagnosis).toBe(false);
+
+    const registry = new RunRegistry({ genId: () => "run-t", genToken: () => "tok", backlogLimit: 3 });
+    const cut = wired(toolThenAnswer(), { registry });
+    const history: HistoryItem[] = Array.from({ length: 6 }, (_, i) => ({ role: i % 2 === 0 ? ("user" as const) : ("assistant" as const), text: `turn ${i}` }));
+    await dispatch(cut.deps, msg("hello there"), fakeIO(history).io);
+    await cut.writer.settled();
+    const rec = await cut.store.get("run-t");
+    expect(rec!.truncated).toBe(true);
+    expect(rec!.diagnosis.truncatedInput).toBe(true);
+  });
+
+  it("an inline `friction report` run is persisted like an agent run: agent `command`, the caller's identity, status from `ok`, events [input, answer]", async () => {
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `cmd-${++n}`, genToken: () => "tok" });
+    const { deps, store, writer } = wired(capturingProvider(), { registry });
+    deps.frictionLedger = new InMemoryFrictionLedger();
+    const ok = fakeIO();
+    await dispatch(deps, { ...msg("friction report"), channelId: "http:cron", userId: "http:cron", threadKey: "http:cron:1" }, ok.io);
+    await writer.settled();
+    const rec = await store.get("cmd-1");
+    expect(rec).toMatchObject({ id: "cmd-1", agent: "command", channelId: "http:cron", userId: "http:cron", threadKey: "http:cron:1", status: "completed", eventCount: 2, truncated: false });
+    expect(rec!.label).toBe('friction · #cron · cron · "friction report"');
+    expect(rec!.events.map((e) => e.type)).toEqual(["input", "answer"]);
+    expect(rec!.events[0]).toMatchObject({ type: "input", text: "friction report" });
+    expect(rec!.events[1]).toMatchObject({ type: "answer", text: ok.replies[0] });
+    expect(registry.getById("cmd-1")).toMatchObject({ agent: "command", channelId: "http:cron", status: "completed", finishedAt: expect.any(Number) });
+
+    // A refused `friction propose` is a persisted `failed` run whose answer is the refusal.
+    const denied = fakeIO();
+    await dispatch(deps, { ...msg("friction propose"), channelId: "http:cron", userId: "http:cron", threadKey: "http:cron:1" }, denied.io);
+    await writer.settled();
+    const failed = await store.get("cmd-2");
+    expect(failed?.status).toBe("failed");
+    expect(failed?.events[1]).toMatchObject({ type: "answer", text: denied.replies[0] });
+    expect(denied.replies[0]).toMatch(/^\ud83d\udeab/);
+  });
+
+  it("a provider throw yields status failed, the record is still written, and the failure reply is still sent", async () => {
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        throw new Error("provider exploded");
+      },
+    };
+    const { deps, store, writer } = wired(provider);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    await writer.settled();
+    const rec = await store.get("run-h");
+    expect(rec?.status).toBe("failed");
+    expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input"]);
+    expect(replies.some((r) => r.includes("provider exploded"))).toBe(true);
+    expect(activeRunCount()).toBe(0);
+  });
+
+  it("a reply that throws after the run loop completed yields status failed (not completed); a stop keeps its stopped_* status", async () => {
+    const { deps, store, writer } = wired(capturingProvider());
+    const { io } = fakeIO();
+    const throwing: ChannelIO = {
+      ...io,
+      reply: async () => {
+        throw new Error("slack is down");
+      },
+    };
+    await dispatch(deps, msg("hello there"), throwing);
+    await writer.settled();
+    const rec = await store.get("run-h");
+    expect(rec?.status).toBe("failed");
+    expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input", "answer"]); // the loop did finish
+    expect(activeRunCount()).toBe(0);
+
+    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok" });
+    const stopped = wired(toolThenAnswer(() => registry.requestStop("run-h", "tok", "soft")), { registry });
+    await dispatch(stopped.deps, msg("hello there"), throwing);
+    await stopped.writer.settled();
+    expect((await stopped.store.get("run-h"))?.status).toBe("stopped_soft");
+  });
+
+  it("the record and the friction row carry the registry's redacted label — a pasted token in the request never reaches either", async () => {
+    const { deps, store, writer } = wired(capturingProvider());
+    const ledger = new InMemoryFrictionLedger();
+    deps.frictionLedger = ledger;
+    await dispatch(deps, msg("please rotate ghp_abcdefghijklmnopqrstuvwxyz0123 now"), fakeIO().io);
+    await writer.settled();
+    const rec = await store.get("run-h");
+    expect(rec!.label).toContain("«redacted-github-token»");
+    expect(rec!.label).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
+    const [row] = await ledger.recent();
+    expect(row.label).toContain("«redacted-github-token»");
+    expect(row.label).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
+    expect(JSON.stringify(await store.list({}))).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
+  });
+
+  it("a reply slower than the registry TTL still yields a full record (built at finish, not after the reply)", async () => {
+    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", ttlMs: 10 });
+    const { deps, store, writer } = wired(toolThenAnswer(), { registry });
+    const { io, replies } = fakeIO();
+    const slow: ChannelIO = {
+      ...io,
+      reply: async (t) => {
+        await new Promise((r) => setTimeout(r, 40));
+        replies.push(t);
+      },
+    };
+    await dispatch(deps, msg("hello there"), slow);
+    await writer.settled();
+    expect(registry.snapshot("run-h", "tok")).toBeNull(); // evicted before the write
+    const rec = await store.get("run-h");
+    expect(rec?.status).toBe("completed");
+    expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input", "answer"]);
+    expect(rec!.events.length).toBeGreaterThan(2);
+    expect(replies.some((r) => r.includes("answer"))).toBe(true);
+  });
+
+  it("more published events than the backlog holds: eventCount is the published total, storedEventCount the backlog length, truncated true", async () => {
+    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", backlogLimit: 5 });
+    const { deps, store, writer } = wired(toolThenAnswer(), { registry });
+    const history: HistoryItem[] = Array.from({ length: 12 }, (_, i) => ({ role: i % 2 === 0 ? ("user" as const) : ("assistant" as const), text: `turn ${i}` }));
+    await dispatch(deps, msg("hello there"), fakeIO(history).io);
+    await writer.settled();
+    const rec = await store.get("run-h");
+    expect(rec!.eventCount).toBeGreaterThan(5);
+    expect(rec!.eventCount).toBe(registry.snapshot("run-h", "tok")!.eventCount);
+    expect(rec!.storedEventCount).toBe(5);
+    expect(rec!.events).toHaveLength(5);
+    expect(rec!.truncated).toBe(true);
+  });
+
+  it("the record's events equal the registry snapshot taken at finish, even though the record is assembled after the reply", async () => {
+    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok" });
+    const { deps, store, writer } = wired(toolThenAnswer(), { registry });
+    const { io } = fakeIO();
+    let snapAtReply: RunEvent[] | undefined;
+    const observing: ChannelIO = {
+      ...io,
+      reply: async () => {
+        // The run has finished (the reply comes after finish) and the record is not written yet.
+        snapAtReply = registry.snapshot("run-h", "tok")!.events;
+        expect(await store.list({})).toHaveLength(0);
+      },
+    };
+    await dispatch(deps, msg("hello there"), observing);
+    await writer.settled();
+    const rec = await store.get("run-h");
+    expect(snapAtReply).toBeDefined();
+    expect(snapAtReply!.length).toBeGreaterThan(2);
+    expect(rec!.events).toEqual(snapAtReply);
+    expect(rec!.storedEventCount).toBe(snapAtReply!.length);
+  });
+
+  it("the write happens after the reply: put has not been called when io.reply runs", async () => {
+    let putsAtReply = -1;
+    const puts: RunRecord[] = [];
+    const store = {
+      put: async (r: RunRecord) => {
+        puts.push(r);
+        return { ok: true as const, retained: 1, stored: true, rewritten: false };
+      },
+    } as unknown as RunStore;
+    const { deps, writer } = wired(toolThenAnswer(), { store });
+    const { io } = fakeIO();
+    const observing: ChannelIO = {
+      ...io,
+      reply: async () => {
+        putsAtReply = puts.length;
+      },
+    };
+    await dispatch(deps, msg("hello there"), observing);
+    await writer.settled();
+    expect(putsAtReply).toBe(0);
+    expect(puts).toHaveLength(1);
+  });
+
+  it("put 503 twice then 200: exactly one record, pending back to 0, no failure counted", async () => {
+    const inner = new InMemoryRunStore();
+    let fails = 2;
+    const store = {
+      put: async (r: RunRecord) => {
+        if (fails-- > 0) throw new TransientStoreError("run store /runs/put HTTP 503");
+        return inner.put(r);
+      },
+      list: (o: Parameters<RunStore["list"]>[0]) => inner.list(o),
+    } as unknown as RunStore;
+    const { deps, writer } = wired(toolThenAnswer(), { store });
+    await dispatch(deps, msg("hello there"), fakeIO().io);
+    await writer.settled();
+    expect(await inner.list({})).toHaveLength(1);
+    expect(writer.pending()).toBe(0);
+    expect(writer.failures()).toBe(0);
+  });
+
+  it("a 413 (PermanentStoreError) is not retried: one attempt, one warn, failures +1; the reply is unaffected", async () => {
+    let attempts = 0;
+    const store = {
+      put: async () => {
+        attempts++;
+        throw new PermanentStoreError("run store /runs/put HTTP 413");
+      },
+    } as unknown as RunStore;
+    const { deps, writer, warnings } = wired(toolThenAnswer(), { store });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    await writer.settled();
+    expect(attempts).toBe(1);
+    expect(warnings).toHaveLength(1);
+    expect(writer.failures()).toBe(1);
+    expect(replies.some((r) => r.includes("answer"))).toBe(true);
+    expect(replies.some((r) => r.includes("413"))).toBe(false);
+  });
+
+  it("a 404 (RouteMissingError) logs once, is not retried, sets degraded, and the friction ledger record() still lands", async () => {
+    let attempts = 0;
+    const store = {
+      put: async () => {
+        attempts++;
+        throw new RouteMissingError("run store /runs/put HTTP 404");
+      },
+    } as unknown as RunStore;
+    const legacy = new InMemoryFrictionLedger();
+    const { deps, writer, warnings } = wired(toolThenAnswer(), { store });
+    deps.frictionLedger = new RunStoreFrictionLedger(store, legacy);
+    await dispatch(deps, msg("hello there"), fakeIO().io);
+    await dispatch(deps, msg("hello again"), fakeIO().io);
+    await writer.settled();
+    expect(attempts).toBe(2);
+    expect(writer.degraded()).toBe(true);
+    expect(writer.failures()).toBe(2);
+    expect(warnings.filter((w) => w.includes("state Worker has no /runs/put"))).toHaveLength(1);
+    expect(await legacy.recent()).toHaveLength(1); // same run id twice → upsert; the ledger write path is untouched
+  });
+
+  it("without a writer nothing is written and the run behaves as before", async () => {
+    const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
 });

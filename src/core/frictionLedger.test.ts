@@ -3,8 +3,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { analyzeRunFriction } from "./runFriction.js";
-import { FileFrictionLedger, InMemoryFrictionLedger, isFrictionRunRecord, type FrictionLedger } from "./frictionLedger.js";
+import {
+  DEFAULT_LEDGER_MAX,
+  FileFrictionLedger,
+  InMemoryFrictionLedger,
+  isFrictionRunRecord,
+  RunStoreFrictionLedger,
+  selectFrictionLedger,
+  type FrictionLedger,
+} from "./frictionLedger.js";
 import type { FrictionRunRecord } from "./frictionProposals.js";
+import type { RunEvent } from "./runEvents.js";
+import type { RunRecord } from "./runRecord.js";
+import { InMemoryRunStore, type RunStore } from "./runStore.js";
 
 // Feature: features/self-improvement.md — the FrictionLedger seam: where each
 // finished run's diagnosis is kept so the proposer can look ACROSS runs (the
@@ -113,6 +124,175 @@ describe("FileFrictionLedger", () => {
 
   it("a missing file reads as empty, never throws", async () => {
     expect(await new FileFrictionLedger(tmpPath()).recent()).toEqual([]);
+  });
+});
+
+// Feature: features/run-history.md / self-improvement.md — the friction ledger is
+// SERVED from the run store (KD3, KTD12): `recent()` projects run-store list
+// rows to FrictionRunRecords and unions the legacy ledger for one retention window.
+describe("RunStoreFrictionLedger", () => {
+  const NOW = 1_800_000_000_000;
+  const runRecord = (id: string, finishedAt: number, over: Partial<RunRecord> = {}): RunRecord => {
+    const events: RunEvent[] = [{ type: "tool_call", tool: "bash", summary: `secret-ish text for ${id}` }];
+    return {
+      id,
+      label: `coding · o/r · "${id}"`,
+      agent: "coding",
+      model: "anthropic/m",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:1",
+      startedAt: finishedAt - 1000,
+      finishedAt,
+      status: "completed",
+      eventCount: 1,
+      storedEventCount: 1,
+      truncated: false,
+      events,
+      diagnosis: analyzeRunFriction([]), // the diagnosis is redacted-at-source and never carries message text
+      ...over,
+    };
+  };
+  const fixture = [
+    ["c", NOW - 100],
+    ["a", NOW - 300],
+    ["b", NOW - 300],
+    ["d", NOW - 50],
+  ] as const;
+
+  it("recent() matches FileFrictionLedger.recent() ordering over the same fixture (differential)", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const file = new FileFrictionLedger(tmpPath());
+    for (const [id, at] of fixture) {
+      await store.put(runRecord(id, at));
+      await file.record({ runId: id, label: `coding · o/r · "${id}"`, agent: "coding", finishedAt: at, diagnosis: (await store.get(id))!.diagnosis });
+    }
+    const viaStore = await new RunStoreFrictionLedger(store).recent();
+    expect(viaStore).toEqual(await file.recent());
+    expect(viaStore.map((r) => r.runId)).toEqual(["a", "b", "c", "d"]);
+    expect((await new RunStoreFrictionLedger(store).recent({ limit: 2 })).map((r) => r.runId)).toEqual(["c", "d"]);
+    expect((await new RunStoreFrictionLedger(store).recent({ sinceMs: NOW - 100 })).map((r) => r.runId)).toEqual(["c", "d"]);
+  });
+
+  it("projects only { runId, label, agent, finishedAt, diagnosis } — no message text, no ids beyond the run id", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    await store.put(runRecord("a", NOW));
+    const [rec] = await new RunStoreFrictionLedger(store).recent();
+    expect(Object.keys(rec).sort()).toEqual(["agent", "diagnosis", "finishedAt", "label", "runId"]);
+    expect(JSON.stringify(rec)).not.toContain("secret-ish");
+    expect(JSON.stringify(rec)).not.toContain("slack:");
+    expect(isFrictionRunRecord(rec)).toBe(true);
+  });
+
+  it("unions the legacy ledger: the run-store row wins on a shared id, a legacy-only run still appears", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const legacy = new InMemoryFrictionLedger();
+    await store.put(runRecord("shared", NOW - 10, { label: "from store" }));
+    await legacy.record({ runId: "shared", label: "from legacy", finishedAt: NOW - 10, diagnosis: analyzeRunFriction([]) });
+    await legacy.record({ runId: "legacy-only", finishedAt: NOW - 20, diagnosis: analyzeRunFriction([]) });
+    const out = await new RunStoreFrictionLedger(store, legacy).recent();
+    expect(out.map((r) => r.runId)).toEqual(["legacy-only", "shared"]);
+    expect(out[1].label).toBe("from store");
+  });
+
+  const failing = (): FrictionLedger => ({
+    record: async () => {},
+    recent: async () => {
+      throw new Error("legacy down");
+    },
+  });
+  const brokenStore = (): RunStore => ({
+    put: async () => ({ ok: true, retained: 0, stored: false, rewritten: false }),
+    get: async () => null,
+    getSummary: async () => null,
+    list: async () => {
+      throw new Error("store down");
+    },
+    events: async () => null,
+    delete: async () => {},
+  });
+
+  it("a failing legacy ledger is warned about once and the run-store rows are still served", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    await store.put(runRecord("a", NOW));
+    const warnings: string[] = [];
+    const out = await new RunStoreFrictionLedger(store, failing(), (m) => warnings.push(m)).recent();
+    expect(out.map((r) => r.runId)).toEqual(["a"]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("legacy down");
+  });
+
+  it("a failing run store is warned about once and the legacy rows are still served", async () => {
+    const legacy = new InMemoryFrictionLedger();
+    await legacy.record({ runId: "l", finishedAt: NOW - 5, diagnosis: analyzeRunFriction([]) });
+    const warnings: string[] = [];
+    const out = await new RunStoreFrictionLedger(brokenStore(), legacy, (m) => warnings.push(m)).recent();
+    expect(out.map((r) => r.runId)).toEqual(["l"]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("store down");
+  });
+
+  it("when both sources fail, recent() rejects with the run store's error", async () => {
+    await expect(new RunStoreFrictionLedger(brokenStore(), failing(), () => {}).recent()).rejects.toThrow("store down");
+  });
+
+  it("pages the run store by {before, beforeId}: 202 runs sharing one finishedAt all reach the ledger", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    for (let i = 0; i < 202; i++) await store.put(runRecord(`same-${String(i).padStart(3, "0")}`, NOW));
+    const out = await new RunStoreFrictionLedger(store).recent({ limit: 202 });
+    expect(out).toHaveLength(202);
+    expect(new Set(out.map((r) => r.runId)).size).toBe(202);
+  });
+
+  it("projects a stored record missing a diagnosis category with that category zero-filled", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const rec = runRecord("legacy", NOW);
+    const { slow_tool: _drop, ...rest } = rec.diagnosis.byCategory;
+    await store.put({ ...rec, diagnosis: { ...rec.diagnosis, byCategory: rest as typeof rec.diagnosis.byCategory } });
+    const [row] = await new RunStoreFrictionLedger(store).recent();
+    expect(row.diagnosis.byCategory.slow_tool).toEqual({ count: 0, durationMs: 0 });
+    expect(isFrictionRunRecord(row)).toBe(true);
+  });
+
+  it("record() forwards to the legacy ledger (FrictionDO keeps its writes until decommission) and is a no-op without one", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const legacy = new InMemoryFrictionLedger();
+    await new RunStoreFrictionLedger(store, legacy).record({ runId: "x", finishedAt: 1, diagnosis: analyzeRunFriction([]) });
+    expect((await legacy.recent()).map((r) => r.runId)).toEqual(["x"]);
+    await expect(new RunStoreFrictionLedger(store).record({ runId: "y", finishedAt: 1, diagnosis: analyzeRunFriction([]) })).resolves.toBeUndefined();
+    expect(await store.list({})).toEqual([]); // never writes the run store
+  });
+
+  it("bounds the run-store read to the ledger default (500) and never calls get", async () => {
+    const calls: string[] = [];
+    const inner = new InMemoryRunStore({ now: () => NOW });
+    for (let i = 0; i < 3; i++) await inner.put(runRecord(`r${i}`, NOW - i));
+    const spy: RunStore = {
+      put: (r) => inner.put(r),
+      get: async (id) => {
+        calls.push(`get ${id}`);
+        return inner.get(id);
+      },
+      getSummary: async (id) => {
+        calls.push(`getSummary ${id}`);
+        return inner.getSummary(id);
+      },
+      list: async (opts) => {
+        calls.push(`list ${opts.limit}`);
+        return inner.list(opts);
+      },
+      events: (id, o) => inner.events(id, o),
+      delete: (id) => inner.delete(id),
+    };
+    await new RunStoreFrictionLedger(spy).recent();
+    await new RunStoreFrictionLedger(spy).recent({ limit: 2 });
+    expect(calls).toEqual([`list ${DEFAULT_LEDGER_MAX}`, "list 2"]);
+  });
+
+  it("selectFrictionLedger: a null run store → the legacy ledger unchanged", () => {
+    const legacy = new InMemoryFrictionLedger();
+    expect(selectFrictionLedger(null, legacy)).toBe(legacy);
+    expect(selectFrictionLedger(new InMemoryRunStore(), legacy)).toBeInstanceOf(RunStoreFrictionLedger);
   });
 });
 

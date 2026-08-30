@@ -84,6 +84,11 @@ export interface FrictionDiagnosis {
   findings: FrictionFinding[];
   /** One-line headline: the dominant cause, or "no friction detected". */
   verdict: string;
+  /** Present (true) when the analyzed stream was head-truncated — the registry's
+   *  bounded backlog dropped its oldest events before the diagnosis ran — so
+   *  the counts and timings describe the tail of the run, not all of it.
+   *  Optional: a stored diagnosis from before this field reads as complete. */
+  truncatedInput?: true;
 }
 
 export interface FrictionOptions {
@@ -97,6 +102,9 @@ export interface FrictionOptions {
    *  trailing tool_call without a result is simply still running — only in a
    *  finished stream is it evidence the run died mid-tool. */
   finished?: boolean;
+  /** Whether `events` is a head-truncated stream (`RunSnapshot.truncated`):
+   *  the diagnosis is then stamped `truncatedInput: true`. Default false. */
+  truncated?: boolean;
 }
 
 const DEFAULT_SLOW_TOOL_MS = 30_000;
@@ -125,6 +133,14 @@ export function isSetupInstallCommand(summary: unknown): boolean {
 interface PendingCall {
   index: number;
   event: Extract<RunEvent, { type: "tool_call" }>;
+}
+
+/** The event types that tell the run's story rather than its steps — the
+ *  narrative (`input`/`context`/`assistant`/`answer`) and the model call's own
+ *  receipt (`turn`), which sits above the step it produced but is not one. */
+type NarrativeEvent = Extract<RunEvent, { type: "input" | "context" | "assistant" | "answer" | "turn" }>;
+function isNarrative(ev: RunEvent): ev is NarrativeEvent {
+  return ev.type === "input" || ev.type === "context" || ev.type === "assistant" || ev.type === "answer" || ev.type === "turn";
 }
 
 /** Analyze a run's event stream. Pure and deterministic; never mutates `events`. */
@@ -169,7 +185,17 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     }
   };
 
+  // The narrative events — the request (`input`), the thread context fed to
+  // the model (`context`), the model's prose between tools (`assistant`), the
+  // final answer (`answer`) — are the run's story, not its steps: none counts
+  // toward `eventCount`. `input`/`assistant`/`answer` still carry the model-turn
+  // clock (a turn runs from the request or a result to the model's next event);
+  // `context` is replayed thread history published at run start with timestamps
+  // of its own, so it is invisible to timing as well.
+  let narrativeEvents = 0;
   events.forEach((ev, index) => {
+    if (isNarrative(ev)) narrativeEvents++;
+    if (ev.type === "context") return;
     if (ev.at !== undefined) {
       firstAt ??= ev.at;
       lastAt = ev.at;
@@ -307,13 +333,14 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   }
 
   const diagnosis: FrictionDiagnosis = {
-    eventCount: events.length,
+    eventCount: events.length - narrativeEvents,
     toolCalls,
     hasTimings,
     ...(firstAt !== undefined && lastAt !== undefined ? { runMs: lastAt - firstAt, toolTimeMs, modelTimeMs } : {}),
     byCategory,
     findings,
     verdict: "",
+    ...(opts.truncated ? { truncatedInput: true as const } : {}),
   };
   diagnosis.verdict = verdictOf(diagnosis);
   return diagnosis;
@@ -354,6 +381,7 @@ export function formatFrictionReport(d: FrictionDiagnosis): string {
   if (d.toolTimeMs !== undefined) totals.push(`tool time: ${formatMs(d.toolTimeMs)}`);
   if (d.modelTimeMs !== undefined) totals.push(`model time: ${formatMs(d.modelTimeMs)}`);
   if (!d.hasTimings) totals.push("(no timestamps — durations unavailable)");
+  if (d.truncatedInput) totals.push("(input truncated — the oldest events were dropped before analysis)");
   lines.push(totals.join(" · "), "", "category         count  time");
   for (const c of FRICTION_CATEGORIES) {
     const t = d.byCategory[c];

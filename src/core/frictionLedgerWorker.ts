@@ -69,7 +69,8 @@ export class WorkerFrictionLedger implements FrictionLedger {
   }
 }
 
-async function errorSuffix(res: Response): Promise<string> {
+/** `: <error>` from a JSON `{error}` body, or empty — shared by every state-Worker client. */
+export async function errorSuffix(res: Response): Promise<string> {
   const text = await res.text().catch(() => "");
   try {
     const parsed = JSON.parse(text) as { error?: unknown };

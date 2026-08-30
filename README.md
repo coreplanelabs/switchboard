@@ -45,7 +45,7 @@ Runtime overrides persist to `data/overrides.json`. Static defaults for channels
 
 ## Architecture
 
-One long-lived Node process, no inbound server. The Slack adapter opens an **outbound websocket** (Socket Mode), so there is no public URL, webhook endpoint, or signature verification to host. State lives in the channel's own thread history and on disk — a restart loses nothing except in-flight runs.
+One long-lived Node process, no inbound server. The Slack adapter opens an **outbound websocket** (Socket Mode), so there is no public URL, webhook endpoint, or signature verification to host. State lives in the channel's own thread history, in the durable run history on the state Worker (every finished run's record survives a restart — see [features/run-history.md](features/run-history.md)), and on disk — a restart loses nothing except in-flight runs.
 
 ```mermaid
 flowchart LR

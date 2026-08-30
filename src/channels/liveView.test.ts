@@ -8,6 +8,7 @@ import {
   renderRunPage,
   RUN_TIMELINE_SCRIPT,
   renderRunsIndex,
+  seedEventsJson,
   serveEvents,
   serveIndexEvents,
   type SseSink,
@@ -525,7 +526,9 @@ describe("serveEvents (SSE, transport-free)", () => {
     reg.publish(id, call("$ echo hi"));
     reg.publish(id, result(true, "hi"));
     // Each frame carries its stream position as the SSE id (resume token).
-    expect(rec.body()).toBe(PRELUDE + `id: 1\ndata: ${JSON.stringify(call("$ echo hi"))}\n\n` + `id: 2\ndata: ${JSON.stringify(result(true, "hi"))}\n\n`);
+    // Each frame carries its stream position twice on purpose: as the SSE `id:`
+    // (the resume cursor) and as `seq` on the event itself (the record's order).
+    expect(rec.body()).toBe(PRELUDE + `id: 1\ndata: ${JSON.stringify({ ...call("$ echo hi"), seq: 1 })}\n\n` + `id: 2\ndata: ${JSON.stringify({ ...result(true, "hi"), seq: 2 })}\n\n`);
   });
 
   it("a reconnect with Last-Event-ID replays only the events after that position — never the whole backlog again", () => {
@@ -537,9 +540,9 @@ describe("serveEvents (SSE, transport-free)", () => {
     const rec = recordingSink();
     const afterSeq = parseLastEventId("2");
     serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, afterSeq), rec.sink);
-    expect(rec.body()).toBe(PRELUDE + `id: 3\ndata: ${JSON.stringify(call("three"))}\n\n`);
+    expect(rec.body()).toBe(PRELUDE + `id: 3\ndata: ${JSON.stringify({ ...call("three"), seq: 3 })}\n\n`);
     reg.publish(id, call("four"));
-    expect(rec.body()).toContain(`id: 4\ndata: ${JSON.stringify(call("four"))}`);
+    expect(rec.body()).toContain(`id: 4\ndata: ${JSON.stringify({ ...call("four"), seq: 4 })}`);
   });
 
   it("parseLastEventId: a positive integer resumes; absent, empty, or garbage means from the start", () => {
@@ -585,7 +588,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
     expect(rec.status).toBe(200);
     // The replayed backlog frame is present, and status was set before any write.
-    expect(rec.body()).toContain(`data: ${JSON.stringify(call("earlier"))}`);
+    expect(rec.body()).toContain(`data: ${JSON.stringify({ ...call("earlier"), seq: 1 })}`);
   });
 
   it("writes a terminal `end` frame and closes the stream when the run finishes", () => {
@@ -607,7 +610,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     const rec = recordingSink();
     serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
     expect(rec.status).toBe(200);
-    expect(rec.body()).toContain(`data: ${JSON.stringify(call("done-earlier"))}`);
+    expect(rec.body()).toContain(`data: ${JSON.stringify({ ...call("done-earlier"), seq: 1 })}`);
     expect(rec.body()).toContain("event: end");
     expect(rec.ended).toBe(true);
   });
@@ -824,7 +827,7 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.status).toBe(200);
     expect(t.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
     reg.publish(id, call("live one"));
-    expect(t.body()).toContain(`data: ${JSON.stringify(call("live one"))}`);
+    expect(t.body()).toContain(`data: ${JSON.stringify({ ...call("live one"), seq: 1 })}`);
     // Client disconnect unsubscribes.
     t.fireClose();
     reg.publish(id, call("after"));
@@ -1254,5 +1257,149 @@ describe("run page model-turn rows (item 15)", () => {
     expect(html).toContain('el("li", "turn")');
     expect(html).toContain("#log > li.turn {"); // #log > li { padding: 0 } outranks a bare li.turn rule
     expect(html).not.toContain("innerHTML");
+  });
+});
+
+// Feature: features/run-visibility.md / live-view.md item 12 — the exchange on
+// the run page (#157 U1): `context` events (the thread turns the model was given)
+// render like the request — markdown through the same guarded renderer — inside
+// a collapsed Context block between the Request block and the log. A page seeded
+// with history (`renderRunPage(id, token, events)`) feeds the seed through the
+// SAME `handle(e)` the EventSource frames use, so seeded and live pages render
+// identically by construction; the seed is a `\u003c`-escaped JSON island, so
+// event text can never open or close a tag inside the inline script.
+describe("context events + seeded history on the run page (#157 U1)", () => {
+  const text = (type: "input" | "context" | "answer", text: string, seq: number): RunEvent => ({ type, text, seq });
+  const SCRIPT_PAYLOAD = "</script><script>alert(1)</script>";
+  const ATTR_PAYLOAD = '"><img src=x onerror=alert(1)>';
+
+  it("renders `context` events into a collapsed Context block between the Request block and the log, via the markdown guard", () => {
+    const html = renderRunPage("run-1", "tok-1");
+    // The fold (runTimeline) turns a `context` event into a `context` change; the page renders it into the block.
+    expect(createRunTimeline().push({ type: "context", text: "earlier turn", at: 5 })).toEqual([{ kind: "context", text: "earlier turn", at: 5 }]);
+    expect(html).toContain('change.kind === "context"');
+    expect(html).toContain("contextTurn(change)");
+    expect(html).toContain('<details class="block" id="context" hidden>');
+    expect(html.indexOf('id="request"')).toBeLessThan(html.indexOf('id="context"'));
+    expect(html.indexOf('id="context"')).toBeLessThan(html.indexOf('<ol id="log"'));
+    // a context turn is [ts] + a markdown box rendered through the same guard as the request
+    expect(html).toMatch(/function contextTurn\(change\) \{[\s\S]*?turn\.appendChild\(stamp\(change\.at\)\);[\s\S]*?md\(box, change\.text\);[\s\S]*?contextTurns\.appendChild\(turn\)/);
+    expect(html).not.toContain("innerHTML");
+    expect(html).not.toContain("insertAdjacentHTML");
+  });
+
+  it("seeded events ride as an escaped JSON island and go through the one `handle` the live stream uses (mirror by construction)", () => {
+    const events: RunEvent[] = [text("input", "please run it", 1), text("context", "earlier turn", 2), { type: "turn", startedAt: 0, durationMs: 900, stopReason: "tool_use", seq: 3, at: 900 }, call("$ npm test"), text("answer", "all green", 5)];
+    const html = renderRunPage("run-1", "tok-1", events);
+    expect(html).toContain(`var seed = ${seedEventsJson(events)};`);
+    expect(html).toContain("for (var i = 0; i < seed.length; i++) handle(seed[i]);");
+    // The live frame is parsed, deduped on its SSE id (run events only), then goes through the same `handle`.
+    expect(html).toMatch(/es\.onmessage = function \(m\) \{\s*var e;\s*try \{ e = JSON\.parse\(m\.data\); \} catch \(_\) \{ return; \}[\s\S]*?\n\s*handle\(e\);\s*\};/);
+    // ONE fold: handle() is the only caller of timeline.push, and both the seed loop and onmessage go through it.
+    expect(html).toMatch(/function handle\(e\) \{\s*var wasAtTail = atTail\(\);\s*var changes = timeline\.push\(e\);/);
+    expect(html.match(/timeline\.push\(/g)).toHaveLength(1);
+    // The seed is the events verbatim once the JSON escapes are undone.
+    expect(JSON.parse(seedEventsJson(events))).toEqual(events);
+  });
+
+  it("a hostile seeded text is inert: `<`, `>` and `&` are \\u-escaped in the JSON island, so no tag opens or closes inside the script", () => {
+    const html = renderRunPage("run-1", "tok-1", [text("input", SCRIPT_PAYLOAD, 1), text("answer", ATTR_PAYLOAD, 2)]);
+    expect(html).not.toContain(SCRIPT_PAYLOAD);
+    expect(html).not.toContain(ATTR_PAYLOAD);
+    expect(html).toContain("\\u003c/script\\u003e");
+    // Exactly one <script> open and one close on the page — the payload added none.
+    expect(html.match(/<script>/g)).toHaveLength(1);
+    expect(html.match(/<\/script>/g)).toHaveLength(1);
+    expect(seedEventsJson([text("input", "a\u2028b & <c>", 1)])).toBe('[{"type":"input","text":"a\\u2028b \\u0026 \\u003cc\\u003e","seq":1}]');
+  });
+
+  it("with no seeded events the seed is empty and the page keeps its waiting placeholder (unchanged live path)", () => {
+    const html = renderRunPage("run-1", "tok-1");
+    expect(html).toContain("var seed = [];");
+    expect(html).toContain('id="placeholder"');
+  });
+});
+
+// Feature: features/live-view.md — bounded live replay (#157 U11): a late
+// subscriber to a long run gets a leading note plus the newest 1000 frames; the
+// registry snapshot still holds the whole backlog; the index feed is unchanged.
+describe("serveEvents — live replay budget (#157 U11)", () => {
+  it("a late subscriber to a 3000-event run gets a 'replaying last 1000 of 3000' note then the newest 1000 frames; snapshot has all 3000", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 3000; i++) reg.publish(id, call(`$ step ${i}`));
+    const rec = recordingSink();
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
+    const frames = rec.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: ")).map((w) => JSON.parse(w.slice(w.indexOf("data: ") + 6)));
+    expect(frames).toHaveLength(1001);
+    expect(frames[0]).toEqual({ type: "replay_note", summary: "replaying last 1000 of 3000 events" });
+    expect(frames[1]).toMatchObject({ summary: "$ step 2001", seq: 2001 });
+    expect(frames[1000]).toMatchObject({ summary: "$ step 3000", seq: 3000 });
+    expect(reg.snapshot(id, token)?.events).toHaveLength(3000);
+    // Live frames after the replay still flow, uncapped.
+    reg.publish(id, call("$ step 3001"));
+    expect(rec.body()).toContain('"summary":"$ step 3001"');
+  });
+
+  it("a run with 1000 or fewer events replays everything with no note (byte-identical to before)", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 1000; i++) reg.publish(id, call(`$ step ${i}`));
+    const rec = recordingSink();
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
+    const frames = rec.writes.filter((w) => w.startsWith("id: "));
+    expect(frames).toHaveLength(1000);
+    expect(rec.body()).not.toContain("replay_note");
+  });
+
+  it("an already-finished long run: note, newest 1000, then the end frame", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 1500; i++) reg.publish(id, call(`$ step ${i}`));
+    reg.finish(id);
+    const rec = recordingSink();
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
+    const data = rec.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: "));
+    expect(data).toHaveLength(1001);
+    expect(data[0]).toContain("replaying last 1000 of 1500 events");
+    expect(rec.writes[rec.writes.length - 1]).toBe("event: end\ndata: {}\n\n");
+    expect(rec.ended).toBe(true);
+  });
+
+  it("a resume cursor and the replay cap compose: the ring holds the newest 1000 AFTER the cursor and the note counts only those", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 3000; i++) reg.publish(id, call(`$ step ${i}`));
+    // Reconnect having applied seq 500: 2500 remain, so 1500 are omitted.
+    const rec = recordingSink();
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, parseLastEventId("500")), rec.sink);
+    const frames = rec.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: "));
+    expect(frames).toHaveLength(1001);
+    expect(frames[0]).toBe(`data: ${JSON.stringify({ type: "replay_note", summary: "replaying last 1000 of 2500 events" })}\n\n`);
+    expect(frames[1]).toMatch(/^id: 2001\n/);
+    expect(frames[1000]).toMatch(/^id: 3000\n/);
+    // A cursor inside the cap window: no note, exactly the events after it.
+    const rec2 = recordingSink();
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, parseLastEventId("2500")), rec2.sink);
+    const frames2 = rec2.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: "));
+    expect(frames2).toHaveLength(500);
+    expect(rec2.body()).not.toContain("replay_note");
+    expect(frames2[0]).toMatch(/^id: 2501\n/);
+  });
+
+  it("the client exempts a replay_note from the Last-Event-ID dedupe (it carries no id of its own)", () => {
+    const html = renderRunPage("run-1", "tok-1");
+    expect(html).toContain('if (e.type !== "replay_note") {');
+    expect(html).toContain("if (sid > 0) { if (sid <= lastSeq) return; lastSeq = sid; }");
+  });
+
+  it("the client renders a replay_note frame as a note row (textContent)", () => {
+    const html = renderRunPage("run-1", "tok-1");
+    // The fold knows the transport frame; the page renders it through addNote with the … glyph, never markup.
+    expect(createRunTimeline().push({ type: "replay_note", summary: "replaying last 1000 of 1200 events" })).toEqual([
+      { kind: "replay_note", text: "replaying last 1000 of 1200 events" },
+    ]);
+    expect(html).toContain('change.kind === "note" || change.kind === "replay_note"');
+    expect(html).toContain('(change.kind === "replay_note" ? "\\u2026 " : "\\u23f1 ") + change.text');
   });
 });

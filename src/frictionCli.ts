@@ -61,6 +61,7 @@ function isRunEvent(v: unknown): v is RunEvent {
     case "answer":
     case "input":
     case "assistant":
+    case "context":
       return typeof o.text === "string"; // the narrative events carry text, not a summary
     case "turn":
       return typeof o.startedAt === "number" && typeof o.durationMs === "number";

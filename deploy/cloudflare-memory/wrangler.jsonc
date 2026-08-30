@@ -23,13 +23,17 @@
       { "name": "FRICTION", "class_name": "FrictionDO" },
       // ONE ScheduleDO (named "schedules"): every cron firing the bot's Worker
       // shim makes, for the /runs Scheduled panel (#244, features/live-view.md).
-      { "name": "SCHEDULES", "class_name": "ScheduleDO" }
+      { "name": "SCHEDULES", "class_name": "ScheduleDO" },
+      // One RunHistoryDO per store key (`runs:default`): persistent run history
+      // (#157, features/run-history.md) — runs + run_events + the retention policy.
+      { "name": "RUNS", "class_name": "RunHistoryDO" }
     ]
   },
   // SQLite-backed DOs (durable across restarts — AGENTS.md invariant 6).
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["MemoryDO"] },
     { "tag": "v2", "new_sqlite_classes": ["FrictionDO"] },
-    { "tag": "v3", "new_sqlite_classes": ["ScheduleDO"] }
+    { "tag": "v3", "new_sqlite_classes": ["ScheduleDO"] },
+    { "tag": "v4", "new_sqlite_classes": ["RunHistoryDO"] }
   ]
 }

@@ -1,6 +1,8 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { isFrictionRunRecord, type FrictionRunRecord } from "./frictionProposals.js";
+import { clone, RUN_LIST_MAX_LIMIT, type RunListItem } from "./runRecord.js";
+import type { RunStore } from "./runStore.js";
 
 export { isFrictionRunRecord };
 
@@ -42,10 +44,6 @@ function sortAndTrim(records: FrictionRunRecord[], max: number, opts: LedgerRead
   if (opts.sinceMs !== undefined) out = out.filter((r) => r.finishedAt >= opts.sinceMs!);
   if (opts.limit !== undefined) out = out.slice(-Math.max(0, opts.limit));
   return out.map(clone);
-}
-
-function clone<T>(v: T): T {
-  return JSON.parse(JSON.stringify(v)) as T;
 }
 
 /** In-process ledger for tests and dev. Not durable — never the production
@@ -128,4 +126,80 @@ export class FileFrictionLedger implements FrictionLedger {
     writeFileSync(this.path, keep.map((r) => JSON.stringify(r)).join("\n") + (keep.length ? "\n" : ""));
     this.lineCount = keep.length;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Served from the run store (#157, KD3 / KTD12)
+// ---------------------------------------------------------------------------
+
+/** The ONLY fields a run-store row contributes to a friction record: the same
+ *  five the dispatcher has always written — message text and platform ids
+ *  never reach a `FrictionRunRecord` or an issue body. */
+export function projectFrictionRecord(item: RunListItem): FrictionRunRecord {
+  const out: FrictionRunRecord = { runId: item.id, finishedAt: item.finishedAt, diagnosis: item.diagnosis };
+  if (item.label !== undefined) out.label = item.label;
+  if (item.agent !== undefined) out.agent = item.agent;
+  return out;
+}
+
+/**
+ * The friction ledger READ from the run store (KD3): one population for the
+ * dashboard and the self-improvement loop. `recent()` pages `store.list`
+ * (never `get` — listings carry the diagnosis, so no event stream is loaded)
+ * down to the newest `limit ?? DEFAULT_LEDGER_MAX` runs, unions the legacy
+ * ledger's rows for the rollout window (deduped by run id, run-store row wins),
+ * then orders and trims exactly like the file/in-memory ledgers so consumers
+ * see no change. The two sources are read independently: one failing half is
+ * warned about once (per read) and the other half is still served; only when
+ * BOTH fail does `recent()` reject, with the run store's error. `record()`
+ * still forwards to the legacy ledger — FrictionDO keeps receiving its small
+ * diagnosis write until the deferred decommission (KD3 call-out) — and is a
+ * no-op without one; this class never writes the run store (the dispatcher's
+ * history write path does).
+ */
+export class RunStoreFrictionLedger implements FrictionLedger {
+  constructor(
+    private readonly store: RunStore,
+    private readonly legacy?: FrictionLedger,
+    private readonly warn: (message: string) => void = (m) => console.warn(m),
+  ) {}
+
+  async record(rec: FrictionRunRecord): Promise<void> {
+    if (this.legacy) await this.legacy.record(rec);
+  }
+
+  async recent(opts: LedgerReadOptions = {}): Promise<FrictionRunRecord[]> {
+    const max = Math.max(0, opts.limit ?? DEFAULT_LEDGER_MAX);
+    const [legacyRes, storeRes] = await Promise.allSettled([this.legacy ? this.legacy.recent(opts) : [], this.newest(max, opts.sinceMs)]);
+    if (storeRes.status === "rejected" && legacyRes.status === "rejected") throw storeRes.reason;
+    const describe = (reason: unknown) => (reason instanceof Error ? reason.message : String(reason));
+    if (legacyRes.status === "rejected") this.warn(`[friction] legacy ledger read failed; serving run-store rows only: ${describe(legacyRes.reason)}`);
+    if (storeRes.status === "rejected") this.warn(`[friction] run store read failed; serving legacy ledger rows only: ${describe(storeRes.reason)}`);
+    const byRun = new Map<string, FrictionRunRecord>();
+    if (legacyRes.status === "fulfilled") for (const r of legacyRes.value) byRun.set(r.runId, r);
+    if (storeRes.status === "fulfilled") for (const item of storeRes.value) byRun.set(item.id, projectFrictionRecord(item));
+    return sortAndTrim([...byRun.values()], max, opts);
+  }
+
+  /** The newest `max` runs, newest first, paging by the `{ before, beforeId }`
+   *  cursor (the last row's `finishedAt` + `id`, so same-millisecond siblings
+   *  are not skipped) since one `list` call returns at most RUN_LIST_MAX_LIMIT rows. */
+  private async newest(max: number, sinceMs: number | undefined): Promise<RunListItem[]> {
+    const out: RunListItem[] = [];
+    let cursor: { before: number; beforeId: string } | undefined;
+    while (out.length < max) {
+      const page = await this.store.list({ limit: max - out.length, ...cursor, sinceMs });
+      out.push(...page);
+      if (page.length < Math.min(RUN_LIST_MAX_LIMIT, max - out.length + page.length)) break;
+      const last = page[page.length - 1];
+      cursor = { before: last.finishedAt, beforeId: last.id };
+    }
+    return out;
+  }
+}
+
+/** Startup wiring: with a run store the ledger is served from it (legacy rows
+ *  unioned); without one the legacy ledger is used unchanged. */
+export function selectFrictionLedger(store: RunStore | null, legacy: FrictionLedger, warn?: (message: string) => void): FrictionLedger {
+  return store ? new RunStoreFrictionLedger(store, legacy, warn) : legacy;
 }
