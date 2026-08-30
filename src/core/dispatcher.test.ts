@@ -1349,6 +1349,72 @@ describe("review post-step (issue #69)", () => {
     ]);
   });
 
+  // features/agent-review.md item 10: a push that lands mid-run makes the
+  // posted review one of an outdated commit — still posted, still pinned to
+  // the reviewed head (so auto-approve skips it), but the thread is TOLD.
+  describe("head-moved note (item 10)", () => {
+    function reviewDeps(fetchPrHead: CoreDeps["fetchPrHead"]) {
+      const provider = capturingProvider();
+      const deps = makeDeps(YAML_FIXTURE, provider);
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      headExecutor(PR_HEAD);
+      const spy = postSpy();
+      deps.postReviewComment = spy.fn;
+      deps.fetchPrHead = fetchPrHead;
+      return { deps, spy };
+    }
+    const MOVED_NOTE =
+      "ℹ️ acme/api#42 moved during the run: reviewed e8e43f4, head is now d75b5a5. " +
+      "The review was posted pinned to e8e43f4 and will not auto-approve — re-request to review d75b5a5.";
+
+    it("PR head moved during the run → review still posted pinned to the reviewed head, and the thread gets the note", async () => {
+      const asked: Array<{ repo: string; number: number }> = [];
+      const { deps, spy } = reviewDeps(async (pr) => {
+        asked.push(pr);
+        return OTHER_HEAD;
+      });
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.calls.map((c) => c.target.commitId)).toEqual([PR_HEAD]);
+      expect(asked).toEqual([{ repo: "acme/api", number: 42 }]);
+      expect(replies).toContain(MOVED_NOTE);
+    });
+
+    it("PR head unchanged → no note", async () => {
+      const { deps, spy } = reviewDeps(async () => PR_HEAD);
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.calls).toHaveLength(1);
+      expect(replies.some((r) => r.includes("moved during the run"))).toBe(false);
+    });
+
+    it("current head unknown (fetch fails or answers nothing) → no note, never a false alarm", async () => {
+      for (const fetchPrHead of [async () => undefined, async () => { throw new Error("boom"); }]) {
+        const { deps, spy } = reviewDeps(fetchPrHead);
+        const { io, replies } = fakeIO();
+        await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+        expect(spy.calls).toHaveLength(1);
+        expect(replies.some((r) => r.includes("moved during the run"))).toBe(false);
+        vi.mocked(makeExecutor).mockClear();
+      }
+    });
+
+    it("no fetch at all when nothing was posted (guard refused)", async () => {
+      const asked: unknown[] = [];
+      const { deps, spy } = reviewDeps(async (pr) => {
+        asked.push(pr);
+        return OTHER_HEAD;
+      });
+      vi.mocked(makeExecutor).mockReset();
+      headExecutor(OTHER_HEAD); // workspace HEAD is not the PR head → guard skips the post
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.calls).toHaveLength(0);
+      expect(asked).toHaveLength(0);
+      expect(replies.some((r) => r.includes("moved during the run"))).toBe(false);
+    });
+  });
+
   // Feature: features/run-loop.md item 8 (#101) — a HARD-stopped review has no
   // findings (its answer is the abort line), so nothing is posted to the PR.
   it("a hard-stopped review posts nothing to the PR", async () => {

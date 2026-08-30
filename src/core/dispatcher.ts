@@ -11,7 +11,8 @@ import { ResidentNeedsRefError, ResidentOperations } from "../execution/resident
 import { LocalOperations } from "../execution/executor.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
-import { resolveRepoContext, type RepoContext } from "./repoContext.js";
+import { currentPrHeadSha, resolveRepoContext, type RepoContext } from "./repoContext.js";
+import { headMovedNote } from "./headMoved.js";
 import { decideReviewPost, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
@@ -87,6 +88,14 @@ export interface CoreDeps {
    * decision without a network call.
    */
   postReviewComment?: (target: ReviewCommentTarget, body: string) => Promise<void>;
+  /**
+   * The PR's head SHA as GitHub reports it right after a review was posted
+   * (agent-review.md item 10): when it differs from the reviewed head — a push
+   * landed mid-run — the thread gets a head-moved note. Default: one REST GET
+   * via repoContext's `currentPrHeadSha`; undefined (or a throw) → no note.
+   * Injectable so tests assert the note without a network call.
+   */
+  fetchPrHead?: (pr: { repo: string; number: number }) => Promise<string | undefined>;
   /**
    * Cross-session memory store (Area 7c, #85). When `config.memory.enabled`
    * is true the dispatcher retrieves scope-relevant records from this store
@@ -681,6 +690,20 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       try {
         await post(target, body);
         console.log(`[review-post] ${msg.threadKey} → ${where} (${verdict?.verdict ?? "no verdict"})`);
+        // Head-moved note (item 10): a push that landed mid-run makes this a
+        // review of an outdated commit — pinned, so it will not auto-approve
+        // (correct) but silent in the thread (not). One best-effort GET after
+        // the post; unknown current head → no note, never a false alarm. The
+        // default `currentPrHeadSha` never throws; the `.catch` guards an
+        // injected `deps.fetchPrHead` (the seam's contract is "undefined or a
+        // throw both mean unknown").
+        const fetchHead = deps.fetchPrHead ?? currentPrHeadSha;
+        const current = await fetchHead({ repo: postTarget.repo, number: postTarget.number }).catch(() => undefined);
+        const moved = headMovedNote({ where, reviewed: repoCtx.headSha, current });
+        if (moved) {
+          console.log(`[review-post] ${msg.threadKey} head moved during run: ${repoCtx.headSha.slice(0, 7)} → ${current?.slice(0, 7)} (${where})`);
+          await io.reply(moved).catch(() => {});
+        }
       } catch (err: unknown) {
         const reason = err instanceof Error ? err.message : String(err);
         console.error(`[review-post] ${msg.threadKey} failed for ${where}: ${reason}`);
