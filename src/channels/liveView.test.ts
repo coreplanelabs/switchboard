@@ -413,6 +413,12 @@ describe("run page call cards (grouped timeline, item 13)", () => {
     expect(html).toContain('a.setAttribute("rel", "noopener noreferrer")');
   });
 
+  it("hides the tail with a rule that beats `li.tail { display: flex }` (a finished run must not keep 'thinking…')", () => {
+    // Same class of bug as the index empty sentinel: `li.tail` (0,1,1) outranks
+    // `[hidden]` (0,1,0), so `tail.hidden = true` alone left it rendered.
+    expect(html).toMatch(/li\.tail\[hidden\]\s*\{\s*display:\s*none/);
+  });
+
   it("leaves room at the bottom so the tail never sits on the viewport edge", () => {
     expect(html).toMatch(/body\s*\{[^}]*padding: 1\.25rem 1\.25rem 8rem/);
   });
