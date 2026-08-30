@@ -234,6 +234,10 @@ export function renderRunPage(id: string, token: string): string {
     color: var(--amber); background: #d2992214; }
   /* The live tail: what is happening right now, always last while connected. */
   li.tail { display: flex; gap: .75rem; align-items: center; padding: .6rem .75rem; margin-top: 1rem; color: var(--muted); font-size: .8rem; }
+  /* \`display: flex\` above outranks the bare \`[hidden]\` rule (0,1,1 vs 0,1,0), so
+     the tail needs its own hidden rule — or a finished run keeps "thinking…"
+     (seen live 2026-08-29 on the first post-deploy run). */
+  li.tail[hidden] { display: none; }
   li.tail .pulse { width: .55em; height: .55em; border-radius: 50%; background: var(--blue); animation: pulse 1.4s ease-in-out infinite; }
   @keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
   .empty { color: var(--muted); }
