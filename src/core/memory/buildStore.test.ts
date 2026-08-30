@@ -36,6 +36,25 @@ describe("buildMemoryStore", () => {
     expect(store).toBeInstanceOf(WorkerMemoryStore);
   });
 
+  // Feature: features/memory.md §29 (#253) — the cap is threaded into the store built here.
+  it("threads memory.maxRecordsPerScope into the in-process store (a write past it evicts)", async () => {
+    const store = buildMemoryStore({ enabled: true, maxRecordsPerScope: 1 }, {}, () => {})!;
+    await store.write("org:coreplanelabs", [{ kind: "fact", text: "first", sourceThreadKey: "slack:C1:1.0" }]);
+    await store.write("org:coreplanelabs", [{ kind: "fact", text: "second", sourceThreadKey: "slack:C1:1.0" }]);
+    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.text)).toEqual(["second"]);
+  });
+
+  it("an out-of-range or non-integer memory.maxRecordsPerScope warns and falls back to the default instead of evicting everything / 400ing every write", async () => {
+    for (const bad of [0, -5, 2.5, 10_001, Number.NaN]) {
+      const warnings: string[] = [];
+      const store = buildMemoryStore({ enabled: true, maxRecordsPerScope: bad }, {}, (m) => warnings.push(m))!;
+      expect(warnings.some((w) => /maxRecordsPerScope/.test(w) && /500/.test(w))).toBe(true);
+      await store.write("org:coreplanelabs", [{ kind: "fact", text: "first", sourceThreadKey: "slack:C1:1.0" }]);
+      await store.write("org:coreplanelabs", [{ kind: "fact", text: "second", sourceThreadKey: "slack:C1:1.0" }]);
+      expect(await store.list("org:coreplanelabs", 10)).toHaveLength(2); // default cap (500) governs, nothing evicted
+    }
+  });
+
   it("enabled without a worker → in-process store and a warning naming the restart loss", () => {
     const warnings: string[] = [];
     const store = buildMemoryStore({ enabled: true }, {}, (m) => warnings.push(m));

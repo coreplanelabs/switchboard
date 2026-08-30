@@ -8,7 +8,7 @@ import type { MemoryCandidate, MemoryQuery, MemoryRecord, MemoryStore } from "./
 // state lives OFF the bot host (AGENTS.md invariant 6 — a bot restart loses
 // nothing). Route contracts (JSON in/out, bearer MEMORY_TOKEN):
 //   POST /retrieve {scopeKey, query, limit} → {records: MemoryRecord[]}
-//   POST /write    {scopeKey, records: MemoryCandidate[]} → {ok, inserted, deduped, superseded}
+//   POST /write    {scopeKey, records: MemoryCandidate[], cap?} → {ok, inserted, deduped, superseded, evicted}
 //   POST /list     {scopeKey, limit, query?} → {records: MemoryRecord[]}  (#278/#293 human controls)
 //   POST /forget   {scopeKey, id} → {ok, forgotten: boolean}
 
@@ -29,6 +29,9 @@ export interface WorkerMemoryStoreOptions {
   baseUrl: string;
   /** Bearer secret (MEMORY_TOKEN on the Worker). */
   token: string;
+  /** Per-scope cap on active records (#253), sent on every /write; absent →
+   *  the Worker's own default. */
+  cap?: number;
   /** Injectable for tests; defaults to global fetch. */
   fetch?: typeof fetch;
   /** Receives one line per degraded retrieval (default: console.warn). */
@@ -76,7 +79,11 @@ export class WorkerMemoryStore implements MemoryStore {
    *  so a failure here is thrown with enough detail to diagnose. */
   async write(scopeKey: string, records: MemoryCandidate[]): Promise<void> {
     if (records.length === 0) return;
-    const res = await this.post("/write", { scopeKey, records });
+    const res = await this.post("/write", {
+      scopeKey,
+      records,
+      ...(this.opts.cap !== undefined ? { cap: this.opts.cap } : {}),
+    });
     if (!res.ok) {
       const data = await parseBody(res);
       throw new Error(`memory worker /write HTTP ${res.status}${data.error ? `: ${String(data.error)}` : ""}`);
@@ -138,6 +145,6 @@ function isMemoryRecord(v: unknown): v is MemoryRecord {
     typeof r.sourceThreadKey === "string" &&
     typeof r.createdAt === "number" &&
     typeof r.useCount === "number" &&
-    (r.status === "active" || r.status === "superseded" || r.status === "forgotten")
+    (r.status === "active" || r.status === "superseded" || r.status === "forgotten" || r.status === "evicted")
   );
 }

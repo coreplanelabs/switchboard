@@ -142,6 +142,10 @@ workspaceDir: ./workspaces
 #   # (user:slack:U…, #107) — a person's records never surface for anyone else.
 #   limit: 8            # max records retrieved/injected per request (default 8)
 #   maxTokens: 800      # hard token budget for the injected block (default 800)
+#   maxRecordsPerScope: 500
+#                       # per-scope cap on ACTIVE records (default 500): a write
+#                       # that would exceed it evicts the least recently used
+#                       # records (soft delete, status `evicted`) in the same write.
 #   model: anthropic/claude-haiku-4-5
 #                       # <provider>/<model> for the reflection pass — pick a
 #                       # cheap tier. Absent → the run's own resolved model.

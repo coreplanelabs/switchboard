@@ -289,3 +289,53 @@ describe("selectMemoryStore", () => {
     expect(selectMemoryStore({ enabled: true })).toBeInstanceOf(InMemoryMemoryStore);
   });
 });
+
+// Feature: features/memory.md — per-scope cap (#253): applied on write in the
+// in-process store; evicted rows are soft-deleted and invisible everywhere.
+describe("InMemoryMemoryStore per-scope cap (#253)", () => {
+  const c = (text: string): MemoryCandidate => ({ kind: "fact", text, keywords: [text], sourceThreadKey: "slack:C1:1.0" });
+
+  it("a write that pushes a scope past the cap evicts the least recently used records down to the cap — in one batch", async () => {
+    let t = NOW;
+    const store = new InMemoryMemoryStore([], { now: () => t, cap: 3 });
+    await store.write("org:coreplanelabs", [c("alpha")]);
+    t += 1;
+    await store.write("org:coreplanelabs", [c("beta")]);
+    t += 1;
+    await store.write("org:coreplanelabs", [c("gamma")]);
+    t += 1;
+    // Use alpha so beta becomes the least recently used.
+    await store.retrieve({ scopeKey: "org:coreplanelabs", query: "alpha", limit: 5 });
+    t += 1;
+    await store.write("org:coreplanelabs", [c("delta"), c("epsilon")]);
+    const active = (await store.list("org:coreplanelabs", 10)).map((r) => r.text).sort();
+    expect(active).toEqual(["alpha", "delta", "epsilon"]); // beta + gamma evicted (LRU), alpha kept (used)
+  });
+
+  it("evicted records are hidden from retrieve, list, and dedup, and keep their row with status `evicted`", async () => {
+    const seed = [
+      rec({ id: "x", text: "x note", keywords: ["x"], createdAt: NOW - 10, lastUsedAt: NOW - 10 }),
+      rec({ id: "y", text: "y note", keywords: ["y"], createdAt: NOW - 5 }),
+    ];
+    const store = new InMemoryMemoryStore(seed, { now: () => NOW, cap: 2 });
+    await store.write("org:coreplanelabs", [c("z note")]);
+    expect(await store.retrieve({ scopeKey: "org:coreplanelabs", query: "x", limit: 5 })).toEqual([]);
+    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.text).sort()).toEqual(["y note", "z note"]);
+    expect(seed[0].status).toBe("evicted");
+    // Not a dedup target: re-asserting the evicted text inserts a fresh active record (evicting the next LRU).
+    await store.write("org:coreplanelabs", [c("x note")]);
+    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.text).sort()).toEqual(["x note", "z note"]);
+  });
+
+  it("the cap counts ACTIVE records only: superseded/forgotten rows do not consume it, and no cap means no eviction", async () => {
+    const store = new InMemoryMemoryStore(
+      [rec({ id: "s", text: "s", status: "superseded" }), rec({ id: "f", text: "f", status: "forgotten" }), rec({ id: "a", text: "a" })],
+      { now: () => NOW, cap: 2 },
+    );
+    await store.write("org:coreplanelabs", [c("b")]);
+    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.id).sort()).toEqual(["a", "mem:org:coreplanelabs:0"]);
+    const uncapped = new InMemoryMemoryStore([], { now: () => NOW });
+    for (let i = 0; i < 12; i++) await uncapped.write("org:coreplanelabs", [c(`n${i}`)]);
+    expect(await uncapped.list("org:coreplanelabs", 50)).toHaveLength(12);
+  });
+});

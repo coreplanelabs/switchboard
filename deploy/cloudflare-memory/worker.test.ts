@@ -358,3 +358,39 @@ describe("dedup / supersede (shared engine rules)", () => {
     expect(r.map((x) => x.text).sort()).toEqual(["deploy v1", "deploy v2"]);
   });
 });
+
+// Feature: features/memory.md — per-scope cap (#253): applied inside the write
+// transaction; evicted rows are soft-deleted and hidden from retrieve + list.
+describe("per-scope cap (#253)", () => {
+  it("an over-cap write evicts the least recently used records down to the cap and reports `evicted`", async () => {
+    const s = scope();
+    for (const t of ["alpha note", "beta note", "gamma note"]) {
+      expect((await post("/write", { scopeKey: s, records: [cand(t)], cap: 3 })).data).toMatchObject({ evicted: 0 });
+    }
+    // Touch alpha so beta is the least recently used.
+    await post("/retrieve", { scopeKey: s, query: "alpha", limit: 8 });
+    const w = await post("/write", { scopeKey: s, records: [cand("delta note"), cand("epsilon note")], cap: 3 });
+    expect(w.status).toBe(200);
+    expect(w.data).toMatchObject({ inserted: 2, evicted: 2 });
+    const listed = ((await post("/list", { scopeKey: s, limit: 10 })).data.records as Array<Record<string, unknown>>)
+      .map((r) => r.text)
+      .sort();
+    expect(listed).toEqual(["alpha note", "delta note", "epsilon note"]);
+    expect(((await post("/retrieve", { scopeKey: s, query: "beta gamma", limit: 8 })).data.records as unknown[]).length).toBe(0);
+    // Evicted rows are not dedup targets: restating inserts fresh (and evicts the next LRU).
+    expect((await post("/write", { scopeKey: s, records: [cand("beta note")], cap: 3 })).data).toMatchObject({
+      inserted: 1,
+      deduped: 0,
+      evicted: 1,
+    });
+  });
+
+  it("absent `cap` uses the server default (no eviction under it); bad caps are 400", async () => {
+    const s = scope();
+    for (let i = 0; i < 5; i++) await post("/write", { scopeKey: s, records: [cand(`note ${i}`)] });
+    expect(((await post("/list", { scopeKey: s, limit: 50 })).data.records as unknown[]).length).toBe(5);
+    expect((await post("/write", { scopeKey: s, records: [cand("x")], cap: 0 })).status).toBe(400);
+    expect((await post("/write", { scopeKey: s, records: [cand("x")], cap: 10001 })).status).toBe(400);
+    expect((await post("/write", { scopeKey: s, records: [cand("x")], cap: "5" })).status).toBe(400);
+  });
+});

@@ -154,3 +154,23 @@ describe("WorkerMemoryStore construction", () => {
     expect(MEMORY_WORKER_TIMEOUT_MS).toBeLessThanOrEqual(10_000);
   });
 });
+
+// Feature: features/memory.md — per-scope cap (#253) reaches the Worker on the /write body.
+describe("WorkerMemoryStore cap on the wire (#253)", () => {
+  it("sends `cap` on /write when configured, and omits it (server default) when not", async () => {
+    const capped = fakeFetch(() => jsonRes({ ok: true, inserted: 1, deduped: 0, superseded: 0, evicted: 0 }));
+    await new WorkerMemoryStore({ baseUrl: "https://memory.example", token: "t", fetch: capped.fetch, cap: 250 }).write(
+      "org:coreplanelabs",
+      [cand],
+    );
+    expect(JSON.parse(String(capped.calls[0].init.body))).toMatchObject({ scopeKey: "org:coreplanelabs", cap: 250 });
+    const plain = fakeFetch(() => jsonRes({ ok: true }));
+    await store(plain.fetch).write("org:coreplanelabs", [cand]);
+    expect(JSON.parse(String(plain.calls[0].init.body))).not.toHaveProperty("cap");
+  });
+
+  it("accepts `evicted` records from the Worker (status is part of the wire contract)", async () => {
+    const { fetch } = fakeFetch(() => jsonRes({ records: [{ ...record, status: "evicted" }] }));
+    expect(await store(fetch).list("org:coreplanelabs", 5)).toHaveLength(1);
+  });
+});

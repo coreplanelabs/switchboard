@@ -39,6 +39,25 @@ export function rankRecords(active: MemoryRecord[], query: string, now: number, 
     .map(({ r }) => r);
 }
 
+/** Default per-scope cap on ACTIVE records (#253) when config does not set one. */
+export const DEFAULT_SCOPE_CAP = 500;
+
+/** Per-scope cap (#253): which ACTIVE records a store must evict so that at
+ *  most `cap` remain — the least recently USED first (`lastUsedAt ??
+ *  createdAt` ascending; ties broken by lower `createdAt`, so the older record
+ *  goes first), exactly `active.length - cap` of them, none at or under the
+ *  cap. Non-active rows are ignored (they neither count nor get evicted).
+ *  Pure: the caller flips status (soft delete — provenance stays). */
+export function planEviction(active: MemoryRecord[], cap: number): MemoryRecord[] {
+  const live = active.filter((r) => r.status === "active");
+  const excess = live.length - cap;
+  if (excess <= 0) return [];
+  return live
+    .slice()
+    .sort((a, b) => (a.lastUsedAt ?? a.createdAt) - (b.lastUsedAt ?? b.createdAt) || a.createdAt - b.createdAt)
+    .slice(0, excess);
+}
+
 /** What a store must do for one candidate. `dedup`: bump `target.useCount`,
  *  insert nothing. `insert`: append `record` (already minted) and, when
  *  `supersede` is set, flip that record to `superseded`. */
