@@ -259,8 +259,13 @@ export function planScheduledFiring(schedule: RunSchedule, ingressTokensJson: st
 
 const RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "stopped_soft", "stopped_hard"]);
 
+/** The firing detail is the reply's FIRST non-empty line, whitespace-collapsed
+ *  and capped: the head line of every command reply is its one-line summary
+ *  (e.g. `🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns`);
+ *  the body under it is the long form, which the /runs panel has no room for. */
 function cap(text: string): string {
-  const line = text.replace(/\s+/g, " ").trim();
+  const first = text.split("\n").find((l) => l.trim() !== "") ?? "";
+  const line = first.replace(/\s+/g, " ").trim();
   return line.length > FIRING_DETAIL_MAX ? `${line.slice(0, FIRING_DETAIL_MAX - 1)}…` : line;
 }
 

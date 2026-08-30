@@ -9,7 +9,7 @@ import type { ScheduleStore } from "../core/scheduleStore.js";
 import { buildScheduledRows, renderScheduledPanel, type FiringsState } from "./scheduledPanel.js";
 import { HTML_PAGE_HEADERS } from "./liveView/html.js";
 import { renderRunPage } from "./liveView/runPage.js";
-import { renderRunsIndex, type IndexRow, type RunsIndexOptions } from "./liveView/runsIndex.js";
+import { renderRunsIndex, renderScheduledPage, type IndexRow, type RunsIndexOptions } from "./liveView/runsIndex.js";
 import { nodeSseSink, parseLastEventId, serveEvents, serveHistoryEvents, serveIndexEvents, startSseHeartbeat } from "./liveView/sse.js";
 
 // Live-view channel: the external, browser-facing surface for a live agent run
@@ -51,15 +51,18 @@ export * from "./liveView/sse.js";
 /** Which live-view route a path is, if any. The bare `/runs` index carries no
  *  id (it is Access-gated, not token-gated); the per-run routes do. `stop` is
  *  the one WRITE route (`POST /runs/:id/stop`, #101). */
-export type RunRoute = { kind: "index" } | { id: string; kind: "page" | "events" | "friction" | "stop" };
+export type RunRoute = { kind: "index" } | { kind: "scheduled" } | { id: string; kind: "page" | "events" | "friction" | "stop" };
 
-/** Match the bare index (`/runs`, `/runs/`), a per-run page (`/runs/:id`), a
- *  per-run SSE stream (`/runs/:id/events`), a per-run friction diagnosis
- *  (`/runs/:id/friction`), or the per-run stop control (`/runs/:id/stop`).
- *  Path only — the token is a query param, read separately. Returns null for
- *  anything else so the server can fall through to its other routes. */
+/** Match the bare index (`/runs`, `/runs/`), the Scheduled tab
+ *  (`/runs/scheduled`, item 18 — a reserved path word, never a run id: ids are
+ *  UUIDs), a per-run page (`/runs/:id`), a per-run SSE stream
+ *  (`/runs/:id/events`), a per-run friction diagnosis (`/runs/:id/friction`), or
+ *  the per-run stop control (`/runs/:id/stop`). Path only — the token is a query
+ *  param, read separately. Returns null for anything else so the server can fall
+ *  through to its other routes. */
 export function parseRunRoute(pathname: string): RunRoute | null {
   if (pathname === "/runs" || pathname === "/runs/") return { kind: "index" };
+  if (pathname === "/runs/scheduled" || pathname === "/runs/scheduled/") return { kind: "scheduled" };
   const m = /^\/runs\/([^/]+)(?:\/(events|friction|stop))?\/?$/.exec(pathname);
   if (!m) return null;
   let id: string;
@@ -248,46 +251,53 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
         return true;
       }
       const live = index.listActive();
-      const scheduled = deps.scheduled;
-      // The Scheduled panel (#244) lists the registry's schedules with each one's
-      // last firing; a live firing links with its token, so the panel reads the
-      // live rows, whatever the view. Without a firing store the history is
-      // "unavailable" (never "never fired").
-      const panelFor = (firings: FiringsState): string | undefined => {
-        if (!scheduled) return undefined;
-        const t = now();
-        return renderScheduledPanel(buildScheduledRows(scheduled.schedules, firings, live, t), firings, t);
-      };
-      const render = (page: IndexPage, firings: FiringsState) => {
+      const render = (page: IndexPage) => {
         res.writeHead(200, HTML_PAGE_HEADERS);
         res.end(
           renderRunsIndex(page.rows, {
             all,
             retention: deps.retention,
-            scheduledPanel: panelFor(firings),
+            now: now(),
             ...(page.storeUnavailable ? { storeUnavailable: true } : {}),
             ...(page.olderHref ? { olderHref: page.olderHref } : {}),
           }),
         );
       };
-      const noStore: FiringsState = { ok: false, reason: NO_STORE_REASON };
-      const activeOnly = () => ({ rows: live.filter((s) => !s.finished) });
-      if (!all && !scheduled?.store) {
+      if (!all) {
         // Nothing to await: the default view is the registry alone (R11 — never a
         // store read), rendered synchronously as before.
-        render(activeOnly(), noStore);
+        render({ rows: live.filter((s) => !s.finished) });
         return true;
       }
-      run(res, async () => {
-        // Both reads are known before the head is written, so the first paint is
-        // complete (a firing-store failure is shown as such, never as an empty
-        // history).
-        const [page, firings] = await Promise.all([
-          all ? mergedRows(live, parseIndexCursor(url.searchParams)) : Promise.resolve<IndexPage>(activeOnly()),
-          scheduled?.store ? loadFirings(scheduled.store) : Promise.resolve(noStore),
-        ]);
-        render(page, firings);
-      });
+      run(res, async () => render(await mergedRows(live, parseIndexCursor(url.searchParams))));
+      return true;
+    }
+
+    // The Scheduled tab (#244, item 18): the registry's schedules with each one's
+    // last firing; a live firing links with its token, so the panel reads the
+    // live rows. Without a firing store the history is "unavailable" (never
+    // "never fired"); without a schedule registry the tab says so (200, not 404).
+    // Same Access gate as the index, no token, GET-only, no feed.
+    if (route.kind === "scheduled") {
+      const scheduled = deps.scheduled;
+      if (!scheduled) {
+        res.writeHead(200, HTML_PAGE_HEADERS);
+        res.end(renderScheduledPage(`<p class="empty">No schedule registry configured.</p>`));
+        return true;
+      }
+      const live = index.listActive();
+      const render = (firings: FiringsState) => {
+        const t = now();
+        res.writeHead(200, HTML_PAGE_HEADERS);
+        res.end(renderScheduledPage(renderScheduledPanel(buildScheduledRows(scheduled.schedules, firings, live, t), firings, t)));
+      };
+      if (!scheduled.store) {
+        render({ ok: false, reason: NO_STORE_REASON });
+        return true;
+      }
+      // The store is read before the head is written, so the first paint is
+      // complete (a firing-store failure is shown as such, never as an empty history).
+      run(res, async () => render(await loadFirings(scheduled.store!)));
       return true;
     }
 

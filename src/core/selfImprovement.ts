@@ -129,7 +129,17 @@ export function formatSelfImprovementReport(r: SelfImprovementReport): string {
   if (r.patterns.length === 0) {
     return `🔍 ${runs}${truncatedNote} — no recurring friction pattern found (a pattern must recur across ≥2 distinct runs).`;
   }
-  const head = `🔍 *Friction proposals* — ${runs}${truncatedNote} · ${r.patterns.length} recurring pattern${r.patterns.length === 1 ? "" : "s"}${r.dryRun ? " · dry run (nothing filed)" : ""}`;
+  // The head line is the whole story in one glance — it is all the /runs
+  // Scheduled tab shows of a firing (live-view item 14).
+  const tally = [
+    r.filed.length > 0 ? `${r.filed.length} filed` : "",
+    r.duplicates.length > 0 ? `${r.duplicates.length} already open` : "",
+    r.failed.length > 0 ? `${r.failed.length} failed to file` : "",
+  ]
+    .filter(Boolean)
+    .map((t) => ` · ${t}`)
+    .join("");
+  const head = `🔍 *Friction proposals* — ${runs}${truncatedNote} · ${r.patterns.length} recurring pattern${r.patterns.length === 1 ? "" : "s"}${tally}${r.dryRun ? " · dry run (nothing filed)" : ""}`;
   const lines = [head, ""];
   r.patterns.forEach((p, i) => {
     const time = p.durationMs > 0 ? ` · ${formatMs(p.durationMs)}` : "";

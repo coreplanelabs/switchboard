@@ -3819,6 +3819,13 @@ describe("input / context / answer events in the run stream (#157 U1)", () => {
     expect(answer.text).toBe("answer");
   });
 
+  it("humanizing maps mrkdwn bold to Markdown: `*bold*` → `**bold**` on word edges only; globs, arithmetic and code are untouched (item 18)", async () => {
+    const { events } = await runWith("*No behavior change.* (*ok*) rm -rf src/*.ts and 2 * 3 * 4 run `echo *x*` then ``` *raw* &amp; ```");
+    const [input] = textEventsOf(events);
+    // entities are unescaped everywhere (that pass predates this one); emphasis leaves code alone
+    expect(input.text).toBe("**No behavior change.** (**ok**) rm -rf src/*.ts and 2 * 3 * 4 run `echo *x*` then ``` *raw* & ```");
+  });
+
   it("humanizing is Slack-only: an `http:` caller's request and context are recorded exactly as dispatched (mrkdwn markup and entities untouched)", async () => {
     const raw = "<https://github.com/o/r/pull/1|github.com/o/r/pull/1> please review &amp; fix <@U123> &lt;now&gt;";
     const history: HistoryItem[] = [{ role: "user", text: "earlier: 1 &lt; 2 <@U777|dana>" }];

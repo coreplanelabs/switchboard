@@ -1384,7 +1384,23 @@ function unescapeSlackEntities(text: string): string {
  *  entities unescaped. Only for text that came in through a channel — model
  *  output is not mrkdwn and must not pass through here. */
 export function humanizeMessageText(text: string): string {
-  return unescapeSlackEntities(humanizeLinks(text, false));
+  return markdownEmphasis(unescapeSlackEntities(humanizeLinks(text, false)));
+}
+
+/** mrkdwn's bold in Markdown terms, so the run page's markdown renderer reads a
+ *  Slack-authored turn as the human saw it (live-view item 18): `*bold*` →
+ *  `**bold**` when the asterisks delimit a run that starts and ends on non-space
+ *  (mrkdwn's rule) and sit on word edges — a glob (`src/*.ts`) or arithmetic
+ *  (`2 * 3 * 4`) is left alone. Code spans and fences are left byte-for-byte.
+ *  `_italic_` already means the same in both dialects; block-level mrkdwn (`•`
+ *  bullets, quotes) cannot survive here — `parseDirectives` has already collapsed
+ *  the request to one line. */
+function markdownEmphasis(text: string): string {
+  const parts = text.split(/(```[\s\S]*?```|`[^`\n]*`)/);
+  for (let i = 0; i < parts.length; i += 2) {
+    parts[i] = parts[i].replace(/(^|[\s(\[{"'>])\*(\S(?:[^*\n]*?\S)?)\*(?=$|[\s)\]}.,!?:;"'<])/gm, "$1**$2**");
+  }
+  return parts.join("");
 }
 
 /** Whether a channel's text is Slack mrkdwn (AGENTS.md invariant 4: the id

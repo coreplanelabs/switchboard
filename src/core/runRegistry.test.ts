@@ -163,6 +163,7 @@ describe("RunRegistry.finish", () => {
     const { reg } = testRegistry();
     expect(() => reg.publish("ghost", call("x"))).not.toThrow();
   });
+
 });
 
 describe("RunRegistry.listActive", () => {

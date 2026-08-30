@@ -9,7 +9,7 @@ export const FIXTURE_SCHEDULES: readonly ScheduleDef[] = [
   { name: "self-improvement", cron: "0 14 * * 1", worker: "bot", description: "Weekly self-improvement pass.", action: { type: "run", command: "friction propose", identity: "cron" } },
   { name: "resident-watchdog", cron: "*/10 * * * *", worker: "resident", description: "Resident watchdog pass.", action: { type: "watchdog" } },
 ];
-import { buildScheduledRows, formatRelative, formatUtc, renderScheduledPanel, type FiringsState } from "./scheduledPanel.js";
+import { buildScheduledRows, firingDetailSummary, formatRelative, formatUtc, renderScheduledPanel, type FiringsState } from "./scheduledPanel.js";
 
 // Feature: features/live-view.md item 14 (#244): the /runs "Scheduled" panel —
 // what is armed, next fire (computed), last fire + outcome, link to the run.
@@ -87,20 +87,36 @@ describe("renderScheduledPanel", () => {
     const html = renderScheduledPanel(rows, { ok: true, firings: [firing()] }, NOW);
     expect(html).toContain('<section id="scheduled"');
     expect(html).not.toContain('data-schedule="keep-alive"');
-    expect(html).toContain('<tr data-schedule="self-improvement">');
+    expect(html).toContain('<li data-schedule="self-improvement">');
     expect(html).toContain("<code>friction propose</code>");
     expect(html).toContain("<code>cron</code>");
-    expect(html).toContain('<tr data-schedule="resident-watchdog">');
+    expect(html).toContain('<li data-schedule="resident-watchdog">');
     expect(html).toContain("resident watchdog — not a run");
-    expect(html).toContain("<code>bot</code>");
+    expect(html).toContain('<span class="worker"><span class="lbl">on</span> <code>bot</code></span>');
     expect(html).toContain("<code>resident</code>");
-    expect(html).toContain("2026-08-31 14:00 UTC");
+    expect(html).toContain("<b>2026-08-31 14:00 UTC</b>");
     expect(html).toContain("(in 2d 1h)");
-    expect(html).toContain("2026-08-24 14:00 UTC");
     expect(html).toContain('<span class="outcome ok">completed</span>');
     expect(html).toContain('<a href="/runs/run-abc12345">run run-abc1</a>');
-    expect(html).toContain("🔍 109 runs analyzed — filed 2");
+    // Line 2 is ONE line: outcome · how long ago (exact UTC on hover) · run · the reply's facts (emoji dropped)
+    expect(html).toContain(
+      '<div class="fire"><span class="lbl">last</span> <span class="outcome ok">completed</span><span class="sep">·</span><span class="when" title="2026-08-24 14:00 UTC">4d 22h ago</span><span class="sep">·</span><a href="/runs/run-abc12345">run run-abc1</a><span class="sep">·</span><span class="detail" title="🔍 109 runs analyzed — filed 2">109 runs analyzed — filed 2</span></div>',
+    );
+    expect(html).not.toContain("<table");
     expect(html).not.toContain("Firing history unavailable");
+  });
+
+  it("the detail is the reply's facts, not its title: a leading `*Title* —` and emoji are dropped, long text is cut", () => {
+    expect(firingDetailSummary("🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns · 1 filed")).toBe("244 runs analyzed · 23 recurring patterns · 1 filed");
+    expect(firingDetailSummary("🔍 109 runs analyzed — filed 2")).toBe("109 runs analyzed — filed 2");
+    expect(firingDetailSummary("HTTP 401 unauthorized")).toBe("HTTP 401 unauthorized");
+    // legacy records flattened the whole reply into one line: cut at a sentence-ish width
+    const legacy = "🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns 1. `slow_tool:npm test` — 22 runs · 23× · 29m 9s · high 2. `slow_tool:npm test, npm run build` — 18 runs · 18× · 27m 26s · high 3. more";
+    expect(firingDetailSummary(legacy)).toBe("244 runs analyzed · 23 recurring patterns"); // the head ends where the list begins
+    const long = firingDetailSummary("x".repeat(200));
+    expect(long.length).toBe(121);
+    expect(long.endsWith("…")).toBe(true);
+    expect(firingDetailSummary("   ")).toBe("");
   });
 
   it("never fired → says so; unavailable history → a note with the reason and `unknown` cells", () => {
