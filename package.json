@@ -14,7 +14,8 @@
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "agent-env-bootstrap": "tsx src/agentEnv/bootstrapCli.ts"
+    "agent-env-bootstrap": "tsx src/agentEnv/bootstrapCli.ts",
+    "deploy:all": "tsx src/deploy/deployAllCli.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
