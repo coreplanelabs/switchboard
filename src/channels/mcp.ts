@@ -2,7 +2,6 @@ import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerRespons
 import { CommandRegistry, type Caller, type CommandDef, type CommandInvoker, type InvokeErrorCode } from "../core/commandRegistry.js";
 import { jsonSchemaFor, mcpToolName, namedToInput } from "../core/commandSurface.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
-import { PlainTextFormatter } from "../core/structuredMessage.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
 import {
   authorizeRequest,
@@ -142,8 +141,6 @@ interface JsonRpcRequest {
  *  no-op (no live surface to edit in one shot), history() is empty (a tool call
  *  carries no prior turns — conversation state, if any, rides on threadKey). */
 export class McpIO implements ChannelIO {
-  /** Structured output renders as plain text for a machine MCP consumer. */
-  readonly formatter = new PlainTextFormatter();
   private replies: string[] = [];
 
   async reply(text: string): Promise<void> {

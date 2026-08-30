@@ -123,15 +123,6 @@ execution:
 # On Fly.io set this to ./data/workspaces so checkouts live on the volume.
 workspaceDir: ./workspaces
 
-# Output formatting (channel-formatter feature, #76).
-# output:
-#   # When true, an agent's answer is converted to a channel-agnostic structured
-#   # representation, zod-validated with a fixed-retry self-heal loop, then
-#   # rendered by the target channel's formatter (Slack -> mrkdwn, CLI/HTTP/MCP
-#   # -> plain text) — so the model never guesses per-channel markup. Default
-#   # false: the Markdown answer is sent as-is (today's behavior, unchanged).
-#   structured: false
-
 # Cross-session self-learning memory (Area 7c, #85). DEFAULT OFF: absent, or
 # enabled:false, means the dispatcher uses a NullMemoryStore and the model input
 # is byte-identical to memory-off — zero behavior change. When enabled, before

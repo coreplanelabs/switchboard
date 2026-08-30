@@ -36,7 +36,6 @@ import { dispatch } from "./core/dispatcher.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
 import { buildRunStore, type RunStore } from "./core/runStore.js";
-import { PlainTextFormatter } from "./core/structuredMessage.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
@@ -166,9 +165,6 @@ export async function runCli(commands: CommandInvoker, parsed: Exclude<CliInvoca
 
 /** The harness channel: replies to stdout, status lines to stderr, no history (one-shot). */
 class ConsoleIO implements ChannelIO {
-  /** Structured output renders as plain text for the terminal. */
-  readonly formatter = new PlainTextFormatter();
-
   async reply(text: string): Promise<void> {
     console.log("\n" + text);
   }
