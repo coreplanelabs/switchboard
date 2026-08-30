@@ -18,8 +18,7 @@ Agent gateway: messages arrive over a channel, get routed to an agent, which run
 | Path | What | Notes |
 |---|---|---|
 | `src/core/types.ts` | Channel contract (`IncomingMessage`, `ChannelIO`, `StatusHandle`, `HistoryItem`) | The open-closed seam for platforms |
-| `src/core/structuredMessage.ts` | Structured-output zod schema + `ChannelFormatter` seam + `PlainTextFormatter` | Channel-agnostic output blocks; `SlackFormatter` in `src/channels/slackFormatter.ts` is the 2nd impl (invariant 2). See `features/channel-formatter.md` |
-| `src/core/structuredOutput.ts` | Validation + fixed-retry self-heal loop + provider-backed producer | Flag-gated (`output.structured`, default off); wired in `dispatcher.sendAnswer` |
+| `src/core/llmOutput/` | Typed LLM output contract (#252 successor): `OutputType<T>` seam + `acceptOutput` control loop, markdown canonicalization, JSON type | The answer is canonicalized once at the dispatcher boundary; raw+canonical on the `answer` event. See `features/llm-output.md` |
 | `src/core/dispatcher.ts` | All orchestration: the ONE chat fast path (the registry's chat adapter — every command, `help` included; commands that do work are inline runs), the natural-language op translation into `repo.test\|build`, directives, resolution, permissions, history assembly, agent run | The only place these live; no legacy chat parser remains (phase 4b) |
 | `src/core/configAwareness.ts`, `src/core/customInstructions.ts` | Pure system-prompt blocks the dispatcher folds in after resolution + gates: resolved-config awareness (#109) and per-scope custom instructions (`Scope.instructions`, #107) | Advisory prompt content only — `resolve()`/gates never read `instructions`; see `features/routing-and-config.md` items 8–9 |
 | `src/core/repoContext.ts` | Pre-model repo/ref resolution (slug/URL/PR in the message, thread history) | Feeds resident selection; PR→ref via one REST call, never `gh` |

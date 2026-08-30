@@ -4,7 +4,6 @@ import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js"
 import { catchUpWindowWarning } from "../core/drain.js";
 import { mdToMrkdwn } from "./mrkdwn.js";
 import { escapeMrkdwn } from "./slackEscape.js";
-import { SlackFormatter } from "./slackFormatter.js";
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 import { ACK_EMOJI, botRepliedAfter, catchUpMissedMentions, fetchReplies, type CatchUpClient, type SlackHistoryMessage } from "./slackCatchUp.js";
 import { missingBotScopes, recordCatchUpOutcome, recordMissingScopes } from "./slackCatchUpStatus.js";
@@ -691,10 +690,6 @@ export async function fetchDocuments(
 
 /** Exported for tests. */
 export class SlackIO implements ChannelIO {
-  /** Structured output renders through the Slack formatter (structured →
-   *  mrkdwn); `sendFormatted` posts its output verbatim. */
-  readonly formatter = new SlackFormatter();
-
   constructor(
     private client: SlackClient,
     private ev: SlackEvent,
@@ -702,12 +697,6 @@ export class SlackIO implements ChannelIO {
 
   async reply(text: string): Promise<void> {
     await this.post(mdToMrkdwn(text));
-  }
-
-  /** Post an already-mrkdwn payload (from `this.formatter`) without re-running
-   *  the Markdown→mrkdwn converter — doing so would double-convert. */
-  async sendFormatted(payload: string): Promise<void> {
-    await this.post(payload);
   }
 
   private async post(mrkdwn: string): Promise<void> {

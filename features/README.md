@@ -27,7 +27,6 @@ Nothing else goes on a criterion: no dates, no receipt links, no "observed live"
 |---|---|
 | [routing-and-config.md](routing-and-config.md) | Directives, config layers, thread stickiness, permission gates, config commands, config awareness, custom instructions |
 | [slack-channel.md](slack-channel.md) | Triggers (mention/DM/follow-up), ack reaction, status cards, formatting, attachments |
-| [channel-formatter.md](channel-formatter.md) | Channel-agnostic structured output (zod schema), `ChannelFormatter` seam (Slack + plain), fixed-retry self-heal, flag-gated (#76) |
 | [llm-output.md](llm-output.md) | Typed LLM output contract: per-datatype request/response modules (`OutputType` seam), markdown canonicalization at the answer boundary, raw+canonical in the run record, deterministic retry loop |
 | [run-visibility.md](run-visibility.md) | Typed run-event stream (tool calls + redacted result summaries); live in-channel status card |
 | [live-view.md](live-view.md) | External run page (#43): per-run capability token + SSE stream while a run is live (in-memory registry), the same page served tokenless from run history once it has finished; Access-gated `/runs` index with an active-only default and `?all=1`; the `/runs` "Scheduled" panel — schedule registry, next fire, last firing + run link (#244) |

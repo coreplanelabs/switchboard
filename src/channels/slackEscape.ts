@@ -1,5 +1,5 @@
 // Slack mrkdwn escaping, shared by every path that builds mrkdwn structural
-// syntax from untrusted content (SlackFormatter, mdToMrkdwn). mrkdwn gives three
+// syntax from untrusted content (mdToMrkdwn, the status card). mrkdwn gives three
 // characters special meaning: `&`, `<`, `>` — the `<…>` form is Slack's link,
 // user-mention, and broadcast syntax (`<url|label>`, `<@U…>`, `<!channel>`). Left
 // raw, a record can inject a live channel ping, a mention, or a forged link.

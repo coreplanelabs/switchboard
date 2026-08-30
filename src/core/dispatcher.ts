@@ -39,9 +39,7 @@ import type { IssueTracker } from "../execution/githubIssues.js";
 import { invokeChatCommand, parseChatCommand, type ChatCommandResult, type ChatCommands, type ParsedChatCommand } from "./commandChat.js";
 import { cliWords } from "./commandSurface.js";
 import { activityOfEvents, defaultRunRegistry, type RunHandle, type RunRegistry, type RunSnapshot } from "./runRegistry.js";
-import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
 import { coalesceStatus } from "./statusCoalescer.js";
-import { produceStructured, providerProducer } from "./structuredOutput.js";
 import type { Provider } from "../providers/types.js";
 import type {
   ChannelIO,
@@ -215,7 +213,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
   // diagnosis — are captured synchronously when the run finishes, inside the
   // run's try/catch, so a failed run has them too. The record itself is
   // assembled and byte-budgeted (`fitRecordToBudget`) here, only AFTER the
-  // reply went out (success path: after `sendAnswer`; failure path: after the
+  // reply went out (success path: after the answer reply; failure path: after the
   // error reply in the outer catch), so neither persistence nor the budgeting
   // pass can delay the user. Undefined until a run finished, or when no writer
   // is configured.
@@ -1039,7 +1037,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // only — the `answer` event published above and the GitHub post body stay
       // link-free.
       const channelAnswer = agent.name === "review" && liveUrl ? `${answer}\n\n[Live run](${liveUrl})` : answer;
-      await sendAnswer(deps, io, msg.threadKey, { provider, model, maxTokens: agent.maxTokens }, channelAnswer);
+      await io.reply(channelAnswer);
     } finally {
       await releaseWorkspace();
     }
@@ -1323,58 +1321,6 @@ function assembleRunRecord(input: {
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
   });
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
-}
-
-// ---- channel-agnostic output (channel-formatter feature, #76) ---------------
-
-/**
- * Send the agent's answer to the channel. Two paths, chosen by config:
- *
- * - Flag OFF (default, `output.structured` unset/false): the answer is sent
- *   verbatim via `io.reply` — identical to today (each channel converts the
- *   Markdown as it always has). Zero behavior change.
- * - Flag ON: the answer is converted to a channel-agnostic structured message
- *   (a constrained model pass), zod-validated with fixed-retry self-heal, then
- *   rendered by the channel's own ChannelFormatter and sent as a native payload.
- *   On validation failure after the retries it falls back to a plain render of
- *   the raw answer — the run never fails over formatting.
- *
- * The core stays platform-blind: it uses the channel-provided formatter (or a
- * PlainTextFormatter default) and `sendFormatted` (or `reply`), never Slack code.
- */
-async function sendAnswer(
-  deps: CoreDeps,
-  io: ChannelIO,
-  threadKey: string,
-  model: { provider: Provider; model: string; maxTokens: number },
-  answer: string,
-): Promise<void> {
-  if (!deps.config.config.output?.structured) {
-    await io.reply(answer);
-    return;
-  }
-
-  const produce = providerProducer({
-    provider: model.provider,
-    model: model.model,
-    answer,
-    maxTokens: model.maxTokens,
-  });
-  const result = await produceStructured(produce, {
-    fallbackText: answer,
-    onWarn: (m) => console.warn(`[structured] ${threadKey} ${m}`),
-  });
-  if (result.fellBack) {
-    console.warn(`[structured] ${threadKey} used plain fallback after ${result.attempts} attempt(s)`);
-  }
-
-  const formatter: ChannelFormatter = io.formatter ?? new PlainTextFormatter();
-  const payload = formatter.format(result.message);
-  if (io.sendFormatted) {
-    await io.sendFormatted(payload);
-  } else {
-    await io.reply(payload);
-  }
 }
 
 /** The external live-view capability URL for a run, or undefined when

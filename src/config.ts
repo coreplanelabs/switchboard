@@ -98,8 +98,6 @@ export interface AppConfig {
   permissions?: Permissions;
   execution?: import("./execution/factory.js").ExecutionConfig;
   workspaceDir?: string;
-  /** Output-formatting behavior (channel-formatter feature, #76). */
-  output?: OutputConfig;
   /**
    * Cross-session self-learning memory (Area 7c, #85). Absent or `enabled:
    * false` (the default) → the dispatcher uses a NullMemoryStore and model
@@ -158,17 +156,6 @@ export interface SlackConfig {
      */
     windowMinutes?: number;
   };
-}
-
-export interface OutputConfig {
-  /**
-   * When true, an agent's answer is converted to a channel-agnostic structured
-   * representation, zod-validated with fixed-retry self-heal, then rendered by
-   * the target channel's ChannelFormatter (Slack → mrkdwn, CLI/HTTP/MCP →
-   * plain). Default false → today's behavior exactly (the Markdown answer is
-   * sent via `io.reply`, which each channel converts as before).
-   */
-  structured?: boolean;
 }
 
 export interface Overrides {

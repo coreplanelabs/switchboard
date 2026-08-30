@@ -54,7 +54,7 @@ describe("classifyMessage (trigger gating)", () => {
   });
 });
 
-// Feature: features/channel-formatter.md — the status/progress card is a context
+// Feature: features/run-visibility.md item 2 — the status/progress card is a context
 // headline (mrkdwn, escaped) over a rich_text body. The body must be rich_text,
 // never a section: Slack folds a section's mrkdwn behind "Show more" at five
 // rendered lines and re-renders a folded card expanded-then-collapsed on every
