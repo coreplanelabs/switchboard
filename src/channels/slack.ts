@@ -245,6 +245,12 @@ export function createSlackApp(deps: CoreDeps) {
           botUserId: id,
           windowMs: catchUp?.windowMinutes != null ? catchUp.windowMinutes * 60_000 : undefined,
           alreadyHandled: wasHandledHere,
+          // Orphaned-card sweep (item 8): cards a dead process left spinning
+          // are closed as interrupted; cards this process is driving are not.
+          ownedHere: ownsLiveCard,
+          onOrphanedCard: async (card, frame) => {
+            await app.client.chat.update({ channel: card.channel, ts: card.ts, ...render(frame) });
+          },
           // Not awaited per message: a run takes minutes and live events run
           // concurrently too — the runner only awaits the hand-off.
           onMissed: (m) => {
@@ -581,6 +587,7 @@ class SlackIO implements ChannelIO {
     await setShimmer();
     const shimmerTimer = setInterval(() => void setShimmer(), 75_000);
     const ts = posted.ts as string;
+    liveCards.add(liveCardKey(this.ev.channel, ts));
     const edit = (frame: StatusUpdate) =>
       this.client.chat
         .update({ channel: this.ev.channel, ts, ...render(frame) })
@@ -589,6 +596,7 @@ class SlackIO implements ChannelIO {
       update: (frame) => void edit(frame),
       done: async (frame) => {
         clearInterval(shimmerTimer);
+        liveCards.delete(liveCardKey(this.ev.channel, ts));
         await edit(frame);
         // reply auto-clears the shimmer; clear explicitly for error paths
         await this.client.assistant.threads
@@ -676,6 +684,16 @@ class SlackIO implements ChannelIO {
 // every raw `<`/`>`/`&`, so truncation can never re-introduce live mrkdwn syntax.
 const RENDER_DETAIL_RAW_MAX = 900;
 const RENDER_DETAIL_ESCAPED_MAX = 2900;
+
+/** Status cards THIS process is currently driving (channel:ts), added when the
+ *  card is posted and removed when it is closed. The reconnect sweep consults
+ *  it so a websocket reconnect without a restart never closes a running run's
+ *  card as "interrupted" — only cards no living process owns are orphans. */
+const liveCards = new Set<string>();
+const liveCardKey = (channel: string, ts: string) => `${channel}:${ts}`;
+export function ownsLiveCard(channel: string, ts: string): boolean {
+  return liveCards.has(liveCardKey(channel, ts));
+}
 
 /** Status frames render as Block Kit: context headline + preformatted activity.
  *  `frame.title` (the run label) and `frame.detail` (tool-output summaries + the

@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   catchUpMissedMentions,
   findMissed,
+  findOrphanedCards,
+  interruptedCardFrame,
   isAckedByBot,
+  ORPHAN_CARD_WINDOW_MS,
   type CatchUpClient,
   type SlackHistoryMessage,
 } from "./slackCatchUp.js";
@@ -167,7 +170,7 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     const onMissed = vi.fn();
     const log = vi.fn();
     const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, log });
-    expect(out).toEqual({ channels: 2, missed: 2 });
+    expect(out).toEqual({ channels: 2, missed: 2, orphans: 0 });
     expect(onMissed.mock.calls.map(([m]) => [m.channel, m.ts])).toEqual([[ "C1", a.ts ], [ "C2", c.ts ]]);
     expect(client.users.conversations).toHaveBeenCalledWith(
       expect.objectContaining({ types: "public_channel,private_channel", exclude_archived: true }),
@@ -194,7 +197,7 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     const client = mockClient({ history: { C1: [mention({ reactions: [{ name: "eyes", users: [BOT], count: 1 }] })] } });
     const onMissed = vi.fn();
     const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed });
-    expect(out).toEqual({ channels: 1, missed: 0 });
+    expect(out).toEqual({ channels: 1, missed: 0, orphans: 0 });
     expect(onMissed).not.toHaveBeenCalled();
   });
 
@@ -202,7 +205,7 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     const client = mockClient({ historyError: "missing_scope" });
     const log = vi.fn();
     const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), log });
-    expect(out).toEqual({ channels: 1, missed: 0 });
+    expect(out).toEqual({ channels: 1, missed: 0, orphans: 0 });
     expect(log).toHaveBeenCalledWith(expect.stringContaining("missing_scope"));
   });
 
@@ -248,5 +251,118 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     expect(Number(first.oldest)).toBeCloseTo((NOW - 86_400_000) / 1000, 0);
     expect(client.conversations.history.mock.calls[1][0]).toEqual(expect.objectContaining({ cursor: "c2" }));
     expect(onMissed).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Feature: features/slack-channel.md item 8 — a status card left spinning by a
+// process that died mid-run (a deploy rollout that killed the container before
+// the drain finished — live 2026-08-29 23:51Z, PR #214's review froze at
+// "153s — thinking") is closed as interrupted by the next connect's sweep, so
+// the requester never stares at a frozen spinner.
+describe("findOrphanedCards (pure selection of the bot's own frozen live cards)", () => {
+  const cutoff = NOW - ORPHAN_CARD_WINDOW_MS;
+  const parent = mention({ ts: ts(600), reply_count: 1, latest_reply: ts(500) });
+  const card = (text: string, over: Partial<SlackHistoryMessage> = {}): SlackHistoryMessage => ({
+    type: "message",
+    user: BOT,
+    bot_id: "B1",
+    text,
+    ts: ts(500),
+    thread_ts: parent.ts,
+    ...over,
+  });
+  const threads = (...replies: SlackHistoryMessage[]) => new Map([[parent.ts, [parent, ...replies]]]);
+  const base = { channel: "C1", botUserId: BOT, cutoffMs: cutoff, ownedHere: () => false };
+
+  it("picks a bot card whose text starts with a live glyph (spinner or 👀 setup), inside the window", () => {
+    for (const glyph of ["◐", "◓", "◑", "◒", "👀"]) {
+      const c = card(`${glyph} *review* on \`anthropic/claude-fable-5\` · 153s — thinking (88s since last tool)`);
+      expect(findOrphanedCards({ ...base, threads: threads(c) }), glyph).toEqual([{ channel: "C1", ts: c.ts, text: c.text }]);
+    }
+  });
+
+  it("skips closed cards (✅ / ❌ / ⏹), human messages, bot replies without a glyph, and cards older than the window", () => {
+    const closed = ["✅ *review* · 203s", "❌ *review* · failed", "⏹ *review* · stopped", "Here is my answer"].map((t) => card(t));
+    const human = card("◓ pretending", { user: "U0USER", bot_id: undefined });
+    const old = card("◓ *review* · 9000s", { ts: ts(3 * 3600) });
+    expect(findOrphanedCards({ ...base, threads: threads(...closed, human, old) })).toEqual([]);
+  });
+
+  it("skips a live card THIS process owns (a reconnect without a restart must not close a running run's card)", () => {
+    const mine = card("◓ *review* · 12s");
+    const out = findOrphanedCards({ ...base, threads: threads(mine), ownedHere: (ch, t) => ch === "C1" && t === mine.ts });
+    expect(out).toEqual([]);
+  });
+});
+
+describe("interruptedCardFrame", () => {
+  it("keeps the run label and elapsed time, drops the spinner and the thinking suffix, explains and tells the reader what to do", () => {
+    const f = interruptedCardFrame("◓ *review* on `anthropic/claude-fable-5` · resident refreshing · 153s — thinking (88s since last tool)");
+    expect(f.title).toBe("❌ interrupted · *review* on `anthropic/claude-fable-5` · resident refreshing · 153s");
+    expect(f.detail).toMatch(/restarted .* while this run was in flight/);
+    expect(f.detail).toMatch(/re-send/i);
+  });
+
+  it("un-escapes the mrkdwn entities Slack returns in history so the label is not double-escaped on re-render", () => {
+    const f = interruptedCardFrame("👀 *coding* on `x` &amp; friends · preparing workspace…");
+    expect(f.title).toBe("❌ interrupted · *coding* on `x` & friends · preparing workspace…");
+  });
+
+  it("un-escapes exactly once: a literal `&amp;lt;` in the label becomes `&lt;`, not `<`", () => {
+    const f = interruptedCardFrame("◓ *general* · &amp;lt;tag&amp;gt; · 3s");
+    expect(f.title).toBe("❌ interrupted · *general* · &lt;tag&gt; · 3s");
+  });
+});
+
+describe("catchUpMissedMentions — orphaned-card sweep", () => {
+  // The requester's mention was 👀-acked (handled) and its thread was last
+  // active 41 min ago: outside the 20 min mention window, inside the orphan one.
+  const parent = mention({ ts: ts(3000), reply_count: 1, latest_reply: ts(2500), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+  const frozen: SlackHistoryMessage = {
+    type: "message",
+    user: BOT,
+    bot_id: "B1",
+    text: "◓ *review* on `m` · 153s — thinking (88s since last tool)",
+    ts: ts(2500),
+    thread_ts: parent.ts,
+  };
+
+  it("fetches threads active inside the (wider) orphan window and closes the frozen card as interrupted; the mention is not re-run", async () => {
+    const client = mockClient({ history: { C1: [parent] }, replies: { [`C1:${parent.ts}`]: [parent, frozen] } });
+    const onMissed = vi.fn();
+    const onOrphanedCard = vi.fn(async () => {});
+    const log = vi.fn();
+    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, ownedHere: () => false, onOrphanedCard, log });
+    expect(out).toEqual({ channels: 1, missed: 0, orphans: 1 });
+    expect(client.conversations.replies).toHaveBeenCalledTimes(1);
+    expect(onMissed).not.toHaveBeenCalled();
+    expect(onOrphanedCard).toHaveBeenCalledWith(
+      { channel: "C1", ts: frozen.ts, text: frozen.text },
+      expect.objectContaining({ title: "❌ interrupted · *review* on `m` · 153s" }),
+    );
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("1 of 1 orphaned status card(s) closed"));
+  });
+
+  it("without an onOrphanedCard hook the sweep is off: no wider fetch, no closes", async () => {
+    const client = mockClient({ history: { C1: [parent] }, replies: { [`C1:${parent.ts}`]: [parent, frozen] } });
+    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn() });
+    expect(out).toEqual({ channels: 1, missed: 0, orphans: 0 });
+    expect(client.conversations.replies).not.toHaveBeenCalled();
+  });
+
+  it("a failing close is logged, does not stop the rest, and is not counted as closed", async () => {
+    const other = mention({ ts: ts(3000, "000002"), reply_count: 1, latest_reply: ts(2400), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+    const frozen2 = { ...frozen, ts: ts(2400), thread_ts: other.ts };
+    const client = mockClient({
+      history: { C1: [parent, other] },
+      replies: { [`C1:${parent.ts}`]: [parent, frozen], [`C1:${other.ts}`]: [other, frozen2] },
+    });
+    const onOrphanedCard = vi.fn().mockRejectedValueOnce(new Error("message_not_found")).mockResolvedValueOnce(undefined);
+    const log = vi.fn();
+    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), ownedHere: () => false, onOrphanedCard, log });
+    expect(onOrphanedCard).toHaveBeenCalledTimes(2);
+    expect(out.orphans).toBe(1);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("message_not_found"));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("1 of 2 orphaned status card(s) closed"));
   });
 });
