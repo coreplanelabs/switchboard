@@ -790,6 +790,70 @@ describe("resident repo dispatch", () => {
     expect(provider.requests).toHaveLength(1);
   });
 
+  // #316: a FRESH thread whose only repo signal is a bare slug the resident
+  // registry rejected must not start a repo-less coding run (empty workspace,
+  // `fatal: not a git repository`) — it says why the slug was ignored. The
+  // resolver reports the refusal as `rejectedRepo`; a bound thread never sets
+  // it (prose slugs there are ignored silently — #289), and a no-repo agent
+  // never resolves a repo at all.
+  it("fresh thread + rejected bare slug + a repo-needing agent → one not-onboarded reply, no run (#316)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("coreplanelabs/try-catch");
+    expect(replies[0]).toContain("not onboarded");
+    expect(replies[0]).toContain("repo onboard coreplanelabs/try-catch");
+    expect(replies[0]).not.toContain("Ask "); // an admin can run `repo onboard` themselves
+    expect(replies[0]).toMatch(/github\.com/); // the URL form still binds a real repo
+    expect(provider.requests).toHaveLength(0); // no model turn
+    expect(makeExecutor).not.toHaveBeenCalled(); // no workspace of any kind
+    expect(statuses[statuses.length - 1].title).toContain("not started");
+  });
+
+  // `repo onboard` is admin-gated (canManageRepos, fail-closed): a non-admin
+  // told to run it would just hit 🚫 next — point them at the admins instead.
+  it("a non-admin gets the not-onboarded reply with an ask-an-admin hint, never a command they cannot run (#316)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UDEV"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("not onboarded");
+    expect(replies[0]).toContain("Ask <@slack:UADMIN> to onboard it (`repo onboard coreplanelabs/try-catch`)");
+    expect(replies[0]).toMatch(/github\.com/); // the self-serve path stays
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("the same rejected slug with a no-repo agent (general) runs unchanged (#316)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    const resolveSpy = vi.fn(() => ({ rejectedRepo: "coreplanelabs/try-catch" }));
+    deps.resolveRepoContext = resolveSpy;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("say hi about coreplanelabs/try-catch", "slack:UADMIN"), io);
+    expect(replies).toContain("answer");
+    expect(replies.some((r) => r.includes("not onboarded"))).toBe(false);
+    expect(resolveSpy).not.toHaveBeenCalled();
+  });
+
+  it("a bound thread with a prose slug in the follow-up stays silent — the resolver keeps the repo, no message (#316/#289)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    // What the production resolver answers for a bound thread + prose slug:
+    // the thread's repo and NO rejectedRepo (the prose token is never probed).
+    deps.resolveRepoContext = () => ({ repo: "acme/api" });
+    const history: HistoryItem[] = [{ role: "user", text: "agent:coding in acme/api: fix the resolver" }];
+    const { io, replies } = fakeIO(history);
+    await dispatch(deps, msg("wrapped it in try/catch, please continue", "slack:UADMIN"), io);
+    expect(replies).toContain("answer");
+    expect(replies.some((r) => r.includes("not onboarded"))).toBe(false);
+    expect(provider.requests).toHaveLength(1);
+  });
+
   it("a resident fallback note appears in the status frames (named, never silent)", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");

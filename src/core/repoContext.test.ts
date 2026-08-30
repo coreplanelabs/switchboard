@@ -562,9 +562,13 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
       expect(fn).not.toHaveBeenCalled();
     });
 
-    it(`resolveRepoContext in a FRESH thread refuses the not-onboarded slug: ${JSON.stringify(payload.slice(0, 40))}…`, async () => {
+    it(`resolveRepoContext in a FRESH thread refuses the not-onboarded slug — and names it as rejected (#316): ${JSON.stringify(payload.slice(0, 40))}…`, async () => {
       const probe = vi.fn(async () => false);
-      await expect(resolveRepoContext(msg(payload), [], probe)).resolves.toEqual({});
+      const ctx = await resolveRepoContext(msg(payload), [], probe);
+      expect(ctx.repo).toBeUndefined();
+      // The dispatcher tells the user the slug was refused instead of starting
+      // a repo-less run — but only for this fresh-thread case (#316).
+      expect(ctx.rejectedRepo).toMatch(/^[a-z]+\/[a-z-]+$/);
       expect(probe).toHaveBeenCalledTimes(1);
     });
 
@@ -585,6 +589,35 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
     await expect(resolveRepoContext(msg("agent:coding fix login in acme/api"), [], probe)).resolves.toEqual({
       repo: "acme/api",
     });
+  });
+
+  it("a fresh thread whose only signal is a rejected bare slug reports it as rejectedRepo, no repo (#316)", async () => {
+    const probe = vi.fn(async () => false);
+    await expect(resolveRepoContext(msg("agent:coding in coreplanelabs/try-catch: say hi"), [], probe)).resolves.toEqual({
+      rejectedRepo: "coreplanelabs/try-catch",
+    });
+  });
+
+  it("a thread weakly bound to a repo the probe rejects reports THAT repo as rejected on a signal-less follow-up (#316)", async () => {
+    const probe = vi.fn(async () => false);
+    const h = [{ role: "user" as const, text: "agent:coding in coreplanelabs/try-catch: say hi" }];
+    await expect(resolveRepoContext(msg("now run git status"), h, probe)).resolves.toEqual({
+      rejectedRepo: "coreplanelabs/try-catch",
+    });
+  });
+
+  it("a rejected `on <slug>` mention is reported too; an accepted candidate never leaves rejectedRepo behind (#316)", async () => {
+    await expect(resolveRepoContext(msg("agent:coding on acme/nope: fix it"), [], async () => false)).resolves.toEqual({
+      rejectedRepo: "acme/nope",
+    });
+    // Thread repo rejected, but this message's own slug accepted → bound, nothing rejected.
+    const probe = vi.fn(async (slug: string) => slug === "acme/api");
+    const h = [{ role: "user" as const, text: "agent:coding in acme/nope: fix it" }];
+    await expect(resolveRepoContext(msg("actually use acme/api"), h, probe)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("without a probe nothing is ever rejected (local/dev binds unvetted, as before)", async () => {
+    await expect(resolveRepoContext(msg("agent:coding in acme/nope: fix it"), [])).resolves.toEqual({ repo: "acme/nope" });
   });
 
   it("a bare slug never overrides even a weakly-established thread repo — probe-independent", async () => {

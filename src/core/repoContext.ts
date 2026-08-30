@@ -74,6 +74,15 @@ export interface RepoContext {
    *  Lets the dispatcher say so in the thread instead of a silent Slack-only
    *  verdict. Never set alongside `pr`. */
   prUnpostable?: { number: number; reason: "closed" | "unreachable" };
+  /** Set when NO repo could be bound and the reason is that every bare
+   *  `owner/name` candidate the resolver consulted (this message's slug, the
+   *  thread's weakly-bound repo, an `on <slug>` mention) was refused by the
+   *  resident probe — the first refused one, in resolution order (#316). The
+   *  dispatcher turns it into a "not onboarded" reply instead of a repo-less
+   *  run. Never set alongside `repo`; never set for a thread that already has
+   *  a repo (prose slugs there are never even probed — #289); never set
+   *  without a probe (local/dev binds unvetted). */
+  rejectedRepo?: string;
 }
 
 // GitHub owner: alphanumeric + hyphens, no leading/trailing hyphen, ≤39.
@@ -302,8 +311,17 @@ export async function resolveRepoContext(
   // may this message's bare slug bind — vetted too. No probe → unvetted.
   const strongNow = s.pr?.repo ?? (s.repoStrong ? s.repo : undefined);
   let repo = strongNow ?? (thread.repoStrong ? thread.repo : undefined);
-  if (!repo && thread.repo && (await safeProbe(isResident, thread.repo))) repo = thread.repo;
-  if (!repo && s.repo && (await safeProbe(isResident, s.repo))) repo = s.repo;
+  // The first bare candidate the probe refused, remembered so the dispatcher
+  // can say why nothing was bound (#316) — only meaningful when `repo` stays
+  // unset; cleared below the moment anything binds.
+  let rejected: string | undefined;
+  const vet = async (cand: string): Promise<boolean> => {
+    if (await safeProbe(isResident, cand)) return true;
+    rejected ??= cand;
+    return false;
+  };
+  if (!repo && thread.repo && (await vet(thread.repo))) repo = thread.repo;
+  if (!repo && s.repo && (await vet(s.repo))) repo = s.repo;
   let ref = s.ref;
 
   // "on <owner/name-shaped>": a ref when a repo is independently established
@@ -312,9 +330,10 @@ export async function resolveRepoContext(
     if (repo && !ref) ref = s.onSlug;
     else if (!repo) {
       const cand = slugOf(s.onSlug);
-      if (cand && (await safeProbe(isResident, cand))) repo = cand;
+      if (cand && (await vet(cand))) repo = cand;
     }
   }
+  if (repo) rejected = undefined;
 
   // PR head — one REST call whenever the CURRENT message names a PR of the
   // resolved repo, regardless of any ref phrasing beside it. The PR is the
@@ -335,6 +354,7 @@ export async function resolveRepoContext(
 
   const out: RepoContext = {};
   if (repo) out.repo = repo;
+  else if (rejected) out.rejectedRepo = rejected;
   if (ref) out.ref = ref;
   // PR for the deterministic review post-step. Named in the current message →
   // set regardless of whether the head fetch succeeded (the reference itself
