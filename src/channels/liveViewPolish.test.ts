@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FAVICON_IDLE, FAVICON_LIVE, indexRowHtml, renderRunNotFoundPage, renderRunPage, renderRunsIndex, renderScheduledPage, type IndexRow } from "./liveView.js";
+import { FAVICON_ICO_SVG, FAVICON_IDLE, FAVICON_LIVE, faviconSvg, indexRowHtml, renderRunNotFoundPage, renderRunPage, renderRunsIndex, renderScheduledPage, type IndexRow } from "./liveView.js";
 import { formatLocalIso } from "./localIso.js";
 import { formatDateTime } from "./indexFormat.js";
 
@@ -318,6 +318,12 @@ describe("runs index — tab title and favicon carry the live count (item 21)", 
     expect(busy).toContain("var BASE_TITLE = document.title.replace(/^\\((\\d+)\\) /");
     // the Scheduled tab and the 404 page carry the idle dot (no live list there)
     expect(renderScheduledPage("<section></section>")).toContain(`href="${FAVICON_IDLE}"`);
+    // one shape everywhere: the data: URIs derive from faviconSvg, and the raw
+    // idle SVG is what GET /favicon.ico serves (the pages-without-a-link fallback)
+    expect(FAVICON_ICO_SVG).toBe(faviconSvg("#6e7681"));
+    expect(FAVICON_IDLE).toBe(`data:image/svg+xml,${encodeURIComponent(FAVICON_ICO_SVG)}`);
+    expect(FAVICON_LIVE).toBe(`data:image/svg+xml,${encodeURIComponent(faviconSvg("#2ea043"))}`);
+    expect(FAVICON_ICO_SVG).toMatch(/^<svg xmlns='http:\/\/www\.w3\.org\/2000\/svg' viewBox='0 0 16 16'><circle [^>]+\/><\/svg>$/);
   });
 });
 
