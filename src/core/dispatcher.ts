@@ -349,7 +349,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     }
     const { executor, note, resident, binding } = selection;
 
-    // Attach-head check (features/agent-review.md item 10, #282): for a PR
+    // Attach-head check (features/agent-review.md item 11, #282): for a PR
     // review on the resident path, the sha the resident ATTACHED the worktree
     // at is compared with the PR head resolved above — before any model turn.
     // A well-formed, different sha means the branch moved between resolution
