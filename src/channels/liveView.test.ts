@@ -337,8 +337,10 @@ describe("run page timeline (request, assistant turns, timestamps, markdown)", (
     // no `at` → no bracket: the formatter returns "" for a missing timestamp
     expect(html).toMatch(/function fmtTime\(at\)\s*\{\s*return typeof at === "number" \? "\[" \+ .*\]" : "";/);
     // rows are built from a timestamp span + a body, via createElement/textContent
-    expect(html).toContain('function stamp(at) { return el("span", "ts", fmtTime(at)); }');
-    expect(html).toContain('headRow("narration", at, turn, step.narration || null'); // the step head carries the narration's `at` (item 18)
+    // item 18: the gutter stamp is the short local clock with the full ISO on hover
+    expect(html).toContain('var s = el("span", "ts", typeof at === "number" ? "[" + formatLocalIso(at).slice(11, 19) + "]" : "");');
+    expect(html).toContain('if (typeof at === "number") s.setAttribute("title", formatLocalIso(at));');
+    expect(html).toContain('appendHead(li, at, turn, step.narration || null'); // the step head carries the narration's `at` (item 18)
     expect(html).toContain("stamp(call.startedAt)");
     expect(html).toContain("requestTs.textContent = fmtTime(change.at)");
     expect(html).toContain("answerTs.textContent = fmtTime(change.at)");
@@ -423,7 +425,7 @@ describe("run page call cards (grouped timeline, item 13)", () => {
     expect(html).toMatch(/es\.onopen = function \(\) \{ live = true;[^}]*refreshTail\(\);/);
     expect(html).toMatch(/es\.addEventListener\("end", function \(\) \{\s*live = false;\s*flushTurn\([^)]*\);[^\n]*\n\s*refreshTail\(\);/);
     expect(html).toMatch(/if \(!live\) \{ tail\.hidden = true; return; \}/);
-    expect(html).toMatch(/li\.tail \.pulse \{[^}]*animation: pulse/);
+    expect(html).toMatch(/\.pulse \{[^}]*animation: pulse/); // the ∿ mark, shared with the header's connection indicator
   });
 
   it("the Request block shows where the request came from: #channel · user · an `open thread` link (http(s) only, noopener)", () => {
@@ -1566,7 +1568,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(html).toContain("var live = false;");
       expect(html).toMatch(/if \(live\) \{\s*var es = new EventSource\(url\);/); // the stream only opens on a live page
       expect(html).toContain('<span class="actions" id="actions" hidden>');
-      expect(html).toContain('<span class="dot grey" id="statedot"></span><span id="state">finished · completed</span>');
+      expect(html).toContain('<span class="pulse grey" id="statedot">∿</span><span id="state">finished · completed</span>');
       expect(html).not.toContain("?t=");
       expect(html).not.toContain("tok-");
     });
@@ -1576,7 +1578,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(html).toContain("var live = true;");
       expect(html).toContain('var url = "/runs/run-1/events?t=tok-1";');
       expect(html).toContain('<span class="actions" id="actions">');
-      expect(html).toContain('<span class="dot amber" id="statedot"></span><span id="state">connecting…</span>');
+      expect(html).toContain('<span class="pulse amber" id="statedot">∿</span><span id="state">connecting…</span>');
     });
 
     it("labels a stopped or failed run's header from its status", async () => {
@@ -1759,15 +1761,30 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
         "/runs/nope/events",
         "/runs/nope/friction",
       ];
+      // Page URLs get the ONE 404 page (item 19: a person landed here — the way
+      // back, the retention sentence, nothing echoed from the request); events
+      // and friction keep the text body. Every page 404 is byte-identical, so
+      // existence is still never revealed.
+      const pageBodies = new Set<string>();
       for (const url of urls) {
         const t = fakeReqRes("GET", url);
         h.handler(t.req, t.res);
         await done(t);
-        expect([url, t.status, t.body()]).toEqual([url, 404, "run not found"]);
+        expect([url, t.status]).toEqual([url, 404]);
+        if (/\/(events|friction)$/.test(url)) expect(t.body()).toBe("run not found");
+        else {
+          expect(t.body()).toContain("That run isn't here.");
+          expect(t.body()).toContain('<a class="back" href="/runs">← All runs</a>');
+          expect(t.body()).toContain("Finished runs are kept for 30 days, then deleted");
+          expect(t.body()).not.toContain("nope");
+          expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+          pageBodies.add(t.body());
+        }
       }
+      expect(pageBodies.size).toBe(1);
     });
 
-    it("with run history off (store null) a finished, evicted run is the same 404", async () => {
+    it("with run history off (store null) a finished, evicted run is the same 404 page", async () => {
       const h = harness({ store: null });
       const run = h.registry.create();
       h.registry.finish(run.id);
@@ -1775,7 +1792,9 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const t = fakeReqRes("GET", `/runs/${run.id}`);
       h.handler(t.req, t.res);
       await done(t);
-      expect([t.status, t.body()]).toEqual([404, "run not found"]);
+      expect(t.status).toBe(404);
+      expect(t.body()).toContain("That run isn't here.");
+      expect(t.body()).toContain("Finished runs are kept for 30 days, then deleted"); // the configured retention, as on the index toggle
     });
   });
 

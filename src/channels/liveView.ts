@@ -9,7 +9,7 @@ import type { ScheduleStore } from "../core/scheduleStore.js";
 import { buildScheduledRows, renderScheduledPanel, type FiringsState } from "./scheduledPanel.js";
 import { HTML_PAGE_HEADERS } from "./liveView/html.js";
 import { renderRunPage } from "./liveView/runPage.js";
-import { renderRunsIndex, renderScheduledPage, type IndexRow, type RunsIndexOptions } from "./liveView/runsIndex.js";
+import { renderRunNotFoundPage, renderRunsIndex, renderScheduledPage, type IndexRow, type RunsIndexOptions } from "./liveView/runsIndex.js";
 import { nodeSseSink, parseLastEventId, serveEvents, serveHistoryEvents, serveIndexEvents, startSseHeartbeat } from "./liveView/sse.js";
 
 // Live-view channel: the external, browser-facing surface for a live agent run
@@ -404,6 +404,11 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
           sink.writeHead(404, TEXT);
           sink.write(NOT_FOUND);
           sink.end();
+        } else if (route.kind === "page") {
+          // A person landed here: the same 404 (existence never revealed), as a
+          // page with the way back (item 19). Machine routes keep the text body.
+          res.writeHead(404, HTML_PAGE_HEADERS);
+          res.end(renderRunNotFoundPage(deps.retention));
         } else text(res, 404, NOT_FOUND);
         return;
       }

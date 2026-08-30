@@ -327,8 +327,10 @@ function runsTabs(current: RunsTab): string {
  * then the tab body and its script. One shell so the two tabs are provably the
  * same page. CSP-safe: inline-only, no external assets.
  */
-function runsShell(current: RunsTab, title: string, body: string, script: string): string {
-  const conn = current === "runs" ? `<span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>` : `<span class="conn"></span>`;
+function runsShell(current: RunsTab, title: string, body: string, script: string, live: boolean = current === "runs"): string {
+  // The connection indicator only where a feed is opened (the index); the
+  // Scheduled tab and the 404 page have no stream to report on.
+  const conn = live ? `<span class="conn"><span class="dot amber" id="statedot"></span><span id="state">connecting…</span></span>` : `<span class="conn"></span>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -426,6 +428,14 @@ function runsShell(current: RunsTab, title: string, body: string, script: string
   a.older { display: inline-block; margin: .75rem .5rem; color: var(--blue); text-decoration: none; font-size: .8rem; }
   a.older:hover { text-decoration: underline; }
   [hidden] { display: none; }
+  /* The run page's 404: quiet, centered, the way back as the one action. */
+  .notfound { max-width: 34rem; margin: 3rem auto; text-align: center; color: var(--fg-soft); }
+  .notfound .code { font: 600 2.6rem/1 var(--mono); color: var(--dim); letter-spacing: .04em; margin: 0 0 .75rem; }
+  .notfound h2 { font: 600 1.1rem/1.3 var(--mono); color: var(--fg); margin: 0 0 .75rem; }
+  .notfound p { margin: 0 0 .6rem; line-height: 1.55; }
+  .notfound .why { color: var(--muted); font-size: .8rem; }
+  .notfound a.back { display: inline-block; margin-top: 1rem; color: var(--blue); text-decoration: none; border: 1px solid #3b4252; border-radius: 4px; padding: .3rem .8rem; }
+  .notfound a.back:hover { background: #161b22; }
   ${SCHEDULED_PANEL_CSS}
 </style>
 </head>
@@ -601,6 +611,22 @@ ${INDEX_ROW_SCRIPT}
  *  Access gate; no SSE (the panel is a snapshot, refreshed on load). */
 export function renderScheduledPage(panel: string): string {
   return runsShell("scheduled", "Scheduled runs", panel, "");
+}
+
+/** The run page's 404 (item 19): the same shell as the runs page, the same
+ *  non-revealing message for an unknown run, an expired one and a wrong token,
+ *  the retention sentence so the likely reason is on the page, and the way
+ *  back. Static text only — nothing from the request is echoed. */
+export function renderRunNotFoundPage(retention: { retentionDays: number } | null): string {
+  const body = `<section class="notfound">
+  <p class="code">404</p>
+  <h2>That run isn't here.</h2>
+  <p>It may have finished and aged out, the link may be missing its token, or it never existed — this page says the same thing in every case.</p>
+  <p class="why">${escapeHtml(retentionSentence(retention))}</p>
+  <a class="back" href="/runs">← All runs</a>
+</section>
+`;
+  return runsShell("runs", "Run not found", body, "", false);
 }
 
 /** The status word a row shows for a terminal status (`stopped (soft)`, …) — the

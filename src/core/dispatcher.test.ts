@@ -2347,7 +2347,7 @@ describe("live run-view wiring (Area 2)", () => {
     // …and the record is bookended by the request (`input`, live-view item 12)
     // and the final answer (the run record is the source of truth; Slack is a
     // projection of it), the latter before the run finishes.
-    expect(events.map((e) => e.type)).toEqual(["input", "turn", "tool_call", "tool_result", "run_note", "turn", "answer"]);
+    expect(events.map((e) => e.type)).toEqual(["input", "run_meta", "turn", "tool_call", "tool_result", "run_note", "turn", "answer"]);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
 
@@ -2435,13 +2435,18 @@ describe("live run-view wiring (Area 2)", () => {
       },
       fakeIO().io,
     );
-    expect(events.map((e) => e.type)).toEqual(["input", "turn", "tool_call", "tool_result", "run_note", "turn", "answer"]);
+    expect(events.map((e) => e.type)).toEqual(["input", "run_meta", "turn", "tool_call", "tool_result", "run_note", "turn", "answer"]);
     const input = events[0];
     if (input.type !== "input") throw new Error("unreachable");
     expect(input.text).toBe("please rotate «redacted-github-token» now [+2 images, 1 document]"); // directives stripped, redacted
     expect(input.at).toEqual(expect.any(Number));
     // where it came from, for the Request block's `#channel · user · open thread` line
     expect(input.source).toEqual({ url: "https://acme.slack.com/archives/CX/p10", channel: "switchboard-prompting", user: "justin" });
+    // what the run is about, right after the request (live-view item 19): the
+    // resolved agent + model; no repo context for a repo-less general run
+    const meta = events[1];
+    if (meta.type !== "run_meta") throw new Error("unreachable");
+    expect(meta).toEqual({ type: "run_meta", agent: "general", model: expect.stringContaining("/"), at: expect.any(Number) });
   });
 
   it("omits `source` from the `input` event entirely when the adapter supplied no origin hints (HTTP/MCP)", async () => {

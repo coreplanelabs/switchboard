@@ -59,6 +59,8 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.text === "string"; // the narrative events carry text, not a summary
     case "turn":
       return typeof o.startedAt === "number" && typeof o.durationMs === "number";
+    case "run_meta":
+      return typeof o.agent === "string" && typeof o.model === "string";
     default:
       return false;
   }

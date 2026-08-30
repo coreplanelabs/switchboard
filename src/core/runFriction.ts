@@ -138,9 +138,9 @@ interface PendingCall {
 /** The event types that tell the run's story rather than its steps — the
  *  narrative (`input`/`context`/`assistant`/`answer`) and the model call's own
  *  receipt (`turn`), which sits above the step it produced but is not one. */
-type NarrativeEvent = Extract<RunEvent, { type: "input" | "context" | "assistant" | "answer" | "turn" }>;
+type NarrativeEvent = Extract<RunEvent, { type: "input" | "context" | "assistant" | "answer" | "turn" | "run_meta" }>;
 function isNarrative(ev: RunEvent): ev is NarrativeEvent {
-  return ev.type === "input" || ev.type === "context" || ev.type === "assistant" || ev.type === "answer" || ev.type === "turn";
+  return ev.type === "input" || ev.type === "context" || ev.type === "assistant" || ev.type === "answer" || ev.type === "turn" || ev.type === "run_meta";
 }
 
 /** Analyze a run's event stream. Pure and deterministic; never mutates `events`. */
@@ -216,7 +216,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     // A `turn` is the model call's own receipt; the gap measurement above stays
     // the source of truth here (it also covers captures from before turns
     // existed), so the event neither starts nor ends a model turn.
-    if (ev.type === "turn") return;
+    if (ev.type === "turn" || ev.type === "run_meta") return; // run_meta: what the run is about, not a step
 
     if (ev.type === "tool_call") {
       endModelTurn(ev, index, typeof ev.summary === "string" ? ev.summary : ev.tool);
