@@ -52,5 +52,5 @@
   // (Socket Mode events during downtime are lost, never redelivered). Not a run.
   // "0 14 * * 1": the weekly self-improvement pass (#84) — POST /ingress as the
   // `cron` identity with `friction propose`; an ordinary run on /runs (#244).
-  "triggers": { "crons": ["* * * * *", "20 4 * * *"] }
+  "triggers": { "crons": ["* * * * *", "0 14 * * 1"] }
 }
