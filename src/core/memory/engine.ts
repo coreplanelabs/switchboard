@@ -21,9 +21,10 @@ export function normalizeText(text: string): string {
  *  cut at `limit`. Does NOT bump usage — the caller persists that. */
 export function rankRecords(active: MemoryRecord[], query: string, now: number, limit: number): MemoryRecord[] {
   // The query (up to ~4k chars) is tokenized ONCE here, not once per record per
-  // pass: the Memory Worker runs this over up to 500 FTS candidates on a single
-  // Durable Object thread, and each record's match is computed exactly once —
-  // the relevance gate and the score share it.
+  // pass: the Memory Worker runs this over its FTS candidate pool (up to
+  // max(50, 5×limit) bm25-ordered rows, #356) on a single Durable Object
+  // thread, and each record's match is computed exactly once — the relevance
+  // gate and the score share it.
   const queryTokens = tokenize(query);
   if (queryTokens.length === 0) return [];
   const scored: Array<{ r: MemoryRecord; score: number }> = [];

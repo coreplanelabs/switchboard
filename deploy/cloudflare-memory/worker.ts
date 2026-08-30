@@ -92,8 +92,22 @@ const MAX_KEYWORDS = 20;
 const MAX_KEYWORD_CHARS = 64;
 const MAX_QUERY_CHARS = 4000;
 const MAX_KEY_CHARS = 200;
-/** FTS candidates handed to the engine per retrieval, most recently used first. */
-const FTS_CANDIDATES = 500;
+/** FTS candidate pool per retrieval: ~5× the requested limit gives the engine's
+ *  re-rank slack to disagree with bm25, and the floor hands the engine EVERY
+ *  match in a scope with ≤50 hits — small scopes rank exactly as the engine
+ *  alone decides. Was a flat 500 recency-ordered rows; ordering candidates by
+ *  bm25 instead means a relevant-but-old record can no longer be starved out
+ *  of the pool by recent weak matches (#356 item 10). */
+const FTS_CANDIDATES_PER_LIMIT = 5;
+const FTS_CANDIDATES_FLOOR = 50;
+/** MATCH terms per query: the N longest distinct tokens (ties by first
+ *  appearance). A 4000-char query would otherwise become a several-hundred-term
+ *  OR the FTS index must union on every retrieval; longer tokens are the
+ *  selective ones — the `[a-z0-9]+` tokenizer's 1–3-char tokens are mostly
+ *  stopwords ("a", "the", "to"). Realistic queries have far fewer distinct
+ *  tokens and are untouched; the engine still ranks with the FULL query, so the
+ *  cap only shapes which rows can become candidates (#356 item 10). */
+const MAX_MATCH_TOKENS = 24;
 /** Request body ceiling, checked against Content-Length before parsing. A full
  *  batch (50 × 4000-char texts + keywords + envelope) fits comfortably. */
 const MAX_BODY_BYTES = 512 * 1024;
@@ -128,8 +142,12 @@ export class MemoryDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    // Idempotent schema. `norm` is the dedup key (normalizeText) so a dedup
-    // lookup is an indexed hit; records_fts holds text + keywords for the
+    // Idempotent schema — CREATE … IF NOT EXISTS is this DO's one migration
+    // path, re-applied on every start and safe over live data. `norm` is the
+    // dedup key (normalizeText) so a dedup lookup is an indexed hit;
+    // records_active_seq serves list()'s newest-first page and
+    // records_active_used the status-prefixed scans (active count, eviction
+    // fetch) (#356 item 10); records_fts holds text + keywords for the
     // whole-token candidate prefilter (unicode61 tokenizer ≈ the engine's
     // tokenize; the engine re-verifies every hit).
     this.sql.exec(`
@@ -151,36 +169,60 @@ export class MemoryDO extends DurableObject<Env> {
         status TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS records_status_norm ON records(status, norm);
+      CREATE INDEX IF NOT EXISTS records_active_seq ON records(status, seq DESC);
+      CREATE INDEX IF NOT EXISTS records_active_used ON records(status, last_used_at DESC, created_at DESC);
       CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(id UNINDEXED, body);
     `);
+    this.reconcileFts();
+  }
+
+  /** Reconcile records_fts down to exactly the active rows. Forget, supersede,
+   *  and evict delete their FTS entry inline; this is the one-time cleanup of
+   *  the dead rows deploys before #356 left behind, kept on every start as a
+   *  self-healing invariant. Idempotent, and O(active rows) once clean (the
+   *  scan is over the FTS table, which then holds only active rows — bounded by
+   *  the scope cap), so it stays cheap forever. Returns rows removed. */
+  reconcileFts(): number {
+    return this.sql.exec(`DELETE FROM records_fts WHERE id NOT IN (SELECT id FROM records WHERE status = 'active')`)
+      .rowsWritten;
   }
 
   /** Rank the scope's active records for `query` (engine rules), bump usage on
    *  the returned ones, return them. */
   async retrieve(scopeKey: string, query: string, limit: number): Promise<MemoryRecord[]> {
-    const tokens = [...new Set(tokenize(query))];
-    if (tokens.length === 0) return [];
-    // FTS5 MATCH with each token as a quoted phrase joined by OR: operators,
-    // parentheses and colons in user text can never reach the query parser
-    // because tokens are [a-z0-9]+ by construction.
-    const match = tokens.map((t) => `"${t}"`).join(" OR ");
+    const match = ftsMatchExpr(query);
+    if (match === null) return [];
+    // Candidates ordered by bm25 (best match first — fts5's bm25() is
+    // more-negative-is-better, so ascending), NOT by recency: recency ordering
+    // let recent weak matches starve a relevant-but-old record out of the pool
+    // before the engine ever saw it. bm25 only chooses which rows reach the
+    // engine; the shared rankRecords still decides the final order — one
+    // algorithm with the in-process store (#356 item 10).
     const rows = this.sql
       .exec<Row>(
         `SELECT r.* FROM records r
            JOIN records_fts f ON f.id = r.id
           WHERE r.status = 'active' AND records_fts MATCH ?
-          ORDER BY COALESCE(r.last_used_at, r.created_at) DESC
+          ORDER BY bm25(records_fts)
           LIMIT ?`,
         match,
-        FTS_CANDIDATES,
+        Math.max(FTS_CANDIDATES_FLOOR, limit * FTS_CANDIDATES_PER_LIMIT),
       )
       .toArray();
     const now = Date.now();
     const ranked = rankRecords(rows.map(toRecord), query, now, limit);
-    for (const r of ranked) {
-      this.sql.exec(`UPDATE records SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?`, now, r.id);
-      r.lastUsedAt = now;
-      r.useCount += 1;
+    if (ranked.length > 0) {
+      // One batched usage bump for the returned set (ids are server-minted and
+      // parameterized; at most MAX_LIMIT of them), not a statement per row.
+      this.sql.exec(
+        `UPDATE records SET last_used_at = ?, use_count = use_count + 1 WHERE id IN (${ranked.map(() => "?").join(", ")})`,
+        now,
+        ...ranked.map((r) => r.id),
+      );
+      for (const r of ranked) {
+        r.lastUsedAt = now;
+        r.useCount += 1;
+      }
     }
     return ranked;
   }
@@ -206,20 +248,39 @@ export class MemoryDO extends DurableObject<Env> {
     const counts = { inserted: 0, deduped: 0, superseded: 0, evicted: 0 };
     if (candidates.length === 0) return counts;
     this.ctx.storage.transactionSync(() => {
-      const active = this.sql.exec<Row>(`SELECT * FROM records WHERE status = 'active'`).toArray().map(toRecord);
       let seq = this.sql.exec<{ next: number }>(`SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM records`).one().next;
       const now = Date.now();
       for (const cand of candidates) {
-        const plan = planWrite(active, cand, (c) => mintRecord(scopeKey, seq++, now, c));
+        // Targeted lookups, never a full-active scan (#356 item 10): planWrite
+        // only ever inspects (a) the active row `supersedes` names — its
+        // supersede target AND its whole dedup pool — or (b) the active rows
+        // whose norm equals the candidate's (the dedup key, an indexed hit on
+        // records_status_norm; ordered by seq so with duplicate-norm actives —
+        // the engine's collision case — the earliest still takes the dedup
+        // bump, exactly as the full-set scan did). Reads inside transactionSync
+        // see the batch's own earlier inserts and flips, so later candidates
+        // still dedup/supersede against them.
+        const relevant = (
+          cand.supersedes !== undefined
+            ? this.sql.exec<Row>(`SELECT * FROM records WHERE id = ? AND status = 'active'`, cand.supersedes)
+            : this.sql.exec<Row>(
+                `SELECT * FROM records WHERE status = 'active' AND norm = ? ORDER BY seq`,
+                normalizeText(cand.text),
+              )
+        )
+          .toArray()
+          .map(toRecord);
+        const plan = planWrite(relevant, cand, (c) => mintRecord(scopeKey, seq++, now, c));
         if (plan.action === "dedup") {
           this.sql.exec(`UPDATE records SET use_count = use_count + 1 WHERE id = ?`, plan.target.id);
-          plan.target.useCount += 1;
           counts.deduped++;
           continue;
         }
         if (plan.supersede) {
           this.sql.exec(`UPDATE records SET status = 'superseded' WHERE id = ?`, plan.supersede.id);
-          plan.supersede.status = "superseded";
+          // Soft delete for the record row, hard delete for its FTS entry: a
+          // superseded row must stop matching queries at the source (#356).
+          this.sql.exec(`DELETE FROM records_fts WHERE id = ?`, plan.supersede.id);
           counts.superseded++;
         }
         const r = plan.record;
@@ -241,15 +302,21 @@ export class MemoryDO extends DurableObject<Env> {
           r.supersedes ?? null,
         );
         this.sql.exec(`INSERT INTO records_fts (id, body) VALUES (?, ?)`, r.id, `${r.text} ${r.keywords.join(" ")}`);
-        active.push(r); // later candidates in the batch see this one
         counts.inserted++;
       }
       // Per-scope cap (#253), inside the same transaction: the batch never
-      // commits with the scope over the cap. Soft delete — rows stay.
-      for (const victim of planEviction(active, cap)) {
-        this.sql.exec(`UPDATE records SET status = 'evicted' WHERE id = ? AND status = 'active'`, victim.id);
-        victim.status = "evicted";
-        counts.evicted++;
+      // commits with the scope over the cap. Soft delete — rows stay (their
+      // FTS entries do not, #356). The full active set is fetched only when
+      // the indexed COUNT says the scope is over the cap — the common
+      // under-cap batch does no full scan (#356 item 10).
+      const activeCount = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM records WHERE status = 'active'`).one().n;
+      if (activeCount > cap) {
+        const active = this.sql.exec<Row>(`SELECT * FROM records WHERE status = 'active'`).toArray().map(toRecord);
+        for (const victim of planEviction(active, cap)) {
+          this.sql.exec(`UPDATE records SET status = 'evicted' WHERE id = ? AND status = 'active'`, victim.id);
+          this.sql.exec(`DELETE FROM records_fts WHERE id = ?`, victim.id);
+          counts.evicted++;
+        }
       }
     });
     return counts;
@@ -266,9 +333,8 @@ export class MemoryDO extends DurableObject<Env> {
         .toArray()
         .map(toRecord);
     }
-    const tokens = [...new Set(tokenize(query))];
-    if (tokens.length === 0) return [];
-    const match = tokens.map((t) => `"${t}"`).join(" OR ");
+    const match = ftsMatchExpr(query);
+    if (match === null) return [];
     return this.sql
       .exec<Row>(
         `SELECT r.* FROM records r
@@ -287,9 +353,35 @@ export class MemoryDO extends DurableObject<Env> {
    *  the row and its provenance stay). Returns whether a row changed. The DO
    *  IS the scope, so an id from another scope simply matches nothing here. */
   async forget(_scopeKey: string, id: string): Promise<boolean> {
-    const cursor = this.sql.exec(`UPDATE records SET status = 'forgotten' WHERE id = ? AND status = 'active'`, id);
-    return cursor.rowsWritten > 0;
+    return this.ctx.storage.transactionSync(() => {
+      const flipped = this.sql.exec(`UPDATE records SET status = 'forgotten' WHERE id = ? AND status = 'active'`, id).rowsWritten > 0;
+      // Soft delete for the record row, hard delete for its FTS entry (#356):
+      // one sync transaction, so no crash can strand a dead FTS row (and the
+      // start-time reconciliation would heal it anyway).
+      if (flipped) this.sql.exec(`DELETE FROM records_fts WHERE id = ?`, id);
+      return flipped;
+    });
   }
+}
+
+/** Build the FTS5 MATCH expression for a query: each engine token (`[a-z0-9]+`
+ *  by construction) quoted and OR-joined, so operators, parentheses and colons
+ *  in user text can never reach the FTS query parser as syntax. At most the
+ *  MAX_MATCH_TOKENS longest distinct tokens are used (see the constant's note);
+ *  `null` when the query has no tokens. Shared by retrieve and list — the one
+ *  place user text becomes a MATCH. */
+function ftsMatchExpr(query: string): string | null {
+  const tokens = [...new Set(tokenize(query))];
+  if (tokens.length === 0) return null;
+  const kept =
+    tokens.length <= MAX_MATCH_TOKENS
+      ? tokens
+      : tokens
+          .map((t, i) => [t, i] as const)
+          .sort((a, b) => b[0].length - a[0].length || a[1] - b[1])
+          .slice(0, MAX_MATCH_TOKENS)
+          .map(([t]) => t);
+  return kept.map((t) => `"${t}"`).join(" OR ");
 }
 
 /** Row → wire record. Optional fields are OMITTED when NULL (never `null` on
