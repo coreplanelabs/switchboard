@@ -22,6 +22,7 @@
     "@anthropic-ai/sdk": "^0.122.0",
     "@slack/bolt": "^4.2.0",
     "e2b": "^2.39.0",
+    "mdast-util-from-markdown": "^2.0.3",
     "undici": "^8.10.0",
     "yaml": "^2.7.0",
     "zod": "^4.4.3"

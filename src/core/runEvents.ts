@@ -99,8 +99,10 @@ export type RunEvent =
    *  per run, before `finish()` and before the reply goes out; absent when an
    *  AGENT run threw (the card shows ❌). An inline command run that throws
    *  still publishes one — the `⚠️ <error>` reply — so its record explains the
-   *  `failed` status. */
-  | { type: "answer"; text: string; seq?: number; at?: number }
+   *  `failed` status. `text` is the CANONICAL Markdown (features/llm-output.md
+   *  item 5); `raw` is the model's own text, present only when normalization
+   *  changed it (redacted too, dropped if it would blow the per-event budget). */
+  | { type: "answer"; text: string; raw?: string; seq?: number; at?: number }
   /** The request as received (directives stripped, attachments noted as a
    *  one-line count suffix — never bytes or file bodies), redacted, uncapped. Published by the dispatcher once
    *  per run, right after the run is registered — the first event of the record,

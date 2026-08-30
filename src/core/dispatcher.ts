@@ -29,7 +29,8 @@ import { recognizeOperation } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import { formatTurnDuration, redactSecrets, type RunEvent } from "./runEvents.js";
-import { fitRecordToBudget, utf8ByteLength, type RunRecord, type RunStatus } from "./runRecord.js";
+import { fitRecordToBudget, MAX_EVENT_BYTES, utf8ByteLength, type RunRecord, type RunStatus } from "./runRecord.js";
+import { markdownOutput } from "./llmOutput/index.js";
 import type { RunHistoryWriter } from "./runHistoryWriter.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
 import { startReviewReadingDiff } from "./readingDiff.js";
@@ -666,9 +667,15 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // persistence), never through onEvent (no card refresh, no friction input),
     // and logged as ONE line of type + byte-length — never the text, which may
     // span lines or carry what redaction missed.
-    const publishText = (type: "input" | "context" | "answer", text: string, source?: { url?: string; channel?: string; user?: string }) => {
+    const publishText = (type: "input" | "context" | "answer", text: string, source?: { url?: string; channel?: string; user?: string }, raw?: string) => {
       const redacted = redactSecrets(text);
-      registry.publish(run.id, { type, text: redacted, ...(source ? { source } : {}), at: Date.now() });
+      const event = { type, text: redacted, ...(source ? { source } : {}), at: Date.now() };
+      // The model's raw answer rides on the event only when normalization
+      // changed it AND the event still fits the per-event byte budget — the
+      // budget already truncates `text` and must not be starved by a second
+      // copy (features/llm-output.md item 5).
+      const withRaw = raw !== undefined ? { ...event, raw: redactSecrets(raw) } : event;
+      registry.publish(run.id, utf8ByteLength(JSON.stringify(withRaw)) <= MAX_EVENT_BYTES ? withRaw : event);
       console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
     };
     // The request is the first event of the run record (live-view item 12): the
@@ -946,7 +953,14 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // at run start, not a timeout: by now it finished minutes ago. The meat
       // upgrade is deliberately NOT awaited — see the comment at the start.
       if (readingDiffBaseline) await readingDiffBaseline;
-      publishText("answer", answer);
+      // Typed-output boundary (features/llm-output.md item 5): the answer is
+      // canonicalized ONCE here, so the event text, the channel reply, the
+      // GitHub post, and memory all read one Markdown dialect; the model's raw
+      // text rides on the event only when normalization changed it.
+      const acceptedAnswer = markdownOutput.parse(answer);
+      const rawAnswer = acceptedAnswer.ok && acceptedAnswer.changed ? answer : undefined;
+      if (acceptedAnswer.ok) answer = acceptedAnswer.value;
+      publishText("answer", answer, undefined, rawAnswer);
     } catch (err) {
       runFailed = true;
       await card.done({ title: title("❌"), detail: finalDetail(), link: liveLink });

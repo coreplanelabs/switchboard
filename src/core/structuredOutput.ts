@@ -1,4 +1,5 @@
 import type { Provider } from "../providers/types.js";
+import { stripJsonFence } from "./llmOutput/index.js";
 import {
   fallbackMessage,
   validateStructuredMessage,
@@ -97,14 +98,6 @@ export function parseStructured(
   return validateStructuredMessage(value);
 }
 
-/** Tolerate a model that wraps JSON in a ```json … ``` fence despite being told
- *  not to — strip a single leading/trailing fence before parsing. Shared with
- *  the memory reflection parser (same JSON-only-reply contract). */
-export function stripJsonFence(text: string): string {
-  const trimmed = text.trim();
-  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
-  return fenced ? fenced[1] : trimmed;
-}
 
 /** The correction message fed back to the model on a re-ask. */
 function reAskFeedback(error: string): string {
