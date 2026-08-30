@@ -3106,6 +3106,40 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     await drainReflections();
   });
 
+  // #317 producer: a mentioned reply was 👀-acked and `dispatch()` entered, then
+  // SIGTERM landed one second later and the drain logged "0 run(s) in flight" —
+  // the count used to start only after resolution, the setup card and the
+  // executor attach. A dispatch is in flight from its first line.
+  it("a dispatch is counted in flight from entry — before history, the setup card or any attach (#317 drain race)", async () => {
+    const { provider } = runThenReflect();
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: new InMemoryMemoryStore() };
+    let releaseHistory!: () => void;
+    const historyGate = new Promise<void>((r) => (releaseHistory = r));
+    const base = fakeIO(longHistory);
+    const io: ChannelIO = { ...base.io, history: () => historyGate.then(() => longHistory) };
+    expect(activeRunCount()).toBe(0);
+    const running = dispatch(deps, msg("how do we deploy?"), io);
+    // The increment is synchronous: the count is already 1 when `dispatch()`
+    // hands back its promise, with no tick needed — which is what the adapter's
+    // fire-and-forget call and the drain's poll rely on.
+    expect(activeRunCount()).toBe(1); // visible to the drain before anything slow
+    expect(base.statuses).toHaveLength(0); // ...and before the setup card exists
+    releaseHistory();
+    await running;
+    expect(activeRunCount()).toBe(0); // released once dispatch returns
+    await drainReflections();
+  });
+
+  it("an early-return path (config command) releases the count: 0 after dispatch", async () => {
+    const { provider } = runThenReflect();
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: new InMemoryMemoryStore() };
+    const running = dispatch(deps, msg("config show"), fakeIO(longHistory).io);
+    expect(activeRunCount()).toBe(1); // held synchronously, even on the fast path
+    await running;
+    expect(activeRunCount()).toBe(0);
+    await drainReflections();
+  });
+
   it("config-command fast path never reflects", async () => {
     const { provider, requests } = runThenReflect();
     const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: new InMemoryMemoryStore() };

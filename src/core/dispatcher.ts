@@ -200,7 +200,15 @@ export function activeRunCount(): number {
 }
 
 export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO): Promise<void> {
-  let counted = false; // whether this dispatch holds an activeRuns slot
+  // Counted in flight from the first line — before history, repo resolution,
+  // the setup card and the executor attach — until the post-run steps (reply,
+  // review post, memory reflection scheduling) have run; decremented in the
+  // outer finally. The shutdown drain (index.ts) polls this count: a SIGTERM
+  // that lands between the channel's 👀 ack and the first status card used to
+  // see "0 run(s) in flight" and exit at once, abandoning an acked run
+  // (#317). Config commands and refusals hold the slot for their few hundred
+  // milliseconds too — cheaper than a second gap.
+  activeRuns++;
   // The run record (#157 KTD4): its inputs — the registry snapshot and the
   // diagnosis — are captured synchronously when the run finishes, inside the
   // run's try/catch, so a failed run has them too. The record itself is
@@ -742,13 +750,6 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // can always tell the difference.
     const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
 
-    // Counted in flight from here until the post-run steps (reply, review
-    // post, memory reflection scheduling) have run — decremented in the
-    // outer finally — so the shutdown drain can never observe "0 runs, 0
-    // reflections" in the window between the run loop ending and the
-    // reflection being scheduled.
-    activeRuns++;
-    counted = true;
     let answer: string;
     // Review verdict, set only through the structured submit_verdict tool; the
     // post-step below turns it into the deterministic first line of the GitHub
@@ -1114,7 +1115,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // its record is written as `failed`, never `completed`.
     writeHistory(true);
   } finally {
-    if (counted) activeRuns--;
+    activeRuns--;
   }
 }
 
