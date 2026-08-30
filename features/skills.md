@@ -25,7 +25,7 @@ This is delivered in stages. **PR1 (this spec) ships the seam + two stores + the
 
 ## Roadmap (gaps)
 
-- `[gap]` **PR2 — user-uploaded skills.** A durable DO-backed `SkillStore` (mirroring the resident/memory remote-plane pattern) plus an upload path, behind the unchanged `SkillStore` interface — the core does not change.
+- `[gap]` ([#255](https://github.com/coreplanelabs/switchboard/issues/255)) **PR2 — user-uploaded skills.** A durable DO-backed `SkillStore` (mirroring the resident/memory remote-plane pattern) plus an upload path, behind the unchanged `SkillStore` interface — the core does not change.
 - **Deferred (later):** per-scope (repo/channel) skills; skill versioning; `skill list`/`skill add`/`skill remove` chat commands; skill enable/disable per agent via config.
 
 ## Validation criteria
@@ -44,4 +44,4 @@ This is delivered in stages. **PR1 (this spec) ships the seam + two stores + the
 | A review run's system prompt gains the review skill list (excluding coding skills); general (no scoped skills) is byte-identical with or without a store; no store → no block | `[unit]` `src/core/dispatcher.test.ts::skill loading / progressive disclosure (#100)` |
 | The store reaches the tool context: `use_skill` in a run returns the body into the next model turn | `[unit]` `src/core/dispatcher.test.ts::skill loading / progressive disclosure (#100) > passes the store to the tool context` |
 | Review invariants intact under progressive disclosure (read-only; defers PR posting, #79) | `[unit]` `src/agents/registry.test.ts::review post-step: prompts defer posting to the system (issue #69)` |
-| PR2 durable user-uploaded skill store | `[gap]` not built (see roadmap) |
+| PR2 durable user-uploaded skill store | `[gap]` ([#255](https://github.com/coreplanelabs/switchboard/issues/255)) not built (see roadmap) |

@@ -46,4 +46,4 @@ Switchboard can diagnose **what cost a run time or made it stumble** from its ow
 | CLI parses JSONL and raw SSE captures, skips garbage AND wrong-shaped events, parses flags incl. `--in-progress` | `[unit]` `src/frictionCli.test.ts::*` (`::skips events whose fields have the wrong shape…`, `::a file path, --json, --slow-ms, and --in-progress…`) |
 | CLI hints at `--in-progress` only when a default analysis blames a trailing unpaired call | `[unit]` `src/frictionCli.test.ts::inProgressHint::*` |
 | CLI end-to-end over a saved SSE capture prints a report | `[agent]` `npx tsx src/frictionCli.ts <capture.sse>` on a `curl`-saved `/runs/:id/events` stream → a `verdict:` line, totals, category table, findings. |
-| Friction JSON of a real deployed run via the live link | `[gap]` Open `<live link>` with `/events` replaced by `/friction` on a finished run within the TTL → 200 JSON with a plausible verdict. |
+| Friction JSON of a real deployed run via the live link | `[gap]` ([#254](https://github.com/coreplanelabs/switchboard/issues/254)) Open `<live link>` with `/events` replaced by `/friction` on a finished run within the TTL → 200 JSON with a plausible verdict. |
