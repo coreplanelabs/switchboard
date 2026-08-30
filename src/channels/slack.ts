@@ -7,6 +7,7 @@ import { escapeMrkdwn } from "./slackEscape.js";
 import { SlackFormatter } from "./slackFormatter.js";
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 import { ACK_EMOJI, catchUpMissedMentions } from "./slackCatchUp.js";
+import { missingBotScopes, recordCatchUpOutcome, recordMissingScopes } from "./slackCatchUpStatus.js";
 export { classifyMessage, threadIncludesBot, type MessageDecision } from "./slackTriggers.js";
 import type {
   ChannelIO,
@@ -233,6 +234,8 @@ export function createSlackApp(deps: CoreDeps) {
   const app = new App({ token: process.env.SLACK_BOT_TOKEN, receiver });
 
   let botUserId: string | undefined;
+  /** The bot-scope check runs once per process, on the first `connected`. */
+  let scopesChecked = false;
 
   const catchUp = deps.config.config.slack?.catchUp;
   if (catchUp?.enabled !== false) {
@@ -242,7 +245,26 @@ export function createSlackApp(deps: CoreDeps) {
     if (windowWarning) console.warn(`[catch-up] ${windowWarning}`);
     receiver.client.on("connected", () => {
       void (async () => {
-        botUserId ??= (await app.client.auth.test()).user_id ?? undefined;
+        // `botUserId` is retried on EVERY connect until it resolves (an
+        // auth.test that answers without user_id must not no-op the catch-up
+        // for the life of the process); only the scope check latches.
+        if (!botUserId || !scopesChecked) {
+          const auth = await app.client.auth.test();
+          botUserId ??= auth.user_id ?? undefined;
+          if (!scopesChecked) {
+            scopesChecked = true;
+            // Startup scope check (#271): every Web API result carries the
+            // token's granted scopes. Missing ones are the silent failure mode —
+            // live 2026-08-30 the catch-up could not list channels for hours and
+            // nothing said so — so they are logged loudly once and kept on the
+            // status record that /healthz reports.
+            const missing = missingBotScopes(auth.response_metadata?.scopes);
+            recordMissingScopes(missing);
+            if (missing.length > 0) {
+              console.error(`[slack] bot token is MISSING required scopes: ${missing.join(", ")} — reinstall the app with them (README → Slack app setup); until then the features needing them silently do nothing`);
+            }
+          }
+        }
         if (!botUserId) return;
         const id = botUserId;
         await catchUpMissedMentions({
@@ -270,7 +292,12 @@ export function createSlackApp(deps: CoreDeps) {
             }).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
           },
         });
-      })().catch((err: Error) => console.error(`[catch-up] ${err.message}`));
+      })().catch((err: Error) => {
+        // auth.test itself failed (bad token, network): the scan never ran —
+        // record that too, or /healthz would keep showing a stale clean run.
+        console.error(`[catch-up] ${err.message}`);
+        recordCatchUpOutcome({ at: Date.now(), channels: 0, missed: 0, skippedChannels: 0, error: err.message });
+      });
     });
   }
 

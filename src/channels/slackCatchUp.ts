@@ -1,6 +1,7 @@
 import { LIVE_CARD_PREFIXES } from "../core/dispatcher.js";
 import { MIN_CATCH_UP_WINDOW_MS } from "../core/drain.js";
 import type { StatusUpdate } from "../core/types.js";
+import { recordCatchUpOutcome, type CatchUpOutcome } from "./slackCatchUpStatus.js";
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 
 // Reconnect catch-up (#184). Socket Mode does not queue events while the app
@@ -252,13 +253,26 @@ export interface CatchUpOptions {
   orphanWindowMs?: number;
   parentLookbackMs?: number;
   log?: (line: string) => void;
+  /** Where the outcome goes so `/healthz` can show it (#271); defaults to the
+   *  in-process record in `slackCatchUpStatus.ts`. */
+  record?: (outcome: CatchUpOutcome) => void;
+}
+
+export interface CatchUpResult {
+  channels: number;
+  missed: number;
+  orphans: number;
+  /** Channels whose scan failed and were skipped. */
+  skippedChannels: number;
 }
 
 /** Scan every channel the bot is a member of: re-dispatch what it missed and
  *  close the status cards a dead process left spinning.
  *  Never throws: per-channel API failures are logged and that channel skipped,
- *  so one bad channel cannot block catch-up of the others or the connect. */
-export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<{ channels: number; missed: number; orphans: number }> {
+ *  so one bad channel cannot block catch-up of the others or the connect. The
+ *  outcome — including a failed channel listing, which is the one failure
+ *  that makes the whole scan a no-op — is recorded for `/healthz`. */
+export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<CatchUpResult> {
   const now = opts.now ?? Date.now();
   const windowMs = opts.windowMs ?? DEFAULT_WINDOW_MS;
   const lookbackMs = opts.parentLookbackMs ?? DEFAULT_PARENT_LOOKBACK_MS;
@@ -269,17 +283,20 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<{ cha
   // Threads are fetched once for both jobs: active since the EARLIER cutoff.
   const threadCutoffMs = sweep ? Math.min(cutoffMs, orphanCutoffMs) : cutoffMs;
   const { client, botUserId } = opts;
+  const record = opts.record ?? recordCatchUpOutcome;
 
   let channels: string[] = [];
   try {
     channels = await listChannels(client);
   } catch (err) {
     log(`[catch-up] cannot list channels: ${errMsg(err)}`);
-    return { channels: 0, missed: 0, orphans: 0 };
+    record({ at: now, channels: 0, missed: 0, skippedChannels: 0, error: errMsg(err) });
+    return { channels: 0, missed: 0, orphans: 0, skippedChannels: 0 };
   }
 
   let missed = 0;
   let orphans = 0;
+  let skippedChannels = 0;
   for (const channel of channels) {
     let found: MissedMessage[];
     let orphaned: OrphanedCard[] = [];
@@ -294,6 +311,7 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<{ cha
       if (sweep) orphaned = findOrphanedCards({ channel, botUserId, cutoffMs: orphanCutoffMs, threads, ownedHere: sweep.ownedHere });
     } catch (err) {
       log(`[catch-up] ${channel}: scan failed, skipped: ${errMsg(err)}`);
+      skippedChannels++;
       continue;
     }
     if (sweep && orphaned.length > 0) {
@@ -322,8 +340,9 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<{ cha
       }
     }
   }
-  log(`[catch-up] scanned ${channels.length} channel(s): ${missed} missed message(s), ${orphans} orphaned card(s)`);
-  return { channels: channels.length, missed, orphans };
+  log(`[catch-up] scanned ${channels.length} channel(s): ${missed} missed message(s), ${orphans} orphaned card(s), ${skippedChannels} skipped`);
+  record({ at: now, channels: channels.length, missed, skippedChannels });
+  return { channels: channels.length, missed, orphans, skippedChannels };
 }
 
 async function listChannels(client: CatchUpClient): Promise<string[]> {

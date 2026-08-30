@@ -13,6 +13,9 @@
 //   - the bot is already draining from an earlier rollout (`draining: true`),
 //   - the container application is not in a settled state (a rollout is still
 //     provisioning/updating — `wrangler containers list --json`).
+// It also WARNS (never refuses — this deploy may be the fix) when /healthz
+// says the reconnect catch-up is failing or the bot token lacks required
+// scopes (#271; `catchUp.error`, `catchUp.missingScopes`).
 //
 // Fail closed: unreachable bot, a body without the JSON shape (a Worker that
 // predates this preflight answers a bare `ok`), a wrangler failure, or an app
@@ -72,11 +75,34 @@ export function listContainerApps({ cwd = dirname(fileURLToPath(import.meta.url)
 }
 
 /**
+ * Warnings (never refusals) from the reconnect catch-up's status on /healthz
+ * (#271, features/slack-channel.md item 7): a scan that could not run at all
+ * (`catchUp.error`, e.g. `missing_scope`) or a bot token missing required
+ * scopes. Pure; an older payload without `catchUp` says nothing.
+ * @returns {string[]}
+ */
+export function catchUpWarnings(payload) {
+  const c = payload && typeof payload === "object" ? payload.catchUp : undefined;
+  if (!c || typeof c !== "object") return [];
+  const out = [];
+  if (typeof c.error === "string" && c.error) {
+    out.push(`reconnect catch-up is NOT running (last attempt${c.lastRunAt ? ` ${c.lastRunAt}` : ""}): ${c.error} — mentions posted during a rollover are being dropped`);
+  }
+  if (Array.isArray(c.missingScopes) && c.missingScopes.length > 0) {
+    out.push(`bot token is missing required Slack scopes: ${c.missingScopes.join(", ")} — reinstall the app with them (README → Slack app setup)`);
+  }
+  return out;
+}
+
+/**
  * The decision, pure. `health` is the result of `fetchHealth`, `apps` of `listContainerApps`.
- * @returns {{ allow: boolean, forced: boolean, problems: string[], message: string }}
+ * `warnings` never block: this deploy may be the fix for what they name.
+ * @returns {{ allow: boolean, forced: boolean, problems: string[], warnings: string[], message: string }}
  */
 export function decide({ health, apps }, { force = false } = {}) {
   const problems = [];
+  const warnings = health?.ok === true ? catchUpWarnings(health.payload) : [];
+  const warningText = warnings.length > 0 ? `\n  WARNING (not blocking — deploy may be the fix):\n${warnings.map((w) => `  - ${w}`).join("\n")}` : "";
 
   if (!health || health.ok !== true) {
     problems.push(`bot not consulted: ${health?.error ?? "unknown error"}`);
@@ -108,7 +134,7 @@ export function decide({ health, apps }, { force = false } = {}) {
   }
 
   if (problems.length === 0) {
-    return { allow: true, forced: false, problems, message: "preflight ok: no runs in flight, not draining, container application settled" };
+    return { allow: true, forced: false, problems, warnings, message: `preflight ok: no runs in flight, not draining, container application settled${warningText}` };
   }
   const detail = problems.map((p) => `  - ${p}`).join("\n");
   if (force) {
@@ -116,14 +142,16 @@ export function decide({ health, apps }, { force = false } = {}) {
       allow: true,
       forced: true,
       problems,
-      message: `preflight WARNING: deploying by force despite —\n${detail}\n  in-flight runs WILL be killed and their status cards left for the next connect's sweep to close`,
+      warnings,
+      message: `preflight WARNING: deploying by force despite —\n${detail}\n  in-flight runs WILL be killed and their status cards left for the next connect's sweep to close${warningText}`,
     };
   }
   return {
     allow: false,
     forced: false,
     problems,
-    message: `preflight REFUSED: a Worker deploy rolls the bot container —\n${detail}\n  wait and retry; ${HOW_TO_FORCE}`,
+    warnings,
+    message: `preflight REFUSED: a Worker deploy rolls the bot container —\n${detail}\n  wait and retry; ${HOW_TO_FORCE}${warningText}`,
   };
 }
 
@@ -132,7 +160,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const baseUrl = env.SWITCHBOARD_BASE_URL || DEFAULT_BASE_URL;
   const [health, apps] = await Promise.all([fetchHealth(baseUrl), listContainerApps()]);
   const d = decide({ health, apps }, { force });
-  (d.allow && !d.forced ? console.log : console.error)(`[bot-preflight] ${d.message}`);
+  (d.allow && !d.forced && d.warnings.length === 0 ? console.log : console.error)(`[bot-preflight] ${d.message}`);
   return d.allow ? 0 : 1;
 }
 
