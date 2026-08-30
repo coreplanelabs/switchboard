@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { checkoutUpdateCommand, planRefresh, type RefreshDisk } from "./residentRefresh.js";
+import {
+  INTERRUPTED_REARM_MAX_CONSECUTIVE,
+  INTERRUPTED_REARM_S,
+  checkoutUpdateCommand,
+  classifyRefreshFailure,
+  nextRefreshDelayS,
+  planRefresh,
+  type RefreshDisk,
+} from "./residentRefresh.js";
 
 const KEY_A = "a".repeat(64);
 const KEY_B = "b".repeat(64);
@@ -93,5 +101,79 @@ describe("checkoutUpdateCommand", () => {
     expect(cmd).toMatch(/git clean -fdx$/);
     expect(cmd).not.toContain("-e node_modules");
     expect(cmd).not.toContain("find .");
+  });
+});
+
+describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an interruption, not evidence)", () => {
+  const live = "exit 143: Session terminated, killing shell... ...killed.";
+
+  it("exit 143 during build → refresh-interrupted, reason prefixed for the streak gate", () => {
+    const f = classifyRefreshFailure({ step: "build", message: live });
+    expect(f.interrupted).toBe(true);
+    expect(f.reason).toMatch(/^refresh-interrupted: build exit 143/);
+    expect(f.reason).not.toMatch(/build-failed/);
+  });
+
+  it("exit 143 during install and checkout-update are interruptions too", () => {
+    expect(classifyRefreshFailure({ step: "install", message: live }).interrupted).toBe(true);
+    expect(classifyRefreshFailure({ step: "checkout-update", message: "exit 143: " }).interrupted).toBe(true);
+  });
+
+  it("SIGTERM / 'Session terminated' wording without the exit code still counts", () => {
+    expect(classifyRefreshFailure({ step: "build", message: "exit 1: Session terminated, killing shell" }).interrupted).toBe(true);
+    expect(classifyRefreshFailure({ step: "build", message: "exit 1: npm ERR! signal SIGTERM" }).interrupted).toBe(true);
+  });
+
+  it("an ordinary build failure stays <step>-failed with the message verbatim", () => {
+    const f = classifyRefreshFailure({ step: "build", message: "exit 1: src/x.ts(3,1): error TS2304" });
+    expect(f).toEqual({ interrupted: false, reason: "build-failed: exit 1: src/x.ts(3,1): error TS2304" });
+  });
+
+  it("our own timeout kill is NOT an interruption — the build really did not finish in budget", () => {
+    const f = classifyRefreshFailure({ step: "build", message: "exit 143 (timed out): killed" });
+    expect(f.interrupted).toBe(false);
+    expect(f.reason).toMatch(/^build-failed: /);
+  });
+
+  it("'killed' inside ordinary compiler output does not count without the signal signature", () => {
+    expect(classifyRefreshFailure({ step: "build", message: "exit 1: error: process killed by OOM killer" }).interrupted).toBe(false);
+  });
+});
+
+describe("nextRefreshDelayS (#216: re-arm short after an interruption or an image-stale restart)", () => {
+  const cadence = { intervalS: 600, idleIntervalS: 21600 };
+
+  it("normal outcome → the regular interval", () => {
+    expect(nextRefreshDelayS({ outcome: "normal", ...cadence })).toBe(600);
+  });
+
+  it("interrupted → the short re-arm, well under the regular interval", () => {
+    expect(nextRefreshDelayS({ outcome: "interrupted", ...cadence })).toBe(INTERRUPTED_REARM_S);
+    expect(INTERRUPTED_REARM_S).toBeGreaterThanOrEqual(30);
+    expect(INTERRUPTED_REARM_S).toBeLessThanOrEqual(60);
+  });
+
+  it("image-stale restart → the same short re-arm (the container is coming back on the new image)", () => {
+    expect(nextRefreshDelayS({ outcome: "image-stale-restart", ...cadence })).toBe(INTERRUPTED_REARM_S);
+  });
+
+  it("idle → the idle interval", () => {
+    expect(nextRefreshDelayS({ outcome: "idle", ...cadence })).toBe(21600);
+  });
+
+  it("a run of consecutive interruptions is capped: past the cap the regular interval returns (no 45 s hot loop on a chronic false positive)", () => {
+    for (let n = 1; n <= INTERRUPTED_REARM_MAX_CONSECUTIVE; n++) {
+      expect(nextRefreshDelayS({ outcome: "interrupted", consecutiveInterrupted: n, ...cadence })).toBe(INTERRUPTED_REARM_S);
+    }
+    expect(nextRefreshDelayS({ outcome: "interrupted", consecutiveInterrupted: INTERRUPTED_REARM_MAX_CONSECUTIVE + 1, ...cadence })).toBe(600);
+    expect(nextRefreshDelayS({ outcome: "interrupted", consecutiveInterrupted: 50, ...cadence })).toBe(600);
+  });
+
+  it("the cap applies to interruptions only — an image-stale restart is never repeated by the same cause", () => {
+    expect(nextRefreshDelayS({ outcome: "image-stale-restart", consecutiveInterrupted: 50, ...cadence })).toBe(INTERRUPTED_REARM_S);
+  });
+
+  it("omitting the count means 'first interruption' (short)", () => {
+    expect(nextRefreshDelayS({ outcome: "interrupted", ...cadence })).toBe(INTERRUPTED_REARM_S);
   });
 });
