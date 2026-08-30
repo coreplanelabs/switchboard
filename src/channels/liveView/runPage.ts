@@ -44,14 +44,22 @@ export function seedEventsJson(events: readonly LiveFrame[]): string {
 export interface HistoryPage {
   status?: RunStatus;
   eventCount: number;
-  /** `finishedAt - startedAt` when the record knows both (item 20): the header reads `finished · completed · 2m 27s`. */
+  /** `finishedAt - startedAt` when the record knows both (item 20/22): the header reads `✓ 2m 27s`. */
   durationMs?: number;
 }
 
-/** The history page's header label: `finished · completed · 2m 27s`, `finished · stopped (soft)`, …, or bare `finished`. */
-function finishedLabel(status: RunStatus | undefined, durationMs?: number): string {
-  const parts = ["finished", ...(status ? [indexStatusLabel(status)] : []), ...(durationMs !== undefined ? [formatElapsed(durationMs)] : [])];
-  return parts.join(" · ");
+/** The history page's header: the run's outcome as the index's own chip plus
+ *  the duration (item 22) — `✓ 2m 22s` for success (nothing to flag IS the
+ *  message), a red `failed`/`killed` or amber `stopped early` chip otherwise,
+ *  and a grey `ended` chip for a pre-history record whose status is unknown.
+ *  No pulse: nothing is connected on a history page, and "finished" is gone —
+ *  the outcome word carries the state. */
+function finishedHeadHtml(status: RunStatus | undefined, durationMs?: number): string {
+  const dur = `<span id="state" class="dur">${durationMs !== undefined ? escapeHtml(formatElapsed(durationMs)) : ""}</span>`;
+  if (status === "completed") return `<span class="ok" role="img" aria-label="succeeded">✓</span>${dur}`;
+  const cls = status === "failed" || status === "stopped_hard" ? "red" : status === "stopped_soft" ? "amber" : "grey";
+  const word = status ? indexStatusLabel(status) : "ended";
+  return `<span class="chip ${cls}">${escapeHtml(word)}</span>${dur}`;
 }
 
 /**
@@ -95,7 +103,7 @@ export const ELAPSED_SCRIPT = String(formatElapsed);
  *
  * `history` switches the page into history mode (R12): no EventSource is opened
  * (the seed IS the stream — opening one would paint every row twice), the stop
- * controls are hidden, the header reads a grey `finished · <status>`, and the
+ * controls are hidden, the header is the outcome chip + duration (item 22), and the
  * AE11 omission marker is seeded in place. `token` is unused in that mode (pass
  * ""): a history page never carries a capability URL.
  *
@@ -115,7 +123,7 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   const title = history ? "Run" : "Live run";
   // The connection mark is the pulse glyph (∿), colored by state; the tail reuses it.
   const conn = history
-    ? `<span class="pulse grey" id="statedot">∿</span><span id="state">${escapeHtml(finishedLabel(history.status, history.durationMs))}</span>`
+    ? finishedHeadHtml(history.status, history.durationMs)
     : `<span class="pulse amber" id="statedot">∿</span><span id="state">connecting…</span>`;
   return `<!doctype html>
 <html lang="en">
@@ -151,6 +159,14 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   #state { font-size: .8rem; color: var(--muted); }
   /* State colors for the pulse mark: green connected, amber connecting/stopping, red disconnected, grey finished. */
   .pulse.green { color: var(--green); }
+  /* The outcome head (item 22): the index's own chips beside the duration —
+     one vocabulary across both surfaces; success is the quiet ✓. */
+  .conn .chip { font-size: .7rem; border: 1px solid; border-radius: 4px; padding: 0 .4em; }
+  .conn .chip.red { color: var(--red); border-color: #f8514944; }
+  .conn .chip.amber { color: var(--amber); border-color: #d2992244; }
+  .conn .chip.grey { color: var(--muted); border-color: #3b4252; }
+  .conn .ok { color: var(--green); }
+  .conn .dur { font-variant-numeric: tabular-nums; }
   .pulse.amber { color: var(--amber); }
   .pulse.red { color: var(--red); }
   .pulse.grey { color: var(--dim); animation: none; }
@@ -177,6 +193,7 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   .runmeta .effort { color: var(--fg-soft); }
   /* The branch: a fact, not a destination — a quiet tag, no link. */
   .runmeta .reftag { border: 1px solid #3b4252; border-radius: 4px; padding: 0 .4em; color: var(--fg-soft); font-size: .75rem; }
+  .runmeta > .reftag::before { content: none; } /* the list separator would land INSIDE the tag's border */
   .runmeta a.prlink { display: inline-flex; align-items: center; gap: .35em; }
   .ghmark { width: 1em; height: 1em; flex: 0 0 auto; }
   .runmeta[hidden] { display: none; }
@@ -563,6 +580,10 @@ ${ELAPSED_SCRIPT}
     tailSince.className = since >= SLOW_MS ? "since slow" : "since";
     tailSince.setAttribute("title", "since the last event arrived");
     tail.hidden = false;
+    // The header stopwatch (item 22): the runner-clock span so far plus the wall
+    // time since the last event ARRIVED — never browser-minus-runner clock math,
+    // so clock skew cannot show in the tick (the end label uses the same stamps).
+    if (!stopMode && firstAt !== null && lastAt !== null) state.textContent = "running \\u00b7 " + formatElapsed(lastAt - firstAt + (now - lastEventAt));
   }
   window.setInterval(refreshTail, 1000);
   // A thread turn the model was given: rendered like the request (markdown via
@@ -910,7 +931,7 @@ ${ELAPSED_SCRIPT}
   // through the same push → apply path, so the two pages can never drift apart.
   // \`wasAtTail\` is sampled once per event, BEFORE anything is added.
   // The run's span on the runner clock (first event's \`at\` → last event's), for
-  // the finished header: \`finished · 2m 27s\` (item 20).
+  // the finished header: the outcome chip + duration (item 22).
   var firstAt = null, lastAt = null;
   function handle(e) {
     lastEventAt = Date.now();
@@ -925,7 +946,7 @@ ${ELAPSED_SCRIPT}
   for (var i = 0; i < seed.length; i++) handle(seed[i]);
   if (live) {
     var es = new EventSource(url);
-    es.onopen = function () { live = true; if (!stopMode) setConn("green", "connected"); refreshTail(); };
+    es.onopen = function () { live = true; if (!stopMode) setConn("green", "running"); refreshTail(); };
     var lastSeq = 0;
     es.onmessage = function (m) {
       var e;
@@ -946,8 +967,18 @@ ${ELAPSED_SCRIPT}
       flushTurn("the run ended here"); // a run that ended without an answer still shows its last turn
       refreshTail();
       actions.hidden = true;
-      var took = firstAt !== null && lastAt !== null && lastAt > firstAt ? " \\u00b7 " + formatElapsed(lastAt - firstAt) : "";
-      setConn("grey", (stopMode ? "stopped (" + stopMode + ")" : "finished") + took);
+      // The outcome chip, like the history header (item 22). The live page does
+      // not know the record's status (an inline ⚠️ reply is still an \`answer\`),
+      // so an unstopped end is the honest grey \`ended\`; a reload shows the
+      // record's word. A stop the viewer requested IS known: killed / stopped early.
+      var took = firstAt !== null && lastAt !== null && lastAt > firstAt ? formatElapsed(lastAt - firstAt) : "";
+      stateDot.hidden = true;
+      var chip = document.createElement("span");
+      chip.className = "chip " + (stopMode === "hard" ? "red" : stopMode === "soft" ? "amber" : "grey");
+      chip.textContent = stopMode === "hard" ? "killed" : stopMode === "soft" ? "stopped early" : "ended";
+      state.parentNode.insertBefore(chip, state);
+      state.className = "dur";
+      state.textContent = took;
       es.close();
     });
     es.onerror = function () {

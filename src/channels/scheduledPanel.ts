@@ -88,7 +88,7 @@ const ACTION_LABEL: Record<Exclude<ScheduleAction["type"], "run">, string> = {
 };
 
 const OUTCOME_LABEL: Record<FiringOutcome, string> = {
-  completed: "completed",
+  completed: "succeeded",
   failed: "failed",
   stopped_soft: "stopped early",
   stopped_hard: "killed",

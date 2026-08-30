@@ -764,7 +764,7 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
     expect(handler({ method: "GET", url: "/runs/scheduled", headers: {}, on: () => {} } as never, res as never)).toBe(true);
     await tick();
     expect(body).toContain('<li data-schedule="self-improvement">');
-    expect(body).toContain('<span class="outcome ok">completed</span>');
+    expect(body).toContain('<span class="outcome ok">succeeded</span>');
     expect(body).toContain('<a href="/runs/run-live?t=tok-live">run run-live</a>');
     expect(body).toContain("2026-08-31 14:00 UTC"); // next fire, Monday
     expect(body).toContain('<li data-schedule="resident-watchdog">');
@@ -1575,7 +1575,10 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(html).toContain("var live = false;");
       expect(html).toMatch(/if \(live\) \{\s*var es = new EventSource\(url\);/); // the stream only opens on a live page
       expect(html).toContain('<span class="actions" id="actions" hidden>');
-      expect(html).toMatch(/<span class="pulse grey" id="statedot">∿<\/span><span id="state">finished · completed · \d+[smh][^<]*<\/span>/); // item 20: how long the run took
+      // item 22: outcome chips — success is the quiet ✓ + duration; no pulse (nothing is connected on a history page)
+      expect(html).toMatch(/<span class="ok" role="img" aria-label="succeeded">✓<\/span><span id="state" class="dur">\d+[smh][^<]*<\/span>/);
+      expect(html).not.toContain('id="statedot"');
+      expect(html).not.toContain("finished ·");
       expect(html).not.toContain("?t=");
       expect(html).not.toContain("tok-");
     });
@@ -1595,11 +1598,11 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const a = fakeReqRes("GET", "/runs/r1");
       h.handler(a.req, a.res);
       await done(a);
-      expect(a.body()).toMatch(/>finished · stopped early( · [^<]+)?<\/span>/);
+      expect(a.body()).toContain('<span class="chip amber">stopped early</span>'); // item 22: the outcome chip
       const b = fakeReqRes("GET", "/runs/r2");
       h.handler(b.req, b.res);
       await done(b);
-      expect(b.body()).toMatch(/>finished · failed( · [^<]+)?<\/span>/);
+      expect(b.body()).toContain('<span class="chip red">failed</span>');
     });
 
     it("a finished run still in the registry is served tokenless in history mode (the card link outlives the TTL either way)", async () => {
@@ -1850,7 +1853,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(html).toContain('href="/runs/p2"');
       // finished rows (item 18): status word on the dot (started/finished on its hover), duration in the facts, no token anywhere
       // item 20: the dot's tooltip is the outcome + how long; the started column's is the exact stamps
-      expect(html).toContain('<span class="dot grey" role="img" aria-label="completed" data-tip="completed in 10s"></span>');
+      expect(html).toContain('<span class="dot grey" role="img" aria-label="succeeded" data-tip="succeeded in 10s"></span>');
       expect(html).toMatch(/<span class="when" data-tip="started [^"\n]+\nfinished [^"\n]+">[^<]*<\/span>/);
       expect(html).toContain('<span class="elapsed" data-tip="start to finish">10s</span>');
       expect(html).toContain('<span class="dot red" role="img" aria-label="failed" data-tip="failed in 1h 02m"></span>');

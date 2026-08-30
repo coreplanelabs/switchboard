@@ -116,7 +116,8 @@ export function indexRowRenderer(doc: RowDocument, fmt: RowFormatters) {
     return n + (n === 1 ? " event" : " events");
   }
   function statusLabel(status: string): string {
-    return status === "stopped_soft" ? "stopped early" : status === "stopped_hard" ? "killed" : status;
+    // Display words, not the enum: succeeded / failed / killed / stopped early.
+    return status === "completed" ? "succeeded" : status === "stopped_soft" ? "stopped early" : status === "stopped_hard" ? "killed" : status;
   }
   // The stop badge: "stopping (soft)" while in flight; once stopped, the same
   // word the outcome badge would use (killed / stopped early).

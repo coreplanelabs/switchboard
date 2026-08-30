@@ -253,6 +253,7 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
     expect(html).toContain('if (m.effort) runMeta.appendChild(el("span", "effort", m.effort + " effort"));');
     expect(html).toContain('if (m.ref) runMeta.appendChild(el("span", "reftag", m.ref));'); // a tag, not a link
     expect(html).toContain("pr.insertBefore(githubMark(), pr.firstChild);");
+    expect(html).toContain(".runmeta > .reftag::before { content: none; }"); // no separator dot inside the branch tag
     expect(html).not.toContain('"/tree/"');
     expect(html).toContain('link("#" + m.pr, base + "/pull/" + m.pr)');
     expect(html).not.toContain("m.headSha"); // the sha is gone from the meta line
@@ -274,19 +275,29 @@ describe("run page — step blocks, turn head, groups, tail (item 18)", () => {
     expect(html).toContain('fold.setAttribute("aria-pressed", allOpen ? "true" : "false");');
   });
 
-  it("once finished the header says how long the run took (item 20): history pages from the record, live pages from the first→last event stamps; a tool whose summary is just its name shows the chip alone", () => {
+  it("once finished the header is the outcome chip + duration (item 22): ✓ for success, the index's red/amber chips otherwise, grey `ended` for a status-less record; no pulse, no 'finished ·'", () => {
     const hist = renderRunPage("run-1", "", [], { status: "completed", eventCount: 3, durationMs: 147_000 });
-    expect(hist).toContain('<span id="state">finished · completed · 2m 27s</span>');
-    expect(renderRunPage("run-1", "", [], { status: "stopped_soft", eventCount: 3 })).toContain('<span id="state">finished · stopped early</span>');
+    expect(hist).toContain('<span class="ok" role="img" aria-label="succeeded">✓</span><span id="state" class="dur">2m 27s</span>');
+    expect(hist).not.toContain('id="statedot"');
+    expect(renderRunPage("run-1", "", [], { status: "stopped_soft", eventCount: 3 })).toContain('<span class="chip amber">stopped early</span><span id="state" class="dur"></span>');
+    expect(renderRunPage("run-1", "", [], { status: "stopped_hard", eventCount: 3, durationMs: 41_000 })).toContain('<span class="chip red">killed</span><span id="state" class="dur">41s</span>');
+    expect(renderRunPage("run-1", "", [], { status: "failed", eventCount: 3, durationMs: 41_000 })).toContain('<span class="chip red">failed</span>');
+    expect(renderRunPage("run-1", "", [], { eventCount: 3, durationMs: 41_000 })).toContain('<span class="chip grey">ended</span>'); // pre-history record: status unknown
     expect(html).toContain('if (e && typeof e.at === "number") { if (firstAt === null || e.at < firstAt) firstAt = e.at; if (lastAt === null || e.at > lastAt) lastAt = e.at; }');
-    expect(html).toContain('var took = firstAt !== null && lastAt !== null && lastAt > firstAt ? " \\u00b7 " + formatElapsed(lastAt - firstAt) : "";');
-    expect(html).toContain('setConn("grey", (stopMode ? "stopped (" + stopMode + ")" : "finished") + took);');
+    // the live page ends the same way: the chip it can know (killed / stopped early / ended), never a guessed "succeeded"
+    expect(html).toContain('chip.textContent = stopMode === "hard" ? "killed" : stopMode === "soft" ? "stopped early" : "ended";');
+    expect(html).toContain('chip.className = "chip " + (stopMode === "hard" ? "red" : stopMode === "soft" ? "amber" : "grey");');
+    expect(html).not.toContain('setConn("grey"');
     expect(html).toContain("if (call.shell || call.title !== call.tool) {"); // no `submit_verdict submit_verdict`
   });
 
-  it("the header reads `connected` beside the title, not `live`", () => {
+  it("while live the header reads `running · <stopwatch>` (green pulse = connected); never `live`", () => {
     expect(html).toContain('<h1>Live run</h1>\n  <span class="conn">');
-    expect(html).toContain('setConn("green", "connected")');
+    expect(html).toContain('setConn("green", "running")');
+    // ticks inside refreshTail (one interval), from runner-clock stamps + wall time
+    // since arrival — never Date.now() minus a runner stamp (clock skew would show)
+    expect(html).toContain('if (!stopMode && firstAt !== null && lastAt !== null) state.textContent = "running \\u00b7 " + formatElapsed(lastAt - firstAt + (now - lastEventAt));');
+    expect(html).not.toContain("formatElapsed(Date.now() - firstAt)");
     expect(html).not.toContain('setConn("green", "live")');
   });
 });
@@ -357,7 +368,7 @@ describe("runs index — outcome, source, repo tag, alignment (item 21)", () => 
     const killed = indexRowHtml(finished("stopped_hard", { activity: "$ npm test" }));
     expect(killed).toContain('data-tip="killed in 1m 03s\n$ npm test"');
     const ok = indexRowHtml(finished("completed", { activity: "done" }));
-    expect(ok).toContain('data-tip="completed in 1m 03s"');
+    expect(ok).toContain('data-tip="succeeded in 1m 03s"');
     expect(ok).not.toContain("\ndone");
   });
 
