@@ -4,6 +4,7 @@
 
 - **Code**: [`src/core/costs.ts`](../src/core/costs.ts) (`parseCostsConfig`, `CLOUDFLARE_PRICES`, `containerCostUsd`, `doDurationCostUsd`, `doRequestsCostUsd`, `buildCostReport`, `resolveRange`, `CloudflareGraphqlUsageSource`, `AnthropicCostReportSource`, `NullLlmCostSource`, `createCostsService`); [`src/channels/costsView.ts`](../src/channels/costsView.ts) (`parseCostsRoute`, `renderCostsPage`, `createCostsViewHandler`); [`src/index.ts`](../src/index.ts) (builds the service from `costs:` config + env, gates `/costs*` behind Access next to `/runs*` and `/residents*`); [`deploy/cloudflare/worker.ts`](../deploy/cloudflare/worker.ts) (forwards `CF_ANALYTICS_TOKEN` / `ANTHROPIC_ADMIN_KEY` into the container env).
 - **Tests**: [`src/core/costs.test.ts`](../src/core/costs.test.ts), [`src/channels/costsView.test.ts`](../src/channels/costsView.test.ts).
+- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/227
 - **Docs**: [AGENTS.md](../AGENTS.md) (module table, container-sizing note), [access-gate.md](access-gate.md), [resident-repos.md](resident-repos.md) (sibling Access-gated dash).
 
 ## Configuration
@@ -56,5 +57,5 @@ Container application ids: `GET /accounts/{id}/containers/applications`; DO name
 | 9 | Routing: index / group / `.json` twin match; traversal-shaped, over-long, and foreign paths don't | `[unit]` `parseCostsRoute` |
 | 10 | Page: escaped, script-free, no external assets; tiles from full days; one titled segment per day×component; legend + table; partial-day marker; method stated; sibling-group links | `[unit]` `renderCostsPage` (×7) |
 | 11 | Handler: falls through for other paths; 503 unconfigured naming the keys; 405 non-GET; live read per request with the hardened headers; `?days` passthrough; 404 unknown group; JSON twin `no-store`; upstream failure → capped 502 | `[unit]` `createCostsViewHandler` (×7) |
-| 12 | Deployed: `/costs` behind Access renders the switchboard group with live Cloudflare numbers matching the dashboard's billing view for the same day | `[agent]` after deploy: sign in, load `/costs/switchboard?days=7`, compare yesterday's container total to Cloudflare dash → receipt on the PR |
+| 12 | Deployed: `/costs` behind Access renders the switchboard group with live Cloudflare numbers matching the dashboard's billing view for the same day | `[agent]` after deploy: sign in, load `/costs/switchboard?days=7`, compare yesterday's container total to the Cloudflare dash |
 | 13 | Deployed: LLM column appears once `ANTHROPIC_ADMIN_KEY` + `anthropicWorkspaceId` are set | `[gap]` until the bot key is moved into its own Anthropic workspace |

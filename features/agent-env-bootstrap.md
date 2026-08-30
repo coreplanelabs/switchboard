@@ -8,6 +8,7 @@ Switchboard itself runs in prod, which is fine — the safety is not where switc
 
 - **Code**: `src/agentEnv/bootstrap.ts` (dependency-injected core: `stripJsonc` + `parseManifest` JSONC parsing, `parseOpRef`, `ALLOWED_ENVS` + `assertAllowedEnv` allowlist, `buildPlan`, `renderPlan`, `renderEnvFile`, `runBootstrap`, the `buildAgentEnv` integration hook, `parseArgs` — `OpReader`/`EnvSink`/`log` injected, no real `op` ever runs). `src/agentEnv/bootstrapCli.ts` (thin CLI: real `op read`, real chmod-600 file sink, argv/exit/usage). `deploy/agent-env.jsonc` (operator-filled manifest template with `REPLACE-ME` placeholders). `deploy/agent-env-bootstrap.sh` + the `agent-env-bootstrap` npm script.
 - **Tests**: `src/agentEnv/bootstrap.test.ts`.
+- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/223
 
 ## The manifest
 
@@ -120,15 +121,5 @@ The decision (mechanism, where the service name comes from, whether the resident
 | Apply refuses a non-uat env before resolving or writing | `[unit]` `::runBootstrap — apply::refuses apply for a non-uat env before resolving or writing` |
 | Integration hook returns the resolved UAT env map; enforces allowlist + fail-closed token | `[unit]` `::buildAgentEnv — integration hook::returns the resolved downstream UAT env map for injection into the sandbox env`, `::enforces the UAT-only allowlist`, `::fails closed with no service-account token` |
 | CLI arg parsing: `--env`/`--service` required, dry-run default, `--apply`/`--out`/`--manifest`, unknown args rejected | `[unit]` `::parseArgs::parses --env, --service and defaults to dry-run`, `::--apply sets the apply flag; --out and --manifest override paths`, `::requires --env and --service`, `::rejects unknown args` |
-| CLI end-to-end (dry-run prints plan; prod refused; apply with a real read-only UAT token writes the 600 file the toolchain sources) | `[gap]` — dry-run + prod-refusal + missing-token fail-closed verified via the CLI locally; a full live apply needs the operator's read-only, UAT-vault-scoped service account + real refs. |
+| CLI end-to-end (dry-run prints plan; prod refused; apply with a real read-only UAT token writes the 600 file the toolchain sources) | `[gap]` — a full live apply needs the operator's read-only, UAT-vault-scoped service account + real refs (human-gated: an org-admin creates the account per *Setup* above; then one dry-run + apply round). |
 | Integration into the deployed resident/executor | `[gap]` — intentionally not wired in v1; the owner's integration decision (see above). |
-
-## Validation status & product gap
-
-**Validated now (on `main`, CI green):** JSONC/manifest parsing, `op://` ref parsing, the env-name allowlist (UAT-only, fail-closed before any read/write), env-var **name** validation, dry-run reads/writes nothing, apply writes exactly one mode-600 file and never logs a value, fail-closed on missing `OP_SERVICE_ACCOUNT_TOKEN`, the shell-quoted dotenv surviving adversarial values, and the atomic 600 write. Receipts: `src/agentEnv/bootstrap.test.ts` + CI.
-
-**Human-gated gap (not yet validated live):**
-1. **Live `--apply` against a real service account** — requires a 1Password Business **owner/admin** to create the read-only, UAT-vault-scoped service account (see *Setup* above). This is an org-admin action the agent cannot self-serve; until then only dry-run + fail-closed paths are exercised.
-2. **Executor integration** — `buildAgentEnv` is a ready seam but is intentionally not wired into the deployed executor in v1 (see *Integration hook + the open decision*). Wiring it (and choosing mechanism 1 vs 2) is a follow-up.
-
-Validating (1) is a one-time setup plus a single dry-run/apply round once the service account exists.

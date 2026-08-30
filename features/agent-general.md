@@ -5,6 +5,7 @@ The default fallback — a plain, fast passthrough to the configured model. No t
 - **Code**: `src/agents/registry.ts` (`general`), default model in `config/config.production.yaml`
 - **Docs**: [README — Agents](../README.md#agents)
 - **Budgets**: 1 turn / 5 min / 16k tokens · toolset `none`
+- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/224
 
 ## Behavior
 
@@ -21,7 +22,7 @@ The default fallback — a plain, fast passthrough to the configured model. No t
 | Toolset `none`, 1 turn, 5 min | `[unit]` `src/agents/registry.test.ts::general` |
 | Declares no repo resource (coding/review declare `required`) | `[unit]` `src/agents/registry.test.ts::resource declarations: coding and review require a repo; general declares none` |
 | With remote execution configured, a general ask provisions no sandbox and still answers | `[unit]` `src/core/dispatcher.test.ts::a general ask with remote execution configured provisions no sandbox and still answers` |
-| Prompt names the other agents and states it has no tools | `[unit]` `src/agents/registry.test.ts::general's prompt redirects` (regression pinned: on 2026-08-21 the redirect-free prompt led general to invent a repo URL and tell the user to run git themselves) |
-| Plain question → direct answer in seconds | `[agent]` `@switchboard what is a Durable Object?` — expect a concise answer, status card showing `general` and single-digit seconds. (Validated 2026-08-21: 2s.) |
-| Settings question → truthful answer naming the resolved agent/model and the tuning commands | `[unit]` `src/core/dispatcher.test.ts::config awareness in the system prompt::a default dispatch names the resolved agent+model and says config is tunable`; live check in [routing-and-config.md](routing-and-config.md) (behavior 8 `[agent]` row). Regression pinned 2026-08-28: general claimed "stateless … no per-user or per-channel tuning". |
+| Prompt names the other agents and states it has no tools | `[unit]` `src/agents/registry.test.ts::general's prompt redirects` (regression pin: a redirect-free prompt leads general to invent a repo URL and tell the user to run git themselves) |
+| Plain question → direct answer in seconds | `[agent]` `@switchboard what is a Durable Object?` — expect a concise answer, status card showing `general` and single-digit seconds. |
+| Settings question → truthful answer naming the resolved agent/model and the tuning commands | `[unit]` `src/core/dispatcher.test.ts::config awareness in the system prompt::a default dispatch names the resolved agent+model and says config is tunable`; live check in [routing-and-config.md](routing-and-config.md) (behavior 8 `[agent]` row). Regression pin: general must never claim "stateless … no per-user or per-channel tuning". |
 | Tool-needing request → honest redirect | `[agent]` `@switchboard clone repo X and list its files` (no `agent:` directive, fresh thread) — expect it to say it has no tools and point at `agent:coding` — no invented URLs, commands-to-run-yourself, or fabricated output. |

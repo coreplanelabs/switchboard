@@ -6,6 +6,7 @@ Transport is a **minimal MCP server over streamable-HTTP**: JSON-RPC 2.0 over a 
 
 - **Code**: `src/channels/mcp.ts` (`handleMcpRequest` transport gating + JSON-RPC routing, `McpIO` single-shot `ChannelIO`, `createMcpHandler` node:http wrapper; auth reused from `src/channels/http.ts` — `authenticate`, `readBody`, `MAX_BODY_BYTES`, `IngressConfig`, `IngressIdentity`, `DispatchFn`); `src/index.ts` (wires `POST /mcp` into the existing http server alongside the health probe and `POST /ingress`, sharing the one parsed token map).
 - **Tests**: `src/channels/mcp.test.ts`.
+- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/231
 - **Docs**: [AGENTS.md invariants 1, 2, 3, 4](../AGENTS.md), [HTTP ingress](http-ingress.md).
 
 ## Behavior
@@ -34,4 +35,4 @@ Transport is a **minimal MCP server over streamable-HTTP**: JSON-RPC 2.0 over a 
 | Auth precedes body-buffering (shared `authorizeRequest` with HTTP): an unauthorized request is rejected from headers without reading the body | `[unit]` `::createMcpHandler (node:http wrapper)::rejects an unauthorized request without reading the body (pre-auth)` |
 | `McpIO`: reply collection/join, no-op status, empty history | `[unit]` `::McpIO (single-shot ChannelIO)::collects replies and joins them; status is a no-op; history is empty` |
 | node:http wrapper reads body, routes `tools/call`, writes 200 JSON-RPC; writes empty 202 for a notification; answers 413 + destroys request over the size cap | `[unit]` `::createMcpHandler (node:http wrapper)::*` |
-| Live: an authed `POST /mcp` `initialize` + `tools/call` reaches an agent end-to-end; unauthenticated is refused | `[agent]` (post-deploy) — pending; requires the bot deployed with `SWITCHBOARD_INGRESS_TOKENS` set and `PORT` exposed. |
+| Live: an authed `POST /mcp` `initialize` + `tools/call` reaches an agent end-to-end; unauthenticated is refused | `[agent]` Requires the bot deployed with `SWITCHBOARD_INGRESS_TOKENS` set and `PORT` exposed: `POST /mcp` with a configured bearer — `initialize` → 200 with `serverInfo`, then `tools/call` `dispatch` → 200 with the reply as tool content; the same request without the header → 401. |

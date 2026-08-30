@@ -6,6 +6,7 @@ This is the identity gate only. It runs FIRST; the live-view handler still appli
 
 - **Code**: [`src/channels/accessAuth.ts`](../src/channels/accessAuth.ts) (`parseAccessConfig`, `parseAccessDevBypass`, `verifyAccessJwt`, `JwksCache`, `httpJwksFetcher`, `requireAccessForRuns`); [`src/index.ts`](../src/index.ts) (builds the config + verifier once, runs the async gate before the `liveView` dispatch, states the access mode in the startup log).
 - **Tests**: [`src/channels/accessAuth.test.ts`](../src/channels/accessAuth.test.ts).
+- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/221
 - **Docs**: [AGENTS.md invariants 2 (≥2 implementations — the JWKS fetch seam)](../AGENTS.md), [live-view.md](live-view.md), [http-ingress.md](http-ingress.md) (sibling fail-closed / constant-time auth patterns).
 
 ## Environment
@@ -46,6 +47,6 @@ Both `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` must be set and non-blank for Access 
 | `parseAccessConfig`: both vars → config; scheme/slash/whitespace normalized; either missing/blank → null | `[unit]` `::parseAccessConfig::*` |
 | `parseAccessDevBypass`: only `1`/`true` (case-insensitive) → true | `[unit]` `::parseAccessDevBypass::*` |
 | Gate: config + valid header → ok+identity; config + missing/bad/spoofed token → 403; config null + no bypass → 403 (fail closed); config null + bypass → ok (dev-bypass identity) | `[unit]` `::requireAccessForRuns::*` |
-| Live end-to-end: with `ACCESS_*` set and a Cloudflare Access rule on `/runs*`, an SSO'd browser opens the live-view link; a direct origin request with a forged/absent `Cf-Access-Jwt-Assertion` gets 403; unsetting `ACCESS_*` denies `/runs*` (fail-closed) | `[agent]` (post-deploy) — pending; requires the bot deployed on the custom domain with the Access edge rule in place and `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` set. |
+| Live end-to-end: with `ACCESS_*` set and a Cloudflare Access rule on `/runs*`, an SSO'd browser opens the live-view link; a direct origin request with a forged/absent `Cf-Access-Jwt-Assertion` gets 403; unsetting `ACCESS_*` denies `/runs*` (fail-closed) | `[agent]` Requires the bot deployed on the custom domain with the Access edge rule in place and `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` set. |
 
 > `src/index.ts` route wiring (the `/runs*` gate dispatch, startup-log mode string) has no unit harness in this repo — consistent with how `liveView`/`ingress`/`mcp` wiring is left to the handler unit tests. The gate's decision logic lives entirely in `requireAccessForRuns` + `parseAccessConfig` + `parseAccessDevBypass`, which are covered above.
