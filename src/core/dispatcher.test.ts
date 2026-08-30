@@ -4524,3 +4524,90 @@ describe("registry chat commands in the fast-path chain (U13, KTD19)", () => {
     expect(provider.requests).toHaveLength(4);
   });
 });
+
+// Feature: features/reading-diff.md item 4 — a PR review run publishes ONE
+// `review_artifact` reading diff into its own stream (before the answer, so it
+// lands in the run record); a coding run never does, and `off` disables it.
+describe("reading-diff artifact on review runs", () => {
+  function reviewRun(env: string | undefined, meatExec?: (cmd: string) => Promise<string>) {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    if (env === undefined) vi.stubEnv("SWITCHBOARD_READING_DIFF", "");
+    else vi.stubEnv("SWITCHBOARD_READING_DIFF", env);
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, capturingProvider("looks correct"));
+    deps.runRegistry = registry;
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "e".repeat(40), baseRef: "main" });
+    deps.postReviewComment = vi.fn(async () => {});
+    const fake = {
+      // The run's executor serves the artifact productions AND the
+      // reviewed-head probe — answer each by command.
+      exec: async (cmd: string) => {
+        if (cmd.startsWith("git diff")) return "diff --git a/f b/f\n+x";
+        if (cmd.startsWith("timeout") && cmd.includes("meat")) return meatExec ? meatExec(cmd) : "exit 127: meat: command not found";
+        return "e".repeat(40);
+      },
+      readFile: async () => "",
+      writeFile: async () => "",
+    };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    return { registry, deps };
+  }
+
+  it("a review of a resolved PR publishes a git-powered reading diff before the answer", async () => {
+    const { registry, deps } = reviewRun(undefined); // default provider: git
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    const events = registry.snapshotById("r1")!.events;
+    const artifacts = events.filter((e) => e.type === "review_artifact");
+    expect(artifacts).toEqual([
+      {
+        type: "review_artifact",
+        artifact: "reading_diff",
+        poweredBy: "git",
+        baseRef: "main",
+        diff: "diff --git a/f b/f\n+x",
+        truncated: false,
+        at: expect.any(Number),
+        seq: expect.any(Number),
+      },
+    ]);
+    const answerSeq = events.find((e) => e.type === "answer")?.seq ?? -1;
+    expect(artifacts[0].seq!).toBeLessThan(answerSeq); // in the record, not after finish
+  });
+
+  it("meat provider, meat fast → the git baseline AND the meat upgrade are both in the record", async () => {
+    const { registry, deps } = reviewRun("meat", async () => JSON.stringify({ smart_diff: "abridged", summary: "s" }));
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    const powered = registry
+      .snapshotById("r1")!
+      .events.filter((e) => e.type === "review_artifact")
+      .map((e) => (e.type === "review_artifact" ? e.poweredBy : "?"))
+      .sort();
+    expect(powered).toEqual(["git", "meat"]);
+  });
+
+  it("meat provider, meat hanging → the run completes with the git baseline only; the reply is never held for meat", async () => {
+    const { registry, deps } = reviewRun("meat", () => new Promise<string>(() => {})); // meat never returns
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    expect(replies.some((r) => r.includes("looks correct"))).toBe(true); // the review replied
+    const artifacts = registry.snapshotById("r1")!.events.filter((e) => e.type === "review_artifact");
+    expect(artifacts.map((e) => (e.type === "review_artifact" ? e.poweredBy : "?"))).toEqual(["git"]);
+  });
+
+  it("SWITCHBOARD_READING_DIFF=off → a review publishes no artifact", async () => {
+    const { registry, deps } = reviewRun("off");
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    expect(registry.snapshotById("r1")!.events.filter((e) => e.type === "review_artifact")).toEqual([]);
+  });
+
+  it("a coding run publishes no artifact", async () => {
+    const { registry, deps } = reviewRun(undefined);
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    expect(registry.snapshotById("r1")!.events.filter((e) => e.type === "review_artifact")).toEqual([]);
+  });
+});
