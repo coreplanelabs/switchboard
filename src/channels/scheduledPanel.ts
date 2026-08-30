@@ -1,5 +1,5 @@
 import type { RunSummary } from "../core/runRegistry.js";
-import { nextFire, type FiringOutcome, type ScheduleDef, type ScheduleFiring } from "../core/schedules.js";
+import { nextFire, type FiringOutcome, type ScheduleAction, type ScheduleDef, type ScheduleFiring, type ScheduleWorker } from "../core/schedules.js";
 
 // The "Scheduled" panel on the Access-gated /runs index (#244): what is armed
 // (from the schedule registry — the same list the Worker shim fires from), when
@@ -16,11 +16,10 @@ export type FiringsState = { ok: true; firings: ScheduleFiring[] } | { ok: false
 
 export interface ScheduledRow {
   name: string;
-  kind: ScheduleDef["kind"];
+  worker: ScheduleWorker;
+  action: ScheduleAction;
   cron: string;
   description: string;
-  command?: string;
-  identity?: string;
   /** ms UTC of the next firing strictly after `now`; undefined when the expression never fires. */
   nextFireAt?: number;
   last?: {
@@ -35,17 +34,15 @@ export interface ScheduledRow {
   };
 }
 
+/** One row per schedule an operator can act on: `internal` plumbing (the
+ *  container keep-alive) is never listed. */
 export function buildScheduledRows(schedules: readonly ScheduleDef[], firings: FiringsState, liveRuns: RunSummary[], now: number): ScheduledRow[] {
   const byName = new Map<string, ScheduleFiring>();
   if (firings.ok) for (const f of firings.firings) byName.set(f.schedule, f);
   const live = new Map(liveRuns.map((r) => [r.id, r]));
-  return schedules.map((s) => {
+  return schedules.filter((s) => !s.internal).map((s) => {
     const f = byName.get(s.name);
-    const row: ScheduledRow = { name: s.name, kind: s.kind, cron: s.cron, description: s.description };
-    if (s.kind === "run") {
-      row.command = s.command;
-      row.identity = s.identity;
-    }
+    const row: ScheduledRow = { name: s.name, worker: s.worker, action: s.action, cron: s.cron, description: s.description };
     const next = nextFire(s.cron, now);
     if (next !== undefined) row.nextFireAt = next;
     if (f) {
@@ -83,6 +80,12 @@ export function formatRelative(ms: number, now: number): string {
   const span = d > 0 ? `${d}d ${h % 24}h` : h > 0 ? `${h}h ${m % 60}m` : m > 0 ? `${m}m` : "<1m";
   return delta >= 0 ? `in ${span}` : `${span} ago`;
 }
+
+/** The "Runs" cell for non-run actions (a `run` shows its command + identity). */
+const ACTION_LABEL: Record<Exclude<ScheduleAction["type"], "run">, string> = {
+  healthz: "container health check",
+  watchdog: "resident watchdog",
+};
 
 const OUTCOME_LABEL: Record<FiringOutcome, string> = {
   completed: "completed",
@@ -125,10 +128,7 @@ export const SCHEDULED_PANEL_CSS = `
 export function renderScheduledPanel(rows: ScheduledRow[], firings: FiringsState, now: number): string {
   const body = rows
     .map((r) => {
-      const what =
-        r.kind === "run"
-          ? `<code>${esc(r.command ?? "")}</code> <span class="muted">as</span> <code>${esc(r.identity ?? "")}</code>`
-          : `<span class="muted">keep-alive — not a run</span>`;
+      const what = r.action.type === "run" ? `<code>${esc(r.action.command)}</code> <span class="muted">as</span> <code>${esc(r.action.identity)}</code>` : `<span class="muted">${esc(ACTION_LABEL[r.action.type])} — not a run</span>`;
       const next = r.nextFireAt !== undefined ? `${esc(formatUtc(r.nextFireAt))} <span class="muted">(${esc(formatRelative(r.nextFireAt, now))})</span>` : `<span class="muted">never</span>`;
       let last: string;
       if (r.last) {
@@ -148,6 +148,7 @@ export function renderScheduledPanel(rows: ScheduledRow[], firings: FiringsState
         `<tr data-schedule="${esc(r.name)}">` +
         `<td class="name" title="${esc(r.description)}">${esc(r.name)}</td>` +
         `<td><code>${esc(r.cron)}</code> <span class="muted">UTC</span></td>` +
+        `<td><code>${esc(r.worker)}</code></td>` +
         `<td>${what}</td>` +
         `<td>${next}</td>` +
         `<td>${last}</td>` +
@@ -158,7 +159,7 @@ export function renderScheduledPanel(rows: ScheduledRow[], firings: FiringsState
   const note = firings.ok ? "" : `<p class="note">Firing history unavailable: ${esc(firings.reason)}</p>`;
   return (
     `<section id="scheduled" aria-label="Scheduled jobs"><h2>Scheduled</h2>` +
-    `<table><thead><tr><th>Schedule</th><th>Cron</th><th>Runs</th><th>Next fire</th><th>Last fire</th></tr></thead>` +
+    `<table><thead><tr><th>Schedule</th><th>Cron</th><th>Worker</th><th>Runs</th><th>Next fire</th><th>Last fire</th></tr></thead>` +
     `<tbody>${body}</tbody></table>${note}</section>`
   );
 }

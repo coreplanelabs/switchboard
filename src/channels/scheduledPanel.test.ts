@@ -5,8 +5,9 @@ import type { ScheduleDef, ScheduleFiring } from "../core/schedules.js";
 /** A registry-shaped fixture: the panel tests must not depend on the production
  *  registry's cron values (which move for live receipts, e.g. #197 / #244). */
 export const FIXTURE_SCHEDULES: readonly ScheduleDef[] = [
-  { name: "keep-alive", cron: "* * * * *", kind: "keep-alive", description: "Container keep-alive. Not a run." },
-  { name: "self-improvement", cron: "0 14 * * 1", kind: "run", description: "Weekly self-improvement pass.", command: "friction propose", identity: "cron" },
+  { name: "keep-alive", cron: "* * * * *", worker: "bot", internal: true, description: "Container keep-alive. Not a run.", action: { type: "healthz" } },
+  { name: "self-improvement", cron: "0 14 * * 1", worker: "bot", description: "Weekly self-improvement pass.", action: { type: "run", command: "friction propose", identity: "cron" } },
+  { name: "resident-watchdog", cron: "*/10 * * * *", worker: "resident", description: "Resident watchdog pass.", action: { type: "watchdog" } },
 ];
 import { buildScheduledRows, formatRelative, formatUtc, renderScheduledPanel, type FiringsState } from "./scheduledPanel.js";
 
@@ -26,18 +27,23 @@ const firing = (over: Partial<ScheduleFiring> = {}): ScheduleFiring => ({
 const liveRun = (id: string): RunSummary => ({ id, token: "tok", finished: false, startedAt: NOW, eventCount: 1 });
 
 describe("buildScheduledRows", () => {
-  it("lists every registry schedule with kind, cron, command/identity, and a computed next fire", () => {
+  it("lists every non-internal schedule with worker, action, cron, and a computed next fire; internal plumbing (keep-alive) is hidden", () => {
     const rows = buildScheduledRows(FIXTURE_SCHEDULES, none, [], NOW);
-    expect(rows.map((r) => r.name)).toEqual(["keep-alive", "self-improvement"]);
-    const [keepAlive, si] = rows;
-    expect(keepAlive).toMatchObject({ kind: "keep-alive", cron: "* * * * *", nextFireAt: Date.UTC(2026, 7, 29, 12, 35) });
-    expect(keepAlive.command).toBeUndefined();
-    expect(si).toMatchObject({ kind: "run", cron: "0 14 * * 1", command: "friction propose", identity: "cron", nextFireAt: Date.UTC(2026, 7, 31, 14, 0) });
+    expect(rows.map((r) => r.name)).toEqual(["self-improvement", "resident-watchdog"]);
+    const [si, wd] = rows;
+    expect(si).toMatchObject({ worker: "bot", cron: "0 14 * * 1", action: { type: "run", command: "friction propose", identity: "cron" }, nextFireAt: Date.UTC(2026, 7, 31, 14, 0) });
     expect(si.last).toBeUndefined();
+    expect(wd).toMatchObject({ worker: "resident", cron: "*/10 * * * *", action: { type: "watchdog" }, nextFireAt: Date.UTC(2026, 7, 29, 12, 40) });
+  });
+
+  it("a firing for a non-run schedule attaches without a run link", () => {
+    const f = firing({ schedule: "resident-watchdog", runId: undefined, detail: "3/10 residents · 0 re-armed · 0 timed out · 0 errors" });
+    const [, wd] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [f] }, [], NOW);
+    expect(wd.last).toEqual({ firedAt: f.firedAt, outcome: "completed", detail: f.detail });
   });
 
   it("attaches the last firing: fired-at, outcome, run id, and a bare /runs/<id> link when the run is no longer live", () => {
-    const [, si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing()] }, [], NOW);
+    const [si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing()] }, [], NOW);
     expect(si.last).toEqual({
       firedAt: Date.UTC(2026, 7, 24, 14, 0, 3),
       outcome: "completed",
@@ -48,12 +54,12 @@ describe("buildScheduledRows", () => {
   });
 
   it("links the run WITH its capability token while it is live in the registry", () => {
-    const [, si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing()] }, [liveRun("run-abc12345")], NOW);
+    const [si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing()] }, [liveRun("run-abc12345")], NOW);
     expect(si.last?.runHref).toBe("/runs/run-abc12345?t=tok");
   });
 
   it("a firing without a run (misconfigured / ingress-error) has no run id or link", () => {
-    const [, si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing({ runId: undefined, outcome: "ingress-error", detail: "HTTP 503 disabled" })] }, [], NOW);
+    const [si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing({ runId: undefined, outcome: "ingress-error", detail: "HTTP 503 disabled" })] }, [], NOW);
     expect(si.last).toEqual({ firedAt: firing().firedAt, outcome: "ingress-error", detail: "HTTP 503 disabled" });
   });
 
@@ -65,12 +71,12 @@ describe("buildScheduledRows", () => {
   });
 
   it("an unparseable cron in a schedule yields no next fire rather than a crash", () => {
-    const bad: ScheduleDef = { name: "broken", cron: "nope", kind: "keep-alive", description: "x" };
+    const bad: ScheduleDef = { name: "broken", cron: "nope", worker: "bot", description: "x", action: { type: "healthz" } };
     expect(buildScheduledRows([bad], none, [], NOW)[0].nextFireAt).toBeUndefined();
   });
 
   it("URL-encodes a hostile run id in the href", () => {
-    const [, si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing({ runId: 'x"/><b>' })] }, [], NOW);
+    const [si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing({ runId: 'x"/><b>' })] }, [], NOW);
     expect(si.last?.runHref).toBe("/runs/x%22%2F%3E%3Cb%3E");
   });
 });
@@ -80,11 +86,14 @@ describe("renderScheduledPanel", () => {
     const rows = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing()] }, [], NOW);
     const html = renderScheduledPanel(rows, { ok: true, firings: [firing()] }, NOW);
     expect(html).toContain('<section id="scheduled"');
-    expect(html).toContain('<tr data-schedule="keep-alive">');
-    expect(html).toContain("keep-alive — not a run");
+    expect(html).not.toContain('data-schedule="keep-alive"');
     expect(html).toContain('<tr data-schedule="self-improvement">');
     expect(html).toContain("<code>friction propose</code>");
     expect(html).toContain("<code>cron</code>");
+    expect(html).toContain('<tr data-schedule="resident-watchdog">');
+    expect(html).toContain("resident watchdog — not a run");
+    expect(html).toContain("<code>bot</code>");
+    expect(html).toContain("<code>resident</code>");
     expect(html).toContain("2026-08-31 14:00 UTC");
     expect(html).toContain("(in 2d 1h)");
     expect(html).toContain("2026-08-24 14:00 UTC");

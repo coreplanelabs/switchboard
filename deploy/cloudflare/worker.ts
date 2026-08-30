@@ -11,7 +11,9 @@
 import { Container, getContainer } from "@cloudflare/containers";
 import {
   interpretIngressResponse,
+  isRunSchedule,
   planScheduledFiring,
+  recordFiring as postFiring,
   scheduleForCron,
   type ScheduleFiring,
 } from "../../src/core/schedules.ts";
@@ -96,23 +98,10 @@ const INTERNAL = "https://switchboard-keepalive.internal";
 
 /** Record a firing on the state Worker's ScheduleDO (the /runs Scheduled panel
  *  reads it). Best-effort: a failure here is a log line — the run itself (if
- *  any) already happened and is its own record. Fail-closed on config: no URL
- *  or bearer → logged, nothing sent. */
+ *  any) already happened and is its own record. */
 async function recordFiring(env: Env, firing: ScheduleFiring): Promise<void> {
-  if (!env.STATE_WORKER_URL || !env.MEMORY_TOKEN) {
-    console.error(`[schedule] ${firing.schedule}: cannot record firing — ${!env.STATE_WORKER_URL ? "STATE_WORKER_URL var" : "MEMORY_TOKEN secret"} is not set`);
-    return;
-  }
-  try {
-    const res = await fetch(`${env.STATE_WORKER_URL.replace(/\/+$/, "")}/schedules/record`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${env.MEMORY_TOKEN}` },
-      body: JSON.stringify({ firing }),
-    });
-    if (!res.ok) console.error(`[schedule] ${firing.schedule}: recording the firing failed — state Worker HTTP ${res.status}`);
-  } catch (err) {
-    console.error(`[schedule] ${firing.schedule}: recording the firing failed — ${err instanceof Error ? err.message : String(err)}`);
-  }
+  const res = await postFiring({ url: env.STATE_WORKER_URL, token: env.MEMORY_TOKEN }, firing);
+  if (!res.ok) console.error(`[schedule] ${firing.schedule}: recording the firing failed — ${res.reason}`);
 }
 
 export default {
@@ -120,26 +109,31 @@ export default {
     return getContainer(env.SWITCHBOARD, INSTANCE).fetch(request);
   },
 
-  // Every cron trigger in wrangler.jsonc is a schedule in the registry
-  // (src/core/schedules.ts — a unit test keeps the two equal). The keep-alive
-  // touches /healthz: any touch starts the container if stopped and renews the
-  // activity timeout, which is also what revives it after platform maintenance.
-  // A `run` schedule POSTs the bot's generic /ingress as the `cron` identity
-  // (its bearer is the `cron` entry of SWITCHBOARD_INGRESS_TOKENS — no extra
-  // secret) with the schedule's command text; the bot dispatches it as a normal
-  // run and answers with the run's id + status, which is recorded on the state
-  // Worker for the /runs Scheduled panel. Fail-closed: no `cron` token → nothing
-  // is sent and the firing is recorded as `misconfigured`; an ingress error
-  // (bot down, unknown identity) is recorded as `ingress-error`.
+  // Every cron trigger in wrangler.jsonc is a `bot` schedule in the registry
+  // (src/core/schedules.ts — a unit test keeps the two equal). `healthz` (the
+  // internal keep-alive) touches /healthz: any touch starts the container if
+  // stopped and renews the activity timeout, which is also what revives it after
+  // platform maintenance; internal, so nothing is recorded. A `run` schedule
+  // POSTs the bot's generic /ingress as the `cron` identity (its bearer is the
+  // `cron` entry of SWITCHBOARD_INGRESS_TOKENS — no extra secret) with the
+  // schedule's command text; the bot dispatches it as a normal run and answers
+  // with the run's id + status, which is recorded on the state Worker for the
+  // /runs Scheduled panel. Fail-closed: no `cron` token → nothing is sent and the
+  // firing is recorded as `misconfigured`; an ingress error (bot down, unknown
+  // identity) is recorded as `ingress-error`.
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    const schedule = scheduleForCron(controller.cron);
+    const schedule = scheduleForCron(controller.cron, "bot");
     if (!schedule) {
-      console.error(`[schedule] cron "${controller.cron}" is not in the schedule registry — nothing fired (wrangler.jsonc and src/core/schedules.ts have drifted)`);
+      console.error(`[schedule] cron "${controller.cron}" is not a bot schedule in the registry — nothing fired (wrangler.jsonc and src/core/schedules.ts have drifted)`);
       return;
     }
-    if (schedule.kind === "keep-alive") {
+    if (schedule.action.type === "healthz") {
       const res = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(new Request(`${INTERNAL}/healthz`));
       if (!res.ok) console.error(`switchboard health check failed: ${res.status}`);
+      return;
+    }
+    if (!isRunSchedule(schedule)) {
+      console.error(`[schedule] ${schedule.name}: action "${schedule.action.type}" is not something the bot shim fires — nothing fired (the registry entry names the wrong worker)`);
       return;
     }
 

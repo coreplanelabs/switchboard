@@ -1,15 +1,24 @@
 import { parseIngressTokenMap, tokenForSubject } from "./ingressTokens.js";
 
-// The schedule registry (#244): the ONE list of jobs the Cloudflare Worker shim
-// runs on a cron. `deploy/cloudflare/wrangler.jsonc` `triggers.crons` must equal
-// the registry's cron expressions (a unit test enforces it), and the shim's
-// `scheduled()` looks each firing up HERE — so a schedule can never exist in
-// one place and not the other. A `run` schedule fires as a normal run: the shim
-// POSTs the generic `/ingress` as the `cron` identity with the schedule's
-// command text, and the dispatcher does the rest (run id, event stream,
-// /runs/<id>, history). The keep-alive is the one non-run schedule.
+// The schedule registry (#244): the ONE catalog of every cron any of our
+// Cloudflare Workers runs. Each Worker's `wrangler.jsonc` `triggers.crons` must
+// equal the registry's expressions for that worker (a unit test enforces it per
+// worker), and each Worker's `scheduled()` looks its firing up HERE — so a
+// schedule can never exist in one place and not the other.
 //
-// Node-free on purpose: the shim (workerd) imports this file by relative path,
+// A schedule has three independent facets:
+//   worker   — whose wrangler.jsonc carries the cron and whose `scheduled()` fires it
+//   action   — what a firing does: `run` (the bot shim POSTs the generic /ingress as
+//              the `cron` identity with the command text; the dispatcher does the
+//              rest — run id, event stream, /runs/<id>, history), `healthz` (the bot
+//              shim touches the container), `watchdog` (the resident Worker sweeps
+//              its residents)
+//   internal — plumbing nobody operates: never rendered on /runs, never recorded
+//
+// Anything expressible as a chat command is a one-line `run` entry here; grow
+// commands, not action types.
+//
+// Node-free on purpose: the shims (workerd) import this file by relative path,
 // like deploy/cloudflare-memory imports src/core/memory/engine.ts. Nothing in
 // here may touch node:* modules.
 
@@ -20,47 +29,77 @@ import { parseIngressTokenMap, tokenForSubject } from "./ingressTokens.js";
  *  `friction propose` → `permissions.repoManagement`) must be granted to it. */
 export const CRON_IDENTITY = "cron";
 
-export interface KeepAliveSchedule {
-  name: string;
-  /** Five-field cron expression, UTC (Cloudflare Workers cron triggers are UTC). */
-  cron: string;
-  kind: "keep-alive";
-  description: string;
-}
+/** The Workers that run crons: `bot` = deploy/cloudflare (the shim in front of
+ *  the bot container), `resident` = deploy/cloudflare-resident. */
+export type ScheduleWorker = "bot" | "resident";
 
-export interface RunSchedule {
-  name: string;
-  cron: string;
-  kind: "run";
-  description: string;
+export interface RunAction {
+  type: "run";
   /** The exact text POSTed to /ingress — a chat command the dispatcher answers. */
   command: string;
   /** The ingress identity (`subject`) whose token the shim presents. */
   identity: string;
 }
 
-export type ScheduleDef = KeepAliveSchedule | RunSchedule;
+export type ScheduleAction =
+  | RunAction
+  /** Bot shim: GET the container's /healthz — starts it if stopped, renews its activity timeout. */
+  | { type: "healthz" }
+  /** Resident Worker: one watchdog pass over every resident (re-arm dead refresh chains, time out stuck onboarding). */
+  | { type: "watchdog" };
+
+export interface ScheduleDef {
+  name: string;
+  /** Five-field cron expression, UTC (Cloudflare Workers cron triggers are UTC). */
+  cron: string;
+  description: string;
+  worker: ScheduleWorker;
+  action: ScheduleAction;
+  /** Infrastructure plumbing: not shown on the /runs Scheduled panel, no firing recorded. */
+  internal?: true;
+}
+
+export type RunSchedule = ScheduleDef & { action: RunAction };
+
+export function isRunSchedule(s: ScheduleDef): s is RunSchedule {
+  return s.action.type === "run";
+}
 
 export const SCHEDULES: readonly ScheduleDef[] = [
   {
     name: "keep-alive",
     cron: "* * * * *",
-    kind: "keep-alive",
+    worker: "bot",
+    internal: true,
     description: "Container keep-alive (GET /healthz) — also what restarts the container after a deploy or platform maintenance. Not a run.",
+    action: { type: "healthz" },
   },
   {
     name: "self-improvement",
     cron: "0 14 * * 1",
-    kind: "run",
+    worker: "bot",
     description: "Weekly self-improvement pass (#84): cluster the friction ledger and file deduped `self-improvement` issues. Proposals only.",
-    command: "friction propose",
-    identity: CRON_IDENTITY,
+    action: { type: "run", command: "friction propose", identity: CRON_IDENTITY },
+  },
+  {
+    name: "resident-watchdog",
+    cron: "*/10 * * * *",
+    worker: "resident",
+    description:
+      "Resident watchdog (KTD4): re-arm dead refresh alarm chains (marking degraded(alarm-missed)) and time out stuck onboarding. Cadence must stay shorter than the resident SLEEP_AFTER (20m). Not a run.",
+    action: { type: "watchdog" },
   },
 ];
 
-/** The schedule a Workers `ScheduledController.cron` belongs to, if any. */
-export function scheduleForCron(cron: string): ScheduleDef | undefined {
-  return SCHEDULES.find((s) => s.cron === cron);
+/** The schedules one Worker's wrangler.jsonc must carry and its `scheduled()` fires. */
+export function schedulesFor(worker: ScheduleWorker): ScheduleDef[] {
+  return SCHEDULES.filter((s) => s.worker === worker);
+}
+
+/** The schedule a Workers `ScheduledController.cron` belongs to, looked up
+ *  among THAT worker's schedules only (two workers may share an expression). */
+export function scheduleForCron(cron: string, worker: ScheduleWorker): ScheduleDef | undefined {
+  return SCHEDULES.find((s) => s.worker === worker && s.cron === cron);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,9 +252,9 @@ export function planScheduledFiring(schedule: RunSchedule, ingressTokensJson: st
   if (!ingressTokensJson || ingressTokensJson.trim() === "") return { ok: false, reason: "SWITCHBOARD_INGRESS_TOKENS is not set" };
   const parsed = parseIngressTokenMap(ingressTokensJson);
   if (parsed.ok === false) return { ok: false, reason: `SWITCHBOARD_INGRESS_TOKENS is ${parsed.reason}` };
-  const token = tokenForSubject(parsed.tokens, schedule.identity);
-  if (!token) return { ok: false, reason: `SWITCHBOARD_INGRESS_TOKENS has no entry with subject "${schedule.identity}"` };
-  return { ok: true, token, body: { text: schedule.command, thread: `${schedule.name}-${firedAt}` } };
+  const token = tokenForSubject(parsed.tokens, schedule.action.identity);
+  if (!token) return { ok: false, reason: `SWITCHBOARD_INGRESS_TOKENS has no entry with subject "${schedule.action.identity}"` };
+  return { ok: true, token, body: { text: schedule.action.command, thread: `${schedule.name}-${firedAt}` } };
 }
 
 const RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "stopped_soft", "stopped_hard"]);
@@ -254,4 +293,67 @@ export function interpretIngressResponse(schedule: RunSchedule, firedAt: number,
     };
   }
   return { schedule: schedule.name, firedAt, outcome: "no-run", ...(reply !== undefined ? { detail: cap(reply) } : {}) };
+}
+
+// ---------------------------------------------------------------------------
+// The resident watchdog's firing record
+// ---------------------------------------------------------------------------
+
+/** The shape `runWatchdog` (deploy/cloudflare-resident/worker.ts) returns; only
+ *  the fields the firing record summarizes are typed here. */
+export interface WatchdogSummary {
+  cap: number;
+  count: number;
+  /** `error` is already a message (`runWatchdog` passes rejections through `errMsg`). */
+  results: ReadonlyArray<{ resource: string; state?: unknown; reason?: unknown; action?: unknown; error?: string }>;
+}
+
+/** Turn a watchdog pass (or the error it threw) into a firing record. A pass is
+ *  `completed` when every resident was checked; any per-resident error — or a
+ *  throw before the sweep — is `failed`, naming the first failing resident. */
+export function watchdogFiring(schedule: ScheduleDef, firedAt: number, result: WatchdogSummary | Error): ScheduleFiring {
+  if (result instanceof Error) return { schedule: schedule.name, firedAt, outcome: "failed", detail: cap(`watchdog threw: ${result.message}`) };
+  const errors = result.results.filter((r) => r.error !== undefined);
+  const reArmed = result.results.filter((r) => r.action === "re-armed").length;
+  const timedOut = result.results.filter((r) => r.action === "provision-timed-out").length;
+  const counts = `${result.count}/${result.cap} residents · ${reArmed} re-armed · ${timedOut} timed out · ${errors.length} errors`;
+  const first = errors[0];
+  return {
+    schedule: schedule.name,
+    firedAt,
+    outcome: errors.length > 0 ? "failed" : "completed",
+    detail: cap(first ? `${counts} — ${first.resource}: ${String(first.error)}` : counts),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Recording a firing on the state Worker's ScheduleDO (shared by both shims)
+// ---------------------------------------------------------------------------
+
+export interface ScheduleRecorderConfig {
+  /** `STATE_WORKER_URL` var: the state Worker's base URL. */
+  url: string | undefined;
+  /** `MEMORY_TOKEN` secret: the state Worker's bearer. */
+  token: string | undefined;
+}
+
+export type RecordResult = { ok: true } | { ok: false; reason: string };
+
+/** POST the firing to `<url>/schedules/record`. Best-effort telemetry for the
+ *  /runs Scheduled panel: a failure is returned for the caller's log line, never
+ *  thrown — the firing's real work already happened and is its own record.
+ *  Fail-closed on config: no URL or bearer → nothing sent. */
+export async function recordFiring(config: ScheduleRecorderConfig, firing: ScheduleFiring, fetchImpl: typeof fetch = fetch): Promise<RecordResult> {
+  if (!config.url) return { ok: false, reason: "STATE_WORKER_URL var is not set" };
+  if (!config.token) return { ok: false, reason: "MEMORY_TOKEN secret is not set" };
+  try {
+    const res = await fetchImpl(`${config.url.replace(/\/+$/, "")}/schedules/record`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${config.token}` },
+      body: JSON.stringify({ firing }),
+    });
+    return res.ok ? { ok: true } : { ok: false, reason: `state Worker HTTP ${res.status}` };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
 }

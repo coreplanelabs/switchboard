@@ -64,6 +64,8 @@
   // Watchdog cadence (KTD4): every 10 minutes, strictly BELOW the container
   // sleep window (SLEEP_AFTER = "20m" in worker.ts) so a healthy resident is
   // re-warmed before the platform can ever sleep it. Invariant: watchdog/alarm
-  // cadence < sleepAfter — bump the two together.
+  // cadence < sleepAfter — bump the two together. This list must equal the
+  // `resident` entries of the schedule registry (src/core/schedules.ts) — a
+  // unit test enforces it; change the registry first.
   "triggers": { "crons": ["*/10 * * * *"] }
 }
