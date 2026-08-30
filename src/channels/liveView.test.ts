@@ -16,7 +16,7 @@ import { createRunTimeline } from "./runTimeline.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
-import { SCHEDULES } from "../core/schedules.js";
+import { FIXTURE_SCHEDULES } from "./scheduledPanel.test.js";
 import { InMemoryScheduleStore, type ScheduleStore } from "../core/scheduleStore.js";
 
 // Feature: features/live-view.md — the external live-view page + SSE stream.
@@ -658,7 +658,7 @@ describe("scheduled panel on the index (#244)", () => {
     registry.create("friction · #cron · cron");
     const store = new InMemoryScheduleStore();
     await store.record({ schedule: "self-improvement", firedAt: NOW - 60_000, outcome: "completed", runId: "run-live", detail: "🔍 8 runs analyzed" });
-    const handler = createLiveViewHandler(registry, { now: () => NOW, scheduled: { schedules: SCHEDULES, store } });
+    const handler = createLiveViewHandler(registry, { now: () => NOW, scheduled: { schedules: FIXTURE_SCHEDULES, store } });
     let body = "";
     const res = { writeHead: () => {}, write: () => {}, end: (c?: string) => void (body += c ?? "") };
     expect(handler({ method: "GET", url: "/runs", headers: {}, on: () => {} } as never, res as never)).toBe(true);
@@ -671,7 +671,7 @@ describe("scheduled panel on the index (#244)", () => {
   });
 
   it("no store → the panel lists the schedules and says history is unavailable (not 'never fired')", async () => {
-    const t = pageFor({ scheduled: { schedules: SCHEDULES } });
+    const t = pageFor({ scheduled: { schedules: FIXTURE_SCHEDULES } });
     await tick();
     expect(t.status).toBe(200);
     expect(t.body).toContain("Firing history unavailable: schedules.worker is not configured");
@@ -685,7 +685,7 @@ describe("scheduled panel on the index (#244)", () => {
         throw new Error("schedule worker /latest HTTP 503");
       },
     };
-    const t = pageFor({ scheduled: { schedules: SCHEDULES, store } });
+    const t = pageFor({ scheduled: { schedules: FIXTURE_SCHEDULES, store } });
     await tick();
     expect(t.status).toBe(200);
     expect(t.body).toContain("Firing history unavailable: schedule worker /latest HTTP 503");

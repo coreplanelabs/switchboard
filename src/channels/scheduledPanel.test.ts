@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { RunSummary } from "../core/runRegistry.js";
-import { SCHEDULES, type ScheduleDef, type ScheduleFiring } from "../core/schedules.js";
+import type { ScheduleDef, ScheduleFiring } from "../core/schedules.js";
+
+/** A registry-shaped fixture: the panel tests must not depend on the production
+ *  registry's cron values (which move for live receipts, e.g. #197 / #244). */
+export const FIXTURE_SCHEDULES: readonly ScheduleDef[] = [
+  { name: "keep-alive", cron: "* * * * *", kind: "keep-alive", description: "Container keep-alive. Not a run." },
+  { name: "self-improvement", cron: "0 14 * * 1", kind: "run", description: "Weekly self-improvement pass.", command: "friction propose", identity: "cron" },
+];
 import { buildScheduledRows, formatRelative, formatUtc, renderScheduledPanel, type FiringsState } from "./scheduledPanel.js";
 
 // Feature: features/live-view.md item 14 (#244): the /runs "Scheduled" panel —
@@ -20,7 +27,7 @@ const liveRun = (id: string): RunSummary => ({ id, token: "tok", finished: false
 
 describe("buildScheduledRows", () => {
   it("lists every registry schedule with kind, cron, command/identity, and a computed next fire", () => {
-    const rows = buildScheduledRows(SCHEDULES, none, [], NOW);
+    const rows = buildScheduledRows(FIXTURE_SCHEDULES, none, [], NOW);
     expect(rows.map((r) => r.name)).toEqual(["keep-alive", "self-improvement"]);
     const [keepAlive, si] = rows;
     expect(keepAlive).toMatchObject({ kind: "keep-alive", cron: "* * * * *", nextFireAt: Date.UTC(2026, 7, 29, 12, 35) });
@@ -30,7 +37,7 @@ describe("buildScheduledRows", () => {
   });
 
   it("attaches the last firing: fired-at, outcome, run id, and a bare /runs/<id> link when the run is no longer live", () => {
-    const [, si] = buildScheduledRows(SCHEDULES, { ok: true, firings: [firing()] }, [], NOW);
+    const [, si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing()] }, [], NOW);
     expect(si.last).toEqual({
       firedAt: Date.UTC(2026, 7, 24, 14, 0, 3),
       outcome: "completed",
@@ -41,19 +48,19 @@ describe("buildScheduledRows", () => {
   });
 
   it("links the run WITH its capability token while it is live in the registry", () => {
-    const [, si] = buildScheduledRows(SCHEDULES, { ok: true, firings: [firing()] }, [liveRun("run-abc12345")], NOW);
+    const [, si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing()] }, [liveRun("run-abc12345")], NOW);
     expect(si.last?.runHref).toBe("/runs/run-abc12345?t=tok");
   });
 
   it("a firing without a run (misconfigured / ingress-error) has no run id or link", () => {
-    const [, si] = buildScheduledRows(SCHEDULES, { ok: true, firings: [firing({ runId: undefined, outcome: "ingress-error", detail: "HTTP 503 disabled" })] }, [], NOW);
+    const [, si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing({ runId: undefined, outcome: "ingress-error", detail: "HTTP 503 disabled" })] }, [], NOW);
     expect(si.last).toEqual({ firedAt: firing().firedAt, outcome: "ingress-error", detail: "HTTP 503 disabled" });
   });
 
   it("ignores firings for schedules no longer in the registry; unavailable history → rows without `last`", () => {
-    const rows = buildScheduledRows(SCHEDULES, { ok: true, firings: [firing({ schedule: "retired" })] }, [], NOW);
+    const rows = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing({ schedule: "retired" })] }, [], NOW);
     expect(rows.every((r) => r.last === undefined)).toBe(true);
-    const unavailable = buildScheduledRows(SCHEDULES, { ok: false, reason: "schedules.worker not configured" }, [], NOW);
+    const unavailable = buildScheduledRows(FIXTURE_SCHEDULES, { ok: false, reason: "schedules.worker not configured" }, [], NOW);
     expect(unavailable.every((r) => r.last === undefined)).toBe(true);
   });
 
@@ -63,14 +70,14 @@ describe("buildScheduledRows", () => {
   });
 
   it("URL-encodes a hostile run id in the href", () => {
-    const [, si] = buildScheduledRows(SCHEDULES, { ok: true, firings: [firing({ runId: 'x"/><b>' })] }, [], NOW);
+    const [, si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing({ runId: 'x"/><b>' })] }, [], NOW);
     expect(si.last?.runHref).toBe("/runs/x%22%2F%3E%3Cb%3E");
   });
 });
 
 describe("renderScheduledPanel", () => {
   it("renders one row per schedule with UTC times, relative hints, outcome class, and the run link", () => {
-    const rows = buildScheduledRows(SCHEDULES, { ok: true, firings: [firing()] }, [], NOW);
+    const rows = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing()] }, [], NOW);
     const html = renderScheduledPanel(rows, { ok: true, firings: [firing()] }, NOW);
     expect(html).toContain('<section id="scheduled"');
     expect(html).toContain('<tr data-schedule="keep-alive">');
@@ -88,16 +95,16 @@ describe("renderScheduledPanel", () => {
   });
 
   it("never fired → says so; unavailable history → a note with the reason and `unknown` cells", () => {
-    expect(renderScheduledPanel(buildScheduledRows(SCHEDULES, none, [], NOW), none, NOW)).toContain("never fired");
+    expect(renderScheduledPanel(buildScheduledRows(FIXTURE_SCHEDULES, none, [], NOW), none, NOW)).toContain("never fired");
     const off: FiringsState = { ok: false, reason: "schedules.worker not configured" };
-    const html = renderScheduledPanel(buildScheduledRows(SCHEDULES, off, [], NOW), off, NOW);
+    const html = renderScheduledPanel(buildScheduledRows(FIXTURE_SCHEDULES, off, [], NOW), off, NOW);
     expect(html).toContain("Firing history unavailable: schedules.worker not configured");
     expect(html).toContain(">unknown<");
   });
 
   it("bad outcomes get the bad class and a plain-English label", () => {
     const f = firing({ runId: undefined, outcome: "misconfigured", detail: 'SWITCHBOARD_INGRESS_TOKENS has no entry with subject "cron"' });
-    const html = renderScheduledPanel(buildScheduledRows(SCHEDULES, { ok: true, firings: [f] }, [], NOW), { ok: true, firings: [f] }, NOW);
+    const html = renderScheduledPanel(buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [f] }, [], NOW), { ok: true, firings: [f] }, NOW);
     expect(html).toContain('<span class="outcome bad">misconfigured — nothing ran</span>');
     expect(html).toContain("has no entry with subject &quot;cron&quot;");
     expect(html).not.toContain("<a href");
@@ -105,7 +112,7 @@ describe("renderScheduledPanel", () => {
 
   it("escapes hostile detail/description text (no markup breakout)", () => {
     const f = firing({ detail: '<img src=x onerror=alert(1)>"' });
-    const html = renderScheduledPanel(buildScheduledRows(SCHEDULES, { ok: true, firings: [f] }, [], NOW), { ok: true, firings: [f] }, NOW);
+    const html = renderScheduledPanel(buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [f] }, [], NOW), { ok: true, firings: [f] }, NOW);
     expect(html).not.toContain("<img");
     expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;&quot;");
   });
