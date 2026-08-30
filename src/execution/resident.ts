@@ -34,9 +34,9 @@ import {
 // recreates the tree on the same ref — this client auto-re-attaches ONCE and
 // retries, then fails legibly.
 
-/** /detach is a small control-plane POST that runs in the dispatcher's finally
- *  BEFORE the answer is sent: bound it tightly so a sick resident delays a
- *  reply by seconds, not the 5-minute exec ceiling. */
+/** /detach is a small control-plane POST the dispatcher makes once the answer
+ *  is out: bound it tightly so a sick resident holds the run's slot for
+ *  seconds, not the 5-minute exec ceiling. */
 const DETACH_TIMEOUT_MS = 10_000;
 
 export interface ResidentExecutorOptions {
