@@ -1,0 +1,67 @@
+<script setup lang="ts">
+import { formatLocalIso } from "../../lib/format";
+import type { CallVm } from "../../lib/runPageModel";
+
+// A call card: <details> — header row is the summary (status glyph, $ or tool
+// chip, the command with a one-line collapsed headline, right-hand facts,
+// chevron), the redacted output inside. The call's start time is pacing
+// information, not a headline: it rides on the card's hover.
+
+const props = defineProps<{ call: CallVm }>();
+
+function toggle(): void {
+  props.call.open = !props.call.open;
+}
+</script>
+
+<template>
+  <details
+    class="call rounded-md border border-default bg-elevated open:bg-accented/40"
+    :class="call.status"
+    :open="call.open"
+    :title="typeof call.startedAt === 'number' ? `started ${formatLocalIso(call.startedAt)}` : undefined"
+    :data-status="call.status"
+  >
+    <summary
+      class="flex min-w-0 cursor-pointer list-none items-baseline gap-3 rounded-md px-3 py-2 hover:bg-accented/60 focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
+      :class="call.open ? 'rounded-b-none border-b border-default' : ''"
+      @click.prevent="toggle"
+    >
+      <span
+        v-if="call.status === 'running'"
+        class="spin inline-block size-[0.7em] shrink-0 animate-spin self-center rounded-full border-2 border-accented border-t-blue-300 motion-reduce:animate-none"
+        role="img"
+        aria-label="running"
+      />
+      <span
+        v-else
+        class="glyph w-[1em] shrink-0 text-center font-bold"
+        :class="call.status === 'ok' ? 'text-green-300' : call.status === 'failed' ? 'text-red-400' : 'text-yellow-600'"
+        >{{ call.status === "ok" ? "✓" : call.status === "failed" ? "✗" : "⚠" }}</span
+      >
+      <span v-if="call.shell" class="dollar shrink-0 select-none text-dimmed">$</span>
+      <span v-else class="tool shrink-0 rounded bg-accented px-1.5 text-[0.7rem] leading-normal text-muted">{{ call.tool }}</span>
+      <template v-if="!call.chipOnly">
+        <!-- Collapsed: the command's first line only (ellipsized); open: all of it. -->
+        <code v-if="!call.open" class="cmd brief min-w-0 flex-1 truncate text-blue-300">{{ call.headline }}</code>
+        <code v-else class="cmd full min-w-0 flex-1 whitespace-pre-wrap break-words text-blue-300">{{ call.title }}</code>
+      </template>
+      <span v-else class="cmd min-w-0 flex-1" />
+      <span class="facts ml-auto flex shrink-0 gap-2.5 text-xs tabular-nums text-muted">
+        <span
+          v-for="(fact, i) in call.facts"
+          :key="i"
+          class="fact"
+          :class="call.status !== 'ok' && i === 0 ? 'text-red-400' : ''"
+          >{{ fact }}</span
+        >
+      </span>
+      <span class="chev shrink-0 text-[0.7rem] text-dimmed transition-transform motion-reduce:transition-none" :class="call.open ? 'rotate-90' : ''">❯</span>
+    </summary>
+    <div class="body">
+      <pre v-if="call.hasResult && call.output" class="out max-h-[28rem] overflow-auto whitespace-pre-wrap break-words px-3.5 py-2.5 font-mono text-[0.8rem] leading-normal" :class="call.status === 'failed' ? 'text-red-200' : 'text-toned'">{{ call.output }}</pre>
+      <div v-else-if="call.hasResult" class="none px-3 py-1.5 text-[0.8rem] italic text-dimmed">no output</div>
+      <div v-else class="none px-3 py-1.5 text-[0.8rem] italic text-dimmed">running…</div>
+    </div>
+  </details>
+</template>
