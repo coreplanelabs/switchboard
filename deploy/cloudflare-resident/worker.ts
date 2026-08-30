@@ -114,7 +114,8 @@ interface Env {
    *  never to change anything. Unset = no read scope exists. */
   RESIDENT_READ_TOKEN?: string;
   // GitHub App identity for minting installation tokens inside residents
-  // (provisioned via secrets.txt; when unset, clones/fetches run anonymously —
+  // (provisioned via `npm run secrets` from deploy/secrets.manifest.json; when
+  // unset, clones/fetches run anonymously —
   // fine for public repos — and any explicit mint attempt is a command-level
   // error that never flips lifecycle state, per KTD12).
   GITHUB_APP_ID: string;

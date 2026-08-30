@@ -10,7 +10,7 @@
     "dev": "wrangler dev",
     "typegen": "wrangler types",
     "tail": "wrangler tail switchboard-sandbox",
-    "secrets": "while read -r name; do [ -z \"$name\" ] && continue; echo \"--- $name ---\"; wrangler secret put \"$name\"; done < secrets.txt"
+    "secrets": "node ../bin/put-secrets.mjs sandbox"
   },
   "dependencies": { "@cloudflare/sandbox": "^0.3.0" },
   "devDependencies": {

@@ -13,7 +13,7 @@
     "test": "vitest run",
     "typegen": "wrangler types",
     "tail": "wrangler tail switchboard-resident",
-    "secrets": "while read -r name; do [ -z \"$name\" ] && continue; echo \"--- $name ---\"; wrangler secret put \"$name\"; done < secrets.txt",
+    "secrets": "node ../bin/put-secrets.mjs resident",
     "wake": "curl -s -o /dev/null -w 'resident worker awake: HTTP %{http_code}\\n' --max-time 180 https://switchboard-resident.coreplanelabs.dev/healthz"
   },
   "dependencies": {

@@ -190,7 +190,7 @@ Railway/Render/k8s also work with the same image — anything that runs an alway
 
 ### Deploying on Cloudflare Containers (recommended)
 
-Four Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastructure` (per-worker `package.json` with pinned wrangler, `secrets.txt`, `wrangler deploy` with Docker running).
+Four Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastructure` (per-worker `package.json` with pinned wrangler, `wrangler deploy` with Docker running). Secrets are declared once in [`deploy/secrets.manifest.json`](deploy/secrets.manifest.json) — every secret, which Worker(s) hold it, and a note on what it is; each Worker's `npm run secrets` runs `deploy/bin/put-secrets.mjs <worker>`, which pipes `~/.secrets/switchboard/<NAME>` into `wrangler secret put` for that Worker's entries and refuses (uploading nothing) when a required value has no local file. The canonical copy of every value is the 1Password item `Switchboard: <NAME>` (Employee vault, tags `switchboard`, `switchboard/<worker>`), mirrored to `~/.secrets/switchboard/<NAME>` (mode 600). Rotating a shared bearer means putting the new value on every Worker the manifest lists for it. A unit test (`src/core/secretsManifest.test.ts`) checks each entry against its Worker's `Env` interface.
 
 **Routine production deploy = one command, from a clean checkout of `origin/main`:**
 
@@ -205,25 +205,22 @@ The per-Worker steps below are what the script runs, for first-time setup (secre
 ```bash
 # one-time: wrangler login (account: coreplane-infra), Docker running
 
-# 0. Generate bearers once with: openssl rand -hex 32
-#    SANDBOX_TOKEN — shared by the sandbox worker and the bot worker
-#    RESIDENT_OPERATOR_TOKEN + RESIDENT_ADMIN_TOKEN — shared by the resident
-#    worker and the bot worker (operator = runtime tool calls; admin = the
-#    `repo onboard/offboard/...` chat commands)
-#    MEMORY_TOKEN — shared by the memory worker and the bot worker (only needed
-#    when memory.enabled is on; see features/memory.md)
+# 0. Values: ~/.secrets/switchboard/<NAME> for every entry in deploy/secrets.manifest.json
+#    (from 1Password "Switchboard: <NAME>"; self-minted bearers are `openssl rand -hex 32`).
+#    Shared bearers (SANDBOX_TOKEN, RESIDENT_*_TOKEN, MEMORY_TOKEN) must be the same
+#    value on every Worker the manifest lists — the manifest is the list.
 
 # 1. Sandbox worker — per-thread execution VMs at switchboard-sandbox.coreplanelabs.dev
 cd deploy/cloudflare-sandbox && npm install
-npm run secrets
+npm run secrets   # SANDBOX_TOKEN (manifest: sandbox)
 npm run deploy
 
 # 2. Resident worker — always-warm per-repo environments at
 #    switchboard-resident.coreplanelabs.dev (per-repo Durable Objects on
 #    Cloudflare Sandbox 1.0, R2 bucket for stamped snapshots, watchdog cron)
 cd ../cloudflare-resident && npm install
-npm run secrets   # RESIDENT_ADMIN_TOKEN, RESIDENT_OPERATOR_TOKEN, GITHUB_APP_*,
-                  # RESIDENT_READ_TOKEN (optional: read-only /residents + debug info/schedules/threads)
+npm run secrets   # manifest: resident — RESIDENT_ADMIN/OPERATOR/READ_TOKEN, GITHUB_APP_*,
+                  # MEMORY_TOKEN (watchdog firing records; STATE_WORKER_URL is a wrangler var)
                   # (the resident holds its own copy of the App key — the
                   # second credential domain; see trust model above)
 RESIDENT_ADMIN_TOKEN=… env -u CLOUDFLARE_API_TOKEN npm run deploy
@@ -236,14 +233,14 @@ RESIDENT_ADMIN_TOKEN=… env -u CLOUDFLARE_API_TOKEN npm run deploy
 #    scope; no container, no Docker needed). Optional: only if memory.enabled.
 cd ../cloudflare-memory && npm install
 npm test          # runs the DO tests inside workerd
-npm run secrets   # MEMORY_TOKEN
+npm run secrets   # manifest: memory — MEMORY_TOKEN
 env -u CLOUDFLARE_API_TOKEN npm run deploy   # ends with a wake ping: /healthz 200
 
 # 4. Bot worker — always-on Switchboard container
 cd ../cloudflare && npm install
-npm run secrets   # prompts through secrets.txt (Slack, Anthropic, SANDBOX_TOKEN,
-                  # RESIDENT_OPERATOR_TOKEN, RESIDENT_ADMIN_TOKEN, MEMORY_TOKEN, GitHub App)
-                  # + CF_ANALYTICS_TOKEN (costs dash) and optional ANTHROPIC_ADMIN_KEY (LLM spend)
+npm run secrets   # manifest: bot — Slack, Anthropic, Brave, SANDBOX_TOKEN, RESIDENT_OPERATOR/ADMIN_TOKEN,
+                  # MEMORY_TOKEN, GitHub App, CF_ANALYTICS_TOKEN (costs dash); ANTHROPIC_ADMIN_KEY
+                  # (LLM spend on /costs) is optional and skipped when there is no local file
 env -u CLOUDFLARE_API_TOKEN npm run deploy
                   # preflight first: refuses while the bot has runs in flight, is still
                   # draining from an earlier deploy, or the container app is mid-rollout

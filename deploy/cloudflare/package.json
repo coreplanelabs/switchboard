@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typegen": "wrangler types",
     "tail": "wrangler tail switchboard",
-    "secrets": "while read -r name; do [ -z \"$name\" ] && continue; echo \"--- $name ---\"; wrangler secret put \"$name\"; done < secrets.txt",
+    "secrets": "node ../bin/put-secrets.mjs bot",
     "wake": "curl -s -o /dev/null -w 'container awake: HTTP %{http_code}\\n' --max-time 180 https://switchboard.coreplanelabs.dev/healthz"
   },
   "dependencies": {
