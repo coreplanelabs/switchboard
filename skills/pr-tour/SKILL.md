@@ -27,6 +27,14 @@ Never code first: a reader who sees code before knowing what it is for has to re
 
 - The permalink is https://github.com/<owner>/<repo>/blob/<head sha>/<path>#L<from>-L<to> with the FULL 40-char head sha from `git rev-parse HEAD` after pushing. GitHub renders that link as an embedded code block inside the body; a branch name does not render.
 - Keep each anchor to the lines that matter (≲25 lines). Split a large hunk into two steps rather than anchoring 80 lines.
+- Never write an anchor from memory — line numbers guessed from recall of the file are usually wrong, and a wrong range embeds the WRONG code under a correct explanation, which is worse than no anchor. Derive every anchor mechanically: locate the hunk with `grep -n <landmark> <path>`, then verify with `git show <sha>:<path> | sed -n '<from>,<to>p'` — the printed lines must be the exact code the step's prose describes. If they are not, fix the range, not the prose.
+
+## Embed conditions (why a permalink renders as a plain link)
+
+GitHub only embeds a permalink when ALL of these hold — violate any one and the reader gets a bare URL instead of the code:
+
+- The path exists at that sha and the range is inside the file. Check `git cat-file -e <sha>:<path>` when in doubt; a renamed or misremembered path is the most common cause of a dead anchor.
+- The permalink is a bare URL standing on its own line, with a blank line before and after — never inside a bullet, blockquote, or heading, and never wrapped in markdown link syntax.
 
 ## The catch-all
 
