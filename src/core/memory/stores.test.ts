@@ -30,6 +30,70 @@ describe("NullMemoryStore", () => {
       store.write("org:coreplanelabs", [{ kind: "fact", text: "x", sourceThreadKey: "slack:C1:1.0" }]),
     ).resolves.toBeUndefined();
   });
+
+  it("list returns [] and forget returns false (#278 human controls)", async () => {
+    const store = new NullMemoryStore();
+    expect(await store.list("org:coreplanelabs", 10)).toEqual([]);
+    expect(await store.forget("org:coreplanelabs", "mem:org:coreplanelabs:0")).toBe(false);
+  });
+});
+
+// Feature: features/memory.md §24 (#278) — human controls: list a scope's active
+// records newest first; forget = soft-delete (status `forgotten`, provenance
+// kept) that hides the record from retrieval, list, and dedup.
+describe("InMemoryMemoryStore.list / forget (#278)", () => {
+  const seed = () =>
+    new InMemoryMemoryStore(
+      [
+        rec({ id: "a", createdAt: NOW - 3000, text: "oldest deploy note" }),
+        rec({ id: "b", createdAt: NOW - 2000, text: "middle deploy note" }),
+        rec({ id: "c", createdAt: NOW - 1000, text: "newest deploy note" }),
+        rec({ id: "s", createdAt: NOW, text: "superseded deploy note", status: "superseded" }),
+        rec({ id: "u", scopeKey: "user:slack:U1", text: "user deploy note" }),
+      ],
+      { now: () => NOW },
+    );
+
+  it("list: the scope's ACTIVE records, newest first, capped at limit; never another scope's", async () => {
+    const store = seed();
+    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.id)).toEqual(["c", "b", "a"]);
+    expect((await store.list("org:coreplanelabs", 2)).map((r) => r.id)).toEqual(["c", "b"]);
+    expect((await store.list("user:slack:U1", 10)).map((r) => r.id)).toEqual(["u"]);
+    expect(await store.list("user:slack:U2", 10)).toEqual([]);
+  });
+
+  it("list does not bump usage (it is a human view, not a retrieval)", async () => {
+    const store = seed();
+    const [first] = await store.list("org:coreplanelabs", 1);
+    expect(first.useCount).toBe(0);
+    expect(first.lastUsedAt).toBeUndefined();
+  });
+
+  it("forget: flips an active same-scope record to `forgotten` (kept, not removed) and returns true", async () => {
+    const store = seed();
+    expect(await store.forget("org:coreplanelabs", "b")).toBe(true);
+    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.id)).toEqual(["c", "a"]);
+    expect((await store.retrieve({ scopeKey: "org:coreplanelabs", query: "middle deploy note", limit: 10 })).map((r) => r.id)).not.toContain("b");
+  });
+
+  it("forget: unknown id, foreign-scope id, or an already non-active record → false, nothing changes", async () => {
+    const store = seed();
+    expect(await store.forget("org:coreplanelabs", "nope")).toBe(false);
+    expect(await store.forget("org:coreplanelabs", "u")).toBe(false); // lives in user:slack:U1
+    expect(await store.forget("org:coreplanelabs", "s")).toBe(false); // superseded
+    expect((await store.list("user:slack:U1", 10)).map((r) => r.id)).toEqual(["u"]);
+    expect(await store.forget("org:coreplanelabs", "b")).toBe(true);
+    expect(await store.forget("org:coreplanelabs", "b")).toBe(false); // second time: no longer active
+  });
+
+  it("a forgotten record is no longer a dedup target: re-asserting its text creates a fresh active record", async () => {
+    const store = seed();
+    await store.forget("org:coreplanelabs", "b");
+    await store.write("org:coreplanelabs", [{ kind: "fact", text: "middle deploy note", sourceThreadKey: "slack:C1:2.0" }]);
+    const ids = (await store.list("org:coreplanelabs", 10)).map((r) => r.id);
+    expect(ids).toHaveLength(3);
+    expect(ids).not.toContain("b");
+  });
 });
 
 describe("InMemoryMemoryStore.retrieve", () => {

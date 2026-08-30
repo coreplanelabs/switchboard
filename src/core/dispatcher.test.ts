@@ -2605,6 +2605,19 @@ describe("self-improvement wiring (Area 7b / #84)", () => {
     warn.mockRestore();
   });
 
+  // Feature: features/memory.md §24 (#278) — `memory list`/`memory forget` are
+  // config-family: answered inline from the store, never a model turn.
+  it("`memory list` is answered inline from the memory store — no model turn", async () => {
+    const provider = capturingProvider();
+    const store = new InMemoryMemoryStore([memRecord()]);
+    const deps: CoreDeps = { ...makeDeps(MEMORY_ON_YAML, provider), memory: store };
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("memory list"), io);
+    expect(provider.requests).toHaveLength(0);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("mem:org:coreplanelabs:0");
+  });
+
   it("`friction report` is answered inline from the ledger — no model turn, no executor", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);

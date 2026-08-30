@@ -211,6 +211,22 @@ export class MemoryDO extends DurableObject<Env> {
     });
     return counts;
   }
+
+  /** Human view (#278): the scope's ACTIVE rows, newest first, no usage bump. */
+  async list(_scopeKey: string, limit: number): Promise<MemoryRecord[]> {
+    return this.sql
+      .exec<Row>(`SELECT * FROM records WHERE status = 'active' ORDER BY seq DESC LIMIT ?`, limit)
+      .toArray()
+      .map(toRecord);
+  }
+
+  /** Human control (#278): soft-delete one ACTIVE row (`status = 'forgotten'`;
+   *  the row and its provenance stay). Returns whether a row changed. The DO
+   *  IS the scope, so an id from another scope simply matches nothing here. */
+  async forget(_scopeKey: string, id: string): Promise<boolean> {
+    const cursor = this.sql.exec(`UPDATE records SET status = 'forgotten' WHERE id = ? AND status = 'active'`, id);
+    return cursor.rowsWritten > 0;
+  }
 }
 
 /** Row → wire record. Optional fields are OMITTED when NULL (never `null` on
@@ -475,6 +491,36 @@ function parseScopeKey(v: unknown): Validated<string> {
   return { ok: true, value: v };
 }
 
+function parseLimit(v: unknown): Validated<number> {
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > MAX_LIMIT) {
+    return invalid(`limit must be an integer between 1 and ${MAX_LIMIT}`);
+  }
+  return { ok: true, value: v };
+}
+
+/** `POST /list {scopeKey, limit}` (#278). */
+function parseList(body: unknown): Validated<{ scopeKey: string; limit: number }> {
+  if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
+  const b = body as Record<string, unknown>;
+  const scope = parseScopeKey(b.scopeKey);
+  if (!scope.ok) return scope;
+  const limit = parseLimit(b.limit);
+  if (!limit.ok) return limit;
+  return { ok: true, value: { scopeKey: scope.value, limit: limit.value } };
+}
+
+/** `POST /forget {scopeKey, id}` (#278): the id is an opaque key, same caps as scopeKey. */
+function parseForget(body: unknown): Validated<{ scopeKey: string; id: string }> {
+  if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
+  const b = body as Record<string, unknown>;
+  const scope = parseScopeKey(b.scopeKey);
+  if (!scope.ok) return scope;
+  if (typeof b.id !== "string" || b.id.length === 0 || b.id.length > MAX_KEY_CHARS || /[\s\p{Cc}]/u.test(b.id)) {
+    return invalid(`id must be a non-empty string of at most ${MAX_KEY_CHARS} characters with no whitespace`);
+  }
+  return { ok: true, value: { scopeKey: scope.value, id: b.id } };
+}
+
 function parseRetrieve(body: unknown): Validated<{ scopeKey: string; query: string; limit: number }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const b = body as Record<string, unknown>;
@@ -554,7 +600,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true });
-    const ROUTES = new Set(["/retrieve", "/write", "/friction/record", "/friction/recent", "/schedules/record", "/schedules/latest"]);
+    const ROUTES = new Set(["/retrieve", "/write", "/list", "/forget", "/friction/record", "/friction/recent", "/schedules/record", "/schedules/latest"]);
     if (!ROUTES.has(url.pathname)) return json({ error: "not found" }, 404);
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
     if (!authorized(env, request)) return json({ error: "unauthorized" }, 401);
@@ -623,6 +669,24 @@ export default {
       // `wrangler tail switchboard-memory` show retrieve traffic and depth.
       console.log(`[retrieve] ${scopeKey} -> ${records.length} records`);
       return json({ records });
+    }
+
+    if (url.pathname === "/list") {
+      const parsed = parseList(body);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      const { scopeKey, limit } = parsed.value;
+      const records = await env.MEMORY.get(env.MEMORY.idFromName(scopeKey)).list(scopeKey, limit);
+      console.log(`[list] ${scopeKey} -> ${records.length} records`);
+      return json({ records });
+    }
+    if (url.pathname === "/forget") {
+      const parsed = parseForget(body);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      const { scopeKey, id } = parsed.value;
+      const forgotten = await env.MEMORY.get(env.MEMORY.idFromName(scopeKey)).forget(scopeKey, id);
+      // Observability: scope + id only (ids carry no record text).
+      console.log(`[forget] ${scopeKey} ${id} -> ${forgotten}`);
+      return json({ ok: true, forgotten });
     }
 
     const parsed = parseWrite(body);

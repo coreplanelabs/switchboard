@@ -19,6 +19,12 @@ export class NullMemoryStore implements MemoryStore {
   async write(_scopeKey: string, _records: MemoryCandidate[]): Promise<void> {
     // intentionally nothing
   }
+  async list(_scopeKey: string, _limit: number): Promise<MemoryRecord[]> {
+    return [];
+  }
+  async forget(_scopeKey: string, _id: string): Promise<boolean> {
+    return false;
+  }
 }
 
 /** In-memory store: a `Map<scopeKey, MemoryRecord[]>` driven by the shared
@@ -32,10 +38,10 @@ export class InMemoryMemoryStore implements MemoryStore {
 
   constructor(seed: MemoryRecord[] = [], opts: { now?: () => number } = {}) {
     this.now = opts.now ?? Date.now;
-    for (const r of seed) this.list(r.scopeKey).push(r);
+    for (const r of seed) this.bucket(r.scopeKey).push(r);
   }
 
-  private list(scopeKey: string): MemoryRecord[] {
+  private bucket(scopeKey: string): MemoryRecord[] {
     let list = this.byScope.get(scopeKey);
     if (!list) {
       list = [];
@@ -46,7 +52,7 @@ export class InMemoryMemoryStore implements MemoryStore {
 
   async retrieve(q: MemoryQuery): Promise<MemoryRecord[]> {
     const now = this.now();
-    const ranked = rankRecords(this.list(q.scopeKey), q.query, now, q.limit);
+    const ranked = rankRecords(this.bucket(q.scopeKey), q.query, now, q.limit);
     // Retrieval bumps recency/usage (feeds the decay term next time).
     for (const r of ranked) {
       r.lastUsedAt = now;
@@ -56,7 +62,7 @@ export class InMemoryMemoryStore implements MemoryStore {
   }
 
   async write(scopeKey: string, records: MemoryCandidate[]): Promise<void> {
-    const list = this.list(scopeKey);
+    const list = this.bucket(scopeKey);
     const now = this.now();
     for (const cand of records) {
       const plan = planWrite(list, cand, (c) => mintRecord(scopeKey, this.seq++, now, c));
@@ -69,6 +75,20 @@ export class InMemoryMemoryStore implements MemoryStore {
       if (plan.supersede) plan.supersede.status = "superseded";
       list.push(plan.record);
     }
+  }
+
+  async list(scopeKey: string, limit: number): Promise<MemoryRecord[]> {
+    return this.bucket(scopeKey)
+      .filter((r) => r.status === "active")
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, limit);
+  }
+
+  async forget(scopeKey: string, id: string): Promise<boolean> {
+    const target = this.bucket(scopeKey).find((r) => r.id === id && r.status === "active");
+    if (!target) return false;
+    target.status = "forgotten"; // soft delete: provenance stays auditable
+    return true;
   }
 }
 

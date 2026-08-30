@@ -110,6 +110,36 @@ describe("WorkerMemoryStore.write", () => {
   });
 });
 
+// Feature: features/memory.md §24 (#278) — human controls over the wire.
+describe("WorkerMemoryStore.list / forget (#278)", () => {
+  it("list POSTs /list {scopeKey, limit} and returns the Worker's records (malformed ones dropped)", async () => {
+    const { fetch, calls } = fakeFetch(() => jsonRes({ records: [record, { junk: true }] }));
+    expect(await store(fetch).list("org:coreplanelabs", 20)).toEqual([record]);
+    expect(calls[0].url).toBe("https://memory.example/list");
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ scopeKey: "org:coreplanelabs", limit: 20 });
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer secret-token");
+  });
+
+  it("list is a human command, so a failure THROWS (never silently shows an empty list)", async () => {
+    const { fetch } = fakeFetch(() => jsonRes({ error: "boom" }, 500));
+    await expect(store(fetch).list("org:coreplanelabs", 20)).rejects.toThrow(/\/list HTTP 500: boom/);
+  });
+
+  it("forget POSTs /forget {scopeKey, id} and returns the Worker's `forgotten` flag", async () => {
+    const { fetch, calls } = fakeFetch(() => jsonRes({ ok: true, forgotten: true }));
+    expect(await store(fetch).forget("org:coreplanelabs", "mem:org:coreplanelabs:0")).toBe(true);
+    expect(calls[0].url).toBe("https://memory.example/forget");
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ scopeKey: "org:coreplanelabs", id: "mem:org:coreplanelabs:0" });
+    const miss = fakeFetch(() => jsonRes({ ok: true, forgotten: false }));
+    expect(await store(miss.fetch).forget("org:coreplanelabs", "mem:org:coreplanelabs:99")).toBe(false);
+  });
+
+  it("forget THROWS on a non-2xx", async () => {
+    const { fetch } = fakeFetch(() => jsonRes({ error: "unauthorized" }, 401));
+    await expect(store(fetch).forget("org:coreplanelabs", "x")).rejects.toThrow(/\/forget HTTP 401: unauthorized/);
+  });
+});
+
 describe("WorkerMemoryStore construction", () => {
   it("has a bounded request timeout so a hung Worker can never stall a dispatch", () => {
     expect(MEMORY_WORKER_TIMEOUT_MS).toBeGreaterThan(0);

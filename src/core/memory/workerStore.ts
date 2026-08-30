@@ -9,6 +9,8 @@ import type { MemoryCandidate, MemoryQuery, MemoryRecord, MemoryStore } from "./
 // nothing). Route contracts (JSON in/out, bearer MEMORY_TOKEN):
 //   POST /retrieve {scopeKey, query, limit} → {records: MemoryRecord[]}
 //   POST /write    {scopeKey, records: MemoryCandidate[]} → {ok, inserted, deduped, superseded}
+//   POST /list     {scopeKey, limit} → {records: MemoryRecord[]}          (#278 human controls)
+//   POST /forget   {scopeKey, id} → {ok, forgotten: boolean}
 
 /** Per-request ceiling. Retrieval sits on the critical path of every model
  *  turn, so a hung Worker must degrade to "no memory" quickly, never stall the
@@ -81,6 +83,23 @@ export class WorkerMemoryStore implements MemoryStore {
     }
   }
 
+  /** Human command (#278): failures THROW — a person asked to see the list, so
+   *  an empty reply on error would be a lie; the command layer renders ⚠️. */
+  async list(scopeKey: string, limit: number): Promise<MemoryRecord[]> {
+    const res = await this.post("/list", { scopeKey, limit });
+    const data = await parseBody(res);
+    if (!res.ok) throw new Error(`memory worker /list HTTP ${res.status}${data.error ? `: ${String(data.error)}` : ""}`);
+    return Array.isArray(data.records) ? data.records.filter(isMemoryRecord) : [];
+  }
+
+  /** Human command (#278): resolves the Worker's `forgotten` flag; throws on a non-2xx. */
+  async forget(scopeKey: string, id: string): Promise<boolean> {
+    const res = await this.post("/forget", { scopeKey, id });
+    const data = await parseBody(res);
+    if (!res.ok) throw new Error(`memory worker /forget HTTP ${res.status}${data.error ? `: ${String(data.error)}` : ""}`);
+    return data.forgotten === true;
+  }
+
   private post(path: string, body: unknown): Promise<Response> {
     return this.fetchImpl(`${this.baseUrl}${path}`, {
       method: "POST",
@@ -119,6 +138,6 @@ function isMemoryRecord(v: unknown): v is MemoryRecord {
     typeof r.sourceThreadKey === "string" &&
     typeof r.createdAt === "number" &&
     typeof r.useCount === "number" &&
-    (r.status === "active" || r.status === "superseded")
+    (r.status === "active" || r.status === "superseded" || r.status === "forgotten")
   );
 }

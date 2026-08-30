@@ -335,6 +335,12 @@ describe("reflect (one extractor call → store.write)", () => {
         return [];
       },
       async write(): Promise<void> {},
+      async list(): Promise<MemoryRecord[]> {
+        return [];
+      },
+      async forget(): Promise<boolean> {
+        return false;
+      },
     };
     const provider = fakeProvider(goodReply);
     await reflect({ ...base, answer: "x".repeat(10_000), provider, store });

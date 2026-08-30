@@ -226,6 +226,61 @@ describe("write → retrieve round trip", () => {
   });
 });
 
+// Feature: features/memory.md §24 (#278) — human controls: /list + /forget.
+describe("list / forget (#278 human controls)", () => {
+  it("/list returns the scope's ACTIVE records newest first, capped at limit, without bumping usage", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("first fact"), cand("second fact"), cand("third fact")] });
+    const all = (await post("/list", { scopeKey: s, limit: 10 })).data.records as Array<Record<string, unknown>>;
+    expect(all.map((r) => r.text)).toEqual(["third fact", "second fact", "first fact"]);
+    expect(all.every((r) => r.useCount === 0 && r.lastUsedAt === undefined)).toBe(true);
+    const two = (await post("/list", { scopeKey: s, limit: 2 })).data.records as Array<Record<string, unknown>>;
+    expect(two.map((r) => r.text)).toEqual(["third fact", "second fact"]);
+    expect((await post("/list", { scopeKey: scope(), limit: 10 })).data).toEqual({ records: [] });
+  });
+
+  it("/forget soft-deletes one active record: hidden from /list, /retrieve, and dedup; row kept; second call → false", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("keep this fact"), cand("drop this fact")] });
+    const f = await post("/forget", { scopeKey: s, id: `mem:${s}:1` });
+    expect(f.status).toBe(200);
+    expect(f.data).toEqual({ ok: true, forgotten: true });
+    expect(((await post("/list", { scopeKey: s, limit: 10 })).data.records as Array<Record<string, unknown>>).map((r) => r.text)).toEqual([
+      "keep this fact",
+    ]);
+    // "drop" is the token only the forgotten record carries ("fact" is shared with the kept one).
+    expect(((await post("/retrieve", { scopeKey: s, query: "drop", limit: 8 })).data.records as unknown[]).length).toBe(0);
+    // Not a dedup target any more: restating inserts a fresh active record.
+    expect((await post("/write", { scopeKey: s, records: [cand("drop this fact")] })).data).toMatchObject({ inserted: 1, deduped: 0 });
+    expect((await post("/forget", { scopeKey: s, id: `mem:${s}:1` })).data).toEqual({ ok: true, forgotten: false });
+  });
+
+  it("/forget through another scope's DO matches nothing (the DO is the scope); unknown id → false", async () => {
+    const a = scope();
+    const b = scope();
+    await post("/write", { scopeKey: a, records: [cand("a's fact")] });
+    expect((await post("/forget", { scopeKey: b, id: `mem:${a}:0` })).data).toEqual({ ok: true, forgotten: false });
+    expect((await post("/forget", { scopeKey: a, id: `mem:${a}:99` })).data).toEqual({ ok: true, forgotten: false });
+    expect(((await post("/list", { scopeKey: a, limit: 10 })).data.records as unknown[]).length).toBe(1);
+  });
+
+  it("validates bodies: bad limit, missing/whitespace id, bad scopeKey → 400 with a reason", async () => {
+    const s = scope();
+    expect((await post("/list", { scopeKey: s, limit: 0 })).status).toBe(400);
+    expect((await post("/list", { scopeKey: s, limit: 51 })).status).toBe(400);
+    expect((await post("/list", { scopeKey: "bad key", limit: 5 })).status).toBe(400);
+    expect((await post("/forget", { scopeKey: s })).status).toBe(400);
+    expect((await post("/forget", { scopeKey: s, id: "has space" })).status).toBe(400);
+    expect((await post("/forget", { scopeKey: s, id: "x".repeat(201) })).status).toBe(400);
+  });
+
+  it("both routes require the bearer", async () => {
+    const s = scope();
+    expect((await post("/list", { scopeKey: s, limit: 5 }, { "content-type": "application/json" })).status).toBe(401);
+    expect((await post("/forget", { scopeKey: s, id: "mem:x:0" }, { "content-type": "application/json" })).status).toBe(401);
+  });
+});
+
 describe("dedup / supersede (shared engine rules)", () => {
   it("dedups identical normalized text: bumps useCount, inserts nothing", async () => {
     const s = scope();
