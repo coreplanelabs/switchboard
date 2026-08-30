@@ -71,7 +71,7 @@ describe("planDeploy", () => {
     expect(forced.steps.find((s) => s.name === "bot")!.setEnv).toEqual({ SWITCHBOARD_DEPLOY_FORCE: "1" });
     expect(forced.steps.find((s) => s.name === "resident")!.setEnv).toEqual({ RESIDENT_DEPLOY_FORCE: "1" });
     expect(forced.steps.find((s) => s.name === "memory")!.setEnv).toEqual({});
-    expect(forced.warnings).toEqual(["--force: preflights are bypassed — in-flight runs on bot and resident WILL be killed"]);
+    expect(forced.warnings).toEqual(["--force: preflights are bypassed — in-flight runs on bot and resident are SIGTERM-drained (finish if they can, else killed at the drain deadline)"]);
   });
 
   it("only preflighted steps may be retried on a refusal; the wait budget comes from the options", () => {

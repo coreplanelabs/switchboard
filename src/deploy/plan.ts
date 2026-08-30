@@ -159,7 +159,7 @@ export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe): Deploy
       atOriginMain: !opts.allowBranch,
       nodeModulesMissing: steps.filter((s) => !checkout.hasNodeModules(s.dir)).map((s) => s.dir),
     },
-    warnings: forcedNames.length > 0 ? [`--force: preflights are bypassed — in-flight runs on ${forcedNames.join(" and ")} WILL be killed`] : [],
+    warnings: forcedNames.length > 0 ? [`--force: preflights are bypassed — in-flight runs on ${forcedNames.join(" and ")} are SIGTERM-drained (finish if they can, else killed at the drain deadline)`] : [],
   };
 }
 
