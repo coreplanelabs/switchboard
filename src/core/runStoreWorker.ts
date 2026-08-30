@@ -4,7 +4,6 @@ import {
   isRunRecord,
   normalizeStored,
   RUN_ID_PATTERN,
-  utf8ByteLength,
   type RetentionPolicy,
   type RunListItem,
   type RunListOptions,
@@ -18,8 +17,11 @@ import type { PutResult, RunEventsOptions, RunEventsPage, RunStore } from "./run
 // key), so run history survives bot restarts and redeploys (AGENTS.md
 // invariant 6). Mirrors WorkerFrictionLedger: the core sees the RunStore
 // interface, the fetch client lives at this boundary. Route contract (JSON
-// in/out, bearer = the Worker's MEMORY_TOKEN, string body with a numeric
-// Content-Length — the Worker's size fence needs it):
+// in/out, bearer = the Worker's MEMORY_TOKEN, string body — the runtime
+// derives the numeric Content-Length the Worker's size fence needs from it,
+// exactly as the memory/friction/schedule clients do; a hand-set header was
+// the one difference between this client and those three, and the only one
+// whose fetches failed from the production container, #313):
 //   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?} → {ok, retained, stored, rewritten}
 //   POST /runs/get    {storeKey, id}                                → {record: RunRecord | null}
 //   POST /runs/summary {storeKey, id}                               → {summary: RunListItem | null}
@@ -53,6 +55,17 @@ export class TransientStoreError extends Error {
 /** Any other non-2xx, or a malformed response body: log and count, never retry. */
 export class PermanentStoreError extends Error {
   readonly name = "PermanentStoreError";
+}
+
+/** An error's message followed by its `cause` chain — Node's fetch reports every
+ *  network failure as a bare "fetch failed" and keeps the reason (ECONNRESET,
+ *  UND_ERR_*, a TLS error) in `cause`; a warn line without it is useless. */
+export function describeError(err: unknown, depth = 0): string {
+  if (!(err instanceof Error)) return String(err);
+  const code = (err as Error & { code?: unknown }).code;
+  const head = typeof code === "string" && !err.message.includes(code) ? `${err.message} [${code}]` : err.message;
+  const cause = (err as Error & { cause?: unknown }).cause;
+  return cause !== undefined && depth < 4 ? `${head} (cause: ${describeError(cause, depth + 1)})` : head;
 }
 
 export interface WorkerRunStoreOptions {
@@ -133,8 +146,8 @@ export class WorkerRunStore implements RunStore {
     await this.post("/runs/delete", { storeKey: this.opts.storeKey, id });
   }
 
-  /** POST a JSON body and classify the outcome. The body is a STRING with an
-   *  explicit numeric Content-Length measured in UTF-8 bytes. */
+  /** POST a JSON body and classify the outcome. The body is a STRING; the
+   *  runtime sets its numeric Content-Length (never hand-set — see header). */
   private async post(path: string, payload: unknown): Promise<Record<string, unknown>> {
     const body = JSON.stringify(payload);
     let res: Response;
@@ -143,14 +156,13 @@ export class WorkerRunStore implements RunStore {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "content-length": String(utf8ByteLength(body)),
           authorization: `Bearer ${this.opts.token}`,
         },
         body,
         signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
       });
     } catch (err) {
-      throw new TransientStoreError(`run store ${path}: ${err instanceof Error ? err.message : String(err)}`);
+      throw new TransientStoreError(`run store ${path}: ${describeError(err)}`);
     }
     if (!res.ok) {
       const message = `run store ${path} HTTP ${res.status}${await errorSuffix(res)}`;
