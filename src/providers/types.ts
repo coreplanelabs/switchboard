@@ -8,7 +8,21 @@ export type ContentPart =
   | { type: "image"; mediaType: string; data: string } // data is base64, no data: prefix
   | { type: "document"; mediaType: string; data: string; name?: string } // PDF; data is base64
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; toolUseId: string; content: ToolResultContent; isError?: boolean };
+  | { type: "tool_result"; toolUseId: string; content: ToolResultContent; isError?: boolean }
+  /** The model's own reasoning, as the provider returned it. Opaque to the
+   *  runner (never shown, never redacted — `collectText` skips it) and echoed
+   *  back byte-for-byte in the next request: Anthropic verifies `signature`
+   *  and rejects a modified or reordered block, and dropping them breaks the
+   *  turn on Claude Fable 5 (features/run-loop.md item 11). Providers without
+   *  the concept drop them on the way out. */
+  | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; data: string };
+
+/** How long a prompt-cache entry written by a request stays warm. `5m` is
+ *  refreshed by every read (strictly cheaper while turns start < 5 min apart);
+ *  `1h` costs 2× on write but survives the long model turns + tool runs of a
+ *  coding run, where a 5m entry would expire between requests. */
+export type CacheTtl = "5m" | "1h";
 
 /** What a tool may hand back: plain text, or a list of text/image/document
  *  parts when the result is something the model should *see* (e.g. web_fetch
@@ -60,6 +74,9 @@ export interface CompletionRequest {
   /** Cancellation for a hard run stop (#101): providers pass it to their HTTP
    *  call so an aborted run stops billing/streaming now. Absent → never aborts. */
   signal?: AbortSignal;
+  /** Prompt-cache TTL for this call's breakpoints; providers that cache apply
+   *  it to every breakpoint. Absent → the provider default (`5m`). */
+  cacheTtl?: CacheTtl;
 }
 
 /** Token accounting for ONE model call, normalized across providers. Cache

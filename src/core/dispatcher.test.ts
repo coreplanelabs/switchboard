@@ -2642,7 +2642,7 @@ channels:
     expect(provider.requests[0].effort).toBeUndefined();
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("config set me effort=turbo"), io);
-    expect(replies[0]).toMatch(/Unknown effort `turbo`.*low, medium, high/);
+    expect(replies[0]).toMatch(/Unknown effort `turbo`.*low, medium, high, xhigh, max/);
     await dispatch(deps, msg("config set me efforts.nope=low"), io);
     expect(replies[1]).toMatch(/Unknown agent `nope`/);
     await dispatch(deps, msg("effort:turbo hi"), io);

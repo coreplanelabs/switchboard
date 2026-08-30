@@ -193,6 +193,7 @@ async function runLoop(
       tools: tools.length > 0 ? tools : undefined,
       maxTokens: opts.agent.maxTokens,
       effort: opts.effort ?? opts.agent.effort,
+      ...(opts.agent.cacheTtl ? { cacheTtl: opts.agent.cacheTtl } : {}),
     });
 
     if (result.stopReason === "refusal") {
@@ -396,6 +397,7 @@ async function runFinale(
         system,
         messages,
         maxTokens: opts.agent.maxTokens,
+        ...(opts.agent.cacheTtl ? { cacheTtl: opts.agent.cacheTtl } : {}),
       },
       AbortSignal.timeout(opts.finaleTimeoutMs ?? FINALE_TIMEOUT_MS),
     );

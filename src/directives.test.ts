@@ -40,7 +40,7 @@ describe("parseDirectives — effort", () => {
   });
 
   it("rejects an unknown effort level, naming the valid ones", () => {
-    expect(() => parseDirectives("effort:turbo do it")).toThrow(/Unknown effort "turbo".*low, medium, high/);
+    expect(() => parseDirectives("effort:turbo do it")).toThrow(/Unknown effort "turbo".*low, medium, high, xhigh, max/);
   });
 
   it("is sticky in a thread like agent/model (user turns only, last wins, lenient)", () => {
