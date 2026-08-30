@@ -78,6 +78,7 @@ import { DurableObject } from "cloudflare:workers";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
+import { shouldRefreshThreadCredentials } from "../../src/execution/residentCredentials.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 import {
   decisivePull,
@@ -651,6 +652,10 @@ interface ThreadBinding {
    *  file, origin = the unreadable mirror. An attach in the other mode
    *  recreates the tree. Absent (pre-field bindings) = writable. */
   readonly?: boolean;
+  /** Epoch ms when `.git/github-credentials` was last written (attach or the
+   *  per-exec refresh). Absent = unknown → the next writable exec re-mints
+   *  (`shouldRefreshThreadCredentials`); cleared by a read-only attach. */
+  credentialsWrittenAt?: number;
 }
 
 type ThreadDepsMechanism = "hardlink" | "copy" | "install" | "none";
@@ -2070,6 +2075,7 @@ export class ResidentDO extends Sandbox<Env> {
 
     let deps: { deps: ThreadDepsMechanism; reconciled: boolean };
     let credentials: AttachOk["credentials"] = mode.readonly ? "none" : "unavailable";
+    let credentialsWrittenAt: number | undefined;
     try {
       const installCmd = record.commands.install ?? "npm install --no-audit --no-fund";
       deps = await this.materializeThreadDeps(binding, locked.value.threadLockKey, facts.lockfileHash, installCmd);
@@ -2078,7 +2084,7 @@ export class ResidentDO extends Sandbox<Env> {
         // this rule (or by a writable attach on this thread) may carry a file.
         await this.scrubThreadCredentials(binding);
       } else if (token) {
-        await this.writeThreadCredentials(binding, token);
+        credentialsWrittenAt = await this.writeThreadCredentials(binding, token);
         credentials = "ok";
       }
     } catch (err) {
@@ -2094,12 +2100,19 @@ export class ResidentDO extends Sandbox<Env> {
       return { error: `attach-failed${step}: ${errMsg(err)}`, status: 500 };
     }
 
+    // The prior write time never survives an attach: a read-only attach
+    // scrubbed the file, a writable one either rewrote it (stamped below) or
+    // could not — and "unknown" is what makes the next exec re-mint.
+    const { credentialsWrittenAt: _prior, ...bindingSansCred } = binding;
     await this.ctx.storage.put(threadBindingKey(threadKey), {
-      ...binding,
+      ...bindingSansCred,
       lastAttachAt: new Date().toISOString(),
       deps: deps.deps,
       sha: locked.value.sha,
       readonly: mode.readonly,
+      // A writable attach that could not mint keeps nothing to date: the next
+      // exec sees the file missing and re-mints (or logs and runs without).
+      ...(credentialsWrittenAt !== undefined ? { credentialsWrittenAt } : {}),
     } satisfies ThreadBinding);
     if ((await this.listSchedules(SWEEP_CALLBACK)).length === 0) {
       await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
@@ -2270,8 +2283,9 @@ export class ResidentDO extends Sandbox<Env> {
    *  privilege-dropped `cat` into `.git/github-credentials` (0600, owned by
    *  the thread user). The token never appears in argv or process-wide env —
    *  `ps` from another thread user sees file PATHS at most. The worktree's
-   *  git credential helper points at the file. */
-  private async writeThreadCredentials(binding: ThreadBinding, token: string): Promise<void> {
+   *  git credential helper points at the file. Returns the write time the
+   *  caller persists as `credentialsWrittenAt`. */
+  private async writeThreadCredentials(binding: ThreadBinding, token: string): Promise<number> {
     const stageDir = `/workspace/.stage-${binding.user}`;
     const stage = `${stageDir}/cred`;
     await this.runOk(["install", "-d", "-m", "700", "-o", binding.user, "-g", binding.user, stageDir], "stage-dir");
@@ -2286,6 +2300,40 @@ export class ResidentDO extends Sandbox<Env> {
       "thread-cred",
       DEFAULT_EXEC_TIMEOUT_MS,
     );
+    return Date.now();
+  }
+
+  /** Per-exec credential refresh (KTD12): the attach-time token lives one
+   *  hour, a coding run can push later than that, and git's `store` helper
+   *  erases a 401'd credential from the file — so before every writable exec,
+   *  size the file (one `stat`) and let the pure `shouldRefreshThreadCredentials`
+   *  decide; on refresh, re-mint (cached per slug) and rewrite. Returns the
+   *  new write time, or undefined when nothing changed. Never throws: a mint
+   *  failure is command-level — logged, and the command runs with whatever the
+   *  file holds (never a lifecycle transition). Unconfigured App → nothing to
+   *  refresh, silently (attach already reported `credentials:"unavailable"`). */
+  private async refreshThreadCredentialsIfDue(binding: ThreadBinding): Promise<number | undefined> {
+    if (binding.readonly || !githubAppConfigured(this.env)) return undefined;
+    const cred = `${binding.worktreePath}/.git/github-credentials`;
+    const sized = await this.run(["stat", "-c", "%s", cred]);
+    const fileBytes = sized.exitCode === 0 ? Number.parseInt(sized.stdout.trim(), 10) : null;
+    const decision = shouldRefreshThreadCredentials({
+      writtenAtMs: binding.credentialsWrittenAt ?? null,
+      nowMs: Date.now(),
+      fileBytes: fileBytes === null || Number.isNaN(fileBytes) ? null : fileBytes,
+      readonly: binding.readonly ?? false,
+    });
+    if (!decision.refresh) return undefined;
+    const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+    try {
+      const token = await mintRepoScopedToken(this.env, resource.slice("repo:".length));
+      const writtenAt = await this.writeThreadCredentials(binding, token);
+      console.log(`credentials: refreshed for ${binding.threadKey} (${decision.reason})`);
+      return writtenAt;
+    } catch (err) {
+      console.log(`credentials: refresh failed (${decision.reason}: ${errMsg(err)}) — command runs without a fresh token`);
+      return undefined;
+    }
   }
 
   /** Shared entry checks for exec/read/write: hydrated resident, live
@@ -2348,9 +2396,11 @@ export class ResidentDO extends Sandbox<Env> {
     const pre = await this.threadPreflight(threadKey);
     if ("error" in pre) return pre;
     const { binding } = pre;
+    const credentialsWrittenAt = await this.refreshThreadCredentialsIfDue(binding);
     await this.ctx.storage.put(threadBindingKey(threadKey), {
       ...binding,
       lastAttachAt: new Date().toISOString(), // exec counts as activity for the sweep
+      ...(credentialsWrittenAt !== undefined ? { credentialsWrittenAt } : {}),
     } satisfies ThreadBinding);
 
     let r: Awaited<ReturnType<ResidentDO["threadRun"]>>;
