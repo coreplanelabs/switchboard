@@ -8,7 +8,8 @@ function report(over: Partial<CostReport> = {}): CostReport {
   const day = (date: string, bot: number, llm: number) => ({
     date,
     containers: { bot: { cpu: bot * 0.1, memory: bot * 0.8, disk: bot * 0.1, total: bot } },
-    durableObjects: { switchboard: 0.25 },
+    durableObjects: { "bot DO": 0.2 },
+    doRequestsUsd: 0.05,
     cloudUsd: bot + 0.25,
     llmUsd: llm,
     total: bot + 0.25 + llm,

@@ -170,6 +170,8 @@ workspaceDir: ./workspaces
 #       workers: [myapp, myapp-worker]           # Worker script names (their Durable Objects)
 #       containerApps:                            # container application id → label
 #         a0000000-0000-0000-0000-000000000000: server
+#       durableObjectNamespaces:                  # DO namespace id → label (billable duration is per namespace)
+#         00000000000000000000000000000000: server DO
 #       anthropicWorkspaceId: wrkspc_...          # this app's Anthropic workspace
 
 # Slack adapter — reconnect catch-up (#184). Socket Mode drops every mention
