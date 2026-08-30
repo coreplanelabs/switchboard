@@ -1,7 +1,7 @@
 import type { AgentDef } from "./agents/registry.js";
 import type { Effort } from "./effort.js";
 import { toolResultText, type ChatMessage, type ContentPart, type Provider } from "./providers/types.js";
-import { parseExitPrefix, prepareToolOutput, redactAndCap, redactSecrets, summarizeToolResult, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
+import { parseExitPrefix, prepareToolResult, redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
 import type { RunControl } from "./core/runRegistry.js";
 import { ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
@@ -199,9 +199,7 @@ async function runLoop(
       return "The model declined this request (safety refusal). Try rephrasing, or switch models with `model:<provider>/<model>`.";
     }
 
-    const toolUses = result.content.filter(
-      (p): p is Extract<ContentPart, { type: "tool_use" }> => p.type === "tool_use",
-    );
+    const toolUses = result.content.filter((p): p is ToolUsePart => p.type === "tool_use");
 
     if (toolUses.length === 0 || result.stopReason !== "tool_use") {
       const text = collectText(result.content);
@@ -223,21 +221,13 @@ async function runLoop(
 
     // Echo the assistant turn, run tools, append results as one user turn.
     messages.push({ role: "assistant", content: result.content });
-    const results: ContentPart[] = [];
-    for (const tu of toolUses) {
-      // Redact THEN cap (redactAndCap): a pre-truncated command could sever a
-      // token below its detector's length floor and leak a raw fragment.
-      emit({ type: "tool_call", tool: tu.name, summary: redactAndCap(describeToolCall(tu)), callId: tu.id });
+    // One tool_use → its tool_result part (and the events it produces). Only a
+    // hard stop escapes as a rejection; every tool failure is a result.
+    const runOne = async (tu: ToolUsePart): Promise<ContentPart> => {
       const tool = toolsByName.get(tu.name);
       if (!tool) {
         emit({ type: "tool_result", tool: tu.name, ok: false, summary: redactAndCap(`Unknown tool: ${tu.name}`), callId: tu.id });
-        results.push({
-          type: "tool_result",
-          toolUseId: tu.id,
-          content: `Unknown tool: ${tu.name}`,
-          isError: true,
-        });
-        continue;
+        return { type: "tool_result", toolUseId: tu.id, content: `Unknown tool: ${tu.name}`, isError: true };
       }
       try {
         const output = await untilHardStop(tool.run((tu.input ?? {}) as Record<string, unknown>, toolContext));
@@ -249,12 +239,11 @@ async function runLoop(
           type: "tool_result",
           tool: tu.name,
           ok: !exit?.failed,
-          summary: summarizeToolResult(text),
           callId: tu.id,
           ...(exit?.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
-          output: prepareToolOutput(text),
+          ...prepareToolResult(text),
         });
-        results.push({ type: "tool_result", toolUseId: tu.id, content: output });
+        return { type: "tool_result", toolUseId: tu.id, content: output };
       } catch (err) {
         // A hard stop is not a tool error to feed back to the model — unwind.
         // A genuine tool error that merely coincides with the hard request is
@@ -272,19 +261,42 @@ async function runLoop(
           type: "tool_result",
           tool: tu.name,
           ok: false,
-          summary: summarizeToolResult(message),
           callId: tu.id,
-          output: prepareToolOutput(message),
+          ...prepareToolResult(message),
           ...(err instanceof ExecInfraError ? { infra: true as const } : {}),
         });
-        results.push({
-          type: "tool_result",
-          toolUseId: tu.id,
-          content: `Error: ${message}`,
-          isError: true,
-        });
+        return { type: "tool_result", toolUseId: tu.id, content: `Error: ${message}`, isError: true };
       }
+    };
+    // Redact THEN cap (redactAndCap): a pre-truncated command could sever a
+    // token below its detector's length floor and leak a raw fragment.
+    const announce = (tu: ToolUsePart) =>
+      emit({ type: "tool_call", tool: tu.name, summary: redactAndCap(describeToolCall(tu)), callId: tu.id });
+    // Execution order: a mutating tool runs alone, in the model's order; a run
+    // of consecutive side-effect-free tools (several read_file/web_fetch in one
+    // turn — each a round trip to the resident or the web) runs concurrently.
+    // Results are appended in the model's order regardless of completion order,
+    // so `messages` is byte-identical to the serial loop. `allSettled` so a hard
+    // stop that rejects several in-flight tools rejects ONCE, never unhandled.
+    const results: ContentPart[] = [];
+    const runBatch = async (batch: ToolUsePart[]) => {
+      batch.forEach(announce);
+      const settled = await Promise.allSettled(batch.map(runOne));
+      for (const s of settled) if (s.status === "rejected") throw s.reason;
+      for (const s of settled) if (s.status === "fulfilled") results.push(s.value);
+    };
+    let batch: ToolUsePart[] = [];
+    for (const tu of toolUses) {
+      if (toolsByName.get(tu.name)?.sideEffectFree) {
+        batch.push(tu);
+        continue;
+      }
+      if (batch.length > 0) await runBatch(batch);
+      batch = [];
+      announce(tu);
+      results.push(await runOne(tu));
     }
+    if (batch.length > 0) await runBatch(batch);
     // One-time wrap-up warning as time runs low, attached to the tool results.
     if (!warned && now() >= warnAt) {
       warned = true;
@@ -469,7 +481,9 @@ function collectText(parts: ContentPart[]): string {
     .trim();
 }
 
-function describeToolCall(tu: Extract<ContentPart, { type: "tool_use" }>): string {
+type ToolUsePart = Extract<ContentPart, { type: "tool_use" }>;
+
+function describeToolCall(tu: ToolUsePart): string {
   const input = tu.input as Record<string, unknown> | undefined;
   if (tu.name === "bash" && input?.command) {
     // Full command — redaction + capping happens at the call site (redactAndCap),

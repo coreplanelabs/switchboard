@@ -8,6 +8,7 @@ import type { RunnableTool } from "./workspace.js";
 // coding only coding skills.
 
 export const listSkillsTool: RunnableTool = {
+  sideEffectFree: true,
   name: "list_skills",
   description:
     "List the skills available to you: each is a reusable methodology you can load into context with use_skill. " +
@@ -25,6 +26,7 @@ export const listSkillsTool: RunnableTool = {
 };
 
 export const useSkillTool: RunnableTool = {
+  sideEffectFree: true,
   name: "use_skill",
   description:
     "Load a skill's full instructions into your context by name (get names from list_skills or your system prompt). " +

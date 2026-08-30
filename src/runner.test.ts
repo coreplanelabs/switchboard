@@ -1071,3 +1071,127 @@ describe("model turn events (features/live-view.md item 15)", () => {
     expect(events).toEqual([expect.objectContaining({ type: "turn", stopReason: "refusal" })]);
   });
 });
+
+// Feature: features/run-loop.md — side-effect-free tools in one turn run concurrently.
+describe("runAgent tool concurrency", () => {
+  /** An executor whose ops resolve only when the test releases them, recording
+   *  how many were in flight at once. */
+  function gatedExecutor() {
+    let inFlight = 0;
+    let peak = 0;
+    const waiters: Array<() => void> = [];
+    const gate = async <T>(value: T): Promise<T> => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise<void>((r) => waiters.push(r));
+      inFlight--;
+      return value;
+    };
+    const executor: Executor = {
+      exec: (cmd) => gate(`ran ${cmd}`),
+      readFile: (path) => gate(`contents of ${path}`),
+      writeFile: async () => "Wrote",
+    };
+    return { executor, peak: () => peak, inFlight: () => inFlight, release: () => waiters.splice(0).forEach((r) => r()) };
+  }
+  const reads = (paths: string[]): CompletionResult => ({
+    content: paths.map((p, i) => ({ type: "tool_use" as const, id: `r${i}`, name: "read_file", input: { path: p } })),
+    stopReason: "tool_use",
+  });
+  const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+
+  it("runs several read_file calls from one turn concurrently and appends results in the model's order", async () => {
+    const g = gatedExecutor();
+    const provider = scripted([reads(["a.ts", "b.ts", "c.ts"]), text("done")]);
+    const events: RunEvent[] = [];
+    const p = runAgent({
+      provider,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: g.executor },
+      onEvent: (e) => events.push(e),
+    });
+    await tick();
+    expect(g.inFlight()).toBe(3); // all three reads started before any finished
+    g.release();
+    expect(await p).toBe("done");
+    expect(g.peak()).toBe(3);
+    const toolTurn = provider.requests[1].messages.at(-1)!;
+    expect(toolTurn.content.map((c) => c.type === "tool_result" && c.toolUseId)).toEqual(["r0", "r1", "r2"]);
+    expect(toolTurn.content.map((c) => c.type === "tool_result" && c.content)).toEqual([
+      "contents of a.ts",
+      "contents of b.ts",
+      "contents of c.ts",
+    ]);
+    // Every call is announced before any result; each result pairs by callId.
+    const calls = events.filter((e) => e.type === "tool_call").map((e) => e.callId);
+    const results = events.filter((e) => e.type === "tool_result").map((e) => e.callId);
+    expect(calls).toEqual(["r0", "r1", "r2"]);
+    expect([...results].sort()).toEqual(["r0", "r1", "r2"]);
+    const lastCallIndex = events.map((e) => e.type).lastIndexOf("tool_call");
+    expect(events.findIndex((e) => e.type === "tool_result")).toBeGreaterThan(lastCallIndex);
+  });
+
+  it("keeps a mutating tool serial: bash never overlaps a read, and order is preserved around it", async () => {
+    const g = gatedExecutor();
+    const mixed: CompletionResult = {
+      content: [
+        { type: "tool_use", id: "r0", name: "read_file", input: { path: "a.ts" } },
+        { type: "tool_use", id: "b1", name: "bash", input: { command: "make" } },
+        { type: "tool_use", id: "r2", name: "read_file", input: { path: "c.ts" } },
+      ],
+      stopReason: "tool_use",
+    };
+    const provider = scripted([mixed, text("done")]);
+    const p = runAgent({
+      provider,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: g.executor },
+    });
+    await tick();
+    expect(g.inFlight()).toBe(1); // only the first read; bash waits for it
+    g.release();
+    await tick();
+    expect(g.inFlight()).toBe(1); // bash alone
+    g.release();
+    await tick();
+    expect(g.inFlight()).toBe(1); // the trailing read, only after bash finished
+    g.release();
+    expect(await p).toBe("done");
+    expect(g.peak()).toBe(1);
+    const toolTurn = provider.requests[1].messages.at(-1)!;
+    expect(toolTurn.content.map((c) => c.type === "tool_result" && c.toolUseId)).toEqual(["r0", "b1", "r2"]);
+  });
+
+  it("a hard stop during a concurrent batch unwinds once — no unhandled rejection from the sibling tools", async () => {
+    const g = gatedExecutor();
+    const provider = scripted([reads(["a.ts", "b.ts"]), text("never")]);
+    const control = new RunControl();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const p = runAgent({
+        provider,
+        model: "m",
+        agent: agent(),
+        messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+        toolContext: { executor: g.executor },
+        control,
+      });
+      await tick();
+      expect(g.inFlight()).toBe(2);
+      control.requestStop("hard");
+      expect(await p).toContain("hard stop");
+      g.release();
+      await tick();
+      await tick();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+});

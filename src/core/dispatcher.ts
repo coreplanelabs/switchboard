@@ -30,6 +30,7 @@ import { parseFrictionCommand, runFrictionCommand } from "./frictionCommands.js"
 import { parseMemoryCommand, runMemoryCommand } from "./memoryCommands.js";
 import { defaultRunRegistry, type RunRegistry } from "./runRegistry.js";
 import { PlainTextFormatter, type ChannelFormatter } from "./structuredMessage.js";
+import { coalesceStatus } from "./statusCoalescer.js";
 import { produceStructured, providerProducer } from "./structuredOutput.js";
 import type { Provider } from "../providers/types.js";
 import type {
@@ -133,11 +134,24 @@ export interface CoreDeps {
    * without a network call.
    */
   issueTracker?: IssueTracker;
+  /** Floor between two status-card edits (default `STATUS_UPDATE_MIN_MS`).
+   *  Tests that assert on an individual intermediate frame set 0. */
+  statusUpdateMinMs?: number;
 }
 
+/** Floor between two edits of a run's status card (see `coalesceStatus`). Below
+ *  the 5 s heartbeat so a heartbeat frame is never held back by it. */
 const STATUS_UPDATE_MIN_MS = 3000;
 /** Max run events kept per run for the post-run friction diagnosis (#84); the newest are kept. */
 const RUN_EVENTS_CAP = 5000;
+
+/** The web capability (undici Agent with the SSRF-checking connector + the
+ *  search adapter) is built ONCE per process, not per run: the Agent owns the
+ *  connection pool, so sharing it lets every run reuse warm TLS sockets to the
+ *  same hosts instead of paying a fresh DNS+TCP+TLS handshake per fetch — and a
+ *  per-run Agent was never closed, so its keep-alive sockets accumulated. */
+let sharedWeb: ReturnType<typeof makeWebCapability> | undefined;
+const webCapability = () => (sharedWeb ??= makeWebCapability(process.env));
 
 // In-flight run tracking so the process can drain before exiting (restarts
 // must not kill runs mid-flight — see index.ts signal handling).
@@ -260,6 +274,20 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
     const provider = deps.providers.get(providerName);
 
+    // Cross-session memory (Area 7c, #85) — READ path, STARTED here and awaited
+    // below, so the memory Worker round trip (up to 5 s) overlaps the repo/PR
+    // resolution and the executor attach instead of adding to them. It needs
+    // only the request text and the user, and it is scope-isolated to the org
+    // + this user, so nothing it reads depends on the repo gate. Started after
+    // the agent gate, never before: a refused request must not touch memory
+    // (retrieval bumps usage counters). Flag-gated: with memory disabled
+    // (default) this resolves to undefined via a NullMemoryStore, leaving
+    // `messages` and `system` byte-identical to memory-off. The no-op catch
+    // keeps an early return (repo refusal, ask-once) from leaving the rejection
+    // unhandled; the real await below still surfaces a failure where it did.
+    const memoryBlockP = memoryContextBlock(deps.config.config.memory, deps.memory, directives.text, msg.userId);
+    memoryBlockP.catch(() => {});
+
     // Acknowledge NOW, before anything slow. Everything between here and the
     // model turn can take minutes — repo/PR resolution (GitHub REST), memory
     // retrieval, and above all executor selection (resident attach or a cold
@@ -272,7 +300,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     let frame = 0;
     const title = (icon?: string) =>
       `${icon ?? SPINNER_GLYPHS[frame++ % SPINNER_GLYPHS.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
-    const card = await io.status({ title: `👀 ${label} · preparing workspace…` });
+    // Coalesced: the run below refreshes it on every event, the channel sees at
+    // most one edit per STATUS_UPDATE_MIN_MS, always the newest frame.
+    const card = coalesceStatus(
+      await io.status({ title: `👀 ${label} · preparing workspace…` }),
+      deps.statusUpdateMinMs ?? STATUS_UPDATE_MIN_MS,
+    );
     setupCard = card;
 
     // Target repo/ref for resident environments, resolved BEFORE the model
@@ -303,20 +336,6 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       );
       return;
     }
-
-    // Cross-session memory (Area 7c, #85) — READ path. BEFORE assembling model
-    // input, retrieve scope-relevant records (the org's + this user's own,
-    // #107 PR B) and render a dedicated advisory context block (kept OUT of
-    // history: it rides on the system prompt below, never mixed into the
-    // turns). Flag-gated: with memory disabled (default)
-    // this resolves to undefined via a NullMemoryStore, leaving `messages` and
-    // `system` byte-identical to memory-off.
-    const memoryBlock = await memoryContextBlock(
-      deps.config.config.memory,
-      deps.memory,
-      directives.text,
-      msg.userId,
-    );
 
     const messages = buildMessages(history, directives.text, msg.images, msg.documents);
 
@@ -463,7 +482,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // present) → config block → custom instructions → the agent's own
     // instructions (+ skills). The memory block is absent with memory off
     // (default), keeping the memory-off request byte-identical to a
-    // NullMemoryStore run.
+    // NullMemoryStore run. Retrieval was started before the repo resolution and
+    // executor selection above; by now it has usually landed.
+    const memoryBlock = await memoryBlockP;
     const system = [memoryBlock, configBlock, instructionsBlock, withSkills ?? agent.system]
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
@@ -542,12 +563,21 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // without limit and its terminal signals (budget/infra notes at the very
     // end — the ones most worth diagnosing) are never the part that is lost.
     // Dropping the oldest can only orphan a tool_result, which the analyzer
-    // ignores; it can never fabricate a "run ended mid-tool" finding.
+    // ignores; it can never fabricate a "run ended mid-tool" finding. The
+    // analyzer never reads `tool_result.output` (up to 8 KB each — 40 MB per
+    // run at the cap), so the copy kept here drops it; the registry backlog
+    // keeps the full event for the page. Over the cap the oldest are dropped
+    // in blocks: a per-event `shift()` moves the whole array each time.
     const runEvents: RunEvent[] = [];
     const onEvent = (e: RunEvent) => {
       registry.publish(run.id, e); // feed the external live-view stream
-      runEvents.push(e);
-      if (runEvents.length > RUN_EVENTS_CAP) runEvents.shift();
+      if (e.type === "tool_result" && e.output !== undefined) {
+        const { output: _output, ...lean } = e;
+        runEvents.push(lean);
+      } else {
+        runEvents.push(e);
+      }
+      if (runEvents.length > RUN_EVENTS_CAP) runEvents.splice(0, RUN_EVENTS_CAP >> 2);
       if (e.type === "tool_call") toolCalls++;
       lastActivityAt = Date.now();
       lastActivity = activityLine(e);
@@ -583,6 +613,27 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
     let observedHead: string | undefined;
     let runThrew = false;
+    // Give the workspace back now rather than at the inactivity sweep: a
+    // resident's pool user is a scarce slot (features/resident-repos.md item
+    // 16a). Read-only agents hold nothing worth keeping; a coding run keeps
+    // its worktree only while it has uncommitted/unpushed work — unless an
+    // operator HARD-stopped it (#101), which means "tear it down now": the
+    // abandoned command may still be running in there, and the whole point
+    // of a hard stop is to free the resources. Best-effort — a failed
+    // release is a log line, never a failed run. Called AFTER the answer has
+    // been sent (or the failure card closed): the `/detach` round trip is
+    // bounded at 10 s on a sick resident, and nothing about the reply depends
+    // on it, so it must never sit between "answer ready" and the thread.
+    const releaseWorkspace = async () => {
+      if (!executor.release) return;
+      const mode = agent.toolset === "readonly" || run.control.requested === "hard" ? "always" : "if-clean";
+      try {
+        const r = await executor.release(mode);
+        console.log(`[release] ${msg.threadKey} ${r.released ? "released" : "kept"}${r.reason ? ` (${r.reason})` : ""}`);
+      } catch (err) {
+        console.warn(`[release] ${msg.threadKey} failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
     try {
       answer = await runAgent({
         provider,
@@ -591,7 +642,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         messages,
         system,
         effort: resolved.effort,
-        toolContext: { executor, reportProgress, web: makeWebCapability(process.env), skills: deps.skills, agentName: agent.name, onVerdict },
+        toolContext: { executor, reportProgress, web: webCapability(), skills: deps.skills, agentName: agent.name, onVerdict },
         onProgress,
         onEvent,
         control: run.control, // operator stop from /runs (#101)
@@ -613,6 +664,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     } catch (err) {
       runThrew = true;
       await card.done({ title: title("❌"), detail: finalDetail() });
+      await releaseWorkspace();
       throw err;
     } finally {
       clearInterval(heartbeat);
@@ -633,31 +685,21 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
             console.warn(`[friction] ${msg.threadKey} ledger write failed: ${err instanceof Error ? err.message : String(err)}`),
           );
       }
-      // Give the workspace back now rather than at the inactivity sweep: a
-      // resident's pool user is a scarce slot (features/resident-repos.md item
-      // 16). Read-only agents hold nothing worth keeping; a coding run keeps
-      // its worktree only while it has uncommitted/unpushed work — unless an
-      // operator HARD-stopped it (#101), which means "tear it down now": the
-      // abandoned command may still be running in there, and the whole point
-      // of a hard stop is to free the resources. Best-effort — a failed
-      // release is a log line, never a failed run.
-      if (executor.release) {
-        const mode = agent.toolset === "readonly" || run.control.requested === "hard" ? "always" : "if-clean";
-        try {
-          const r = await executor.release(mode);
-          console.log(`[release] ${msg.threadKey} ${r.released ? "released" : "kept"}${r.reason ? ` (${r.reason})` : ""}`);
-        } catch (err) {
-          console.warn(`[release] ${msg.threadKey} failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
     }
 
     // The card's final icon tells the stop apart from a normal finish: ⏹ soft
     // (a summary was written), ⛔ hard (aborted, no summary).
     const stopped = run.control.requested;
     console.log(`[done] ${msg.threadKey} ${answer.length} chars${stopped ? ` (stopped: ${stopped})` : ""}`);
-    await card.done({ title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"), detail: finalDetail() });
-    await sendAnswer(deps, io, msg.threadKey, { provider, model, maxTokens: agent.maxTokens }, answer);
+    // `finally`, not sequential: a Slack failure in either call (outage, an
+    // unchunkable line) must still give the pool user back, or it is held
+    // until the hourly sweep — the toil 16a exists to avoid.
+    try {
+      await card.done({ title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"), detail: finalDetail() });
+      await sendAnswer(deps, io, msg.threadKey, { provider, model, maxTokens: agent.maxTokens }, answer);
+    } finally {
+      await releaseWorkspace();
+    }
 
     // Cross-session memory (Area 7c, #85) — WRITE path. AFTER the reply has
     // landed, distill this run into memory records: fire-and-forget (tracked

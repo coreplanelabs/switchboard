@@ -93,6 +93,10 @@ export function createRunTimeline(): RunTimeline {
   const steps: TimelineStep[] = [];
   let current: TimelineStep | null = null;
   let seq = 0;
+  // Calls without a result yet, oldest first — kept alongside the steps so
+  // `pending()` (asked once per incoming event by the page's tail) is a lookup,
+  // not a rescan of every step's every call.
+  const pendingCalls: TimelineCall[] = [];
 
   function num(v: unknown): number | undefined {
     return typeof v === "number" && isFinite(v) ? v : undefined;
@@ -156,6 +160,8 @@ export function createRunTimeline(): RunTimeline {
     const code = num(e.exitCode);
     if (code !== undefined) result.exitCode = code;
     call.result = result;
+    const pendingAt = pendingCalls.indexOf(call);
+    if (pendingAt !== -1) pendingCalls.splice(pendingAt, 1);
     call.status = result.infra ? "infra" : result.ok ? "ok" : "failed";
     if (call.status !== "ok") call.tags = call.tags.concat(call.status);
     if (call.startedAt !== undefined && result.at !== undefined && result.at >= call.startedAt) {
@@ -200,7 +206,7 @@ export function createRunTimeline(): RunTimeline {
     // Shell: the command without its `$ ` marker. Other tools: the target
     // without the tool-name prefix (the card shows the tool as a chip).
     const title = shell && raw.startsWith("$ ") ? raw.slice(2) : !shell && raw.startsWith(tool + " ") ? raw.slice(tool.length + 1) : raw;
-    return {
+    const call: TimelineCall = {
       id: str(e.callId) || "c" + ++seq,
       tool,
       title,
@@ -212,6 +218,8 @@ export function createRunTimeline(): RunTimeline {
       startedAt: num(e.at),
       facts: [],
     };
+    pendingCalls.push(call);
+    return call;
   }
 
   function findCall(e: Record<string, unknown>): { step: TimelineStep; call: TimelineCall } | null {
@@ -299,8 +307,7 @@ export function createRunTimeline(): RunTimeline {
   }
 
   function pending(): TimelineCall | null {
-    for (const step of steps) for (const call of step.calls) if (!call.result) return call;
-    return null;
+    return pendingCalls.length > 0 ? pendingCalls[0] : null;
   }
 
   return { push, pending, steps: () => steps };

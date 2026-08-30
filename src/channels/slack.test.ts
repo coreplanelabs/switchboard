@@ -7,6 +7,7 @@ import {
   fetchImages,
   render,
   resetSlackNameCaches,
+  SlackIO,
   resolveChannelName,
   resolveUserName,
   stripMention,
@@ -257,6 +258,65 @@ describe("resolveChannelName / resolveUserName (best-effort, cached)", () => {
     expect(await resolveChannelName(flaky, "CF")).toBeUndefined();
     expect(await resolveChannelName(flaky, "CF")).toBe("general");
     expect(flaky.conversations.info).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Feature: features/slack-channel.md — a follow-up's thread page is fetched
+// once (the bot-in-thread check hands it to history()), and a message's
+// attachments download concurrently instead of one after another.
+describe("SlackIO.history — thread reuse and concurrent attachment downloads", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const ev = { channel: "C1", user: "U1", text: "hi", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
+
+  it("uses the thread the handler already fetched instead of calling conversations.replies again", async () => {
+    const replies = vi.fn();
+    const client = { conversations: { replies } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const thread = [
+      { user: "U1", text: "<@UBOT> first ask", ts: "1.0" },
+      { bot_id: "B1", text: "an answer", ts: "2.0" },
+      { user: "U1", text: "hi", ts: "3.0" }, // the triggering message — skipped
+    ];
+    const items = await new SlackIO(client, { ...ev, thread }).history();
+    expect(replies).not.toHaveBeenCalled();
+    expect(items.map((i) => [i.role, i.text])).toEqual([
+      ["user", "first ask"],
+      ["assistant", "an answer"],
+    ]);
+  });
+
+  it("fetches the thread itself when no prefetched page is given (mention path)", async () => {
+    const replies = vi.fn(async () => ({ messages: [{ user: "U1", text: "earlier", ts: "1.0" }] }));
+    const client = { conversations: { replies } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const items = await new SlackIO(client, ev).history();
+    expect(replies).toHaveBeenCalledWith({ channel: "C1", ts: "1.0", limit: 50 });
+    expect(items.map((i) => i.text)).toEqual(["earlier"]);
+  });
+
+  it("downloads a message's images concurrently — every fetch starts before any finishes", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const gates: Array<() => void> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise<void>((r) => gates.push(r));
+        inFlight--;
+        return new Response(new Uint8Array(4).fill(7), { status: 200, headers: { "content-type": "image/png" } });
+      }),
+    );
+    const png = (name: string) => ({ id: name, name, mimetype: "image/png", size: 4, url_private_download: `https://files.slack.test/${name}` });
+    const p = fetchImages([png("a.png"), png("b.png"), png("c.png")], 10);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(inFlight).toBe(3);
+    gates.splice(0).forEach((r) => r());
+    const { images, skipped, bytes } = await p;
+    expect(peak).toBe(3);
+    expect(images.map((i) => i.name)).toEqual(["a.png", "b.png", "c.png"]); // original order, not completion order
+    expect(skipped).toEqual([]);
+    expect(bytes).toBe(12);
   });
 });
 

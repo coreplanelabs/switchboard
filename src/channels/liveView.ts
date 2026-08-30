@@ -547,7 +547,13 @@ ${LOCAL_ISO_SCRIPT}
   }
   var es = new EventSource(url);
   es.onopen = function () { live = true; if (!stopMode) setConn("green", "live"); refreshTail(); };
+  var lastSeq = 0;
   es.onmessage = function (m) {
+    // Frames carry their stream position as the SSE id; a proxy that strips
+    // Last-Event-ID on reconnect would make the server replay from the start,
+    // so anything at or before the last applied position is dropped here too.
+    var sid = Number(m.lastEventId);
+    if (sid > 0) { if (sid <= lastSeq) return; lastSeq = sid; }
     var e;
     try { e = JSON.parse(m.data); } catch (_) { return; }
     var wasAtTail = atTail();
@@ -880,9 +886,34 @@ export interface SseSink {
   onClose(cb: () => void): void;
 }
 
-/** One SSE `data:` frame for a run event. */
-function sseData(event: RunEvent): string {
-  return `data: ${JSON.stringify(event)}\n\n`;
+/** One SSE frame for a run event: `id:` is its position in the run's stream, so
+ *  a browser that reconnects (proxy drop, deploy, laptop sleep) sends it back as
+ *  `Last-Event-ID` and the server replays only what it missed — instead of the
+ *  whole backlog again, which the page would have appended as duplicates. */
+function sseData(event: RunEvent, seq: number): string {
+  return `id: ${seq}\ndata: ${serializedOnce(event)}\n\n`;
+}
+
+/** `JSON.stringify(event)`, computed once per event object no matter how many
+ *  viewers a run has: the registry hands every subscriber the SAME event object
+ *  (and the same backlog entries on replay), so with k open tabs on one run
+ *  each tool_result (up to 8 KB of output) was serialized k times. */
+const serialized = new WeakMap<object, string>();
+function serializedOnce(event: object): string {
+  let s = serialized.get(event);
+  if (s === undefined) {
+    s = JSON.stringify(event);
+    serialized.set(event, s);
+  }
+  return s;
+}
+
+/** The `Last-Event-ID` a reconnecting EventSource sends, as the stream position
+ *  to resume after; anything absent or malformed means "from the start". */
+export function parseLastEventId(header: string | string[] | undefined): number {
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (!raw || !/^\d{1,15}$/.test(raw.trim())) return 0;
+  return Number(raw.trim());
 }
 
 /** The terminal `end` frame the page listens for to close its EventSource. */
@@ -928,7 +959,7 @@ function startSseHeartbeat(req: HttpRequest, res: ServerResponse): void {
  * result (unknown run or bad token) is a 404 — existence is never revealed.
  */
 export function serveEvents(
-  subscribe: (onEvent: (e: RunEvent) => void, onFinish: () => void) => Unsubscribe | null,
+  subscribe: (onEvent: (e: RunEvent, seq: number) => void, onFinish: () => void) => Unsubscribe | null,
   sink: SseSink,
   onLive?: () => void,
 ): void {
@@ -945,7 +976,7 @@ export function serveEvents(
     else endedDuringReplay = true;
   };
 
-  const unsubscribe = subscribe((e) => send(sseData(e)), onFinish);
+  const unsubscribe = subscribe((e, seq) => send(sseData(e, seq)), onFinish);
   if (!unsubscribe) {
     sink.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     sink.write("run not found");
@@ -966,9 +997,10 @@ export function serveEvents(
   onLive?.(); // stream stays open → safe to start the keepalive heartbeat
 }
 
-/** One SSE `data:` frame for an index event (upsert/removed). */
+/** One SSE `data:` frame for an index event (upsert/removed). No `id:` — the
+ *  index has no resume semantics (a reconnect replays the current active set). */
 function sseIndexData(ev: IndexEvent): string {
-  return `data: ${JSON.stringify(ev)}\n\n`;
+  return `data: ${serializedOnce(ev)}\n\n`;
 }
 
 /**
@@ -1188,8 +1220,9 @@ export function createLiveViewHandler(
     }
 
     // route.kind === "events"
+    const afterSeq = parseLastEventId(req.headers["last-event-id"]);
     serveEvents(
-      (onEvent, onFinish) => registry.subscribe(route.id, token, onEvent, onFinish),
+      (onEvent, onFinish) => registry.subscribe(route.id, token, onEvent, onFinish, afterSeq),
       nodeSseSink(req, res),
       () => startSseHeartbeat(req, res),
     );

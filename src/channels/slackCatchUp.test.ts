@@ -178,6 +178,32 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining("2 missed"));
   });
 
+  it("scans channels concurrently (bounded), and still re-dispatches in channel order", async () => {
+    const channels = [{ id: "C1" }, { id: "C2" }, { id: "C3" }];
+    const hits = { C1: mention({ ts: ts(10) }), C2: mention({ ts: ts(20) }), C3: mention({ ts: ts(30) }) };
+    const client = mockClient({ channels, history: { C1: [hits.C1], C2: [hits.C2], C3: [hits.C3] } });
+    let inFlight = 0;
+    let peak = 0;
+    const gates: Array<() => void> = [];
+    client.conversations.history.mockImplementation(async ({ channel }: { channel: string }) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise<void>((r) => gates.push(r));
+      inFlight--;
+      return { messages: [hits[channel as keyof typeof hits]], response_metadata: { next_cursor: "" } };
+    });
+    const onMissed = vi.fn();
+    const p = catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(inFlight).toBe(3); // all three channel scans in flight before any history page came back
+    // Resolve out of order: C3 first, then C1, then C2 — dispatch order must not follow it.
+    gates.splice(0).reverse().forEach((r) => r());
+    const out = await p;
+    expect(peak).toBe(3);
+    expect(out).toMatchObject({ channels: 3, missed: 3 });
+    expect(onMissed.mock.calls.map(([m]) => m.channel)).toEqual(["C1", "C2", "C3"]);
+  });
+
   it("fetches replies only for threads with activity inside the window", async () => {
     const quiet = mention({ ts: ts(5000), reply_count: 2, latest_reply: ts(4000) });
     const active = mention({ ts: ts(5000, "000002"), reply_count: 2, latest_reply: ts(30) });

@@ -41,6 +41,13 @@ export interface RunnableTool extends ToolDef {
   /** Text for most tools; a parts list when the result should reach the model
    *  as something it can see (image/PDF) — see `ToolResultContent`. */
   run(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResultContent>;
+  /** True for a tool that only READS (workspace files, the web, skills): when
+   *  one assistant turn asks for several of these, the runner executes them
+   *  concurrently — on a resident/sandbox each is a network round trip, and
+   *  they cannot observe each other. Anything that mutates the workspace
+   *  (`bash`, `write_file`) or the run's own state (`update_status`,
+   *  `submit_verdict`) leaves this unset and runs strictly in order. */
+  sideEffectFree?: true;
 }
 
 export const bashTool: RunnableTool = {
@@ -61,6 +68,7 @@ export const bashTool: RunnableTool = {
 };
 
 export const readFileTool: RunnableTool = {
+  sideEffectFree: true,
   name: "read_file",
   description: "Read a file from the workspace. Path is relative to the workspace root.",
   inputSchema: {
@@ -97,6 +105,7 @@ export const writeFileTool: RunnableTool = {
 // body; the review agent uses it to orient. The parse/render lives in the pure
 // distillDiff (src/core/diffDigest.ts); this tool only bridges the Executor.
 export const diffDigestTool: RunnableTool = {
+  sideEffectFree: true,
   name: "diff_digest",
   description:
     "Summarize the current branch's diff against a base ref as a compact digest: per-file +adds/-dels, totals, " +

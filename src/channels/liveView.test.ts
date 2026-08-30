@@ -3,6 +3,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import {
   createLiveViewHandler,
   escapeHtml,
+  parseLastEventId,
   parseRunRoute,
   renderRunPage,
   RUN_TIMELINE_SCRIPT,
@@ -523,7 +524,48 @@ describe("serveEvents (SSE, transport-free)", () => {
 
     reg.publish(id, call("$ echo hi"));
     reg.publish(id, result(true, "hi"));
-    expect(rec.body()).toBe(PRELUDE + `data: ${JSON.stringify(call("$ echo hi"))}\n\n` + `data: ${JSON.stringify(result(true, "hi"))}\n\n`);
+    // Each frame carries its stream position as the SSE id (resume token).
+    expect(rec.body()).toBe(PRELUDE + `id: 1\ndata: ${JSON.stringify(call("$ echo hi"))}\n\n` + `id: 2\ndata: ${JSON.stringify(result(true, "hi"))}\n\n`);
+  });
+
+  it("a reconnect with Last-Event-ID replays only the events after that position — never the whole backlog again", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    reg.publish(id, call("one"));
+    reg.publish(id, call("two"));
+    reg.publish(id, call("three"));
+    const rec = recordingSink();
+    const afterSeq = parseLastEventId("2");
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, afterSeq), rec.sink);
+    expect(rec.body()).toBe(PRELUDE + `id: 3\ndata: ${JSON.stringify(call("three"))}\n\n`);
+    reg.publish(id, call("four"));
+    expect(rec.body()).toContain(`id: 4\ndata: ${JSON.stringify(call("four"))}`);
+  });
+
+  it("parseLastEventId: a positive integer resumes; absent, empty, or garbage means from the start", () => {
+    expect(parseLastEventId("17")).toBe(17);
+    expect(parseLastEventId(" 3 ")).toBe(3);
+    expect(parseLastEventId(["5", "9"])).toBe(5);
+    expect(parseLastEventId(undefined)).toBe(0);
+    expect(parseLastEventId("")).toBe(0);
+    expect(parseLastEventId("abc")).toBe(0);
+    expect(parseLastEventId("-1")).toBe(0);
+    expect(parseLastEventId("1e3")).toBe(0);
+  });
+
+  it("serializes each event once however many viewers are attached (the frame body is byte-identical per subscriber)", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    const a = recordingSink();
+    const b = recordingSink();
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), a.sink);
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), b.sink);
+    const spy = vi.spyOn(JSON, "stringify");
+    reg.publish(id, result(true, "x".repeat(5000)));
+    const calls = spy.mock.calls.filter((c) => typeof c[0] === "object" && c[0] !== null && (c[0] as { type?: string }).type === "tool_result");
+    spy.mockRestore();
+    expect(calls).toHaveLength(1);
+    expect(a.body()).toBe(b.body());
   });
 
   it("flushes the head with the prelude even when the backlog is empty (no stuck 'connecting')", () => {

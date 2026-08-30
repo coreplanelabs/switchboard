@@ -466,6 +466,44 @@ describe("executor provisioning by agent resources", () => {
     expect(release).toHaveBeenCalledWith("always");
   });
 
+  it("the answer reaches the thread BEFORE the workspace release round trip (a slow /detach never delays the reply)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const order: string[] = [];
+    const { io } = fakeIO();
+    const replyInner = io.reply;
+    io.reply = async (t) => {
+      order.push("reply");
+      await replyInner(t);
+    };
+    const release = vi.fn(async () => {
+      order.push("release");
+      return { released: true };
+    });
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "", release };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(order).toEqual(["reply", "release"]);
+  });
+
+  it("the workspace is still released when sending the answer throws (a Slack failure never holds the pool user)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const { io } = fakeIO();
+    io.reply = async () => {
+      throw new Error("msg_too_long");
+    };
+    const release = vi.fn(async () => ({ released: true }));
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "", release };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io); // dispatch reports the failure itself, never throws
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
   // Feature: features/run-loop.md item 8 (#101) — a HARD stop tears the
   // workspace down (`release("always")`, even for a coding run that would
   // otherwise keep dirty work), and the card/answer say the run was stopped.
@@ -2008,6 +2046,7 @@ describe("live run-view wiring (Area 2)", () => {
     };
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.runRegistry = new RunRegistry({ genId: () => "abc", genToken: () => "secret" });
+    deps.statusUpdateMinMs = 0; // every frame reaches the channel; the 💬 one is superseded within ms otherwise
     const { io, statuses } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
     const trace = statuses.map((s) => s.detail ?? "").find((d) => d.includes("💬"));

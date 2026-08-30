@@ -341,6 +341,7 @@ function fileNameOf(u: URL): string | undefined {
 }
 
 export const webFetchTool: RunnableTool = {
+  sideEffectFree: true,
   name: "web_fetch",
   description:
     "Fetch a public web page or file by URL. Pages and text files come back as readable text; an image (jpeg/png/gif/webp) or PDF link comes back as the image/document itself so you can look at it. Use it to read a link the user shared, a doc, a spec, an issue, a screenshot. http(s) only; private/internal addresses are refused for safety.",
@@ -421,6 +422,7 @@ export const webFetchTool: RunnableTool = {
 // ---- web_search tool --------------------------------------------------------
 
 export const webSearchTool: RunnableTool = {
+  sideEffectFree: true,
   name: "web_search",
   description:
     "Search the web and return the top results (title, URL, snippet). Use it to find current information or sources to then read with web_fetch.",

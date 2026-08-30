@@ -93,7 +93,9 @@ export interface RunSummary {
   stop?: RunStopStatus;
 }
 
-export type RunSubscriber = (event: RunEvent) => void;
+/** `seq` is the event's 1-based position in the run's stream (the registry's
+ *  `eventCount` at publish) — the SSE `id:` a client resumes from. */
+export type RunSubscriber = (event: RunEvent, seq: number) => void;
 /** Called once when the run it is subscribed to finishes. */
 export type RunFinishListener = () => void;
 /** Tear-down returned by a successful subscribe(); safe to call more than once. */
@@ -133,7 +135,8 @@ interface Subscription {
 interface RunState {
   id: string;
   token: string;
-  backlog: RunEvent[];
+  /** The newest `backlogLimit` events with their stream positions. */
+  backlog: Array<{ seq: number; event: RunEvent }>;
   subscribers: Set<Subscription>;
   finished: boolean;
   /** Wall-clock finish time; drives TTL eviction. */
@@ -235,10 +238,10 @@ export class RunRegistry {
   publish(id: string, event: RunEvent): void {
     const run = this.runs.get(id);
     if (!run || run.finished) return;
-    run.eventCount++;
-    run.backlog.push(event);
+    const seq = ++run.eventCount;
+    run.backlog.push({ seq, event });
     if (run.backlog.length > this.backlogLimit) run.backlog.shift();
-    for (const sub of run.subscribers) sub.onEvent(event);
+    for (const sub of run.subscribers) sub.onEvent(event, seq);
     // Index rows show live activity (event count + running state). Agent tool
     // events are seconds apart, so one upsert per event is not chatty; the
     // summary is built cheaply from the run we already hold.
@@ -273,18 +276,21 @@ export class RunRegistry {
    * fn, or `null` if the run is unknown or the token is wrong (the caller maps
    * both to a 404 — never reveal which). If the run is already finished (but not
    * yet evicted), the backlog is replayed and `onFinish` fires immediately.
+   * `afterSeq` resumes a dropped stream: only events with a higher `seq` are
+   * replayed (the SSE `Last-Event-ID`); 0 replays the whole retained backlog.
    */
   subscribe(
     id: string,
     token: string,
     onEvent: RunSubscriber,
     onFinish?: RunFinishListener,
+    afterSeq = 0,
   ): Unsubscribe | null {
     this.sweep();
     const run = this.validate(id, token);
     if (!run) return null;
 
-    for (const event of run.backlog) onEvent(event);
+    for (const { seq, event } of run.backlog) if (seq > afterSeq) onEvent(event, seq);
 
     if (run.finished) {
       onFinish?.();
@@ -327,7 +333,7 @@ export class RunRegistry {
     this.sweep();
     const run = this.validate(id, token);
     if (!run) return null;
-    return { events: [...run.backlog], finished: run.finished };
+    return { events: run.backlog.map((entry) => entry.event), finished: run.finished };
   }
 
   /** Live + finished-but-unevicted run count (observability / tests). */

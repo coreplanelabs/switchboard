@@ -20,9 +20,20 @@ export function normalizeText(text: string): string {
  *  query does not touch is dropped), scored by the pure scorer, best first,
  *  cut at `limit`. Does NOT bump usage — the caller persists that. */
 export function rankRecords(active: MemoryRecord[], query: string, now: number, limit: number): MemoryRecord[] {
-  return active
-    .filter((r) => r.status === "active" && keywordMatch(r, query) > 0)
-    .map((r) => ({ r, score: scoreRecord(r, query, now) }))
+  // The query (up to ~4k chars) is tokenized ONCE here, not once per record per
+  // pass: the Memory Worker runs this over up to 500 FTS candidates on a single
+  // Durable Object thread, and each record's match is computed exactly once —
+  // the relevance gate and the score share it.
+  const queryTokens = tokenize(query);
+  if (queryTokens.length === 0) return [];
+  const scored: Array<{ r: MemoryRecord; score: number }> = [];
+  for (const r of active) {
+    if (r.status !== "active") continue;
+    const match = keywordMatch(r, queryTokens);
+    if (match <= 0) continue;
+    scored.push({ r, score: scoreRecord(r, queryTokens, now) });
+  }
+  return scored
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map(({ r }) => r);
