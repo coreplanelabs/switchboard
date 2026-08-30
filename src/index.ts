@@ -304,6 +304,9 @@ async function main() {
       // tokens — and referenced by pages a capability-token viewer can load,
       // so served without the in-process Access gate (the edge policy still
       // applies to whatever it covers). Immutable-cacheable by content hash.
+      // GUARD: because this route is ungated, nothing beyond the built bundle
+      // may land in web/dist — in particular, keep `build.sourcemap` OFF in
+      // web/vite.config.ts, or the app's source would be world-readable here.
       if (webAssets.serve(req, res)) return;
       // /runs* + /residents* + /costs* SSO gate: identity FIRST (fail-closed), before the view
       // dispatch. The gate is async (it may fetch the JWKS), so we resolve the

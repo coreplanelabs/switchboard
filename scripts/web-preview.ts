@@ -231,4 +231,4 @@ createServer((req, res) => {
   const { "x-frame-options": _xfo, ...headers } = WEB_HTML_HEADERS;
   res.writeHead(p.status ?? 200, { ...headers, "content-security-policy": headers["content-security-policy"].replace("frame-ancestors 'none'", "frame-ancestors 'self'") });
   res.end(shell(p.title, p.seed));
-}).listen(PORT, () => console.log(`web preview on http://localhost:${PORT}/runs (fixtures only, no bot)`));
+}).listen(PORT, "127.0.0.1", () => console.log(`web preview on http://localhost:${PORT}/runs (fixtures only, no bot)`));
