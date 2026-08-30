@@ -26,6 +26,16 @@ permissions:
   # No agents block: every agent is open to the whole workspace (an absent
   # allowlist key means unrestricted, enforced in ConfigService.canRunAgent).
   channelConfig: [] # admins only
+  # Cloudflare Access service tokens (#157 phase 2, features/access-gate.md):
+  # keyed by the token's `common_name` claim = its Client ID; the value is the
+  # exact scope list it holds (unlisted tokens authenticate but hold nothing).
+  # Service tokens are served /api/* only — never /runs*, /residents*, /costs*.
+  # `switchboard-ops` (1Password, Employee vault: "Switchboard:
+  # ACCESS_SERVICE_TOKEN switchboard-ops"): read on every command group; no
+  # write/exec — stopping runs, filing proposals, memory forget and repo
+  # mutations stay with humans until a token is explicitly granted them.
+  serviceTokens:
+    3b57552bb2c7edd495bed8ae72b63186.access: [runs:read, friction:read, repo:read, memory:read, schedule:read, config:read, help:read, deploy:read]
 
 execution:
   type: cloudflare
