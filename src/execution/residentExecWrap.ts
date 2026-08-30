@@ -19,12 +19,15 @@
 // - a `cd` failure surfaces as before: message on stderr, non-zero exit.
 //
 // Known, accepted edges (named in features/resident-repos.md item 21):
-// - a SIGKILL-timeout skips the EXIT trap: the heads never run and the two
-//   files survive until recovery/recycling. That is why callers that care
-//   about hung-run output pass FIXED file paths (`execCapFiles`) — the DO can
-//   then salvage the capped heads with one follow-up command and clean up
-//   (before this module, `proc.output()` returned whatever streamed pre-kill;
-//   with mktemp-only paths a timeout would return nothing at all);
+// - ANY timeout kill (the SDK's is TERM-based; KILL behaves the same here)
+//   ends the wrapper before its own head/cleanup lines run, leaving the two
+//   files behind. That is why callers that care about hung-run output pass
+//   FIXED file paths (`execCapFiles`) — the DO salvages the capped heads with
+//   one follow-up command and cleans up (before this module, `proc.output()`
+//   returned whatever streamed pre-kill; with mktemp-only paths a timeout
+//   would return nothing at all). Recoverable mode deliberately sets NO EXIT
+//   trap — bash runs EXIT traps when TERM ends it, and a cleanup trap deleted
+//   the files before recovery could read them (live 2026-08-30);
 // - `mktemp` failing (disk full) exits 125 before the command runs — legible,
 //   and a full disk would have failed the command anyway.
 
@@ -57,7 +60,15 @@ export function capWrappedCommand(cwd: string, command: string, capBytes: number
   return [
     files ? `o=${files.out}` : `o=$(mktemp) || exit 125`,
     files ? `e=${files.err}` : `e=$(mktemp) || exit 125`,
-    `trap 'rm -f "$o" "$e"' EXIT`,
+    // Recoverable (fixed-file) mode sets NO trap, deliberately: the sandbox
+    // SDK's timeout kill is TERM-based, and bash runs EXIT traps when TERM
+    // ends it — a cleanup trap deleted the files BEFORE the caller's recovery
+    // leg could salvage them (live 2026-08-30: prod salvage returned empty
+    // while the SIGKILL-based test stayed green). Cleanup in this mode is the
+    // explicit rm after the heads (normal completion) or the recovery command
+    // (any kill). mktemp mode has no recovery reader, so the trap remains the
+    // right tool there.
+    files ? `:` : `trap 'rm -f "$o" "$e"' EXIT`,
     // The newline before `)` keeps a trailing `#comment` (or an unterminated
     // last line) in the command from swallowing the closing paren.
     `( cd ${cwd} && ${command}`,
@@ -65,6 +76,7 @@ export function capWrappedCommand(cwd: string, command: string, capBytes: number
     `ec=$?`,
     `head -c ${capBytes} "$o"`,
     `head -c ${capBytes} "$e" >&2`,
+    `rm -f "$o" "$e"`,
     `exit $ec`,
   ].join("\n");
 }

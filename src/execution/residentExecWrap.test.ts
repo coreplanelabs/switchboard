@@ -96,6 +96,30 @@ describe("capWrappedCommand (run under real bash)", () => {
     expect(leftovers.stdout.trim()).toBe("0"); // recovery removed them
   });
 
+  it("SIGTERM mid-command (the SDK's actual kill) also leaves the files for recovery — no EXIT trap may delete them", async () => {
+    // Live 2026-08-30: the sandbox SDK's timeout kill is TERM-based; bash then
+    // ran the recoverable-mode EXIT trap and deleted the files before the
+    // recovery leg could read them — salvage returned empty on prod while the
+    // SIGKILL-based test above stayed green.
+    const files = { out: join(cwd, `term.out`), err: join(cwd, `term.err`) };
+    const wrapper = capWrappedCommand(cwd, `echo term-clue && sleep 30`, 1024, files);
+    const child = spawn("bash", ["-c", wrapper], { stdio: "ignore", detached: true });
+    await new Promise((r) => setTimeout(r, 500));
+    process.kill(-child.pid!, "SIGTERM"); // the whole process group, like a supervisor kill
+    await new Promise((r) => child.once("close", r));
+    const rec = await bash(recoverCapturedOutput(files, 1024));
+    expect(rec.code).toBe(0);
+    expect(rec.stdout).toBe("term-clue\n");
+  });
+
+  it("fixed-file mode cleans up after itself on NORMAL completion (explicit rm, not a trap)", async () => {
+    const files = { out: join(cwd, `norm.out`), err: join(cwd, `norm.err`) };
+    const r = await bash(capWrappedCommand(cwd, `echo fine`, 1024, files));
+    expect(r).toEqual({ stdout: "fine\n", stderr: "", code: 0 });
+    const left = await bash(`ls ${cwd}/norm.* 2>/dev/null | wc -l`);
+    expect(left.stdout.trim()).toBe("0");
+  });
+
   it("recovery over missing files is a clean no-op (exit 0, empty streams)", async () => {
     const rec = await bash(recoverCapturedOutput({ out: join(cwd, "gone.out"), err: join(cwd, "gone.err") }, 1024));
     expect(rec).toEqual({ stdout: "", stderr: "", code: 0 });
