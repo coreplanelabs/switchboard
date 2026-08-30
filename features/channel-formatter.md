@@ -12,6 +12,7 @@ degraded — instead of shipped.
 - **Code**: `src/core/structuredMessage.ts` (schema + `ChannelFormatter` seam + `PlainTextFormatter`), `src/core/structuredOutput.ts` (validation + fixed-retry self-heal + provider-backed producer), `src/channels/slackFormatter.ts` (`SlackFormatter`), `src/channels/slackEscape.ts` (shared mrkdwn escaping/encoding), wiring in `src/core/dispatcher.ts` (`sendAnswer`) and each adapter (`src/channels/slack.ts`, `src/cli.ts`, `src/channels/http.ts`, `src/channels/mcp.ts`).
 - **Docs**: [AGENTS.md invariants 1 & 2](../AGENTS.md), [routing-and-config.md](routing-and-config.md), [issue #76](https://github.com/coreplanelabs/switchboard/issues/76).
 - **Tests**: `src/core/structuredMessage.test.ts`, `src/core/structuredOutput.test.ts`, `src/channels/slackFormatter.test.ts`, `src/core/dispatcher.test.ts`.
+- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/226
 
 ## Behavior
 

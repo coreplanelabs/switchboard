@@ -5,6 +5,7 @@ Takes a task from Slack, scopes fast, implements the change in its sandbox, and 
 - **Code**: `src/agents/registry.ts` (`CODING_SYSTEM`; resident-path variant `CODING_SYSTEM_RESIDENT`)
 - **Docs**: [README — Agents](../README.md#agents)
 - **Budgets**: 60 turns / 45 min / 64k tokens · toolset `full`
+- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/222
 
 ## Behavior
 
@@ -23,7 +24,7 @@ Takes a task from Slack, scopes fast, implements the change in its sandbox, and 
 | Budgets and toolset as specified | `[unit]` `src/agents/registry.test.ts::coding`; budget mechanics in `src/runner.test.ts`. |
 | Resident variant: ready worktree, no clone/install/gh instructions, honest PR fallback; fallback prompt unchanged | `[unit]` `src/agents/registry.test.ts::resident prompt variants`; selection wiring in `src/core/dispatcher.test.ts::repo/ref resolution + resident prompt selection (U7)`. |
 | Templated PR description by default (both prompts) | `[unit]` `src/agents/registry.test.ts::coding prompts: templated PR description by default` — both prompts carry every section and the honesty rules (default for every PR, unwrapped prose, hyperlinked issue, no fabricated validation). `[agent]` `agent:coding fix <issue URL>` with NO description ask → the opened PR's body has all seven sections, the issue hyperlinked, and validation matching what actually ran. |
-| End-to-end: issue → PR | `[agent]` `@switchboard agent:coding investigate and fix <issue URL>` on a small real issue. Expect: it reads the issue itself (no 403, no asking you to paste it), one repo cloned (cold path) / attached to the warm resident worktree (resident path), a PR opened whose diff addresses the issue, final message = outcome + PR link. Reference runs (A5 re-run, 2026-08-29): cold path [switchboard#166](https://github.com/coreplanelabs/switchboard/pull/166) from [issue #165](https://github.com/coreplanelabs/switchboard/issues/165); warm resident path [switchboard#169](https://github.com/coreplanelabs/switchboard/pull/169) from [issue #168](https://github.com/coreplanelabs/switchboard/issues/168) ([receipt](https://github.com/coreplanelabs/switchboard/issues/81#issuecomment-5464946211)). |
+| End-to-end: issue → PR | `[agent]` `@switchboard agent:coding investigate and fix <issue URL>` on a small real issue. Expect: it reads the issue itself (no 403, no asking you to paste it), one repo cloned (cold path) / attached to the warm resident worktree (resident path), a PR opened whose diff addresses the issue, final message = outcome + PR link. |
 | Ambiguity → one question, then stop | `[agent]` Give a task naming no repo with several plausible candidates; expect exactly one clarifying question and a stopped turn — not a survey of the org. |
 | Honest failure reporting | `[agent]` Ask for a change in a repo whose tests are broken at HEAD; the final message must state the failure plainly rather than claim success. |
-| No placeholder narration | `[agent]` Replies must never contain bracketed placeholders (e.g. "[title and details from the issue]") in place of real command output. Regression observed 2026-08-21 when a follow-up mis-routed to `general`; guarded by thread stickiness ([routing-and-config.md](routing-and-config.md)). |
+| No placeholder narration | `[agent]` Replies must never contain bracketed placeholders (e.g. "[title and details from the issue]") in place of real command output. A follow-up mis-routed to `general` produces exactly this; guarded by thread stickiness ([routing-and-config.md](routing-and-config.md)). |

@@ -58,7 +58,7 @@ Non-negotiable discipline:
 
 1. **Same-PR updates.** Any PR that changes behavior updates the matching feature file in that PR (criteria added/edited/pruned). A feature file describing removed code is a bug.
 2. **TDD from the spec.** New behavior: write/extend the feature file's criteria → write failing tests → implement to green. Prefer unit tests; use `[agent]` instructions only where a unit test genuinely can't prove it, and make those instructions literally executable (exact messages/commands + expected observable result).
-3. **Receipts.** When an `[agent]` criterion is validated live, date it and link the evidence in the feature file.
+3. **Receipts live in the tracker, never in the spec.** Each feature file links its receipts issue on the [Golden Product project](https://github.com/orgs/coreplanelabs/projects/1); a live validation is a comment there (criterion, date, deploy SHA, evidence link). Feature files carry no dates, run links, incident narratives, or "validated on …" notes — those are tracking, they change on every prod check, and in VCS they conflict with parallel work. Gaps, incidents, and test campaigns are issues on the same project (e.g. [#81](https://github.com/coreplanelabs/switchboard/issues/81) for the Claude Tag parity matrix).
 4. Milestones live in `features/README.md`; current: [milestone 1 — agents work as designed, obviously better than Claude Tag](features/milestone-1-vs-claude-tag.md).
 
 ## Working on this repo

@@ -2,19 +2,24 @@
 
 The behavioral contract of Switchboard, versioned with the code. Every file in this directory states what a feature is supposed to do, why, and **how to prove it still does** — so at any git SHA, the validation criteria describe exactly the code at that SHA, and an agent (or human) can verify behavior for any moment in history.
 
+**Specs, not ledgers.** A feature file holds behavior, criteria, and the *kind* of proof each criterion has. It never holds the proof itself: no receipts, dates, run links, incident narratives, or "validated on …" notes. Those are tracking, they change on every prod validation, and keeping them in VCS turned every receipt into a PR that conflicted with parallel work. Receipts live in the tracker — see rule 6.
+
 ## The rules
 
 1. **Same-PR updates.** A PR that changes behavior updates the matching feature file in that PR — new criteria for new behavior, edits for changed behavior, deletions for removed behavior. A feature file that describes code that no longer exists is a bug.
 2. **TDD from the spec.** New behavior starts as validation criteria here, then failing tests, then implementation to green. Unit tests are the preferred proof; each criterion names its test (`file::test name`).
-3. **Agent-runnable validation for the rest.** Criteria that genuinely can't be unit-tested (live Slack flows, sandbox infrastructure, deploy-gated behavior) carry explicit `[agent]` instructions an agent can execute — the exact commands/messages to run and the expected observable result.
+3. **Agent-runnable validation for the rest.** Criteria that genuinely can't be unit-tested (live Slack flows, sandbox infrastructure, deploy-gated behavior) carry explicit `[agent]` instructions an agent can execute — the exact commands/messages to run and the expected observable result. The instructions are timeless: they say *how* to prove it, never *when it was last proven*.
 4. **Grow and prune.** Files are added when features ship and deleted when features are removed. History lives in git, not in dead prose.
 5. **Link, don't duplicate.** Feature files own *behavioral expectations*; the technical *how* lives in [README.md](../README.md) (architecture, diagrams) and [AGENTS.md](../AGENTS.md) (invariants, map). Each feature file links to its code and docs.
+6. **Receipts go to the tracker, not the spec.** Every feature file has a receipts issue in the [Switchboard: Golden Product](https://github.com/orgs/coreplanelabs/projects/1) project, linked from its header. A live validation of an `[agent]` criterion is a *comment* on that issue (criterion number, date, deploy SHA, evidence link) — append-only, no PR, no conflicts. Gaps that need work are issues on the same project, linked from the `[gap]` criterion. Incident write-ups and A/B campaigns are issues too (e.g. the [Claude Tag parity matrix](https://github.com/coreplanelabs/switchboard/issues/81)). A PR that adds a receipt line to a feature file is a review finding.
 
 ## Criterion labels
 
 - `[unit]` — proven by a named test in the suite (`npm test`).
 - `[agent]` — proven by following the written validation instructions against a live deployment.
-- `[gap]` — known-untested; a criterion we hold but haven't yet encoded. Gaps are work items, not decoration.
+- `[gap]` — known-untested; a criterion we hold but haven't yet encoded. Gaps are work items, not decoration — link the tracker issue when one exists.
+
+Nothing else goes on a criterion: no dates, no receipt links, no "observed live" prose. Proof *status* is read from the receipts issue and the test suite, not from the spec.
 
 ## Index
 

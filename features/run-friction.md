@@ -8,6 +8,7 @@ Switchboard can diagnose **what cost a run time or made it stumble** from its ow
 
 - **Code**: [`src/core/runFriction.ts`](../src/core/runFriction.ts) (`analyzeRunFriction`, `formatFrictionReport`, `isSetupInstallCommand`, `formatMs`, the `FrictionDiagnosis`/`FrictionFinding` types); [`src/core/runEvents.ts`](../src/core/runEvents.ts) (`at`, `infra`, `run_note`/`RunNoteKind`); [`src/runner.ts`](../src/runner.ts) (stamps `at`, marks `infra`, emits `run_note`s); [`src/core/runRegistry.ts`](../src/core/runRegistry.ts) (`snapshot(id, token)` — token-gated backlog copy + finished flag); [`src/channels/liveView.ts`](../src/channels/liveView.ts) (`GET /runs/:id/friction?t=…`); [`src/frictionCli.ts`](../src/frictionCli.ts) (`parseRunEventLines`, `parseFrictionArgs`, the CLI).
 - **Tests**: [`src/core/runFriction.test.ts`](../src/core/runFriction.test.ts), [`src/runner.test.ts`](../src/runner.test.ts) (`run-friction signals in the event stream (#84)`), [`src/core/runRegistry.test.ts`](../src/core/runRegistry.test.ts) (`snapshot`), [`src/channels/liveView.test.ts`](../src/channels/liveView.test.ts) (`GET /runs/:id/friction`), [`src/frictionCli.test.ts`](../src/frictionCli.test.ts).
+- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/235
 
 ## Behavior
 
@@ -44,5 +45,5 @@ Switchboard can diagnose **what cost a run time or made it stumble** from its ow
 | `/runs/:id/friction`: route parsed; 404 on bad/missing token; JSON diagnosis (`no-store`, 405 non-GET); mid-run `finished:false` | `[unit]` `src/channels/liveView.test.ts::GET /runs/:id/friction::*` |
 | CLI parses JSONL and raw SSE captures, skips garbage AND wrong-shaped events, parses flags incl. `--in-progress` | `[unit]` `src/frictionCli.test.ts::*` (`::skips events whose fields have the wrong shape…`, `::a file path, --json, --slow-ms, and --in-progress…`) |
 | CLI hints at `--in-progress` only when a default analysis blames a trailing unpaired call | `[unit]` `src/frictionCli.test.ts::inProgressHint::*` |
-| CLI end-to-end over a saved SSE capture prints a report | `[agent]` `npx tsx src/frictionCli.ts <capture.sse>` on a `curl`-saved `/runs/:id/events` stream → a `verdict:` line, totals, category table, findings. Validated 2026-08-28 on a synthetic capture (see PR). |
-| Friction JSON of a real deployed run via the live link | `[gap]` Open `<live link>` with `/events` replaced by `/friction` on a finished run within the TTL → 200 JSON with a plausible verdict. Needs a deploy carrying this change. |
+| CLI end-to-end over a saved SSE capture prints a report | `[agent]` `npx tsx src/frictionCli.ts <capture.sse>` on a `curl`-saved `/runs/:id/events` stream → a `verdict:` line, totals, category table, findings. |
+| Friction JSON of a real deployed run via the live link | `[gap]` Open `<live link>` with `/events` replaced by `/friction` on a finished run within the TTL → 200 JSON with a plausible verdict. |

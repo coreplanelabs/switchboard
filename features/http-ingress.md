@@ -6,6 +6,7 @@ HTTP is single-shot request/response, unlike Slack's long-lived threads. The end
 
 - **Code**: `src/channels/http.ts` (`authenticate` pure auth, `handleIngressRequest` transport gating, `HttpIO` single-shot `ChannelIO`, `readBody` size cap, `createIngressHandler` node:http wrapper, `parseIngressTokens` env→config); `src/index.ts` (wires `POST /ingress` into the existing http server alongside the health probe).
 - **Tests**: `src/channels/http.test.ts`.
+- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/229
 - **Docs**: [AGENTS.md invariants 1, 2, 3, 4](../AGENTS.md), [README — Architecture](../README.md#architecture).
 
 ## Behavior
@@ -33,4 +34,4 @@ HTTP is single-shot request/response, unlike Slack's long-lived threads. The end
 | node:http wrapper reads body, dispatches, writes 200 JSON | `[unit]` `::createIngressHandler (node:http wrapper)::reads the body, dispatches, and writes a 200 JSON reply` |
 | Pre-auth: an unauthorized request is rejected from headers without reading the body | `[unit]` `::createIngressHandler (node:http wrapper)::rejects an unauthorized request without reading the body (pre-auth)`; `::authorizeRequest (header-only gate)::*` |
 | Env→config parsing is fail-closed: valid map parsed; unset/blank/malformed → disabled; malformed entries skipped without opening | `[unit]` `::parseIngressTokens (env → config, fail-closed)::*` |
-| Live: an authed `POST /ingress` reaches an agent end-to-end; unauthenticated is refused | `[agent]` (post-deploy) — pending; requires the bot deployed with `SWITCHBOARD_INGRESS_TOKENS` set and `PORT` exposed. |
+| Live: an authed `POST /ingress` reaches an agent end-to-end; unauthenticated is refused | `[agent]` Requires the bot deployed with `SWITCHBOARD_INGRESS_TOKENS` set and `PORT` exposed: `POST /ingress` with a configured bearer and `{"text":"…"}` → 200 `{ reply }`; the same request without the header → 401. |

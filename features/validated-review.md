@@ -9,6 +9,7 @@ The parsing/rendering core is `distillDiff`, a pure `string -> string` function 
 
 - **Code**: `src/core/diffDigest.ts` (the pure `distillDiff`); `src/tools/workspace.ts` (the `diff_digest` `RunnableTool` + `full`/`readonly` toolset wiring; reuses `src/execution/shellQuote.ts` to quote the base ref); `src/agents/registry.ts` (`CODING_SYSTEM_RESIDENT` puts the digest in the PR body; `REVIEW_SYSTEM_RESIDENT` runs tests/build and reports pass/fail).
 - **Tests**: `src/core/diffDigest.test.ts`, `src/tools/workspace.test.ts`, `src/agents/registry.test.ts`.
+- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/241
 
 ## Behavior
 
@@ -35,4 +36,4 @@ The parsing/rendering core is `distillDiff`, a pure `string -> string` function 
 | Enablement: diff_digest in full + readonly, not web/none | `[unit]` `src/tools/workspace.test.ts::diff_digest toolset wiring::is in the coding (full) and review (readonly) toolsets, not web/none` |
 | Coding resident prompt puts the distilled digest (not the raw diff) in the PR body | `[unit]` `src/agents/registry.test.ts::validated-review prompt behavior (resident variants)::coding resident: calls diff_digest and puts the distilled digest in the PR body (R14)` |
 | Review resident prompt runs tests + build, reports pass/fail, orients with the digest, stays read-only + gather-once | `[unit]` `::review resident: runs tests + build and reports what it ran + pass/fail (R15)`, `::review resident keeps the gather-once discipline` |
-| Live: coding PR body actually carries a distilled digest; review actually runs the tests/build and reports real pass/fail | `[agent]` (post-deploy) — pending. Send `agent:coding …` and confirm the opened PR body contains a "Diff digest" block; send `agent:review <PR>` and confirm the reply names the test/build commands run and their results. Requires the resident deployment. |
+| Live: coding PR body actually carries a distilled digest; review actually runs the tests/build and reports real pass/fail | `[agent]` Send `agent:coding …` and confirm the opened PR body contains a "Diff digest" block; send `agent:review <PR>` and confirm the reply names the test/build commands run and their results. Requires the resident deployment. |
