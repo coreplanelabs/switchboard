@@ -353,3 +353,4 @@ Add an entry to `AGENTS` in `src/agents/registry.ts` (system prompt, toolset, tu
 - Workspaces are confined for file tools, but `bash` is inherently unconfined — isolation belongs at the host level.
 
 <!-- receipt probe for features/agent-review.md item 10 (PR #281) — never merged -->
+- probe head B (mid-run)
