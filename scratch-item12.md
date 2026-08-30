@@ -9,3 +9,10 @@ while its head moves.
 - Scenario B: a new commit lands mid-review — the same run must re-review.
 
 Second commit so the PR has more than one commit in its compare lists.
+
+## Scenario B marker
+
+This section lands in a NEW commit pushed while a review is in flight — the
+same run must notice, re-review at the new head, and post one review pinned
+to it. If a reviewer is reading this sentence, it is reviewing the post-move
+head.
