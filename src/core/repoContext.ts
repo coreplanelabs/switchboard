@@ -23,6 +23,16 @@ import { validRef } from "./repoCommands.js";
 // `features/memory.md` in a re-review reply rebound the repo, unbound the
 // PR, and the LGTM never reached GitHub).
 //
+// Weak tokens are further guarded two ways (2026-08-29 regressions: prose
+// like `reflection/review-post`, `try/catch`, `comment/spec` in a thread
+// opened with a bare `in coreplanelabs/switchboard` each sent a review into
+// a cold sandbox for a repo that does not exist): (1) a bare token NEVER
+// overrides a repo the thread already established, whatever its strength —
+// the first binding stays until a STRONG signal replaces it; (2) in a thread
+// with no repo yet, a bare token binds only when the injectable resident
+// probe (`isResident`) confirms it names an onboarded resource. No probe
+// (local/dev, tests) → binds as before: there is no registry to consult.
+//
 // Ref extraction is deliberately conservative (KTD6: ref binding is
 // explicit-or-ask-once, never a silent guess): explicit forms only —
 // "on branch X" / `branch:X`, "on X" where X is a well-known default branch
@@ -205,10 +215,17 @@ interface ThreadSignals {
   pr?: { repo: string; number: number };
 }
 
+/** Sync "is this slug an onboarded resident?" predicate for the history scan
+ *  (`repoFromThread`), and its async twin for the resolver. Injected by the
+ *  dispatcher from the resident config; absent → weak tokens bind unvetted. */
+export type ResidentPredicate = (slug: string) => boolean;
+export type ResidentProbe = (slug: string) => Promise<boolean>;
+
 const threadSignalsCache = new WeakMap<Array<{ role: string; text: string }>, ThreadSignals>();
 
-function threadSignals(history: Array<{ role: string; text: string }>): ThreadSignals {
-  const cached = threadSignalsCache.get(history);
+function threadSignals(history: Array<{ role: string; text: string }>, isResident?: ResidentPredicate): ThreadSignals {
+  // Only the unvetted scan is memoized: a predicate can change the answer.
+  const cached = isResident ? undefined : threadSignalsCache.get(history);
   if (cached) return cached;
   const out: ThreadSignals = {};
   for (const h of history) {
@@ -218,26 +235,50 @@ function threadSignals(history: Array<{ role: string; text: string }>): ThreadSi
     if (strong) {
       out.repo = strong;
       out.repoStrong = true;
-    } else if (!out.repoStrong) {
-      // Weak signals only while the thread is not strongly bound.
-      if (s.repo) out.repo = s.repo;
-      else if (!out.repo && s.onSlug) out.repo = slugOf(s.onSlug);
+    } else if (!out.repo) {
+      // Weak signals bind only an UNBOUND thread (first bind wins — a later
+      // bare token never overrides), and only when vetted by the probe.
+      const weak = s.repo ?? (s.onSlug ? slugOf(s.onSlug) : undefined);
+      if (weak && (!isResident || safePredicate(isResident, weak))) out.repo = weak;
     }
     if (s.pr) out.pr = s.pr;
   }
-  threadSignalsCache.set(history, out);
+  if (!isResident) threadSignalsCache.set(history, out);
   return out;
+}
+
+/** A probe that throws is treated as "not onboarded" (fail-closed): a bare
+ *  token must never bind a repo on the strength of an error. */
+function safePredicate(isResident: ResidentPredicate, slug: string): boolean {
+  try {
+    return isResident(slug) === true;
+  } catch {
+    return false;
+  }
+}
+
+async function safeProbe(isResident: ResidentProbe | undefined, slug: string): Promise<boolean> {
+  if (!isResident) return true; // no registry to consult → bind as before
+  try {
+    return (await isResident(slug)) === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
  * The repo this thread already established (its binding): the last user turn
- * with a STRONG repo signal wins; bare slugs count only in a thread no strong
- * signal has bound (like `lastThreadDirectives` — derived from history on
- * every message, never stored, restart-safe). A PR URL in history contributes
- * its repo part only, never a fetch.
+ * with a STRONG repo signal wins; a bare slug binds only a thread nothing has
+ * bound yet — and, when a predicate is supplied, only if it names an onboarded
+ * resident (like `lastThreadDirectives` — derived from history on every
+ * message, never stored, restart-safe). A PR URL in history contributes its
+ * repo part only, never a fetch.
  */
-export function repoFromThread(history: Array<{ role: string; text: string }>): string | undefined {
-  return threadSignals(history).repo;
+export function repoFromThread(
+  history: Array<{ role: string; text: string }>,
+  isResident?: ResidentPredicate,
+): string | undefined {
+  return threadSignals(history, isResident).repo;
 }
 
 /**
@@ -248,21 +289,29 @@ export function repoFromThread(history: Array<{ role: string; text: string }>): 
 export async function resolveRepoContext(
   msg: { text: string },
   history: Array<{ role: string; text: string }> = [],
+  isResident?: ResidentProbe,
 ): Promise<RepoContext> {
   const s = extractSignals(msg.text);
   const thread = threadSignals(history);
-  // Strong signal in this message → it (re)binds. Else a strongly bound thread
-  // keeps its repo — a bare slug in this message (a file path, a phrase) is
-  // never a repo switch. Else weak signals, this message first.
+  // Strong signal in this message → it (re)binds. Else the thread's repo,
+  // whatever its strength — a bare slug in this message (a file path, a phrase)
+  // is NEVER a repo switch. A weakly-bound thread repo is vetted by the probe
+  // (it was itself a bare token once); only if the thread has no repo at all
+  // may this message's bare slug bind — vetted too. No probe → unvetted.
   const strongNow = s.pr?.repo ?? (s.repoStrong ? s.repo : undefined);
-  let repo = strongNow ?? (thread.repoStrong ? thread.repo : undefined) ?? s.repo ?? thread.repo;
+  let repo = strongNow ?? (thread.repoStrong ? thread.repo : undefined);
+  if (!repo && thread.repo && (await safeProbe(isResident, thread.repo))) repo = thread.repo;
+  if (!repo && s.repo && (await safeProbe(isResident, s.repo))) repo = s.repo;
   let ref = s.ref;
 
   // "on <owner/name-shaped>": a ref when a repo is independently established
-  // (current message or thread), otherwise a repo mention.
+  // (current message or thread), otherwise a (vetted) repo mention.
   if (s.onSlug) {
     if (repo && !ref) ref = s.onSlug;
-    else if (!repo) repo = slugOf(s.onSlug);
+    else if (!repo) {
+      const cand = slugOf(s.onSlug);
+      if (cand && (await safeProbe(isResident, cand))) repo = cand;
+    }
   }
 
   // PR head ref — one REST call, only when nothing more explicit bound a ref

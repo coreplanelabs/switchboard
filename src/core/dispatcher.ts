@@ -6,7 +6,7 @@ import { AGENTS, getAgent } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
 import { makeWebCapability } from "../tools/web.js";
-import { localWorkspaceDir, makeExecutor } from "../execution/factory.js";
+import { localWorkspaceDir, makeExecutor, residentOnboardedProbe } from "../execution/factory.js";
 import { ResidentNeedsRefError, ResidentOperations } from "../execution/resident.js";
 import { LocalOperations } from "../execution/executor.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
@@ -282,9 +282,15 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // repo (e.g. the toolless general default) never resolves or gates one, so
     // a toolless follow-up in a repo-mentioning thread is not wrongly refused
     // and a PR-URL never triggers a wasted GitHub REST call for it.
+    // The production resolver vets bare `owner/name` tokens against the
+    // resident registry (an onboarded-resource probe from the resident
+    // config) so prose shaped like a slug can never bind a repo; an injected
+    // resolver (tests) is called as before.
     const needsRepo = agent.resources?.repo === "required";
     const repoCtx: RepoContext = needsRepo
-      ? ((await (deps.resolveRepoContext ?? resolveRepoContext)(msg, history)) ?? {})
+      ? ((await (deps.resolveRepoContext
+          ? deps.resolveRepoContext(msg, history)
+          : resolveRepoContext(msg, history, residentOnboardedProbe(deps.config.config.execution?.resident)))) ?? {})
       : {};
 
     // Per-repo access gate (KD7): open when permissions.repos is absent or
@@ -349,7 +355,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     }
     const { executor, note, resident, binding } = selection;
 
-    // Attach-head check (features/agent-review.md item 11, #282): for a PR
+    // Attach-head check (features/agent-review.md item 10, #282): for a PR
     // review on the resident path, the sha the resident ATTACHED the worktree
     // at is compared with the PR head resolved above — before any model turn.
     // A well-formed, different sha means the branch moved between resolution

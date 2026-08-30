@@ -1244,7 +1244,7 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     expect(system).not.toMatch(/verified it before this run/);
   });
 
-  // Feature: features/agent-review.md item 11 (#282) — the dispatcher compares
+  // Feature: features/agent-review.md item 10 (#282) — the dispatcher compares
   // the sha the resident ATTACHED the worktree at with the PR head it resolved,
   // before any model turn. Incident 2026-08-30 (PR #279): the worktree was at
   // the PR head, but the agent left it (`cd /workspace`, `find … .git`), found
