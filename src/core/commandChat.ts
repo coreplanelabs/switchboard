@@ -1,6 +1,6 @@
 import type { ConfigStore } from "../config.js";
 import { renderText, type Caller, type CommandInput, type CommandInvoker, type CommandSurfaces, type InvokeErrorCode } from "./commandRegistry.js";
-import { catalogueText, chatForm, commandsInGroup, helpText, parseInvocation, tokenize, type CommandShape } from "./commandSurface.js";
+import { catalogueText, chatForm, commandsInGroup, helpText, parseInvocation, tokenize, type CommandShape, type GrammarRejection } from "./commandSurface.js";
 import type { IncomingMessage } from "./types.js";
 
 // The chat adapter for the command registry (#157 U13 — R7, KTD18, KTD19,
@@ -17,8 +17,9 @@ import type { IncomingMessage } from "./types.js";
 //
 // The rest of the message is bound by the SAME grammar the CLI uses
 // (`parseInvocation`): positionals, `--kebab-case` flags, quoted values. A
-// recognized command with a malformed tail is a usage reply, never a model
-// turn — a command that is almost right must be corrected, not guessed at.
+// recognized command with a malformed tail is an `invalid_input` reply — the
+// registry's own code for that fault, worded as the usage hint — never a model
+// turn: a command that is almost right must be corrected, not guessed at.
 // `<group> help` and `<group> <verb> --help` reply with derived help.
 //
 // Like every adapter it holds no command logic: it builds the `Caller`, hands
@@ -30,8 +31,10 @@ import type { IncomingMessage } from "./types.js";
 export type ParsedChatCommand =
   /** A well-formed command: invoke it. */
   | { kind: "invoke"; id: string; input: CommandInput }
-  /** Help or a usage error for a recognized command form: reply, never invoke. */
-  | { kind: "reply"; text: string };
+  /** Help, or a rejected tail, for a recognized command form: reply, never
+   *  invoke. A rejection carries the grammar's `error` code (`invalid_input`);
+   *  a help reply has none. */
+  | { kind: "reply"; text: string; error?: GrammarRejection["code"] };
 
 /** The slice of a registry the parser needs: ids, descriptions, arguments, options, surface opt-outs. */
 export interface ChatCommandCatalog {
@@ -73,14 +76,17 @@ export function parseChatCommand(text: string, catalog: ChatCommandCatalog): Par
   const id = `${group}.${verb}`;
   const cmd = exposed.find((c) => c.id === id);
   if (!cmd) return null;
+  // A malformed tail (or an unterminated quote) is worded exactly like a
+  // registry `invalid_input` (`chatErrorLine`'s default) and carries that code.
+  const rejected = (message: string): ParsedChatCommand => ({ kind: "reply", error: "invalid_input", text: `⚠️ \`${chatForm(id)}\`: ${message}` });
   const tokens = tokenize(text);
-  if (!tokens.ok) return { kind: "reply", text: `⚠️ \`${chatForm(id)}\`: ${tokens.error}` };
+  if (!tokens.ok) return rejected(tokens.error);
   const bound = parseInvocation(cmd, tokens.tokens.slice(2));
   switch (bound.kind) {
     case "help":
       return { kind: "reply", text: helpText(cmd) };
-    case "usage":
-      return { kind: "reply", text: `⚠️ \`${chatForm(id)}\`: ${bound.error}` };
+    case "invalid":
+      return rejected(bound.error);
     case "invoke":
       return { kind: "invoke", id, input: bound.input };
   }
@@ -132,7 +138,8 @@ export function chatCallerFor(msg: Pick<IncomingMessage, "userId" | "channelId" 
 export interface ChatCommandResult {
   text: string;
   ok: boolean;
-  /** The registry's error code when the invocation failed (a help/usage reply has none). */
+  /** The error code when the invocation failed — the registry's, or the
+   *  grammar's `invalid_input` for a malformed tail (a help reply has none). */
   error?: InvokeErrorCode;
 }
 
@@ -152,9 +159,9 @@ export function chatErrorLine(id: string, error: InvokeErrorCode, message: strin
   }
 }
 
-/** Invoke a parsed chat command as the message's user (a help/usage parse is replied as-is, `ok: false`). */
+/** Invoke a parsed chat command as the message's user (a help or rejected parse is replied as-is, `ok: false`, with its code). */
 export async function invokeChatCommand({ commands, parsed, msg, config, resolveRepo, now }: HandleChatCommandArgs): Promise<ChatCommandResult> {
-  if (parsed.kind === "reply") return { ok: false, text: parsed.text };
+  if (parsed.kind === "reply") return { ok: false, text: parsed.text, ...(parsed.error ? { error: parsed.error } : {}) };
   const caller = chatCallerFor(msg, config, resolveRepo);
   const res = await commands.invoke(parsed.id, parsed.input, caller);
   if (res.ok) return { ok: true, text: renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, now === undefined ? {} : { now }) };

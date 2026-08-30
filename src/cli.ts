@@ -17,15 +17,20 @@
 //   npx tsx src/cli.ts ask "agent:coding model:openai/gpt-5 ship a PR that ..."
 //   npx tsx src/cli.ts ask --thread cli:mywork "agent:coding continue where we left off"
 // Parsing is pure and unit-tested; `main()` only wires in-process deps. Exit
-// codes: 0 ok, 1 the command (or dispatch) failed, 2 usage. The caller is
+// codes: 0 ok; 2 the invocation was rejected — `usage` (no `<group> <verb>`,
+// an unknown command, a malformed `ask`) or `invalid_input`, whether the
+// grammar refused the tail (`error (invalid_input): unknown option --x` + the
+// usage line) or the registry refused the parsed input (the same code every
+// surface returns for that fault); 1 the command (or dispatch) ran and failed
+// with any other code. The caller is
 // `cli:local` holding every scope (KTD10) — whoever can run this process can
 // already read the config and the data directory.
 
 import { pathToFileURL } from "node:url";
 import { ConfigStore } from "./config.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
-import { CommandRegistry, renderText, type Caller, type CommandInput, type CommandInvoker } from "./core/commandRegistry.js";
-import { catalogueText, chatForm, helpText, parseInvocation } from "./core/commandSurface.js";
+import { CommandRegistry, renderText, type Caller, type CommandInput, type CommandInvoker, type InvokeErrorCode } from "./core/commandRegistry.js";
+import { catalogueText, chatForm, helpText, parseInvocation, type GrammarRejection } from "./core/commandSurface.js";
 import { dispatch } from "./core/dispatcher.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
@@ -55,6 +60,9 @@ export type CliInvocation =
   | { kind: "catalogue" }
   /** The built-in harness: dispatch `text` on `threadKey`. */
   | { kind: "ask"; threadKey: string; text: string }
+  /** The command exists but its tail is malformed: the grammar's `invalid_input` (usage hint in `error`). */
+  | GrammarRejection
+  /** Nothing to bind: no `<group> <verb>`, an unknown command, a malformed `ask`. */
   | { kind: "usage"; error: string };
 
 const WORD = /^[a-z][a-z0-9]*$/;
@@ -65,7 +73,8 @@ const WORD = /^[a-z][a-z0-9]*$/;
  * own built-in; everything else goes to `parseInvocation` unchanged.
  */
 export function parseCliArgv(argv: readonly string[], commands: Pick<CommandInvoker, "list" | "get">, now: () => number = Date.now): CliInvocation {
-  if (argv.length === 0 || argv[0] === "help" || argv[0] === "--help" || argv[0] === "-h") return { kind: "catalogue" };
+  // A bare `help` is the catalogue; `help show …` is the registered command like any other `<group> <verb>`.
+  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h" || (argv[0] === "help" && argv.length === 1)) return { kind: "catalogue" };
   if (argv[0] === "ask") return parseAsk(argv.slice(1), now);
   const json = argv.includes("--json");
   const rest = argv.filter((a) => a !== "--json");
@@ -78,8 +87,8 @@ export function parseCliArgv(argv: readonly string[], commands: Pick<CommandInvo
   switch (bound.kind) {
     case "help":
       return { kind: "command-help", id };
-    case "usage":
-      return { kind: "usage", error: bound.error };
+    case "invalid":
+      return bound;
     case "invoke":
       return { kind: "command", id, input: bound.input, json };
   }
@@ -116,16 +125,23 @@ export interface CommandRunOutput {
   stderr: string;
 }
 
+/** `error (<code>): <message>` — the one stderr shape for every refusal, whoever decided it. */
+function errorLine(code: InvokeErrorCode, message: string): string {
+  return `error (${code}): ${message}`;
+}
+
 /**
  * Run one bound registry command. Transport-free so the contract test drives
- * the very path `main()` uses: a command that ran and failed is exit 1
- * (`error (<code>): <message>` on stderr, nothing on stdout); success prints
- * the exact `invoke` JSON (`--json`) or `renderText` of it.
+ * the very path `main()` uses: a failure is `error (<code>): <message>` on
+ * stderr and nothing on stdout — exit 2 when the registry rejected the input
+ * (`invalid_input`, the same exit the grammar's rejection gets), exit 1 for
+ * any other failure; success prints the exact `invoke` JSON (`--json`) or
+ * `renderText` of it.
  */
 export async function runCommand(commands: CommandInvoker, parsed: Extract<CliInvocation, { kind: "command" }>, caller: Caller, opts: { now?: number } = {}): Promise<CommandRunOutput> {
   const cmd = commands.get(parsed.id);
   const result = await commands.invoke(parsed.id, parsed.input, caller);
-  if (!result.ok) return { exitCode: 1, stdout: "", stderr: `error (${result.error}): ${result.message}` };
+  if (!result.ok) return { exitCode: result.error === "invalid_input" ? 2 : 1, stdout: "", stderr: errorLine(result.error, result.message) };
   return { exitCode: 0, stdout: parsed.json ? JSON.stringify(result.value, null, 2) : renderText(cmd ?? { id: parsed.id }, result.value, opts), stderr: "" };
 }
 
@@ -134,6 +150,8 @@ export async function runCli(commands: CommandInvoker, parsed: Exclude<CliInvoca
   switch (parsed.kind) {
     case "usage":
       return { exitCode: 2, stdout: "", stderr: parsed.error };
+    case "invalid":
+      return { exitCode: 2, stdout: "", stderr: errorLine(parsed.code, parsed.error) };
     case "catalogue":
       return { exitCode: 0, stdout: `${USAGE}\n\ncommands:\n${cliCatalogue(commands)}`, stderr: "" };
     case "command-help": {

@@ -110,7 +110,7 @@ describe("parseInvocation — the one grammar", () => {
     expect(parseInvocation(propose, ["--dry-run=false"])).toMatchObject({ kind: "invoke", input: { options: { dryRun: "false" } } });
     // a boolean flag never swallows the next token
     expect(parseInvocation(propose, ["--dry-run", "--top", "2"])).toMatchObject({ kind: "invoke", input: { options: { dryRun: true, top: "2" } } });
-    expect(parseInvocation(propose, ["--no-dry-run=x"])).toMatchObject({ kind: "usage", error: expect.stringContaining("takes no value") });
+    expect(parseInvocation(propose, ["--no-dry-run=x"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("takes no value") });
   });
 
   it("dotted keys nest: --models.coding x --models.review y → { models: { coding, review } }", () => {
@@ -118,7 +118,7 @@ describe("parseInvocation — the one grammar", () => {
       kind: "invoke",
       input: { args: [], options: { models: { coding: "x", review: "y" } } },
     });
-    expect(parseInvocation(propose, ["--models", "x", "--models.coding", "y"])).toMatchObject({ kind: "usage", error: expect.stringContaining("given twice") });
+    expect(parseInvocation(propose, ["--models", "x", "--models.coding", "y"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("given twice") });
   });
 
   it("a trailing rest argument takes every remaining positional joined with single spaces", () => {
@@ -129,17 +129,17 @@ describe("parseInvocation — the one grammar", () => {
     expect(parseInvocation(instructions, ["me", "--", "--not-a-flag", "x"])).toEqual({ kind: "invoke", input: { args: ["me", "--not-a-flag x"], options: {} } });
   });
 
-  it("usage errors name the flag or the argument, never a value, and end with the usage line", () => {
+  it("a rejected tail is the registry's own `invalid_input` (one error vocabulary); the message names the flag or the argument, never a value, and ends with the usage line", () => {
     const unknown = parseInvocation(stop, ["abc", "--bogus", "s3cret"]);
-    expect(unknown).toMatchObject({ kind: "usage", error: expect.stringMatching(/^unknown option --bogus\nusage: runs stop <id> --mode <soft\|hard>$/) });
+    expect(unknown).toEqual({ kind: "invalid", code: "invalid_input", error: "unknown option --bogus\nusage: runs stop <id> --mode <soft|hard>" });
     expect(JSON.stringify(unknown)).not.toContain("s3cret");
-    expect(parseInvocation(stop, ["--mode", "soft"])).toMatchObject({ kind: "usage", error: expect.stringMatching(/^missing argument <id>/) });
-    expect(parseInvocation(stop, ["abc", "--mode"])).toMatchObject({ kind: "usage", error: expect.stringMatching(/^option --mode needs a value/) });
-    expect(parseInvocation(stop, ["abc", "extra-secret", "--mode", "soft"])).toMatchObject({ kind: "usage", error: expect.stringMatching(/^unexpected argument: runs stop takes at most 1/) });
-    expect(parseInvocation(propose, ["please"])).toMatchObject({ kind: "usage", error: expect.stringMatching(/^friction propose takes no arguments/) });
-    expect(parseInvocation(stop, ["abc", "--mode", "soft", "--mode", "hard"])).toMatchObject({ kind: "usage", error: expect.stringContaining("given twice") });
-    expect(parseInvocation(stop, ["abc", "-m", "soft"])).toMatchObject({ kind: "usage", error: expect.stringContaining("unknown option -m") });
-    expect(parseInvocation(stop, ["abc", "--Mode", "soft"])).toMatchObject({ kind: "usage", error: expect.stringContaining("unknown option --Mode") });
+    expect(parseInvocation(stop, ["--mode", "soft"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringMatching(/^missing argument <id>/) });
+    expect(parseInvocation(stop, ["abc", "--mode"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringMatching(/^option --mode needs a value/) });
+    expect(parseInvocation(stop, ["abc", "extra-secret", "--mode", "soft"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringMatching(/^unexpected argument: runs stop takes at most 1/) });
+    expect(parseInvocation(propose, ["please"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringMatching(/^friction propose takes no arguments/) });
+    expect(parseInvocation(stop, ["abc", "--mode", "soft", "--mode", "hard"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("given twice") });
+    expect(parseInvocation(stop, ["abc", "-m", "soft"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("unknown option -m") });
+    expect(parseInvocation(stop, ["abc", "--Mode", "soft"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("unknown option --Mode") });
   });
 
   it("--help / -h anywhere asks for help; a negative number is a positional, not a flag", () => {

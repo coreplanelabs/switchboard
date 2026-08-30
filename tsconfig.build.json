@@ -4,5 +4,5 @@
   // would throw on a vitest import pruned from production node_modules.
   // `npm run typecheck` keeps using tsconfig.json, which includes tests.
   "extends": "./tsconfig.json",
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": ["src/**/*.test.ts", "src/**/testing/**"]
 }

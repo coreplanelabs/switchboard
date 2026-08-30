@@ -17,7 +17,8 @@ import { registerCoreCommands, type CoreCommandDeps } from "./core/commands/all.
 // Feature: features/command-registry.md — the derived CLI (`npx tsx src/cli.ts
 // <group> <verb> [args…] [--option value…] [--json]`, KTD21): argv goes through
 // the SAME grammar chat uses; `runCli` is the transport-free path `main()` and
-// the contract test share. Exit codes: 1 = command error, 2 = usage. The one
+// the contract test share. Exit codes: 2 = the invocation was rejected (usage,
+// or `invalid_input` from the grammar or the registry), 1 = command error. The one
 // built-in beside the derived commands is `ask` (KTD22).
 
 const NOW = 1_700_000_000_000;
@@ -69,9 +70,9 @@ describe("parseCliArgv", () => {
     expect(parseCliArgv(["runs", "list", "--since-ms", "5", "--before-id", "abc"], commands)).toMatchObject({ input: { options: { sinceMs: "5", beforeId: "abc" } } });
   });
 
-  it("usage errors (exit 2): no verb, a flag without a value, a stray positional, a malformed word, a short flag, an unknown command with the catalogue", async () => {
+  it("usage errors (exit 2): no verb, a malformed word, an unknown command with the catalogue — the faults the registry has no code for", async () => {
     const { commands } = await fixture();
-    for (const argv of [["runs"], ["runs", "list", "--status"], ["runs", "list", "extra"], ["Runs", "list"], ["runs", "list.all"], ["runs", "list", "-s", "all"], ["runs", "frobnicate"]]) {
+    for (const argv of [["runs"], ["Runs", "list"], ["runs", "list.all"], ["runs", "frobnicate"]]) {
       const res = parseCliArgv(argv, commands);
       expect(res.kind, argv.join(" ")).toBe("usage");
       if (res.kind === "usage") expect(res.error).toMatch(/usage/i);
@@ -79,6 +80,15 @@ describe("parseCliArgv", () => {
     const unknown = parseCliArgv(["runs", "frobnicate"], commands);
     expect(unknown).toMatchObject({ kind: "usage", error: expect.stringContaining("unknown command: runs frobnicate") });
     expect((unknown as { error: string }).error).toContain("runs list");
+  });
+
+  it("a malformed tail of a real command — a flag without a value, a stray positional, a short flag, an unknown option — is the registry's own `invalid_input` (one error vocabulary), with the usage hint as its message", async () => {
+    const { commands } = await fixture();
+    for (const argv of [["runs", "list", "--status"], ["runs", "list", "extra"], ["runs", "list", "-s", "all"], ["runs", "list", "--bogus", "s3cret"]]) {
+      const res = parseCliArgv(argv, commands);
+      expect(res, argv.join(" ")).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("usage: runs list") });
+      expect(JSON.stringify(res)).not.toContain("s3cret");
+    }
   });
 
   it("help: no args / help / --help → the catalogue; `<group> <verb> --help` → that command's derived help", async () => {
@@ -142,15 +152,17 @@ describe("runCommand", () => {
     expect(out.stdout).not.toContain("tok-");
   });
 
-  it("a command error (bad input, not found) is exit 1 with the code on stderr and nothing on stdout, never echoing the value", async () => {
+  it("a rejected input is exit 2 with `error (invalid_input): …` on stderr whether the registry or the grammar refused it; any other command failure is exit 1; nothing on stdout, never the value", async () => {
     const { commands } = await fixture();
     const out = await runCommand(commands, command(["runs", "list", "--status", "s3cret"], commands), CLI_CALLER);
-    expect(out.exitCode).toBe(1);
+    expect(out.exitCode).toBe(2);
     expect(out.stdout).toBe("");
-    expect(out.stderr).toContain("invalid_input");
-    expect(out.stderr).toContain("status");
+    expect(out.stderr).toMatch(/^error \(invalid_input\): status: /);
     expect(out.stderr).not.toContain("s3cret");
-    expect(await runCommand(commands, command(["runs", "get", "nope", "--json"], commands), CLI_CALLER)).toMatchObject({ exitCode: 1, stdout: "" });
+    const grammar = await runCli(commands, parseCliArgv(["runs", "list", "--bogus", "s3cret"], commands) as Extract<ReturnType<typeof parseCliArgv>, { kind: "invalid" }>, CLI_CALLER);
+    expect(grammar).toEqual({ exitCode: 2, stdout: "", stderr: expect.stringMatching(/^error \(invalid_input\): unknown option --bogus\nusage: runs list/) });
+    expect(grammar.stderr).not.toContain("s3cret");
+    expect(await runCommand(commands, command(["runs", "get", "nope", "--json"], commands), CLI_CALLER)).toMatchObject({ exitCode: 1, stdout: "", stderr: expect.stringMatching(/^error \(not_found\)/) });
   });
 
   it("runs stop <id> --mode soft from the CLI records the cli:local actor", async () => {
@@ -215,6 +227,9 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     for (const form of ["help show", "config show", "config set", "config instructions", "memory list", "memory forget", "repo onboard", "repo test", "schedule list", "friction analyze", "deploy plan", "deploy all", "env bootstrap"]) {
       expect(cat.stdout, form).toContain(form);
     }
+    // Only a BARE `help` is the catalogue: `help show` is the registered command (the conformance suite found it unreachable).
+    expect(parseCliArgv(["help", "show"], commands)).toMatchObject({ kind: "command", id: "help.show" });
+    expect(parseCliArgv(["help", "show", "--help"], commands)).toEqual({ kind: "command-help", id: "help.show" });
     expect(parseCliArgv(["env", "bootstrap", "--env", "uat", "--service", "api"], commands)).toMatchObject({ kind: "command", id: "env.bootstrap", input: { args: [], options: { env: "uat", service: "api" } } });
     expect(parseCliArgv(["friction", "analyze", "run.sse", "--in-progress"], commands)).toMatchObject({ kind: "command", id: "friction.analyze", input: { args: ["run.sse"], options: { inProgress: true } } });
     const plan = await runCommand(commands, command(["deploy", "plan", "--only", "memory", "--json"], commands), CLI_CALLER);
@@ -222,7 +237,7 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     expect(JSON.parse(plan.stdout)).toMatchObject({ dryRun: true, steps: [{ name: "memory" }] });
     // `config show` from the CLI needs a channel: the caller has no origin.
     const show = await runCommand(commands, command(["config", "show"], commands), CLI_CALLER);
-    expect(show).toMatchObject({ exitCode: 1, stderr: "error (invalid_input): channel: required on this surface — pass --channel <id>" });
+    expect(show).toMatchObject({ exitCode: 2, stderr: "error (invalid_input): channel: required on this surface — pass --channel <id>" });
     const shown = await runCommand(commands, command(["config", "show", "--channel", "slack:C1"], commands), CLI_CALLER);
     expect(shown.exitCode).toBe(0);
     expect(shown.stdout).toContain("*Effective for you in this channel:*");

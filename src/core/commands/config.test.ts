@@ -139,10 +139,10 @@ describe("config set", () => {
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
   });
 
-  it("the legacy `key=value` spelling is a usage error (the grammar is `--key value`), and `instructions` is its own command", () => {
+  it("the legacy `key=value` spelling is rejected as `invalid_input` (the grammar is `--key value`), and `instructions` is its own command", () => {
     const commands = bind(store());
-    expect(parseInvocation(commands.get("config.set")!, ["me", "agent=review"])).toMatchObject({ kind: "usage", error: expect.stringContaining("unexpected argument: config set takes at most 1") });
-    expect(parseInvocation(commands.get("config.set")!, ["me", "--instructions", "x"])).toMatchObject({ kind: "usage", error: expect.stringContaining("unknown option --instructions") });
+    expect(parseInvocation(commands.get("config.set")!, ["me", "agent=review"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("unexpected argument: config set takes at most 1") });
+    expect(parseInvocation(commands.get("config.set")!, ["me", "--instructions", "x"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("unknown option --instructions") });
     expect(parseInvocation(commands.get("config.set")!, ["me", "--models.coding", "x/y"])).toEqual({ kind: "invoke", input: { args: ["me"], options: { models: { coding: "x/y" } } } });
   });
 
