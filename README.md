@@ -170,7 +170,17 @@ Railway/Render/k8s also work with the same image — anything that runs an alway
 
 ### Deploying on Cloudflare Containers (recommended)
 
-Four Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastructure` (per-worker `package.json` with pinned wrangler, `secrets.txt`, manual `wrangler deploy` with Docker running):
+Four Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastructure` (per-worker `package.json` with pinned wrangler, `secrets.txt`, `wrangler deploy` with Docker running).
+
+**Routine production deploy = one command, from a clean checkout of `origin/main`:**
+
+```bash
+RESIDENT_ADMIN_TOKEN=… npm run deploy:all          # add -- --dry-run to see the plan
+```
+
+It runs the four `npm run deploy`s in the **only supported order — memory (state Worker) → bot → resident → sandbox** — after checking that wrangler is on the coreplane-infra account, the tree is clean and at `origin/main`, and each dir has `node_modules`. The state Worker goes first because its Durable Object migrations must exist before the bot writes to them; the bot and resident steps are preflighted and the script **waits and retries** (every 60 s, up to 30 min) while runs are in flight instead of killing them — `-- --force` is the only way to bypass, and it says what it will kill. `-- --only bot,resident` / `-- --skip sandbox` keep the order; `-- --allow-branch` relaxes only the `origin/main` check. Ambient `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` are stripped from every step (a set `CLOUDFLARE_ACCOUNT_ID` would override the pinned account). Plan + gating live in `src/deploy/plan.ts` (unit-tested); the runner is `src/deploy/deployAllCli.ts`.
+
+The per-Worker steps below are what the script runs, for first-time setup (secrets) or when you need one Worker by hand:
 
 ```bash
 # one-time: wrangler login (account: coreplane-infra), Docker running
