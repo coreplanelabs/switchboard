@@ -314,6 +314,15 @@ describe("createRunTimeline — skill_use", () => {
   });
 });
 
+describe("createRunTimeline — review_artifact (features/reading-diff.md item 5)", () => {
+  it("folds a review_artifact to nothing — the panel renders it, the step story does not change shape", () => {
+    const t = createRunTimeline();
+    t.push(call("bash", "$ ls"));
+    expect(t.push({ type: "review_artifact", artifact: "reading_diff", poweredBy: "git", baseRef: "main", diff: "d", truncated: false, at: 1 })).toEqual([]);
+    expect(t.steps()[0].calls).toHaveLength(1); // untouched
+  });
+});
+
 describe("createRunTimeline — run_meta (item 19)", () => {
   it("folds `run_meta` into a `meta` change carrying only the well-typed fields; a meta without agent/model is ignored", () => {
     const t = createRunTimeline();
