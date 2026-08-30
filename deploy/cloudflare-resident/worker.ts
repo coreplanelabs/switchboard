@@ -77,6 +77,7 @@ import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
+import { DEP_CACHE_DIRS, depCacheMaterialization, foldDepsMechanism } from "../../src/execution/residentDepCache.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
 import { shouldRefreshThreadCredentials } from "../../src/execution/residentCredentials.js";
 import { recordFiring, scheduleForCron, watchdogFiring, type ScheduleFiring, type WatchdogSummary } from "../../src/core/schedules.js";
@@ -311,10 +312,6 @@ const MAX_EXEC_COMMAND_LENGTH = 8_000;
 const EXEC_OUTPUT_CAP = 100_000;
 const READ_CONTENT_CAP = 262_144;
 const MAX_WRITE_CONTENT = 524_288;
-
-/** Dep/build cache dirs materialized from the warm checkout into a fresh
- *  worktree when the committed-lockfile key matches (KTD7). */
-const DEP_CACHE_DIRS = ["node_modules", "dist", "build", "out", ".next"] as const;
 
 /** Files whose COMMITTED content keys the dependency/build cache (KTD7).
  *  The key hashes `git ls-tree <sha> -- <these>` output from the mirror —
@@ -2216,13 +2213,17 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** Materialize the dep/build cache (KTD7). Same committed-lockfile key as
-   *  the warm checkout → hardlink-copy (cp -al) node_modules/build dirs from
-   *  it, chowning only DIRECTORIES to the thread user: file inodes stay
-   *  worker1-owned and read-only to the thread, so a thread can delete or
-   *  replace entries in its own tree but can never mutate the inodes shared
-   *  with the warm checkout. cp -al failing (e.g. cross-device) falls back
-   *  to a plain copy (fresh inodes, fully chowned). A differing key runs the
-   *  repo's install command in the worktree, token-free, as the thread user. */
+   *  the warm checkout → per-dir mechanism from `depCacheMaterialization`:
+   *  node_modules is hardlink-copied (cp -al), chowning only DIRECTORIES to
+   *  the thread user: file inodes stay worker1-owned and read-only to the
+   *  thread, so a thread can delete or replace entries in its own tree but
+   *  can never mutate the inodes shared with the warm checkout (cp -al
+   *  failing, e.g. cross-device, falls back to the plain copy). Build output
+   *  dirs (dist/build/out/.next) are plain-copied — fresh inodes, fully
+   *  chowned — because the review agent and `/op build` rebuild them IN
+   *  PLACE, which a shared read-only inode refuses with EACCES (#315 review).
+   *  A differing key runs the repo's install command in the worktree,
+   *  token-free, as the thread user. */
   private async materializeThreadDeps(
     binding: { user: string; worktreePath: string }, // a ThreadBinding, or U6's per-op checkout
     threadLockKey: string,
@@ -2234,7 +2235,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (hasDeps) return { deps: "none", reconciled: false }; // reused tree, cache already in place
 
     if (threadLockKey === warmLockKey) {
-      let mech: ThreadDepsMechanism = "none";
+      let mech: "hardlink" | "copy" | "none" = "none";
       // Serialize the hardlink-copy on the mirror mutex (FIX 2): `cp -al` reads
       // CHECKOUT_DIR, which the refresh alarm rebuilds under the same lock, so
       // this can never hardlink a half-rebuilt checkout into the thread tree.
@@ -2248,32 +2249,37 @@ export class ResidentDO extends Sandbox<Env> {
           const dst = `${wt}/${dir}`;
           if ((await this.run(["test", "-d", src])).exitCode !== 0) continue;
           if ((await this.run(["test", "-e", dst])).exitCode === 0) continue;
-          const hard = await this.run(["cp", "-al", src, dst], { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
-          if (hard.exitCode === 0) {
-            await this.runOk(
-              ["sh", "-c", `find ${dst} -type d -exec chown ${binding.user}:${binding.user} {} +`],
-              "deps-chown",
-            );
-            // The hardlinked FILE inodes stay owned by the warm-checkout user
-            // and are shared with the warm checkout and every peer worktree.
-            // Dirs-only chown lets the thread delete/replace entries in its own
-            // tree, but an unusual world/group-writable file (an odd dependency
-            // file or a permissively-emitted build artifact under node_modules/
-            // dist/build/.next) would still be mutable THROUGH the shared inode
-            // → cross-thread tamper / cache poisoning the next snapshot could
-            // capture. Strip group/world write from the shared file inodes
-            // (read stays intact, so the thread can still consume the cache).
-            await this.runOk(
-              ["sh", "-c", `find ${dst} -type f \\( -perm -g+w -o -perm -o+w \\) -exec chmod go-w {} +`],
-              "deps-harden",
-            );
-            if (mech === "none") mech = "hardlink";
-          } else {
-            await this.run(["rm", "-rf", dst]);
+          let used: "hardlink" | "copy" = "copy";
+          if (depCacheMaterialization(dir) === "hardlink") {
+            const hard = await this.run(["cp", "-al", src, dst], { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
+            if (hard.exitCode === 0) {
+              await this.runOk(
+                ["sh", "-c", `find ${dst} -type d -exec chown ${binding.user}:${binding.user} {} +`],
+                "deps-chown",
+              );
+              // The hardlinked FILE inodes stay owned by the warm-checkout user
+              // and are shared with the warm checkout and every peer worktree.
+              // Dirs-only chown lets the thread delete/replace entries in its own
+              // tree, but an unusual world/group-writable file (an odd dependency
+              // file under node_modules) would still be mutable THROUGH the
+              // shared inode → cross-thread tamper / cache poisoning the next
+              // snapshot could capture. Strip group/world write from the shared
+              // file inodes (read stays intact, so the thread can still consume
+              // the cache).
+              await this.runOk(
+                ["sh", "-c", `find ${dst} -type f \\( -perm -g+w -o -perm -o+w \\) -exec chmod go-w {} +`],
+                "deps-harden",
+              );
+              used = "hardlink";
+            } else {
+              await this.run(["rm", "-rf", dst]);
+            }
+          }
+          if (used === "copy") {
             await this.runOk(["cp", "-R", src, dst], "deps-copy", { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
             await this.runOk(["chown", "-R", `${binding.user}:${binding.user}`, dst], "deps-copy-chown");
-            mech = "copy";
           }
+          mech = foldDepsMechanism(mech, dir, used);
         }
       }, ATTACH_MUTEX_WAIT_MS);
       return { deps: mech, reconciled: false };
