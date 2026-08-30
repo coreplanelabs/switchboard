@@ -244,6 +244,10 @@ describe("interpretIngressResponse (the firing record)", () => {
       outcome: "completed",
       detail: "🔍 8 runs analyzed",
     });
+    // Only the reply's FIRST line is the detail: the ranked list under the
+    // friction head used to flatten into one 300-char run-on on the panel.
+    const multi = JSON.stringify({ reply: "🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns\n\n1. `slow_tool` — 22 runs", run: { id: "run-3", status: "completed" } });
+    expect(interpretIngressResponse(selfImprovement, T0, 200, multi)).toMatchObject({ detail: "🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns" });
     const failed = JSON.stringify({ reply: "🚫 restricted", run: { id: "run-2", status: "failed" } });
     expect(interpretIngressResponse(selfImprovement, T0, 200, failed)).toMatchObject({ runId: "run-2", outcome: "failed", detail: "🚫 restricted" });
   });

@@ -4,6 +4,7 @@ import type { RunStatus } from "../../core/runRecord.js";
 import { renderMarkdownInto } from "../markdownLite.js";
 import { createRunTimeline } from "../runTimeline.js";
 import { formatLocalIso } from "../localIso.js";
+import { formatElapsed } from "../indexFormat.js";
 import { escapeHtml, NAME_SHIM } from "./html.js";
 import { indexStatusLabel } from "./runsIndex.js";
 import { withOmittedMarkers, type LiveFrame } from "./sse.js";
@@ -58,6 +59,10 @@ export const RUN_TIMELINE_SCRIPT = String(createRunTimeline);
 
 /** The timestamp formatter as browser source (localIso.ts), inlined the same way. */
 export const LOCAL_ISO_SCRIPT = String(formatLocalIso);
+
+/** The stopwatch formatter (indexFormat.ts) as browser source — the tail's
+ *  "since the last event" and a call group's total time read like the index. */
+export const ELAPSED_SCRIPT = String(formatElapsed);
 
 /**
  * The self-contained HTML page for one run: a readable timeline of the whole
@@ -131,7 +136,10 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   a.back { color: var(--blue); text-decoration: none; font-size: .8rem; }
   a.back:hover { text-decoration: underline; }
   ${NAV_CSS}
-  .conn { margin-left: auto; display: inline-flex; align-items: center; gap: .35rem; }
+  /* The connection indicator sits beside the title and says what IT is —
+     connected / connecting… / disconnected — never "live", which is a run state. */
+  .conn { display: inline-flex; align-items: center; gap: .35rem; }
+  header nav.site { margin-left: auto; }
   #state { font-size: .8rem; color: var(--muted); }
   .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%; background: #6e7681; flex: 0 0 auto; }
   .dot.green { background: #2ea043; }
@@ -166,10 +174,44 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
      steps are separated by space, not lines. */
   #log { list-style: none; margin: 0; padding: 0; }
   #log > li { margin: 0; padding: 0; }
-  #log > li.step + li.step { margin-top: 1.5rem; }
-  li.step > .narration { display: flex; gap: .75rem; align-items: baseline; padding: .15rem .75rem .65rem; color: var(--fg); }
-  li.step > .calls { display: flex; flex-direction: column; gap: .5rem; }
+  #log > li.step + li.step, #log > li.step + li.turn, #log > li.turn + li.step { margin-top: 1.25rem; }
+  /* ONE STEP = ONE BLOCK, read top to bottom (item 18): a rail marks where it
+     starts and ends; its first row is the head — [when] 💭 how long the model
+     thought → what it then said (the narration IS what the thinking produced) …
+     tokens — and under it, the calls that prose explains. One column grid for
+     every row inside a step: rail → 1.5rem → timestamp → marker → text … facts.
+     Text rows (head, group tally) pad 1.5rem directly; cards sit .75rem in and
+     pad .75rem inside their border — so a card's timestamp lands in the same
+     column as the head's, and the right-hand facts end on the same line (text
+     rows leave room for a card's chevron). */
+  li.step, #log > li.turn { border-left: 2px solid var(--rail); padding: .35rem 0 .45rem 0; }
+  li.step.live { border-left-color: #2ea04366; }
+  li.step > .narration, #log > li.turn { display: flex; gap: .75rem; align-items: baseline; padding: .15rem 2rem .5rem 1.5rem; color: var(--fg); }
+  .think { flex: 0 0 auto; color: var(--muted); font-size: .75rem; background: #1b1f28; border-radius: 4px; padding: 0 .4em; line-height: 1.6; white-space: nowrap; }
+  .think.long { color: var(--amber); }
+  .nonar { flex: 1 1 auto; color: var(--dim); font: italic .8rem/1.5 var(--sans); }
+  .narration > .facts, #log > li.turn > .facts { margin-left: 0; flex: 0 0 auto; }
+  li.step > .calls { display: flex; flex-direction: column; gap: .5rem; padding-left: .75rem; }
   li.step > .calls:empty { display: none; }
+  /* Two or more calls under one narration fold into ONE group row — "[when]
+     ❯ 7 calls · ✓ 6 · ✗ 1 · 9.4s" — so a step reads as a sentence, not a wall
+     of cards. Open while any call is still running or after a failure; a clean
+     step folds when the next one begins (a manual toggle sticks). */
+  details.group { margin-left: -.75rem; } /* back out the .calls inset: a tally is a text row, not a card */
+  details.group > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: .75rem; padding: .3rem 2rem .3rem 1.5rem;
+    color: var(--muted); font-size: .8rem; border-radius: 6px; }
+  details.group > summary::-webkit-details-marker { display: none; }
+  details.group > summary:hover { background: #12151c; color: var(--fg-soft); }
+  details.group > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+  details.group > summary .gchev { flex: 0 0 auto; color: var(--dim); font-size: .7rem; transition: transform .12s; }
+  details.group[open] > summary .gchev { transform: rotate(90deg); }
+  details.group > summary .gcount { color: var(--fg-soft); }
+  details.group > summary .gok { color: var(--green); }
+  details.group > summary .gbad { color: var(--red); }
+  details.group > summary .ginfra { color: var(--amber); }
+  details.group > summary .grun { color: var(--blue); }
+  details.group > summary .facts { margin-left: auto; }
+  details.group > .gbody { display: flex; flex-direction: column; gap: .5rem; padding: .25rem 0 .35rem .75rem; } /* cards back on the card inset */
   /* A call card: <details> — header row is the <summary>, output inside. */
   details.call { border: 1px solid var(--line); border-radius: 6px; background: var(--card); }
   details.call[open] { background: var(--card-open); }
@@ -205,17 +247,21 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   .failed pre.out { color: #f0d0cd; }
   .none { padding: .4rem .75rem; color: var(--dim); font-style: italic; font-size: .8rem; }
   /* Bookkeeping (update_status): one muted line, no card. */
-  #log > li.turn { display: flex; gap: .75rem; align-items: baseline; padding: .5rem 2rem .1rem .75rem; margin-top: .6rem; color: var(--dim); font-size: .8rem; }
   .quiet { display: flex; gap: .75rem; align-items: baseline; padding: .2rem .75rem; color: var(--dim); font-size: .8rem; }
   /* Runner notices (wrap-up, budget, stop). */
   li.note { display: flex; gap: .75rem; align-items: baseline; padding: .4rem .75rem; margin-top: 1rem; border-radius: 6px;
     color: var(--amber); background: #d2992214; }
   /* The live tail: what is happening right now, always last while connected. */
-  li.tail { display: flex; gap: .75rem; align-items: center; padding: .6rem .75rem; margin-top: 1rem; color: var(--muted); font-size: .8rem; }
+  /* \`#log > li\` resets margin/padding at (0,1,1) — the tail's own rule must match that specificity. */
+  #log > li.tail { display: flex; gap: .75rem; align-items: center; padding: 1rem 2rem .75rem 1.5rem; margin-top: 2.5rem; color: var(--muted); font-size: .8rem;
+    border-top: 1px dashed #2a2f3a; }
+  li.tail .verb { color: var(--fg-soft); }
+  li.tail .since { margin-left: auto; flex: 0 0 auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+  li.tail .since.slow { color: var(--amber); }
   /* \`display: flex\` above outranks the bare \`[hidden]\` rule (0,1,1 vs 0,1,0), so
      the tail needs its own hidden rule — or a finished run keeps "thinking…"
      (seen live 2026-08-29 on the first post-deploy run). */
-  li.tail[hidden] { display: none; }
+  #log > li.tail[hidden] { display: none; }
   li.tail .pulse { width: .55em; height: .55em; border-radius: 50%; background: var(--blue); animation: pulse 1.4s ease-in-out infinite; }
   @keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
   .empty { color: var(--muted); }
@@ -255,12 +301,12 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
 <header>
   <a class="back" href="/runs">← All runs</a>
   <h1>${title}</h1>
+  <span class="conn">${conn}</span>
   <span class="actions" id="actions"${history ? " hidden" : ""}>
     <button class="stop soft" data-mode="soft" title="Soft stop: no new steps, the agent writes up what it has">Stop</button>
     <button class="stop hard" data-mode="hard" title="Hard stop: abort now, no summary, free the sandbox">Kill</button>
   </span>
   <button class="fold" id="fold" data-open="0" title="Open every call card">Expand all</button>
-  <span class="conn">${conn}</span>
   ${renderNav("runs")}
 </header>
 <section class="block" id="request" hidden><h2><span>Request</span><span class="ts" id="requestts"></span><span class="source" id="source"></span></h2><div class="md" id="requesttext"></div></section>
@@ -271,6 +317,7 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
 ${MARKDOWN_RENDERER_SCRIPT}
 ${RUN_TIMELINE_SCRIPT}
 ${LOCAL_ISO_SCRIPT}
+${ELAPSED_SCRIPT}
 (function () {
   // \`live\` = this page follows a stream: false on a history page (the seed is the
   // whole record; no stream, no stop route), true on a live page until \`end\` or
@@ -360,20 +407,40 @@ ${LOCAL_ISO_SCRIPT}
 
   // The live tail: pinned last while connected; names the running call or
   // says the agent is thinking. Removed on \`end\`.
+  // Layout: ● <verb>… ……… <elapsed>. The verb rotates through a few words (the
+  // way Claude Code does — a live page that changes reads as alive); the running
+  // command is NOT repeated here (its card, with the spinner, is the row above);
+  // the elapsed counts from the last event RECEIVED (client clock, so no skew
+  // against the runner's stamps) and turns amber past two minutes — a slow model
+  // turn and a dead stream no longer look the same.
   var tail = el("li", "tail");
   var tailDot = el("span", "pulse");
-  var tailText = el("span", "", "");
+  var tailVerb = el("span", "verb", "");
+  var tailSince = el("span", "since", "");
   tail.appendChild(tailDot);
-  tail.appendChild(tailText);
+  tail.appendChild(tailVerb);
+  tail.appendChild(tailSince);
   tail.hidden = true;
   log.appendChild(tail);
+  var THINKING = ["Thinking", "Pondering", "Mulling it over", "Reasoning", "Cogitating", "Weighing options", "Puzzling", "Deliberating", "Noodling", "Chewing on it", "Ruminating", "Reticulating splines"];
+  var SLOW_MS = 120000;
+  var lastEventAt = Date.now(); // client receipt time of the newest stream event
+  var verbIndex = 0;
+  var verbSince = Date.now();
   function refreshTail() {
     if (!live) { tail.hidden = true; return; }
     clearPlaceholder();
-    var p = timeline.pending();
-    tailText.textContent = p ? "running \\u00b7 " + (p.headline.length > 80 ? p.headline.slice(0, 80) + "\\u2026" : p.headline) : "thinking\\u2026";
+    var now = Date.now();
+    // A new word every 6 s, in order — predictable, not twitchy.
+    if (now - verbSince > 6000) { verbIndex = (verbIndex + 1) % THINKING.length; verbSince = now; }
+    tailVerb.textContent = THINKING[verbIndex] + "\\u2026";
+    var since = now - lastEventAt;
+    tailSince.textContent = formatElapsed(since);
+    tailSince.className = since >= SLOW_MS ? "since slow" : "since";
+    tailSince.setAttribute("title", "since the last event arrived");
     tail.hidden = false;
   }
+  window.setInterval(refreshTail, 1000);
   // A thread turn the model was given: rendered like the request (markdown via
   // the same guard), inside the collapsed Context block. Never in the log.
   function contextTurn(change) {
@@ -389,23 +456,121 @@ ${LOCAL_ISO_SCRIPT}
   }
 
   // --- steps ---------------------------------------------------------------
-  var stepNodes = {}; // step.index -> { li, calls }
+  var stepNodes = {}; // step.index -> { li, calls, group, gbody, tally, step, manual }
   var callNodes = {}; // call.id -> { details, glyph, facts, body }
-  function addStep(step) {
-    var li = el("li", "step");
-    if (step.narration) {
-      var nar = el("div", "narration");
-      nar.appendChild(stamp(step.narration.at));
-      var box = el("div", "md");
-      nar.appendChild(box);
-      md(box, step.narration.text);
-      li.appendChild(nar);
+  // The model turn waiting for the step it produced: a \`turn\` change arrives
+  // BEFORE that step, so it is held here and painted in the step's head row (one
+  // thought = one block). A turn with no step after it (the answer's thinking, or
+  // the run ended) is flushed as its own row.
+  var pendingTurn = null;
+  var lastStepIndex = -1;
+  // The head row of a step (or of a stray turn): [when] · 💭 how long the model
+  // thought (amber past 2 min) · what it then said — the narration is what the
+  // thinking produced, so they share one line — · the turn's token facts.
+  // \`turn\` may be null (a stream from before turns existed); \`narration\` may be
+  // null (a tool-only completion) — then a muted note fills the slot.
+  function headRow(cls, at, turn, narration, note) {
+    var row = el("div", cls);
+    row.appendChild(stamp(at));
+    if (turn) {
+      var chip = el("span", "think" + (turn.durationMs >= 120000 ? " long" : ""), "\\ud83d\\udcad " + turn.label.replace(/^Thought for /, ""));
+      chip.setAttribute("title", turn.label);
+      row.appendChild(chip);
     }
+    if (narration) {
+      var box = el("div", "md");
+      md(box, narration.text);
+      row.appendChild(box);
+    } else {
+      row.appendChild(el("span", "nonar", note));
+    }
+    var facts = el("span", "facts");
+    if (turn) for (var i = 0; i < turn.facts.length; i++) facts.appendChild(el("span", "fact", turn.facts[i]));
+    row.appendChild(facts);
+    return row;
+  }
+  function addStep(step) {
+    // A new step begins: the previous step is over — fold its calls unless
+    // something in it failed (or the viewer toggled it by hand).
+    if (lastStepIndex >= 0) { foldStep(stepNodes[lastStepIndex]); stepNodes[lastStepIndex].li.classList.remove("live"); }
+    lastStepIndex = step.index;
+    var li = el("li", "step live");
+    var turn = pendingTurn;
+    pendingTurn = null;
+    var at = step.narration ? step.narration.at : turn ? turn.at : undefined;
+    li.appendChild(headRow("narration", at, turn, step.narration || null, "went straight to tools"));
     var calls = el("div", "calls");
     li.appendChild(calls);
     log.insertBefore(li, tail);
-    stepNodes[step.index] = { li: li, calls: calls };
+    stepNodes[step.index] = { li: li, calls: calls, group: null, gbody: null, tally: null, step: step, manual: false };
     return li;
+  }
+  // --- call groups -----------------------------------------------------------
+  // From the second call on, a step's cards live inside ONE <details class="group">
+  // whose summary tallies them: "[when] ❯ 7 calls · ✓ 6 · ✗ 1 · 9.4s". It stays
+  // open while a call is running or after a failure; addStep folds it otherwise.
+  function groupFor(node) {
+    if (node.group) return node.group;
+    var g = el("details", "group");
+    g.open = true;
+    var s = el("summary");
+    s.appendChild(stamp(node.step.calls[0] ? node.step.calls[0].startedAt : undefined)); // when the calls began
+    s.appendChild(el("span", "gchev", "\\u276f"));
+    // The tally cells, kept by name on the node so refreshGroup never depends
+    // on their order here.
+    node.tally = { count: el("span", "gcount", ""), ok: el("span", "gok", ""), bad: el("span", "gbad", ""), infra: el("span", "ginfra", ""), running: el("span", "grun", ""), time: el("span", "facts", "") };
+    s.appendChild(node.tally.count);
+    s.appendChild(node.tally.ok);
+    s.appendChild(node.tally.bad);
+    s.appendChild(node.tally.infra);
+    s.appendChild(node.tally.running);
+    s.appendChild(node.tally.time);
+    // A click on the summary is the viewer's choice; the auto-fold then leaves
+    // this group alone.
+    s.addEventListener("click", function () { node.manual = true; });
+    g.appendChild(s);
+    var body = el("div", "gbody");
+    g.appendChild(body);
+    // Move the first card (already painted directly under the step) inside.
+    while (node.calls.firstChild) body.appendChild(node.calls.firstChild);
+    node.calls.appendChild(g);
+    node.group = g;
+    node.gbody = body;
+    refreshGroup(node);
+    return g;
+  }
+  function refreshGroup(node) {
+    if (!node.group) return;
+    var calls = node.step.calls, n = 0, ok = 0, bad = 0, infra = 0, running = 0, ms = 0;
+    for (var i = 0; i < calls.length; i++) {
+      var c = calls[i];
+      if (c.quiet) continue;
+      n++;
+      if (c.status === "ok") ok++;
+      else if (c.status === "failed") bad++;
+      else if (c.status === "infra") infra++;
+      else running++;
+      if (typeof c.durationMs === "number") ms += c.durationMs;
+    }
+    var t = node.tally;
+    t.count.textContent = n + (n === 1 ? " call" : " calls");
+    t.ok.textContent = ok ? "\\u2713 " + ok : "";
+    t.bad.textContent = bad ? "\\u2717 " + bad : "";
+    t.infra.textContent = infra ? "\\u26a0 " + infra : "";
+    t.running.textContent = running ? running + " running" : "";
+    t.time.textContent = ms > 0 ? formatElapsed(ms) : "";
+    if (bad || infra || running) node.group.open = true;
+  }
+  function foldStep(node) {
+    if (!node || !node.group || node.manual || allOpen) return;
+    var calls = node.step.calls;
+    for (var i = 0; i < calls.length; i++) if (calls[i].status !== "ok" && !calls[i].quiet) return;
+    node.group.open = false;
+  }
+  function cardParent(node) {
+    var cards = 0;
+    for (var i = 0; i < node.step.calls.length; i++) if (!node.step.calls[i].quiet) cards++;
+    return cards >= 2 ? groupFor(node).lastChild : node.calls;
   }
   function glyphFor(call) {
     if (call.status === "running") return el("span", "spin");
@@ -427,13 +592,16 @@ ${LOCAL_ISO_SCRIPT}
     else node.appendChild(el("div", "none", "no output"));
   }
   function addCall(step, call) {
-    var parent = stepNodes[step.index] ? stepNodes[step.index].calls : addStep(step).lastChild;
+    if (!stepNodes[step.index]) addStep(step);
+    var node = stepNodes[step.index];
+    var parent = cardParent(node); // may create the group (the model already holds this call)
     if (call.quiet) {
       var q = el("div", "quiet");
       q.appendChild(stamp(call.startedAt));
       q.appendChild(el("span", "", "\\u270e " + (call.tool === "update_status" ? "status checklist updated" : call.title)));
       parent.appendChild(q);
       callNodes[call.id] = { quiet: q };
+      refreshGroup(node);
       return q;
     }
     var details = el("details", "call " + call.status);
@@ -455,6 +623,7 @@ ${LOCAL_ISO_SCRIPT}
     if (allOpen || opensByDefault(call)) details.open = true;
     parent.appendChild(details);
     callNodes[call.id] = { details: details, glyph: glyph, facts: facts, body: body };
+    refreshGroup(node);
     return details;
   }
   function settleCall(step, call) {
@@ -468,17 +637,23 @@ ${LOCAL_ISO_SCRIPT}
     fillFacts(n.facts, call);
     fillBody(n.body, call);
     if (opensByDefault(call)) n.details.open = true;
+    if (stepNodes[step.index]) refreshGroup(stepNodes[step.index]);
     return n.details;
   }
-  // A model turn (item 15): one muted line, "💭 Thought for 5m 04s" plus the
-  // token facts, above the step that turn produced.
+  // A model turn (item 15): "💭 Thought for 5m 04s" plus the token facts. Held
+  // for the step it produced — addStep paints it in that step's head row (item 18).
   function addTurn(change) {
+    if (pendingTurn) flushTurn();
+    pendingTurn = change;
+  }
+  // A turn with no step after it (the answer's own thinking, or the run ended
+  // mid-thought): its own head row, \`note\` saying what came of it.
+  function flushTurn(note) {
+    if (!pendingTurn) return null;
     var li = el("li", "turn");
-    li.appendChild(stamp(change.at));
-    li.appendChild(el("span", "", "\ud83d\udcad " + change.label));
-    var facts = el("span", "facts");
-    for (var i = 0; i < change.facts.length; i++) facts.appendChild(el("span", "fact", change.facts[i]));
-    li.appendChild(facts);
+    var row = headRow("", pendingTurn.at, pendingTurn, null, note || "");
+    while (row.firstChild) li.appendChild(row.firstChild);
+    pendingTurn = null;
     log.insertBefore(li, tail);
     return li;
   }
@@ -532,7 +707,7 @@ ${LOCAL_ISO_SCRIPT}
     } else if (change.kind === "result") {
       follow(settleCall(change.step, change.call), wasAtTail);
     } else if (change.kind === "turn") {
-      follow(addTurn(change), wasAtTail);
+      addTurn(change); // painted with the step that follows (or flushed before the answer)
     } else if (change.kind === "context") {
       contextTurn(change);
     } else if (change.kind === "note" || change.kind === "replay_note") {
@@ -540,6 +715,8 @@ ${LOCAL_ISO_SCRIPT}
       if ((change.noteKind === "stop_requested" || change.noteKind === "stopped") && change.mode) markStopping(change.mode);
     } else if (change.kind === "answer") {
       // The run's final answer — the same text the thread got, as markdown.
+      flushTurn("wrote the answer below"); // the answer's own thinking has no step to sit on
+      if (lastStepIndex >= 0) foldStep(stepNodes[lastStepIndex]);
       answerTs.textContent = fmtTime(change.at);
       md(answerText, change.text);
       answerBox.hidden = false;
@@ -550,6 +727,7 @@ ${LOCAL_ISO_SCRIPT}
   // through the same push → apply path, so the two pages can never drift apart.
   // \`wasAtTail\` is sampled once per event, BEFORE anything is added.
   function handle(e) {
+    lastEventAt = Date.now();
     var wasAtTail = atTail();
     var changes = timeline.push(e);
     for (var i = 0; i < changes.length; i++) apply(changes[i], wasAtTail);
@@ -560,7 +738,7 @@ ${LOCAL_ISO_SCRIPT}
   for (var i = 0; i < seed.length; i++) handle(seed[i]);
   if (live) {
     var es = new EventSource(url);
-    es.onopen = function () { live = true; if (!stopMode) setConn("green", "live"); refreshTail(); };
+    es.onopen = function () { live = true; if (!stopMode) setConn("green", "connected"); refreshTail(); };
     var lastSeq = 0;
     es.onmessage = function (m) {
       var e;
@@ -578,6 +756,7 @@ ${LOCAL_ISO_SCRIPT}
     };
     es.addEventListener("end", function () {
       live = false;
+      flushTurn("the run ended here"); // a run that ended without an answer still shows its last turn
       refreshTail();
       actions.hidden = true;
       setConn("grey", stopMode ? "stopped (" + stopMode + ")" : "finished");

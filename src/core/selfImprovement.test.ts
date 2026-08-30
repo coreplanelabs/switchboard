@@ -170,6 +170,8 @@ describe("formatSelfImprovementReport", () => {
     const report = await runSelfImprovement({ records, tracker, repo: REPO, label: "self-improvement", top: 2, dryRun: false });
     const text = formatSelfImprovementReport(report);
     expect(text).toContain("3 runs analyzed");
+    // The head line is the whole story in one glance (the /runs panel shows only it).
+    expect(text.split("\n")[0]).toMatch(/^🔍 \*Friction proposals\* — 3 runs analyzed · \d+ recurring patterns? · 1 filed · 1 already open$/);
     expect(text).toContain("setup_install:pnpm install --frozen-lockfile");
     expect(text).toMatch(/already open/i);
     expect(text).toMatch(/filed/);
