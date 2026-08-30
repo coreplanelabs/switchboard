@@ -304,9 +304,12 @@ describe("run page timeline (request, assistant turns, timestamps, markdown)", (
     expect(html).toMatch(/#log > li\.step \+ li\.step\s*\{[^}]*margin-top/);
   });
 
-  it("stamps every row and both blocks with a gray UTC [HH:MM:SS] from `at` (omitted when absent)", () => {
-    // toISOString().slice(11, 19) is UTC HH:MM:SS regardless of the viewer's zone
-    expect(html).toContain("toISOString().slice(11, 19)");
+  it("stamps every row and both blocks with a gray local-zone ISO timestamp from `at` (omitted when absent)", () => {
+    // formatLocalIso (localIso.ts) is inlined and reads the viewer's zone offset
+    expect(html).toContain("function formatLocalIso(");
+    expect(html).toContain("getTimezoneOffset()");
+    expect(html).not.toContain("toISOString().slice(11, 19)");
+    expect(html).toMatch(/function fmtTime\(at\)\s*\{\s*return typeof at === "number" \? "\[" \+ formatLocalIso\(at\) \+ "\]" : "";/);
     expect(html).toMatch(/\.ts\s*\{[^}]*color:\s*var\(--dim\)/); // gray
     // no `at` → no bracket: the formatter returns "" for a missing timestamp
     expect(html).toMatch(/function fmtTime\(at\)\s*\{\s*return typeof at === "number" \? "\[" \+ .*\]" : "";/);
