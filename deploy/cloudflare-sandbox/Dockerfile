@@ -25,6 +25,23 @@ RUN apt-get update \
   && git config --system user.name "switchboard-bot" \
   && git config --system user.email "switchboard-bot@users.noreply.github.com"
 
+# Node 22: the base image ships Node 20 (NodeSource `nodejs` deb, with the
+# NodeSource keyring + node_20.x apt list already in place), but this repo pins
+# `engines: node >=22` (undici@8 needs Node 22's `webidl.util.markAsUncloneable`),
+# so a review run that falls back off the resident onto a fresh sandbox
+# couldn't even LOAD 15 vitest suites (#372). The resident image gets Node 24
+# from its newer base; here the base tag is pinned to the 0.3.x SDK, so instead
+# retarget the base's own NodeSource apt list at the Node 22 repo and upgrade
+# the same `nodejs` package (npm + corepack ride along with the deb). Must run
+# BEFORE the corepack/pnpm step below so pnpm is prepared by the final Node.
+# The greps assert the retarget and the upgrade took, failing the build
+# otherwise (e.g. if a base bump moves the list file or Node lands below 22).
+RUN sed -i 's|node_20\.x|node_22.x|' /etc/apt/sources.list.d/nodesource.list \
+  && grep -q 'node_22\.x' /etc/apt/sources.list.d/nodesource.list \
+  && apt-get update && apt-get install -y --no-install-recommends nodejs \
+  && rm -rf /var/lib/apt/lists/* \
+  && node --version | grep -q '^v22\.'
+
 # pnpm: the base image ships Node/npm/corepack but not pnpm, so coding runs in
 # pnpm repos hit `pnpm: command not found` on install/build. corepack ships with
 # the base Node (no apt package needed); `prepare` fetches and pins pnpm at
