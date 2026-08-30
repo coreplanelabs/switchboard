@@ -152,6 +152,9 @@ async function main() {
   const pendingHistoryWrites = () => runHistoryWriter?.pending() ?? 0;
   const inFlight = () => activeRunCount() + pendingReflectionCount() + pendingHistoryWrites();
   let draining = false;
+  // Epoch ms when the HTTP server's listen() callback fired; undefined until
+  // then (and forever when PORT is unset). Reported on /healthz.
+  let httpListeningAt: number | undefined;
   let drainStartedAt: number | undefined;
 
   // Optional HTTP server. Slack traffic arrives over the outbound Socket Mode
@@ -353,19 +356,25 @@ async function main() {
       // preflight refuses on (features/slack-channel.md item 8).
       if (path === "/healthz") {
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining, drainStartedAt, catchUp: getCatchUpStatus(), slack: getSocketStatus(), build, startedAt: PROCESS_STARTED_AT })));
+        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining, drainStartedAt, catchUp: getCatchUpStatus(), slack: getSocketStatus(), build, startedAt: PROCESS_STARTED_AT, httpListeningAt })));
         return;
       }
       // Unknown paths. The live-view handler only ever owns /runs*, which the
       // gate above already handled, so there is nothing else for it to serve.
       res.writeHead(200, { "content-type": "text/plain" });
       res.end("ok");
-    }).listen(Number(process.env.PORT), () =>
+    }).listen(Number(process.env.PORT), () => {
+      // Stamped when the server is ACCEPTING — /healthz reports it so the
+      // listen-before-Slack ordering is provable from one later poll
+      // (`httpListeningAt < slack.since`, both on this process's clock).
+      // The Worker shim's port polling releases held requests too coarsely
+      // (~seconds) for an external prober to land inside the window itself.
+      httpListeningAt = Date.now();
       console.log(
         `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${commandHttpState}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
-      ),
-    );
+      );
+    });
   }
 
   // The Slack Socket Mode handshake comes LAST, after the HTTP server above is

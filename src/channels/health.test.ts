@@ -110,6 +110,12 @@ describe("healthPayload — slack socket state", () => {
     expect(Object.keys(boot.slack ?? {})).toEqual(["connected"]);
   });
 
+  it("carries httpListeningAt (ISO) when given — with slack.since it is the one-poll, one-clock listen-before-connect receipt (#298)", () => {
+    const p = healthPayload({ inFlight: 0, draining: false, httpListeningAt: 1_700_000_000_000 });
+    expect(p.httpListeningAt).toBe("2023-11-14T22:13:20.000Z");
+    expect(healthPayload({ inFlight: 0, draining: false }).httpListeningAt).toBeUndefined();
+  });
+
   it("no slack key when the state is not given (other entrypoints)", () => {
     expect(healthPayload({ inFlight: 0, draining: false }).slack).toBeUndefined();
   });
