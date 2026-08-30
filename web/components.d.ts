@@ -26,8 +26,10 @@ declare module 'vue' {
     StatusDot: typeof import('./src/components/StatusDot.vue')['default']
     StepBlock: typeof import('./src/components/run/StepBlock.vue')['default']
     StepItems: typeof import('./src/components/run/StepItems.vue')['default']
+    ThemeToggle: typeof import('./src/components/ThemeToggle.vue')['default']
     UApp: typeof import('./node_modules/@nuxt/ui/dist/runtime/components/App.vue')['default']
     UButton: typeof import('./node_modules/@nuxt/ui/dist/runtime/components/Button.vue')['default']
+    UDropdownMenu: typeof import('./node_modules/@nuxt/ui/dist/runtime/components/DropdownMenu.vue')['default']
     UTooltip: typeof import('./node_modules/@nuxt/ui/dist/runtime/components/Tooltip.vue')['default']
   }
 }

@@ -5,8 +5,14 @@ FROM node:22-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
+COPY web/package.json web/package-lock.json ./web/
+RUN cd web && npm ci
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
+COPY web ./web
+# The web app (Vue, served as hashed assets under /assets/*): vite build reads
+# the shared pure modules from ../src, so src must be in place first.
+RUN cd web && npm run build
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-slim
@@ -24,6 +30,8 @@ RUN useradd -m -u 1001 switchboard
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+# The built web app: index.ts loads /app/web/dist at startup (manifest + assets).
+COPY --from=build /app/web/dist ./web/dist
 # build.json is written by deploy/cloudflare/write-build.mjs (npm run deploy) and
 # served on /healthz as `build`; the glob keeps it optional so a bare
 # `wrangler deploy` / docker compose still builds (the bot then says "unknown").

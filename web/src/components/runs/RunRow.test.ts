@@ -83,10 +83,10 @@ describe("RunRow", () => {
   it("shows the outcome badge for a finished run that did not succeed — failed/killed red, stopped early amber; none when it succeeded", () => {
     expect(mountRow(finished("failed")).find(".outcome").text()).toBe("failed");
     expect(mountRow(finished("stopped_hard")).find(".outcome").text()).toBe("killed");
-    expect(mountRow(finished("stopped_hard")).find(".outcome").classes().join(" ")).toContain("red");
+    expect(mountRow(finished("stopped_hard")).find(".outcome").classes().join(" ")).toContain("bad");
     const soft = mountRow(finished("stopped_soft")).find(".outcome");
     expect(soft.text()).toBe("stopped early");
-    expect(soft.classes().join(" ")).toContain("yellow");
+    expect(soft.classes().join(" ")).toContain("warn");
     expect(mountRow(finished("completed")).find(".outcome").exists()).toBe(false);
   });
 

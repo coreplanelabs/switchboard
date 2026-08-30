@@ -6,6 +6,16 @@
   --font-sans:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* Status colors as first-class utilities (text-ok, border-warn/30, …): the
+   * values swap with the theme via the --sb-* vars below — the dark set is the
+   * original run-page palette. */
+  --color-ok: var(--sb-ok);
+  --color-bad: var(--sb-bad);
+  --color-warn: var(--sb-warn);
+  --color-info: var(--sb-info);
+  --color-skill: var(--sb-skill);
+  --color-review: var(--sb-review);
+  --color-research: var(--sb-research);
 }
 
 /*
@@ -14,6 +24,13 @@
  * values exist so a future color-mode toggle is a class flip, not a redesign.
  */
 :root {
+  --sb-ok: #1a7f37;
+  --sb-bad: #c93c37;
+  --sb-warn: #9a6700;
+  --sb-info: #0969da;
+  --sb-skill: #6639ba;
+  --sb-review: #8250df;
+  --sb-research: #1b7c83;
   --ui-bg: #f5f7fa;
   --ui-bg-muted: #eef1f5;
   --ui-bg-elevated: #ffffff;
@@ -28,6 +45,13 @@
 }
 
 .dark {
+  --sb-ok: #7ee787;
+  --sb-bad: #ff7b72;
+  --sb-warn: #d29922;
+  --sb-info: #9ecbff;
+  --sb-skill: #a78bfa;
+  --sb-review: #d2a8ff;
+  --sb-research: #76e3ea;
   --ui-bg: #0b0d12;
   --ui-bg-muted: #0f1218;
   --ui-bg-elevated: #12151c;

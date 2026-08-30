@@ -4,6 +4,7 @@
 // normalization the port buys — the four hand-rolled shells (runs, run page,
 // residents, costs) collapse into this component.
 import AppNav from "./AppNav.vue";
+import ThemeToggle from "./ThemeToggle.vue";
 import type { NavSection } from "./AppNav.vue";
 
 defineProps<{ title: string; nav: NavSection }>();
@@ -18,6 +19,7 @@ defineProps<{ title: string; nav: NavSection }>();
       <span class="ml-auto flex items-center gap-4">
         <slot name="actions" />
         <AppNav :current="nav" />
+        <ThemeToggle />
       </span>
     </header>
     <slot />

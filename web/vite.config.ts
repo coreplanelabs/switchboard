@@ -16,6 +16,9 @@ export default defineConfig({
           neutral: "neutral",
         },
       },
+      // Bundle every icon the source uses (plus the theme's defaults) at build
+      // time: the CSP allows no runtime fetch from the Iconify API.
+      icon: { clientBundle: { scan: true } },
     }),
   ],
   resolve: {

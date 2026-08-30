@@ -194,6 +194,8 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
 
   const stepVms = new Map<number, StepVm>();
   const callVms = new Map<string, CallVm>();
+  /** Quiet calls (update_status) render once; their results only refresh the tally. */
+  const quietIds = new Set<string>();
   let pendingTurn: TurnVm | null = null;
   let lastStepIndex = -1;
   let keySeq = 0;
@@ -268,6 +270,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
   function addCall(step: TimelineStep, call: TimelineCall): void {
     const vm = stepFor(step);
     if (call.quiet) {
+      quietIds.add(call.id);
       vm.items.push({
         kind: "quiet",
         at: call.startedAt,
@@ -283,6 +286,11 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
   }
 
   function settleCall(step: TimelineStep, call: TimelineCall): void {
+    if (quietIds.has(call.id)) {
+      const vm = stepVms.get(step.index);
+      if (vm) refreshGroup(vm);
+      return;
+    }
     const existing = callVms.get(call.id);
     if (!existing) {
       addCall(step, call);

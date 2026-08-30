@@ -21,9 +21,9 @@ const now = computed(() => seed?.now ?? Date.now());
 const rows = computed(() => seed?.rows ?? null);
 
 const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
-  ok: "text-green-500",
-  bad: "text-red-400",
-  warn: "text-yellow-600",
+  ok: "text-ok",
+  bad: "text-bad",
+  warn: "text-warn",
 };
 </script>
 
@@ -42,7 +42,7 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
             <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.cron }}</code>
             <span class="text-dimmed">UTC</span>
             <span class="text-accented">·</span>
-            <span><span class="mr-0.5 text-[0.62rem] uppercase tracking-wider text-dimmed">on</span> <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.worker }}</code></span>
+            <span><span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">on</span> <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.worker }}</code></span>
             <span class="text-accented">·</span>
             <template v-if="r.action.type === 'run'">
               <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.action.command }}</code>
@@ -52,7 +52,7 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
             <span v-else class="text-dimmed">{{ ACTION_LABEL[r.action.type] }} — not a run</span>
             <span class="text-accented">·</span>
             <span class="tabular-nums">
-              <span class="mr-0.5 text-[0.62rem] uppercase tracking-wider text-dimmed">next</span>
+              <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">next</span>
               <template v-if="r.nextFireAt !== undefined">
                 <b class="font-medium text-highlighted">{{ formatUtc(r.nextFireAt) }}</b>
                 <span class="text-dimmed"> ({{ formatRelative(r.nextFireAt, now) }})</span>
@@ -61,7 +61,7 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
             </span>
           </div>
           <div class="mt-1.5 overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted">
-            <span class="mr-0.5 text-[0.62rem] uppercase tracking-wider text-dimmed">last</span>
+            <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">last</span>
             <template v-if="r.last">
               <span class="outcome" :class="OUTCOME_TONE[OUTCOME_CLASS[r.last.outcome]]">{{ OUTCOME_LABEL[r.last.outcome] }}</span>
               <span class="mx-1.5 text-accented">·</span>

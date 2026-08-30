@@ -73,4 +73,9 @@ describe("renderShell", () => {
     expect(html).toContain(`<html lang="en" class="dark">`);
     expect(html).toContain(`<meta name="robots" content="noindex" />`);
   });
+
+  it("carries the idle-dot favicon link (the runs page swaps it live by id)", () => {
+    const html = renderShell("Runs", seed, assets);
+    expect(html).toContain(`<link rel="icon" id="favicon" href="data:image/svg+xml,`);
+  });
 });

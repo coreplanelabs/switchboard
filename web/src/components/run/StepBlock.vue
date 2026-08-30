@@ -48,7 +48,7 @@ function stamp(at: number | undefined): string {
 <template>
   <li
     class="step relative border-l-2 pb-3 pl-[9.5rem] pt-2"
-    :class="step.live ? 'border-green-600/40' : 'border-(--ui-border-accented)/50'"
+    :class="step.live ? 'border-ok/40' : 'border-(--ui-border-accented)/50'"
     :data-live="step.live ? '1' : undefined"
   >
     <!-- The gutter stamp: the short local clock, the full ISO on hover. -->
@@ -68,7 +68,7 @@ function stamp(at: number | undefined): string {
       <span
         v-if="step.turn"
         class="think shrink-0 whitespace-nowrap rounded px-2 text-[0.8rem] leading-relaxed"
-        :class="step.turn.quick ? 'bg-accented text-muted' : 'bg-yellow-600/10 text-yellow-600'"
+        :class="step.turn.quick ? 'bg-accented text-muted' : 'bg-warn/10 text-warn'"
         :title="step.turn.label"
         >{{ step.turn.chip }}</span
       >
@@ -94,10 +94,10 @@ function stamp(at: number | undefined): string {
             >❯</span
           >
           <span class="gcount font-semibold text-highlighted">{{ tally.n }} {{ tally.n === 1 ? "call" : "calls" }}</span>
-          <span v-if="tally.ok" class="gok text-green-300">✓ {{ tally.ok }}</span>
-          <span v-if="tally.bad" class="gbad text-red-400">✗ {{ tally.bad }}</span>
-          <span v-if="tally.infra" class="ginfra text-yellow-600">⚠ {{ tally.infra }}</span>
-          <span v-if="tally.running" class="grun text-blue-300">{{ tally.running }} running</span>
+          <span v-if="tally.ok" class="gok text-ok">✓ {{ tally.ok }}</span>
+          <span v-if="tally.bad" class="gbad text-bad">✗ {{ tally.bad }}</span>
+          <span v-if="tally.infra" class="ginfra text-warn">⚠ {{ tally.infra }}</span>
+          <span v-if="tally.running" class="grun text-info">{{ tally.running }} running</span>
           <span v-if="tally.ms > 0" class="gtime ml-auto text-[0.8rem] tabular-nums text-muted">{{ formatElapsed(tally.ms) }}</span>
         </summary>
         <div class="gbody flex flex-col gap-2 pb-1 pt-2">

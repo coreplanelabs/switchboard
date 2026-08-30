@@ -52,10 +52,10 @@ const outcome = computed(() => (props.run.finished && props.run.status && props.
 const stopBadge = computed(() => (props.run.stop && !(props.run.finished && props.run.status) ? stopLabel(props.run.stop) : ""));
 
 const AGENT_HUE: Record<ReturnType<typeof agentHue>, string> = {
-  coding: "text-green-300 bg-green-300/8 border-green-300/20",
-  review: "text-purple-300 bg-purple-300/8 border-purple-300/20",
-  research: "text-teal-300 bg-teal-300/8 border-teal-300/20",
-  general: "text-blue-300 bg-blue-300/8 border-blue-300/20",
+  coding: "text-ok bg-ok/8 border-ok/25",
+  review: "text-review bg-review/8 border-review/25",
+  research: "text-research bg-research/8 border-research/25",
+  general: "text-info bg-info/8 border-info/25",
   other: "text-toned bg-accented/60 border-accented",
 };
 
@@ -127,20 +127,20 @@ function onRowClick(ev: MouseEvent): void {
       </UTooltip>
       <span v-else class="scope shrink-0 font-semibold" :class="run.finished ? 'text-toned' : 'text-highlighted'">{{ parts.scope }}</span>
       <span v-if="parts.snippet !== undefined" class="snippet min-w-0 flex-1 truncate text-muted">{{ parts.snippet }}</span>
-      <span v-if="outcome" class="outcome shrink-0 rounded border px-1.5 text-[0.7rem]" :class="tone === 'red' ? 'border-red-400/30 text-red-400' : 'border-yellow-600/30 text-yellow-600'">{{ outcome }}</span>
+      <span v-if="outcome" class="outcome shrink-0 rounded border px-1.5 text-[0.7rem]" :class="tone === 'red' ? 'border-bad/30 text-bad' : 'border-warn/30 text-warn'">{{ outcome }}</span>
       <span
         v-if="stopBadge"
         class="stopbadge shrink-0 rounded border px-1.5 text-[0.7rem]"
-        :class="run.stop?.state === 'stopped' ? 'border-accented text-muted' : 'border-yellow-600/30 text-yellow-600'"
+        :class="run.stop?.state === 'stopped' ? 'border-accented text-muted' : 'border-warn/30 text-warn'"
         >{{ stopBadge }}</span
       >
       <SourceMark :kind="src.kind" :tip="sourceTip(run)" :url="sourceUrl || undefined" />
       <UTooltip v-if="leaving && expires !== undefined" :text="`removed at ${formatLocalIso(expires)}`">
-        <span class="expires pointer-events-auto shrink-0 text-xs tabular-nums text-yellow-600">gone {{ formatDateTime(expires, now) }}</span>
+        <span class="expires pointer-events-auto shrink-0 text-xs tabular-nums text-warn">gone {{ formatDateTime(expires, now) }}</span>
       </UTooltip>
       <span class="facts ml-auto flex shrink-0 gap-4 text-xs tabular-nums text-muted">
         <UTooltip :text="run.finished ? 'start to finish' : 'running for'">
-          <span class="elapsed pointer-events-auto min-w-[4.5em] text-right" :class="run.finished ? 'text-muted' : 'text-green-300'">{{
+          <span class="elapsed pointer-events-auto min-w-[4.5em] text-right" :class="run.finished ? 'text-muted' : 'text-ok'">{{
             elapsedText(run, now)
           }}</span>
         </UTooltip>

@@ -144,7 +144,7 @@ onUnmounted(() => {
       </span>
     </div>
 
-    <p v-if="seed?.storeUnavailable" class="banner mb-3 rounded-md border border-yellow-600 px-2.5 py-1.5 text-[0.8rem] text-yellow-600" role="status">
+    <p v-if="seed?.storeUnavailable" class="banner mb-3 rounded-md border border-warn px-2.5 py-1.5 text-[0.8rem] text-warn" role="status">
       {{ seed.storeUnavailable }}
     </p>
 
@@ -153,7 +153,7 @@ onUnmounted(() => {
       <li
         v-if="afterDivider.length > 0"
         id="leaving"
-        class="divider flex items-baseline gap-2 border-b border-dashed border-yellow-600/40 px-2 pb-1.5 pt-3 text-[0.72rem] uppercase tracking-wider text-yellow-600"
+        class="divider flex items-baseline gap-2 border-b border-dashed border-warn/40 px-2 pb-1.5 pt-3 text-[0.72rem] uppercase tracking-wider text-warn"
         role="separator"
       >
         <span aria-hidden="true" class="text-sm tracking-normal">⏳</span>

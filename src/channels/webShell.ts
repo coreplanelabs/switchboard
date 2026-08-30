@@ -1,4 +1,5 @@
 import { escapeHtml } from "./liveView/html.js";
+import { FAVICON_IDLE } from "./favicon.js";
 import { serializeSeed, SEED_ELEMENT_ID, type WebSeed } from "./webSeed.js";
 
 // The one HTML document the server renders: a shell that mounts the web app
@@ -49,6 +50,7 @@ export function renderShell(title: string, seed: WebSeed, assets: ShellAssets): 
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex" />
 <title>${escapeHtml(title)}</title>
+<link rel="icon" id="favicon" href="${FAVICON_IDLE}" />
 ${css}
 </head>
 <body>

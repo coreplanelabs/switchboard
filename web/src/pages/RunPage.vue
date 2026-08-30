@@ -9,7 +9,7 @@ import { useSeed } from "../lib/seed";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
 import { createRunPageModel, runningHeader, runSpan } from "../lib/runPageModel";
-import { formatElapsed, formatLocalIso } from "../lib/format";
+import { formatDateTime, formatElapsed, formatLocalIso } from "../lib/format";
 import { statusLabel } from "../lib/indexRow";
 
 // The per-run page: one timeline of the whole run, LIVE (follows the
@@ -56,8 +56,8 @@ const endDuration = computed(() =>
   isHistory && seed?.mode === "history" ? (seed.durationMs !== undefined ? formatElapsed(seed.durationMs) : "") : runSpan(state),
 );
 const CHIP_CLS: Record<string, string> = {
-  red: "border-red-400/30 text-red-400",
-  amber: "border-yellow-600/30 text-yellow-600",
+  red: "border-bad/30 text-bad",
+  amber: "border-warn/30 text-warn",
   grey: "border-accented text-muted",
 };
 
@@ -69,7 +69,7 @@ const headerText = computed(() => {
   return runningHeader(state, nowWall.value) ?? "running";
 });
 const pulseCls = computed(() =>
-  stopError.value || phase.value === "disconnected" ? "text-red-400" : phase.value === "running" ? "text-green-300 motion-safe:animate-pulse" : "text-yellow-600 motion-safe:animate-pulse",
+  stopError.value || phase.value === "disconnected" ? "text-bad" : phase.value === "running" ? "text-ok motion-safe:animate-pulse" : "text-warn motion-safe:animate-pulse",
 );
 
 // ---- stop control (#101) -----------------------------------------------------
@@ -199,8 +199,14 @@ const sourceUrl = computed(() => {
 });
 const metaRepoOk = computed(() => !!state.meta?.repo && /^[\w.-]+\/[\w.-]+$/.test(state.meta.repo));
 
+/** Block headers (Request/Context/Answer) read a human moment — `Aug 30,
+ *  3:06 PM` — with the exact ISO stamp on hover; the log gutter keeps its
+ *  `[HH:MM:SS]` grammar. */
 function fmtTime(at: number | undefined): string {
-  return typeof at === "number" ? `[${formatLocalIso(at)}]` : "";
+  return typeof at === "number" ? formatDateTime(at, nowWall.value) : "";
+}
+function fmtTimeTitle(at: number | undefined): string | undefined {
+  return typeof at === "number" ? formatLocalIso(at) : undefined;
 }
 function stamp(at: number | undefined): string {
   return typeof at === "number" ? `[${formatLocalIso(at).slice(11, 19)}]` : "";
@@ -215,13 +221,13 @@ function stamp(at: number | undefined): string {
     <template #status>
       <span class="conn flex items-center gap-2">
         <template v-if="phase === 'ended'">
-          <span v-if="endChip.ok" class="ok text-green-300" role="img" aria-label="succeeded">✓</span>
+          <span v-if="endChip.ok" class="ok text-ok" role="img" aria-label="succeeded">✓</span>
           <span v-else class="chip rounded border px-1.5 text-[0.7rem]" :class="CHIP_CLS[endChip.cls]">{{ endChip.word }}</span>
           <span id="state" class="dur text-xs tabular-nums text-muted">{{ endDuration }}</span>
         </template>
         <template v-else>
           <span class="pulse text-[1.1em] leading-none" :class="pulseCls" id="statedot">∿</span>
-          <span id="state" class="text-xs tabular-nums" :class="stopError ? 'text-red-400' : 'text-muted'">{{ headerText }}</span>
+          <span id="state" class="text-xs tabular-nums" :class="stopError ? 'text-bad' : 'text-muted'">{{ headerText }}</span>
         </template>
       </span>
     </template>
@@ -241,7 +247,7 @@ function stamp(at: number | undefined): string {
       <section v-if="state.request" id="request" class="block mb-5 rounded-lg border border-default bg-(--ui-bg-muted) px-3 py-2.5">
         <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
           <span>Request</span>
-          <span class="ts select-none text-xs normal-case tracking-normal text-dimmed">{{ fmtTime(state.request.at) }}</span>
+          <span class="ts select-none text-xs normal-case tracking-normal text-dimmed" :title="fmtTimeTitle(state.request.at)">{{ fmtTime(state.request.at) }}</span>
           <span v-if="state.request.source" class="source ml-auto flex items-center gap-2 font-normal normal-case tracking-normal text-muted">
             <template v-if="state.request.source.channel">
               <SlackMark />
@@ -274,12 +280,12 @@ function stamp(at: number | undefined): string {
             <span v-if="state.meta.ref" class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned">{{ state.meta.ref }}</span>
             <a
               v-if="state.meta.pr"
-              class="prlink inline-flex items-center gap-1 text-primary no-underline hover:underline"
+              class="prlink whitespace-nowrap text-primary no-underline hover:underline"
               :href="`https://github.com/${state.meta.repo}/pull/${state.meta.pr}`"
               target="_blank"
               rel="noopener noreferrer"
             >
-              <GithubMark />#{{ state.meta.pr }}
+              <GithubMark class="mr-1 align-[-0.125em]" />#{{ state.meta.pr }}
             </a>
           </template>
         </div>
@@ -292,7 +298,7 @@ function stamp(at: number | undefined): string {
         </summary>
         <div id="contextturns">
           <div v-for="turn in state.context" :key="turn.key" class="turn flex items-baseline gap-3 border-t border-default py-1.5 opacity-85 first-of-type:border-t-0">
-            <span class="ts select-none text-xs text-dimmed">{{ fmtTime(turn.at) }}</span>
+            <span class="ts select-none text-xs text-dimmed" :title="fmtTimeTitle(turn.at)">{{ fmtTime(turn.at) }}</span>
             <MarkdownText :text="turn.text" />
           </div>
         </div>
@@ -326,7 +332,7 @@ function stamp(at: number | undefined): string {
             <div class="narration flex items-baseline gap-3 pr-3">
               <span
                 class="think shrink-0 whitespace-nowrap rounded px-2 text-[0.8rem] leading-relaxed"
-                :class="item.turn.quick ? 'bg-accented text-muted' : 'bg-yellow-600/10 text-yellow-600'"
+                :class="item.turn.quick ? 'bg-accented text-muted' : 'bg-warn/10 text-warn'"
                 :title="item.turn.label"
                 >{{ item.turn.chip }}</span
               >
@@ -336,7 +342,7 @@ function stamp(at: number | undefined): string {
               <span v-if="item.note" class="nonar font-sans text-sm italic text-dimmed">{{ item.note }}</span>
             </div>
           </li>
-          <li v-else class="note mt-4 flex items-baseline gap-3 rounded-md px-3 py-1.5" :class="item.replay ? 'text-dimmed' : 'bg-yellow-600/10 text-yellow-600'">
+          <li v-else class="note mt-4 flex items-baseline gap-3 rounded-md px-3 py-1.5" :class="item.replay ? 'text-dimmed' : 'bg-warn/10 text-warn'">
             <span v-if="item.at !== undefined" class="ts select-none text-xs text-dimmed">{{ stamp(item.at) }}</span>
             <span>{{ (item.replay ? "… " : "⏱ ") + item.text }}</span>
           </li>
@@ -347,9 +353,9 @@ function stamp(at: number | undefined): string {
           class="tail mt-10 flex items-center gap-3 border-t border-dashed border-accented py-3 pl-6 pr-8 text-[0.8rem] text-muted"
           id="tail"
         >
-          <span class="pulse text-[1.1em] leading-none text-blue-300 motion-safe:animate-pulse">∿</span>
+          <span class="pulse text-[1.1em] leading-none text-info motion-safe:animate-pulse">∿</span>
           <span class="verb text-toned">{{ THINKING[verbIndex] }}…</span>
-          <span class="since ml-auto shrink-0 tabular-nums" :class="tailSince >= SLOW_MS ? 'text-yellow-600' : 'text-dimmed'" title="since the last event arrived">{{
+          <span class="since ml-auto shrink-0 tabular-nums" :class="tailSince >= SLOW_MS ? 'text-warn' : 'text-dimmed'" title="since the last event arrived">{{
             formatElapsed(tailSince)
           }}</span>
         </li>
@@ -357,10 +363,10 @@ function stamp(at: number | undefined): string {
       </ol>
 
       <!-- Answer -->
-      <section v-if="state.answer" id="answer" class="block mt-6 rounded-lg border border-green-600/40 bg-(--ui-bg-muted) px-3 py-2.5">
-        <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-green-300">
+      <section v-if="state.answer" id="answer" class="block mt-6 rounded-lg border border-ok/40 bg-(--ui-bg-muted) px-3 py-2.5">
+        <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-ok">
           <span>Answer</span>
-          <span class="ts select-none text-xs normal-case tracking-normal text-dimmed">{{ fmtTime(state.answer.at) }}</span>
+          <span class="ts select-none text-xs normal-case tracking-normal text-dimmed" :title="fmtTimeTitle(state.answer.at)">{{ fmtTime(state.answer.at) }}</span>
         </h2>
         <MarkdownText :text="state.answer.text" />
       </section>

@@ -117,9 +117,11 @@ describe("calls, groups, folding", () => {
     expect(item.call.output).toBe("boom");
   });
 
-  it("update_status renders as a quiet row, never a card", () => {
+  it("update_status renders as ONE quiet row, never a card — its result must not duplicate it", () => {
     const m = model();
     m.handle(call("q1", "update_status …", 2, "update_status"));
+    m.handle(result("q1", { tool: "update_status" }));
+    expect(step(m).items).toHaveLength(1);
     const item = step(m).items[0];
     expect(item.kind).toBe("quiet");
     if (item.kind === "quiet") expect(item.text).toContain("status checklist updated");

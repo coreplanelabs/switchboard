@@ -81,7 +81,7 @@ describe("RunPage — history mode", () => {
     expect(ok.find(".conn .pulse").exists()).toBe(false); // nothing is connected on a history page
     const failed = mountApp(RunPage, { seed: historySeed([], { status: "failed", durationMs: 41_000 }) });
     expect(failed.find(".conn .chip").text()).toBe("failed");
-    expect(failed.find(".conn .chip").classes().join(" ")).toContain("red");
+    expect(failed.find(".conn .chip").classes().join(" ")).toContain("bad");
     const soft = mountApp(RunPage, { seed: historySeed([], { status: "stopped_soft" }) });
     expect(soft.find(".conn .chip").text()).toBe("stopped early");
     const hard = mountApp(RunPage, { seed: historySeed([], { status: "stopped_hard", durationMs: 41_000 }) });

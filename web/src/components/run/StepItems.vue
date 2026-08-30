@@ -28,7 +28,7 @@ function fmtBytes(n: number): string {
       <span v-if="item.at !== undefined" class="ts select-none text-xs text-dimmed" :title="formatLocalIso(item.at)">{{ stamp(item.at) }}</span>
       <span>{{ item.text }}</span>
     </div>
-    <div v-else class="skill flex items-baseline gap-2.5 rounded-r-md border-l-2 border-purple-400 bg-purple-400/8 px-3 py-1 text-[0.85rem]">
+    <div v-else class="skill flex items-baseline gap-2.5 rounded-r-md border-l-2 border-skill bg-skill/8 px-3 py-1 text-[0.85rem]">
       <span v-if="item.skill.at !== undefined" class="ts select-none text-xs text-dimmed" :title="formatLocalIso(item.skill.at)">{{
         stamp(item.skill.at)
       }}</span>
