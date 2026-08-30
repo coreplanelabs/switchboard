@@ -567,6 +567,20 @@ describe("retrieval + write efficiency (#356)", () => {
     expect(listed[0].useCount).toBe(1); // the dedup bump
   });
 
+  it("a candidate with an EMPTY supersedes ('' — passes validation, falsy to planWrite) still dedups against the whole active set", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("the deploy command is npm run deploy")] });
+    // planWrite branches on truthiness (engine.ts): '' means NO supersede, so
+    // the dedup pool is every active row — the store's lookup branch must
+    // agree, or a duplicate-text candidate inserts a second active row.
+    const w = await post("/write", { scopeKey: s, records: [cand("the deploy command is npm run deploy", { supersedes: "" })] });
+    expect(w.status).toBe(200);
+    expect(w.data).toMatchObject({ ok: true, inserted: 0, deduped: 1, superseded: 0 });
+    const listed = (await post("/list", { scopeKey: s, limit: 10 })).data.records as Array<Record<string, unknown>>;
+    expect(listed).toHaveLength(1);
+    expect(listed[0].useCount).toBe(1); // the dedup bump
+  });
+
   it("dedup against duplicate-norm actives bumps the earliest (seq order), deterministically", async () => {
     const s = scope();
     // The §8 collision path is the one legitimate way two ACTIVE rows share a

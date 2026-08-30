@@ -259,9 +259,13 @@ export class MemoryDO extends DurableObject<Env> {
         // the engine's collision case — the earliest still takes the dedup
         // bump, exactly as the full-set scan did). Reads inside transactionSync
         // see the batch's own earlier inserts and flips, so later candidates
-        // still dedup/supersede against them.
+        // still dedup/supersede against them. The branch matches planWrite's
+        // own TRUTHINESS test: `supersedes: ""` passes validation but means NO
+        // supersede to the engine, so it must dedup against the norm pool —
+        // an `!== undefined` branch here would hand it an empty pool and
+        // insert a duplicate active row.
         const relevant = (
-          cand.supersedes !== undefined
+          cand.supersedes
             ? this.sql.exec<Row>(`SELECT * FROM records WHERE id = ? AND status = 'active'`, cand.supersedes)
             : this.sql.exec<Row>(
                 `SELECT * FROM records WHERE status = 'active' AND norm = ? ORDER BY seq`,
