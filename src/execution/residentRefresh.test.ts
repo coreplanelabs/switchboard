@@ -135,6 +135,43 @@ describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an inte
     expect(f.reason).toMatch(/^build-failed: /);
   });
 
+  it("snapshot step killed by a container replacement — 'Process supervisor is closed' → refresh-interrupted (#335)", () => {
+    const f = classifyRefreshFailure({ step: "snapshot", message: "Process supervisor is closed" });
+    expect(f.interrupted).toBe(true);
+    expect(f.reason).toBe("refresh-interrupted: snapshot Process supervisor is closed");
+  });
+
+  it("SDK stale-handle wording ('previous runtime incarnation') → refresh-interrupted, any step (#335)", () => {
+    const f = classifyRefreshFailure({
+      step: "fetch",
+      message: "Process handle refers to a previous runtime incarnation",
+    });
+    expect(f.interrupted).toBe(true);
+    expect(f.reason).toMatch(/^refresh-interrupted: fetch /);
+  });
+
+  it("the SDK replacement wording is case-insensitive and covers the whole isRuntimeReplacement message family (#335)", () => {
+    for (const msg of [
+      "process supervisor is closed",
+      "operation was interrupted because the runtime changed",
+      "the runtime identity is no longer active",
+      "sandbox lifetime is no longer current",
+      "the platform was updating the sandbox runtime",
+      "supervisor no longer identifies pid 42",
+    ]) {
+      expect(classifyRefreshFailure({ step: "snapshot", message: msg }).interrupted).toBe(true);
+    }
+  });
+
+  it("our own timeout kill still wins over a replacement wording in the same message (#335)", () => {
+    const f = classifyRefreshFailure({
+      step: "snapshot",
+      message: "exit 1 (timed out): Process supervisor is closed",
+    });
+    expect(f.interrupted).toBe(false);
+    expect(f.reason).toMatch(/^snapshot-failed: /);
+  });
+
   it("'killed' inside ordinary compiler output does not count without the signal signature", () => {
     expect(classifyRefreshFailure({ step: "build", message: "exit 1: error: process killed by OOM killer" }).interrupted).toBe(false);
   });

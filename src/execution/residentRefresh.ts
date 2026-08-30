@@ -89,9 +89,14 @@ export function checkoutUpdateCommand(sha: string, clean: CleanScope): string {
 // -- interruption vs. failure (#216) -----------------------------------------
 
 /** How a refresh-cycle step failed. `interrupted` is the one outcome that says
- *  NOTHING about the repository: the step was killed from outside (a Worker
- *  deploy swapping the container mid-cycle — SIGTERM, exit 143, the shell's
- *  "Session terminated"). Everything else is the repo's own build failing. */
+ *  NOTHING about the repository: the step was killed from outside because the
+ *  CONTAINER was replaced under it — an image-changing deploy or an explicit
+ *  container stop/restart. (A Worker-only deploy swaps the DO isolate but
+ *  leaves the container and its processes running — live 2026-08-30, #335 — so
+ *  it cannot interrupt a step at all.) The kill surfaces either as the shell's
+ *  own death (SIGTERM, exit 143, "Session terminated") or, past the shell, as
+ *  the SDK's replacement errors (stale process handle, closed supervisor).
+ *  Everything else is the repo's own build failing. */
 export interface RefreshFailure {
   /** The `degraded` reason to record. Interruptions are prefixed
    *  `refresh-interrupted:` so the park-streak gate can exclude them by prefix,
@@ -107,10 +112,24 @@ export interface RefreshFailure {
  *  failure however it died. */
 const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM/;
 
+/** Message wording of the Sandbox SDK's runtime-replacement error family — the
+ *  container went away UNDER a live SDK call, so the failure never reaches the
+ *  shell-kill signature above: a step that dies this way surfaces as
+ *  `StaleProcessHandleError` ("previous runtime incarnation"),
+ *  `ProcessSpawnFailedError` ("Process supervisor is closed"), or one of the
+ *  SDK's interruption messages. Shared with the resident Worker's
+ *  `isRuntimeReplacement` (deploy/cloudflare-resident/worker.ts) as its
+ *  message-level fallback, so the exec path and the refresh classifier agree on
+ *  one wording list (#335: a `stop-container` mid-snapshot produced
+ *  "Process supervisor is closed" and was classified as the repo's own
+ *  `snapshot-failed`, re-arming at the full cadence). */
+export const RUNTIME_REPLACEMENT_WORDING =
+  /previous runtime incarnation|interrupted because the runtime changed|runtime identity is no longer active|sandbox lifetime is no longer current|platform was updating the sandbox runtime|no longer identifies pid|process supervisor is closed/i;
+
 export function classifyRefreshFailure(input: { step: string; message: string }): RefreshFailure {
   const { step, message } = input;
   const timedOut = /\(timed out\)/.test(message);
-  if (!timedOut && INTERRUPTION_SIGNATURE.test(message)) {
+  if (!timedOut && (INTERRUPTION_SIGNATURE.test(message) || RUNTIME_REPLACEMENT_WORDING.test(message))) {
     return { interrupted: true, reason: `refresh-interrupted: ${step} ${message}` };
   }
   return { interrupted: false, reason: `${step}-failed: ${message}` };

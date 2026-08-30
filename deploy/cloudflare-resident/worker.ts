@@ -101,6 +101,7 @@ import {
   classifyRefreshFailure,
   nextRefreshDelayS,
   planRefresh,
+  RUNTIME_REPLACEMENT_WORDING,
   type RefreshDisk,
   type RefreshOutcome,
 } from "../../src/execution/residentRefresh.js";
@@ -392,8 +393,10 @@ class RuntimeReplacedError extends Error {
  *  (`SandboxLifetimeChangedError`) or throws raw before its adapter translates
  *  them (`RuntimeIdentityInactiveError` at ~10 process/exec sites), so a typed
  *  check alone would miss them. */
-const RUNTIME_REPLACEMENT_WORDING =
-  /previous runtime incarnation|interrupted because the runtime changed|runtime identity is no longer active|sandbox lifetime is no longer current|platform was updating the sandbox runtime|no longer identifies pid/i;
+// RUNTIME_REPLACEMENT_WORDING moved to src/execution/residentRefresh.ts (#335)
+// so the refresh classifier and this file's isRuntimeReplacement share ONE
+// message-wording list (it now also carries "Process supervisor is closed" —
+// the spawn-refusal a stopped container answers until it restarts).
 
 /** `err` and its `cause` chain, bounded like the SDK's own `selfAndCauses`
  *  walker: the SDK wraps platform errors, so the telling message can sit one or
@@ -737,7 +740,7 @@ interface RepoFacts {
   lockfileHash: string; // dependency/build cache key (KTD7)
   provisionedAt: string;
   lastRefreshAt: string;
-  lastRefreshError?: string; // command-level failures (e.g. token mint) that did NOT flip lifecycle
+  lastRefreshError?: string; // last cycle's failure reason: command-level (e.g. token mint, no lifecycle flip) or the classified reason of a failed/interrupted cycle (#335 — survives a concurrent state overwrite); cleared by the next completed cycle
   lastRestore?: { at: string; ms: number }; // proof of restore-not-reclone on the wake path
   /** Set while the resident is in idle mode (refresh alarm parked far out so the container may sleep). */
   idleSince?: string;
@@ -1397,8 +1400,15 @@ export class ResidentDO extends Sandbox<Env> {
       if (this.hydration === p) this.hydration = null;
     });
     this.hydration = p;
+    this.hydrationStartedAt = Date.now();
     return p;
   }
+
+  /** When the in-flight hydration began — lets the watchdog distinguish a
+   *  restore that is genuinely running from one whose promise will never
+   *  settle (an SDK call hung on a container that was replaced under it,
+   *  #335). Only meaningful while `this.hydration` is non-null. */
+  private hydrationStartedAt = 0;
 
   private async doHydrate(): Promise<void> {
     const state = await this.ctx.storage.get<ResidentState>(STATE_KEY);
@@ -1689,25 +1699,34 @@ export class ResidentDO extends Sandbox<Env> {
       }
     } catch (err) {
       if (err instanceof ResidentDownError) return; // already down with reason; chain stops below
-      // A step killed from OUTSIDE (a Worker deploy swapping the container
-      // mid-build: SIGTERM / exit 143) is `refresh-interrupted` (#216): it is not
-      // evidence about the repo — it never counts toward the park streak (the
-      // entry gate above) — and the chain re-arms SHORT so the resident is warm
-      // again within a minute instead of after the full cadence (live
-      // 2026-08-29: `degraded(build-failed: exit 143 …)` 22:31 → warm 22:42,
-      // every switchboard run in between fell back cold). Any other failure is
-      // the repo's own: `<step>-failed: …` / `refresh-failed: …` as before.
-      let reason: string;
-      if (err instanceof StepError) {
-        const failure = classifyRefreshFailure({ step: err.step, message: err.message });
-        reason = failure.reason;
-        // Set BEFORE the state write on purpose: if that write throws, the
-        // finally still re-arms short — the safe direction for an interruption.
-        if (failure.interrupted) this.rearmOutcome = "interrupted";
-      } else {
-        reason = `refresh-failed: ${errMsg(err)}`;
-      }
-      await this.setResidentState("degraded", reason); // last snapshot keeps serving
+      // A step killed from OUTSIDE (the container replaced under it — an
+      // image-changing deploy or a container stop; a Worker-only deploy leaves
+      // the container running and interrupts nothing, live 2026-08-30 #335) is
+      // `refresh-interrupted` (#216): it is not evidence about the repo — it
+      // never counts toward the park streak (the entry gate above) — and the
+      // chain re-arms SHORT so the resident is warm again within a minute
+      // instead of after the full cadence (live 2026-08-29:
+      // `degraded(build-failed: exit 143 …)` 22:31 → warm 22:42; live
+      // 2026-08-30 #335: an unclassified mid-snapshot kill cost 9 min 53 s).
+      // Any other failure is the repo's own: `<step>-failed: …` /
+      // `refresh-failed: …` as before. Non-StepErrors classify too — an SDK
+      // replacement error can surface between steps — with the generic
+      // "refresh" step, whose failure reason is the pre-existing
+      // `refresh-failed: …` shape.
+      const failure = classifyRefreshFailure(
+        err instanceof StepError ? { step: err.step, message: err.message } : { step: "refresh", message: errMsg(err) },
+      );
+      // Set BEFORE the writes on purpose: if either throws, the finally still
+      // re-arms short — the safe direction for an interruption.
+      if (failure.interrupted) this.rearmOutcome = "interrupted";
+      // Record on the facts too (#335): the degraded state write below can be
+      // clobbered within seconds by a concurrent attach/exec whose
+      // ensureHydrated flips the state to `restoring · rehydrating` (that is
+      // exactly what the live incident showed — no visible trace of WHY).
+      // `lastRefreshError` survives that race and the next completed cycle
+      // clears it, same as a mint error.
+      await this.recordRefreshError(failure.reason);
+      await this.setResidentState("degraded", failure.reason); // last snapshot keeps serving
     } finally {
       if (refreshCounted) this.refreshesInFlight--;
       const state = await this.ctx.storage.get<ResidentState>(STATE_KEY);
@@ -1899,14 +1918,27 @@ export class ResidentDO extends Sandbox<Env> {
     // KTD10) and pull the next cycle to +5s so it normalizes.
     if (status.state === "refreshing" || status.state === "restoring") {
       const updatedAt = Date.parse((await this.ctx.storage.get<string>(UPDATED_KEY)) ?? "") || 0;
-      const inFlight = this.refreshesInFlight > 0 || this.hydration !== null;
+      // A hydration older than the stale bound counts as DEAD, not in flight
+      // (#335): its promise lives on SDK calls into a container that may have
+      // been replaced under it, and a promise that never settles would
+      // otherwise hold `this.hydration` non-null forever — making a stuck
+      // `restoring` permanently invisible to this branch. No legitimate
+      // restore approaches STALE_MIDFLIGHT_MS (a full R2 restore is ~1 min).
+      const hydrationLive = this.hydration !== null && Date.now() - this.hydrationStartedAt <= STALE_MIDFLIGHT_MS;
+      const inFlight = this.refreshesInFlight > 0 || hydrationLive;
       if (!inFlight && Date.now() - updatedAt > STALE_MIDFLIGHT_MS) {
         // The reads above yielded; a cycle that started meanwhile owns the
         // state now — leave it alone rather than stamp `degraded` over it.
         const again = await this.getStatus();
-        if (again.state !== status.state || this.refreshesInFlight > 0 || this.hydration !== null) {
+        const hydrationStillDead = this.hydration === null || Date.now() - this.hydrationStartedAt > STALE_MIDFLIGHT_MS;
+        if (again.state !== status.state || this.refreshesInFlight > 0 || !hydrationStillDead) {
           return { resource, ...again, action: "none" };
         }
+        // Drop the dead hydration reference so the re-armed cycle's
+        // ensureHydrated starts a fresh restore instead of awaiting a promise
+        // that will never settle. Safe: past the bound nothing on the other
+        // end is still writing (the container it talked to is gone).
+        this.hydration = null;
         const reason = `stale-mid-flight: ${status.state} since ${new Date(updatedAt).toISOString()} with no cycle running; re-armed by watchdog`;
         await this.setResidentState("degraded", reason);
         this.deleteSchedules(REFRESH_CALLBACK);
