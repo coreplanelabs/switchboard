@@ -32,6 +32,22 @@ describe("the pr-tour skill carries the Tour contract", () => {
     expect(skill.body).toMatch(/25 lines/);
   });
 
+  it("pins anchor verification: derived from the pushed tree and checked, never written from memory", () => {
+    expect(skill.body).toMatch(/[Nn]ever write an anchor from memory/);
+    expect(skill.body).toMatch(/git show <sha>:<path>/);
+    expect(skill.body).toMatch(/sed -n '<from>,<to>p'/);
+    expect(skill.body).toMatch(/fix the range, not the prose/i);
+  });
+
+  it("pins the embed conditions: existing path, in-range lines, standalone bare URL on its own line", () => {
+    expect(skill.body).toMatch(/bare URL/);
+    expect(skill.body).toMatch(/git cat-file -e <sha>:<path>/);
+    expect(skill.body).toMatch(/own line/i);
+    expect(skill.body).toMatch(/blank line before and after/i);
+    expect(skill.body).toMatch(/never wrapped in markdown link syntax/i);
+    expect(skill.body).toMatch(/bullet, blockquote, or heading/i);
+  });
+
   it("pins the catch-all step and the repush regeneration rule", () => {
     expect(skill.body).toMatch(/Remaining changes/);
     expect(skill.body).toMatch(/every push that changes the head/i);
