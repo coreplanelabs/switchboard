@@ -82,7 +82,7 @@ export type TimelineChange =
    *  ("12.3k in", "800 out", "11.2k cached") when the event carries usage. */
   | { kind: "turn"; label: string; facts: string[]; durationMs: number; at?: number }
   /** What the run is about (item 19): agent, model and the resolved repo context, for the Request head. */
-  | { kind: "meta"; agent: string; model: string; repo?: string; ref?: string; pr?: number; headSha?: string; at?: number }
+  | { kind: "meta"; agent: string; model: string; effort?: string; repo?: string; ref?: string; pr?: number; headSha?: string; at?: number }
   /** One thread turn the model was given (a `context` event) — the page's
    *  collapsed Context block, never a step. */
   | { kind: "context"; text: string; at?: number }
@@ -286,6 +286,7 @@ export function createRunTimeline(): RunTimeline {
         // shows exactly what was resolved, never an empty slot.
         if (!str(e.agent) || !str(e.model)) return [];
         const meta: TimelineChange = { kind: "meta", agent: str(e.agent), model: str(e.model), at: num(e.at) };
+        if (str(e.effort)) meta.effort = str(e.effort);
         if (str(e.repo)) meta.repo = str(e.repo);
         if (str(e.ref)) meta.ref = str(e.ref);
         if (num(e.pr) !== undefined && Number.isInteger(e.pr) && (e.pr as number) > 0) meta.pr = e.pr as number;

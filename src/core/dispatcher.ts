@@ -694,6 +694,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       type: "run_meta",
       agent: agent.name,
       model: resolved.modelRef,
+      ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
       ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
       ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),

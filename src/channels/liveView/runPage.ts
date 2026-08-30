@@ -174,6 +174,11 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   .runmeta .agent { color: var(--fg-soft); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; font-size: .68rem; }
   .runmeta a { color: var(--blue); text-decoration: none; }
   .runmeta a:hover { text-decoration: underline; }
+  .runmeta .effort { color: var(--fg-soft); }
+  /* The branch: a fact, not a destination — a quiet tag, no link. */
+  .runmeta .reftag { border: 1px solid #3b4252; border-radius: 4px; padding: 0 .4em; color: var(--fg-soft); font-size: .75rem; }
+  .runmeta a.prlink { display: inline-flex; align-items: center; gap: .35em; }
+  .ghmark { width: 1em; height: 1em; flex: 0 0 auto; }
   .runmeta[hidden] { display: none; }
   #request { margin-bottom: 1.25rem; }
   /* Context: the thread turns the model was given, collapsed by default (secondary to the request). */
@@ -213,11 +218,11 @@ export function renderRunPage(id: string, token: string, events: readonly RunEve
   .think.quick { color: var(--muted); background: #1b1f28; }
   .nonar { flex: 1 1 auto; color: var(--dim); font: italic .9rem/1.5 var(--sans); }
   /* The turn's token facts: their own quiet line under the prose. */
-  /* Under prose: its own row, left edge aligned with the duration chip's TEXT
-     (the chip pads .5em at .8rem = .4rem). Inline (a no-prose head): part of the
-     head row, no padding of its own. */
-  .turnfacts { display: flex; gap: .6rem; padding: 0 .75rem .6rem .4rem; font-size: .75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .narration .turnfacts { padding: 0; align-self: center; }
+  /* Above the prose: a small metadata line, tight against the head row (item
+     21), left edge aligned with the duration chip's TEXT. Inline (a no-prose
+     head): part of the head row, regular size. */
+  .turnfacts { display: flex; gap: .6rem; padding: 0 .75rem 0 .45rem; margin-bottom: -.1rem; font-size: .7rem; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .narration .turnfacts { padding: 0; margin: 0; align-self: center; font-size: .75rem; color: var(--muted); }
   .turnfacts .fact + .fact::before { content: "\\00b7"; color: var(--dim); margin-right: .6rem; }
   .turnfacts:empty { display: none; }
   li.step > .calls { display: flex; flex-direction: column; gap: .5rem; padding-right: .75rem; }
@@ -472,20 +477,39 @@ ${ELAPSED_SCRIPT}
     }
     return svg;
   }
-  // What the run is about (item 19): agent · model, then — for a repo run —
-  // owner/repo · ref · #PR · head, each a GitHub link (setAttribute, never markup).
+  // What the run is about (item 19, tightened in item 21): agent · model ·
+  // effort, then — for a repo run — the repo (a GitHub link), the branch as a
+  // plain tag (nobody clicks "main"; the sha is gone for the same reason) and
+  // the PR, the one link worth following, led by the GitHub mark.
   var runMeta = document.getElementById("runmeta");
   function showMeta(m) {
     runMeta.textContent = "";
     runMeta.appendChild(el("span", "agent", m.agent));
     runMeta.appendChild(el("span", "model", m.model));
+    if (m.effort) runMeta.appendChild(el("span", "effort", m.effort + " effort"));
     if (!m.repo || !/^[\\w.-]+\\/[\\w.-]+$/.test(m.repo)) { runMeta.hidden = false; return; }
     var base = "https://github.com/" + m.repo;
     runMeta.appendChild(link(m.repo, base));
-    if (m.ref) runMeta.appendChild(link(m.ref, base + "/tree/" + encodeURIComponent(m.ref)));
-    if (m.pr) runMeta.appendChild(link("#" + m.pr, base + "/pull/" + m.pr));
-    if (m.headSha) runMeta.appendChild(link(m.headSha.slice(0, 7), m.pr ? base + "/pull/" + m.pr + "/commits/" + m.headSha : base + "/commit/" + m.headSha));
+    if (m.ref) runMeta.appendChild(el("span", "reftag", m.ref));
+    if (m.pr) {
+      var pr = link("#" + m.pr, base + "/pull/" + m.pr);
+      pr.className = "prlink";
+      pr.insertBefore(githubMark(), pr.firstChild);
+      runMeta.appendChild(pr);
+    }
     runMeta.hidden = false;
+  }
+  function githubMark() {
+    var ns = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("class", "ghmark");
+    svg.setAttribute("aria-hidden", "true");
+    var p = document.createElementNS(ns, "path");
+    p.setAttribute("fill", "currentColor");
+    p.setAttribute("d", "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z");
+    svg.appendChild(p);
+    return svg;
   }
   function link(text, href) {
     var a = el("a", "", text);
@@ -590,8 +614,8 @@ ${ELAPSED_SCRIPT}
       var box = el("div", "md");
       md(box, narration.text);
       row.appendChild(box);
+      li.appendChild(turnFacts(turn)); // above the prose: a small tight metadata line, never where the eye lands first
       li.appendChild(row);
-      li.appendChild(turnFacts(turn)); // its own row, under the prose
     } else if (turn && turn.facts.length) {
       // No prose to head the step: the facts ARE the head — one row, no filler
       // text for the eye to land on (the calls below say what happened).
