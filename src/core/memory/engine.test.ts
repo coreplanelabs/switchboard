@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mintRecord, normalizeText, planWrite, rankRecords } from "./engine.js";
+import { mintRecord, normalizeText, planEviction, planWrite, rankRecords } from "./engine.js";
 import type { MemoryCandidate, MemoryRecord } from "./types.js";
 
 // Feature: features/memory.md — the store-agnostic engine shared by the
@@ -108,5 +108,47 @@ describe("mintRecord", () => {
       supersedes: "x",
       status: "active",
     });
+  });
+});
+
+// Feature: features/memory.md — per-scope cap (#253): the pure eviction plan.
+describe("planEviction (#253)", () => {
+  const NOW = 1_700_000_000_000;
+  const mk = (id: string, createdAt: number, lastUsedAt?: number): MemoryRecord => ({
+    id,
+    scopeKey: "org:coreplanelabs",
+    kind: "fact",
+    text: id,
+    keywords: [id],
+    sourceThreadKey: "slack:C1:1.0",
+    createdAt,
+    ...(lastUsedAt !== undefined ? { lastUsedAt } : {}),
+    useCount: 0,
+    status: "active",
+  });
+
+  it("evicts nothing at or under the cap", () => {
+    const active = [mk("a", NOW - 3), mk("b", NOW - 2), mk("c", NOW - 1)];
+    expect(planEviction(active, 3)).toEqual([]);
+    expect(planEviction(active, 10)).toEqual([]);
+    expect(planEviction([], 1)).toEqual([]);
+  });
+
+  it("evicts exactly (active − cap) records, least recently USED first (lastUsedAt ?? createdAt)", () => {
+    const active = [
+      mk("old-but-hot", NOW - 10_000, NOW - 1), // created long ago, used just now → keep
+      mk("recent-never-used", NOW - 5), // never used → falls back to createdAt
+      mk("stale", NOW - 9_000, NOW - 8_000), // used long ago → evict first
+      mk("mid", NOW - 4_000, NOW - 3_000),
+    ];
+    expect(planEviction(active, 2).map((r) => r.id)).toEqual(["stale", "mid"]);
+    expect(planEviction(active, 3).map((r) => r.id)).toEqual(["stale"]);
+  });
+
+  it("breaks a lastUsedAt tie by lower createdAt (the older record goes first) and never returns non-active rows", () => {
+    const active = [mk("newer", NOW - 100, NOW - 50), mk("older", NOW - 200, NOW - 50), mk("keep", NOW, NOW)];
+    expect(planEviction(active, 2).map((r) => r.id)).toEqual(["older"]);
+    const withDead = [...active, { ...mk("gone", NOW - 999), status: "forgotten" as const }];
+    expect(planEviction(withDead, 2).map((r) => r.id)).toEqual(["older"]);
   });
 });

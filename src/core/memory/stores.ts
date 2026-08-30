@@ -1,5 +1,5 @@
 import type { MemoryCandidate, MemoryConfig, MemoryQuery, MemoryRecord, MemoryStore } from "./types.js";
-import { mintRecord, planWrite, rankRecords } from "./engine.js";
+import { DEFAULT_SCOPE_CAP, mintRecord, planEviction, planWrite, rankRecords } from "./engine.js";
 import { keywordMatch, tokenize } from "./scorer.js";
 
 // Three implementations of the MemoryStore seam (AGENTS.md invariant 2): the
@@ -35,10 +35,13 @@ export class NullMemoryStore implements MemoryStore {
 export class InMemoryMemoryStore implements MemoryStore {
   private readonly byScope = new Map<string, MemoryRecord[]>();
   private readonly now: () => number;
+  /** Per-scope cap on active records (#253); undefined → uncapped (tests/dev). */
+  private readonly cap: number | undefined;
   private seq = 0;
 
-  constructor(seed: MemoryRecord[] = [], opts: { now?: () => number } = {}) {
+  constructor(seed: MemoryRecord[] = [], opts: { now?: () => number; cap?: number } = {}) {
     this.now = opts.now ?? Date.now;
+    this.cap = opts.cap;
     for (const r of seed) this.bucket(r.scopeKey).push(r);
   }
 
@@ -76,6 +79,8 @@ export class InMemoryMemoryStore implements MemoryStore {
       if (plan.supersede) plan.supersede.status = "superseded";
       list.push(plan.record);
     }
+    // Per-scope cap (#253): the batch never leaves the scope over the cap.
+    if (this.cap !== undefined) for (const r of planEviction(list, this.cap)) r.status = "evicted";
   }
 
   async list(scopeKey: string, limit: number, query?: string): Promise<MemoryRecord[]> {
@@ -103,5 +108,5 @@ export class InMemoryMemoryStore implements MemoryStore {
  *  `InMemoryMemoryStore` for dev/tests when nothing is injected. */
 export function selectMemoryStore(cfg: MemoryConfig | undefined, injected?: MemoryStore): MemoryStore {
   if (!cfg?.enabled) return new NullMemoryStore();
-  return injected ?? new InMemoryMemoryStore();
+  return injected ?? new InMemoryMemoryStore([], { cap: cfg.maxRecordsPerScope ?? DEFAULT_SCOPE_CAP });
 }

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { MemoryCandidate, MemoryRecord } from "../../src/core/memory/types.ts";
-import { mintRecord, normalizeText, planWrite, rankRecords } from "../../src/core/memory/engine.ts";
+import { DEFAULT_SCOPE_CAP, mintRecord, normalizeText, planEviction, planWrite, rankRecords } from "../../src/core/memory/engine.ts";
 import { tokenize } from "../../src/core/memory/scorer.ts";
 import { isFrictionRunRecord, type FrictionRunRecord } from "../../src/core/frictionProposals.ts";
 import { FIRING_DETAIL_MAX, isScheduleFiring, type ScheduleFiring } from "../../src/core/schedules.ts";
@@ -166,8 +166,9 @@ export class MemoryDO extends DurableObject<Env> {
   async write(
     scopeKey: string,
     candidates: MemoryCandidate[],
-  ): Promise<{ inserted: number; deduped: number; superseded: number }> {
-    const counts = { inserted: 0, deduped: 0, superseded: 0 };
+    cap: number = DEFAULT_SCOPE_CAP,
+  ): Promise<{ inserted: number; deduped: number; superseded: number; evicted: number }> {
+    const counts = { inserted: 0, deduped: 0, superseded: 0, evicted: 0 };
     if (candidates.length === 0) return counts;
     this.ctx.storage.transactionSync(() => {
       const active = this.sql.exec<Row>(`SELECT * FROM records WHERE status = 'active'`).toArray().map(toRecord);
@@ -207,6 +208,13 @@ export class MemoryDO extends DurableObject<Env> {
         this.sql.exec(`INSERT INTO records_fts (id, body) VALUES (?, ?)`, r.id, `${r.text} ${r.keywords.join(" ")}`);
         active.push(r); // later candidates in the batch see this one
         counts.inserted++;
+      }
+      // Per-scope cap (#253), inside the same transaction: the batch never
+      // commits with the scope over the cap. Soft delete — rows stay.
+      for (const victim of planEviction(active, cap)) {
+        this.sql.exec(`UPDATE records SET status = 'evicted' WHERE id = ? AND status = 'active'`, victim.id);
+        victim.status = "evicted";
+        counts.evicted++;
       }
     });
     return counts;
@@ -599,11 +607,21 @@ function parseCandidate(v: unknown, i: number): Validated<MemoryCandidate> {
   return { ok: true, value: out };
 }
 
-function parseWrite(body: unknown): Validated<{ scopeKey: string; records: MemoryCandidate[] }> {
+/** Upper bound on a caller-supplied per-scope cap (#253). */
+const MAX_SCOPE_CAP = 10_000;
+
+function parseWrite(body: unknown): Validated<{ scopeKey: string; records: MemoryCandidate[]; cap?: number }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const b = body as Record<string, unknown>;
   const scope = parseScopeKey(b.scopeKey);
   if (!scope.ok) return scope;
+  let cap: number | undefined;
+  if (b.cap !== undefined) {
+    if (typeof b.cap !== "number" || !Number.isInteger(b.cap) || b.cap < 1 || b.cap > MAX_SCOPE_CAP) {
+      return invalid(`cap must be an integer between 1 and ${MAX_SCOPE_CAP}`);
+    }
+    cap = b.cap;
+  }
   if (!Array.isArray(b.records)) return invalid("records must be an array");
   if (b.records.length > MAX_BATCH) return invalid(`records must hold at most ${MAX_BATCH} candidates`);
   const records: MemoryCandidate[] = [];
@@ -612,7 +630,7 @@ function parseWrite(body: unknown): Validated<{ scopeKey: string; records: Memor
     if (!c.ok) return c;
     records.push(c.value);
   }
-  return { ok: true, value: { scopeKey: scope.value, records } };
+  return { ok: true, value: { scopeKey: scope.value, records, ...(cap !== undefined ? { cap } : {}) } };
 }
 
 // ---------------------------------------------------------------------------
@@ -718,12 +736,13 @@ export default {
 
     const parsed = parseWrite(body);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
-    const { scopeKey, records } = parsed.value;
+    const { scopeKey, records, cap } = parsed.value;
     const stub = env.MEMORY.get(env.MEMORY.idFromName(scopeKey));
-    const counts = await stub.write(scopeKey, records);
+    const counts = await stub.write(scopeKey, records, cap);
     // Observability (counts + scopeKey only, never record content/PII): confirms
-    // the reflection write fired and how many candidates it carried.
-    console.log(`[write] ${scopeKey} <- ${records.length} candidates`);
+    // the reflection write fired, how many candidates it carried, and whether
+    // the per-scope cap evicted anything.
+    console.log(`[write] ${scopeKey} <- ${records.length} candidates${counts.evicted > 0 ? ` (evicted ${counts.evicted})` : ""}`);
     return json({ ok: true, ...counts });
   },
 } satisfies ExportedHandler<Env>;

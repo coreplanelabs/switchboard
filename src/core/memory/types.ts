@@ -32,10 +32,11 @@ export interface MemoryRecord {
   confidence?: number;
   /** id this record replaces (conflict resolution / supersession). */
   supersedes?: string;
-  /** `superseded`: replaced by a newer record; `forgotten`: removed by a human
+  /** `evicted`: dropped by the per-scope cap (#253, least recently used);
+   *  `superseded`: replaced by a newer record; `forgotten`: removed by a human
    *  via `memory forget` (#278). Both are soft deletes — the row stays for
    *  provenance but is invisible to retrieval, list, and dedup. */
-  status: "active" | "superseded" | "forgotten";
+  status: "active" | "superseded" | "forgotten" | "evicted";
 }
 
 /** What the reflection extractor emits. The store assigns id/timestamps/useCount/
@@ -98,6 +99,10 @@ export interface MemoryConfig {
   limit?: number;
   /** Hard token budget for the injected block. Default ~800. */
   maxTokens?: number;
+  /** Per-scope cap on ACTIVE records (#253). A write that would leave a scope
+   *  over the cap evicts the least recently used records (soft delete, status
+   *  `evicted`) down to it, inside the same write. Default 500. */
+  maxRecordsPerScope?: number;
   /** `<provider>/<model>` ref for the post-run reflection (write path) — a cheap
    *  tier. Absent → the run's own resolved model. Never hardcoded (invariant 7). */
   model?: string;
