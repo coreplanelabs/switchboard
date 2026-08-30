@@ -795,14 +795,18 @@ export function render(frame: StatusUpdate): { text: string; blocks: object[] } 
   const blocks: object[] = [
     { type: "context", elements: [{ type: "mrkdwn", text: title }] },
   ];
+  const lines: string[] = [];
+  // The run link is ONE hyperlink line, never the bare URL: inlined, the
+  // 100+-char capability URL wrapped to four lines and pushed the card behind
+  // Slack's "Show more" fold, where every edit flashed it open and shut.
+  if (frame.link) lines.push(`<${escapeMrkdwn(frame.link.url)}|${escapeMrkdwn(frame.link.label)}>`);
   if (frame.detail) {
-    const detail = escapeMrkdwn(frame.detail.slice(0, RENDER_DETAIL_RAW_MAX)).slice(
-      0,
-      RENDER_DETAIL_ESCAPED_MAX,
-    );
+    lines.push(escapeMrkdwn(frame.detail.slice(0, RENDER_DETAIL_RAW_MAX)).slice(0, RENDER_DETAIL_ESCAPED_MAX));
+  }
+  if (lines.length > 0) {
     blocks.push({
       type: "section",
-      text: { type: "mrkdwn", text: detail },
+      text: { type: "mrkdwn", text: lines.join("\n") },
     });
   }
   return { text: title, blocks };

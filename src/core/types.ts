@@ -83,6 +83,15 @@ export interface StatusUpdate {
   title: string;
   /** recent activity, shown as preformatted text (e.g. last tool commands) */
   detail?: string;
+  /**
+   * The run's live page, rendered by each channel in its own short form
+   * (Slack: a one-line `<url|label>` hyperlink; CLI: the bare URL). Kept out of
+   * `detail` on purpose: the capability URL is 100+ chars and, inlined, wraps
+   * to four lines on Slack — enough to push the card behind the "Show more"
+   * fold, where EVERY edit (5 s heartbeat included) flashes the card open and
+   * shut and shoves the thread around.
+   */
+  link?: { url: string; label: string };
 }
 
 /** A live, updatable progress indicator (e.g. an edited Slack message). */

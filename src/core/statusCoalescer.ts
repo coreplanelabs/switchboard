@@ -29,7 +29,7 @@ export function coalesceStatus(
   let timer: { unref?(): void } | undefined;
   let closed = false;
 
-  const key = (f: StatusUpdate) => `${f.title}\n${f.detail ?? ""}`;
+  const key = (f: StatusUpdate) => `${f.title}\n${f.detail ?? ""}\n${f.link?.url ?? ""}\n${f.link?.label ?? ""}`;
   const flush = () => {
     timer = undefined;
     if (!pending || closed) return;
