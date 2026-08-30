@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { DRAIN_DEADLINE_MS } from "../core/drain.js";
 import type { CatchUpStatus } from "./slackCatchUpStatus.js";
+import type { SlackSocketStatus } from "./slackSocketStatus.js";
 
 // `GET /healthz` body. Beyond liveness it is the bot deploy preflight's source
 // of truth (deploy/cloudflare/preflight.mjs, features/slack-channel.md item 8):
@@ -63,6 +64,10 @@ export interface HealthState {
   drainStartedAt?: number;
   /** The reconnect catch-up's record (`getCatchUpStatus()`); `{}` before the first scan. */
   catchUp?: CatchUpStatus;
+  /** The Socket Mode state (`getSocketStatus()`): `{connected:false}` from
+   *  process boot until the handshake lands — the HTTP server starts FIRST, so
+   *  this is how the cold-start window (and a silently dead socket) shows. */
+  slack?: SlackSocketStatus;
   /** The running build (`readBuildInfo`), when the entrypoint knows it. */
   build?: BuildInfo;
   /** Epoch ms of the process start. `deploy restart` (no image build, same
@@ -83,6 +88,10 @@ export interface HealthPayload {
    *  `/healthz` it is unconditionally present; a caller that omits the state
    *  (another entrypoint, a test) gets no key. Undefined fields are dropped. */
   catchUp?: CatchUpStatus;
+  /** Present whenever `HealthState.slack` is given — the bot process always
+   *  passes `getSocketStatus()`, so on the live `/healthz` it is
+   *  unconditionally present; `since`/`connects` are dropped while absent. */
+  slack?: SlackSocketStatus;
   /** Present whenever `HealthState.build` is given — the bot process always
    *  passes `readBuildInfo(...)`, so on the live `/healthz` it is unconditionally
    *  present (`commit: "unknown"` for an image built without `build.json`). */
@@ -105,6 +114,13 @@ export function healthPayload(state: HealthState): HealthPayload {
     const catchUp: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(state.catchUp)) if (v !== undefined) catchUp[k] = v;
     payload.catchUp = catchUp as CatchUpStatus;
+  }
+  if (state.slack) {
+    payload.slack = {
+      connected: state.slack.connected,
+      ...(state.slack.since !== undefined ? { since: state.slack.since } : {}),
+      ...(state.slack.connects !== undefined ? { connects: state.slack.connects } : {}),
+    };
   }
   if (state.build) payload.build = { commit: state.build.commit, ...(state.build.builtAt !== undefined ? { builtAt: state.build.builtAt } : {}) };
   if (state.startedAt !== undefined) payload.startedAt = new Date(state.startedAt).toISOString();

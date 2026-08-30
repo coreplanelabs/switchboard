@@ -96,3 +96,21 @@ describe("healthPayload — catchUp", () => {
     expect(healthPayload({ inFlight: 0, draining: false, catchUp: {} }).catchUp).toEqual({});
   });
 });
+
+// Feature: features/slack-channel.md item 8 — /healthz reports the Socket Mode
+// state. The HTTP server starts before the Slack handshake, so a cold start
+// legitimately answers `slack: {connected:false}` until the socket lands; the
+// validation poller (and any operator) reads deafness here, not in stdout.
+describe("healthPayload — slack socket state", () => {
+  it("carries connected with since/connects when known, and drops the absent fields", () => {
+    const p = healthPayload({ inFlight: 0, draining: false, slack: { connected: true, since: "2026-08-30T20:48:09.000Z", connects: 1 } });
+    expect(p.slack).toEqual({ connected: true, since: "2026-08-30T20:48:09.000Z", connects: 1 });
+    const boot = healthPayload({ inFlight: 0, draining: false, slack: { connected: false } });
+    expect(boot.slack).toEqual({ connected: false });
+    expect(Object.keys(boot.slack ?? {})).toEqual(["connected"]);
+  });
+
+  it("no slack key when the state is not given (other entrypoints)", () => {
+    expect(healthPayload({ inFlight: 0, draining: false }).slack).toBeUndefined();
+  });
+});
