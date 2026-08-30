@@ -44,7 +44,9 @@ export function parseRevParseOutput(output: string): string | undefined {
   return undefined;
 }
 
-function sameCommit(a: string, b: string): boolean {
+/** Two normalized heads name the same commit when one is a ≥7-hex prefix of
+ *  the other (the dispatcher's pre-run attach check reuses this, #282). */
+export function sameCommit(a: string, b: string): boolean {
   const n = Math.min(a.length, b.length);
   return n >= 7 && a.slice(0, n) === b.slice(0, n);
 }

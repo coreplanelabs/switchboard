@@ -1237,8 +1237,114 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
     const system = provider.requests[0].system ?? "";
     expect(system).toContain(AGENTS.review.residentSystem!);
-    expect(system).toContain(reviewTargetBlock({ ...ctx, resident: true }));
+    // The stub attaches at the malformed sha "abc": nothing to verify against,
+    // so the block carries the worktree path but no verified-at-attach claim.
+    expect(system).toContain(reviewTargetBlock({ ...ctx, resident: true, workspace: "/workspace/threads/t/main" }));
     expect(system).toContain(`Head commit: ${"e".repeat(40)}`);
+    expect(system).not.toMatch(/verified it before this run/);
+  });
+
+  // Feature: features/agent-review.md item 10 (#282) — the dispatcher compares
+  // the sha the resident ATTACHED the worktree at with the PR head it resolved,
+  // before any model turn. Incident 2026-08-30 (PR #279): the worktree was at
+  // the PR head, but the agent left it (`cd /workspace`, `find … .git`), found
+  // the resident's warm default-branch checkout and reported ITS HEAD as a
+  // mismatch. Now the agent is told the worktree path and that the attach was
+  // verified; a real mismatch never reaches the model at all.
+  it("a resident review attached AT the PR head: the block names the worktree path and says the attach was verified", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const head = "e".repeat(40);
+    residentFetchStub({
+      attach: () =>
+        new Response(JSON.stringify({ workspace: "/workspace/threads/t-9f/patch-1", ref: "patch-1", sha: head, user: "worker3" }), {
+          status: 200,
+        }),
+    });
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const ctx = { repo: "acme/api", ref: "patch-1", pr: 42, headSha: head, baseRef: "main" };
+    deps.resolveRepoContext = () => ctx;
+    deps.postReviewComment = vi.fn(async () => {});
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    expect(provider.requests).toHaveLength(1); // the review ran
+    const system = provider.requests[0].system ?? "";
+    expect(system).toContain(
+      reviewTargetBlock({ ...ctx, resident: true, workspace: "/workspace/threads/t-9f/patch-1", verifiedAtAttach: true }),
+    );
+    expect(system).toContain("`/workspace/threads/t-9f/patch-1`");
+    expect(system).toMatch(/verified it before this run/);
+    expect(system).toMatch(/never `cd` out of it/i);
+    // The coding/review resident preamble names the path too — every resident run, not only reviews.
+    expect(system).toMatch(/Your shell starts in the worktree `\/workspace\/threads\/t-9f\/patch-1`/);
+    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+  });
+
+  it("a resident review attached at ANOTHER commit than the PR head is not started: named reply, no model turn, worktree released", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const head = "e".repeat(40);
+    const attached = "4dd3832099140ee5c76022a525bbc5e7629d5ada";
+    // Own stub: the shared one has no /detach route, and the release is the point here.
+    const calls: Array<{ path: string; body?: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: RequestInit) => {
+        const path = new URL(String(url)).pathname;
+        const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+        calls.push({ path, body });
+        if (path === "/status") return new Response(JSON.stringify({ state: "warm", reason: "" }), { status: 200 });
+        if (path === "/attach") {
+          return new Response(JSON.stringify({ workspace: "/workspace/threads/t-9f/patch-1", ref: "patch-1", sha: attached, user: "worker3" }), {
+            status: 200,
+          });
+        }
+        if (path === "/detach") return new Response(JSON.stringify({ released: true }), { status: 200 });
+        throw new Error(`unexpected fetch: ${String(url)}`);
+      }),
+    );
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const ctx = { repo: "acme/api", ref: "patch-1", pr: 42, headSha: head, baseRef: "main" };
+    deps.resolveRepoContext = () => ctx;
+    const post = vi.fn(async () => {});
+    deps.postReviewComment = post;
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    expect(provider.requests).toHaveLength(0); // no model turn burned on a guaranteed-refused review
+    expect(post).not.toHaveBeenCalled();
+    const reply = replies.find((r) => /not started/i.test(r)) ?? "";
+    expect(reply).toContain("acme/api#42");
+    expect(reply).toContain("`4dd3832`"); // what the resident attached
+    expect(reply).toContain("`eeeeeee`"); // what the PR head is
+    expect(reply).toMatch(/re-send/i);
+    const last = statuses[statuses.length - 1];
+    expect(last.title).toMatch(/not started/);
+    expect(calls.map((c) => c.path)).toEqual(["/status", "/attach", "/detach"]); // the pool user goes back
+    expect(calls[2]?.body).toMatchObject({ force: true });
+  });
+
+  it("a coding run attached at a commit other than the PR head still runs — the pre-run head check is review-only", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    residentFetchStub({
+      attach: () =>
+        new Response(
+          JSON.stringify({ workspace: "/workspace/threads/t-9f/patch-1", ref: "patch-1", sha: "4dd3832099140ee5c76022a525bbc5e7629d5ada", user: "worker3" }),
+          { status: 200 },
+        ),
+    });
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "e".repeat(40), baseRef: "main" });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding https://github.com/acme/api/pull/42 fix the failing test", "slack:UADMIN"), io);
+    expect(provider.requests).toHaveLength(1);
+    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
   });
 
   it("a sandbox-path review of a resolved PR gets the sandbox variant of the REVIEW TARGET block", async () => {

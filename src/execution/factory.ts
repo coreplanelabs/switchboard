@@ -80,6 +80,10 @@ export interface ExecutorSelection {
   executor: Executor;
   note?: string;
   resident?: boolean;
+  /** The resident's attach answer (ref, sha, worktree path) on the resident
+   *  path — the dispatcher names the path to the model and checks the sha
+   *  against the PR head before a review runs (#282). Unset on every other path. */
+  binding?: ResidentBinding;
 }
 
 // Resident lifecycle states the bot attaches in — `isServiceable` in
@@ -228,6 +232,7 @@ async function openResident(
   return {
     executor,
     resident: true,
+    binding,
     note: nonWarm ? `resident ${nonWarm} · ${where}${why} — attached to the last snapshot` : `resident · ${where}${why}`,
   };
 }
