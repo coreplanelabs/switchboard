@@ -187,6 +187,10 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       endModelTurn(ev, index, "(answer)");
       return;
     }
+    // A `turn` is the model call's own receipt; the gap measurement above stays
+    // the source of truth here (it also covers captures from before turns
+    // existed), so the event neither starts nor ends a model turn.
+    if (ev.type === "turn") return;
 
     if (ev.type === "tool_call") {
       endModelTurn(ev, index, typeof ev.summary === "string" ? ev.summary : ev.tool);

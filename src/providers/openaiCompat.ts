@@ -6,6 +6,7 @@ import {
   type ContentPart,
   type Provider,
   type ProviderConfig,
+  type TokenUsage,
 } from "./types.js";
 
 // Generic adapter for any OpenAI-compatible Chat Completions endpoint:
@@ -76,6 +77,7 @@ export class OpenAICompatProvider implements Provider {
     }
     const data = (await res.json()) as {
       choices: Array<{ message: OAIMessage; finish_reason: string }>;
+      usage?: unknown;
     };
     const choice = data.choices?.[0];
     if (!choice) throw new Error(`Provider "${this.name}": empty choices in response`);
@@ -111,7 +113,8 @@ export class OpenAICompatProvider implements Provider {
       default:
         stopReason = (choice.message.tool_calls?.length ?? 0) > 0 ? "tool_use" : "other";
     }
-    return { content, stopReason };
+    const usage = usageFromOpenAI(data.usage);
+    return { content, stopReason, ...(usage ? { usage } : {}) };
   }
 }
 
@@ -184,4 +187,20 @@ export function toOAIMessages(m: ChatMessage): OAIMessage[] {
     });
   }
   return out;
+}
+
+/** OpenAI-style `usage` → TokenUsage. `prompt_tokens_details.cached_tokens` is
+ *  the cache-read count where the server reports one. Undefined unless both
+ *  core counts are numbers. */
+export function usageFromOpenAI(u: unknown): TokenUsage | undefined {
+  if (typeof u !== "object" || u === null) return undefined;
+  const o = u as Record<string, unknown>;
+  if (typeof o.prompt_tokens !== "number" || typeof o.completion_tokens !== "number") return undefined;
+  const usage: TokenUsage = { inputTokens: o.prompt_tokens, outputTokens: o.completion_tokens };
+  const details = o.prompt_tokens_details;
+  if (typeof details === "object" && details !== null) {
+    const cached = (details as Record<string, unknown>).cached_tokens;
+    if (typeof cached === "number") usage.cacheReadTokens = cached;
+  }
+  return usage;
 }

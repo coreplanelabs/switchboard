@@ -228,6 +228,7 @@ export function renderRunPage(id: string, token: string): string {
   .failed pre.out { color: #f0d0cd; }
   .none { padding: .4rem .75rem; color: var(--dim); font-style: italic; font-size: .8rem; }
   /* Bookkeeping (update_status): one muted line, no card. */
+  #log > li.turn { display: flex; gap: .75rem; align-items: baseline; padding: .5rem 2rem .1rem .75rem; margin-top: .6rem; color: var(--dim); font-size: .8rem; }
   .quiet { display: flex; gap: .75rem; align-items: baseline; padding: .2rem .75rem; color: var(--dim); font-size: .8rem; }
   /* Runner notices (wrap-up, budget, stop). */
   li.note { display: flex; gap: .75rem; align-items: baseline; padding: .4rem .75rem; margin-top: 1rem; border-radius: 6px;
@@ -470,6 +471,18 @@ ${LOCAL_ISO_SCRIPT}
     if (opensByDefault(call)) n.details.open = true;
     return n.details;
   }
+  // A model turn (item 15): one muted line, "💭 Thought for 5m 04s" plus the
+  // token facts, above the step that turn produced.
+  function addTurn(change) {
+    var li = el("li", "turn");
+    li.appendChild(stamp(change.at));
+    li.appendChild(el("span", "", "\ud83d\udcad " + change.label));
+    var facts = el("span", "facts");
+    for (var i = 0; i < change.facts.length; i++) facts.appendChild(el("span", "fact", change.facts[i]));
+    li.appendChild(facts);
+    log.insertBefore(li, tail);
+    return li;
+  }
   function addNote(change) {
     var li = el("li", "note");
     li.appendChild(stamp(change.at));
@@ -519,6 +532,8 @@ ${LOCAL_ISO_SCRIPT}
       follow(addCall(change.step, change.call), wasAtTail);
     } else if (change.kind === "result") {
       follow(settleCall(change.step, change.call), wasAtTail);
+    } else if (change.kind === "turn") {
+      follow(addTurn(change), wasAtTail);
     } else if (change.kind === "note") {
       follow(addNote(change), wasAtTail);
       if ((change.noteKind === "stop_requested" || change.noteKind === "stopped") && change.mode) markStopping(change.mode);

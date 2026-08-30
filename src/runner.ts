@@ -74,7 +74,9 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   // attribute wall time; lifecycle notices go out BOTH as free-text progress
   // (the card/log) and as a typed `run_note` event (the stream).
   const now = opts.now ?? Date.now;
-  const emit = (event: RunEvent) => opts.onEvent?.({ ...event, at: now() });
+  // An event that already carries `at` keeps it (the `turn` event stamps its own
+  // end time so `at - startedAt === durationMs` holds exactly).
+  const emit = (event: RunEvent) => opts.onEvent?.(event.at === undefined ? { ...event, at: now() } : event);
   const note = (kind: RunNoteKind, summary: string, mode?: StopMode) => {
     opts.onProgress?.(summary);
     emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
@@ -142,11 +144,26 @@ async function runLoop(
   // A provider call under the hard signal, optionally joined with a deadline
   // (the finale's timeout). A hard stop always unwinds as HardStopError; a
   // deadline that fires first is a FinaleTimeoutError the finale caller handles.
-  const complete: Complete = (req, deadline) => {
+  // Every provider call is one model `turn` on the stream (live-view item 15):
+  // timed here, emitted the moment the provider returns and before anything the
+  // completion produced is emitted. A call that throws (hard stop, finale
+  // deadline, provider error) is not a turn — nothing was produced.
+  const complete: Complete = async (req, deadline) => {
     const signal = hardSignal && deadline ? AbortSignal.any([hardSignal, deadline]) : (hardSignal ?? deadline);
-    return raceSignal(opts.provider.complete(signal ? { ...req, signal } : req), signal, () =>
+    const startedAt = now();
+    const result = await raceSignal(opts.provider.complete(signal ? { ...req, signal } : req), signal, () =>
       hardSignal?.aborted ? new HardStopError() : new FinaleTimeoutError(),
     );
+    const at = now();
+    emit({
+      type: "turn",
+      startedAt,
+      durationMs: at - startedAt,
+      stopReason: result.stopReason,
+      ...(result.usage ? { usage: result.usage } : {}),
+      at,
+    });
+    return result;
   };
 
   // The wall clock is the real budget; turns are a backstop. At the deadline

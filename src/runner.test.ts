@@ -387,7 +387,7 @@ describe("run-visibility events", () => {
       toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
     });
-    expect(events).toEqual([
+    expect(events.filter((e) => e.type !== "turn")).toEqual([
       { type: "tool_call", tool: "bash", summary: expect.stringContaining("echo hi"), callId: "t1", at: expect.any(Number) },
       { type: "tool_result", tool: "bash", ok: true, summary: expect.stringContaining("ok"), callId: "t1", exitCode: 0, output: "ok", at: expect.any(Number) },
     ]);
@@ -436,8 +436,9 @@ describe("run-visibility events", () => {
       toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
     });
-    expect(events[0]).toMatchObject({ type: "tool_call", callId: "toolu_1" });
-    expect(events[1]).toMatchObject({ type: "tool_result", callId: "toolu_1" });
+    const tools = events.filter((e) => e.type !== "turn");
+    expect(tools[0]).toMatchObject({ type: "tool_call", callId: "toolu_1" });
+    expect(tools[1]).toMatchObject({ type: "tool_result", callId: "toolu_1" });
   });
 
   it("carries the bash exit code and marks a nonzero exit as ok:false (the executor's `exit N:` prefix)", async () => {
@@ -513,7 +514,7 @@ describe("run-visibility events", () => {
       toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
     });
-    expect(events[0]).toMatchObject({ type: "tool_call", tool: "use_skill", summary: "use_skill code-review-and-quality" });
+    expect(events.find((e) => e.type === "tool_call")).toMatchObject({ type: "tool_call", tool: "use_skill", summary: "use_skill code-review-and-quality" });
   });
 
   it("redacts a secret in a long bash command before capping (no fragment leak)", async () => {
@@ -563,8 +564,9 @@ describe("assistant text turns in the event stream", () => {
       toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
     });
-    expect(events.map((e) => e.type)).toEqual(["assistant", "tool_call", "tool_result"]);
-    expect(events[0]).toEqual({ type: "assistant", text: "Let me check the file.", at: expect.any(Number) });
+    const seen = events.filter((e) => e.type !== "turn");
+    expect(seen.map((e) => e.type)).toEqual(["assistant", "tool_call", "tool_result"]);
+    expect(seen[0]).toEqual({ type: "assistant", text: "Let me check the file.", at: expect.any(Number) });
   });
 
   it("does NOT emit `assistant` for a tool_use turn with no text, nor for the final text-only answer", async () => {
@@ -577,7 +579,7 @@ describe("assistant text turns in the event stream", () => {
       toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
     });
-    expect(events.map((e) => e.type)).toEqual(["tool_call", "tool_result"]);
+    expect(events.filter((e) => e.type !== "turn").map((e) => e.type)).toEqual(["tool_call", "tool_result"]);
   });
 
   it("redacts secrets in assistant text but does not cap it", async () => {
@@ -670,7 +672,8 @@ describe("run-friction signals in the event stream (#84)", () => {
       onEvent: (e) => events.push(e),
       now: () => t,
     });
-    expect(events.map((e) => e.at)).toEqual([1000, 1500]);
+    // turn (model call, instant here) · tool_call · tool_result · final turn
+    expect(events.map((e) => [e.type, e.at])).toEqual([["turn", 1000], ["tool_call", 1000], ["tool_result", 1500], ["turn", 1500]]);
   });
 
   it("marks an ExecInfraError result with infra:true; an ordinary tool error is NOT marked", async () => {
@@ -998,5 +1001,73 @@ describe("run control: soft / hard stop (#101)", () => {
     });
     expect(answer).toBe("all done");
     expect(provider.requests[0].signal).toBeUndefined();
+  });
+});
+
+describe("model turn events (features/live-view.md item 15)", () => {
+  const withUsage = (r: CompletionResult, usage: CompletionResult["usage"]): CompletionResult => ({ ...r, usage });
+
+  it("emits one `turn` per model call, BEFORE the events that turn produced, timed by the runner clock", async () => {
+    const events: RunEvent[] = [];
+    let t = 1_000;
+    const provider = scripted([bashUse("t1"), text("done")]);
+    const slow: Provider = { name: "slow", complete: async (req) => { t += 5_000; return provider.complete(req); } };
+    await runAgent({
+      provider: slow,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+      now: () => t,
+    });
+    expect(events.map((e) => e.type)).toEqual(["turn", "tool_call", "tool_result", "turn"]);
+    expect(events[0]).toEqual({ type: "turn", startedAt: 1_000, durationMs: 5_000, stopReason: "tool_use", at: 6_000 });
+    // the final text-only completion is a turn too (its output is the `answer`, published by the dispatcher)
+    expect(events[3]).toMatchObject({ type: "turn", stopReason: "end_turn", durationMs: 5_000 });
+  });
+
+  it("carries the provider's token usage when it reports one, and omits the field when it does not", async () => {
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([withUsage(bashUse("t1"), { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 }), text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    const turns = events.filter((e) => e.type === "turn");
+    expect(turns[0]).toMatchObject({ usage: { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 } });
+    expect(turns[1]).not.toHaveProperty("usage");
+  });
+
+  it("a `turn` precedes the assistant narration it produced", async () => {
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([
+        { content: [{ type: "text", text: "Looking." }, { type: "tool_use", id: "t1", name: "bash", input: { command: "ls" } }], stopReason: "tool_use" },
+        text("done"),
+      ]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    expect(events.map((e) => e.type)).toEqual(["turn", "assistant", "tool_call", "tool_result", "turn"]);
+  });
+
+  it("a refusal is still a turn (stopReason refusal)", async () => {
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([text("no", "refusal")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+    });
+    expect(events).toEqual([expect.objectContaining({ type: "turn", stopReason: "refusal" })]);
   });
 });
