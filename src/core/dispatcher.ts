@@ -370,6 +370,31 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // the branch moved between resolution and attach (item 12).
     let repoCtx: RepoContext = await repoCtxP;
 
+    // Not-onboarded gate (#316): the thread has no repo, and the only reason
+    // is that its bare `owner/name` slug was refused by the resident registry
+    // (item 29's probe). A repo-needing agent would otherwise start with an
+    // EMPTY workspace and report `fatal: not a git repository` (live
+    // 2026-08-30, `coreplanelabs/try-catch`) — say why instead, before any
+    // attach or model turn. A thread that already has a repo never reaches
+    // here with `rejectedRepo` (prose slugs there are never probed — #289), so
+    // the silence that fix bought is untouched.
+    if (needsRepo && !repoCtx.repo && repoCtx.rejectedRepo) {
+      const slug = repoCtx.rejectedRepo;
+      console.log(`[dispatch] ${msg.threadKey} not started: repo not onboarded (${slug})`);
+      await card.done({ title: `📦 ${label} · not started (repo not onboarded)` });
+      // `repo onboard` is admin-gated (canManageRepos, fail-closed): only tell
+      // someone to run it if they can; everyone else is pointed at who can.
+      const onboardHint = deps.config.canManageRepos(msg.userId)
+        ? `Onboard it (\`repo onboard ${slug}\`)`
+        : `Ask ${deps.config.adminsHint()} to onboard it (\`repo onboard ${slug}\`)`;
+      await io.reply(
+        `📦 \`${slug}\` is not onboarded as a resident, so I did not start a *${agent.name}* run for it. ` +
+          `${onboardHint} for a warm, deps-ready environment, or name the repository by URL ` +
+          `(https://github.com/${slug}) to run in a cold per-thread sandbox.`,
+      );
+      return;
+    }
+
     // Per-repo access gate (KD7): open when permissions.repos is absent or
     // the repo is unlisted; a configured allowlist refuses BY NAME — a
     // refused user must see why, never get a silent per-thread fallback.
