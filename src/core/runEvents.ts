@@ -178,8 +178,12 @@ const SUMMARY_CAP = 200;
 /** One-line, control-stripped, redacted, length-capped summary of a tool's output for the run
  *  stream — the first non-empty line plus a size note. */
 export function summarizeToolResult(output: string): string {
-  const redacted = redactSecrets(stripAnsi(output));
-  const trimmed = redacted.trim();
+  return summarizeClean(redactSecrets(stripAnsi(output)));
+}
+
+/** `summarizeToolResult` for text that is ALREADY control-stripped and redacted. */
+function summarizeClean(clean: string): string {
+  const trimmed = clean.trim();
   if (trimmed === "") return "(no output)";
   const firstLine = trimmed.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
   const head = firstLine.length > SUMMARY_CAP ? `${firstLine.slice(0, SUMMARY_CAP)}…` : firstLine;
@@ -208,9 +212,24 @@ export const TOOL_OUTPUT_CAP = 8_000;
 /** The full tool output as it may leave the process: control-stripped, then
  *  redacted, then capped (that order — see redactAndCap). Empty output → "". */
 export function prepareToolOutput(output: string): string {
-  const text = redactSecrets(stripAnsi(output)).trim();
+  return capClean(redactSecrets(stripAnsi(output)));
+}
+
+/** `prepareToolOutput` for text that is ALREADY control-stripped and redacted. */
+function capClean(clean: string): string {
+  const text = clean.trim();
   if (text.length <= TOOL_OUTPUT_CAP) return text;
   return `${text.slice(0, TOOL_OUTPUT_CAP)}…[${text.length - TOOL_OUTPUT_CAP} more chars]`;
+}
+
+/** Both `tool_result` display fields from ONE strip+redact pass. The redaction
+ *  battery is ~20 regexes over up to 120k chars of raw tool output; paying it
+ *  once per result instead of twice (summary, then output) halves the
+ *  synchronous CPU the runner spends per tool call. Byte-identical to calling
+ *  `summarizeToolResult` and `prepareToolOutput` separately. */
+export function prepareToolResult(output: string): { summary: string; output: string } {
+  const clean = redactSecrets(stripAnsi(output));
+  return { summary: summarizeClean(clean), output: capClean(clean) };
 }
 
 /** `5m 04s` / `1.3s` / `800ms` — the one duration format every surface that

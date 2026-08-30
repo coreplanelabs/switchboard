@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TOOL_OUTPUT_CAP, parseExitPrefix, prepareToolOutput, redactAndCap, redactSecrets, summarizeToolResult } from "./runEvents.js";
+import { TOOL_OUTPUT_CAP, parseExitPrefix, prepareToolOutput, prepareToolResult, redactAndCap, redactSecrets, summarizeToolResult } from "./runEvents.js";
 
 // Feature: features/run-visibility.md — the run-event stream and its redaction.
 
@@ -172,5 +172,15 @@ describe("prepareToolOutput", () => {
   it("returns an empty string for empty/whitespace output", () => {
     expect(prepareToolOutput("")).toBe("");
     expect(prepareToolOutput("  \n ")).toBe("");
+  });
+});
+
+describe("prepareToolResult", () => {
+  it("equals summarizeToolResult + prepareToolOutput, from one redaction pass", () => {
+    const raw = "\x1b[32mok\x1b[0m token=abcd1234efgh\n" + "x".repeat(TOOL_OUTPUT_CAP + 1000) + "\nAuthorization: Bearer abcdefghijklmnop";
+    expect(prepareToolResult(raw)).toEqual({ summary: summarizeToolResult(raw), output: prepareToolOutput(raw) });
+    expect(prepareToolResult(raw).summary).toContain("«redacted»");
+    expect(prepareToolResult(raw).output).not.toContain("abcd1234efgh");
+    expect(prepareToolResult("")).toEqual({ summary: "(no output)", output: "" });
   });
 });

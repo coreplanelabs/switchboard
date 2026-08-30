@@ -24,24 +24,8 @@ export class AnthropicProvider implements Provider {
     // Stream to avoid HTTP timeouts on large max_tokens; collect the final message.
     // effort is supported on Opus 4.5+/Sonnet 4.6+/Fable; it 400s on Haiku —
     // apply only where safe, since per-request model overrides can be anything.
-    const effortSupported = req.effort && !/haiku|claude-3|claude-2/.test(req.model);
     const stream = this.client.messages.stream(
-      {
-        model: req.model,
-        max_tokens: req.maxTokens,
-        system: req.system,
-        messages: req.messages.map(toAnthropicMessage),
-        ...(effortSupported ? { output_config: { effort: req.effort } } : {}),
-        ...(req.tools && req.tools.length > 0
-          ? {
-              tools: req.tools.map((t) => ({
-                name: t.name,
-                description: t.description,
-                input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
-              })),
-            }
-          : {}),
-      },
+      buildAnthropicParams(req),
       // A hard run stop (#101) aborts the stream mid-flight instead of letting
       // it run to completion in the background.
       req.signal ? { signal: req.signal } : undefined,
@@ -80,6 +64,56 @@ export class AnthropicProvider implements Provider {
     const usage = usageFromAnthropic(msg.usage);
     return { content, stopReason, ...(usage ? { usage } : {}) };
   }
+}
+
+const EPHEMERAL: Anthropic.CacheControlEphemeral = { type: "ephemeral" };
+
+/**
+ * The Messages API request for one completion — pure, so the prompt-cache
+ * layout is unit-testable. Two cache breakpoints:
+ *
+ * 1. The static prefix — tools (last tool) and the system prompt (one text
+ *    block) — identical on every turn of a run, so from the second call on it
+ *    is a cache READ (~10% of input price, and faster time-to-first-token).
+ * 2. TWO rolling breakpoints: the LAST block of the LAST message and of the
+ *    message before it. The agent loop only ever appends, so turn N's whole
+ *    conversation is a prefix of turn N+1's, and the API finds a cache entry
+ *    by looking back from each breakpoint over a bounded number of blocks —
+ *    with a single breakpoint, a turn that appends more blocks than that
+ *    window (a 16-read batch = 16 tool_results + the assistant blocks) misses
+ *    the previous turn's entry and re-bills the prefix once; the second
+ *    breakpoint sits exactly where the previous turn's did, so the lookup
+ *    always lands. Four breakpoints is the API's ceiling: 2 static + 2 rolling.
+ *    Without any of this a 20-turn coding run re-bills every earlier turn's
+ *    tool output in full, 20 times over.
+ *
+ * `effort` is supported on Opus 4.5+/Sonnet 4.6+/Fable; it 400s on Haiku —
+ * applied only where safe, since per-request model overrides can be anything.
+ */
+export function buildAnthropicParams(req: CompletionRequest): Anthropic.MessageCreateParamsStreaming {
+  const effortSupported = req.effort && !/haiku|claude-3|claude-2/.test(req.model);
+  const messages = req.messages.map(toAnthropicMessage);
+  for (const m of [messages.at(-1), messages.at(-2)]) {
+    const content = m?.content;
+    if (!Array.isArray(content) || content.length === 0) continue;
+    const block = content[content.length - 1];
+    content[content.length - 1] = { ...block, cache_control: EPHEMERAL } as typeof block;
+  }
+  const tools = (req.tools ?? []).map((t, i, all) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
+    ...(i === all.length - 1 ? { cache_control: EPHEMERAL } : {}),
+  }));
+  return {
+    model: req.model,
+    max_tokens: req.maxTokens,
+    stream: true,
+    ...(req.system ? { system: [{ type: "text", text: req.system, cache_control: EPHEMERAL }] } : {}),
+    messages,
+    ...(effortSupported ? { output_config: { effort: req.effort } } : {}),
+    ...(tools.length > 0 ? { tools } : {}),
+  } as Anthropic.MessageCreateParamsStreaming;
 }
 
 /** Exported for tests. */
