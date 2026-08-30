@@ -1,0 +1,47 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+@theme static {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/*
+ * One token set for every page (replaces the four divergent CSS blobs of the
+ * string-rendered frontend). Dark is the product's canonical look; light
+ * values exist so a future color-mode toggle is a class flip, not a redesign.
+ */
+:root {
+  --ui-bg: #f5f7fa;
+  --ui-bg-muted: #eef1f5;
+  --ui-bg-elevated: #ffffff;
+  --ui-bg-accented: #e8ecf2;
+  --ui-border: #dbe1ea;
+  --ui-border-muted: #e8ecf2;
+  --ui-border-accented: #cdd5e0;
+  --ui-text: #141a22;
+  --ui-text-muted: #4f5966;
+  --ui-text-dimmed: #7b8593;
+  --ui-text-highlighted: #0a0e13;
+}
+
+.dark {
+  --ui-bg: #0b0d12;
+  --ui-bg-muted: #0f1218;
+  --ui-bg-elevated: #12151c;
+  --ui-bg-accented: #181d27;
+  --ui-border: #232836;
+  --ui-border-muted: #1b1f28;
+  --ui-border-accented: #3b4252;
+  --ui-text: #e6e6e6;
+  --ui-text-muted: #8b93a7;
+  --ui-text-dimmed: #5f677a;
+  --ui-text-highlighted: #ffffff;
+}
+
+@layer base {
+  body {
+    @apply bg-default text-default font-mono text-[13px] leading-normal antialiased;
+  }
+}
