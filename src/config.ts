@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { EFFORT_LEVELS_HINT, isEffort, type Effort } from "./effort.js";
 import YAML from "yaml";
 import type { ProviderConfig } from "./providers/types.js";
 import type { MemoryConfig } from "./core/memory/types.js";
@@ -21,6 +22,10 @@ export interface Scope {
   model?: string;
   /** Per-agent model overrides for this scope. */
   models?: Record<string, string>;
+  /** Force a model effort regardless of agent (same shape as `model`). */
+  effort?: Effort;
+  /** Per-agent effort overrides for this scope (same shape as `models`). */
+  efforts?: Record<string, Effort>;
   /**
    * Free-text custom instructions folded into the system prompt as ADVISORY
    * content only (#107 phase 2). Channel text applies to every run in the
@@ -67,6 +72,9 @@ export interface AppConfig {
     agent: string;
     /** default model per agent, e.g. { general: "anthropic/claude-opus-5" } */
     models: Record<string, string>;
+    /** default effort per agent, e.g. { coding: "medium" }; unset → the agent
+     *  definition's effort, else the provider's default */
+    efforts?: Record<string, Effort>;
     maxTokens?: number;
   };
   channels?: Record<string, Scope>;
@@ -139,6 +147,9 @@ export interface Overrides {
 export interface ResolvedRequest {
   agentName: string;
   modelRef: string; // provider/model
+  /** Resolved through the config layers only; undefined = no layer set it (the
+   *  agent definition, then the provider default, decide downstream). */
+  effort?: Effort;
 }
 
 export class ConfigStore {
@@ -160,6 +171,7 @@ export class ConfigStore {
     // The chat command enforces the cap on write; a hand-edited overrides.json
     // is the one way around it, so hold it to the same bound at load.
     validateInstructions(this.overrides, `overrides (${this.overridesPath})`);
+    validateScopeEfforts(this.overrides, `overrides (${this.overridesPath})`);
   }
 
   private channelScope(channelId: string): Scope {
@@ -180,15 +192,16 @@ export class ConfigStore {
   }
 
   /**
-   * Resolve which agent and model serve a request.
-   * Agent: request directive > user scope > channel scope > default.
-   * Model: request directive > (user > channel) forced model
-   *        > (user > channel > defaults) per-agent model.
+   * Resolve which agent, model, and effort serve a request.
+   * Agent:  request directive > user scope > channel scope > default.
+   * Model:  request directive > (user > channel) forced model
+   *         > (user > channel > defaults) per-agent model.
+   * Effort: the same ladder as model; unset at every layer → undefined.
    */
   resolve(opts: {
     channelId: string;
     userId: string;
-    request: { agent?: string; model?: string };
+    request: { agent?: string; model?: string; effort?: Effort };
   }): ResolvedRequest {
     const ch = this.channelScope(opts.channelId);
     const us = this.userScope(opts.userId);
@@ -210,7 +223,16 @@ export class ConfigStore {
         `No model configured for agent "${agentName}" — set defaults.models.${agentName} in config.yaml`,
       );
     }
-    return { agentName, modelRef };
+
+    const effort =
+      opts.request.effort ??
+      us.effort ??
+      ch.effort ??
+      us.efforts?.[agentName] ??
+      ch.efforts?.[agentName] ??
+      this.config.defaults.efforts?.[agentName];
+
+    return { agentName, modelRef, ...(effort !== undefined ? { effort } : {}) };
   }
 
   // ---- permissions ---------------------------------------------------------
@@ -294,9 +316,14 @@ export class ConfigStore {
 
   describe(channelId: string, userId: string): string {
     const resolved = this.resolve({ channelId, userId, request: {} });
+    const effective = `agent \`${resolved.agentName}\`, model \`${resolved.modelRef}\`${resolved.effort ? `, effort \`${resolved.effort}\`` : ""}`;
+    const defaultEfforts = this.config.defaults.efforts;
+    const defaults =
+      `agent \`${this.config.defaults.agent}\`, models ${fmtModels(this.config.defaults.models)}` +
+      (defaultEfforts && Object.keys(defaultEfforts).length > 0 ? `, efforts ${fmtModels(defaultEfforts)}` : "");
     const lines = [
-      `*Effective for you in this channel:* agent \`${resolved.agentName}\`, model \`${resolved.modelRef}\``,
-      `*Defaults:* agent \`${this.config.defaults.agent}\`, models ${fmtModels(this.config.defaults.models)}`,
+      `*Effective for you in this channel:* ${effective}`,
+      `*Defaults:* ${defaults}`,
       `*Channel scope:* ${fmtScope(this.channelScope(channelId))}`,
       `*Your scope:* ${fmtScope(this.userScope(userId))}`,
     ];
@@ -345,7 +372,30 @@ function fmtScope(s: Scope): string {
   if (s.agent) parts.push(`agent \`${s.agent}\``);
   if (s.model) parts.push(`model \`${s.model}\``);
   if (s.models && Object.keys(s.models).length > 0) parts.push(`models ${fmtModels(s.models)}`);
+  if (s.effort) parts.push(`effort \`${s.effort}\``);
+  if (s.efforts && Object.keys(s.efforts).length > 0) parts.push(`efforts ${fmtModels(s.efforts)}`);
   return parts.length > 0 ? parts.join(", ") : "_none_";
+}
+
+/** Reject an effort value outside EFFORT_LEVELS wherever config can carry one
+ *  (static scopes, `defaults.efforts`, a hand-edited overrides.json). The chat
+ *  command validates on write; this holds the files to the same rule at load. */
+function validateScopeEfforts(
+  layer: { channels?: Record<string, Scope>; users?: Record<string, Scope>; defaults?: { efforts?: Record<string, unknown> } },
+  source: string,
+): void {
+  const check = (path: string, value: unknown) => {
+    if (value !== undefined && !isEffort(value)) {
+      throw new Error(`${source}: ${path} is "${String(value)}" — valid efforts: ${EFFORT_LEVELS_HINT}`);
+    }
+  };
+  for (const [agent, value] of Object.entries(layer.defaults?.efforts ?? {})) check(`defaults.efforts.${agent}`, value);
+  for (const [kind, scopes] of [["channels", layer.channels], ["users", layer.users]] as const) {
+    for (const [id, scope] of Object.entries(scopes ?? {})) {
+      check(`${kind}.${id}.effort`, scope.effort);
+      for (const [agent, value] of Object.entries(scope.efforts ?? {})) check(`${kind}.${id}.efforts.${agent}`, value);
+    }
+  }
 }
 
 function fmtModels(m: Record<string, string>): string {
@@ -355,6 +405,7 @@ function fmtModels(m: Record<string, string>): string {
 }
 
 function validateConfig(cfg: AppConfig): void {
+  validateScopeEfforts(cfg, "config.yaml");
   if (!cfg.providers || Object.keys(cfg.providers).length === 0) {
     throw new Error("config.yaml must define at least one provider");
   }

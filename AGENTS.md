@@ -10,7 +10,7 @@ Agent gateway: messages arrive over a channel, get routed to an agent, which run
 4. **IDs are platform-namespaced**: `slack:C0123` (channel scope), `slack:U0123` (user scope), `slack:C0123:<ts>` (thread key). Config scopes and permissions key on these. New adapters must namespace with their own prefix.
 5. **Tools never touch the host directly** — they call `ctx.executor`. `LocalExecutor` is the only place local process/fs access is allowed for tool execution. Resident environments keep this invariant by being remote: `ResidentExecutor` speaks HTTPS to the resident Worker, and even the dispatcher's repo/PR resolution uses the GitHub REST API — never a `gh` shell-out from the bot process.
 6. **State must survive restarts**: conversation context rebuilds from channel history; workspaces/sandboxes are recreatable (repos re-clone). Never introduce in-memory state a restart would lose silently.
-7. **Model refs are `<provider>/<model>` strings** resolved through config layers (request directive > user > channel > defaults). Never hardcode a model in an agent or the core.
+7. **Model refs are `<provider>/<model>` strings** resolved through config layers (request directive > thread > user > channel > defaults). Never hardcode a model in an agent or the core. **Effort (`low | medium | high`, `src/effort.ts`) rides the same layers** (`effort:` directive, `effort` / `efforts.<agent>` per scope, `defaults.efforts`); an agent definition's `effort` is only the floor under them, never the setting.
 
 ## Map
 
