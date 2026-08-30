@@ -35,6 +35,16 @@ describe("build identity on /healthz", () => {
   });
 });
 
+// Feature: features/slack-channel.md item 8 — `deploy restart` restarts the
+// container without a build, so `build.commit` is unchanged; `startedAt`
+// (process start, ISO) is how its live gate tells the new instance from the old.
+describe("startedAt on /healthz", () => {
+  it("is the process start as ISO when given, and absent otherwise", () => {
+    expect(healthPayload({ inFlight: 0, draining: false, startedAt: Date.UTC(2026, 7, 30, 10, 0, 41) }).startedAt).toBe("2026-08-30T10:00:41.000Z");
+    expect(healthPayload({ inFlight: 0, draining: false })).not.toHaveProperty("startedAt");
+  });
+});
+
 // Feature: features/slack-channel.md item 8 — `GET /healthz` is the bot deploy
 // preflight's source of truth (deploy/cloudflare/preflight.mjs): it must say
 // how many runs are in flight and whether a drain is already under way; and

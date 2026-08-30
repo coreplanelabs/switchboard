@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { AGENTS } from "../agents/registry.js";
 import { bootstrapOnHost } from "../agentEnv/host.js";
 import type { ConfigStore } from "../config.js";
-import { hasNodeModules, runDeployPlan } from "../deploy/run.js";
+import { hasNodeModules, runBotRestart, runDeployPlan } from "../deploy/run.js";
 import { LocalOperations } from "../execution/executor.js";
 import { localWorkspaceDir } from "../execution/factory.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -146,10 +146,10 @@ export function buildCoreCommands(config: Provided<ConfigStore>, store: Provided
     schedule: { schedules: SCHEDULES, store: wiring.scheduleStore, now: wiring.now ?? Date.now },
     deploy: {
       run: (plan) => runDeployPlan(plan, { log: (l) => console.log(l), warn: (l) => console.error(l), stream: (c) => process.stdout.write(c) }),
+      restart: (plan) => runBotRestart(plan, { log: (l) => console.log(l), warn: (l) => console.error(l) }),
       checkout: { hasNodeModules },
     },
     env: { bootstrap: bootstrapOnHost },
   };
   return bindCommands(registry, deps);
 }
-

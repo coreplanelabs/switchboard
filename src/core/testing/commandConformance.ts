@@ -436,6 +436,7 @@ export const COMMAND_FIXTURES: Readonly<Record<string, { hints?: SampleHints; ba
   "config.instructions": { baseline: { channel: FIXTURE.channel }, why: "as config.show" },
   "repo.reconfigure": { baseline: { ref: "main" }, why: "at least one change is required (a bare `repo reconfigure <slug>` is `nothing to reconfigure`)" },
   "memory.forget": { hints: { id: FIXTURE.ownMemoryRecord }, why: "the record must exist in the CALLER's own scope — the generic `id` hint is a run id" },
+  "deploy.restart": { hints: { only: "bot" }, why: "`--only` is an enum of the one restartable Worker (`bot`) — the generic `only` hint (`memory`) is a deploy target" },
 };
 
 /** The suite's variants for one command: `exhaustiveVariants` over the shared

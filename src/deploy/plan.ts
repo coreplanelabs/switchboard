@@ -60,7 +60,7 @@ export const WORKERS: readonly WorkerDef[] = [
     dir: "deploy/cloudflare",
     preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: BOT_HEALTH_URL },
     liveGate: { healthUrl: BOT_HEALTH_URL },
-    why: "container shim — preflight refuses while runs are in flight; done only when the new container is live. Also the only way a rotated bot secret goes live: `wrangler secret put` alone leaves the running container on its old env",
+    why: "container shim — preflight refuses while runs are in flight; done only when the new container is live. A rotated bot secret needs no build: `wrangler secret put` alone leaves the running container on its old env — `deploy restart` restarts it on the current env",
   },
   {
     name: "resident",

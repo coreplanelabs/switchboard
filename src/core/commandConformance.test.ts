@@ -12,7 +12,8 @@ import { ConfigStore } from "../config.js";
 import { createCommandHttpHandler } from "../channels/commandHttp.js";
 import { handleMcpRequest } from "../channels/mcp.js";
 import type { DeployPlan } from "../deploy/plan.js";
-import type { DeployRunResult } from "../deploy/run.js";
+import type { RestartPlan } from "../deploy/restart.js";
+import type { DeployRunResult, RestartRunResult } from "../deploy/run.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { buildCoreCommands } from "./commandCatalogue.js";
 import { invokeChatCommand, parseChatCommand } from "./commandChat.js";
@@ -313,6 +314,8 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
     deploy: {
       run: async (plan: DeployPlan): Promise<DeployRunResult> =>
         exec(`deploy.run ${plan.steps.map((st) => st.name).join(",")}`, { kind: "ran", ok: true, results: plan.steps.map((st) => ({ name: st.name, script: st.script, versionId: "v1", live: "n/a", status: "deployed" })), notAttempted: [] }),
+      restart: async (plan: RestartPlan): Promise<RestartRunResult> =>
+        exec(`deploy.restart ${plan.target} force=${plan.force}`, { kind: "ran", ok: true, target: plan.target, previousStartedAt: "2026-08-30T10:00:00.000Z", startedAt: "2026-08-30T10:00:41.000Z", waitedMs: 41_000 }),
       // A probe of the checkout, not an executor: not recorded in `executed`.
       checkout: { hasNodeModules: () => true },
     },

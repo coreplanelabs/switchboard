@@ -17,6 +17,9 @@ import type { CatchUpStatus } from "./slackCatchUpStatus.js";
 // missing scopes (item 7, #271) — the only place those are visible without
 // container logs; the preflight WARNS on them but never refuses.
 //
+// `startedAt` (process start) is what `deploy restart`'s live gate compares:
+// a restart re-uses the image, so `build.commit` cannot tell old from new.
+//
 // The Worker's per-minute keep-alive and the post-deploy `wake` only check the
 // HTTP status, so the body shape is free to be JSON. Counts, timings, an error
 // string and scope names only — nothing here is sensitive, and the endpoint is
@@ -62,6 +65,9 @@ export interface HealthState {
   catchUp?: CatchUpStatus;
   /** The running build (`readBuildInfo`), when the entrypoint knows it. */
   build?: BuildInfo;
+  /** Epoch ms of the process start. `deploy restart` (no image build, same
+   *  `build.commit`) tells the restarted container from the old one by this. */
+  startedAt?: number;
 }
 
 export interface HealthPayload {
@@ -81,6 +87,8 @@ export interface HealthPayload {
    *  passes `readBuildInfo(...)`, so on the live `/healthz` it is unconditionally
    *  present (`commit: "unknown"` for an image built without `build.json`). */
   build?: BuildInfo;
+  /** ISO process start; present whenever `HealthState.startedAt` is given (always on the live `/healthz`). */
+  startedAt?: string;
 }
 
 export function healthPayload(state: HealthState): HealthPayload {
@@ -99,5 +107,6 @@ export function healthPayload(state: HealthState): HealthPayload {
     payload.catchUp = catchUp as CatchUpStatus;
   }
   if (state.build) payload.build = { commit: state.build.commit, ...(state.build.builtAt !== undefined ? { builtAt: state.build.builtAt } : {}) };
+  if (state.startedAt !== undefined) payload.startedAt = new Date(state.startedAt).toISOString();
   return payload;
 }

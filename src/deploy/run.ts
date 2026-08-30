@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { decideLive, heartbeatLine, LIVE_GATE_DEADLINE_MS, LIVE_GATE_POLL_MS, parseHealthz, type HealthzBody } from "./liveGate.js";
+import { decideLive, decideRestarted, heartbeatLine, LIVE_GATE_DEADLINE_MS, LIVE_GATE_POLL_MS, parseHealthz, type HealthzBody } from "./liveGate.js";
 import { classifyDeployOutput, type DeployPlan, type DeployStep } from "./plan.js";
+import { classifyRestartResponse, type RestartPlan } from "./restart.js";
 
 // The production deploy RUNNER behind the registry's `deploy all` (CLI only):
 // runs the four Workers' `npm run deploy` in the plan's canonical order
@@ -69,7 +70,7 @@ function run(cmd: string, args: string[], opts: { cwd: string; unset?: readonly 
   });
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 async function preChecks(plan: DeployPlan): Promise<string[]> {
   const problems: string[] = [];
@@ -223,4 +224,101 @@ export function formatDeployResults(results: readonly DeployStepResult[], notAtt
   for (const r of results) lines.push(`  ${r.name.padEnd(9)} ${r.script.padEnd(22)} ${(r.versionId ?? "-").padEnd(38)} ${r.live.padEnd(8)} ${r.status}`);
   if (notAttempted.length > 0) lines.push(`  not attempted: ${notAttempted.join(", ")}`);
   return lines.join("\n");
+}
+
+// ---- `deploy restart` (src/deploy/restart.ts is the pure half) -----------------------------------
+
+export type RestartRunResult =
+  /** Refused before anything was posted (no bearer in the env). */
+  | { kind: "refused"; problems: string[] }
+  /** The route was called. `ok` only when a non-draining container answered with a LATER `startedAt`. */
+  | { kind: "ran"; ok: boolean; target: string; previousStartedAt?: string; startedAt?: string; waitedMs: number; reason?: string };
+
+/** The runner's I/O, injectable so the loop is unit-tested without a network or a clock. */
+export interface RestartRunnerDeps {
+  env: Record<string, string | undefined>;
+  fetch: (url: string, init?: RequestInit) => Promise<Response>;
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+}
+
+export const defaultRestartRunnerDeps: RestartRunnerDeps = {
+  env: process.env,
+  fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(20_000) }),
+  sleep,
+  now: Date.now,
+};
+
+async function fetchHealthzWith(deps: RestartRunnerDeps, url: string): Promise<HealthzBody | undefined> {
+  try {
+    return parseHealthz(await (await deps.fetch(url)).text());
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Restart the bot container without a build: POST the Worker's `/admin/restart`
+ * (bearer from `plan.tokenEnv`); a 409 (runs in flight, or already draining)
+ * is waited out with a heartbeat and retried every `pollMs` up to `waitMaxMs`
+ * — never forced unless the plan says so; then poll `/healthz` until a
+ * non-draining container reports a `startedAt` later than the old one's
+ * (`decideRestarted`), logging every poll so the drain is visible.
+ */
+export async function runBotRestart(plan: RestartPlan, io: Pick<DeployRunnerIO, "log" | "warn">, deps: RestartRunnerDeps = defaultRestartRunnerDeps): Promise<RestartRunResult> {
+  const token = deps.env[plan.tokenEnv];
+  if (!token) return { kind: "refused", problems: [`${plan.tokenEnv} is not set in the environment — a SWITCHBOARD_INGRESS_TOKENS bearer whose identity carries deploy:write`] };
+  const tag = "deploy:restart";
+  const started = deps.now();
+  const deadline = started + plan.waitMaxMs;
+  if (plan.force) io.warn(`[${tag}] WARNING --force: the preflight is bypassed — in-flight runs on ${plan.target} WILL be killed`);
+
+  let previousStartedAt: string | undefined;
+  for (;;) {
+    io.log(`[${tag}] ▶ ${plan.target}: POST ${plan.adminUrl}${plan.force ? " (force)" : ""}`);
+    let status: number;
+    let text: string;
+    try {
+      const res = await deps.fetch(plan.adminUrl, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ force: plan.force }) });
+      status = res.status;
+      text = await res.text();
+    } catch (err) {
+      return { kind: "ran", ok: false, target: plan.target, waitedMs: deps.now() - started, reason: `POST ${plan.adminUrl} failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    const outcome = classifyRestartResponse(status, text);
+    if (outcome.kind === "stopping") {
+      previousStartedAt = outcome.previousStartedAt;
+      io.log(`[${tag}] ${plan.target}: SIGTERM sent (old container started ${previousStartedAt ?? "unknown"}) — waiting until a restarted container answers /healthz`);
+      break;
+    }
+    if (outcome.kind === "not-running") {
+      io.log(`[${tag}] ${plan.target}: container was not running — the next request starts it with the current env; checking /healthz`);
+      break;
+    }
+    if (outcome.kind === "refused" && !plan.force) {
+      const left = deadline - deps.now();
+      if (left <= 0) return { kind: "ran", ok: false, target: plan.target, waitedMs: deps.now() - started, reason: `still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to kill what is in flight` };
+      const body = await fetchHealthzWith(deps, plan.healthUrl);
+      io.log(heartbeatLine(plan.target, body, deps.now() - started, plan.waitMaxMs, tag));
+      io.log(`[${tag}] ${plan.target}: retrying in ${plan.pollMs / 1000}s (${Math.ceil(left / 60_000)} min left)`);
+      await deps.sleep(plan.pollMs);
+      continue;
+    }
+    return { kind: "ran", ok: false, target: plan.target, waitedMs: deps.now() - started, reason: outcome.reason };
+  }
+
+  const gateStarted = deps.now();
+  for (;;) {
+    const elapsed = deps.now() - gateStarted;
+    const d = decideRestarted(await fetchHealthzWith(deps, plan.healthUrl), previousStartedAt, elapsed, plan.liveDeadlineMs);
+    if (d.kind === "live") {
+      io.log(`[${tag}] ${plan.target}: restarted — startedAt ${d.startedAt} (was ${previousStartedAt ?? "unknown"}), live after ${Math.round(elapsed / 1000)}s`);
+      return { kind: "ran", ok: true, target: plan.target, previousStartedAt, startedAt: d.startedAt, waitedMs: deps.now() - started };
+    }
+    if (d.kind === "timeout") {
+      return { kind: "ran", ok: false, target: plan.target, previousStartedAt, waitedMs: deps.now() - started, reason: `${d.reason} — gave up after ${Math.round(elapsed / 60_000)} min (drain deadline ${plan.liveDeadlineMs / 60_000} min)` };
+    }
+    io.log(`[${tag}] ${plan.target}: not live yet — ${d.reason} (${Math.floor(elapsed / 60_000)}m ${Math.floor((elapsed % 60_000) / 1000)}s)`);
+    await deps.sleep(LIVE_GATE_POLL_MS);
+  }
 }

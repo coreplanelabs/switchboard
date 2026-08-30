@@ -229,6 +229,41 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     "args": [],
     "chatGate": "operator",
     "effect": "write",
+    "id": "deploy.restart",
+    "options": [
+      {
+        "name": "only",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "bot",
+        ],
+      },
+      {
+        "name": "force",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "waitMax",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "poll",
+        "required": false,
+        "type": "integer",
+      },
+    ],
+    "scope": "deploy:write",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "args": [],
+    "chatGate": "operator",
+    "effect": "write",
     "id": "env.bootstrap",
     "options": [
       {
