@@ -2616,25 +2616,36 @@ describe("live run-view wiring (Area 2)", () => {
 // Feature: features/agent-review.md item 13 — the review verdict reply carries
 // the run link at the projection layer only: never in the `answer` event or
 // the GitHub post body.
+const REVIEW_PR_HEAD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
+
+/** An executor at a checkout of the PR head, so the reviewed-head guard and
+ *  the reading-diff baseline both pass without touching the host. */
+function prHeadExecutor() {
+  const executor = {
+    exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${REVIEW_PR_HEAD}\n` : ""),
+    readFile: async () => "",
+    writeFile: async () => "",
+    release: async () => ({ released: true }),
+  };
+  vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
+}
+
+/** Review-run deps against a resolved PR with a benign post spy — the minimal
+ *  harness for tests that exercise the answer path of a review run. */
+function reviewRunDeps(provider: Provider) {
+  const deps = makeDeps(YAML_FIXTURE, provider);
+  deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: REVIEW_PR_HEAD });
+  prHeadExecutor();
+  deps.postReviewComment = vi.fn(async () => {});
+  deps.fetchPrHead = async () => REVIEW_PR_HEAD;
+  return deps;
+}
+
 describe("closed-card checklist and review verdict run link", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.mocked(makeExecutor).mockClear();
   });
-
-  const PR_HEAD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
-
-  /** An executor at a checkout of the PR head, so the reviewed-head guard and
-   *  the reading-diff baseline both pass without touching the host. */
-  function prHeadExecutor() {
-    const executor = {
-      exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${PR_HEAD}\n` : ""),
-      readFile: async () => "",
-      writeFile: async () => "",
-      release: async () => ({ released: true }),
-    };
-    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
-  }
 
   /** A review provider that walks its checklist through update_status turns
    *  (each entry = one checklist payload) and then answers. */
@@ -2655,17 +2666,8 @@ describe("closed-card checklist and review verdict run link", () => {
     };
   }
 
-  function reviewDeps(provider: Provider) {
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
-    prHeadExecutor();
-    deps.postReviewComment = vi.fn(async () => {});
-    deps.fetchPrHead = async () => PR_HEAD;
-    return deps;
-  }
-
   it("the ✅ close checks every checklist item off — ✱/○ become ✓, ✓ stays", async () => {
-    const deps = reviewDeps(checklistProvider(["○ Read the diff\n○ Run tests", "✓ Read the diff\n✱ Run tests"]));
+    const deps = reviewRunDeps(checklistProvider(["○ Read the diff\n○ Run tests", "✓ Read the diff\n✱ Run tests"]));
     const { io, statuses } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     const last = statuses[statuses.length - 1];
@@ -2674,7 +2676,7 @@ describe("closed-card checklist and review verdict run link", () => {
   });
 
   it("an empty update_status never erases the checklist — the closed card keeps the last real one", async () => {
-    const deps = reviewDeps(checklistProvider(["✱ Read the diff\n○ Run tests", "  "]));
+    const deps = reviewRunDeps(checklistProvider(["✱ Read the diff\n○ Run tests", "  "]));
     const { io, statuses } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     const last = statuses[statuses.length - 1];
@@ -2696,7 +2698,7 @@ describe("closed-card checklist and review verdict run link", () => {
         throw new Error("model exploded");
       },
     };
-    const deps = reviewDeps(provider);
+    const deps = reviewRunDeps(provider);
     const { io, statuses } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     const last = statuses[statuses.length - 1];
@@ -2715,7 +2717,7 @@ describe("closed-card checklist and review verdict run link", () => {
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
-    const deps = reviewDeps(capturingProvider());
+    const deps = reviewRunDeps(capturingProvider());
     deps.runRegistry = spy;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -2738,10 +2740,91 @@ describe("closed-card checklist and review verdict run link", () => {
   });
 
   it("a review with no PUBLIC_BASE_URL replies the bare answer (graceful degradation)", async () => {
-    const deps = reviewDeps(capturingProvider());
+    const deps = reviewRunDeps(capturingProvider());
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     expect(replies).toContain("answer");
+  });
+});
+
+// Feature: features/llm-output.md item 5 — the answer is canonicalized ONCE at
+// the typed-output boundary: the answer event, the channel reply, and the
+// GitHub post body all carry the canonical Markdown; the model's raw text
+// rides on the event only when normalization changed it (redacted, and dropped
+// when it would blow the per-event byte budget).
+describe("typed answer output (features/llm-output.md)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  function spyRegistry(events: RunEvent[]) {
+    return {
+      create: () => ({ id: "run-t", token: "tok-t", control: new RunControl() }),
+      publish: (_id: string, e: RunEvent) => void events.push(e),
+      finish: () => {},
+      has: () => true,
+      subscribe: () => () => {},
+      size: () => 1,
+    } as unknown as RunRegistry;
+  }
+
+  it("canonicalizes the answer for the event AND the reply, keeping the raw on the event", async () => {
+    const events: RunEvent[] = [];
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider("*Verdict: approve* — fine"));
+    deps.runRegistry = spyRegistry(events);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("hello there"), io);
+    expect(replies).toContain("**Verdict: approve** — fine");
+    const answer = events.find((e) => e.type === "answer");
+    if (answer?.type !== "answer") throw new Error("unreachable");
+    expect(answer.text).toBe("**Verdict: approve** — fine");
+    expect(answer.raw).toBe("*Verdict: approve* — fine");
+  });
+
+  it("omits `raw` when normalization changed nothing — the common case", async () => {
+    const events: RunEvent[] = [];
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider("plain **bold** answer"));
+    deps.runRegistry = spyRegistry(events);
+    await dispatch(deps, msg("hello there"), fakeIO().io);
+    const answer = events.find((e) => e.type === "answer");
+    if (answer?.type !== "answer") throw new Error("unreachable");
+    expect(answer.text).toBe("plain **bold** answer");
+    expect("raw" in answer).toBe(false);
+  });
+
+  it("redacts the raw like the text — a secret never survives on either copy", async () => {
+    const events: RunEvent[] = [];
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider("*token* is ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    deps.runRegistry = spyRegistry(events);
+    await dispatch(deps, msg("hello there"), fakeIO().io);
+    const answer = events.find((e) => e.type === "answer");
+    if (answer?.type !== "answer") throw new Error("unreachable");
+    expect(answer.text).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    expect(answer.raw).toBeDefined();
+    expect(answer.raw).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+  });
+
+  it("drops `raw` (keeping the canonical text) when it would blow the per-event byte budget", async () => {
+    const events: RunEvent[] = [];
+    const big = `*x* ${"a".repeat(70_000)}`; // canonical differs; event with raw would exceed MAX_EVENT_BYTES
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider(big));
+    deps.runRegistry = spyRegistry(events);
+    await dispatch(deps, msg("hello there"), fakeIO().io);
+    const answer = events.find((e) => e.type === "answer");
+    if (answer?.type !== "answer") throw new Error("unreachable");
+    expect(answer.text.startsWith("**x**")).toBe(true);
+    expect("raw" in answer).toBe(false);
+  });
+
+  it("posts the canonical answer to GitHub too — every projection reads one dialect", async () => {
+    const deps = reviewRunDeps(capturingProvider("*ok* — ship it"));
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    const posted = vi.mocked(deps.postReviewComment!).mock.calls.map((c) => c[1]);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toContain("**ok** — ship it");
+    expect(posted[0]).not.toContain("*ok* —");
   });
 });
 

@@ -1,6 +1,7 @@
+import { z } from "zod";
 import type { Provider } from "../../providers/types.js";
 import { redactSecrets } from "../runEvents.js";
-import { stripJsonFence } from "../structuredOutput.js";
+import { jsonOutput } from "../llmOutput/index.js";
 import type { HistoryItem } from "../types.js";
 import type { MemoryCandidate, MemoryRecord, MemoryStore } from "./types.js";
 import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
@@ -138,6 +139,13 @@ export type RoutedCandidate = MemoryCandidate & { audience: MemoryAudience };
 
 export type ParsedReflection = { ok: true; candidates: RoutedCandidate[] } | { ok: false; error: string };
 
+/** The reflection reply's envelope as a typed LLM output (features/llm-output.md
+ *  item 6): the JSON type owns the format (fence-strip, parse, shape); the
+ *  fact-level leniency below owns the meaning. */
+const REFLECTION_ENVELOPE = jsonOutput(z.object({ facts: z.array(z.unknown()), summary: z.unknown().optional() }), {
+  name: "reflection-envelope",
+});
+
 /** Validate + sanitize the extractor's reply into routed MemoryCandidates.
  *  Lenient on shape inside the object (bad facts are dropped, not fatal), strict
  *  on the envelope (non-JSON / non-object → error). Every text field is
@@ -148,17 +156,9 @@ export type ParsedReflection = { ok: true; candidates: RoutedCandidate[] } | { o
  *  repo-/channel-specific) knowledge has a summary that restates it, and
  *  routing that to org would leak it to everyone. */
 export function parseReflection(raw: string, prov: ReflectionProvenance, knownIds: Set<string>): ParsedReflection {
-  let value: unknown;
-  try {
-    value = JSON.parse(stripJsonFence(raw));
-  } catch (err) {
-    return { ok: false, error: `not valid JSON: ${err instanceof Error ? err.message : String(err)}` };
-  }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return { ok: false, error: "not an object" };
-  }
-  const obj = value as Record<string, unknown>;
-  if (!Array.isArray(obj.facts)) return { ok: false, error: "`facts` is not an array" };
+  const parsed = REFLECTION_ENVELOPE.parse(raw);
+  if (!parsed.ok) return { ok: false, error: parsed.failure.observed };
+  const obj = parsed.value;
 
   const candidates: RoutedCandidate[] = [];
   for (const f of obj.facts) {
