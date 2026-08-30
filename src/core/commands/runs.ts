@@ -71,7 +71,7 @@ const asJson = (v: unknown): JsonValue => v as JsonValue;
 export const runsList = defineCommand({
   id: "runs.list",
   options: z.object({
-    status: z.enum(["active", "finished", "all"]).describe("which runs: live, persisted, or both"),
+    status: z.enum(["active", "finished", "all"]).default("active").describe("which runs: live (default), persisted, or both"),
     agent: z.string().min(1).optional().describe("only runs of this agent"),
     channel: z.string().min(1).optional().describe("only runs in this platform-namespaced channel (`slack:C0123`, `http:ops`)"),
     sinceMs: z.coerce.number().int().nonnegative().optional().describe("only runs started at or after this epoch ms"),

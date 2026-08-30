@@ -14,7 +14,7 @@ const cli: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
 const admin: Caller = { kind: "chat", id: "slack:UADMIN", scopes: new Set(), chatGate: () => true };
 const mcp = (...scopes: string[]): Caller => ({ kind: "mcp", id: "mcp:alice", scopes: new Set(scopes) });
 
-function bind(run: (plan: DeployPlan) => Promise<DeployRunResult>) {
+function bind(run: (plan: DeployPlan) => Promise<DeployRunResult>, hasNodeModules: (dir: string) => boolean = () => true) {
   const registry = new CommandRegistry<DeployCommandDeps>({ audit: () => {} });
   registerDeployCommands(registry);
   const plans: DeployPlan[] = [];
@@ -24,6 +24,7 @@ function bind(run: (plan: DeployPlan) => Promise<DeployRunResult>) {
         plans.push(plan);
         return run(plan);
       },
+      checkout: { hasNodeModules },
     },
   });
   return { commands, plans };
@@ -44,6 +45,22 @@ describe("deploy.plan", () => {
     expect(plan).toMatchObject({ dryRun: true, force: false, waitMaxMs: 30 * 60_000, pollMs: 60_000, checks: { atOriginMain: true } });
     expect(renderText(commands.get("deploy.plan")!, res.value)).toBe(formatPlan(plan));
     expect(renderText(commands.get("deploy.plan")!, res.value)).toContain("then wait until live");
+  });
+
+  it("reads the checkout through its deps: the dirs without node_modules are in checks.nodeModulesMissing and the rendered check line names them", async () => {
+    const { commands } = bind(
+      async () => {
+        throw new Error("must not run");
+      },
+      (dir) => dir !== "deploy/cloudflare-sandbox",
+    );
+    const res = await commands.invoke("deploy.plan", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect((res.value as unknown as DeployPlan).checks.nodeModulesMissing).toEqual(["deploy/cloudflare-sandbox"]);
+    expect(renderText(commands.get("deploy.plan")!, res.value)).toContain("node_modules missing in deploy/cloudflare-sandbox — the runner will `npm ci` there first");
+    const all = await neverRuns().commands.invoke("deploy.plan", {}, cli);
+    if (!all.ok) throw new Error(all.message);
+    expect(renderText(commands.get("deploy.plan")!, all.value)).toContain("node_modules present in every dir");
   });
 
   it("--only/--skip (comma lists), --force, --allow-branch, --wait-max, --poll shape the plan; an unknown Worker or an empty selection is invalid_input naming the expectation", async () => {

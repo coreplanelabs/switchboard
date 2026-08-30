@@ -26,15 +26,16 @@
 // `cli:local` holding every scope (KTD10) — whoever can run this process can
 // already read the config and the data directory.
 
+import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { ConfigStore } from "./config.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
-import { CommandRegistry, renderText, type Caller, type CommandInput, type CommandInvoker, type InvokeErrorCode } from "./core/commandRegistry.js";
+import { CommandError, CommandRegistry, renderText, type Caller, type CommandInput, type CommandInvoker, type InvokeErrorCode } from "./core/commandRegistry.js";
 import { catalogueText, chatForm, helpText, parseInvocation, type GrammarRejection } from "./core/commandSurface.js";
 import { dispatch } from "./core/dispatcher.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
-import { buildRunStore } from "./core/runStore.js";
+import { buildRunStore, type RunStore } from "./core/runStore.js";
 import { PlainTextFormatter } from "./core/structuredMessage.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
 import { ProviderRegistry } from "./providers/registry.js";
@@ -183,15 +184,34 @@ class ConsoleIO implements ChannelIO {
   }
 }
 
+/** The bot config, loaded on first use — `deploy.*`, `env.*`, `friction
+ *  analyze`, `schedule list`, `help show` never ask for it, so they run in a
+ *  worktree, a fresh clone, or CI without the git-ignored `config/config.yaml`.
+ *  A command that does ask for it in such a checkout fails `unavailable`
+ *  naming the path and the env var, never with an ENOENT stack. */
+export function loadBotConfig(configPath: string, overridesPath: string, exists: (path: string) => boolean = existsSync): ConfigStore {
+  if (!exists(configPath)) {
+    throw new CommandError("unavailable", `bot config not found at ${configPath} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`);
+  }
+  return new ConfigStore(configPath, overridesPath);
+}
+
 async function main(): Promise<void> {
-  const config = new ConfigStore(CONFIG_PATH, "./data/cli-overrides.json");
   const warn = (m: string) => console.error(m);
-  // Run history (#157): a CLI `ask` persists exactly like a bot run when
-  // `runHistory` is configured (null store → history off); the registry
-  // commands read the same store. A fresh process holds no live runs, so
-  // `runs list` here is persisted history.
-  const runStore = buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => warn(`[run-history] ${m}`) });
-  const commands = buildCoreCommands(config, runStore, { registry: defaultRunRegistry, env: process.env, dataDir: "./data", warn, audit: () => {} });
+  // The bot config and, from it, the run history store (#157): a CLI `ask`
+  // persists exactly like a bot run when `runHistory` is configured (null
+  // store → history off); the registry commands read the same store. A fresh
+  // process holds no live runs, so `runs list` here is persisted history.
+  // Both load on first use — see `loadBotConfig`.
+  let loaded: { config: ConfigStore; runStore: RunStore | null } | undefined;
+  const bot = () => {
+    if (!loaded) {
+      const config = loadBotConfig(CONFIG_PATH, "./data/cli-overrides.json");
+      loaded = { config, runStore: buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => warn(`[run-history] ${m}`) }) };
+    }
+    return loaded;
+  };
+  const commands = buildCoreCommands(() => bot().config, () => bot().runStore, { registry: defaultRunRegistry, env: process.env, dataDir: "./data", warn, audit: () => {} });
 
   const parsed = parseCliArgv(process.argv.slice(2), commands);
   if (parsed.kind !== "ask") {
@@ -201,6 +221,7 @@ async function main(): Promise<void> {
     process.exit(out.exitCode);
   }
 
+  const { config, runStore } = bot();
   const providers = new ProviderRegistry(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
   const runHistoryWriter = runStore
@@ -217,7 +238,8 @@ async function main(): Promise<void> {
 // (the parsing helpers above are unit-tested).
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
-    console.error(err);
+    // `ask` without a bot config: the same one-line refusal the commands give, not a stack.
+    console.error(err instanceof CommandError ? errorLine(err.code, err.message) : err);
     process.exit(1);
   });
 }

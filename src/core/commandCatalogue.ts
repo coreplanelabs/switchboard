@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { AGENTS } from "../agents/registry.js";
 import { bootstrapOnHost } from "../agentEnv/host.js";
 import type { ConfigStore } from "../config.js";
-import { runDeployPlan } from "../deploy/run.js";
+import { hasNodeModules, runDeployPlan } from "../deploy/run.js";
 import { LocalOperations } from "../execution/executor.js";
 import { localWorkspaceDir } from "../execution/factory.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -82,41 +82,74 @@ function readSource(source: string): Promise<string> {
   return Promise.resolve(readFileSync(source === "-" ? 0 : source, "utf8"));
 }
 
-export function buildCoreCommands(config: ConfigStore, store: RunStore | null, wiring: CoreCommandWiring): CommandInvoker {
+/** A dependency handed in ready, or produced on first use. The CLI hands the
+ *  bot config (and the run store derived from it) in lazily: `deploy.*`,
+ *  `env.*`, `friction analyze`, `schedule list` and `help show` never touch
+ *  them, so those run in a checkout without `config/config.yaml`; a command
+ *  that does touch them gets whatever the accessor throws (the CLI throws a
+ *  clear `unavailable` CommandError) as its result. */
+export type Provided<T> = T | (() => T);
+
+function once<T>(provided: Provided<T>): () => T {
+  if (typeof provided !== "function") return () => provided;
+  const make = provided as () => T;
+  let made: { value: T } | undefined;
+  return () => (made ??= { value: make() }).value;
+}
+
+export function buildCoreCommands(config: Provided<ConfigStore>, store: Provided<RunStore | null>, wiring: CoreCommandWiring): CommandInvoker {
   const registry = new CommandRegistry<CoreCommandDeps>(wiring.audit ? { audit: wiring.audit } : {});
   registerCoreCommands(registry);
   const warn = (prefix: string) => (m: string) => wiring.warn(`[${prefix}] ${m}`);
-  const ledger =
-    wiring.frictionLedger ??
-    selectFrictionLedger(store, buildFrictionLedger(config.config.selfImprovement, wiring.env, { dataDir: wiring.dataDir, warn: warn("friction") }), warn("friction"));
-  const admin = (): ResidentAdminClient | { unavailable: string } => wiring.residentAdmin?.() ?? residentAdminFromConfig(config, wiring.env);
+  const cfg = once(config);
+  const runStore = once(store);
+  const ledger = once(
+    () =>
+      wiring.frictionLedger ??
+      selectFrictionLedger(runStore(), buildFrictionLedger(cfg().config.selfImprovement, wiring.env, { dataDir: wiring.dataDir, warn: warn("friction") }), warn("friction")),
+  );
+  const runs = once(() => wiring.runs ?? createRunsService({ registry: wiring.registry, store: runStore() }));
+  const admin = (): ResidentAdminClient | { unavailable: string } => wiring.residentAdmin?.() ?? residentAdminFromConfig(cfg(), wiring.env);
   const deps: CoreCommandDeps = {
     help: { agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })), commands: () => registry.list() },
     config: {
-      describeConfig: (c, u) => config.describeConfig(c, u),
-      scopes: (c, u) => config.scopes(c, u),
-      setChannelOverride: (c, p) => config.setChannelOverride(c, p),
-      setUserOverride: (u, p) => config.setUserOverride(u, p),
-      clearChannelOverride: (c) => config.clearChannelOverride(c),
-      clearUserOverride: (u) => config.clearUserOverride(u),
+      describeConfig: (c, u) => cfg().describeConfig(c, u),
+      scopes: (c, u) => cfg().scopes(c, u),
+      setChannelOverride: (c, p) => cfg().setChannelOverride(c, p),
+      setUserOverride: (u, p) => cfg().setUserOverride(u, p),
+      clearChannelOverride: (c) => cfg().clearChannelOverride(c),
+      clearUserOverride: (u) => cfg().clearUserOverride(u),
       agentNames: () => Object.keys(AGENTS),
     },
-    runs: wiring.runs ?? createRunsService({ registry: wiring.registry, store }),
-    friction: { ledger, tracker: wiring.tracker, config: () => config.config.selfImprovement, readSource },
+    get runs() {
+      return runs();
+    },
+    friction: {
+      get ledger() {
+        return ledger();
+      },
+      tracker: wiring.tracker,
+      config: () => cfg().config.selfImprovement,
+      readSource,
+    },
     repo: {
       admin,
-      operations: (caller) => (wiring.operations ? wiring.operations(caller) : defaultOperations(config, wiring.env, caller)),
-      canUseRepo: (callerId, slug) => config.canUseRepo(callerId, slug),
+      operations: (caller) => (wiring.operations ? wiring.operations(caller) : defaultOperations(cfg(), wiring.env, caller)),
+      canUseRepo: (callerId, slug) => cfg().canUseRepo(callerId, slug),
     },
     memory: {
-      config: () => config.config.memory,
+      config: () => cfg().config.memory,
       get store() {
         return wiring.memory?.();
       },
     },
     schedule: { schedules: SCHEDULES, store: wiring.scheduleStore, now: wiring.now ?? Date.now },
-    deploy: { run: (plan) => runDeployPlan(plan, { log: (l) => console.log(l), warn: (l) => console.error(l), stream: (c) => process.stdout.write(c) }) },
+    deploy: {
+      run: (plan) => runDeployPlan(plan, { log: (l) => console.log(l), warn: (l) => console.error(l), stream: (c) => process.stdout.write(c) }),
+      checkout: { hasNodeModules },
+    },
     env: { bootstrap: bootstrapOnHost },
   };
   return bindCommands(registry, deps);
 }
+

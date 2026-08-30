@@ -95,9 +95,14 @@ async function preChecks(plan: DeployPlan): Promise<string[]> {
   return problems;
 }
 
+/** The plan's `CheckoutProbe`: `<repo root>/<dir>/node_modules` exists. */
+export function hasNodeModules(dir: string): boolean {
+  return existsSync(join(REPO_ROOT, dir, "node_modules"));
+}
+
 async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO): Promise<boolean> {
   const dir = join(REPO_ROOT, step.dir);
-  if (existsSync(join(dir, "node_modules"))) return true;
+  if (hasNodeModules(step.dir)) return true;
   io.log(`[deploy:all] ${step.name}: node_modules missing — npm ci`);
   const r = await run("npm", ["ci", "--silent"], { cwd: dir });
   if (r.code !== 0) io.warn(r.output);

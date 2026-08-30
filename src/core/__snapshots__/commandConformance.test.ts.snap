@@ -721,7 +721,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     "options": [
       {
         "name": "status",
-        "required": true,
+        "required": false,
         "type": "enum",
         "values": [
           "active",

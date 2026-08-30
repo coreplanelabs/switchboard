@@ -111,6 +111,15 @@ describe("runs.list", () => {
     expect(json).not.toMatch(/"events"/);
   });
 
+  it("status defaults to active (features/run-history.md: active by default, `all` opt-in) — a bare `runs list` equals `--status active`", async () => {
+    const { reg, registry, deps } = await setup();
+    const { id } = reg.create("coding · acme/live", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t" });
+    const bare = await registry.invoke("runs.list", {}, reader, deps);
+    expect(bare).toEqual(await registry.invoke("runs.list", { options: { status: "active" } }, reader, deps));
+    expect(value<{ runs: { id: string }[] }>(bare).runs.map((r) => r.id)).toEqual([id]);
+    expect(value<{ runs: { id: string }[] }>(await registry.invoke("runs.list", { options: { status: "all" } }, reader, deps)).runs).toHaveLength(3);
+  });
+
   it("limit:'10' (string) and limit:10 yield the same result", async () => {
     const { registry, deps } = await setup();
     const a = await registry.invoke("runs.list", { options: { status: "finished", limit: "10", sinceMs: String(NOW - 5000) } }, reader, deps);

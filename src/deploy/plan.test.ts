@@ -1,19 +1,17 @@
 import { describe, expect, it } from "vitest";
-import {
-  BOT_HEALTH_URL,
-  classifyDeployOutput,
-  DEPLOY_ORDER,
-  formatPlan,
-  parseDeployArgs,
-  planDeploy,
-  PRODUCTION_ACCOUNT_ID,
-  WORKERS,
-} from "./plan.js";
+import { BOT_HEALTH_URL, classifyDeployOutput, DEPLOY_ORDER, formatPlan, planDeploy, PRODUCTION_ACCOUNT_ID, WORKERS, type CheckoutProbe, type DeployOptions } from "./plan.js";
 
 // The one production deploy order, as a pure plan (README "Deploying on
 // Cloudflare Containers", AGENTS.md "Deploy order"). The runner
-// (src/deploy/run.ts, behind the registry's `deploy all`) only executes what this module plans, so the order, the
-// filters, and the force gating are provable here without touching wrangler.
+// (src/deploy/run.ts, behind the registry's `deploy all`) only executes what
+// this module plans, so the order, the filters, the force gating, and the
+// checks the plan reports are provable here without touching wrangler. The
+// options are the registry's `deploy.*` parse (src/core/commands/deploy.ts);
+// here they are built directly.
+
+const DEFAULTS: DeployOptions = { only: undefined, skip: undefined, dryRun: false, force: false, allowBranch: false, waitMaxMinutes: 30, pollSeconds: 60 };
+const installed: CheckoutProbe = { hasNodeModules: () => true };
+const plan = (opts: Partial<DeployOptions> = {}, checkout: CheckoutProbe = installed) => planDeploy({ ...DEFAULTS, ...opts }, checkout);
 
 describe("WORKERS / DEPLOY_ORDER", () => {
   it("is state Worker → bot → resident → sandbox, each once, each with its dir and command", () => {
@@ -37,64 +35,38 @@ describe("WORKERS / DEPLOY_ORDER", () => {
     expect(byName.bot.liveGate).toEqual({ healthUrl: BOT_HEALTH_URL });
     expect(BOT_HEALTH_URL).toBe("https://switchboard.coreplanelabs.dev/healthz");
     for (const n of ["memory", "resident", "sandbox"] as const) expect(byName[n].liveGate, n).toBeUndefined();
-    const plan = planDeploy({ only: undefined, skip: undefined, dryRun: true, force: false, allowBranch: false, waitMaxMinutes: 30, pollSeconds: 60 });
-    expect(plan.steps.find((s) => s.name === "bot")).toMatchObject({ healthUrl: BOT_HEALTH_URL, liveGate: { healthUrl: BOT_HEALTH_URL } });
-    expect(plan.steps.find((s) => s.name === "resident")).not.toHaveProperty("liveGate");
-    expect(plan.steps.find((s) => s.name === "resident")).not.toHaveProperty("healthUrl");
-    expect(formatPlan(plan)).toContain("then wait until live (https://switchboard.coreplanelabs.dev/healthz not draining + build.commit == HEAD)");
-  });
-});
-
-describe("parseDeployArgs", () => {
-  it("defaults: everything, no force, not dry, main-only, 30 min wait, 60 s poll", () => {
-    expect(parseDeployArgs([])).toEqual({
-      ok: true,
-      opts: { only: undefined, skip: undefined, dryRun: false, force: false, allowBranch: false, waitMaxMinutes: 30, pollSeconds: 60 },
-    });
+    const p = plan({ dryRun: true });
+    expect(p.steps.find((s) => s.name === "bot")).toMatchObject({ healthUrl: BOT_HEALTH_URL, liveGate: { healthUrl: BOT_HEALTH_URL } });
+    expect(p.steps.find((s) => s.name === "resident")).not.toHaveProperty("liveGate");
+    expect(p.steps.find((s) => s.name === "resident")).not.toHaveProperty("healthUrl");
+    expect(formatPlan(p)).toContain("then wait until live (https://switchboard.coreplanelabs.dev/healthz not draining + build.commit == HEAD)");
   });
 
-  it("parses --only/--skip lists (comma or repeated), --dry-run, --force, --allow-branch, --wait-max, --poll", () => {
-    const r = parseDeployArgs(["--only", "bot,resident", "--only", "sandbox", "--dry-run", "--force", "--allow-branch", "--wait-max", "5", "--poll", "10"]);
-    expect(r).toEqual({
-      ok: true,
-      opts: { only: ["bot", "resident", "sandbox"], skip: undefined, dryRun: true, force: true, allowBranch: true, waitMaxMinutes: 5, pollSeconds: 10 },
-    });
-    expect(parseDeployArgs(["--skip=sandbox"])).toMatchObject({ ok: true, opts: { skip: ["sandbox"] } });
-  });
-
-  it("rejects unknown flags, unknown Worker names, and non-positive numbers by name", () => {
-    expect(parseDeployArgs(["--yolo"])).toEqual({ ok: false, error: "unknown option `--yolo`" });
-    expect(parseDeployArgs(["--only", "memory,botz"])).toEqual({ ok: false, error: "unknown Worker `botz` (known: memory, bot, resident, sandbox)" });
-    expect(parseDeployArgs(["--wait-max", "0"])).toEqual({ ok: false, error: "`--wait-max` expects a positive integer (minutes), got `0`" });
-    expect(parseDeployArgs(["--poll"])).toEqual({ ok: false, error: "`--poll` expects a positive integer (seconds), got ``" });
+  it("the bot step says a rotated secret goes live only through it — `wrangler secret put` alone leaves the running container on its old env", () => {
+    const bot = WORKERS.find((w) => w.name === "bot")!;
+    expect(bot.why).toContain("wrangler secret put");
+    expect(formatPlan(plan())).toContain("rotated bot secret");
   });
 });
 
 describe("planDeploy", () => {
-  const parse = (argv: string[]) => {
-    const r = parseDeployArgs(argv);
-    if (!r.ok) throw new Error(r.error);
-    return planDeploy(r.opts);
-  };
-
   it("keeps the canonical order whatever order --only names them in", () => {
-    expect(parse(["--only", "sandbox,memory"]).steps.map((s) => s.name)).toEqual(["memory", "sandbox"]);
-    expect(parse(["--only", "resident,bot"]).steps.map((s) => s.name)).toEqual(["bot", "resident"]);
+    expect(plan({ only: ["sandbox", "memory"] }).steps.map((s) => s.name)).toEqual(["memory", "sandbox"]);
+    expect(plan({ only: ["resident", "bot"] }).steps.map((s) => s.name)).toEqual(["bot", "resident"]);
   });
 
   it("--skip removes steps; --only and --skip compose", () => {
-    expect(parse(["--skip", "sandbox"]).steps.map((s) => s.name)).toEqual(["memory", "bot", "resident"]);
-    expect(parse(["--only", "bot,resident", "--skip", "resident"]).steps.map((s) => s.name)).toEqual(["bot"]);
+    expect(plan({ skip: ["sandbox"] }).steps.map((s) => s.name)).toEqual(["memory", "bot", "resident"]);
+    expect(plan({ only: ["bot", "resident"], skip: ["resident"] }).steps.map((s) => s.name)).toEqual(["bot"]);
   });
 
   it("each step spawns its dir's deploy script with the Cloudflare env vars removed and never a force env unless --force", () => {
-    const plan = parse([]);
-    for (const s of plan.steps) {
+    for (const s of plan().steps) {
       expect(s.command).toEqual(["npm", "run", "deploy"]);
       expect(s.unsetEnv).toEqual(["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"]);
       expect(s.setEnv).toEqual({});
     }
-    const forced = parse(["--force"]);
+    const forced = plan({ force: true });
     expect(forced.steps.find((s) => s.name === "bot")!.setEnv).toEqual({ SWITCHBOARD_DEPLOY_FORCE: "1" });
     expect(forced.steps.find((s) => s.name === "resident")!.setEnv).toEqual({ RESIDENT_DEPLOY_FORCE: "1" });
     expect(forced.steps.find((s) => s.name === "memory")!.setEnv).toEqual({});
@@ -102,22 +74,22 @@ describe("planDeploy", () => {
   });
 
   it("only preflighted steps may be retried on a refusal; the wait budget comes from the options", () => {
-    const plan = parse(["--wait-max", "7", "--poll", "30"]);
-    expect(plan.steps.map((s) => [s.name, s.retryOnPreflightRefusal])).toEqual([
+    const p = plan({ waitMaxMinutes: 7, pollSeconds: 30 });
+    expect(p.steps.map((s) => [s.name, s.retryOnPreflightRefusal])).toEqual([
       ["memory", false],
       ["bot", true],
       ["resident", true],
       ["sandbox", false],
     ]);
-    expect(plan.waitMaxMs).toBe(7 * 60_000);
-    expect(plan.pollMs).toBe(30_000);
-    expect(parse(["--force"]).steps.every((s) => !s.retryOnPreflightRefusal)).toBe(true); // forced → nothing to wait for
+    expect(p.waitMaxMs).toBe(7 * 60_000);
+    expect(p.pollMs).toBe(30_000);
+    expect(plan({ force: true }).steps.every((s) => !s.retryOnPreflightRefusal)).toBe(true); // forced → nothing to wait for
   });
 
   it("--dry-run marks the plan and formatPlan renders it in order with the checks it would run", () => {
-    const plan = parse(["--dry-run", "--only", "memory,bot"]);
-    expect(plan.dryRun).toBe(true);
-    const text = formatPlan(plan);
+    const p = plan({ dryRun: true, only: ["memory", "bot"] });
+    expect(p.dryRun).toBe(true);
+    const text = formatPlan(p);
     expect(text.indexOf("1. memory")).toBeLessThan(text.indexOf("2. bot"));
     expect(text).toContain("deploy/cloudflare-memory");
     expect(text).toContain("preflight (retry every 60s up to 30 min)");
@@ -127,8 +99,27 @@ describe("planDeploy", () => {
   });
 
   it("--allow-branch relaxes only the branch check, never the clean-tree or account checks", () => {
-    expect(parse([]).checks).toEqual({ account: PRODUCTION_ACCOUNT_ID, cleanTree: true, atOriginMain: true });
-    expect(parse(["--allow-branch"]).checks).toEqual({ account: PRODUCTION_ACCOUNT_ID, cleanTree: true, atOriginMain: false });
+    expect(plan().checks).toMatchObject({ account: PRODUCTION_ACCOUNT_ID, cleanTree: true, atOriginMain: true });
+    expect(plan({ allowBranch: true }).checks).toMatchObject({ account: PRODUCTION_ACCOUNT_ID, cleanTree: true, atOriginMain: false });
+  });
+
+  it("the node_modules check tells the truth: every planned dir is probed, the missing ones are named and the runner's `npm ci` announced", () => {
+    expect(plan().checks.nodeModulesMissing).toEqual([]);
+    expect(formatPlan(plan())).toContain("; node_modules present in every dir");
+    const probed: string[] = [];
+    const partial: CheckoutProbe = {
+      hasNodeModules: (dir) => {
+        probed.push(dir);
+        return dir === "deploy/cloudflare-memory" || dir === "deploy/cloudflare";
+      },
+    };
+    const p = plan({}, partial);
+    expect(probed).toEqual(["deploy/cloudflare-memory", "deploy/cloudflare", "deploy/cloudflare-resident", "deploy/cloudflare-sandbox"]);
+    expect(p.checks.nodeModulesMissing).toEqual(["deploy/cloudflare-resident", "deploy/cloudflare-sandbox"]);
+    expect(formatPlan(p)).toContain("; node_modules missing in deploy/cloudflare-resident, deploy/cloudflare-sandbox — the runner will `npm ci` there first");
+    expect(formatPlan(p)).not.toContain("present in every dir");
+    // Only the planned steps are probed: a skipped Worker's dir is nobody's business.
+    expect(plan({ only: ["bot"] }, partial).checks.nodeModulesMissing).toEqual([]);
   });
 });
 

@@ -60,7 +60,7 @@ export const WORKERS: readonly WorkerDef[] = [
     dir: "deploy/cloudflare",
     preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: BOT_HEALTH_URL },
     liveGate: { healthUrl: BOT_HEALTH_URL },
-    why: "container shim — preflight refuses while runs are in flight; done only when the new container is live",
+    why: "container shim — preflight refuses while runs are in flight; done only when the new container is live. Also the only way a rotated bot secret goes live: `wrangler secret put` alone leaves the running container on its old env",
   },
   {
     name: "resident",
@@ -90,62 +90,6 @@ export interface DeployOptions {
   pollSeconds: number;
 }
 
-export type ParsedArgs = { ok: true; opts: DeployOptions } | { ok: false; error: string };
-
-const KNOWN = `known: ${DEPLOY_ORDER.join(", ")}`;
-
-function parseNames(raw: string, into: WorkerName[]): string | undefined {
-  for (const n of raw.split(",").map((s) => s.trim()).filter(Boolean)) {
-    if (!DEPLOY_ORDER.includes(n as WorkerName)) return `unknown Worker \`${n}\` (${KNOWN})`;
-    if (!into.includes(n as WorkerName)) into.push(n as WorkerName);
-  }
-  return undefined;
-}
-
-/** `--only a,b` / `--skip a` (comma lists, repeatable, `--flag=value` too),
- *  `--dry-run`, `--force`, `--allow-branch`, `--wait-max <min>`, `--poll <s>`. */
-export function parseDeployArgs(argv: string[]): ParsedArgs {
-  const opts: DeployOptions = { only: undefined, skip: undefined, dryRun: false, force: false, allowBranch: false, waitMaxMinutes: 30, pollSeconds: 60 };
-  for (let i = 0; i < argv.length; i++) {
-    const [flag, inline] = argv[i].includes("=") ? (argv[i].split(/=(.*)/s) as [string, string]) : [argv[i], undefined];
-    const takeValue = () => (inline !== undefined ? inline : (argv[++i] ?? ""));
-    switch (flag) {
-      case "--dry-run":
-        opts.dryRun = true;
-        break;
-      case "--force":
-        opts.force = true;
-        break;
-      case "--allow-branch":
-        opts.allowBranch = true;
-        break;
-      case "--only":
-      case "--skip": {
-        const list: WorkerName[] = (flag === "--only" ? opts.only : opts.skip) ?? [];
-        const err = parseNames(takeValue(), list);
-        if (err) return { ok: false, error: err };
-        if (flag === "--only") opts.only = list;
-        else opts.skip = list;
-        break;
-      }
-      case "--wait-max":
-      case "--poll": {
-        const raw = takeValue();
-        const n = Number(raw);
-        if (!Number.isInteger(n) || n < 1) {
-          return { ok: false, error: `\`${flag}\` expects a positive integer (${flag === "--poll" ? "seconds" : "minutes"}), got \`${raw}\`` };
-        }
-        if (flag === "--wait-max") opts.waitMaxMinutes = n;
-        else opts.pollSeconds = n;
-        break;
-      }
-      default:
-        return { ok: false, error: `unknown option \`${flag}\`` };
-    }
-  }
-  return { ok: true, opts };
-}
-
 export interface DeployStep {
   name: WorkerName;
   script: string;
@@ -170,11 +114,25 @@ export interface DeployPlan {
   force: boolean;
   waitMaxMs: number;
   pollMs: number;
-  checks: { account: string; cleanTree: true; atOriginMain: boolean };
+  checks: {
+    account: string;
+    cleanTree: true;
+    atOriginMain: boolean;
+    /** Step dirs (repo-relative) without `node_modules` when the plan was computed — the runner `npm ci`s each before its deploy. */
+    nodeModulesMissing: string[];
+  };
   warnings: string[];
 }
 
-export function planDeploy(opts: DeployOptions): DeployPlan {
+/** What the plan reads from the checkout it is computed in. The plan stays
+ *  free of node:* imports; the runner (src/deploy/run.ts) supplies the real
+ *  probe through the command deps. */
+export interface CheckoutProbe {
+  /** Does `<repo root>/<dir>/node_modules` exist? */
+  hasNodeModules(dir: string): boolean;
+}
+
+export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe): DeployPlan {
   const steps = WORKERS.filter((w) => (opts.only ? opts.only.includes(w.name) : true) && !(opts.skip ?? []).includes(w.name)).map<DeployStep>((w) => ({
     name: w.name,
     script: w.script,
@@ -195,15 +153,22 @@ export function planDeploy(opts: DeployOptions): DeployPlan {
     force: opts.force,
     waitMaxMs: opts.waitMaxMinutes * 60_000,
     pollMs: opts.pollSeconds * 1000,
-    checks: { account: PRODUCTION_ACCOUNT_ID, cleanTree: true, atOriginMain: !opts.allowBranch },
+    checks: {
+      account: PRODUCTION_ACCOUNT_ID,
+      cleanTree: true,
+      atOriginMain: !opts.allowBranch,
+      nodeModulesMissing: steps.filter((s) => !checkout.hasNodeModules(s.dir)).map((s) => s.dir),
+    },
     warnings: forcedNames.length > 0 ? [`--force: preflights are bypassed — in-flight runs on ${forcedNames.join(" and ")} WILL be killed`] : [],
   };
 }
 
 /** Human rendering of a plan (what `--dry-run` prints). */
 export function formatPlan(plan: DeployPlan): string {
+  const missing = plan.checks.nodeModulesMissing;
+  const nodeModules = missing.length === 0 ? "node_modules present in every dir" : `node_modules missing in ${missing.join(", ")} — the runner will \`npm ci\` there first`;
   const lines = [
-    `Checks: wrangler account = ${plan.checks.account}; clean tree; ${plan.checks.atOriginMain ? "HEAD == origin/main" : "any branch (--allow-branch)"}; node_modules present per dir`,
+    `Checks: wrangler account = ${plan.checks.account}; clean tree; ${plan.checks.atOriginMain ? "HEAD == origin/main" : "any branch (--allow-branch)"}; ${nodeModules}`,
     ...plan.warnings.map((w) => `WARNING ${w}`),
     "Steps:",
   ];
