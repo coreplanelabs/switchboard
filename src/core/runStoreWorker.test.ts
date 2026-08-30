@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { analyzeRunFriction } from "./runFriction.js";
 import type { RunEvent } from "./runEvents.js";
 import { DEFAULT_RETENTION_POLICY, type RunRecord } from "./runRecord.js";
-import { PermanentStoreError, RouteMissingError, TransientStoreError, WorkerRunStore } from "./runStoreWorker.js";
+import { describeError, PermanentStoreError, RouteMissingError, TransientStoreError, WorkerRunStore } from "./runStoreWorker.js";
 
 // Feature: features/run-history.md — the HTTPS RunStore client to the state
 // Worker's RunHistoryDO (POST /runs/put|get|list|events|delete).
@@ -55,7 +55,7 @@ function fakeFetch(handler: (call: Call) => { status: number; body?: unknown } |
 const OPTS = { baseUrl: "https://state.example/", token: "tok", storeKey: "runs:default", policy: DEFAULT_RETENTION_POLICY, policyUpdatedAt: NOW };
 
 describe("WorkerRunStore", () => {
-  it("put sends a 1.9 MB record as a string body with a numeric Content-Length, the bearer, and the policy", async () => {
+  it("put sends a 1.9 MB record as a string body (Content-Length left to the runtime), the bearer, and the policy", async () => {
     const { fetch, calls } = fakeFetch(() => ({ status: 200, body: { ok: true, retained: 1, stored: true, rewritten: false } }));
     const rec = record("a", events(38, 50_000));
     const res = await new WorkerRunStore({ ...OPTS, fetch }).put(rec);
@@ -64,7 +64,9 @@ describe("WorkerRunStore", () => {
     expect(typeof calls[0].rawBody).toBe("string");
     const bytes = Buffer.byteLength(calls[0].rawBody as string);
     expect(bytes).toBeGreaterThan(1_900_000);
-    expect(calls[0].headers["content-length"]).toBe(String(bytes));
+    // #313: a hand-set Content-Length was the one header the working clients do not send;
+    // the runtime derives it from the string body.
+    expect(calls[0].headers["content-length"]).toBeUndefined();
     expect(calls[0].headers.authorization).toBe("Bearer tok");
     expect(calls[0].body.storeKey).toBe("runs:default");
     expect(calls[0].body.policy).toEqual(DEFAULT_RETENTION_POLICY);
@@ -155,5 +157,25 @@ describe("WorkerRunStore", () => {
     await expect(mk(new Error("ECONNRESET")).get("a")).rejects.toThrow(TransientStoreError);
     await expect(mk({ status: 400, body: { error: "record must be a RunRecord" } }).put(record("a"))).rejects.toThrow(PermanentStoreError);
     await expect(mk({ status: 400, body: { error: "record must be a RunRecord" } }).put(record("a"))).rejects.toThrow(/HTTP 400: record must be a RunRecord/);
+  });
+});
+
+describe("describeError — the cause chain survives into the warn line (#313)", () => {
+  it("appends nested causes and error codes, so a bare `fetch failed` names its reason", () => {
+    const socket = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+    const undici = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET", cause: socket });
+    const fetchFailed = new TypeError("fetch failed", { cause: undici });
+    expect(describeError(fetchFailed)).toBe("fetch failed (cause: other side closed [UND_ERR_SOCKET] (cause: read ECONNRESET))");
+    expect(describeError("plain")).toBe("plain");
+    expect(describeError(new Error("no cause"))).toBe("no cause");
+  });
+
+  it("a network failure surfaces as a TransientStoreError whose message carries the cause", async () => {
+    const { fetch } = fakeFetch(() => new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }) }));
+    const store = new WorkerRunStore({ ...OPTS, fetch });
+    await expect(store.list({ limit: 1 })).rejects.toMatchObject({
+      name: "TransientStoreError",
+      message: "run store /runs/list: fetch failed (cause: getaddrinfo ENOTFOUND)", // code already in the message → not repeated
+    });
   });
 });
