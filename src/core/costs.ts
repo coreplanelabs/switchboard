@@ -3,9 +3,12 @@
 // assembled from the providers' own billing datasets and priced at list.
 //
 // Two sources, both behind seams (AGENTS.md invariant 2 — ≥2 implementations):
-//   - Cloudflare GraphQL Analytics (`containersUsageAdaptiveGroups` for
-//     container CPU/memory/disk, `durableObjectsInvocationsAdaptiveGroups` for
-//     DO duration + requests) — the same dataset Cloudflare bills from.
+//   - Cloudflare GraphQL Analytics: `containersUsageAdaptiveGroups` for
+//     container CPU/memory/disk, `durableObjectsPeriodicGroups.duration` for
+//     billable DO GB-s (per namespace), `durableObjectsInvocationsAdaptiveGroups`
+//     for DO request counts — the datasets Cloudflare bills from. NOT summed
+//     request wall time: concurrent long requests (SSE streams, exec) overlap,
+//     so that sum runs ~2× above what is billed (audit 2026-08-29).
 //   - Anthropic Admin API `GET /v1/organizations/cost_report` grouped by
 //     workspace — LLM spend, attributed to a group by its Anthropic workspace.
 // `buildCostReport` is pure and does every dollar of arithmetic, so the math is
@@ -23,6 +26,9 @@ export interface CostGroupConfig {
   workers: string[];
   /** Cloudflare container application id → display label. */
   containerApps: Record<string, string>;
+  /** Durable Object namespace id → display label (billable DO duration is
+   *  reported per namespace, not per Worker). */
+  durableObjectNamespaces: Record<string, string>;
   /** Anthropic workspace whose cost report is this group's LLM spend. Absent → no LLM line. */
   anthropicWorkspaceId?: string;
 }
@@ -54,10 +60,13 @@ export function parseCostsConfig(raw: unknown): CostsConfig | undefined {
     if (!Array.isArray(gg.workers) || !gg.workers.every((w) => typeof w === "string")) throw new Error(`costs.groups.${name}.workers must be a list of Worker script names`);
     const apps = gg.containerApps ?? {};
     if (typeof apps !== "object" || Object.values(apps as object).some((v) => typeof v !== "string")) throw new Error(`costs.groups.${name}.containerApps must map application id → label`);
+    const namespaces = gg.durableObjectNamespaces ?? {};
+    if (typeof namespaces !== "object" || Object.values(namespaces as object).some((v) => typeof v !== "string")) throw new Error(`costs.groups.${name}.durableObjectNamespaces must map namespace id → label`);
     groups[name] = {
       label: typeof gg.label === "string" ? gg.label : undefined,
       workers: gg.workers as string[],
       containerApps: apps as Record<string, string>,
+      durableObjectNamespaces: namespaces as Record<string, string>,
       anthropicWorkspaceId: typeof gg.anthropicWorkspaceId === "string" ? gg.anthropicWorkspaceId : undefined,
     };
   }
@@ -78,9 +87,9 @@ export const CLOUDFLARE_PRICES = {
   vcpuSecond: 0.00002,
   memoryGibSecond: 0.0000025,
   diskGbSecond: 0.00000007,
-  /** DO duration: $12.50 per million GB-s, metered at 128 MB per active DO. */
+  /** DO duration: $12.50 per million GB-s (Cloudflare meters 128 MB × active
+   *  wall-clock seconds and reports the product as `duration`). */
   doDurationGbSecond: 12.5e-6,
-  doMemoryGb: 0.125,
   doRequestsPerMillion: 0.15,
 } as const;
 
@@ -96,15 +105,21 @@ export interface ContainerUsageRow {
   allocatedMemoryByteSec: number;
   allocatedDiskByteSec: number;
 }
-export interface DoUsageRow {
+export interface DoRequestsRow {
   date: string;
   scriptName: string;
   requests: number;
-  wallTimeUs: number;
+}
+export interface DoDurationRow {
+  date: string;
+  namespaceId: string;
+  /** Billable GB-s as Cloudflare reports it (`durableObjectsPeriodicGroups.sum.duration`). */
+  gbSeconds: number;
 }
 export interface CloudflareUsage {
   containers: ContainerUsageRow[];
-  durableObjects: DoUsageRow[];
+  durableObjectRequests: DoRequestsRow[];
+  durableObjectDuration: DoDurationRow[];
 }
 export interface LlmCostRow {
   date: string;
@@ -137,9 +152,12 @@ export function containerCostUsd(row: ContainerUsageRow): ContainerCost {
   return { cpu, memory, disk, total: cpu + memory + disk };
 }
 
-export function durableObjectCostUsd(row: DoUsageRow): number {
-  const gbSeconds = (row.wallTimeUs / 1e6) * CLOUDFLARE_PRICES.doMemoryGb;
-  return gbSeconds * CLOUDFLARE_PRICES.doDurationGbSecond + (row.requests / 1e6) * CLOUDFLARE_PRICES.doRequestsPerMillion;
+export function doDurationCostUsd(gbSeconds: number): number {
+  return gbSeconds * CLOUDFLARE_PRICES.doDurationGbSecond;
+}
+
+export function doRequestsCostUsd(requests: number): number {
+  return (requests / 1e6) * CLOUDFLARE_PRICES.doRequestsPerMillion;
 }
 
 // ---- the report -------------------------------------------------------------------
@@ -147,7 +165,11 @@ export function durableObjectCostUsd(row: DoUsageRow): number {
 export interface DailyCost {
   date: string;
   containers: Record<string, ContainerCost>;
+  /** Billable DO duration cost per configured namespace label. Duration only — the
+   *  full DO figure is this sum plus `doRequestsUsd` (`totals.byResource.durableObjects`). */
   durableObjects: Record<string, number>;
+  /** DO request cost for the group's Workers (cents a day; not attributable to a namespace). */
+  doRequestsUsd: number;
   cloudUsd: number;
   llmUsd: number;
   total: number;
@@ -200,16 +222,24 @@ export function buildCostReport(group: string, cfg: CostGroupConfig, usage: Clou
       byResource.disk += c.disk;
     }
     const durableObjects: Record<string, number> = {};
-    for (const row of usage.durableObjects) {
-      if (row.date !== date || !workers.has(row.scriptName)) continue;
-      const usd = durableObjectCostUsd(row);
-      durableObjects[row.scriptName] = (durableObjects[row.scriptName] ?? 0) + usd;
+    for (const row of usage.durableObjectDuration) {
+      if (row.date !== date) continue;
+      const label = cfg.durableObjectNamespaces[row.namespaceId];
+      if (!label) continue;
+      const usd = doDurationCostUsd(row.gbSeconds);
+      durableObjects[label] = (durableObjects[label] ?? 0) + usd;
       byResource.durableObjects += usd;
     }
+    let doRequestsUsd = 0;
+    for (const row of usage.durableObjectRequests) {
+      if (row.date !== date || !workers.has(row.scriptName)) continue;
+      doRequestsUsd += doRequestsCostUsd(row.requests);
+    }
+    byResource.durableObjects += doRequestsUsd;
     const llmUsd =
       llm && cfg.anthropicWorkspaceId ? llm.filter((r) => r.date === date && r.workspaceId === cfg.anthropicWorkspaceId).reduce((s, r) => s + r.amountUsd, 0) : 0;
-    const cloudUsd = Object.values(containers).reduce((s, c) => s + c.total, 0) + Object.values(durableObjects).reduce((s, v) => s + v, 0);
-    return { date, containers, durableObjects, cloudUsd, llmUsd, total: cloudUsd + llmUsd };
+    const cloudUsd = Object.values(containers).reduce((s, c) => s + c.total, 0) + Object.values(durableObjects).reduce((s, v) => s + v, 0) + doRequestsUsd;
+    return { date, containers, durableObjects, doRequestsUsd, cloudUsd, llmUsd, total: cloudUsd + llmUsd };
   });
   const cloudUsd = days.reduce((s, d) => s + d.cloudUsd, 0);
   const llmUsd = days.reduce((s, d) => s + d.llmUsd, 0);
@@ -257,8 +287,10 @@ const CF_USAGE_QUERY = `query SwitchboardCosts($accountTag: String!, $from: Time
   viewer { accounts(filter: { accountTag: $accountTag }) {
     containers: containersUsageAdaptiveGroups(limit: 10000, filter: { datetime_geq: $from, datetime_lt: $to }) {
       sum { cpuTimeSec allocatedMemory allocatedDisk } dimensions { date applicationId } }
-    durableObjects: durableObjectsInvocationsAdaptiveGroups(limit: 10000, filter: { datetime_geq: $from, datetime_lt: $to }) {
-      sum { requests wallTime } dimensions { date scriptName } }
+    durableObjectRequests: durableObjectsInvocationsAdaptiveGroups(limit: 10000, filter: { datetime_geq: $from, datetime_lt: $to }) {
+      sum { requests } dimensions { date scriptName } }
+    durableObjectDuration: durableObjectsPeriodicGroups(limit: 10000, filter: { datetime_geq: $from, datetime_lt: $to }) {
+      sum { duration } dimensions { date namespaceId } }
   } }
 }`;
 
@@ -292,7 +324,8 @@ export class CloudflareGraphqlUsageSource implements CloudflareUsageSource {
     if (Array.isArray(body.errors) && body.errors.length > 0) throw new Error(`cloudflare graphql: ${body.errors.map((e) => e.message ?? "?").join("; ")}`);
     const account = ((body.data as { viewer?: { accounts?: unknown[] } })?.viewer?.accounts?.[0] ?? {}) as {
       containers?: { dimensions?: Record<string, unknown>; sum?: Record<string, unknown> }[];
-      durableObjects?: { dimensions?: Record<string, unknown>; sum?: Record<string, unknown> }[];
+      durableObjectRequests?: { dimensions?: Record<string, unknown>; sum?: Record<string, unknown> }[];
+      durableObjectDuration?: { dimensions?: Record<string, unknown>; sum?: Record<string, unknown> }[];
     };
     return {
       containers: (account.containers ?? []).map((r) => ({
@@ -302,11 +335,15 @@ export class CloudflareGraphqlUsageSource implements CloudflareUsageSource {
         allocatedMemoryByteSec: num(r.sum?.allocatedMemory),
         allocatedDiskByteSec: num(r.sum?.allocatedDisk),
       })),
-      durableObjects: (account.durableObjects ?? []).map((r) => ({
+      durableObjectRequests: (account.durableObjectRequests ?? []).map((r) => ({
         date: str(r.dimensions?.date),
         scriptName: str(r.dimensions?.scriptName),
         requests: num(r.sum?.requests),
-        wallTimeUs: num(r.sum?.wallTime),
+      })),
+      durableObjectDuration: (account.durableObjectDuration ?? []).map((r) => ({
+        date: str(r.dimensions?.date),
+        namespaceId: str(r.dimensions?.namespaceId),
+        gbSeconds: num(r.sum?.duration),
       })),
     };
   }

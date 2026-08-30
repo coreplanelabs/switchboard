@@ -6,7 +6,8 @@ import {
   NullLlmCostSource,
   buildCostReport,
   containerCostUsd,
-  durableObjectCostUsd,
+  doDurationCostUsd,
+  doRequestsCostUsd,
   parseCostsConfig,
   resolveRange,
   type CloudflareUsage,
@@ -23,6 +24,10 @@ const GROUP: CostGroupConfig = {
     "a0390da2-08e7-447f-aab9-f513815b9fce": "bot",
     "a0373f6a-a87c-429c-bb96-ac378de550c9": "resident",
     "a030b6eb-42de-4c30-ad2b-e692327ca813": "sandbox",
+  },
+  durableObjectNamespaces: {
+    "5fcc0392bd4240e4910a88ecf4040b43": "bot DO",
+    "d89e62295c1f47a9b25449739e62a164": "resident DOs",
   },
   anthropicWorkspaceId: "wrkspc_switchboard",
 };
@@ -47,10 +52,18 @@ const USAGE: CloudflareUsage = {
     { date: "2026-08-28", applicationId: "a03277f6-d087-448d-8c26-fbf5a316cb8c", cpuTimeSec: 2155, allocatedMemoryByteSec: 339642 * GiB, allocatedDiskByteSec: 679284 * GB },
     { date: "2026-08-29", applicationId: "a0390da2-08e7-447f-aab9-f513815b9fce", cpuTimeSec: 1110, allocatedMemoryByteSec: 76855 * GiB, allocatedDiskByteSec: 307420 * GB },
   ],
-  durableObjects: [
-    { date: "2026-08-28", scriptName: "switchboard", requests: 2160, wallTimeUs: 154724e6 },
-    { date: "2026-08-28", scriptName: "terrateam", requests: 994, wallTimeUs: 106e9 },
-    { date: "2026-08-29", scriptName: "switchboard", requests: 2377, wallTimeUs: 158978e6 },
+  durableObjectRequests: [
+    { date: "2026-08-28", scriptName: "switchboard", requests: 2160 },
+    { date: "2026-08-28", scriptName: "terrateam", requests: 994 },
+    { date: "2026-08-29", scriptName: "switchboard", requests: 2377 },
+  ],
+  // Real 2026-08-28 rows from durableObjectsPeriodicGroups: `duration` is
+  // Cloudflare's billable GB-s (128 MB × active seconds), per namespace.
+  durableObjectDuration: [
+    { date: "2026-08-28", namespaceId: "5fcc0392bd4240e4910a88ecf4040b43", gbSeconds: 11023.7 },
+    { date: "2026-08-28", namespaceId: "d89e62295c1f47a9b25449739e62a164", gbSeconds: 12011.5 },
+    { date: "2026-08-28", namespaceId: "b38f077520034582804ad74d35a48812", gbSeconds: 11032.6 }, // terrateam — not ours
+    { date: "2026-08-29", namespaceId: "5fcc0392bd4240e4910a88ecf4040b43", gbSeconds: 11002.9 },
   ],
 };
 
@@ -77,11 +90,16 @@ describe("containerCostUsd", () => {
   });
 });
 
-describe("durableObjectCostUsd", () => {
-  it("charges duration at 128 MB × wall seconds plus per-million requests", () => {
-    const usd = durableObjectCostUsd({ date: "d", scriptName: "s", requests: 1_000_000, wallTimeUs: 8e6 });
-    // 8 s × 0.125 GB = 1 GB-s → $12.5e-6; 1M requests → $0.15
-    expect(usd).toBeCloseTo(12.5e-6 + 0.15, 9);
+describe("durable object pricing", () => {
+  it("prices billable GB-s at $12.50 per million — an always-on DO is 86400 s × 128 MB ≈ $0.135/day", () => {
+    expect(doDurationCostUsd(1_000_000)).toBeCloseTo(12.5, 9);
+    expect(doDurationCostUsd(86400 * 0.125)).toBeCloseTo(0.135, 3);
+    // the real 2026-08-28 bot DO row
+    expect(doDurationCostUsd(11023.7)).toBeCloseTo(0.1378, 4);
+  });
+  it("prices requests at $0.15 per million", () => {
+    expect(doRequestsCostUsd(1_000_000)).toBeCloseTo(0.15, 9);
+    expect(doRequestsCostUsd(2160)).toBeCloseTo(0.000324, 9);
   });
 });
 
@@ -91,11 +109,14 @@ describe("buildCostReport", () => {
   const range = { from: "2026-08-28", to: "2026-08-29", days: 2, partialLastDay: true };
   const report = buildCostReport("switchboard", GROUP, USAGE, LLM, range);
 
-  it("keeps only the group's container apps and workers, labelled from config", () => {
+  it("keeps only the group's container apps, DO namespaces and workers, labelled from config", () => {
     const d = report.days.find((x) => x.date === "2026-08-28")!;
     expect(Object.keys(d.containers).sort()).toEqual(["bot", "resident"]);
-    expect(Object.keys(d.durableObjects)).toEqual(["switchboard"]);
+    expect(Object.keys(d.durableObjects).sort()).toEqual(["bot DO", "resident DOs"]);
+    expect(d.durableObjects["bot DO"]).toBeCloseTo(0.1378, 4);
+    expect(d.doRequestsUsd).toBeCloseTo(0.000324, 9); // switchboard only, not terrateam's 994
     expect(JSON.stringify(report)).not.toContain("terrateam");
+    expect(JSON.stringify(report)).not.toContain("b38f0775");
   });
 
   it("keeps only the group's Anthropic workspace for LLM spend", () => {
@@ -105,7 +126,7 @@ describe("buildCostReport", () => {
   });
 
   it("emits one row per day in range, oldest first, with zero-filled gaps", () => {
-    const r = buildCostReport("switchboard", GROUP, { containers: [], durableObjects: [] }, [], { from: "2026-08-27", to: "2026-08-29", days: 3, partialLastDay: false });
+    const r = buildCostReport("switchboard", GROUP, { containers: [], durableObjectRequests: [], durableObjectDuration: [] }, [], { from: "2026-08-27", to: "2026-08-29", days: 3, partialLastDay: false });
     expect(r.days.map((d) => d.date)).toEqual(["2026-08-27", "2026-08-28", "2026-08-29"]);
     expect(r.days.every((d) => d.total === 0)).toBe(true);
     expect(r.totals.total).toBe(0);
@@ -114,7 +135,7 @@ describe("buildCostReport", () => {
   it("totals per day and across the range, and splits cloud vs LLM", () => {
     const d = report.days.find((x) => x.date === "2026-08-28")!;
     const containers = d.containers.bot.total + d.containers.resident.total;
-    const dos = d.durableObjects.switchboard;
+    const dos = d.durableObjects["bot DO"] + d.durableObjects["resident DOs"] + d.doRequestsUsd;
     expect(d.cloudUsd).toBeCloseTo(containers + dos, 9);
     expect(d.total).toBeCloseTo(containers + dos + 12.5, 9);
     expect(report.totals.total).toBeCloseTo(report.days.reduce((s, x) => s + x.total, 0), 9);
@@ -160,8 +181,9 @@ describe("resolveRange", () => {
 
 describe("parseCostsConfig", () => {
   it("accepts a well-formed block and applies env-name defaults", () => {
-    const c = parseCostsConfig({ cloudflareAccountId: "3c7b", groups: { switchboard: { workers: ["switchboard"], containerApps: { a: "bot" } } } });
+    const c = parseCostsConfig({ cloudflareAccountId: "3c7b", groups: { switchboard: { workers: ["switchboard"], containerApps: { a: "bot" }, durableObjectNamespaces: { n1: "bot DO" } } } });
     expect(c?.cloudflareTokenEnv).toBe("CF_ANALYTICS_TOKEN");
+    expect(c?.groups.switchboard.durableObjectNamespaces).toEqual({ n1: "bot DO" });
     expect(c?.anthropicAdminKeyEnv).toBe("ANTHROPIC_ADMIN_KEY");
     expect(c?.groups.switchboard.workers).toEqual(["switchboard"]);
   });
@@ -169,6 +191,7 @@ describe("parseCostsConfig", () => {
     expect(parseCostsConfig(undefined)).toBeUndefined();
     expect(() => parseCostsConfig({ groups: {} })).toThrow(/cloudflareAccountId/);
     expect(() => parseCostsConfig({ cloudflareAccountId: "x", groups: { g: { workers: "nope" } } })).toThrow(/workers/);
+    expect(() => parseCostsConfig({ cloudflareAccountId: "x", groups: { g: { workers: [], durableObjectNamespaces: { n: 1 } } } })).toThrow(/durableObjectNamespaces/);
   });
 });
 
@@ -192,7 +215,8 @@ describe("CloudflareGraphqlUsageSource", () => {
         accounts: [
           {
             containers: [{ dimensions: { date: "2026-08-28", applicationId: "app1" }, sum: { cpuTimeSec: 10, allocatedMemory: 20, allocatedDisk: 30 } }],
-            durableObjects: [{ dimensions: { date: "2026-08-28", scriptName: "switchboard" }, sum: { requests: 5, wallTime: 6 } }],
+            durableObjectRequests: [{ dimensions: { date: "2026-08-28", scriptName: "switchboard" }, sum: { requests: 5 } }],
+            durableObjectDuration: [{ dimensions: { date: "2026-08-28", namespaceId: "ns1" }, sum: { duration: 7.5 } }],
           },
         ],
       },
@@ -211,7 +235,9 @@ describe("CloudflareGraphqlUsageSource", () => {
     expect(body.variables.from).toBe("2026-08-01T00:00:00Z");
     expect(body.variables.to).toBe("2026-08-29T00:00:00Z"); // exclusive end: the whole last day
     expect(usage.containers).toEqual([{ date: "2026-08-28", applicationId: "app1", cpuTimeSec: 10, allocatedMemoryByteSec: 20, allocatedDiskByteSec: 30 }]);
-    expect(usage.durableObjects).toEqual([{ date: "2026-08-28", scriptName: "switchboard", requests: 5, wallTimeUs: 6 }]);
+    expect(usage.durableObjectRequests).toEqual([{ date: "2026-08-28", scriptName: "switchboard", requests: 5 }]);
+    expect(usage.durableObjectDuration).toEqual([{ date: "2026-08-28", namespaceId: "ns1", gbSeconds: 7.5 }]);
+    expect(body.query).toContain("durableObjectsPeriodicGroups"); // the billable-duration dataset, not summed request wall time
   });
 
   it("throws on a non-200 and on GraphQL-level errors (the API returns 200 for those)", async () => {

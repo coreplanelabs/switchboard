@@ -50,7 +50,7 @@ function seriesOf(report: CostReport): string[] {
 }
 
 function valueOf(d: DailyCost, series: string): number {
-  if (series === DO_LABEL) return Object.values(d.durableObjects).reduce((s, v) => s + v, 0);
+  if (series === DO_LABEL) return Object.values(d.durableObjects).reduce((s, v) => s + v, 0) + d.doRequestsUsd;
   if (series === LLM_LABEL) return d.llmUsd;
   return d.containers[series]?.total ?? 0;
 }
@@ -205,8 +205,8 @@ ${tiles(report)}
   <p class="note">Machine-readable twin: <code>GET /costs/${escapeHtml(report.group)}.json</code> (same Access gate).</p>
 </section>
 <footer class="foot">
-  <div><b>Method.</b> Cloudflare GraphQL Analytics <code>containersUsageAdaptiveGroups</code> (cpuTimeSec, allocatedMemory, allocatedDisk per app per UTC day) and <code>durableObjectsInvocationsAdaptiveGroups</code> (wallTime, requests per Worker). Prices: vCPU $0.000020/s, memory $0.0000025/GiB-s, disk $0.00000007/GB-s, DO duration $12.50 per million GB-s at 128 MB, DO requests $0.15/M. Gross list price — plan fees and included allowances are not subtracted.</div>
-  <div><b>Scope.</b> Only the container apps and Workers mapped to this group in <code>costs.groups.${escapeHtml(report.group)}</code>; everything else in the account is excluded.</div>
+  <div><b>Method.</b> Cloudflare GraphQL Analytics <code>containersUsageAdaptiveGroups</code> (cpuTimeSec, allocatedMemory, allocatedDisk per app per UTC day), <code>durableObjectsPeriodicGroups</code> (billable <code>duration</code> GB-s per namespace) and <code>durableObjectsInvocationsAdaptiveGroups</code> (requests per Worker). Prices: vCPU $0.000020/s, memory $0.0000025/GiB-s, disk $0.00000007/GB-s, DO duration $12.50 per million GB-s, DO requests $0.15/M. Gross list price — plan fees and included allowances are not subtracted.</div>
+  <div><b>Scope.</b> Only the container apps, DO namespaces and Workers mapped to this group in <code>costs.groups.${escapeHtml(report.group)}</code>; everything else in the account is excluded. Not included: R2 (resident snapshots), DO SQLite storage, Workers requests, Access — each is cents a month at current volume.</div>
 </footer>
 </main>
 </body>

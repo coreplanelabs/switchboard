@@ -79,4 +79,13 @@ costs:
         a0390da2-08e7-447f-aab9-f513815b9fce: bot
         a0373f6a-a87c-429c-bb96-ac378de550c9: resident
         a030b6eb-42de-4c30-ad2b-e692327ca813: sandbox
+      # Durable Object namespaces (GET /accounts/{id}/workers/durable_objects/namespaces);
+      # billable DO duration is reported per namespace, not per Worker.
+      durableObjectNamespaces:
+        5fcc0392bd4240e4910a88ecf4040b43: bot DO
+        d89e62295c1f47a9b25449739e62a164: resident DOs
+        b3e64f14c8914d18baae6b093ac3c4d8: resident registry DO
+        f5a6c76f9c71412ca1349bd5cb72a771: sandbox DOs
+        f03b679428124934b3bf85b75ae99413: memory DOs
+        0ff13de1f9bd4b76a963b41e8fe92318: friction DO
       # anthropicWorkspaceId: wrkspc_...   # set once the bot's API key lives in its own Anthropic workspace
