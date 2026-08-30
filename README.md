@@ -351,3 +351,5 @@ Add an entry to `AGENTS` in `src/agents/registry.ts` (system prompt, toolset, tu
 - The `bash` tool executes model-generated commands on the host with the bot's permissions. Run Switchboard in a container or dedicated user/VM, scope the `gh` token to the repos it should touch, restrict which channels can reach it, and put the `coding` agent behind a `permissions.agents` allowlist.
 - API keys are only ever read from environment variables (`apiKeyEnv`), never from config files.
 - Workspaces are confined for file tools, but `bash` is inherently unconfined — isolation belongs at the host level.
+
+<!-- receipt probe 2 for features/resident-repos.md item 51 (PR #245) — never merged -->
