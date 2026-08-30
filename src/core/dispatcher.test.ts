@@ -1764,6 +1764,9 @@ describe("live run-view wiring (Area 2)", () => {
       deps,
       {
         ...msg("agent:general please rotate ghp_abcdefghijklmnopqrstuvwxyz0123 now"),
+        channelName: "switchboard-prompting",
+        userName: "justin",
+        sourceUrl: "https://acme.slack.com/archives/CX/p10",
         images: [png, png],
         documents: [{ name: "spec.pdf", mediaType: "application/pdf" as const, data: "AAAA" }],
       },
@@ -1774,6 +1777,30 @@ describe("live run-view wiring (Area 2)", () => {
     if (input.type !== "input") throw new Error("unreachable");
     expect(input.text).toBe("please rotate «redacted-github-token» now [+2 images, 1 document]"); // directives stripped, redacted
     expect(input.at).toEqual(expect.any(Number));
+    // where it came from, for the Request block's `#channel · user · open thread` line
+    expect(input.source).toEqual({ url: "https://acme.slack.com/archives/CX/p10", channel: "switchboard-prompting", user: "justin" });
+  });
+
+  it("omits `source` from the `input` event entirely when the adapter supplied no origin hints (HTTP/MCP)", async () => {
+    const events: RunEvent[] = [];
+    const spy = {
+      create() {
+        return { id: "run-i", token: "tok-i", control: new RunControl() };
+      },
+      publish(_id: string, e: RunEvent) {
+        events.push(e);
+      },
+      finish() {},
+      has: () => true,
+      subscribe: () => () => {},
+      size: () => 1,
+    } as unknown as RunRegistry;
+    const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
+    deps.runRegistry = spy;
+    await dispatch(deps, msg("agent:general hi"), fakeIO().io);
+    const input = events[0];
+    if (input.type !== "input") throw new Error("unreachable");
+    expect("source" in input).toBe(false);
   });
 
   it("shows an `assistant` turn on the status card as a one-line 💬 excerpt (capped), never the full text", async () => {

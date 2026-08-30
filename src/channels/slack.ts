@@ -343,6 +343,27 @@ function wasHandledHere(channel: string, ts: string): boolean {
   return handledHere.has(`${channel}:${ts}`);
 }
 
+/** The permalink Slack itself would mint for a message: `<team url>archives/
+ *  <channel>/p<ts sans dot>`, plus the thread qualifier when the message is a
+ *  reply. Pure — built from the cached `auth.test` URL, no extra API call. */
+export function slackPermalink(teamUrl: string, channel: string, ts: string, threadTs: string): string {
+  const base = `${teamUrl.replace(/\/+$/, "")}/archives/${channel}/p${ts.replace(".", "")}`;
+  return threadTs && threadTs !== ts ? `${base}?thread_ts=${threadTs}&cid=${channel}` : base;
+}
+
+// The workspace URL from auth.test (e.g. https://acme.slack.com/), resolved once
+// per process — the permalink on every run's Request block is built from it.
+let teamUrl: string | undefined;
+async function resolveTeamUrl(client: SlackClient): Promise<string | undefined> {
+  if (teamUrl) return teamUrl;
+  try {
+    teamUrl = (await client.auth.test()).url ?? undefined;
+  } catch (err) {
+    console.warn(`[slack] auth.test for the team URL failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return teamUrl;
+}
+
 async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Promise<void> {
   markHandledHere(ev.channel, ev.ts);
   // Immediate receipt: react to the triggering message so the sender knows it
@@ -365,9 +386,10 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
   // lookup leaves the field undefined (the label falls back to the raw id) and
   // never fails the dispatch. Resolved in parallel so the two lookups don't add
   // up on the first message for a new channel/user.
-  const [channelName, userName] = await Promise.all([
+  const [channelName, userName, team] = await Promise.all([
     resolveChannelName(client, ev.channel),
     resolveUserName(client, ev.user),
+    resolveTeamUrl(client),
   ]);
   // Tell the model about attachments it can't see, so it never claims an
   // attached file simply didn't come through.
@@ -384,6 +406,7 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
       text: ev.text + note,
       channelName,
       userName,
+      sourceUrl: team ? slackPermalink(team, ev.channel, ev.ts, ev.threadTs) : undefined,
       images: images.length > 0 ? images : undefined,
       documents: documents.length > 0 ? documents : undefined,
     },

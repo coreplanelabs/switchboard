@@ -1,6 +1,6 @@
 import type { AgentDef } from "./agents/registry.js";
 import { toolResultText, type ChatMessage, type ContentPart, type Provider } from "./providers/types.js";
-import { redactAndCap, redactSecrets, summarizeToolResult, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
+import { parseExitPrefix, prepareToolOutput, redactAndCap, redactSecrets, summarizeToolResult, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
 import type { RunControl } from "./core/runRegistry.js";
 import { ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
@@ -204,10 +204,10 @@ async function runLoop(
     for (const tu of toolUses) {
       // Redact THEN cap (redactAndCap): a pre-truncated command could sever a
       // token below its detector's length floor and leak a raw fragment.
-      emit({ type: "tool_call", tool: tu.name, summary: redactAndCap(describeToolCall(tu)) });
+      emit({ type: "tool_call", tool: tu.name, summary: redactAndCap(describeToolCall(tu)), callId: tu.id });
       const tool = toolsByName.get(tu.name);
       if (!tool) {
-        emit({ type: "tool_result", tool: tu.name, ok: false, summary: redactAndCap(`Unknown tool: ${tu.name}`) });
+        emit({ type: "tool_result", tool: tu.name, ok: false, summary: redactAndCap(`Unknown tool: ${tu.name}`), callId: tu.id });
         results.push({
           type: "tool_result",
           toolUseId: tu.id,
@@ -218,7 +218,19 @@ async function runLoop(
       }
       try {
         const output = await untilHardStop(tool.run((tu.input ?? {}) as Record<string, unknown>, toolContext));
-        emit({ type: "tool_result", tool: tu.name, ok: true, summary: summarizeToolResult(toolResultText(output)) });
+        const text = toolResultText(output);
+        // A bash command that exited nonzero did not succeed, whatever the tool
+        // returned — the executors say so with an `exit N:` prefix (runEvents).
+        const exit = tu.name === "bash" ? parseExitPrefix(text) : undefined;
+        emit({
+          type: "tool_result",
+          tool: tu.name,
+          ok: !exit?.failed,
+          summary: summarizeToolResult(text),
+          callId: tu.id,
+          ...(exit?.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
+          output: prepareToolOutput(text),
+        });
         results.push({ type: "tool_result", toolUseId: tu.id, content: output });
       } catch (err) {
         // A hard stop is not a tool error to feed back to the model — unwind.
@@ -238,6 +250,8 @@ async function runLoop(
           tool: tu.name,
           ok: false,
           summary: summarizeToolResult(message),
+          callId: tu.id,
+          output: prepareToolOutput(message),
           ...(err instanceof ExecInfraError ? { infra: true as const } : {}),
         });
         results.push({
@@ -439,6 +453,12 @@ function describeToolCall(tu: Extract<ContentPart, { type: "tool_use" }>): strin
     // so we never truncate before redacting.
     return `$ ${String(input.command)}`;
   }
-  if (input?.path) return `${tu.name} ${String(input.path)}`;
+  // The call's target, when the input names one: a path, a skill name, a URL…
+  // — so `use_skill code-review-and-quality` reads as what it is, not just the
+  // tool name. First short string field among the conventional keys wins.
+  for (const key of ["path", "name", "url", "query"]) {
+    const v = input?.[key];
+    if (typeof v === "string" && v.trim() && v.length <= 200) return `${tu.name} ${v.trim()}`;
+  }
   return tu.name;
 }

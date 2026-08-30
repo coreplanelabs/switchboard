@@ -31,8 +31,26 @@ export type RunNoteKind =
 export type StopMode = "soft" | "hard";
 
 export type RunEvent =
-  | { type: "tool_call"; tool: string; summary: string; at?: number }
-  | { type: "tool_result"; tool: string; ok: boolean; summary: string; infra?: true; at?: number }
+  /** `callId` is the provider's tool_use id — the explicit pair key between a
+   *  call and its result (live-view item 13); absent only on legacy captures. */
+  | { type: "tool_call"; tool: string; summary: string; callId?: string; at?: number }
+  /** `ok` is "the tool succeeded": false when it threw AND (bash) when the
+   *  command exited nonzero. `exitCode` rides on bash results (parsed from the
+   *  executors' shared `exit N:` prefix, 0 for a clean run; absent when the code
+   *  was not numeric). `output` is the tool's text — control-stripped, redacted,
+   *  capped at TOOL_OUTPUT_CAP — for the run page's expandable card; the status
+   *  card and the friction analyzer keep reading `summary`. */
+  | {
+      type: "tool_result";
+      tool: string;
+      ok: boolean;
+      summary: string;
+      callId?: string;
+      exitCode?: number;
+      output?: string;
+      infra?: true;
+      at?: number;
+    }
   /** `mode` rides only on the stop notes (`stop_requested` / `stopped`). */
   | { type: "run_note"; kind: RunNoteKind; summary: string; mode?: StopMode; at?: number }
   /** The run's final answer — the same text the channel reply/PR post is
@@ -44,7 +62,15 @@ export type RunEvent =
    *  one-line suffix), redacted, uncapped. Published by the dispatcher once per
    *  run, right after the run is registered — the first event of the record, so
    *  the run page can lead with what was asked (features/live-view.md item 12). */
-  | { type: "input"; text: string; at?: number }
+  | {
+      type: "input";
+      text: string;
+      /** Where the request came from, for the Request block: the channel and
+       *  user display names and a link back to the triggering message —
+       *  whatever the adapter supplied (all optional). */
+      source?: { url?: string; channel?: string; user?: string };
+      at?: number;
+    }
   /** The model's prose BETWEEN tool calls — text content that rode alongside
    *  tool_use in one completion. Emitted by the runner, redacted, uncapped. The
    *  final text-only completion is NOT one of these (that is the `answer`). */
@@ -147,4 +173,29 @@ export function summarizeToolResult(output: string): string {
   const lineCount = trimmed.split("\n").length;
   const more = trimmed.length > head.length ? ` (${trimmed.length} chars${lineCount > 1 ? `, ${lineCount} lines` : ""})` : "";
   return head + more;
+}
+
+/** Every executor renders a nonzero command exit as an `exit <code>:` first line
+ *  (`LocalExecutor.exec`, `ResidentExecutor.exec`, `CloudflareSandboxExecutor.exec`)
+ *  so the model sees the status. This is the single reader of that contract.
+ *  `failed` is true for any such prefix; `exitCode` is the code when numeric
+ *  (execFile can report an errno string instead). Ordinary output — including
+ *  text that merely mentions "exit 1:" later on — is a clean 0. */
+export function parseExitPrefix(output: string): { failed: boolean; exitCode?: number } {
+  const m = /^\s*exit (\S+?):/.exec(stripAnsi(output));
+  if (!m) return { failed: false, exitCode: 0 };
+  return /^\d+$/.test(m[1]) ? { failed: true, exitCode: Number(m[1]) } : { failed: true };
+}
+
+/** Upper bound on a `tool_result.output` — large enough for a test run or a
+ *  diff to read in full on the run page, small enough that the registry's
+ *  1000-event backlog stays in the low megabytes worst case. */
+export const TOOL_OUTPUT_CAP = 8_000;
+
+/** The full tool output as it may leave the process: control-stripped, then
+ *  redacted, then capped (that order — see redactAndCap). Empty output → "". */
+export function prepareToolOutput(output: string): string {
+  const text = redactSecrets(stripAnsi(output)).trim();
+  if (text.length <= TOOL_OUTPUT_CAP) return text;
+  return `${text.slice(0, TOOL_OUTPUT_CAP)}…[${text.length - TOOL_OUTPUT_CAP} more chars]`;
 }

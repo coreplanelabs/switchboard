@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  slackPermalink,
   classifyDocument,
   classifyMessage,
   fetchDocuments,
@@ -569,5 +570,18 @@ describe("fetchDocuments (secret files skipped-with-note, never decoded)", () =>
     expect(documents.map((d) => d.name)).toEqual(["notes.txt", "data.csv", "main.ts"]);
     expect(skipped).toEqual(["config.env (text/plain)"]);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("slackPermalink (the Request block's link back to the thread)", () => {
+  it("builds Slack's own permalink shape from the team URL, channel and ts", () => {
+    expect(slackPermalink("https://acme.slack.com/", "C0BQS7KPJHK", "1788045076.113369", "1788045076.113369")).toBe(
+      "https://acme.slack.com/archives/C0BQS7KPJHK/p1788045076113369",
+    );
+  });
+  it("adds the thread qualifier for a reply inside a thread", () => {
+    expect(slackPermalink("https://acme.slack.com", "C1", "1788045099.000100", "1788045076.113369")).toBe(
+      "https://acme.slack.com/archives/C1/p1788045099000100?thread_ts=1788045076.113369&cid=C1",
+    );
   });
 });
