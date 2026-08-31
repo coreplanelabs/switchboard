@@ -1,8 +1,8 @@
 import type { ConfigStore } from "../config.js";
 import { configAwarenessBlock } from "./configAwareness.js";
 import { customInstructionsBlock } from "./customInstructions.js";
-import { getAgent } from "../agents/registry.js";
-import { lastThreadDirectives, parseDirectives } from "../directives.js";
+import { getAgent, type AgentDef } from "../agents/registry.js";
+import { lastThreadDirectives, parseDirectives, type RequestDirectives, type ThreadDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
 import { makeWebCapability } from "../tools/web.js";
 import { residentOnboardedProbe } from "../execution/factory.js";
@@ -12,7 +12,23 @@ import type { ProviderRegistry } from "../providers/registry.js";
 import { currentPrHeadSha, prCommitsSince, resolveRepoContext, type RepoContext } from "./repoContext.js";
 import type { PrCommitList } from "./headMoved.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
-import { openPullRequest, type OpenedPullRequest, type PullRequestTarget } from "../execution/githubPulls.js";
+import {
+  fetchPullRequestFacts,
+  fetchRepoShipInfo,
+  openPullRequest,
+  type OpenedPullRequest,
+  type PullRequestFacts,
+  type PullRequestTarget,
+  type RepoShipInfo,
+} from "../execution/githubPulls.js";
+import {
+  resolveShipCaps,
+  runShipPipeline,
+  shipPreflight,
+  type ShipBlocks,
+  type ShipChildSpec,
+  type ShipOutcome,
+} from "./shipPipeline.js";
 import type { PrDescription } from "./prDescription.js";
 import type { ReviewVerdict } from "./reviewVerdict.js";
 import {
@@ -102,6 +118,22 @@ export interface CoreDeps {
    * Injectable so tests assert the note without a network call.
    */
   fetchPrHead?: (pr: { repo: string; number: number }) => Promise<string | undefined>;
+  /**
+   * Repo facts for the agent:ship gate (features/agent-ship.md item 9): the
+   * `allow_auto_merge` flag — ship refuses when it is enabled OR unknown
+   * (fail-closed: an LGTM into auto-merge would merge with no human) — and
+   * the repo's default branch, the PR base of last resort. Default: one REST
+   * GET via githubPulls' `fetchRepoShipInfo` (App token, never `gh`).
+   * Injectable so tests assert the refusal without a network call.
+   */
+  fetchRepoShipInfo?: (repo: string) => Promise<RepoShipInfo | undefined>;
+  /**
+   * One PR's entry-check facts for agent:ship (item 10): open/closed, author
+   * identity (login + immutable numeric id), same-repo head, head ref/sha —
+   * the resume-at-review checks, and the merge-ready "still open" re-check.
+   * Default: githubPulls' `fetchPullRequestFacts`. Injectable for tests.
+   */
+  fetchPrFacts?: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
   /**
    * The commits a PR head carries over its base (agent-review.md item 12):
    * asked once for the reviewed head and once for the current one when the
@@ -420,6 +452,30 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       await io.reply(
         `🚫 You're not on the allowlist for the \`${repoCtx.repo}\` repo environment. Ask ${deps.config.adminsHint()} for access.`,
       );
+      return;
+    }
+
+    // agent:ship fork (features/agent-ship.md): after agent resolution and the
+    // repo gates above, BEFORE the top-level attach — ship names its own
+    // pipeline branch and each child round attaches its own workspace
+    // (shipPipeline.ts). The branch owns everything from here: the preflight
+    // refusals, the one run record, the round loop, the final report. An
+    // unexpected throw propagates to the outer catch after the branch closed
+    // its own card and persisted its failed record.
+    if (agent.name === "ship") {
+      setupCard = undefined; // the ship branch owns the card from here
+      await runShipBranch(deps, msg, io, {
+        agent,
+        modelRef: resolved.modelRef,
+        label,
+        startedAt,
+        card,
+        directives,
+        sticky,
+        history,
+        repoCtx,
+        memoryBlockP,
+      });
       return;
     }
 
@@ -1131,6 +1187,276 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     writeHistory(true);
   } finally {
     activeRuns--;
+  }
+}
+
+/** What the agent:ship fork carries out of dispatch()'s prelude — values the
+ *  pipeline must not re-derive, because the gates already ran against them. */
+interface ShipBranchContext {
+  /** AGENTS["ship"] — labels and run meta only; never handed to runAgent. */
+  agent: AgentDef;
+  /** The modelRef resolved for the ship request — recorded on the run, never
+   *  called; child rounds resolve their own per-agent models. */
+  modelRef: string;
+  label: string;
+  startedAt: number;
+  /** The coalesced ack card; the ship branch owns its close from here. */
+  card: StatusHandle;
+  directives: RequestDirectives;
+  sticky: ThreadDirectives;
+  history: HistoryItem[];
+  repoCtx: RepoContext;
+  memoryBlockP: Promise<string | undefined>;
+}
+
+/**
+ * The agent:ship branch (features/agent-ship.md): preflight refusals, then
+ * the ONE run record + card shell around `runShipPipeline`'s round loop —
+ * the ship counterpart of the main path's run shell, reusing the same label,
+ * event, record, and friction vocabulary so /runs shows a pipeline exactly
+ * like any run. Handled endings reply here; an unexpected throw closes the
+ * card, persists the `failed` record, and propagates to dispatch()'s outer
+ * catch for the error reply.
+ */
+async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO, ctx: ShipBranchContext): Promise<void> {
+  const { agent, card, directives, history, repoCtx, label } = ctx;
+  const pre = await shipPreflight({
+    channelId: msg.channelId,
+    threadKey: msg.threadKey,
+    requestText: directives.text,
+    repoCtx,
+    gates: { canRunAgent: (a) => deps.config.canRunAgent(msg.userId, a), adminsHint: () => deps.config.adminsHint() },
+    repoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
+    prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
+    runsBase: process.env.PUBLIC_BASE_URL,
+  });
+  if (!pre.ok) {
+    console.log(`[ship] ${msg.threadKey} not started: ${pre.where}`);
+    await card.done({ title: `🚫 ${label} · ${pre.card}` });
+    await io.reply(pre.reply);
+    return;
+  }
+  const entry = pre.entry;
+
+  // The one run record (KTD2): registered and stamped exactly like the main
+  // path — input, run_meta, bounded context, the #375 tombstone.
+  const registry = deps.runRegistry ?? defaultRunRegistry;
+  const run = registry.create(
+    composeRunLabel({
+      agent: agent.name,
+      repo: repoCtx.repo,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      channelName: msg.channelName,
+      userName: msg.userName,
+      text: directives.text,
+    }),
+    {
+      agent: agent.name,
+      model: ctx.modelRef,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      threadKey: msg.threadKey,
+      ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+      ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    },
+  );
+  const publishText = (type: "input" | "context" | "answer", text: string, source?: { url?: string; channel?: string; user?: string }) => {
+    const redacted = redactSecrets(text);
+    registry.publish(run.id, { type, text: redacted, ...(source ? { source } : {}), at: Date.now() });
+    console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
+  };
+  const humanize = isMrkdwnChannel(msg.channelId);
+  const attachments = attachmentSuffix(msg.images, msg.documents);
+  const source = {
+    ...(msg.sourceUrl ? { url: msg.sourceUrl } : {}),
+    ...(msg.channelName ? { channel: msg.channelName } : {}),
+    ...(msg.userName ? { user: msg.userName } : {}),
+  };
+  const request = humanize ? humanizeMessageText(directives.text) : directives.text;
+  publishText("input", attachments ? `${request} ${attachments}` : request, Object.keys(source).length > 0 ? source : undefined);
+  registry.publish(run.id, {
+    type: "run_meta",
+    agent: agent.name,
+    model: ctx.modelRef,
+    ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+    ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
+    at: Date.now(),
+  });
+  if (deps.config.config.runHistory?.includeContext !== false) {
+    for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
+  }
+  // Tombstone-first (#375), like the main path — a pipeline can run for
+  // hours, so the provisional terminal record matters even more here.
+  if (deps.runHistoryWriter) {
+    const startSnap = registry.snapshot(run.id, run.token);
+    if (startSnap) {
+      deps.runHistoryWriter.write(
+        assembleRunRecord({
+          run,
+          snap: startSnap,
+          agent: agent.name,
+          model: ctx.modelRef,
+          msg,
+          repo: repoCtx.repo,
+          finishedAt: startSnap.startedAt,
+          status: "interrupted",
+          diagnosis: analyzeRunFriction(startSnap.events, { finished: false, truncated: startSnap.truncated }),
+        }),
+        { provisional: true },
+      );
+    }
+  }
+
+  // The card shell — the main path's frame vocabulary (spinner title,
+  // checklist + one-line activity trace, heartbeat, shutdown notice).
+  let frame = 0;
+  const title = (icon?: string) =>
+    `${icon ?? SPINNER_GLYPHS[frame++ % SPINNER_GLYPHS.length]} ${label} · ${Math.round((Date.now() - ctx.startedAt) / 1000)}s`;
+  const liveUrl = liveViewLink(run.id, run.token);
+  const liveLink = liveUrl ? { url: liveUrl, label: "Live run" } : undefined;
+  let checklist: string | undefined;
+  let lastActivity: string | undefined;
+  const currentFrame = () => {
+    const detail = [checklist, lastActivity].filter(Boolean).join("\n");
+    return { title: title() + (shutdownNotice ? ` · ${shutdownNotice}` : ""), detail: detail || undefined, link: liveLink };
+  };
+  const finalDetail = () => checklist;
+  const checkedOffDetail = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
+  const onEvent = (e: RunEvent) => {
+    registry.publish(run.id, e);
+    lastActivity = activityLine(e);
+    console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
+    card.update(currentFrame());
+  };
+  const onProgress = (note: string) => console.log(`[note] ${msg.threadKey} ${note}`);
+  const reportProgress = (list: string) => {
+    const trimmed = list.trim();
+    if (!trimmed) return; // never blank the durable progress record
+    checklist = trimmed;
+    card.update(currentFrame());
+  };
+
+  // Child resolution: each round resolves ITS agent's model/effort through
+  // the standard layers — a `model:`/`effort:` directive on the ship request
+  // wins for every child, exactly like a directive wins on any request.
+  const child = (name: "coding" | "review"): ShipChildSpec => {
+    const r = deps.config.resolve({
+      channelId: msg.channelId,
+      userId: msg.userId,
+      request: { agent: name, model: directives.model ?? ctx.sticky.model, effort: directives.effort ?? ctx.sticky.effort },
+    });
+    const { provider: providerName, model } = parseModelRef(r.modelRef);
+    return {
+      agent: getAgent(name),
+      provider: deps.providers.get(providerName),
+      modelRef: r.modelRef,
+      model,
+      ...(r.effort !== undefined ? { effort: r.effort } : {}),
+    };
+  };
+  const scopes = deps.config.scopes(msg.channelId, msg.userId);
+  const instructionsBlock = customInstructionsBlock(scopes);
+  const memoryBlock = await ctx.memoryBlockP;
+  const blocks = (spec: ShipChildSpec): ShipBlocks => ({
+    memory: memoryBlock,
+    config: configAwarenessBlock({
+      agentName: spec.agent.name,
+      modelRef: spec.modelRef,
+      effort: spec.effort,
+      channel: scopes.channel,
+      user: scopes.user,
+      messageDirective: { agent: directives.agent, model: directives.model, effort: directives.effort },
+      threadDirective: { agent: ctx.sticky.agent, model: ctx.sticky.model, effort: ctx.sticky.effort },
+      canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
+    }),
+    instructions: instructionsBlock,
+    skills: deps.skills ? skillGuidanceBlock(deps.skills, spec.agent.name) : undefined,
+  });
+
+  console.log(
+    `[run] ${msg.threadKey} user=${msg.userId} agent=ship model=${ctx.modelRef} entry=${entry.resume ? `resume ${entry.repo}#${entry.resume.pr}` : `round0 ${entry.branch}`}`,
+  );
+  card.update({ title: title() });
+  const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
+  let outcome: ShipOutcome | undefined;
+  let writeRecordAfterReply: (() => void) | undefined;
+  try {
+    outcome = await runShipPipeline({
+      entry,
+      round0Messages: buildMessages(history, directives.text, msg.images, msg.documents),
+      child,
+      blocks,
+      factory: {
+        execution: deps.config.config.execution,
+        workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
+        dataDir: deps.dataDir ?? "./data",
+      },
+      threadKey: msg.threadKey,
+      caps: resolveShipCaps(deps.config.config.ship),
+      control: run.control,
+      onEvent,
+      onProgress,
+      reportProgress,
+      publish: (e) => registry.publish(run.id, e),
+      reply: (text) => io.reply(text),
+      web: webCapability(),
+      skills: deps.skills,
+      github: {
+        openPullRequest: deps.openPullRequest ?? openPullRequest,
+        postReviewComment: deps.postReviewComment ?? postReviewComment,
+        fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+        fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
+        prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
+      },
+      redactDescription: redactPrDescription,
+      logKey: msg.threadKey,
+    });
+    // The run record is the source of truth: the report enters the stream
+    // BEFORE finish() below (a publish on a finished run is a no-op).
+    publishText("answer", outcome.reply);
+  } catch (err) {
+    await card.done({ title: title("❌"), detail: finalDetail(), link: liveLink }).catch(() => {});
+    throw err; // the outer catch replies; the finally below persisted `failed`
+  } finally {
+    clearInterval(heartbeat);
+    const status: RunStatus = outcome?.status ?? "failed";
+    registry.finish(run.id, status);
+    const snap = deps.frictionLedger || deps.runHistoryWriter ? registry.snapshot(run.id, run.token) : null;
+    const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
+    const finishedAt = snap?.finishedAt ?? Date.now();
+    io.runFinished?.({ id: run.id, status });
+    if (deps.frictionLedger) {
+      const ledger = deps.frictionLedger;
+      void ledger
+        .record({ runId: run.id, ...(run.label !== undefined ? { label: run.label } : {}), agent: agent.name, finishedAt, diagnosis })
+        .catch((err: unknown) =>
+          console.warn(`[friction] ${msg.threadKey} ledger write failed: ${err instanceof Error ? err.message : String(err)}`),
+        );
+    }
+    if (deps.runHistoryWriter) {
+      const writer = deps.runHistoryWriter;
+      const record = () =>
+        writer.write(
+          assembleRunRecord({ run, snap, agent: agent.name, model: ctx.modelRef, msg, repo: repoCtx.repo, finishedAt, status, diagnosis }),
+        );
+      // A throw skips the post-reply write below — persist the failed record
+      // now; the happy path writes after the reply, like the main path.
+      if (outcome) writeRecordAfterReply = record;
+      else record();
+    }
+  }
+  if (!outcome) return; // unreachable: the catch above rethrew
+  console.log(`[done] ${msg.threadKey} ship ${outcome.reply.length} chars (${outcome.status})`);
+  const icon = outcome.status === "stopped_hard" ? "⛔" : outcome.status === "stopped_soft" ? "⏹" : "✅";
+  try {
+    await card.done({ title: title(icon), detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(), link: liveLink });
+    await io.reply(outcome.reply);
+  } finally {
+    // Fire-and-forget AFTER the reply (the writer's `pending()` counts it for
+    // the shutdown drain), so persistence can never delay the thread.
+    writeRecordAfterReply?.();
   }
 }
 

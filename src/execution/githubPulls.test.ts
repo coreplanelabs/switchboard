@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { findOpenPrByHead, openPullRequest, updatePullRequest } from "./githubPulls.js";
+import { fetchPullRequestFacts, fetchRepoShipInfo, findOpenPrByHead, openPullRequest, updatePullRequest } from "./githubPulls.js";
 
 // Feature: features/pr-description.md — the bot process opens and edits PRs
 // itself over the GitHub REST API with the App token (never the model, never
@@ -163,5 +163,94 @@ describe("githubPulls", () => {
     const last = payload.body.charCodeAt(cut - 1);
     // never a lone high surrogate at the clip point
     expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+  });
+
+  // Feature: features/agent-ship.md items 9–10 — the read-only repo/PR facts
+  // the ship gate consumes. Both lookups answer undefined on ANY failure (the
+  // caller fail-closes); neither ever throws.
+  describe("fetchRepoShipInfo (ship auto-merge gate)", () => {
+    it("parses allow_auto_merge and default_branch", async () => {
+      stubToken();
+      const calls = stubFetch(() => new Response(JSON.stringify({ allow_auto_merge: true, default_branch: "main" }), { status: 200 }));
+      expect(await fetchRepoShipInfo("acme/api")).toEqual({ allowAutoMerge: true, defaultBranch: "main" });
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api");
+
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ allow_auto_merge: false, default_branch: "develop" }), { status: 200 })));
+      expect(await fetchRepoShipInfo("acme/api")).toEqual({ allowAutoMerge: false, defaultBranch: "develop" });
+    });
+
+    it("a response without the field leaves allowAutoMerge absent (the caller fail-closes on unknown)", async () => {
+      stubToken();
+      stubFetch(() => new Response(JSON.stringify({ default_branch: "main" }), { status: 200 }));
+      expect(await fetchRepoShipInfo("acme/api")).toEqual({ defaultBranch: "main" });
+    });
+
+    it("non-2xx, malformed JSON, or a missing credential → undefined, never a throw", async () => {
+      stubToken();
+      stubFetch(() => new Response("nope", { status: 404 }));
+      expect(await fetchRepoShipInfo("acme/api")).toBeUndefined();
+
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("not json", { status: 200 })));
+      expect(await fetchRepoShipInfo("acme/api")).toBeUndefined();
+
+      vi.stubEnv("GH_TOKEN", "");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const calls = stubFetch(() => new Response("{}", { status: 200 }));
+      expect(await fetchRepoShipInfo("acme/api")).toBeUndefined();
+      expect(calls).toHaveLength(0); // no unauthenticated repo-settings probe
+    });
+  });
+
+  describe("fetchPullRequestFacts (ship entry checks)", () => {
+    const openPr = {
+      state: "open",
+      html_url: "https://github.com/acme/api/pull/7",
+      user: { login: "coreplane-switchboard[bot]", id: 318072483 },
+      head: { ref: "ship/fix-x-abc123", sha: "c".repeat(40), repo: { full_name: "acme/api" } },
+    };
+
+    it("parses state, author login+id, head ref/sha, and a POSITIVE same-repo head match", async () => {
+      stubToken();
+      const calls = stubFetch(() => new Response(JSON.stringify(openPr), { status: 200 }));
+      expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toEqual({
+        state: "open",
+        author: { login: "coreplane-switchboard[bot]", id: 318072483 },
+        headRef: "ship/fix-x-abc123",
+        headSha: "c".repeat(40),
+        sameRepoHead: true,
+        htmlUrl: "https://github.com/acme/api/pull/7",
+      });
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
+    });
+
+    it("a deleted-fork null head repo is sameRepoHead: false — never assumed same-repo", async () => {
+      stubToken();
+      stubFetch(() => new Response(JSON.stringify({ ...openPr, head: { ...openPr.head, repo: null } }), { status: 200 }));
+      const facts = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+      expect(facts?.sameRepoHead).toBe(false);
+    });
+
+    it("a malformed sha is dropped; an unrecognizable state, non-2xx, or fetch throw → undefined", async () => {
+      stubToken();
+      stubFetch(() => new Response(JSON.stringify({ ...openPr, head: { ...openPr.head, sha: "HEAD" } }), { status: 200 }));
+      expect((await fetchPullRequestFacts({ repo: "acme/api", number: 7 }))?.headSha).toBeUndefined();
+
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ state: "weird" }), { status: 200 })));
+      expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toBeUndefined();
+
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("x", { status: 500 })));
+      expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toBeUndefined();
+
+      vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("boom"))));
+      expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toBeUndefined();
+    });
+
+    it("works unauthenticated (public repos): no credential drops the auth header, the lookup still runs", async () => {
+      vi.stubEnv("GH_TOKEN", "");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const calls = stubFetch(() => new Response(JSON.stringify(openPr), { status: 200 }));
+      expect((await fetchPullRequestFacts({ repo: "acme/api", number: 7 }))?.state).toBe("open");
+      expect((calls[0].init.headers as Record<string, string>).authorization).toBeUndefined();
+    });
   });
 });

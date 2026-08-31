@@ -249,6 +249,23 @@ export const AGENTS: Record<string, AgentDef> = {
     maxMinutes: 25, // safety net, not the mechanism — typical reviews land in ~5
     effort: "medium", // fast turns; one big-context pass does the deep work
   },
+  ship: {
+    name: "ship",
+    description: "Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.",
+    // Never sent to a model: `agent:ship` forks inside dispatch() into the
+    // pipeline orchestrator (src/core/shipPipeline.ts), whose child rounds run
+    // on the coding/review defs above — runAgent is never called with THIS def.
+    system: "You are Switchboard's ship pipeline. This prompt is never sent to a model — the pipeline orchestrates coding and review child runs on their own definitions.",
+    // Full toolset so a ship thread provisions a writable workspace class like
+    // coding; nominal budgets — the pipeline is bounded by the `ship` config
+    // caps and by each child's own budgets clipped to the remaining wall clock,
+    // never by these numbers.
+    toolset: "full",
+    maxTurns: 1,
+    maxTokens: 16000,
+    maxMinutes: 5,
+    resources: { repo: "required" },
+  },
   research: {
     name: "research",
     description: "Answers questions with web search + URL reading. No repo.",

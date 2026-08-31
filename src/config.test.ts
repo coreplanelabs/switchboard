@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ConfigStore, MAX_INSTRUCTIONS_LENGTH } from "./config.js";
+import { resolveShipCaps, SHIP_DEFAULT_MAX_MINUTES, SHIP_DEFAULT_MAX_ROUNDS } from "./core/shipPipeline.js";
 
 // Feature: features/routing-and-config.md — layered resolution & permission gates.
 
@@ -394,5 +395,34 @@ describe("runHistory config", () => {
     warnings.length = 0;
     load(`${YAML_FIXTURE}\nselfImprovement:\n  repo: o/r\n  ledgerMax: 500\n`, (m) => warnings.push(m));
     expect(warnings).toEqual([]);
+  });
+});
+
+// Feature: features/agent-ship.md item 8 — the `ship` caps block: pipeline
+// wall clock + review-round cap, deployment-level like the sibling `review`
+// block, validated at load so a typo cannot silently become "no cap".
+describe("ship caps block (agent:ship pipeline)", () => {
+  it("parses maxRounds/maxMinutes; absent block leaves the field unset", () => {
+    const s = store(YAML_FIXTURE + "ship:\n  maxRounds: 2\n  maxMinutes: 30\n");
+    expect(s.config.ship).toEqual({ maxRounds: 2, maxMinutes: 30 });
+    expect(store().config.ship).toBeUndefined();
+  });
+
+  it("rejects non-integers and values < 1 at load, naming the key", () => {
+    expect(() => store(YAML_FIXTURE + "ship:\n  maxRounds: 0\n")).toThrow(/ship\.maxRounds must be an integer >= 1/);
+    expect(() => store(YAML_FIXTURE + "ship:\n  maxMinutes: 1.5\n")).toThrow(/ship\.maxMinutes must be an integer >= 1/);
+    expect(() => store(YAML_FIXTURE + 'ship: "nope"\n')).toThrow(/ship must be a mapping/);
+  });
+
+  it("resolveShipCaps: defaults 3 rounds / 120 minutes; configured values win", () => {
+    expect(resolveShipCaps(undefined)).toEqual({ maxRounds: SHIP_DEFAULT_MAX_ROUNDS, maxMinutes: SHIP_DEFAULT_MAX_MINUTES });
+    expect(resolveShipCaps({})).toEqual({ maxRounds: 3, maxMinutes: 120 });
+    expect(resolveShipCaps({ maxRounds: 1 })).toEqual({ maxRounds: 1, maxMinutes: 120 });
+    expect(resolveShipCaps({ maxRounds: 5, maxMinutes: 45 })).toEqual({ maxRounds: 5, maxMinutes: 45 });
+  });
+
+  it("the example config (config/config.example.yaml) still loads through ConfigStore", () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-config-example-"));
+    expect(() => new ConfigStore(join(process.cwd(), "config/config.example.yaml"), join(dir, "overrides.json"))).not.toThrow();
   });
 });

@@ -268,3 +268,26 @@ describe("coding prompts: the PR-description content contract (submitted object)
     }
   });
 });
+
+// Feature: features/agent-ship.md item 1 — `agent:ship` resolves through the
+// registry like every directive, but the ship branch in dispatch() never calls
+// runAgent with THIS def: children run on the coding/review defs (clipped), so
+// ship's budgets are nominal and its prompt is never sent to a model.
+describe("ship agent (features/agent-ship.md)", () => {
+  it("ship: repo required, full toolset, nominal budgets (never used for a model call)", () => {
+    expect(AGENTS.ship.resources?.repo).toBe("required");
+    expect(AGENTS.ship.toolset).toBe("full");
+    expect(AGENTS.ship.maxTurns).toBe(1);
+    expect(AGENTS.ship.maxTokens).toBe(16000);
+    expect(AGENTS.ship.maxMinutes).toBe(5);
+  });
+
+  it("ship's prompt says it is never sent to a model, and getAgent resolves the directive", () => {
+    expect(AGENTS.ship.system).toMatch(/never sent to a model/i);
+    expect(getAgent("ship")).toBe(AGENTS.ship);
+  });
+
+  it("ship carries no resident prompt variant — children use the coding/review variants", () => {
+    expect(AGENTS.ship.residentSystem).toBeUndefined();
+  });
+});

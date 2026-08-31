@@ -192,6 +192,15 @@ workspaceDir: ./workspaces
 #     baseUrl: https://switchboard-memory.coreplanelabs.dev
 #     tokenEnv: MEMORY_TOKEN    # env var holding the Worker's bearer (default)
 
+# agent:ship pipeline caps (features/agent-ship.md). `agent:ship in owner/repo:
+# <task>` runs the coding → review → fix loop to LGTM as one pipeline: at most
+# `maxRounds` review rounds and `maxMinutes` minutes of wall clock — whichever
+# hits first ends the loop, and each child round's own budget is clipped to the
+# remaining pipeline time. Defaults shown; both must be integers >= 1.
+# ship:
+#   maxRounds: 3      # review rounds per pipeline
+#   maxMinutes: 120   # pipeline wall-clock budget in minutes
+
 # Spend reporting: GET /costs (Access-gated). Optional. See features/costs.md.
 # costs:
 #   cloudflareAccountId: <32-hex account id>

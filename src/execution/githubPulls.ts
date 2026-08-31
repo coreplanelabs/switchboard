@@ -140,6 +140,104 @@ export async function updatePullRequest(
   }
 }
 
+// ---- read-only repo/PR facts for the ship gate (features/agent-ship.md) ----
+// Same REST-with-App-token conventions as the writes above; both lookups are
+// advisory reads whose UNKNOWN answer the caller treats fail-closed, so they
+// return undefined on any failure instead of throwing.
+
+/** What the ship preflight needs to know about a repository before round 0:
+ *  whether auto-merge is enabled (spec item 9 — unknown counts as enabled),
+ *  and the default branch (the PR base of last resort). */
+export interface RepoShipInfo {
+  /** `allow_auto_merge` as GitHub reports it; absent when the response did not
+   *  carry the field (a token without enough scope) — the caller fail-closes. */
+  allowAutoMerge?: boolean;
+  defaultBranch?: string;
+}
+
+/** GET /repos/{repo} → the ship-gate facts, or undefined when the credential
+ *  is missing, the fetch fails, or the answer is malformed. Never throws. */
+export async function fetchRepoShipInfo(repo: string): Promise<RepoShipInfo | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  if (!token) return undefined;
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as { allow_auto_merge?: unknown; default_branch?: unknown } | null;
+  if (!data || typeof data !== "object") return undefined;
+  return {
+    ...(typeof data.allow_auto_merge === "boolean" ? { allowAutoMerge: data.allow_auto_merge } : {}),
+    ...(typeof data.default_branch === "string" && data.default_branch ? { defaultBranch: data.default_branch } : {}),
+  };
+}
+
+/** One PR's entry-check facts for ship (spec item 10): open/closed, the author
+ *  identity (login AND immutable numeric id — the same pair the org
+ *  auto-approve workflow pins), whether the head lives on the base repo, and
+ *  the head branch/sha for the resume path. */
+export interface PullRequestFacts {
+  state: "open" | "closed";
+  author?: { login?: string; id?: number };
+  /** Head branch name (a fork's head ref is still reported; `sameRepoHead`
+   *  says whether it lives on the base repo). */
+  headRef?: string;
+  /** Head sha (40-hex) when well-formed. */
+  headSha?: string;
+  /** True only on a POSITIVE match of head repo == base repo — a deleted-fork
+   *  null head repo is false, never assumed same-repo. */
+  sameRepoHead: boolean;
+  htmlUrl?: string;
+}
+
+/** GET /repos/{repo}/pulls/{n} → the entry-check facts, or undefined when the
+ *  fetch fails or the state is unrecognizable. Never throws. */
+export async function fetchPullRequestFacts(pr: { repo: string; number: number }): Promise<PullRequestFacts | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  const headers = apiHeaders(token ?? "");
+  if (!token) delete headers.authorization; // public repos answer unauthenticated
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}`, {
+      headers,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as {
+    state?: unknown;
+    html_url?: unknown;
+    user?: { login?: unknown; id?: unknown };
+    head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } };
+  } | null;
+  if (!data || (data.state !== "open" && data.state !== "closed")) return undefined;
+  const headRepo = typeof data.head?.repo?.full_name === "string" ? data.head.repo.full_name.toLowerCase() : undefined;
+  const sha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
+  return {
+    state: data.state,
+    ...(data.user && (typeof data.user.login === "string" || typeof data.user.id === "number")
+      ? {
+          author: {
+            ...(typeof data.user.login === "string" ? { login: data.user.login } : {}),
+            ...(typeof data.user.id === "number" ? { id: data.user.id } : {}),
+          },
+        }
+      : {}),
+    ...(typeof data.head?.ref === "string" && data.head.ref ? { headRef: data.head.ref } : {}),
+    ...(sha ? { headSha: sha } : {}),
+    sameRepoHead: headRepo === pr.repo.toLowerCase(),
+    ...(typeof data.html_url === "string" ? { htmlUrl: data.html_url } : {}),
+  };
+}
+
 async function requireToken(): Promise<string> {
   const token = await resolveGithubToken();
   if (!token) {
