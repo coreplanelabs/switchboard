@@ -75,6 +75,7 @@ import {
 import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
+import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
 import { depCacheScript, mutableCachePaths, mutableCacheSwapScript, parseDepCacheScriptOutput } from "../../src/execution/residentDepCache.js";
@@ -327,11 +328,17 @@ const ATTACH_MUTEX_WAIT_MS = 60_000;
 const AUTO_REBUILD_AFTER_STRIKES = 3;
 const REHYDRATION_FAILURE_RE = /^(r2-restore-failed|snapshot-stamp-mismatch|no-snapshot)/;
 
-/** /exec budget (5-minute default per the U4 contract; also the ceiling —
- *  longer work belongs in background jobs, and the streamed heartbeat only
- *  protects the HTTP hop, not the DO wall clock). */
-const DEFAULT_THREAD_EXEC_TIMEOUT_MS = 5 * 60_000;
-const MAX_THREAD_EXEC_TIMEOUT_MS = 5 * 60_000;
+/** /exec budget (U4 contract): the shared 5-minute default (`BASH_TIMEOUT_MS`);
+ *  a caller may raise it per call via the body's `timeoutMs` up to the shared
+ *  20-minute ceiling (`BASH_TIMEOUT_MAX_MS`) — clamped server-side by
+ *  `clampBashTimeout` in handleExec, never trusting the client's number. The
+ *  heartbeat keeps every HTTP hop alive for the whole budget; the ceiling
+ *  stays far inside the bot's 45-min run budget. Work beyond 20 minutes
+ *  belongs in background jobs.
+ *
+ *  /op runs (test/build) keep the flat 5-minute budget — the deterministic op
+ *  path has no caller-supplied knob, so nothing may stretch it. */
+const OP_EXEC_TIMEOUT_MS = BASH_TIMEOUT_MS;
 const MAX_EXEC_COMMAND_LENGTH = 8_000;
 /** Output caps, per stream; truncation is annotated in stderr like the
  *  thread-sandbox Worker annotates its timeout note. */
@@ -2649,7 +2656,11 @@ export class ResidentDO extends Sandbox<Env> {
     }
     const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP;
     const notes: string[] = [];
-    if (r.timedOut) notes.push(`command timed out after ${timeoutMs}ms; re-run as smaller steps or background it`);
+    if (r.timedOut)
+      notes.push(
+        `command timed out after ${timeoutMs}ms (pass the bash tool's timeoutMs for longer commands, max ${BASH_TIMEOUT_MAX_MS} ms); ` +
+          "re-run as smaller steps or background it",
+      );
     if (truncated) notes.push(`output truncated to ${EXEC_OUTPUT_CAP} chars per stream`);
     const stderr = [r.stderr.slice(0, EXEC_OUTPUT_CAP), ...notes].filter(Boolean).join("\n");
     return {
@@ -3041,11 +3052,11 @@ export class ResidentDO extends Sandbox<Env> {
         record.commands.install ?? "npm install --no-audit --no-fund",
       );
 
-      const r = await this.threadRunCapped(user, checkout, command, MAX_THREAD_EXEC_TIMEOUT_MS, EXEC_OUTPUT_CAP);
+      const r = await this.threadRunCapped(user, checkout, command, OP_EXEC_TIMEOUT_MS, EXEC_OUTPUT_CAP);
       const ok = r.exitCode === 0 && !r.timedOut;
       const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP;
       const notes: string[] = [];
-      if (r.timedOut) notes.push(`command timed out after ${MAX_THREAD_EXEC_TIMEOUT_MS}ms`);
+      if (r.timedOut) notes.push(`command timed out after ${OP_EXEC_TIMEOUT_MS}ms`);
       if (truncated) notes.push(`output truncated to ${EXEC_OUTPUT_CAP} chars per stream`);
       const durationMs = Date.now() - t0;
       const sha8 = locked.value.sha.slice(0, 8);
@@ -4328,12 +4339,11 @@ async function handleExec(env: Env, body: Record<string, unknown>): Promise<Resp
   if (typeof body.command !== "string" || body.command.length === 0 || body.command.length > MAX_EXEC_COMMAND_LENGTH) {
     return json({ error: `command must be a non-empty string of at most ${MAX_EXEC_COMMAND_LENGTH} chars` }, 400);
   }
-  let timeoutMs = DEFAULT_THREAD_EXEC_TIMEOUT_MS;
-  if (body.timeoutMs !== undefined) {
-    const parsed = parsePositiveInt(body.timeoutMs, "timeoutMs", 1000, MAX_THREAD_EXEC_TIMEOUT_MS);
-    if ("error" in parsed) return json({ error: parsed.error }, 400);
-    timeoutMs = parsed.value;
-  }
+  // The client's number is never trusted: the SAME clamp rule bot-side code
+  // uses — a finite number lands in [1s, 20 min], anything else (absent, NaN,
+  // a string) runs at the 5-minute default. A clamp, not a 400: an out-of-range
+  // ask still runs, at the nearest bound.
+  const timeoutMs = clampBashTimeout(body.timeoutMs);
   return streamThreadExec(ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs));
 }
 

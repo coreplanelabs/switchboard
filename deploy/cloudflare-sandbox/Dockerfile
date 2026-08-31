@@ -7,12 +7,14 @@ USER root
 # The SDK's container server kills any command after COMMAND_TIMEOUT_MS
 # (default 30s) — far too short for clones, installs, and test runs. exec()
 # in 0.3.x ignores per-call timeouts, so this env var is the only lever.
-# Pure BACKSTOP: the real per-command limit is coreutils `timeout` at
-# EXEC_TIMEOUT_SECS (280s) in worker.ts, which yields a genuine exit 124
-# through the normal result path. This sits 40s above so it never wins the
-# race (the SDK's rejection surfaces only a useless generic error). Bump the
-# two together.
-ENV COMMAND_TIMEOUT_MS=320000
+# Pure BACKSTOP: the real per-command limit is coreutils `timeout` in
+# worker.ts (280s default, raisable per call via the bash tool's timeoutMs up
+# to the 20-min ceiling BASH_TIMEOUT_MAX_MS), which yields a genuine exit 124
+# through the normal result path. This sits 40s above the 20-min ceiling so it
+# never wins the race (the SDK's rejection surfaces only a useless generic
+# error). Bump alongside BASH_TIMEOUT_MAX_MS (src/execution/bashTimeout.ts);
+# changing it requires a container rebuild + redeploy.
+ENV COMMAND_TIMEOUT_MS=1240000
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git curl ca-certificates \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \

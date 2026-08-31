@@ -1,3 +1,4 @@
+import { clampBashTimeout } from "./bashTimeout.js";
 import { ExecInfraError, truncate, type ExecOptions, type Executor } from "./executor.js";
 
 // Remote execution in a Cloudflare Sandbox, via the authenticated proxy Worker
@@ -24,7 +25,7 @@ export class CloudflareSandboxExecutor implements Executor {
 
   private async call(
     route: string,
-    body: Record<string, string>,
+    body: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const headers: Record<string, string> = {
@@ -84,7 +85,13 @@ export class CloudflareSandboxExecutor implements Executor {
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
-    const r = await this.call("/exec", { command }, opts?.signal);
+    // Per-call budget (features/execution.md item 11): rides in the body only
+    // when the caller asked for one, so an older sandbox Worker sees the body
+    // it always did (it enforces its tuned 280s limit); the Worker clamps
+    // server-side with the same [1s, 20 min] bounds — never this number alone.
+    const body: Record<string, unknown> = { command };
+    if (opts?.timeoutMs !== undefined) body.timeoutMs = clampBashTimeout(opts.timeoutMs);
+    const r = await this.call("/exec", body, opts?.signal);
     const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
     const exitCode = Number(r.exitCode ?? 0);
     if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);

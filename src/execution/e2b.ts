@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, posix } from "node:path";
 import { Sandbox } from "e2b";
-import { truncate, type Executor, type ReleaseMode, type ReleaseResult, BASH_TIMEOUT_MS } from "./executor.js";
+import { bashTimeoutNote, clampBashTimeout } from "./bashTimeout.js";
+import { truncate, type ExecOptions, type Executor, type ReleaseMode, type ReleaseResult } from "./executor.js";
 
 // Remote execution in an E2B micro-VM. One sandbox per thread: the repo
 // checkout and GH_TOKEN live inside the sandbox, never on the bot host.
@@ -69,13 +70,24 @@ export class E2BExecutor implements Executor {
 
   /** The e2b command API takes no AbortSignal, so a hard run stop (#101)
    *  degrades safely here: the runner stops waiting on this call, and the
-   *  dispatcher's `release("always")` then kills the whole sandbox below. */
-  async exec(command: string): Promise<string> {
+   *  dispatcher's `release("always")` then kills the whole sandbox below.
+   *  `opts.timeoutMs` (the bash tool's per-call budget, re-clamped here) IS
+   *  honored — it maps onto the SDK's own command timeout. */
+  async exec(command: string, opts?: ExecOptions): Promise<string> {
+    const timeoutMs = clampBashTimeout(opts?.timeoutMs);
     const result = await this.sbx.commands
-      .run(command, { cwd: WORKDIR, timeoutMs: BASH_TIMEOUT_MS })
+      .run(command, { cwd: WORKDIR, timeoutMs })
       .catch((err: unknown) => {
+        const e = err as { name?: string; exitCode?: number; stdout?: string; stderr?: string; message?: string };
+        // The SDK's deadline kill throws TimeoutError with no exit code —
+        // render it as exit 124 naming the limit that fired, so the model can
+        // self-correct instead of reading a generic failure.
+        // Exactly the SDK's TimeoutError — a message-regex fallback would also
+        // catch CONNECTION timeouts and mislabel them as the command deadline.
+        if (e.exitCode === undefined && e.name === "TimeoutError") {
+          return { exitCode: 124, stdout: e.stdout ?? "", stderr: bashTimeoutNote(timeoutMs) };
+        }
         // e2b throws on non-zero exit; surface it as output like LocalExecutor
-        const e = err as { exitCode?: number; stdout?: string; stderr?: string; message?: string };
         return {
           exitCode: e.exitCode ?? 1,
           stdout: e.stdout ?? "",

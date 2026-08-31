@@ -1,6 +1,6 @@
 import type { ToolDef, ToolResultContent } from "../providers/types.js";
 import { parseVerdictInput, type ReviewVerdict } from "../core/reviewVerdict.js";
-import type { Executor } from "../execution/executor.js";
+import { clampBashTimeout, type ExecOptions, type Executor } from "../execution/executor.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { distillDiff } from "../core/diffDigest.js";
 import { webFetchTool, webSearchTool, type WebCapability } from "./web.js";
@@ -61,16 +61,34 @@ export const bashTool: RunnableTool = {
   name: "bash",
   description:
     "Run a bash command in the workspace directory. Use for git, gh, tests, builds, and inspecting files. " +
-    "Commands time out after 5 minutes. Output is truncated at 30k characters.",
+    "Commands time out after 5 minutes (300000 ms) by default; pass timeoutMs when a command legitimately needs " +
+    "longer — a full test suite, a large build — up to the 1200000 ms (20 minute) maximum. " +
+    "Output is truncated at 30k characters.",
   inputSchema: {
     type: "object",
     properties: {
       command: { type: "string", description: "The bash command to run" },
+      timeoutMs: {
+        type: "integer",
+        description:
+          "Optional timeout in milliseconds for this command (default 300000 = 5 min; max 1200000 = 20 min). " +
+          "Values outside [1000, 1200000] are clamped.",
+      },
     },
     required: ["command"],
   },
   run(input, ctx) {
-    return ctx.executor.exec(String(input.command ?? ""), ctx.signal ? { signal: ctx.signal } : undefined);
+    // A finite number is clamped to [1s, 20 min] (clampBashTimeout); anything
+    // else is dropped so executors run on the 5-minute default — no timeoutMs
+    // in the input is byte-for-byte the pre-timeoutMs call.
+    const requested = input.timeoutMs;
+    const opts: ExecOptions = {
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      ...(typeof requested === "number" && Number.isFinite(requested)
+        ? { timeoutMs: clampBashTimeout(requested) }
+        : {}),
+    };
+    return ctx.executor.exec(String(input.command ?? ""), (opts.signal !== undefined || opts.timeoutMs !== undefined) ? opts : undefined);
   },
 };
 

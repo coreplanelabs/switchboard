@@ -1,5 +1,6 @@
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { repoResourceId } from "../core/residentAdmin.js";
+import { EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
 import {
   BASH_TIMEOUT_MS,
   ExecInfraError,
@@ -22,7 +23,7 @@ import {
 //   /attach {resource, threadKey, refHint?, readonly?, sha?} → 200 attach result
 //     | 409 {needs:"ref"} (thread has no ref binding — ask the user)
 //     | 400 unknown-ref/pattern | 404 not onboarded | 503 mirror-busy | 429 pool
-//   /exec {resource, threadKey, command} → streamed HTTP 200: whitespace
+//   /exec {resource, threadKey, command, timeoutMs?} → streamed HTTP 200: whitespace
 //     heartbeats then ONE JSON document {stdout, stderr, exitCode, truncated};
 //     post-validation failures arrive IN-BODY as {error, needs?, exitCode:127}
 //     — parse the body, never trust the status.
@@ -36,7 +37,7 @@ import {
 
 /** /detach is a small control-plane POST the dispatcher makes once the answer
  *  is out: bound it tightly so a sick resident holds the run's slot for
- *  seconds, not the 5-minute exec ceiling. */
+ *  seconds, not a multi-minute exec budget. */
 const DETACH_TIMEOUT_MS = 10_000;
 
 export interface ResidentExecutorOptions {
@@ -236,8 +237,9 @@ export class ResidentExecutor implements Executor {
         },
         body: JSON.stringify({ resource: this.opts.resource, threadKey: this.opts.threadKey, ...body }),
         // Bound every route so a hung resident can't stall the dispatch; /exec
-        // streams and can legitimately run minutes, so the default is the exec
-        // ceiling; control-plane routes pass a short bound. A timeout throws
+        // streams and can legitimately run minutes, so it passes its command
+        // budget plus EXEC_CALL_MARGIN_MS (the server's own exit-124 answer
+        // must win the race); control-plane routes pass a short bound. A timeout throws
         // here and is translated into the legible request-failed error below,
         // never an unhandled throw. A hard run stop (#101) joins the deadline:
         // it drops the bot-side request; the resident's own `timeout` still
@@ -330,6 +332,7 @@ export class ResidentExecutor implements Executor {
     route: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
+    callTimeoutMs: number = BASH_TIMEOUT_MS,
   ): Promise<{ status: number; data: Record<string, unknown> }> {
     // Worktree still gone after a re-attach — the resident is unhealthy
     // (mid-restore or worse). Infra, not a command exit: counts toward
@@ -339,17 +342,17 @@ export class ResidentExecutor implements Executor {
         `resident ${route}: worktree still unavailable after a re-attach (${String(data.error ?? "")}) — ` +
           "the resident may be mid-restore; try again shortly.",
       );
-    let r = await this.call(route, body, BASH_TIMEOUT_MS, signal);
+    let r = await this.call(route, body, callTimeoutMs, signal);
     if (r.data.needs === "attach") {
       await this.attach();
-      r = await this.call(route, body, BASH_TIMEOUT_MS, signal);
+      r = await this.call(route, body, callTimeoutMs, signal);
       if (r.data.needs === "attach") throw stillGone(r.data);
     }
     if (r.data.reason === "runtime-replaced") {
       this.noteRuntimeReplaced(route, r.data);
       await this.attach();
       if (route === "/read" || route === "/write") {
-        r = await this.call(route, body, BASH_TIMEOUT_MS, signal);
+        r = await this.call(route, body, callTimeoutMs, signal);
         if (r.data.reason === "runtime-replaced") this.noteRuntimeReplaced(route, r.data);
         // Compound fault: the deploy also left the worktree evicted. The
         // re-attach above was this op's one re-attach, so name it precisely
@@ -372,7 +375,17 @@ export class ResidentExecutor implements Executor {
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
-    const { status, data } = await this.opWithReattach("/exec", { command }, opts?.signal);
+    // Per-call budget (features/execution.md item 11). It rides in the body
+    // only when the caller asked for one, so an older resident Worker sees the
+    // body it always did (same convention as attach's readonly/sha); the
+    // resident clamps server-side with the same [1s, 20 min] bounds and never
+    // trusts this number. The HTTP wait is the budget plus a margin so the
+    // resident's own streamed exit-124 answer arrives instead of the client
+    // aborting the transport at the same instant.
+    const timeoutMs = clampBashTimeout(opts?.timeoutMs);
+    const body: Record<string, unknown> = { command };
+    if (opts?.timeoutMs !== undefined) body.timeoutMs = timeoutMs;
+    const { status, data } = await this.opWithReattach("/exec", body, opts?.signal, timeoutMs + EXEC_CALL_MARGIN_MS);
     // A pre-validation client rejection — a plain HTTP 400 with an {error} and NO
     // `needs` (e.g. command-too-long), nothing streamed — is agent-fixable, not a
     // sick resident. Surface it as a normal Error so it does NOT count toward the
