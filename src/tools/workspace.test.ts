@@ -162,6 +162,155 @@ describe("submit_verdict tool", () => {
       "verdict recorded: request_changes",
     );
   });
+
+  // Feature: features/agent-ship.md item 6 — the verdict enumerates findings
+  // as typed entries with stable ids; the tool text is where the review agent
+  // learns the id and severity contract.
+  describe("findings (agent-ship item 6)", () => {
+    it("declares `findings` in the input schema — optional, with the finding field shapes and the severity vocabulary", () => {
+      const props = submitVerdictTool.inputSchema.properties as Record<string, any>;
+      expect(props.findings?.type).toBe("array");
+      const item = props.findings.items;
+      expect(item.required).toEqual(expect.arrayContaining(["id", "severity", "file", "title"]));
+      expect(item.required).not.toContain("line");
+      expect(item.properties.severity.enum).toEqual(["blocking", "major", "minor", "nit"]);
+      expect(item.properties.line.type).toBe("integer");
+      expect(submitVerdictTool.inputSchema.required).not.toContain("findings");
+    });
+
+    it("the description instructs stable ids (F1, F2, …) and names the severity vocabulary once", () => {
+      expect(submitVerdictTool.description).toMatch(/stable/i);
+      expect(submitVerdictTool.description).toContain("F1");
+      expect(submitVerdictTool.description).toContain("blocking|major|minor|nit");
+    });
+
+    it("forwards parsed findings to the verdict sink and reports the count", async () => {
+      const got: unknown[] = [];
+      const out = await submitVerdictTool.run(
+        {
+          verdict: "request_changes",
+          summary: "one bug",
+          findings: [{ id: "F1", severity: "major", file: "src/a.ts", line: 3, title: "off by one" }],
+        },
+        ctxWith((v) => got.push(v)),
+      );
+      expect(got).toEqual([
+        {
+          verdict: "request_changes",
+          summary: "one bug",
+          findings: [{ id: "F1", severity: "major", file: "src/a.ts", line: 3, title: "off by one" }],
+        },
+      ]);
+      expect(String(out)).toContain("1 finding");
+    });
+
+    it("surfaces dropped findings in the ack so the model can resubmit", async () => {
+      const out = await submitVerdictTool.run(
+        {
+          verdict: "request_changes",
+          summary: "s",
+          findings: [
+            { id: "F1", severity: "major", file: "a.ts", title: "ok" },
+            { id: "F2", severity: "meh", file: "b.ts", title: "bad" },
+          ],
+        },
+        ctxWith(() => {}),
+      );
+      expect(String(out)).toContain("F2");
+      expect(String(out)).toMatch(/dropped/i);
+    });
+  });
+});
+
+// Feature: features/agent-ship.md item 6 — fix rounds record one disposition
+// per review finding through this tool; the ship orchestrator (U7) injects
+// the round's known finding ids and consumes the last valid call.
+describe("submit_dispositions tool", () => {
+  const ctxWith = (onDispositions?: ToolContext["onDispositions"], knownFindingIds?: string[]): ToolContext =>
+    ({ executor: {} as ToolContext["executor"], onDispositions, knownFindingIds }) as ToolContext;
+
+  const valid = () => ({
+    dispositions: [
+      { findingId: "F1", disposition: "fixed", note: "guarded the null path" },
+      { findingId: "F2", disposition: "declined", note: "by design" },
+    ],
+  });
+
+  // Looked up through the toolset so every test exercises the wired instance.
+  const tool = () => TOOLSETS.full.find((t) => t.name === "submit_dispositions")!;
+
+  it("is in the coding (full) toolset only — review/web/none never record dispositions", () => {
+    const names = (key: string) => (TOOLSETS[key] ?? []).map((t) => t.name);
+    expect(names("full")).toContain("submit_dispositions");
+    expect(names("readonly")).not.toContain("submit_dispositions");
+    expect(names("web")).not.toContain("submit_dispositions");
+    expect(names("none")).not.toContain("submit_dispositions");
+  });
+
+  it("mutates run state, so it is never side-effect-free (must run strictly in order)", () => {
+    expect(tool().sideEffectFree).toBeUndefined();
+  });
+
+  it("forwards a valid set to the context and acknowledges the count", async () => {
+    const got: unknown[] = [];
+    const out = await tool().run(valid(), ctxWith((d) => got.push(d)));
+    expect(got).toEqual([
+      [
+        { findingId: "F1", disposition: "fixed", note: "guarded the null path" },
+        { findingId: "F2", disposition: "declined", note: "by design" },
+      ],
+    ]);
+    expect(String(out)).toContain("2");
+    expect(String(out)).not.toMatch(/^error:/);
+  });
+
+  it("an unknown findingId (with knownFindingIds provided) is a string error naming it — context untouched", async () => {
+    const got: unknown[] = [];
+    const out = await tool().run(
+      { dispositions: [{ findingId: "F1", disposition: "fixed", note: "n" }, { findingId: "F9", disposition: "declined", note: "n" }] },
+      ctxWith((d) => got.push(d), ["F1", "F2"]),
+    );
+    expect(got).toEqual([]);
+    expect(String(out)).toMatch(/^error:/);
+    expect(String(out)).toContain("F9");
+  });
+
+  it("without knownFindingIds the id-existence check is skipped (the orchestrator supplies it in U7)", async () => {
+    const got: unknown[] = [];
+    const out = await tool().run({ dispositions: [{ findingId: "F9", disposition: "fixed", note: "n" }] }, ctxWith((d) => got.push(d)));
+    expect(got).toHaveLength(1);
+    expect(String(out)).not.toMatch(/^error:/);
+  });
+
+  it("last valid call wins at the sink", async () => {
+    let latest: unknown;
+    const ctx = ctxWith((d) => (latest = d));
+    await tool().run(valid(), ctx);
+    await tool().run({ dispositions: [{ findingId: "F1", disposition: "declined", note: "changed my mind" }] }, ctx);
+    expect(latest).toEqual([{ findingId: "F1", disposition: "declined", note: "changed my mind" }]);
+  });
+
+  it("a non-array input is a string error — context untouched", async () => {
+    const got: unknown[] = [];
+    const out = await tool().run({ dispositions: "all fixed" }, ctxWith((d) => got.push(d)));
+    expect(got).toEqual([]);
+    expect(String(out)).toMatch(/^error:/);
+  });
+
+  it("a malformed entry is dropped with the drop surfaced in the ack; the rest are recorded", async () => {
+    const got: unknown[][] = [];
+    const out = await tool().run(
+      { dispositions: [{ findingId: "F1", disposition: "fixed", note: "done" }, { findingId: "F2", disposition: "wontfix", note: "nope" }] },
+      ctxWith((d) => got.push(d as unknown[])),
+    );
+    expect(got).toEqual([[{ findingId: "F1", disposition: "fixed", note: "done" }]]);
+    expect(String(out)).toMatch(/dropped/i);
+    expect(String(out)).toContain("F2");
+  });
+
+  it("tolerates a context with no dispositions sink", async () => {
+    await expect(tool().run(valid(), ctxWith(undefined))).resolves.not.toMatch(/^error:/);
+  });
 });
 
 // Feature: features/pr-description.md — the coding agent's PR deliverable is a

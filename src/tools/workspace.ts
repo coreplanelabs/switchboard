@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ToolDef, ToolResultContent } from "../providers/types.js";
 import { parsePrDescription, type PrDescription } from "../core/prDescription.js";
-import { parseVerdictInput, type ReviewVerdict } from "../core/reviewVerdict.js";
+import { parseDispositionsInput, parseVerdictInput, type FindingDisposition, type ReviewVerdict } from "../core/reviewVerdict.js";
 import { clampBashTimeout, type ExecOptions, type Executor } from "../execution/executor.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { distillDiff } from "../core/diffDigest.js";
@@ -50,6 +50,19 @@ export interface ToolContext {
    *  renders the GitHub body from it at the pushed head and opens/edits the
    *  PR. Absent → the tool still accepts the call. */
   onPrDescription?: (desc: PrDescription) => void;
+  /** Receives a fix round's per-finding dispositions from
+   *  `submit_dispositions` (features/agent-ship.md item 6). Injected by the
+   *  ship orchestrator for fix rounds; the last valid call wins. Absent → the
+   *  tool still accepts the call. */
+  onDispositions?: (dispositions: FindingDisposition[]) => void;
+  /** The finding ids from the round's review verdict, for
+   *  `submit_dispositions`' known-id check: a disposition naming an id
+   *  outside this list is a string error naming it. The tool cannot know the
+   *  findings on its own, so validation runs against this list — optional:
+   *  when absent (plain coding runs, unit contexts) the id-existence check is
+   *  skipped; the ship orchestrator (U7) supplies it from the parsed
+   *  verdict's findings. */
+  knownFindingIds?: string[];
 }
 
 export interface RunnableTool extends ToolDef {
@@ -61,8 +74,8 @@ export interface RunnableTool extends ToolDef {
    *  concurrently — on a resident/sandbox each is a network round trip, and
    *  they cannot observe each other. Anything that mutates the workspace
    *  (`bash`, `write_file`) or the run's own state (`update_status`,
-   *  `submit_verdict`, `submit_pr_description`) leaves this unset and runs
-   *  strictly in order. */
+   *  `submit_verdict`, `submit_pr_description`, `submit_dispositions`) leaves
+   *  this unset and runs strictly in order. */
   sideEffectFree?: true;
 }
 
@@ -191,13 +204,33 @@ export const submitVerdictTool: RunnableTool = {
     "Switchboard writes the verdict as the first line of the GitHub comment itself (`LGTM:` only for approve); " +
     "a review with no submitted verdict is posted as NOT approving. Call it once, after your analysis; a later call replaces the earlier one. " +
     "`head` is the commit you reviewed — run `git rev-parse HEAD` in the checkout you read and tested and pass its output; " +
-    "Switchboard posts to the PR only if that commit IS the PR's head, so a review of the wrong branch can never land on a PR.",
+    "Switchboard posts to the PR only if that commit IS the PR's head, so a review of the wrong branch can never land on a PR. " +
+    "Enumerate EVERY issue you report in `findings` with STABLE ids assigned in order (F1, F2, …) — a fix round " +
+    "references findings by these ids, so never renumber them. Severity is exactly one of blocking|major|minor|nit; " +
+    "the entry carries the file (plus line when it points at one) and a one-line title, while the full explanation " +
+    "stays in your review text keyed by the same ids. An `approve` carrying a `blocking` finding is downgraded to " +
+    "`request_changes` — approve only when nothing blocking remains.",
   inputSchema: {
     type: "object",
     properties: {
       verdict: { type: "string", enum: ["approve", "request_changes"], description: "approve | request_changes" },
       summary: { type: "string", description: "One-line rationale shown right after the verdict token" },
       head: { type: "string", description: "Output of `git rev-parse HEAD` in the checkout you reviewed (the commit the review is about)" },
+      findings: {
+        type: "array",
+        description: "Every issue you report, one entry each, in the order reported — rendered under the verdict line",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: 'Stable id assigned in order: "F1", "F2", … — dispositions reference it' },
+            severity: { type: "string", enum: ["blocking", "major", "minor", "nit"], description: "blocking | major | minor | nit" },
+            file: { type: "string", description: "Repo-relative file the finding points at" },
+            line: { type: "integer", description: "1-based line number, when the finding points at one" },
+            title: { type: "string", description: "One line naming the issue (the full explanation goes in your review text)" },
+          },
+          required: ["id", "severity", "file", "title"],
+        },
+      },
     },
     required: ["verdict", "summary", "head"],
   },
@@ -205,7 +238,61 @@ export const submitVerdictTool: RunnableTool = {
     const verdict = parseVerdictInput(input);
     if (!verdict) return "error: verdict must be exactly `approve` or `request_changes`";
     ctx.onVerdict?.(verdict);
-    return `verdict recorded: ${verdict.verdict}`;
+    const notes: string[] = [];
+    if (verdict.findings) notes.push(`${verdict.findings.length} finding${verdict.findings.length === 1 ? "" : "s"}`);
+    if (verdict.droppedFindings?.length) notes.push(`dropped: ${verdict.droppedFindings.join("; ")}`);
+    return notes.length ? `verdict recorded: ${verdict.verdict} (${notes.join("; ")})` : `verdict recorded: ${verdict.verdict}`;
+  },
+};
+
+// The fix round's answer to the review's findings (features/agent-ship.md
+// item 6): one typed disposition per finding, so the ship orchestrator can
+// split a cap report into declined (disposition recorded) vs unaddressed
+// (none). Validation mirrors submit_verdict's fail-closed style — the parse
+// lives beside the findings in src/core/reviewVerdict.ts. The tool cannot
+// know the round's findings on its own: the known-id check runs against
+// `ToolContext.knownFindingIds` when the orchestrator supplies it, and is
+// skipped when absent.
+export const submitDispositionsTool: RunnableTool = {
+  name: "submit_dispositions",
+  description:
+    "Record one disposition per review finding after addressing them: `fixed` (the finding is addressed in your " +
+    "pushed code) or `declined` (deliberately not doing it — the note says why). `findingId` is the finding's " +
+    "stable id from the review (F1, F2, …) — use exactly those ids; an unknown id is rejected by name. Every " +
+    "finding gets exactly one entry, every severity included (nits too). Call it once with the complete set after " +
+    "your last push; a later call replaces the earlier one.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      dispositions: {
+        type: "array",
+        description: "The complete set — one entry per finding from the review",
+        items: {
+          type: "object",
+          properties: {
+            findingId: { type: "string", description: 'The finding\'s stable id from the review (e.g. "F1")' },
+            disposition: { type: "string", enum: ["fixed", "declined"], description: "fixed | declined" },
+            note: { type: "string", description: "One line: what was done, or why it was declined" },
+          },
+          required: ["findingId", "disposition", "note"],
+        },
+      },
+    },
+    required: ["dispositions"],
+  },
+  async run(input, ctx) {
+    const parsed = parseDispositionsInput(input);
+    if (!parsed) return "error: dispositions must be an array of { findingId, disposition: fixed|declined, note }";
+    if (ctx.knownFindingIds) {
+      const known = new Set(ctx.knownFindingIds);
+      const unknown = [...new Set(parsed.dispositions.map((d) => d.findingId).filter((id) => !known.has(id)))];
+      if (unknown.length) {
+        return `error: unknown finding id${unknown.length === 1 ? "" : "s"} ${unknown.join(", ")} — use exactly the ids from the review's findings list`;
+      }
+    }
+    ctx.onDispositions?.(parsed.dispositions);
+    const drops = parsed.dropped.length ? ` (dropped: ${parsed.dropped.join("; ")})` : "";
+    return `dispositions recorded: ${parsed.dispositions.length}${drops}; a later call replaces this one`;
   },
 };
 
@@ -336,10 +423,11 @@ export const updateStatusTool: RunnableTool = {
 // #100: the read-only skill tools (list_skills/use_skill) join both the full
 // (coding) and readonly (review) toolsets — loading a methodology into context
 // never mutates the workspace, so it is safe for the read-only review agent.
-// submit_pr_description is full-only: only the coding agent ships PRs, the way
-// submit_verdict is readonly-only because only the review agent judges them.
+// submit_pr_description and submit_dispositions are full-only: only the coding
+// agent ships PRs and answers review findings, the way submit_verdict is
+// readonly-only because only the review agent judges them.
 export const TOOLSETS: Record<string, RunnableTool[]> = {
-  full: [bashTool, readFileTool, writeFileTool, updateStatusTool, submitPrDescriptionTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
+  full: [bashTool, readFileTool, writeFileTool, updateStatusTool, submitPrDescriptionTool, submitDispositionsTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
   readonly: [bashTool, readFileTool, updateStatusTool, submitVerdictTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
   web: [webFetchTool, webSearchTool, updateStatusTool],
   none: [],
