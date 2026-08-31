@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TOOL_OUTPUT_CAP, parseExitPrefix, prepareToolOutput, prepareToolResult, redactAndCap, redactSecrets, summarizeToolResult } from "./runEvents.js";
+import { TOOL_OUTPUT_CAP, type RunEvent, parseExitPrefix, prepareToolOutput, prepareToolResult, redactAndCap, redactSecrets, serializedOnce, summarizeToolResult } from "./runEvents.js";
 
 // Feature: features/run-visibility.md — the run-event stream and its redaction.
 
@@ -236,5 +236,16 @@ describe("redactSecrets — linear on long unbroken tokens (#213 CI timeout)", (
     const out = redactSecrets("x".repeat(20_000) + " api_key=abcdef123456 https://user:pw@host/x");
     expect(out).toContain("api_key=«redacted»");
     expect(out).toContain("https://user:«redacted»@host/x");
+  });
+});
+
+// Feature: features/agent-ship.md item 12 — the `ship_round` variant: a typed
+// round boundary on the one run stream (index 0-based, round 0 = the initial
+// coding round; a review round and its fix round share an index). This pin is
+// mostly a compile-time contract: the fields are typed, not free text.
+describe("ship_round events", () => {
+  it("carries typed index/agent/outcome and serializes like any event", () => {
+    const e: RunEvent = { type: "ship_round", index: 2, agent: "review", outcome: "approve", at: 5 };
+    expect(JSON.parse(serializedOnce(e))).toEqual(e);
   });
 });

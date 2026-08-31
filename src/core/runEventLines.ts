@@ -69,6 +69,8 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.description === "object" && o.description !== null;
     case "pr_opened":
       return typeof o.url === "string" && typeof o.number === "number" && typeof o.created === "boolean";
+    case "ship_round":
+      return typeof o.index === "number" && typeof o.agent === "string" && typeof o.outcome === "string";
     default:
       return false;
   }

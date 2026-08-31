@@ -193,7 +193,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   // `context` is replayed thread history published at run start with timestamps
   // of its own, so it is invisible to timing as well.
   let narrativeEvents = 0;
-  let sideFactEvents = 0; // skill_use / review_artifact / pr_description / pr_opened: facts about the run, not steps
+  let sideFactEvents = 0; // skill_use / review_artifact / pr_description / pr_opened / ship_round: facts about the run, not steps
   events.forEach((ev, index) => {
     if (isNarrative(ev)) narrativeEvents++;
     if (ev.type === "context") return;
@@ -220,9 +220,10 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     if (ev.type === "turn" || ev.type === "run_meta") return; // run_meta: what the run is about, not a step
     // Side facts about the run, not steps: skill_use rides beside a use_skill
     // call that already produced its own tool pair; review_artifact,
-    // pr_description and pr_opened are published by the dispatcher outside
-    // the model loop entirely. Counting any of them would distort the story.
-    if (ev.type === "skill_use" || ev.type === "review_artifact" || ev.type === "pr_description" || ev.type === "pr_opened") {
+    // pr_description, pr_opened and the ship_round boundaries are published
+    // by the dispatcher/pipeline outside the model loop entirely. Counting
+    // any of them would distort the story.
+    if (ev.type === "skill_use" || ev.type === "review_artifact" || ev.type === "pr_description" || ev.type === "pr_opened" || ev.type === "ship_round") {
       sideFactEvents++;
       return;
     }

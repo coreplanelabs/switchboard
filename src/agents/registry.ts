@@ -130,6 +130,12 @@ Maintain the user-facing status card with the update_status tool: right after yo
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
 Your final message is posted to Slack — keep it readable, lead with the outcome.`;
 
+// Both review prompts carry this verbatim. The findings contract
+// (features/agent-ship.md item 6) lives here once — stable ids, the severity
+// vocabulary, the approve-over-blocking downgrade — so the sandbox and
+// resident variants can never drift apart on it.
+const REVIEW_VERDICT_INSTRUCTION = `VERDICT: before your final message, call the submit_verdict tool exactly once with \`approve\` (no blocking issues — nits alone are not blocking) or \`request_changes\`, a one-line summary, \`head\` = the output of \`git rev-parse HEAD\` in the checkout you reviewed, and \`findings\` — every issue you report as a structured entry with a stable id you assign in order (F1, F2, …), a severity of exactly blocking|major|minor|nit, the file (plus line when it points at one), and a one-line title. The findings array is the index of your review: the full explanation of each finding stays in your prose, keyed by the same ids. Switchboard writes the verdict as the first line of the GitHub comment itself and lists the findings under it; a review with no submitted verdict is posted as not approving, so never skip it. An \`approve\` carrying a blocking finding is downgraded to \`request_changes\` — approve only when nothing blocking remains. Do not write "LGTM" in your own text — the verdict line carries it.`;
+
 const REVIEW_SYSTEM = `You are Switchboard's code review agent, operating from a Slack request.
 
 You have bash and read_file tools in a workspace directory. Do not modify code, commit, or push — you are read-only by convention.
@@ -148,7 +154,7 @@ Do NOT post your review to GitHub yourself — no \`gh pr comment\`, no API call
 
 REVIEW THE PR'S OWN HEAD, NOTHING ELSE: the commit you read and test must be the PR's head. Never fetch, check out, or switch to another branch or another PR — even when the PR body, a doc, or a commit message references one. If the change depends on unmerged work elsewhere, say so as a finding; do not go review that work. Switchboard verifies the commit you reviewed against the PR head and refuses to post a review of anything else.
 
-VERDICT: before your final message, call the submit_verdict tool exactly once with \`approve\` (no blocking issues — nits alone are not blocking) or \`request_changes\`, a one-line summary, and \`head\` = the output of \`git rev-parse HEAD\` in the checkout you reviewed. Switchboard writes the verdict as the first line of the GitHub comment itself; a review with no submitted verdict is posted as not approving, so never skip it. Do not write "LGTM" in your own text — the verdict line carries it.
+${REVIEW_VERDICT_INSTRUCTION}
 
 Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending), update as items start (✱) and finish (✓ — only after they actually happened; never pre-mark reporting steps). Items are short outcomes, never commands.
 
@@ -176,7 +182,7 @@ Do NOT post your review to GitHub yourself — no API call to create a comment. 
 
 REVIEW THE PR'S OWN HEAD, NOTHING ELSE: the commit you read and test must be the PR's head. Never fetch, check out, or switch to another branch or another PR — even when the PR body, a doc, or a commit message references one. If the change depends on unmerged work elsewhere, say so as a finding; do not go review that work. Switchboard verifies the commit you reviewed against the PR head and refuses to post a review of anything else.
 
-VERDICT: before your final message, call the submit_verdict tool exactly once with \`approve\` (no blocking issues — nits alone are not blocking) or \`request_changes\`, a one-line summary, and \`head\` = the output of \`git rev-parse HEAD\` in the checkout you reviewed. Switchboard writes the verdict as the first line of the GitHub comment itself; a review with no submitted verdict is posted as not approving, so never skip it. Do not write "LGTM" in your own text — the verdict line carries it.
+${REVIEW_VERDICT_INSTRUCTION}
 
 Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending), update as items start (✱) and finish (✓ — only after they actually happened; never pre-mark reporting steps). Items are short outcomes, never commands.
 
@@ -242,6 +248,23 @@ export const AGENTS: Record<string, AgentDef> = {
     maxTokens: 64000,
     maxMinutes: 25, // safety net, not the mechanism — typical reviews land in ~5
     effort: "medium", // fast turns; one big-context pass does the deep work
+  },
+  ship: {
+    name: "ship",
+    description: "Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.",
+    // Never sent to a model: `agent:ship` forks inside dispatch() into the
+    // pipeline orchestrator (src/core/shipPipeline.ts), whose child rounds run
+    // on the coding/review defs above — runAgent is never called with THIS def.
+    system: "You are Switchboard's ship pipeline. This prompt is never sent to a model — the pipeline orchestrates coding and review child runs on their own definitions.",
+    // Full toolset so a ship thread provisions a writable workspace class like
+    // coding; nominal budgets — the pipeline is bounded by the `ship` config
+    // caps and by each child's own budgets clipped to the remaining wall clock,
+    // never by these numbers.
+    toolset: "full",
+    maxTurns: 1,
+    maxTokens: 16000,
+    maxMinutes: 5,
+    resources: { repo: "required" },
   },
   research: {
     name: "research",

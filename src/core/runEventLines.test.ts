@@ -94,6 +94,16 @@ describe("parseRunEventLines", () => {
     expect(skipped).toBe(1);
   });
 
+  it("accepts `ship_round` when it carries a numeric index + agent and outcome strings, skips it otherwise", () => {
+    const ok = { type: "ship_round", index: 1, agent: "review", outcome: "approve", at: 3 };
+    const badIndex = { type: "ship_round", index: "1", agent: "review", outcome: "approve" };
+    const noAgent = { type: "ship_round", index: 1, outcome: "approve" };
+    const noOutcome = { type: "ship_round", index: 1, agent: "review" };
+    const { events, skipped } = parseRunEventLines([ok, badIndex, noAgent, noOutcome].map((e) => JSON.stringify(e)).join("\n"));
+    expect(events).toEqual([ok]);
+    expect(skipped).toBe(3);
+  });
+
   it("empty input yields no events", () => {
     expect(parseRunEventLines("")).toEqual({ events: [], skipped: 0 });
   });

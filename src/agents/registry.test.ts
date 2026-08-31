@@ -184,6 +184,31 @@ describe("coding prompts: push then submit_pr_description (opening the PR is the
   });
 });
 
+// Feature: features/agent-ship.md item 6 — the review verdict enumerates
+// findings as typed entries. Both review prompts must instruct the structured
+// findings array with stable ids and define the severity vocabulary once; the
+// prose still carries the full explanation of each finding.
+describe("review prompts: structured findings through submit_verdict (agent-ship item 6)", () => {
+  it("both review prompts instruct enumerating every finding with stable ids and the severity vocabulary", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
+      expect(sys).toContain("findings");
+      expect(sys).toMatch(/stable id/i);
+      expect(sys).toContain("F1, F2"); // the id shape, shown once
+      expect(sys).toContain("blocking|major|minor|nit"); // vocabulary defined once
+      expect(sys).toMatch(/file/i);
+      expect(sys).toMatch(/line/i);
+      // the array is the index — the full explanation stays in the prose
+      expect(sys).toMatch(/full explanation .* prose/i);
+    }
+  });
+
+  it("both review prompts warn that approve over a blocking finding is downgraded", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
+      expect(sys).toMatch(/downgraded to `request_changes`/i);
+    }
+  });
+});
+
 // Feature: features/agent-coding.md — every PR carries a rich description BY
 // DEFAULT (not on request). The template survives as the content contract for
 // the submitted object's fields — sections map 1:1 — plus the rules that keep
@@ -241,5 +266,28 @@ describe("coding prompts: the PR-description content contract (submitted object)
       expect(sys).toMatch(/hyperlink/i); // link the triggering issue/request
       expect(sys).toMatch(/never fabricate validation/i); // real results only
     }
+  });
+});
+
+// Feature: features/agent-ship.md item 1 — `agent:ship` resolves through the
+// registry like every directive, but the ship branch in dispatch() never calls
+// runAgent with THIS def: children run on the coding/review defs (clipped), so
+// ship's budgets are nominal and its prompt is never sent to a model.
+describe("ship agent (features/agent-ship.md)", () => {
+  it("ship: repo required, full toolset, nominal budgets (never used for a model call)", () => {
+    expect(AGENTS.ship.resources?.repo).toBe("required");
+    expect(AGENTS.ship.toolset).toBe("full");
+    expect(AGENTS.ship.maxTurns).toBe(1);
+    expect(AGENTS.ship.maxTokens).toBe(16000);
+    expect(AGENTS.ship.maxMinutes).toBe(5);
+  });
+
+  it("ship's prompt says it is never sent to a model, and getAgent resolves the directive", () => {
+    expect(AGENTS.ship.system).toMatch(/never sent to a model/i);
+    expect(getAgent("ship")).toBe(AGENTS.ship);
+  });
+
+  it("ship carries no resident prompt variant — children use the coding/review variants", () => {
+    expect(AGENTS.ship.residentSystem).toBeUndefined();
   });
 });

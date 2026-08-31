@@ -7,6 +7,7 @@ import type { MemoryConfig } from "./core/memory/types.js";
 import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
+import type { ShipConfig } from "./core/shipPipeline.js";
 import type { ChatGate } from "./core/commandRegistry.js";
 import { AGENTS } from "./agents/registry.js";
 
@@ -128,6 +129,14 @@ export interface AppConfig {
    *  (`git` | `meat` | `off`; env `SWITCHBOARD_READING_DIFF` overrides).
    *  See features/reading-diff.md. */
   review?: { readingDiff?: import("./core/readingDiff.js").ReadingDiffConfig };
+  /**
+   * agent:ship pipeline caps (features/agent-ship.md item 8): `maxRounds`
+   * review rounds (default 3) and `maxMinutes` of pipeline wall clock
+   * (default 120) — whichever hits first ends the loop, and each child round
+   * runs its own agent budget clipped to the remaining pipeline time.
+   * Deployment-level like `review`; validated at load.
+   */
+  ship?: ShipConfig;
   /** Slack adapter behavior that is not pure transport. */
   slack?: SlackConfig;
   /**
@@ -509,6 +518,17 @@ function validateConfig(cfg: AppConfig, warn: (message: string) => void): void {
     );
   }
   if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory, cfg.selfImprovement, warn);
+  if (cfg.ship !== undefined) validateShip(cfg.ship);
+}
+
+/** `ship` caps (features/agent-ship.md item 8): both bounds enforced at load
+ *  so a typo cannot silently become "no cap" (mirrors validateRunHistory). */
+function validateShip(ship: ShipConfig): void {
+  if (typeof ship !== "object" || ship === null) throw new Error("config.yaml: ship must be a mapping");
+  for (const key of ["maxRounds", "maxMinutes"] as const) {
+    const v = ship[key];
+    if (v !== undefined && (!Number.isInteger(v) || v < 1)) throw new Error(`config.yaml: ship.${key} must be an integer >= 1`);
+  }
 }
 
 /** `runHistory` (features/run-history.md, KTD14): retention bounds are enforced

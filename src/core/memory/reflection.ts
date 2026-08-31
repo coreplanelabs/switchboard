@@ -60,8 +60,10 @@ export interface ReflectGateInput {
 
 /** Agents whose runs are never distilled. A review's findings already land on
  *  the PR and describe one PR at one moment — distilling them floods the org
- *  scope with "PR #N approved at <sha>, 1616 tests pass" ephemera (#292). */
-export const NO_REFLECT_AGENTS: ReadonlySet<string> = new Set(["review"]);
+ *  scope with "PR #N approved at <sha>, 1616 tests pass" ephemera (#292).
+ *  `ship` joins it (features/agent-ship.md item 12): its report is the same
+ *  per-PR findings content, one pipeline's worth. */
+export const NO_REFLECT_AGENTS: ReadonlySet<string> = new Set(["review", "ship"]);
 
 /** Only runs that did real work reflect: used a tool, or sit in a thread that
  *  already carries some back-and-forth — and never a `review` run, however

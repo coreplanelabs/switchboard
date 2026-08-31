@@ -66,6 +66,27 @@ export function sanitizeActor(actor: RunActor): RunActor {
   return { kind: actor.kind, id: id.length > 0 ? id : "unknown" };
 }
 
+/** How one `agent:ship` round boundary reads (features/agent-ship.md item 12).
+ *  `started` marks the round's child being dispatched; the rest settle it:
+ *  `pr_opened` — a coding round's post-step opened or edited the PR;
+ *  `completed` — a fix round finished without a PR write (e.g. it declined
+ *  everything and never resubmitted the description); `approve` /
+ *  `request_changes` — a review round's verdict; `no_verdict` — the review
+ *  child ended without `submit_verdict`, aborting the pipeline; `aborted` — the
+ *  round ended the pipeline (a refusal, no resident worktree, a round-0
+ *  terminal); `stopped` — an operator stop settled the round. A cap never
+ *  settles a round: caps end the pipeline BETWEEN rounds, visible as the
+ *  absence of a next `started` boundary plus the answer's cap report. */
+export type ShipRoundOutcome =
+  | "started"
+  | "pr_opened"
+  | "completed"
+  | "approve"
+  | "request_changes"
+  | "no_verdict"
+  | "aborted"
+  | "stopped";
+
 /**
  * One event in a run's stream. `seq` is stamped by `RunRegistry.publish` — a
  * monotonic, per-run 1-based position (optional on the way in, present on every
@@ -202,7 +223,17 @@ export type RunEvent =
    *  dispatcher straight to the registry BEFORE the stream finishes, so the
    *  run record carries the PR URL as a fact of the run rather than only the
    *  channel reply's projection of it. Additive: unknown → ignored. */
-  | { type: "pr_opened"; url: string; number: number; created: boolean; seq?: number; at?: number };
+  | { type: "pr_opened"; url: string; number: number; created: boolean; seq?: number; at?: number }
+  /** One `agent:ship` round boundary (features/agent-ship.md item 12): the
+   *  pipeline publishes a `started` event when a round's child is dispatched
+   *  and one settle event when its outcome is known (`ShipRoundOutcome`), so
+   *  rounds are legible on the one stream and per-round cost is derivable by
+   *  slicing `turn` events between boundaries. `index` is 0-based in the
+   *  spec's round vocabulary — round 0 is the initial coding round; a review
+   *  round and its fix round share an index. Published by the ship pipeline
+   *  straight to the registry (like `pr_opened`), never through the runner.
+   *  Additive: unknown → ignored. */
+  | { type: "ship_round"; index: number; agent: string; outcome: ShipRoundOutcome; seq?: number; at?: number };
 
 // Credential shapes we must never surface in a run-visibility stream (which may
 // be shown in-channel or on a shared page). Two layers: (1) specific known

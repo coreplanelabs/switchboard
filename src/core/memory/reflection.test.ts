@@ -71,6 +71,12 @@ describe("shouldReflect", () => {
     expect(shouldReflect({ toolCalls: 9, historyTurns: 9, agentName: "review" })).toBe(false);
   });
 
+  // features/agent-ship.md item 12 (KTD10): a ship run's report is per-PR
+  // findings ephemera — the exact content #292 excluded for `review`.
+  it("never qualifies a `ship` run either (agent-ship KTD10)", () => {
+    expect(shouldReflect({ toolCalls: 9, historyTurns: 9, agentName: "ship" })).toBe(false);
+  });
+
   it("other agents (and an unnamed agent) keep the work-based gate (#292)", () => {
     expect(shouldReflect({ toolCalls: 1, historyTurns: 0, agentName: "coding" })).toBe(true);
     expect(shouldReflect({ toolCalls: 1, historyTurns: 0, agentName: "general" })).toBe(true);

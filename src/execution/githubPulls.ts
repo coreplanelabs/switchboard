@@ -140,6 +140,155 @@ export async function updatePullRequest(
   }
 }
 
+/**
+ * Create `refs/heads/<branch>` at the current tip of `fromRef` (ship round 0,
+ * features/agent-ship.md item 3 / KTD12). The resident binds a thread's
+ * worktree to a ref that must already exist on origin — an attach naming a
+ * branch GitHub has never heard of is refused, and the executor factory's
+ * sandbox fallback would then misreport "onboard the repo" on every fresh
+ * pipeline — so the BOT creates the pipeline branch itself BEFORE the first
+ * attach. Two REST calls with the App token (`contents:write`), same
+ * conventions as the PR writes above, never a `gh` shell-out:
+ *
+ *   GET  /repos/{repo}/git/ref/heads/{fromRef}  → the base tip's sha
+ *   POST /repos/{repo}/git/refs                 → refs/heads/<branch> at it
+ *
+ * A 422 "already exists" on the create is SUCCESS: a restarted pipeline
+ * recreates the same deterministic branch name, and the existing ref — with
+ * any work already pushed to it — is exactly what the restart wants
+ * (recreatability, AGENTS.md invariant 6). Everything else throws so the
+ * caller can abort honestly instead of dispatching a round that cannot bind.
+ */
+export async function createBranchRef(repo: string, branch: string, fromRef: string): Promise<void> {
+  const token = await requireToken();
+  // Segment-encode the base ref: slashes are path structure (`release/1.x`),
+  // everything else inside a segment is escaped.
+  const basePath = fromRef.split("/").map(encodeURIComponent).join("/");
+  const baseRes = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/${basePath}`, {
+    headers: apiHeaders(token),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!baseRes.ok) {
+    const text = await baseRes.text().catch(() => "");
+    throw new Error(`base ref lookup failed for ${fromRef}: HTTP ${baseRes.status} ${text.slice(0, 300)}`);
+  }
+  const base = (await baseRes.json().catch(() => null)) as { object?: { sha?: unknown } } | null;
+  const sha = typeof base?.object?.sha === "string" && base.object.sha ? base.object.sha : undefined;
+  if (!sha) throw new Error(`base ref lookup for ${fromRef} answered without a sha`);
+  const res = await fetch(`https://api.github.com/repos/${repo}/git/refs`, {
+    method: "POST",
+    headers: apiHeaders(token, true),
+    body: JSON.stringify({ ref: `refs/heads/${branch}`, sha }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (res.ok) return;
+  const text = await res.text().catch(() => "");
+  if (res.status === 422 && /already exists/i.test(text)) return;
+  throw new Error(`branch create failed for ${branch}: HTTP ${res.status} ${text.slice(0, 300)}`);
+}
+
+// ---- read-only repo/PR facts for the ship gate (features/agent-ship.md) ----
+// Same REST-with-App-token conventions as the writes above; both lookups are
+// advisory reads whose UNKNOWN answer the caller treats fail-closed, so they
+// return undefined on any failure instead of throwing.
+
+/** What the ship preflight needs to know about a repository before round 0:
+ *  whether auto-merge is enabled (spec item 9 — unknown counts as enabled),
+ *  and the default branch (the PR base of last resort). */
+export interface RepoShipInfo {
+  /** `allow_auto_merge` as GitHub reports it; absent when the response did not
+   *  carry the field (a token without enough scope) — the caller fail-closes. */
+  allowAutoMerge?: boolean;
+  defaultBranch?: string;
+}
+
+/** GET /repos/{repo} → the ship-gate facts, or undefined when the credential
+ *  is missing, the fetch fails, or the answer is malformed. Never throws. */
+export async function fetchRepoShipInfo(repo: string): Promise<RepoShipInfo | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  if (!token) return undefined;
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as { allow_auto_merge?: unknown; default_branch?: unknown } | null;
+  if (!data || typeof data !== "object") return undefined;
+  return {
+    ...(typeof data.allow_auto_merge === "boolean" ? { allowAutoMerge: data.allow_auto_merge } : {}),
+    ...(typeof data.default_branch === "string" && data.default_branch ? { defaultBranch: data.default_branch } : {}),
+  };
+}
+
+/** One PR's entry-check facts for ship (spec item 10): open/closed, the author
+ *  identity (login AND immutable numeric id — the same pair the org
+ *  auto-approve workflow pins), whether the head lives on the base repo, and
+ *  the head branch/sha for the resume path. */
+export interface PullRequestFacts {
+  state: "open" | "closed";
+  author?: { login?: string; id?: number };
+  /** Head branch name (a fork's head ref is still reported; `sameRepoHead`
+   *  says whether it lives on the base repo). */
+  headRef?: string;
+  /** Head sha (40-hex) when well-formed. */
+  headSha?: string;
+  /** True only on a POSITIVE match of head repo == base repo — a deleted-fork
+   *  null head repo is false, never assumed same-repo. */
+  sameRepoHead: boolean;
+  /** The PR's own base branch — the resume path's true merge base (a PR
+   *  opened against a non-default base must not resume against the default). */
+  baseRef?: string;
+  htmlUrl?: string;
+}
+
+/** GET /repos/{repo}/pulls/{n} → the entry-check facts, or undefined when the
+ *  fetch fails or the state is unrecognizable. Never throws. */
+export async function fetchPullRequestFacts(pr: { repo: string; number: number }): Promise<PullRequestFacts | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  const headers = apiHeaders(token); // no credential → unauthenticated (public repos answer)
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}`, {
+      headers,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as {
+    state?: unknown;
+    html_url?: unknown;
+    user?: { login?: unknown; id?: unknown };
+    head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } };
+    base?: { ref?: unknown };
+  } | null;
+  if (!data || (data.state !== "open" && data.state !== "closed")) return undefined;
+  const headRepo = typeof data.head?.repo?.full_name === "string" ? data.head.repo.full_name.toLowerCase() : undefined;
+  const sha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
+  return {
+    state: data.state,
+    ...(data.user && (typeof data.user.login === "string" || typeof data.user.id === "number")
+      ? {
+          author: {
+            ...(typeof data.user.login === "string" ? { login: data.user.login } : {}),
+            ...(typeof data.user.id === "number" ? { id: data.user.id } : {}),
+          },
+        }
+      : {}),
+    ...(typeof data.head?.ref === "string" && data.head.ref ? { headRef: data.head.ref } : {}),
+    ...(sha ? { headSha: sha } : {}),
+    sameRepoHead: headRepo === pr.repo.toLowerCase(),
+    ...(typeof data.base?.ref === "string" && data.base.ref ? { baseRef: data.base.ref } : {}),
+    ...(typeof data.html_url === "string" ? { htmlUrl: data.html_url } : {}),
+  };
+}
+
 async function requireToken(): Promise<string> {
   const token = await resolveGithubToken();
   if (!token) {
@@ -148,12 +297,14 @@ async function requireToken(): Promise<string> {
   return token;
 }
 
-function apiHeaders(token: string, withBody = false): Record<string, string> {
+/** The module's standard REST headers; a null/empty token sends no
+ *  authorization header (the unauthenticated public-repo path). */
+function apiHeaders(token: string | null, withBody = false): Record<string, string> {
   const headers: Record<string, string> = {
-    authorization: `Bearer ${token}`,
     accept: "application/vnd.github+json",
     "user-agent": "switchboard",
   };
+  if (token) headers.authorization = `Bearer ${token}`;
   if (withBody) headers["content-type"] = "application/json";
   return headers;
 }

@@ -286,9 +286,9 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     };
   }
 
-  it("a review AgentDef with a verified head posts, pinned to it", async () => {
+  it("a review AgentDef with a verified head posts, pinned to it — and reports { posted: true }", async () => {
     const h = harness();
-    await runReviewPostStep({
+    const out = await runReviewPostStep({
       agent: AGENTS.review,
       requestText: "review acme/api#42",
       repoCtx: { repo: "acme/api", pr: 42 },
@@ -305,11 +305,12 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     expect(h.posts).toHaveLength(1);
     expect(h.posts[0].target).toMatchObject({ repo: "acme/api", number: 42, commitId: HEAD });
     expect(h.posts[0].body.startsWith("LGTM:")).toBe(true);
+    expect(out).toEqual({ posted: true });
   });
 
   it("a non-review AgentDef never posts, even with a resolved PR and a verdict", async () => {
     const h = harness();
-    await runReviewPostStep({
+    const out = await runReviewPostStep({
       agent: AGENTS.coding,
       requestText: "fix acme/api#42",
       repoCtx: { repo: "acme/api", pr: 42 },
@@ -325,11 +326,12 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     });
     expect(h.posts).toHaveLength(0);
     expect(h.replies).toHaveLength(0);
+    expect(out).toMatchObject({ posted: false });
   });
 
-  it("the reviewed-head guard refuses a strayed head fail-closed: no post, the thread told both shas", async () => {
+  it("the reviewed-head guard refuses a strayed head fail-closed: no post, the thread told both shas, the outcome carries the reason", async () => {
     const h = harness();
-    await runReviewPostStep({
+    const out = await runReviewPostStep({
       agent: AGENTS.review,
       requestText: "review acme/api#42",
       repoCtx: { repo: "acme/api", pr: 42 },
@@ -345,11 +347,34 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     });
     expect(h.posts).toHaveLength(0);
     expect(h.replies.some((r) => r.includes("Slack-only"))).toBe(true);
+    expect(out).toEqual({ posted: false, reason: expect.stringContaining("is not the PR head") });
   });
 
-  it("a hard-stopped round posts nothing and says nothing", async () => {
+  it("a post that throws comes back { posted: false, reason } — ship's merge-ready gate consumes it; the thread is told Slack-only", async () => {
     const h = harness();
-    await runReviewPostStep({
+    const out = await runReviewPostStep({
+      agent: AGENTS.review,
+      requestText: "review acme/api#42",
+      repoCtx: { repo: "acme/api", pr: 42 },
+      heads: { reviewHead: HEAD, observedHead: HEAD },
+      verdict,
+      answer,
+      carried: undefined,
+      hardStopped: false,
+      post: async () => {
+        throw new Error("HTTP 502 bad gateway");
+      },
+      fetchPrHead: async () => HEAD,
+      reply: h.reply,
+      logKey: "t",
+    });
+    expect(out).toEqual({ posted: false, reason: "HTTP 502 bad gateway" });
+    expect(h.replies.some((r) => r.includes("Slack-only"))).toBe(true);
+  });
+
+  it("a hard-stopped round posts nothing and says nothing — and reports posted: false", async () => {
+    const h = harness();
+    const out = await runReviewPostStep({
       agent: AGENTS.review,
       requestText: "review acme/api#42",
       repoCtx: { repo: "acme/api", pr: 42 },
@@ -365,6 +390,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     });
     expect(h.posts).toHaveLength(0);
     expect(h.replies).toHaveLength(0);
+    expect(out).toMatchObject({ posted: false });
   });
 });
 
