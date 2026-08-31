@@ -9,6 +9,8 @@ import { useSeed } from "../lib/seed";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
 import { createRunPageModel, runningHeader, runSpan } from "../lib/runPageModel";
+import { createPrReviewCollector } from "../lib/prReviewCollector";
+import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
 import { formatDateTime, formatElapsed, formatLocalIso } from "../lib/format";
 import { statusLabel } from "../lib/indexRow";
 
@@ -123,9 +125,16 @@ const logEnd = ref<HTMLElement | null>(null);
 function atTail(): boolean {
   return window.innerHeight + window.scrollY >= document.body.scrollHeight - 60;
 }
+// PR-review panel (features/reading-diff.md item 6): the collector is the
+// runs→module adapter — it reads the same frames the timeline gets and, when
+// this run is a PR review carrying reading-diff artifacts, gates the button.
+const prReview = createPrReviewCollector();
+const prPanelOpen = ref(false);
+
 function handle(e: unknown): void {
   const wasAtTail = atTail();
   model.handle(e);
+  prReview.handle(e);
   if (wasAtTail) requestAnimationFrame(() => logEnd.value?.scrollIntoView?.({ block: "nearest" }));
 }
 
@@ -137,7 +146,10 @@ let tick: ReturnType<typeof setInterval> | null = null;
 // History seeds synchronously: the seed IS the stream, and feeding it before
 // the first render keeps the paint complete (no flash of an empty page).
 if (seed?.mode === "history") {
-  for (const e of seed.events) model.handle(e);
+  for (const e of seed.events) {
+    model.handle(e);
+    prReview.handle(e);
+  }
 }
 
 onMounted(() => {
@@ -288,6 +300,19 @@ function stamp(at: number | undefined): string {
               <GithubMark class="mr-1 align-[-0.125em]" />#{{ state.meta.pr }}
             </a>
           </template>
+          <!-- The review's reading diff (features/reading-diff.md item 6):
+               present exactly when the run published reading-diff artifacts. -->
+          <UButton
+            v-if="prReview.state.ready"
+            class="ml-auto"
+            size="xs"
+            color="neutral"
+            variant="outline"
+            icon="i-lucide-diff"
+            label="Reading diff"
+            data-testid="reading-diff-button"
+            @click="prPanelOpen = true"
+          />
         </div>
       </section>
 
@@ -371,5 +396,13 @@ function stamp(at: number | undefined): string {
         <MarkdownText :text="state.answer.text" />
       </section>
     </div>
+
+    <!-- The PR-review slideout: the pr-review module rendering the adapter's
+         state. Wide, because a diff is the content. -->
+    <USlideover v-model:open="prPanelOpen" title="PR review" :ui="{ content: 'max-w-3xl' }">
+      <template #body>
+        <PrReviewPanel :data="prReview.state" />
+      </template>
+    </USlideover>
   </AppShell>
 </template>
