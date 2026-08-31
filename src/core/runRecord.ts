@@ -10,9 +10,16 @@ import { FRICTION_CATEGORIES, type CategoryTotals, type FrictionCategory, type F
 // ONE retention function both sides apply (so a read on either side hides the
 // same rows), and the byte-budget helper that keeps a record storable.
 
-export type RunStatus = "completed" | "stopped_soft" | "stopped_hard" | "failed";
+// `interrupted` (#375, tombstone-first): the run was cut down before finish —
+// container replaced at the drain deadline, or crashed outright. Written as a
+// provisional TERMINAL record at run start (`finishedAt` = `startedAt` there:
+// nobody knows the real death time of a crash) and upgraded at the drain
+// deadline with the full event stream; the finish-path write replaces it for a
+// run that ends normally, so `interrupted` survives only for a run that never
+// reached `finish`.
+export type RunStatus = "completed" | "stopped_soft" | "stopped_hard" | "failed" | "interrupted";
 
-const RUN_STATUSES: readonly RunStatus[] = ["completed", "stopped_soft", "stopped_hard", "failed"];
+const RUN_STATUSES: readonly RunStatus[] = ["completed", "stopped_soft", "stopped_hard", "failed", "interrupted"];
 
 /** Every `runs.*` id (R4): checked before any store call. */
 export const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;

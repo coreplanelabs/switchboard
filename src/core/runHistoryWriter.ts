@@ -4,7 +4,11 @@ import { PermanentStoreError, RouteMissingError } from "./runStoreWorker.js";
 
 // Run history (#157, U4 / KTD4): the dispatcher's write path. A finished run's
 // record is built synchronously at finish and handed here AFTER the reply is
-// sent, so persistence never delays or fails the reply. Writes are
+// sent, so persistence never delays or fails the reply. The same path also
+// carries the tombstone-first writes (#375): a provisional `interrupted`
+// record at run start (`provisional: true` — no `onPersisted`) and the drain
+// deadline's full-transcript upgrade, both upserts the finish write replaces
+// when the run ends normally. Writes are
 // fire-and-forget but drain-counted: `pending()` is what the shutdown drain in
 // index.ts waits on (like `pendingReflectionCount`), and it counts a write for
 // its whole life — retry backoff included — so SIGTERM during a backoff waits
@@ -24,8 +28,12 @@ export const RUN_HISTORY_RETRY_DELAYS_MS: readonly number[] = [1000, 4000];
 export const ROUTE_MISSING_MESSAGE = "[run-history] state Worker has no /runs/put — deploy the state Worker with run-history routes before this bot version";
 
 export interface RunHistoryWriter {
-  /** Persist a record in the background. Never throws; never blocks. */
-  write(record: RunRecord): void;
+  /** Persist a record in the background. Never throws; never blocks.
+   *  `provisional: true` (the start-of-run `interrupted` tombstone, #375)
+   *  skips the `onPersisted` hook: the index's persisted flag means "finished
+   *  and durably stored", which a provisional write must not claim. Retries
+   *  and drain accounting (`pending()`) apply to both kinds alike. */
+  write(record: RunRecord, opts?: { provisional?: boolean }): void;
   /** Writes in flight, retry backoff included — awaited by the shutdown drain. */
   pending(): number;
   /** Records lost for good (retries exhausted, 4xx, or a missing route). */
@@ -70,12 +78,12 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
     }
   };
 
-  const attemptAll = async (record: RunRecord): Promise<void> => {
+  const attemptAll = async (record: RunRecord, provisional: boolean): Promise<void> => {
     const attempts = RUN_HISTORY_RETRY_DELAYS_MS.length + 1;
     for (let attempt = 1; ; attempt++) {
       try {
         await opts.store.put(record);
-        persisted(record.id);
+        if (!provisional) persisted(record.id);
         return;
       } catch (err) {
         if (err instanceof RouteMissingError) {
@@ -103,10 +111,10 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
   };
 
   return {
-    write(record) {
+    write(record, writeOpts) {
       // attemptAll never rejects (every path returns), but a defensive catch
       // keeps a bug here from surfacing as an unhandled rejection in a run.
-      const p: Promise<void> = attemptAll(record)
+      const p: Promise<void> = attemptAll(record, writeOpts?.provisional === true)
         .catch((err: unknown) => {
           failures++;
           opts.warn(`[run-history] ${record.id} writer failed unexpectedly: ${describe(err)}`);

@@ -38,7 +38,7 @@ import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { invokeChatCommand, parseChatCommand, type ChatCommandResult, type ChatCommands, type ParsedChatCommand } from "./commandChat.js";
 import { cliWords } from "./commandSurface.js";
-import { activityOfEvents, defaultRunRegistry, type RunHandle, type RunRegistry, type RunSnapshot } from "./runRegistry.js";
+import { activityOfEvents, defaultRunRegistry, type RunHandle, type RunRegistry, type RunSnapshot, type RunSummary } from "./runRegistry.js";
 import { coalesceStatus } from "./statusCoalescer.js";
 import type { Provider } from "../providers/types.js";
 import type {
@@ -715,6 +715,38 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     if (deps.config.config.runHistory?.includeContext !== false) {
       for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
     }
+    // Tombstone-first (#375): a provisional TERMINAL record — status
+    // `interrupted`, `finishedAt` = `startedAt` — goes to the store now, built
+    // from the events published so far (request, run_meta, context). Because it
+    // is already terminal, a crash or a drain-abandonment needs NO store-side
+    // fixup by the next container: the tombstone is already the truth (its
+    // `finishedAt` stays the start time — nobody knows the real death time of a
+    // crash). The finish write below replaces it (same-id upsert) for every run
+    // that ends normally, and the drain deadline upgrades it with the full
+    // transcript for a run it abandons. Fire-and-forget through the same writer
+    // (retry + drain accounting), but `provisional`: `onPersisted`/
+    // `markPersisted` must NOT run — the index's persisted flag means "finished
+    // and durably stored". Synchronous assembly over a handful of bounded
+    // events; the first model call is not delayed.
+    if (deps.runHistoryWriter) {
+      const startSnap = registry.snapshot(run.id, run.token);
+      if (startSnap) {
+        deps.runHistoryWriter.write(
+          assembleRunRecord({
+            run,
+            snap: startSnap,
+            agent: agent.name,
+            model: resolved.modelRef,
+            msg,
+            repo: repoCtx.repo,
+            finishedAt: startSnap.startedAt,
+            status: "interrupted",
+            diagnosis: analyzeRunFriction(startSnap.events, { finished: false, truncated: startSnap.truncated }),
+          }),
+          { provisional: true },
+        );
+      }
+    }
     // The card body is the agent's own checklist (via the update_status tool)
     // plus a live one-line activity trace (current tool call + redacted result
     // summary) so the card reflects progress per tool event, not only on the
@@ -1275,6 +1307,36 @@ function errorReply(err: unknown): string {
 }
 
 /**
+ * The `interrupted` record for a run the drain deadline abandons (#375): the
+ * run's full registry snapshot (every event published so far) with
+ * `finishedAt` = the drain's clock — the tombstone upgrade `src/index.ts`
+ * writes for each still-active run before `process.exit`. Identity comes from
+ * the run's `RunSummary` (the same `RunMeta` the dispatcher gave `create()`;
+ * the channel/user/thread fields are always present on a dispatcher-created
+ * run — the empty-string fallback only guards a hand-built registry entry).
+ * The diagnosis is computed as unfinished: the run never reached `finish`.
+ */
+export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, finishedAt: number): RunRecord {
+  return assembleRunRecord({
+    run: { id: summary.id, ...(summary.label !== undefined ? { label: summary.label } : {}) },
+    snap,
+    agent: summary.agent,
+    model: summary.model,
+    msg: {
+      channelId: summary.channelId ?? "",
+      userId: summary.userId ?? "",
+      threadKey: summary.threadKey ?? "",
+      sourceUrl: summary.sourceUrl,
+      userName: summary.userName,
+    },
+    repo: summary.repo,
+    finishedAt,
+    status: "interrupted",
+    diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated }),
+  });
+}
+
+/**
  * The persisted `RunRecord` for a finished run — the ONE assembly both an agent
  * run and an inline command run go through: the registry's redacted label and
  * finish-time snapshot, the caller's identity from the message, the terminal
@@ -1285,9 +1347,9 @@ function errorReply(err: unknown): string {
  * `truncated` before the byte budget is even considered.
  */
 function assembleRunRecord(input: {
-  run: RunHandle;
+  run: Pick<RunHandle, "id" | "label">;
   snap: RunSnapshot | null;
-  agent: string;
+  agent?: string;
   model?: string;
   msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey" | "sourceUrl" | "userName">;
   repo?: string;
@@ -1300,7 +1362,7 @@ function assembleRunRecord(input: {
   const fitted = fitRecordToBudget({
     id: run.id,
     ...(run.label !== undefined ? { label: run.label } : {}),
-    agent: input.agent,
+    ...(input.agent !== undefined ? { agent: input.agent } : {}),
     ...(input.model !== undefined ? { model: input.model } : {}),
     channelId: msg.channelId,
     userId: msg.userId,

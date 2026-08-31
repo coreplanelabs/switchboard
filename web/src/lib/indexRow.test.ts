@@ -44,6 +44,7 @@ describe("status vocabulary", () => {
     expect(statusLabel("failed")).toBe("failed");
     expect(statusLabel("stopped_hard")).toBe("killed");
     expect(statusLabel("stopped_soft")).toBe("stopped early");
+    expect(statusLabel("interrupted")).toBe("interrupted"); // #375: already a display word, passes through
   });
 
   it("statusWord: live, else the status word, else finished", () => {
@@ -52,10 +53,11 @@ describe("status vocabulary", () => {
     expect(statusWord(row({ finished: true }))).toBe("finished");
   });
 
-  it("dot tone: green live, red failed/killed, amber stopped early, grey succeeded", () => {
+  it("dot tone: green live, red failed/killed/interrupted, amber stopped early, grey succeeded", () => {
     expect(statusDot(row())).toBe("green");
     expect(statusDot(finished("failed"))).toBe("red");
     expect(statusDot(finished("stopped_hard"))).toBe("red");
+    expect(statusDot(finished("interrupted"))).toBe("red"); // #375: cut down before finish
     expect(statusDot(finished("stopped_soft"))).toBe("amber");
     expect(statusDot(finished("completed"))).toBe("grey");
   });

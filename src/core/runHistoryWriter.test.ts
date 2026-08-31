@@ -72,6 +72,17 @@ describe("createRunHistoryWriter", () => {
     expect(h.warnings).toEqual([]);
   });
 
+  it("a provisional write (#375, the start-of-run tombstone) skips onPersisted but is stored, retried and drain-counted like any write", async () => {
+    const h = harness([new TransientStoreError("HTTP 503"), OK]);
+    h.writer.write({ ...record("run-tomb"), status: "interrupted" }, { provisional: true });
+    expect(h.writer.pending()).toBe(1); // drain-counted while in flight
+    await h.writer.settled();
+    expect(h.puts.map((r) => r.id)).toEqual(["run-tomb", "run-tomb"]); // the transient failure was retried
+    expect(h.persisted).toEqual([]); // never onPersisted: the index dot means "finished and persisted"
+    expect(h.writer.pending()).toBe(0);
+    expect(h.writer.failures()).toBe(0);
+  });
+
   it("503 twice then 200: three puts of the same record, backoff 1 s then 4 s (jittered), one success, pending 0, no failure counted", async () => {
     const h = harness([new TransientStoreError("HTTP 503"), new TransientStoreError("HTTP 503"), OK]);
     h.writer.write(record("run-retry"));
