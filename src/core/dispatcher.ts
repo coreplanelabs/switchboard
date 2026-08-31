@@ -25,6 +25,7 @@ import {
   resolveShipCaps,
   runShipPipeline,
   shipPreflight,
+  shipRoundHeader,
   type ShipBlocks,
   type ShipChildSpec,
   type ShipOutcome,
@@ -1318,8 +1319,13 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
   const liveLink = liveUrl ? { url: liveUrl, label: "Live run" } : undefined;
   let checklist: string | undefined;
   let lastActivity: string | undefined;
+  // The round header is orchestrator-owned (spec item 12): its OWN variable,
+  // composed into the frame ABOVE the checklist — the same pattern as
+  // `lastActivity` — so a child's update_status (which replaces the checklist
+  // outright) can never erase which round the pipeline is in.
+  let roundHeader: string | undefined;
   const currentFrame = () => {
-    const detail = [checklist, lastActivity].filter(Boolean).join("\n");
+    const detail = [roundHeader, checklist, lastActivity].filter(Boolean).join("\n");
     return { title: title() + (shutdownNotice ? ` · ${shutdownNotice}` : ""), detail: detail || undefined, link: liveLink };
   };
   const finalDetail = () => checklist;
@@ -1399,7 +1405,16 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
       onEvent,
       onProgress,
       reportProgress,
-      publish: (e) => registry.publish(run.id, e),
+      publish: (e) => {
+        registry.publish(run.id, e);
+        // A round's `started` boundary retitles the card's round header (the
+        // settle events stay stream-only — the next round or the close frame
+        // takes over the card).
+        if (e.type === "ship_round" && e.outcome === "started") {
+          roundHeader = shipRoundHeader(e);
+          card.update(currentFrame());
+        }
+      },
       reply: (text) => io.reply(text),
       web: webCapability(),
       skills: deps.skills,
@@ -1874,6 +1889,8 @@ function activityLine(e: RunEvent): string {
       return "PR description recorded"; // published straight to the registry — never arrives here
     case "pr_opened":
       return "PR opened"; // published straight to the registry — never arrives here
+    case "ship_round":
+      return `round ${e.index} (${e.agent}): ${e.outcome}`; // published straight to the registry — never arrives here
   }
 }
 

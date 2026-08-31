@@ -457,3 +457,31 @@ describe("analyzeRunFriction — truncated input (the registry backlog dropped e
     expect(formatFrictionReport(full)).not.toMatch(/truncated/i);
   });
 });
+
+// Feature: features/agent-ship.md item 12 — `ship_round` marks a pipeline's
+// round boundaries: a fact about the run, not a step. Like the other side
+// facts (skill_use, review_artifact, pr_description, pr_opened) it must not
+// count as an event, a tool call, or a model-turn boundary.
+describe("analyzeRunFriction — ship_round is a side fact, invisible to friction", () => {
+  const base: RunEvent[] = [
+    { type: "input", text: "agent:ship in acme/api: fix it", at: T0 },
+    ...bash("npm test", T0 + 1000, 2000),
+    { type: "answer", text: "Merge-ready", at: T0 + 9000 },
+  ];
+  const withRounds: RunEvent[] = [
+    base[0],
+    { type: "ship_round", index: 0, agent: "coding", outcome: "started", at: T0 + 500 },
+    ...base.slice(1, 3),
+    { type: "ship_round", index: 0, agent: "coding", outcome: "pr_opened", at: T0 + 3500 },
+    base[3],
+  ];
+
+  it("the diagnosis is identical with or without the ship_round boundaries", () => {
+    const a = analyzeRunFriction(base, { finished: true });
+    const b = analyzeRunFriction(withRounds, { finished: true });
+    expect(b.eventCount).toBe(a.eventCount);
+    expect(b.toolCalls).toBe(a.toolCalls);
+    expect(b.findings).toEqual(a.findings);
+    expect(b.runMs).toBe(a.runMs);
+  });
+});

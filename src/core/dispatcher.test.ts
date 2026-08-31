@@ -5912,4 +5912,121 @@ workspaceDir: __WORKDIR__
     // The typed seams carry no merge concept: exactly the open/edit fields.
     for (const t of opened) expect(Object.keys(t).sort()).toEqual(["base", "body", "headBranch", "repo", "title"]);
   });
+
+  // Feature: features/agent-ship.md item 12 (U8) — rounds are legible: typed
+  // `ship_round` boundary events on the one stream, and an orchestrator-owned
+  // round header on the card that a child's update_status cannot erase.
+  /** The 2-round script (request_changes → fix → approve) the round-visibility
+   *  tests share; children walk update_status so the card tests see checklists. */
+  function twoRoundProvider() {
+    return shipProvider({
+      coding: [
+        toolUse("update_status", { checklist: "✱ Implementing the redirect fix" }),
+        toolUse("submit_pr_description", SHIP_DESCRIPTION),
+        say("Done — pushed."),
+        toolUse("update_status", { checklist: "✱ Addressing findings" }),
+        toolUse("submit_dispositions", { dispositions: [{ findingId: "F1", disposition: "fixed", note: "cookie restored" }] }),
+        toolUse("submit_pr_description", SHIP_DESCRIPTION),
+        say("Fixed."),
+      ],
+      review: [
+        toolUse("update_status", { checklist: "✱ Reading the diff" }),
+        toolUse("submit_verdict", { verdict: "request_changes", summary: "one blocker", head: HEAD_A, findings: [F1] }),
+        say("R1 prose."),
+        toolUse("submit_verdict", { verdict: "approve", summary: "fixed", head: HEAD_B }),
+        say("R2 prose."),
+      ],
+    });
+  }
+  function twoRoundWorkspaces(onFlip: () => void) {
+    queueWorkspaces(
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), // round 0 (coding)
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), // review round 1
+      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH, onHeadProbe: onFlip }), // fix round pushes B
+      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH }), // review round 2
+    );
+  }
+
+  it("round events: typed ship_round boundaries in order across a 2-round pipeline; every turn event falls inside a started→settle window (per-round cost derivability)", async () => {
+    const registry = new RunRegistry({ genId: () => "rship-ev", genToken: () => "tship-ev" });
+    let currentHead = HEAD_A;
+    const provider = twoRoundProvider();
+    const { deps } = shipDeps(provider);
+    deps.runRegistry = registry;
+    deps.fetchPrHead = vi.fn(async () => currentHead);
+    twoRoundWorkspaces(() => (currentHead = HEAD_B));
+    const { io } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const snap = registry.snapshot("rship-ev", "tship-ev");
+    if (!snap) throw new Error("run not in registry");
+    const rounds = snap.events.filter((e): e is Extract<RunEvent, { type: "ship_round" }> => e.type === "ship_round");
+    expect(rounds.map(({ index, agent, outcome }) => ({ index, agent, outcome }))).toEqual([
+      { index: 0, agent: "coding", outcome: "started" },
+      { index: 0, agent: "coding", outcome: "pr_opened" },
+      { index: 1, agent: "review", outcome: "started" },
+      { index: 1, agent: "review", outcome: "request_changes" },
+      { index: 1, agent: "coding", outcome: "started" },
+      { index: 1, agent: "coding", outcome: "pr_opened" },
+      { index: 2, agent: "review", outcome: "started" },
+      { index: 2, agent: "review", outcome: "approve" },
+    ]);
+    for (const r of rounds) {
+      expect(typeof r.at).toBe("number"); // stamped for the friction/cost timeline
+      expect(typeof r.seq).toBe("number"); // ordered on the one stream
+    }
+    // Per-round cost derivability (spec item 12): every model-turn receipt lies
+    // between a round's `started` boundary and its settle, so slicing `turn`
+    // events by ship_round boundaries attributes cost per round.
+    let inRound = false;
+    const turnsPerRound: number[] = [];
+    for (const e of snap.events) {
+      if (e.type === "ship_round") {
+        inRound = e.outcome === "started";
+        if (inRound) turnsPerRound.push(0);
+      } else if (e.type === "turn") {
+        expect(inRound, `turn event (seq ${e.seq}) outside any round window`).toBe(true);
+        turnsPerRound[turnsPerRound.length - 1]++;
+      }
+    }
+    expect(turnsPerRound).toHaveLength(4); // round 0, review 1, fix 1, review 2
+    for (const turns of turnsPerRound) expect(turns).toBeGreaterThan(0);
+  });
+
+  it("round header: the card carries the orchestrator-owned header above the child's checklist during each round (coding, review, fix)", async () => {
+    let currentHead = HEAD_A;
+    const provider = twoRoundProvider();
+    const { deps } = shipDeps(provider);
+    deps.fetchPrHead = vi.fn(async () => currentHead);
+    twoRoundWorkspaces(() => (currentHead = HEAD_B));
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const details = statuses.map((s) => s.detail ?? "");
+    // Header line first, the child's checklist below it — one frame carries both.
+    expect(details.some((d) => d.startsWith("Round 0 — coding") && d.includes("✱ Implementing the redirect fix"))).toBe(true);
+    expect(details.some((d) => d.startsWith("Round 1 — review") && d.includes("✱ Reading the diff"))).toBe(true);
+    expect(details.some((d) => d.startsWith("Round 1 — fix") && d.includes("✱ Addressing findings"))).toBe(true);
+  });
+
+  it("round header: a child update_status replaces the checklist outright, but the orchestrator-owned header survives", async () => {
+    const provider = shipProvider({
+      coding: [
+        toolUse("update_status", { checklist: "✱ alpha" }),
+        toolUse("update_status", { checklist: "✱ beta" }),
+        toolUse("submit_pr_description", SHIP_DESCRIPTION),
+        say("Done — pushed."),
+      ],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider);
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const details = statuses.map((s) => s.detail ?? "");
+    const alpha = details.findIndex((d) => d.startsWith("Round 0 — coding") && d.includes("✱ alpha"));
+    expect(alpha).toBeGreaterThanOrEqual(0);
+    const beta = details.findIndex((d) => d.startsWith("Round 0 — coding") && d.includes("✱ beta"));
+    expect(beta).toBeGreaterThan(alpha);
+    expect(details[beta]).not.toContain("✱ alpha"); // the checklist is REPLACED …
+    expect(details[beta].startsWith("Round 0 — coding")).toBe(true); // … the header is not
+  });
 });

@@ -33,7 +33,7 @@ import type { SkillStore } from "../skills/index.js";
 import type { PrDescription } from "./prDescription.js";
 import type { Finding, FindingDisposition, ReviewVerdict } from "./reviewVerdict.js";
 import type { RepoContext } from "./repoContext.js";
-import type { RunEvent } from "./runEvents.js";
+import type { RunEvent, ShipRoundOutcome } from "./runEvents.js";
 import type { RunControl } from "./runRegistry.js";
 import { normalizeHead } from "./reviewedHead.js";
 import { observeCodingWorkspace, runCodingPrPostStep } from "./codingPrPostStep.js";
@@ -308,6 +308,18 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   };
 }
 
+// ---- round visibility (spec item 12) ------------------------------------------
+
+/** The card's orchestrator-owned round header for a `ship_round` boundary:
+ *  `Round 0 — coding` / `Round 1 — review` / `Round 1 — fix` (a fix round
+ *  shares its review round's index; a coding round above index 0 IS a fix
+ *  round). Lives here so the phase derivation sits next to the round
+ *  vocabulary that produces the indexes. */
+export function shipRoundHeader(round: { index: number; agent: string }): string {
+  const phase = round.agent === "review" ? "review" : round.index === 0 ? "coding" : "fix";
+  return `Round ${round.index} — ${phase}`;
+}
+
 // ---- synthesized child turns (spec items 5, 7) --------------------------------
 
 const findingLine = (f: Finding): string =>
@@ -399,7 +411,9 @@ export interface ShipPipelineInput {
   onProgress: (note: string) => void;
   /** The card checklist hook children drive through update_status. */
   reportProgress: (checklist: string) => void;
-  /** Registry-only publish (typed artifacts: pr_description, pr_opened). */
+  /** Registry publish for events the pipeline owns (typed artifacts:
+   *  pr_description, pr_opened; the ship_round boundaries) — the dispatcher's
+   *  hook also feeds the card's round header off the `ship_round` events. */
   publish: (event: RunEvent) => void;
   /** Thread reply for mid-pipeline notes (review-post notes, the PR link). */
   reply: (text: string) => Promise<void>;
@@ -467,10 +481,15 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
   const roundsLine = () => `${reviewRounds} review round${reviewRounds === 1 ? "" : "s"}`;
   const reissue = () =>
     `To continue, re-issue \`agent:ship\` in this thread${prUrl ? ` and include the PR URL (${prUrl})` : " — include the PR URL if a PR exists"}.`;
-  // U8 adds the typed `ship_round` event + the card round header at this
-  // boundary; until then the boundary is a log line.
-  const logRound = (index: number, agentName: string, phase: string) =>
-    console.log(`[ship] ${logKey} round ${index} (${agentName}) ${phase}`);
+  // The round boundary (spec item 12): one `started` event when a round's
+  // child is dispatched, one settle event when its outcome is known —
+  // published on the one stream, so per-round cost is derivable by slicing
+  // `turn` events between boundaries (the dispatcher's publish hook also
+  // drives the card's round header off these).
+  const emitRound = (index: number, agentName: "coding" | "review", outcome: ShipRoundOutcome) => {
+    console.log(`[ship] ${logKey} round ${index} (${agentName}) ${outcome}`);
+    input.publish({ type: "ship_round", index, agent: agentName, outcome, at: now() });
+  };
 
   const stoppedOutcome = (tail?: string): ShipOutcome => {
     const mode = control.requested === "hard" ? "hard" : "soft";
@@ -774,20 +793,27 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
   if (!entry.resume) {
     if (control.requested) return stoppedOutcome();
     if (remainingMs() < SHIP_ROUND_RESERVE_MS) return wallClockCap();
-    logRound(0, "coding", "task");
+    emitRound(0, "coding", "started");
     const r0 = await runCodingChild({ messages: input.round0Messages });
-    if (r0.residentUnavailable) return residentOutcome(r0.residentUnavailable);
+    if (r0.residentUnavailable) {
+      emitRound(0, "coding", "aborted");
+      return residentOutcome(r0.residentUnavailable);
+    }
     if (r0.opened) {
       // Record the PR FIRST so a stop or terminal below reports its URL.
       prNumber = r0.opened.number;
       prUrl = r0.opened.url;
       lastReviewHead = r0.headSha;
     }
-    if (control.requested) return stoppedOutcome(r0.answer);
+    if (control.requested) {
+      emitRound(0, "coding", "stopped");
+      return stoppedOutcome(r0.answer);
+    }
     if (!r0.opened) {
       // Round-0 terminal other than "PR opened" (spec item 4): the child's
       // final text leads the reply — a clarifying question keeps the thread
       // alive (the user answers and re-enters) — and the terminal is named.
+      emitRound(0, "coding", "aborted");
       const terminal = r0.description
         ? "a PR description was submitted but no PR could be opened (the note above says why)"
         : "the coding round ended without submitting a PR description (a clarifying question, a budget write-up, or an unproven push ends the pipeline here)";
@@ -796,7 +822,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         reply: [r0.answer, r0.prNote, `⚠️ Ship ended at round 0: ${terminal}. No review round ran.`, reissue()].filter(Boolean).join("\n\n"),
       };
     }
-    logRound(0, "coding", `pr ${entry.repo}#${prNumber}`);
+    emitRound(0, "coding", "pr_opened");
     if (r0.prNote) await input.reply(r0.prNote).catch(() => {});
   }
 
@@ -806,14 +832,24 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     if (reviewRounds >= caps.maxRounds) return capOutcome(`the ${caps.maxRounds}-round cap`);
     if (remainingMs() < SHIP_ROUND_RESERVE_MS) return wallClockCap();
     reviewRounds += 1;
-    logRound(reviewRounds, "review", "start");
+    emitRound(reviewRounds, "review", "started");
     const rv = await runReviewChild(reviewRounds);
-    if (control.requested) return stoppedOutcome(rv.answer);
-    if (rv.residentUnavailable) return residentOutcome(rv.residentUnavailable);
-    if (rv.refusal) return abortOutcome(rv.refusal);
+    if (control.requested) {
+      emitRound(reviewRounds, "review", "stopped");
+      return stoppedOutcome(rv.answer);
+    }
+    if (rv.residentUnavailable) {
+      emitRound(reviewRounds, "review", "aborted");
+      return residentOutcome(rv.residentUnavailable);
+    }
+    if (rv.refusal) {
+      emitRound(reviewRounds, "review", "aborted");
+      return abortOutcome(rv.refusal);
+    }
     if (!rv.verdict) {
       // Spec item 5: a review child that ends without submit_verdict aborts the
       // pipeline — never converted into a request_changes it did not make.
+      emitRound(reviewRounds, "review", "no_verdict");
       return abortOutcome(
         `⚠️ Review round ${reviewRounds} ended without a submitted verdict (budget, refusal, or stop) — ship never converts that into a request for changes, so no fix round ran.`,
         rv.answer ? `Review round's final message:\n\n${rv.answer}` : undefined,
@@ -821,12 +857,12 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     }
     lastFindings = rv.verdict.findings ?? [];
     lastReviewHead = rv.reviewHead ?? lastReviewHead;
-    logRound(reviewRounds, "review", rv.verdict.verdict);
+    emitRound(reviewRounds, "review", rv.verdict.verdict);
     if (rv.verdict.verdict === "approve") return await mergeReady(rv.verdict);
     // request_changes → a fix round, only if its re-review could still run.
     if (reviewRounds >= caps.maxRounds) return capOutcome(`the ${caps.maxRounds}-round cap`);
     if (remainingMs() < SHIP_ROUND_RESERVE_MS) return wallClockCap();
-    logRound(reviewRounds, "coding", "fix");
+    emitRound(reviewRounds, "coding", "started");
     const fx = await runCodingChild({
       messages: [
         {
@@ -839,10 +875,17 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       knownFindingIds: lastFindings.map((f) => f.id),
       attachHeadSha: lastReviewHead,
     });
-    if (fx.residentUnavailable) return residentOutcome(fx.residentUnavailable);
-    if (control.requested) return stoppedOutcome(fx.answer);
+    if (fx.residentUnavailable) {
+      emitRound(reviewRounds, "coding", "aborted");
+      return residentOutcome(fx.residentUnavailable);
+    }
+    if (control.requested) {
+      emitRound(reviewRounds, "coding", "stopped");
+      return stoppedOutcome(fx.answer);
+    }
     // The fix round's repush/edit outcome is a fact of the round (pr_opened
     // event, [pr-post] log); the loop re-reviews regardless — declining
     // everything still earns a re-review, and the cap bounds a decline loop.
+    emitRound(reviewRounds, "coding", fx.opened ? "pr_opened" : "completed");
   }
 }
