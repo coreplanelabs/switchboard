@@ -1337,6 +1337,37 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
 }
 
 /**
+ * The drain deadline's abandonment pass (#375), called by `src/index.ts` right
+ * before `process.exit`: every registry run still unfinished gets its tombstone
+ * upgraded to a full-transcript `interrupted` record (`interruptedRunRecord`
+ * over the run's whole snapshot, `finishedAt` = the drain's clock). The writes
+ * are `provisional` like the start tombstone: the persisted flag means
+ * "finished and durably stored" — these runs never finished (and the registry
+ * dies with the process) — and a provisional write stands down in the writer
+ * if the run's real finish record shows up inside the drain's write budget, so
+ * this pass can never clobber a finish that races it. Synchronous end to end
+ * (the writes are fire-and-forget); returns how many were enqueued so the
+ * caller knows whether to await the writer under its budget.
+ */
+export function writeAbandonedRunRecords(
+  registry: Pick<RunRegistry, "listActive" | "snapshotById">,
+  writer: Pick<RunHistoryWriter, "write">,
+  now: number,
+  log: (line: string) => void = console.log,
+): number {
+  let written = 0;
+  for (const summary of registry.listActive()) {
+    if (summary.finished) continue;
+    const snap = registry.snapshotById(summary.id);
+    if (!snap) continue;
+    writer.write(interruptedRunRecord(summary, snap, now), { provisional: true });
+    log(`[drain] wrote interrupted record for ${summary.id} (${snap.events.length} events)`);
+    written++;
+  }
+  return written;
+}
+
+/**
  * The persisted `RunRecord` for a finished run — the ONE assembly both an agent
  * run and an inline command run go through: the registry's redacted label and
  * finish-time snapshot, the caller's identity from the message, the terminal

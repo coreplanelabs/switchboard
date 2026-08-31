@@ -12,7 +12,17 @@ import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
-import { activeRunCount, attachmentSuffix, composeRunLabel, dispatch, interruptedRunRecord, setShutdownNotice, turnContent, type CoreDeps } from "./dispatcher.js";
+import {
+  activeRunCount,
+  attachmentSuffix,
+  composeRunLabel,
+  dispatch,
+  interruptedRunRecord,
+  setShutdownNotice,
+  turnContent,
+  writeAbandonedRunRecords,
+  type CoreDeps,
+} from "./dispatcher.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { RunControl, RunRegistry, activityOfEvents } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
@@ -4522,9 +4532,12 @@ describe("run history write path (#157 U4)", () => {
     await dispatch(deps, msg("hello there"), fakeIO().io);
     await dispatch(deps, msg("hello again"), fakeIO().io);
     await writer.settled();
-    expect(attempts).toBe(4); // (tombstone + finish record) × two runs, none retried
+    // The fixture registry mints ONE id for both runs (unique in production),
+    // so the second tombstone is dropped by final-beats-provisional — that id's
+    // final record was already enqueued: tombstone + finish, finish.
+    expect(attempts).toBe(3);
     expect(writer.degraded()).toBe(true);
-    expect(writer.failures()).toBe(4);
+    expect(writer.failures()).toBe(3);
     expect(warnings.filter((w) => w.includes("state Worker has no /runs/put"))).toHaveLength(1);
     expect(await legacy.recent()).toHaveLength(1); // same run id twice → upsert; the ledger write path is untouched
   });
@@ -4624,6 +4637,36 @@ describe("run history write path (#157 U4)", () => {
       expect(rec.events).toEqual(snap.events); // ALL events published so far — the full-transcript upgrade
       expect(rec.label).toBe("coding · acme/x");
       expect(isRunRecord(rec)).toBe(true);
+    });
+
+    it("writeAbandonedRunRecords (the drain deadline's pass) writes one PROVISIONAL full-snapshot interrupted record per unfinished run, skips finished ones, returns the count", () => {
+      const ids = ["run-live", "run-done"];
+      const registry = new RunRegistry({ genId: () => ids.shift() ?? "run-x", genToken: () => "tok" });
+      const live = registry.create("coding · acme/x", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t" });
+      registry.publish(live.id, { type: "input", text: "go", at: 1 });
+      registry.publish(live.id, { type: "tool_call", tool: "bash", summary: "$ npm test" });
+      const done = registry.create("review · acme/y", { agent: "review", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:u" });
+      registry.finish(done.id, "completed");
+      const writes: Array<{ record: RunRecord; opts: { provisional?: boolean } | undefined }> = [];
+      const lines: string[] = [];
+      const n = writeAbandonedRunRecords(
+        registry,
+        { write: (record, opts) => void writes.push({ record, opts }) },
+        1_234_567,
+        (line) => lines.push(line),
+      );
+      expect(n).toBe(1);
+      expect(writes).toHaveLength(1);
+      const only = writes[0];
+      // Provisional (#375): the persisted dot means "finished and durably stored" —
+      // an abandoned run never finished — and a provisional write stands down if
+      // the run's real finish record shows up inside the drain's write budget.
+      expect(only.opts).toEqual({ provisional: true });
+      expect(only.record).toMatchObject({ id: live.id, status: "interrupted", finishedAt: 1_234_567 });
+      expect(only.record.events).toEqual(registry.snapshotById(live.id)!.events); // the FULL snapshot, not the start tombstone
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(live.id);
+      expect(lines[0]).toContain("2 events");
     });
   });
 });

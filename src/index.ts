@@ -32,7 +32,7 @@ import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
-import { activeRunCount, DEPLOY_RESTART_NOTICE, interruptedRunRecord, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
+import { activeRunCount, DEPLOY_RESTART_NOTICE, setShutdownNotice, writeAbandonedRunRecords, type CoreDeps } from "./core/dispatcher.js";
 import { buildScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters (#157 U7) ---
@@ -447,21 +447,17 @@ async function main() {
     // Tombstone upgrade (#375): the deadline passed with runs still in flight —
     // they are about to be killed by process.exit. Each still-active registry
     // run already has its provisional `interrupted` tombstone (written at
-    // start, a few events); rewrite it now from the FULL snapshot (every event
-    // published so far) with `finishedAt` = now, so the common abandonment
-    // leaves a full transcript, not just the tombstone. Bounded: one write per
-    // run through the normal writer (its own retries run inside the budget),
-    // at most INTERRUPTED_WRITE_BUDGET_MS total — never a second drain.
+    // start, a few events); `writeAbandonedRunRecords` rewrites it now from the
+    // FULL snapshot (every event published so far) with `finishedAt` = now, so
+    // the common abandonment leaves a full transcript, not just the tombstone.
+    // The writes are provisional (no persisted flag on the dying registry, and
+    // they stand down for a finish record that races them inside the budget).
+    // Bounded: one write per run through the normal writer (its own retries run
+    // inside the budget), at most INTERRUPTED_WRITE_BUDGET_MS total — never a
+    // second drain.
     if (runHistoryWriter && inFlight() > 0) {
-      const abandoned = defaultRunRegistry.listActive().filter((r) => !r.finished);
-      const now = Date.now();
-      for (const summary of abandoned) {
-        const snap = defaultRunRegistry.snapshotById(summary.id);
-        if (!snap) continue;
-        runHistoryWriter.write(interruptedRunRecord(summary, snap, now));
-        console.log(`[drain] wrote interrupted record for ${summary.id} (${snap.events.length} events)`);
-      }
-      if (abandoned.length > 0) {
+      const written = writeAbandonedRunRecords(defaultRunRegistry, runHistoryWriter, Date.now());
+      if (written > 0) {
         await Promise.race([runHistoryWriter.settled(), new Promise((r) => setTimeout(r, INTERRUPTED_WRITE_BUDGET_MS))]);
       }
     }
