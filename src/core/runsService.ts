@@ -256,6 +256,16 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
 
       const byId = new Map<string, RunView>();
       let storeUnavailable = false;
+      // Every unfinished registry run, whatever `status`/page was asked for: a
+      // store row for one of these is its provisional `interrupted` tombstone
+      // (#375) — the truth only if the run dies — and must never surface while
+      // the run is demonstrably alive.
+      const unfinished = new Set(
+        registry
+          .listActive()
+          .filter((s) => !s.finished)
+          .map((s) => s.id),
+      );
       if (store) {
         try {
           const rows = await store.list({
@@ -266,7 +276,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             ...(opts.before !== undefined ? { before: opts.before } : {}),
             ...(opts.beforeId !== undefined ? { beforeId: opts.beforeId } : {}),
           });
-          for (const row of rows) byId.set(row.id, persistedView(row));
+          for (const row of rows) if (!unfinished.has(row.id)) byId.set(row.id, persistedView(row));
         } catch (err) {
           // Degrade to live rows — never a whole-command failure — but say so
           // in the log: the message only (a store error names a route or an
@@ -275,20 +285,27 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
           warn(`[runs] history store list failed — showing live runs only: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      // The live row wins on every field it carries (the current stop state, the
-      // registry's own persisted flag) EXCEPT the finish fields: the store row is
-      // the same run, already finished, and the record is the source of truth for
-      // `finishedAt`/`status` (a reply that threw after the loop is `failed` in
-      // the record while the registry row still says `completed`). It also
-      // contributes what only the record knows — `diagnosis`, `bytes` — so a run
-      // in both lists as one complete row (U8).
+      // A FINISHED live row wins on every field it carries (the final stop
+      // state, the registry's own persisted flag) EXCEPT the finish fields: the
+      // store row is the same run, already finished, and the record is the
+      // source of truth for `finishedAt`/`status` (a reply that threw after the
+      // loop is `failed` in the record while the registry row still says
+      // `completed`). It also contributes what only the record knows —
+      // `diagnosis`, `bytes` — so a run in both lists as one complete row (U8).
+      // An UNFINISHED live row wins whole (its store row — the provisional
+      // tombstone, already dropped above — says `interrupted`, which is the
+      // truth only once the run is dead; a live run must list as live, #375).
       for (const row of live) {
         const stored = byId.get(row.id);
+        if (!row.finished || !stored) {
+          byId.set(row.id, row);
+          continue;
+        }
         byId.set(row.id, {
           ...stored,
           ...row,
-          ...(stored?.finishedAt !== undefined ? { finishedAt: stored.finishedAt } : {}),
-          ...(stored?.status !== undefined ? { status: stored.status } : {}),
+          ...(stored.finishedAt !== undefined ? { finishedAt: stored.finishedAt } : {}),
+          ...(stored.status !== undefined ? { status: stored.status } : {}),
         });
       }
       const runs = [...byId.values()].sort(newestFinished).slice(0, limit);

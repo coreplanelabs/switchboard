@@ -12,7 +12,7 @@ import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
-import { activeRunCount, attachmentSuffix, composeRunLabel, dispatch, setShutdownNotice, turnContent, type CoreDeps } from "./dispatcher.js";
+import { activeRunCount, attachmentSuffix, composeRunLabel, dispatch, interruptedRunRecord, setShutdownNotice, turnContent, type CoreDeps } from "./dispatcher.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { RunControl, RunRegistry, activityOfEvents } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
@@ -4251,7 +4251,7 @@ describe("run history write path (#157 U4)", () => {
     expect(bareRec).not.toHaveProperty("userName");
   });
 
-  it("a completed run is one put: status completed, eventCount = published count, events include the user and assistant messages, identity fields set", async () => {
+  it("a completed run ends as one stored record: status completed, eventCount = published count, events include the user and assistant messages, identity fields set", async () => {
     const { deps, store, writer, registry } = wired(capturingProvider());
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
@@ -4432,21 +4432,23 @@ describe("run history write path (#157 U4)", () => {
     const observing: ChannelIO = {
       ...io,
       reply: async () => {
-        // The run has finished (the reply comes after finish) and the record is not written yet.
+        // The run has finished (the reply comes after finish) and the finish
+        // record is not written yet — only the start-of-run tombstone (#375).
         snapAtReply = registry.snapshot("run-h", "tok")!.events;
-        expect(await store.list({})).toHaveLength(0);
+        expect((await store.get("run-h"))?.status).toBe("interrupted");
       },
     };
     await dispatch(deps, msg("hello there"), observing);
     await writer.settled();
     const rec = await store.get("run-h");
+    expect(rec?.status).toBe("completed"); // a throw inside the observing reply would have made it `failed`
     expect(snapAtReply).toBeDefined();
     expect(snapAtReply!.length).toBeGreaterThan(2);
     expect(rec!.events).toEqual(snapAtReply);
     expect(rec!.storedEventCount).toBe(snapAtReply!.length);
   });
 
-  it("the write happens after the reply: put has not been called when io.reply runs", async () => {
+  it("the finish write happens after the reply: only the provisional tombstone has been put when io.reply runs", async () => {
     let putsAtReply = -1;
     const puts: RunRecord[] = [];
     const store = {
@@ -4465,8 +4467,8 @@ describe("run history write path (#157 U4)", () => {
     };
     await dispatch(deps, msg("hello there"), observing);
     await writer.settled();
-    expect(putsAtReply).toBe(0);
-    expect(puts).toHaveLength(1);
+    expect(putsAtReply).toBe(1); // the start-of-run tombstone (#375), never the finish record
+    expect(puts.map((p) => p.status)).toEqual(["interrupted", "completed"]);
   });
 
   it("put 503 twice then 200: exactly one record, pending back to 0, no failure counted", async () => {
@@ -4499,9 +4501,9 @@ describe("run history write path (#157 U4)", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
     await writer.settled();
-    expect(attempts).toBe(1);
-    expect(warnings).toHaveLength(1);
-    expect(writer.failures()).toBe(1);
+    expect(attempts).toBe(2); // tombstone + finish record: one un-retried attempt each
+    expect(warnings).toHaveLength(2);
+    expect(writer.failures()).toBe(2);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
     expect(replies.some((r) => r.includes("413"))).toBe(false);
   });
@@ -4520,9 +4522,9 @@ describe("run history write path (#157 U4)", () => {
     await dispatch(deps, msg("hello there"), fakeIO().io);
     await dispatch(deps, msg("hello again"), fakeIO().io);
     await writer.settled();
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(4); // (tombstone + finish record) × two runs, none retried
     expect(writer.degraded()).toBe(true);
-    expect(writer.failures()).toBe(2);
+    expect(writer.failures()).toBe(4);
     expect(warnings.filter((w) => w.includes("state Worker has no /runs/put"))).toHaveLength(1);
     expect(await legacy.recent()).toHaveLength(1); // same run id twice → upsert; the ledger write path is untouched
   });
@@ -4532,6 +4534,97 @@ describe("run history write path (#157 U4)", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
+  });
+
+  describe("tombstone-first provisional records (#375)", () => {
+    it("a provisional interrupted record is written at run start — finishedAt = startedAt, the request/context events — and the finish write replaces it", async () => {
+      const inner = new InMemoryRunStore();
+      const puts: RunRecord[] = [];
+      const store = {
+        put: async (r: RunRecord) => {
+          puts.push(r);
+          return inner.put(r);
+        },
+        get: (id: string) => inner.get(id),
+        list: (o: Parameters<RunStore["list"]>[0]) => inner.list(o),
+      } as unknown as RunStore;
+      const { deps, writer } = wired(toolThenAnswer(), { store });
+      const history: HistoryItem[] = [{ role: "user", text: "earlier turn" }];
+      await dispatch(deps, { ...msg("hello there"), sourceUrl: "https://acme.slack.com/archives/CX/p10", userName: "justin" }, fakeIO(history).io);
+      await writer.settled();
+
+      expect(puts.map((p) => p.status)).toEqual(["interrupted", "completed"]);
+      const tomb = puts[0];
+      expect(tomb.id).toBe("run-h");
+      expect(tomb.finishedAt).toBe(tomb.startedAt); // provisional: nobody knows a crash's real death time
+      expect(tomb.events.map((e) => e.type)).toEqual(["input", "run_meta", "context"]);
+      expect(tomb).toMatchObject({ agent: "general", model: "anthropic/general-model", channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0", sourceUrl: "https://acme.slack.com/archives/CX/p10", userName: "justin", truncated: false });
+      expect(isRunRecord(tomb)).toBe(true);
+
+      // The finish write is an upsert of the SAME id: the store holds one row, the final record.
+      expect(await inner.list({})).toHaveLength(1);
+      const rec = (await inner.get("run-h"))!;
+      expect(rec.status).toBe("completed");
+      expect(rec.events.map((e) => e.type)).toContain("answer");
+      expect(rec.finishedAt).toBeGreaterThanOrEqual(rec.startedAt);
+    });
+
+    it("the provisional write never marks the run persisted: a run whose finish write is lost keeps `persisted` unset", async () => {
+      const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok" });
+      let n = 0;
+      const store = {
+        put: async () => {
+          // The tombstone put succeeds; the finish put is permanently lost.
+          if (++n === 2) throw new PermanentStoreError("run store /runs/put HTTP 413");
+          return { ok: true as const, retained: 1, stored: true, rewritten: false };
+        },
+      } as unknown as RunStore;
+      const { deps, writer } = wired(toolThenAnswer(), { registry, store });
+      await dispatch(deps, msg("hello there"), fakeIO().io);
+      await writer.settled();
+      expect(n).toBe(2);
+      expect(registry.getById("run-h")).not.toHaveProperty("persisted"); // the tombstone's success set nothing
+      expect(writer.failures()).toBe(1);
+    });
+
+    it("interruptedRunRecord (the drain deadline's seam) builds a full-snapshot interrupted record from a live run's summary + snapshot", () => {
+      const registry = new RunRegistry({ genId: () => "run-d", genToken: () => "tok" });
+      const run = registry.create("coding · acme/x", {
+        agent: "coding",
+        model: "anthropic/claude",
+        channelId: "slack:C1",
+        userId: "slack:U1",
+        threadKey: "slack:C1:t",
+        repo: "acme/x",
+        sourceUrl: "https://acme.slack.com/archives/C1/p1",
+        userName: "justin",
+      });
+      registry.publish(run.id, { type: "input", text: "go", at: 1 });
+      for (let i = 1; i <= 3; i++) registry.publish(run.id, { type: "tool_call", tool: "bash", summary: `$ step ${i}` });
+      const summary = registry.getById(run.id)!;
+      const snap = registry.snapshotById(run.id)!;
+      const rec = interruptedRunRecord(summary, snap, 1_234_567);
+      expect(rec).toMatchObject({
+        id: "run-d",
+        status: "interrupted",
+        finishedAt: 1_234_567,
+        startedAt: snap.startedAt,
+        agent: "coding",
+        model: "anthropic/claude",
+        channelId: "slack:C1",
+        userId: "slack:U1",
+        threadKey: "slack:C1:t",
+        repo: "acme/x",
+        sourceUrl: "https://acme.slack.com/archives/C1/p1",
+        userName: "justin",
+        eventCount: 4,
+        storedEventCount: 4,
+        truncated: false,
+      });
+      expect(rec.events).toEqual(snap.events); // ALL events published so far — the full-transcript upgrade
+      expect(rec.label).toBe("coding · acme/x");
+      expect(isRunRecord(rec)).toBe(true);
+    });
   });
 });
 

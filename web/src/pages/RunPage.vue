@@ -45,7 +45,7 @@ const nowWall = ref(Date.now());
 const endChip = computed(() => {
   if (isHistory && seed?.mode === "history") {
     if (seed.status === "completed") return { ok: true, cls: "", word: "succeeded" };
-    const cls = seed.status === "failed" || seed.status === "stopped_hard" ? "red" : seed.status === "stopped_soft" ? "amber" : "grey";
+    const cls = seed.status === "failed" || seed.status === "stopped_hard" || seed.status === "interrupted" ? "red" : seed.status === "stopped_soft" ? "amber" : "grey";
     return { ok: false, cls, word: seed.status ? statusLabel(seed.status) : "ended" };
   }
   const mode = state.stopMode;

@@ -27,7 +27,10 @@ export type DotTone = "green" | "red" | "amber" | "grey";
 
 export function statusDot(run: IndexRow): DotTone {
   if (!run.finished) return "green";
-  if (run.status === "failed" || run.status === "stopped_hard") return "red";
+  // `interrupted` (#375): the run was cut down before finish (container
+  // replaced or crashed) — as red as a failure. The word itself passes through
+  // `statusLabel` unchanged.
+  if (run.status === "failed" || run.status === "stopped_hard" || run.status === "interrupted") return "red";
   if (run.status === "stopped_soft") return "amber";
   return "grey";
 }

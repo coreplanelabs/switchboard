@@ -146,6 +146,39 @@ describe("RunsService.listRuns — read merge", () => {
     expect(after.runs[0].stop).toBeUndefined(); // stop state lived only on the registry row
   });
 
+  it("a live run's provisional interrupted tombstone (#375) never surfaces: the run lists as live under `all`, is absent from `finished`, and getRun serves the live row", async () => {
+    const { reg, svc, store } = setup();
+    const { id } = reg.create("coding · acme/x", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:x" });
+    reg.publish(id, { type: "input", text: "go" });
+    // The start-of-run tombstone: terminal in the store while the run is live.
+    await store!.put(record(id, NOW, { status: "interrupted", startedAt: NOW, events: [{ type: "input", text: "go", seq: 1 }], eventCount: 1, storedEventCount: 1 }));
+
+    const all = await svc.listRuns({ status: "all" });
+    expect(all.runs.map((r) => r.id)).toEqual([id]);
+    expect(all.runs[0].finished).toBe(false); // never "interrupted" while demonstrably alive
+    expect(all.runs[0].status).toBeUndefined();
+    expect(all.runs[0].finishedAt).toBeUndefined();
+    expect(all.runs[0].diagnosis).toBeUndefined();
+    expect(all.runs[0].persisted).toBeUndefined(); // the tombstone is not "finished and persisted"
+
+    const finished = await svc.listRuns({ status: "finished" });
+    expect(finished.runs).toEqual([]); // the tombstone must not list a live run as finished
+
+    const got = await svc.getRun(id);
+    expect(got.ok && got.value.finished).toBe(false);
+    expect(got.ok && got.value.status).toBeUndefined();
+  });
+
+  it("a crash leaves the tombstone as the record (#375): with the registry empty, the interrupted row lists under `finished` and reads as interrupted", async () => {
+    const { svc, store } = setup(); // an empty registry = the next container after a crash
+    await store!.put(record("dead", NOW, { status: "interrupted", startedAt: NOW }));
+    const finished = await svc.listRuns({ status: "finished" });
+    expect(finished.runs.map((r) => r.id)).toEqual(["dead"]);
+    expect(finished.runs[0]).toMatchObject({ finished: true, status: "interrupted", finishedAt: NOW, persisted: true });
+    const got = await svc.getRun("dead");
+    expect(got.ok && got.value.status).toBe("interrupted");
+  });
+
   it("active = unfinished registry runs only and never calls the store; finished = finished registry ∪ store; all = union", async () => {
     const { reg, svc, store } = setup();
     const list = vi.spyOn(store!, "list");

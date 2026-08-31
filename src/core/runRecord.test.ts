@@ -187,6 +187,12 @@ describe("isRunRecord", () => {
     expect(isRunRecord(JSON.parse(JSON.stringify(record({ label: undefined, agent: undefined }))))).toBe(true);
   });
 
+  it("accepts every terminal status — `interrupted` (#375, the tombstone/drain status) included — and the Worker shares this validator", () => {
+    for (const status of ["completed", "stopped_soft", "stopped_hard", "failed", "interrupted"] as const) {
+      expect(isRunRecord(record({ status }))).toBe(true);
+    }
+  });
+
   it("round-trips the run-page fields on tool, input and turn events verbatim (callId, exitCode, output, source, startedAt/durationMs/stopReason/usage) — the validator only checks each event's `type`", () => {
     const events: RunEvent[] = [
       { type: "input", text: "please review", source: { url: "https://x.slack.com/archives/C1/p1", channel: "general", user: "justin" }, seq: 1, at: 1 },

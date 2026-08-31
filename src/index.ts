@@ -32,7 +32,7 @@ import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
-import { activeRunCount, DEPLOY_RESTART_NOTICE, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
+import { activeRunCount, DEPLOY_RESTART_NOTICE, interruptedRunRecord, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
 import { buildScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters (#157 U7) ---
@@ -46,6 +46,11 @@ const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.js
 // Process start for `/healthz.startedAt` — `deploy restart`'s live gate tells
 // the restarted container (same image, same `build.commit`) from the old one by it.
 const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
+
+/** Total budget for the drain deadline's `interrupted` full-transcript writes
+ *  (#375) — the runs are being abandoned anyway; the tombstones written at
+ *  their start already cover a write that misses this window. */
+const INTERRUPTED_WRITE_BUDGET_MS = 10_000;
 
 async function main() {
   for (const v of ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]) {
@@ -438,6 +443,27 @@ async function main() {
     const deadline = drainStartedAt + DRAIN_DEADLINE_MS;
     while (inFlight() > 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 2000));
+    }
+    // Tombstone upgrade (#375): the deadline passed with runs still in flight —
+    // they are about to be killed by process.exit. Each still-active registry
+    // run already has its provisional `interrupted` tombstone (written at
+    // start, a few events); rewrite it now from the FULL snapshot (every event
+    // published so far) with `finishedAt` = now, so the common abandonment
+    // leaves a full transcript, not just the tombstone. Bounded: one write per
+    // run through the normal writer (its own retries run inside the budget),
+    // at most INTERRUPTED_WRITE_BUDGET_MS total — never a second drain.
+    if (runHistoryWriter && inFlight() > 0) {
+      const abandoned = defaultRunRegistry.listActive().filter((r) => !r.finished);
+      const now = Date.now();
+      for (const summary of abandoned) {
+        const snap = defaultRunRegistry.snapshotById(summary.id);
+        if (!snap) continue;
+        runHistoryWriter.write(interruptedRunRecord(summary, snap, now));
+        console.log(`[drain] wrote interrupted record for ${summary.id} (${snap.events.length} events)`);
+      }
+      if (abandoned.length > 0) {
+        await Promise.race([runHistoryWriter.settled(), new Promise((r) => setTimeout(r, INTERRUPTED_WRITE_BUDGET_MS))]);
+      }
     }
     console.log(
       `[drain] exiting (${activeRunCount()} run(s), ${pendingReflectionCount()} reflection(s), ${pendingHistoryWrites()} history write(s) abandoned` +

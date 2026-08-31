@@ -194,6 +194,23 @@ describe("run history routes", () => {
     expect(await rowCount(key, "run_events")).toBe(3);
   });
 
+  it("tombstone-first (#375): the DO accepts status `interrupted` (shared validator), and the finish put replaces the provisional record whole", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    // The provisional tombstone written at run start: terminal, finishedAt = startedAt, few events.
+    const tombstone = record("t1", now - 5000, { status: "interrupted", startedAt: now - 5000, events: events(2) });
+    expect((await post("/runs/put", { storeKey: key, record: tombstone })).status).toBe(200);
+    expect((await post("/runs/get", { storeKey: key, id: "t1" })).data.record).toMatchObject({ status: "interrupted", finishedAt: now - 5000 });
+    // The finish write: a different stored version (eventCount/finishedAt/bytes) → full rewrite.
+    const final = record("t1", now, { status: "completed", startedAt: now - 5000, events: events(6) });
+    expect((await post("/runs/put", { storeKey: key, record: final })).data).toMatchObject({ rewritten: true, retained: 1 });
+    expect((await post("/runs/get", { storeKey: key, id: "t1" })).data.record).toEqual(final);
+    expect(await rowCount(key, "run_events")).toBe(6);
+    const list = (await post("/runs/list", { storeKey: key })).data.items as Array<{ id: string; status: string }>;
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ id: "t1", status: "completed" });
+  });
+
   it("a put that fails mid-transaction leaves no runs row and no events", async () => {
     const key = storeKey();
     const rec = record("boom", Date.now(), { events: events(3) });
