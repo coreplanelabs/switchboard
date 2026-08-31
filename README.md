@@ -22,7 +22,7 @@ Behavioral expectations live in [`features/`](features/README.md) — one spec p
 | Agent | What it does | Toolset (`src/agents/registry.ts`) |
 |---|---|---|
 | `general` | Default fallback — plain passthrough to the configured model; refers repo/web work to the other agents | `none` |
-| `coding` | Implements a change and ships a PR ([features/agent-coding.md](features/agent-coding.md)). Cold path: clone → branch → edit → test → `gh pr create`. Resident path: the worktree is already warm, `gh` is not in the image, and the PR is opened via the GitHub REST API | `full` — bash, read, write, web fetch, diff digest, skills |
+| `coding` | Implements a change and ships a PR ([features/agent-coding.md](features/agent-coding.md)). Cold path: clone → branch → edit → test → push. Resident path: the worktree is already warm and `gh` is not in the image. Either way the agent pushes the branch and submits a typed description; Switchboard renders the body at the pushed head and opens the PR itself ([features/pr-description.md](features/pr-description.md)) | `full` — bash, read, write, web fetch, diff digest, PR description submit, skills |
 | `review` | Reviews a PR with full-repo context, reports ranked findings with a submitted verdict ([features/agent-review.md](features/agent-review.md)) | `readonly` — bash, read (read-only by convention), verdict, web fetch, diff digest, skills |
 | `research` | Answers questions with web search + URL reading; no repo or workspace is ever provisioned ([features/web-tools.md](features/web-tools.md)) | `web` — web search, web fetch |
 
@@ -147,8 +147,9 @@ flowchart LR
     end
     BOT -->|exec / read / write per tool call| S1 & S2
     BOT -->|operator bearer per tool call| RW --> RD
-    S1 & S2 -->|git push, gh pr create| GH["GitHub"]
+    S1 & S2 -->|git push| GH["GitHub"]
     RD -->|git push via per-attach credential file| GH
+    BOT -->|opens/edits the PR — App token| GH
 ```
 
 **Residents are a second credential domain**: the GitHub App private key lives in the resident Worker's own wrangler secrets (never the bot's env, never a container); the Worker mints 1-hour installation tokens scoped to exactly the resident's one repo, and each thread receives its token through a mode-600 per-attach credential file — never argv, never process-wide env. Repo code (installs/builds) always executes token-free and unprivileged. Two bearer scopes gate the Worker itself: the operator token (bot runtime: attach/exec/read/write/status) and the admin token (`repo onboard/offboard/reconfigure/rebuild` chat commands — fail-closed to admins, see Permissions).

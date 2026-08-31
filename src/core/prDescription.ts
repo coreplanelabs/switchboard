@@ -1,9 +1,10 @@
 import { z } from "zod";
 
 // The PR description as DATA (features/pr-description.md). One typed object
-// carries everything a reader needs about a change — TL;DR, what & why, the
-// Tour (hunk-anchored walkthrough), decisions, risks, validation criteria with
-// their proofs — and each surface has its own renderer over that object:
+// carries everything a reader needs about a change — the PR title, TL;DR,
+// what & why, the Tour (hunk-anchored walkthrough), decisions, risks,
+// validation criteria with their proofs — and each surface has its own
+// renderer over that object:
 // `renderPrDescriptionMarkdown` for the GitHub body today, the run page's
 // review panel next, whatever replaces GitHub after that. Nothing about the
 // content is authored per surface, so there is never a second copy to keep in
@@ -11,7 +12,14 @@ import { z } from "zod";
 // against the head sha at render time, regenerating the body after a repush is
 // a re-render, not a rewrite.
 
-const line = z.string().trim().min(1);
+// `line` is single-line by contract: a title or path with an embedded newline
+// would split the renderer's `### N.` headings — and the PR title goes
+// verbatim into POST /pulls. `prose` may span lines.
+const line = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((s) => !/[\r\n]/.test(s), "must be a single line (no embedded newlines)");
 const prose = z.string().trim().min(1);
 
 /** A hunk the reader is pointed at: a path + inclusive 1-based line range in
@@ -39,6 +47,9 @@ export const TourStepSchema = z.object({
 });
 
 export const PrDescriptionSchema = z.object({
+  /** The PR title's single source. Metadata for the PR's own title field —
+   *  never rendered into the body (GitHub shows the title itself). */
+  title: line,
   tldr: prose,
   whatWhy: prose,
   tour: z.array(TourStepSchema).min(1),
@@ -52,9 +63,12 @@ export const PrDescriptionSchema = z.object({
   }),
 });
 
-export type TourAnchor = z.infer<typeof TourAnchorSchema>;
-export type TourStep = z.infer<typeof TourStepSchema>;
-export type PrDescription = z.infer<typeof PrDescriptionSchema>;
+// The shape lives zod-free in prDescriptionTypes.ts (the run-event contract
+// needs it without this module's zod dependency); re-exported here so schema
+// consumers keep one import. The annotated return below is what pins the zod
+// output to that shape — drift either way is a compile error.
+import type { TourAnchor, PrDescription } from "./prDescriptionTypes.js";
+export type { TourAnchor, TourStep, PrDescription } from "./prDescriptionTypes.js";
 
 /** Validate untrusted input (a tool call, a JSON file) into a PrDescription.
  *  Throws a zod error naming the offending path — callers surface it. */
@@ -75,12 +89,16 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 
 export const GENERATED_FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
 
-/** The permalink GitHub renders as an embedded code block inside a PR body.
- *  Each path segment is percent-encoded (a space or `#` in a filename would
- *  otherwise break the link or start the fragment early); `/` stays a separator. */
+/** Percent-encode each segment of a GitHub URL path piece (a file path, a
+ *  branch name) while keeping `/` as the separator — a space or `#` in a
+ *  segment would otherwise break the link or start the fragment early. */
+export function encodeGithubPathSegments(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
+}
+
+/** The permalink GitHub renders as an embedded code block inside a PR body. */
 export function anchorUrl(ctx: RenderContext, a: TourAnchor): string {
-  const path = a.path.split("/").map(encodeURIComponent).join("/");
-  return `https://github.com/${ctx.repo}/blob/${ctx.headSha}/${path}#L${a.from}-L${a.to}`;
+  return `https://github.com/${ctx.repo}/blob/${ctx.headSha}/${encodeGithubPathSegments(a.path)}#L${a.from}-L${a.to}`;
 }
 
 /** Markdown cells: a literal `|` would split the row, a newline would end it,

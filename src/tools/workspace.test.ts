@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ExecOptions, Executor } from "../execution/executor.js";
-import { bashTool, diffDigestTool, submitVerdictTool, TOOLSETS, type ToolContext } from "./workspace.js";
+import type { PrDescription } from "../core/prDescription.js";
+import { bashTool, diffDigestTool, submitPrDescriptionTool, submitVerdictTool, TOOLSETS, type ToolContext } from "./workspace.js";
 
 // Feature: features/validated-review.md (R14). The diff_digest tool is a thin
 // wrapper: it runs `git diff <base>...HEAD` through the Executor seam and
@@ -160,6 +161,102 @@ describe("submit_verdict tool", () => {
     await expect(submitVerdictTool.run({ verdict: "request_changes", summary: "bug" }, ctxWith(undefined))).resolves.toBe(
       "verdict recorded: request_changes",
     );
+  });
+});
+
+// Feature: features/pr-description.md — the coding agent's PR deliverable is a
+// typed PrDescription submitted through this tool; the dispatcher (not the
+// model) renders the GitHub body from it at the pushed head and opens/edits
+// the PR. Validation mirrors submit_verdict: a bad object comes back as a
+// readable string error (never a throw) so the model can fix it and retry.
+describe("submit_pr_description tool", () => {
+  const ctxWith = (onPrDescription?: ToolContext["onPrDescription"]): ToolContext =>
+    ({ executor: {} as ToolContext["executor"], onPrDescription }) as ToolContext;
+
+  function validInput(): Record<string, unknown> {
+    return {
+      title: "Fix the widget gate",
+      tldr: "Two sentences.",
+      whatWhy: "Because.",
+      tour: [{ title: "The thing", description: "What it does.", anchor: { path: "src/a.ts", from: 3, to: 9 } }],
+      remaining: [],
+      decisions: [{ title: "Chose X", rationale: "Y was worse." }],
+      risks: "None.",
+      validation: { criteria: [{ criterion: "It renders", proof: "`[unit]` this test" }] },
+    };
+  }
+
+  it("is in the coding (full) toolset only — review/web/none never submit descriptions", () => {
+    const names = (key: string) => (TOOLSETS[key] ?? []).map((t) => t.name);
+    expect(names("full")).toContain("submit_pr_description");
+    expect(names("readonly")).not.toContain("submit_pr_description");
+    expect(names("web")).not.toContain("submit_pr_description");
+    expect(names("none")).not.toContain("submit_pr_description");
+  });
+
+  it("mutates run state, so it is never side-effect-free (must run strictly in order)", () => {
+    expect(submitPrDescriptionTool.sideEffectFree).toBeUndefined();
+  });
+
+  it("forwards a valid description to the context, parsed and normalized, and acknowledges it", async () => {
+    const got: PrDescription[] = [];
+    const out = await submitPrDescriptionTool.run({ ...validInput(), title: "  Fix the widget gate  " }, ctxWith((d) => got.push(d)));
+    expect(got).toHaveLength(1);
+    expect(got[0].title).toBe("Fix the widget gate"); // trimmed by the schema, not passed through raw
+    expect(got[0].tour[0].anchor).toEqual({ path: "src/a.ts", from: 3, to: 9 });
+    expect(String(out)).toMatch(/PR description recorded/);
+  });
+
+  it("a missing section is a string error naming the zod path — no throw, context untouched", async () => {
+    const got: PrDescription[] = [];
+    const { risks: _r, ...noRisks } = validInput();
+    const out = await submitPrDescriptionTool.run(noRisks, ctxWith((d) => got.push(d)));
+    expect(got).toEqual([]);
+    expect(String(out)).toMatch(/^error:/);
+    expect(String(out)).toContain("risks");
+  });
+
+  it("a blank title is a string error naming `title`", async () => {
+    const got: PrDescription[] = [];
+    const out = await submitPrDescriptionTool.run({ ...validInput(), title: "   " }, ctxWith((d) => got.push(d)));
+    expect(got).toEqual([]);
+    expect(String(out)).toMatch(/^error:/);
+    expect(String(out)).toContain("title");
+  });
+
+  it("a bad anchor is a string error naming the full path into the tour", async () => {
+    const input = validInput();
+    input.tour = [{ title: "t", description: "d", anchor: { path: "/etc/passwd", from: 1, to: 2 } }];
+    const out = await submitPrDescriptionTool.run(input, ctxWith(() => {}));
+    expect(String(out)).toMatch(/^error:/);
+    expect(String(out)).toContain("tour.0.anchor.path");
+  });
+
+  it("last valid call wins: a second submission replaces the first at the sink", async () => {
+    let latest: PrDescription | undefined;
+    const ctx = ctxWith((d) => (latest = d));
+    await submitPrDescriptionTool.run(validInput(), ctx);
+    await submitPrDescriptionTool.run({ ...validInput(), title: "Second title" }, ctx);
+    expect(latest?.title).toBe("Second title");
+  });
+
+  it("an invalid call after a valid one leaves the valid one standing", async () => {
+    let latest: PrDescription | undefined;
+    const ctx = ctxWith((d) => (latest = d));
+    await submitPrDescriptionTool.run(validInput(), ctx);
+    await submitPrDescriptionTool.run({ ...validInput(), tldr: "" }, ctx);
+    expect(latest?.title).toBe("Fix the widget gate");
+  });
+
+  it("tolerates a context with no description sink", async () => {
+    await expect(submitPrDescriptionTool.run(validInput(), ctxWith(undefined))).resolves.toMatch(/PR description recorded/);
+  });
+
+  it("declares every schema section in the tool input schema (the model's contract)", () => {
+    const required = submitPrDescriptionTool.inputSchema.required as string[];
+    for (const field of ["title", "tldr", "whatWhy", "tour", "remaining", "decisions", "risks", "validation"]) {
+      expect(required).toContain(field);
+    }
   });
 });
 

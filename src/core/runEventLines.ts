@@ -65,6 +65,10 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.skill === "string" && typeof o.agent === "string" && typeof o.bodyBytes === "number";
     case "review_artifact":
       return o.artifact === "reading_diff" && typeof o.diff === "string" && (o.poweredBy === "git" || o.poweredBy === "meat");
+    case "pr_description":
+      return typeof o.description === "object" && o.description !== null;
+    case "pr_opened":
+      return typeof o.url === "string" && typeof o.number === "number" && typeof o.created === "boolean";
     default:
       return false;
   }

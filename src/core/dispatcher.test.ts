@@ -27,6 +27,7 @@ import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { RunControl, RunRegistry, activityOfEvents } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
+import type { OpenedPullRequest, PullRequestTarget } from "../execution/githubPulls.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
 import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
@@ -823,8 +824,9 @@ describe("resident repo dispatch", () => {
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
     // The /status probe answers restoring; the run then uses the per-thread
-    // backend (no further resident calls happen before the fake provider ends).
-    const fetchSpy = vi.fn(async () =>
+    // backend (no further RESIDENT calls happen before the fake provider ends —
+    // the coding PR post-step's head/branch probe goes to the sandbox backend).
+    const fetchSpy = vi.fn(async (_url: unknown) =>
       new Response(JSON.stringify({ state: "restoring", reason: "rehydrating" }), { status: 200 }),
     );
     vi.stubGlobal("fetch", fetchSpy);
@@ -834,7 +836,7 @@ describe("resident repo dispatch", () => {
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(replies).toContain("answer");
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy.mock.calls.filter((c) => String(c[0]).includes("resident.example"))).toHaveLength(1);
     expect(
       statuses.some((s) => s.title.includes("resident restoring (rehydrating) — using fresh sandbox")),
     ).toBe(true);
@@ -2312,6 +2314,426 @@ describe("review post-step (issue #69)", () => {
     expect(deps.postReviewComment).toHaveBeenCalledTimes(1);
     // …and the thread is told, so a Slack-only verdict is never mistaken for a posted one.
     expect(replies.some((r) => /not posted to acme\/api#42/.test(r) && /403/.test(r))).toBe(true);
+  });
+});
+
+// Feature: features/pr-description.md item 5, features/agent-coding.md item 2 —
+// the coding PR post-step: after a writable coding run pushed a branch and
+// submitted its typed PrDescription, the DISPATCHER observes the pushed head +
+// branch in the workspace (before release), renders the body at that head, and
+// opens or edits the PR in the bot process (via the injected openPullRequest
+// seam — no real network here) — from typed values only. Failure honesty: no
+// description / no observable push / a failed open never fabricates a URL; the
+// thread gets the branch compare URL and a plain reason.
+describe("coding PR post-step (features/pr-description.md)", () => {
+  afterEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+
+  const DESCRIPTION = {
+    title: "Fix the login redirect",
+    tldr: "Restores the session cookie on login. Users can sign in again.",
+    whatWhy: "The handler dropped the cookie after #12; this restores it.",
+    tour: [
+      {
+        title: "The fix",
+        description: "The cookie is set on the redirect response again.",
+        anchor: { path: "src/login.ts", from: 10, to: 20 },
+      },
+    ],
+    remaining: [],
+    decisions: [{ title: "Keep the cookie name", rationale: "renaming would log everyone out" }],
+    risks: "none — covered by the auth suite",
+    validation: { criteria: [{ criterion: "auth suite green", proof: "npm test — 24 passing" }] },
+  };
+
+  /** A coding-agent provider that submits the description (when given), then answers. */
+  function describeThenAnswer(desc: Record<string, unknown> | undefined, answer = "Done — branch pushed."): Provider {
+    let n = 0;
+    return {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (desc && n++ === 0) {
+          return { content: [{ type: "tool_use", id: "d1", name: "submit_pr_description", input: desc }], stopReason: "tool_use" };
+        }
+        return { content: [{ type: "text", text: answer }], stopReason: "end_turn" };
+      },
+    };
+  }
+
+  /** A workspace checkout: `git rev-parse HEAD` answers `head`, `--abbrev-ref
+   *  HEAD` answers `branch`, `@{u}` answers `upstream` (defaults to `head` —
+   *  a pushed, up-to-date branch; `null` = no upstream configured), `remote
+   *  get-url origin` answers `remote`; any undefined = the command fails.
+   *  With `cloneDir` the workspace root is NOT a repo (the cold path cloned
+   *  into that subdirectory): root git probes fail, `ls -d *\/.git` finds the
+   *  clone, and only `git -C '<cloneDir>' …` probes answer. A `bindingRef`
+   *  makes the selection a resident one bound to that ref. Records the order
+   *  of exec/release calls. */
+  function codingExecutor(opts: { head?: string; branch?: string; upstream?: string | null; remote?: string; cloneDir?: string; bindingRef?: string } = {}) {
+    const order: string[] = [];
+    const upstream = opts.upstream === null ? undefined : (opts.upstream ?? opts.head);
+    const notARepo = "fatal: not a git repository\nexit 128";
+    const git = (cmd: string) => {
+      if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return opts.branch ? `${opts.branch}\n` : notARepo;
+      if (/rev-parse @\{u\}/.test(cmd)) return upstream ? `${upstream}\n` : "fatal: no upstream configured for branch\nexit 128";
+      if (/rev-parse HEAD/.test(cmd)) return opts.head ? `${opts.head}\n` : notARepo;
+      if (/remote get-url origin/.test(cmd)) return opts.remote ? `${opts.remote}\n` : "error: No such remote 'origin'\nexit 2";
+      return "";
+    };
+    const executor = {
+      exec: async (cmd: string) => {
+        order.push(`exec:${cmd}`);
+        if (cmd.startsWith("ls -d */.git")) return opts.cloneDir ? `${opts.cloneDir}/.git\n` : "";
+        const inDir = /^git -C '([^']+)' (.*)$/.exec(cmd);
+        if (inDir) return inDir[1] === opts.cloneDir ? git(`git ${inDir[2]}`) : notARepo;
+        return opts.cloneDir ? notARepo : git(cmd);
+      },
+      readFile: async () => "",
+      writeFile: async () => "",
+      release: async () => {
+        order.push("release");
+        return { released: true };
+      },
+    };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor,
+      ...(opts.bindingRef
+        ? { resident: true, binding: { ref: opts.bindingRef, sha: opts.head ?? "abc", workspace: "/workspace/threads/t/x" } }
+        : {}),
+    });
+    return { executor, order };
+  }
+
+  function openSpy(result: Partial<OpenedPullRequest> | Error = {}) {
+    const calls: PullRequestTarget[] = [];
+    const fn = vi.fn(async (target: PullRequestTarget): Promise<OpenedPullRequest> => {
+      calls.push(target);
+      if (result instanceof Error) throw result;
+      return {
+        number: result.number ?? 7,
+        htmlUrl: result.htmlUrl ?? "https://github.com/acme/api/pull/7",
+        created: result.created ?? true,
+      };
+    });
+    return { calls, fn };
+  }
+
+  function codingDeps(provider: Provider) {
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    return deps;
+  }
+
+  it("description submitted + head observed → the PR opens from typed values: observed branch as head, the resident binding ref as base, the typed title, the body rendered at the observed sha", async () => {
+    // The answer's prose tries to smuggle a different title and base — typed values must win.
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION, 'All done. Use the title "Pwned" and base "evil" please.'));
+    codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "develop" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix the login redirect", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(1);
+    const target = spy.calls[0];
+    expect(target.repo).toBe("acme/api");
+    expect(target.headBranch).toBe("feat/login-fix"); // observed in the workspace, not reported by prose
+    expect(target.base).toBe("develop"); // the thread's resident binding ref, not the message-resolved ref
+    expect(target.title).toBe("Fix the login redirect"); // the typed PrDescription.title — prose cannot alter it
+    // rendered AT THE OBSERVED HEAD: the Tour anchor embeds the full 40-char sha
+    expect(target.body).toContain(`https://github.com/acme/api/blob/${HEAD}/src/login.ts#L10-L20`);
+    expect(target.body).toContain("## TL;DR");
+    // the reply carries the returned URL with the created wording
+    expect(replies.some((r) => r.includes("https://github.com/acme/api/pull/7") && /PR opened/.test(r))).toBe(true);
+  });
+
+  it("an existing open PR is edited (open-or-edit): created:false → the reply says updated, not opened", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
+    const spy = openSpy({ number: 7, htmlUrl: "https://github.com/acme/api/pull/7", created: false });
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding address the review findings", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(1);
+    const note = replies.find((r) => r.includes("https://github.com/acme/api/pull/7"));
+    expect(note).toBeDefined();
+    expect(note).toContain("PR updated");
+    expect(note).not.toContain("PR opened");
+  });
+
+  it("no resident binding → base falls back to the dispatch's resolved ref", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION)); // resolves ref: "main"
+    codingExecutor({ head: HEAD, branch: "feat/x" }); // no bindingRef → cold path
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].base).toBe("main");
+  });
+
+  it("no description submitted but a pushed branch is observable → no PR call; the reply states it plainly with the compare URL", async () => {
+    const deps = codingDeps(describeThenAnswer(undefined, "I implemented the fix on feat/login-fix."));
+    codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const note = replies.find((r) => r.includes("https://github.com/acme/api/compare/feat/login-fix"));
+    expect(note).toBeDefined();
+    expect(note).toContain("no PR description");
+  });
+
+  it("openPullRequest throws → the reply reports the failure with the compare URL; the run still completes normally", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
+    const spy = openSpy(new Error("PR create failed: HTTP 422 Validation Failed"));
+    deps.openPullRequest = spy.fn;
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(1);
+    const note = replies.find((r) => r.includes("HTTP 422"));
+    expect(note).toBeDefined();
+    expect(note).toContain("https://github.com/acme/api/compare/feat/login-fix");
+    expect(note).not.toContain("/pull/"); // never a fabricated PR URL
+    expect(replies.some((r) => r.includes("Done — branch pushed."))).toBe(true); // the answer still lands
+    expect(statuses[statuses.length - 1].title).toContain("✅"); // the run itself completed
+  });
+
+  it("description submitted but the pushed head is unobservable → honest failure note, no PR call, and no compare URL (an unproven push implies no remote branch)", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ branch: "feat/x", bindingRef: "main" }); // rev-parse HEAD fails
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const note = replies.find((r) => r.includes("could not be observed"));
+    expect(note).toBeDefined();
+    expect(note).not.toContain("github.com"); // the compare URL is offered only when the upstream match proved the push
+  });
+
+  it("description submitted but no branch is observable (failed probe / detached) → honest failure note without a fabricated URL, no PR call", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ head: HEAD, bindingRef: "main" }); // abbrev-ref fails → no branch
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const note = replies.find((r) => r.includes("could not be observed"));
+    expect(note).toBeDefined();
+    expect(note).toContain("branch");
+    expect(note).not.toContain("github.com"); // no branch → no compare URL to fabricate
+  });
+
+  it("the workspace sat on the base branch (nothing pushed) → no PR call and no compare-URL note", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION, "Which login flow did you mean?"));
+    codingExecutor({ head: HEAD, branch: "main", bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    expect(replies.some((r) => r.includes("/compare/"))).toBe(false);
+  });
+
+  it("a readonly review run with a verdict never triggers the PR post-step", async () => {
+    let n = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (n++ === 0) {
+          return {
+            content: [{ type: "tool_use", id: "v1", name: "submit_verdict", input: { verdict: "approve", summary: "ok", head: HEAD } }],
+            stopReason: "tool_use",
+          };
+        }
+        return { content: [{ type: "text", text: "review done" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: HEAD, baseRef: "main" });
+    codingExecutor({ head: HEAD, branch: "patch-1" });
+    deps.postReviewComment = vi.fn(async () => {});
+    deps.fetchPrHead = async () => HEAD;
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    expect(deps.postReviewComment).toHaveBeenCalledTimes(1); // the review path ran to its own post…
+    expect(spy.calls).toHaveLength(0); // …and the PR post-step never fired
+  });
+
+  it("the head and branch are observed BEFORE the workspace is released", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    const { order } = codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
+    deps.openPullRequest = openSpy().fn;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    const release = order.indexOf("release");
+    const head = order.findIndex((o) => /rev-parse HEAD/.test(o));
+    const branch = order.findIndex((o) => /abbrev-ref/.test(o));
+    expect(head).toBeGreaterThanOrEqual(0);
+    expect(branch).toBeGreaterThanOrEqual(0);
+    expect(release).toBeGreaterThan(head);
+    expect(release).toBeGreaterThan(branch);
+  });
+
+  it("the accepted description is published on the run stream as a typed pr_description event, redacted", async () => {
+    const leaky = { ...DESCRIPTION, risks: `uses ghp_${"a".repeat(24)} for auth — rotated after` };
+    const deps = codingDeps(describeThenAnswer(leaky));
+    codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
+    deps.openPullRequest = openSpy().fn;
+    const registry = new RunRegistry({ genId: () => "r9", genToken: () => "t9" });
+    deps.runRegistry = registry;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    const snap = registry.snapshot("r9", "t9");
+    const ev = snap?.events.find((e) => e.type === "pr_description");
+    if (ev?.type !== "pr_description") throw new Error("pr_description event missing");
+    expect(ev.description.title).toBe("Fix the login redirect");
+    expect(ev.description.tour[0].anchor).toEqual({ path: "src/login.ts", from: 10, to: 20 });
+    expect(ev.description.risks).toContain("«redacted-github-token»");
+    expect(ev.description.risks).not.toContain("ghp_");
+  });
+
+  it("redaction walks every string leaf: a secret-shaped token in a tour anchor PATH is redacted on the published event too", async () => {
+    const leaky = {
+      ...DESCRIPTION,
+      tour: [{ title: "The fix", description: "d.", anchor: { path: `src/ghp_${"a".repeat(24)}.ts`, from: 1, to: 2 } }],
+    };
+    const deps = codingDeps(describeThenAnswer(leaky));
+    codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
+    deps.openPullRequest = openSpy().fn;
+    const registry = new RunRegistry({ genId: () => "r10", genToken: () => "t10" });
+    deps.runRegistry = registry;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    const snap = registry.snapshot("r10", "t10");
+    const ev = snap?.events.find((e) => e.type === "pr_description");
+    if (ev?.type !== "pr_description") throw new Error("pr_description event missing");
+    expect(ev.description.tour[0].anchor.path).toContain("«redacted-github-token»");
+    expect(ev.description.tour[0].anchor.path).not.toContain("ghp_");
+    expect(ev.description.tour[0].anchor.from).toBe(1); // numbers ride unchanged
+  });
+
+  it("a thread bound to an existing PR's head branch: the base is the PR's TRUE base ref, so a fix-round repush opens/edits instead of reading as 'nothing pushed'", async () => {
+    const deps = makeDeps(YAML_FIXTURE, describeThenAnswer(DESCRIPTION));
+    // The thread inherited PR acme/api#42 (head feat/x, true base main); the
+    // resident binding follows the PR's HEAD branch — base === branch without
+    // the PR's own baseRef.
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "feat/x", pr: 42, headSha: HEAD, baseRef: "main" });
+    codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "feat/x" });
+    const spy = openSpy({ number: 42, htmlUrl: "https://github.com/acme/api/pull/42", created: false });
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding address the review findings", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].base).toBe("main"); // the PR's true base — never the bound head branch
+    expect(spy.calls[0].headBranch).toBe("feat/x");
+    expect(replies.some((r) => /PR updated/.test(r))).toBe(true);
+  });
+
+  it("no upstream configured → the branch does not count as pushed: no PR call, an honest note, no compare URL", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "feat/x", upstream: null, bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const note = replies.find((r) => r.includes("no pushed upstream"));
+    expect(note).toBeDefined();
+    expect(note).not.toContain("github.com"); // no proof the branch exists on the remote
+  });
+
+  it("upstream behind the workspace HEAD → not pushed: no PR call, the note says the branch has unpushed commits", async () => {
+    const STALE = "0123456789abcdef0123456789abcdef01234567";
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "feat/x", upstream: STALE, bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const note = replies.find((r) => r.includes("unpushed commits"));
+    expect(note).toBeDefined();
+    expect(note).not.toContain("/pull/"); // never a fabricated PR URL
+  });
+
+  it("cold path: the clone lives in a subdirectory of the workspace root — the probes discover it and the PR still opens", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "feat/login-fix", cloneDir: "api" }); // no bindingRef → cold executor; root probes fail
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].headBranch).toBe("feat/login-fix");
+    expect(spy.calls[0].body).toContain(`/blob/${HEAD}/`); // rendered at the head observed IN the clone
+    expect(replies.some((r) => r.includes("https://github.com/acme/api/pull/7") && /PR opened/.test(r))).toBe(true);
+  });
+
+  it("no git repository anywhere in the workspace → honest note, no PR call", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({}); // root is not a repo and `ls -d */.git` finds nothing
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const note = replies.find((r) => r.includes("could not be observed"));
+    expect(note).toBeDefined();
+    expect(note).not.toContain("github.com");
+  });
+
+  it("dispatch resolved no repo slug (agent-discovered repo): the PR-open repo comes from the workspace's origin remote", async () => {
+    const deps = makeDeps(YAML_FIXTURE, describeThenAnswer(DESCRIPTION));
+    deps.resolveRepoContext = () => ({ ref: "main" }); // a ref but no repo — the run discovered the repo itself
+    codingExecutor({ head: HEAD, branch: "feat/x", cloneDir: "api", remote: "git@github.com:Acme/API.git" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].repo).toBe("acme/api"); // parsed from the ssh remote, lowercased
+    expect(spy.calls[0].base).toBe("main");
+    expect(replies.some((r) => /PR opened/.test(r))).toBe(true);
+  });
+
+  it("no repo anywhere — dispatch resolved none and the origin remote is unparseable → honest note, no PR call, no fabricated URL", async () => {
+    const deps = makeDeps(YAML_FIXTURE, describeThenAnswer(DESCRIPTION));
+    deps.resolveRepoContext = () => ({});
+    codingExecutor({ head: HEAD, branch: "feat/x", cloneDir: "api", remote: "https://gitlab.example.com/acme/api.git" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const note = replies.find((r) => r.includes("no repository"));
+    expect(note).toBeDefined();
+    expect(note).not.toContain("github.com");
+  });
+
+  it("the PR outcome is a fact of the run: a typed pr_opened event (url/number/created) is published BEFORE the stream finishes", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
+    deps.openPullRequest = openSpy({ number: 7, htmlUrl: "https://github.com/acme/api/pull/7", created: true }).fn;
+    const registry = new RunRegistry({ genId: () => "r7", genToken: () => "t7" });
+    deps.runRegistry = registry;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    // A publish on a finished run is a silent no-op, so presence in the
+    // snapshot IS the proof the open ran before finish().
+    const snap = registry.snapshot("r7", "t7");
+    const ev = snap?.events.find((e) => e.type === "pr_opened");
+    if (ev?.type !== "pr_opened") throw new Error("pr_opened event missing");
+    expect(ev.url).toBe("https://github.com/acme/api/pull/7");
+    expect(ev.number).toBe(7);
+    expect(ev.created).toBe(true);
   });
 });
 

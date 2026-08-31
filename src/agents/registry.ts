@@ -36,33 +36,42 @@ export interface AgentDef {
   residentSystem?: string;
 }
 
-// Every PR the coding agent opens carries a rich, templated description by
-// default — never only on request. Right after implementing, the agent
-// understands the change better than anyone; the template makes it bring that
-// context forward for the reviewer. Rules baked in: default for EVERY PR; prose
-// unwrapped (no hard line breaks inside a paragraph); the triggering
-// issue/request is always hyperlinked; validation states exactly what was run
-// (never fabricated); concise, not padded. Shared by both coding prompts.
+// Every PR the coding agent ships carries a rich description by default —
+// never only on request. Right after implementing, the agent understands the
+// change better than anyone; the contract below makes it bring that context
+// forward for the reviewer. The description is DATA (features/pr-description.md):
+// the agent submits a typed object through submit_pr_description and
+// Switchboard renders the GitHub body from it at the pushed head and opens or
+// edits the PR itself — the agent never authors body markdown and never opens
+// a PR. Rules baked in: submitted for EVERY PR; prose unwrapped (no hard line
+// breaks inside a paragraph); the triggering issue/request is always
+// hyperlinked; validation states exactly what was run (never fabricated);
+// concise, not padded. Shared by both coding prompts.
 //
 // The Tour (features/agent-coding.md item 3) replaced the prose "Changes" and
 // "How to review" sections: a walkthrough that never points at the code was
-// what made bodies hard to consume. Each step anchors to a line permalink at
-// the PR head sha — GitHub renders those as embedded code in the body, so the
-// reader sees the hunk beside its explanation. The author writes it, so no
-// extra model call is spent. A permalink pins a sha: after any push that moves
-// the head the anchors point at a stale commit, so the Tour is regenerated then.
-const PR_DESCRIPTION_TEMPLATE = `PR description — write the body from this template for EVERY PR (this is the default, not something to wait to be asked for). Prose is unwrapped: no hard line breaks inside a paragraph. Always hyperlink the triggering issue/request. Never fabricate validation — state exactly what you ran and the real result. Keep each section concise, not padded. Every section below is a \`## <Section>\` markdown heading — the first one (\`## TL;DR\`) included, never a headingless opening paragraph — so the body has a scannable information architecture.
-- **TL;DR** (first): two sentences for a naive reader with zero context — what this PR does and why it matters.
-- **What & why**: the change and its motivation, linked to the triggering issue/request.
-- **Tour**: the guided walkthrough of the change, replacing any prose list of changes. BEFORE writing the body, load the \`pr-tour\` skill with use_skill — it defines the reader-first step shape, the permalink anchor rules, the Remaining-changes catch-all, and the regenerate-on-repush rule. Follow it for every PR, and re-follow its repush rule on every push that changes the head.
-- **Decisions**: non-obvious choices, alternatives considered and rejected, trade-offs.
-- **Risks & implications**: what could break, the blast radius, and any migration/rollout/compatibility concerns (or "none" — and why).
-- **Validation**: what you tested and the actual results (commands run, pass/fail), plus how the reviewer can verify it themselves.`;
+// what made bodies hard to consume. Anchors are stored as (path, from, to)
+// and rendered against the head sha at render time, so a repush is a
+// re-render by Switchboard — the agent only resubmits when the CONTENT (line
+// numbers included) changed.
+const PR_DESCRIPTION_TEMPLATE = `PR description — submit it with the submit_pr_description tool for EVERY PR (this is the default, not something to wait to be asked for). Switchboard renders the GitHub body from the object you submit, so never author PR-body markdown yourself. Content contract per field (each renders as its own section): prose is unwrapped — no hard line breaks inside a paragraph. Always hyperlink the triggering issue/request. Never fabricate validation — state exactly what you ran and the real result. Keep each field concise, not padded.
+- **title**: the PR title — one line naming the change, specific enough to pick out of a PR list.
+- **TL;DR** (\`tldr\`, rendered first): two sentences for a naive reader with zero context — what this PR does and why it matters.
+- **What & why** (\`whatWhy\`): the change and its motivation, linked to the triggering issue/request.
+- **Tour** (\`tour\` + \`remaining\`): the guided walkthrough of the change, replacing any prose list of changes — ordered steps of { title, description, optional lookFor, anchor }, each anchor a { path, from, to } line range at your pushed head; every touched file no step covers goes in \`remaining\` as { path, note }. BEFORE authoring the Tour steps, load the \`pr-tour\` skill with use_skill — it defines the reader-first step shape, the anchor rules, and the Remaining-changes catch-all. Follow it for every PR; if a later push changes what the steps point at, resubmit the description with corrected anchors.
+- **Decisions** (\`decisions\`): non-obvious choices as { title, rationale } — alternatives considered and rejected, trade-offs.
+- **Risks & implications** (\`risks\`): what could break, the blast radius, and any migration/rollout/compatibility concerns (or "none" — and why).
+- **Validation** (\`validation\`): what you tested and the actual results as { criterion, proof } rows (commands run, pass/fail), plus how the reviewer can verify it themselves; the optional summary line carries the overall result.`;
+
+// Both coding prompts carry this verbatim: coding runs hold a write-scoped
+// token where a merge is one command away, so the boundary is spelled out the
+// same way the review prompts spell out "never an approval or a merge".
+const NEVER_MERGE = `NEVER merge a pull request and NEVER approve one — no merge or approve command, no merge/approve API call, no pushing to the default branch. Your deliverable is the pushed branch plus the submitted description; Switchboard's own GitHub writes are the PR open/edit, never an approval or a merge — a human decides what merges.`;
 
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
 
 You work inside a dedicated workspace directory with bash, read_file, and write_file tools.
-Typical job: take a task, clone the relevant repository, implement the change, and open a pull request.
+Typical job: take a task, clone the relevant repository, implement the change, push a branch, and submit a typed PR description — Switchboard opens the pull request from it.
 
 SCOPE FIRST — a hard rule, at most 5 tool calls: identify the target repository and surface before doing anything else.
 - If the request names a repo, go. If it doesn't and one obvious candidate exists (check with ONE \`gh repo list\` or \`gh search code --owner <org>\` call), go.
@@ -74,8 +83,11 @@ Workflow for shipping a PR:
 2. Create a branch with a descriptive name.
 3. Implement the change. Match the surrounding code's style and conventions.
 4. Run the project's tests/linters if they exist and are quick enough to run.
-5. Commit with a clear message, push the branch, and open a PR with \`gh pr create\`. Write the PR body from the PR description template below — every time, bringing forward the context you gained while implementing.
-6. Report back with the PR URL and a short summary of what you did, including anything you skipped or couldn't verify.
+5. Commit with a clear message and push the branch.
+6. Call the submit_pr_description tool with the typed description object (content contract below) — every time, bringing forward the context you gained while implementing. Switchboard renders the PR body from your object at the pushed head and opens (or updates) the pull request itself: do NOT open a PR yourself, with \`gh\` or any API call.
+7. Report back with a short summary of what you did, including anything you skipped or couldn't verify; Switchboard adds the PR link when it opens the PR.
+
+${NEVER_MERGE}
 
 ${PR_DESCRIPTION_TEMPLATE}
 
@@ -83,7 +95,7 @@ Maintain the user-facing status card with the update_status tool: right after yo
 
 If the request doesn't name a repository and you can't infer it, ask for it instead of guessing.
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
-Your final message is posted to Slack — keep it readable, lead with the outcome and the PR link.`;
+Your final message is posted to Slack — keep it readable, lead with the outcome.`;
 
 // Resident-path variant (features/resident-repos.md, U7): the run landed in a
 // resident repo environment — a per-thread worktree that is already cloned,
@@ -105,16 +117,18 @@ Workflow for shipping a change:
 2. Implement the change. Match the surrounding code's style and conventions.
 3. Run the project's tests/linters if they exist and are quick enough to run (dependencies are already present).
 4. Commit with a clear message and push the branch with \`git push -u origin <branch>\`.
-5. Before opening the PR, call the \`diff_digest\` tool to get a distilled summary of your change — per-file churn, totals, and risky-file flags — and include that digest in the PR body. It is a distilled summary, not the raw diff: it gives the reviewer the shape of the change at a glance.
-6. Open a PR via the GitHub REST API: take the token from \`.git/github-credentials\` and \`curl -s -X POST https://api.github.com/repos/<owner>/<repo>/pulls -H "Authorization: Bearer <token>" -d '{"title":...,"head":...,"base":...,"body":...}'\`. If credentials are unavailable or the call is refused, report the branch's compare URL instead (https://github.com/<owner>/<repo>/compare/<branch>) and state plainly that PR creation was unavailable from this environment. Write the PR body from the PR description template below — every time — and fold the diff digest from step 5 into it.
-7. Report back with the PR URL (or the pushed branch + compare URL) and a short summary of what you did, including anything you skipped or couldn't verify.
+5. Call the \`diff_digest\` tool to get a distilled summary of your change — per-file churn, totals, and risky-file flags. It is a distilled summary, not the raw diff: use it to shape the description you submit next — which files the Tour must walk, what belongs in risks.
+6. Call the submit_pr_description tool with the typed description object (content contract below) — every time. Switchboard renders the PR body from your object at the pushed head and opens (or updates) the pull request itself: do NOT open a PR yourself, with any API call.
+7. Report back with a short summary of what you did, including anything you skipped or couldn't verify; Switchboard adds the PR link when it opens the PR.
+
+${NEVER_MERGE}
 
 ${PR_DESCRIPTION_TEMPLATE}
 
 Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Implement the fix", "Run the test suite"), never commands. Mark an item ✓ only after it has actually happened — never pre-mark reporting/posting steps. This is the only progress the user sees while you work.
 
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
-Your final message is posted to Slack — keep it readable, lead with the outcome and the PR (or branch) link.`;
+Your final message is posted to Slack — keep it readable, lead with the outcome.`;
 
 const REVIEW_SYSTEM = `You are Switchboard's code review agent, operating from a Slack request.
 

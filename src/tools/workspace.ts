@@ -1,4 +1,6 @@
+import { z } from "zod";
 import type { ToolDef, ToolResultContent } from "../providers/types.js";
+import { parsePrDescription, type PrDescription } from "../core/prDescription.js";
 import { parseVerdictInput, type ReviewVerdict } from "../core/reviewVerdict.js";
 import { clampBashTimeout, type ExecOptions, type Executor } from "../execution/executor.js";
 import { shellQuote } from "../execution/shellQuote.js";
@@ -42,6 +44,12 @@ export interface ToolContext {
    *  dispatcher turns it into the deterministic first line of the GitHub post
    *  (src/core/reviewVerdict.ts). Absent → the tool still accepts the call. */
   onVerdict?: (verdict: ReviewVerdict) => void;
+  /** Receives the coding agent's typed PR description from
+   *  `submit_pr_description` (features/pr-description.md). Injected by the
+   *  dispatcher for coding runs; the last valid call wins. The dispatcher
+   *  renders the GitHub body from it at the pushed head and opens/edits the
+   *  PR. Absent → the tool still accepts the call. */
+  onPrDescription?: (desc: PrDescription) => void;
 }
 
 export interface RunnableTool extends ToolDef {
@@ -53,7 +61,8 @@ export interface RunnableTool extends ToolDef {
    *  concurrently — on a resident/sandbox each is a network round trip, and
    *  they cannot observe each other. Anything that mutates the workspace
    *  (`bash`, `write_file`) or the run's own state (`update_status`,
-   *  `submit_verdict`) leaves this unset and runs strictly in order. */
+   *  `submit_verdict`, `submit_pr_description`) leaves this unset and runs
+   *  strictly in order. */
   sideEffectFree?: true;
 }
 
@@ -200,6 +209,105 @@ export const submitVerdictTool: RunnableTool = {
   },
 };
 
+// The coding agent's PR deliverable (features/pr-description.md): a typed
+// PrDescription instead of hand-written markdown. The dispatcher renders the
+// GitHub body from the submitted object at the pushed head and opens/edits
+// the PR itself, so the loop's ground truth comes from code, never from prose.
+// Validation mirrors submit_verdict: a schema violation comes back as a
+// readable string error naming the failing path — never a throw — so the
+// model can fix the object and call again within its own budget.
+export const submitPrDescriptionTool: RunnableTool = {
+  name: "submit_pr_description",
+  description:
+    "Submit the PR description as a typed object. REQUIRED after pushing your branch: Switchboard renders the " +
+    "GitHub PR body from this object at the pushed head and opens (or updates) the pull request itself — never " +
+    "open a PR yourself. Fields map 1:1 to the rendered sections; `title` becomes the PR's title; tour anchors " +
+    "are (path, from, to) line ranges at your pushed head. Call it after your last push; if you push again " +
+    "afterwards, call it again — the last valid call wins. An invalid object returns an error naming the field " +
+    "to fix; correct it and resubmit.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "The PR title — one line naming the change" },
+      tldr: { type: "string", description: "Two sentences for a naive reader with zero context: what and why it matters" },
+      whatWhy: { type: "string", description: "The change and its motivation, with the triggering issue/request hyperlinked" },
+      tour: {
+        type: "array",
+        description: "Reader-first walkthrough steps in reading order (load the pr-tour skill first)",
+        items: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "What this change is" },
+            description: { type: "string", description: "The explanation the reader needs before seeing the code" },
+            lookFor: { type: "string", description: "Optional pointer at the detail worth checking" },
+            anchor: {
+              type: "object",
+              description: "The hunk: repo-relative path + inclusive 1-based line range at the pushed head",
+              properties: {
+                path: { type: "string" },
+                from: { type: "integer" },
+                to: { type: "integer" },
+              },
+              required: ["path", "from", "to"],
+            },
+          },
+          required: ["title", "description", "anchor"],
+        },
+      },
+      remaining: {
+        type: "array",
+        description: "Every touched file the Tour steps did not cover, one note each ([] when the Tour covers everything)",
+        items: {
+          type: "object",
+          properties: { path: { type: "string" }, note: { type: "string" } },
+          required: ["path", "note"],
+        },
+      },
+      decisions: {
+        type: "array",
+        description: "Non-obvious choices: alternatives considered and rejected, trade-offs",
+        items: {
+          type: "object",
+          properties: { title: { type: "string" }, rationale: { type: "string" } },
+          required: ["title", "rationale"],
+        },
+      },
+      risks: { type: "string", description: 'What could break and the blast radius (or "none" — and why)' },
+      validation: {
+        type: "object",
+        description: "What you actually ran and the real results — never fabricated",
+        properties: {
+          summary: { type: "string", description: "Optional one-line overall result" },
+          criteria: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { criterion: { type: "string" }, proof: { type: "string" } },
+              required: ["criterion", "proof"],
+            },
+          },
+        },
+        required: ["criteria"],
+      },
+    },
+    required: ["title", "tldr", "whatWhy", "tour", "remaining", "decisions", "risks", "validation"],
+  },
+  async run(input, ctx) {
+    let desc: PrDescription;
+    try {
+      desc = parsePrDescription(input);
+    } catch (err) {
+      const detail =
+        err instanceof z.ZodError
+          ? err.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")
+          : String(err);
+      return `error: invalid PR description — ${detail}`;
+    }
+    ctx.onPrDescription?.(desc);
+    return `PR description recorded (title: ${desc.title}). Switchboard renders the body at your pushed head and opens or updates the PR; a later call replaces this one.`;
+  },
+};
+
 export const updateStatusTool: RunnableTool = {
   name: "update_status",
   description:
@@ -228,8 +336,10 @@ export const updateStatusTool: RunnableTool = {
 // #100: the read-only skill tools (list_skills/use_skill) join both the full
 // (coding) and readonly (review) toolsets — loading a methodology into context
 // never mutates the workspace, so it is safe for the read-only review agent.
+// submit_pr_description is full-only: only the coding agent ships PRs, the way
+// submit_verdict is readonly-only because only the review agent judges them.
 export const TOOLSETS: Record<string, RunnableTool[]> = {
-  full: [bashTool, readFileTool, writeFileTool, updateStatusTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
+  full: [bashTool, readFileTool, writeFileTool, updateStatusTool, submitPrDescriptionTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
   readonly: [bashTool, readFileTool, updateStatusTool, submitVerdictTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
   web: [webFetchTool, webSearchTool, updateStatusTool],
   none: [],

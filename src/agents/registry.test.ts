@@ -74,16 +74,17 @@ describe("resident prompt variants", () => {
     }
   });
 
-  it("coding variant is honest about PR creation: push + compare URL fallback", () => {
+  it("coding variant pushes the branch and submits the description; PR creation is not its job", () => {
     const sys = AGENTS.coding.residentSystem!;
     expect(sys).toContain("git push");
-    expect(sys).toMatch(/compare/i); // compare-URL fallback when credentials aren't provisioned
-    expect(sys).toMatch(/api\.github\.com|REST/i); // PR creation via REST, not gh
+    expect(sys).toContain("submit_pr_description");
+    // the bot reports PR state (or its absence) now — the agent no longer
+    // constructs compare-URL fallbacks for failed PR creation
+    expect(sys).not.toMatch(/compare URL/i);
   });
 
-  it("fallback prompts are unchanged: coding still clones and uses gh pr create", () => {
+  it("fallback prompt still clones; review still reads the diff with gh", () => {
     expect(AGENTS.coding.system).toContain("clone the relevant repository");
-    expect(AGENTS.coding.system).toContain("gh pr create");
     expect(AGENTS.review.system).toContain("gh pr diff");
   });
 });
@@ -93,12 +94,12 @@ describe("resident prompt variants", () => {
 // diff digest in the PR body; review actually RUNS the project's tests/build in
 // the warm worktree and reports what it ran + pass/fail.
 describe("validated-review prompt behavior (resident variants)", () => {
-  it("coding resident: calls diff_digest and puts the distilled digest in the PR body (R14)", () => {
+  it("coding resident: calls diff_digest to inform the submitted description (R14)", () => {
     const sys = AGENTS.coding.residentSystem!;
     expect(sys).toContain("diff_digest");
     expect(sys).toMatch(/distilled/i);
-    expect(sys).toMatch(/PR body/i);
-    // the digest, not the raw diff, goes in the body
+    // the digest shapes the description object's content, not a pasted body
+    expect(sys).toMatch(/description/i);
     expect(sys).toMatch(/not the raw diff/i);
   });
 
@@ -147,15 +148,62 @@ describe("review post-step: prompts defer posting to the system (issue #69)", ()
   });
 });
 
-// Feature: features/agent-coding.md — every PR the coding agent opens carries a
-// rich, templated description BY DEFAULT (not on request). Both prompts must
-// contain the template's sections plus the rules that keep it honest.
-describe("coding prompts: templated PR description by default", () => {
-  const SECTIONS = ["**TL;DR**", "**What & why**", "**Tour**", "**Decisions**", "**Risks & implications**", "**Validation**"];
+// Feature: features/pr-description.md — the coding agent's PR deliverable is a
+// typed PrDescription submitted through submit_pr_description after pushing;
+// the bot process renders the body at the pushed head and opens/edits the PR.
+// The prompts must instruct push-then-submit and never open-the-PR-yourself.
+describe("coding prompts: push then submit_pr_description (opening the PR is the system's job)", () => {
+  it("both coding prompts instruct pushing the branch, then submitting the typed description", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).toMatch(/push the branch/i);
+      expect(sys).toContain("submit_pr_description");
+      expect(sys).toMatch(/Switchboard renders the .*body/i);
+      expect(sys).toMatch(/opens \(or updates\) the pull request/i);
+    }
+  });
 
-  it("both coding prompts include every PR-description section", () => {
+  it("neither coding prompt tells the agent to open the PR itself", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).not.toContain("gh pr create");
+      expect(sys).toMatch(/do NOT open a (PR|pull request) yourself/i);
+    }
+  });
+
+  it("the resident prompt no longer carries the curl POST /pulls instruction", () => {
+    const sys = AGENTS.coding.residentSystem!;
+    expect(sys).not.toMatch(/POST\s+\S*\/pulls/i);
+    expect(sys).not.toMatch(/curl[^\n]*\/pulls/i);
+  });
+
+  it("both coding prompts forbid merging and approving (mirrors the review prompts' wording)", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).toMatch(/NEVER merge a pull request/i);
+      expect(sys).toMatch(/NEVER approve one/i);
+      expect(sys).toMatch(/never an approval or a merge/i);
+    }
+  });
+});
+
+// Feature: features/agent-coding.md — every PR carries a rich description BY
+// DEFAULT (not on request). The template survives as the content contract for
+// the submitted object's fields — sections map 1:1 — plus the rules that keep
+// it honest; nothing in it tells the agent to write body markdown anymore.
+describe("coding prompts: the PR-description content contract (submitted object)", () => {
+  const SECTIONS = ["**TL;DR**", "**What & why**", "**Tour**", "**Decisions**", "**Risks & implications**", "**Validation**"];
+  const FIELDS = ["**title**", "`tldr`", "`whatWhy`", "`tour`", "`remaining`", "`decisions`", "`risks`", "`validation`"];
+
+  it("both coding prompts map every rendered section to its object field", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
       for (const section of SECTIONS) expect(sys, section).toContain(section);
+      for (const field of FIELDS) expect(sys, field).toContain(field);
+    }
+  });
+
+  it("no markdown-body authoring instructions remain (the renderer owns headings and layout)", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).not.toMatch(/## <Section>/);
+      expect(sys).not.toMatch(/## TL;DR/);
+      expect(sys).not.toMatch(/write the (PR )?body from/i);
     }
   });
 
@@ -171,31 +219,20 @@ describe("coding prompts: templated PR description by default", () => {
   });
 
   // The Tour's craft moved into the first-party `pr-tour` skill (pinned by
-  // src/skills/prTourSkill.test.ts); the template keeps the section and makes
+  // src/skills/prTourSkill.test.ts); the contract keeps the section and makes
   // loading the skill mandatory, so every coding run's Tour is a visible
   // skill_use event and the rules live in one place.
-  it("the Tour section requires loading the pr-tour skill before writing the body", () => {
+  it("the Tour field requires loading the pr-tour skill before authoring its steps", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
       expect(sys).toMatch(/\*\*Tour\*\*/);
       expect(sys).toMatch(/use_skill/);
       expect(sys).toMatch(/`pr-tour` skill/);
-      expect(sys).toMatch(/BEFORE writing the body/i);
-      // the craft is in the skill, not duplicated in the template
+      expect(sys).toMatch(/BEFORE authoring the Tour/i);
+      // the craft is in the skill, not duplicated in the contract
       expect(sys).not.toMatch(/blob\/<head sha>\/<path>#L<from>-L<to>/);
       expect(sys).not.toMatch(/### N\. <what this change is>/);
     }
   });
-
-  // Reader-first ordering: a heading naming the change, the explanation, then
-  // the code — never code first (the reader must know what they are looking at
-  // before the hunk appears). Markdown structure, not a wall of prose.
-  it("every section is a `##` heading, the TL;DR included (no headingless opening paragraph)", () => {
-    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
-      expect(sys).toMatch(/## <Section>/);
-      expect(sys).toMatch(/## TL;DR/);
-    }
-  });
-
 
   it("both prompts state the rules that keep the description honest", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {

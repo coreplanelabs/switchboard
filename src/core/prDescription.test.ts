@@ -11,6 +11,7 @@ const CTX = { repo: "coreplanelabs/switchboard", headSha: "685c471f31feaadd725fb
 
 function desc(over: Partial<PrDescription> = {}): PrDescription {
   return {
+    title: "A test PR title",
     tldr: "Two sentences.",
     whatWhy: "Because.",
     tour: [{ title: "The thing", description: "What it does.", anchor: { path: "src/a.ts", from: 3, to: 9 } }],
@@ -26,6 +27,24 @@ describe("parsePrDescription (the schema)", () => {
   it("accepts a complete description and normalizes whitespace on lines", () => {
     const d = parsePrDescription({ ...desc(), tldr: "  Two sentences.  " });
     expect(d.tldr).toBe("Two sentences.");
+  });
+
+  it("requires a title — the PR title's single source; missing or blank is rejected naming the field", () => {
+    const { title: _t, ...noTitle } = desc();
+    expect(() => parsePrDescription(noTitle)).toThrow(/title/);
+    expect(() => parsePrDescription({ ...desc(), title: "   " })).toThrow(/title/);
+    expect(parsePrDescription({ ...desc(), title: "  Fix the gate  " }).title).toBe("Fix the gate");
+  });
+
+  it("rejects an embedded newline on a `line` field — a multi-line PR title would split the `### N.` headings and go verbatim into the PR's own title", () => {
+    const badTitle = () => parsePrDescription({ ...desc(), title: "Fix the gate\nand also the fence" });
+    expect(badTitle).toThrow(/single line/);
+    expect(badTitle).toThrow(/title/); // the zod error names the offending path
+    expect(() => parsePrDescription({ ...desc(), title: "Fix\r\nthe gate" })).toThrow(/single line/);
+    const badStep = () =>
+      parsePrDescription({ ...desc(), tour: [{ title: "The\nthing", description: "d", anchor: { path: "src/a.ts", from: 1, to: 2 } }] });
+    expect(badStep).toThrow(/single line/);
+    expect(badStep).toThrow(/tour/); // …for tour-step titles too
   });
 
   it("rejects an empty tour, missing sections, and empty strings", () => {
@@ -56,6 +75,11 @@ describe("renderPrDescriptionMarkdown", () => {
     expect(headings).toEqual(["## TL;DR", "## What & why", "## Tour", "## Decisions", "## Risks & implications", "## Validation"]);
     expect(md.startsWith("## TL;DR\n\nTwo sentences.\n")).toBe(true);
     expect(md.trimEnd().endsWith(GENERATED_FOOTER)).toBe(true);
+  });
+
+  it("the title is metadata for the PR's own title field — never rendered into the body", () => {
+    const md = renderPrDescriptionMarkdown(desc({ title: "UNIQUE-TITLE-NEVER-IN-BODY" }), CTX);
+    expect(md).not.toContain("UNIQUE-TITLE-NEVER-IN-BODY");
   });
 
   it("a Tour step is `### N. title` → description → optional Look for → permalink LAST, numbered from 1", () => {
