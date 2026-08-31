@@ -154,13 +154,13 @@ describe("ResidentExecutor.exec", () => {
     // that would falsely count toward the fail-fast abort on a HEALTHY resident.
     const { fn } = stubFetch({
       status: 400,
-      body: { error: "command must be a non-empty string of at most 8000 chars" },
+      body: { error: "command must be a non-empty string of at most 64000 chars" },
     });
     const ex = new ResidentExecutor(OPTS);
     const err = await ex.exec("x").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(ExecInfraError);
-    expect((err as Error).message).toMatch(/at most 8000 chars/);
+    expect((err as Error).message).toMatch(/at most 64000 chars/);
     expect(fn).toHaveBeenCalledTimes(1); // never retried
   });
 
@@ -191,12 +191,12 @@ describe("ResidentExecutor.exec", () => {
 describe("ResidentExecutor infra classification through ExecHealthTracker (#92)", () => {
   it("two consecutive command-too-long rejections don't increment the infra counter (healthy resident)", async () => {
     stubFetch(
-      { status: 400, body: { error: "command must be a non-empty string of at most 8000 chars" } },
-      { status: 400, body: { error: "command must be a non-empty string of at most 8000 chars" } },
+      { status: 400, body: { error: "command must be a non-empty string of at most 64000 chars" } },
+      { status: 400, body: { error: "command must be a non-empty string of at most 64000 chars" } },
     );
     const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
-    await expect(tracker.exec("x".repeat(9000))).rejects.toThrow(/8000 chars/);
-    await expect(tracker.exec("y".repeat(9000))).rejects.toThrow(/8000 chars/);
+    await expect(tracker.exec("x".repeat(65000))).rejects.toThrow(/64000 chars/);
+    await expect(tracker.exec("y".repeat(65000))).rejects.toThrow(/64000 chars/);
     // Two client rejections crossed the old MAX_CONSECUTIVE_INFRA_FAILURES (2)
     // and falsely aborted; a healthy resident must stay at zero.
     expect(tracker.consecutiveInfraFailures).toBe(0);
