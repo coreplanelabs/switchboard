@@ -5,29 +5,26 @@ import { getAgent } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
 import { makeWebCapability } from "../tools/web.js";
-import { makeExecutor, residentOnboardedProbe } from "../execution/factory.js";
-import { shellQuote } from "../execution/shellQuote.js";
+import { residentOnboardedProbe } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { currentPrHeadSha, prCommitsSince, resolveRepoContext, type RepoContext } from "./repoContext.js";
-import {
-  carriedFooter,
-  classifyHeadMove,
-  headCarriedNote,
-  headMovedNote,
-  headRereviewNote,
-  rereviewFollowUp,
-  type HeadMove,
-  type PrCommitList,
-} from "./headMoved.js";
-import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
+import type { PrCommitList } from "./headMoved.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import { openPullRequest, type OpenedPullRequest, type PullRequestTarget } from "../execution/githubPulls.js";
-import { encodeGithubPathSegments, renderPrDescriptionMarkdown, type PrDescription } from "./prDescription.js";
-import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
-import { checkReviewedHead, normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
-import { reviewTargetBlock } from "./reviewTarget.js";
+import type { PrDescription } from "./prDescription.js";
+import type { ReviewVerdict } from "./reviewVerdict.js";
+import {
+  attachRoundWorkspace,
+  checkPrHeadPreflight,
+  guardAttachedHead,
+  makeSystemComposer,
+  runReviewPostStep,
+  settleReviewedHead,
+  type RoundWorkspace,
+} from "./reviewRound.js";
+import { observeCodingWorkspace, runCodingPrPostStep } from "./codingPrPostStep.js";
 import { recognizeOperation } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
@@ -433,45 +430,32 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // and repo/ref carry resident-repo inference. A resident fallback comes
     // back with a named note (KTD10) that rides on every status frame below.
     // Unknown-head check (features/agent-review.md item 11): a review whose PR
-    // head could not be resolved — the message named a PR but the GitHub fetch
-    // failed, or the thread's inherited PR was unreachable — is a guaranteed
-    // refusal downstream: the resident cannot be told which commit to attach,
-    // the model finds a stale worktree, and the reviewed-head guard (item 8)
-    // refuses the post. Live 2026-08-30 (PR #300): 75 s and a model turn spent
-    // to produce a `request_changes` "cannot review" verdict that was then
-    // Slack-only. Not started instead — before any attach, one named reply.
-    // An explicit "slack only" opt-out wants no post anyway, so an unpinned
-    // review is exactly what was asked for — no refusal (`reviewPostIntended`
-    // is the same predicate the post-step decides by).
-    if (repoCtx.repo && reviewPostIntended({ agentName: resolved.agentName, requestText: directives.text })) {
-      const unknownHead =
-        repoCtx.pr !== undefined && !repoCtx.headSha
-          ? repoCtx.pr
-          : repoCtx.prUnpostable?.reason === "unreachable"
-            ? repoCtx.prUnpostable.number
-            : undefined;
-      if (unknownHead !== undefined) {
-        const where = `${repoCtx.repo}#${unknownHead}`;
-        console.log(`[review] ${msg.threadKey} not started: PR head unknown (${where})`);
-        await card.done({ title: `🔀 ${label} · not started (PR head unknown)` });
-        await io.reply(
-          `🔀 Review of ${where} not started: GitHub did not give me a usable head commit for the PR (the lookup failed, or answered without a well-formed SHA), ` +
-            `so I cannot pin a review to it. Re-send the request in a moment; if it keeps failing, look at the PR on GitHub and at the bot's GitHub App credentials.`,
-        );
-        return;
-      }
+    // head could not be resolved is a guaranteed refusal downstream — not
+    // started instead, before any attach, one named reply (the decision and
+    // the reply live in `checkPrHeadPreflight`; live incident 2026-08-30,
+    // PR #300: 75 s and a model turn spent on a Slack-only "cannot review").
+    const preflight = checkPrHeadPreflight({ agent, requestText: directives.text, repoCtx });
+    if (!preflight.ok) {
+      console.log(`[review] ${msg.threadKey} not started: PR head unknown (${preflight.where})`);
+      await card.done({ title: `🔀 ${label} · not started (PR head unknown)` });
+      await io.reply(preflight.reply);
+      return;
     }
 
-    let selection: Awaited<ReturnType<typeof makeExecutor>>;
+    // The workspace attach is paired with its release on the round's agent
+    // (reviewRound.ts, KTD4): readonly toolset → readonly worktree +
+    // release("always"); writable → release("if-clean").
+    let round: RoundWorkspace;
     try {
-      selection = await makeExecutor(
-        {
+      round = await attachRoundWorkspace({
+        factory: {
           execution: deps.config.config.execution,
           workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
           dataDir: deps.dataDir ?? "./data",
         },
-        { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref, headSha: repoCtx.headSha },
-      );
+        round: { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref, headSha: repoCtx.headSha },
+        logKey: msg.threadKey,
+      });
     } catch (err) {
       // Ask-once (KTD6): the resident has no ref binding for this thread, the
       // message named no branch, AND the resident did not name a default to
@@ -491,77 +475,44 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       }
       throw err;
     }
-    const { executor, note, resident, binding } = selection;
+    const { executor, note, resident, binding } = round.selection;
 
     // Attach-head check (features/agent-review.md item 10, #282): for a PR
     // review on the resident path, the sha the resident ATTACHED the worktree
-    // at is compared with the PR head resolved above — before any model turn.
-    // A well-formed, different sha means the branch moved between resolution
-    // and attach (a push or force-push racing the request): the reviewed-head
-    // guard (item 8) would refuse the post anyway — UNLESS the attached sha is
-    // the PR's head NOW (item 12: the resident's attach fetched the mirror to
-    // the ref's tip, which is exactly where a push that raced the request
-    // landed). One GET decides: attached = current → the run reviews the
-    // current head (RepoContext adopts it, the block says it was verified);
-    // otherwise not started — one named reply, the pool user released, no
-    // provider call. Equal shas are told to the model as a verified fact, so it
-    // has no reason to go and look. A malformed/absent attach sha proves
-    // nothing either way: the run proceeds unverified, exactly as before.
+    // at is compared with the PR head resolved above — before any model turn
+    // (the comparison, the current-head second lookup and the refusal reply
+    // live in `guardAttachedHead`). "adopted" means a push raced the request
+    // and the worktree sits at the PR's head NOW: RepoContext adopts it and
+    // the block says it was verified. "refused" means the branch moved while
+    // the worktree was being attached: not started — one named reply, the
+    // pool user released, no provider call.
     let verifiedAtAttach = false;
-    if (resolved.agentName === "review" && resident && repoCtx.pr !== undefined && repoCtx.repo) {
-      const expected = normalizeHead(repoCtx.headSha);
-      const attached = normalizeHead(binding?.sha);
-      if (expected && attached && sameCommit(expected, attached)) {
+    if (agent.name === "review" && resident && repoCtx.pr !== undefined && repoCtx.repo) {
+      const guard = await guardAttachedHead({
+        pr: { repo: repoCtx.repo, number: repoCtx.pr },
+        expectedHeadSha: repoCtx.headSha,
+        attached: { sha: binding?.sha, ref: binding?.ref },
+        fallbackRef: repoCtx.ref,
+        fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+        logKey: msg.threadKey,
+      });
+      if (guard.outcome === "verified") {
         verifiedAtAttach = true;
-      } else if (expected && attached) {
-        const where = `${repoCtx.repo}#${repoCtx.pr}`;
-        const fetchHead = deps.fetchPrHead ?? currentPrHeadSha;
-        const current = normalizeHead(await fetchHead({ repo: repoCtx.repo, number: repoCtx.pr }).catch(() => undefined));
-        if (current && sameCommit(attached, current)) {
-          console.log(
-            `[review] ${msg.threadKey} PR head moved since resolution: ${expected.slice(0, 7)} → ${current.slice(0, 7)}; the worktree is attached at the current head — reviewing it (${where})`,
-          );
-          repoCtx = { ...repoCtx, headSha: current };
-          verifiedAtAttach = true;
-        } else {
-          console.log(`[review] ${msg.threadKey} not started: worktree attached at ${attached.slice(0, 7)}, PR head ${expected.slice(0, 7)} (${where})`);
-          if (executor.release) await executor.release("always").catch(() => {});
-          await card.done({ title: `🔀 ${label} · not started (branch moved)` });
-          await io.reply(
-            `🔀 Review of ${where} not started: the resident attached \`${binding?.ref ?? repoCtx.ref ?? "the branch"}\` at \`${attached.slice(0, 7)}\`, ` +
-              `but the PR head is \`${expected.slice(0, 7)}\` — the branch moved while the worktree was being attached (a push or force-push). Re-send the request to review the new head.`,
-          );
-          return;
-        }
+      } else if (guard.outcome === "adopted") {
+        repoCtx = { ...repoCtx, headSha: guard.headSha };
+        verifiedAtAttach = true;
+      } else if (guard.outcome === "refused") {
+        if (executor.release) await executor.release("always").catch(() => {});
+        await card.done({ title: `🔀 ${label} · not started (branch moved)` });
+        await io.reply(guard.reply);
+        return;
       }
     }
 
-    // Effective system prompt, composed AFTER executor resolution (via
-    // RunOptions.system, U1): a resident-path run swaps in the agent's
-    // resident variant — the workspace is a ready worktree, no cloning, no
-    // installs — with the resolved repo named, and the worktree path when the
-    // attach answered it (#282: a model that knows where it is has no reason
-    // to `cd` off looking for the repository). Every other path keeps the
-    // agent's own prompt. Selection reports the resident backend via a
-    // discriminant (not an executor `instanceof`), keeping the executor
-    // implementation out of the channel-agnostic core. The shared AgentDef is
-    // never mutated (concurrent dispatches share it).
-    const residentSystem =
-      resident && agent.residentSystem
-        ? `${agent.residentSystem}\n\nTarget repository: ${repoCtx.repo}. ` +
-          (binding?.workspace
-            ? `Your shell starts in the worktree \`${binding.workspace}\` on every bash call; it is already on this thread's bound branch (confirm with \`git branch --show-current\` from there — no \`cd\`).`
-            : "The worktree is already on this thread's bound branch (confirm with `git branch --show-current`).")
-        : undefined;
-    // REVIEW TARGET (features/agent-review.md item 9): a review run whose repo
-    // resolution found a PR is TOLD what it is reviewing — repo, PR, head
-    // branch/commit, base — from the same RepoContext the post-step guard
-    // (item 8) later checks against. Both paths; the block is path-aware
-    // (ready worktree vs. clone + `gh pr checkout`). Nothing to tell for a
-    // coding run or a PR-less review, so those prompts stay byte-identical.
-    // The head is a parameter: a re-review at a moved head (item 12) recomposes
-    // the prompt with the new commit instead of contradicting the old one.
-    const isPrReview = resolved.agentName === "review" && repoCtx.repo !== undefined && repoCtx.pr !== undefined;
+    // Whether this run reviews a resolved PR (its system prompt carries the
+    // REVIEW TARGET block, item 9) — the same predicate the post-step and the
+    // head-settle key on.
+    const isPrReview = agent.name === "review" && repoCtx.repo !== undefined && repoCtx.pr !== undefined;
     // Coding PR post-step gate (features/pr-description.md item 5): only a
     // writable-toolset run can have pushed a branch — readonly (review) and
     // none/web toolsets never trigger the post-step. The repo is deliberately
@@ -569,34 +520,13 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // the PR from the workspace's observed origin remote (an agent-discovered
     // repo; the App token bounds what is writable either way).
     const isCodingPrRun = agent.toolset === "full";
-    const targetBlock = (head: { sha: string | undefined; verified: boolean }): string | undefined =>
-      isPrReview && repoCtx.repo && repoCtx.pr !== undefined
-        ? reviewTargetBlock({
-            repo: repoCtx.repo,
-            pr: repoCtx.pr,
-            ref: repoCtx.ref,
-            headSha: head.sha,
-            baseRef: repoCtx.baseRef,
-            resident: resident === true,
-            ...(binding?.workspace ? { workspace: binding.workspace } : {}),
-            ...(head.verified ? { verifiedAtAttach: true } : {}),
-          })
-        : undefined;
-
-    // Progressive disclosure (#100): append the calling agent's scoped skill
-    // name+description list AFTER the agent's own instructions (it is guidance
-    // about the agent's tools, not advisory context like the memory block).
-    // Bodies load on demand via use_skill — never dumped here. No store, or an
-    // agent with no scoped skills (general/research), leaves the prompt
-    // untouched: `skillsBlock` is undefined and `withSkills` stays `baseSystem`,
-    // preserving the byte-identical path (and the runner's `agent.system`
-    // fallback when `system` is undefined).
+    // Progressive disclosure (#100): the calling agent's scoped skill
+    // name+description list trails the agent's own instructions (it is
+    // guidance about the agent's tools, not advisory context like the memory
+    // block). Bodies load on demand via use_skill — never dumped here. No
+    // store, or an agent with no scoped skills (general/research) → undefined
+    // and the prompt is untouched.
     const skillsBlock = deps.skills ? skillGuidanceBlock(deps.skills, agent.name) : undefined;
-    const agentSystem = (head: { sha: string | undefined; verified: boolean }): string | undefined => {
-      const target = targetBlock(head);
-      const baseSystem = target ? `${residentSystem ?? agent.system}\n\n${target}` : residentSystem;
-      return skillsBlock ? `${baseSystem ?? agent.system}\n\n${skillsBlock}` : baseSystem;
-    };
 
     // Config awareness (routing-and-config behavior 8): tell the model the
     // RESOLVED agent/model/scope of this very run and how users tune it, so no
@@ -623,22 +553,37 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // Absent (the default) → no block, prompt unchanged.
     const instructionsBlock = customInstructionsBlock(scopes);
 
-    // Effective system prompt order: memory (advisory context, leads when
-    // present) → config block → custom instructions → the agent's own
-    // instructions (+ skills). The memory block is absent with memory off
-    // (default), keeping the memory-off request byte-identical to a
-    // NullMemoryStore run. Retrieval was started before the repo resolution and
-    // executor selection above; by now it has usually landed.
+    // Effective system prompt, composed AFTER executor resolution (via
+    // RunOptions.system, U1) by the extracted composer (reviewRound.ts): a
+    // resident-path run swaps in the agent's resident variant with the
+    // resolved repo named and the worktree path when the attach answered it
+    // (#282); a PR review gets the REVIEW TARGET block (item 9) recomposed
+    // per pinned head. Order: memory (advisory context, leads when present) →
+    // config block → custom instructions → the agent's effective instructions
+    // (+ skills). The memory block is absent with memory off (default),
+    // keeping the memory-off request byte-identical to a NullMemoryStore run.
+    // Retrieval was started before the repo resolution and executor selection
+    // above; by now it has usually landed. The shared AgentDef is never
+    // mutated (concurrent dispatches share it).
     const memoryBlock = await memoryBlockP;
-    const composeSystem = (head: { sha: string | undefined; verified: boolean }): string =>
-      [memoryBlock, configBlock, instructionsBlock, agentSystem(head) ?? agent.system]
-        .filter((part): part is string => Boolean(part))
-        .join("\n\n");
+    const composeSystem = makeSystemComposer({
+      agent,
+      resident: resident === true,
+      repo: repoCtx.repo,
+      workspace: binding?.workspace,
+      prTarget:
+        isPrReview && repoCtx.repo && repoCtx.pr !== undefined
+          ? { repo: repoCtx.repo, pr: repoCtx.pr, ref: repoCtx.ref, baseRef: repoCtx.baseRef }
+          : undefined,
+      blocks: { memory: memoryBlock, config: configBlock, instructions: instructionsBlock, skills: skillsBlock },
+    });
     // The PR head this run reviews — the resolved head, or the one adopted at
-    // attach; a re-review at a moved head (item 12) advances it. The post-step
-    // pins to it and the reviewed-head guard checks against it.
+    // attach; the head settle (item 12) advances it after the model turn. The
+    // post-step pins to it and the reviewed-head guard checks against it.
     let reviewHead = repoCtx.headSha;
-    let system = composeSystem({ sha: reviewHead, verified: verifiedAtAttach });
+    // The first turn's system, pinned to that head; a re-review recomposes its
+    // own inside settleReviewedHead.
+    const system = composeSystem({ sha: reviewHead, verified: verifiedAtAttach });
 
     if (note) label = `${label} · ${note}`;
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
@@ -890,25 +835,22 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     let runFailed = false; // the runner threw → terminal status `failed`
     // Give the workspace back now rather than at the inactivity sweep: a
     // resident's pool user is a scarce slot (features/resident-repos.md item
-    // 16a). Read-only agents hold nothing worth keeping; a coding run keeps
-    // its worktree only while it has uncommitted/unpushed work — unless an
-    // operator HARD-stopped it (#101), which means "tear it down now": the
-    // abandoned command may still be running in there, and the whole point
-    // of a hard stop is to free the resources. Best-effort — a failed
-    // release is a log line, never a failed run. Called AFTER the answer has
-    // been sent (or the failure card closed): the `/detach` round trip is
-    // bounded at 10 s on a sick resident, and nothing about the reply depends
-    // on it, so it must never sit between "answer ready" and the thread.
-    const releaseWorkspace = async () => {
-      if (!executor.release) return;
-      const mode = agent.toolset === "readonly" || run.control.requested === "hard" ? "always" : "if-clean";
-      try {
-        const r = await executor.release(mode);
-        console.log(`[release] ${msg.threadKey} ${r.released ? "released" : "kept"}${r.reason ? ` (${r.reason})` : ""}`);
-      } catch (err) {
-        console.warn(`[release] ${msg.threadKey} failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    };
+    // 16a). The release mode is paired to the round's agent by the attach
+    // helper (reviewRound.ts): read-only agents hold nothing worth keeping; a
+    // coding run keeps its worktree only while it has uncommitted/unpushed
+    // work — unless an operator HARD-stopped it (#101), which means "tear it
+    // down now": the abandoned command may still be running in there, and the
+    // whole point of a hard stop is to free the resources. Best-effort — a
+    // failed release is a log line, never a failed run. Called AFTER the
+    // answer has been sent (or the failure card closed): the `/detach` round
+    // trip is bounded at 10 s on a sick resident, and nothing about the reply
+    // depends on it, so it must never sit between "answer ready" and the
+    // thread. Hard-stop is read at CALL time — it may land during the run.
+    const releaseWorkspace = () => round.release({ hardStopped: run.control.requested === "hard" });
+    // One tool context for the whole run: the first turn and any re-review
+    // turn (settleReviewedHead) share it, so submit_pr_description and the
+    // progress checklist keep flowing to the same hooks.
+    const toolContext = { executor, reportProgress, web: webCapability(), skills: deps.skills, agentName: agent.name, onVerdict, onPrDescription };
     try {
       answer = await runAgent({
         provider,
@@ -917,103 +859,47 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         messages,
         system,
         effort: resolved.effort,
-        toolContext: { executor, reportProgress, web: webCapability(), skills: deps.skills, agentName: agent.name, onVerdict, onPrDescription },
+        toolContext,
         onProgress,
         onEvent,
         control: run.control, // operator stop from /runs (#101)
       });
-      // Reviewed-head probe (features/agent-review.md item 8): for a PR review,
-      // read the workspace HEAD NOW — after the model is done, BEFORE the
-      // finally below releases the workspace. Post-release a resident would
-      // re-attach a fresh tree at the ref's CURRENT tip, which is not evidence
-      // of what was reviewed. Best-effort: a failed probe leaves it undefined
-      // and the guard falls back to the verdict's reported head.
-      const probeHead = async () => parseRevParseOutput(await executor.exec("git rev-parse HEAD").catch(() => ""));
+      // Reviewed-head settle (features/agent-review.md items 8 + 12,
+      // settleReviewedHead in reviewRound.ts): for a PR review, read the
+      // workspace HEAD NOW — after the model is done, BEFORE the finally
+      // below releases the workspace — and reconcile a PR head that moved
+      // during the run: adopt the current head when the run reviewed it,
+      // carry the review across a rebase of the same commits, or void the
+      // verdict and re-review ONCE at the new head (worktree moved, prompt
+      // recomposed, one more model turn). A hard stop observes nothing and
+      // settles nothing.
       if (isPrReview && repoCtx.repo && repoCtx.pr !== undefined && run.control.requested !== "hard") {
-        observedHead = await probeHead();
-        // Head moved during the run (item 12): the PR head is fetched NOW, before
-        // anything is posted, and compared with the head the agent reviewed
-        // (observed, else reported — the guard's own authority order).
-        //   reviewed = current ≠ resolved → the agent reviewed the PR's current
-        //     head (a mid-run re-attach landed on a newer tip): adopt it.
-        //   reviewed = resolved ≠ current → the PR moved under the review:
-        //     classify the move from GitHub's compare lists. A rebase of the same
-        //     commits carries the review to the new head (post pinned there, footer
-        //     + note); a substantive move makes THIS run re-review at the new
-        //     head — worktree moved, prompt recomposed, one more model turn —
-        //     before posting. Unclassifiable → item 10 (pinned to the reviewed
-        //     head + re-request note). Once: a head that moves again after the
-        //     re-review gets item 10's note, never a third turn.
-        //   reviewed ≠ both → the agent strayed (item 8); the guard refuses below.
-        const pr = { repo: repoCtx.repo, number: repoCtx.pr };
-        const where = `${pr.repo}#${pr.number}`;
-        const fetchHead = deps.fetchPrHead ?? currentPrHeadSha;
-        const currentHead = async () => normalizeHead(await fetchHead(pr).catch(() => undefined));
-        const expected = normalizeHead(reviewHead);
-        const reviewed = normalizeHead(observedHead) ?? normalizeHead(verdict?.head);
-        if (expected && reviewed) {
-          const current = await currentHead();
-          if (current && !sameCommit(current, expected) && sameCommit(reviewed, current)) {
-            console.log(`[review] ${msg.threadKey} reviewed the PR's current head ${current.slice(0, 7)} (resolved ${expected.slice(0, 7)} was superseded mid-run) (${where})`);
-            reviewHead = current;
-          } else if (current && !sameCommit(current, expected) && sameCommit(reviewed, expected)) {
-            const classified = await classifyMove(deps, { repo: pr.repo, base: repoCtx.baseRef, from: expected, to: current });
-            const move = classified?.move;
-            if (move?.kind === "rebase") {
-              console.log(`[review] ${msg.threadKey} head moved during run: ${expected.slice(0, 7)} → ${current.slice(0, 7)} — rebase of the same ${move.commits} commit(s); review carried to ${current.slice(0, 7)} (${where})`);
-              carried = { reviewed: expected, current, commits: move.commits };
-            } else if (classified && move?.kind === "substantive") {
-              const summary = `head moved ${expected.slice(0, 7)} → ${current.slice(0, 7)} — re-reviewing at ${current.slice(0, 7)}`;
-              console.log(`[review] ${msg.threadKey} ${summary} (${where})`);
-              onEvent({ type: "run_note", kind: "head_moved", summary, at: Date.now() });
-              label = `${label} · head moved → ${current.slice(0, 7)}`;
+        const settled = await settleReviewedHead({
+          pr: { repo: repoCtx.repo, number: repoCtx.pr },
+          baseRef: repoCtx.baseRef,
+          reviewHead,
+          verdict,
+          answer,
+          messages,
+          composeSystem,
+          executor,
+          turn: { provider, model, agent, effort: resolved.effort, toolContext, onProgress, onEvent, control: run.control },
+          fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+          fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
+          notify: {
+            reply: (text) => io.reply(text),
+            headMoved: (suffix) => {
+              label = `${label} · ${suffix}`;
               card.update(currentFrame());
-              await io.reply(headRereviewNote({ where, reviewed: expected, current, move })).catch(() => {});
-              // Resident: move the worktree ourselves (one re-attach at the new
-              // head). Anything else — no moveTo, a refusal, a tip that moved
-              // again under the re-attach — leaves the model to check it out.
-              let worktreeMoved = false;
-              if (executor.moveTo) {
-                try {
-                  const at = normalizeHead((await executor.moveTo(current)).sha);
-                  worktreeMoved = at !== undefined && sameCommit(at, current);
-                  console.log(`[review] ${msg.threadKey} worktree moved to ${at?.slice(0, 7) ?? "?"}${worktreeMoved ? "" : " (not the expected head)"}`);
-                } catch (err) {
-                  console.warn(`[review] ${msg.threadKey} worktree move failed: ${err instanceof Error ? err.message : String(err)}`);
-                }
-              }
-              verdict = undefined; // the earlier verdict is void; the re-review must submit its own
-              reviewHead = current;
-              system = composeSystem({ sha: current, verified: worktreeMoved });
-              messages.push(
-                { role: "assistant", content: [{ type: "text", text: answer }] },
-                {
-                  role: "user",
-                  content: [
-                    {
-                      type: "text",
-                      text: rereviewFollowUp({ where, reviewed: expected, current, move, before: classified.before, after: classified.after, worktreeMoved }),
-                    },
-                  ],
-                },
-              );
-              answer = await runAgent({
-                provider,
-                model,
-                agent,
-                messages,
-                system,
-                effort: resolved.effort,
-                toolContext: { executor, reportProgress, web: webCapability(), skills: deps.skills, agentName: agent.name, onVerdict, onPrDescription },
-                onProgress,
-                onEvent,
-                control: run.control,
-              });
-              // Re-read, not narrowed: the stop may have been requested during the turn.
-              if (!run.control.hardSignal.aborted) observedHead = await probeHead();
-            }
-          }
-        }
+            },
+          },
+          logKey: msg.threadKey,
+        });
+        answer = settled.answer;
+        verdict = settled.verdict;
+        reviewHead = settled.reviewHead;
+        observedHead = settled.observedHead;
+        carried = settled.carried;
       }
       // PR post-step observation (features/pr-description.md item 5): for a
       // writable coding run, read the workspace HEAD, its branch name, and
@@ -1042,90 +928,28 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         registry.publish(run.id, { type: "pr_description", description: redactPrDescription(prDescription), at: Date.now() });
       }
       // Deterministic coding PR post-step (features/pr-description.md item 5,
-      // agent-coding.md item 2): a writable coding run that pushed a branch and
-      // submitted its typed PrDescription gets its PR opened — or edited, the
-      // open-or-edit idempotency lives in githubPulls — HERE, in the bot
-      // process, BEFORE the finally below finish()es the stream, so the
-      // outcome lands in the run record as a typed `pr_opened` event and not
-      // only in a console line. Typed values only: the body rendered at the
-      // head observed above, the title from the validated object, the head
-      // from the observed branch. The base is the PR's true base ref when the
-      // thread's context came from a PR (a fix round repushes the PR's OWN
-      // head branch, so the binding ref equals the branch and is NOT the
-      // merge base), else the thread's resident binding ref, else the
-      // dispatch's resolved ref. The repo is the dispatch's slug or — an
-      // agent-discovered repo — the workspace's observed origin remote (the
-      // App token bounds what is writable either way). "Pushed" is OBSERVED,
-      // never inferred: the branch counts as pushed only when its upstream
-      // resolved and matches the observed HEAD. The note rides on the final
-      // reply below. Failure honesty: never a fabricated PR URL, and the
-      // branch compare URL is offered only when the upstream match proved the
-      // remote branch exists. A hard stop observed nothing above and posts
-      // nothing.
+      // agent-coding.md item 2, runCodingPrPostStep in codingPrPostStep.ts):
+      // a writable coding run that pushed a branch and submitted its typed
+      // PrDescription gets its PR opened — or edited, the open-or-edit
+      // idempotency lives in githubPulls — HERE, in the bot process, BEFORE
+      // the finally below finish()es the stream, so the outcome lands in the
+      // run record as a typed `pr_opened` event and not only in a console
+      // line. The base is the PR's true base ref when the thread's context
+      // came from a PR (a fix round repushes the PR's OWN head branch, so the
+      // binding ref equals the branch and is NOT the merge base), else the
+      // thread's resident binding ref, else the dispatch's resolved ref —
+      // binding is only ever set on the resident path (factory.ts), so no
+      // resident check is needed. The note rides on the final reply below. A
+      // hard stop observed nothing above and posts nothing.
       if (isCodingPrRun && run.control.requested !== "hard") {
-        const repo = repoCtx.repo ?? observedRemoteRepo;
-        const headSha = normalizeHead(observedHead);
-        const branch = observedBranch;
-        const upstream = normalizeHead(observedUpstream);
-        // binding is only ever set on the resident path (factory.ts), so no
-        // resident check is needed — same idiom as the attach note above.
-        const base = repoCtx.baseRef ?? binding?.ref ?? repoCtx.ref;
-        const pushed = headSha !== undefined && upstream !== undefined && sameCommit(upstream, headSha);
-        const compareUrl = repo && branch && pushed ? `https://github.com/${repo}/compare/${encodeGithubPathSegments(branch)}` : undefined;
-        const pushedBranch = branch !== undefined && branch !== base && pushed;
-        if (repo === undefined) {
-          // Neither the dispatch nor the workspace names a repository —
-          // nowhere a PR could be opened. Said plainly when a description was
-          // submitted; otherwise there is nothing to report on.
-          if (prDescription) {
-            console.log(`[pr-post] ${msg.threadKey} skipped: no repo resolvable (none at dispatch, no GitHub origin remote observed; branch ${branch ?? "unknown"})`);
-            prNote = `⚠️ A PR description was submitted but no repository is known for this thread (none resolved at dispatch, and no GitHub origin remote was observed in the workspace), so no PR was opened.`;
-          }
-        } else if (prDescription && branch !== undefined && branch === base) {
-          // The workspace sat on the base branch: nothing was pushed to open a
-          // PR from, and a compare-URL note would mislead — the agent's own
-          // report stands.
-          console.log(`[pr-post] ${msg.threadKey} skipped: workspace on the base branch ${base} (repo ${repo}) — nothing pushed`);
-        } else if (prDescription && branch !== undefined && headSha !== undefined && !pushed) {
-          // A commit sits on a non-base branch, but nothing proves it reached
-          // the remote: no upstream, or an upstream behind the workspace. The
-          // note must not claim a push — and offers no compare URL, which
-          // would imply a remote branch nothing observed.
-          const why =
-            upstream === undefined
-              ? "has no pushed upstream"
-              : `has unpushed commits (its upstream is at ${upstream.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`;
-          console.log(`[pr-post] ${msg.threadKey} skipped: push not observed (repo ${repo}, branch ${branch}, head ${headSha.slice(0, 7)}, upstream ${upstream?.slice(0, 7) ?? "none"})`);
-          prNote = `⚠️ A PR description was submitted but the branch \`${branch}\` ${why}, so no PR was opened.`;
-        } else if (prDescription && pushedBranch && headSha?.length === 40 && base) {
-          try {
-            const body = renderPrDescriptionMarkdown(prDescription, { repo, headSha });
-            const open = deps.openPullRequest ?? openPullRequest;
-            const opened = await open({ repo, headBranch: branch, base, title: prDescription.title, body });
-            console.log(`[pr-post] ${msg.threadKey} ${opened.created ? "opened" : "updated"} ${repo}#${opened.number} (${branch} → ${base} @ ${headSha.slice(0, 7)})`);
-            registry.publish(run.id, { type: "pr_opened", url: opened.htmlUrl, number: opened.number, created: opened.created, at: Date.now() });
-            prNote = opened.created
-              ? `🔀 PR opened: ${opened.htmlUrl} (\`${branch}\` → \`${base}\`)`
-              : `🔀 PR updated: ${opened.htmlUrl} — body re-rendered at \`${headSha.slice(0, 7)}\``;
-          } catch (err) {
-            const reason = err instanceof Error ? err.message : String(err);
-            console.error(`[pr-post] ${msg.threadKey} open/edit failed for ${repo} ${branch}: ${reason}`);
-            prNote = `⚠️ The branch \`${branch}\` is pushed but the PR could not be opened: ${reason} — compare & open manually: ${compareUrl}`;
-          }
-        } else if (prDescription && pushedBranch && !base) {
-          console.log(`[pr-post] ${msg.threadKey} skipped: no base branch resolvable (repo ${repo}, branch ${branch})`);
-          prNote = `⚠️ A PR description was submitted but no base branch is known for this thread, so no PR was opened — compare & open manually: ${compareUrl}`;
-        } else if (prDescription) {
-          // A description was submitted but the pushed head — or the branch
-          // itself (a failed probe, a detached checkout) — could not be
-          // observed. Never render anchors at a guessed commit, and never leave
-          // the submission dangling silently: say plainly that no PR was opened.
-          console.log(`[pr-post] ${msg.threadKey} skipped: push unobservable (repo ${repo}, branch ${branch ?? "unknown"}, head ${headSha ?? "unknown"})`);
-          prNote = `⚠️ A PR description was submitted but the pushed ${branch === undefined ? "branch" : "head"} could not be observed in the workspace, so no PR was opened${compareUrl ? ` — compare & open manually: ${compareUrl}` : "."}`;
-        } else if (pushedBranch && compareUrl) {
-          console.log(`[pr-post] ${msg.threadKey} skipped: no description submitted (repo ${repo}, branch ${branch})`);
-          prNote = `ℹ️ No PR was opened: the run pushed \`${branch}\` but submitted no PR description (submit_pr_description was never called) — compare & open manually: ${compareUrl}`;
-        }
+        prNote = await runCodingPrPostStep({
+          observed: { head: observedHead, branch: observedBranch, upstream: observedUpstream, remoteRepo: observedRemoteRepo },
+          description: prDescription,
+          target: { repo: repoCtx.repo, baseRef: repoCtx.baseRef, bindingRef: binding?.ref, resolvedRef: repoCtx.ref },
+          openPullRequest: deps.openPullRequest ?? openPullRequest,
+          publish: (e) => registry.publish(run.id, e),
+          logKey: msg.threadKey,
+        });
       }
       // The run record is the source of truth and Slack/GitHub are projections
       // of it: publish the final answer into the stream FIRST (redacted like
@@ -1269,97 +1093,30 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       answer,
     });
 
-    // Deterministic review post-step (issue #69): a `review` run against a
-    // resolved PR posts its findings back to that PR by default — no need to
-    // ask. Only for PR reviews (a resolved PR number); a review of pasted code
-    // or a repo with no PR posts nowhere. Best-effort: a post failure is logged
-    // but never fails the dispatch (the review already landed in Slack). A
-    // HARD-stopped review has no findings — only the abort line — so nothing is
-    // posted to the PR; a soft stop's "findings so far" finale posts as usual.
-    let postTarget: ReviewPostTarget | null = null;
-    if (stopped !== "hard") {
-      postTarget = decideReviewPost({
-        agentName: resolved.agentName,
-        repo: repoCtx.repo,
-        pr: repoCtx.pr,
-        requestText: directives.text,
-      });
-      if (!postTarget && resolved.agentName === "review") {
-        // Never a silent skip: a review that lands only in Slack says why, so a
-        // re-review that failed to resolve its PR is visible in the logs — and,
-        // when the thread HAD a bound PR that turned out closed, in the thread
-        // itself: a Slack-only verdict must never be mistaken for a posted one.
-        // (An UNREACHABLE bound PR never gets this far — the unknown-head check
-        // above refuses the run before any model turn.) An explicit opt-out is
-        // the one case where the user already knows: log it, no note.
-        const optedOut = reviewPostOptedOut(directives.text);
-        const unpostable = optedOut ? undefined : repoCtx.prUnpostable;
-        const why = optedOut
-          ? "opted out"
-          : unpostable
-            ? `bound PR ${unpostable.reason}`
-            : "no PR resolved";
-        console.log(`[review-post] ${msg.threadKey} skipped: ${why} (repo ${repoCtx.repo ?? "none"})`);
-        if (unpostable && repoCtx.repo) {
-          const detail =
-            unpostable.reason === "closed" ? "the PR is closed" : "the PR's head could not be verified on GitHub";
-          await io
-            .reply(`ℹ️ Review not posted to ${repoCtx.repo}#${unpostable.number}: ${detail} — this verdict is Slack-only.`)
-            .catch(() => {});
-        }
-      }
-    }
-    if (postTarget) {
-      const where = `${postTarget.repo}#${postTarget.number}`;
-      // Reviewed-head guard (item 8): the review is posted to this PR only if
-      // the commit the agent reviewed IS the PR head resolved for this run.
-      // Observed HEAD is authoritative; the verdict's reported head is the
-      // fallback; unknown either way → no post (fail-closed). Found live on
-      // PR #182 (2026-08-29): the agent reviewed another PR's branch and its
-      // LGTM was posted — and auto-approved — on the wrong PR.
-      const head = checkReviewedHead({ expected: reviewHead, observed: observedHead, reported: verdict?.head });
-      if (!head.ok) {
-        console.log(`[review-post] ${msg.threadKey} skipped: ${head.reason} (${where})`);
-        await io.reply(`ℹ️ Review not posted to ${where}: ${head.reason} — this verdict is Slack-only.`).catch(() => {});
-        postTarget = null;
-      }
-    }
-    if (postTarget && reviewHead) { // narrowing only — the guard above already required it
-      const post = deps.postReviewComment ?? postReviewComment;
-      // Pinned to the PR head the guard just verified was reviewed — or, for a
-      // review carried across a rebase (item 12), to the new head it applies
-      // to — so the org's auto-approve stale-review check bites on a later push
-      // and not on this one.
-      const pinned = carried?.current ?? reviewHead;
-      const target: ReviewCommentTarget = { ...postTarget, commitId: pinned };
-      // The verdict line is built here, by code — the model's prose never
-      // decides whether the body starts with "LGTM:" (auto-approve contract).
-      const body = carried ? `${buildReviewPostBody(answer, verdict)}\n\n${carriedFooter(carried)}` : buildReviewPostBody(answer, verdict);
-      const where = `${postTarget.repo}#${postTarget.number}`;
-      try {
-        await post(target, body);
-        console.log(`[review-post] ${msg.threadKey} → ${where} (${verdict?.verdict ?? "no verdict"})${carried ? ` carried ${carried.reviewed.slice(0, 7)} → ${pinned.slice(0, 7)}` : ""}`);
-        if (carried) await io.reply(headCarriedNote({ where, ...carried })).catch(() => {});
-        // Head-moved note (item 10): a push that landed after the head was last
-        // checked makes this a review of an outdated commit — pinned, so it
-        // will not auto-approve (correct) but silent in the thread (not). One
-        // best-effort GET after the post; unknown current head → no note, never
-        // a false alarm. The default `currentPrHeadSha` never throws; the
-        // `.catch` guards an injected `deps.fetchPrHead` (the seam's contract
-        // is "undefined or a throw both mean unknown").
-        const fetchHead = deps.fetchPrHead ?? currentPrHeadSha;
-        const current = await fetchHead({ repo: postTarget.repo, number: postTarget.number }).catch(() => undefined);
-        const moved = headMovedNote({ where, reviewed: pinned, current });
-        if (moved) {
-          console.log(`[review-post] ${msg.threadKey} head moved after review: ${pinned.slice(0, 7)} → ${current?.slice(0, 7)} (${where})`);
-          await io.reply(moved).catch(() => {});
-        }
-      } catch (err: unknown) {
-        const reason = err instanceof Error ? err.message : String(err);
-        console.error(`[review-post] ${msg.threadKey} failed for ${where}: ${reason}`);
-        await io.reply(`ℹ️ Review not posted to ${where}: ${reason} — this verdict is Slack-only.`).catch(() => {});
-      }
-    }
+    // Deterministic review post-step (issue #69, runReviewPostStep in
+    // reviewRound.ts): a `review` run against a resolved PR posts its findings
+    // back to that PR by default — no need to ask — behind the reviewed-head
+    // guard (item 8, fail-closed) and pinned to the verified head (or the
+    // carried one, item 12). Best-effort: a post failure is logged and said in
+    // the thread but never fails the dispatch (the review already landed in
+    // Slack). A HARD-stopped review has no findings — only the abort line — so
+    // nothing is posted; a soft stop's "findings so far" finale posts as
+    // usual. Deliberately AFTER the workspace release and registry finish
+    // above — the plain path's lifecycle position is unchanged.
+    await runReviewPostStep({
+      agent,
+      requestText: directives.text,
+      repoCtx,
+      heads: { reviewHead, observedHead },
+      verdict,
+      answer,
+      carried,
+      hardStopped: stopped === "hard",
+      post: deps.postReviewComment ?? postReviewComment,
+      fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+      reply: (text) => io.reply(text),
+      logKey: msg.threadKey,
+    });
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     // A card left spinning after a setup failure looks like a hang; close it.
@@ -1375,123 +1132,6 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
   } finally {
     activeRuns--;
   }
-}
-
-/** Item 12: the PR's commits over its base at the reviewed head and at the
- *  current one (two compare GETs, in parallel), classified. Undefined — no
- *  verdict — when the base branch is unknown or either list could not be
- *  fetched; the caller then falls back to item 10. */
-async function classifyMove(
-  deps: CoreDeps,
-  q: { repo: string; base: string | undefined; from: string; to: string },
-): Promise<{ move: HeadMove; before: PrCommitList; after: PrCommitList } | undefined> {
-  if (!q.base) return undefined;
-  const fetchCommits = deps.fetchPrCommits ?? prCommitsSince;
-  const [before, after] = await Promise.all([
-    fetchCommits({ repo: q.repo, base: q.base, sha: q.from }).catch(() => undefined),
-    fetchCommits({ repo: q.repo, base: q.base, sha: q.to }).catch(() => undefined),
-  ]);
-  if (!before || !after) return undefined;
-  return { move: classifyHeadMove(before, after), before, after };
-}
-
-/** The branch name from `git rev-parse --abbrev-ref HEAD` output, or undefined
- *  when the command failed (the executors' `exit N:`/`fatal:` noise), printed
- *  nothing usable, or the checkout is detached (`HEAD` is not a branch —
- *  nothing a PR could be opened from). A branch name is one whitespace-free
- *  token; anything else on the first non-empty line is command noise. */
-function parseBranchOutput(output: string): string | undefined {
-  const first = output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  if (!first || first === "HEAD") return undefined;
-  if (/\s/.test(first) || /^(exit \d+:|fatal:|error:)/i.test(first)) return undefined;
-  return first;
-}
-
-/** What the PR post-step observed in the run's workspace, all read BEFORE the
- *  workspace is released. Every field is undefined when its probe failed. */
-interface WorkspaceObservation {
-  head: string | undefined;
-  branch: string | undefined;
-  /** The checked-out branch's upstream commit (`@{u}`) — the proof of a push. */
-  upstream: string | undefined;
-  /** `owner/name` parsed from the origin remote, probed only when asked. */
-  remoteRepo: string | undefined;
-}
-
-/**
- * Probe a coding run's workspace — HEAD, branch, upstream, and (when the
- * dispatch resolved no repo) the origin remote — concurrently, at the
- * workspace root first. Cold coding agents clone the repo into a SUBDIRECTORY
- * of the sandbox root (the coding prompt mandates at most ONE clone), so a
- * failed root HEAD probe discovers the single cloned repo and re-probes with
- * `git -C` — the directory shell-quoted AND vetted against a conservative
- * name pattern, never interpolated raw. Best-effort throughout: a failed
- * probe leaves its field undefined and the post-step reports honestly.
- */
-async function observeCodingWorkspace(
-  executor: { exec: (cmd: string) => Promise<string> },
-  opts: { probeRemote: boolean },
-): Promise<WorkspaceObservation> {
-  const probe = (cmd: string) => executor.exec(cmd).catch(() => "");
-  const probesAt = async (git: string): Promise<WorkspaceObservation> => {
-    const [headOut, branchOut, upstreamOut, remoteOut] = await Promise.all([
-      probe(`${git} rev-parse HEAD`),
-      probe(`${git} rev-parse --abbrev-ref HEAD`),
-      probe(`${git} rev-parse @{u}`),
-      opts.probeRemote ? probe(`${git} remote get-url origin`) : Promise.resolve(""),
-    ]);
-    return {
-      head: parseRevParseOutput(headOut),
-      branch: parseBranchOutput(branchOut),
-      upstream: parseRevParseOutput(upstreamOut),
-      remoteRepo: parseOriginRemoteOutput(remoteOut),
-    };
-  };
-  const atRoot = await probesAt("git");
-  if (atRoot.head !== undefined) return atRoot;
-  const dir = parseCloneDirOutput(await probe("ls -d */.git 2>/dev/null | head -1"));
-  if (dir === undefined) return atRoot; // no clone anywhere → the post-step reports honestly
-  return probesAt(`git -C ${shellQuote(dir)}`);
-}
-
-/** The single cloned repo directory from `ls -d *\/.git` output, or undefined.
- *  Conservative on purpose: the name is interpolated into a `git -C` command
- *  (shell-quoted as well), so anything but a plain repo-name-shaped directory
- *  — spaces, a leading dash an option parser could eat, dot traversal — is
- *  refused rather than probed. */
-function parseCloneDirOutput(output: string): string | undefined {
-  const first = output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  const dir = first?.match(/^(.+)\/\.git\/?$/)?.[1];
-  if (!dir || !/^[A-Za-z0-9._-]{1,100}$/.test(dir) || /^\.+$/.test(dir) || dir.startsWith("-")) return undefined;
-  return dir;
-}
-
-// The clone-URL forms a GitHub origin remote takes: https, scp-style ssh, and
-// URL-style ssh; owner/name held to the same conservative charsets
-// repoContext.ts binds slugs with (the trailing `.git` is stripped after).
-const ORIGIN_REMOTE_RE =
-  /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)\/([A-Za-z0-9._-]{1,104})$/;
-
-/** The `owner/name` slug from `git remote get-url origin` output, or undefined
- *  for anything that is not a well-formed GitHub remote (another host, a local
- *  path, the executors' command noise). Lowercased like every resolved slug. */
-function parseOriginRemoteOutput(output: string): string | undefined {
-  const first = output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  if (!first || /\s/.test(first)) return undefined;
-  const m = ORIGIN_REMOTE_RE.exec(first);
-  if (!m) return undefined;
-  const name = m[2].replace(/\.git$/i, "");
-  if (name.length === 0 || name.length > 100 || /^\.+$/.test(name)) return undefined;
-  return `${m[1]}/${name}`.toLowerCase();
 }
 
 /** The `pr_description` event's payload: every string LEAF passed through
