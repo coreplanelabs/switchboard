@@ -151,7 +151,7 @@ async function main() {
   // registration, every surface.
   deps.commands = commands;
   // --- end command registry ---
-  const app = createSlackApp(deps);
+  const { app } = createSlackApp(deps);
 
   // Work in flight = agent runs + the background memory reflections they spawn
   // + run-history writes still retrying (#157 KTD4: a record lost at SIGTERM is

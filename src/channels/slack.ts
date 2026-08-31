@@ -1,5 +1,5 @@
 import { extname } from "node:path";
-import bolt from "@slack/bolt";
+import { App, SocketModeReceiver, type webApi } from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
 import { catchUpWindowWarning } from "../core/drain.js";
 import { mdToMrkdwn } from "./mrkdwn.js";
@@ -22,8 +22,7 @@ import type {
 // the core dispatcher and implements ChannelIO on top of the Slack Web API.
 // No routing, config, or agent logic lives here.
 
-const { App, SocketModeReceiver } = bolt;
-type SlackClient = bolt.webApi.WebClient;
+type SlackClient = webApi.WebClient;
 
 const PLATFORM = "slack";
 const SLACK_MSG_LIMIT = 3500;
@@ -367,7 +366,11 @@ export function createSlackApp(deps: CoreDeps) {
     });
   });
 
-  return app;
+  // The receiver rides along for the Bolt-level wiring test (#259): emitting
+  // `connected` on `receiver.client` is exactly what a real reconnect does, so
+  // the test can drive the hook without a live socket. Production
+  // (src/index.ts) uses only `app`.
+  return { app, receiver };
 }
 
 interface SlackEvent {
