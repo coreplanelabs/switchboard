@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import ScheduledPage from "./ScheduledPage.vue";
 import { mountApp } from "../testing/mount";
+import { formatDateTime, formatLocalIso } from "../lib/format";
 import type { ScheduledSeed } from "@core/channels/webSeed.js";
 import type { ScheduledRow } from "@core/channels/scheduledPanel.js";
 
@@ -38,16 +39,20 @@ const seed = (rows: ScheduledRow[] | null, firingsUnavailable?: string): Schedul
 });
 
 describe("ScheduledPage", () => {
-  it("renders one block per schedule: name · cron UTC · worker · command as identity · next fire", () => {
+  it("renders one block per schedule: name · cron UTC · worker · command as identity · next fire in the viewer's clock", () => {
     const w = mountApp(ScheduledPage, { seed: seed([RUN_ROW]) });
     const t = w.text();
     expect(t).toContain("self-improvement");
     expect(t).toContain("0 14 * * 1");
-    expect(t).toContain("UTC");
+    expect(t).toContain("UTC"); // the cron expression is defined in UTC — that label stays on the chip
     expect(t).toContain("bot");
     expect(t).toContain("friction propose");
     expect(t).toContain("cron");
-    expect(t).toContain("2026-08-31 14:00 UTC");
+    // The next-fire stamp reads in the viewer's timezone, exact local ISO on hover — never UTC.
+    const next = w.find(".next");
+    expect(next.text()).toContain(formatDateTime(RUN_ROW.nextFireAt!, NOW));
+    expect(next.text()).not.toContain("UTC");
+    expect(next.attributes("title")).toBe(formatLocalIso(RUN_ROW.nextFireAt!));
     expect(t).toContain("(in 1d 2h)");
   });
 
@@ -57,10 +62,11 @@ describe("ScheduledPage", () => {
     expect(w.text()).toContain("never");
   });
 
-  it("shows the last firing: outcome word ('succeeded'), relative time with exact UTC on hover, a token'd run link, the detail's facts", () => {
+  it("shows the last firing: outcome word ('succeeded'), relative time with the exact local time on hover, a token'd run link, the detail's facts", () => {
     const w = mountApp(ScheduledPage, { seed: seed([RUN_ROW]) });
     expect(w.find(".outcome").text()).toBe("succeeded");
     expect(w.text()).toContain("ago");
+    expect(w.find(".fire .when").attributes("title")).toBe(formatLocalIso(RUN_ROW.last!.firedAt));
     const run = w.findAll("a").find((a) => a.text().startsWith("run "));
     expect(run?.attributes("href")).toBe("/runs/0a1b2c3d4e5f6789?t=tok-live");
     expect(run?.text()).toBe("run 0a1b2c3d");

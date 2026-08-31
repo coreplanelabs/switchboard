@@ -9,7 +9,7 @@ export const FIXTURE_SCHEDULES: readonly ScheduleDef[] = [
   { name: "self-improvement", cron: "0 14 * * 1", worker: "bot", description: "Weekly self-improvement pass.", action: { type: "run", command: "friction propose", identity: "cron" } },
   { name: "resident-watchdog", cron: "*/10 * * * *", worker: "resident", description: "Resident watchdog pass.", action: { type: "watchdog" } },
 ];
-import { buildScheduledRows, firingDetailSummary, formatRelative, formatUtc, type FiringsState } from "./scheduledPanel.js";
+import { buildScheduledRows, firingDetailSummary, formatRelative, type FiringsState } from "./scheduledPanel.js";
 
 // Feature: features/live-view.md item 14 (#244): the /runs "Scheduled" panel —
 // what is armed, next fire (computed), last fire + outcome, link to the run.
@@ -113,8 +113,7 @@ describe("outcome vocabulary (shared with the web page)", () => {
 });
 
 describe("time helpers", () => {
-  it("formatUtc / formatRelative", () => {
-    expect(formatUtc(Date.UTC(2026, 7, 31, 14, 0))).toBe("2026-08-31 14:00 UTC");
+  it("formatRelative", () => {
     expect(formatRelative(NOW + 30_000, NOW)).toBe("in <1m");
     expect(formatRelative(NOW + 45 * 60_000, NOW)).toBe("in 45m");
     expect(formatRelative(NOW + 3 * 3_600_000 + 60_000, NOW)).toBe("in 3h 1m");

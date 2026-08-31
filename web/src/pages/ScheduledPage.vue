@@ -3,14 +3,8 @@ import { computed } from "vue";
 import AppShell from "../components/AppShell.vue";
 import RunsTabs from "../components/runs/RunsTabs.vue";
 import { useSeed } from "../lib/seed";
-import {
-  ACTION_LABEL,
-  firingDetailSummary,
-  formatRelative,
-  formatUtc,
-  OUTCOME_CLASS,
-  OUTCOME_LABEL,
-} from "@core/channels/scheduledPanel.js";
+import { formatDateTime, formatLocalIso } from "../lib/format";
+import { ACTION_LABEL, firingDetailSummary, formatRelative, OUTCOME_CLASS, OUTCOME_LABEL } from "@core/channels/scheduledPanel.js";
 
 // The Scheduled tab (#244): the registry's schedules with each one's last
 // firing — a snapshot per load, no feed. The rows arrive prebuilt from the
@@ -19,8 +13,10 @@ import {
 // One DOM, two readings: from sm each schedule is two flowing ·-separated
 // lines (definition, then the last firing); below sm the SAME cells stack into
 // labeled lines (`sm:contents` wrappers group them, the separators are
-// desktop-only, and the absolute next-fire stamp yields to its relative form
-// — the exact UTC stays on the hover title).
+// desktop-only, and the absolute next-fire stamp yields to its relative form).
+//
+// Every stamp reads in the viewer's timezone (the exact local ISO on hover);
+// only the cron chip keeps its UTC label — the expression is defined in UTC.
 
 const seed = useSeed("scheduled");
 const now = computed(() => seed?.now ?? Date.now());
@@ -63,12 +59,12 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
               <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.cron }}</code>
               <span class="text-dimmed">UTC</span>
               <span class="hidden text-accented sm:inline" aria-hidden="true">·</span>
-              <span class="next tabular-nums max-sm:ml-auto" :title="r.nextFireAt !== undefined ? formatUtc(r.nextFireAt) : undefined">
+              <span class="next tabular-nums max-sm:ml-auto" :title="r.nextFireAt !== undefined ? formatLocalIso(r.nextFireAt) : undefined">
                 <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">next</span>
                 <template v-if="r.nextFireAt !== undefined">
-                  <!-- The absolute stamp is a wide-screen luxury; the phone reads the relative form (exact UTC on the title). -->
+                  <!-- The absolute stamp is a wide-screen luxury; the phone reads the relative form (exact local time on the title). -->
                   <span class="max-sm:hidden">
-                    <b class="font-medium text-highlighted">{{ formatUtc(r.nextFireAt) }}</b>
+                    <b class="font-medium text-highlighted">{{ formatDateTime(r.nextFireAt, now) }}</b>
                     <span class="text-dimmed"> ({{ formatRelative(r.nextFireAt, now) }})</span>
                   </span>
                   <span class="text-toned sm:hidden">{{ formatRelative(r.nextFireAt, now) }}</span>
@@ -84,7 +80,7 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
             <template v-if="r.last">
               <span class="outcome" :class="OUTCOME_TONE[OUTCOME_CLASS[r.last.outcome]]">{{ OUTCOME_LABEL[r.last.outcome] }}</span>
               <span class="mx-1.5 text-accented max-sm:mx-0" aria-hidden="true">·</span>
-              <span class="text-toned" :title="formatUtc(r.last.firedAt)">{{ formatRelative(r.last.firedAt, now) }}</span>
+              <span class="when text-toned" :title="formatLocalIso(r.last.firedAt)">{{ formatRelative(r.last.firedAt, now) }}</span>
               <template v-if="r.last.runId">
                 <span class="mx-1.5 text-accented max-sm:mx-0" aria-hidden="true">·</span>
                 <a v-if="r.last.runHref" class="text-primary hover:underline" :href="r.last.runHref">run {{ r.last.runId.slice(0, 8) }}</a>

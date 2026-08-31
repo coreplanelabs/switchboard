@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import RunPage from "./RunPage.vue";
 import { mountApp } from "../testing/mount";
 import { browser } from "../lib/browser";
+import { formatLocalIso } from "../lib/format";
 import { fakeEventSourceFactory } from "../testing/fakeEventSource";
 import type { RunHistorySeed, RunLiveSeed } from "@core/channels/webSeed.js";
 import type { LiveFrame } from "@core/channels/liveView/sse.js";
@@ -164,7 +165,7 @@ describe("RunPage — history mode", () => {
     expect(w.find("details.grp").attributes("data-group-open")).toBe("1");
   });
 
-  it("update_status renders as a quiet line and a loaded skill as its own row", () => {
+  it("update_status renders as a quiet line and a loaded skill as its own row — the gutter owns the clock: no inline stamps, exact local time on the row's hover", () => {
     const w = mountApp(RunPage, {
       seed: historySeed([
         assistant("work", 1),
@@ -172,11 +173,18 @@ describe("RunPage — history mode", () => {
         { type: "skill_use", skill: "pdf", description: "Fill PDFs", agent: "coding", bodyBytes: 2048, source: "https://example.com/x", at: 3 },
       ] as LiveFrame[]),
     });
-    expect(w.find(".quiet").text()).toContain("status checklist updated");
+    const quiet = w.find(".quiet");
+    expect(quiet.text()).toContain("status checklist updated");
+    expect(quiet.text()).not.toMatch(/\[\d\d:\d\d:\d\d\]/);
+    expect(quiet.attributes("title")).toBe(formatLocalIso(2));
     const skill = w.find(".skill");
     expect(skill.text()).toContain("skill pdf");
     expect(skill.text()).toContain("2.0 KB into context");
+    expect(skill.text()).not.toMatch(/\[\d\d:\d\d:\d\d\]/);
+    expect(skill.attributes("title")).toBe(formatLocalIso(3));
     expect(skill.find("a").attributes("href")).toBe("https://example.com/x");
+    // the step's gutter stamp is the ONE visible clock
+    expect(w.find(".step .ts").text()).toMatch(/^\[\d\d:\d\d:\d\d\]$/);
   });
 
   it("the fold toggle opens every card (and future ones), then closes them; icon state flips", async () => {
