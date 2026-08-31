@@ -11,8 +11,9 @@ import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from
 import { createRunPageModel, runningHeader, runSpan } from "../lib/runPageModel";
 import { createPrReviewCollector } from "../lib/prReviewCollector";
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
-import { formatDateTime, formatElapsed, formatLocalIso } from "../lib/format";
+import { formatClock, formatDateTime, formatElapsed, formatLocalIso } from "../lib/format";
 import { statusLabel } from "../lib/indexRow";
+import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 
 // The per-run page: one timeline of the whole run, LIVE (follows the
 // token-scoped SSE stream) or HISTORY (seeded from the stored record, no
@@ -106,6 +107,17 @@ watch(
     if (mode && phase.value !== "ended" && phase.value !== "disconnected") markStopping(mode);
   },
 );
+
+// The tab's dot speaks run state (item 21): green while this run is going,
+// gray once it ended or the stream dropped. A history page is idle by
+// definition — the shell's gray dot already says so.
+if (!isHistory) {
+  watch(
+    phase,
+    (p) => browser.setFavicon(p === "ended" || p === "disconnected" ? FAVICON_IDLE : FAVICON_LIVE),
+    { immediate: true },
+  );
+}
 
 // ---- the live tail -----------------------------------------------------------
 const THINKING = ["Thinking", "Pondering", "Mulling it over", "Reasoning", "Cogitating", "Weighing options", "Puzzling", "Deliberating", "Noodling", "Chewing on it", "Ruminating", "Reticulating splines"];
@@ -212,16 +224,13 @@ const sourceUrl = computed(() => {
 const metaRepoOk = computed(() => !!state.meta?.repo && /^[\w.-]+\/[\w.-]+$/.test(state.meta.repo));
 
 /** Block headers (Request/Context/Answer) read a human moment — `Aug 30,
- *  3:06 PM` — with the exact ISO stamp on hover; the log gutter keeps its
- *  `[HH:MM:SS]` grammar. */
+ *  3:06 PM` — with the exact ISO stamp on hover; the timeline's meta rows
+ *  read the wall clock (`5:19:57 PM PDT`, formatClock). */
 function fmtTime(at: number | undefined): string {
   return typeof at === "number" ? formatDateTime(at, nowWall.value) : "";
 }
 function fmtTimeTitle(at: number | undefined): string | undefined {
   return typeof at === "number" ? formatLocalIso(at) : undefined;
-}
-function stamp(at: number | undefined): string {
-  return typeof at === "number" ? `[${formatLocalIso(at).slice(11, 19)}]` : "";
 }
 </script>
 
@@ -316,23 +325,30 @@ function stamp(at: number | undefined): string {
         </div>
       </section>
 
-      <!-- Context: the thread turns the model was given, collapsed by default. -->
-      <details v-if="state.context.length > 0" id="context" class="mb-5">
-        <summary class="cursor-pointer list-none text-xs font-semibold uppercase tracking-wider text-muted [&::-webkit-details-marker]:hidden">
-          Context <span class="count font-normal normal-case tracking-normal">({{ state.context.length }} turn{{ state.context.length === 1 ? "" : "s" }})</span>
-        </summary>
-        <div id="contextturns">
-          <div v-for="turn in state.context" :key="turn.key" class="turn flex items-baseline gap-3 border-t border-default py-1.5 opacity-85 first-of-type:border-t-0">
-            <span class="ts select-none text-xs text-dimmed" :title="fmtTimeTitle(turn.at)">{{ fmtTime(turn.at) }}</span>
-            <MarkdownText :text="turn.text" />
+      <!-- The log's toolbar: the Context fold (when the run has context) and
+           the one ghost toggle share ONE line — the button stays pinned to the
+           first line when the fold opens downward. -->
+      <div class="logbar mb-1.5 flex items-start gap-4 px-3">
+        <!-- Context: the thread turns the model was given, collapsed by default.
+             The chevron says "this opens" — the same fold grammar as the cards. -->
+        <details v-if="state.context.length > 0" id="context" class="group min-w-0 flex-1">
+          <summary
+            class="flex min-h-6 cursor-pointer list-none items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted hover:text-toned [&::-webkit-details-marker]:hidden"
+          >
+            <span class="chev select-none text-xs text-dimmed transition-transform group-open:rotate-90 motion-reduce:transition-none">❯</span>
+            <span>Context</span>
+            <span class="count font-normal normal-case tracking-normal">({{ state.context.length }} turn{{ state.context.length === 1 ? "" : "s" }})</span>
+          </summary>
+          <div id="contextturns" class="pb-3">
+            <div v-for="turn in state.context" :key="turn.key" class="turn flex items-baseline gap-3 border-t border-default py-1.5 opacity-85 first-of-type:border-t-0">
+              <span class="ts select-none text-xs text-dimmed" :title="fmtTimeTitle(turn.at)">{{ fmtTime(turn.at) }}</span>
+              <MarkdownText :text="turn.text" />
+            </div>
           </div>
-        </div>
-      </details>
-
-      <!-- The log's own toolbar: one ghost toggle, right-aligned above the timeline. -->
-      <div class="logbar mb-1.5 flex justify-end pl-3 pr-3 sm:pl-[9.5rem]">
+        </details>
         <UButton
           id="fold"
+          class="ml-auto shrink-0"
           size="xs"
           color="neutral"
           variant="ghost"
@@ -350,26 +366,18 @@ function stamp(at: number | undefined): string {
         <li v-if="state.placeholder && !tailVisible" id="placeholder" class="empty text-muted">Waiting for activity…</li>
         <template v-for="item in state.log" :key="item.key">
           <StepBlock v-if="item.kind === 'step'" :step="item" class="mt-5 first:mt-0" @toggle-group="model.toggleGroup(item)" />
-          <li v-else-if="item.kind === 'turn'" class="turn relative mt-5 border-l-2 border-(--ui-border-accented)/50 pb-3 pl-3 pt-2 sm:pl-[9.5rem]">
-            <span v-if="item.turn.at !== undefined" class="ts absolute left-3 top-2.5 hidden select-none text-xs text-dimmed sm:block" :title="formatLocalIso(item.turn.at)">{{
-              stamp(item.turn.at)
-            }}</span>
-            <div class="narration flex items-baseline gap-3 pr-3">
-              <span
-                class="think shrink-0 whitespace-nowrap rounded px-2 text-[0.8rem] leading-relaxed"
-                :class="item.turn.quick ? 'bg-accented text-muted' : 'bg-warn/10 text-warn'"
-                :title="item.turn.label"
-                >{{ item.turn.chip }}</span
-              >
-              <span v-if="item.turn.facts.length" class="turnfacts flex gap-2.5 self-center text-xs tabular-nums text-muted">
-                <span v-for="(f, i) in item.turn.facts" :key="i" class="fact">{{ f }}</span>
-              </span>
-              <span v-if="item.note" class="nonar font-sans text-sm italic text-dimmed">{{ item.note }}</span>
+          <li v-else-if="item.kind === 'turn'" class="turn mt-5 border-l-2 border-(--ui-border-accented)/50 pb-3 pl-3 pt-2">
+            <!-- A turn that produced no step: the same ONE meta row a step heads with. -->
+            <div class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 pr-3 text-xs tabular-nums text-dimmed">
+              <span class="thought" :class="item.turn.quick ? '' : 'text-warn'" :title="item.turn.label">thought {{ item.turn.chip }}</span>
+              <span v-for="(f, i) in item.turn.facts" :key="i" class="fact">{{ f }}</span>
+              <span v-if="item.note" class="nonar font-sans italic">{{ item.note }}</span>
+              <span v-if="item.turn.at !== undefined" class="ts ml-auto select-none" :title="formatLocalIso(item.turn.at)">{{ formatClock(item.turn.at) }}</span>
             </div>
           </li>
           <li v-else class="note mt-4 flex items-baseline gap-3 rounded-md px-3 py-1.5" :class="item.replay ? 'text-dimmed' : 'bg-warn/10 text-warn'">
-            <span v-if="item.at !== undefined" class="ts select-none text-xs text-dimmed">{{ stamp(item.at) }}</span>
             <span>{{ (item.replay ? "… " : "⏱ ") + item.text }}</span>
+            <span v-if="item.at !== undefined" class="ts ml-auto select-none text-xs text-dimmed" :title="formatLocalIso(item.at)">{{ formatClock(item.at) }}</span>
           </li>
         </template>
         <!-- The live tail: what is happening right now, always last while connected. -->

@@ -1,5 +1,5 @@
 import { escapeHtml } from "./liveView/html.js";
-import { FAVICON_IDLE } from "./favicon.js";
+import { FAVICON_DEFAULT, FAVICON_IDLE } from "./favicon.js";
 import { serializeSeed, SEED_ELEMENT_ID, type WebSeed } from "./webSeed.js";
 
 // The one HTML document the server renders: a shell that mounts the web app
@@ -43,6 +43,10 @@ export interface ShellAssets {
  */
 export function renderShell(title: string, seed: WebSeed, assets: ShellAssets): string {
   const css = assets.css.map((href) => `<link rel="stylesheet" href="${escapeHtml(href)}">`).join("\n");
+  // Run-state pages wear the dot (the app repaints it green/gray by id);
+  // every other page wears the neutral mark — a dot there would claim a
+  // run state the page does not have.
+  const favicon = seed.page === "runs" || seed.page === "run" ? FAVICON_IDLE : FAVICON_DEFAULT;
   return `<!doctype html>
 <html lang="en" class="dark">
 <head>
@@ -50,7 +54,7 @@ export function renderShell(title: string, seed: WebSeed, assets: ShellAssets): 
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex" />
 <title>${escapeHtml(title)}</title>
-<link rel="icon" id="favicon" href="${FAVICON_IDLE}" />
+<link rel="icon" id="favicon" href="${favicon}" />
 ${css}
 </head>
 <body>

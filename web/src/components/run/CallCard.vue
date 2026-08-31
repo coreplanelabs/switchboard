@@ -42,7 +42,7 @@ function toggle(): void {
         >{{ call.status === "ok" ? "✓" : call.status === "failed" ? "✗" : "⚠" }}</span
       >
       <span v-if="call.shell" class="dollar shrink-0 select-none text-dimmed">$</span>
-      <span v-else class="tool shrink-0 rounded bg-accented px-1.5 text-[0.7rem] leading-normal text-muted">{{ call.tool }}</span>
+      <span v-else class="tool shrink-0 rounded bg-accented px-1.5 text-xs leading-normal text-muted">{{ call.tool }}</span>
       <template v-if="!call.chipOnly">
         <!-- Collapsed: the command's first line only (ellipsized); open: all of it. -->
         <code v-if="!call.open" class="cmd brief min-w-0 flex-1 truncate text-info">{{ call.headline }}</code>
@@ -58,12 +58,12 @@ function toggle(): void {
           >{{ fact }}</span
         >
       </span>
-      <span class="chev shrink-0 text-[0.7rem] text-dimmed transition-transform motion-reduce:transition-none" :class="call.open ? 'rotate-90' : ''">❯</span>
+      <span class="chev shrink-0 text-xs text-dimmed transition-transform motion-reduce:transition-none" :class="call.open ? 'rotate-90' : ''">❯</span>
     </summary>
     <div class="body">
-      <pre v-if="call.hasResult && call.output" class="out max-h-[28rem] overflow-auto whitespace-pre-wrap break-words px-3.5 py-2.5 font-mono text-[0.8rem] leading-normal" :class="call.status === 'failed' ? 'text-bad' : 'text-toned'">{{ call.output }}</pre>
-      <div v-else-if="call.hasResult" class="none px-3 py-1.5 text-[0.8rem] italic text-dimmed">no output</div>
-      <div v-else class="none px-3 py-1.5 text-[0.8rem] italic text-dimmed">running…</div>
+      <pre v-if="call.hasResult && call.output" class="out max-h-[28rem] overflow-auto whitespace-pre-wrap break-words px-3.5 py-2.5 font-mono leading-normal" :class="call.status === 'failed' ? 'text-bad' : 'text-toned'">{{ call.output }}</pre>
+      <div v-else-if="call.hasResult" class="none px-3 py-1.5 text-xs italic text-dimmed">no output</div>
+      <div v-else class="none px-3 py-1.5 text-xs italic text-dimmed">running…</div>
     </div>
   </details>
 </template>
