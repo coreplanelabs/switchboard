@@ -286,6 +286,13 @@ describe("githubPulls", () => {
       expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
     });
 
+    it("parses the PR's own base ref — the resume path's true merge base", async () => {
+      stubToken();
+      stubFetch(() => new Response(JSON.stringify({ ...openPr, base: { ref: "release/1.x" } }), { status: 200 }));
+      const facts = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+      expect(facts?.baseRef).toBe("release/1.x");
+    });
+
     it("a deleted-fork null head repo is sameRepoHead: false — never assumed same-repo", async () => {
       stubToken();
       stubFetch(() => new Response(JSON.stringify({ ...openPr, head: { ...openPr.head, repo: null } }), { status: 200 }));

@@ -240,6 +240,9 @@ export interface PullRequestFacts {
   /** True only on a POSITIVE match of head repo == base repo — a deleted-fork
    *  null head repo is false, never assumed same-repo. */
   sameRepoHead: boolean;
+  /** The PR's own base branch — the resume path's true merge base (a PR
+   *  opened against a non-default base must not resume against the default). */
+  baseRef?: string;
   htmlUrl?: string;
 }
 
@@ -263,6 +266,7 @@ export async function fetchPullRequestFacts(pr: { repo: string; number: number }
     html_url?: unknown;
     user?: { login?: unknown; id?: unknown };
     head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } };
+    base?: { ref?: unknown };
   } | null;
   if (!data || (data.state !== "open" && data.state !== "closed")) return undefined;
   const headRepo = typeof data.head?.repo?.full_name === "string" ? data.head.repo.full_name.toLowerCase() : undefined;
@@ -280,6 +284,7 @@ export async function fetchPullRequestFacts(pr: { repo: string; number: number }
     ...(typeof data.head?.ref === "string" && data.head.ref ? { headRef: data.head.ref } : {}),
     ...(sha ? { headSha: sha } : {}),
     sameRepoHead: headRepo === pr.repo.toLowerCase(),
+    ...(typeof data.base?.ref === "string" && data.base.ref ? { baseRef: data.base.ref } : {}),
     ...(typeof data.html_url === "string" ? { htmlUrl: data.html_url } : {}),
   };
 }

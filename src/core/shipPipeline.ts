@@ -247,19 +247,22 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       );
     }
     if (facts.state === "open") {
-      if (task) {
-        return refuse(
-          "new task over open PR",
-          "not started (open PR)",
-          `🚫 This thread's PR ${where} is still open — a new task over it is refused. Re-issue \`agent:ship\` with only the PR URL to resume its review loop, or finish/close ${where} and start the new task in a fresh thread.`,
-        );
-      }
+      // Authorship first: a human-authored PR is never ship's to drive, so
+      // the refusal must say THAT — refusing on "new task over open PR" first
+      // would advise a PR-URL resume that the author check then rejects.
       const author = facts.author;
       if (!(author?.login === SHIP_PR_AUTHOR.login && author?.id === SHIP_PR_AUTHOR.id)) {
         return refuse(
           "human-authored PR",
           "not started (not ship's PR)",
           `🚫 ${where} was not authored by \`${SHIP_PR_AUTHOR.login}\` — it is not ship's to drive. Use \`agent:review\` for a one-off review, or drive the loop manually.`,
+        );
+      }
+      if (task) {
+        return refuse(
+          "new task over open PR",
+          "not started (open PR)",
+          `🚫 This thread's PR ${where} is still open — a new task over it is refused. Re-issue \`agent:ship\` with only the PR URL to resume its review loop, or finish/close ${where} and start the new task in a fresh thread.`,
         );
       }
       if (!facts.sameRepoHead) {
@@ -282,7 +285,12 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
         entry: {
           repo,
           branch,
-          base: repoCtx.baseRef ?? info.defaultBranch,
+          // The PR's OWN base wins on resume: a ship PR opened against a
+          // non-default base must not run its re-reviews (or re-open a closed
+          // PR) against the default branch. repoCtx.baseRef carries the same
+          // fact when the thread context resolved the PR; the default branch
+          // is the last resort.
+          base: facts.baseRef ?? repoCtx.baseRef ?? info.defaultBranch,
           resume: {
             pr: repoCtx.pr,
             headSha: facts.headSha ?? repoCtx.headSha,
@@ -563,6 +571,10 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
    *  (`dispositionFor`): declined = a `declined` disposition; unaddressed =
    *  none; a finding claimed fixed but still flagged is named as such. */
   const splitReport = (): string => {
+    // No review round ran → there are no findings to split; three "none"
+    // lists under "Open findings from the last review (0)" would read as a
+    // review that found nothing rather than a review that never happened.
+    if (reviewRounds === 0) return "No review round ran before the cap — there are no findings to report.";
     const withDisposition = (f: Finding) => dispositionFor(f, reviewRounds);
     const declined = lastFindings.filter((f) => withDisposition(f)?.disposition === "declined");
     const unaddressed = lastFindings.filter((f) => !withDisposition(f));

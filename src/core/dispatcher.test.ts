@@ -5764,6 +5764,10 @@ workspaceDir: __WORKDIR__
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     const final = replies[replies.length - 1];
     expect(final).toContain("cannot hold another round");
+    // No review round ran: the cap report says so plainly instead of an
+    // empty "Open findings from the last review (0)" split.
+    expect(final).toContain("No review round ran before the cap");
+    expect(final).not.toContain("Open findings from the last review (0)");
     expect(provider.requests).toHaveLength(0);
     expect(makeExecutor).not.toHaveBeenCalled();
   });
@@ -5837,6 +5841,35 @@ workspaceDir: __WORKDIR__
     expect(replies[0]).toContain("acme/api#7");
     expect(replies[0]).toContain("still open");
     expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
+  });
+
+  it("resume prefers the PR's OWN base ref over the repo default (non-default-base ship PR)", async () => {
+    const provider = shipProvider({
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, ref: SHIP_BRANCH }); // thread text names no base
+    deps.fetchPrFacts = vi.fn(async () => openBotPr({ baseRef: "release/1.x" }));
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const { io } = fakeIO();
+    await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), io);
+    // The review child's system carries the PR's true base, not the default branch.
+    const reviewSystem = provider.requests[provider.requests.length - 1].system ?? "";
+    expect(reviewSystem).toContain("release/1.x");
+    expect(reviewSystem).not.toContain("BASE main");
+  });
+
+  it("a human-authored open thread PR WITH new task text refuses on authorship — never advising a resume the author check would reject", async () => {
+    const provider = shipProvider();
+    const { deps } = shipDeps(provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
+    deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "justin", id: 42 } }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:ship also add rate limiting", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("not ship's to drive");
+    expect(replies[0]).not.toContain("resume its review loop"); // the misleading advice the ordering fix removes
     expect(makeExecutor).not.toHaveBeenCalled();
   });
 
