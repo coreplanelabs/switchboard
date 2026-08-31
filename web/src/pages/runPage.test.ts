@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import RunPage from "./RunPage.vue";
 import { mountApp } from "../testing/mount";
 import { browser } from "../lib/browser";
-import { formatLocalIso } from "../lib/format";
+import { formatClock, formatLocalIso } from "../lib/format";
 import { fakeEventSourceFactory } from "../testing/fakeEventSource";
 import type { RunHistorySeed, RunLiveSeed } from "@core/channels/webSeed.js";
 import type { LiveFrame } from "@core/channels/liveView/sse.js";
+import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 
 const liveSeed: RunLiveSeed = {
   page: "run",
@@ -183,8 +184,61 @@ describe("RunPage — history mode", () => {
     expect(skill.text()).not.toMatch(/\[\d\d:\d\d:\d\d\]/);
     expect(skill.attributes("title")).toBe(formatLocalIso(3));
     expect(skill.find("a").attributes("href")).toBe("https://example.com/x");
-    // the step's gutter stamp is the ONE visible clock
-    expect(w.find(".step .ts").text()).toMatch(/^\[\d\d:\d\d:\d\d\]$/);
+    // the step's head row carries the ONE visible clock
+    expect(w.find(".step .head .ts").text()).toBe(formatClock(1));
+  });
+
+  it("the step head is ONE row — thought duration + token facts left, the 12-hour clock right; the prose sits flush under it, no chip, no gutter", () => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([
+        { type: "turn", durationMs: 304_000, at: 900, usage: { inputTokens: 12_300, outputTokens: 800 } },
+        assistant("now I will test", 1000),
+        call("c1", "$ npm test", 2000),
+        result("c1"),
+      ] as LiveFrame[]),
+    });
+    const head = w.find(".step .head");
+    expect(head.find(".meta").text()).toContain("thought 5m 04s");
+    expect(head.find(".meta").text()).toContain("12.3k in");
+    expect(head.find(".ts").text()).toBe(formatClock(1000));
+    expect(head.find(".ts").text()).toMatch(/\d{1,2}:\d\d:\d\d (AM|PM)/); // 12-hour, no brackets
+    expect(head.find(".ts").attributes("title")).toBe(formatLocalIso(1000));
+    expect(head.text()).not.toContain("now I will test"); // the prose is its own row under the cost head
+    expect(w.find(".step .narration").text()).toContain("now I will test");
+    expect(w.find(".think").exists()).toBe(false); // the chip dissolved into the meta row
+    expect(w.find("#log").text()).not.toMatch(/\[\d\d:\d\d:\d\d\]/); // the bracket gutter grammar is gone
+    // a long think is the one tinted fact
+    expect(head.find(".thought").classes().join(" ")).toContain("text-warn");
+  });
+
+  it("a step with no turn shares its one line: the prose left, the clock right", () => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([assistant("tests are red — implementing now", 1500)] as LiveFrame[]),
+    });
+    const head = w.find(".step .head");
+    expect(head.text()).toContain("tests are red");
+    expect(head.find(".ts").text()).toBe(formatClock(1500));
+    expect(w.find(".step .meta").exists()).toBe(false); // no turn, no cost row
+  });
+
+  it("a sub-minute think reads as plain meta, not a warning", () => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([{ type: "turn", durationMs: 5_000, at: 900 }, assistant("quick", 1000)] as LiveFrame[]),
+    });
+    expect(w.find(".step .meta .thought").text()).toBe("thought 5.0s");
+    expect(w.find(".step .meta .thought").classes().join(" ")).not.toContain("text-warn");
+  });
+
+  it("the context fold announces itself with a rotating chevron and shares the toolbar line with the fold toggle", () => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([{ type: "context", text: "earlier turn", at: 500 }, input] as LiveFrame[]),
+    });
+    const chev = w.find("#context summary .chev");
+    expect(chev.exists()).toBe(true);
+    expect(chev.classes().join(" ")).toContain("group-open:rotate-90");
+    // Context and Expand-all live in the SAME bar (one line when collapsed).
+    expect(w.find(".logbar #context").exists()).toBe(true);
+    expect(w.find(".logbar #fold").exists()).toBe(true);
   });
 
   it("the fold toggle opens every card (and future ones), then closes them; icon state flips", async () => {
@@ -219,6 +273,19 @@ describe("RunPage — live mode", () => {
     expect(wrapper.find("details.call").attributes("data-status")).toBe("running");
     expect(wrapper.find("#state").text()).toMatch(/^running · /);
     expect(wrapper.find("h1").text()).toBe("Live run");
+  });
+
+  it("the tab's dot speaks run state: green while the run is going, gray once it ends (a history page never repaints)", async () => {
+    const setFavicon = vi.spyOn(browser, "setFavicon").mockImplementation(() => {});
+    const { wrapper, es } = mountLive();
+    expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_LIVE); // live page: green from the first paint
+    es().emitOpen();
+    es().emitNamed("end");
+    await wrapper.vm.$nextTick();
+    expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_IDLE);
+    setFavicon.mockClear();
+    mountApp(RunPage, { seed: historySeed([]) });
+    expect(setFavicon).not.toHaveBeenCalled(); // history: the shell's gray dot stands
   });
 
   it("dedupes replayed frames by SSE id (a stripped Last-Event-ID must not double the log); replay notes are exempt", async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderShell, WEB_HTML_HEADERS, type ShellAssets } from "./webShell.js";
 import { serializeSeed, SEED_ELEMENT_ID, type WebSeed } from "./webSeed.js";
+import { FAVICON_DEFAULT, FAVICON_IDLE } from "./favicon.js";
 
 const assets: ShellAssets = { js: "/assets/main-AbC123.js", css: ["/assets/main-DeF456.css"] };
 const seed: WebSeed = { page: "runNotFound", retentionDays: 14 };
@@ -74,8 +75,14 @@ describe("renderShell", () => {
     expect(html).toContain(`<meta name="robots" content="noindex" />`);
   });
 
-  it("carries the idle-dot favicon link (the runs page swaps it live by id)", () => {
-    const html = renderShell("Runs", seed, assets);
-    expect(html).toContain(`<link rel="icon" id="favicon" href="data:image/svg+xml,`);
+  it("run-state pages wear the idle dot (the app repaints it live by id); every other page wears the neutral mark", () => {
+    const runs = renderShell("Runs", { page: "runs", now: 0, rows: [], all: false, retentionDays: 30 } as unknown as WebSeed, assets);
+    expect(runs).toContain(`<link rel="icon" id="favicon" href="${FAVICON_IDLE}" />`);
+    const run = renderShell("Run", { page: "run", mode: "history", id: "r", events: [], eventCount: 0 } as unknown as WebSeed, assets);
+    expect(run).toContain(`<link rel="icon" id="favicon" href="${FAVICON_IDLE}" />`);
+    for (const other of [seed, { page: "costs", now: 0 } as unknown as WebSeed]) {
+      expect(renderShell("x", other, assets)).toContain(`<link rel="icon" id="favicon" href="${FAVICON_DEFAULT}" />`);
+    }
+    expect(FAVICON_DEFAULT).not.toBe(FAVICON_IDLE);
   });
 });
