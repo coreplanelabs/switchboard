@@ -77,6 +77,23 @@ describe("parseRunEventLines", () => {
     expect(skipped).toBe(1);
   });
 
+  it("accepts `pr_description` when it carries an object description, skips a string or null one", () => {
+    const ok = { type: "pr_description", description: { title: "Fix the gate" }, at: 1 };
+    const badString = { type: "pr_description", description: "not an object" };
+    const badNull = { type: "pr_description", description: null };
+    const { events, skipped } = parseRunEventLines([ok, badString, badNull].map((e) => JSON.stringify(e)).join("\n"));
+    expect(events).toEqual([ok]);
+    expect(skipped).toBe(2);
+  });
+
+  it("accepts `pr_opened` when it carries url + number + created, skips it otherwise", () => {
+    const ok = { type: "pr_opened", url: "https://github.com/acme/api/pull/7", number: 7, created: true, at: 2 };
+    const bad = { type: "pr_opened", url: "https://github.com/acme/api/pull/7" }; // no number/created
+    const { events, skipped } = parseRunEventLines([ok, bad].map((e) => JSON.stringify(e)).join("\n"));
+    expect(events).toEqual([ok]);
+    expect(skipped).toBe(1);
+  });
+
   it("empty input yields no events", () => {
     expect(parseRunEventLines("")).toEqual({ events: [], skipped: 0 });
   });

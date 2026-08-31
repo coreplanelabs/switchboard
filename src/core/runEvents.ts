@@ -1,4 +1,8 @@
 import type { CompletionResult, TokenUsage } from "../providers/types.js";
+// Types only, and from the zod-free module deliberately: this file is part of
+// the node-free contract the memory Worker and web app compile with their own
+// tsconfigs — importing prDescription.ts would drag zod into those graphs.
+import type { PrDescription } from "./prDescriptionTypes.js";
 
 // Run visibility (Area 2 / R12): a typed stream of what an agent is doing —
 // tool calls and their (redacted, summarized) results — emitted by the runner.
@@ -183,7 +187,22 @@ export type RunEvent =
       meatTokens?: { input: number; output: number };
       seq?: number;
       at?: number;
-    };
+    }
+  /** A coding run's accepted `PrDescription` (features/pr-description.md): the
+   *  typed object the run submitted through `submit_pr_description`, as
+   *  validated — the same object the dispatcher renders the GitHub body from,
+   *  so the run page's review panel can render it without a second authoring
+   *  path. Published by the dispatcher once per run (the last valid submission
+   *  wins), string fields redacted like every event payload. Additive: unknown
+   *  → ignored. */
+  | { type: "pr_description"; description: PrDescription; seq?: number; at?: number }
+  /** The coding PR post-step's outcome (features/pr-description.md item 5):
+   *  the PR opened for the run's pushed branch — or, open-or-edit, the
+   *  existing open PR that was edited (`created: false`). Published by the
+   *  dispatcher straight to the registry BEFORE the stream finishes, so the
+   *  run record carries the PR URL as a fact of the run rather than only the
+   *  channel reply's projection of it. Additive: unknown → ignored. */
+  | { type: "pr_opened"; url: string; number: number; created: boolean; seq?: number; at?: number };
 
 // Credential shapes we must never surface in a run-visibility stream (which may
 // be shown in-channel or on a shared page). Two layers: (1) specific known

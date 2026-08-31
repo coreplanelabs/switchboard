@@ -6,6 +6,7 @@ import { lastThreadDirectives, parseDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
 import { makeWebCapability } from "../tools/web.js";
 import { makeExecutor, residentOnboardedProbe } from "../execution/factory.js";
+import { shellQuote } from "../execution/shellQuote.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
@@ -22,6 +23,8 @@ import {
 } from "./headMoved.js";
 import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
+import { openPullRequest, type OpenedPullRequest, type PullRequestTarget } from "../execution/githubPulls.js";
+import { encodeGithubPathSegments, renderPrDescriptionMarkdown, type PrDescription } from "./prDescription.js";
 import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
 import { checkReviewedHead, normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
@@ -85,6 +88,15 @@ export interface CoreDeps {
    * decision without a network call.
    */
   postReviewComment?: (target: ReviewCommentTarget, body: string) => Promise<void>;
+  /**
+   * Opens the PR for a coding run's pushed branch — or edits the one already
+   * open for it (open-or-edit idempotency) — after the run submitted its typed
+   * `PrDescription` (features/pr-description.md item 5). Default: the real
+   * GitHub REST call with the App installation token
+   * (src/execution/githubPulls.ts; no `gh` shell-out — AGENTS.md invariant 5).
+   * Injectable so tests assert the typed inputs without a network call.
+   */
+  openPullRequest?: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
   /**
    * The PR's head SHA as GitHub reports it right after a review was posted
    * (agent-review.md item 10): when it differs from the reviewed head — a push
@@ -550,6 +562,13 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // The head is a parameter: a re-review at a moved head (item 12) recomposes
     // the prompt with the new commit instead of contradicting the old one.
     const isPrReview = resolved.agentName === "review" && repoCtx.repo !== undefined && repoCtx.pr !== undefined;
+    // Coding PR post-step gate (features/pr-description.md item 5): only a
+    // writable-toolset run can have pushed a branch — readonly (review) and
+    // none/web toolsets never trigger the post-step. The repo is deliberately
+    // NOT part of the gate: a dispatch that resolved no slug can still open
+    // the PR from the workspace's observed origin remote (an agent-discovered
+    // repo; the App token bounds what is writable either way).
+    const isCodingPrRun = agent.toolset === "full";
     const targetBlock = (head: { sha: string | undefined; verified: boolean }): string | undefined =>
       isPrReview && repoCtx.repo && repoCtx.pr !== undefined
         ? reviewTargetBlock({
@@ -803,10 +822,35 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     const onVerdict = (v: ReviewVerdict) => {
       verdict = v;
     };
+    // Coding PR description, set only through the structured
+    // submit_pr_description tool (the last valid call wins — a resubmit after
+    // a fix-up push supersedes the earlier one); the post-step below renders
+    // the GitHub body from it at the observed pushed head and opens/edits the
+    // PR. See prDescription.ts.
+    let prDescription: PrDescription | undefined;
+    const onPrDescription = (d: PrDescription) => {
+      prDescription = d;
+    };
     // The commit actually checked out in the run's workspace when the model
     // finished — read by us, not reported by the model — for the reviewed-head
     // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
     let observedHead: string | undefined;
+    // The branch that commit sits on (coding runs), read alongside it for the
+    // PR post-step. Undefined when unreadable or detached ("HEAD" is not a
+    // branch — nothing a PR could be opened from).
+    let observedBranch: string | undefined;
+    // That branch's upstream commit (`git rev-parse @{u}`), the post-step's
+    // proof of a push: the branch counts as pushed only when this matches the
+    // observed HEAD. Undefined when no upstream is configured or unreadable.
+    let observedUpstream: string | undefined;
+    // `owner/name` parsed from the workspace's origin remote, probed only when
+    // the dispatch resolved no repo (the agent discovered the repo itself) —
+    // the PR-open repo of last resort.
+    let observedRemoteRepo: string | undefined;
+    // The PR post-step's reply note: assembled in the try below — the open
+    // runs BEFORE the stream finishes, so its outcome is a fact of the run —
+    // and appended to the channel reply at the end.
+    let prNote: string | undefined;
     // Set when the head moved during the run by a rebase of the same commits
     // (item 12): the post is pinned to `current` with a footer, and the thread
     // is told the review was carried forward.
@@ -841,7 +885,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         messages,
         system,
         effort: resolved.effort,
-        toolContext: { executor, reportProgress, web: webCapability(), skills: deps.skills, agentName: agent.name, onVerdict },
+        toolContext: { executor, reportProgress, web: webCapability(), skills: deps.skills, agentName: agent.name, onVerdict, onPrDescription },
         onProgress,
         onEvent,
         control: run.control, // operator stop from /runs (#101)
@@ -928,7 +972,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
                 messages,
                 system,
                 effort: resolved.effort,
-                toolContext: { executor, reportProgress, web: webCapability(), skills: deps.skills, agentName: agent.name, onVerdict },
+                toolContext: { executor, reportProgress, web: webCapability(), skills: deps.skills, agentName: agent.name, onVerdict, onPrDescription },
                 onProgress,
                 onEvent,
                 control: run.control,
@@ -937,6 +981,118 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
               if (!run.control.hardSignal.aborted) observedHead = await probeHead();
             }
           }
+        }
+      }
+      // PR post-step observation (features/pr-description.md item 5): for a
+      // writable coding run, read the workspace HEAD, its branch name, and
+      // that branch's upstream NOW — after the model is done, BEFORE the
+      // finally below can release the workspace (a resident re-attach would
+      // show the ref's current tip, not what this run pushed). The cold path
+      // clones into a SUBDIRECTORY of the workspace root, so a failed root
+      // HEAD probe discovers the single clone and re-probes inside it; with
+      // no dispatch-resolved repo the origin remote is read too (an
+      // agent-discovered repo). Best-effort: a failed probe leaves its field
+      // undefined and the post-step reports honestly instead of guessing. A
+      // hard stop tore the work down mid-flight — nothing observed, nothing
+      // posted.
+      if (isCodingPrRun && run.control.requested !== "hard") {
+        const observed = await observeCodingWorkspace(executor, { probeRemote: repoCtx.repo === undefined });
+        observedHead = observed.head;
+        observedBranch = observed.branch;
+        observedUpstream = observed.upstream;
+        observedRemoteRepo = observed.remoteRepo;
+      }
+      // The accepted PrDescription is a fact of the run: publish it as a typed
+      // event BEFORE the finally below finish()es the stream, string fields
+      // redacted like every payload, so the run page's review panel renders
+      // the same object the GitHub body is rendered from.
+      if (prDescription) {
+        registry.publish(run.id, { type: "pr_description", description: redactPrDescription(prDescription), at: Date.now() });
+      }
+      // Deterministic coding PR post-step (features/pr-description.md item 5,
+      // agent-coding.md item 2): a writable coding run that pushed a branch and
+      // submitted its typed PrDescription gets its PR opened — or edited, the
+      // open-or-edit idempotency lives in githubPulls — HERE, in the bot
+      // process, BEFORE the finally below finish()es the stream, so the
+      // outcome lands in the run record as a typed `pr_opened` event and not
+      // only in a console line. Typed values only: the body rendered at the
+      // head observed above, the title from the validated object, the head
+      // from the observed branch. The base is the PR's true base ref when the
+      // thread's context came from a PR (a fix round repushes the PR's OWN
+      // head branch, so the binding ref equals the branch and is NOT the
+      // merge base), else the thread's resident binding ref, else the
+      // dispatch's resolved ref. The repo is the dispatch's slug or — an
+      // agent-discovered repo — the workspace's observed origin remote (the
+      // App token bounds what is writable either way). "Pushed" is OBSERVED,
+      // never inferred: the branch counts as pushed only when its upstream
+      // resolved and matches the observed HEAD. The note rides on the final
+      // reply below. Failure honesty: never a fabricated PR URL, and the
+      // branch compare URL is offered only when the upstream match proved the
+      // remote branch exists. A hard stop observed nothing above and posts
+      // nothing.
+      if (isCodingPrRun && run.control.requested !== "hard") {
+        const repo = repoCtx.repo ?? observedRemoteRepo;
+        const headSha = normalizeHead(observedHead);
+        const branch = observedBranch;
+        const upstream = normalizeHead(observedUpstream);
+        // binding is only ever set on the resident path (factory.ts), so no
+        // resident check is needed — same idiom as the attach note above.
+        const base = repoCtx.baseRef ?? binding?.ref ?? repoCtx.ref;
+        const pushed = headSha !== undefined && upstream !== undefined && sameCommit(upstream, headSha);
+        const compareUrl = repo && branch && pushed ? `https://github.com/${repo}/compare/${encodeGithubPathSegments(branch)}` : undefined;
+        const pushedBranch = branch !== undefined && branch !== base && pushed;
+        if (repo === undefined) {
+          // Neither the dispatch nor the workspace names a repository —
+          // nowhere a PR could be opened. Said plainly when a description was
+          // submitted; otherwise there is nothing to report on.
+          if (prDescription) {
+            console.log(`[pr-post] ${msg.threadKey} skipped: no repo resolvable (none at dispatch, no GitHub origin remote observed; branch ${branch ?? "unknown"})`);
+            prNote = `⚠️ A PR description was submitted but no repository is known for this thread (none resolved at dispatch, and no GitHub origin remote was observed in the workspace), so no PR was opened.`;
+          }
+        } else if (prDescription && branch !== undefined && branch === base) {
+          // The workspace sat on the base branch: nothing was pushed to open a
+          // PR from, and a compare-URL note would mislead — the agent's own
+          // report stands.
+          console.log(`[pr-post] ${msg.threadKey} skipped: workspace on the base branch ${base} (repo ${repo}) — nothing pushed`);
+        } else if (prDescription && branch !== undefined && headSha !== undefined && !pushed) {
+          // A commit sits on a non-base branch, but nothing proves it reached
+          // the remote: no upstream, or an upstream behind the workspace. The
+          // note must not claim a push — and offers no compare URL, which
+          // would imply a remote branch nothing observed.
+          const why =
+            upstream === undefined
+              ? "has no pushed upstream"
+              : `has unpushed commits (its upstream is at ${upstream.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`;
+          console.log(`[pr-post] ${msg.threadKey} skipped: push not observed (repo ${repo}, branch ${branch}, head ${headSha.slice(0, 7)}, upstream ${upstream?.slice(0, 7) ?? "none"})`);
+          prNote = `⚠️ A PR description was submitted but the branch \`${branch}\` ${why}, so no PR was opened.`;
+        } else if (prDescription && pushedBranch && headSha?.length === 40 && base) {
+          try {
+            const body = renderPrDescriptionMarkdown(prDescription, { repo, headSha });
+            const open = deps.openPullRequest ?? openPullRequest;
+            const opened = await open({ repo, headBranch: branch, base, title: prDescription.title, body });
+            console.log(`[pr-post] ${msg.threadKey} ${opened.created ? "opened" : "updated"} ${repo}#${opened.number} (${branch} → ${base} @ ${headSha.slice(0, 7)})`);
+            registry.publish(run.id, { type: "pr_opened", url: opened.htmlUrl, number: opened.number, created: opened.created, at: Date.now() });
+            prNote = opened.created
+              ? `🔀 PR opened: ${opened.htmlUrl} (\`${branch}\` → \`${base}\`)`
+              : `🔀 PR updated: ${opened.htmlUrl} — body re-rendered at \`${headSha.slice(0, 7)}\``;
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : String(err);
+            console.error(`[pr-post] ${msg.threadKey} open/edit failed for ${repo} ${branch}: ${reason}`);
+            prNote = `⚠️ The branch \`${branch}\` is pushed but the PR could not be opened: ${reason} — compare & open manually: ${compareUrl}`;
+          }
+        } else if (prDescription && pushedBranch && !base) {
+          console.log(`[pr-post] ${msg.threadKey} skipped: no base branch resolvable (repo ${repo}, branch ${branch})`);
+          prNote = `⚠️ A PR description was submitted but no base branch is known for this thread, so no PR was opened — compare & open manually: ${compareUrl}`;
+        } else if (prDescription) {
+          // A description was submitted but the pushed head — or the branch
+          // itself (a failed probe, a detached checkout) — could not be
+          // observed. Never render anchors at a guessed commit, and never leave
+          // the submission dangling silently: say plainly that no PR was opened.
+          console.log(`[pr-post] ${msg.threadKey} skipped: push unobservable (repo ${repo}, branch ${branch ?? "unknown"}, head ${headSha ?? "unknown"})`);
+          prNote = `⚠️ A PR description was submitted but the pushed ${branch === undefined ? "branch" : "head"} could not be observed in the workspace, so no PR was opened${compareUrl ? ` — compare & open manually: ${compareUrl}` : "."}`;
+        } else if (pushedBranch && compareUrl) {
+          console.log(`[pr-post] ${msg.threadKey} skipped: no description submitted (repo ${repo}, branch ${branch})`);
+          prNote = `ℹ️ No PR was opened: the run pushed \`${branch}\` but submitted no PR description (submit_pr_description was never called) — compare & open manually: ${compareUrl}`;
         }
       }
       // The run record is the source of truth and Slack/GitHub are projections
@@ -1026,6 +1182,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // (a summary was written), ⛔ hard (aborted, no summary).
     const stopped = run.control.requested;
     console.log(`[done] ${msg.threadKey} ${answer.length} chars${stopped ? ` (stopped: ${stopped})` : ""}`);
+
+    // The coding PR post-step ran INSIDE the try above (before the stream
+    // finished — its outcome is the `pr_opened` event); `prNote` carries what
+    // it has to say to the thread.
     // `finally`, not sequential: a Slack failure in either call (outage, an
     // unchunkable line) must still give the pool user back, or it is held
     // until the hourly sweep — the toil 16a exists to avoid.
@@ -1037,7 +1197,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // only — the `answer` event published above and the GitHub post body stay
       // link-free.
       const channelAnswer = agent.name === "review" && liveUrl ? `${answer}\n\n[Live run](${liveUrl})` : answer;
-      await io.reply(channelAnswer);
+      // The PR note (post-step above) is a projection too: the `answer` event
+      // stays the model's own words — the PR facts live in the pr_description
+      // event and the [pr-post] log line.
+      await io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer);
     } finally {
       await releaseWorkspace();
     }
@@ -1198,6 +1361,123 @@ async function classifyMove(
   ]);
   if (!before || !after) return undefined;
   return { move: classifyHeadMove(before, after), before, after };
+}
+
+/** The branch name from `git rev-parse --abbrev-ref HEAD` output, or undefined
+ *  when the command failed (the executors' `exit N:`/`fatal:` noise), printed
+ *  nothing usable, or the checkout is detached (`HEAD` is not a branch —
+ *  nothing a PR could be opened from). A branch name is one whitespace-free
+ *  token; anything else on the first non-empty line is command noise. */
+function parseBranchOutput(output: string): string | undefined {
+  const first = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!first || first === "HEAD") return undefined;
+  if (/\s/.test(first) || /^(exit \d+:|fatal:|error:)/i.test(first)) return undefined;
+  return first;
+}
+
+/** What the PR post-step observed in the run's workspace, all read BEFORE the
+ *  workspace is released. Every field is undefined when its probe failed. */
+interface WorkspaceObservation {
+  head: string | undefined;
+  branch: string | undefined;
+  /** The checked-out branch's upstream commit (`@{u}`) — the proof of a push. */
+  upstream: string | undefined;
+  /** `owner/name` parsed from the origin remote, probed only when asked. */
+  remoteRepo: string | undefined;
+}
+
+/**
+ * Probe a coding run's workspace — HEAD, branch, upstream, and (when the
+ * dispatch resolved no repo) the origin remote — concurrently, at the
+ * workspace root first. Cold coding agents clone the repo into a SUBDIRECTORY
+ * of the sandbox root (the coding prompt mandates at most ONE clone), so a
+ * failed root HEAD probe discovers the single cloned repo and re-probes with
+ * `git -C` — the directory shell-quoted AND vetted against a conservative
+ * name pattern, never interpolated raw. Best-effort throughout: a failed
+ * probe leaves its field undefined and the post-step reports honestly.
+ */
+async function observeCodingWorkspace(
+  executor: { exec: (cmd: string) => Promise<string> },
+  opts: { probeRemote: boolean },
+): Promise<WorkspaceObservation> {
+  const probe = (cmd: string) => executor.exec(cmd).catch(() => "");
+  const probesAt = async (git: string): Promise<WorkspaceObservation> => {
+    const [headOut, branchOut, upstreamOut, remoteOut] = await Promise.all([
+      probe(`${git} rev-parse HEAD`),
+      probe(`${git} rev-parse --abbrev-ref HEAD`),
+      probe(`${git} rev-parse @{u}`),
+      opts.probeRemote ? probe(`${git} remote get-url origin`) : Promise.resolve(""),
+    ]);
+    return {
+      head: parseRevParseOutput(headOut),
+      branch: parseBranchOutput(branchOut),
+      upstream: parseRevParseOutput(upstreamOut),
+      remoteRepo: parseOriginRemoteOutput(remoteOut),
+    };
+  };
+  const atRoot = await probesAt("git");
+  if (atRoot.head !== undefined) return atRoot;
+  const dir = parseCloneDirOutput(await probe("ls -d */.git 2>/dev/null | head -1"));
+  if (dir === undefined) return atRoot; // no clone anywhere → the post-step reports honestly
+  return probesAt(`git -C ${shellQuote(dir)}`);
+}
+
+/** The single cloned repo directory from `ls -d *\/.git` output, or undefined.
+ *  Conservative on purpose: the name is interpolated into a `git -C` command
+ *  (shell-quoted as well), so anything but a plain repo-name-shaped directory
+ *  — spaces, a leading dash an option parser could eat, dot traversal — is
+ *  refused rather than probed. */
+function parseCloneDirOutput(output: string): string | undefined {
+  const first = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  const dir = first?.match(/^(.+)\/\.git\/?$/)?.[1];
+  if (!dir || !/^[A-Za-z0-9._-]{1,100}$/.test(dir) || /^\.+$/.test(dir) || dir.startsWith("-")) return undefined;
+  return dir;
+}
+
+// The clone-URL forms a GitHub origin remote takes: https, scp-style ssh, and
+// URL-style ssh; owner/name held to the same conservative charsets
+// repoContext.ts binds slugs with (the trailing `.git` is stripped after).
+const ORIGIN_REMOTE_RE =
+  /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)\/([A-Za-z0-9._-]{1,104})$/;
+
+/** The `owner/name` slug from `git remote get-url origin` output, or undefined
+ *  for anything that is not a well-formed GitHub remote (another host, a local
+ *  path, the executors' command noise). Lowercased like every resolved slug. */
+function parseOriginRemoteOutput(output: string): string | undefined {
+  const first = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!first || /\s/.test(first)) return undefined;
+  const m = ORIGIN_REMOTE_RE.exec(first);
+  if (!m) return undefined;
+  const name = m[2].replace(/\.git$/i, "");
+  if (name.length === 0 || name.length > 100 || /^\.+$/.test(name)) return undefined;
+  return `${m[1]}/${name}`.toLowerCase();
+}
+
+/** The `pr_description` event's payload: every string LEAF passed through
+ *  `redactSecrets` by a generic deep walk — numbers/booleans ride unchanged,
+ *  structure preserved — so a field added to the schema (or a secret smuggled
+ *  into an anchor path) can never dodge redaction by being missed in a
+ *  hand-walk. */
+function redactPrDescription(d: PrDescription): PrDescription {
+  return redactStringLeaves(d) as PrDescription;
+}
+
+function redactStringLeaves(value: unknown): unknown {
+  if (typeof value === "string") return redactSecrets(value);
+  if (Array.isArray(value)) return value.map(redactStringLeaves);
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, redactStringLeaves(v)]));
+  }
+  return value;
 }
 
 /** The agent name an inline (no-model) command run carries in its `RunMeta` and
@@ -1531,6 +1811,10 @@ function activityLine(e: RunEvent): string {
       return `📚 skill ${e.skill} loaded`;
     case "review_artifact":
       return "reading diff ready"; // published straight to the registry — never arrives here
+    case "pr_description":
+      return "PR description recorded"; // published straight to the registry — never arrives here
+    case "pr_opened":
+      return "PR opened"; // published straight to the registry — never arrives here
   }
 }
 
