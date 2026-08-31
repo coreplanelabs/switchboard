@@ -265,7 +265,11 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
 
     <div class="mx-auto max-w-6xl">
       <!-- Request -->
-      <section v-if="state.request" id="request" class="block mb-5 rounded-lg border border-default bg-(--ui-bg-muted) px-3 py-2.5">
+      <!-- The card's spacing states the hierarchy: the frame (label, meta)
+           and the framed prose breathe by the same rhythm — the meta row is
+           small type, so it gets MORE air, not less (gap-y for the phone
+           where it wraps to two lines). -->
+      <section v-if="state.request" id="request" class="block mb-5 rounded-lg border border-default bg-(--ui-bg-muted) px-3.5 py-3">
         <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
           <span>Request</span>
           <span class="ts select-none text-xs normal-case tracking-normal text-dimmed" :title="fmtTimeTitle(state.request.at)">{{ fmtTime(state.request.at) }}</span>
@@ -290,7 +294,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         <!-- What the run is about (item 19/21): agent · model · effort · linked
              repo · branch tag · GitHub-marked #PR. The branch is a fact, not a
              destination; the sha is gone for the same reason. -->
-        <div v-if="state.meta" class="runmeta mt-2.5 flex flex-wrap items-baseline gap-2 border-t border-default pt-2 text-xs text-muted" id="runmeta">
+        <div v-if="state.meta" class="runmeta mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 border-t border-default pt-2.5 text-xs text-muted" id="runmeta">
           <span class="agent text-[0.68rem] font-semibold uppercase tracking-wider text-toned">{{ state.meta.agent }}</span>
           <span class="model">{{ state.meta.model }}</span>
           <span v-if="state.meta.effort" class="effort text-toned">{{ state.meta.effort }} effort</span>
@@ -396,7 +400,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       </ol>
 
       <!-- Answer -->
-      <section v-if="state.answer" id="answer" class="block mt-6 rounded-lg border border-ok/40 bg-(--ui-bg-muted) px-3 py-2.5">
+      <section v-if="state.answer" id="answer" class="block mt-6 rounded-lg border border-ok/40 bg-(--ui-bg-muted) px-3.5 py-3">
         <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-ok">
           <span>Answer</span>
           <span class="ts select-none text-xs normal-case tracking-normal text-dimmed" :title="fmtTimeTitle(state.answer.at)">{{ fmtTime(state.answer.at) }}</span>
