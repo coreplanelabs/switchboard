@@ -190,6 +190,55 @@ describe("createRunHistoryWriter", () => {
     expect(writer.failures()).toBe(0);
   });
 
+  it("a final write for the same id stands down a provisional write sitting in retry backoff (#375): the tombstone retry never lands after the finish record", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { store, puts } = scriptedStore([new TransientStoreError("HTTP 503"), OK, OK]);
+    const persisted: string[] = [];
+    const writer = createRunHistoryWriter({ store, warn: () => {}, onPersisted: (id) => persisted.push(id), sleep: () => gate });
+    writer.write({ ...record("run-x"), status: "interrupted" }, { provisional: true });
+    await new Promise((r) => setTimeout(r, 0)); // the tombstone's first put failed; it is now in backoff
+    writer.write(record("run-x")); // the run finished: its FINAL record is enqueued
+    release();
+    await writer.settled();
+    // Two puts, not three: the provisional retry stood down instead of clobbering the final record.
+    expect(puts.map((r) => [r.id, r.status])).toEqual([
+      ["run-x", "interrupted"],
+      ["run-x", "completed"],
+    ]);
+    expect(persisted).toEqual(["run-x"]);
+    expect(writer.failures()).toBe(0); // a stood-down write is not a loss — the final record IS the run's record
+    expect(writer.pending()).toBe(0);
+  });
+
+  it("the stand-down is per id: a provisional write for a DIFFERENT run retries and lands untouched", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { store, puts } = scriptedStore([new TransientStoreError("HTTP 503"), OK, OK]);
+    const writer = createRunHistoryWriter({ store, warn: () => {}, sleep: () => gate });
+    writer.write({ ...record("run-a"), status: "interrupted" }, { provisional: true });
+    await new Promise((r) => setTimeout(r, 0)); // run-a's tombstone is in backoff
+    writer.write(record("run-b"));
+    release();
+    await writer.settled();
+    expect(puts.map((r) => [r.id, r.status])).toEqual([
+      ["run-a", "interrupted"],
+      ["run-b", "completed"],
+      ["run-a", "interrupted"], // the retry ran: run-b's final write supersedes nothing of run-a's
+    ]);
+    expect(writer.failures()).toBe(0);
+  });
+
+  it("a provisional write enqueued after the run's final write is dropped before its first attempt", async () => {
+    const h = harness([OK]);
+    h.writer.write(record("run-c"));
+    await h.writer.settled();
+    h.writer.write({ ...record("run-c"), status: "interrupted" }, { provisional: true });
+    await h.writer.settled();
+    expect(h.puts.map((r) => r.status)).toEqual(["completed"]); // the final record stands
+    expect(h.writer.failures()).toBe(0);
+  });
+
   it("concurrent writes are tracked independently: pending() is the number in flight, settled() waits for all", async () => {
     const h = harness([OK, new TransientStoreError("x"), OK]);
     h.writer.write(record("run-1"));
