@@ -3,26 +3,18 @@ import type { IncomingHttpHeaders } from "node:http";
 import {
   createLiveViewHandler,
   escapeHtml,
-  indexRowHtml,
-  indexRowRenderer,
-  INDEX_ROW_SCRIPT,
   parseLastEventId,
   parseRunRoute,
-  renderRunPage,
-  RUN_TIMELINE_SCRIPT,
-  renderRunsIndex,
   retentionSentence,
-  seedEventsJson,
   serveEvents,
   serveIndexEvents,
-  staticDocument,
   withOmittedMarkers,
   type IndexRow,
   type LiveViewDeps,
   type SseSink,
 } from "./liveView.js";
-import { renderMarkdownInto } from "./markdownLite.js";
-import { createRunTimeline } from "./runTimeline.js";
+import { makeShellRenderer, type ShellRenderer } from "./webShell.js";
+import { SEED_ELEMENT_ID, type RunHistorySeed, type RunLiveSeed, type RunNotFoundSeed, type RunsIndexSeed, type ScheduledSeed, type WebSeed } from "./webSeed.js";
 import { isLoopbackAddress } from "./commandHttp.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
@@ -35,18 +27,33 @@ import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
 import { FIXTURE_SCHEDULES } from "./scheduledPanel.test.js";
 import { InMemoryScheduleStore, type ScheduleStore } from "../core/scheduleStore.js";
 
-// Feature: features/live-view.md — the external live-view page + SSE stream.
-// Auth is a per-run capability token (in the URL, not a header); a wrong/missing
-// token or unknown run is a 404. Handlers are transport-free where possible:
-// parseRunRoute (pure), renderRunPage (pure), serveEvents (drives an SseSink).
+// Feature: features/live-view.md — the external live-view surface. Every HTML
+// route serves the web-app shell with this page's SEED embedded (rendering
+// itself is tested in web/); these tests own the server side: routing, the
+// capability-token and Access gates, the seeds' content (token rules, 404
+// shapes, retention), and the SSE transport. Auth is a per-run capability
+// token (in the URL, not a header); a wrong/missing token or unknown run is a
+// 404 that never reveals existence.
 
 const call = (summary: string): RunEvent => ({ type: "tool_call", tool: "bash", summary });
 const result = (ok: boolean, summary: string): RunEvent => ({ type: "tool_result", tool: "bash", ok, summary });
 
-/** Every SSE response now writes this prelude first, to flush the 200 head so the
- *  browser's EventSource fires `onopen` even before any data (fixes the page being
- *  stuck "connecting" through a buffering proxy when there's nothing to replay). */
+/** Every SSE response writes this prelude first, to flush the 200 head so the
+ *  browser's EventSource fires `onopen` even before any data. */
 const PRELUDE = "retry: 3000\n\n";
+
+/** Fixed assets so shell output is deterministic. */
+const shell: ShellRenderer = makeShellRenderer({ js: "/assets/main-test.js", css: ["/assets/main-test.css"] });
+
+/** The seed a rendered shell carries — what the web app will paint. */
+function seedOf(html: string): WebSeed {
+  const m = new RegExp(`<script type="application/json" id="${SEED_ELEMENT_ID}">([\\s\\S]*?)</script>`).exec(html);
+  if (!m) throw new Error("no seed island in the page");
+  return JSON.parse(m[1]) as WebSeed;
+}
+const indexSeedOf = (html: string) => seedOf(html) as RunsIndexSeed;
+const runSeedOf = (html: string) => seedOf(html) as RunLiveSeed | RunHistorySeed;
+const scheduledSeedOf = (html: string) => seedOf(html) as ScheduledSeed;
 
 /** Deterministic registry so ids/tokens are predictable in URL assertions. */
 function fixedRegistry() {
@@ -55,9 +62,9 @@ function fixedRegistry() {
 }
 
 /** The handler over a registry alone — run history off (store: null), the
- *  pre-#157 live-only shape every token-path test below exercises. */
+ *  live-only shape every token-path test below exercises. */
 function liveOnlyHandler(registry: RunRegistry) {
-  return createLiveViewHandler({ service: createRunsService({ registry, store: null }), index: registry, retention: null });
+  return createLiveViewHandler({ shell, service: createRunsService({ registry, store: null }), index: registry, retention: null });
 }
 
 /** An SseSink that records everything written, for socket-free assertions. */
@@ -122,413 +129,7 @@ describe("escapeHtml", () => {
   });
   it("escapes & before the entity-introducing characters (no double-escaping order bug)", () => {
     expect(escapeHtml("a<b")).toBe("a&lt;b");
-    expect(escapeHtml("&amp;")).toBe("&amp;amp;"); // the literal input & is escaped once
-  });
-});
-
-describe("renderRunsIndex", () => {
-  const summary = (over: Partial<RunSummary> = {}): RunSummary => ({
-    id: "run-1",
-    token: "tok-1",
-    label: "coding · owner/repo",
-    finished: false,
-    startedAt: 1000,
-    eventCount: 3,
-    ...over,
-  });
-
-  it("lists each run as a link carrying its per-run token", () => {
-    const html = renderRunsIndex([summary()]);
-    expect(html).toContain('href="/runs/run-1?t=tok-1"');
-    expect(html).toContain('<span class="agent agent-coding">coding</span><a class="repo" href="https://github.com/owner/repo" target="_blank" rel="noopener noreferrer" data-tip="owner/repo">repo</a>'); // item 18: agent chip · scope
-  });
-
-  it("shows an empty-state message when there are no active runs", () => {
-    expect(renderRunsIndex([])).toMatch(/no active runs/i);
-  });
-
-  it("is self-contained (no external/CDN assets — CSP-safe)", () => {
-    const html = renderRunsIndex([summary()]);
-    // outbound NAVIGATION links (the repo tag, a thread link) are fine; nothing is LOADED from elsewhere
-    const withThread = renderRunsIndex([summary({ sourceUrl: "https://acme.slack.com/archives/C1/p1" })]);
-    for (const page of [html, withThread]) {
-      expect(page).not.toMatch(/<(?:script|link|img|iframe|source|video|audio|object|embed)\b[^>]*\b(?:src|href)\s*=\s*["']https?:/i);
-      expect(page).not.toMatch(/@import|url\(\s*["']?https?:/i);
-      expect(page).not.toContain("//cdn");
-    }
-    expect(withThread).toContain('href="https://acme.slack.com/archives/C1/p1"');
-  });
-
-  it("HTML-escapes a malicious label instead of injecting it", () => {
-    const html = renderRunsIndex([summary({ label: "<script>alert(1)</script>" })]);
-    expect(html).not.toContain("<script>alert(1)</script>");
-    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
-  });
-
-  it("URL-encodes id/token into the href so special chars can't break the link or markup", () => {
-    const html = renderRunsIndex([summary({ id: 'a/b"c', token: 'x"y', label: undefined })]);
-    expect(html).toContain("/runs/a%2Fb%22c?t=x%22y");
-    expect(html).not.toContain('t=x"y'); // raw quote never lands in an attribute
-  });
-
-  it("opens an EventSource on the index SSE feed (/runs?stream=1) for live updates", () => {
-    const html = renderRunsIndex([summary()]);
-    expect(html).toContain('new EventSource("/runs?stream=1")');
-  });
-
-  it("keys each server-rendered row by data-run-id so the client can reconcile it", () => {
-    const html = renderRunsIndex([summary()]);
-    expect(html).toContain('data-run-id="run-1"');
-  });
-
-  it("escapes the data-run-id attribute so a hostile id can't break out of it", () => {
-    const html = renderRunsIndex([summary({ id: 'a"b', label: undefined })]);
-    expect(html).toContain('data-run-id="a&quot;b"');
-    expect(html).not.toContain('data-run-id="a"b"');
-  });
-
-  it("updates rows client-side with textContent, never innerHTML (no injection)", () => {
-    const html = renderRunsIndex([summary()]);
-    expect(html).toContain("textContent");
-    expect(html).not.toContain("innerHTML");
-  });
-
-  it("has a connection-state indicator like the per-run page", () => {
-    const html = renderRunsIndex([]);
-    expect(html).toContain('id="state"');
-  });
-
-  it("carries data-started-at on each row so the client can place rows by start time", () => {
-    const html = renderRunsIndex([summary({ startedAt: 1000 })]);
-    expect(html).toContain('data-started-at="1000"');
-  });
-
-  it("server-renders multiple runs newest-first, with matching data-started-at order", () => {
-    const html = renderRunsIndex([
-      summary({ id: "newer", startedAt: 2000, label: undefined }),
-      summary({ id: "older", startedAt: 1000, label: undefined }),
-    ]);
-    expect(html.indexOf('data-run-id="newer"')).toBeLessThan(html.indexOf('data-run-id="older"'));
-    expect(html.indexOf('data-started-at="2000"')).toBeLessThan(html.indexOf('data-started-at="1000"'));
-  });
-
-  it("inserts new rows by startedAt (sorted), not a blind prepend — so a replayed batch isn't inverted", () => {
-    const html = renderRunsIndex([summary()]);
-    expect(html).toContain("insertSorted"); // client places by comparing data-started-at
-    expect(html).not.toContain("list.firstChild"); // the old blind-prepend is gone
-  });
-
-  it("makes the ENTIRE row a link (a stretched anchor under the body, named after the run), with the label in the body beside it", () => {
-    const html = renderRunsIndex([summary()]);
-    // one anchor carrying the token URL covers the row; the body is its sibling (links and buttons may not nest in a link)
-    expect(html).toContain('<a class="row" href="/runs/run-1?t=tok-1" aria-label="open run coding · owner/repo"></a><div class="body">');
-    expect(html).toMatch(/<\/a><div class="body">[\s\S]*>coding<[\s\S]*>repo<[\s\S]*<\/div><\/li>/);
-    expect(html).toMatch(/#runs a\.row \{ position: absolute; inset: 0;/);
-    // the data attrs the client reconciles on stay on the <li>, not the <a>
-    expect(html).toContain('<li class="run live" data-run-id="run-1" data-started-at="1000">');
-  });
-
-  it("has a :hover background so the row reads as clickable", () => {
-    const html = renderRunsIndex([summary()]);
-    expect(html).toMatch(/li\.run:hover[^{]*\{[^}]*background/);
-  });
-
-  it("renders a per-row status dot: green for live, grey for finished, with an accessible label", () => {
-    const live = renderRunsIndex([summary({ finished: false })]);
-    expect(live).toMatch(/<span class="dot green"[^>]*aria-label="live"/);
-    const done = renderRunsIndex([summary({ finished: true })]);
-    expect(done).toMatch(/<span class="dot grey"[^>]*aria-label="finished"/);
-  });
-
-  it("gives the header connection indicator a status dot alongside its label (dot + label)", () => {
-    const html = renderRunsIndex([]);
-    expect(html).toContain('id="statedot"'); // the colored connection dot
-    expect(html).toContain('id="state"'); // and its text label
-  });
-
-  it("client-added rows are full-row clickable and carry a status dot too (parity with server rows)", () => {
-    const html = renderRunsIndex([summary()]);
-    expect(html).toContain('a.className = "row"'); // client builds the same full-row anchor
-    expect(html).toContain('dot.setAttribute("aria-label"'); // …and an accessible status dot
-    expect(html).not.toContain("innerHTML"); // still textContent/setAttribute only
-  });
-
-  it("HTML-escapes a hostile label even inside the full-row anchor", () => {
-    const html = renderRunsIndex([summary({ label: "<img src=x onerror=alert(1)>" })]);
-    expect(html).not.toContain("<img src=x");
-    expect(html).toContain("&lt;img src=x");
-  });
-});
-
-// Feature: features/live-view.md item 11 — the run page shows the final answer
-// (the `answer` event) as its own block, via textContent; the index hides its
-// empty-state sentinel even though rows are flex containers.
-describe("final answer on the run page + index empty-state (post-#137 fixes)", () => {
-  it("renders an `answer` change into a dedicated block through the safe markdown renderer", () => {
-    const html = renderRunPage("run-1", "tok-1");
-    expect(html).toContain('change.kind === "answer"');
-    expect(html).toContain('id="answer"');
-    expect(html).toMatch(/md\(answerText, change\.text\)/);
-    expect(html).not.toContain("innerHTML");
-    // Every addition — the answer included — only scrolls into view when the
-    // viewer was already at the tail; a reader parked on earlier steps keeps
-    // their place (review nit, #158). `wasAtTail` is sampled once per event,
-    // BEFORE anything is added, so the addition itself can't defeat the check.
-    expect(html).toMatch(/var wasAtTail = atTail\(\);\s*var changes = timeline\.push\(e\);/);
-    expect(html).toMatch(/function follow\(node, wasAtTail\) \{ if \(wasAtTail\) node\.scrollIntoView/);
-    expect(html).toContain("follow(answerBox, wasAtTail)");
-  });
-
-  it("every markdown surface renders through a try/catch guard that falls back to textContent (#179 review)", () => {
-    const html = renderRunPage("run-1", "tok-1");
-    expect(html).toMatch(/function md\(target, text\) \{\s*try \{ renderMarkdownInto\(target, text\); \} catch \(_\) \{ target\.textContent = text; \}/);
-    // The three surfaces call the guard, never the renderer directly.
-    expect(html).toContain("md(box, narration.text)");
-    expect(html).toContain("md(requestText, change.text)");
-    expect(html).toContain("md(answerText, change.text)");
-    expect(html.match(/renderMarkdownInto\(/g)?.length).toBe(1 + 1); // the definition + the guard's single call
-  });
-
-  it("the index hides the empty sentinel with a rule that beats `#runs li { display:flex }`", () => {
-    const html = renderRunsIndex([]);
-    expect(html).toMatch(/#runs li\[hidden\]\s*\{\s*display:\s*none/);
-  });
-});
-
-// Feature: features/live-view.md item 12 — the run page is a timeline of the
-// whole run: the request on top, the model's prose between tool rows, a UTC
-// timestamp on every row, and markdown rendered through the inlined safe subset.
-describe("run page timeline (request, assistant turns, timestamps, markdown)", () => {
-  const html = renderRunPage("run-1", "tok-1");
-
-  it("inlines the self-contained markdown renderer AND the timeline model (String(fn)), shim first", () => {
-    expect(html).toContain(String(renderMarkdownInto));
-    expect(html).toContain(RUN_TIMELINE_SCRIPT);
-    expect(RUN_TIMELINE_SCRIPT).toBe(String(createRunTimeline));
-    // The transpiler's keepNames helper (`__name`, emitted by esbuild under tsx)
-    // must resolve in the browser: a no-op shim precedes BOTH inlined sources.
-    const shim = html.indexOf("var __name = function (fn) { return fn; };");
-    expect(shim).toBeGreaterThan(-1);
-    expect(shim).toBeLessThan(html.indexOf("function renderMarkdownInto("));
-    expect(shim).toBeLessThan(html.indexOf("function createRunTimeline("));
-    // every event goes through the model; the page applies its changes
-    expect(html).toContain("var timeline = createRunTimeline();");
-    expect(html).toContain("var changes = timeline.push(e);");
-    expect(html).not.toContain("innerHTML");
-  });
-
-  it("renders the `input` change into a Request block that sits ABOVE the log, the answer below", () => {
-    expect(html).toContain('change.kind === "input"');
-    expect(html).toContain('id="request"');
-    expect(html.indexOf('id="request"')).toBeLessThan(html.indexOf('<ol id="log"'));
-    expect(html.indexOf('<ol id="log"')).toBeLessThan(html.indexOf('id="answer"'));
-    expect(html).toContain(">Request<");
-  });
-
-  it("renders a step's narration as proportional prose and its calls beneath it, on ONE left edge (no rails)", () => {
-    expect(html).toContain('change.kind === "step"');
-    expect(html).toMatch(/li\.step > \.narration[^{]*\{[^}]*display: flex/);
-    expect(html).not.toMatch(/\.calls\s*\{[^}]*border-left/); // the rail that misaligned with the prose is gone
-    // steps are separated by space that beats the `#log > li` margin reset
-    expect(html).toMatch(/#log > li\.step \+ li\.step[^{]*\{[^}]*margin-top/);
-  });
-
-  it("stamps every row and both blocks with a gray local-zone ISO timestamp from `at` (omitted when absent)", () => {
-    // formatLocalIso (localIso.ts) is inlined and reads the viewer's zone offset
-    expect(html).toContain("function formatLocalIso(");
-    expect(html).toContain("getTimezoneOffset()");
-    expect(html).not.toContain("toISOString().slice(11, 19)");
-    expect(html).toMatch(/function fmtTime\(at\)\s*\{\s*return typeof at === "number" \? "\[" \+ formatLocalIso\(at\) \+ "\]" : "";/);
-    expect(html).toMatch(/\.ts\s*\{[^}]*color:\s*var\(--dim\)/); // gray
-    // no `at` → no bracket: the formatter returns "" for a missing timestamp
-    expect(html).toMatch(/function fmtTime\(at\)\s*\{\s*return typeof at === "number" \? "\[" \+ .*\]" : "";/);
-    // rows are built from a timestamp span + a body, via createElement/textContent
-    // item 18: the gutter stamp is the short local clock with the full ISO on hover
-    expect(html).toContain('var s = el("span", "ts", typeof at === "number" ? "[" + formatLocalIso(at).slice(11, 19) + "]" : "");');
-    expect(html).toContain('if (typeof at === "number") s.setAttribute("title", formatLocalIso(at));');
-    expect(html).toContain('appendHead(li, at, turn, step.narration || null'); // the step head carries the narration's `at` (item 18)
-    expect(html).toContain("stamp(call.startedAt)");
-    expect(html).toContain("requestTs.textContent = fmtTime(change.at)");
-    expect(html).toContain("answerTs.textContent = fmtTime(change.at)");
-  });
-
-  it("keeps the commands monospace and the markdown surfaces proportional", () => {
-    expect(html).toMatch(/body\s*\{[^}]*font: 13px\/1\.5 var\(--mono\)/);
-    expect(html).toMatch(/--mono: ui-monospace/);
-    expect(html).toMatch(/\.md\s*\{[^}]*var\(--sans\)/);
-    expect(html).toMatch(/--sans: -apple-system/);
-  });
-});
-
-// Feature: features/live-view.md item 13 — the run page groups the flat stream
-// into steps and call cards: the command as a collapsible <details> with its
-// truthful status, exit code, size and duration in the header and the redacted
-// output inside; failures open by default; a live tail names what is running.
-describe("run page call cards (grouped timeline, item 13)", () => {
-  const html = renderRunPage("run-1", "tok-1");
-
-  it("renders each call as a native <details> card: <summary> header, output body — no custom toggle JS", () => {
-    expect(html).toContain('el("details", "call " + call.status)');
-    expect(html).toContain('el("summary")');
-    expect(html).toContain('el("pre", "out", text)');
-    expect(html).toMatch(/details\.call > summary::-webkit-details-marker \{ display: none; \}/);
-    expect(html).toMatch(/details\.call > summary:focus-visible \{ outline/); // keyboard-reachable
-  });
-
-  it("the header carries: timestamp, status glyph (spinner while running, ✓ ✗ ⚠ after), `$` for shell / tool chip otherwise, command, facts, chevron", () => {
-    expect(html).toContain('if (call.status === "running") return el("span", "spin");');
-    expect(html).toContain('call.status === "ok" ? "\\u2713" : call.status === "failed" ? "\\u2717" : "\\u26a0"');
-    expect(html).toContain('call.shell ? el("span", "dollar", "$") : el("span", "tool", call.tool)');
-    expect(html).toContain('el("span", bad ? "fact bad" : "fact", f)'); // exit 1 / error / sandbox error read red
-    expect(html).toContain('el("span", "chev", "\\u276f")');
-    expect(html).toMatch(/details\.call\[open\] > summary \.chev \{ transform: rotate\(90deg\); \}/);
-  });
-
-  it("collapsed shows the one-line headline; open shows the full command with a hanging indent for wrapped lines", () => {
-    expect(html).toContain('el("code", "cmd brief", call.headline)');
-    expect(html).toContain('el("code", "cmd full", call.title)');
-    expect(html).toMatch(/details\.call:not\(\[open\]\) > summary \.cmd\.full \{ display: none; \}/);
-    expect(html).toMatch(/details\.call\[open\] > summary \.cmd\.brief \{ display: none; \}/);
-    // the command is its own flex item with pre-wrap, so continuation lines
-    // align under the command's first character, not under the timestamp
-    expect(html).toMatch(/\.cmd \{[^}]*flex: 1 1 auto[^}]*white-space: pre-wrap/);
-    expect(html).toMatch(/\.cmd\.brief \{[^}]*text-overflow: ellipsis/);
-  });
-
-  it("the body shows the redacted output (or `no output` / `running…`), never markup", () => {
-    expect(html).toContain("var text = call.result.output || call.result.summary;");
-    expect(html).toContain('el("div", "none", "no output")');
-    expect(html).toContain('el("div", "none", "running\\u2026")');
-    expect(html).not.toContain("innerHTML");
-    expect(html).not.toContain("insertAdjacentHTML");
-  });
-
-  it("failures and sandbox errors open by default; the list is a page constant overridable with ?open=tag,tag (or all)", () => {
-    expect(html).toContain('var OPEN_BY_DEFAULT = ["failed", "infra"];');
-    expect(html).toContain('new URLSearchParams(window.location.search).get("open")');
-    expect(html).toMatch(/if \(OPEN_BY_DEFAULT\.indexOf\("all"\) !== -1\) return true;/);
-    expect(html).toContain("if (allOpen || opensByDefault(call)) details.open = true;"); // at creation (replayed backlog)
-    expect(html).toContain("if (opensByDefault(call)) n.details.open = true;"); // when the result lands
-  });
-
-  it("has an Expand all / Collapse all toggle that also applies to cards added later", () => {
-    expect(html).toContain('id="fold"');
-    expect(html).toContain('fold.textContent = allOpen ? "Collapse all" : "Expand all";');
-    expect(html).toContain('log.querySelectorAll("details.call")');
-  });
-
-  it("update_status is one muted line, not a card", () => {
-    expect(html).toContain("if (call.quiet) {");
-    expect(html).toContain('"status checklist updated"');
-  });
-
-  it("a live tail row is pinned last while connected — naming the running command or `thinking…` — and removed at end/disconnect", () => {
-    expect(html).toContain('var tail = el("li", "tail");');
-    expect(html).toContain("log.insertBefore(li, tail)"); // steps and notes go above the tail
-    // item 18: a rotating verb + elapsed, never the running command (its card with the spinner is the row above)
-    expect(html).toContain('tailVerb.textContent = THINKING[verbIndex] + "\\u2026";');
-    expect(html).not.toContain("p.headline.length > 80");
-    expect(html).toMatch(/es\.onopen = function \(\) \{ live = true;[^}]*refreshTail\(\);/);
-    expect(html).toMatch(/es\.addEventListener\("end", function \(\) \{\s*live = false;\s*flushTurn\([^)]*\);[^\n]*\n\s*refreshTail\(\);/);
-    expect(html).toMatch(/if \(!live\) \{ tail\.hidden = true; return; \}/);
-    expect(html).toMatch(/\.pulse \{[^}]*animation: pulse/); // the ∿ mark, shared with the header's connection indicator
-  });
-
-  it("the Request block shows where the request came from: #channel · user · an `open thread` link (http(s) only, noopener)", () => {
-    expect(html).toContain('id="source"');
-    expect(html).toContain("showSource(change.source)");
-    expect(html).toContain('source.appendChild(el("span", "", "#" + src.channel))');
-    expect(html).toMatch(/if \(typeof src\.url === "string" && \/\^https\?:\\\/\\\/\/\.test\(src\.url\)\)/);
-    expect(html).toContain('a.setAttribute("href", src.url)');
-    expect(html).toContain('a.setAttribute("rel", "noopener noreferrer")');
-  });
-
-  it("hides the tail with a rule that beats `li.tail { display: flex }` (a finished run must not keep 'thinking…')", () => {
-    // Same class of bug as the index empty sentinel: `li.tail` (0,1,1) outranks
-    // `[hidden]` (0,1,0), so `tail.hidden = true` alone left it rendered.
-    expect(html).toMatch(/li\.tail\[hidden\]\s*\{\s*display:\s*none/);
-  });
-
-  it("leaves room at the bottom so the tail never sits on the viewport edge", () => {
-    expect(html).toMatch(/body\s*\{[^}]*padding: 1\.25rem 1\.25rem 8rem/);
-  });
-
-  it("the inlined page script parses as JavaScript (shim + both String(fn) sources + the IIFE)", () => {
-    const script = html.slice(html.lastIndexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
-    // No DOM here — just prove the source is syntactically sound as shipped.
-    expect(() => new Function(script)).not.toThrow();
-  });
-});
-
-// Feature: features/live-view.md item 12 polish (#209): the "Waiting for
-// activity…" placeholder must disappear on ANY first event — a no-tool run
-// (input → answer, no rows) previously kept it forever — and the page styles
-// the renderer's new tables and h4–h6 headings.
-describe("run page placeholder + table/heading polish (#209)", () => {
-  const html = renderRunPage("run-1", "tok-1");
-
-  it("clears the placeholder on ANY painted change (input/answer too), not only call cards", () => {
-    // one named helper, so every clearing site is the same code
-    expect(html).toMatch(/function clearPlaceholder\(\) \{ if \(placeholder\) \{ placeholder\.remove\(\); placeholder = null; \} \}/);
-    // apply() is the single paint dispatcher — clearing there covers input,
-    // step, call, result, note AND answer (a no-tool run never keeps the sentinel)
-    expect(html).toMatch(/function apply\(change, wasAtTail\) \{\s*clearPlaceholder\(\);/);
-    // the live tail also clears it (it pins a row into the log)
-    expect(html).toMatch(/function refreshTail\(\) \{[\s\S]{0,80}clearPlaceholder\(\);/);
-    // no clearing site bypasses the helper
-    expect(html.match(/placeholder\.remove\(\)/g)).toHaveLength(1);
-  });
-
-  it("styles markdown tables (bordered, collapsed) and h4\u2013h6 headings", () => {
-    expect(html).toMatch(/\.md table\s*\{[^}]*border-collapse:\s*collapse/);
-    expect(html).toMatch(/\.md th, \.md td\s*\{[^}]*border:/);
-    expect(html).toMatch(/\.md h1, \.md h2, \.md h3, \.md h4, \.md h5, \.md h6/);
-  });
-});
-
-describe("renderRunPage", () => {
-  const html = renderRunPage("run-1", "tok-secret");
-
-  it("references the token-scoped EventSource URL for this run", () => {
-    expect(html).toContain("/runs/run-1/events?t=tok-secret");
-    expect(html).toContain("new EventSource(");
-  });
-
-  it("is self-contained (no external/CDN assets — CSP-safe)", () => {
-    expect(html).not.toMatch(/src\s*=\s*["']https?:/i);
-    expect(html).not.toMatch(/href\s*=\s*["']https?:/i);
-    expect(html).not.toContain("//cdn");
-  });
-
-  it("renders event summaries with textContent, never innerHTML (no injection)", () => {
-    expect(html).toContain("textContent");
-    expect(html).not.toContain("innerHTML");
-  });
-
-  it("URL-encodes id/token safely into the stream URL", () => {
-    const page = renderRunPage("a/b", 'x"y');
-    expect(page).toContain("/runs/a%2Fb/events?t=x%22y");
-    // JSON-encoded into the script, so no raw quote breaks out of the string.
-    expect(page).not.toContain('t=x"y');
-  });
-
-  it("carries the shared site nav with Runs current, plus the contextual back link", () => {
-    expect(html).toContain('<nav class="site" aria-label="Sections">');
-    expect(html).toContain('<a href="/runs" aria-current="page">Runs</a>');
-    expect(html).toContain('<a href="/residents">Residents</a>');
-    expect(html).toContain('<a href="/costs">Costs</a>');
-  });
-
-  it('has a "← All runs" back link to the token-less, Access-gated index', () => {
-    expect(html).toContain('<a class="back" href="/runs">');
-    expect(html).toContain("← All runs");
-    // the index is Access-gated, not token-gated — the back link must carry no token
-    expect(html).not.toMatch(/href="\/runs\?[^"]*t=/);
-  });
-
-  it("renders a connection status dot in the header (dot + label)", () => {
-    expect(html).toContain('id="statedot"');
-    expect(html).toContain('id="state"');
+    expect(escapeHtml("&amp;")).toBe("&amp;amp;");
   });
 });
 
@@ -553,7 +154,6 @@ describe("serveEvents (SSE, transport-free)", () => {
 
     reg.publish(id, call("$ echo hi"));
     reg.publish(id, result(true, "hi"));
-    // Each frame carries its stream position as the SSE id (resume token).
     // Each frame carries its stream position twice on purpose: as the SSE `id:`
     // (the resume cursor) and as `seq` on the event itself (the record's order).
     expect(rec.body()).toBe(PRELUDE + `id: 1\ndata: ${JSON.stringify({ ...call("$ echo hi"), seq: 1 })}\n\n` + `id: 2\ndata: ${JSON.stringify({ ...result(true, "hi"), seq: 2 })}\n\n`);
@@ -605,7 +205,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     const rec = recordingSink();
     serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
     expect(rec.status).toBe(200);
-    expect(rec.body()).toBe(PRELUDE); // head flushed immediately, before any run event
+    expect(rec.body()).toBe(PRELUDE);
   });
 
   it("flushes a late subscriber's replayed backlog AFTER the 200 head (never before)", () => {
@@ -615,7 +215,6 @@ describe("serveEvents (SSE, transport-free)", () => {
     const rec = recordingSink();
     serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
     expect(rec.status).toBe(200);
-    // The replayed backlog frame is present, and status was set before any write.
     expect(rec.body()).toContain(`data: ${JSON.stringify({ ...call("earlier"), seq: 1 })}`);
   });
 
@@ -648,7 +247,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     const { id, token } = reg.create();
     const rec = recordingSink();
     serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
-    rec.fireClose(); // client disconnects
+    rec.fireClose();
     reg.publish(id, call("after-close"));
     expect(rec.body()).not.toContain("after-close");
   });
@@ -665,7 +264,7 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
     };
 
     serveIndexEvents((onEvent) => {
-      onEvent(replayed); // synchronous replay, BEFORE serveIndexEvents writes the head
+      onEvent(replayed);
       emit = onEvent;
       return () => void (unsubscribed = true);
     }, rec.sink);
@@ -673,7 +272,6 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
     expect(rec.status).toBe(200);
     expect(rec.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
     expect(rec.headers["cache-control"]).toContain("no-cache");
-    // The prelude flushes the head, then the replay frame follows (after the 200 head).
     expect(rec.body()).toBe(PRELUDE + `data: ${JSON.stringify(replayed)}\n\n`);
 
     const live: IndexEvent = { type: "removed", id: "r1" };
@@ -688,8 +286,6 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
     const reg = fixedRegistry();
     const rec = recordingSink();
     serveIndexEvents((onEvent) => reg.subscribeIndex(onEvent), rec.sink);
-    // Nothing to replay, but the prelude still flushes the head immediately — this
-    // is the fix for the page hanging on "connecting…" when no runs are active.
     expect(rec.body()).toBe(PRELUDE);
     reg.create("coding · owner/repo");
     expect(rec.body()).toContain('"type":"upsert"');
@@ -698,14 +294,13 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
   });
 });
 
-// Feature: features/live-view.md item 14 (#244) — the Scheduled panel on the
-// index: built from the schedule registry + the ScheduleStore's latest firings
+// Feature: features/live-view.md item 14 (#244) — the Scheduled tab: its seed
+// is built from the schedule registry + the ScheduleStore's latest firings
 // before the page is written; a missing/failing store is reported as such.
 describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
   const NOW = Date.UTC(2026, 7, 29, 12, 0);
-  /** A live-only handler (no run store) over `registry`, with the panel options under test. */
   function panelHandler(registry: RunRegistry, options: Pick<LiveViewDeps, "scheduled">) {
-    return createLiveViewHandler({ service: createRunsService({ registry, store: null }), index: registry, retention: null, now: () => NOW, ...options });
+    return createLiveViewHandler({ shell, service: createRunsService({ registry, store: null }), index: registry, retention: null, now: () => NOW, ...options });
   }
   function pageFor(options: Pick<LiveViewDeps, "scheduled">, url = "/runs/scheduled", method = "GET") {
     const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
@@ -724,26 +319,21 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
   }
   const tick = () => new Promise((r) => setTimeout(r, 0));
 
-  it("the runs index carries NO panel — it links to the tab; the tab is the same shell with Scheduled current", () => {
+  it("the runs index seed carries no schedule rows — the tab is its own page with its own seed", () => {
     const index = pageFor({ scheduled: { schedules: FIXTURE_SCHEDULES } }, "/runs");
     expect(index.status).toBe(200);
-    expect(index.body).not.toContain('id="scheduled"');
-    expect(index.body).toContain('<nav class="tabs" aria-label="Runs views"><a href="/runs" aria-current="page">Runs</a><a href="/runs/scheduled">Scheduled</a></nav>');
+    expect(indexSeedOf(index.body).page).toBe("runs");
     const tab = pageFor({ scheduled: { schedules: FIXTURE_SCHEDULES } });
     expect(tab.status).toBe(200);
-    expect(tab.headers["content-security-policy"]).toContain("frame-ancestors 'none'"); // same page headers as the index
-    expect(tab.body).toContain('<a href="/runs">Runs</a><a href="/runs/scheduled" aria-current="page">Scheduled</a>');
-    expect(tab.body).toContain('<section id="scheduled"');
-    expect(tab.body).not.toContain("new EventSource"); // a snapshot page, no feed
-    expect(tab.body).not.toContain('id="runs"');
+    expect(tab.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+    expect(scheduledSeedOf(tab.body).page).toBe("scheduled");
   });
 
-  it("without `scheduled` the tab says no registry is configured (200, not 404)", () => {
+  it("without `scheduled` the tab's seed says no registry is configured (rows null; 200, not 404)", () => {
     const t = pageFor({});
     expect(t.owned).toBe(true);
     expect(t.status).toBe(200);
-    expect(t.body).toContain("No schedule registry configured.");
-    expect(t.body).not.toContain('id="scheduled"');
+    expect(scheduledSeedOf(t.body).rows).toBeNull();
   });
 
   it("is GET-only like the index (POST → 405 allow: GET)", () => {
@@ -753,7 +343,7 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
     expect(t.headers.allow).toBe("GET");
   });
 
-  it("renders the panel from the registry + the store's latest firings, linking a live run with its token", async () => {
+  it("seeds the rows from the registry + the store's latest firings, linking a live run with its token; internal plumbing stays off", async () => {
     const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
     registry.create("friction · #cron · cron");
     const store = new InMemoryScheduleStore();
@@ -763,20 +353,24 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
     const res = { writeHead: () => {}, write: () => {}, end: (c?: string) => void (body += c ?? "") };
     expect(handler({ method: "GET", url: "/runs/scheduled", headers: {}, on: () => {} } as never, res as never)).toBe(true);
     await tick();
-    expect(body).toContain('<li data-schedule="self-improvement">');
-    expect(body).toContain('<span class="outcome ok">succeeded</span>');
-    expect(body).toContain('<a href="/runs/run-live?t=tok-live">run run-live</a>');
-    expect(body).toContain("2026-08-31 14:00 UTC"); // next fire, Monday
-    expect(body).toContain('<li data-schedule="resident-watchdog">');
-    expect(body).not.toContain('data-schedule="keep-alive"'); // internal plumbing stays off the dashboard
+    const seed = scheduledSeedOf(body);
+    expect(seed.now).toBe(NOW);
+    expect(seed.firingsUnavailable).toBeUndefined();
+    const rows = seed.rows ?? [];
+    const si = rows.find((r) => r.name === "self-improvement");
+    expect(si?.last).toMatchObject({ outcome: "completed", runId: "run-live", runHref: "/runs/run-live?t=tok-live", detail: "🔍 8 runs analyzed" });
+    expect(si?.nextFireAt).toBe(Date.UTC(2026, 7, 31, 14, 0)); // next fire, Monday
+    expect(rows.some((r) => r.name === "resident-watchdog")).toBe(true);
+    expect(rows.some((r) => r.name === "keep-alive")).toBe(false); // internal plumbing stays off the dashboard
   });
 
-  it("no store → the panel lists the schedules and says history is unavailable (not 'never fired')", async () => {
+  it("no store → the seed lists the schedules and says history is unavailable (not 'never fired')", async () => {
     const t = pageFor({ scheduled: { schedules: FIXTURE_SCHEDULES } });
     await tick();
     expect(t.status).toBe(200);
-    expect(t.body).toContain("Firing history unavailable: schedules.worker is not configured");
-    expect(t.body).not.toContain("never fired");
+    const seed = scheduledSeedOf(t.body);
+    expect(seed.firingsUnavailable).toBe("schedules.worker is not configured");
+    expect(seed.rows?.length).toBeGreaterThan(0);
   });
 
   it("a failing store → the page still renders, with the failure as the reason", async () => {
@@ -789,16 +383,14 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
     const t = pageFor({ scheduled: { schedules: FIXTURE_SCHEDULES, store } });
     await tick();
     expect(t.status).toBe(200);
-    expect(t.body).toContain("Firing history unavailable: schedule worker /latest HTTP 503");
-    expect(t.body).toContain('<li data-schedule="self-improvement">');
+    const seed = scheduledSeedOf(t.body);
+    expect(seed.firingsUnavailable).toBe("schedule worker /latest HTTP 503");
+    expect(seed.rows?.some((r) => r.name === "self-improvement")).toBe(true);
   });
 });
 
 describe("createLiveViewHandler (node:http)", () => {
   function fakeReqRes(method: string, url: string, headers: IncomingHttpHeaders = {}) {
-    // Mimic node's EventEmitter: multiple listeners per event, all fired on emit.
-    // (The SSE handler registers two "close" listeners — the sink's unsubscribe
-    // and the heartbeat's clearInterval — and both must run.)
     const listeners: Record<string, Array<() => void>> = {};
     const req = {
       method,
@@ -842,10 +434,10 @@ describe("createLiveViewHandler (node:http)", () => {
     const handler = liveOnlyHandler(fixedRegistry());
     const t = fakeReqRes("GET", "/ingress");
     expect(handler(t.req, t.res)).toBe(false);
-    expect(t.status).toBe(0); // nothing written
+    expect(t.status).toBe(0);
   });
 
-  it("serves the HTML page for a valid id+token (CSP set, no-store)", () => {
+  it("serves the live-run shell for a valid id+token (strict headers; seed carries the token-scoped stream + stop URLs)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     const handler = liveOnlyHandler(reg);
@@ -854,10 +446,24 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.status).toBe(200);
     expect(t.headers["content-type"]).toContain("text/html");
     expect(t.headers["content-security-policy"]).toContain("default-src 'none'");
-    // Clickjacking defense on this public page (CSP frame-ancestors + legacy header).
+    expect(t.headers["content-security-policy"]).toContain("script-src 'self'");
     expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
     expect(t.headers["x-frame-options"]).toBe("DENY");
-    expect(t.body()).toContain(`/runs/${id}/events?t=${token}`);
+    expect(t.headers["cache-control"]).toBe("no-store");
+    const seed = runSeedOf(t.body());
+    expect(seed).toEqual({ page: "run", mode: "live", id, eventsUrl: `/runs/${id}/events?t=${token}`, stopUrl: `/runs/${id}/stop?t=${token}` });
+  });
+
+  it("percent-encodes id/token into the seeded URLs so special chars can't break them", () => {
+    const reg = new RunRegistry({ genId: () => "a/b", genToken: () => 'x"y' });
+    const { id, token } = reg.create();
+    const handler = liveOnlyHandler(reg);
+    const t = fakeReqRes("GET", `/runs/${encodeURIComponent(id)}?t=${encodeURIComponent(token)}`);
+    handler(t.req, t.res);
+    expect(t.status).toBe(200);
+    const seed = runSeedOf(t.body()) as RunLiveSeed;
+    expect(seed.eventsUrl).toBe("/runs/a%2Fb/events?t=x%22y");
+    expect(t.body()).not.toContain('t=x"y');
   });
 
   it("404s the page for a wrong/missing token (never reveals the run exists)", async () => {
@@ -866,8 +472,8 @@ describe("createLiveViewHandler (node:http)", () => {
     const handler = liveOnlyHandler(reg);
     const wrong = fakeReqRes("GET", `/runs/${id}?t=nope`);
     handler(wrong.req, wrong.res);
-    await vi.waitFor(() => expect(wrong.status).toBe(404)); // the tokenless lookup is async (history path, #157 U8)
-    expect(wrong.body()).not.toContain("EventSource"); // no page leaked
+    await vi.waitFor(() => expect(wrong.status).toBe(404));
+    expect((seedOf(wrong.body()) as RunNotFoundSeed).page).toBe("runNotFound"); // no live page leaked
 
     const missing = fakeReqRes("GET", `/runs/${id}`);
     handler(missing.req, missing.res);
@@ -884,7 +490,6 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
     reg.publish(id, call("live one"));
     expect(t.body()).toContain(`data: ${JSON.stringify({ ...call("live one"), seq: 1 })}`);
-    // Client disconnect unsubscribes.
     t.fireClose();
     reg.publish(id, call("after"));
     expect(t.body()).not.toContain("after");
@@ -910,10 +515,9 @@ describe("createLiveViewHandler (node:http)", () => {
   });
 
   // The bare /runs index is the Access-gated home page: it is NOT token-gated
-  // (Cloudflare Access is the "who" gate), and it renders the per-run capability
-  // links — so it must only ever be exposed behind Access. Same CSP + clickjacking
-  // + no-store headers as the per-run page.
-  it("serves the HTML index at bare /runs, listing active runs with their token links (CSP + no-store)", () => {
+  // (Cloudflare Access is the "who" gate), and its seed carries the per-run
+  // capability tokens — so it must only ever be exposed behind Access.
+  it("serves the index shell at bare /runs: live rows with tokens in the seed, strict headers, the live count in the title", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create("coding · owner/repo");
     const handler = liveOnlyHandler(reg);
@@ -925,8 +529,12 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
     expect(t.headers["x-frame-options"]).toBe("DENY");
     expect(t.headers["cache-control"]).toBe("no-store");
-    expect(t.body()).toContain(`/runs/${id}?t=${token}`);
-    expect(t.body()).toContain('<span class="agent agent-coding">coding</span><a class="repo" href="https://github.com/owner/repo" target="_blank" rel="noopener noreferrer" data-tip="owner/repo">repo</a>');
+    const seed = indexSeedOf(t.body());
+    expect(seed.all).toBe(false);
+    expect(seed.retentionDays).toBeNull();
+    expect(seed.rows).toHaveLength(1);
+    expect(seed.rows[0]).toMatchObject({ id, token, label: "coding · owner/repo", finished: false });
+    expect(t.body()).toContain("<title>(1) Live runs</title>"); // item 21: the tab carries the live count
   });
 
   it("also serves the index at /runs/ (trailing slash)", () => {
@@ -939,13 +547,14 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.headers["content-type"]).toContain("text/html");
   });
 
-  it("renders the empty state when there are no active runs", () => {
+  it("seeds an empty row list (and a bare title) when there are no active runs", () => {
     const reg = fixedRegistry();
     const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs");
     handler(t.req, t.res);
     expect(t.status).toBe(200);
-    expect(t.body()).toMatch(/no active runs/i);
+    expect(indexSeedOf(t.body()).rows).toEqual([]);
+    expect(t.body()).toContain("<title>Live runs</title>");
   });
 
   it("405s a non-GET method on the index", () => {
@@ -956,14 +565,17 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.status).toBe(405);
   });
 
-  it("HTML-escapes a malicious run label in the index instead of injecting markup", () => {
+  it("a hostile run label is inert in the page: the seed island escapes every angle bracket", () => {
     const reg = new RunRegistry({ genId: () => "run-1", genToken: () => "tok-1" });
-    reg.create("<script>alert(1)</script>");
+    reg.create("</script><script>alert(1)</script>");
     const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs");
     handler(t.req, t.res);
-    expect(t.body()).not.toContain("<script>alert(1)</script>");
-    expect(t.body()).toContain("&lt;script&gt;");
+    const html = t.body();
+    expect(html).not.toContain("<script>alert(1)</script>");
+    // exactly the shell's own two script elements (the seed island + the module)
+    expect(html.match(/<\/script>/g)).toHaveLength(2);
+    expect(indexSeedOf(html).rows[0].label).toBe("</script><script>alert(1)</script>"); // …and survives the round trip as data
   });
 
   it("routes /runs (no flag) to HTML and /runs?stream=1 to the index SSE feed", () => {
@@ -982,18 +594,18 @@ describe("createLiveViewHandler (node:http)", () => {
 
   it("streams the index SSE feed at /runs?stream=1: replays active runs, forwards new ones, unsubscribes on close", () => {
     const reg = fixedRegistry();
-    reg.create("coding · owner/repo"); // active before connect → replayed
+    reg.create("coding · owner/repo");
     const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs?stream=1");
     expect(handler(t.req, t.res)).toBe(true);
     expect(t.status).toBe(200);
     expect(t.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
-    expect(t.body()).toContain('"label":"coding · owner/repo"'); // replayed upsert
+    expect(t.body()).toContain('"label":"coding · owner/repo"');
 
-    reg.create("review · thread-9"); // live upsert
+    reg.create("review · thread-9");
     expect(t.body()).toContain('"label":"review · thread-9"');
 
-    t.fireClose(); // client disconnects → unsubscribe
+    t.fireClose();
     reg.create("after-close");
     expect(t.body()).not.toContain("after-close");
   });
@@ -1006,29 +618,23 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.status).toBe(405);
   });
 
-  // #66 follow-up: prove the keepalive TIMER's real behavior (not just the
-  // prelude wiring). An idle live stream must emit a `: hb` comment every
-  // SSE_HEARTBEAT_MS, and a client disconnect must clearInterval so no further
-  // heartbeat is written. Driven with fake timers through the real handler.
   it("SSE heartbeat: writes a keepalive comment on an idle live stream, then stops on client close", () => {
     vi.useFakeTimers();
     try {
       const reg = fixedRegistry();
       const handler = liveOnlyHandler(reg);
-      // The index feed with no runs stays open and idle — the exact case the
-      // heartbeat exists for (only the prelude, then nothing but heartbeats).
       const t = fakeReqRes("GET", "/runs?stream=1");
       expect(handler(t.req, t.res)).toBe(true);
       expect(t.status).toBe(200);
-      expect(t.body()).not.toContain(": hb"); // none before the first interval elapses
+      expect(t.body()).not.toContain(": hb");
 
       vi.advanceTimersByTime(20_000);
-      expect(t.body()).toContain(": hb\n\n"); // one heartbeat fired at the interval
+      expect(t.body()).toContain(": hb\n\n");
       const afterOne = t.body();
 
-      t.fireClose(); // client disconnects → clearInterval must stop the timer
+      t.fireClose();
       vi.advanceTimersByTime(40_000);
-      expect(t.body()).toBe(afterOne); // nothing more written — the interval was cleared
+      expect(t.body()).toBe(afterOne);
     } finally {
       vi.useRealTimers();
     }
@@ -1036,8 +642,6 @@ describe("createLiveViewHandler (node:http)", () => {
 });
 
 describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => {
-  // Feature: features/run-friction.md. Same capability-token gate as the page
-  // and the stream; a JSON diagnosis of the run's backlog (live or finished).
   function fakeReqRes(method: string, url: string) {
     const req = { method, url, headers: {}, on: () => {} };
     let status = 0;
@@ -1121,15 +725,12 @@ describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => 
     expect(t.status).toBe(200);
     const body = JSON.parse(t.body());
     expect(body.finished).toBe(false);
-    // The in-flight call has no result yet; mid-run that is not a failure.
     expect(body.diagnosis.findings).toEqual([]);
   });
 });
 
 // Feature: features/live-view.md item 10 — run control from /runs (#101):
-// `POST /runs/:id/stop?t=…&mode=soft|hard` behind the same token gate (Access
-// fronts every /runs* method at the edge), plus Stop/Kill controls on the index
-// rows and the per-run page, and stopping → stopped state on both.
+// `POST /runs/:id/stop?t=…&mode=soft|hard` behind the same token gate.
 describe("run control: POST /runs/:id/stop (#101)", () => {
   function fakeReqRes(method: string, url: string) {
     const listeners: Record<string, Array<() => void>> = {};
@@ -1240,146 +841,9 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
     expect(t.status).toBe(405);
     expect(t.headers.allow).toBe("GET");
   });
-
-  const summary = (over: Partial<RunSummary> = {}): RunSummary => ({
-    id: "run-1",
-    token: "tok-1",
-    label: "coding · owner/repo",
-    finished: false,
-    startedAt: 1000,
-    eventCount: 3,
-    ...over,
-  });
-
-  describe("index UI", () => {
-    it("renders Stop (soft) and Kill (hard) buttons OUTSIDE the row anchor for a live run", () => {
-      const html = renderRunsIndex([summary()]);
-      // buttons live in the body's always-present actions cell, never inside the <a class="row"> (invalid HTML)
-      expect(html).toMatch(/<span class="actions"><button class="stop soft" data-mode="soft" data-tip="[^"]+">Stop<\/button><button class="stop hard" data-mode="hard" data-tip="[^"]+">Kill<\/button><\/span><\/div><\/li>/);
-      expect(renderRunsIndex([summary({ finished: true })])).toContain('<span class="actions"></span></div></li>'); // the empty cell keeps the facts aligned
-      expect(html).not.toMatch(/<a class="row"[^>]*>[^]*?<button[^]*?<\/a>/);
-    });
-
-    it("hides the buttons for a finished run", () => {
-      const html = renderRunsIndex([summary({ finished: true })]);
-      expect(html).not.toContain('data-mode="soft"');
-      expect(html).not.toContain('data-mode="hard"');
-    });
-
-    it("shows a stopping / stopped badge from the summary's stop state", () => {
-      expect(renderRunsIndex([summary({ stop: { mode: "soft", state: "stopping" } })])).toContain(
-        '<span class="stopbadge stopping">stopping (soft)</span>',
-      );
-      expect(renderRunsIndex([summary({ finished: true, stop: { mode: "hard", state: "stopped" } })])).toContain(
-        '<span class="stopbadge stopped">killed</span>',
-      );
-      expect(renderRunsIndex([summary()])).not.toContain('class="stopbadge');
-      // a run already asked to stop offers no second set of buttons
-      expect(renderRunsIndex([summary({ stop: { mode: "soft", state: "stopping" } })])).not.toContain('data-mode="hard"');
-    });
-
-    it("client-side rows mirror the buttons + badge and POST the stop with the row's token", () => {
-      const html = renderRunsIndex([summary()]);
-      expect(html).toContain('method: "POST"');
-      expect(html).toContain('"/stop?t="');
-      expect(html).toContain('stop.state + " (" + stop.mode + ")"'); // same label as the server badge
-      expect(html).toContain('stopButton("hard"');
-      expect(html).not.toContain("innerHTML");
-    });
-  });
-
-  describe("per-run page UI", () => {
-    it("has Stop and Kill buttons that POST to this run's token-scoped stop route", () => {
-      const html = renderRunPage("run-1", "tok-1");
-      expect(html).toContain('data-mode="soft"');
-      expect(html).toContain('data-mode="hard"');
-      expect(html).toContain("/runs/run-1/stop?t=tok-1");
-      expect(html).toContain('method: "POST"');
-    });
-
-    it("reflects stop_requested → stopping and end → stopped from the event stream (textContent only)", () => {
-      const html = renderRunPage("run-1", "tok-1");
-      expect(html).toContain('"stop_requested"');
-      expect(html).toContain("stopping (");
-      expect(html).toContain("stopped (");
-      expect(html).not.toContain("innerHTML");
-    });
-  });
 });
 
-describe("run page model-turn rows (item 15)", () => {
-  it("renders a `turn` change as a muted 💭 row with its facts, built with createElement/textContent only", () => {
-    const html = renderRunPage("run-1", "tok-1");
-    expect(html).toContain('change.kind === "turn"');
-    expect(html).toContain('el("li", "turn")');
-    expect(html).toContain("#log > li.turn {"); // #log > li { padding: 0 } outranks a bare li.turn rule
-    expect(html).not.toContain("innerHTML");
-  });
-});
-
-// Feature: features/run-visibility.md / live-view.md item 12 — the exchange on
-// the run page (#157 U1): `context` events (the thread turns the model was given)
-// render like the request — markdown through the same guarded renderer — inside
-// a collapsed Context block between the Request block and the log. A page seeded
-// with history (`renderRunPage(id, token, events)`) feeds the seed through the
-// SAME `handle(e)` the EventSource frames use, so seeded and live pages render
-// identically by construction; the seed is a `\u003c`-escaped JSON island, so
-// event text can never open or close a tag inside the inline script.
-describe("context events + seeded history on the run page (#157 U1)", () => {
-  const text = (type: "input" | "context" | "answer", text: string, seq: number): RunEvent => ({ type, text, seq });
-  const SCRIPT_PAYLOAD = "</script><script>alert(1)</script>";
-  const ATTR_PAYLOAD = '"><img src=x onerror=alert(1)>';
-
-  it("renders `context` events into a collapsed Context block between the Request block and the log, via the markdown guard", () => {
-    const html = renderRunPage("run-1", "tok-1");
-    // The fold (runTimeline) turns a `context` event into a `context` change; the page renders it into the block.
-    expect(createRunTimeline().push({ type: "context", text: "earlier turn", at: 5 })).toEqual([{ kind: "context", text: "earlier turn", at: 5 }]);
-    expect(html).toContain('change.kind === "context"');
-    expect(html).toContain("contextTurn(change)");
-    expect(html).toContain('<details class="block" id="context" hidden>');
-    expect(html.indexOf('id="request"')).toBeLessThan(html.indexOf('id="context"'));
-    expect(html.indexOf('id="context"')).toBeLessThan(html.indexOf('<ol id="log"'));
-    // a context turn is [ts] + a markdown box rendered through the same guard as the request
-    expect(html).toMatch(/function contextTurn\(change\) \{[\s\S]*?turn\.appendChild\(stamp\(change\.at\)\);[\s\S]*?md\(box, change\.text\);[\s\S]*?contextTurns\.appendChild\(turn\)/);
-    expect(html).not.toContain("innerHTML");
-    expect(html).not.toContain("insertAdjacentHTML");
-  });
-
-  it("seeded events ride as an escaped JSON island and go through the one `handle` the live stream uses (mirror by construction)", () => {
-    const events: RunEvent[] = [text("input", "please run it", 1), text("context", "earlier turn", 2), { type: "turn", startedAt: 0, durationMs: 900, stopReason: "tool_use", seq: 3, at: 900 }, call("$ npm test"), text("answer", "all green", 5)];
-    const html = renderRunPage("run-1", "tok-1", events);
-    expect(html).toContain(`var seed = ${seedEventsJson(events)};`);
-    expect(html).toContain("for (var i = 0; i < seed.length; i++) handle(seed[i]);");
-    // The live frame is parsed, deduped on its SSE id (run events only), then goes through the same `handle`.
-    expect(html).toMatch(/es\.onmessage = function \(m\) \{\s*var e;\s*try \{ e = JSON\.parse\(m\.data\); \} catch \(_\) \{ return; \}[\s\S]*?\n\s*handle\(e\);\s*\};/);
-    // ONE fold: handle() is the only caller of timeline.push, and both the seed loop and onmessage go through it.
-    expect(html).toMatch(/function handle\(e\) \{\s*lastEventAt = Date\.now\(\);\s*if \(e && typeof e\.at === "number"\)[^\n]*\n\s*var wasAtTail = atTail\(\);\s*var changes = timeline\.push\(e\);/);
-    expect(html.match(/timeline\.push\(/g)).toHaveLength(1);
-    // The seed is the events verbatim once the JSON escapes are undone.
-    expect(JSON.parse(seedEventsJson(events))).toEqual(events);
-  });
-
-  it("a hostile seeded text is inert: `<`, `>` and `&` are \\u-escaped in the JSON island, so no tag opens or closes inside the script", () => {
-    const html = renderRunPage("run-1", "tok-1", [text("input", SCRIPT_PAYLOAD, 1), text("answer", ATTR_PAYLOAD, 2)]);
-    expect(html).not.toContain(SCRIPT_PAYLOAD);
-    expect(html).not.toContain(ATTR_PAYLOAD);
-    expect(html).toContain("\\u003c/script\\u003e");
-    // Exactly one <script> open and one close on the page — the payload added none.
-    expect(html.match(/<script>/g)).toHaveLength(1);
-    expect(html.match(/<\/script>/g)).toHaveLength(1);
-    expect(seedEventsJson([text("input", "a\u2028b & <c>", 1)])).toBe('[{"type":"input","text":"a\\u2028b \\u0026 \\u003cc\\u003e","seq":1}]');
-  });
-
-  it("with no seeded events the seed is empty and the page keeps its waiting placeholder (unchanged live path)", () => {
-    const html = renderRunPage("run-1", "tok-1");
-    expect(html).toContain("var seed = [];");
-    expect(html).toContain('id="placeholder"');
-  });
-});
-
-// Feature: features/live-view.md — bounded live replay (#157 U11): a late
-// subscriber to a long run gets a leading note plus the newest 1000 frames; the
-// registry snapshot still holds the whole backlog; the index feed is unchanged.
+// Feature: features/live-view.md — bounded live replay (#157 U11).
 describe("serveEvents — live replay budget (#157 U11)", () => {
   it("a late subscriber to a 3000-event run gets a 'replaying last 1000 of 3000' note then the newest 1000 frames; snapshot has all 3000", () => {
     const reg = fixedRegistry();
@@ -1393,7 +857,6 @@ describe("serveEvents — live replay budget (#157 U11)", () => {
     expect(frames[1]).toMatchObject({ summary: "$ step 2001", seq: 2001 });
     expect(frames[1000]).toMatchObject({ summary: "$ step 3000", seq: 3000 });
     expect(reg.snapshot(id, token)?.events).toHaveLength(3000);
-    // Live frames after the replay still flow, uncapped.
     reg.publish(id, call("$ step 3001"));
     expect(rec.body()).toContain('"summary":"$ step 3001"');
   });
@@ -1427,7 +890,6 @@ describe("serveEvents — live replay budget (#157 U11)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     for (let i = 1; i <= 3000; i++) reg.publish(id, call(`$ step ${i}`));
-    // Reconnect having applied seq 500: 2500 remain, so 1500 are omitted.
     const rec = recordingSink();
     serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, parseLastEventId("500")), rec.sink);
     const frames = rec.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: "));
@@ -1435,7 +897,6 @@ describe("serveEvents — live replay budget (#157 U11)", () => {
     expect(frames[0]).toBe(`data: ${JSON.stringify({ type: "replay_note", summary: "replaying last 1000 of 2500 events" })}\n\n`);
     expect(frames[1]).toMatch(/^id: 2001\n/);
     expect(frames[1000]).toMatch(/^id: 3000\n/);
-    // A cursor inside the cap window: no note, exactly the events after it.
     const rec2 = recordingSink();
     serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, parseLastEventId("2500")), rec2.sink);
     const frames2 = rec2.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: "));
@@ -1443,29 +904,13 @@ describe("serveEvents — live replay budget (#157 U11)", () => {
     expect(rec2.body()).not.toContain("replay_note");
     expect(frames2[0]).toMatch(/^id: 2501\n/);
   });
-
-  it("the client exempts a replay_note from the Last-Event-ID dedupe (it carries no id of its own)", () => {
-    const html = renderRunPage("run-1", "tok-1");
-    expect(html).toContain('if (e.type !== "replay_note") {');
-    expect(html).toContain("if (sid > 0) { if (sid <= lastSeq) return; lastSeq = sid; }");
-  });
-
-  it("the client renders a replay_note frame as a note row (textContent)", () => {
-    const html = renderRunPage("run-1", "tok-1");
-    // The fold knows the transport frame; the page renders it through addNote with the … glyph, never markup.
-    expect(createRunTimeline().push({ type: "replay_note", summary: "replaying last 1000 of 1200 events" })).toEqual([
-      { kind: "replay_note", text: "replaying last 1000 of 1200 events" },
-    ]);
-    expect(html).toContain('change.kind === "note" || change.kind === "replay_note"');
-    expect(html).toContain('(change.kind === "replay_note" ? "\\u2026 " : "\\u23f1 ") + change.text');
-  });
 });
 
 // Feature: features/live-view.md / run-history.md — the live view on
-// `RunsService` (#157 U8): finished/persisted runs render tokenless in history
-// mode through the one `renderRunPage`; the index shows active runs by default
-// (never touching the store) and everything with `?all=1`; live rows keep their
-// capability hrefs, finished rows never carry a token.
+// `RunsService` (#157 U8): finished/persisted runs are seeded tokenless in
+// history mode; the index seeds active runs by default (never touching the
+// store) and everything with `?all=1`; live rows keep their capability tokens
+// in the seed, finished rows never carry one.
 describe("live view on RunsService: history pages + index toggle (#157 U8)", () => {
   const NOW = 1_700_000_000_000;
   const text = (type: "input" | "context" | "assistant" | "answer", t: string, seq: number): RunEvent => ({ type, text: t, seq }) as RunEvent;
@@ -1549,6 +994,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     const store = opts.store === undefined ? new InMemoryRunStore({ now }) : opts.store;
     const service = createRunsService({ registry, store });
     const handler = createLiveViewHandler({
+      shell,
       service,
       index: registry,
       retention: opts.retention === undefined ? { retentionDays: 30 } : opts.retention,
@@ -1562,7 +1008,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
   const done = (t: { ended: boolean }) => vi.waitFor(() => expect(t.ended).toBe(true));
 
   describe("persisted run page (history mode)", () => {
-    it("200s tokenless with request/context/reply/tool rows seeded, no EventSource, stop controls hidden, a grey finished header", async () => {
+    it("200s tokenless: the seed is history mode with the record's events, status and duration — no token anywhere", async () => {
       const h = harness();
       await h.store!.put(record("r1"));
       const t = fakeReqRes("GET", "/runs/r1");
@@ -1570,39 +1016,28 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       await done(t);
       expect(t.status).toBe(200);
       expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
-      const html = t.body();
-      expect(html).toContain(`var seed = ${seedEventsJson(record("r1").events)};`);
-      expect(html).toContain("var live = false;");
-      expect(html).toMatch(/if \(live\) \{\s*var es = new EventSource\(url\);/); // the stream only opens on a live page
-      expect(html).toContain('<span class="actions" id="actions" hidden>');
-      // item 22: outcome chips — success is the quiet ✓ + duration; no pulse (nothing is connected on a history page)
-      expect(html).toMatch(/<span class="ok" role="img" aria-label="succeeded">✓<\/span><span id="state" class="dur">\d+[smh][^<]*<\/span>/);
-      expect(html).not.toContain('id="statedot"');
-      expect(html).not.toContain("finished ·");
-      expect(html).not.toContain("?t=");
-      expect(html).not.toContain("tok-");
+      const seed = runSeedOf(t.body()) as RunHistorySeed;
+      expect(seed.mode).toBe("history");
+      expect(seed.events).toEqual(record("r1").events);
+      expect(seed.status).toBe("completed");
+      expect(seed.eventCount).toBe(5);
+      expect(seed.durationMs).toBe(10_000);
+      expect(t.body()).not.toContain("?t=");
+      expect(t.body()).not.toContain("tok-");
     });
 
-    it("a live page still opens the EventSource and shows the stop controls (unchanged live path)", () => {
-      const html = renderRunPage("run-1", "tok-1");
-      expect(html).toContain("var live = true;");
-      expect(html).toContain('var url = "/runs/run-1/events?t=tok-1";');
-      expect(html).toContain('<span class="actions" id="actions">');
-      expect(html).toContain('<span class="pulse amber" id="statedot">∿</span><span id="state">connecting…</span>');
-    });
-
-    it("labels a stopped or failed run's header from its status", async () => {
+    it("carries the record's terminal status for stopped and failed runs (the page renders the outcome chip from it)", async () => {
       const h = harness();
       await h.store!.put(record("r1", { status: "stopped_soft" }));
       await h.store!.put(record("r2", { status: "failed" }));
       const a = fakeReqRes("GET", "/runs/r1");
       h.handler(a.req, a.res);
       await done(a);
-      expect(a.body()).toContain('<span class="chip amber">stopped early</span>'); // item 22: the outcome chip
+      expect((runSeedOf(a.body()) as RunHistorySeed).status).toBe("stopped_soft");
       const b = fakeReqRes("GET", "/runs/r2");
       h.handler(b.req, b.res);
       await done(b);
-      expect(b.body()).toContain('<span class="chip red">failed</span>');
+      expect((runSeedOf(b.body()) as RunHistorySeed).status).toBe("failed");
     });
 
     it("a finished run still in the registry is served tokenless in history mode (the card link outlives the TTL either way)", async () => {
@@ -1614,8 +1049,9 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       h.handler(t.req, t.res);
       await done(t);
       expect(t.status).toBe(200);
-      expect(t.body()).toContain("var live = false;");
-      expect(t.body()).toContain('"text":"hi"');
+      const seed = runSeedOf(t.body()) as RunHistorySeed;
+      expect(seed.mode).toBe("history");
+      expect(seed.events.some((e) => "text" in e && e.text === "hi")).toBe(true);
       expect(t.body()).not.toContain(run.token);
     });
 
@@ -1627,8 +1063,9 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       h.handler(t.req, t.res);
       await done(t);
       expect(t.body()).not.toContain(payload);
-      expect(t.body()).toContain("\\u003c/script\\u003e\\u003cscript\\u003ealert(1)\\u003c/script\\u003e");
-      expect(t.body().match(/<\/script>/g)).toHaveLength(1);
+      expect(t.body().match(/<\/script>/g)).toHaveLength(2); // the shell's own two script elements only
+      const seed = runSeedOf(t.body()) as RunHistorySeed;
+      expect(seed.events[0]).toMatchObject({ text: payload }); // …and the payload survives as data
     });
 
     it("emits one audit line per history page/events read with the route, run id and identity — never content", async () => {
@@ -1649,7 +1086,6 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
   describe("AE11: truncated records", () => {
     it("withOmittedMarkers marks every seq gap with its own count; the unaccounted remainder is a tail marker", () => {
       const events: RunEvent[] = [text("input", "a", 1), { ...call("b"), seq: 4 }, { ...call("c"), seq: 5 }, { ...call("d"), seq: 9 }];
-      // 12 published, 4 stored → 8 omitted: 2 (seq 2–3) + 3 (seq 6–8) + 3 cut from the tail
       expect(withOmittedMarkers(events, 12)).toEqual([
         events[0],
         { type: "replay_note", summary: "2 events omitted" },
@@ -1659,7 +1095,6 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
         events[3],
         { type: "replay_note", summary: "3 events omitted" },
       ]);
-      // counts never exceed published − stored, even when seq numbering is odd
       const odd: RunEvent[] = [{ ...call("x"), seq: 1 }, { ...call("y"), seq: 50 }];
       expect(withOmittedMarkers(odd, 3)).toEqual([odd[0], { type: "replay_note", summary: "1 event omitted" }, odd[1]]);
     });
@@ -1684,8 +1119,8 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const page = fakeReqRes("GET", "/runs/r1");
       h.handler(page.req, page.res);
       await done(page);
-      expect(page.body()).toContain(`var seed = ${seedEventsJson(withOmittedMarkers(events, 9))};`);
-      expect(page.body()).toContain('"summary":"5 events omitted"');
+      const seed = runSeedOf(page.body()) as RunHistorySeed;
+      expect(seed.events).toEqual(withOmittedMarkers(events, 9));
       const stream = fakeReqRes("GET", "/runs/r1/events");
       h.handler(stream.req, stream.res);
       await done(stream);
@@ -1710,7 +1145,6 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(body.endsWith("event: end\ndata: {}\n\n")).toBe(true);
       const seqs = [...body.matchAll(/"seq":(\d+)/g)].map((m) => Number(m[1]));
       expect(seqs).toEqual(events.map((e) => e.seq));
-      // `getRun({ include: "messages" })` already holds every event: one record read, zero event pages.
       expect(get).toHaveBeenCalledTimes(1);
       expect(pages).not.toHaveBeenCalled();
     });
@@ -1757,7 +1191,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
   });
 
   describe("404 shapes (R4/R10)", () => {
-    it("unknown, expired, and wrong-token-on-live give the identical 404 body; a live run without a token is 404 on page, events and friction", async () => {
+    it("unknown, expired, and wrong-token-on-live give the identical 404 page seed; events and friction keep the text body", async () => {
       const h = harness();
       await h.store!.put(record("old", { finishedAt: NOW - 31 * 86_400_000 }));
       const live = h.registry.create();
@@ -1771,10 +1205,6 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
         "/runs/nope/events",
         "/runs/nope/friction",
       ];
-      // Page URLs get the ONE 404 page (item 19: a person landed here — the way
-      // back, the retention sentence, nothing echoed from the request); events
-      // and friction keep the text body. Every page 404 is byte-identical, so
-      // existence is still never revealed.
       const pageBodies = new Set<string>();
       for (const url of urls) {
         const t = fakeReqRes("GET", url);
@@ -1783,15 +1213,14 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
         expect([url, t.status]).toEqual([url, 404]);
         if (/\/(events|friction)$/.test(url)) expect(t.body()).toBe("run not found");
         else {
-          expect(t.body()).toContain("That run isn't here.");
-          expect(t.body()).toContain('<a class="back" href="/runs">← All runs</a>');
-          expect(t.body()).toContain("Finished runs are kept for 30 days, then deleted");
+          const seed = seedOf(t.body()) as RunNotFoundSeed;
+          expect(seed).toEqual({ page: "runNotFound", retentionDays: 30 }); // nothing echoed from the request — a static seed
           expect(t.body()).not.toContain("nope");
           expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
           pageBodies.add(t.body());
         }
       }
-      expect(pageBodies.size).toBe(1);
+      expect(pageBodies.size).toBe(1); // byte-identical: existence never revealed
     });
 
     it("with run history off (store null) a finished, evicted run is the same 404 page", async () => {
@@ -1803,13 +1232,13 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       h.handler(t.req, t.res);
       await done(t);
       expect(t.status).toBe(404);
-      expect(t.body()).toContain("That run isn't here.");
-      expect(t.body()).toContain("Finished runs are kept for 30 days, then deleted"); // the configured retention, as on the index toggle
+      const seed = seedOf(t.body()) as RunNotFoundSeed;
+      expect(seed).toEqual({ page: "runNotFound", retentionDays: 30 });
     });
   });
 
   describe("index: active by default, everything with ?all=1", () => {
-    it("the default view lists only unfinished runs and never calls the store", async () => {
+    it("the default view seeds only unfinished runs and never calls the store", async () => {
       const h = harness();
       await h.store!.put(record("p1"));
       const active = h.registry.create("active one");
@@ -1821,21 +1250,16 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       h.handler(t.req, t.res);
       await done(t);
       expect(t.status).toBe(200);
-      expect(t.body()).toContain(`href="/runs/${active.id}?t=${active.token}"`);
-      expect(t.body()).not.toContain("finished one");
-      expect(t.body()).not.toContain("p1");
+      const seed = indexSeedOf(t.body());
+      expect(seed.all).toBe(false);
+      expect(seed.retentionDays).toBe(30);
+      expect(seed.rows.map((r) => r.id)).toEqual([active.id]);
+      expect(seed.rows[0].token).toBe(active.token); // the live row keeps its capability token
       expect(list).not.toHaveBeenCalled();
       expect(get).not.toHaveBeenCalled();
-      // item 20: the completed toggle is a checkbox that navigates to the ?all=1 view
-      expect(t.body()).toContain('<input type="checkbox" id="showdone" aria-describedby="retention" /> Show completed');
-      expect(t.body()).toContain('window.location.assign(ev.target.checked ? "/runs?all=1" : "/runs");');
-      // item 20: the shared tooltip component (data-tip) + a screen-reader copy the checkbox describes itself by
-      expect(t.body()).toContain('<span class="help" tabindex="0" data-tip="Finished runs are kept for 30 days, then deleted">?</span><span class="sr" id="retention">Finished runs are kept for 30 days, then deleted</span>');
-      expect(t.body()).toContain('new EventSource("/runs?stream=1")');
-      expect(t.body()).toContain("var showAll = false;");
     });
 
-    it("?all=1 lists live rows with token hrefs and finished/persisted rows tokenless, with status, duration and finished-at", async () => {
+    it("?all=1 seeds live rows with tokens and finished/persisted rows tokenless, with status and finished-at", async () => {
       const h = harness();
       await h.store!.put(record("p1"));
       await h.store!.put(record("p2", { status: "failed", finishedAt: NOW - 30_000, startedAt: NOW - 30_000 - 3_725_000 }));
@@ -1845,48 +1269,42 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const t = fakeReqRes("GET", "/runs?all=1");
       h.handler(t.req, t.res);
       await done(t);
-      const html = t.body();
-      expect(html).toContain(`href="/runs/${active.id}?t=${active.token}"`);
-      expect(html).toContain(`href="/runs/${fin.id}"`);
-      expect(html).not.toContain(fin.token);
-      expect(html).toContain('href="/runs/p1"');
-      expect(html).toContain('href="/runs/p2"');
-      // finished rows (item 18): status word on the dot (started/finished on its hover), duration in the facts, no token anywhere
-      // item 20: the dot's tooltip is the outcome + how long; the started column's is the exact stamps
-      expect(html).toContain('<span class="dot grey" role="img" aria-label="succeeded" data-tip="succeeded in 10s"></span>');
-      expect(html).toMatch(/<span class="when" data-tip="started [^"\n]+\nfinished [^"\n]+">[^<]*<\/span>/);
-      expect(html).toContain('<span class="elapsed" data-tip="start to finish">10s</span>');
-      expect(html).toContain('<span class="dot red" role="img" aria-label="failed" data-tip="failed in 1h 02m"></span>');
-      expect(html).toContain('<span class="elapsed" data-tip="start to finish">1h 02m</span>');
-      const finishedRows = html.match(/<li class="run finished(?: leaving)?" data-run-id="[^]*?<\/li>/g) ?? []; // fixture dates are 2023 → "leaving" under the real clock
-      expect(finishedRows.length).toBe(3);
-      for (const row of finishedRows) expect(row).not.toMatch(/tok-|\?t=/);
-      expect(html).toContain('href="/runs"');
-      expect(html).toContain("var showAll = true;");
-      expect(html).toContain('new EventSource("/runs?stream=1&all=1")');
+      const seed = indexSeedOf(t.body());
+      expect(seed.all).toBe(true);
+      const byId = new Map(seed.rows.map((r) => [r.id, r]));
+      expect(byId.get(active.id)?.token).toBe(active.token);
+      for (const finished of [fin.id, "p1", "p2"]) {
+        const row = byId.get(finished);
+        expect(row?.finished).toBe(true);
+        expect(row?.token).toBeUndefined(); // a finished row never carries a token (R10)
+      }
+      expect(byId.get("p2")).toMatchObject({ status: "failed", finishedAt: NOW - 30_000 });
+      expect(t.body()).not.toContain(fin.token);
     });
 
-    it("the toggle tooltip is truthful with run history off", async () => {
+    it("the retention days ride the seed truthfully with run history off", async () => {
       const h = harness({ store: null, retention: null });
       const t = fakeReqRes("GET", "/runs");
       h.handler(t.req, t.res);
       await done(t);
-      expect(t.body()).toContain('data-tip="Run history is off; finished runs are kept about a minute."');
-      expect(retentionSentence({ retentionDays: 7 })).toBe("Finished runs are kept for 7 days, then deleted");
-      expect(retentionSentence({ retentionDays: 1 })).toBe("Finished runs are kept for 1 day, then deleted");
+      expect(indexSeedOf(t.body()).retentionDays).toBeNull();
+      expect(retentionSentence(7)).toBe("Finished runs are kept for 7 days, then deleted");
+      expect(retentionSentence(1)).toBe("Finished runs are kept for 1 day, then deleted");
+      expect(retentionSentence(null)).toBe("Run history is off; finished runs are kept about a minute.");
     });
 
-    it("AE9: a hostile persisted label is escaped in the index row", async () => {
+    it("AE9: a hostile persisted label is inert in the page and survives the seed round trip as data", async () => {
       const h = harness();
       await h.store!.put(record("p1", { label: '<script>alert(1)</script>" onmouseover="x' }));
       const t = fakeReqRes("GET", "/runs?all=1");
       h.handler(t.req, t.res);
       await done(t);
       expect(t.body()).not.toContain("<script>alert(1)</script>");
-      expect(t.body()).toContain("&lt;script&gt;alert(1)&lt;/script&gt;&quot; onmouseover=&quot;x");
+      const seed = indexSeedOf(t.body());
+      expect(seed.rows.find((r) => r.id === "p1")?.label).toBe('<script>alert(1)</script>" onmouseover="x');
     });
 
-    it("a persisted row's `data-persisted` attribute is mirrored; the store spy sees exactly one list call for ?all=1", async () => {
+    it("a persisted row's flag rides the seed; the store spy sees exactly one list call for ?all=1", async () => {
       const h = harness();
       const run = h.registry.create("both");
       h.registry.finish(run.id);
@@ -1897,11 +1315,11 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       h.handler(t.req, t.res);
       await done(t);
       expect(list).toHaveBeenCalledTimes(1);
-      expect(t.body()).toMatch(new RegExp(`<li class="run finished(?: leaving)?" data-run-id="${run.id}" data-started-at="${NOW}" data-persisted="1" data-finished-at="${NOW - 60_000}" data-status="completed"`));
-      expect(t.body()).toContain('li.setAttribute("data-persisted", "1")');
+      const seed = indexSeedOf(t.body());
+      expect(seed.rows.find((r) => r.id === run.id)).toMatchObject({ persisted: true, finishedAt: NOW - 60_000, status: "completed" });
     });
 
-    it("?all=1 renders a visible banner when the history store is unavailable (live rows still listed); the default view never shows it", async () => {
+    it("?all=1 seeds a visible banner when the history store is unavailable (live rows still listed); the default view never does", async () => {
       const broken = new InMemoryRunStore({ now: () => NOW });
       broken.list = async () => {
         throw new Error("store down");
@@ -1913,13 +1331,14 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       h.handler(all.req, all.res);
       await done(all);
       expect(all.status).toBe(200);
-      expect(all.body()).toContain('<p class="banner" role="status">⚠ history store unavailable — showing live runs only</p>');
-      expect(all.body()).toContain(`data-run-id="${live.id}"`);
+      const seed = indexSeedOf(all.body());
+      expect(seed.storeUnavailable).toBe("⚠ history store unavailable — showing live runs only");
+      expect(seed.rows.some((r) => r.id === live.id)).toBe(true);
       expect(all.body()).not.toContain("store down");
       const dflt = fakeReqRes("GET", "/runs");
       h.handler(dflt.req, dflt.res);
       await done(dflt);
-      expect(dflt.body()).not.toContain("history store unavailable");
+      expect(indexSeedOf(dflt.body()).storeUnavailable).toBeUndefined();
       warn.mockRestore();
     });
 
@@ -1929,10 +1348,10 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const t = fakeReqRes("GET", "/runs?all=1");
       h.handler(t.req, t.res);
       await done(t);
-      expect(list).toHaveBeenCalledWith({ status: "all", limit: INDEX_PAGE_SIZE }); // item 20: a screen's worth per page, paged by cursor
+      expect(list).toHaveBeenCalledWith({ status: "all", limit: INDEX_PAGE_SIZE });
     });
 
-    it("a full page renders an `Older runs →` link carrying the service's cursor; following it yields the next page", async () => {
+    it("a full page seeds an `olderHref` carrying the service's cursor; following it yields the next page with `olderThan`", async () => {
       const h = harness({ indexPageSize: 2 });
       await h.store!.put(record("p1", { finishedAt: NOW - 10_000 }));
       await h.store!.put(record("p2", { finishedAt: NOW - 20_000 }));
@@ -1940,26 +1359,20 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const first = fakeReqRes("GET", "/runs?all=1");
       h.handler(first.req, first.res);
       await done(first);
-      const html = first.body();
-      expect(html).toContain('href="/runs/p1"');
-      expect(html).toContain('href="/runs/p2"');
-      expect(html).not.toContain('href="/runs/p3"');
+      const firstSeed = indexSeedOf(first.body());
+      expect(firstSeed.rows.map((r) => r.id)).toEqual(["p1", "p2"]);
       const older = `/runs?all=1&before=${NOW - 20_000}&beforeId=p2`;
-      expect(html).toContain(`<a class="older" href="${escapeHtml(older)}">Older runs →</a>`);
+      expect(firstSeed.olderHref).toBe(older);
+      expect(firstSeed.olderThan).toBeUndefined();
 
       const second = fakeReqRes("GET", older);
       h.handler(second.req, second.res);
       await done(second);
       expect(second.status).toBe(200);
-      expect(second.body()).toContain('href="/runs/p3"');
-      expect(second.body()).not.toContain('href="/runs/p2"');
-      expect(second.body()).not.toContain("Older runs");
-      // item 20: a cursor page offers the way back; the first page does not
-      expect(second.body()).toMatch(
-        /<nav class="pager" aria-label="Completed runs pages"><a href="\/runs\?all=1">← Newest runs<\/a><span class="range">· runs finished before [A-Z][a-z]{2} \d{1,2}(, \d{4})?, \d{1,2}:\d{2} [AP]M<\/span><\/nav>/,
-      );
-      expect(html).not.toContain("← Newest");
-      expect(html).not.toContain('class="range"');
+      const secondSeed = indexSeedOf(second.body());
+      expect(secondSeed.rows.map((r) => r.id)).toEqual(["p3"]);
+      expect(secondSeed.olderThan).toBe(NOW - 20_000);
+      expect(secondSeed.olderHref).toBeUndefined(); // a short page has no next
     });
 
     it("a cursor page holds finished runs only — the live rows are on the newest page (item 21)", async () => {
@@ -1971,12 +1384,13 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const first = fakeReqRes("GET", "/runs?all=1");
       h.handler(first.req, first.res);
       await done(first);
-      expect(first.body()).toContain(`data-run-id="${live.id}"`);
+      expect(indexSeedOf(first.body()).rows.some((r) => r.id === live.id)).toBe(true);
       const second = fakeReqRes("GET", `/runs?all=1&before=${NOW - 20_000}&beforeId=p2`);
       h.handler(second.req, second.res);
       await done(second);
-      expect(second.body()).toContain('href="/runs/p3"');
-      expect(second.body()).not.toContain(`data-run-id="${live.id}"`);
+      const seed = indexSeedOf(second.body());
+      expect(seed.rows.map((r) => r.id)).toEqual(["p3"]);
+      expect(seed.rows.some((r) => r.id === live.id)).toBe(false);
     });
 
     it("a short page has no older link; a malformed cursor is ignored (first page)", async () => {
@@ -1985,88 +1399,12 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const t = fakeReqRes("GET", "/runs?all=1");
       h.handler(t.req, t.res);
       await done(t);
-      expect(t.body()).not.toContain("Older runs");
+      expect(indexSeedOf(t.body()).olderHref).toBeUndefined();
       const bad = fakeReqRes("GET", "/runs?all=1&before=abc&beforeId=p1");
       h.handler(bad.req, bad.res);
       await done(bad);
       expect(bad.status).toBe(200);
-      expect(bad.body()).toContain('href="/runs/p1"');
-    });
-  });
-
-  describe("index rows: one projection for the server and the client", () => {
-    /** Evaluate the inlined row library exactly as the browser would. */
-    function clientLib(doc: ReturnType<typeof staticDocument>) {
-      // The formatters are the inlined globals, exactly as the page passes them.
-      return new Function("doc", `${INDEX_ROW_SCRIPT}; return indexRowRenderer(doc, { formatElapsed: formatElapsed, formatRelative: formatRelative, splitRunLabel: splitRunLabel, formatLocalIso: formatLocalIso });`)(doc) as ReturnType<
-        typeof indexRowRenderer
-      >;
-    }
-
-    it("the server row equals the client `fill()` of the same row, for live, finished and persisted rows", () => {
-      const rows: IndexRow[] = [
-        { id: "l1", token: "tok-l1", label: "live", finished: false, startedAt: 1000, eventCount: 2 },
-        { id: "s1", token: "tok-s1", label: "stopping", finished: false, startedAt: 1000, eventCount: 2, stop: { mode: "soft", state: "stopping" } },
-        { id: "f1", token: "tok-f1", label: "finished in registry", finished: true, startedAt: 1000, eventCount: 2 },
-        { id: "p1", label: "persisted", finished: true, persisted: true, startedAt: 1000, finishedAt: 61_000, status: "stopped_hard", eventCount: 9, stop: { mode: "hard", state: "stopped" } },
-      ];
-      const doc = staticDocument();
-      const lib = clientLib(doc);
-      for (const row of rows) {
-        const li = doc.createElement("li");
-        lib.fill(li, row);
-        expect(doc.serialize(li)).toBe(indexRowHtml(row));
-      }
-    });
-
-    it("finished rows never carry a token in their HTML, live rows do", () => {
-      expect(indexRowHtml({ id: "f1", token: "tok-f1", finished: true, startedAt: 1, eventCount: 1 })).not.toContain("tok-f1");
-      expect(indexRowHtml({ id: "f1", token: "tok-f1", finished: true, startedAt: 1, eventCount: 1 })).toContain('href="/runs/f1"');
-      expect(indexRowHtml({ id: "l1", token: "tok-l1", finished: false, startedAt: 1, eventCount: 1 })).toContain('href="/runs/l1?t=tok-l1"');
-    });
-
-    it("feed semantics: default view drops a finished upsert; ?all=1 keeps it and suppresses `removed` only for a persisted row", () => {
-      const lib = clientLib(staticDocument());
-      const row = (finished: boolean): IndexRow => ({ id: "a", finished, startedAt: 1, eventCount: 0 });
-      const fin = { type: "upsert", run: row(true) };
-      expect(lib.feedAction(fin, false, false)).toEqual({ op: "remove", id: "a" });
-      expect(lib.feedAction(fin, true, false)).toEqual({ op: "upsert", run: fin.run });
-      expect(lib.feedAction({ type: "upsert", run: row(false) }, false, false)).toEqual({ op: "upsert", run: row(false) });
-      expect(lib.feedAction({ type: "removed", id: "a" }, true, true)).toEqual({ op: "keep" });
-      expect(lib.feedAction({ type: "removed", id: "a" }, true, false)).toEqual({ op: "remove", id: "a" });
-      expect(lib.feedAction({ type: "removed", id: "a" }, false, true)).toEqual({ op: "remove", id: "a" });
-    });
-
-    it("a registry upsert of a finished, persisted row keeps its status/duration (merge, never a wipe) — server and client agree", () => {
-      const doc = staticDocument();
-      const lib = clientLib(doc);
-      // The server rendered the store-merged row: finished with status + finishedAt.
-      const merged: IndexRow = { id: "b1", label: "both", finished: true, persisted: true, startedAt: 1000, finishedAt: 61_000, status: "completed", eventCount: 9 };
-      const li = doc.createElement("li");
-      lib.fill(li, merged);
-      expect(doc.serialize(li)).toContain('<span class="elapsed" data-tip="start to finish">1m 00s</span>');
-      // The `?all=1` feed then replays the registry's RunSummary for the same run: no finishedAt/status,
-      // but the current eventCount / label / persisted flag.
-      const summary: IndexRow = { id: "b1", token: "tok-b1", label: "both", finished: true, persisted: true, startedAt: 1000, eventCount: 10 };
-      lib.fill(li, lib.mergeRow(lib.persistedFields(li), summary));
-      const repaint = doc.serialize(li);
-      expect(repaint).toContain('<span class="elapsed" data-tip="start to finish">1m 00s</span>');
-      expect(repaint).toContain('class="dot grey"');
-      expect(repaint).toContain("10 events");
-      expect(repaint).not.toContain("tok-b1");
-      expect(repaint).toBe(indexRowHtml({ ...summary, finishedAt: 61_000, status: "completed" }));
-      // A live row has nothing to keep: the summary is painted as-is.
-      const live = doc.createElement("li");
-      lib.fill(live, { id: "l1", token: "t", finished: false, startedAt: 1, eventCount: 1 });
-      expect(lib.mergeRow(lib.persistedFields(live), { id: "l1", token: "t", finished: false, startedAt: 1, eventCount: 2 })).toEqual({ id: "l1", token: "t", finished: false, startedAt: 1, eventCount: 2 });
-      // The page's upsert goes through the same merge.
-      expect(renderRunsIndex([], { all: true, retention: null })).toContain("rowLib.fill(li, rowLib.mergeRow(rowLib.persistedFields(li), run), Date.now(), RETENTION_MS);");
-    });
-
-    it("the index page routes every frame through feedAction, reading the row's data-persisted flag", () => {
-      const html = renderRunsIndex([], { all: true, retention: null });
-      expect(html).toContain('var act = rowLib.feedAction(ev, showAll, li ? li.getAttribute("data-persisted") === "1" : false);');
-      expect(html).toContain('if (act.op === "upsert") upsert(act.run); else if (act.op === "remove") remove(act.id);');
+      expect(indexSeedOf(bad.body()).rows.map((r) => r.id)).toEqual(["p1"]);
     });
   });
 
@@ -2111,5 +1449,16 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(["127.0.0.1", "::1", "::ffff:127.0.0.1"].map(isLoopbackAddress)).toEqual([true, true, true]);
       expect(["10.0.0.1", "203.0.113.9", undefined, ""].map(isLoopbackAddress)).toEqual([false, false, false, false]);
     });
+  });
+});
+
+// The IndexRow alias re-exported here is the seed row shape — one type across
+// the handler, the seed, and the web app's row model.
+describe("IndexRow seed shape", () => {
+  it("accepts a live registry summary (with token) and a store view (without)", () => {
+    const live: IndexRow = { id: "a", token: "t", finished: false, startedAt: 1, eventCount: 0 } satisfies Partial<RunSummary> as IndexRow;
+    const stored: IndexRow = { id: "b", finished: true, startedAt: 1, finishedAt: 2, status: "completed", eventCount: 3 };
+    expect(live.token).toBe("t");
+    expect(stored.token).toBeUndefined();
   });
 });

@@ -1,0 +1,84 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+@plugin "@tailwindcss/typography";
+
+@theme static {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* Status colors as first-class utilities (text-ok, border-warn/30, …): the
+   * values swap with the theme via the --sb-* vars below — the dark set is the
+   * original run-page palette. */
+  --color-ok: var(--sb-ok);
+  --color-bad: var(--sb-bad);
+  --color-warn: var(--sb-warn);
+  --color-info: var(--sb-info);
+  --color-skill: var(--sb-skill);
+  --color-review: var(--sb-review);
+  --color-research: var(--sb-research);
+}
+
+/*
+ * One token set for every page (replaces the four divergent CSS blobs of the
+ * string-rendered frontend). Dark is the product's canonical look; light
+ * values exist so a future color-mode toggle is a class flip, not a redesign.
+ */
+:root {
+  --sb-ok: #1a7f37;
+  --sb-bad: #c93c37;
+  --sb-warn: #9a6700;
+  --sb-info: #0969da;
+  --sb-skill: #6639ba;
+  --sb-review: #8250df;
+  --sb-research: #1b7c83;
+  --ui-bg: #f5f7fa;
+  --ui-bg-muted: #eef1f5;
+  --ui-bg-elevated: #ffffff;
+  --ui-bg-accented: #e8ecf2;
+  --ui-border: #dbe1ea;
+  --ui-border-muted: #e8ecf2;
+  --ui-border-accented: #cdd5e0;
+  --ui-text: #141a22;
+  --ui-text-muted: #4f5966;
+  --ui-text-dimmed: #7b8593;
+  --ui-text-highlighted: #0a0e13;
+}
+
+.dark {
+  --sb-ok: #7ee787;
+  --sb-bad: #ff7b72;
+  --sb-warn: #d29922;
+  --sb-info: #9ecbff;
+  --sb-skill: #a78bfa;
+  --sb-review: #d2a8ff;
+  --sb-research: #76e3ea;
+  --ui-bg: #0b0d12;
+  --ui-bg-muted: #0f1218;
+  --ui-bg-elevated: #12151c;
+  --ui-bg-accented: #181d27;
+  --ui-border: #232836;
+  --ui-border-muted: #1b1f28;
+  --ui-border-accented: #3b4252;
+  --ui-text: #e6e6e6;
+  --ui-text-muted: #8b93a7;
+  --ui-text-dimmed: #5f677a;
+  --ui-text-highlighted: #ffffff;
+}
+
+@layer base {
+  /* ONE scaling knob: phones render ~10% larger. Every font size and spacing
+   * utility in the app is rem-based, so text AND whitespace scale together —
+   * no per-component mobile sizing. (Media queries resolve rem against the
+   * browser's initial size, so the breakpoints themselves do not move.) */
+  html {
+    font-size: 17.5px;
+  }
+  @media (min-width: 640px) {
+    html {
+      font-size: 16px;
+    }
+  }
+  body {
+    @apply bg-default text-default font-mono text-[0.8125rem] leading-normal antialiased;
+  }
+}

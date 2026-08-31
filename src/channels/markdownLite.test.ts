@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { renderMarkdownInto } from "./markdownLite.js";
-import { MARKDOWN_RENDERER_SCRIPT } from "./liveView.js";
 
 // Feature: features/live-view.md item 12 — the safe-subset markdown renderer the
 // run page uses for the Request/Answer blocks and assistant rows. It runs in the
@@ -227,14 +226,6 @@ describe("renderMarkdownInto — safety contract", () => {
     const out = ser(root);
     expect(out).toContain("x");
     expect((out.match(/<blockquote>/g) ?? []).length).toBeLessThanOrEqual(8);
-  });
-
-  it("the inlined page script (shim + source) re-evaluates and renders", () => {
-    const again = new Function(`${MARKDOWN_RENDERER_SCRIPT}\nreturn renderMarkdownInto;`)() as typeof renderMarkdownInto;
-    const { node } = makeDoc();
-    const root = node("div");
-    again(root as unknown as HTMLElement, "# hi\n\n- a\n- b");
-    expect(ser(root)).toBe("<div><h1>hi</h1><ul><li>a</li><li>b</li></ul></div>");
   });
 
   it("a link's href is set via setAttribute exactly as written, never interpreted", () => {

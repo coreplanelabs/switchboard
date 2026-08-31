@@ -5,12 +5,19 @@ import type { RunRegistry, RunSummary } from "../core/runRegistry.js";
 import type { RunListCursor, RunsService } from "../core/runsService.js";
 import type { ScheduleDef } from "../core/schedules.js";
 import type { ScheduleStore } from "../core/scheduleStore.js";
-import { buildScheduledRows, renderScheduledPanel, type FiringsState } from "./scheduledPanel.js";
-import { HTML_PAGE_HEADERS } from "./liveView/html.js";
-import { renderRunPage } from "./liveView/runPage.js";
-import { renderRunNotFoundPage, renderRunsIndex, renderScheduledPage, type IndexRow, type RunsIndexOptions } from "./liveView/runsIndex.js";
-export { FAVICON_ICO_SVG, FAVICON_IDLE, FAVICON_LIVE, faviconSvg } from "./liveView/runsIndex.js";
-import { nodeSseSink, parseLastEventId, serveEvents, serveHistoryEvents, serveIndexEvents, startSseHeartbeat } from "./liveView/sse.js";
+import { STORE_UNAVAILABLE_BANNER } from "../core/commandRegistry.js";
+import { buildScheduledRows, type FiringsState } from "./scheduledPanel.js";
+import type { ShellRenderer } from "./webShell.js";
+import { WEB_HTML_HEADERS } from "./webShell.js";
+import type { RunIndexRowSeed, RunsIndexSeed, ScheduledSeed } from "./webSeed.js";
+export { FAVICON_ICO_SVG, FAVICON_IDLE, FAVICON_LIVE, faviconSvg } from "./favicon.js";
+import { nodeSseSink, parseLastEventId, serveEvents, serveHistoryEvents, serveIndexEvents, startSseHeartbeat, withOmittedMarkers } from "./liveView/sse.js";
+
+/** One index row, whatever its source: a live registry row (which carries the
+ *  capability `token`) or a finished/persisted `RunView` (no token). The seed
+ *  type in webSeed.ts is the same shape — one alias so handler code reads
+ *  naturally. */
+export type IndexRow = RunIndexRowSeed;
 
 // Live-view channel: the external, browser-facing surface for a live agent run
 // (Area 2 / #43). It streams the SAME redacted RunEvents the in-channel status
@@ -31,22 +38,19 @@ import { nodeSseSink, parseLastEventId, serveEvents, serveHistoryEvents, serveIn
 // EventSource auto-reconnects, and it needs no handshake or extra dependency.
 //
 // Handlers are split from transport so the logic is unit-testable without a
-// socket: `parseRunRoute` (pure), `renderRunPage` (pure string), and
+// socket: `parseRunRoute` (pure), the seed builders (pure data), and
 // `serveEvents` (drives an abstract SseSink). `createLiveViewHandler` is the
 // thin node:http wrapper.
 //
-// This file is the router (`parseRunRoute`, `createLiveViewHandler`); the
-// rendering and transport live in `./liveView/` and are re-exported here so
-// every importer keeps one entry point:
-//   html.ts      — HTML_PAGE_HEADERS, escapeHtml, NAME_SHIM
-//   runPage.ts   — renderRunPage + the inlined client scripts, seedEventsJson
-//   runsIndex.ts — renderRunsIndex, indexRowRenderer, staticDocument, feed rules
-//   sse.ts       — SseSink, serveEvents / serveIndexEvents / serveHistoryEvents
+// RENDERING lives in the web app (web/): every HTML route serves the shared
+// shell (webShell.ts) with this page's seed (webSeed.ts) embedded; the Vue
+// pages paint it and open the SSE routes here. This file is the router and
+// the seed source; the transport lives in ./liveView/sse.ts, re-exported so
+// every importer keeps one entry point.
 
 export * from "./liveView/html.js";
-export * from "./liveView/runPage.js";
-export * from "./liveView/runsIndex.js";
 export * from "./liveView/sse.js";
+export { retentionSentence } from "./webSeed.js";
 
 /** Which live-view route a path is, if any. The bare `/runs` index carries no
  *  id (it is Access-gated, not token-gated); the per-run routes do. `stop` is
@@ -91,6 +95,8 @@ export interface HistoryReadAudit {
 }
 
 export interface LiveViewDeps {
+  /** The bound web-app shell (webShell.ts): title + seed → the HTML document. */
+  shell: ShellRenderer;
   /** Every run read and the tokenless stop go through the service (KTD7). */
   service: RunsService;
   /** The registry's index face: the live rows (with tokens, for their hrefs) and
@@ -217,8 +223,11 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
     const { runs, nextBefore, storeUnavailable } = await service.listRuns({ status: "all", limit: pageSize, ...(cursor ?? {}) });
     // A cursor page holds finished runs only — the service leaves the live rows
     // off it (they all sort ahead of any cursor), so the page is a full page.
+    // Only an UNFINISHED row gets its capability token (R10): the seed is data
+    // the page ships verbatim, and a finished row must never carry one — the
+    // registry may still hold a token for a recently finished run.
     const rows = runs.map((v) => {
-      const token = tokens.get(v.id);
+      const token = v.finished ? undefined : tokens.get(v.id);
       return token === undefined ? v : { ...v, token };
     });
     // The service degraded to live rows: the page says so (a banner), never a silently short list.
@@ -260,17 +269,22 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
       }
       const live = index.listActive();
       const render = (page: IndexPage) => {
-        res.writeHead(200, HTML_PAGE_HEADERS);
-        res.end(
-          renderRunsIndex(page.rows, {
-            all,
-            retention: deps.retention,
-            now: now(),
-            ...(page.storeUnavailable ? { storeUnavailable: true } : {}),
-            ...(page.olderHref ? { olderHref: page.olderHref } : {}),
-            ...(page.olderThan !== undefined ? { olderThan: page.olderThan } : {}),
-          }),
-        );
+        const liveCount = page.rows.filter((r) => !r.finished).length;
+        // The tab title carries the live count (item 21); the page keeps it
+        // current from the feed after this first paint.
+        const title = `${liveCount > 0 ? `(${liveCount}) ` : ""}${all ? "All runs" : "Live runs"}`;
+        const seed: RunsIndexSeed = {
+          page: "runs",
+          all,
+          retentionDays: deps.retention ? deps.retention.retentionDays : null,
+          now: now(),
+          rows: [...page.rows],
+          ...(page.storeUnavailable ? { storeUnavailable: STORE_UNAVAILABLE_BANNER } : {}),
+          ...(page.olderHref ? { olderHref: page.olderHref } : {}),
+          ...(page.olderThan !== undefined ? { olderThan: page.olderThan } : {}),
+        };
+        res.writeHead(200, WEB_HTML_HEADERS);
+        res.end(deps.shell(title, seed));
       };
       if (!all) {
         // Nothing to await: the default view is the registry alone (R11 — never a
@@ -290,15 +304,21 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
     if (route.kind === "scheduled") {
       const scheduled = deps.scheduled;
       if (!scheduled) {
-        res.writeHead(200, HTML_PAGE_HEADERS);
-        res.end(renderScheduledPage(`<p class="empty">No schedule registry configured.</p>`));
+        res.writeHead(200, WEB_HTML_HEADERS);
+        res.end(deps.shell("Scheduled runs", { page: "scheduled", now: now(), rows: null }));
         return true;
       }
       const live = index.listActive();
       const render = (firings: FiringsState) => {
         const t = now();
-        res.writeHead(200, HTML_PAGE_HEADERS);
-        res.end(renderScheduledPage(renderScheduledPanel(buildScheduledRows(scheduled.schedules, firings, live, t), firings, t)));
+        const seed: ScheduledSeed = {
+          page: "scheduled",
+          now: t,
+          rows: buildScheduledRows(scheduled.schedules, firings, live, t),
+          ...(firings.ok ? {} : { firingsUnavailable: firings.reason }),
+        };
+        res.writeHead(200, WEB_HTML_HEADERS);
+        res.end(deps.shell("Scheduled runs", seed));
       };
       if (!scheduled.store) {
         render({ ok: false, reason: NO_STORE_REASON });
@@ -317,8 +337,17 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
     // pre-history handler (KTD6).
     if (access) {
       if (route.kind === "page") {
-        res.writeHead(200, HTML_PAGE_HEADERS);
-        res.end(renderRunPage(route.id, token));
+        res.writeHead(200, WEB_HTML_HEADERS);
+        res.end(
+          deps.shell("Live run", {
+            page: "run",
+            mode: "live",
+            id: route.id,
+            // Stop control (#101): same token, POST-only; `&mode=` is appended client-side.
+            eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
+            stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}`,
+          }),
+        );
         return true;
       }
       // Read-only friction diagnosis of the run's retained backlog (#84): works
@@ -416,18 +445,24 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
         } else if (route.kind === "page") {
           // A person landed here: the same 404 (existence never revealed), as a
           // page with the way back (item 19). Machine routes keep the text body.
-          res.writeHead(404, HTML_PAGE_HEADERS);
-          res.end(renderRunNotFoundPage(deps.retention));
+          res.writeHead(404, WEB_HTML_HEADERS);
+          res.end(deps.shell("Run not found", { page: "runNotFound", retentionDays: deps.retention ? deps.retention.retentionDays : null }));
         } else text(res, 404, NOT_FOUND);
         return;
       }
       const view = found.value;
       audit({ route: route.kind === "page" ? "page" : "events", runId: route.id, ...(ctx?.identity ? { identity: ctx.identity } : {}) });
       if (route.kind === "page") {
-        res.writeHead(200, HTML_PAGE_HEADERS);
+        res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
-          renderRunPage(route.id, "", view.events ?? [], {
-            status: view.status,
+          deps.shell("Run", {
+            page: "run",
+            mode: "history",
+            id: route.id,
+            // The stored stream with the truncation made visible (AE11): the
+            // seed IS the stream on a history page.
+            events: withOmittedMarkers(view.events ?? [], view.eventCount),
+            ...(view.status ? { status: view.status } : {}),
             eventCount: view.eventCount,
             ...(typeof view.finishedAt === "number" ? { durationMs: view.finishedAt - view.startedAt } : {}),
           }),

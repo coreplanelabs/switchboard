@@ -9,10 +9,12 @@ export const FIXTURE_SCHEDULES: readonly ScheduleDef[] = [
   { name: "self-improvement", cron: "0 14 * * 1", worker: "bot", description: "Weekly self-improvement pass.", action: { type: "run", command: "friction propose", identity: "cron" } },
   { name: "resident-watchdog", cron: "*/10 * * * *", worker: "resident", description: "Resident watchdog pass.", action: { type: "watchdog" } },
 ];
-import { buildScheduledRows, firingDetailSummary, formatRelative, formatUtc, renderScheduledPanel, type FiringsState } from "./scheduledPanel.js";
+import { buildScheduledRows, firingDetailSummary, formatRelative, formatUtc, type FiringsState } from "./scheduledPanel.js";
 
 // Feature: features/live-view.md item 14 (#244): the /runs "Scheduled" panel —
 // what is armed, next fire (computed), last fire + outcome, link to the run.
+// Rendering lives in web/src/pages/ScheduledPage.vue (tested there); these
+// tests own the pure row model both sides share.
 
 const NOW = Date.UTC(2026, 7, 29, 12, 34, 56); // Sat
 const none: FiringsState = { ok: true, firings: [] };
@@ -81,31 +83,7 @@ describe("buildScheduledRows", () => {
   });
 });
 
-describe("renderScheduledPanel", () => {
-  it("renders one row per schedule with UTC times, relative hints, outcome class, and the run link", () => {
-    const rows = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing()] }, [], NOW);
-    const html = renderScheduledPanel(rows, { ok: true, firings: [firing()] }, NOW);
-    expect(html).toContain('<section id="scheduled"');
-    expect(html).not.toContain('data-schedule="keep-alive"');
-    expect(html).toContain('<li data-schedule="self-improvement">');
-    expect(html).toContain("<code>friction propose</code>");
-    expect(html).toContain("<code>cron</code>");
-    expect(html).toContain('<li data-schedule="resident-watchdog">');
-    expect(html).toContain("resident watchdog — not a run");
-    expect(html).toContain('<span class="worker"><span class="lbl">on</span> <code>bot</code></span>');
-    expect(html).toContain("<code>resident</code>");
-    expect(html).toContain("<b>2026-08-31 14:00 UTC</b>");
-    expect(html).toContain("(in 2d 1h)");
-    expect(html).toContain('<span class="outcome ok">succeeded</span>');
-    expect(html).toContain('<a href="/runs/run-abc12345">run run-abc1</a>');
-    // Line 2 is ONE line: outcome · how long ago (exact UTC on hover) · run · the reply's facts (emoji dropped)
-    expect(html).toContain(
-      '<div class="fire"><span class="lbl">last</span> <span class="outcome ok">succeeded</span><span class="sep">·</span><span class="when" title="2026-08-24 14:00 UTC">4d 22h ago</span><span class="sep">·</span><a href="/runs/run-abc12345">run run-abc1</a><span class="sep">·</span><span class="detail" title="🔍 109 runs analyzed — filed 2">109 runs analyzed — filed 2</span></div>',
-    );
-    expect(html).not.toContain("<table");
-    expect(html).not.toContain("Firing history unavailable");
-  });
-
+describe("firingDetailSummary", () => {
   it("the detail is the reply's facts, not its title: a leading `*Title* —` and emoji are dropped, long text is cut", () => {
     expect(firingDetailSummary("🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns · 1 filed")).toBe("244 runs analyzed · 23 recurring patterns · 1 filed");
     expect(firingDetailSummary("🔍 109 runs analyzed — filed 2")).toBe("109 runs analyzed — filed 2");
@@ -119,27 +97,18 @@ describe("renderScheduledPanel", () => {
     expect(firingDetailSummary("   ")).toBe("");
   });
 
-  it("never fired → says so; unavailable history → a note with the reason and `unknown` cells", () => {
-    expect(renderScheduledPanel(buildScheduledRows(FIXTURE_SCHEDULES, none, [], NOW), none, NOW)).toContain("never fired");
-    const off: FiringsState = { ok: false, reason: "schedules.worker not configured" };
-    const html = renderScheduledPanel(buildScheduledRows(FIXTURE_SCHEDULES, off, [], NOW), off, NOW);
-    expect(html).toContain("Firing history unavailable: schedules.worker not configured");
-    expect(html).toContain(">unknown<");
-  });
+});
 
-  it("bad outcomes get the bad class and a plain-English label", () => {
-    const f = firing({ runId: undefined, outcome: "misconfigured", detail: 'SWITCHBOARD_INGRESS_TOKENS has no entry with subject "cron"' });
-    const html = renderScheduledPanel(buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [f] }, [], NOW), { ok: true, firings: [f] }, NOW);
-    expect(html).toContain('<span class="outcome bad">misconfigured — nothing ran</span>');
-    expect(html).toContain("has no entry with subject &quot;cron&quot;");
-    expect(html).not.toContain("<a href");
-  });
-
-  it("escapes hostile detail/description text (no markup breakout)", () => {
-    const f = firing({ detail: '<img src=x onerror=alert(1)>"' });
-    const html = renderScheduledPanel(buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [f] }, [], NOW), { ok: true, firings: [f] }, NOW);
-    expect(html).not.toContain("<img");
-    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;&quot;");
+describe("outcome vocabulary (shared with the web page)", () => {
+  it("labels every outcome in plain English with its tone class", async () => {
+    const { OUTCOME_CLASS, OUTCOME_LABEL } = await import("./scheduledPanel.js");
+    expect(OUTCOME_LABEL.completed).toBe("succeeded");
+    expect(OUTCOME_LABEL.misconfigured).toBe("misconfigured — nothing ran");
+    expect(OUTCOME_LABEL.stopped_hard).toBe("killed");
+    expect(OUTCOME_CLASS.completed).toBe("ok");
+    expect(OUTCOME_CLASS.failed).toBe("bad");
+    expect(OUTCOME_CLASS.stopped_soft).toBe("warn");
+    expect(OUTCOME_CLASS["ingress-error"]).toBe("bad");
   });
 });
 

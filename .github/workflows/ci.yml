@@ -40,6 +40,25 @@ jobs:
           echo "test files in dist: $count"
           test "$count" -eq 0
 
+  web:
+    name: web app typecheck + tests + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # The server refuses to boot without the built manifest — prove it builds.
+      - run: npm run build
+
   bot-worker:
     name: bot worker typecheck + deploy preflight tests
     runs-on: ubuntu-latest

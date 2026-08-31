@@ -5,3 +5,9 @@ workspaces
 .env
 deploy
 README.md
+# .dockerignore patterns are root-anchored: `node_modules` above does NOT
+# cover web/'s tree. COPY web ./web runs after the image's own `npm ci` in
+# web/, so a host-installed (macOS) node_modules copied over it would break
+# the Linux image; web/dist is rebuilt in the image too.
+web/node_modules
+web/dist
