@@ -195,3 +195,44 @@ describe("LocalExecutor exec abort", () => {
     expect(text).toMatch(/^exit /); // aborted → legible failure text, not a throw
   });
 });
+
+// Feature: features/execution.md item 11 — per-call bash timeout. The local
+// executor honors ExecOptions.timeoutMs (execFile's `timeout`, maxBuffer kept)
+// and a deadline kill renders as exit 124 NAMING the limit that fired and the
+// timeoutMs knob, so the model can self-correct instead of seeing a bare abort.
+describe("LocalExecutor per-call timeout", () => {
+  it("kills the command at the requested timeout and names the limit + the timeoutMs knob", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-local-timeout-"));
+    const ex = new LocalExecutor(dir);
+    const started = Date.now();
+    const text = await ex.exec("sleep 30", { timeoutMs: 1_000 });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(text).toMatch(/^exit 124: /);
+    expect(text).toContain("1s command timeout");
+    expect(text).toContain("timeoutMs");
+    expect(text).toContain("1200000"); // the ceiling, so the model knows the max
+  });
+
+  it("clamps a sub-floor timeoutMs up to 1s instead of killing instantly", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-local-timeout-"));
+    const ex = new LocalExecutor(dir);
+    const started = Date.now();
+    const text = await ex.exec("sleep 30", { timeoutMs: 0 });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(text).toMatch(/^exit 124: /);
+  });
+
+  it("a command that finishes inside its timeout returns output as before", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-local-timeout-"));
+    const ex = new LocalExecutor(dir);
+    await expect(ex.exec("echo fast", { timeoutMs: 60_000 })).resolves.toBe("fast\n");
+  });
+
+  it("a nonzero exit inside the timeout is still an ordinary exit line, never the 124 wording", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-local-timeout-"));
+    const ex = new LocalExecutor(dir);
+    const text = await ex.exec("exit 3", { timeoutMs: 60_000 });
+    expect(text).toMatch(/^exit 3/);
+    expect(text).not.toContain("command timeout");
+  });
+});

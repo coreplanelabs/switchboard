@@ -1,7 +1,7 @@
 // Sandbox proxy Worker: fronts per-thread Cloudflare Sandboxes with a minimal
 // authenticated HTTP API the bot's CloudflareSandboxExecutor calls.
 //
-//   POST /exec   { command }         -> { stdout, stderr, exitCode }
+//   POST /exec   { command, timeoutMs? } -> { stdout, stderr, exitCode }
 //   POST /read   { path }            -> { content }
 //   POST /write  { path, content }   -> { ok: true }
 //
@@ -14,6 +14,7 @@
 // Verify method names against https://developers.cloudflare.com/sandbox/ on
 // first deploy; the SDK is young and its surface may shift.
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
+import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
 
 export class SwitchboardSandbox extends Sandbox {
@@ -65,9 +66,14 @@ interface Env {
 
 const WORKDIR = "/workspace";
 
-// Per-command time limit, enforced by coreutils `timeout` inside the sandbox.
-// Must stay BELOW the SDK backstop (COMMAND_TIMEOUT_MS in the Dockerfile) so
-// the real exit 124 wins, and below undici's 300s client ceilings.
+// Default per-command time limit, enforced by coreutils `timeout` inside the
+// sandbox. The tuned 280s applies when the body carries no timeoutMs (an older
+// bot); a caller-supplied timeoutMs is clamped server-side to the shared
+// [1s, 20 min] bounds (clampBashTimeout — never trust the client's number).
+// Whatever the effective limit, it must stay BELOW the SDK backstop
+// (COMMAND_TIMEOUT_MS in the Dockerfile, sized above the 20-min ceiling) so
+// the real exit 124 wins. undici's 300s no-headers ceiling stopped mattering
+// once /exec streamed heartbeats — headers go out immediately.
 const EXEC_TIMEOUT_SECS = 280;
 
 export default {
@@ -96,7 +102,7 @@ export default {
     }
 
     const url = new URL(request.url);
-    const body = (await request.json().catch(() => ({}))) as Record<string, string>;
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
 
     // Env injection is inline per command (base64-safe export prefix): the
     // per-exec `env` option is ignored in SDK 0.3.7, and setEnvVars only
@@ -130,18 +136,29 @@ export default {
           // classification needed. SIGKILL follows 10s after TERM for
           // stragglers. COMMAND_TIMEOUT_MS (Dockerfile) sits above this as a
           // pure backstop.
-          const full = `${envPrefix}mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${body.command}`;
+          //
+          // Per-call budget (features/execution.md item 11): a numeric
+          // timeoutMs in the body is clamped server-side to the shared
+          // [1s, 20 min] bounds; absent (an older bot) → the tuned 280s
+          // default this Worker has always used.
+          const requested = body.timeoutMs;
+          const execTimeoutSecs =
+            typeof requested === "number" && Number.isFinite(requested)
+              ? Math.ceil(clampBashTimeout(requested) / 1000)
+              : EXEC_TIMEOUT_SECS;
+          const full = `${envPrefix}mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${String(body.command ?? "")}`;
           return streamExec(
             sandbox,
-            `timeout -k 10 ${EXEC_TIMEOUT_SECS} bash -c ${shellQuote(full)}`,
+            `timeout -k 10 ${execTimeoutSecs} bash -c ${shellQuote(full)}`,
+            execTimeoutSecs,
           );
         }
         case "/read": {
-          const file = await withSessionRecovery(sandbox, () => sandbox.readFile(abs(body.path)));
+          const file = await withSessionRecovery(sandbox, () => sandbox.readFile(abs(String(body.path ?? ""))));
           return json({ content: typeof file === "string" ? file : (file?.content ?? "") });
         }
         case "/write": {
-          await withSessionRecovery(sandbox, () => sandbox.writeFile(abs(body.path), body.content ?? ""));
+          await withSessionRecovery(sandbox, () => sandbox.writeFile(abs(String(body.path ?? "")), String(body.content ?? "")));
           return json({ ok: true });
         }
         default:
@@ -161,6 +178,7 @@ export default {
 function streamExec(
   sandbox: { resetDefaultSession(): void | Promise<void>; exec(command: string): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> },
   command: string,
+  execTimeoutSecs: number,
 ): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -189,7 +207,8 @@ function streamExec(
           // agent knows what happened and how to adapt.
           const timedOut = exitCode === 124 || exitCode === 137;
           const note = timedOut
-            ? `command timed out in the sandbox after ${EXEC_TIMEOUT_SECS}s; re-run as smaller/faster steps or background it with nohup`
+            ? `command timed out in the sandbox after ${execTimeoutSecs}s (pass the bash tool's timeoutMs for longer commands, max ${BASH_TIMEOUT_MAX_MS} ms); ` +
+              "re-run as smaller/faster steps or background it with nohup"
             : "";
           finish({
             stdout: result.stdout ?? "",

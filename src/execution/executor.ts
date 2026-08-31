@@ -2,6 +2,12 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
+import { BASH_TIMEOUT_MS, bashTimeoutNote, clampBashTimeout } from "./bashTimeout.js";
+
+// The timeout policy (default/floor/ceiling + clamp) lives in bashTimeout.ts
+// so the deploy Workers can bundle it; re-exported here for the many callers
+// that know the Executor seam, not the policy module.
+export { BASH_TIMEOUT_MS, BASH_TIMEOUT_MAX_MS, EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
 
 // The Executor is the seam between agents and where their commands actually
 // run. Tools never touch the filesystem or spawn processes directly — they
@@ -34,6 +40,11 @@ export interface Executor {
 export interface ExecOptions {
   /** Aborted when the run is hard-stopped; cancel the command if you can. */
   signal?: AbortSignal;
+  /** Per-call command budget in ms (the bash tool's `timeoutMs`), already
+   *  clamped to [1s, BASH_TIMEOUT_MAX_MS] by the tool layer; implementations
+   *  re-clamp defensively (`clampBashTimeout`). Absent → BASH_TIMEOUT_MS, the
+   *  exact pre-timeoutMs behavior. */
+  timeoutMs?: number;
 }
 
 /** The per-call deadline for a remote route, joined with an optional hard-stop
@@ -113,7 +124,6 @@ export class ExecHealthTracker implements Executor {
   }
 }
 
-export const BASH_TIMEOUT_MS = 5 * 60_000;
 const MAX_OUTPUT = 120_000;
 
 export function truncate(s: string): string {
@@ -135,8 +145,14 @@ export class LocalExecutor implements Executor {
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
-    const r = await runBash(command, this.workspaceDir, opts?.signal);
+    const timeoutMs = clampBashTimeout(opts?.timeoutMs);
+    const r = await runBash(command, this.workspaceDir, opts?.signal, timeoutMs);
     const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
+    if (r.timedOut) {
+      // Name the limit that fired (not a generic abort) so the model can
+      // self-correct: 124 is the exit code coreutils `timeout` uses too.
+      return truncate(`exit 124: ${bashTimeoutNote(timeoutMs)}\n${parts}`);
+    }
     if (r.error) {
       return truncate(`exit ${r.error.code ?? "error"}: ${r.error.message}\n${parts}`);
     }
@@ -209,29 +225,45 @@ async function runLocalCommand(command: string, cwd: string): Promise<{ exitCode
   return { exitCode: typeof code === "number" ? code : 1, output };
 }
 
-/** Shared bash spawn-and-collect (`bash -c` under the standard budget and
- *  buffer). `error` is null on a clean zero-exit run; otherwise it carries
- *  execFile's raw code (number exit code, string errno, or undefined when
- *  signal-killed) and message — each caller formats its own result. An
- *  optional AbortSignal (hard run stop, #101) kills the child; that surfaces as
- *  an `error` like any other abnormal exit — never a throw. */
+/** Shared bash spawn-and-collect (`bash -c` under the given budget — the
+ *  standard 5-minute one unless the caller passes a clamped per-call value —
+ *  and the standard buffer). `error` is null on a clean zero-exit run;
+ *  otherwise it carries execFile's raw code (number exit code, string errno,
+ *  or undefined when signal-killed) and message — each caller formats its own
+ *  result. `timedOut` is true only for the budget's own kill: the child died
+ *  from execFile's timeout signal (signal-killed, no error code) at or after
+ *  the deadline — a hard-stop abort (#101), a maxBuffer kill
+ *  (ERR_CHILD_PROCESS_STDIO_MAXBUFFER), and ordinary nonzero exits all keep it
+ *  false. An optional AbortSignal (hard run stop) kills the child; that
+ *  surfaces as an `error` like any other abnormal exit — never a throw. */
 function runBash(
   command: string,
   cwd: string,
   signal?: AbortSignal,
-): Promise<{ stdout: string; stderr: string; error: { code?: number | string; message: string } | null }> {
+  timeoutMs: number = BASH_TIMEOUT_MS,
+): Promise<{ stdout: string; stderr: string; timedOut: boolean; error: { code?: number | string; message: string } | null }> {
+  const started = Date.now();
   return new Promise((res) => {
     execFile(
       "bash",
       ["-c", command],
-      { cwd, timeout: BASH_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024, ...(signal ? { signal } : {}) },
+      { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, ...(signal ? { signal } : {}) },
       (err, stdout, stderr) => {
+        const e = err as (NodeJS.ErrnoException & { code?: number | string; signal?: string | null }) | null;
         res({
           stdout,
           stderr,
-          error: err
-            ? { code: (err as NodeJS.ErrnoException & { code?: number | string }).code, message: err.message }
-            : null,
+          timedOut:
+            e != null &&
+            // Node marks ITS OWN kill (the `timeout` option) with killed=true;
+            // an external SIGKILL (OOM killer) after the budget elapsed leaves
+            // killed=false and must not masquerade as `exit 124: …timeout`.
+            (e as { killed?: boolean }).killed === true &&
+            e.signal != null &&
+            e.code == null &&
+            !(signal?.aborted ?? false) &&
+            Date.now() - started >= timeoutMs,
+          error: e ? { code: e.code, message: e.message } : null,
         });
       },
     );

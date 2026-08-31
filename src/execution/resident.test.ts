@@ -532,3 +532,45 @@ describe("ResidentExecutor.moveTo", () => {
     await expect(ex.moveTo("d75b5a51aba97d43c64a42c96e580dd9abbfd78e")).rejects.toThrow(/not-serviceable/);
   });
 });
+
+// Feature: features/execution.md item 11 — per-call bash timeout on the
+// resident path. The budget rides in the /exec body only when the caller asked
+// for one (an older resident keeps seeing the body it always did), clamped
+// client-side to [1s, 20 min]; the resident clamps again server-side and never
+// trusts this number.
+describe("ResidentExecutor per-call timeout", () => {
+  const OK = { stdout: "ok", stderr: "", exitCode: 0, truncated: false };
+
+  it("sends the requested timeoutMs in the /exec body, clamped to the 20-min ceiling", async () => {
+    const { calls } = stubFetch({ body: OK });
+    const ex = new ResidentExecutor(OPTS);
+    await expect(ex.exec("npm test", { timeoutMs: 25 * 60_000 })).resolves.toBe("ok");
+    expect(sentBody(calls[0]).timeoutMs).toBe(20 * 60_000);
+  });
+
+  it("sends an in-range timeoutMs unchanged", async () => {
+    const { calls } = stubFetch({ body: OK });
+    const ex = new ResidentExecutor(OPTS);
+    await ex.exec("npm test", { timeoutMs: 600_000 });
+    expect(sentBody(calls[0]).timeoutMs).toBe(600_000);
+  });
+
+  it("no timeoutMs → the body an older resident expects (no timeoutMs key at all)", async () => {
+    const { calls } = stubFetch({ body: OK });
+    const ex = new ResidentExecutor(OPTS);
+    await ex.exec("ls");
+    expect("timeoutMs" in sentBody(calls[0])).toBe(false);
+  });
+
+  it("the retried command after a re-attach carries the same timeoutMs", async () => {
+    const { calls } = stubFetch(
+      { body: { error: "evicted: worktree was evicted", needs: "attach", stdout: "", stderr: "evicted", exitCode: 127 } },
+      { body: ATTACH_OK },
+      { body: OK },
+    );
+    const ex = new ResidentExecutor(OPTS);
+    await expect(ex.exec("npm test", { timeoutMs: 600_000 })).resolves.toBe("ok");
+    expect(calls.map(route)).toEqual(["/exec", "/attach", "/exec"]);
+    expect(sentBody(calls[2]).timeoutMs).toBe(600_000);
+  });
+});
