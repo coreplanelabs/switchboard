@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WebClient } from "@slack/web-api";
+import { WebClient, type WebAPICallResult } from "@slack/web-api";
 import { createSlackApp } from "./slack.js";
 import { ACK_EMOJI } from "./slackCatchUp.js";
 import { getCatchUpStatus, resetCatchUpStatus, REQUIRED_BOT_SCOPES } from "./slackCatchUpStatus.js";
@@ -73,7 +73,7 @@ describe("connected-hook wiring (Bolt-level harness, #259)", () => {
     // WebClient call at the transport seam so nothing leaves the process.
     // (bindApiCall captures apiCall at construction, so this must be stubbed
     // before makeApp runs; the per-endpoint fakes then shadow it.)
-    vi.spyOn(WebClient.prototype, "apiCall").mockResolvedValue({ ok: true, user_id: BOT, bot_id: "B0BOT" });
+    vi.spyOn(WebClient.prototype, "apiCall").mockResolvedValue({ ok: true, user_id: BOT, bot_id: "B0BOT" } as WebAPICallResult);
     dispatchMock.mockClear();
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
