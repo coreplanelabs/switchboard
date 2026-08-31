@@ -2473,6 +2473,25 @@ describe("coding PR post-step (features/pr-description.md)", () => {
     expect(spy.calls[0].base).toBe("main");
   });
 
+  // Characterization (U4): the no-base branch of the post-step — nothing at
+  // dispatch resolved a ref, no resident binding, so there is no base to open
+  // the PR against. Honest note naming the missing base, the compare URL (the
+  // push WAS proven), and no PR call.
+  it("description submitted + pushed branch but NO base resolvable → no PR call; the note says no base branch is known, with the compare URL", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    deps.resolveRepoContext = () => ({ repo: "acme/api" }); // no ref resolved
+    codingExecutor({ head: HEAD, branch: "feat/x" }); // no bindingRef → no binding ref either
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const note = replies.find((r) => r.includes("no base branch"));
+    expect(note).toBeDefined();
+    expect(note).toContain("no PR was opened");
+    expect(note).toContain("https://github.com/acme/api/compare/feat/x");
+  });
+
   it("no description submitted but a pushed branch is observable → no PR call; the reply states it plainly with the compare URL", async () => {
     const deps = codingDeps(describeThenAnswer(undefined, "I implemented the fix on feat/login-fix."));
     codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
