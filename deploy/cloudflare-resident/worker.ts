@@ -339,7 +339,15 @@ const REHYDRATION_FAILURE_RE = /^(r2-restore-failed|snapshot-stamp-mismatch|no-s
  *  /op runs (test/build) keep the flat 5-minute budget — the deterministic op
  *  path has no caller-supplied knob, so nothing may stretch it. */
 const OP_EXEC_TIMEOUT_MS = BASH_TIMEOUT_MS;
-const MAX_EXEC_COMMAND_LENGTH = 8_000;
+/** Sanity bound on /exec's command body — a guard against a runaway caller,
+ *  not a working limit: legitimate agent one-liners (heredocs writing test
+ *  files, `node -e` scripts, long pipelines) run well past the old 8 000 and
+ *  were refused here while the sandbox/local executors took them fine.
+ *  64 000 is far above any sane command yet still tiny beside the route's
+ *  content caps (write 512 KB) — real file content belongs in /write. The
+ *  bot-side exec wrapper's `( cd <worktree> && …` framing counts against
+ *  this bound too, so the agent's effective budget is slightly smaller. */
+const MAX_EXEC_COMMAND_LENGTH = 64_000;
 /** Output caps, per stream; truncation is annotated in stderr like the
  *  thread-sandbox Worker annotates its timeout note. */
 const EXEC_OUTPUT_CAP = 100_000;
