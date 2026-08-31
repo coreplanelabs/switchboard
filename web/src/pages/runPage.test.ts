@@ -304,3 +304,54 @@ describe("RunPage — live mode", () => {
     expect(wrapper.find("#actions").exists()).toBe(false);
   });
 });
+
+// Feature: features/reading-diff.md item 6 — the pr-review module on the run
+// page: a run that published reading-diff artifacts gets the Reading diff
+// button; the slideout renders the module from the adapter's state. The
+// module itself is tested in src/modules/pr-review/; this is the wiring.
+describe("PR-review panel wiring", () => {
+  const inputFrame = { ...input, type: "input" } as const;
+  const runMeta = { type: "run_meta", agent: "review", model: "anthropic/m", repo: "acme/api", ref: "patch-1", pr: 42, headSha: "e".repeat(40), at: 2 } as const;
+  const artifact = {
+    type: "review_artifact",
+    artifact: "reading_diff",
+    poweredBy: "git",
+    baseRef: "main",
+    diff: "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,1 +1,1 @@\n-const OLD_MARKER = 1;\n+const NEW_MARKER = 2;\n",
+    truncated: false,
+    at: 3,
+  } as const;
+
+  it("a history run with artifacts shows the button; opening it renders the panel with the PR link and the rendered diff", async () => {
+    const wrapper = mountApp(RunPage, { seed: historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "looks correct", at: 9 }]) });
+    const button = wrapper.find('[data-testid="reading-diff-button"]');
+    expect(button.exists()).toBe(true);
+    await button.trigger("click");
+    await wrapper.vm.$nextTick();
+    const panel = document.querySelector('[data-testid="pr-review-panel"]');
+    expect(panel).not.toBeNull();
+    expect(panel!.textContent).toContain("acme/api#42");
+    expect(panel!.textContent).toContain("full diff · git");
+    expect(panel!.textContent).toContain("NEW_MARKER");
+    wrapper.unmount();
+  });
+
+  it("artifacts arriving over the live stream light the button too", async () => {
+    const { wrapper, es } = mountLive();
+    es().emitOpen();
+    es().emitMessage(input, "1");
+    es().emitMessage(runMeta, "2");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="reading-diff-button"]').exists()).toBe(false); // identity alone is not a panel
+    es().emitMessage(artifact, "3");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="reading-diff-button"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("a run without artifacts (a coding run, or reading diffs off) has no button", () => {
+    const wrapper = mountApp(RunPage, { seed: historySeed([inputFrame, runMeta, { type: "answer", text: "done", at: 9 }]) });
+    expect(wrapper.find('[data-testid="reading-diff-button"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+});
