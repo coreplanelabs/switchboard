@@ -97,7 +97,10 @@ const WELL_KNOWN_REFS = new Set(["main", "master", "develop", "trunk"]);
 // Slack and Markdown both render these as code.
 const CODE_SPAN = /```[\s\S]*?```|`[^`\n]*`/g;
 
-/** Slack link markup `<url>` / `<url|label>` → the bare url. */
+/** Slack link markup `<url>` / `<url|label>` → the bare url. Deliberately
+ *  case-SENSITIVE, unlike shipTaskText's `gi` twin: unwrapping an
+ *  uppercase-scheme labeled link (`<HTTPS://…|label>`) would change what the
+ *  signal regexes below bind — see the note in shipPipeline.ts. */
 function unwrapSlack(text: string): string {
   return text.replace(/<(https?:\/\/[^|>\s]+)(?:\|[^>]*)?>/g, " $1 ");
 }

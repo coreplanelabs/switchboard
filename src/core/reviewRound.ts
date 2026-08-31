@@ -441,6 +441,14 @@ async function classifyMove(
 
 // ---- reviewed-head post gate + review post (issue #69, item 8) --------------
 
+/** How the post step ended: `posted: true` only when the GitHub post call
+ *  succeeded; every skip, guard refusal, and failure is `posted: false` with
+ *  the reason (already said in the thread where the contract wants it said).
+ *  The plain dispatch path may ignore the value — its behavior is unchanged —
+ *  while ship's merge-ready gate consumes it: an approve whose LGTM never
+ *  landed on the PR must not be reported merge-ready. */
+export type ReviewPostOutcome = { posted: true } | { posted: false; reason: string };
+
 /**
  * The deterministic review post-step: a round on the review agent against a
  * resolved PR posts its verdict back to that PR by default — unless the
@@ -453,6 +461,7 @@ async function classifyMove(
  * false alarm). Safe to call at any lifecycle position — it touches only its
  * inputs, so the plain dispatch path keeps calling it AFTER workspace release
  * and registry finish, while a ship round may invoke it inside its loop.
+ * Never throws; the returned `ReviewPostOutcome` says whether a post landed.
  */
 export async function runReviewPostStep(input: {
   agent: AgentDef;
@@ -469,10 +478,13 @@ export async function runReviewPostStep(input: {
   fetchPrHead: FetchPrHead;
   reply: (text: string) => Promise<void>;
   logKey: string;
-}): Promise<void> {
+}): Promise<ReviewPostOutcome> {
   const { agent, repoCtx, verdict, carried, logKey } = input;
   const { reviewHead, observedHead } = input.heads;
   let postTarget: ReviewPostTarget | null = null;
+  // Why nothing was posted, carried into the typed outcome — every path that
+  // leaves `postTarget` null fills it (the hard-stop skip is the default).
+  let skipReason = "the round was hard-stopped — nothing is posted after an abort";
   if (!input.hardStopped) {
     postTarget = decideReviewPost({
       agentName: agent.name,
@@ -480,21 +492,25 @@ export async function runReviewPostStep(input: {
       pr: repoCtx.pr,
       requestText: input.requestText,
     });
-    if (!postTarget && agent.name === "review") {
-      // Never a silent skip: a review that lands only in Slack says why, so a
-      // re-review that failed to resolve its PR is visible in the logs — and,
-      // when the thread HAD a bound PR that turned out closed, in the thread
-      // itself: a Slack-only verdict must never be mistaken for a posted one.
-      // (An UNREACHABLE bound PR never gets this far — the unknown-head check
-      // refuses the run before any model turn.) An explicit opt-out is
-      // the one case where the user already knows: log it, no note.
-      const optedOut = reviewPostOptedOut(input.requestText);
-      const unpostable = optedOut ? undefined : repoCtx.prUnpostable;
-      const why = optedOut ? "opted out" : unpostable ? `bound PR ${unpostable.reason}` : "no PR resolved";
-      console.log(`[review-post] ${logKey} skipped: ${why} (repo ${repoCtx.repo ?? "none"})`);
-      if (unpostable && repoCtx.repo) {
-        const detail = unpostable.reason === "closed" ? "the PR is closed" : "the PR's head could not be verified on GitHub";
-        await input.reply(`ℹ️ Review not posted to ${repoCtx.repo}#${unpostable.number}: ${detail} — this verdict is Slack-only.`).catch(() => {});
+    if (!postTarget) {
+      skipReason = "no PR post was intended for this round";
+      if (agent.name === "review") {
+        // Never a silent skip: a review that lands only in Slack says why, so a
+        // re-review that failed to resolve its PR is visible in the logs — and,
+        // when the thread HAD a bound PR that turned out closed, in the thread
+        // itself: a Slack-only verdict must never be mistaken for a posted one.
+        // (An UNREACHABLE bound PR never gets this far — the unknown-head check
+        // refuses the run before any model turn.) An explicit opt-out is
+        // the one case where the user already knows: log it, no note.
+        const optedOut = reviewPostOptedOut(input.requestText);
+        const unpostable = optedOut ? undefined : repoCtx.prUnpostable;
+        const why = optedOut ? "opted out" : unpostable ? `bound PR ${unpostable.reason}` : "no PR resolved";
+        skipReason = why;
+        console.log(`[review-post] ${logKey} skipped: ${why} (repo ${repoCtx.repo ?? "none"})`);
+        if (unpostable && repoCtx.repo) {
+          const detail = unpostable.reason === "closed" ? "the PR is closed" : "the PR's head could not be verified on GitHub";
+          await input.reply(`ℹ️ Review not posted to ${repoCtx.repo}#${unpostable.number}: ${detail} — this verdict is Slack-only.`).catch(() => {});
+        }
       }
     }
   }
@@ -510,6 +526,7 @@ export async function runReviewPostStep(input: {
     if (!head.ok) {
       console.log(`[review-post] ${logKey} skipped: ${head.reason} (${where})`);
       await input.reply(`ℹ️ Review not posted to ${where}: ${head.reason} — this verdict is Slack-only.`).catch(() => {});
+      skipReason = head.reason;
       postTarget = null;
     }
   }
@@ -527,27 +544,31 @@ export async function runReviewPostStep(input: {
     const where = `${postTarget.repo}#${postTarget.number}`;
     try {
       await input.post(target, body);
-      console.log(
-        `[review-post] ${logKey} → ${where} (${verdict?.verdict ?? "no verdict"})${carried ? ` carried ${carried.reviewed.slice(0, 7)} → ${pinned.slice(0, 7)}` : ""}`,
-      );
-      if (carried) await input.reply(headCarriedNote({ where, ...carried })).catch(() => {});
-      // Head-moved note (item 10): a push that landed after the head was last
-      // checked makes this a review of an outdated commit — pinned, so it
-      // will not auto-approve (correct) but silent in the thread (not). One
-      // best-effort GET after the post; unknown current head → no note, never
-      // a false alarm. The default `currentPrHeadSha` never throws; the
-      // `.catch` guards an injected `fetchPrHead` (the seam's contract is
-      // "undefined or a throw both mean unknown").
-      const current = await input.fetchPrHead({ repo: postTarget.repo, number: postTarget.number }).catch(() => undefined);
-      const moved = headMovedNote({ where, reviewed: pinned, current });
-      if (moved) {
-        console.log(`[review-post] ${logKey} head moved after review: ${pinned.slice(0, 7)} → ${current?.slice(0, 7)} (${where})`);
-        await input.reply(moved).catch(() => {});
-      }
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
       console.error(`[review-post] ${logKey} failed for ${where}: ${reason}`);
       await input.reply(`ℹ️ Review not posted to ${where}: ${reason} — this verdict is Slack-only.`).catch(() => {});
+      return { posted: false, reason };
     }
+    console.log(
+      `[review-post] ${logKey} → ${where} (${verdict?.verdict ?? "no verdict"})${carried ? ` carried ${carried.reviewed.slice(0, 7)} → ${pinned.slice(0, 7)}` : ""}`,
+    );
+    if (carried) await input.reply(headCarriedNote({ where, ...carried })).catch(() => {});
+    // Head-moved note (item 10): a push that landed after the head was last
+    // checked makes this a review of an outdated commit — pinned, so it
+    // will not auto-approve (correct) but silent in the thread (not). One
+    // best-effort GET after the post; unknown current head → no note, never
+    // a false alarm. The default `currentPrHeadSha` never throws; the
+    // `.catch` guards an injected `fetchPrHead` (the seam's contract is
+    // "undefined or a throw both mean unknown"). The post already landed, so
+    // these notes never demote the outcome.
+    const current = await input.fetchPrHead({ repo: postTarget.repo, number: postTarget.number }).catch(() => undefined);
+    const moved = headMovedNote({ where, reviewed: pinned, current });
+    if (moved) {
+      console.log(`[review-post] ${logKey} head moved after review: ${pinned.slice(0, 7)} → ${current?.slice(0, 7)} (${where})`);
+      await input.reply(moved).catch(() => {});
+    }
+    return { posted: true };
   }
+  return { posted: false, reason: skipReason };
 }

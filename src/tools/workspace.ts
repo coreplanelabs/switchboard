@@ -260,7 +260,8 @@ export const submitDispositionsTool: RunnableTool = {
     "pushed code) or `declined` (deliberately not doing it — the note says why). `findingId` is the finding's " +
     "stable id from the review (F1, F2, …) — use exactly those ids; an unknown id is rejected by name. Every " +
     "finding gets exactly one entry, every severity included (nits too). Call it once with the complete set after " +
-    "your last push; a later call replaces the earlier one.",
+    "your last push; a later call replaces the earlier one. Dispositions are recorded only inside a ship " +
+    "pipeline's fix round; anywhere else the call is an honest no-op that says nothing was recorded.",
   inputSchema: {
     type: "object",
     properties: {
@@ -290,7 +291,11 @@ export const submitDispositionsTool: RunnableTool = {
         return `error: unknown finding id${unknown.length === 1 ? "" : "s"} ${unknown.join(", ")} — use exactly the ids from the review's findings list`;
       }
     }
-    ctx.onDispositions?.(parsed.dispositions);
+    // No sink means no ship fix round is listening (features/agent-ship.md
+    // item 6): a "recorded" ack here would be a false success the model
+    // relays to the user — say the truth instead.
+    if (!ctx.onDispositions) return "no ship fix round is active here — dispositions were not recorded (they apply only when addressing a ship review's findings)";
+    ctx.onDispositions(parsed.dispositions);
     const drops = parsed.dropped.length ? ` (dropped: ${parsed.dropped.join("; ")})` : "";
     return `dispositions recorded: ${parsed.dispositions.length}${drops}; a later call replaces this one`;
   },

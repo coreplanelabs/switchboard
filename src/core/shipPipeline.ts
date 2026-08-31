@@ -16,10 +16,12 @@
 //     on, the PR would merge with no human). Unknown = refused (fail-closed).
 //   - Resident-only v1: a round that cannot attach a resident worktree ends
 //     the pipeline with a plain report — never a cold per-round clone.
-//   - Ship's bot-process GitHub writes are exactly the PR open/edit
-//     (githubPulls) and the pinned review post (runReviewPostStep) — no merge
-//     endpoint is reachable from any code path here.
+//   - Ship's bot-process GitHub writes are exactly the round-0 branch create
+//     (githubPulls.createBranchRef), the PR open/edit (githubPulls), and the
+//     pinned review post (runReviewPostStep) — no merge endpoint is reachable
+//     from any code path here.
 
+import { createHash } from "node:crypto";
 import type { AgentDef } from "../agents/registry.js";
 import type { Effort } from "../effort.js";
 import { runAgent } from "../runner.js";
@@ -31,11 +33,11 @@ import type { ToolContext } from "../tools/workspace.js";
 import type { WebCapability } from "../tools/web.js";
 import type { SkillStore } from "../skills/index.js";
 import type { PrDescription } from "./prDescription.js";
-import type { Finding, FindingDisposition, ReviewVerdict } from "./reviewVerdict.js";
+import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdict } from "./reviewVerdict.js";
 import type { RepoContext } from "./repoContext.js";
 import type { RunEvent, ShipRoundOutcome } from "./runEvents.js";
 import type { RunControl } from "./runRegistry.js";
-import { normalizeHead } from "./reviewedHead.js";
+import { normalizeHead, sameCommit } from "./reviewedHead.js";
 import { observeCodingWorkspace, runCodingPrPostStep } from "./codingPrPostStep.js";
 import {
   attachRoundWorkspace,
@@ -46,6 +48,7 @@ import {
   settleReviewedHead,
   type FetchPrCommits,
   type FetchPrHead,
+  type ReviewPostOutcome,
 } from "./reviewRound.js";
 
 // ---- config (`ship` block, features/agent-ship.md item 8) -------------------
@@ -98,6 +101,11 @@ export const SHIP_PR_AUTHOR = { login: "coreplane-switchboard[bot]", id: 3180724
  * a resume must carry only the directive + the PR reference.
  */
 export function shipTaskText(requestText: string, repo: string): string {
+  // Mirrors repoContext.ts's unwrapSlack but deliberately case-insensitive:
+  // an uppercase-scheme link (`<HTTPS://…|label>`) must still strip to nothing
+  // here, while repoContext's case-sensitive unwrap feeds regexes whose
+  // bindings would change if it started unwrapping those — so the two stay
+  // separate rather than sharing one regex with different semantics.
   let t = requestText.replace(/<((?:https?):\/\/[^|>\s]+)(?:\|[^>]*)?>/gi, " $1 ");
   t = t.replace(/https?:\/\/\S+/gi, " ");
   const slug = repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -122,17 +130,9 @@ export function shipBranchName(task: string, threadKey: string): string {
       .replace(/^-+|-+$/g, "")
       .slice(0, 24)
       .replace(/-+$/, "") || "task";
-  return `ship/${slug}-${fnv1a(threadKey)}`;
-}
-
-/** FNV-1a 32-bit, hex, 6 chars — a stable short discriminator, not a secret. */
-function fnv1a(s: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(16).padStart(8, "0").slice(0, 6);
+  // sha256 prefix — a stable short discriminator, not a secret.
+  const hash = createHash("sha256").update(threadKey).digest("hex").slice(0, 6);
+  return `ship/${slug}-${hash}`;
 }
 
 // ---- preflight (spec items 1, 2, 9, 10) --------------------------------------
@@ -146,8 +146,6 @@ export interface ShipEntry {
   /** The PR base branch: the dispatch-resolved ref, else the repo's default
    *  branch. Undefined → the PR post-step reports "no base" honestly. */
   base: string | undefined;
-  /** Round-0 task text (the full request); absent on a resume. */
-  task?: string;
   /** Resume-at-review: the user-named, bot-authored, same-repo open PR. */
   resume?: { pr: number; headSha?: string; url?: string };
 }
@@ -304,7 +302,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   }
   return {
     ok: true,
-    entry: { repo, branch: shipBranchName(task, input.threadKey), base: repoCtx.ref ?? info.defaultBranch, task: input.requestText },
+    entry: { repo, branch: shipBranchName(task, input.threadKey), base: repoCtx.ref ?? info.defaultBranch },
   };
 }
 
@@ -322,9 +320,6 @@ export function shipRoundHeader(round: { index: number; agent: string }): string
 
 // ---- synthesized child turns (spec items 5, 7) --------------------------------
 
-const findingLine = (f: Finding): string =>
-  `[${f.severity}] ${f.id} ${f.file}${f.line !== undefined ? `:${f.line}` : ""} — ${f.title}`;
-
 /** The review child's one user turn. Re-review rounds carry the prior findings
  *  and the fix round's dispositions; the `re-review-delta` skill (scoped to the
  *  review agent) narrows READING only — the verdict still covers the full diff. */
@@ -338,7 +333,7 @@ export function buildShipReviewTurn(input: {
   if (input.round <= 1 || !input.prior) {
     return `Review pull request ${input.where}${at}. Submit your verdict with findings via submit_verdict before your final message.`;
   }
-  const findings = input.prior.findings.map(findingLine).join("\n") || "(none recorded)";
+  const findings = input.prior.findings.map(formatFinding).join("\n") || "(none recorded)";
   const dispositions =
     input.prior.dispositions.map((d) => `${d.findingId}: ${d.disposition}${d.note ? ` — ${d.note}` : ""}`).join("\n") || "(none recorded)";
   return (
@@ -353,7 +348,7 @@ export function buildShipReviewTurn(input: {
  *  file:line, title) plus the review prose, and the loop contract — every
  *  severity gets a disposition, description resubmitted, branch repushed. */
 export function buildShipFixTurn(input: { where: string; findings: Finding[]; review: string }): string {
-  const findings = input.findings.map(findingLine).join("\n") || "(the review listed no structured findings — address its prose)";
+  const findings = input.findings.map(formatFinding).join("\n") || "(the review listed no structured findings — address its prose)";
   return (
     `The review of ${input.where} requested changes. Load the \`address-review-findings\` skill and address EVERY finding below, nits included: ` +
     `record one disposition per finding with submit_dispositions (fixed|declined, with a note), squash to coherent commits, ` +
@@ -386,6 +381,11 @@ export interface ShipBlocks {
 }
 
 export interface ShipGithub {
+  /** Round 0's pipeline-branch create (`refs/heads/<branch>` at the base
+   *  tip): the ref must exist on origin BEFORE the first attach, or the
+   *  resident refuses the binding. Idempotent — 422 already-exists is
+   *  success inside the implementation. Throws on any real failure. */
+  createBranchRef: (repo: string, branch: string, fromRef: string) => Promise<void>;
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
   postReviewComment: (target: ReviewCommentTarget, body: string) => Promise<void>;
   fetchPrHead: FetchPrHead;
@@ -427,20 +427,32 @@ export interface ShipPipelineInput {
   now?: () => number;
 }
 
-/** How the pipeline ended, as the dispatcher's shell consumes it: the terminal
- *  run status and the one reply the thread gets. Refusals never get here —
- *  they are preflight results. An unexpected throw propagates instead. */
+/** How the pipeline ended, as the dispatcher's shell consumes it: the truthful
+ *  ending kind and the one reply the thread gets. Refusals never get here —
+ *  they are preflight results. An unexpected throw propagates instead.
+ *  `completed` means the pipeline delivered its outcome (merge-ready, or a
+ *  report it chose to end on); `aborted` names an early ending with a reason;
+ *  `capped` a round/wall-clock ceiling; `stopped_*` an operator stop. The
+ *  dispatcher maps these onto the run-record vocabulary and the card close —
+ *  only `completed` closes ✅ with a checked-off checklist. */
 export interface ShipOutcome {
-  status: "completed" | "stopped_soft" | "stopped_hard";
+  status: "completed" | "aborted" | "capped" | "stopped_soft" | "stopped_hard";
   reply: string;
 }
 
 interface CodingRoundResult {
   answer: string;
+  /** Attach-time refusal (the thread's worktree is bound to another ref) —
+   *  the pipeline aborts with it; no model turn ran. */
+  refusal?: string;
   prNote?: string;
-  opened?: { number: number; url: string };
+  opened?: { number: number; url: string; created: boolean };
   headSha?: string;
   description?: PrDescription;
+  /** The round's LAST submit_dispositions set (a later call replaces the
+   *  earlier one). The loop keys it by the review round it answers — finding
+   *  ids are only unique within one round. */
+  dispositions?: FindingDisposition[];
   residentUnavailable?: string;
 }
 
@@ -450,6 +462,9 @@ interface ReviewRoundResult {
   verdict?: ReviewVerdict;
   answer?: string;
   reviewHead?: string;
+  /** Whether the round's verdict actually landed on the PR — the merge-ready
+   *  gate consumes it (an approve whose post failed approves nothing). */
+  reviewPost?: ReviewPostOutcome;
 }
 
 /**
@@ -470,8 +485,33 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
   /** Never mutate the shared AgentDef — children run a clipped COPY. */
   const clip = (def: AgentDef): AgentDef => ({ ...def, maxMinutes: Math.min(def.maxMinutes, Math.max(remainingMs(), 0) / 60_000) });
 
-  /** Dispositions recorded across fix rounds, latest call per finding id wins. */
-  const dispositions = new Map<string, FindingDisposition>();
+  /** Findings per review round and dispositions per fix round, both keyed by
+   *  the REVIEW round they belong to. Finding ids are only unique WITHIN one
+   *  round — a later review may reuse an id for a brand-new finding — so one
+   *  flat map would let a stale disposition claim a finding it never
+   *  addressed. Earlier rounds' records stay for lookback (and any history
+   *  line a report wants). */
+  const findingsByRound = new Map<number, Finding[]>();
+  const dispositionsByRound = new Map<number, Map<string, FindingDisposition>>();
+  /** The same finding across rounds: matching id plus the content that
+   *  identifies it (severity/file/title — line excluded, fixes shift lines).
+   *  A reused id over different content is a different finding. */
+  const sameFinding = (a: Finding, b: Finding) => a.severity === b.severity && a.file === b.file && a.title === b.title;
+  /** The disposition that answers `finding` as review round `round` listed
+   *  it: that round's own fix-round record when one exists, else walk earlier
+   *  rounds while the finding was carried forward unchanged — never across a
+   *  reused id, which inherits nothing. */
+  const dispositionFor = (finding: Finding, round: number): FindingDisposition | undefined => {
+    let cur = finding;
+    for (let r = round; r >= 1; r--) {
+      const d = dispositionsByRound.get(r)?.get(cur.id);
+      if (d) return d;
+      const carriedFrom = findingsByRound.get(r - 1)?.find((p) => p.id === cur.id && sameFinding(p, cur));
+      if (!carriedFrom) return undefined;
+      cur = carriedFrom;
+    }
+    return undefined;
+  };
   let lastFindings: Finding[] = [];
   let reviewRounds = 0;
   let prNumber = entry.resume?.pr;
@@ -506,39 +546,40 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
   };
 
   const residentOutcome = (note: string): ShipOutcome => ({
-    status: "completed",
+    status: "aborted",
     reply:
       `📦 Ship needs a warm resident worktree for \`${entry.repo}\` and none is available (${note}). ` +
       `Ship v1 never falls back to cold per-round clones — onboard the repo as a resident (\`repo onboard ${entry.repo}\`) and re-issue ship.\n\n${reissue()}`,
   });
 
   const abortOutcome = (reason: string, tail?: string): ShipOutcome => ({
-    status: "completed",
+    status: "aborted",
     reply: [reason, tail, `⚠️ Ship aborted after ${roundsLine()}.`, reissue()].filter(Boolean).join("\n\n"),
   });
 
-  /** The cap report's declined-vs-unaddressed split over the LAST verdict's
-   *  open findings (spec item 8): declined = a `declined` disposition was
-   *  recorded; unaddressed = no disposition at all; a finding claimed fixed
-   *  but still flagged is named as such. */
+  /** The cap report's declined-vs-unaddressed split over the LAST review
+   *  round's open findings (spec item 8), each answered only by a disposition
+   *  recorded FOR it — its own round's, or one carried forward unchanged
+   *  (`dispositionFor`): declined = a `declined` disposition; unaddressed =
+   *  none; a finding claimed fixed but still flagged is named as such. */
   const splitReport = (): string => {
-    const withDisposition = (f: Finding) => dispositions.get(f.id);
+    const withDisposition = (f: Finding) => dispositionFor(f, reviewRounds);
     const declined = lastFindings.filter((f) => withDisposition(f)?.disposition === "declined");
     const unaddressed = lastFindings.filter((f) => !withDisposition(f));
     const claimedFixed = lastFindings.filter((f) => withDisposition(f)?.disposition === "fixed");
     const list = (items: Finding[], note?: (f: Finding) => string) =>
-      items.length > 0 ? items.map((f) => `  - ${findingLine(f)}${note ? ` — ${note(f)}` : ""}`).join("\n") : "  - none";
+      items.length > 0 ? items.map((f) => `  - ${formatFinding(f)}${note ? ` — ${note(f)}` : ""}`).join("\n") : "  - none";
     const lines = [
       `Open findings from the last review (${lastFindings.length}):`,
-      `Declined (disposition recorded):\n${list(declined, (f) => dispositions.get(f.id)?.note || "no note")}`,
+      `Declined (disposition recorded):\n${list(declined, (f) => withDisposition(f)?.note || "no note")}`,
       `Unaddressed (no disposition):\n${list(unaddressed)}`,
     ];
-    if (claimedFixed.length > 0) lines.push(`Claimed fixed but still flagged:\n${list(claimedFixed, (f) => dispositions.get(f.id)?.note || "no note")}`);
+    if (claimedFixed.length > 0) lines.push(`Claimed fixed but still flagged:\n${list(claimedFixed, (f) => withDisposition(f)?.note || "no note")}`);
     return lines.join("\n");
   };
 
   const capOutcome = (reason: string): ShipOutcome => ({
-    status: "completed",
+    status: "capped",
     reply: [
       `🧢 Ship stopped at a cap: ${reason} — no approval after ${roundsLine()}.${prUrl ? ` PR: ${prUrl}` : ""}`,
       splitReport(),
@@ -564,6 +605,20 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     if (resident !== true) {
       await ws.release({ hardStopped: false });
       return { answer: "", residentUnavailable: note ?? "no resident worktree attached" };
+    }
+    // KTD12 honesty (mirrors guardAttachedHead): the resident binds ONE ref
+    // per thread at first attach and ignores later hints — a thread already
+    // bound to another branch would code, push, and open-or-edit somewhere
+    // the pipeline never looks. Refuse BEFORE any model call, naming both
+    // refs; an attach that answered no ref proves nothing and proceeds.
+    if (binding?.ref !== undefined && binding.ref !== entry.branch) {
+      await ws.release({ hardStopped: false });
+      return {
+        answer: "",
+        refusal:
+          `🔀 Ship round not started: this thread's worktree is bound to \`${binding.ref}\`, but the pipeline branch is \`${entry.branch}\` — ` +
+          `the resident binds one ref per thread at its first attach, so this thread cannot drive the ship branch. Start ship in a fresh thread.`,
+      };
     }
     let description: PrDescription | undefined;
     let roundDispositions: FindingDisposition[] | undefined;
@@ -614,7 +669,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       await ws.release({ hardStopped: control.requested === "hard" });
     }
     if (description) input.publish({ type: "pr_description", description: input.redactDescription(description), at: now() });
-    let opened: { number: number; url: string } | undefined;
+    let opened: { number: number; url: string; created: boolean } | undefined;
     let prNote: string | undefined;
     if (observed && control.requested !== "hard") {
       prNote = await runCodingPrPostStep({
@@ -625,14 +680,20 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         target: { repo: entry.repo, baseRef: entry.base, bindingRef: undefined, resolvedRef: undefined },
         openPullRequest: github.openPullRequest,
         publish: (e) => {
-          if (e.type === "pr_opened") opened = { number: e.number, url: e.url };
+          if (e.type === "pr_opened") opened = { number: e.number, url: e.url, created: e.created };
           input.publish(e);
         },
         logKey,
       });
     }
-    if (roundDispositions) for (const d of roundDispositions) dispositions.set(d.findingId, d);
-    return { answer, prNote, opened, headSha: observed?.head, description };
+    return {
+      answer,
+      ...(prNote !== undefined ? { prNote } : {}),
+      ...(opened !== undefined ? { opened } : {}),
+      ...(observed?.head !== undefined ? { headSha: observed.head } : {}),
+      ...(description !== undefined ? { description } : {}),
+      ...(roundDispositions !== undefined ? { dispositions: roundDispositions } : {}),
+    };
   };
 
   // ---- one review child (pinned head, extracted units) ----------------------
@@ -702,7 +763,16 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
                 where: `${entry.repo}#${pr.number}`,
                 round,
                 headSha: pinned,
-                prior: round > 1 ? { findings: lastFindings, dispositions: [...dispositions.values()] } : undefined,
+                // The PREVIOUS review round's findings with THAT round's
+                // dispositions — never an accumulated flat set, where a
+                // reused finding id would drag an old disposition along.
+                prior:
+                  round > 1
+                    ? {
+                        findings: findingsByRound.get(round - 1) ?? [],
+                        dispositions: [...(dispositionsByRound.get(round - 1)?.values() ?? [])],
+                      }
+                    : undefined,
               }),
             },
           ],
@@ -752,8 +822,10 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     // (guard refusal, hard stop) — this narrows the type for what follows.
     if (!settled) return {};
     // The pinned review post (extracted unit): posts only when the reviewed
-    // head IS the pinned head, says every skip out loud, never throws.
-    await runReviewPostStep({
+    // head IS the pinned head, says every skip out loud, never throws. Its
+    // typed outcome rides back to the loop — the merge-ready gate stands on
+    // a POSTED approval, not on a verdict that never reached the PR.
+    const reviewPost = await runReviewPostStep({
       agent: spec.agent,
       requestText: "",
       repoCtx: { repo: entry.repo, pr: prNumber },
@@ -767,24 +839,34 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       reply: input.reply,
       logKey,
     });
-    return { verdict: settled.verdict, answer: settled.answer, reviewHead: settled.reviewHead };
+    return { verdict: settled.verdict, answer: settled.answer, reviewHead: settled.reviewHead, reviewPost };
   };
 
   const mergeReady = async (verdict: ReviewVerdict): Promise<ShipOutcome> => {
-    // Re-check the PR is still open (spec item 9) — the LGTM already triggered
-    // the org auto-approve workflow, so the report must say what is left.
+    // Re-check the PR (spec item 9) — the LGTM already triggered the org
+    // auto-approve workflow, so the report must say what is left. Three
+    // honest answers: still open (a human merge remains), no longer open
+    // (nothing left), and UNKNOWN — a failed lookup is reported as
+    // unverified, never as a closed PR (they mean opposite things to the
+    // person holding the merge button).
     const facts = await github.prFacts({ repo: entry.repo, number: prNumber! }).catch(() => undefined);
-    const stillOpen = facts?.state === "open";
-    const declined = [...dispositions.values()].filter((d) => d.disposition === "declined");
+    const where = prUrl ?? `${entry.repo}#${prNumber}`;
+    // The declined findings this approval ratified: the fix round BEFORE the
+    // approving review recorded them (an approve with no fix round — round 1,
+    // or a resume straight to LGTM — has none). Never the flat all-rounds
+    // set, where a reused finding id would resurrect a stale decline.
+    const declined = [...(dispositionsByRound.get(reviewRounds - 1)?.values() ?? [])].filter((d) => d.disposition === "declined");
     return {
       status: "completed",
       reply: [
-        `✅ Merge-ready after ${roundsLine()}: ${prUrl ?? `${entry.repo}#${prNumber}`}`,
+        `✅ Merge-ready after ${roundsLine()}: ${where}`,
         `Verdict: LGTM${verdict.summary ? ` — ${verdict.summary}` : ""}`,
         `Declined findings: ${declined.length > 0 ? declined.map((d) => `${d.findingId}${d.note ? ` — ${d.note}` : ""}`).join("; ") : "none"}`,
-        stillOpen
-          ? "Remaining gate: a human merge — ship never merges and never approves."
-          : "Note: the PR is no longer open (merged or closed since the approval) — nothing is left to merge.",
+        facts === undefined
+          ? `Note: approved and posted, but the PR's current state could not be re-verified — check ${where}.`
+          : facts.state === "open"
+            ? "Remaining gate: a human merge — ship never merges and never approves."
+            : "Note: the PR is no longer open (merged or closed since the approval) — nothing is left to merge.",
       ].join("\n"),
     };
   };
@@ -793,11 +875,35 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
   if (!entry.resume) {
     if (control.requested) return stoppedOutcome();
     if (remainingMs() < SHIP_ROUND_RESERVE_MS) return wallClockCap();
+    // The pipeline branch must exist on origin BEFORE the first attach
+    // (KTD12): the resident refuses to bind a thread to a ref GitHub does not
+    // have, and the executor factory's sandbox fallback would then misreport
+    // "onboard the repo" on every fresh pipeline. The BOT creates the ref
+    // from the PR base (422 already-exists is success inside createBranchRef
+    // — a restarted pipeline reuses its own deterministic branch).
+    if (entry.base === undefined) {
+      return abortOutcome(
+        `⚠️ No base branch is known for \`${entry.repo}\` (none resolved at dispatch, and the repository lookup answered no default), ` +
+          `so the pipeline branch \`${entry.branch}\` could not be created and round 0 never started.`,
+      );
+    }
+    try {
+      await github.createBranchRef(entry.repo, entry.branch, entry.base);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return abortOutcome(
+        `⚠️ Could not create the pipeline branch \`${entry.branch}\` from \`${entry.base}\` on \`${entry.repo}\`: ${reason} — round 0 never started.`,
+      );
+    }
     emitRound(0, "coding", "started");
     const r0 = await runCodingChild({ messages: input.round0Messages });
     if (r0.residentUnavailable) {
       emitRound(0, "coding", "aborted");
       return residentOutcome(r0.residentUnavailable);
+    }
+    if (r0.refusal) {
+      emitRound(0, "coding", "aborted");
+      return abortOutcome(r0.refusal);
     }
     if (r0.opened) {
       // Record the PR FIRST so a stop or terminal below reports its URL.
@@ -818,7 +924,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         ? "a PR description was submitted but no PR could be opened (the note above says why)"
         : "the coding round ended without submitting a PR description (a clarifying question, a budget write-up, or an unproven push ends the pipeline here)";
       return {
-        status: "completed",
+        status: "aborted",
         reply: [r0.answer, r0.prNote, `⚠️ Ship ended at round 0: ${terminal}. No review round ran.`, reissue()].filter(Boolean).join("\n\n"),
       };
     }
@@ -834,7 +940,10 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     reviewRounds += 1;
     emitRound(reviewRounds, "review", "started");
     const rv = await runReviewChild(reviewRounds);
-    if (control.requested) {
+    // A stop short-circuits here only when the round settled NO verdict: a
+    // verdict that was already posted to the PR is a fact no stop can
+    // un-post, so it settles first below and the stop is honored around it.
+    if (control.requested && !rv.verdict) {
       emitRound(reviewRounds, "review", "stopped");
       return stoppedOutcome(rv.answer);
     }
@@ -856,9 +965,34 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       );
     }
     lastFindings = rv.verdict.findings ?? [];
+    findingsByRound.set(reviewRounds, lastFindings);
     lastReviewHead = rv.reviewHead ?? lastReviewHead;
     emitRound(reviewRounds, "review", rv.verdict.verdict);
-    if (rv.verdict.verdict === "approve") return await mergeReady(rv.verdict);
+    if (rv.verdict.verdict === "approve") {
+      // Merge-ready stands on the POSTED LGTM (spec item 9): an approval
+      // whose post failed or was refused left no approving review on the PR,
+      // so the pipeline must not report merge-ready over it.
+      if (rv.reviewPost !== undefined && !rv.reviewPost.posted) {
+        return abortOutcome(
+          `⚠️ The review approved, but the approval could not be posted: ${rv.reviewPost.reason} — the PR carries no approving review. ` +
+            `Re-run ship in this thread with the PR URL to retry the approval.`,
+        );
+      }
+      return await mergeReady(rv.verdict);
+    }
+    // request_changes with a stop flagged during the round: the verdict above
+    // settled (and posted) — now the stop short-circuits the fix round, and
+    // the stopped report says a review is standing on the PR.
+    if (control.requested) {
+      return stoppedOutcome(
+        [
+          rv.answer,
+          rv.reviewPost?.posted ? "ℹ️ A changes-requested review was posted this round before the stop — its findings stand on the PR." : undefined,
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+      );
+    }
     // request_changes → a fix round, only if its re-review could still run.
     if (reviewRounds >= caps.maxRounds) return capOutcome(`the ${caps.maxRounds}-round cap`);
     if (remainingMs() < SHIP_ROUND_RESERVE_MS) return wallClockCap();
@@ -879,13 +1013,55 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       emitRound(reviewRounds, "coding", "aborted");
       return residentOutcome(fx.residentUnavailable);
     }
+    if (fx.refusal) {
+      emitRound(reviewRounds, "coding", "aborted");
+      return abortOutcome(fx.refusal);
+    }
+    // The round's dispositions answer THIS review round's findings — keyed by
+    // the round, replace semantics (the tool's contract: a later call within
+    // the round replaces the earlier one). Recorded before the stop check:
+    // they were submitted, a fact a stop does not erase.
+    if (fx.dispositions) dispositionsByRound.set(reviewRounds, new Map(fx.dispositions.map((d) => [d.findingId, d])));
     if (control.requested) {
       emitRound(reviewRounds, "coding", "stopped");
       return stoppedOutcome(fx.answer);
     }
-    // The fix round's repush/edit outcome is a fact of the round (pr_opened
-    // event, [pr-post] log); the loop re-reviews regardless — declining
-    // everything still earns a re-review, and the cap bounds a decline loop.
+    // A fix round that opened a NEW PR (the old one was closed out from under
+    // the pipeline) is the pipeline's PR from here on: later review rounds
+    // and every report target it.
+    if (fx.opened?.created) {
+      prNumber = fx.opened.number;
+      prUrl = fx.opened.url;
+    }
+    // The post-step's note is a fact of the round the thread must see,
+    // exactly like round 0's — a failed repush or PR edit must not vanish
+    // into the log while the pipeline sails on.
+    if (fx.prNote) await input.reply(fx.prNote).catch(() => {});
+    // Nothing repushed → usually nothing to re-review: a branch still at the
+    // head the review already read would burn a review round on the very same
+    // diff. ONE exception, by contract (spec item 7): a round that DECLINED
+    // every finding of the last review changes no code on purpose — the
+    // re-review exists to verify those arguments and may concede, so it still
+    // runs (over the same head; the re-review-delta skill covers exactly
+    // this). Anything else that moved no head — fixes claimed, findings left
+    // unanswered — aborts, carrying the post-step's reason for why nothing
+    // landed. (An unobservable fix-round head proves nothing and proceeds as
+    // before.)
+    const fixHead = normalizeHead(fx.headSha);
+    const reviewedAt = normalizeHead(lastReviewHead);
+    if (fixHead !== undefined && reviewedAt !== undefined && sameCommit(fixHead, reviewedAt)) {
+      const roundDispositions = dispositionsByRound.get(reviewRounds);
+      const allDeclined =
+        lastFindings.length > 0 &&
+        lastFindings.every((f) => roundDispositions?.get(f.id)?.disposition === "declined");
+      if (!allDeclined) {
+        emitRound(reviewRounds, "coding", "aborted");
+        return abortOutcome(
+          `⚠️ Fix round ${reviewRounds} produced no new head — the branch still sits at \`${fixHead.slice(0, 7)}\`, the commit the review already read, and not every finding was declined on the record, so there is nothing new to re-review.`,
+          fx.prNote,
+        );
+      }
+    }
     emitRound(reviewRounds, "coding", fx.opened ? "pr_opened" : "completed");
   }
 }

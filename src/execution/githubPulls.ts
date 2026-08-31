@@ -140,6 +140,53 @@ export async function updatePullRequest(
   }
 }
 
+/**
+ * Create `refs/heads/<branch>` at the current tip of `fromRef` (ship round 0,
+ * features/agent-ship.md item 3 / KTD12). The resident binds a thread's
+ * worktree to a ref that must already exist on origin — an attach naming a
+ * branch GitHub has never heard of is refused, and the executor factory's
+ * sandbox fallback would then misreport "onboard the repo" on every fresh
+ * pipeline — so the BOT creates the pipeline branch itself BEFORE the first
+ * attach. Two REST calls with the App token (`contents:write`), same
+ * conventions as the PR writes above, never a `gh` shell-out:
+ *
+ *   GET  /repos/{repo}/git/ref/heads/{fromRef}  → the base tip's sha
+ *   POST /repos/{repo}/git/refs                 → refs/heads/<branch> at it
+ *
+ * A 422 "already exists" on the create is SUCCESS: a restarted pipeline
+ * recreates the same deterministic branch name, and the existing ref — with
+ * any work already pushed to it — is exactly what the restart wants
+ * (recreatability, AGENTS.md invariant 6). Everything else throws so the
+ * caller can abort honestly instead of dispatching a round that cannot bind.
+ */
+export async function createBranchRef(repo: string, branch: string, fromRef: string): Promise<void> {
+  const token = await requireToken();
+  // Segment-encode the base ref: slashes are path structure (`release/1.x`),
+  // everything else inside a segment is escaped.
+  const basePath = fromRef.split("/").map(encodeURIComponent).join("/");
+  const baseRes = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/${basePath}`, {
+    headers: apiHeaders(token),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!baseRes.ok) {
+    const text = await baseRes.text().catch(() => "");
+    throw new Error(`base ref lookup failed for ${fromRef}: HTTP ${baseRes.status} ${text.slice(0, 300)}`);
+  }
+  const base = (await baseRes.json().catch(() => null)) as { object?: { sha?: unknown } } | null;
+  const sha = typeof base?.object?.sha === "string" && base.object.sha ? base.object.sha : undefined;
+  if (!sha) throw new Error(`base ref lookup for ${fromRef} answered without a sha`);
+  const res = await fetch(`https://api.github.com/repos/${repo}/git/refs`, {
+    method: "POST",
+    headers: apiHeaders(token, true),
+    body: JSON.stringify({ ref: `refs/heads/${branch}`, sha }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (res.ok) return;
+  const text = await res.text().catch(() => "");
+  if (res.status === 422 && /already exists/i.test(text)) return;
+  throw new Error(`branch create failed for ${branch}: HTTP ${res.status} ${text.slice(0, 300)}`);
+}
+
 // ---- read-only repo/PR facts for the ship gate (features/agent-ship.md) ----
 // Same REST-with-App-token conventions as the writes above; both lookups are
 // advisory reads whose UNKNOWN answer the caller treats fail-closed, so they
@@ -200,8 +247,7 @@ export interface PullRequestFacts {
  *  fetch fails or the state is unrecognizable. Never throws. */
 export async function fetchPullRequestFacts(pr: { repo: string; number: number }): Promise<PullRequestFacts | undefined> {
   const token = await resolveGithubToken().catch(() => null);
-  const headers = apiHeaders(token ?? "");
-  if (!token) delete headers.authorization; // public repos answer unauthenticated
+  const headers = apiHeaders(token); // no credential → unauthenticated (public repos answer)
   let res: Response;
   try {
     res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}`, {
@@ -246,12 +292,14 @@ async function requireToken(): Promise<string> {
   return token;
 }
 
-function apiHeaders(token: string, withBody = false): Record<string, string> {
+/** The module's standard REST headers; a null/empty token sends no
+ *  authorization header (the unauthenticated public-repo path). */
+function apiHeaders(token: string | null, withBody = false): Record<string, string> {
   const headers: Record<string, string> = {
-    authorization: `Bearer ${token}`,
     accept: "application/vnd.github+json",
     "user-agent": "switchboard",
   };
+  if (token) headers.authorization = `Bearer ${token}`;
   if (withBody) headers["content-type"] = "application/json";
   return headers;
 }

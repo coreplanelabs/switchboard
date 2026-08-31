@@ -261,6 +261,7 @@ describe("submit_dispositions tool", () => {
       ],
     ]);
     expect(String(out)).toContain("2");
+    expect(String(out)).toContain("dispositions recorded"); // the real ack, only where a ship fix round listens
     expect(String(out)).not.toMatch(/^error:/);
   });
 
@@ -308,8 +309,12 @@ describe("submit_dispositions tool", () => {
     expect(String(out)).toContain("F2");
   });
 
-  it("tolerates a context with no dispositions sink", async () => {
-    await expect(tool().run(valid(), ctxWith(undefined))).resolves.not.toMatch(/^error:/);
+  it("no dispositions sink (a plain coding run — no ship fix round) → an honest no-op, never a false 'recorded' ack", async () => {
+    const out = await tool().run(valid(), ctxWith(undefined));
+    expect(String(out)).toContain("no ship fix round");
+    expect(String(out)).toContain("were not recorded");
+    expect(String(out)).not.toContain("dispositions recorded");
+    expect(String(out)).not.toMatch(/^error:/);
   });
 });
 

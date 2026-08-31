@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchPullRequestFacts, fetchRepoShipInfo, findOpenPrByHead, openPullRequest, updatePullRequest } from "./githubPulls.js";
+import { createBranchRef, fetchPullRequestFacts, fetchRepoShipInfo, findOpenPrByHead, openPullRequest, updatePullRequest } from "./githubPulls.js";
 
 // Feature: features/pr-description.md — the bot process opens and edits PRs
 // itself over the GitHub REST API with the App token (never the model, never
@@ -168,6 +168,69 @@ describe("githubPulls", () => {
   // Feature: features/agent-ship.md items 9–10 — the read-only repo/PR facts
   // the ship gate consumes. Both lookups answer undefined on ANY failure (the
   // caller fail-closes); neither ever throws.
+  // Feature: features/agent-ship.md item 3 (KTD12) — ship round 0 creates the
+  // pipeline branch on origin BEFORE the first attach: the resident refuses to
+  // bind a thread to a ref GitHub does not have. 422 "already exists" is
+  // success (a restarted pipeline reuses its own deterministic branch name).
+  describe("createBranchRef (ship round 0, KTD12)", () => {
+    const BASE_SHA = "c".repeat(40);
+
+    /** Base-ref lookup answers `main`'s tip; the ref create answers `createStatus`. */
+    function stubRefPath(createStatus = 201, createBody = "{}") {
+      return stubFetch((url, init) =>
+        (init.method ?? "GET") === "GET"
+          ? new Response(JSON.stringify({ ref: "refs/heads/main", object: { sha: BASE_SHA, type: "commit" } }), { status: 200 })
+          : new Response(createBody, { status: createStatus }),
+      );
+    }
+
+    it("GETs the base ref's sha and POSTs the new ref at it", async () => {
+      stubToken();
+      const calls = stubRefPath();
+      await createBranchRef("acme/api", "ship/fix-login-abc123", "main");
+      expect(calls).toHaveLength(2);
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/main");
+      expect(calls[0].init.method ?? "GET").toBe("GET");
+      expect(calls[1].url).toBe("https://api.github.com/repos/acme/api/git/refs");
+      expect(calls[1].init.method).toBe("POST");
+      expect(JSON.parse(String(calls[1].init.body))).toEqual({ ref: "refs/heads/ship/fix-login-abc123", sha: BASE_SHA });
+      expect((calls[1].init.headers as Record<string, string>).authorization).toBe("Bearer ghtok");
+    });
+
+    it("a 422 'already exists' is success — a restarted pipeline reuses its own branch", async () => {
+      stubToken();
+      stubRefPath(422, '{"message":"Reference already exists"}');
+      await expect(createBranchRef("acme/api", "ship/fix-login-abc123", "main")).resolves.toBeUndefined();
+    });
+
+    it("anything else throws: a non-already-exists 422, another non-2xx, a failed base lookup, a sha-less answer, a missing credential", async () => {
+      stubToken();
+      stubRefPath(422, '{"message":"Object does not exist"}');
+      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/HTTP 422/);
+
+      stubRefPath(403, '{"message":"Resource not accessible"}');
+      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/HTTP 403/);
+
+      stubFetch(() => new Response("{}", { status: 404 }));
+      await expect(createBranchRef("acme/api", "b", "missing-base")).rejects.toThrow(/HTTP 404/);
+
+      stubFetch(() => new Response('{"object":{}}', { status: 200 }));
+      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/without a sha/);
+
+      vi.stubEnv("GH_TOKEN", "");
+      const calls = stubFetch(() => new Response("{}", { status: 200 }));
+      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/credential/);
+      expect(calls).toHaveLength(0); // refused before any fetch
+    });
+
+    it("a base ref with slashes stays a path (segment-encoded, never a single escaped blob)", async () => {
+      stubToken();
+      const calls = stubRefPath();
+      await createBranchRef("acme/api", "ship/x", "release/1.x");
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/release/1.x");
+    });
+  });
+
   describe("fetchRepoShipInfo (ship auto-merge gate)", () => {
     it("parses allow_auto_merge and default_branch", async () => {
       stubToken();

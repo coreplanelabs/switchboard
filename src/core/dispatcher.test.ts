@@ -5500,6 +5500,9 @@ workspaceDir: __WORKDIR__
     });
     const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
     deps.postReviewComment = vi.fn(async (target: ReviewCommentTarget, body: string) => void posts.push({ target, body }));
+    // Round 0 creates the pipeline branch through this seam (KTD12) — stubbed
+    // so the fetch guard below proves no direct GitHub call ever fires.
+    deps.createBranchRef = vi.fn(async () => {});
     return { deps, opened, posts };
   }
 
@@ -5721,7 +5724,7 @@ workspaceDir: __WORKDIR__
       shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH, onHeadProbe: () => (currentHead = HEAD_B) }),
       shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH }),
     );
-    const { io, replies } = fakeIO();
+    const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     const final = replies[replies.length - 1];
     expect(final).toContain("🧢");
@@ -5730,6 +5733,8 @@ workspaceDir: __WORKDIR__
     expect(final).toMatch(/Unaddressed \(no disposition\):[\s\S]*F3/);
     // The cap ended the loop: 4 attaches (coding, review, fix, review), never a 3rd review.
     expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(4);
+    // A capped pipeline closes ⚠️ — never ✅ with a checked-off checklist.
+    expect(statuses[statuses.length - 1].title).toContain("⚠️");
   });
 
   it("wall-clock: a child is dispatched with clipped maxMinutes = min(agent ceiling, remaining pipeline time); shared AGENTS defs never mutated", async () => {
@@ -5815,6 +5820,7 @@ workspaceDir: __WORKDIR__
     expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(makeExecutor).mock.calls[0][1].agent.name).toBe("review"); // round 0 skipped
     expect(opened).toHaveLength(0); // no create, no edit
+    expect(deps.createBranchRef).not.toHaveBeenCalled(); // the PR's head branch already exists on origin
     const final = replies[replies.length - 1];
     expect(final).toContain("Merge-ready");
     expect(final).toContain("1 review round");
@@ -6028,5 +6034,321 @@ workspaceDir: __WORKDIR__
     expect(beta).toBeGreaterThan(alpha);
     expect(details[beta]).not.toContain("✱ alpha"); // the checklist is REPLACED …
     expect(details[beta].startsWith("Round 0 — coding")).toBe(true); // … the header is not
+  });
+
+  // ---- pipeline honesty fixes (2026-08-30 review) ----------------------------
+
+  it("fresh pipeline: the bot creates the pipeline branch from base BEFORE the first attach (KTD12)", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider);
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const { io } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(deps.createBranchRef).toHaveBeenCalledTimes(1);
+    expect(deps.createBranchRef).toHaveBeenCalledWith("acme/api", SHIP_BRANCH, "main");
+    // BEFORE any attach: the resident 400s binding a thread to a ref origin
+    // does not have, and the sandbox fallback would misreport "onboard the repo".
+    const createdAt = vi.mocked(deps.createBranchRef!).mock.invocationCallOrder[0];
+    const attachedAt = vi.mocked(makeExecutor).mock.invocationCallOrder[0];
+    expect(createdAt).toBeLessThan(attachedAt);
+  });
+
+  it("branch creation fails → honest abort naming branch and reason; no attach, no model call", async () => {
+    const provider = shipProvider();
+    const { deps } = shipDeps(provider);
+    deps.createBranchRef = vi.fn(async () => {
+      throw new Error("branch create failed: HTTP 403 forbidden");
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const final = replies[replies.length - 1];
+    expect(final).toContain("Could not create the pipeline branch");
+    expect(final).toContain(SHIP_BRANCH);
+    expect(final).toContain("HTTP 403");
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("a thread already bound to another ref: the coding round refuses naming both refs — no model call, no PR (KTD12)", async () => {
+    const provider = shipProvider();
+    const { deps, opened } = shipDeps(provider);
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: "feature-a" })); // the thread's prior binding wins at the resident
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const final = replies[replies.length - 1];
+    expect(final).toContain("`feature-a`");
+    expect(final).toContain(`\`${SHIP_BRANCH}\``);
+    expect(provider.requests).toHaveLength(0); // refused BEFORE any model call
+    expect(opened).toHaveLength(0);
+    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1);
+  });
+
+  it("approve whose post FAILED is not merge-ready: the report names the post failure, never claims an approving review", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider);
+    deps.postReviewComment = vi.fn(async () => {
+      throw new Error("HTTP 502 bad gateway");
+    });
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const final = replies[replies.length - 1];
+    expect(final).not.toContain("Merge-ready");
+    expect(final).toContain("could not be posted");
+    expect(final).toContain("HTTP 502");
+    expect(deps.fetchPrFacts).not.toHaveBeenCalled(); // the merge-ready re-check never ran
+  });
+
+  it("approve whose post was REFUSED by the reviewed-head guard is not merge-ready either", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_B }), say("ok")],
+    });
+    const { deps, posts } = shipDeps(provider);
+    // The review workspace ATTACHED at the pinned head A, but its observed
+    // HEAD after the turn is B (the checkout strayed) — the post gate refuses.
+    const strayed = shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH });
+    strayed.binding.sha = HEAD_A;
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), strayed);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(posts).toHaveLength(0);
+    const final = replies[replies.length - 1];
+    expect(final).not.toContain("Merge-ready");
+    expect(final).toContain("could not be posted");
+  });
+
+  it("merge-ready re-check that cannot fetch the PR says so honestly — never 'no longer open'", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider);
+    deps.fetchPrFacts = vi.fn(async () => undefined);
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const final = replies[replies.length - 1];
+    expect(final).toContain("Merge-ready");
+    expect(final).toContain("could not be re-verified");
+    expect(final).not.toContain("no longer open");
+  });
+
+  it("a soft stop flagged during an approving round never swallows the posted LGTM: the reply is the merge-ready report", async () => {
+    const registry = new RunRegistry({ genId: () => "rship-s", genToken: () => "tship-s" });
+    const provider = shipProvider(
+      {
+        coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+        review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+      },
+      (n) => {
+        if (n === 2) registry.requestStop("rship-s", "tship-s", "soft"); // during the review child's turn
+      },
+    );
+    const { deps, posts } = shipDeps(provider);
+    deps.runRegistry = registry;
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(posts).toHaveLength(1); // the LGTM WAS posted — a fact the stop cannot un-post
+    const final = replies[replies.length - 1];
+    expect(final).toContain("Merge-ready");
+    expect(final).not.toContain("Ship stopped by operator");
+  });
+
+  it("a soft stop flagged during a changes-requested round: the stopped report names the posted review, no fix round", async () => {
+    const registry = new RunRegistry({ genId: () => "rship-s2", genToken: () => "tship-s2" });
+    const provider = shipProvider(
+      {
+        coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+        review: [toolUse("submit_verdict", { verdict: "request_changes", summary: "one blocker", head: HEAD_A, findings: [F1] }), say("R1 prose.")],
+      },
+      (n) => {
+        if (n === 2) registry.requestStop("rship-s2", "tship-s2", "soft");
+      },
+    );
+    const { deps, posts } = shipDeps(provider);
+    deps.runRegistry = registry;
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(posts).toHaveLength(1);
+    const final = replies[replies.length - 1];
+    expect(final).toContain("Ship stopped by operator (soft stop)");
+    expect(final).toContain("changes-requested review was posted this round");
+    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(2); // the stop was honored: no fix round
+  });
+
+  it("a fix round that repushed nothing (head unchanged) aborts with the post-step's reason — no review round burned on the same diff", async () => {
+    const provider = shipProvider({
+      coding: [
+        toolUse("submit_pr_description", SHIP_DESCRIPTION),
+        say("Done — pushed."),
+        toolUse("submit_dispositions", { dispositions: [{ findingId: "F1", disposition: "fixed", note: "cookie restored" }] }),
+        toolUse("submit_pr_description", SHIP_DESCRIPTION),
+        say("Fixed (but the push failed)."),
+      ],
+      review: [toolUse("submit_verdict", { verdict: "request_changes", summary: "one blocker", head: HEAD_A, findings: [F1] }), say("R1 prose.")],
+    });
+    const { deps, posts } = shipDeps(provider);
+    queueWorkspaces(
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH, upstream: null }), // fix round: same head, push not observed
+    );
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const final = replies[replies.length - 1];
+    expect(final).toContain("no new head");
+    expect(final).toContain("has no pushed upstream"); // the post-step's reason rides the report
+    expect(posts).toHaveLength(1); // review round 1 only — never a second review of the same diff
+    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(3);
+  });
+
+  it("a fix round that declines EVERY finding without repushing still earns a re-review — the reviewer can concede and approve the same head", async () => {
+    const provider = shipProvider({
+      coding: [
+        toolUse("submit_pr_description", SHIP_DESCRIPTION),
+        say("Done — pushed."),
+        toolUse("submit_dispositions", { dispositions: [{ findingId: "F1", disposition: "declined", note: "by design — the guard is load-bearing" }] }),
+        say("Declined with the argument; nothing to change."),
+      ],
+      review: [
+        toolUse("submit_verdict", { verdict: "request_changes", summary: "one concern", head: HEAD_A, findings: [F1] }),
+        say("R1 prose."),
+        toolUse("submit_verdict", { verdict: "approve", summary: "conceded — the decline argument holds", head: HEAD_A }),
+        say("R2 prose."),
+      ],
+    });
+    const { deps, posts } = shipDeps(provider);
+    queueWorkspaces(
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), // fix round: same head on purpose (all declined)
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), // re-review over the same head
+    );
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(posts).toHaveLength(2); // the re-review RAN — the all-declined round is the designed exception
+    const final = replies[replies.length - 1];
+    expect(final).toContain("Merge-ready");
+    expect(final).toContain("F1"); // the declined finding is on the merge-ready record
+  });
+
+  it("a fix round that opened a NEW PR hands the pipeline its number: later rounds review it and the report links it", async () => {
+    let currentHead = HEAD_A;
+    const provider = twoRoundProvider();
+    const { deps, posts } = shipDeps(provider);
+    let opens = 0;
+    deps.openPullRequest = vi.fn(async (): Promise<OpenedPullRequest> => {
+      opens += 1;
+      return opens === 1
+        ? { number: 7, htmlUrl: PR_URL, created: true }
+        : { number: 8, htmlUrl: "https://github.com/acme/api/pull/8", created: true }; // PR 7 was closed under the pipeline
+    });
+    deps.fetchPrHead = vi.fn(async () => currentHead);
+    twoRoundWorkspaces(() => (currentHead = HEAD_B));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(posts).toHaveLength(2);
+    expect(posts[1].target.number).toBe(8); // review round 2 targets the NEW PR
+    const final = replies[replies.length - 1];
+    expect(final).toContain("Merge-ready");
+    expect(final).toContain("https://github.com/acme/api/pull/8");
+    // The fix round's post-step note reached the thread, exactly like round 0's.
+    expect(replies.some((r) => r.includes("PR opened") && r.includes("https://github.com/acme/api/pull/8"))).toBe(true);
+  });
+
+  it("a final reply that throws writes the run record as `failed`, never `completed` (the thread never saw the report)", async () => {
+    const registry = new RunRegistry({ genId: () => "rship-w", genToken: () => "tship-w" });
+    const store = new InMemoryRunStore();
+    const writer = createRunHistoryWriter({ store, warn: () => {}, onPersisted: (id) => registry.markPersisted(id), sleep: async () => {} });
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const io: ChannelIO = {
+      reply: async () => {
+        throw new Error("slack outage"); // mid-pipeline notes are best-effort; the FINAL reply throw must fail the record
+      },
+      status: async () => ({ update: () => {}, done: async () => {} }),
+      history: async () => [],
+    };
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    await writer.settled();
+    expect((await store.get("rship-w"))?.status).toBe("failed");
+  });
+
+  it("card close is truthful: an abort closes ⚠️ over the un-rewritten checklist; merge-ready keeps ✅ with checked-off items", async () => {
+    // Abort: the review child walks a checklist then ends with no verdict.
+    const abortProvider = shipProvider({
+      coding: [toolUse("update_status", { checklist: "✱ Implementing" }), toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("update_status", { checklist: "✱ Reading the diff" }), say("ran out of budget")],
+    });
+    const abortRun = shipDeps(abortProvider);
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const abortIO = fakeIO();
+    await dispatch(abortRun.deps, msg(TASK_MSG, "slack:UADMIN"), abortIO.io);
+    const abortClose = abortIO.statuses[abortIO.statuses.length - 1];
+    expect(abortClose.title).toContain("⚠️");
+    expect(abortClose.detail).toContain("✱ Reading the diff"); // un-rewritten: nothing gets checked off
+    expect(abortClose.detail ?? "").not.toContain("✓");
+
+    // Completed: the LGTM pipeline keeps the ✅ + checked-off close.
+    const okProvider = shipProvider({
+      coding: [toolUse("update_status", { checklist: "✱ Implementing" }), toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const okRun = shipDeps(okProvider);
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const okIO = fakeIO();
+    await dispatch(okRun.deps, msg(TASK_MSG, "slack:UADMIN"), okIO.io);
+    const okClose = okIO.statuses[okIO.statuses.length - 1];
+    expect(okClose.title).toContain("✅");
+    expect(okClose.detail).toContain("✓ Implementing");
+  });
+
+  it("a later round reusing a finding id never inherits the earlier round's disposition: the cap report lists the new finding unaddressed", async () => {
+    let currentHead = HEAD_A;
+    const F1_NIT = { id: "F1", severity: "nit", file: "src/login.ts", title: "rename shadowed variable" };
+    const F1_REUSED = { id: "F1", severity: "blocking", file: "src/auth.ts", title: "missing rate limit" }; // same id, DIFFERENT finding
+    const provider = shipProvider({
+      coding: [
+        toolUse("submit_pr_description", SHIP_DESCRIPTION),
+        say("Done — pushed."),
+        toolUse("submit_dispositions", { dispositions: [{ findingId: "F1", disposition: "declined", note: "style-only" }] }),
+        toolUse("submit_pr_description", SHIP_DESCRIPTION),
+        say("Declined the nit, pushed a cleanup."),
+      ],
+      review: [
+        toolUse("submit_verdict", { verdict: "request_changes", summary: "a nit", head: HEAD_A, findings: [F1_NIT] }),
+        say("R1 prose."),
+        toolUse("submit_verdict", { verdict: "request_changes", summary: "new blocker", head: HEAD_B, findings: [F1_REUSED] }),
+        say("R2 prose."),
+      ],
+    });
+    const { deps } = shipDeps(provider, SHIP_YAML + "ship:\n  maxRounds: 2\n");
+    deps.fetchPrHead = vi.fn(async () => currentHead);
+    queueWorkspaces(
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH, onHeadProbe: () => (currentHead = HEAD_B) }),
+      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH }),
+    );
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const final = replies[replies.length - 1];
+    expect(final).toMatch(/Unaddressed \(no disposition\):[\s\S]*F1 src\/auth\.ts — missing rate limit/);
+    expect(final).toMatch(/Declined \(disposition recorded\):\n  - none/);
   });
 });

@@ -13,6 +13,7 @@ import { currentPrHeadSha, prCommitsSince, resolveRepoContext, type RepoContext 
 import type { PrCommitList } from "./headMoved.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import {
+  createBranchRef,
   fetchPullRequestFacts,
   fetchRepoShipInfo,
   openPullRequest,
@@ -111,6 +112,14 @@ export interface CoreDeps {
    * Injectable so tests assert the typed inputs without a network call.
    */
   openPullRequest?: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /**
+   * Ship round 0's pipeline-branch create (features/agent-ship.md item 3,
+   * KTD12): `refs/heads/<branch>` at the base ref's tip, so the ref exists on
+   * origin BEFORE the resident is asked to bind the thread to it. Default:
+   * githubPulls' `createBranchRef` (App token REST, 422 already-exists is
+   * success). Injectable so tests assert the call without a network call.
+   */
+  createBranchRef?: (repo: string, branch: string, fromRef: string) => Promise<void>;
   /**
    * The PR's head SHA as GitHub reports it right after a review was posted
    * (agent-review.md item 10): when it differs from the reviewed head — a push
@@ -1387,7 +1396,7 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
   card.update({ title: title() });
   const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
   let outcome: ShipOutcome | undefined;
-  let writeRecordAfterReply: (() => void) | undefined;
+  let writeRecordAfterReply: ((failedAfterReply?: boolean) => void) | undefined;
   try {
     outcome = await runShipPipeline({
       entry,
@@ -1419,6 +1428,7 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
       web: webCapability(),
       skills: deps.skills,
       github: {
+        createBranchRef: deps.createBranchRef ?? createBranchRef,
         openPullRequest: deps.openPullRequest ?? openPullRequest,
         postReviewComment: deps.postReviewComment ?? postReviewComment,
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
@@ -1436,7 +1446,16 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
     throw err; // the outer catch replies; the finally below persisted `failed`
   } finally {
     clearInterval(heartbeat);
-    const status: RunStatus = outcome?.status ?? "failed";
+    // RunStatus is the run-store contract (shared with the memory worker):
+    // an aborted or capped pipeline still finished and delivered its report,
+    // so record and registry say `completed` — the abort/cap distinction
+    // lives in ShipOutcome, the reply, and the card close below.
+    const status: RunStatus =
+      outcome === undefined
+        ? "failed"
+        : outcome.status === "stopped_soft" || outcome.status === "stopped_hard"
+          ? outcome.status
+          : "completed";
     registry.finish(run.id, status);
     const snap = deps.frictionLedger || deps.runHistoryWriter ? registry.snapshot(run.id, run.token) : null;
     const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
@@ -1452,9 +1471,22 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
     }
     if (deps.runHistoryWriter) {
       const writer = deps.runHistoryWriter;
-      const record = () =>
+      // Mirrors the main path's `failedAfterFinish` handling: a completed
+      // pipeline whose final reply throws is recorded `failed` — the thread
+      // never saw the report — while a stopped status stays what it was.
+      const record = (failedAfterReply = false) =>
         writer.write(
-          assembleRunRecord({ run, snap, agent: agent.name, model: ctx.modelRef, msg, repo: repoCtx.repo, finishedAt, status, diagnosis }),
+          assembleRunRecord({
+            run,
+            snap,
+            agent: agent.name,
+            model: ctx.modelRef,
+            msg,
+            repo: repoCtx.repo,
+            finishedAt,
+            status: failedAfterReply && status === "completed" ? "failed" : status,
+            diagnosis,
+          }),
         );
       // A throw skips the post-reply write below — persist the failed record
       // now; the happy path writes after the reply, like the main path.
@@ -1464,15 +1496,26 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
   }
   if (!outcome) return; // unreachable: the catch above rethrew
   console.log(`[done] ${msg.threadKey} ship ${outcome.reply.length} chars (${outcome.status})`);
-  const icon = outcome.status === "stopped_hard" ? "⛔" : outcome.status === "stopped_soft" ? "⏹" : "✅";
+  // The close tells the truth about HOW the pipeline ended: only a COMPLETED
+  // pipeline checks its checklist off — an abort or cap closes ⚠️ over the
+  // un-rewritten checklist (✓s over an abort would claim work that never
+  // finished); stops keep their ⏹/⛔.
+  const icon =
+    outcome.status === "stopped_hard" ? "⛔" : outcome.status === "stopped_soft" ? "⏹" : outcome.status === "completed" ? "✅" : "⚠️";
   try {
     await card.done({ title: title(icon), detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(), link: liveLink });
     await io.reply(outcome.reply);
-  } finally {
-    // Fire-and-forget AFTER the reply (the writer's `pending()` counts it for
-    // the shutdown drain), so persistence can never delay the thread.
-    writeRecordAfterReply?.();
+  } catch (err) {
+    // The report never reached the thread: the record must say `failed`,
+    // never `completed` — the main path's invariant (its outer catch writes
+    // the failed record when a reply throws after the loop). The registry
+    // row keeps its terminal status for the TTL, exactly like the main path.
+    writeRecordAfterReply?.(true);
+    throw err;
   }
+  // Fire-and-forget AFTER the reply (the writer's `pending()` counts it for
+  // the shutdown drain), so persistence can never delay the thread.
+  writeRecordAfterReply?.();
 }
 
 /** The `pr_description` event's payload: every string LEAF passed through

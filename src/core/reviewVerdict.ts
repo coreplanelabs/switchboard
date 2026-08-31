@@ -153,10 +153,11 @@ export function verdictLine(verdict: ReviewVerdict | undefined): string {
   return summary ? `${token} ${summary}` : token;
 }
 
-/** One compact line per finding, rendered directly under the verdict line. */
-function findingLine(f: Finding): string {
+/** One compact finding line — `[severity] id file[:line] — title` — shared by
+ *  the posted body's list (bulleted below) and ship's synthesized child turns. */
+export function formatFinding(f: Finding): string {
   const location = f.line !== undefined ? `${f.file}:${f.line}` : f.file;
-  return `- [${f.severity}] ${f.id} ${location} — ${f.title}`;
+  return `[${f.severity}] ${f.id} ${location} — ${f.title}`;
 }
 
 /**
@@ -165,7 +166,7 @@ function findingLine(f: Finding): string {
  * review text. Never starts with "LGTM" unless the verdict is `approve`.
  */
 export function buildReviewPostBody(answer: string, verdict: ReviewVerdict | undefined): string {
-  const head = [verdictLine(verdict), ...(verdict?.findings ?? []).map(findingLine)];
+  const head = [verdictLine(verdict), ...(verdict?.findings ?? []).map((f) => `- ${formatFinding(f)}`)];
   return `${head.join("\n")}\n\n${answer.trim()}`;
 }
 
