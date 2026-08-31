@@ -61,11 +61,6 @@ export function buildScheduledRows(schedules: readonly ScheduleDef[], firings: F
   });
 }
 
-/** `2026-08-31 14:00 UTC` */
-export function formatUtc(ms: number): string {
-  return `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
-}
-
 /** `in 2d 3h` / `in 45m` / `in <1m` / `3h ago` — coarse, for a glance. */
 export function formatRelative(ms: number, now: number): string {
   const delta = ms - now;
