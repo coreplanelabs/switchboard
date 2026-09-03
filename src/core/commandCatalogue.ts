@@ -18,6 +18,7 @@ import type { RunRegistry } from "./runRegistry.js";
 import type { RunStore } from "./runStore.js";
 import { createRunsService, type RunsService } from "./runsService.js";
 import { SCHEDULES } from "./schedules.js";
+import { githubRepoInspector, type RepoInspector } from "../execution/githubRepoInspect.js";
 import type { ScheduleStore } from "./scheduleStore.js";
 
 // THE one catalogue every in-process binding shares — src/index.ts (bot) and
@@ -52,6 +53,9 @@ export interface CoreCommandWiring {
   scheduleStore?: ScheduleStore;
   /** The resident admin client; default: from `execution.resident` + its bearer (per call). */
   residentAdmin?: () => ResidentAdminClient | undefined;
+  /** `repo onboard`'s root inspection (resident-repos item 52); default: GitHub
+   *  REST with the App's read token. */
+  repoInspector?: RepoInspector;
   /** The deterministic-op backend; default: resident-backed when a resident is
    *  configured, local for local execution, none otherwise (per call). */
   operations?: (caller: Caller) => Operations | null;
@@ -136,6 +140,7 @@ export function buildCoreCommands(config: Provided<ConfigStore>, store: Provided
       admin,
       operations: (caller) => (wiring.operations ? wiring.operations(caller) : defaultOperations(cfg(), wiring.env, caller)),
       canUseRepo: (callerId, slug) => cfg().canUseRepo(callerId, slug),
+      inspect: wiring.repoInspector ?? githubRepoInspector(),
     },
     memory: {
       config: () => cfg().config.memory,

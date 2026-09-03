@@ -303,7 +303,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     if (deps.commands) {
       const chatCmd = parseChatCommand(msg.text, deps.commands);
       if (chatCmd) {
-        await io.reply((await runChatCommand(deps, msg, io, chatCmd)).text);
+        const res = await runChatCommand(deps, msg, io, chatCmd);
+        await io.reply(res.text);
+        if (res.followUp) postSettledOutcome(res.followUp, io);
         return;
       }
     }
@@ -1555,6 +1557,21 @@ async function runChatCommand(deps: CoreDeps, msg: IncomingMessage, io: ChannelI
   const invoke = () => invokeChatCommand({ commands, parsed, msg, config: deps.config, resolveRepo });
   if (parsed.kind === "invoke" && isInlineRunCommand(parsed.id)) return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke);
   return invoke();
+}
+
+/**
+ * A command with a deferred outcome (`CommandDef.settle` — `repo onboard` /
+ * `repo rebuild`, whose provisioning settles minutes after the 202) gets a
+ * SECOND reply in the thread when it does: awaited off the request path, so the
+ * acknowledgement is never held back. Best-effort by design — the poll lives in
+ * this process, so a restart mid-provision loses the follow-up; the resident
+ * state itself is never in doubt (`repo list` / the residents dash read it
+ * live), and the acknowledgement says so.
+ */
+function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined>, io: ChannelIO): void {
+  void followUp()
+    .then((outcome) => (outcome ? io.reply(outcome.text) : undefined))
+    .catch((err) => console.error("[command] settle follow-up failed:", err));
 }
 
 /**

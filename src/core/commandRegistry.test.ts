@@ -454,3 +454,51 @@ describe("who decided a failure (phase 4b): registry vs handler; the wider Comma
     expect(await registry.invoke("demo.exec", {}, { kind: "access", id: "access:u", scopes: new Set() }, {})).toMatchObject({ ok: false, error: "unauthorized" });
   });
 });
+
+describe("settle — the deferred outcome of an accepted command (resident-repos item 52)", () => {
+  const caller: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
+  const settling = define({
+    id: "demo.provision",
+    scope: "demo:write",
+    chatGate: "operator",
+    effect: "write",
+    describe: "accepts now, settles later",
+    handler: async () => ({ accepted: true }),
+    settle: async (output, { deps, caller: who }) => {
+      deps.hits.push(`settle ${JSON.stringify(output)} by ${who.id}`);
+      return { ok: true, text: "settled" };
+    },
+  });
+  const throwing = define({
+    id: "demo.unsettled",
+    scope: "demo:write",
+    chatGate: "operator",
+    effect: "write",
+    describe: "settle throws",
+    handler: async () => ({}),
+    settle: async () => {
+      throw new Error("poll exploded");
+    },
+  });
+
+  it("settles() names the commands that have one; settle() runs it with the handler's output, the caller, and the bound deps", async () => {
+    const reg = new CommandRegistry<Deps>({ audit: () => {} });
+    reg.register(settling);
+    reg.register(echo);
+    const deps: Deps = { hits: [] };
+    expect(reg.settles("demo.provision")).toBe(true);
+    expect(reg.settles("demo.echo")).toBe(false);
+    expect(reg.settles("demo.nope")).toBe(false);
+    expect(await reg.settle("demo.provision", { accepted: true }, caller, deps)).toEqual({ ok: true, text: "settled" });
+    expect(deps.hits).toEqual(['settle {"accepted":true} by cli:local']);
+    expect(await reg.settle("demo.echo", {}, caller, deps)).toBeUndefined();
+  });
+
+  it("a throwing settle is logged and yields undefined — a follow-up that cannot be produced is not an error the caller can act on", async () => {
+    const logged: unknown[] = [];
+    const reg = new CommandRegistry<Deps>({ audit: () => {}, logError: (id, err) => logged.push([id, (err as Error).message]) });
+    reg.register(throwing);
+    expect(await reg.settle("demo.unsettled", {}, caller, { hits: [] })).toBeUndefined();
+    expect(logged).toEqual([["demo.unsettled", "poll exploded"]]);
+  });
+});

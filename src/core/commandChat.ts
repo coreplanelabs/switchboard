@@ -1,5 +1,5 @@
 import type { ConfigStore } from "../config.js";
-import { renderText, type Caller, type CommandInput, type CommandInvoker, type CommandSurfaces, type InvokeErrorCode } from "./commandRegistry.js";
+import { renderText, type Caller, type CommandInput, type CommandInvoker, type CommandSurfaces, type InvokeErrorCode, type SettledOutcome } from "./commandRegistry.js";
 import { catalogueText, chatForm, commandsInGroup, helpText, parseInvocation, tokenize, type CommandShape, type GrammarRejection } from "./commandSurface.js";
 import type { IncomingMessage } from "./types.js";
 
@@ -141,6 +141,11 @@ export interface ChatCommandResult {
   /** The error code when the invocation failed — the registry's, or the
    *  grammar's `invalid_input` for a malformed tail (a help reply has none). */
   error?: InvokeErrorCode;
+  /** Present when the command succeeded AND has a deferred outcome
+   *  (`CommandDef.settle`): awaiting it yields the follow-up to post in the
+   *  same thread once the effect has settled (undefined = nothing to add). The
+   *  caller posts `text` first, then awaits this. */
+  followUp?: () => Promise<SettledOutcome | undefined>;
 }
 
 /** One line per error code; the shared wording every chat command uses. A
@@ -164,7 +169,11 @@ export async function invokeChatCommand({ commands, parsed, msg, config, resolve
   if (parsed.kind === "reply") return { ok: false, text: parsed.text, ...(parsed.error ? { error: parsed.error } : {}) };
   const caller = chatCallerFor(msg, config, resolveRepo);
   const res = await commands.invoke(parsed.id, parsed.input, caller);
-  if (res.ok) return { ok: true, text: renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, { surface: "chat", ...(now === undefined ? {} : { now }) }) };
+  if (res.ok) {
+    const text = renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, { surface: "chat", ...(now === undefined ? {} : { now }) });
+    const { id } = parsed;
+    return { ok: true, text, ...(commands.settles(id) ? { followUp: () => commands.settle(id, res.value, caller) } : {}) };
+  }
   return { ok: false, error: res.error, text: chatErrorLine(parsed.id, res.error, res.message, config, res.decidedBy) };
 }
 

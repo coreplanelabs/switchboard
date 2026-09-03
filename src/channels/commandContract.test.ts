@@ -45,6 +45,7 @@ const residentAdmin: ResidentAdminClient = {
   reconfigure: async () => ({ status: 500, data: {} }),
   rebuild: async () => ({ status: 500, data: {} }),
   residents: async () => ({ status: 200, data: RESIDENTS }),
+  status: async () => ({ status: 200, data: { state: "warm", reason: "", inFlight: 0 } }),
 };
 
 const CONFIG_YAML = `

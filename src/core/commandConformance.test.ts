@@ -244,6 +244,8 @@ function recording(inner: CommandInvoker, recorded: Recorded[]): CommandInvoker 
       recorded.push({ id, input, caller, result });
       return result;
     },
+    settles: (id) => inner.settles(id),
+    settle: (id, value, caller) => inner.settle(id, value, caller),
   };
 }
 
@@ -279,6 +281,7 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
           : { registryRemoved: true, schedulesCancelled: 1, containerStopped: true, storageCleared: true, backupObjectsDeleted: 2, r2ObjectsDeleted: 3, errors: [] },
       }),
     reconfigure: async (body) => exec(`admin.reconfigure ${String(body.resource)}`, { status: 200, data: {} }),
+    status: async (resource) => exec(`admin.status ${resource}`, { status: 200, data: { state: "warm", reason: "", inFlight: 0 } }),
     rebuild: async (resource, dryRun) =>
       exec(`admin.rebuild ${resource} dryRun=${dryRun}`, {
         status: dryRun ? 200 : 202,

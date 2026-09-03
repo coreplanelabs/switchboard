@@ -2300,8 +2300,7 @@ export class ResidentDO extends Sandbox<Env> {
     let credentials: AttachOk["credentials"] = mode.readonly ? "none" : "unavailable";
     let credentialsWrittenAt: number | undefined;
     try {
-      const installCmd = record.commands.install ?? "npm install --no-audit --no-fund";
-      deps = await this.materializeThreadDeps(binding, locked.value.threadLockKey, facts.lockfileHash, installCmd);
+      deps = await this.materializeThreadDeps(binding, locked.value.threadLockKey, facts.lockfileHash, record.commands.install);
       if (mode.scrubCredentials) {
         // Every read-only attach, reused tree included: a tree built before
         // this rule (or by a writable attach on this thread) may carry a file.
@@ -2472,7 +2471,7 @@ export class ResidentDO extends Sandbox<Env> {
     binding: { user: string; worktreePath: string }, // a ThreadBinding, or U6's per-op checkout
     threadLockKey: string,
     warmLockKey: string,
-    installCmd: string,
+    installCmd: string | undefined,
   ): Promise<{ deps: ThreadDepsMechanism; reconciled: boolean }> {
     const wt = binding.worktreePath;
     const hasDeps = (await this.run(["test", "-d", `${wt}/node_modules`])).exitCode === 0;
@@ -2517,7 +2516,11 @@ export class ResidentDO extends Sandbox<Env> {
     }
 
     // Committed lockfile differs from the warm checkout: scoped, token-free
-    // incremental install as the thread user (KTD7).
+    // incremental install as the thread user (KTD7). A table with no install
+    // (a repo with no root package.json — resident-repos item 52) has nothing
+    // to reconcile; before item 52 this fell back to `npm install`, which can
+    // only fail there.
+    if (installCmd === undefined) return { deps: "none", reconciled: false };
     await this.threadRunOk(binding.user, wt, installCmd, "thread-install", REFRESH_BUILD_TIMEOUT_MS);
     return { deps: "install", reconciled: true };
   }
@@ -3057,7 +3060,7 @@ export class ResidentDO extends Sandbox<Env> {
         { user, worktreePath: checkout },
         locked.value.lockKey,
         facts.lockfileHash,
-        record.commands.install ?? "npm install --no-audit --no-fund",
+        record.commands.install,
       );
 
       const r = await this.threadRunCapped(user, checkout, command, OP_EXEC_TIMEOUT_MS, EXEC_OUTPUT_CAP);
