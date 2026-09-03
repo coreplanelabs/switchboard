@@ -384,6 +384,20 @@ export interface ShipChildSpec {
   effort?: Effort;
 }
 
+/** The ship coding rounds' branch contract, appended AFTER the composed
+ *  system so it beats the coding prompt's generic "create a branch with a
+ *  descriptive name" step — a ship child that leaves the pipeline branch
+ *  strands the pipeline (the thread binding cannot follow it). */
+export function shipBranchContract(branch: string): string {
+  return (
+    `SHIP PIPELINE BRANCH CONTRACT (overrides any instruction above to create or switch branches): ` +
+    `this worktree is already checked out on \`${branch}\`, the pipeline's PR branch. ` +
+    `Do NOT create a branch and do NOT switch branches — implement, commit, and push on \`${branch}\` ` +
+    `(\`git push -u origin ${branch}\`). Switchboard opens and edits the PR from that branch only; ` +
+    `work pushed anywhere else is unreachable to this pipeline.`
+  );
+}
+
 /** The advisory/system blocks composed into one child's prompt (the same seam
  *  the dispatcher uses: memory → config awareness → instructions → agent). */
 export interface ShipBlocks {
@@ -673,7 +687,12 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         model: spec.model,
         agent: clip(spec.agent),
         messages: opts.messages,
-        system: composeSystem({ sha: undefined, verified: false }),
+        // The branch contract OVERRIDES the coding prompt's generic "create a
+        // branch" step — the first live run (2026-09-03) followed that step,
+        // pushed its own branch, and stranded the pipeline: the thread's
+        // binding stays on the ship branch, so the review round can never see
+        // a PR opened from anywhere else.
+        system: `${composeSystem({ sha: undefined, verified: false })}\n\n${shipBranchContract(entry.branch)}`,
         effort: spec.effort,
         toolContext,
         onProgress: input.onProgress,
@@ -686,6 +705,18 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       await ws.release({ hardStopped: control.requested === "hard" });
     }
     if (description) input.publish({ type: "pr_description", description: input.redactDescription(description), at: now() });
+    // Branch contract enforced structurally, before any PR write: a child
+    // that ended on another branch pushed work this pipeline cannot reach
+    // (the thread binding stays on the ship branch) — opening or editing a
+    // PR from it would strand the loop, as the first live run proved.
+    if (observed?.branch !== undefined && observed.branch !== entry.branch) {
+      return {
+        answer,
+        refusal:
+          `⚠️ The coding round left the pipeline branch: it ended on \`${observed.branch}\` instead of \`${entry.branch}\`, ` +
+          `so no PR was opened or edited from it — work pushed there is unreachable to this pipeline.`,
+      };
+    }
     let opened: { number: number; url: string; created: boolean } | undefined;
     let prNote: string | undefined;
     if (observed && control.requested !== "hard") {
