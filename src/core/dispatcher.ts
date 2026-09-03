@@ -1,7 +1,8 @@
 import type { ConfigStore } from "../config.js";
 import { configAwarenessBlock } from "./configAwareness.js";
+import { selfDescriptionBlock } from "./selfDescription.js";
 import { customInstructionsBlock } from "./customInstructions.js";
-import { getAgent, type AgentDef } from "../agents/registry.js";
+import { AGENTS, getAgent, type AgentDef } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives, type RequestDirectives, type ThreadDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
 import { makeWebCapability } from "../tools/web.js";
@@ -55,6 +56,8 @@ import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
 import { startReviewReadingDiff } from "./readingDiff.js";
 import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
+import { RestGithubApi, type GithubApi } from "../execution/githubApi.js";
+import type { GithubCapability } from "../tools/github.js";
 import { invokeChatCommand, parseChatCommand, type ChatCommandResult, type ChatCommands, type ParsedChatCommand } from "./commandChat.js";
 import { cliWords } from "./commandSurface.js";
 import { activityOfEvents, defaultRunRegistry, type RunHandle, type RunRegistry, type RunSnapshot, type RunSummary } from "./runRegistry.js";
@@ -185,6 +188,13 @@ export interface CoreDeps {
    */
   mcp?: McpToolSource;
   /**
+   * The GitHub API behind the `github_*` tools (features/github-tools.md).
+   * Absent → the production REST client on the App credential; tests inject an
+   * `InMemoryGithubApi`. The per-run capability adds the requesting user's
+   * `canUseRepo` write gate (`githubCapabilityFor`).
+   */
+  githubApi?: GithubApi;
+  /**
    * Friction ledger (Area 7b, #84): after every run the dispatcher analyzes the
    * run's event stream (`analyzeRunFriction`) and records the diagnosis here,
    * so `friction propose` can cluster friction ACROSS recent runs (the live
@@ -253,6 +263,17 @@ const CONTEXT_MAX_BYTES = 256 * 1024;
  *  per-run Agent was never closed, so its keep-alive sockets accumulated. */
 let sharedWeb: ReturnType<typeof makeWebCapability> | undefined;
 const webCapability = () => (sharedWeb ??= makeWebCapability(process.env));
+
+/** The `github_*` tools' capability for one run (features/github-tools.md):
+ *  the process-wide REST client on the App credential (or the injected test
+ *  double) plus the REQUESTING USER's per-repo write gate — `canUseRepo`, the
+ *  same allowlist that admits a user to a repo's resident (KD7) — so an issue
+ *  write from a plain mention is authorized like a coding run on that repo. */
+let sharedGithubApi: GithubApi | undefined;
+function githubCapabilityFor(deps: CoreDeps, userId: string): GithubCapability {
+  const api = deps.githubApi ?? (sharedGithubApi ??= new RestGithubApi());
+  return { api, canWrite: (repo) => deps.config.canUseRepo(userId, repo) };
+}
 
 // In-flight run tracking so the process can drain before exiting (restarts
 // must not kill runs mid-flight — see index.ts signal handling).
@@ -632,6 +653,13 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
     });
 
+    // Self-description (routing-and-config behavior 11): what Switchboard is —
+    // agents, residents, runs, where the source and specs live — built from
+    // the live agent registry, on every agent's prompt, so "how does your
+    // resident system work?" is answered from fact instead of a public-web
+    // 404 on our private repo.
+    const aboutBlock = selfDescriptionBlock(AGENTS);
+
     // Custom instructions (#107 phase 2): the requester's user text + this
     // channel's text, as ONE advisory block. Read from the same resolved
     // scopes as the config block, AFTER resolution and every gate above — so
@@ -661,7 +689,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         isPrReview && repoCtx.repo && repoCtx.pr !== undefined
           ? { repo: repoCtx.repo, pr: repoCtx.pr, ref: repoCtx.ref, baseRef: repoCtx.baseRef }
           : undefined,
-      blocks: { memory: memoryBlock, config: configBlock, instructions: instructionsBlock, skills: skillsBlock, mcp: mcpBlock },
+      blocks: { memory: memoryBlock, config: configBlock, about: aboutBlock, instructions: instructionsBlock, skills: skillsBlock, mcp: mcpBlock },
     });
     // The PR head this run reviews — the resolved head, or the one adopted at
     // attach; the head settle (item 12) advances it after the model turn. The
@@ -942,7 +970,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // One tool context for the whole run: the first turn and any re-review
     // turn (settleReviewedHead) share it, so submit_pr_description and the
     // progress checklist keep flowing to the same hooks.
-    const toolContext = { executor, reportProgress, web: webCapability(), skills: deps.skills, agentName: agent.name, onVerdict, onPrDescription };
+    const toolContext = { executor, reportProgress, web: webCapability(), skills: deps.skills, github: githubCapabilityFor(deps, msg.userId), agentName: agent.name, onVerdict, onPrDescription };
     try {
       answer = await runAgent({
         provider,
@@ -1413,6 +1441,7 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
       threadDirective: { agent: ctx.sticky.agent, model: ctx.sticky.model, effort: ctx.sticky.effort },
       canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
     }),
+    about: selfDescriptionBlock(AGENTS),
     instructions: instructionsBlock,
     skills: deps.skills ? skillGuidanceBlock(deps.skills, spec.agent.name) : undefined,
   });
@@ -1454,6 +1483,7 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
       reply: (text) => io.reply(text),
       web: webCapability(),
       skills: deps.skills,
+      githubTools: githubCapabilityFor(deps, msg.userId),
       github: {
         createBranchRef: deps.createBranchRef ?? createBranchRef,
         openPullRequest: deps.openPullRequest ?? openPullRequest,

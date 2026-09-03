@@ -7,9 +7,9 @@ import { AGENTS, getAgent } from "./registry.js";
 // change forces a feature-file update (and vice versa).
 
 describe("agent registry matches the feature specs", () => {
-  it("general: no tools, 1 turn, 5 min", () => {
-    expect(AGENTS.general.toolset).toBe("none");
-    expect(AGENTS.general.maxTurns).toBe(1);
+  it("general: the assistant toolset (GitHub reads + issue writes + web_fetch, no shell), 8 turns, 5 min", () => {
+    expect(AGENTS.general.toolset).toBe("assistant");
+    expect(AGENTS.general.maxTurns).toBe(8);
     expect(AGENTS.general.maxMinutes).toBe(5);
   });
 
@@ -26,12 +26,27 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.coding.effort).toBeUndefined();
   });
 
-  it("general's prompt redirects tool-needing requests to the other agents", () => {
+  it("general's prompt names its GitHub tools and redirects code/PR/web-research asks to the other agents", () => {
     // Live failure 2026-08-21: general invented a repo URL and told the user
     // to run git themselves instead of pointing at the agents that can.
+    // 2026-09-03 (features/github-tools.md): "open an issue on the switchboard
+    // app" bounced to agent:coding — general now holds the issue tools itself
+    // and must say what it can do, never that it has no tools.
     expect(AGENTS.general.system).toContain("agent:coding");
     expect(AGENTS.general.system).toContain("agent:review");
-    expect(AGENTS.general.system).toMatch(/NO tools/i);
+    expect(AGENTS.general.system).toContain("agent:research");
+    for (const tool of ["github_repos", "github_file", "github_issue_create", "github_issue_update", "github_issue_delete", "web_fetch"]) expect(AGENTS.general.system).toContain(tool);
+    expect(AGENTS.general.system).not.toMatch(/NO tools/i);
+    expect(AGENTS.general.system).toMatch(/cannot run commands, clone repositories, edit code, or review pull requests/);
+    expect(AGENTS.general.system).toMatch(/never claim an action you did not perform/);
+  });
+
+  it("research's prompt names the GitHub read tools and forbids concluding a private repo is inaccessible from a public 404", () => {
+    // Live failure 2026-09-01: research reported "repo is private, inaccessible"
+    // for our own repo after a public-web 404, with the App credential unused.
+    for (const tool of ["github_repos", "github_tree", "github_file", "github_search_code", "github_issue_list"]) expect(AGENTS.research.system).toContain(tool);
+    expect(AGENTS.research.system).toMatch(/never conclude a repo is inaccessible from a public-web 404/);
+    expect(AGENTS.research.system).not.toContain("github_issue_create");
   });
 
   it("resource declarations: coding and review require a repo; general declares none", () => {

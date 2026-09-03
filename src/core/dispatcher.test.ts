@@ -1,5 +1,7 @@
 import { NO_VERDICT_LINE } from "./reviewVerdict.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
+import { SELF_DESCRIPTION_HEADER, selfDescriptionBlock } from "./selfDescription.js";
+import { InMemoryGithubApi } from "../execution/githubApi.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2825,12 +2827,12 @@ describe("live run-view wiring (Area 2)", () => {
     await dispatch(deps, msg("hello there"), io);
 
     expect(log).toEqual(["create", "finish"]); // created before the run, finished after
-    // The 1-turn general agent hits its turn budget here, so the runner's typed
-    // budget note (#84) also flows into the registry after the tool pair.
-    // …and the record is bookended by the request (`input`, live-view item 12)
-    // and the final answer (the run record is the source of truth; Slack is a
+    // The general agent's `bash` call is an unknown tool (its toolset has no
+    // shell), so the pair is a failed tool result and the next turn answers.
+    // The record is bookended by the request (`input`, live-view item 12) and
+    // the final answer (the run record is the source of truth; Slack is a
     // projection of it), the latter before the run finishes.
-    expect(events.map((e) => e.type)).toEqual(["input", "run_meta", "turn", "tool_call", "tool_result", "run_note", "turn", "answer"]);
+    expect(events.map((e) => e.type)).toEqual(["input", "run_meta", "turn", "tool_call", "tool_result", "turn", "answer"]);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
 
@@ -2918,7 +2920,7 @@ describe("live run-view wiring (Area 2)", () => {
       },
       fakeIO().io,
     );
-    expect(events.map((e) => e.type)).toEqual(["input", "run_meta", "turn", "tool_call", "tool_result", "run_note", "turn", "answer"]);
+    expect(events.map((e) => e.type)).toEqual(["input", "run_meta", "turn", "tool_call", "tool_result", "turn", "answer"]);
     const input = events[0];
     if (input.type !== "input") throw new Error("unreachable");
     expect(input.text).toBe("please rotate «redacted-github-token» now [+2 images, 1 document]"); // directives stripped, redacted
@@ -3800,6 +3802,70 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
 // general agent answered "stateless, no per-user/per-channel tuning" — false;
 // the config system existed, the model was simply never told. Every run's
 // system prompt now carries the RESOLVED agent/model/scope and how to tune it.
+describe("self-description in the system prompt (routing-and-config behavior 11) and the github_* tools (features/github-tools.md)", () => {
+  it("every run's prompt carries the About block right after the config block, naming the agents, residents, and the repo + specs", async () => {
+    const provider = capturingProvider();
+    await dispatch(makeDeps(YAML_FIXTURE, provider), msg("how does your resident system work?"), fakeIO().io);
+    const sys = provider.requests[0].system ?? "";
+    expect(sys).toContain(selfDescriptionBlock(AGENTS));
+    expect(sys.indexOf("Switchboard runtime config")).toBeLessThan(sys.indexOf(SELF_DESCRIPTION_HEADER));
+    expect(sys.indexOf(SELF_DESCRIPTION_HEADER)).toBeLessThan(sys.indexOf("You are Switchboard"));
+    expect(sys.split(SELF_DESCRIPTION_HEADER)).toHaveLength(2); // exactly once
+  });
+
+  it("a plain mention opens an issue through github_issue_create on the injected API, and the answer carries the tool's number + URL", async () => {
+    let n = 0;
+    const provider: Provider & { requests: CompletionRequest[] } = {
+      name: "fake",
+      requests: [],
+      async complete(req): Promise<CompletionResult> {
+        provider.requests.push(req);
+        if (n++ === 0) return { content: [{ type: "tool_use", id: "t1", name: "github_issue_create", input: { repo: "coreplanelabs/switchboard", title: "foo", body: "bar" } }], stopReason: "tool_use" };
+        const result = req.messages.at(-1)?.content;
+        const text = Array.isArray(result) ? result.map((c) => ("content" in c && typeof c.content === "string" ? c.content : "")).join("") : String(result);
+        return { content: [{ type: "text", text: `Done: ${text}` }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const api = new InMemoryGithubApi({ "coreplanelabs/switchboard": {} });
+    deps.githubApi = api;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg('open an issue on the switchboard app with the title "foo" and the body "bar"'), io);
+    expect(provider.requests[0].tools?.map((t) => t.name)).toEqual(expect.arrayContaining(["github_issue_create", "github_file", "github_repos", "web_fetch"]));
+    expect(provider.requests[0].tools?.map((t) => t.name)).not.toContain("bash");
+    expect((await api.listIssues("coreplanelabs/switchboard")).map((i) => ({ title: i.title, body: i.body }))).toEqual([{ title: "foo", body: "bar" }]);
+    expect(replies.at(-1)).toContain("Opened coreplanelabs/switchboard#1: foo\nhttps://github.com/coreplanelabs/switchboard/issues/1");
+  });
+
+  it("the issue write is gated by permissions.repos for the requesting user — refused before the API, allowed for a listed user", async () => {
+    const gated = YAML_FIXTURE.replace("permissions:\n", 'permissions:\n  repos:\n    "coreplanelabs/switchboard": ["slack:UADMIN"]\n');
+    const call = (): Provider => {
+      let n = 0;
+      return {
+        name: "fake",
+        async complete(req): Promise<CompletionResult> {
+          if (n++ === 0) return { content: [{ type: "tool_use", id: "t1", name: "github_issue_create", input: { repo: "coreplanelabs/switchboard", title: "foo" } }], stopReason: "tool_use" };
+          const result = req.messages.at(-1)?.content;
+          const text = Array.isArray(result) ? result.map((c) => ("content" in c && typeof c.content === "string" ? c.content : "")).join("") : String(result);
+          return { content: [{ type: "text", text }], stopReason: "end_turn" };
+        },
+      };
+    };
+    const api = new InMemoryGithubApi({ "coreplanelabs/switchboard": {} });
+    const denied = makeDeps(gated, call());
+    denied.githubApi = api;
+    const d = fakeIO();
+    await dispatch(denied, msg("open an issue", "slack:UX"), d.io);
+    expect(d.replies.at(-1)).toContain("github_issue_create: you are not allowed to write to coreplanelabs/switchboard (permissions.repos)");
+    expect(await api.listIssues("coreplanelabs/switchboard")).toEqual([]);
+    const allowed = makeDeps(gated, call());
+    allowed.githubApi = api;
+    const a = fakeIO();
+    await dispatch(allowed, msg("open an issue", "slack:UADMIN"), a.io);
+    expect(a.replies.at(-1)).toContain("Opened coreplanelabs/switchboard#1: foo");
+  });
+});
+
 describe("config awareness in the system prompt", () => {
   const CHANNEL_FORCED_YAML =
     YAML_FIXTURE +
@@ -3985,8 +4051,8 @@ describe("self-improvement wiring (Area 7b / #84)", () => {
     expect(rec.runId).toBe("run-friction-1");
     expect(rec.agent).toBe("general");
     expect(rec.label).toContain("general");
-    expect(rec.diagnosis.eventCount).toBe(3); // tool_call + tool_result + the turn-budget note (the two `turn` receipts are narrative, not steps)
-    // The toolless general agent's `bash` call is an unknown tool → a failed_tool finding.
+    expect(rec.diagnosis.eventCount).toBe(2); // tool_call + tool_result (the two `turn` receipts are narrative, not steps)
+    // The general agent has no shell: its `bash` call is an unknown tool → a failed_tool finding.
     expect(rec.diagnosis.byCategory.failed_tool.count).toBe(1);
   });
 
@@ -4649,7 +4715,7 @@ describe("friction diagnosis reads the registry backlog (#157 U11)", () => {
     const snap = registry.snapshot("run-f", "tok");
     expect(snap).not.toBeNull();
     expect(rec.diagnosis).toEqual(analyzeRunFriction(snap!.events, { finished: true }));
-    expect(rec.diagnosis.eventCount).toBe(3); // the narrative events (input/answer) do not count
+    expect(rec.diagnosis.eventCount).toBe(2); // the narrative events (input/answer/turn) do not count
   });
 });
 
@@ -6523,8 +6589,12 @@ describe("MCP tools (#394, features/mcp-tools.md)", () => {
     await dispatch(deps, msg("find the login bug in linear"), io);
     expect(replies.join("\n")).toContain("3 issues match");
     // Tools + block on the first request.
-    expect(provider.requests[0].tools?.map((t) => t.name)).toEqual(["mcp__linear__search_issues"]);
-    expect(provider.requests[0].tools?.[0].description).toContain('external MCP server "linear"');
+    // general's own `assistant` toolset (features/github-tools.md item 5) comes first; the bridged MCP tool rides after it.
+    const names = provider.requests[0].tools?.map((t) => t.name) ?? [];
+    expect(names.at(-1)).toBe("mcp__linear__search_issues");
+    expect(names).toEqual(expect.arrayContaining(["web_fetch", "github_repos", "github_issue_create"]));
+    expect(names).not.toContain("bash");
+    expect(provider.requests[0].tools?.find((t) => t.name === "mcp__linear__search_issues")?.description).toContain('external MCP server "linear"');
     expect(provider.requests[0].system).toContain("## External MCP tools");
     expect(provider.requests[0].system).toContain("- linear: 1 tool");
     // The call reached the server with the model's arguments; the result came back wrapped.
@@ -6560,7 +6630,9 @@ describe("MCP tools (#394, features/mcp-tools.md)", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("anything"), io);
     expect(replies.join("\n")).toContain("still answered");
-    expect(provider.requests[0].tools).toBeUndefined();
+    // general keeps its own `assistant` toolset; no bridged tool is offered.
+    expect(provider.requests[0].tools?.map((t) => t.name)).toEqual(expect.arrayContaining(["web_fetch", "github_repos"]));
+    expect(provider.requests[0].tools?.some((t) => t.name.startsWith("mcp__"))).toBe(false);
     expect(provider.requests[0].system).toContain("- linear: unavailable (HTTP 503)");
     const events = [...runIds].flatMap((id) => registry.snapshotById(id)?.events ?? []);
     expect(events).toContainEqual(expect.objectContaining({ type: "run_note", kind: "mcp_unavailable", summary: "MCP server linear unavailable: HTTP 503" }));

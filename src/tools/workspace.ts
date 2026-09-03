@@ -6,6 +6,7 @@ import { clampBashTimeout, type ExecOptions, type Executor } from "../execution/
 import { shellQuote } from "../execution/shellQuote.js";
 import { distillDiff } from "../core/diffDigest.js";
 import { webFetchTool, webSearchTool, type WebCapability } from "./web.js";
+import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS, type GithubCapability } from "./github.js";
 import { listSkillsTool, useSkillTool } from "./skills.js";
 import type { SkillStore } from "../skills/index.js";
 import type { RunEvent } from "../core/runEvents.js";
@@ -30,6 +31,11 @@ export interface ToolContext {
   /** Skill store backing list_skills/use_skill (#100). Injected by the
    *  dispatcher; absent → the skill tools report themselves unavailable. */
   skills?: SkillStore;
+  /** GitHub capability behind the `github_*` tools (features/github-tools.md):
+   *  the REST client on the bot's App credential plus the requesting user's
+   *  per-repo write gate. Injected by the dispatcher; absent → the tools
+   *  report themselves unavailable. */
+  github?: GithubCapability;
   /** The calling agent's name — scopes list_skills/use_skill so an agent only
    *  sees and loads skills declared for it. */
   agentName?: string;
@@ -431,9 +437,19 @@ export const updateStatusTool: RunnableTool = {
 // submit_pr_description and submit_dispositions are full-only: only the coding
 // agent ships PRs and answers review findings, the way submit_verdict is
 // readonly-only because only the review agent judges them.
+// features/github-tools.md: the GitHub READ tools (repos, files, trees, code
+// search, issue list/get) join every toolset with a tool loop — they need no
+// workspace and let any agent answer from the org's repos. The issue WRITE
+// tools (create/update/comment/delete) go where the agent may act on GitHub:
+// `assistant` (general) and `full` (coding); the read-only review agent and
+// the research agent never mutate GitHub.
 export const TOOLSETS: Record<string, RunnableTool[]> = {
-  full: [bashTool, readFileTool, writeFileTool, updateStatusTool, submitPrDescriptionTool, submitDispositionsTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
-  readonly: [bashTool, readFileTool, updateStatusTool, submitVerdictTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool],
-  web: [webFetchTool, webSearchTool, updateStatusTool],
+  full: [bashTool, readFileTool, writeFileTool, updateStatusTool, submitPrDescriptionTool, submitDispositionsTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool, ...GITHUB_READ_TOOLS, ...GITHUB_ISSUE_WRITE_TOOLS],
+  readonly: [bashTool, readFileTool, updateStatusTool, submitVerdictTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool, ...GITHUB_READ_TOOLS],
+  web: [webFetchTool, webSearchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
+  /** The general agent: no workspace, no shell — GitHub reads + issue writes
+   *  and URL reading, so a plain mention can answer from the repos and act on
+   *  issues without being re-sent to another agent. */
+  assistant: [webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS, ...GITHUB_ISSUE_WRITE_TOOLS],
   none: [],
 };

@@ -98,7 +98,7 @@ describe("resolveGithubToken", () => {
     // The read token requests read-only permissions — it physically cannot
     // write (no comment/review/push) even though the sandbox has `gh`.
     expect(JSON.parse(String(init.body))).toEqual({
-      permissions: { contents: "read", pull_requests: "read", metadata: "read" },
+      permissions: { contents: "read", pull_requests: "read", issues: "read", metadata: "read" },
     });
     expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json");
   });

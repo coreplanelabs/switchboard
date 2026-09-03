@@ -38,7 +38,9 @@ Nothing else goes on a criterion: no dates, no receipt links, no "observed live"
 | [execution.md](execution.md) | Per-thread workspaces, sandbox timeouts (exit 124), heartbeat streaming, session recovery, GitHub identity |
 | [costs.md](costs.md) | Costs dash: Access-gated `GET /costs` + JSON twin — per-day spend for a named group (Workers' DOs + container apps + Anthropic workspace) priced live from Cloudflare's billing datasets and the Anthropic Admin cost report |
 | [resident-repos.md](resident-repos.md) | Resident repo environments: auth scopes, atomic cap, lifecycle engine, thread data plane, bot-side selection, `repo onboard/offboard/rebuild/list` chat commands (fail-closed gate, --dry-run plans) |
-| [agent-general.md](agent-general.md) | Default passthrough agent |
+| [agent-general.md](agent-general.md) | The default agent: fast model, `assistant` toolset — GitHub repo reads + issue writes, URL reading, no workspace; redirects code/PR/web-research asks |
+| [github-tools.md](github-tools.md) | The `github_*` tools: repo reads (repos, tree, file, code search) and issue read/write over the App credential from the bot process, per-repo write gate, toolset enablement (`assistant` for general, reads for research/review) |
+| [web-tools.md](web-tools.md) | `web_fetch` (SSRF-hardened URL reading, binary links as model-visible blocks) + `web_search` (Brave/Null seam); the `research` agent |
 | [agent-review.md](agent-review.md) | Code review agent |
 | [agent-coding.md](agent-coding.md) | Coding agent (ships PRs) |
 | [agent-ship.md](agent-ship.md) | Ship pipeline (coding → review → fix to LGTM) |

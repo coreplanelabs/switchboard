@@ -21,11 +21,11 @@ Behavioral expectations live in [`features/`](features/README.md) — one spec p
 
 | Agent | What it does | Toolset (`src/agents/registry.ts`) |
 |---|---|---|
-| `general` | Default fallback — plain passthrough to the configured model; refers repo/web work to the other agents | `none` |
+| `general` | Default — the plain mention. Answers directly, reads the org's repos and manages their issues over GitHub ([features/github-tools.md](features/github-tools.md)), reads a linked URL; refers code changes, PR reviews, and web research to the other agents ([features/agent-general.md](features/agent-general.md)) | `assistant` — GitHub reads + issue writes, web fetch, status; no shell |
 | `coding` | Implements a change and ships a PR ([features/agent-coding.md](features/agent-coding.md)). Cold path: clone → branch → edit → test → push. Resident path: the worktree is already warm and `gh` is not in the image. Either way the agent pushes the branch and submits a typed description; Switchboard renders the body at the pushed head and opens the PR itself ([features/pr-description.md](features/pr-description.md)) | `full` — bash, read, write, web fetch, diff digest, PR description submit, skills |
 | `review` | Reviews a PR with full-repo context, reports ranked findings with a submitted verdict ([features/agent-review.md](features/agent-review.md)) | `readonly` — bash, read (read-only by convention), verdict, web fetch, diff digest, skills |
 | `ship` | Runs the coding → review → fix loop to LGTM as one pipeline ([features/agent-ship.md](features/agent-ship.md)): opens the PR, loops pinned reviews and fix rounds until the review approves, reports merge-ready — a human still merges. Requires permission for `ship`, `coding`, and `review` | `full` — orchestrator only: the def is never sent to a model; each child round runs on the coding/review toolsets above |
-| `research` | Answers questions with web search + URL reading; no repo or workspace is ever provisioned ([features/web-tools.md](features/web-tools.md)) | `web` — web search, web fetch |
+| `research` | Answers questions with web search + URL reading, and reads the org's repos and issues over GitHub; no repo or workspace is ever provisioned ([features/web-tools.md](features/web-tools.md)) | `web` — web search, web fetch, GitHub reads |
 
 Any agent can additionally be given tools from **external MCP servers** (Linear, Notion, Vanta, GitHub, … over Streamable HTTP) via `mcp.servers` in the config ([features/mcp-tools.md](features/mcp-tools.md)): they appear as `mcp__<server>__<tool>`, their descriptions and results are treated as untrusted data, every call is budgeted and recorded, and the review agent only sees a server that explicitly lists it.
 

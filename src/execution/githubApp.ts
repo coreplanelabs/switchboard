@@ -29,10 +29,13 @@ export type GithubTokenScope = "write" | "read";
 // Subset of the installation's permissions for a read-scoped token: enough for
 // `gh pr view`/`gh pr diff` and `git clone`/checkout on a PRIVATE repo, nothing
 // that writes. contents:read → clone/checkout; pull_requests:read → PR
-// metadata + diff; metadata:read → always required by GitHub.
+// metadata + diff; issues:read → the `github_issue_list/get` tools
+// (features/github-tools.md) on the read path; metadata:read → always
+// required by GitHub.
 const READ_ONLY_PERMISSIONS = {
   contents: "read",
   pull_requests: "read",
+  issues: "read",
   metadata: "read",
 } as const;
 

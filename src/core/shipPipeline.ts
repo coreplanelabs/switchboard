@@ -31,6 +31,7 @@ import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget, RepoShipIn
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { ToolContext } from "../tools/workspace.js";
 import type { WebCapability } from "../tools/web.js";
+import type { GithubCapability } from "../tools/github.js";
 import type { SkillStore } from "../skills/index.js";
 import type { PrDescription } from "./prDescription.js";
 import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdict } from "./reviewVerdict.js";
@@ -403,6 +404,8 @@ export function shipBranchContract(branch: string): string {
 export interface ShipBlocks {
   memory: string | undefined;
   config: string | undefined;
+  /** The self-description block (routing-and-config behavior 11). */
+  about?: string | undefined;
   instructions: string | undefined;
   skills: string | undefined;
 }
@@ -446,6 +449,8 @@ export interface ShipPipelineInput {
   reply: (text: string) => Promise<void>;
   web?: WebCapability;
   skills?: SkillStore;
+  /** The `github_*` tools' capability for the child runs (features/github-tools.md). */
+  githubTools?: GithubCapability;
   github: ShipGithub;
   /** Deep string-leaf redaction for the published pr_description event (the
    *  dispatcher passes its own, so ship and plain coding publish ONE shape). */
@@ -658,6 +663,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       reportProgress: input.reportProgress,
       web: input.web,
       skills: input.skills,
+      github: input.githubTools,
       agentName: spec.agent.name,
       onPrDescription: (d) => {
         description = d;
@@ -787,6 +793,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         reportProgress: input.reportProgress,
         web: input.web,
         skills: input.skills,
+        github: input.githubTools,
         agentName: spec.agent.name,
         onVerdict: (v) => {
           verdict = v;
