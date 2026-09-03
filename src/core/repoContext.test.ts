@@ -377,6 +377,10 @@ describe("resolveRepoContext: thread history inheritance", () => {
     await expect(resolveRepoContext(msg("on fix/x"), history)).resolves.toEqual({ repo: "acme/api", ref: "fix/x" });
   });
 
+  it("`on <the established repo's own slug>` restates the repo — it never becomes the ref (live incident 2026-09-03: ship's base became 'coreplanelabs/switchboard')", async () => {
+    await expect(resolveRepoContext(msg("auto-merge is now disabled on acme/api — retry the task"), history)).resolves.toEqual({ repo: "acme/api" });
+  });
+
   it("a STRONG repo signal in the current message beats the thread's; a bare slug does not", async () => {
     // URL form: unambiguously a repository → it rebinds.
     await expect(resolveRepoContext(msg("also check https://github.com/acme/other"), history)).resolves.toEqual({

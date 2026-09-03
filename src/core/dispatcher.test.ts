@@ -5452,7 +5452,7 @@ workspaceDir: __WORKDIR__
   /** One round's resident workspace: git probes answer head/branch/upstream;
    *  `onHeadProbe` fires when the round's HEAD is observed (the head-flip hook
    *  for multi-round scenarios). */
-  function shipWorkspace(opts: { head: string; branch: string; upstream?: string | null; onHeadProbe?: () => void }) {
+  function shipWorkspace(opts: { head: string; branch: string; bindingRef?: string; upstream?: string | null; onHeadProbe?: () => void }) {
     const upstream = opts.upstream === null ? undefined : (opts.upstream ?? opts.head);
     const executor = {
       exec: async (cmd: string) => {
@@ -5468,7 +5468,7 @@ workspaceDir: __WORKDIR__
       writeFile: async () => "",
       release: async () => ({ released: true }),
     };
-    return { executor, resident: true as const, binding: { ref: opts.branch, sha: opts.head, workspace: "/workspace/threads/t/x" } };
+    return { executor, resident: true as const, binding: { ref: opts.bindingRef ?? opts.branch, sha: opts.head, workspace: "/workspace/threads/t/x" } };
   }
 
   function queueWorkspaces(...selections: unknown[]) {
@@ -5770,6 +5770,53 @@ workspaceDir: __WORKDIR__
     expect(final).not.toContain("Open findings from the last review (0)");
     expect(provider.requests).toHaveLength(0);
     expect(makeExecutor).not.toHaveBeenCalled();
+  });
+
+  it("a repo-shaped repoCtx.ref never becomes the pipeline base — the default branch wins (live incident 2026-09-03)", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "acme/api" }); // the "on <slug>" misparse shape
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const { io } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const createRef = deps.createBranchRef!;
+    expect(createRef).toHaveBeenCalled();
+    expect(vi.mocked(createRef).mock.calls[0][2]).toBe("main"); // fromRef = default branch, never the slug
+  });
+
+  it("a coding round that ends on ANOTHER branch aborts before any PR write — work pushed elsewhere is unreachable (live incident 2026-09-03)", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed (on my own branch).")],
+    });
+    const { deps, opened, posts } = shipDeps(provider);
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: "docs/my-own-branch", bindingRef: SHIP_BRANCH }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const final = replies[replies.length - 1];
+    expect(final).toContain("left the pipeline branch");
+    expect(final).toContain("docs/my-own-branch");
+    expect(final).toContain(SHIP_BRANCH);
+    expect(opened).toHaveLength(0); // no PR opened from the foreign branch
+    expect(posts).toHaveLength(0); // no review round followed
+  });
+
+  it("ship coding rounds carry the branch contract in their system prompt, overriding the coding prompt's create-a-branch step", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider);
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const { io } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const codingSystem = provider.requests[0].system ?? "";
+    expect(codingSystem).toContain("SHIP PIPELINE BRANCH CONTRACT");
+    expect(codingSystem).toContain(SHIP_BRANCH);
+    const reviewSystem = provider.requests[provider.requests.length - 1].system ?? "";
+    expect(reviewSystem).not.toContain("SHIP PIPELINE BRANCH CONTRACT"); // review children are readonly — no branch work
   });
 
   it("branch binding (KTD12): every round attaches the ship branch, review/fix rounds at the pinned head", async () => {
