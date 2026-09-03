@@ -308,9 +308,14 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       `🚫 Nothing to ship: give ship a task (\`agent:ship in ${repo}: <task>\`), or name an open ship PR by URL to resume its review loop.`,
     );
   }
+  // Belt-and-braces under the repoContext fix: a base that is repo-shaped
+  // (the slug itself, or any owner/name the API would 404 on as a ref) can
+  // only be a misparse — createBranchRef would fail on it. Fall back to the
+  // repo's default branch rather than aborting round 0 on bad prose.
+  const ref = repoCtx.ref && repoCtx.ref.toLowerCase() !== repo.toLowerCase() ? repoCtx.ref : undefined;
   return {
     ok: true,
-    entry: { repo, branch: shipBranchName(task, input.threadKey), base: repoCtx.ref ?? info.defaultBranch },
+    entry: { repo, branch: shipBranchName(task, input.threadKey), base: ref ?? info.defaultBranch },
   };
 }
 

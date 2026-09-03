@@ -5772,6 +5772,21 @@ workspaceDir: __WORKDIR__
     expect(makeExecutor).not.toHaveBeenCalled();
   });
 
+  it("a repo-shaped repoCtx.ref never becomes the pipeline base — the default branch wins (live incident 2026-09-03)", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "acme/api" }); // the "on <slug>" misparse shape
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const { io } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    const createRef = deps.createBranchRef!;
+    expect(createRef).toHaveBeenCalled();
+    expect(vi.mocked(createRef).mock.calls[0][2]).toBe("main"); // fromRef = default branch, never the slug
+  });
+
   it("branch binding (KTD12): every round attaches the ship branch, review/fix rounds at the pinned head", async () => {
     let currentHead = HEAD_A;
     const provider = shipProvider({

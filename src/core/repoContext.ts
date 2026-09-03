@@ -328,10 +328,14 @@ export async function resolveRepoContext(
   let ref = s.ref;
 
   // "on <owner/name-shaped>": a ref when a repo is independently established
-  // (current message or thread), otherwise a (vetted) repo mention.
+  // (current message or thread), otherwise a (vetted) repo mention. When the
+  // slug IS the established repo, "on <slug>" merely restates it — never a
+  // ref (live incident 2026-09-03: "auto-merge is now disabled on
+  // coreplanelabs/switchboard" handed ship a repo-shaped base ref).
   if (s.onSlug) {
-    if (repo && !ref) ref = s.onSlug;
-    else if (!repo) {
+    if (repo && !ref) {
+      if (slugOf(s.onSlug) !== repo) ref = s.onSlug;
+    } else if (!repo) {
       const cand = slugOf(s.onSlug);
       if (cand && (await vet(cand))) repo = cand;
     }
