@@ -22,6 +22,7 @@ import {
 } from "./channels/accessAuth.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
+import { buildMcpToolSource } from "./mcp/index.js";
 import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { buildFrictionLedger, WorkerFrictionLedger } from "./core/frictionLedgerWorker.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
@@ -70,6 +71,11 @@ async function main() {
   // across all channels via CoreDeps, so review/coding get their scoped skill
   // list in-prompt and can load bodies on demand with use_skill.
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
+  // External MCP servers as tools (#394, features/mcp-tools.md): the static
+  // `mcp.servers` list, validated loudly here (a bad URL or a missing bearer
+  // env var stops startup), served per run by ONE source whose clients ride
+  // the SSRF-pinned web fetch. No servers → undefined → requests unchanged.
+  const mcp = buildMcpToolSource(config.config.mcp, process.env);
   // Cross-session memory (#85): ONE store instance shared by every channel so
   // what the reflection pass writes after a run is what the next run reads.
   // Durable WorkerMemoryStore when memory.worker (+ its bearer) is configured;
@@ -124,7 +130,7 @@ async function main() {
       })
       .catch((err: unknown) => console.warn(`[run-history] /healthz probe of ${base} failed: ${err instanceof Error ? err.message : String(err)}`));
   }
-  const deps: CoreDeps = { config, providers, skills, memory, frictionLedger, runHistoryWriter };
+  const deps: CoreDeps = { config, providers, skills, mcp, memory, frictionLedger, runHistoryWriter };
   // --- command registry (#157 U6/U7/U9): the ONE core catalogue (`buildCoreCommands`,
   // shared with src/cli.ts), bound ONCE; every adapter
   // (HTTP /api/*, MCP tools, chat) exposes the same registrations over the same

@@ -46,6 +46,7 @@ import { observeCodingWorkspace, runCodingPrPostStep } from "./codingPrPostStep.
 import { recognizeOperation } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
+import { mcpGuidanceBlock, type McpToolSource } from "../mcp/source.js";
 import { formatTurnDuration, redactSecrets, type RunEvent } from "./runEvents.js";
 import { fitRecordToBudget, MAX_EVENT_BYTES, utf8ByteLength, type RunRecord, type RunStatus } from "./runRecord.js";
 import { markdownOutput } from "./llmOutput/index.js";
@@ -173,6 +174,16 @@ export interface CoreDeps {
    * src/cli.ts); the DO-backed upload store is PR2, behind this same interface.
    */
   skills?: SkillStore;
+  /**
+   * External MCP servers as tools (#394, features/mcp-tools.md). Asked once
+   * per run, before the first model turn, for the servers scoped to the
+   * resolved agent; the bridged tools ride `RunOptions.extraTools` and the
+   * outcome becomes the MCP prompt block + one `mcp_unavailable` note per
+   * server that did not answer. Absent, or no server scoped to the agent →
+   * the request is byte-identical to before the feature. Production wires a
+   * `ConfigMcpToolSource` over `mcp.servers` (src/index.ts, src/cli.ts).
+   */
+  mcp?: McpToolSource;
   /**
    * Friction ledger (Area 7b, #84): after every run the dispatcher analyzes the
    * run's event stream (`analyzeRunFriction`) and records the diagnosis here,
@@ -593,6 +604,13 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // store, or an agent with no scoped skills (general/research) → undefined
     // and the prompt is untouched.
     const skillsBlock = deps.skills ? skillGuidanceBlock(deps.skills, agent.name) : undefined;
+    // External MCP tools (#394, features/mcp-tools.md item 8): discovery for
+    // the servers scoped to THIS agent, once, before the model turn. A server
+    // that does not answer contributes no tools and is named in the MCP block
+    // (and, once the run is registered, in an `mcp_unavailable` note). No
+    // source, or nothing scoped → no tools, no block, request unchanged.
+    const mcpForRun = deps.mcp ? await deps.mcp.toolsFor(agent.name, { userId: msg.userId }) : undefined;
+    const mcpBlock = mcpForRun ? mcpGuidanceBlock(mcpForRun.servers) : undefined;
 
     // Config awareness (routing-and-config behavior 8): tell the model the
     // RESOLVED agent/model/scope of this very run and how users tune it, so no
@@ -641,7 +659,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         isPrReview && repoCtx.repo && repoCtx.pr !== undefined
           ? { repo: repoCtx.repo, pr: repoCtx.pr, ref: repoCtx.ref, baseRef: repoCtx.baseRef }
           : undefined,
-      blocks: { memory: memoryBlock, config: configBlock, instructions: instructionsBlock, skills: skillsBlock },
+      blocks: { memory: memoryBlock, config: configBlock, instructions: instructionsBlock, skills: skillsBlock, mcp: mcpBlock },
     });
     // The PR head this run reviews — the resolved head, or the one adopted at
     // attach; the head settle (item 12) advances it after the model turn. The
@@ -817,6 +835,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
       card.update(currentFrame());
     };
+    // A configured MCP server that did not answer discovery is a fact of the
+    // run (features/mcp-tools.md item 8): one note per server, before the
+    // first tool event, so the run page explains a missing tool.
+    for (const s of mcpForRun?.servers ?? []) {
+      if (s.unavailable !== undefined) onEvent({ type: "run_note", kind: "mcp_unavailable", summary: `MCP server ${s.server} unavailable: ${s.unavailable}` });
+    }
     const reportProgress = (list: string) => {
       const trimmed = list.trim();
       // An empty update never erases the checklist: the closed card is the
@@ -926,6 +950,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         system,
         effort: resolved.effort,
         toolContext,
+        ...(mcpForRun && mcpForRun.tools.length > 0 ? { extraTools: mcpForRun.tools } : {}),
         onProgress,
         onEvent,
         control: run.control, // operator stop from /runs (#101)
@@ -949,7 +974,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
           messages,
           composeSystem,
           executor,
-          turn: { provider, model, agent, effort: resolved.effort, toolContext, onProgress, onEvent, control: run.control },
+          turn: { provider, model, agent, effort: resolved.effort, toolContext, extraTools: mcpForRun?.tools, onProgress, onEvent, control: run.control },
           fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
           fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
           notify: {
@@ -1926,6 +1951,8 @@ function activityLine(e: RunEvent): string {
       return "run context recorded"; // published straight to the registry too — never arrives here
     case "skill_use":
       return `📚 skill ${e.skill} loaded`;
+    case "mcp_tool_use":
+      return `🔌 ${e.server}/${e.tool} ${e.ok ? "ok" : "failed"} (${e.durationMs} ms)`;
     case "review_artifact":
       return "reading diff ready"; // published straight to the registry — never arrives here
     case "pr_description":

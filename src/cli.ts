@@ -39,6 +39,7 @@ import { buildRunStore, type RunStore } from "./core/runStore.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
+import { buildMcpToolSource } from "./mcp/index.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
@@ -220,12 +221,13 @@ async function main(): Promise<void> {
   const { config, runStore } = bot();
   const providers = new ProviderRegistry(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
+  const mcp = buildMcpToolSource(config.config.mcp, process.env);
   const runHistoryWriter = runStore
     ? createRunHistoryWriter({ store: runStore, warn, onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
     : undefined;
   // The chat fast path (`runs list`, `friction report`, …) answers from the same
   // catalogue the bot binds — without it those messages would go to the model.
-  await dispatch({ config, providers, skills, runHistoryWriter, commands }, { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text }, new ConsoleIO());
+  await dispatch({ config, providers, skills, mcp, runHistoryWriter, commands }, { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text }, new ConsoleIO());
   // Wait for the record write to settle before exiting rather than dropping it.
   await runHistoryWriter?.settled();
 }

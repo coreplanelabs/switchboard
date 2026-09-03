@@ -1251,3 +1251,55 @@ describe("model-call hygiene (features/run-loop.md item 11)", () => {
     expect(assistant?.content[0]).toEqual({ type: "thinking", thinking: "", signature: "sig" });
   });
 });
+
+describe("extra tools (MCP, #394 — features/mcp-tools.md item 12)", () => {
+  const extra = (name: string, out = "extra ran") => ({
+    name,
+    description: "per-run tool",
+    inputSchema: { type: "object", properties: {} },
+    run: async () => out,
+  });
+
+  it("merges per-run tools with the static toolset and dispatches calls to them", async () => {
+    const provider = scripted([
+      { content: [{ type: "tool_use", id: "x1", name: "mcp__linear__search", input: { q: "bug" } }], stopReason: "tool_use" },
+      text("done"),
+    ]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ toolset: "none" }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      extraTools: [extra("mcp__linear__search", "found bug")],
+    });
+    expect(answer).toBe("done");
+    expect(provider.requests[0].tools?.map((t) => t.name)).toEqual(["mcp__linear__search"]);
+    expect(JSON.stringify(provider.requests[1].messages)).toContain("found bug");
+  });
+
+  it("static toolset alone when extraTools is absent or empty (byte-identical request)", async () => {
+    const a = scripted([text("a")]);
+    const b = scripted([text("b")]);
+    const messages: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "go" }] }];
+    await runAgent({ provider: a, model: "m", agent: agent({ toolset: "none" }), messages, toolContext: { executor: fakeExecutor } });
+    await runAgent({ provider: b, model: "m", agent: agent({ toolset: "none" }), messages, toolContext: { executor: fakeExecutor }, extraTools: [] });
+    expect(JSON.stringify(a.requests[0])).toBe(JSON.stringify(b.requests[0]));
+    expect(a.requests[0].tools).toBeUndefined();
+  });
+
+  it("a name that collides with a built-in throws before the first model turn", async () => {
+    const provider = scripted([text("never")]);
+    await expect(
+      runAgent({
+        provider,
+        model: "m",
+        agent: agent({ toolset: "full" }),
+        messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+        toolContext: { executor: fakeExecutor },
+        extraTools: [extra("bash")],
+      }),
+    ).rejects.toThrow('extra tool "bash" collides');
+    expect(provider.requests.length).toBe(0);
+  });
+});

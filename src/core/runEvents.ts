@@ -32,7 +32,11 @@ export type RunNoteKind =
   | "stopped"
   /** The PR head moved while a review ran and the same run is re-reviewing at
    *  the new head (agent-review.md item 12). Published by the dispatcher. */
-  | "head_moved";
+  | "head_moved"
+  /** An MCP server configured for this agent did not answer discovery
+   *  (features/mcp-tools.md item 8); the run proceeds without its tools. One
+   *  note per server, published by the dispatcher before the first turn. */
+  | "mcp_unavailable";
 
 /** How an operator asked a run to stop (#101): `soft` — take no new steps and
  *  wrap up through the normal finale; `hard` — abort the in-flight call now, no
@@ -188,6 +192,14 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
+  /** One call to an external MCP server's tool (features/mcp-tools.md item
+   *  10). Emitted by the bridge beside the runner's generic `tool_call`/
+   *  `tool_result` pair so remote time is attributable per service: which
+   *  server and remote tool, whether it succeeded (`ok` = not a transport
+   *  error and not `isError`), how long, and how many result bytes. Never the
+   *  arguments or the body — those ride the redacted `tool_result.output`
+   *  like every tool's. Additive: unknown → ignored. */
+  | { type: "mcp_tool_use"; server: string; tool: string; ok: boolean; durationMs: number; bytes: number; seq?: number; at?: number }
   /** A review run's reading diff (features/reading-diff.md): the change as a
    *  reviewer reads it. The baseline artifact is the full `git diff`
    *  (`poweredBy: "git"`, guaranteed on every PR review); with the meat

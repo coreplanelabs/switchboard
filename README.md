@@ -26,6 +26,8 @@ Behavioral expectations live in [`features/`](features/README.md) — one spec p
 | `review` | Reviews a PR with full-repo context, reports ranked findings with a submitted verdict ([features/agent-review.md](features/agent-review.md)) | `readonly` — bash, read (read-only by convention), verdict, web fetch, diff digest, skills |
 | `research` | Answers questions with web search + URL reading; no repo or workspace is ever provisioned ([features/web-tools.md](features/web-tools.md)) | `web` — web search, web fetch |
 
+Any agent can additionally be given tools from **external MCP servers** (Linear, Notion, Vanta, GitHub, … over Streamable HTTP) via `mcp.servers` in the config ([features/mcp-tools.md](features/mcp-tools.md)): they appear as `mcp__<server>__<tool>`, their descriptions and results are treated as untrusted data, every call is budgeted and recorded, and the review agent only sees a server that explicitly lists it.
+
 Onboarded repos run in an always-warm **resident worktree** ([features/resident-repos.md](features/resident-repos.md)); everything else falls back to a cold per-thread workspace directory (`workspaces/<channel>-<thread>`). On both paths, follow-ups in the same thread reuse the same checkout.
 
 ## Configuration layers

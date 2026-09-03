@@ -20,7 +20,7 @@ import type { ChatMessage, Provider } from "../providers/types.js";
 import { runAgent } from "../runner.js";
 import { makeExecutor, type ExecutorFactoryOptions, type ExecutorSelection } from "../execution/factory.js";
 import type { Executor, ReleaseMode } from "../execution/executor.js";
-import type { ToolContext } from "../tools/workspace.js";
+import type { RunnableTool, ToolContext } from "../tools/workspace.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import {
   carriedFooter,
@@ -228,7 +228,7 @@ export function makeSystemComposer(input: {
   /** Set for a PR review round: the REVIEW TARGET block's coordinates. */
   prTarget: { repo: string; pr: number; ref: string | undefined; baseRef: string | undefined } | undefined;
   /** Pre-built advisory/context blocks; absent blocks leave the prompt untouched. */
-  blocks: { memory: string | undefined; config: string | undefined; instructions: string | undefined; skills: string | undefined };
+  blocks: { memory: string | undefined; config: string | undefined; instructions: string | undefined; skills: string | undefined; mcp?: string | undefined };
 }): (head: HeadPin) => string {
   const { agent, resident, workspace, prTarget, blocks } = input;
   const residentSystem =
@@ -254,7 +254,11 @@ export function makeSystemComposer(input: {
   const agentSystem = (head: HeadPin): string | undefined => {
     const target = targetBlock(head);
     const baseSystem = target ? `${residentSystem ?? agent.system}\n\n${target}` : residentSystem;
-    return blocks.skills ? `${baseSystem ?? agent.system}\n\n${blocks.skills}` : baseSystem;
+    // Tool guidance trails the agent's own instructions: skills, then the
+    // external MCP servers (features/mcp-tools.md item 9) — both are about the
+    // agent's tools, not advisory context like the memory block up front.
+    const trailing = [blocks.skills, blocks.mcp].filter((b): b is string => Boolean(b));
+    return trailing.length > 0 ? [baseSystem ?? agent.system, ...trailing].join("\n\n") : baseSystem;
   };
   return (head) =>
     [blocks.memory, blocks.config, blocks.instructions, agentSystem(head) ?? agent.system]
@@ -275,6 +279,9 @@ export interface ReviewTurnSpec {
   agent: AgentDef;
   effort?: Effort;
   toolContext: ToolContext;
+  /** This run's per-run tools (bridged MCP tools) — the re-review turn must
+   *  see exactly what the first turn saw (features/mcp-tools.md item 12). */
+  extraTools?: RunnableTool[];
   onProgress: (note: string) => void;
   onEvent: (event: RunEvent) => void;
   control: RunControl;
@@ -410,6 +417,7 @@ export async function settleReviewedHead(input: {
               verdict = v;
             },
           },
+          ...(turn.extraTools && turn.extraTools.length > 0 ? { extraTools: turn.extraTools } : {}),
           onProgress: turn.onProgress,
           onEvent: turn.onEvent,
           control: turn.control,
