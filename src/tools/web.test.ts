@@ -390,11 +390,16 @@ describe("toolset + agent wiring", () => {
     expect(names("none")).toEqual([]);
   });
 
-  it("registers a no-repo research agent and keeps general tool-less", async () => {
+  it("registers a no-repo research agent; general holds the assistant toolset (web_fetch, no web_search)", async () => {
     const { AGENTS } = await import("../agents/registry.js");
+    const { TOOLSETS } = await import("./workspace.js");
     expect(AGENTS.research.toolset).toBe("web");
     expect(AGENTS.research.resources?.repo).toBe("none");
-    expect(AGENTS.general.toolset).toBe("none");
+    expect(AGENTS.general.toolset).toBe("assistant");
+    const assistant = TOOLSETS.assistant.map((t) => t.name);
+    expect(assistant).toContain("web_fetch");
+    expect(assistant).not.toContain("web_search");
+    expect(assistant).not.toContain("bash");
   });
 });
 

@@ -227,8 +227,10 @@ export function makeSystemComposer(input: {
   workspace: string | undefined;
   /** Set for a PR review round: the REVIEW TARGET block's coordinates. */
   prTarget: { repo: string; pr: number; ref: string | undefined; baseRef: string | undefined } | undefined;
-  /** Pre-built advisory/context blocks; absent blocks leave the prompt untouched. */
-  blocks: { memory: string | undefined; config: string | undefined; instructions: string | undefined; skills: string | undefined; mcp?: string | undefined };
+  /** Pre-built advisory/context blocks; absent blocks leave the prompt untouched.
+   *  `about` is the self-description (routing-and-config behavior 11), right
+   *  after the config block — the same category of fact-about-yourself. */
+  blocks: { memory: string | undefined; config: string | undefined; about?: string | undefined; instructions: string | undefined; skills: string | undefined; mcp?: string | undefined };
 }): (head: HeadPin) => string {
   const { agent, resident, workspace, prTarget, blocks } = input;
   const residentSystem =
@@ -261,7 +263,7 @@ export function makeSystemComposer(input: {
     return trailing.length > 0 ? [baseSystem ?? agent.system, ...trailing].join("\n\n") : baseSystem;
   };
   return (head) =>
-    [blocks.memory, blocks.config, blocks.instructions, agentSystem(head) ?? agent.system]
+    [blocks.memory, blocks.config, blocks.about, blocks.instructions, agentSystem(head) ?? agent.system]
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
 }

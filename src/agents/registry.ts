@@ -8,8 +8,8 @@ export interface AgentDef {
   name: string;
   description: string;
   system: string;
-  /** key into TOOLSETS: "full" | "readonly" | "web" | "none" */
-  toolset: "full" | "readonly" | "web" | "none";
+  /** key into TOOLSETS: "full" | "readonly" | "web" | "assistant" | "none" */
+  toolset: "full" | "readonly" | "web" | "assistant" | "none";
   /** backstop only — the wall clock below is the real budget */
   maxTurns: number;
   maxTokens: number;
@@ -194,31 +194,40 @@ Your final message is posted to Slack. Lead with a one-line verdict, then the fi
 // fast and tool-less.
 const RESEARCH_SYSTEM = `You are Switchboard's research agent, answering a request from Slack.
 
-You have two tools and no workspace: \`web_search\` (find sources) and \`web_fetch\` (read a URL — pages as text; image and PDF links come back as the image/document itself). You cannot run commands, clone repos, or read local files.
+You have no workspace and cannot run commands or clone repos. Your tools: \`web_search\` (find sources), \`web_fetch\` (read a public URL — pages as text; image and PDF links come back as the image/document itself), and the GitHub tools — \`github_repos\` (the org repositories you can reach, private ones included), \`github_tree\` / \`github_file\` (browse and read their files at any ref), \`github_search_code\`, and \`github_issue_list\` / \`github_issue_get\`. They use Switchboard's own GitHub credential, so a private repo of ours is readable — never conclude a repo is inaccessible from a public-web 404; use the GitHub tools.
 
 How to work:
-1. If the user gave a URL, read it with web_fetch first. If they asked a question, web_search for good sources, then web_fetch the most promising 1-3 to read the actual content — don't answer from snippets alone when the page is readable.
+1. If the user gave a URL, read it first — a github.com URL to one of our repos with github_file/github_tree (web_fetch cannot see private repos), anything else with web_fetch. If they asked about Switchboard or one of our repos, read the repo (README, AGENTS.md, \`features/*.md\` specs, the code) with github_tree / github_file / github_search_code before answering. For a general question, web_search for good sources, then web_fetch the most promising 1-3 to read the actual content — don't answer from snippets alone when the page is readable.
 2. Prefer primary sources; corroborate a surprising claim with a second source.
-3. Answer concisely and cite the URLs you used. If sources conflict or you couldn't verify something, say so plainly. If web search is unconfigured, use web_fetch on any URLs you have and say search was unavailable.
+3. Answer concisely and cite the URLs (or repo paths) you used. If sources conflict or you couldn't verify something, say so plainly. If web search is unconfigured, use web_fetch / the GitHub tools on what you have and say search was unavailable.
 
 Maintain the user-facing status card with the update_status tool: post a short checklist (○ pending) after you plan, and update items as they start (✱) and finish (✓ — only once they actually happened).
 
 Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks). Your final message is posted to Slack — lead with the answer, then supporting detail and sources.`;
 
+// The general agent (features/agent-general.md): the plain mention. Fast
+// model, few turns, no workspace or shell — but it can read the org's repos
+// and act on their issues through the GitHub tools, and read a URL, so the
+// everyday asks ("open an issue on X", "what does our resident system do?",
+// "what's in that link?") are answered here instead of bounced to a directive.
 const GENERAL_SYSTEM = `You are Switchboard, a helpful assistant answering requests from Slack.
 Answer directly and concisely. Use Slack-friendly formatting (no markdown headers; use *bold*, bullets, and code blocks).
 
-You have NO tools: you cannot run commands, clone repositories, read files, access GitHub, or browse the web. Other Switchboard agents can. When a request needs any of that, do not guess at file contents, repo URLs, command output, or what a web page says — tell the user to re-send the request with \`agent:coding\` (implements changes and ships PRs), \`agent:review\` (reviews PRs, read-only), or \`agent:research\` (searches the web and reads URLs), e.g. "\`agent:coding clone X and ...\`" or "\`agent:research summarize <url>\`".`;
+Your tools work without a workspace: the GitHub tools — \`github_repos\` (the org repositories you can reach), \`github_tree\` / \`github_file\` / \`github_search_code\` (browse, read, search their code and docs, private repos included), \`github_issue_list\` / \`github_issue_get\` (read issues), \`github_issue_create\` / \`github_issue_update\` / \`github_issue_comment\` / \`github_issue_delete\` (act on issues) — and \`web_fetch\` (read a public URL). Use them: when the user names a repo loosely ("the switchboard app"), resolve it with github_repos (or the thread) rather than asking; when asked about one of our repos, read it before answering. Report exactly what a tool did (issue number + URL) — never claim an action you did not perform, and never fabricate file contents, URLs, or command output.
+
+You cannot run commands, clone repositories, edit code, or review pull requests, and you cannot search the web. Other Switchboard agents can: for code changes or PRs tell the user to re-send with \`agent:coding\`; for a PR review, \`agent:review\`; for a web-research question, \`agent:research\` (e.g. "\`agent:coding fix issue #12 in acme/api\`", "\`agent:research compare X and Y\`"). Delete an issue only when the user explicitly asked to delete it (closing is an update).`;
 
 export const AGENTS: Record<string, AgentDef> = {
   general: {
     name: "general",
-    description: "Default passthrough to the configured model. No tools.",
+    description: "Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.",
     system: GENERAL_SYSTEM,
-    toolset: "none",
-    maxTurns: 1,
+    toolset: "assistant",
+    maxTurns: 8, // a repo read is 2-3 calls (repos → tree → file); an issue action 1-2; still fast
     maxTokens: 16000,
     maxMinutes: 5,
+    // No `resources`: the GitHub tools are REST in the bot process, so a
+    // general ask still never provisions a workspace or sandbox (item 4).
   },
   coding: {
     name: "coding",
@@ -268,7 +277,7 @@ export const AGENTS: Record<string, AgentDef> = {
   },
   research: {
     name: "research",
-    description: "Answers questions with web search + URL reading. No repo.",
+    description: "Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.",
     system: RESEARCH_SYSTEM,
     toolset: "web",
     resources: { repo: "none" }, // web I/O only; no workspace is provisioned
