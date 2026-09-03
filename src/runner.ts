@@ -26,6 +26,11 @@ export interface RunOptions {
   agent: AgentDef;
   messages: ChatMessage[];
   toolContext: ToolContext;
+  /** Tools that exist for THIS run only, beside the agent's static toolset —
+   *  today the bridged external MCP tools (features/mcp-tools.md item 12). A
+   *  name that collides with a built-in throws at run start: a remote server
+   *  must never shadow `bash`. Absent → the static toolset alone. */
+  extraTools?: RunnableTool[];
   /** Per-run system prompt override — the dispatcher may choose an effective
    *  prompt after executor resolution (e.g. resident-repo context). Flows
    *  here, never by mutating the shared AgentDef (concurrent dispatches share
@@ -52,6 +57,19 @@ export interface RunOptions {
   /** Bound on the finale's single write-up call (default 3 min); injectable so
    *  tests can prove the timeout path without waiting. */
   finaleTimeoutMs?: number;
+}
+
+/** The static toolset plus this run's extra tools. A duplicate name is a
+ *  programming error (an extra tool shadowing a built-in, or two extras with
+ *  one name) and throws before the first model turn. Exported for tests. */
+export function mergeTools(base: RunnableTool[], extra: RunnableTool[] | undefined): RunnableTool[] {
+  if (!extra || extra.length === 0) return base;
+  const seen = new Set(base.map((t) => t.name));
+  for (const t of extra) {
+    if (seen.has(t.name)) throw new Error(`extra tool "${t.name}" collides with an existing tool name`);
+    seen.add(t.name);
+  }
+  return [...base, ...extra];
 }
 
 /** Thrown inside the loop the moment a hard stop is observed, so every await
@@ -102,7 +120,7 @@ async function runLoop(
   note: (kind: RunNoteKind, summary: string, mode?: StopMode) => void,
   emit: (event: RunEvent) => void,
 ): Promise<string> {
-  const tools: RunnableTool[] = TOOLSETS[opts.agent.toolset] ?? [];
+  const tools: RunnableTool[] = mergeTools(TOOLSETS[opts.agent.toolset] ?? [], opts.extraTools);
   const toolsByName = new Map(tools.map((t) => [t.name, t]));
   const messages: ChatMessage[] = [...opts.messages];
   const system = opts.system ?? opts.agent.system;

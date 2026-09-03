@@ -33,6 +33,7 @@ import { SHIP_PR_AUTHOR, shipBranchName, shipTaskText } from "./shipPipeline.js"
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
 import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
+import { ConfigMcpToolSource, InMemoryMcpClient } from "../mcp/index.js";
 import { InMemoryFrictionLedger, RunStoreFrictionLedger } from "./frictionLedger.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
@@ -6467,5 +6468,101 @@ workspaceDir: __WORKDIR__
     const final = replies[replies.length - 1];
     expect(final).toMatch(/Unaddressed \(no disposition\):[\s\S]*F1 src\/auth\.ts — missing rate limit/);
     expect(final).toMatch(/Declined \(disposition recorded\):\n  - none/);
+  });
+});
+
+describe("MCP tools (#394, features/mcp-tools.md)", () => {
+  afterEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  function trackedRegistry() {
+    const registry = new RunRegistry();
+    const runIds = new Set<string>();
+    const create = registry.create.bind(registry);
+    registry.create = (label, meta) => {
+      const h = create(label, meta);
+      runIds.add(h.id);
+      return h;
+    };
+    return { registry, runIds };
+  }
+
+  function mcpSource(opts: { fail?: string } = {}) {
+    const client = new InMemoryMcpClient([
+      {
+        name: "search_issues",
+        description: "Search Linear issues",
+        inputSchema: { type: "object", properties: { q: { type: "string" } } },
+        annotations: { readOnlyHint: true },
+        handler: async (args) => ({ content: [{ type: "text", text: `LINEAR RESULT for ${String(args.q)}` }] }),
+      },
+    ]);
+    if (opts.fail) client.failListWith = opts.fail;
+    const source = new ConfigMcpToolSource([{ name: "linear", url: "https://mcp.linear.app/mcp", agents: ["general", "research"] }], { factory: () => client });
+    return { client, source };
+  }
+
+  it("a general run gets the bridged tools + the MCP block; the model's call reaches the server and the result the next turn", async () => {
+    let n = 0;
+    const provider: Provider & { requests: CompletionRequest[] } = {
+      name: "fake",
+      requests: [],
+      async complete(req): Promise<CompletionResult> {
+        this.requests.push({ ...req, messages: structuredClone(req.messages) });
+        if (n++ === 0) {
+          return { content: [{ type: "tool_use", id: "m1", name: "mcp__linear__search_issues", input: { q: "login bug" } }], stopReason: "tool_use" };
+        }
+        return { content: [{ type: "text", text: "3 issues match" }], stopReason: "end_turn" };
+      },
+    };
+    const { client, source } = mcpSource();
+    const { registry, runIds } = trackedRegistry();
+    const deps: CoreDeps = { ...makeDeps(YAML_FIXTURE, provider), mcp: source, runRegistry: registry };
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("find the login bug in linear"), io);
+    expect(replies.join("\n")).toContain("3 issues match");
+    // Tools + block on the first request.
+    expect(provider.requests[0].tools?.map((t) => t.name)).toEqual(["mcp__linear__search_issues"]);
+    expect(provider.requests[0].tools?.[0].description).toContain('external MCP server "linear"');
+    expect(provider.requests[0].system).toContain("## External MCP tools");
+    expect(provider.requests[0].system).toContain("- linear: 1 tool");
+    // The call reached the server with the model's arguments; the result came back wrapped.
+    expect(client.calls).toEqual([{ name: "search_issues", args: { q: "login bug" } }]);
+    expect(JSON.stringify(provider.requests[1].messages)).toContain("LINEAR RESULT for login bug");
+    expect(JSON.stringify(provider.requests[1].messages)).toContain("UNTRUSTED CONTENT");
+    // The run stream carries the mcp_tool_use fact between the generic pair.
+    const events = [...runIds].flatMap((id) => registry.snapshotById(id)?.events ?? []);
+    const types = events.map((e) => e.type);
+    const call = types.indexOf("tool_call");
+    const use = types.indexOf("mcp_tool_use");
+    const result = types.indexOf("tool_result");
+    expect(call).toBeGreaterThanOrEqual(0);
+    expect(use).toBeGreaterThan(call);
+    expect(result).toBeGreaterThan(use);
+    expect(events[use]).toMatchObject({ type: "mcp_tool_use", server: "linear", tool: "search_issues", ok: true });
+  });
+
+  it("no source, or no server scoped to the agent → the request is byte-identical", async () => {
+    const withSource = capturingProvider();
+    await dispatch({ ...makeDeps(YAML_FIXTURE, withSource), mcp: mcpSource().source }, msg("agent:review look at the code"), fakeIO().io);
+    const without = capturingProvider();
+    await dispatch(makeDeps(YAML_FIXTURE, without), msg("agent:review look at the code"), fakeIO().io);
+    expect(JSON.stringify(withSource.requests[0])).toBe(JSON.stringify(without.requests[0]));
+    expect(withSource.requests[0].system).not.toContain("External MCP tools");
+    expect(withSource.requests[0].tools?.some((t) => t.name.startsWith("mcp__"))).toBe(false);
+  });
+
+  it("a failing server → mcp_unavailable note, the block says so, the run proceeds without its tools", async () => {
+    const provider = capturingProvider("still answered");
+    const { registry, runIds } = trackedRegistry();
+    const deps: CoreDeps = { ...makeDeps(YAML_FIXTURE, provider), mcp: mcpSource({ fail: "HTTP 503" }).source, runRegistry: registry };
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("anything"), io);
+    expect(replies.join("\n")).toContain("still answered");
+    expect(provider.requests[0].tools).toBeUndefined();
+    expect(provider.requests[0].system).toContain("- linear: unavailable (HTTP 503)");
+    const events = [...runIds].flatMap((id) => registry.snapshotById(id)?.events ?? []);
+    expect(events).toContainEqual(expect.objectContaining({ type: "run_note", kind: "mcp_unavailable", summary: "MCP server linear unavailable: HTTP 503" }));
   });
 });

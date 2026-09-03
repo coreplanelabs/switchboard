@@ -250,3 +250,19 @@ workspaceDir: ./workspaces
 #   worker:
 #     baseUrl: https://switchboard-memory.coreplanelabs.dev
 #     tokenEnv: MEMORY_TOKEN   # env var holding the Worker's bearer (default)
+
+# External MCP servers as agent tools (#394, features/mcp-tools.md). Each entry
+# is a Streamable-HTTP MCP server whose tools reach the listed agents as
+# `mcp__<name>__<tool>`. Descriptions and results are treated as untrusted data;
+# every call is budgeted and recorded as an `mcp_tool_use` run event. The URL is
+# SSRF-checked at load and at connect (internal addresses refused). No stdio
+# servers. Without this block no MCP tools exist and requests are unchanged.
+# mcp:
+#   servers:
+#     - name: github            # slug, ≤ 32 chars — the middle of every tool name
+#       url: https://api.githubcopilot.com/mcp/
+#       auth:
+#         type: bearer
+#         tokenEnv: MCP_GITHUB_TOKEN   # env var holding the bearer; startup fails if unset
+#       agents: [general, research, coding]  # default [general, research]; review only
+#                                            # when listed here (a remote tool may mutate)

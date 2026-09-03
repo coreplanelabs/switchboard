@@ -27,6 +27,8 @@ Behavioral expectations live in [`features/`](features/README.md) — one spec p
 | `ship` | Runs the coding → review → fix loop to LGTM as one pipeline ([features/agent-ship.md](features/agent-ship.md)): opens the PR, loops pinned reviews and fix rounds until the review approves, reports merge-ready — a human still merges. Requires permission for `ship`, `coding`, and `review` | `full` — orchestrator only: the def is never sent to a model; each child round runs on the coding/review toolsets above |
 | `research` | Answers questions with web search + URL reading; no repo or workspace is ever provisioned ([features/web-tools.md](features/web-tools.md)) | `web` — web search, web fetch |
 
+Any agent can additionally be given tools from **external MCP servers** (Linear, Notion, Vanta, GitHub, … over Streamable HTTP) via `mcp.servers` in the config ([features/mcp-tools.md](features/mcp-tools.md)): they appear as `mcp__<server>__<tool>`, their descriptions and results are treated as untrusted data, every call is budgeted and recorded, and the review agent only sees a server that explicitly lists it.
+
 Onboarded repos run in an always-warm **resident worktree** ([features/resident-repos.md](features/resident-repos.md)); everything else falls back to a cold per-thread workspace directory (`workspaces/<channel>-<thread>`). On both paths, follow-ups in the same thread reuse the same checkout.
 
 ## Configuration layers

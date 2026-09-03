@@ -223,7 +223,14 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     // pr_description, pr_opened and the ship_round boundaries are published
     // by the dispatcher/pipeline outside the model loop entirely. Counting
     // any of them would distort the story.
-    if (ev.type === "skill_use" || ev.type === "review_artifact" || ev.type === "pr_description" || ev.type === "pr_opened" || ev.type === "ship_round") {
+    if (
+      ev.type === "skill_use" ||
+      ev.type === "mcp_tool_use" ||
+      ev.type === "review_artifact" ||
+      ev.type === "pr_description" ||
+      ev.type === "pr_opened" ||
+      ev.type === "ship_round"
+    ) {
       sideFactEvents++;
       return;
     }

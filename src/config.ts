@@ -146,6 +146,14 @@ export interface AppConfig {
    * is `retentionDays` / `maxRuns` / `maxBytes`. See features/run-history.md.
    */
   runHistory?: RunHistoryConfig;
+  /**
+   * External MCP servers as agent tools (#394, features/mcp-tools.md item 11):
+   * `servers[]` of `{ name, url, auth?: { type: bearer, tokenEnv }, agents? }`.
+   * Parsed and validated by `parseMcpConfig` (src/mcp/config.ts) at startup —
+   * the bearer is read from the environment there, never stored here. Absent
+   * → no MCP tools, requests byte-identical to before the feature.
+   */
+  mcp?: unknown;
 }
 
 export interface SlackConfig {
