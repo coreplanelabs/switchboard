@@ -6,7 +6,7 @@ import { analyzeRunFriction } from "./core/runFriction.js";
 import { RunRegistry } from "./core/runRegistry.js";
 import { InMemoryRunStore } from "./core/runStore.js";
 import { createRunsService } from "./core/runsService.js";
-import { CLI_CALLER, loadBotConfig, parseCliArgv, runCli, runCommand, type CliInvocation } from "./cli.js";
+import { bindBotConfig, CLI_CALLER, loadBotConfig, missingBotConfig, parseCliArgv, runCli, runCommand, type CliInvocation } from "./cli.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -259,9 +259,9 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
   /** What `main()` binds: the bot config loaded on first use — here from a path that does not exist. */
   function bindWithoutConfig() {
     let hits = 0;
-    const config = () => {
+    const config = (): ConfigStore => {
       hits++;
-      return loadBotConfig(missing, join(missing, "..", "overrides.json"));
+      throw missingBotConfig(missing);
     };
     // As in `main()`: the run store is derived from the config, so it needs the file too.
     const store = () => {
@@ -277,10 +277,10 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
     return parsed;
   };
 
-  it("loadBotConfig: a missing file is an `unavailable` CommandError naming the path, SWITCHBOARD_CONFIG, and the commands that need no config — never an ENOENT stack; an existing file loads", () => {
+  it("loadBotConfig: a missing file is an `unavailable` CommandError naming the path, SWITCHBOARD_CONFIG, and the commands that need no config — never an ENOENT stack; an existing file loads", async () => {
     let err: unknown;
     try {
-      loadBotConfig(missing, "/dev/null");
+      await loadBotConfig(missing, "/dev/null");
     } catch (e) {
       err = e;
     }
@@ -289,7 +289,25 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
     expect((err as CommandError).message).toBe(`bot config not found at ${missing} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`);
     const dir = mkdtempSync(join(tmpdir(), "swb-cli-config-"));
     writeFileSync(join(dir, "config.yaml"), "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n");
-    expect(loadBotConfig(join(dir, "config.yaml"), join(dir, "overrides.json"))).toBeInstanceOf(ConfigStore);
+    expect(await loadBotConfig(join(dir, "config.yaml"), join(dir, "overrides.json"))).toBeInstanceOf(ConfigStore);
+    expect(missingBotConfig(missing).message).toBe((err as CommandError).message);
+  });
+
+  it("bindBotConfig: a config.yaml whose overrides backing cannot be opened (runtimeOverrides.worker without its bearer) still lets `deploy plan` run; the command that needs it gets `unavailable` naming the cause", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-cli-config-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(
+      cfg,
+      "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n",
+    );
+    const config = await bindBotConfig(cfg, join(dir, "overrides.json"), { env: {}, warn: () => {} });
+    const commands = buildCoreCommands(config, () => null, { registry: new RunRegistry({ now: () => NOW }), env: {}, dataDir: dir, warn: () => {} });
+    expect((await runCommand(commands, command(["deploy", "plan", "--only", "memory"], commands), CLI_CALLER)).exitCode).toBe(0);
+    const show = await runCommand(commands, command(["config", "show", "--channel", "slack:C1"], commands), CLI_CALLER);
+    expect(show).toEqual({ exitCode: 1, stdout: "", stderr: `error (unavailable): bot config at ${cfg} could not be opened: runtimeOverrides.worker is configured but MEMORY_TOKEN is not set` });
+    // A missing file binds the same way it always did.
+    const unbound = await bindBotConfig(missing, "/dev/null", { env: {} });
+    expect(() => unbound()).toThrow(missingBotConfig(missing).message);
   });
 
   it("(a) `deploy plan` succeeds without ever asking for the bot config; so do `help show` and the catalogue", async () => {

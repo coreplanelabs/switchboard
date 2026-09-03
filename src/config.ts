@@ -147,6 +147,14 @@ export interface AppConfig {
    */
   runHistory?: RunHistoryConfig;
   /**
+   * Where chat-set runtime overrides (`config set`, `config instructions`, …)
+   * persist (features/routing-and-config.md item 12). Absent → the JSON file
+   * (`data/overrides.json`; ephemeral on Cloudflare Containers). `worker`
+   * names the ConfigDO on the state Worker — the production choice; the bearer
+   * comes from `tokenEnv` (default `MEMORY_TOKEN`). Validated at load.
+   */
+  runtimeOverrides?: { worker?: { baseUrl: string; tokenEnv?: string } };
+  /**
    * External MCP servers as agent tools (#394, features/mcp-tools.md item 11):
    * `servers[]` of `{ name, url, auth?: { type: bearer, tokenEnv }, agents? }`.
    * Parsed and validated by `parseMcpConfig` (src/mcp/config.ts) at startup —
@@ -180,6 +188,157 @@ export interface Overrides {
   users: Record<string, Scope>;
 }
 
+/**
+ * Where runtime overrides live (features/routing-and-config.md item 12). Two
+ * implementations behind one seam (AGENTS.md invariant 2): `FileOverridesBacking`
+ * — a JSON file, the local-dev / single-host choice — and `WorkerOverridesBacking`
+ * — the `ConfigDO` on the state Worker, the production choice, because the
+ * container disk is wiped on every restart (invariant 6). `InMemoryOverridesBacking`
+ * serves tests. The store loads the document ONCE at open and saves the whole
+ * document on every write; documents are small (one entry per channel/user
+ * that ever set something).
+ */
+export interface OverridesBacking {
+  /** The stored document, or undefined when nothing was ever saved. */
+  load(): Promise<Overrides | undefined>;
+  /** Persist the whole document; throws on failure (the write is then rolled back). */
+  save(overrides: Overrides): Promise<void>;
+  /** Where it lives, for startup logs and error messages (never a secret). */
+  describe(): string;
+}
+
+export class FileOverridesBacking implements OverridesBacking {
+  private readonly path: string;
+  constructor(path: string) {
+    this.path = resolve(path);
+  }
+  /** Synchronous under the hood so the legacy `new ConfigStore(config, path)` can load it inline. */
+  loadSync(): Overrides | undefined {
+    return existsSync(this.path) ? (JSON.parse(readFileSync(this.path, "utf8")) as Overrides) : undefined;
+  }
+  async load(): Promise<Overrides | undefined> {
+    return this.loadSync();
+  }
+  async save(overrides: Overrides): Promise<void> {
+    mkdirSync(dirname(this.path), { recursive: true });
+    writeFileSync(this.path, JSON.stringify(overrides, null, 2));
+  }
+  describe(): string {
+    return `file ${this.path}`;
+  }
+}
+
+export class InMemoryOverridesBacking implements OverridesBacking {
+  saves = 0;
+  /** When set, the next save throws with this message (tests of the rollback). */
+  failNextSaveWith: string | undefined;
+  /** When set, the next save is refused as stale: the stored document becomes
+   *  this one (another writer's) and an `OverridesConflictError` is thrown. */
+  conflictNextSaveWith: Overrides | undefined;
+  /** When set, `conflictNextSaveWith` is re-armed with this after it fires (a second writer sneaks in during the rebase). */
+  conflictAfterNextSaveWith: Overrides | undefined;
+  constructor(public document: Overrides | undefined = undefined) {}
+  async load(): Promise<Overrides | undefined> {
+    return this.document ? structuredClone(this.document) : undefined;
+  }
+  async save(overrides: Overrides): Promise<void> {
+    if (this.failNextSaveWith) {
+      const m = this.failNextSaveWith;
+      this.failNextSaveWith = undefined;
+      throw new Error(m);
+    }
+    if (this.conflictNextSaveWith) {
+      this.document = structuredClone(this.conflictNextSaveWith);
+      this.conflictNextSaveWith = this.conflictAfterNextSaveWith;
+      this.conflictAfterNextSaveWith = undefined;
+      throw new OverridesConflictError();
+    }
+    this.saves++;
+    this.document = structuredClone(overrides);
+  }
+  describe(): string {
+    return "in-memory";
+  }
+}
+
+/** A save refused because another writer saved first (the ConfigDO's 409).
+ *  The store answers it by reloading and re-applying the change (`write`). */
+export class OverridesConflictError extends Error {
+  constructor() {
+    super("config store: the overrides changed elsewhere since this process loaded them — retry the command");
+    this.name = "OverridesConflictError";
+  }
+}
+
+/** The one document key the overrides live under on the ConfigDO. */
+export const OVERRIDES_DOCUMENT_KEY = "overrides";
+export const CONFIG_WORKER_TIMEOUT_MS = 8_000;
+
+export interface WorkerOverridesBackingOptions {
+  baseUrl: string;
+  token: string;
+  fetch?: typeof fetch;
+}
+
+/**
+ * Route contract (JSON in/out, bearer = the Worker's MEMORY_TOKEN):
+ *   POST /config/get {key}                          → {document: object | null, version: number}
+ *   POST /config/put {key, document, expectedVersion} → {ok: true, version}  |  409 {error, version}
+ * The version is optimistic concurrency: the bot is one instance, but the CLI
+ * writes the same document, so a stale save is refused rather than clobbering.
+ */
+export class WorkerOverridesBacking implements OverridesBacking {
+  private readonly baseUrl: string;
+  private readonly fetchImpl: typeof fetch;
+  private version = 0;
+
+  constructor(private readonly opts: WorkerOverridesBackingOptions) {
+    this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
+    this.fetchImpl = opts.fetch ?? fetch;
+  }
+
+  async load(): Promise<Overrides | undefined> {
+    const body = await this.post("/config/get", { key: OVERRIDES_DOCUMENT_KEY });
+    this.version = typeof body.version === "number" ? body.version : 0;
+    const doc = body.document;
+    if (doc === null || doc === undefined) return undefined;
+    if (typeof doc !== "object" || Array.isArray(doc)) throw new Error(`config store returned a non-object overrides document`);
+    return doc as Overrides;
+  }
+
+  async save(overrides: Overrides): Promise<void> {
+    const body = await this.post("/config/put", { key: OVERRIDES_DOCUMENT_KEY, document: overrides, expectedVersion: this.version });
+    this.version = typeof body.version === "number" ? body.version : this.version + 1;
+  }
+
+  describe(): string {
+    return `state Worker ${this.baseUrl} (ConfigDO)`;
+  }
+
+  private async post(path: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${this.opts.token}`, "content-type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(CONFIG_WORKER_TIMEOUT_MS),
+      });
+    } catch (err) {
+      throw new Error(`config store unreachable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (res.status === 409) {
+      // Another writer (the CLI, an earlier bot) saved first: take its version so
+      // the NEXT save can go through; the store reloads the document and rebases.
+      if (typeof body.version === "number") this.version = body.version;
+      throw new OverridesConflictError();
+    }
+    if (!res.ok) throw new Error(`config store answered HTTP ${res.status} on ${path}`);
+    return body;
+  }
+}
+
 export interface ResolvedRequest {
   agentName: string;
   modelRef: string; // provider/model
@@ -188,27 +347,85 @@ export interface ResolvedRequest {
   effort?: Effort;
 }
 
+/** Where runtime overrides are persisted, chosen from `config.yaml` (item 12):
+ *  `runtimeOverrides.worker` names the state Worker's ConfigDO; absent → the
+ *  JSON file at `overridesPath`. The Worker bearer comes from `tokenEnv`
+ *  (default `MEMORY_TOKEN`); a configured Worker without its bearer is a
+ *  startup error, never a silent fall back to the ephemeral file. */
+export function overridesBackingFor(config: AppConfig, opts: { overridesPath: string; env: Record<string, string | undefined>; fetch?: typeof fetch }): OverridesBacking {
+  const worker = config.runtimeOverrides?.worker;
+  if (!worker) return new FileOverridesBacking(opts.overridesPath);
+  const tokenEnv = worker.tokenEnv ?? "MEMORY_TOKEN";
+  const token = opts.env[tokenEnv];
+  if (!token) throw new Error(`runtimeOverrides.worker is configured but ${tokenEnv} is not set`);
+  return new WorkerOverridesBacking({ baseUrl: worker.baseUrl, token, ...(opts.fetch ? { fetch: opts.fetch } : {}) });
+}
+
+/** Read + validate `config.yaml` once; `warn` receives the non-fatal findings. */
+export function loadAppConfig(configPath: string, warn: (message: string) => void): AppConfig {
+  const config = YAML.parse(readFileSync(resolve(configPath), "utf8")) as AppConfig;
+  validateConfig(config, warn);
+  return config;
+}
+
+/** Open the store the way production does: parse + validate `config.yaml`,
+ *  pick the overrides backing from it, load the document, construct. */
+export async function openConfigStore(
+  configPath: string,
+  opts: { overridesPath: string; env: Record<string, string | undefined>; warn?: (message: string) => void; fetch?: typeof fetch },
+): Promise<ConfigStore> {
+  const warn = opts.warn ?? ((m: string) => console.warn(m));
+  const config = loadAppConfig(configPath, warn);
+  const backing = overridesBackingFor(config, opts);
+  const initial = await backing.load();
+  return new ConfigStore({ validated: config }, { backing, initial }, warn);
+}
+
 export class ConfigStore {
   readonly config: AppConfig;
   private overrides: Overrides;
-  private overridesPath: string;
+  private readonly backing: OverridesBacking;
+  /** Writes run one at a time (see `write`); a rejected write does not hold the queue. */
+  private writes: Promise<void> = Promise.resolve();
 
-  /** `warn` receives non-fatal config findings (default: console.warn). */
-  constructor(configPath: string, overridesPath: string, warn: (message: string) => void = (m) => console.warn(m)) {
-    const raw = readFileSync(resolve(configPath), "utf8");
-    this.config = YAML.parse(raw) as AppConfig;
-    validateConfig(this.config, warn);
+  /** The first argument is the `config.yaml` path (read + validated here — dev,
+   *  tests) or a config `openConfigStore` already validated. The second is a
+   *  JSON file path (loaded inline) or a backing whose document was already
+   *  loaded. `warn` receives non-fatal config findings (default: console.warn). */
+  constructor(
+    config: string | { validated: AppConfig },
+    overrides: string | { backing: OverridesBacking; initial: Overrides | undefined },
+    warn: (message: string) => void = (m) => console.warn(m),
+  ) {
+    this.config = typeof config === "string" ? loadAppConfig(config, warn) : config.validated;
 
-    this.overridesPath = resolve(overridesPath);
-    this.overrides = existsSync(this.overridesPath)
-      ? (JSON.parse(readFileSync(this.overridesPath, "utf8")) as Overrides)
-      : { channels: {}, users: {} };
-    this.overrides.channels ??= {};
-    this.overrides.users ??= {};
-    // The chat command enforces the cap on write; a hand-edited overrides.json
-    // is the one way around it, so hold it to the same bound at load.
-    validateInstructions(this.overrides, `overrides (${this.overridesPath})`);
-    validateScopeEfforts(this.overrides, `overrides (${this.overridesPath})`);
+    let initial: Overrides | undefined;
+    if (typeof overrides === "string") {
+      const file = new FileOverridesBacking(overrides);
+      this.backing = file;
+      initial = file.loadSync();
+    } else {
+      this.backing = overrides.backing;
+      initial = overrides.initial;
+    }
+    this.overrides = this.checkedDocument(initial);
+  }
+
+  /** A loaded document, shaped and held to the chat path's caps: the chat
+   *  command enforces them on write, so a hand-edited or otherwise-stored
+   *  document is the one way around them — refuse it here, naming the backing. */
+  private checkedDocument(loaded: Overrides | undefined): Overrides {
+    const doc = loaded ?? { channels: {}, users: {} };
+    doc.channels ??= {};
+    doc.users ??= {};
+    validateInstructions(doc, `overrides (${this.backing.describe()})`);
+    validateScopeEfforts(doc, `overrides (${this.backing.describe()})`);
+    return doc;
+  }
+
+  /** Where runtime overrides are persisted (for the startup log). */
+  overridesLocation(): string {
+    return this.backing.describe();
   }
 
   private channelScope(channelId: string): Scope {
@@ -371,26 +588,66 @@ export class ConfigStore {
    * the in-memory scope and the reloaded-from-disk scope agree: the static
    * config.yaml value for that key shows through again in both.
    */
-  setChannelOverride(channelId: string, patch: Scope): Scope {
-    this.overrides.channels[channelId] = mergeScope(this.overrides.channels[channelId], patch);
-    this.save();
+  async setChannelOverride(channelId: string, patch: Scope): Promise<Scope> {
+    await this.write((o) => {
+      o.channels[channelId] = mergeScope(o.channels[channelId], patch);
+    });
     return this.channelScope(channelId);
   }
 
-  setUserOverride(userId: string, patch: Scope): Scope {
-    this.overrides.users[userId] = mergeScope(this.overrides.users[userId], patch);
-    this.save();
+  async setUserOverride(userId: string, patch: Scope): Promise<Scope> {
+    await this.write((o) => {
+      o.users[userId] = mergeScope(o.users[userId], patch);
+    });
     return this.userScope(userId);
   }
 
-  clearChannelOverride(channelId: string): void {
-    delete this.overrides.channels[channelId];
-    this.save();
+  async clearChannelOverride(channelId: string): Promise<void> {
+    await this.write((o) => {
+      delete o.channels[channelId];
+    });
   }
 
-  clearUserOverride(userId: string): void {
-    delete this.overrides.users[userId];
-    this.save();
+  async clearUserOverride(userId: string): Promise<void> {
+    await this.write((o) => {
+      delete o.users[userId];
+    });
+  }
+
+  /** Apply a mutation to a COPY, persist it, then adopt it — so a failed save
+   *  leaves the in-memory document exactly as it was (what the running bot
+   *  uses is always what the store holds). The caller sees the error.
+   *
+   *  Writes are serialized: two `config set`s in flight at once would otherwise
+   *  both copy the same base and the second save would drop the first change.
+   *
+   *  A save refused as stale (another writer — the CLI — saved first) is
+   *  rebased, not retried blind: reload the current document, adopt it, apply
+   *  the same mutation on top, save once more. A second refusal surfaces the
+   *  conflict error with the store now holding the other writer's document, so
+   *  the retry it asks for carries every writer's change. */
+  private write(mutate: (o: Overrides) => void): Promise<void> {
+    const run = this.writes.then(() => this.writeUnqueued(mutate));
+    this.writes = run.catch(() => {});
+    return run;
+  }
+
+  private async writeUnqueued(mutate: (o: Overrides) => void): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      const next = structuredClone(this.overrides);
+      mutate(next);
+      try {
+        await this.backing.save(next);
+        this.overrides = next;
+        return;
+      } catch (err) {
+        if (!(err instanceof OverridesConflictError)) throw err;
+        // Adopt what the other writer stored, so the rebase (or the caller's
+        // retry) starts from the current document, never the stale snapshot.
+        this.overrides = this.checkedDocument(await this.backing.load());
+        if (attempt >= 1) throw err;
+      }
+    }
   }
 
   /** What `config show` reports for one user in one channel — structured; the
@@ -413,10 +670,6 @@ export class ConfigStore {
     return formatConfigDescription(this.describeConfig(channelId, userId));
   }
 
-  private save(): void {
-    mkdirSync(dirname(this.overridesPath), { recursive: true });
-    writeFileSync(this.overridesPath, JSON.stringify(this.overrides, null, 2));
-  }
 }
 
 /** Every scope's `instructions` (both kinds, either file) must be a string within the cap. */
@@ -526,6 +779,7 @@ function validateConfig(cfg: AppConfig, warn: (message: string) => void): void {
     );
   }
   if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory, cfg.selfImprovement, warn);
+  validateRuntimeOverrides(cfg.runtimeOverrides);
   if (cfg.ship !== undefined) validateShip(cfg.ship);
 }
 
@@ -564,5 +818,25 @@ function validateRunHistory(rh: RunHistoryConfig, si: SelfImprovementConfig | un
       "config.yaml: selfImprovement.ledgerMax is set alongside runHistory — the friction ledger is now read from the run store, " +
         "so runHistory.retentionDays/maxRuns bound the friction population; ledgerMax only affects the legacy FrictionDO writes.",
     );
+  }
+}
+
+/** `runtimeOverrides` (routing-and-config item 12): a mapping; `worker.baseUrl` https; `tokenEnv` a name. */
+function validateRuntimeOverrides(ro: AppConfig["runtimeOverrides"]): void {
+  if (ro !== undefined) {
+    if (typeof ro !== "object" || ro === null || Array.isArray(ro)) throw new Error("config.yaml: runtimeOverrides must be a mapping");
+    if (ro.worker !== undefined) {
+      if (typeof ro.worker !== "object" || ro.worker === null) throw new Error("config.yaml: runtimeOverrides.worker must be a mapping with baseUrl");
+      let url: URL | undefined;
+      try {
+        url = new URL(String(ro.worker.baseUrl));
+      } catch {
+        url = undefined;
+      }
+      if (!url || url.protocol !== "https:") throw new Error("config.yaml: runtimeOverrides.worker.baseUrl must be an https: URL");
+      if (ro.worker.tokenEnv !== undefined && (typeof ro.worker.tokenEnv !== "string" || !ro.worker.tokenEnv)) {
+        throw new Error("config.yaml: runtimeOverrides.worker.tokenEnv must be an environment variable name");
+      }
+    }
   }
 }

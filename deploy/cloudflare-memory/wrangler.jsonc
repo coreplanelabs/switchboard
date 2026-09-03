@@ -26,7 +26,10 @@
       { "name": "SCHEDULES", "class_name": "ScheduleDO" },
       // One RunHistoryDO per store key (`runs:default`): persistent run history
       // (#157, features/run-history.md) — runs + run_events + the retention policy.
-      { "name": "RUNS", "class_name": "RunHistoryDO" }
+      { "name": "RUNS", "class_name": "RunHistoryDO" },
+      // ONE ConfigDO (named "config"): the bot's runtime config documents — the
+      // chat-set `overrides` (features/routing-and-config.md item 12) — versioned.
+      { "name": "CONFIG", "class_name": "ConfigDO" }
     ]
   },
   // SQLite-backed DOs (durable across restarts — AGENTS.md invariant 6).
@@ -34,6 +37,7 @@
     { "tag": "v1", "new_sqlite_classes": ["MemoryDO"] },
     { "tag": "v2", "new_sqlite_classes": ["FrictionDO"] },
     { "tag": "v3", "new_sqlite_classes": ["ScheduleDO"] },
-    { "tag": "v4", "new_sqlite_classes": ["RunHistoryDO"] }
+    { "tag": "v4", "new_sqlite_classes": ["RunHistoryDO"] },
+    { "tag": "v5", "new_sqlite_classes": ["ConfigDO"] }
   ]
 }

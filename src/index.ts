@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { ConfigStore } from "./config.js";
+import { openConfigStore } from "./config.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { createSlackApp } from "./channels/slack.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
@@ -65,7 +65,11 @@ async function main() {
   // `deploy/cloudflare/write-build.mjs` into the image; "unknown" when built by hand.
   const build = readBuildInfo(process.env.SWITCHBOARD_BUILD_INFO ?? "./build.json");
   console.log(`[build] ${build.commit}${build.builtAt ? ` @ ${build.builtAt}` : ""}`);
-  const config = new ConfigStore(CONFIG_PATH, OVERRIDES_PATH);
+  // Runtime overrides (`config set …`) live where `runtimeOverrides.worker`
+  // says — the state Worker's ConfigDO in prod, so a container restart keeps
+  // them (features/routing-and-config.md item 12); the JSON file otherwise.
+  const config = await openConfigStore(CONFIG_PATH, { overridesPath: OVERRIDES_PATH, env: process.env });
+  console.log(`[config] runtime overrides: ${config.overridesLocation()}`);
   const providers = new ProviderRegistry(config.config.providers);
   // Bundled skills (#100): loaded once from the seeded `skills/` dir and shared
   // across all channels via CoreDeps, so review/coding get their scoped skill

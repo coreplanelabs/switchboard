@@ -28,7 +28,7 @@
 
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { ConfigStore } from "./config.js";
+import { openConfigStore, type ConfigStore } from "./config.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { CommandError, CommandRegistry, renderText, type Caller, type CommandInput, type CommandInvoker, type InvokeErrorCode } from "./core/commandRegistry.js";
 import { catalogueText, chatForm, helpText, parseInvocation, type GrammarRejection } from "./core/commandSurface.js";
@@ -186,11 +186,46 @@ class ConsoleIO implements ChannelIO {
  *  worktree, a fresh clone, or CI without the git-ignored `config/config.yaml`.
  *  A command that does ask for it in such a checkout fails `unavailable`
  *  naming the path and the env var, never with an ENOENT stack. */
-export function loadBotConfig(configPath: string, overridesPath: string, exists: (path: string) => boolean = existsSync): ConfigStore {
-  if (!exists(configPath)) {
-    throw new CommandError("unavailable", `bot config not found at ${configPath} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`);
+export function missingBotConfig(configPath: string): CommandError {
+  return new CommandError("unavailable", `bot config not found at ${configPath} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`);
+}
+
+export async function loadBotConfig(
+  configPath: string,
+  overridesPath: string,
+  opts: { env?: Record<string, string | undefined>; exists?: (path: string) => boolean; warn?: (message: string) => void } = {},
+): Promise<ConfigStore> {
+  if (!(opts.exists ?? existsSync)(configPath)) throw missingBotConfig(configPath);
+  // The same backing the bot uses (`runtimeOverrides.worker` → the ConfigDO), so
+  // `config set` from the CLI and from Slack write ONE document; the file is
+  // the fallback for a config without a state Worker.
+  return openConfigStore(configPath, { overridesPath, env: opts.env ?? process.env, warn: opts.warn ?? ((m) => console.error(m)) });
+}
+
+/** What `main()` binds the commands to: the bot config opened ONCE, up front
+ *  (the open is async — the overrides backing may be the state Worker), with
+ *  the outcome deferred to the first command that asks. A missing file, a
+ *  configured Worker without its bearer, or an unreachable Worker never stop
+ *  `deploy plan`, `help`, `env`, … from running; the command that does need
+ *  the config gets one `unavailable` line naming the cause. */
+export async function bindBotConfig(
+  configPath: string,
+  overridesPath: string,
+  opts: { env?: Record<string, string | undefined>; exists?: (path: string) => boolean; warn?: (message: string) => void } = {},
+): Promise<() => ConfigStore> {
+  let outcome: { config: ConfigStore } | { error: CommandError };
+  try {
+    outcome = { config: await loadBotConfig(configPath, overridesPath, opts) };
+  } catch (err) {
+    outcome = {
+      error:
+        err instanceof CommandError ? err : new CommandError("unavailable", `bot config at ${configPath} could not be opened: ${err instanceof Error ? err.message : String(err)}`),
+    };
   }
-  return new ConfigStore(configPath, overridesPath);
+  return () => {
+    if ("error" in outcome) throw outcome.error;
+    return outcome.config;
+  };
 }
 
 async function main(): Promise<void> {
@@ -199,11 +234,13 @@ async function main(): Promise<void> {
   // persists exactly like a bot run when `runHistory` is configured (null
   // store → history off); the registry commands read the same store. A fresh
   // process holds no live runs, so `runs list` here is persisted history.
-  // Both load on first use — see `loadBotConfig`.
+  // Opened up front (see `bindBotConfig`); a command that needs it and cannot
+  // have it gets the `unavailable` error naming the cause, every other command runs.
+  const botConfig = await bindBotConfig(CONFIG_PATH, "./data/cli-overrides.json");
   let loaded: { config: ConfigStore; runStore: RunStore | null } | undefined;
   const bot = () => {
     if (!loaded) {
-      const config = loadBotConfig(CONFIG_PATH, "./data/cli-overrides.json");
+      const config = botConfig();
       loaded = { config, runStore: buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => warn(`[run-history] ${m}`) }) };
     }
     return loaded;
