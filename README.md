@@ -1,6 +1,6 @@
 # Switchboard
 
-A cheap, configurable agent gateway: requests arrive over a **channel** (Slack today; the CLI is a second channel; Discord/Teams/HTTP are adapters away), get routed to an **agent** (coding, review, research, general), which runs on a **pluggable inference provider** and executes its tools through a **pluggable executor** (local or per-thread micro-VM). Replaces/subsumes a plain "Claude in Slack" bot with per-channel, per-user, and per-request configuration.
+A cheap, configurable agent gateway: requests arrive over a **channel** (Slack today; the CLI is a second channel; Discord/Teams/HTTP are adapters away), get routed to an **agent** (coding, review, ship, research, general), which runs on a **pluggable inference provider** and executes its tools through a **pluggable executor** (local or per-thread micro-VM). Replaces/subsumes a plain "Claude in Slack" bot with per-channel, per-user, and per-request configuration.
 
 Every boundary is a swappable seam, same pattern at each one:
 
@@ -9,7 +9,7 @@ Every boundary is a swappable seam, same pattern at each one:
 | Channel | `ChannelIO` + `IncomingMessage` (`src/core/types.ts`) | Slack (Bolt/Socket Mode), CLI | one adapter file in `src/channels/` |
 | Provider | `Provider` (`src/providers/types.ts`) | Anthropic, OpenAI-compatible (OpenAI/Groq/Ollama/vLLM = config-only) | one adapter file, or just config |
 | Executor | `Executor` (`src/execution/executor.ts`) | local host, E2B micro-VM, Cloudflare Sandbox (via `deploy/cloudflare-sandbox/` proxy Worker), resident repo environments (always-warm per-repo, via `deploy/cloudflare-resident/`) | one backend file + config |
-| Agent | `AgentDef` data (`src/agents/registry.ts`) | general, coding, review, research | one registry entry |
+| Agent | `AgentDef` data (`src/agents/registry.ts`) | general, coding, review, ship, research | one registry entry |
 
 The **core dispatcher** (`src/core/dispatcher.ts`) is the only place orchestration lives: config commands, directive parsing, layered resolution, permission gates, history assembly, the agent run. Channels are pure transports; the dispatcher never imports a platform SDK.
 
@@ -24,6 +24,7 @@ Behavioral expectations live in [`features/`](features/README.md) — one spec p
 | `general` | Default fallback — plain passthrough to the configured model; refers repo/web work to the other agents | `none` |
 | `coding` | Implements a change and ships a PR ([features/agent-coding.md](features/agent-coding.md)). Cold path: clone → branch → edit → test → push. Resident path: the worktree is already warm and `gh` is not in the image. Either way the agent pushes the branch and submits a typed description; Switchboard renders the body at the pushed head and opens the PR itself ([features/pr-description.md](features/pr-description.md)) | `full` — bash, read, write, web fetch, diff digest, PR description submit, skills |
 | `review` | Reviews a PR with full-repo context, reports ranked findings with a submitted verdict ([features/agent-review.md](features/agent-review.md)) | `readonly` — bash, read (read-only by convention), verdict, web fetch, diff digest, skills |
+| `ship` | Runs the coding → review → fix loop to LGTM as one pipeline ([features/agent-ship.md](features/agent-ship.md)): opens the PR, loops pinned reviews and fix rounds until the review approves, reports merge-ready — a human still merges. Requires permission for `ship`, `coding`, and `review` | `full` — orchestrator only: the def is never sent to a model; each child round runs on the coding/review toolsets above |
 | `research` | Answers questions with web search + URL reading; no repo or workspace is ever provisioned ([features/web-tools.md](features/web-tools.md)) | `web` — web search, web fetch |
 
 Onboarded repos run in an always-warm **resident worktree** ([features/resident-repos.md](features/resident-repos.md)); everything else falls back to a cold per-thread workspace directory (`workspaces/<channel>-<thread>`). On both paths, follow-ups in the same thread reuse the same checkout.
