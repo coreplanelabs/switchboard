@@ -125,3 +125,14 @@ costs:
         f03b679428124934b3bf85b75ae99413: memory DOs
         0ff13de1f9bd4b76a963b41e8fe92318: friction DO
       # anthropicWorkspaceId: wrkspc_...   # set once the bot's API key lives in its own Anthropic workspace
+
+# agent:ship pipeline caps (features/agent-ship.md item 8). maxMinutes is the
+# authoritative wall clock — every child run's own budget is clipped to what
+# remains — and maxRounds counts review rounds. 40 min ≈ four ~10-minute
+# coding+review rounds at observed live pace (the first e2e did a full round
+# in ~9 min); a worst-case coding child alone can run past 30 min, so a big
+# task may cap early — deliberate for now, revisit from the run pages'
+# ship_round timings.
+ship:
+  maxRounds: 4
+  maxMinutes: 40
