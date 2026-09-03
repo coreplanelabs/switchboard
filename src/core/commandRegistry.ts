@@ -119,6 +119,20 @@ export interface CommandDef<D, A extends readonly ArgDef[] = readonly ArgDef[], 
   /** Chat's projection when `render` is shaped for a terminal (aligned
    *  columns collapse in a proportional font). Absent → `render`. */
   renderChat?(output: JsonValue): string;
+  /** The DEFERRED outcome of a command whose effect completes after its reply
+   *  (a resident accepted for provisioning reaches `warm` or `down` minutes
+   *  later). Given the handler's own output, it waits — bounded, by its own
+   *  clock — for the effect to settle and returns the outcome as text (`ok` =
+   *  the effect succeeded), or undefined when there is nothing to add. Only the
+   *  chat adapter consumes it (a second reply in the thread); machine surfaces
+   *  poll the state themselves. Never starts an agent run (KTD16). */
+  settle?(output: JsonValue, ctx: { caller: Caller; deps: D }): Promise<SettledOutcome | undefined>;
+}
+
+/** What `settle` reports back into the thread once the effect has a result. */
+export interface SettledOutcome {
+  ok: boolean;
+  text: string;
 }
 
 /** What every adapter hands `invoke`: parsed-but-untyped positional values and
@@ -296,6 +310,26 @@ export class CommandRegistry<D> {
       return done(fail("internal", "internal error", "handler"));
     }
   }
+
+  /** True when `id` names a command with a deferred outcome (`settle`). */
+  settles(id: string): boolean {
+    return typeof this.commands.get(id)?.settle === "function";
+  }
+
+  /** Wait for an accepted command's effect and report it (see `CommandDef.settle`).
+   *  Called with a `value` that `invoke` returned `ok` for; a command without
+   *  `settle`, or a settle that throws, yields undefined (the throw is logged —
+   *  a follow-up that cannot be produced is not an error the caller can act on). */
+  async settle(id: string, value: JsonValue, caller: Caller, deps: D): Promise<SettledOutcome | undefined> {
+    const cmd = this.commands.get(id);
+    if (!cmd?.settle) return undefined;
+    try {
+      return await cmd.settle(value, { caller, deps });
+    } catch (err) {
+      this.logError(cmd.id, err);
+      return undefined;
+    }
+  }
 }
 
 /**
@@ -307,6 +341,9 @@ export interface CommandInvoker {
   list(): CommandDef<unknown>[];
   get(id: string): CommandDef<unknown> | undefined;
   invoke(id: string, input: CommandInput, caller: Caller): Promise<InvokeResult>;
+  /** Whether `id` has a deferred outcome, and that outcome (see `CommandDef.settle`). */
+  settles(id: string): boolean;
+  settle(id: string, value: JsonValue, caller: Caller): Promise<SettledOutcome | undefined>;
 }
 
 export function bindCommands<D>(registry: CommandRegistry<D>, deps: D): CommandInvoker {
@@ -314,6 +351,8 @@ export function bindCommands<D>(registry: CommandRegistry<D>, deps: D): CommandI
     list: () => registry.list() as CommandDef<unknown>[],
     get: (id) => registry.get(id) as CommandDef<unknown> | undefined,
     invoke: (id, input, caller) => registry.invoke(id, input, caller, deps),
+    settles: (id) => registry.settles(id),
+    settle: (id, value, caller) => registry.settle(id, value, caller, deps),
   };
 }
 

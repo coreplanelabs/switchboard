@@ -67,6 +67,8 @@ function wireCommands(deps: TestDeps): { invoked: string[] } {
     tracker: deps.issueTracker,
     memory: () => deps.memory,
     residentAdmin: () => deps.residentAdmin,
+    // Never the network: an onboard here falls back to the npm table (and says so).
+    repoInspector: async () => ({ ok: false, reason: "not inspected in tests" }),
     operations: (caller) => deps.operations ?? defaultOperations(deps.config, process.env, caller),
   });
   deps.invoked = [];
@@ -904,6 +906,7 @@ describe("repo management commands (U8)", () => {
         status: 200,
         data: { cap: 8, count: 1, residents: [{ resource: "repo:jshttp/vary", defaultRef: "master", live: { state: "warm", reason: "" } }] },
       })),
+      status: vi.fn(async () => ({ status: 200, data: { state: "warm", reason: "", inFlight: 0 } })),
     };
   }
 
@@ -5196,6 +5199,7 @@ describe("registry chat commands in the fast-path chain (U13, KTD19)", () => {
       reconfigure: vi.fn(async () => ({ status: 200, data: {} })),
       rebuild: vi.fn(async () => ({ status: 200, data: {} })),
       residents: vi.fn(async () => ({ status: 200, data: { cap: 8, count: 0, residents: [] } })),
+      status: vi.fn(async () => ({ status: 200, data: { state: "warm", reason: "", inFlight: 0 } })),
     };
     deps.residentAdmin = admin;
     const { invoked } = withCommands(deps);
@@ -5207,11 +5211,43 @@ describe("registry chat commands in the fast-path chain (U13, KTD19)", () => {
     await dispatch(deps, msg("repo onboard acme/api", "slack:UADMIN"), io);
     expect(admin.onboard).toHaveBeenCalledTimes(1);
     expect(replies[1]).toMatch(/^🏗️ Onboarding `acme\/api` on `main`/);
+    // Item 52: the accepted onboard settles (here: warm at the first poll) as a
+    // SECOND reply in the thread, off the request path.
+    await vi.waitFor(() => expect(replies[2]).toBe("✅ `acme/api` is warm — provisioned and attach-ready."));
+    expect(admin.status).toHaveBeenCalledWith("repo:acme/api");
     await dispatch(deps, msg("repo list", "slack:UADMIN"), io);
     expect(invoked).toEqual(["repo.onboard", "repo.onboard", "repo.list"]);
     expect(admin.residents).toHaveBeenCalledTimes(1);
-    expect(replies[2]).toBe("No repos onboarded (0/8). Onboard one with `repo onboard <owner/name>`.");
+    expect(replies[3]).toBe("No repos onboarded (0/8). Onboard one with `repo onboard <owner/name>`.");
     expect(provider.requests).toHaveLength(0);
+  });
+
+  it("item 52: a provisioning that fails after the acknowledgement is reported in the thread with the resident's reason; a dry-run rebuild posts no follow-up", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    const admin: ResidentAdminClient = {
+      onboard: vi.fn(async () => ({ status: 202, data: {} })),
+      offboard: vi.fn(async () => ({ status: 200, data: {} })),
+      reconfigure: vi.fn(async () => ({ status: 200, data: {} })),
+      rebuild: vi.fn(async () => ({ status: 200, data: { dryRun: true, from: { state: "warm" }, discards: {}, reprovision: {}, keeps: {} } })),
+      residents: vi.fn(async () => ({ status: 200, data: { cap: 8, count: 0, residents: [] } })),
+      status: vi.fn(async () => ({ status: 200, data: { state: "down", reason: "provision-failed at install: exit 254: npm error enoent Could not read package.json", inFlight: 0 } })),
+    };
+    deps.residentAdmin = admin;
+    withCommands(deps);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo onboard coreplanelabs/infrastructure", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    await vi.waitFor(() =>
+      expect(replies[1]).toBe(
+        "❌ `coreplanelabs/infrastructure` failed to provision: provision-failed at install: exit 254: npm error enoent Could not read package.json\n" +
+          'Fix the command table with `repo reconfigure coreplanelabs/infrastructure --install "…" --build "…" --test "…"`, then `repo rebuild coreplanelabs/infrastructure`.',
+      ),
+    );
+    await dispatch(deps, msg("repo rebuild coreplanelabs/infrastructure --dry-run", "slack:UADMIN"), io);
+    expect(replies[2]).toMatch(/^🧪 \*Dry run\*/);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(replies).toHaveLength(3);
+    expect(admin.status).toHaveBeenCalledTimes(1);
   });
 
   it("a mutating repo verb is an inline run with a receipt; `repo list` and a usage reply are not", async () => {
@@ -5222,6 +5258,7 @@ describe("registry chat commands in the fast-path chain (U13, KTD19)", () => {
       reconfigure: vi.fn(async () => ({ status: 200, data: {} })),
       rebuild: vi.fn(async () => ({ status: 200, data: {} })),
       residents: vi.fn(async () => ({ status: 200, data: { cap: 8, count: 0, residents: [] } })),
+      status: vi.fn(async () => ({ status: 200, data: { state: "warm", reason: "", inFlight: 0 } })),
     };
     let n = 0;
     deps.runRegistry = new RunRegistry({ genId: () => `repo-${++n}`, genToken: () => "tok" });

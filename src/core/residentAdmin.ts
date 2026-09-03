@@ -23,6 +23,9 @@ export interface ResidentAdminClient {
   reconfigure(body: Record<string, unknown>): Promise<ResidentAdminResponse>;
   rebuild(resource: string, dryRun: boolean): Promise<ResidentAdminResponse>;
   residents(): Promise<ResidentAdminResponse>;
+  /** One resident's `{ state, reason, inFlight }` (`GET /status`; 404 when not
+   *  onboarded) — what the onboard/rebuild follow-up polls. */
+  status(resource: string): Promise<ResidentAdminResponse>;
 }
 
 export function makeResidentAdminClient(baseUrl: string, token: string): ResidentAdminClient {
@@ -52,6 +55,7 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
     reconfigure: (body) => call("/reconfigure", "POST", body),
     rebuild: (resource, dryRun) => call("/rebuild", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
     residents: () => call("/residents", "GET"),
+    status: (resource) => call(`/status?resource=${encodeURIComponent(resource)}`, "GET"),
   };
 }
 

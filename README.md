@@ -359,7 +359,7 @@ permissions:
      @switchboard repo offboard acme/api --dry-run   # itemized plan, nothing executed
      @switchboard repo rebuild acme/api              # discard snapshots, reprovision from scratch
      ```
-     Omitted commands get Node defaults (`npm install --no-audit --no-fund` / `npm run build --if-present` / `npm test`). Onboarding requires the repo to already be in the GitHub App installation's repository list when the App is configured (the onboard reply carries an honest warning when it is not).
+     Omitted commands are detected from the repo root (`packageManager` field or lockfile → pnpm / yarn / bun / npm; `build`/`test` only when `package.json` has the script, a no-op otherwise; a repo with no root `package.json` gets no install) — the reply names the toolchain and why, and falls back to the npm table with a warning when the root cannot be inspected. The thread then gets a second reply when provisioning reaches `warm` or fails, with the resident's own reason. Onboarding requires the repo to already be in the GitHub App installation's repository list when the App is configured (the onboard reply carries an honest warning when it is not).
    - Once a repo is `warm`, any coding/review request that names it (slug, GitHub URL, or PR link) runs in its resident: ready worktree on the thread's branch, deps installed, zero setup. Restrict who may use a given repo's resident with `permissions.repos`.
 
 ## Adding a provider

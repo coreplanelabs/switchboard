@@ -2,6 +2,8 @@ import { z } from "zod";
 import { CommandError, commandDefiner, flag, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
 import type { Operations, OpName } from "../operations.js";
 import { parseSlug, repoResourceId, validRef, type ResidentAdminClient, type ResidentAdminResponse } from "../residentAdmin.js";
+import { NO_OP_COMMAND, NPM_FALLBACK_COMMANDS, detectCommands, type DetectedCommands } from "../repoToolchain.js";
+import type { RepoInspector } from "../../execution/githubRepoInspect.js";
 
 // The `repo.*` registrations (#157 R13 + phase 4b): the whole repo surface on
 // ONE typed model.
@@ -36,20 +38,28 @@ export interface RepoCommandDeps {
     operations(caller: Caller): Operations | null;
     /** Per-repo access for resident environments (KD7, open-when-absent). */
     canUseRepo(callerId: string, slug: string): boolean;
+    /** Reads the repo root before `onboard` chooses a command table (item 52).
+     *  Absent, or a named failure → the npm fallback table WITH a warning in
+     *  the reply; the table is never silently assumed. */
+    inspect?: RepoInspector;
+    /** The provisioning follow-up's clock (tests inject a no-op). */
+    sleep?: (ms: number) => Promise<void>;
   };
 }
 
 const defineCommand = commandDefiner<RepoCommandDeps>();
 
-/** Sensible Node defaults for an onboard that names no commands (the shape U3
- *  proved on jshttp/vary — install is verbatim what U3 used; test/build are
- *  the generic equivalents of its repo-specific choices). */
-export const DEFAULT_COMMANDS = {
-  install: "npm install --no-audit --no-fund",
-  build: "npm run build --if-present",
-  test: "npm test",
-} as const;
+/** The table an uninspectable onboard falls back to (the shape U3 proved on
+ *  jshttp/vary). An INSPECTED onboard derives its table from the repo root
+ *  instead (`detectCommands`, item 52). */
+export const DEFAULT_COMMANDS = NPM_FALLBACK_COMMANDS;
 export const DEFAULT_REF = "main";
+
+/** The provisioning follow-up (`settle`, item 52): poll the resident's `/status`
+ *  this often, and give up (still reporting) after this long — a step budget
+ *  is 5 min and provisioning is two steps plus clone + snapshot. */
+export const SETTLE_POLL_MS = 10_000;
+export const SETTLE_MAX_MS = 12 * 60_000;
 
 /** `owner/name` (`.git` tolerated) → lowercase slug; anything else names the expected form. */
 export const repoSlug = z
@@ -140,9 +150,9 @@ export const repoOnboard = defineCommand({
   args: [slugArg],
   options: z.object({
     ref: gitRef.optional().describe(`default branch to keep warm (default ${DEFAULT_REF})`),
-    test: command.optional().describe(`the repo's test command (default \`${DEFAULT_COMMANDS.test}\`)`),
-    build: command.optional().describe(`the repo's build command (default \`${DEFAULT_COMMANDS.build}\`)`),
-    install: command.optional().describe(`the repo's install command (default \`${DEFAULT_COMMANDS.install}\`)`),
+    test: command.optional().describe("the repo's test command (default: detected from the repo root — `<pm> test`, or a no-op without a test script)"),
+    build: command.optional().describe("the repo's build command (default: detected — `<pm> run build`, or a no-op without a build script)"),
+    install: command.optional().describe("the repo's install command (default: detected from the root lockfile / packageManager — pnpm, yarn, bun, or npm; none without a package.json)"),
     evictColdest: flag.optional().describe("over the resident cap, offboard the coldest eligible warm resident instead of failing (#50)"),
   }),
   scope: "repo:write",
@@ -153,9 +163,22 @@ export const repoOnboard = defineCommand({
     const o = output as JsonObject;
     const commands = obj(o.commands);
     const lines = [
-      `🏗️ Onboarding \`${str(o.slug)}\` on \`${str(o.defaultRef)}\` — provisioning started (state \`onboarding\`; watch \`repo list\` until it reaches \`warm\`).`,
-      `Commands: install \`${str(commands.install)}\` · build \`${str(commands.build)}\` · test \`${str(commands.test)}\``,
+      `🏗️ Onboarding \`${str(o.slug)}\` on \`${str(o.defaultRef)}\` — provisioning started (state \`onboarding\`). I'll report here when it is warm or has failed; \`repo list\` shows the live state meanwhile.`,
     ];
+    const detection = obj(o.detection);
+    const explicit = new Set(Array.isArray(o.explicit) ? o.explicit.map(String) : []);
+    if (typeof detection.unavailable === "string") {
+      const defaulted = COMMAND_KEYS.filter((k) => !explicit.has(k));
+      lines.push(
+        defaulted.length === 0
+          ? `⚠️ Repo root not inspected (${detection.unavailable}) — every command was given explicitly, so nothing was assumed.`
+          : `⚠️ Repo root not inspected (${detection.unavailable}) — using npm defaults${defaulted.length < COMMAND_KEYS.length ? ` for ${listWords(defaulted)}` : ""}. If the repo is not an npm package, \`repo reconfigure\` the commands before it fails.`,
+      );
+    } else {
+      const notes = Array.isArray(detection.notes) ? detection.notes.map(String) : [];
+      lines.push(`Toolchain: ${str(o.toolchain)}${notes.length ? ` (${notes.join("; ")})` : ""}`);
+    }
+    lines.push(`Commands: ${COMMAND_KEYS.map((k) => commandCell(k, commands[k], explicit.has(k))).join(" · ")}`);
     const evicted = obj(o.evicted);
     if (typeof evicted.resource === "string") {
       const errors = Array.isArray(evicted.errors) ? evicted.errors.length : 0;
@@ -168,13 +191,25 @@ export const repoOnboard = defineCommand({
     return lines.join("\n");
   },
   handler: async ({ args, options, deps }) => {
-    const commands = {
-      ...DEFAULT_COMMANDS,
+    const defaultRef = options.ref ?? DEFAULT_REF;
+    // Item 52: the table comes from the repo root, not from an assumption. An
+    // explicit flag wins per key; an uninspectable root falls back to the npm
+    // table and the reply SAYS so.
+    let detected: DetectedCommands | undefined;
+    let unavailable: string | undefined;
+    if (!deps.repo.inspect) unavailable = "no repo inspector configured";
+    else {
+      const r = await deps.repo.inspect(args.slug, defaultRef);
+      if (r.ok) detected = detectCommands(r.facts);
+      else unavailable = r.reason;
+    }
+    const explicit = COMMAND_KEYS.filter((k) => options[k] !== undefined);
+    const commands: { install?: string; build: string; test: string } = {
+      ...(detected ? detected.commands : DEFAULT_COMMANDS),
       ...(options.test !== undefined ? { test: options.test } : {}),
       ...(options.build !== undefined ? { build: options.build } : {}),
       ...(options.install !== undefined ? { install: options.install } : {}),
     };
-    const defaultRef = options.ref ?? DEFAULT_REF;
     const r = await call(() => adminOf(deps).onboard({ resource: repoResourceId(args.slug), commands, defaultRef, ...(options.evictColdest ? { evictColdest: true } : {}) }));
     if (r.status !== 202) {
       // Over the cap with --evict-coldest and nothing eligible: the resident
@@ -188,12 +223,68 @@ export const repoOnboard = defineCommand({
       slug: args.slug,
       defaultRef,
       commands,
+      toolchain: detected?.toolchain ?? null,
+      detection: detected ? { notes: detected.notes } : { unavailable: unavailable ?? "unknown" },
+      explicit,
       state: "onboarding",
       ...(r.data.evicted !== undefined ? { evicted: r.data.evicted as JsonValue } : {}),
       ...(typeof r.data.warning === "string" ? { warning: r.data.warning } : {}),
     };
   },
+  settle: (output, { deps }) => settleProvisioning(deps, str((output as JsonObject).slug)),
 });
+
+/** The command table's keys, in reply order. */
+const COMMAND_KEYS = ["install", "build", "test"] as const;
+
+/** `install \`cmd\``, or the honest reading of a DETECTED no-op: `build — none
+ *  (\`true\`)`. A command the operator typed is always shown verbatim — an
+ *  explicit `--build true` is their choice, not detection's. */
+function commandCell(name: string, value: unknown, explicit: boolean): string {
+  if (value === undefined || value === null) return `${name} — none`;
+  if (value === NO_OP_COMMAND && !explicit) return `${name} — none (\`${NO_OP_COMMAND}\`)`;
+  return `${name} \`${str(value)}\``;
+}
+
+/** `a`, `a and b`, `a, b, and c`. */
+function listWords(words: readonly string[]): string {
+  if (words.length <= 1) return words.join("");
+  if (words.length === 2) return `${words[0]} and ${words[1]}`;
+  return `${words.slice(0, -1).join(", ")}, and ${words[words.length - 1]}`;
+}
+
+/**
+ * The provisioning follow-up (item 52): after an onboard or rebuild is accepted
+ * (202, state `onboarding`), poll `/status` until the resident leaves
+ * `onboarding` and say what happened — `warm`, or `down` with the resident's
+ * own reason and the two commands that fix a bad table. Bounded by
+ * `SETTLE_MAX_MS`; a resident still onboarding then is reported as such (not
+ * silently dropped), and every transport/404 outcome is a sentence too.
+ */
+export async function settleProvisioning(deps: RepoCommandDeps, slug: string): Promise<{ ok: boolean; text: string }> {
+  const sleep = deps.repo.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const resource = repoResourceId(slug);
+  const fix = `Fix the command table with \`repo reconfigure ${slug} --install "…" --build "…" --test "…"\`, then \`repo rebuild ${slug}\`.`;
+  for (let elapsed = 0; elapsed <= SETTLE_MAX_MS; elapsed += SETTLE_POLL_MS) {
+    if (elapsed > 0) await sleep(SETTLE_POLL_MS);
+    const api = deps.repo.admin();
+    if ("unavailable" in api) return { ok: false, text: `⚠️ Cannot follow \`${slug}\`'s provisioning: ${api.unavailable}` };
+    let r: ResidentAdminResponse;
+    try {
+      r = await api.status(resource);
+    } catch (err) {
+      return { ok: false, text: `⚠️ Lost track of \`${slug}\`'s provisioning (${err instanceof Error ? err.message : String(err)}) — check \`repo list\`.` };
+    }
+    if (r.status === 404) return { ok: false, text: `⚠️ \`${slug}\` is no longer onboarded — it was offboarded while provisioning.` };
+    if (r.status !== 200) return { ok: false, text: `⚠️ Lost track of \`${slug}\`'s provisioning (HTTP ${r.status}: ${str(r.data.error ?? "unknown error")}) — check \`repo list\`.` };
+    const state = str(r.data.state);
+    if (state === "onboarding") continue;
+    if (state === "warm") return { ok: true, text: `✅ \`${slug}\` is warm — provisioned and attach-ready.` };
+    if (state === "down") return { ok: false, text: `❌ \`${slug}\` failed to provision: ${str(r.data.reason ?? "no reason recorded")}\n${fix}` };
+    return { ok: true, text: `ℹ️ \`${slug}\` left \`onboarding\` and is \`${state}\`${r.data.reason ? ` (${str(r.data.reason)})` : ""}.` };
+  }
+  return { ok: false, text: `⏳ \`${slug}\` is still onboarding after ${Math.round(SETTLE_MAX_MS / 60_000)} min — provisioning is slow or stuck; \`repo list\` shows the live state, and the resident watchdog marks a stuck onboard \`down\` at its deadline.` };
+}
 
 // ---- repo offboard / rebuild -------------------------------------------------------
 
@@ -271,8 +362,13 @@ export const repoRebuild = defineCommand({
     return (
       `🔄 Rebuilding \`${slug}\`: discarded ${n(o.backupObjectsDeleted)} backup object(s); ` +
       `reprovisioning from scratch on \`${String(reprov.defaultRef ?? "?")}\` ` +
-      `(state \`onboarding\` — watch \`repo list\` until it reaches \`warm\`).`
+      `(state \`onboarding\` — I'll report here when it is warm or has failed; \`repo list\` shows the live state meanwhile).`
     );
+  },
+  // A dry run changed nothing, so there is nothing to follow.
+  settle: (output, { deps }) => {
+    const o = output as JsonObject;
+    return o.dryRun === true ? Promise.resolve(undefined) : settleProvisioning(deps, str(o.slug));
   },
   handler: async ({ args, options, deps }) => {
     const dryRun = options.dryRun ?? false;

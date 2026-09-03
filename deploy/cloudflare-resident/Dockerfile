@@ -28,11 +28,15 @@ ENV CI=1 \
     UV_THREADPOOL_SIZE=2 \
     NODE_OPTIONS=--max-old-space-size=1536
 
-# pnpm: the base ships Node 24 + npm + bun but not pnpm, so a pnpm repo can't be
-# provisioned (install → build) when onboarded. corepack is NOT on this base's
-# PATH (unlike the older sandbox base), so install pnpm via npm at build time —
-# this bakes pnpm into the image so it's ready offline when a worktree provisions.
-RUN npm install -g pnpm@latest
+# pnpm + yarn: the base ships Node 24 + npm + bun but neither pnpm nor yarn, so a
+# repo whose onboard table is detected as pnpm or yarn (resident-repos item 52 —
+# every manager `detectCommands` can emit must exist here, or the table fails
+# deterministically at provision) couldn't be provisioned (install → build).
+# corepack is NOT on this base's PATH (unlike the older sandbox base), so install
+# both via npm at build time — baked into the image, ready offline when a
+# worktree provisions. yarn here is classic (1.x); a Yarn Berry repo bootstraps
+# through it via the `yarnPath` release it commits under `.yarn/releases`.
+RUN npm install -g pnpm@latest yarn@latest
 
 # KTD5: agent commands never run as root. The SDK's exec has no user/uid option
 # (verified against 0.13.0-next.751.1), so the container server itself runs as

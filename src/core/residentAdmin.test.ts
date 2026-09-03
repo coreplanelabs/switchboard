@@ -94,6 +94,15 @@ describe("makeResidentAdminClient (real fetch client)", () => {
     expect(JSON.parse(String(calls[1].init.body))).toEqual({ resource: "repo:acme/api" }); // no dryRun key when false
   });
 
+  it("status(resource) is GET /status?resource=<encoded> with the bearer (item 52: what the provisioning follow-up polls)", async () => {
+    const { calls } = stubFetch({ body: { state: "onboarding", reason: "", inFlight: 0 } });
+    const client = makeResidentAdminClient("https://resident.example", "admin-tok");
+    expect(await client.status("repo:acme/api")).toEqual({ status: 200, data: { state: "onboarding", reason: "", inFlight: 0 } });
+    expect(calls[0].init.method).toBe("GET");
+    expect(new URL(calls[0].url).pathname + new URL(calls[0].url).search).toBe("/status?resource=repo%3Aacme%2Fapi");
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer admin-tok");
+  });
+
   it("a transport failure is a legible error (names the route + `repo list` guidance, never a raw throw)", async () => {
     stubFetch({ reject: "network down" }, { reject: "network down" });
     const client = makeResidentAdminClient("https://resident.example", "admin-tok");

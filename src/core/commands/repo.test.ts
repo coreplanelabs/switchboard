@@ -3,7 +3,8 @@ import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInv
 import { parseInvocation } from "../commandSurface.js";
 import type { OperationResult, Operations } from "../operations.js";
 import type { ResidentAdminClient, ResidentAdminResponse } from "../residentAdmin.js";
-import { NO_OPS_BACKEND_MESSAGE, registerRepoCommands, repoCommands, repoList, type RepoCommandDeps } from "./repo.js";
+import { NO_OPS_BACKEND_MESSAGE, SETTLE_MAX_MS, SETTLE_POLL_MS, registerRepoCommands, repoCommands, repoList, settleProvisioning, type RepoCommandDeps } from "./repo.js";
+import type { RepoInspector } from "../../execution/githubRepoInspect.js";
 
 // Feature: features/resident-repos.md (items 32, 41) / features/command-registry.md
 // (phase 4b): the whole `repo.*` group as registry commands — `repo.list` (open,
@@ -55,6 +56,7 @@ function mockClient(overrides: Partial<Record<keyof ResidentAdminClient, Residen
       ),
     ),
     residents: answer("residents", ok(TWO_RESIDENTS)),
+    status: answer("status", ok({ state: "warm", reason: "", inFlight: 0 })),
   };
 }
 
@@ -73,16 +75,34 @@ interface BindOptions {
   admin?: ResidentAdminClient | { unavailable: string };
   ops?: Operations | null;
   canUseRepo?: (callerId: string, slug: string) => boolean;
+  inspect?: RepoInspector;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+function depsOf(opts: BindOptions = {}): RepoCommandDeps {
+  const admin = opts.admin ?? mockClient();
+  return {
+    repo: {
+      admin: () => admin,
+      operations: () => (opts.ops === undefined ? null : opts.ops),
+      canUseRepo: opts.canUseRepo ?? (() => true),
+      ...(opts.inspect ? { inspect: opts.inspect } : {}),
+      ...(opts.sleep ? { sleep: opts.sleep } : {}),
+    },
+  };
 }
 
 function bind(opts: BindOptions = {}): CommandInvoker {
   const registry = new CommandRegistry<RepoCommandDeps>({ audit: () => {} });
   registerRepoCommands(registry);
-  const admin = opts.admin ?? mockClient();
-  return bindCommands(registry, {
-    repo: { admin: () => admin, operations: () => (opts.ops === undefined ? null : opts.ops), canUseRepo: opts.canUseRepo ?? (() => true) },
-  });
+  return bindCommands(registry, depsOf(opts));
 }
+
+/** An inspector answering the given root facts for every repo. */
+const inspecting =
+  (facts: { entries: string[]; packageJson?: { scripts?: Record<string, unknown>; packageManager?: unknown } | null }): RepoInspector =>
+  async () => ({ ok: true, facts });
+const PNPM_ROOT = { entries: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"], packageJson: { scripts: { test: "turbo test -- run" } } };
 
 /** A chat caller admitted through exactly the given gates (`open` always). */
 const chat = (userId: string, gates: Array<"repoManager" | "agentRun"> = []): Caller => ({
@@ -187,16 +207,66 @@ describe("gates (KTD9 fail-closed) and scopes", () => {
 });
 
 describe("repo onboard", () => {
-  it("bare onboard uses sensible Node defaults and ref main; the slug is lowercased", async () => {
+  it("item 52: the command table is detected from the repo root — a pnpm workspace gets pnpm commands, no build, and the reply explains each choice", async () => {
     const c = mockClient();
-    const { text } = await say(bind({ admin: c }), "repo onboard Acme/API", admin);
+    const inspect = vi.fn(inspecting(PNPM_ROOT));
+    const { text } = await say(bind({ admin: c, inspect }), "repo onboard Acme/API", admin);
+    expect(inspect).toHaveBeenCalledWith("acme/api", "main");
+    expect(c.onboard).toHaveBeenCalledWith({
+      resource: "repo:acme/api",
+      commands: { install: "pnpm install --frozen-lockfile", build: "true", test: "pnpm test" },
+      defaultRef: "main",
+    });
+    expect(text.split("\n")).toEqual([
+      "🏗️ Onboarding `acme/api` on `main` — provisioning started (state `onboarding`). I'll report here when it is warm or has failed; `repo list` shows the live state meanwhile.",
+      "Toolchain: pnpm (package manager from pnpm-lock.yaml; no build script — build is a no-op)",
+      "Commands: install `pnpm install --frozen-lockfile` · build — none (`true`) · test `pnpm test`",
+    ]);
+  });
+
+  it("item 52: a repo with no root package.json gets NO install and no-op build/test — the resident's table simply lacks `install`", async () => {
+    const c = mockClient();
+    const { text } = await say(bind({ admin: c, inspect: inspecting({ entries: ["Taskfile.yaml", "terrateam"] }) }), "repo onboard coreplanelabs/infrastructure", admin);
+    expect(c.onboard).toHaveBeenCalledWith({ resource: "repo:coreplanelabs/infrastructure", commands: { build: "true", test: "true" }, defaultRef: "main" });
+    expect(text).toContain("Toolchain: none (no package.json at the repo root — nothing to install or build; pass --test/--build to set real commands)");
+    expect(text).toContain("Commands: install — none · build — none (`true`) · test — none (`true`)");
+  });
+
+  it("item 52: the ref is inspected, and explicit flags win per key over the detected table", async () => {
+    const c = mockClient();
+    const inspect = vi.fn(inspecting(PNPM_ROOT));
+    await say(bind({ admin: c, inspect }), 'repo onboard acme/api --ref develop --test "pnpm vitest run"', admin);
+    expect(inspect).toHaveBeenCalledWith("acme/api", "develop");
+    expect(c.onboard).toHaveBeenCalledWith({ resource: "repo:acme/api", commands: { install: "pnpm install --frozen-lockfile", build: "true", test: "pnpm vitest run" }, defaultRef: "develop" });
+  });
+
+  it("item 52: an uninspectable root (no credential, 404, no inspector) falls back to the npm table and SAYS so; ref main; the slug is lowercased", async () => {
+    const c = mockClient();
+    const { text } = await say(bind({ admin: c, inspect: async () => ({ ok: false, reason: "no GitHub credential configured (GitHub App or GH_TOKEN)" }) }), "repo onboard Acme/API", admin);
     expect(c.onboard).toHaveBeenCalledWith({
       resource: "repo:acme/api",
       commands: { install: "npm install --no-audit --no-fund", build: "npm run build --if-present", test: "npm test" },
       defaultRef: "main",
     });
     expect(text).toContain("🏗️ Onboarding `acme/api` on `main`");
-    expect(text).toContain("state `onboarding`");
+    expect(text).toContain("⚠️ Repo root not inspected (no GitHub credential configured (GitHub App or GH_TOKEN)) — using npm defaults. If the repo is not an npm package, `repo reconfigure` the commands before it fails.");
+    expect(text).toContain("Commands: install `npm install --no-audit --no-fund` · build `npm run build --if-present` · test `npm test`");
+    const none = await say(bind({ admin: mockClient() }), "repo onboard acme/api", admin);
+    expect(none.text).toContain("⚠️ Repo root not inspected (no repo inspector configured) — using npm defaults. If the repo is not an npm package, `repo reconfigure` the commands before it fails.");
+  });
+
+  it("item 52: the not-inspected warning names only the keys that actually took an npm default — none when every command was given explicitly", async () => {
+    const uninspectable = async () => ({ ok: false as const, reason: "no GitHub credential configured (GitHub App or GH_TOKEN)" });
+    const partial = await say(bind({ admin: mockClient(), inspect: uninspectable }), 'repo onboard acme/api --install "make deps"', admin);
+    expect(partial.text).toContain("⚠️ Repo root not inspected (no GitHub credential configured (GitHub App or GH_TOKEN)) — using npm defaults for build and test. If the repo is not an npm package, `repo reconfigure` the commands before it fails.");
+    const all = await say(bind({ admin: mockClient(), inspect: uninspectable }), 'repo onboard acme/api --install "make deps" --build "make" --test "make check"', admin);
+    expect(all.text).toContain("⚠️ Repo root not inspected (no GitHub credential configured (GitHub App or GH_TOKEN)) — every command was given explicitly, so nothing was assumed.");
+    expect(all.text).not.toContain("npm defaults");
+  });
+
+  it("item 52: an explicit `--build true` renders as the operator's own command, not as a detected no-op", async () => {
+    const { text } = await say(bind({ admin: mockClient(), inspect: inspecting(PNPM_ROOT) }), 'repo onboard acme/api --build true --test "pnpm vitest run"', admin);
+    expect(text).toContain("Commands: install `pnpm install --frozen-lockfile` · build `true` · test `pnpm vitest run`");
   });
 
   it("--ref and quoted --test/--build/--install override the defaults (the derived grammar, not key=value)", async () => {
@@ -303,7 +373,9 @@ describe("repo offboard / rebuild (--dry-run)", () => {
     const real = mockClient();
     const { text } = await say(bind({ admin: real }), "repo rebuild acme/api", admin);
     expect(real.rebuild).toHaveBeenCalledWith("repo:acme/api", false);
-    expect(text).toBe("🔄 Rebuilding `acme/api`: discarded 4 backup object(s); reprovisioning from scratch on `master` (state `onboarding` — watch `repo list` until it reaches `warm`).");
+    expect(text).toBe(
+      "🔄 Rebuilding `acme/api`: discarded 4 backup object(s); reprovisioning from scratch on `master` (state `onboarding` — I'll report here when it is warm or has failed; `repo list` shows the live state meanwhile).",
+    );
   });
 
   it("an unknown flag is `invalid_input` naming the flag, never a resident call; a 404 from the resident is `not_found`", async () => {
@@ -312,6 +384,89 @@ describe("repo offboard / rebuild (--dry-run)", () => {
     expect(parseInvocation(commands.get("repo.offboard")!, ["acme/api", "--force"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("unknown option --force") });
     expect(c.offboard).not.toHaveBeenCalled();
     expect(await commands.invoke("repo.rebuild", { args: ["acme/api"] }, admin)).toMatchObject({ ok: false, error: "not_found", message: "HTTP 404: unknown resource" });
+  });
+});
+
+describe("provisioning follow-up (item 52): repo onboard / repo rebuild settle", () => {
+  /** A /status that answers each call from the sequence (the last one repeats). */
+  const statusSequence = (...states: Array<Record<string, unknown> | { httpStatus: number; error?: string } | Error>) => {
+    let i = 0;
+    return vi.fn(async () => {
+      const s = states[Math.min(i++, states.length - 1)];
+      if (s instanceof Error) throw s;
+      if ("httpStatus" in s) return ok({ error: s.error ?? "boom" }, s.httpStatus as number);
+      return ok(s);
+    });
+  };
+  const slept: number[] = [];
+  const sleep = async (ms: number) => {
+    slept.push(ms);
+  };
+
+  it("onboard and non-dry rebuild settle; dry-run rebuild, list, offboard, reconfigure do not", () => {
+    const commands = bind();
+    expect(commands.settles("repo.onboard")).toBe(true);
+    expect(commands.settles("repo.rebuild")).toBe(true);
+    for (const id of ["repo.list", "repo.offboard", "repo.reconfigure", "repo.test", "repo.build"]) expect(commands.settles(id), id).toBe(false);
+  });
+
+  it("warm: polls /status every SETTLE_POLL_MS while `onboarding`, then reports warm as ok", async () => {
+    slept.length = 0;
+    const status = statusSequence({ state: "onboarding", reason: "", inFlight: 0 }, { state: "onboarding", reason: "", inFlight: 0 }, { state: "warm", reason: "", inFlight: 0 });
+    const c = { ...mockClient(), status };
+    const commands = bind({ admin: c, sleep, inspect: inspecting(PNPM_ROOT) });
+    const res = await commands.invoke("repo.onboard", { args: ["acme/api"] }, admin);
+    expect(res.ok).toBe(true);
+    const out = await commands.settle("repo.onboard", (res as { value: unknown }).value as never, admin);
+    expect(out).toEqual({ ok: true, text: "✅ `acme/api` is warm — provisioned and attach-ready." });
+    expect(status).toHaveBeenCalledTimes(3);
+    expect(status).toHaveBeenCalledWith("repo:acme/api");
+    expect(slept).toEqual([SETTLE_POLL_MS, SETTLE_POLL_MS]);
+  });
+
+  it("down: reports the resident's own reason and names the two commands that fix a bad table", async () => {
+    const reason = "provision-failed at install: exit 1: npm error code EOVERRIDE";
+    const c = { ...mockClient(), status: statusSequence({ state: "down", reason, inFlight: 0 }) };
+    const out = await settleProvisioning(depsOf({ admin: c, sleep }), "coreplanelabs/nominal");
+    expect(out).toEqual({
+      ok: false,
+      text: `❌ \`coreplanelabs/nominal\` failed to provision: ${reason}\nFix the command table with \`repo reconfigure coreplanelabs/nominal --install "…" --build "…" --test "…"\`, then \`repo rebuild coreplanelabs/nominal\`.`,
+    });
+  });
+
+  it("rebuild: a real rebuild settles like onboard; --dry-run has no follow-up", async () => {
+    const c = { ...mockClient(), status: statusSequence({ state: "warm", reason: "", inFlight: 0 }) };
+    const commands = bind({ admin: c, sleep });
+    const real = await commands.invoke("repo.rebuild", { args: ["acme/api"] }, admin);
+    expect(await commands.settle("repo.rebuild", (real as { value: unknown }).value as never, admin)).toEqual({ ok: true, text: "✅ `acme/api` is warm — provisioned and attach-ready." });
+    const dry = await commands.invoke("repo.rebuild", { args: ["acme/api"], options: { dryRun: true } }, admin);
+    expect(await commands.settle("repo.rebuild", (dry as { value: unknown }).value as never, admin)).toBeUndefined();
+    expect(c.status).toHaveBeenCalledTimes(1);
+  });
+
+  it("every other outcome is a sentence: offboarded mid-provision (404), a non-200, a transport throw, another state, the admin client gone", async () => {
+    const deps = (status: ReturnType<typeof statusSequence>) => depsOf({ admin: { ...mockClient(), status }, sleep });
+    expect(await settleProvisioning(deps(statusSequence({ httpStatus: 404, error: "not onboarded" })), "acme/api")).toEqual({ ok: false, text: "⚠️ `acme/api` is no longer onboarded — it was offboarded while provisioning." });
+    expect(await settleProvisioning(deps(statusSequence({ httpStatus: 500, error: "kaboom" })), "acme/api")).toEqual({ ok: false, text: "⚠️ Lost track of `acme/api`'s provisioning (HTTP 500: kaboom) — check `repo list`." });
+    expect(await settleProvisioning(deps(statusSequence(new Error("resident admin /status request failed (fetch failed)"))), "acme/api")).toEqual({
+      ok: false,
+      text: "⚠️ Lost track of `acme/api`'s provisioning (resident admin /status request failed (fetch failed)) — check `repo list`.",
+    });
+    expect(await settleProvisioning(deps(statusSequence({ state: "degraded", reason: "alarm-missed", inFlight: 0 })), "acme/api")).toEqual({ ok: true, text: "ℹ️ `acme/api` left `onboarding` and is `degraded` (alarm-missed)." });
+    expect(await settleProvisioning(depsOf({ admin: { unavailable: "Repo management needs the resident admin bearer — `RESIDENT_ADMIN_TOKEN` is not set." }, sleep }), "acme/api")).toEqual({
+      ok: false,
+      text: "⚠️ Cannot follow `acme/api`'s provisioning: Repo management needs the resident admin bearer — `RESIDENT_ADMIN_TOKEN` is not set.",
+    });
+  });
+
+  it("still onboarding at SETTLE_MAX_MS: reports that, bounded — never a silent drop, never an unbounded poll", async () => {
+    slept.length = 0;
+    const status = statusSequence({ state: "onboarding", reason: "", inFlight: 0 });
+    const out = await settleProvisioning(depsOf({ admin: { ...mockClient(), status }, sleep }), "acme/api");
+    expect(out.ok).toBe(false);
+    expect(out.text).toBe("⏳ `acme/api` is still onboarding after 12 min — provisioning is slow or stuck; `repo list` shows the live state, and the resident watchdog marks a stuck onboard `down` at its deadline.");
+    expect(status).toHaveBeenCalledTimes(SETTLE_MAX_MS / SETTLE_POLL_MS + 1);
+    expect(slept.reduce((a, b) => a + b, 0)).toBe(SETTLE_MAX_MS);
   });
 });
 
