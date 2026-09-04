@@ -4,7 +4,7 @@ import { nonceOfState } from "../mcp/oauth.js";
 import { MCP_TOKEN_MAX_CHARS, type McpServerView } from "../mcp/registry.js";
 import type { McpService } from "../mcp/service.js";
 import type { AccessIdentity } from "./accessAuth.js";
-import { WEB_HTML_HEADERS } from "./webShell.js";
+import { FORM_PAGE_CSP, WEB_HTML_HEADERS } from "./webShell.js";
 
 // The connect page (features/mcp-tools.md items 15 + 18): GET /mcp/connect/<nonce>
 // shows a one-field token form for a bearer server, or a "continue to <host>"
@@ -121,8 +121,19 @@ async function start(svc: McpService, nonce: string, identity: AccessIdentity, r
     if (result.refusal.kind === "oauth_failed" && result.server) return page(res, 502, "Sign-in could not start", `<p class="err">${esc(message)}</p><p>Nothing was stored.</p>${entryForm(result.server, nonce)}`);
     return page(res, statusFor(result.refusal.kind), "Connect link unavailable", `<p class="err">${esc(message)}</p>`);
   }
-  res.writeHead(303, { location: result.redirectUrl, "cache-control": "no-store" });
-  res.end();
+  // Not a 303: Chrome checks a redirect that follows a form post against
+  // `form-action`, and the authorization server is another origin. A page
+  // that forwards itself (meta refresh — outside CSP's form-action and
+  // script-src) with the same link visible is the cross-origin hop the
+  // policy allows, and it needs no script.
+  const host = hostOf(result.redirectUrl);
+  page(
+    res,
+    200,
+    `Continue to ${host}`,
+    `<p>Sending you to <strong>${esc(host)}</strong> to sign in. If nothing happens, <a href="${esc(result.redirectUrl)}">continue to ${esc(host)}</a>.</p>`,
+    `<meta http-equiv="refresh" content="0;url=${esc(result.redirectUrl)}">`,
+  );
 }
 
 /** OAuth: the browser is back. The service checks who/when/state and exchanges the code. */
@@ -248,12 +259,17 @@ function hostOf(url: string): string {
   }
 }
 
-function page(res: ServerResponse, status: number, title: string, body: string): void {
+/** The shared page headers with `form-action 'self'`: this is the one HTML
+ *  surface that posts a form, and the shell's `form-action 'none'` blocked it
+ *  (live, 2026-09-04). Every other directive is unchanged — no script runs. */
+const CONNECT_HTML_HEADERS: Record<string, string> = { ...WEB_HTML_HEADERS, "content-security-policy": FORM_PAGE_CSP };
+
+function page(res: ServerResponse, status: number, title: string, body: string, head = ""): void {
   const html =
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · Switchboard</title>` +
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${head}<title>${esc(title)} · Switchboard</title>` +
     `<style>body{font:15px system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#222}code{background:#f3f3f3;padding:.1em .3em;border-radius:3px}label{display:block;margin:1rem 0 .3rem;font-weight:600}input{width:100%;padding:.6rem;font-size:1rem;border:1px solid #bbb;border-radius:4px}button{margin-top:1rem;padding:.6rem 1.2rem;font-size:1rem;border-radius:4px;border:0;background:#1f6feb;color:#fff}.err{color:#b00020}.warn{color:#8a6d00}</style>` +
     `</head><body><h1>${esc(title)}</h1>${body}</body></html>`;
-  res.writeHead(status, WEB_HTML_HEADERS);
+  res.writeHead(status, CONNECT_HTML_HEADERS);
   res.end(html);
 }
 

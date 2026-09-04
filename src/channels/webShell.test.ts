@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderShell, WEB_HTML_HEADERS, type ShellAssets } from "./webShell.js";
+import { FORM_PAGE_CSP, PAGE_CSP, renderShell, WEB_HTML_HEADERS, type ShellAssets } from "./webShell.js";
 import { serializeSeed, SEED_ELEMENT_ID, type WebSeed } from "./webSeed.js";
 import { FAVICON_DEFAULT, FAVICON_IDLE } from "./favicon.js";
 
@@ -20,6 +20,13 @@ describe("WEB_HTML_HEADERS", () => {
     expect(csp).toContain("form-action 'none'");
     expect(WEB_HTML_HEADERS["x-frame-options"]).toBe("DENY");
     expect(WEB_HTML_HEADERS["cache-control"]).toBe("no-store");
+  });
+
+  it("FORM_PAGE_CSP (the MCP connect page) differs from the shell policy in exactly one directive: form-action 'self'", () => {
+    expect(FORM_PAGE_CSP).toBe(PAGE_CSP.replace("form-action 'none'", "form-action 'self'"));
+    expect(FORM_PAGE_CSP).toContain("form-action 'self'");
+    expect(FORM_PAGE_CSP).not.toContain("form-action 'none'");
+    expect(FORM_PAGE_CSP).toContain("script-src 'self'");
   });
 });
 
