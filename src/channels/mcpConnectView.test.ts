@@ -71,6 +71,13 @@ const post = (base: string, path: string, body: string, headers: Record<string, 
 
 const NONCE1 = "/mcp/connect/nonce-00000000000000000001";
 
+/** The authorization URL the forwarding page carries (the visible link; the meta refresh names the same one). */
+function authUrlOf(html: string): string {
+  const m = /<a href="([^"]+)">/.exec(html);
+  if (!m) throw new Error("forwarding page carries no link");
+  return m[1].replace(/&amp;/g, "&");
+}
+
 describe("connect route parsing", () => {
   it("matches only /mcp/connect/<nonce> with a plausible nonce; never the /mcp ingress", () => {
     expect(isConnectPath("/mcp")).toBe(false);
@@ -216,20 +223,26 @@ describe("OAuth on the connect page (item 18)", () => {
     }
   });
 
-  it("GET shows a sign-in button (no token field) for an oauth server; POST action=start answers 303 to the authorization server with PKCE + state; the ticket is `authorizing`", async () => {
+  it("GET shows a sign-in button (no token field) for an oauth server under a CSP that allows the same-origin post; POST action=start answers a page that forwards to the authorization server (meta refresh + a visible link, no script, never a redirect — Chrome checks those against form-action) with PKCE + state; the ticket is `authorizing`", async () => {
     const h = harness();
     await h.addOAuth();
     const { server, base } = await serve(h.handler);
     try {
       const page = await fetch(`${base}${NONCE1}`);
       expect(page.status).toBe(200);
+      expect(page.headers.get("content-security-policy")).toContain("form-action 'self'");
+      expect(page.headers.get("content-security-policy")).toContain("script-src 'self'");
       const html = await page.text();
       expect(html).toContain("Continue to mcp.vanta.com");
       expect(html).toContain('name="action" value="start"');
       expect(html).not.toContain('name="token"');
       const started = await post(base, NONCE1, "action=start");
-      expect(started.status).toBe(303);
-      const location = new URL(started.headers.get("location") as string);
+      expect(started.status).toBe(200);
+      expect(started.headers.get("location")).toBeNull();
+      const forward = await started.text();
+      expect(forward).toContain('<meta http-equiv="refresh" content="0;url=https://as.example.com/oauth/authorize?');
+      expect(forward).not.toContain("<script");
+      const location = new URL(authUrlOf(forward));
       expect(location.origin + location.pathname).toBe("https://as.example.com/oauth/authorize");
       expect(location.searchParams.get("code_challenge_method")).toBe("S256");
       expect(location.searchParams.get("redirect_uri")).toBe("https://switchboard.test/mcp/oauth/callback");
@@ -249,7 +262,7 @@ describe("OAuth on the connect page (item 18)", () => {
     const { server, base } = await serve(h.handler);
     try {
       const started = await post(base, NONCE1, "action=start");
-      const auth = started.headers.get("location") as string;
+      const auth = authUrlOf(await started.text());
       const state = new URL(auth).searchParams.get("state") as string;
       const code = h.as.issueCode(auth);
       const done = await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(state)}&code=${code}`);
@@ -271,7 +284,7 @@ describe("OAuth on the connect page (item 18)", () => {
     const { server, base } = await serve(h.handler);
     try {
       const started = await post(base, NONCE1, "action=start");
-      const auth = started.headers.get("location") as string;
+      const auth = authUrlOf(await started.text());
       const state = new URL(auth).searchParams.get("state") as string;
       const nonce = "nonce-00000000000000000001";
       expect((await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(state)}&code=c`, { headers: { "x-test-sub": "cf-other", "x-test-email": "other@else.example" } })).status).toBe(403);
@@ -287,7 +300,7 @@ describe("OAuth on the connect page (item 18)", () => {
       expect(await h.secrets.getCredential(KEY_ID)).toBeNull();
       // The link still opens: the person can start again.
       expect((await fetch(`${base}${NONCE1}`)).status).toBe(200);
-      expect((await post(base, NONCE1, "action=start")).status).toBe(303);
+      expect((await post(base, NONCE1, "action=start")).status).toBe(200);
     } finally {
       server.close();
     }

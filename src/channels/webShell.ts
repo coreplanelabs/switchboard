@@ -13,8 +13,12 @@ import { serializeSeed, SEED_ELEMENT_ID, type WebSeed } from "./webSeed.js";
  *  does not govern), styles are the built stylesheet plus inline style
  *  attributes (Reka UI positions floating elements that way), same-origin
  *  connections only (the SSE streams), and no framing. */
-const PAGE_CSP =
+export const PAGE_CSP =
   "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/** The same policy for a page that carries a same-origin form (the MCP connect
+ *  page): `form-action 'self'` — a post anywhere else is still blocked. */
+export const FORM_PAGE_CSP = PAGE_CSP.replace("form-action 'none'", "form-action 'self'");
 
 /** Response headers shared by every HTML surface: the strict CSP, both
  *  clickjacking defenses, and `no-store` so no proxy or browser caches a page
