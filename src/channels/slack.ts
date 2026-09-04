@@ -716,9 +716,9 @@ export class SlackIO implements ChannelIO {
     await this.post(mdToMrkdwn(text));
   }
 
-  /** Long command output as a snippet in the thread: Slack renders an uploaded
-   *  text file as a collapsed preview with an expand control — one message
-   *  instead of a run of 3500-char chunks. Needs the `files:write` scope; a
+  /** Long command output as a file in the thread: Slack renders an uploaded
+   *  `.md` as formatted Markdown in a collapsed preview with an expand control
+   *  — one message instead of a run of 3500-char chunks. Needs the `files:write` scope; a
    *  failed upload (scope missing, API error) falls back to the chunked reply
    *  so the output always arrives. */
   async attach(file: { name: string; text: string; lead: string }): Promise<void> {
