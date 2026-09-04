@@ -1,7 +1,7 @@
 import type { ConfigStore } from "../config.js";
 import { resolveChatActor } from "./authz/actor.js";
 import { renderText, type Caller, type CommandInput, type CommandInvoker, type CommandSurfaces, type InvokeErrorCode, type SettledOutcome } from "./commandRegistry.js";
-import { catalogueText, chatForm, commandsInGroup, helpText, parseInvocation, tokenize, type CommandShape, type GrammarRejection } from "./commandSurface.js";
+import { chatCatalogueText, chatForm, chatHelpText, commandsInGroup, parseInvocation, tokenize, type CommandShape, type GrammarRejection } from "./commandSurface.js";
 import type { IncomingMessage } from "./types.js";
 
 // The chat adapter for the command registry (#157 U13 — R7, KTD18, KTD19,
@@ -86,7 +86,7 @@ export function parseChatCommand(rawText: string, catalog: ChatCommandCatalog): 
   if (verb === "help") {
     const inGroup = commandsInGroup(exposed, group);
     if (inGroup.length === 0) return null;
-    return { kind: "reply", text: `${group} commands:\n${catalogueText(inGroup)}` };
+    return { kind: "reply", text: `*${group} commands*\n${chatCatalogueText(inGroup)}` };
   }
   const id = `${group}.${verb}`;
   const cmd = exposed.find((c) => c.id === id);
@@ -99,7 +99,7 @@ export function parseChatCommand(rawText: string, catalog: ChatCommandCatalog): 
   const bound = parseInvocation(cmd, tokens.tokens.slice(2));
   switch (bound.kind) {
     case "help":
-      return { kind: "reply", text: helpText(cmd) };
+      return { kind: "reply", text: chatHelpText(cmd) };
     case "invalid":
       return rejected(bound.error);
     case "invoke":

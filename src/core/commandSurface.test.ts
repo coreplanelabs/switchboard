@@ -4,6 +4,8 @@ import { commandDefiner, flag } from "./commandRegistry.js";
 import {
   camelToKebab,
   catalogueText,
+  chatCatalogueText,
+  chatHelpText,
   cliFlag,
   helpText,
   httpPath,
@@ -216,5 +218,30 @@ describe("help", () => {
 
   it("catalogueText is one aligned line per command", () => {
     expect(catalogueText([stop, propose]).split("\n")).toEqual(["  runs stop         — Stop a live run.", "  friction propose  — File proposals."]);
+  });
+
+  // Chat renders in a proportional font (Slack): padded columns collapse into
+  // ragged runs of spaces, so the chat shapes use bullets and code spans instead.
+  it("chatCatalogueText is one bullet per command, the form in a code span, no column padding", () => {
+    expect(chatCatalogueText([stop, propose]).split("\n")).toEqual(["• `runs stop` — Stop a live run.", "• `friction propose` — File proposals."]);
+    expect(chatCatalogueText([])).toBe("");
+  });
+
+  it("chatHelpText: description, usage in a code span, one bullet per argument and option, no column padding", () => {
+    expect(chatHelpText(stop).split("\n")).toEqual([
+      "Stop a live run.",
+      "usage: `runs stop <id> --mode <soft|hard>`",
+      "*arguments*",
+      "• `<id>` — run id",
+      "*options*",
+      "• `--mode <soft|hard>` — soft = finish the step; hard = abort (required)",
+    ]);
+    expect(chatHelpText(propose)).toContain("• `--dry-run` — file nothing");
+    expect(chatHelpText(propose)).not.toContain("*arguments*");
+    expect(chatHelpText(instructions)).toContain("• `<text>` — the instructions (omit to show) (optional)");
+    // An option without a description still gets a bullet, with no dangling dash.
+    const bare = define({ id: "x.y", options: z.object({ quiet: flag.optional() }), action: "x:read", effect: "read", describe: "x", handler: async () => ({}) });
+    expect(chatHelpText(bare)).toContain("• `--quiet`");
+    expect(chatHelpText(bare)).not.toMatch(/—\s*$/m);
   });
 });

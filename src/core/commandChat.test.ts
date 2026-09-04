@@ -186,14 +186,14 @@ describe("parseChatCommand", () => {
     expect(parseChatCommand("demo echo --help", registry)).not.toHaveProperty("error");
   });
 
-  it("help is derived: `<group> <verb> --help` gives the command's help, `<group> help` lists the group's chat commands", () => {
+  it("help is derived and chat-shaped: `<group> <verb> --help` gives the command's help, `<group> help` lists the group's chat commands — bullets and code spans, never padded columns", () => {
     expect(parseChatCommand("demo echo --help", registry)).toEqual({
       kind: "reply",
-      text: ["echoes its parsed options", "usage: demo echo --status <active|finished|all> [--limit <integer>]", "options:", "  --status <active|finished|all>  which (required)", "  --limit <integer>               how many"].join("\n"),
+      text: ["echoes its parsed options", "usage: `demo echo --status <active|finished|all> [--limit <integer>]`", "*options*", "• `--status <active|finished|all>` — which (required)", "• `--limit <integer>` — how many"].join("\n"),
     });
     const group = parseChatCommand("demo help", registry);
-    expect(group).toMatchObject({ kind: "reply", text: expect.stringMatching(/^demo commands:\n/) });
-    expect((group as { text: string }).text).toContain("demo echo");
+    expect(group).toMatchObject({ kind: "reply", text: expect.stringMatching(/^\*demo commands\*\n• `demo echo` — /) });
+    expect((group as { text: string }).text).not.toMatch(/ {2,}/);
     expect((group as { text: string }).text).not.toContain("demo hidden");
     expect(parseChatCommand("nothing help", registry)).toBeNull();
   });
@@ -295,7 +295,7 @@ describe("handleChatCommand", () => {
     const { commands, deps, config } = setup();
     expect(await run(commands, config, "demo missing x", "slack:UADMIN")).toBe("⚠️ `demo missing`: thing not found");
     expect(await run(commands, config, "demo echo please", "slack:UX")).toContain("takes no arguments");
-    expect(await run(commands, config, "demo echo --help", "slack:UX")).toContain("usage: demo echo");
+    expect(await run(commands, config, "demo echo --help", "slack:UX")).toContain("usage: `demo echo");
     const rejected = await invokeChatCommand({ commands, parsed: parseChatCommand("demo echo please", commands)!, msg: msg("demo echo please", "slack:UX"), config });
     expect(rejected).toMatchObject({ ok: false, error: "invalid_input", text: expect.stringContaining("takes no arguments") });
     const help = await invokeChatCommand({ commands, parsed: parseChatCommand("demo echo --help", commands)!, msg: msg("demo echo --help", "slack:UX"), config });
