@@ -4,6 +4,8 @@ Switchboard is a Slack bot — and a CLI, and an HTTP/MCP surface — that runs 
 
 It's organized by [the Diataxis framework](https://diataxis.fr): four kinds of writing, because "documentation" is really four different jobs that shouldn't be mixed into one page.
 
+You can read this tree here on GitHub or as a site — [docs.switchboard.coreplanelabs.dev](https://docs.switchboard.coreplanelabs.dev), also reachable at `/docs` on the dashboard and from the docs icon in its header. Same markdown, same links: the site is compiled from these files on every push, with search, diagrams, and dark mode.
+
 | Kind | Answers | When you reach for it |
 |---|---|---|
 | **[Tutorials](tutorials/)** | "Walk me through it" | You're new — you want a working result, not a decision |
@@ -55,6 +57,6 @@ It's organized by [the Diataxis framework](https://diataxis.fr): four kinds of w
 
 ## Where the ground truth lives
 
-This tree explains and orients. It is not the contract. [`features/`](../features/README.md) is the versioned behavioral contract — one file per feature, every criterion backed by a named test or explicit agent-runnable instructions, updated in the same PR as any behavior change. When something here and a feature file disagree, the feature file is right — and that disagreement is a docs bug worth filing.
+This tree explains and orients. It is not the contract. [`features/`](https://github.com/coreplanelabs/switchboard/blob/main/features/README.md) is the versioned behavioral contract — one file per feature, every criterion backed by a named test or explicit agent-runnable instructions, updated in the same PR as any behavior change. When something here and a feature file disagree, the feature file is right — and that disagreement is a docs bug worth filing.
 
-The root [`README.md`](../README.md) and [`AGENTS.md`](../AGENTS.md) serve a different reader: an engineer or a coding agent working *on* Switchboard's own codebase — architecture internals, the deploy runbook in full, invariants that must not break. Read this tree to understand and use Switchboard; read those to change it.
+The root [`README.md`](https://github.com/coreplanelabs/switchboard/blob/main/README.md) and [`AGENTS.md`](https://github.com/coreplanelabs/switchboard/blob/main/AGENTS.md) serve a different reader: an engineer or a coding agent working *on* Switchboard's own codebase — architecture internals, the deploy runbook in full, invariants that must not break. Read this tree to understand and use Switchboard; read those to change it.

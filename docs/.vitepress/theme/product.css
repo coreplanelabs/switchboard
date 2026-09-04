@@ -1,0 +1,54 @@
+/*
+ * The docs wear the product's accent, so moving between the dashboard and the
+ * docs doesn't feel like moving between two products: green — the same green
+ * the live-run dot uses (src/channels/favicon.ts) and the dashboard's Nuxt UI
+ * primary. Everything else is VitePress's default theme, untouched.
+ */
+:root {
+  --vp-c-brand-1: #1f883d;
+  --vp-c-brand-2: #2ea043;
+  --vp-c-brand-3: #3fb950;
+  --vp-c-brand-soft: rgba(46, 160, 67, 0.14);
+}
+
+.dark {
+  /* Dark needs the lighter end of the ramp to clear the contrast floor. */
+  --vp-c-brand-1: #3fb950;
+  --vp-c-brand-2: #2ea043;
+  --vp-c-brand-3: #238636;
+  --vp-c-brand-soft: rgba(46, 160, 67, 0.16);
+}
+
+/* Reference pages are wide tables of commands and flags, and the default 688px
+ * column wraps a usage line four times. 56rem still keeps prose inside a
+ * comfortable measure. (Specificity, not just source order, so it wins over
+ * the default theme's own rule.) */
+@media (min-width: 960px) {
+  .VPDoc.has-aside .container .content-container {
+    max-width: 56rem;
+  }
+}
+
+/* A table wider than the column scrolls itself — the page never does. */
+.vp-doc div:has(> table) {
+  overflow-x: auto;
+}
+
+/* Mermaid diagrams: centred, and never wider than the column. */
+.mermaid {
+  margin: 1.5rem auto;
+  text-align: center;
+}
+
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* A label lives in a foreignObject, which CLIPS what overflows it. If a label
+ * ever measures short (a font that arrives late, a zoom level), the last line
+ * of a node would silently disappear — a diagram that lies. Overflowing the
+ * box is the better failure. */
+.mermaid foreignObject {
+  overflow: visible;
+}

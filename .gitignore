@@ -8,3 +8,7 @@ config/config.yaml
 node_modules
 build.json
 .DS_Store
+
+# The docs site is built in place (docs/.vitepress/dist is covered by dist/
+# above); its dev-server cache is not.
+.vitepress/cache
