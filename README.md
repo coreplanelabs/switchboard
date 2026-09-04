@@ -13,7 +13,7 @@ Every boundary is a swappable seam, same pattern at each one:
 
 The **core dispatcher** (`src/core/dispatcher.ts`) is the only place orchestration lives: config commands, directive parsing, layered resolution, permission gates, history assembly, the agent run. Channels are pure transports; the dispatcher never imports a platform SDK.
 
-Behavioral expectations live in [`features/`](features/README.md) — one spec per feature with validation criteria (unit tests or agent-runnable instructions), updated in the same PR as any behavior change, so every git SHA carries the criteria that describe it. Human-first architecture tours with diagrams live in [`docs/`](docs/) — start with [how Switchboard improves itself](docs/self-improvement-architecture.md).
+Behavioral expectations live in [`features/`](features/README.md) — one spec per feature with validation criteria (unit tests or agent-runnable instructions), updated in the same PR as any behavior change, so every git SHA carries the criteria that describe it. This README is the engineering reference (architecture, deploy runbooks, setup); **for the human-facing docs — tutorials, how-to guides, reference, and explanation, organized per [Diataxis](https://diataxis.fr) — start at [`docs/README.md`](docs/README.md).**
 
 - **How does it stack up against Claude in Slack?** See the [Switchboard-vs-Claude-Tag parity report (issue #81)](https://github.com/coreplanelabs/switchboard/issues/81) — a measured, receipt-linked side-by-side (same prompts, both bots, per-test metrics), not an asserted comparison.
 
