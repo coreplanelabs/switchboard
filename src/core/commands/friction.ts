@@ -54,22 +54,24 @@ const repoSlug = z.string().refine((s) => /^[\w.-]+\/[\w.-]+$/.test(s), "expecte
 export const NO_LEDGER_MESSAGE = "The friction ledger isn't wired in this process, so there are no recent runs to analyze.";
 export const NO_REPO_MESSAGE = "Set `selfImprovement.repo` (an `owner/name`) in config.yaml to tell `friction propose` where to file issues.";
 
-/** The ledger, or undefined; an accessor that throws (the run store's config
- *  could not be opened) is the ledger being unavailable, named. */
-async function ledgerOf(deps: FrictionCommandDeps): Promise<FrictionLedger | undefined> {
+/** The ledger, resolved ONCE per invocation. No ledger, or an accessor that
+ *  throws (the run store's config could not be opened), is `unavailable` — the
+ *  message names the cause. */
+async function ledgerOf(deps: FrictionCommandDeps): Promise<FrictionLedger> {
+  let ledger: FrictionLedger | undefined;
   try {
-    return await deps.friction.ledger();
+    ledger = await deps.friction.ledger();
   } catch (err) {
     throw new CommandError("unavailable", err instanceof Error ? err.message : String(err));
   }
+  if (!ledger) throw new CommandError("unavailable", NO_LEDGER_MESSAGE);
+  return ledger;
 }
 
-/** The ledger's recent records. No ledger, or a ledger that cannot be read
- *  (the run store is down), is `unavailable` — the message names the cause, as
- *  the chat command has always shown it — never a masked `internal`. */
-async function recentRecords(deps: FrictionCommandDeps, query: Parameters<FrictionLedger["recent"]>[0]): Promise<FrictionRunRecord[]> {
-  const ledger = await ledgerOf(deps);
-  if (!ledger) throw new CommandError("unavailable", NO_LEDGER_MESSAGE);
+/** The ledger's recent records. A ledger that cannot be read (the run store is
+ *  down) is `unavailable` — the message names the cause, as the chat command
+ *  has always shown it — never a masked `internal`. */
+async function recentRecords(ledger: FrictionLedger, query: Parameters<FrictionLedger["recent"]>[0]): Promise<FrictionRunRecord[]> {
   try {
     return await ledger.recent(query);
   } catch (err) {
@@ -93,7 +95,7 @@ export const frictionReport = defineCommand({
   describe: "Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.",
   render,
   handler: async ({ options, caller, deps }) => {
-    const records = await recentRecords(deps, { sinceMs: options.sinceMs, limit: options.limit, channel: caller.channel });
+    const records = await recentRecords(await ledgerOf(deps), { sinceMs: options.sinceMs, limit: options.limit, channel: caller.channel });
     return asJson({
       runsAnalyzed: records.length,
       patterns: clusterFriction(records, { minRuns: options.minRuns ?? (await deps.friction.config())?.minRuns }),
@@ -121,14 +123,14 @@ export const frictionPropose = defineCommand({
   describe: "Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.",
   render,
   handler: async ({ options, caller, deps }) => {
-    if (!(await ledgerOf(deps))) throw new CommandError("unavailable", NO_LEDGER_MESSAGE);
+    const ledger = await ledgerOf(deps);
     const cfg = await deps.friction.config();
     const repo = options.repo ?? cfg?.repo;
     if (!repo) throw new CommandError("unavailable", NO_REPO_MESSAGE);
     try {
       return asJson(
         await runSelfImprovement({
-          records: await recentRecords(deps, { channel: caller.channel }),
+          records: await recentRecords(ledger, { channel: caller.channel }),
           tracker: deps.friction.tracker ?? new GithubIssueTracker(),
           repo,
           label: cfg?.label,

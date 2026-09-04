@@ -125,8 +125,9 @@ export const runsEvents = defineCommand({
   surfaces: { chat: false },
   describe: "A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content.",
   handler: async ({ args, options, caller, deps }) => {
-    await assertVisible(await deps.runs(), args.id, caller);
-    const page = unwrap(await (await deps.runs()).getRunEvents(args.id, { afterSeq: options.afterSeq, limit: options.limit }));
+    const runs = await deps.runs();
+    await assertVisible(runs, args.id, caller);
+    const page = unwrap(await runs.getRunEvents(args.id, { afterSeq: options.afterSeq, limit: options.limit }));
     return asJson({ ...page, events: page.events.map(wrapEvent) });
   },
 });
@@ -140,8 +141,9 @@ export const runsFriction = defineCommand({
   surfaces: { chat: false },
   describe: "One run's friction diagnosis (live: computed now; persisted: as stored).",
   handler: async ({ args, caller, deps }) => {
-    await assertVisible(await deps.runs(), args.id, caller);
-    return asJson(unwrap(await (await deps.runs()).getRunFriction(args.id)));
+    const runs = await deps.runs();
+    await assertVisible(runs, args.id, caller);
+    return asJson(unwrap(await runs.getRunFriction(args.id)));
   },
 });
 
@@ -154,8 +156,9 @@ export const runsStop = defineCommand({
   effect: "write",
   describe: "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor.",
   handler: async ({ args, options, caller, deps }) => {
-    await assertVisible(await deps.runs(), args.id, caller);
-    return asJson(unwrap(await (await deps.runs()).stopRun(args.id, options.mode, { kind: caller.kind, id: caller.id })));
+    const runs = await deps.runs();
+    await assertVisible(runs, args.id, caller);
+    return asJson(unwrap(await runs.stopRun(args.id, options.mode, { kind: caller.kind, id: caller.id })));
   },
 });
 

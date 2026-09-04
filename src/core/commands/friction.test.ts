@@ -209,6 +209,21 @@ describe("friction.propose", () => {
     const commands = bindCommands(registry, { friction: { ledger: ledgerDep(await seededLedger()), tracker, config: async () => CONFIG, readSource: async () => "" } });
     expect(await commands.invoke("friction.propose", {}, mcp("friction:write"))).toMatchObject({ ok: false, error: "unavailable", message: "GitHub App credentials missing" });
   });
+
+  it("`report` and `propose` each resolve the ledger accessor exactly once per invocation (#409, F2)", async () => {
+    const ledger = await seededLedger();
+    let resolved = 0;
+    const { commands } = bind({
+      ledger: async () => {
+        resolved++;
+        return ledger;
+      },
+    });
+    expect((await commands.invoke("friction.report", {}, mcp("friction:read"))).ok).toBe(true);
+    expect(resolved).toBe(1);
+    expect((await commands.invoke("friction.propose", { options: { dryRun: "true" } }, mcp("friction:write"))).ok).toBe(true);
+    expect(resolved).toBe(2);
+  });
 });
 
 describe("scopes on machine surfaces (AE12)", () => {
