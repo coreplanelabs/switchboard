@@ -62,6 +62,7 @@ import type { IssueTracker } from "../execution/githubIssues.js";
 import { RestGithubApi, type GithubApi } from "../execution/githubApi.js";
 import type { GithubCapability } from "../tools/github.js";
 import { invokeChatCommand, parseChatCommand, type ChatCommandResult, type ChatCommands, type ParsedChatCommand } from "./commandChat.js";
+import { toMarkdownDocument } from "./markdownDocument.js";
 import { cliWords } from "./commandSurface.js";
 import { activityOfEvents, defaultRunRegistry, type RunHandle, type RunRegistry, type RunSnapshot, type RunSummary } from "./runRegistry.js";
 import { coalesceStatus } from "./statusCoalescer.js";
@@ -1696,8 +1697,10 @@ async function runChatCommand(deps: CoreDeps, msg: IncomingMessage, io: ChannelI
  */
 /** A command reply longer than one chat message can hold (a 100-tool `mcp
  *  show`) goes out as an attachment where the channel has one: the first line
- *  as the message, the whole text as a file named after the command. Channels
- *  without `attach` — and an attach that fails — reply the text as before. */
+ *  as the message, the whole text as a Markdown document named after the
+ *  command (`toMarkdownDocument` — Slack renders a `.md` upload as CommonMark,
+ *  which reads the chat dialect differently). Channels without `attach` — and
+ *  an attach that fails — reply the text as before. */
 export const LONG_COMMAND_REPLY_CHARS = 3_000;
 
 export async function replyCommandOutput(io: ChannelIO, parsed: ParsedChatCommand, text: string): Promise<void> {
@@ -1705,7 +1708,7 @@ export async function replyCommandOutput(io: ChannelIO, parsed: ParsedChatComman
   const nl = text.indexOf("\n");
   const lead = nl === -1 ? text : text.slice(0, nl);
   const name = parsed.kind === "invoke" ? cliWords(parsed.id).join("-") : "command";
-  await io.attach({ name: `${name}.txt`, text, lead: `${lead}\n_(full output attached — ${text.length.toLocaleString("en-US")} chars)_` });
+  await io.attach({ name: `${name}.md`, text: toMarkdownDocument(text), lead: `${lead}\n_(full output attached — ${text.length.toLocaleString("en-US")} chars)_` });
 }
 
 function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined>, io: ChannelIO): void {
