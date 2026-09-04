@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { openConfigStore } from "./config.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { createSlackApp } from "./channels/slack.js";
+import { SlackChannelDirectory } from "./channels/slackChannelDirectory.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
 import { join } from "node:path";
@@ -184,6 +185,12 @@ async function main() {
   deps.commands = commands;
   // --- end command registry ---
   const { app } = createSlackApp(deps);
+  // Channel facts for the run stamp (authorization.md item 7, plan U5): with
+  // the Slack adapter up, `conversations.info` decides whether a `slack:C…`
+  // channel is public or private — cached per channel per TTL, `unknown` on any
+  // failure — so a public channel's runs are readable by everyone and a private
+  // channel's or DM's stay grants-only. Non-Slack ids keep the static answer.
+  deps.channelDirectory = new SlackChannelDirectory(app.client);
   // Connect tickets bind to the requester's email when Slack can tell us
   // (`users:read.email`); without the scope the lookup yields undefined and the
   // ticket binds to the first Access identity that opens it instead.

@@ -1,9 +1,11 @@
 import { z } from "zod";
 import type { Provider } from "../../providers/types.js";
+import { authorize } from "../authz/index.js";
+import type { Actor, ChannelVisibility, Resource } from "../authz/types.js";
 import { redactSecrets } from "../runEvents.js";
 import { jsonOutput } from "../llmOutput/index.js";
 import type { HistoryItem } from "../types.js";
-import type { MemoryCandidate, MemoryRecord, MemoryStore } from "./types.js";
+import type { MemoryCandidate, MemoryRecord, MemoryScope, MemoryStore } from "./types.js";
 import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
 
 // Cross-session memory WRITE path (Area 7c, #85, PR2): the post-run reflection
@@ -22,6 +24,14 @@ import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
 // knowledge. Each fact is written to its audience's scope when the run has it
 // (else org); the summary follows the narrowest scope that got a fact — user >
 // repo > channel > org (#205). Still ONE extractor call per run.
+//
+// Write gate (authorization R11, features/authorization.md item 8): the
+// audience is a HINT the policy may narrow, never widen. Every candidate's
+// write is `authorize(runActor, "memory:write", memory-scope{kind, key,
+// originChannelVisibility})`; a fact whose run originated in a private, DM, or
+// unknown channel has no `org` row and is narrowed to the origin's own
+// audience — the user's scope for a DM, the channel's for a private channel —
+// never dropped silently. Reads (`memoryContextBlock`) are untouched.
 
 /** Toolless threads shorter than this many prior turns are not worth an
  *  extractor call (a one-shot Q&A rarely yields a durable fact). */
@@ -219,6 +229,26 @@ function parseKeywords(v: unknown): string[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
+/** The actor reflection writes as: the run's principal holding the run's own
+ *  channel and repo as memberships. Both are facts the dispatcher established
+ *  before the run (the adapter delivered the message from that channel; the
+ *  repo gate admitted that repo), stated here on the membership axis so the
+ *  table's `member-of` / `owner-of` rows recognize the run's own scopes and the
+ *  one open question left to the policy is R11's — may THIS origin write the
+ *  shared org scope. No action is added; `"all"` is left alone; the principal
+ *  is not mutated. */
+export function reflectionActor(principal: Actor, run: { channelId?: string; repo?: string }): Actor {
+  const { channels, repos } = principal.grants;
+  return {
+    ...principal,
+    grants: {
+      actions: principal.grants.actions,
+      channels: channels === "all" || run.channelId === undefined ? channels : new Set([...channels, run.channelId]),
+      repos: repos === "all" || run.repo === undefined ? repos : new Set([...repos, run.repo]),
+    },
+  };
+}
+
 export interface ReflectDeps extends ReflectionProvenance {
   provider: Provider;
   /** Bare model id (provider prefix already stripped) — resolved by the caller
@@ -228,23 +258,83 @@ export interface ReflectDeps extends ReflectionProvenance {
   /** The run's scopes: the org's, plus the repo's / channel's / the requesting
    *  user's own when the run has them. */
   scopeKeys: RequestScopeKeys;
+  /** Who the writes are decided for (authorization.md item 8): the run's
+   *  principal as `reflectionActor` prepares it. */
+  actor: Actor;
+  /** The run's stamped `channelVisibility` (KTD7) — the origin every write is
+   *  decided under. Absent → `unknown`: an unstamped run never writes org (R7). */
+  originChannelVisibility?: ChannelVisibility;
   history: HistoryItem[];
   request: string;
   answer: string;
   onWarn?: (message: string) => void;
 }
 
-/** Which scope a routed candidate lands in: a supersede follows the record it
+/** One of the run's scopes, by kind and key. */
+interface ScopeTarget {
+  kind: MemoryScope;
+  key: string;
+}
+
+const SCOPE_KINDS: readonly MemoryScope[] = ["org", "user", "repo", "channel"];
+
+/** Which of the run's scopes a key names; `undefined` for a key the run does not have. */
+function kindOfKey(keys: RequestScopeKeys, key: string): MemoryScope | undefined {
+  return SCOPE_KINDS.find((kind) => keys[kind] === key);
+}
+
+/** Which scope the extractor's routing puts a candidate in — the HINT the
+ *  policy then decides on (`placeCandidate`): a supersede follows the record it
  *  corrects (the id was validated against the shown records, whose scopes we
  *  know); otherwise the audience's scope when the run has it (`user` → the
  *  requester's own, `repo` → the bound repo's, `channel` → the message's), and
  *  org for everything else. An audience whose scope this run lacks falls back
  *  to org rather than being dropped. */
-function routeCandidate(cand: RoutedCandidate, keys: RequestScopeKeys, scopeOf: Map<string, string>): string {
+function routeCandidate(cand: RoutedCandidate, keys: RequestScopeKeys, scopeOf: Map<string, string>): ScopeTarget {
   const superseded = cand.supersedes ? scopeOf.get(cand.supersedes) : undefined;
-  if (superseded) return superseded;
-  if (cand.audience === "org") return keys.org;
-  return keys[cand.audience] ?? keys.org;
+  if (superseded !== undefined) {
+    const kind = kindOfKey(keys, superseded);
+    if (kind) return { kind, key: superseded };
+  }
+  const own = cand.audience === "org" ? undefined : keys[cand.audience];
+  return own === undefined ? { kind: "org", key: keys.org } : { kind: cand.audience, key: own };
+}
+
+/** Where a denied `org` write may go instead, narrowest-faithful first
+ *  (authorization.md item 8): a DM is one person's conversation with the bot,
+ *  so its facts are that person's (`user`); a private (or unknown) channel's
+ *  audience is exactly its participants (`channel`). The other follows when
+ *  the run lacks the first. `repo` is never a target — a repo scope is read
+ *  from every channel the repo is used in, wider than the origin. */
+function narrowingOrder(origin: ChannelVisibility): readonly ("user" | "channel")[] {
+  return origin === "dm" ? ["user", "channel"] : ["channel", "user"];
+}
+
+function scopeResource(target: ScopeTarget, origin: ChannelVisibility): Resource {
+  return { type: "memory-scope", kind: target.kind, key: target.key, originChannelVisibility: origin };
+}
+
+type Placement =
+  | { kind: "write"; target: ScopeTarget; narrowed?: { from: MemoryScope; reason: string } }
+  | { kind: "drop"; from: MemoryScope; reason: string };
+
+/** The policy's decision on one candidate (R11): its routed scope when the
+ *  table allows the write; a denied `org` write narrows down `narrowingOrder`
+ *  to the first scope the run has AND the table allows; any other denial, or
+ *  no allowed narrower scope, drops the candidate — never a wider scope, never
+ *  silently (the caller logs the reason token). */
+function placeCandidate(cand: RoutedCandidate, actor: Actor, origin: ChannelVisibility, keys: RequestScopeKeys, scopeOf: Map<string, string>): Placement {
+  const routed = routeCandidate(cand, keys, scopeOf);
+  const decision = authorize(actor, "memory:write", scopeResource(routed, origin));
+  if (decision.allow) return { kind: "write", target: routed };
+  if (routed.kind !== "org") return { kind: "drop", from: routed.kind, reason: decision.reason };
+  for (const kind of narrowingOrder(origin)) {
+    const key = keys[kind];
+    if (key !== undefined && authorize(actor, "memory:write", scopeResource({ kind, key }, origin)).allow) {
+      return { kind: "write", target: { kind, key }, narrowed: { from: routed.kind, reason: decision.reason } };
+    }
+  }
+  return { kind: "drop", from: routed.kind, reason: decision.reason };
 }
 
 /** One extractor call → validate → `store.write` per scope. Never throws and
@@ -278,14 +368,34 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
     }
     if (parsed.candidates.length === 0) return;
     const scopeOf = new Map(existing.map((r) => [r.id, r.scopeKey]));
+    const origin = deps.originChannelVisibility ?? "unknown";
     const byScope = new Map<string, MemoryCandidate[]>();
+    // Policy outcomes are logged as counts of reason tokens — never a fact's text.
+    const narrowed = new Map<string, number>();
+    const dropped: string[] = [];
     for (const cand of parsed.candidates) {
       const { audience: _audience, ...plain } = cand;
-      const scopeKey = routeCandidate(cand, deps.scopeKeys, scopeOf);
-      let batch = byScope.get(scopeKey);
-      if (!batch) byScope.set(scopeKey, (batch = []));
-      batch.push(plain);
+      const placement = placeCandidate(cand, deps.actor, origin, deps.scopeKeys, scopeOf);
+      if (placement.kind === "drop") {
+        dropped.push(`${placement.from} (${placement.reason})`);
+        continue;
+      }
+      let record: MemoryCandidate = plain;
+      if (placement.narrowed) {
+        // A correction cannot follow its target into a scope the origin may
+        // not write: the superseded record stands and the narrowed record is a
+        // plain insert into the narrower scope.
+        const { supersedes: _supersedes, ...withoutSupersede } = record;
+        record = withoutSupersede;
+        const line = `${placement.narrowed.from} → ${placement.target.kind} (${placement.narrowed.reason})`;
+        narrowed.set(line, (narrowed.get(line) ?? 0) + 1);
+      }
+      let batch = byScope.get(placement.target.key);
+      if (!batch) byScope.set(placement.target.key, (batch = []));
+      batch.push(record);
     }
+    if (narrowed.size > 0) warn(`write narrowed by policy: ${[...narrowed].map(([line, n]) => `${n}× ${line}`).join(", ")}`);
+    if (dropped.length > 0) warn(`write denied by policy, ${dropped.length} candidate(s) dropped: ${dropped.join(", ")}`);
     for (const [scopeKey, records] of byScope) await deps.store.write(scopeKey, records);
   } catch (err) {
     warn(`reflection failed: ${err instanceof Error ? err.message : String(err)}`);

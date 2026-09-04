@@ -1,7 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { Provider } from "../../providers/types.js";
+import { authorize } from "../authz/index.js";
 import type { MemoryRecord } from "./types.js";
 import { InMemoryMemoryStore, NullMemoryStore } from "./stores.js";
-import { memoryContextBlock } from "./index.js";
+import { memoryContextBlock, reflect } from "./index.js";
+
+// The one authorization entry point, spied so the read-path test below can
+// prove it is never consulted (authorization R11: reads are unchanged).
+vi.mock("../authz/index.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../authz/index.js")>();
+  return { ...mod, authorize: vi.fn(mod.authorize) };
+});
 
 // Feature: features/memory.md — the dispatcher-facing read path that ties the
 // store, scope deriver, budget, and renderer together.
@@ -67,6 +76,47 @@ describe("memoryContextBlock", () => {
 // Feature: features/memory.md §21–22 (#253) — repo and channel scopes join the
 // one ranked pool; repo may arrive late (a promise) because the dispatcher
 // starts the memory read before repo resolution finishes.
+// Feature: features/authorization.md item 8, features/memory.md §22 (R11):
+// reads are unchanged — the write gate is reflection's alone. The read path
+// derives its scopes from the request and never asks the policy.
+describe("memoryContextBlock — reads are not policy-gated (authorization R11)", () => {
+  it("retrieving every scope of a request never calls `authorize`; the write path (reflect) does — the same spy sees both", async () => {
+    const store = new InMemoryMemoryStore(
+      [
+        rec({ id: "mem:org:coreplanelabs:1", text: "deploy is npm run deploy", keywords: ["deploy"] }),
+        rec({ id: "mem:channel:slack:C1:0", scopeKey: "channel:slack:C1", text: "this channel is for deploy coordination", keywords: ["deploy"] }),
+        rec({ id: "mem:user:slack:U1:0", scopeKey: "user:slack:U1", text: "prefers deploy previews", keywords: ["deploy"] }),
+        rec({ id: "mem:repo:acme/api:0", scopeKey: "repo:acme/api", text: "acme/api deploys via make release", keywords: ["deploy"] }),
+      ],
+      { now: () => NOW },
+    );
+    vi.mocked(authorize).mockClear();
+    const block = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", { channelId: "slack:C1", repo: "acme/api" });
+    expect(block).toContain("org:coreplanelabs + repo:acme/api + channel:slack:C1 + user:slack:U1");
+    expect(vi.mocked(authorize)).not.toHaveBeenCalled();
+
+    const provider: Provider = {
+      name: "fake",
+      async complete() {
+        return { content: [{ type: "text", text: JSON.stringify({ facts: [{ text: "the deploy command is npm run deploy", confidence: 0.9 }], summary: "" }) }], stopReason: "end_turn" };
+      },
+    };
+    await reflect({
+      provider,
+      model: "cheap-model",
+      store,
+      scopeKeys: { org: "org:coreplanelabs", user: "user:slack:U1" },
+      actor: { kind: "user", id: "slack:U1", grants: { actions: new Set(), channels: new Set(), repos: new Set() } },
+      originChannelVisibility: "public",
+      history: [],
+      request: "how do we deploy?",
+      answer: "npm run deploy",
+      sourceThreadKey: "slack:C1:1.0",
+    });
+    expect(vi.mocked(authorize)).toHaveBeenCalledWith(expect.objectContaining({ id: "slack:U1" }), "memory:write", expect.objectContaining({ type: "memory-scope", kind: "org", originChannelVisibility: "public" }));
+  });
+});
+
 describe("memoryContextBlock — repo + channel scopes (#253)", () => {
   const orgRec = rec({ id: "mem:org:coreplanelabs:1", text: "deploy is npm run deploy", keywords: ["deploy"] });
   const repoRec = rec({ id: "mem:repo:acme/api:0", scopeKey: "repo:acme/api", text: "acme/api deploys via make release", keywords: ["deploy", "release"] });

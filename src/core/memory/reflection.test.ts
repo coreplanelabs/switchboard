@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CompletionRequest, CompletionResult, Provider } from "../../providers/types.js";
+import { actor } from "../authz/testing.js";
+import type { ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";
 import { InMemoryMemoryStore } from "./stores.js";
 import type { MemoryQuery, MemoryRecord, MemoryStore } from "./types.js";
@@ -12,6 +14,7 @@ import {
   reflect,
   REFLECT_MIN_TURNS,
   REFLECTION_SYSTEM,
+  reflectionActor,
   shouldReflect,
   trackReflection,
 } from "./reflection.js";
@@ -35,6 +38,12 @@ function fakeProvider(reply: string | (() => string)): Provider & { requests: Co
 
 const SCOPE = "org:coreplanelabs";
 const PROVENANCE = { sourceThreadKey: "slack:CX:1.0", sourceRunId: "run-1" };
+/** The requesting user, as every routing test below sees them: a plain Slack
+ *  user speaking from a PUBLIC channel — the origin under which org writes are
+ *  allowed (authorization.md item 8, R11), so the routing tests keep today's
+ *  expectations. The write-gate suite varies the origin. */
+const PRINCIPAL = actor("user", "slack:U1");
+const PUBLIC_ORIGIN = { actor: PRINCIPAL, originChannelVisibility: "public" as ChannelVisibility };
 
 function existing(over: Partial<MemoryRecord> = {}): MemoryRecord {
   return {
@@ -294,6 +303,7 @@ describe("reflect (one extractor call → store.write)", () => {
     request: "how do we deploy now?",
     answer: "npm run ship",
     ...PROVENANCE,
+    ...PUBLIC_ORIGIN,
   };
 
   it("makes exactly one model call on the configured cheap model with the reflection system prompt", async () => {
@@ -393,6 +403,9 @@ describe("reflect — repo / channel routing (#253)", () => {
     request: "how does acme/api deploy here?",
     answer: "make release",
     ...PROVENANCE,
+    ...PUBLIC_ORIGIN,
+    // The run's principal as the dispatcher hands it to reflection: a member of the run's own channel and repo.
+    actor: reflectionActor(PRINCIPAL, { channelId: "slack:C1", repo: "acme/api" }),
   };
   const reply = JSON.stringify({
     facts: [
@@ -494,6 +507,7 @@ describe("reflect — user scope routing (#107 PR B)", () => {
     request: "deploy it the way I like",
     answer: "done",
     ...PROVENANCE,
+    ...PUBLIC_ORIGIN,
   };
   const reply = JSON.stringify({
     facts: [
@@ -576,6 +590,141 @@ describe("reflect — user scope routing (#107 PR B)", () => {
     const store = new InMemoryMemoryStore();
     await reflect({ ...base, provider, store });
     expect(await store.retrieve({ scopeKey: "user:slack:U2", query: "deploy preview", limit: 10 })).toEqual([]);
+  });
+});
+
+// Feature: features/authorization.md item 8, features/memory.md §23 (R11,
+// deliberate change (c)): every candidate's write is a policy decision —
+// `authorize(runActor, "memory:write", memory-scope{kind, key,
+// originChannelVisibility})` — and a fact from a private, DM, or unknown origin
+// never reaches `org`: it is NARROWED (dm → the user's own scope, else the
+// channel's, then the user's), never widened, never silently dropped.
+describe("reflect — write gate (authorization R11, deliberate change c)", () => {
+  const USER = "user:slack:U1";
+  const CHAN = "channel:slack:C1";
+  const REPO = "repo:acme/api";
+  const orgFact = { text: "the org standup is at 10am", confidence: 0.9, audience: "org" };
+  const reply = JSON.stringify({ facts: [orgFact], summary: "Standup time was confirmed." });
+  const runActor = reflectionActor(PRINCIPAL, { channelId: "slack:C1", repo: "acme/api" });
+  const base = {
+    scopeKeys: { org: SCOPE, user: USER, repo: REPO, channel: CHAN },
+    model: "cheap-model",
+    history: [] as HistoryItem[],
+    request: "when is standup?",
+    answer: "10am",
+    actor: runActor,
+    ...PROVENANCE,
+  };
+  const texts = async (store: InMemoryMemoryStore, scope: string) => (await store.list(scope, 10)).map((r) => r.text).sort();
+
+  it("a dm-origin org fact is written to the user scope, never org — and its summary follows it", async () => {
+    const store = new InMemoryMemoryStore();
+    const warnings: string[] = [];
+    await reflect({ ...base, scopeKeys: { org: SCOPE, user: USER, channel: "channel:slack:D1" }, actor: reflectionActor(PRINCIPAL, { channelId: "slack:D1" }), originChannelVisibility: "dm", provider: fakeProvider(reply), store, onWarn: (m) => warnings.push(m) });
+    expect(await texts(store, SCOPE)).toEqual([]);
+    expect(await texts(store, USER)).toEqual(["Standup time was confirmed.", "the org standup is at 10am"]);
+    expect(await texts(store, "channel:slack:D1")).toEqual([]);
+    // One line, the reason token, never the fact text.
+    expect(warnings).toEqual([expect.stringContaining("org → user (origin-visibility)")]);
+    expect(warnings[0]).toContain("2×");
+    expect(warnings[0]).not.toContain("standup");
+  });
+
+  it("a private-channel org fact narrows to the channel scope — the origin's own audience; without a channel scope, to the user", async () => {
+    const withChannel = new InMemoryMemoryStore();
+    await reflect({ ...base, originChannelVisibility: "private", provider: fakeProvider(reply), store: withChannel });
+    expect(await texts(withChannel, SCOPE)).toEqual([]);
+    expect(await texts(withChannel, CHAN)).toEqual(["Standup time was confirmed.", "the org standup is at 10am"]);
+    expect(await texts(withChannel, REPO)).toEqual([]); // repo is never a narrowing target: its readers span every channel
+    expect(await texts(withChannel, USER)).toEqual([]);
+
+    const noChannel = new InMemoryMemoryStore();
+    await reflect({ ...base, scopeKeys: { org: SCOPE, user: USER, repo: REPO }, originChannelVisibility: "private", provider: fakeProvider(reply), store: noChannel });
+    expect(await texts(noChannel, SCOPE)).toEqual([]);
+    expect(await texts(noChannel, USER)).toEqual(["Standup time was confirmed.", "the org standup is at 10am"]);
+  });
+
+  it("an unstamped run (no origin visibility → `unknown`) never writes org: the fact narrows like a private origin (fail-closed, R7)", async () => {
+    const store = new InMemoryMemoryStore();
+    await reflect({ ...base, provider: fakeProvider(reply), store });
+    expect(await texts(store, SCOPE)).toEqual([]);
+    expect(await texts(store, CHAN)).toEqual(["Standup time was confirmed.", "the org standup is at 10am"]);
+  });
+
+  it("a public-channel or machine-channel org fact keeps today's routing — written to org, nothing logged", async () => {
+    for (const origin of ["public", "machine"] as const) {
+      const store = new InMemoryMemoryStore();
+      const warnings: string[] = [];
+      await reflect({ ...base, originChannelVisibility: origin, provider: fakeProvider(reply), store, onWarn: (m) => warnings.push(m) });
+      expect(await texts(store, SCOPE), origin).toEqual(["Standup time was confirmed.", "the org standup is at 10am"]);
+      expect(warnings, origin).toEqual([]);
+    }
+  });
+
+  it("the audience is a hint the policy narrows and never widens: user / channel / repo facts from a public origin stay where the extractor put them", async () => {
+    const mixed = JSON.stringify({
+      facts: [
+        { text: "this user likes terse answers", confidence: 0.9, audience: "user" },
+        { text: "this channel coordinates deploys", confidence: 0.9, audience: "channel" },
+        { text: "acme/api deploys with make release", confidence: 0.9, audience: "repo" },
+      ],
+      summary: "",
+    });
+    const store = new InMemoryMemoryStore();
+    await reflect({ ...base, originChannelVisibility: "public", provider: fakeProvider(mixed), store });
+    expect(await texts(store, USER)).toEqual(["this user likes terse answers"]);
+    expect(await texts(store, CHAN)).toEqual(["this channel coordinates deploys"]);
+    expect(await texts(store, REPO)).toEqual(["acme/api deploys with make release"]);
+    expect(await texts(store, SCOPE)).toEqual([]);
+  });
+
+  it("a correction of an org record from a DM cannot follow it into org: the fact is written narrowed WITHOUT `supersedes`, and the org record stands", async () => {
+    const stale = existing({ id: "mem:org:coreplanelabs:0", scopeKey: SCOPE, text: "the org standup is at 9am" });
+    const correction = JSON.stringify({ facts: [{ ...orgFact, supersedes: "mem:org:coreplanelabs:0" }], summary: "" });
+    const store = new InMemoryMemoryStore([stale]);
+    await reflect({ ...base, originChannelVisibility: "dm", provider: fakeProvider(correction), store });
+    expect(await texts(store, SCOPE)).toEqual(["the org standup is at 9am"]);
+    const user = await store.list(USER, 10);
+    expect(user.map((r) => r.text)).toEqual(["the org standup is at 10am"]);
+    expect(user[0].supersedes).toBeUndefined();
+  });
+
+  it("a write the table denies for any other reason is dropped with the reason — never rerouted wider, never logged with the fact text", async () => {
+    // The run's own channel scope, but an actor that is NOT a member of it (the dispatcher's `reflectionActor` makes this impossible; the gate still holds).
+    const channelFact = JSON.stringify({ facts: [{ text: "this channel coordinates deploys", confidence: 0.9, audience: "channel" }], summary: "" });
+    const store = new InMemoryMemoryStore();
+    const warnings: string[] = [];
+    await reflect({ ...base, actor: PRINCIPAL, originChannelVisibility: "public", provider: fakeProvider(channelFact), store, onWarn: (m) => warnings.push(m) });
+    expect(await texts(store, CHAN)).toEqual([]);
+    expect(await texts(store, SCOPE)).toEqual([]);
+    expect(await texts(store, USER)).toEqual([]);
+    expect(warnings).toEqual([expect.stringContaining("channel (not-member)")]);
+    expect(warnings[0]).not.toContain("deploys");
+  });
+
+  it("with no narrower scope allowed, the fact is dropped and said so — never written to org", async () => {
+    const store = new InMemoryMemoryStore();
+    const warnings: string[] = [];
+    await reflect({ ...base, scopeKeys: { org: SCOPE }, originChannelVisibility: "private", provider: fakeProvider(reply), store, onWarn: (m) => warnings.push(m) });
+    expect(await texts(store, SCOPE)).toEqual([]);
+    expect(warnings).toEqual([expect.stringContaining("org (origin-visibility)")]);
+    expect(warnings[0]).toContain("2 candidate(s) dropped");
+  });
+
+  it("reflectionActor: the run's principal holding the run's own channel and repo as memberships — no action added, `all` left alone, nothing else changed", () => {
+    const plain = actor("user", "slack:U1", { actions: new Set(["memory:write"]), channels: new Set(["slack:C9"]) }, { origin: { channelId: "slack:C1", threadKey: "slack:C1:1" } });
+    const scoped = reflectionActor(plain, { channelId: "slack:C1", repo: "acme/api" });
+    expect(scoped.grants.actions).toEqual(new Set(["memory:write"]));
+    expect(scoped.grants.channels).toEqual(new Set(["slack:C9", "slack:C1"]));
+    expect(scoped.grants.repos).toEqual(new Set(["acme/api"]));
+    expect(scoped.id).toBe("slack:U1");
+    expect(scoped.kind).toBe("user");
+    expect(scoped.origin).toEqual(plain.origin);
+    expect(plain.grants.channels).toEqual(new Set(["slack:C9"])); // the principal is not mutated
+
+    const admin = actor("user", "slack:UADMIN", { actions: "all", channels: "all", repos: "all" });
+    expect(reflectionActor(admin, { channelId: "slack:C1", repo: "acme/api" }).grants).toEqual(admin.grants);
+    expect(reflectionActor(plain, {}).grants).toEqual(plain.grants);
   });
 });
 

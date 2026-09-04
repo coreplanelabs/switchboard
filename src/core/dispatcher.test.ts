@@ -34,6 +34,8 @@ import { runAgent } from "../runner.js";
 import { SHIP_PR_AUTHOR, shipBranchName, shipTaskText } from "./shipPipeline.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
 import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
+import { matchesPredicate, NO_GRANTS, predicateFor, type Actor, type ChannelDirectory } from "./authz/index.js";
+import { SlackChannelDirectory } from "../channels/slackChannelDirectory.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
 import { StaticMcpToolSource, InMemoryMcpClient } from "../mcp/index.js";
 import { InMemoryFrictionLedger, RunStoreFrictionLedger } from "./frictionLedger.js";
@@ -3499,6 +3501,13 @@ const REFLECTION_REPLY = JSON.stringify({
   summary: "User asked how to deploy; the deploy command was confirmed.",
 });
 
+/** A directory that calls the fixture's `slack:CX` a PUBLIC channel. The static
+ *  default knows a Slack `C…` id only as `unknown`, and since authorization R11
+ *  an unknown origin never writes the org scope (the fact is narrowed to the
+ *  channel's), so the routing tests that expect org writes speak from a public
+ *  channel — as the deployed bot's Slack directory would say of one. */
+const PUBLIC_CHANNEL: ChannelDirectory = { info: async () => ({ visibility: "public" }), isMember: async () => "unknown" };
+
 /** Provider that answers the run (optionally after one tool call) and then the
  *  reflection request — keeping both requests observable. */
 function runThenReflect(opts: { toolFirst?: boolean; failReflection?: boolean } = {}) {
@@ -3537,7 +3546,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
   async function run(yaml: string, history: HistoryItem[], opts: Parameters<typeof runThenReflect>[0] = {}) {
     const { provider, requests, order } = runThenReflect(opts);
     const store = new InMemoryMemoryStore();
-    const deps: CoreDeps = { ...makeDeps(yaml, provider), memory: store };
+    const deps: CoreDeps = { ...makeDeps(yaml, provider), memory: store, channelDirectory: PUBLIC_CHANNEL };
     const { io, replies } = fakeIO(history);
     await dispatch(deps, msg("how do we deploy?"), io);
     await drainReflections();
@@ -3648,13 +3657,14 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
       },
     };
     const store = new InMemoryMemoryStore();
-    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store, channelDirectory: PUBLIC_CHANNEL };
 
     await dispatch(deps, msg("how do we deploy?", "slack:U1"), fakeIO(longHistory).io);
     await drainReflections();
     expect((await store.retrieve({ scopeKey: "user:slack:U1", query: "preview link deploy", limit: 10 })).map((r) => r.text)).toEqual([
       "this user wants a preview link before every deploy",
     ]);
+    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
     expect(await store.retrieve({ scopeKey: "user:slack:U2", query: "preview link deploy", limit: 10 })).toEqual([]);
 
     requests.length = 0;
@@ -3670,6 +3680,49 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     expect(u2System).toContain("Background memory for org:coreplanelabs + channel:slack:CX + user:slack:U2");
     expect(u2System).not.toContain("preview link before every deploy");
     expect(u2System).toContain("the deploy command is npm run deploy");
+  });
+
+  // Feature: features/authorization.md item 8, features/memory.md §23 (R11,
+  // deliberate change c) — end to end: the run's stamped channel visibility is
+  // the origin the write gate decides under. A DM (`slack:D…`, dm by the static
+  // directory) may not write the org scope: its `org` fact lands in the
+  // requesting user's own scope, org stays empty, one `[memory]` line names the
+  // reason token, and the channel fact keeps its scope (the audience is
+  // narrowed, never widened). The same run from a public channel writes org.
+  it("dm-origin memory: an `org` fact from a DM is narrowed to the user's scope, never org — and the same fact from a public channel reaches org (R11)", async () => {
+    const reply = JSON.stringify({
+      facts: [
+        { text: "the deploy command is npm run deploy", confidence: 0.9, audience: "org" },
+        { text: "this conversation is about deploys", confidence: 0.9, audience: "channel" },
+      ],
+      summary: "",
+    });
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        if (req.system === REFLECTION_SYSTEM) return { content: [{ type: "text", text: reply }], stopReason: "end_turn" };
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const store = new InMemoryMemoryStore();
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await dispatch(deps, { ...msg("how do we deploy?", "slack:U1"), channelId: "slack:D0AB", threadKey: "slack:D0AB:1.0" }, fakeIO(longHistory).io);
+    await drainReflections();
+    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.text)).toEqual([]);
+    expect((await store.list("user:slack:U1", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
+    expect((await store.list("channel:slack:D0AB", 10)).map((r) => r.text)).toEqual(["this conversation is about deploys"]);
+    const lines = warn.mock.calls.map(([l]) => String(l)).filter((l) => l.startsWith("[memory] slack:D0AB:1.0"));
+    expect(lines).toEqual([expect.stringContaining("1× org → user (origin-visibility)")]);
+    expect(lines[0]).not.toContain("deploy command");
+    warn.mockRestore();
+
+    const pub = new InMemoryMemoryStore();
+    const publicDeps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: pub, channelDirectory: PUBLIC_CHANNEL };
+    await dispatch(publicDeps, msg("how do we deploy?", "slack:U1"), fakeIO(longHistory).io);
+    await drainReflections();
+    expect((await pub.list("org:coreplanelabs", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
+    expect(await pub.list("user:slack:U1", 10)).toEqual([]);
   });
 
   // Feature: features/memory.md §21–23 (#253) — repo + channel scopes end to end:
@@ -3695,7 +3748,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
       },
     };
     const store = new InMemoryMemoryStore();
-    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store, channelDirectory: PUBLIC_CHANNEL };
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
 
     await dispatch(deps, msg("agent:coding how do we deploy?", "slack:UADMIN"), fakeIO(longHistory).io);
@@ -3752,7 +3805,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
       },
     };
     const store = new InMemoryMemoryStore();
-    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store, channelDirectory: PUBLIC_CHANNEL };
     const { io, replies } = fakeIO(longHistory);
     await dispatch(deps, msg("how do we deploy?"), io);
     expect(replies).toEqual(["answer"]);
@@ -4841,6 +4894,88 @@ describe("run history write path (#157 U4)", () => {
     await failing.writer.settled();
     expect((await failing.store.get("run-f"))!.channelVisibility).toBe("unknown");
     expect(warn.mock.calls.some(([line]) => String(line).includes("[authz] channel directory failed for slack:CX"))).toBe(true);
+  });
+
+  // Feature: features/authorization.md item 7 (U5) — the Slack directory behind
+  // the stamp: `conversations.info` decides a `slack:C…` channel's visibility, so
+  // a run in a PUBLIC channel is readable by every actor (`member-of`'s public
+  // half) while a private channel's or a DM's stays grants-only; one Slack call
+  // per channel, however many runs.
+  it("Slack directory stamp: a public-channel run is visible to a plain Slack user's run reads, a private-channel or DM run is not; conversations.info is asked once per channel across runs", async () => {
+    const info = vi.fn(async ({ channel }: { channel: string }) => ({ channel: { is_private: channel === "CPRIV" } }));
+    const directory = new SlackChannelDirectory({ conversations: { info } }, { now: () => 0 });
+    const plainUser: Actor = { kind: "user", id: "slack:U9", grants: NO_GRANTS };
+    const readable = predicateFor(plainUser, "runs:read", "run");
+    const records: RunRecord[] = [];
+    for (const [id, channel] of [
+      ["run-pub", "slack:CPUB"],
+      ["run-pub2", "slack:CPUB"],
+      ["run-priv", "slack:CPRIV"],
+      ["run-dm", "slack:D0AB"],
+    ] as const) {
+      const w = wired(capturingProvider(), { registry: new RunRegistry({ genId: () => id, genToken: () => "tok" }) });
+      w.deps.channelDirectory = directory;
+      await dispatch(w.deps, { ...msg("hello there", "slack:U1"), channelId: channel, threadKey: `${channel}:1` }, fakeIO().io);
+      await w.writer.settled();
+      records.push((await w.store.get(id))!);
+    }
+    expect(records.map((r) => r.channelVisibility)).toEqual(["public", "public", "private", "dm"]);
+    expect(records.map((r) => matchesPredicate(readable, r))).toEqual([true, true, false, false]);
+    expect(info.mock.calls.map(([a]) => a.channel)).toEqual(["CPUB", "CPRIV"]); // cached for the second CPUB run; the DM never asks
+  });
+
+  it("a slow channel directory cannot hold a reply: past `channelDirectoryTimeoutMs` the run is stamped `unknown` and proceeds", async () => {
+    const { deps, store, writer } = wired(capturingProvider(), { registry: new RunRegistry({ genId: () => "run-slow", genToken: () => "tok" }) });
+    deps.channelDirectory = { info: () => new Promise(() => {}), isMember: async () => "unknown" }; // never answers
+    deps.channelDirectoryTimeoutMs = 20;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { io, replies } = fakeIO();
+    // Without the bound this dispatch would never return (the test's own timeout is the proof).
+    await dispatch(deps, msg("hello there"), io);
+    await writer.settled();
+    expect(replies).toEqual(["answer"]);
+    expect((await store.get("run-slow"))!.channelVisibility).toBe("unknown");
+    expect(warn.mock.calls.some(([line]) => String(line).includes("[authz] channel directory timed out after 20 ms for slack:CX"))).toBe(true);
+    warn.mockRestore();
+  });
+
+  // The `ChannelDirectory` seam admits implementations that reject (both shipped
+  // ones catch internally). A rejection that arrives AFTER the timeout has
+  // already stamped `unknown` must be swallowed — never an unhandled rejection —
+  // and one that arrives before it stamps `unknown` at once, by the same path.
+  it("a directory that rejects AFTER the timeout fired raises no unhandled rejection; the run is already stamped `unknown`", async () => {
+    const { deps, store, writer } = wired(capturingProvider(), { registry: new RunRegistry({ genId: () => "run-late", genToken: () => "tok" }) });
+    deps.channelDirectory = { info: () => new Promise((_, reject) => setTimeout(() => reject(new Error("slack down, late")), 60)), isMember: async () => "unknown" };
+    deps.channelDirectoryTimeoutMs = 20;
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await dispatch(deps, msg("hello there"), fakeIO().io);
+      await writer.settled();
+      expect((await store.get("run-late"))!.channelVisibility).toBe("unknown");
+      expect(warn.mock.calls.some(([line]) => String(line).includes("[authz] channel directory timed out after 20 ms for slack:CX"))).toBe(true);
+      await new Promise((r) => setTimeout(r, 120)); // let the late rejection land
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+      warn.mockRestore();
+    }
+  });
+
+  it("a directory that rejects BEFORE the timeout stamps `unknown` at once — the failure path, not the timeout path", async () => {
+    const { deps, store, writer } = wired(capturingProvider(), { registry: new RunRegistry({ genId: () => "run-early", genToken: () => "tok" }) });
+    deps.channelDirectory = { info: () => new Promise((_, reject) => setTimeout(() => reject(new Error("slack down, early")), 5)), isMember: async () => "unknown" };
+    deps.channelDirectoryTimeoutMs = 500;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const started = Date.now();
+    await dispatch(deps, msg("hello there"), fakeIO().io);
+    await writer.settled();
+    expect(Date.now() - started).toBeLessThan(500);
+    expect((await store.get("run-early"))!.channelVisibility).toBe("unknown");
+    const lines = warn.mock.calls.map(([l]) => String(l)).filter((l) => l.startsWith("[authz] channel directory"));
+    expect(lines).toEqual([expect.stringContaining("[authz] channel directory failed for slack:CX — stamping unknown: slack down, early")]);
+    warn.mockRestore();
   });
 
   it("a completed run ends as one stored record: status completed, eventCount = published count, events include the user and assistant messages, identity fields set", async () => {
