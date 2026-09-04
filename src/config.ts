@@ -9,6 +9,9 @@ import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
 import type { ShipConfig } from "./core/shipPipeline.js";
 import type { ChatGate } from "./core/commandRegistry.js";
+import { grantsIn, grantsTable, parseGrantsConfig, type GrantsConfig, type GrantsTable } from "./core/authz/grants.js";
+import type { Grants } from "./core/authz/types.js";
+import type { IngressTokenMap } from "./core/ingressTokens.js";
 import { AGENTS } from "./agents/registry.js";
 import { assertUrlAllowed } from "./tools/web.js";
 import { isMcpServerEntry, MCP_SELF_SERVE_AGENTS, MCP_SERVER_NAME_MAX, MCP_SERVER_NAME_RE, MCP_SERVERS_PER_SCOPE_MAX, type McpServerEntry } from "./mcp/registry.js";
@@ -112,6 +115,16 @@ export interface AppConfig {
   channels?: Record<string, Scope>;
   users?: Record<string, Scope>;
   permissions?: Permissions;
+  /**
+   * The native grants shape (one authorization model, plan U2 — R8): actor id
+   * (`slack:U…`, `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
+   * `access:svc:<cn>`, `schedule:<name>`) → `{ actions, channels, repos }`,
+   * each a list of names or the explicit word `all`; an absent axis is the
+   * empty set. Accepted alongside `permissions.*` / token `scopes` during the
+   * dual-acceptance release: an actor both shapes name takes THIS entry and is
+   * warned about at load. `ConfigStore.grantsFor` is the one lookup.
+   */
+  grants?: GrantsConfig;
   execution?: import("./execution/factory.js").ExecutionConfig;
   workspaceDir?: string;
   /**
@@ -398,17 +411,28 @@ export function loadAppConfig(configPath: string, warn: (message: string) => voi
   return config;
 }
 
+/** What the grants table needs beyond config.yaml: the ingress token map (its
+ *  `scopes` / `channel` translate to grants for `http:` / `mcp:` actors) and the
+ *  command groups (`permissions.operators` translates to every group's read +
+ *  write). Absent = none: a store built without them resolves token actors and
+ *  operators to no actions — fail-closed, never widened. The CLI never resolves
+ *  either kind of actor; the bot passes both at startup. */
+export interface ConfigStoreOptions {
+  ingressTokens?: IngressTokenMap;
+  commandGroups?: readonly string[];
+}
+
 /** Open the store the way production does: parse + validate `config.yaml`,
  *  pick the overrides backing from it, load the document, construct. */
 export async function openConfigStore(
   configPath: string,
-  opts: { overridesPath: string; env: Record<string, string | undefined>; warn?: (message: string) => void; fetch?: typeof fetch },
+  opts: { overridesPath: string; env: Record<string, string | undefined>; warn?: (message: string) => void; fetch?: typeof fetch } & ConfigStoreOptions,
 ): Promise<ConfigStore> {
   const warn = opts.warn ?? ((m: string) => console.warn(m));
   const config = loadAppConfig(configPath, warn);
   const backing = overridesBackingFor(config, opts);
   const initial = await backing.load();
-  return new ConfigStore({ validated: config }, { backing, initial }, warn);
+  return new ConfigStore({ validated: config }, { backing, initial }, warn, { ingressTokens: opts.ingressTokens, commandGroups: opts.commandGroups });
 }
 
 export class ConfigStore {
@@ -417,17 +441,25 @@ export class ConfigStore {
   private readonly backing: OverridesBacking;
   /** Writes run one at a time (see `write`); a rejected write does not hold the queue. */
   private writes: Promise<void> = Promise.resolve();
+  private readonly grants: GrantsTable;
 
   /** The first argument is the `config.yaml` path (read + validated here — dev,
    *  tests) or a config `openConfigStore` already validated. The second is a
    *  JSON file path (loaded inline) or a backing whose document was already
-   *  loaded. `warn` receives non-fatal config findings (default: console.warn). */
+   *  loaded. `warn` receives non-fatal config findings (default: console.warn);
+   *  `options` is what the grants table needs beyond the file (`ConfigStoreOptions`). */
   constructor(
     config: string | { validated: AppConfig },
     overrides: string | { backing: OverridesBacking; initial: Overrides | undefined },
     warn: (message: string) => void = (m) => console.warn(m),
+    options: ConfigStoreOptions = {},
   ) {
     this.config = typeof config === "string" ? loadAppConfig(config, warn) : config.validated;
+    // The native block already passed `validateConfig` (either path above); this parse just builds the table.
+    this.grants = grantsTable({ grants: validateGrants(this.config.grants), permissions: this.config.permissions, ingressTokens: options.ingressTokens, agentNames: Object.keys(AGENTS), commandGroups: options.commandGroups });
+    if (this.grants.overlapping.length > 0) {
+      warn(`config.yaml: grants and permissions both name ${this.grants.overlapping.map((id) => `"${id}"`).join(", ")} — the grants entry wins; remove the permissions/token entry (one identity, one shape)`);
+    }
 
     let initial: Overrides | undefined;
     if (typeof overrides === "string") {
@@ -642,6 +674,13 @@ export class ConfigStore {
           return this.canRunAgent(userId, "coding");
       }
     };
+  }
+
+  /** The one grants lookup (plan U2, R8): what `grants[<actorId>]` declares,
+   *  else the legacy keys translated (`translateLegacyConfig`), else nothing.
+   *  Attached to every `Caller.actor`; decides nothing until the policy units. */
+  grantsFor(actorId: string): Grants {
+    return grantsIn(this.grants, actorId);
   }
 
   /** `permissions.operators`: Access identities granted `*:write` over HTTP. */
@@ -900,6 +939,8 @@ function fmtModels(m: Record<string, string>): string {
     .join(" ");
 }
 
+/** Validates in place (throws on the first fatal finding, `warn`s the rest) and
+ *  returns the parsed native `grants` table (empty when the block is absent). */
 function validateConfig(cfg: AppConfig, warn: (message: string) => void): void {
   validateScopeEfforts(cfg, "config.yaml");
   validateMcpServers(cfg, "config.yaml");
@@ -927,6 +968,17 @@ function validateConfig(cfg: AppConfig, warn: (message: string) => void): void {
   if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory, cfg.selfImprovement, warn);
   validateRuntimeOverrides(cfg.runtimeOverrides);
   if (cfg.ship !== undefined) validateShip(cfg.ship);
+  validateGrants(cfg.grants);
+}
+
+/** `grants` (plan U2): every finding names the actor id and axis it is about —
+ *  an unknown namespace, a misspelled `all`, an unknown field — and the load
+ *  fails, because a silently dropped entry would be a silently missing grant. */
+function validateGrants(raw: unknown): ReadonlyMap<string, Grants> {
+  if (raw === undefined) return new Map();
+  const parsed = parseGrantsConfig(raw);
+  if (!parsed.ok) throw new Error(`config.yaml: ${parsed.errors.join("; ")}`);
+  return parsed.grants;
 }
 
 /** `ship` caps (features/agent-ship.md item 8): both bounds enforced at load

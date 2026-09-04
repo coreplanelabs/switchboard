@@ -10,7 +10,9 @@ import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { createRunsService } from "../core/runsService.js";
 import type { AccessIdentity } from "./accessAuth.js";
-import { callerIdFor, createCommandHttpHandler, isCommandPath, isLocalhostBase, serviceTokenAllowed, type CommandHttpOptions } from "./commandHttp.js";
+import { ALL_GRANTS, grantsFor } from "../core/authz/grants.js";
+import { NO_GRANTS } from "../core/authz/types.js";
+import { callerFor, callerIdFor, createCommandHttpHandler, isCommandPath, isLocalhostBase, serviceTokenAllowed, type CommandHttpOptions } from "./commandHttp.js";
 
 // Feature: features/command-registry.md — the generic HTTP adapter for `/api/*`
 // (R7/R9/R10, KTD13/KTD15). No per-command code: every registered command is
@@ -57,6 +59,8 @@ async function fixture(over: Partial<CommandHttpOptions> = {}) {
   const opts: CommandHttpOptions = {
     operatorIdentities: () => ["access:op-1"],
     serviceTokenScopes: (cn) => (cn === "reader-bot" ? ["runs:read"] : []),
+    // The same two legacy keys, as `ConfigStore.grantsFor` would translate them.
+    grantsFor: (id) => grantsFor(id, { permissions: { operators: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } }, commandGroups: ["runs"] }),
     devBypassActive: false,
     ...over,
   };
@@ -371,6 +375,7 @@ describe("createCommandHttpHandler — dev bypass (KTD13)", () => {
     const ok = createCommandHttpHandler((await fixture()).commands, {
       operatorIdentities: () => [],
       serviceTokenScopes: () => [],
+      grantsFor: () => NO_GRANTS,
       devBypassActive: true,
       publicBaseUrl: "http://localhost:3000",
     });
@@ -409,6 +414,21 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
     expect(callerIdFor(browser)).toBe("access:user-1");
     expect(callerIdFor(readerBot)).toBe("access:svc:reader-bot");
     expect(callerIdFor(readerBot)).not.toBe("access:");
+  });
+
+  it("callerFor carries the same identity as an Actor: browser sub → user access:<sub>, service token → service access:svc:<cn>, grants from the lookup (plan U2)", async () => {
+    const { commands } = await fixture();
+    const opts: CommandHttpOptions = {
+      operatorIdentities: () => ["access:op-1"],
+      serviceTokenScopes: (cn) => (cn === "reader-bot" ? ["runs:read"] : []),
+      grantsFor: (id) => grantsFor(id, { permissions: { admins: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } } }),
+      devBypassActive: false,
+    };
+    expect(callerFor({ sub: "op-1" }, commands, opts).actor).toEqual({ kind: "user", id: "access:op-1", grants: ALL_GRANTS });
+    expect(callerFor(browser, commands, opts).actor).toEqual({ kind: "user", id: "access:user-1", grants: NO_GRANTS });
+    expect(callerFor(readerBot, commands, opts).actor).toEqual({ kind: "service", id: "access:svc:reader-bot", grants: { actions: new Set(["runs:read"]), channels: "all", repos: new Set() } });
+    // The legacy fields the registry still decides on are untouched.
+    expect(callerFor(browser, commands, opts)).toMatchObject({ kind: "access", id: "access:user-1", scopes: new Set() });
   });
 
   it("is the id callerFor's Caller carries", async () => {

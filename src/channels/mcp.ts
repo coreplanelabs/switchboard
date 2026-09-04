@@ -1,4 +1,6 @@
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
+import { grantsFor } from "../core/authz/grants.js";
 import { CommandRegistry, type Caller, type CommandDef, type CommandInvoker, type InvokeErrorCode } from "../core/commandRegistry.js";
 import { jsonSchemaFor, mcpToolName, namedToInput } from "../core/commandSurface.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
@@ -81,6 +83,10 @@ export interface McpOptions {
   /** The command registry (deps bound) whose MCP-exposed commands become tools
    *  beside `dispatch`. Absent → `dispatch` is the only tool. */
   commands?: CommandInvoker;
+  /** Grants by actor id (`ConfigStore.grantsFor`) for the `Caller.actor` a
+   *  tool call carries. Absent → the legacy translation of `auth.tokens` alone
+   *  (what the token entry itself says, nothing from config.yaml). */
+  grantsFor?: GrantsLookup;
 }
 
 /** KTD2/KTD11: `runs.list` → tool `runs_list`; `inputSchema` = the command's
@@ -94,14 +100,17 @@ function mcpExposed(commands: CommandInvoker | undefined): CommandDef<unknown>[]
 }
 
 /** R9: the Caller an MCP bearer identity resolves to — the token's explicit
- *  scopes, and its pinned channel as the `mcp:`-namespaced pin (the same
- *  namespace `toIncomingMessage` gives a dispatch's channelId). */
-function toCaller(identity: IngressIdentity): Caller {
+ *  scopes, its pinned channel as the `mcp:`-namespaced pin (the same
+ *  namespace `toIncomingMessage` gives a dispatch's channelId), and the same
+ *  identity as a `service` `Actor` with the grants config names for `mcp:<subject>`. */
+export function toCaller(identity: IngressIdentity, options: Pick<McpOptions, "auth" | "grantsFor">): Caller {
+  const lookup: GrantsLookup = options.grantsFor ?? ((id) => grantsFor(id, { ingressTokens: options.auth.tokens }));
   return {
     kind: "mcp",
     id: `${PLATFORM}:${identity.subject}`,
     scopes: new Set(identity.scopes),
     ...(identity.channel !== undefined ? { channel: `${PLATFORM}:${identity.channel}` } : {}),
+    actor: resolveActor({ surface: "mcp", subjectId: identity.subject }, lookup),
   };
 }
 
@@ -250,7 +259,7 @@ async function route(
         // schemas live there), the returned object straight back out.
         const input = namedToInput(command, args, "camel");
         if ("error" in input) return err(id, INVALID_PARAMS, input.error, { code: "invalid_input" });
-        const result = await options.commands!.invoke(command.id, input, toCaller(identity));
+        const result = await options.commands!.invoke(command.id, input, toCaller(identity, options));
         if (!result.ok) return err(id, RPC_CODE_FOR[result.error], result.message, { code: result.error });
         return ok(id, { content: [{ type: "text", text: `${command.id}: ok\n${JSON.stringify(result.value)}` }] });
       }

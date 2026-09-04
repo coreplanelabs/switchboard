@@ -1,4 +1,5 @@
 import type { ConfigStore } from "../config.js";
+import { resolveChatActor } from "./authz/actor.js";
 import { renderText, type Caller, type CommandInput, type CommandInvoker, type CommandSurfaces, type InvokeErrorCode, type SettledOutcome } from "./commandRegistry.js";
 import { catalogueText, chatForm, commandsInGroup, helpText, parseInvocation, tokenize, type CommandShape, type GrammarRejection } from "./commandSurface.js";
 import type { IncomingMessage } from "./types.js";
@@ -113,7 +114,7 @@ export interface HandleChatCommandArgs {
    *  machine caller (`http:`/`mcp:`) to its channel (see `chatCallerFor`);
    *  channel + thread are the caller's `origin`. */
   msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">;
-  config: Pick<ConfigStore, "chatGateFor" | "adminsHint">;
+  config: Pick<ConfigStore, "chatGateFor" | "grantsFor" | "adminsHint">;
   /** Resolves the repo this thread is bound to, lazily — `Caller.origin.repo`
    *  for the commands that ask (the dispatcher supplies history + the
    *  production resolver). Absent → no repo scope. */
@@ -133,14 +134,16 @@ export function isMachineChannel(channelId: string): boolean {
 }
 
 /** The `Caller` a chat message resolves to: the message's user as the id, the
- *  config's chat gates, the channel + thread it came from (`origin`), and — for
- *  a machine channel — the channel pin. */
-export function chatCallerFor(msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">, config: Pick<ConfigStore, "chatGateFor">, resolveRepo?: () => Promise<string | undefined>): Caller {
+ *  config's chat gates, the channel + thread it came from (`origin`), for a
+ *  machine channel the channel pin, and the same identity as an `Actor` whose
+ *  grants config names for that user id. */
+export function chatCallerFor(msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">, config: Pick<ConfigStore, "chatGateFor" | "grantsFor">, resolveRepo?: () => Promise<string | undefined>): Caller {
   return {
     kind: "chat",
     id: msg.userId,
     scopes: new Set(),
     chatGate: config.chatGateFor(msg.userId),
+    actor: resolveChatActor(msg, (id) => config.grantsFor(id)),
     origin: { channelId: msg.channelId, threadKey: msg.threadKey, ...(resolveRepo ? { repo: resolveRepo } : {}) },
     ...(isMachineChannel(msg.channelId) ? { channel: msg.channelId } : {}),
   };

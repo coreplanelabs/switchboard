@@ -99,6 +99,14 @@ describe("schedule registry", () => {
   it("isRunSchedule narrows to schedules the shim POSTs to /ingress", () => {
     expect(SCHEDULES.filter(isRunSchedule).map((s) => s.name)).toEqual(["self-improvement"]);
   });
+
+  it("every run schedule declares its `schedule` actor as schedule:<name> (plan U2, R9) — grants come from config, not the registry", () => {
+    for (const s of SCHEDULES.filter(isRunSchedule)) {
+      expect(s.action.actor).toEqual({ kind: "schedule", id: `schedule:${s.name}` });
+      expect(s.action.actor).not.toHaveProperty("grants");
+    }
+    expect(selfImprovement.action.actor.id).toBe("schedule:self-improvement");
+  });
 });
 
 describe("watchdogFiring (the resident's firing record)", () => {

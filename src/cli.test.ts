@@ -50,6 +50,12 @@ async function fixture() {
   return { commands, live, reg };
 }
 
+describe("CLI_CALLER — the local operator", () => {
+  it("is cli:local with every scope, and the same identity as the cli:local Actor holding every grant (plan U2)", () => {
+    expect(CLI_CALLER).toEqual({ kind: "cli", id: "cli:local", scopes: "all", actor: { kind: "user", id: "cli:local", grants: { actions: "all", channels: "all", repos: "all" } } });
+  });
+});
+
 describe("parseCliArgv", () => {
   it("parses <group> <verb> plus positionals and --kebab flags (value or =value) through the shared grammar; --json is the one switch", async () => {
     const { commands } = await fixture();

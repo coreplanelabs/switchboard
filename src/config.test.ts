@@ -374,6 +374,62 @@ describe("custom instructions (Scope.instructions)", () => {
 });
 
 // Feature: features/run-history.md — the `runHistory` section (KTD14).
+describe("grants config — the native shape beside the legacy keys (plan U2, R7/R8/KTD6)", () => {
+  const load = (yaml: string, warn: (m: string) => void = () => {}, options?: ConstructorParameters<typeof ConfigStore>[3]) => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-config-grants-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, yaml);
+    return new ConfigStore(cfg, join(dir, "overrides.json"), warn, options);
+  };
+  const set = (...names: string[]) => new Set(names);
+
+  it("a well-formed block validates and grantsFor resolves it: absent axis = empty set, `all` explicit", () => {
+    const s = load(`${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch, runs:read]\n    channels: [http:ops]\n  "schedule:self-improvement":\n    actions: [friction:write]\n    channels: all\n`);
+    expect(s.grantsFor("http:ci")).toEqual({ actions: set("dispatch", "runs:read"), channels: set("http:ops"), repos: set() });
+    expect(s.grantsFor("schedule:self-improvement")).toEqual({ actions: set("friction:write"), channels: "all", repos: set() });
+  });
+
+  it("an unknown actor id prefix fails the load naming the id", () => {
+    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "discord:123":\n    actions: all\n`)).toThrow(/config\.yaml: grants\["discord:123"\].*slack:, http:, mcp:, access:, schedule:/);
+  });
+
+  it("a misspelled `all`, an unknown axis, and a non-mapping block fail the load naming the id and field", () => {
+    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "slack:U1":\n    actions: ALL\n`)).toThrow(/grants\["slack:U1"\]\.actions: expected "all" or a list/);
+    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "slack:U1":\n    agents: [coding]\n`)).toThrow(/grants\["slack:U1"\]: unknown field agents/);
+    expect(() => load(`${YAML_FIXTURE}\ngrants: [a]\n`)).toThrow(/grants must be a mapping/);
+  });
+
+  it("the legacy keys translate through the same lookup: admins → everything; an agents-listed user → agent:run:<name> (+ every repo, repos absent); a plain user → the unrestricted agents; ingress tokens and command groups come from the store options", () => {
+    const s = load(YAML_FIXTURE, undefined, { ingressTokens: { tok: { subject: "ci", channel: "ops", scopes: ["dispatch", "runs:read"] } }, commandGroups: ["runs", "friction"] });
+    expect(s.grantsFor("slack:UADMIN")).toEqual({ actions: "all", channels: "all", repos: "all" });
+    const dev = s.grantsFor("slack:UDEV");
+    expect(dev.repos).toBe("all");
+    expect(dev.actions).toContain("agent:run:coding");
+    expect(dev.actions).toContain("agent:run:general");
+    const plain = s.grantsFor("slack:UNOBODY");
+    expect(plain.actions).not.toContain("agent:run:coding");
+    expect(plain.actions).toContain("agent:run:general");
+    // Credentials hold exactly what names them — no everyone baseline.
+    expect(s.grantsFor("http:ci")).toEqual({ actions: set("dispatch", "runs:read"), channels: set("http:ops"), repos: set() });
+    expect(s.grantsFor("schedule:unlisted")).toEqual({ actions: set(), channels: set(), repos: set() });
+    expect(s.grantsFor("mcp:ci").channels).toEqual(set("mcp:ops"));
+    const ops = load(`${YAML_FIXTURE}  operators: ["access:op-1"]\n`, undefined, { commandGroups: ["runs", "friction"] }).grantsFor("access:op-1");
+    expect(ops.channels).toBe("all");
+    for (const a of ["runs:read", "runs:write", "friction:read", "friction:write"]) expect(ops.actions).toContain(a);
+  });
+
+  it("an identity named by BOTH shapes takes the grants entry and is warned about by id", () => {
+    const warnings: string[] = [];
+    const s = load(`${YAML_FIXTURE}\ngrants:\n  "slack:UADMIN":\n    actions: [runs:read]\n`, (m) => warnings.push(m));
+    expect(warnings).toEqual([expect.stringMatching(/config\.yaml: grants and permissions both name "slack:UADMIN" — the grants entry wins/)]);
+    expect(s.grantsFor("slack:UADMIN")).toEqual({ actions: set("runs:read"), channels: set(), repos: set() });
+    // No overlap → no warning.
+    warnings.length = 0;
+    load(`${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch]\n`, (m) => warnings.push(m));
+    expect(warnings).toEqual([]);
+  });
+});
+
 describe("runHistory config", () => {
   const withRunHistory = (block: string, extra = "") => `${YAML_FIXTURE}\n${extra}\nrunHistory:\n${block}\n`;
   const load = (yaml: string, warn?: (m: string) => void) => {
