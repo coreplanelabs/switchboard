@@ -32,11 +32,28 @@ ENV CI=1 \
 # repo whose onboard table is detected as pnpm or yarn (resident-repos item 52 —
 # every manager `detectCommands` can emit must exist here, or the table fails
 # deterministically at provision) couldn't be provisioned (install → build).
-# corepack is NOT on this base's PATH (unlike the older sandbox base), so install
-# both via npm at build time — baked into the image, ready offline when a
-# worktree provisions. yarn here is classic (1.x); a Yarn Berry repo bootstraps
-# through it via the `yarnPath` release it commits under `.yarn/releases`.
-RUN npm install -g pnpm@latest yarn@latest
+# corepack is NOT on this base's PATH (unlike the older sandbox base), so both
+# come from npm at build time. yarn here is classic (1.x); a Yarn Berry repo
+# bootstraps through it via the `yarnPath` release it commits under
+# `.yarn/releases`.
+#
+# EXACT versions, enforced by src/deploy/imagePins.test.ts. This line read
+# `pnpm@latest yarn@latest` until 2026-09-04, which made the pnpm major a
+# property of the last image build: the 2026-09-03 rebuild moved it 10 -> 11,
+# and pnpm 11 no longer reads `package.json`'s `pnpm` field (overrides,
+# patchedDependencies, onlyBuiltDependencies), so a repo keeping its settings
+# there fails `--frozen-lockfile` with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH.
+# pnpm is pinned to the 10 line ON PURPOSE: 10.x reads that field, and pnpm
+# >=10 self-manages `packageManager`, so a repo pinning 11/12 still gets its
+# own version — the pin is a floor, not a ceiling. Which means the version
+# baked here is NOT necessarily the one that runs: a repo with a
+# `packageManager` field downloads that version on first install (nominal
+# pins pnpm@10.10.0), so provisioning needs the registry, not just the image.
+# The grep asserts the pin took (the #372 pattern), so a resolution surprise
+# fails the build instead of a provision.
+RUN npm install -g pnpm@10.34.5 yarn@1.22.22 \
+  && pnpm --version | grep -qx '10\.34\.5' \
+  && yarn --version | grep -qx '1\.22\.22'
 
 # KTD5: agent commands never run as root. The SDK's exec has no user/uid option
 # (verified against 0.13.0-next.751.1), so the container server itself runs as

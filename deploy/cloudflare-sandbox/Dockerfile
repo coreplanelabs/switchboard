@@ -47,5 +47,15 @@ RUN sed -i 's|node_20\.x|node_22.x|' /etc/apt/sources.list.d/nodesource.list \
 # pnpm: the base image ships Node/npm/corepack but not pnpm, so coding runs in
 # pnpm repos hit `pnpm: command not found` on install/build. corepack ships with
 # the base Node (no apt package needed); `prepare` fetches and pins pnpm at
-# build time so it's baked into the image and ready offline at run time.
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# build time, so this version is here before any run needs it. It is not
+# necessarily the version that RUNS: corepack honours a repo's own
+# `packageManager` field and fetches it, so a pnpm repo that pins one still
+# needs the registry on its first install.
+#
+# EXACT version, enforced by src/deploy/imagePins.test.ts, same pin and same
+# reason as the resident image (deploy/cloudflare-resident/Dockerfile): with
+# `@latest` here the pnpm major moved on a rebuild, and pnpm 11 stopped
+# reading `package.json`'s `pnpm` field. corepack still honours a repo's own
+# `packageManager`, so this is the floor for repos that name none.
+RUN corepack enable && corepack prepare pnpm@10.34.5 --activate \
+  && pnpm --version | grep -qx '10\.34\.5'

@@ -1,0 +1,76 @@
+// How a failed resident step describes itself (features/resident-repos.md
+// item 53). Pure, so the shape is a unit test and not a live post-mortem.
+//
+// The rule this module exists to enforce: a failure report may never CHOOSE
+// between the two streams. It used to — `tail(r.stderr || r.stdout)` — and on
+// 2026-09-04 that cost a whole diagnosis. `coreplanelabs/nominal` went
+// `down (provision-failed at install: exit 1: [WARN] The "pnpm" field in
+// package.json is no longer read by pnpm …)`. That warning cannot fail an
+// install: the same command prints those exact 239 bytes on stderr and exits
+// 0 (reproduced on nominal's tree inside the resident's own base image). The
+// pnpm family reports through its own logger on STDOUT, so `stderr || stdout`
+// let a harmless warning shadow the error that named the exit — and nothing
+// else recorded the command's output, so the real cause is gone for good.
+//
+// Every stream a step can write is therefore reported, labelled, tail-first
+// (a tool's error is its last output), each bounded on its own so one noisy
+// stream cannot crowd out the other.
+
+/** What the sandbox exec hands back for one command. */
+export interface StepResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  timedOut: boolean;
+}
+
+/** Chars kept per stream in the STORED reason — it travels into DO storage,
+ *  `GET /residents`, `repo list` and a Slack reply, so it stays short. The
+ *  full output goes to the Worker log instead (`stepFailureLog`). */
+export const STEP_REPORT_PER_STREAM = 400;
+
+/** Chars kept per stream in the LOG line: enough for a pnpm/vitest error
+ *  block with its context, still bounded so one runaway step cannot flood
+ *  the Worker's logs. */
+export const STEP_LOG_PER_STREAM = 4000;
+
+/** The last `budget` chars of `s`, marked with a leading `…` when cut. Empty
+ *  (after trimming) yields "" so the caller can drop the label entirely. */
+function tailOf(s: string, budget: number): string {
+  const trimmed = s.trim();
+  if (trimmed.length <= budget) return trimmed;
+  return `…${trimmed.slice(-budget)}`;
+}
+
+function exitPhrase(r: StepResult): string {
+  return `exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}`;
+}
+
+/** The stored `provision-failed at <step>: <this>` / refresh-error detail.
+ *
+ *  Throws when handed a success: the only correct caller is a failure branch,
+ *  and a "failure" description of exit 0 would be a lie in the record. */
+export function describeStepFailure(r: StepResult, perStream = STEP_REPORT_PER_STREAM): string {
+  if (r.exitCode === 0 && !r.timedOut) {
+    throw new Error(`describeStepFailure: not a failure (exit ${r.exitCode})`);
+  }
+  const parts: string[] = [];
+  const out = tailOf(r.stdout, perStream);
+  const err = tailOf(r.stderr, perStream);
+  if (out) parts.push(`stdout: ${out}`);
+  if (err) parts.push(`stderr: ${err}`);
+  return `${exitPhrase(r)}: ${parts.length > 0 ? parts.join("; ") : "no output"}`;
+}
+
+/** The operator's escape hatch: what `console.log` writes when a step fails,
+ *  so the Worker log (observability is on for this Worker) holds the error
+ *  block itself even when the stored reason only had room for its tail. */
+export function stepFailureLog(step: string, r: StepResult, perStream = STEP_LOG_PER_STREAM): string {
+  const out = tailOf(r.stdout, perStream);
+  const err = tailOf(r.stderr, perStream);
+  return [
+    `step ${step} failed: ${exitPhrase(r)}`,
+    `--- stdout ---\n${out || "(empty)"}`,
+    `--- stderr ---\n${err || "(empty)"}`,
+  ].join("\n");
+}
