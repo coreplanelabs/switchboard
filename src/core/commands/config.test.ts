@@ -44,8 +44,8 @@ function bind(config: ConfigStore): CommandInvoker {
 
 function configDeps(config: ConfigStore) {
   return {
-    describeConfig: (c: string, u: string) => config.describeConfig(c, u),
-    scopes: (c: string, u: string) => config.scopes(c, u),
+    describeConfig: async (c: string, u: string) => config.describeConfig(c, u),
+    scopes: async (c: string, u: string) => config.scopes(c, u),
     setChannelOverride: (c: string, p: Parameters<ConfigStore["setChannelOverride"]>[1]) => config.setChannelOverride(c, p),
     setUserOverride: (u: string, p: Parameters<ConfigStore["setUserOverride"]>[1]) => config.setUserOverride(u, p),
     clearChannelOverride: (c: string) => config.clearChannelOverride(c),

@@ -322,7 +322,7 @@ describe("runs list on chat (KTD18)", () => {
     await store.put(record("fin00001", NOW - 1000));
     const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
     registerRunsCommands(registry);
-    const commands = bindCommands(registry, { runs: createRunsService({ registry: reg, store }) });
+    const commands = bindCommands(registry, { runs: async () => createRunsService({ registry: reg, store }) });
     reg.create("review · acme/api <!channel>", { agent: "review", channelId: "slack:D0PRIVATE", userId: "slack:UOWNER", threadKey: "slack:D0PRIVATE:t" });
     return { commands, config: configStore(ADMIN_YAML) };
   }

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { InMemoryIssueTracker } from "../../execution/githubIssues.js";
 import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
 import { jsonSchemaFor } from "../commandSurface.js";
-import { InMemoryFrictionLedger, RunStoreFrictionLedger } from "../frictionLedger.js";
+import { InMemoryFrictionLedger, RunStoreFrictionLedger, type FrictionLedger } from "../frictionLedger.js";
 import type { FrictionRunRecord } from "../frictionProposals.js";
 import type { RunRecord } from "../runRecord.js";
 import { analyzeRunFriction } from "../runFriction.js";
@@ -41,11 +41,14 @@ async function seededLedger() {
 
 const CONFIG: SelfImprovementConfig = { repo: "coreplanelabs/switchboard" };
 
+/** A ready ledger as the async accessor the deps now carry. */
+const ledgerDep = (ledger: FrictionLedger) => async () => ledger;
+
 function bind(deps: Partial<FrictionCommandDeps["friction"]> = {}): { commands: CommandInvoker; tracker: InMemoryIssueTracker } {
   const tracker = new InMemoryIssueTracker();
   const registry = new CommandRegistry<FrictionCommandDeps>({ audit: () => {} });
   registerFrictionCommands(registry);
-  const commands = bindCommands(registry, { friction: { tracker, config: () => CONFIG, readSource: async () => "", ...deps } });
+  const commands = bindCommands(registry, { friction: { ledger: async () => undefined, tracker, config: async () => CONFIG, readSource: async () => "", ...deps } });
   return { commands, tracker };
 }
 
@@ -81,7 +84,7 @@ function reportOf(res: Invoked): SelfImprovementReport {
 
 describe("friction.report", () => {
   it("is open to any chat caller and renders the exact pre-migration reply (AE10)", async () => {
-    const { commands, tracker } = bind({ ledger: await seededLedger() });
+    const { commands, tracker } = bind({ ledger: ledgerDep(await seededLedger()) });
     for (const caller of [chat("slack:UADMIN", { repoManager: true }), chat("slack:UNOBODY", { repoManager: false })]) {
       const res = await commands.invoke("friction.report", {}, caller);
       expect(res.ok, caller.id).toBe(true);
@@ -91,7 +94,7 @@ describe("friction.report", () => {
   });
 
   it("returns the structured report as JSON (runsAnalyzed, ranked patterns, nothing filed) and coerces string inputs", async () => {
-    const { commands } = bind({ ledger: await seededLedger() });
+    const { commands } = bind({ ledger: ledgerDep(await seededLedger()) });
     const res = await commands.invoke("friction.report", { options: { limit: "1", minRuns: "1" } }, mcp("friction:read"));
     expect(res.ok).toBe(true);
     const report = reportOf(res);
@@ -138,7 +141,7 @@ describe("friction.report", () => {
     for (const id of ["x1", "x2"]) await store.put(record(id, "http:x"));
     for (const id of ["y1", "y2"]) await store.put(record(id, "http:y"));
     const legacy = await seededLedger(); // legacy rows carry no channel → excluded under a pin
-    const { commands } = bind({ ledger: new RunStoreFrictionLedger(store, legacy) });
+    const { commands } = bind({ ledger: ledgerDep(new RunStoreFrictionLedger(store, legacy)) });
 
     const pinned = await commands.invoke("friction.report", { options: { minRuns: "1" } }, { ...mcp("friction:read"), channel: "http:x" });
     expect(pinned.ok).toBe(true);
@@ -156,7 +159,7 @@ describe("friction.report", () => {
 
 describe("friction.propose", () => {
   it("a repoManager chat caller files through the tracker with the exact pre-migration reply; a plain user is refused (R13)", async () => {
-    const { commands, tracker } = bind({ ledger: await seededLedger() });
+    const { commands, tracker } = bind({ ledger: ledgerDep(await seededLedger()) });
     const refused = await commands.invoke("friction.propose", { options: { top: "3" } }, chat("slack:UNOBODY", { repoManager: false }));
     expect(refused).toMatchObject({ ok: false, error: "unauthorized", status: 403 });
     expect(tracker.calls).toEqual([]);
@@ -175,7 +178,7 @@ describe("friction.propose", () => {
   });
 
   it("`dryRun` is a real boolean on text surfaces: \"false\" files, \"true\" files nothing", async () => {
-    const { commands, tracker } = bind({ ledger: await seededLedger() });
+    const { commands, tracker } = bind({ ledger: ledgerDep(await seededLedger()) });
     const dry = await commands.invoke("friction.propose", { options: { dryRun: "true", top: "3" } }, mcp("friction:write"));
     expect(text(commands, "friction.propose", dry)).toBe(
       "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · dry run (nothing filed)\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Would file (dry run):*\n• [friction] setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
@@ -188,7 +191,7 @@ describe("friction.propose", () => {
   });
 
   it("`repo` overrides the configured target; without either it is `unavailable` with the legacy hint", async () => {
-    const { commands, tracker } = bind({ ledger: await seededLedger(), config: () => undefined });
+    const { commands, tracker } = bind({ ledger: ledgerDep(await seededLedger()), config: async () => undefined });
     expect(await commands.invoke("friction.propose", {}, mcp("friction:write"))).toMatchObject({ ok: false, error: "unavailable", message: NO_REPO_MESSAGE });
     const res = await commands.invoke("friction.propose", { options: { repo: "acme/other" } }, mcp("friction:write"));
     expect(res.ok).toBe(true);
@@ -203,14 +206,14 @@ describe("friction.propose", () => {
     };
     const registry = new CommandRegistry<FrictionCommandDeps>({ audit: () => {} });
     registerFrictionCommands(registry);
-    const commands = bindCommands(registry, { friction: { ledger: await seededLedger(), tracker, config: () => CONFIG, readSource: async () => "" } });
+    const commands = bindCommands(registry, { friction: { ledger: ledgerDep(await seededLedger()), tracker, config: async () => CONFIG, readSource: async () => "" } });
     expect(await commands.invoke("friction.propose", {}, mcp("friction:write"))).toMatchObject({ ok: false, error: "unavailable", message: "GitHub App credentials missing" });
   });
 });
 
 describe("scopes on machine surfaces (AE12)", () => {
   it("a dispatch-only token is refused on both; runs:write is refused on friction.propose; the exact scope passes", async () => {
-    const { commands, tracker } = bind({ ledger: await seededLedger() });
+    const { commands, tracker } = bind({ ledger: ledgerDep(await seededLedger()) });
     for (const id of ["friction.report", "friction.propose"]) {
       expect(await commands.invoke(id, {}, mcp("dispatch")), id).toMatchObject({ ok: false, error: "unauthorized", status: 403 });
     }
@@ -285,7 +288,7 @@ describe("friction.analyze (CLI only) — the former frictionCli", () => {
 
 describe("friction.report — truncated inputs", () => {
   it("counts records diagnosed on a truncated event stream (`truncatedRuns`) and the rendered report says so", async () => {
-    const { commands } = bind({ ledger: await truncatedLedger() });
+    const { commands } = bind({ ledger: ledgerDep(await truncatedLedger()) });
     const res = await commands.invoke("friction.report", {}, chat("slack:UX", { repoManager: false }));
     expect(res.ok).toBe(true);
     if (!res.ok) throw new Error("unreachable");

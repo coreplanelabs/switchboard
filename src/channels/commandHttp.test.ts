@@ -53,7 +53,7 @@ async function fixture(over: Partial<CommandHttpOptions> = {}) {
   const runs = createRunsService({ registry: reg, store });
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
   registerRunsCommands(registry);
-  const commands: CommandInvoker = bindCommands(registry, { runs });
+  const commands: CommandInvoker = bindCommands(registry, { runs: async () => runs });
   const opts: CommandHttpOptions = {
     operatorIdentities: () => ["access:op-1"],
     serviceTokenScopes: (cn) => (cn === "reader-bot" ? ["runs:read"] : []),

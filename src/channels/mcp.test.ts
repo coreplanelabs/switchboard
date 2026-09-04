@@ -392,7 +392,7 @@ async function commandFixture() {
   });
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
   registerRunsCommands(registry);
-  const commands = bindCommands(registry, { runs: createRunsService({ registry: reg, store }) });
+  const commands = bindCommands(registry, { runs: async () => createRunsService({ registry: reg, store }) });
   return { reg, live, commands };
 }
 

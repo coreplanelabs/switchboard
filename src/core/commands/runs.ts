@@ -19,7 +19,8 @@ import { MAX_EVENTS_PAGE, type Result, type RunRecordView, type RunsService } fr
 // `runs stop <id> --mode soft|hard`, `runs list [--status …] [--agent …] …`.
 
 export interface RunsCommandDeps {
-  runs: RunsService;
+  /** Resolved on first use: the CLI opens the run store lazily behind an async config open. */
+  runs(): Promise<RunsService>;
 }
 
 const defineCommand = commandDefiner<RunsCommandDeps>();
@@ -91,7 +92,7 @@ export const runsList = defineCommand({
       channel = caller.channel;
     }
     const { channel: _ignored, ...rest } = options;
-    return asJson(await deps.runs.listRuns({ ...rest, ...(channel !== undefined ? { channel } : {}) }));
+    return asJson(await (await deps.runs()).listRuns({ ...rest, ...(channel !== undefined ? { channel } : {}) }));
   },
 });
 
@@ -105,7 +106,7 @@ export const runsGet = defineCommand({
   surfaces: { chat: false },
   describe: "One run's record; `--include messages` adds its events with free text wrapped as untrusted content.",
   handler: async ({ args, options, caller, deps }) => {
-    const view = await getVisibleRun(deps.runs, args.id, caller, options.include ? { include: options.include } : {});
+    const view = await getVisibleRun(await deps.runs(), args.id, caller, options.include ? { include: options.include } : {});
     if (view.events) view.events = view.events.map(wrapEvent);
     return asJson(view);
   },
@@ -124,8 +125,8 @@ export const runsEvents = defineCommand({
   surfaces: { chat: false },
   describe: "A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content.",
   handler: async ({ args, options, caller, deps }) => {
-    await assertVisible(deps.runs, args.id, caller);
-    const page = unwrap(await deps.runs.getRunEvents(args.id, { afterSeq: options.afterSeq, limit: options.limit }));
+    await assertVisible(await deps.runs(), args.id, caller);
+    const page = unwrap(await (await deps.runs()).getRunEvents(args.id, { afterSeq: options.afterSeq, limit: options.limit }));
     return asJson({ ...page, events: page.events.map(wrapEvent) });
   },
 });
@@ -139,8 +140,8 @@ export const runsFriction = defineCommand({
   surfaces: { chat: false },
   describe: "One run's friction diagnosis (live: computed now; persisted: as stored).",
   handler: async ({ args, caller, deps }) => {
-    await assertVisible(deps.runs, args.id, caller);
-    return asJson(unwrap(await deps.runs.getRunFriction(args.id)));
+    await assertVisible(await deps.runs(), args.id, caller);
+    return asJson(unwrap(await (await deps.runs()).getRunFriction(args.id)));
   },
 });
 
@@ -153,8 +154,8 @@ export const runsStop = defineCommand({
   effect: "write",
   describe: "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor.",
   handler: async ({ args, options, caller, deps }) => {
-    await assertVisible(deps.runs, args.id, caller);
-    return asJson(unwrap(await deps.runs.stopRun(args.id, options.mode, { kind: caller.kind, id: caller.id })));
+    await assertVisible(await deps.runs(), args.id, caller);
+    return asJson(unwrap(await (await deps.runs()).stopRun(args.id, options.mode, { kind: caller.kind, id: caller.id })));
   },
 });
 

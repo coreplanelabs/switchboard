@@ -193,36 +193,36 @@ export function missingBotConfig(configPath: string): CommandError {
 export async function loadBotConfig(
   configPath: string,
   overridesPath: string,
-  opts: { env?: Record<string, string | undefined>; exists?: (path: string) => boolean; warn?: (message: string) => void } = {},
+  opts: { env?: Record<string, string | undefined>; exists?: (path: string) => boolean; warn?: (message: string) => void; fetch?: typeof fetch } = {},
 ): Promise<ConfigStore> {
   if (!(opts.exists ?? existsSync)(configPath)) throw missingBotConfig(configPath);
   // The same backing the bot uses (`runtimeOverrides.worker` → the ConfigDO), so
   // `config set` from the CLI and from Slack write ONE document; the file is
   // the fallback for a config without a state Worker.
-  return openConfigStore(configPath, { overridesPath, env: opts.env ?? process.env, warn: opts.warn ?? ((m) => console.error(m)) });
+  return openConfigStore(configPath, { overridesPath, env: opts.env ?? process.env, warn: opts.warn ?? ((m) => console.error(m)), ...(opts.fetch ? { fetch: opts.fetch } : {}) });
 }
 
-/** What `main()` binds the commands to: the bot config opened ONCE, up front
- *  (the open is async — the overrides backing may be the state Worker), with
- *  the outcome deferred to the first command that asks. A missing file, a
- *  configured Worker without its bearer, or an unreachable Worker never stop
- *  `deploy plan`, `help`, `env`, … from running; the command that does need
- *  the config gets one `unavailable` line naming the cause. */
-export async function bindBotConfig(
+/** What `main()` binds the commands to: the bot config, opened ONCE. The open
+ *  STARTS here (up front, so a command that needs the config pays no extra
+ *  latency) but is awaited only by the accessor — i.e. by the first command
+ *  that reaches for the config through its deps (#409). A command that never
+ *  does (`deploy plan`, `help`, `env`, …) never waits, whatever the state
+ *  Worker is doing; nothing classifies commands. A missing file, a configured
+ *  Worker without its bearer, or an unreachable Worker reach only the command
+ *  that asked, as one `unavailable` line naming the cause. */
+export function bindBotConfig(
   configPath: string,
   overridesPath: string,
-  opts: { env?: Record<string, string | undefined>; exists?: (path: string) => boolean; warn?: (message: string) => void } = {},
-): Promise<() => ConfigStore> {
-  let outcome: { config: ConfigStore } | { error: CommandError };
-  try {
-    outcome = { config: await loadBotConfig(configPath, overridesPath, opts) };
-  } catch (err) {
-    outcome = {
-      error:
-        err instanceof CommandError ? err : new CommandError("unavailable", `bot config at ${configPath} could not be opened: ${err instanceof Error ? err.message : String(err)}`),
-    };
-  }
-  return () => {
+  opts: { env?: Record<string, string | undefined>; exists?: (path: string) => boolean; warn?: (message: string) => void; fetch?: typeof fetch } = {},
+): () => Promise<ConfigStore> {
+  const opening = loadBotConfig(configPath, overridesPath, opts).then(
+    (config) => ({ config }),
+    (err: unknown) => ({
+      error: err instanceof CommandError ? err : new CommandError("unavailable", `bot config at ${configPath} could not be opened: ${err instanceof Error ? err.message : String(err)}`),
+    }),
+  );
+  return async () => {
+    const outcome = await opening;
     if ("error" in outcome) throw outcome.error;
     return outcome.config;
   };
@@ -234,18 +234,19 @@ async function main(): Promise<void> {
   // persists exactly like a bot run when `runHistory` is configured (null
   // store → history off); the registry commands read the same store. A fresh
   // process holds no live runs, so `runs list` here is persisted history.
-  // Opened up front (see `bindBotConfig`); a command that needs it and cannot
-  // have it gets the `unavailable` error naming the cause, every other command runs.
-  const botConfig = await bindBotConfig(CONFIG_PATH, "./data/cli-overrides.json");
-  let loaded: { config: ConfigStore; runStore: RunStore | null } | undefined;
-  const bot = () => {
-    if (!loaded) {
-      const config = botConfig();
-      loaded = { config, runStore: buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => warn(`[run-history] ${m}`) }) };
-    }
-    return loaded;
-  };
-  const commands = buildCoreCommands(() => bot().config, () => bot().runStore, { registry: defaultRunRegistry, env: process.env, dataDir: "./data", warn, audit: () => {} });
+  // The open starts now (see `bindBotConfig`) and is awaited only by the deps
+  // that reach for it: `deploy plan`, `help`, `env`, … run at once whatever the
+  // state Worker is doing; a command that needs the config and cannot have it
+  // gets the `unavailable` error naming the cause.
+  const botConfig = bindBotConfig(CONFIG_PATH, "./data/cli-overrides.json");
+  let loaded: Promise<{ config: ConfigStore; runStore: RunStore | null }> | undefined;
+  const bot = () =>
+    (loaded ??= botConfig().then((config) => ({ config, runStore: buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => warn(`[run-history] ${m}`) }) })));
+  const commands = buildCoreCommands(
+    () => bot().then((b) => b.config),
+    () => bot().then((b) => b.runStore),
+    { registry: defaultRunRegistry, env: process.env, dataDir: "./data", warn, audit: () => {} },
+  );
 
   const parsed = parseCliArgv(process.argv.slice(2), commands);
   if (parsed.kind !== "ask") {
@@ -255,7 +256,7 @@ async function main(): Promise<void> {
     process.exit(out.exitCode);
   }
 
-  const { config, runStore } = bot();
+  const { config, runStore } = await bot();
   const providers = new ProviderRegistry(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
   const mcp = buildMcpToolSource(config.config.mcp, process.env);

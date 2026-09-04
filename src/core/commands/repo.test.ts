@@ -83,9 +83,9 @@ function depsOf(opts: BindOptions = {}): RepoCommandDeps {
   const admin = opts.admin ?? mockClient();
   return {
     repo: {
-      admin: () => admin,
-      operations: () => (opts.ops === undefined ? null : opts.ops),
-      canUseRepo: opts.canUseRepo ?? (() => true),
+      admin: async () => admin,
+      operations: async () => (opts.ops === undefined ? null : opts.ops),
+      canUseRepo: async (callerId: string, slug: string) => (opts.canUseRepo ? opts.canUseRepo(callerId, slug) : true),
       ...(opts.inspect ? { inspect: opts.inspect } : {}),
       ...(opts.sleep ? { sleep: opts.sleep } : {}),
     },

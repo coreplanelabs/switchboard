@@ -38,7 +38,7 @@ const seeded = () => new InMemoryMemoryStore([ORG(), MINE(), THEIRS(), REPO(), C
 function bind(store: MemoryStore | undefined = seeded(), cfg: MemoryConfig | undefined | "on" = "on"): CommandInvoker {
   const registry = new CommandRegistry<MemoryCommandDeps>({ audit: () => {} });
   registerMemoryCommands(registry);
-  return bindCommands(registry, { memory: { config: () => (cfg === "on" ? ON : cfg), store } });
+  return bindCommands(registry, { memory: { config: async () => (cfg === "on" ? ON : cfg), store } });
 }
 
 /** A Slack person in channel C1; `admin` passes the repo-management gate; `repo` binds the thread's repo lazily. */

@@ -19,11 +19,19 @@ import { CommandError, commandDefiner, type Caller, type CommandDef, type Comman
 // (`--models.coding x`) nest on every surface (KTD21). None of this reaches a
 // model or starts a run.
 
+/** The store's reads and writes, each behind an async accessor: the config is
+ *  opened asynchronously (its overrides backing may be the state Worker,
+ *  routing-and-config item 12), so a command that needs it awaits the open
+ *  exactly when it first reaches for it — and a command that never does never
+ *  waits (#409). No classification of commands anywhere. */
 export interface ConfigCommandDeps {
-  config: Pick<
-    ConfigStore,
-    "describeConfig" | "scopes" | "setChannelOverride" | "setUserOverride" | "clearChannelOverride" | "clearUserOverride"
-  > & {
+  config: {
+    describeConfig(channelId: string, userId: string): Promise<ConfigDescription>;
+    scopes(channelId: string, userId: string): Promise<{ channel: Scope; user: Scope }>;
+    setChannelOverride(channelId: string, patch: Scope): Promise<Scope>;
+    setUserOverride(userId: string, patch: Scope): Promise<Scope>;
+    clearChannelOverride(channelId: string): Promise<void>;
+    clearUserOverride(userId: string): Promise<void>;
     /** The agent names a scope may pin (`AGENTS` keys). */
     agentNames(): string[];
   };
@@ -70,7 +78,7 @@ export const configShow = defineCommand({
   effect: "read",
   describe: "The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.",
   render: (output) => formatConfigDescription(output as unknown as ConfigDescription),
-  handler: async ({ options, caller, deps }) => deps.config.describeConfig(targetChannel(caller, options.channel), caller.id) as unknown as JsonValue,
+  handler: async ({ options, caller, deps }) => (await deps.config.describeConfig(targetChannel(caller, options.channel), caller.id)) as unknown as JsonValue,
 });
 
 // ---- config set --------------------------------------------------------------------
@@ -178,7 +186,7 @@ export const configInstructions = defineCommand({
   },
   handler: async ({ args, options, caller, deps }) => {
     const channel = args.scope === "channel" ? targetChannel(caller, options.channel) : undefined;
-    const scopes = deps.config.scopes(channel ?? caller.origin?.channelId ?? "", caller.id);
+    const scopes = await deps.config.scopes(channel ?? caller.origin?.channelId ?? "", caller.id);
     const current = (args.scope === "channel" ? scopes.channel : scopes.user).instructions?.trim();
     // No value at all only SHOWS the current text (a peek must never clear).
     if (args.text === undefined) return { scope: args.scope, action: "show", ...(current ? { instructions: current } : {}) };

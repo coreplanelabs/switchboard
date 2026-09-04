@@ -46,7 +46,7 @@ async function fixture() {
   });
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
   registerRunsCommands(registry);
-  const commands: CommandInvoker = bindCommands(registry, { runs: createRunsService({ registry: reg, store }) });
+  const commands: CommandInvoker = bindCommands(registry, { runs: async () => createRunsService({ registry: reg, store }) });
   return { commands, live, reg };
 }
 
@@ -300,14 +300,14 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
       cfg,
       "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n",
     );
-    const config = await bindBotConfig(cfg, join(dir, "overrides.json"), { env: {}, warn: () => {} });
+    const config = bindBotConfig(cfg, join(dir, "overrides.json"), { env: {}, warn: () => {} });
     const commands = buildCoreCommands(config, () => null, { registry: new RunRegistry({ now: () => NOW }), env: {}, dataDir: dir, warn: () => {} });
     expect((await runCommand(commands, command(["deploy", "plan", "--only", "memory"], commands), CLI_CALLER)).exitCode).toBe(0);
     const show = await runCommand(commands, command(["config", "show", "--channel", "slack:C1"], commands), CLI_CALLER);
     expect(show).toEqual({ exitCode: 1, stdout: "", stderr: `error (unavailable): bot config at ${cfg} could not be opened: runtimeOverrides.worker is configured but MEMORY_TOKEN is not set` });
     // A missing file binds the same way it always did.
-    const unbound = await bindBotConfig(missing, "/dev/null", { env: {} });
-    expect(() => unbound()).toThrow(missingBotConfig(missing).message);
+    const unbound = bindBotConfig(missing, "/dev/null", { env: {} });
+    await expect(unbound()).rejects.toThrow(missingBotConfig(missing).message);
   });
 
   it("(a) `deploy plan` succeeds without ever asking for the bot config; so do `help show` and the catalogue", async () => {
@@ -338,5 +338,35 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
         stderr: `error (unavailable): bot config not found at ${missing} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`,
       });
     }
+  });
+});
+
+// #409 — the config open is awaited only by the deps that reach for it.
+describe("a command that never touches the config never waits for the open (#409)", () => {
+  it("with a state Worker that never answers, `deploy plan` and `help show` return at once and never ask for the config; `config show` asks — and waits", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-cli-409-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n");
+    const hanging: typeof fetch = () => new Promise(() => {}); // the Worker never answers
+    let asked = 0;
+    const config = bindBotConfig(cfg, join(dir, "overrides.json"), { env: { MEMORY_TOKEN: "t" }, warn: () => {}, fetch: hanging });
+    const counted = () => {
+      asked++;
+      return config();
+    };
+    const commands = buildCoreCommands(counted, () => null, { registry: new RunRegistry({ now: () => NOW }), env: {}, dataDir: dir, warn: () => {} });
+    const cmd = (argv: string[]) => {
+      const parsed = parseCliArgv(argv, commands);
+      if (parsed.kind !== "command") throw new Error(JSON.stringify(parsed));
+      return parsed;
+    };
+    expect((await runCommand(commands, cmd(["deploy", "plan", "--only", "memory"]), CLI_CALLER)).exitCode).toBe(0);
+    expect((await runCommand(commands, cmd(["help", "show"]), CLI_CALLER)).exitCode).toBe(0);
+    expect(asked).toBe(0); // nothing reached for the config
+    // A config-needing command DOES reach for it and, with this Worker, waits: prove the reach and the pending wait.
+    const show = runCommand(commands, cmd(["config", "show", "--channel", "slack:C1"]), CLI_CALLER);
+    const settled = await Promise.race([show.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 50))]);
+    expect(settled).toBe(false);
+    expect(asked).toBe(1);
   });
 });

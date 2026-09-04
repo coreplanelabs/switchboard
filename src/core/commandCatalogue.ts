@@ -92,13 +92,27 @@ function readSource(source: string): Promise<string> {
  *  them, so those run in a checkout without `config/config.yaml`; a command
  *  that does touch them gets whatever the accessor throws (the CLI throws a
  *  clear `unavailable` CommandError) as its result. */
-export type Provided<T> = T | (() => T);
+export type Provided<T> = T | (() => T | Promise<T>);
 
-function once<T>(provided: Provided<T>): () => T {
-  if (typeof provided !== "function") return () => provided;
-  const make = provided as () => T;
-  let made: { value: T } | undefined;
-  return () => (made ??= { value: make() }).value;
+/** Resolve once, on first use, asynchronously: the config's overrides backing
+ *  may be the state Worker, so opening it is an await — and because every
+ *  config-backed dep below reaches for it through this accessor, a command that
+ *  never touches the config never waits for the open (#409), with nothing to
+ *  classify. A rejected open is NOT cached: the next command retries. */
+function once<T>(provided: Provided<T>): () => Promise<T> {
+  if (typeof provided !== "function") {
+    const ready = Promise.resolve(provided);
+    return () => ready;
+  }
+  const make = provided as () => T | Promise<T>;
+  let pending: Promise<T> | undefined;
+  return () =>
+    (pending ??= Promise.resolve()
+      .then(make)
+      .catch((err: unknown) => {
+        pending = undefined;
+        throw err;
+      }));
 }
 
 export function buildCoreCommands(config: Provided<ConfigStore>, store: Provided<RunStore | null>, wiring: CoreCommandWiring): CommandInvoker {
@@ -108,42 +122,38 @@ export function buildCoreCommands(config: Provided<ConfigStore>, store: Provided
   const cfg = once(config);
   const runStore = once(store);
   const ledger = once(
-    () =>
+    async () =>
       wiring.frictionLedger ??
-      selectFrictionLedger(runStore(), buildFrictionLedger(cfg().config.selfImprovement, wiring.env, { dataDir: wiring.dataDir, warn: warn("friction") }), warn("friction")),
+      selectFrictionLedger(await runStore(), buildFrictionLedger((await cfg()).config.selfImprovement, wiring.env, { dataDir: wiring.dataDir, warn: warn("friction") }), warn("friction")),
   );
-  const runs = once(() => wiring.runs ?? createRunsService({ registry: wiring.registry, store: runStore() }));
-  const admin = (): ResidentAdminClient | { unavailable: string } => wiring.residentAdmin?.() ?? residentAdminFromConfig(cfg(), wiring.env);
+  const runs = once(async () => wiring.runs ?? createRunsService({ registry: wiring.registry, store: await runStore() }));
+  const admin = async (): Promise<ResidentAdminClient | { unavailable: string }> => wiring.residentAdmin?.() ?? residentAdminFromConfig(await cfg(), wiring.env);
   const deps: CoreCommandDeps = {
     help: { agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })), commands: () => registry.list() },
     config: {
-      describeConfig: (c, u) => cfg().describeConfig(c, u),
-      scopes: (c, u) => cfg().scopes(c, u),
-      setChannelOverride: (c, p) => cfg().setChannelOverride(c, p),
-      setUserOverride: (u, p) => cfg().setUserOverride(u, p),
-      clearChannelOverride: (c) => cfg().clearChannelOverride(c),
-      clearUserOverride: (u) => cfg().clearUserOverride(u),
+      describeConfig: async (c, u) => (await cfg()).describeConfig(c, u),
+      scopes: async (c, u) => (await cfg()).scopes(c, u),
+      setChannelOverride: async (c, p) => (await cfg()).setChannelOverride(c, p),
+      setUserOverride: async (u, p) => (await cfg()).setUserOverride(u, p),
+      clearChannelOverride: async (c) => (await cfg()).clearChannelOverride(c),
+      clearUserOverride: async (u) => (await cfg()).clearUserOverride(u),
       agentNames: () => Object.keys(AGENTS),
     },
-    get runs() {
-      return runs();
-    },
+    runs,
     friction: {
-      get ledger() {
-        return ledger();
-      },
+      ledger,
       tracker: wiring.tracker,
-      config: () => cfg().config.selfImprovement,
+      config: async () => (await cfg()).config.selfImprovement,
       readSource,
     },
     repo: {
       admin,
-      operations: (caller) => (wiring.operations ? wiring.operations(caller) : defaultOperations(cfg(), wiring.env, caller)),
-      canUseRepo: (callerId, slug) => cfg().canUseRepo(callerId, slug),
+      operations: async (caller) => (wiring.operations ? wiring.operations(caller) : defaultOperations(await cfg(), wiring.env, caller)),
+      canUseRepo: async (callerId, slug) => (await cfg()).canUseRepo(callerId, slug),
       inspect: wiring.repoInspector ?? githubRepoInspector(),
     },
     memory: {
-      config: () => cfg().config.memory,
+      config: async () => (await cfg()).config.memory,
       get store() {
         return wiring.memory?.();
       },
