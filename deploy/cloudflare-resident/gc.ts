@@ -143,8 +143,9 @@ export interface LimitDefaults {
   floorS: number;
 }
 
-/** What the registry DO stores. `build` is the healthz `u` marker of the
- *  deploy that wrote it; a different build ignores the record. */
+/** What the registry DO stores. `build` is the identity of the deploy that
+ *  wrote it (`buildId`: the commit plus that build's timestamp); a different
+ *  build ignores the record. */
 export interface StoredTestOverrides {
   cap?: number;
   floorS?: number;
