@@ -6,7 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "deploy": "wrangler deploy && npm run wake",
+    "deploy": "node ../bin/build-stamp.mjs && npm run wake",
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",

@@ -451,7 +451,11 @@ describe("run history routes", () => {
 
   it("/healthz lists runs", async () => {
     const res = await SELF.fetch(`${BASE}/healthz`);
-    expect(await res.json()).toEqual({ ok: true, features: ["memory", "friction", "schedules", "runs", "config"] });
+    expect(await res.json()).toEqual({
+      ok: true,
+      build: { commit: "unknown" },
+      features: ["memory", "friction", "schedules", "runs", "config"],
+    });
   });
 
   it("list: newest-first, limit 1000 → at most 200 rows plus a cursor; before/sinceMs/agent/channel filters; no events on the wire", async () => {

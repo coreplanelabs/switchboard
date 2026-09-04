@@ -112,11 +112,14 @@ import {
 } from "../../src/execution/residentRefresh.js";
 import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
 import { describeStepFailure, stepFailureLog, type StepResult } from "../../src/execution/residentStepReport.js";
+import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 
-/** Build marker: answered by GET /healthz (`u`) so a deploy's edge propagation
- *  is provable from outside, and stamped on test overrides so they die with
- *  the build that set them (gc.ts). Bump on every deploy-worthy change. */
-const BUILD_MARKER = "perf53";
+/** The commit this bundle was built from, injected by the deploy
+ *  (`deploy/bin/build-stamp.mjs`; `unknown` when nobody stamped it). Answered
+ *  by GET /healthz as `build` so a deploy's edge propagation is provable from
+ *  outside without auth, and stamped on test overrides so they die with the
+ *  build that set them (gc.ts). Nothing to bump: it follows the tree. */
+const BUILD = injectedBuildStamp();
 
 interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
@@ -829,7 +832,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  interleave with an onboard. */
   async limits(): Promise<EffectiveLimits> {
     const stored = await this.ctx.storage.get<StoredTestOverrides>(TEST_OVERRIDES_KEY);
-    return effectiveLimits(stored, BUILD_MARKER, { cap: RESIDENT_CAP, floorS: LRU_FLOOR_S });
+    return effectiveLimits(stored, BUILD.commit, { cap: RESIDENT_CAP, floorS: LRU_FLOOR_S });
   }
 
   /** Admin-only by construction (reached solely via /debug set-test-overrides,
@@ -841,7 +844,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       await this.ctx.storage.put(TEST_OVERRIDES_KEY, {
         ...overrides,
         setAt: new Date().toISOString(),
-        build: BUILD_MARKER,
+        build: BUILD.commit,
       } satisfies StoredTestOverrides);
     }
     return this.limits();
@@ -3814,7 +3817,7 @@ export default {
     // Unauthenticated wake ping for `npm run deploy` — touches no DO, no data.
     // `u` tracks the last shipped unit so a deploy's propagation is provable
     // from the outside without auth.
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, u: BUILD_MARKER });
+    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, build: BUILD });
 
     // Auth precedes existence: unknown paths demand admin before revealing
     // 404 vs 401, so an unauthenticated scanner learns nothing.
@@ -4542,7 +4545,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
   if (op === "set-test-overrides") {
     // Item 49: lower the effective cap / LRU floor for live over-cap checks.
     // Registry-wide (no `resource`), admin-only (not in READ_DEBUG_OPS), only
-    // ever lower than the compiled constants, and stamped with BUILD_MARKER so
+    // ever lower than the compiled constants, and stamped with the build commit so
     // the next deploy ignores it. An empty body clears.
     const parsed = parseTestOverrides(body, { cap: RESIDENT_CAP, floorS: LRU_FLOOR_S });
     if ("error" in parsed) return json({ error: parsed.error }, 400);
