@@ -407,6 +407,189 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
   {
     "args": [
       {
+        "name": "name",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "chatGate": "open",
+    "effect": "write",
+    "id": "mcp.add",
+    "options": [
+      {
+        "name": "url",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "scope",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "me",
+          "channel",
+          "org",
+        ],
+      },
+      {
+        "name": "agents",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "auth",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "bearer",
+          "none",
+        ],
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "scope": "mcp:write",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "args": [
+      {
+        "name": "name",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "chatGate": "open",
+    "effect": "write",
+    "id": "mcp.connect",
+    "options": [
+      {
+        "name": "scope",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "me",
+          "channel",
+          "org",
+        ],
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "scope": "mcp:write",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "args": [],
+    "chatGate": "open",
+    "effect": "read",
+    "id": "mcp.list",
+    "options": [
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "scope": "mcp:read",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "args": [
+      {
+        "name": "name",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "chatGate": "open",
+    "effect": "write",
+    "id": "mcp.remove",
+    "options": [
+      {
+        "name": "scope",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "me",
+          "channel",
+          "org",
+        ],
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "scope": "mcp:write",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "args": [
+      {
+        "name": "name",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "chatGate": "open",
+    "effect": "read",
+    "id": "mcp.show",
+    "options": [
+      {
+        "name": "scope",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "me",
+          "channel",
+          "org",
+        ],
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "scope": "mcp:read",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "args": [
+      {
         "name": "id",
         "required": true,
         "type": "string",

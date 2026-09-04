@@ -57,3 +57,54 @@ describe("ConfigDO routes", () => {
     expect((await post("/config/nope", { key: key() })).status).toBe(404);
   });
 });
+
+describe("ConfigDO secrets + tickets (features/mcp-tools.md items 15–16)", () => {
+  it("put → get → delete a sealed credential; the blob is stored verbatim and never interpreted", async () => {
+    const serverId = `user:slack:U${key()}/vanta`;
+    const sealed = { serverId, keyId: "k1", sealed: "AAAA", updatedAt: 3 };
+    expect((await post("/config/secrets/get", { serverId })).data).toEqual({ sealed: null });
+    expect((await post("/config/secrets/put", { sealed })).data).toEqual({ ok: true });
+    expect((await post("/config/secrets/get", { serverId })).data).toEqual({ sealed });
+    await post("/config/secrets/put", { sealed: { ...sealed, sealed: "BBBB", updatedAt: 4 } });
+    expect(((await post("/config/secrets/get", { serverId })).data.sealed as { sealed: string }).sealed).toBe("BBBB");
+    expect((await post("/config/secrets/delete", { serverId })).data).toEqual({ ok: true, removed: true });
+    expect((await post("/config/secrets/delete", { serverId })).data).toEqual({ ok: true, removed: false });
+    expect((await post("/config/secrets/put", { sealed: { serverId } })).status).toBe(400);
+    expect((await post("/config/secrets/get", {})).status).toBe(400);
+  });
+
+  it("tickets: put (insert or replace) → get; a bad nonce is 400; writes sweep tickets expired more than a day ago", async () => {
+    const serverId = `org/${key()}`;
+    const nonce = `${"t".repeat(20)}${key()}`;
+    const ticket = { nonce, serverId, requesterId: "slack:U1", createdAt: 1, expiresAt: Date.now() + 600_000, state: "pending" };
+    expect((await post("/config/tickets/get", { nonce })).data).toEqual({ ticket: null });
+    expect((await post("/config/tickets/put", { ticket })).data).toEqual({ ok: true });
+    expect((await post("/config/tickets/get", { nonce })).data).toEqual({ ticket });
+    await post("/config/tickets/put", { ticket: { ...ticket, state: "opened", openedBy: { sub: "cf", at: 2 } } });
+    expect(((await post("/config/tickets/get", { nonce })).data.ticket as { state: string }).state).toBe("opened");
+    expect((await post("/config/tickets/put", { ticket: { nonce: "short" } })).status).toBe(400);
+    expect((await post("/config/tickets/get", { nonce: "short" })).status).toBe(400);
+    const old = { ...ticket, nonce: `${"o".repeat(20)}${key()}`, expiresAt: Date.now() - 2 * 24 * 3600_000 };
+    await post("/config/tickets/put", { ticket: old });
+    await post("/config/tickets/put", { ticket: { ...ticket, nonce: `${"r".repeat(20)}${key()}` } }); // sweeps `old`
+    expect((await post("/config/tickets/get", { nonce: old.nonce })).data).toEqual({ ticket: null });
+  });
+
+  it("tickets/transition is a compare-and-swap on the stored state: applied once; the race loser sees applied=false and the row is untouched", async () => {
+    const serverId = `org/${key()}`;
+    const nonce = `${"c".repeat(20)}${key()}`;
+    const ticket = { nonce, serverId, requesterId: "slack:U1", createdAt: 1, expiresAt: Date.now() + 600_000, state: "pending" };
+    const first = { ...ticket, state: "opened", openedBy: { sub: "cf-a", at: 2 } };
+    const second = { ...ticket, state: "opened", openedBy: { sub: "cf-b", at: 3 } };
+    expect((await post("/config/tickets/transition", { ticket: first, fromState: "pending" })).data).toEqual({ ok: true, applied: false }); // unknown nonce
+    await post("/config/tickets/put", { ticket });
+    expect((await post("/config/tickets/transition", { ticket: first, fromState: "pending" })).data).toEqual({ ok: true, applied: true });
+    expect((await post("/config/tickets/transition", { ticket: second, fromState: "pending" })).data).toEqual({ ok: true, applied: false });
+    expect(((await post("/config/tickets/get", { nonce })).data.ticket as { openedBy: { sub: string } }).openedBy.sub).toBe("cf-a");
+    const done = { ...first, state: "completed", completedBy: { sub: "cf-a", at: 4 } };
+    expect((await post("/config/tickets/transition", { ticket: done, fromState: "opened" })).data).toEqual({ ok: true, applied: true });
+    expect((await post("/config/tickets/transition", { ticket: done, fromState: "opened" })).data).toEqual({ ok: true, applied: false });
+    expect((await post("/config/tickets/transition", { ticket: done, fromState: "done" })).status).toBe(400);
+    expect((await post("/config/tickets/transition", { ticket: { nonce: "short" }, fromState: "pending" })).status).toBe(400);
+  });
+});

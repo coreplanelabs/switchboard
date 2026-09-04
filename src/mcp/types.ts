@@ -6,6 +6,10 @@
 
 /** A configured server, credentials already resolved (never the env var name). */
 export interface McpServerSpec {
+  /** Registry servers carry their `<scopeKey>/<name>` id — the client/cache
+   *  key, so an org and a user server with one name are two clients. Config
+   *  servers have none (their name is the key). */
+  id?: string;
   /** Slug, `^[a-z0-9][a-z0-9-]*$`, ≤ 32 chars — the middle of every bridged tool name. */
   name: string;
   /** Streamable-HTTP endpoint (http/https; SSRF-checked at load and at connect). */

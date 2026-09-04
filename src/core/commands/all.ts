@@ -4,6 +4,7 @@ import { registerDeployCommands, type DeployCommandDeps } from "./deploy.js";
 import { registerEnvCommands, type EnvCommandDeps } from "./env.js";
 import { registerFrictionCommands, type FrictionCommandDeps } from "./friction.js";
 import { registerHelpCommands, type HelpCommandDeps } from "./help.js";
+import { registerMcpCommands, type McpCommandDeps } from "./mcp.js";
 import { registerMemoryCommands, type MemoryCommandDeps } from "./memory.js";
 import { registerRepoCommands, type RepoCommandDeps } from "./repo.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./runs.js";
@@ -23,6 +24,7 @@ export type CoreCommandDeps = HelpCommandDeps &
   FrictionCommandDeps &
   RepoCommandDeps &
   MemoryCommandDeps &
+  McpCommandDeps &
   ScheduleCommandDeps &
   DeployCommandDeps &
   EnvCommandDeps;
@@ -34,6 +36,7 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerFrictionCommands(registry);
   registerRepoCommands(registry);
   registerMemoryCommands(registry);
+  registerMcpCommands(registry);
   registerScheduleCommands(registry);
   registerDeployCommands(registry);
   registerEnvCommands(registry);

@@ -24,6 +24,7 @@ import {
   type StoredRunEvent,
 } from "../../src/core/runRecord.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
+import { isMcpTicket, isSealedCredential, type McpTicket, type McpTicketState, type SealedCredential } from "../../src/mcp/registry.ts";
 
 // Memory Worker: the durable backend behind the bot's WorkerMemoryStore
 // (src/core/memory/workerStore.ts) — cross-session memory PR3 (#85). One
@@ -589,7 +590,63 @@ export class ConfigDO extends DurableObject<Env> {
         body TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS secrets (
+        server_id TEXT PRIMARY KEY,
+        sealed TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS tickets (
+        nonce TEXT PRIMARY KEY,
+        server_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        ticket TEXT NOT NULL
+      );
     `);
+  }
+
+  // ---- MCP sealed credentials + connect tickets (features/mcp-tools.md items 15–16).
+  // Ciphertext the bot sealed — opaque here — and one-time tickets: the two
+  // things a config document must never carry, kept beside it on this object.
+
+  async putSecret(sealed: SealedCredential): Promise<void> {
+    this.sql.exec(`INSERT OR REPLACE INTO secrets (server_id, sealed) VALUES (?, ?)`, sealed.serverId, JSON.stringify(sealed));
+  }
+
+  async getSecret(serverId: string): Promise<SealedCredential | null> {
+    const row = this.sql.exec<{ sealed: string }>(`SELECT sealed FROM secrets WHERE server_id = ?`, serverId).toArray()[0];
+    return row ? parseStored(row.sealed, isSealedCredential) : null;
+  }
+
+  async deleteSecret(serverId: string): Promise<boolean> {
+    const had = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM secrets WHERE server_id = ?`, serverId).one().n;
+    this.sql.exec(`DELETE FROM secrets WHERE server_id = ?`, serverId);
+    return had > 0;
+  }
+
+  /** Insert or replace; tickets expired more than a day ago are swept on every write. */
+  async putTicket(ticket: McpTicket, now: number): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(`INSERT OR REPLACE INTO tickets (nonce, server_id, expires_at, ticket) VALUES (?, ?, ?, ?)`, ticket.nonce, ticket.serverId, ticket.expiresAt, JSON.stringify(ticket));
+      this.sql.exec(`DELETE FROM tickets WHERE expires_at < ?`, now - 24 * 3600_000);
+    });
+  }
+
+  async getTicket(nonce: string): Promise<McpTicket | null> {
+    const row = this.sql.exec<{ ticket: string }>(`SELECT ticket FROM tickets WHERE nonce = ?`, nonce).toArray()[0];
+    return row ? parseStored(row.ticket, isMcpTicket) : null;
+  }
+
+  /** Compare-and-swap: write `ticket` only while the stored row is still in
+   *  `fromState`. One transaction on a single-threaded object, so of two
+   *  concurrent opens/completions exactly one is applied — "single-use" is a
+   *  property of the store, not of request timing. */
+  async transitionTicket(ticket: McpTicket, fromState: McpTicketState): Promise<boolean> {
+    return this.ctx.storage.transactionSync(() => {
+      const row = this.sql.exec<{ ticket: string }>(`SELECT ticket FROM tickets WHERE nonce = ?`, ticket.nonce).toArray()[0];
+      const stored = row ? parseStored(row.ticket, isMcpTicket) : null;
+      if (!stored || stored.state !== fromState) return false;
+      this.sql.exec(`UPDATE tickets SET server_id = ?, expires_at = ?, ticket = ? WHERE nonce = ?`, ticket.serverId, ticket.expiresAt, JSON.stringify(ticket), ticket.nonce);
+      return true;
+    });
   }
 
   async get(key: string): Promise<{ document: unknown; version: number }> {
@@ -621,13 +678,61 @@ export class ConfigDO extends DurableObject<Env> {
   }
 }
 
+function parseStored<T>(text: string, guard: (v: unknown) => v is T): T | null {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return guard(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Documents are small; a body over this is refused before storage. */
 const MAX_CONFIG_DOCUMENT_BYTES = 256 * 1024;
 
+const CONFIG_ROUTES = new Set(["/config/get", "/config/put", "/config/secrets/put", "/config/secrets/get", "/config/secrets/delete", "/config/tickets/put", "/config/tickets/get", "/config/tickets/transition"]);
+const TICKET_STATES: ReadonlySet<string> = new Set<McpTicketState>(["pending", "opened", "completed", "cancelled"]);
+
 async function handleConfig(pathname: string, body: unknown, env: Env): Promise<Response> {
   const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
-  if (typeof b.key !== "string" || !CONFIG_KEY_RE.test(b.key)) return json({ error: "key must be a short lowercase slug" }, 400);
   const dO = env.CONFIG.get(env.CONFIG.idFromName(CONFIG_OBJECT));
+  // MCP secrets + tickets (opaque to this Worker beyond shape).
+  switch (pathname) {
+    case "/config/secrets/put": {
+      if (!isSealedCredential(b.sealed)) return json({ error: "sealed must be a SealedCredential" }, 400);
+      await dO.putSecret(b.sealed);
+      console.log(`[config/secrets/put] ${b.sealed.serverId} key=${b.sealed.keyId}`);
+      return json({ ok: true });
+    }
+    case "/config/secrets/get": {
+      if (typeof b.serverId !== "string" || !b.serverId) return json({ error: "serverId required" }, 400);
+      return json({ sealed: await dO.getSecret(b.serverId) });
+    }
+    case "/config/secrets/delete": {
+      if (typeof b.serverId !== "string" || !b.serverId) return json({ error: "serverId required" }, 400);
+      return json({ ok: true, removed: await dO.deleteSecret(b.serverId) });
+    }
+    case "/config/tickets/put": {
+      if (!isMcpTicket(b.ticket)) return json({ error: "ticket must be an McpTicket" }, 400);
+      await dO.putTicket(b.ticket, Date.now());
+      console.log(`[config/tickets/put] ${b.ticket.serverId} state=${b.ticket.state}`);
+      return json({ ok: true });
+    }
+    case "/config/tickets/get": {
+      if (typeof b.nonce !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(b.nonce)) return json({ error: "nonce malformed" }, 400);
+      return json({ ticket: await dO.getTicket(b.nonce) });
+    }
+    case "/config/tickets/transition": {
+      if (!isMcpTicket(b.ticket)) return json({ error: "ticket must be an McpTicket" }, 400);
+      if (typeof b.fromState !== "string" || !TICKET_STATES.has(b.fromState)) return json({ error: "fromState must be a ticket state" }, 400);
+      const applied = await dO.transitionTicket(b.ticket, b.fromState as McpTicketState);
+      console.log(`[config/tickets/transition] ${b.ticket.serverId} ${b.fromState}→${b.ticket.state} applied=${applied}`);
+      return json({ ok: true, applied });
+    }
+    default:
+      break;
+  }
+  if (typeof b.key !== "string" || !CONFIG_KEY_RE.test(b.key)) return json({ error: "key must be a short lowercase slug" }, 400);
   if (pathname === "/config/get") {
     return json(await dO.get(b.key));
   }
@@ -1439,8 +1544,7 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, features: ["memory", "friction", "schedules", "runs", "config"] });
     const ROUTES = new Set([
-      "/config/get",
-      "/config/put",
+      ...CONFIG_ROUTES,
       "/retrieve",
       "/write",
       "/list",

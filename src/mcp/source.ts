@@ -8,6 +8,10 @@ import type { McpClient, McpClientFactory, McpServerSpec, McpToolInfo } from "./
 // servers this agent may see, discovery with a bounded fan-out and an
 // in-process tools/list cache, one bridge per server sharing ONE call budget,
 // and the outcome the dispatcher turns into run notes + the MCP prompt block.
+// `DiscoveringMcpToolSource` is the shared engine; where the servers come from
+// is the subclass's business: the static config (`ConfigMcpToolSource`) or the
+// durable registry (`RegistryMcpToolSource`, registrySource.ts). `Composite`
+// merges sources, first one wins on a tool-name clash.
 
 /** `tools/list` results are cached this long per server. A cache, recreatable,
  *  never authoritative (AGENTS.md invariant 6). */
@@ -28,40 +32,40 @@ export interface McpToolsForRun {
 }
 
 export interface McpToolSource {
-  toolsFor(agentName: string, caller: { userId: string }, opts?: { signal?: AbortSignal }): Promise<McpToolsForRun>;
+  toolsFor(agentName: string, caller: { userId: string; channelId?: string }, opts?: { signal?: AbortSignal }): Promise<McpToolsForRun>;
 }
 
-export interface ConfigMcpToolSourceOptions {
+/** A server the subclass resolved for this run — a usable spec, or a named
+ *  failure (a credential that would not open, a shadowed name). */
+export type ResolvedServer = { spec: McpServerSpec } | { name: string; unavailable: string };
+
+export interface DiscoveringSourceOptions {
   factory: McpClientFactory;
   now?: () => number;
   cacheTtlMs?: number;
 }
 
-export class ConfigMcpToolSource implements McpToolSource {
+export abstract class DiscoveringMcpToolSource implements McpToolSource {
   private readonly clients = new Map<string, McpClient>();
   private readonly cache = new Map<string, { at: number; tools: McpToolInfo[] }>();
-  private readonly now: () => number;
+  protected readonly now: () => number;
   private readonly ttl: number;
 
-  constructor(
-    private readonly servers: McpServerSpec[],
-    private readonly opts: ConfigMcpToolSourceOptions,
-  ) {
+  constructor(protected readonly opts: DiscoveringSourceOptions) {
     this.now = opts.now ?? Date.now;
     this.ttl = opts.cacheTtlMs ?? MCP_TOOLS_CACHE_TTL_MS;
   }
 
-  /** The servers an agent may see. Scoping is by configuration only — the
-   *  review agent gets nothing unless a server lists it (item 7). */
-  serversFor(agentName: string): McpServerSpec[] {
-    return this.servers.filter((s) => s.agents.includes(agentName));
-  }
+  /** The servers this agent + caller may see, in priority order. */
+  protected abstract resolve(agentName: string, caller: { userId: string; channelId?: string }): Promise<ResolvedServer[]>;
 
-  async toolsFor(agentName: string, _caller: { userId: string }, opts?: { signal?: AbortSignal }): Promise<McpToolsForRun> {
-    const scoped = this.serversFor(agentName);
-    if (scoped.length === 0) return { tools: [], servers: [] };
+  async toolsFor(agentName: string, caller: { userId: string; channelId?: string }, opts?: { signal?: AbortSignal }): Promise<McpToolsForRun> {
+    const resolved = await this.resolve(agentName, caller);
+    if (resolved.length === 0) return { tools: [], servers: [] };
     const budget = newRunBudget();
-    const results = await mapLimit(scoped, MCP_DISCOVERY_CONCURRENCY, async (server) => {
+    const results = await mapLimit(resolved, MCP_DISCOVERY_CONCURRENCY, async (entry) => {
+      if (!("spec" in entry)) return { outcome: { server: entry.name, unavailable: entry.unavailable } as McpServerOutcome, tools: [] as RunnableTool[] };
+      const server = entry.spec;
       const client = this.clientFor(server);
       try {
         const tools = await this.discover(server, client, opts?.signal);
@@ -74,22 +78,86 @@ export class ConfigMcpToolSource implements McpToolSource {
     return { tools: results.flatMap((r) => r.tools), servers: results.map((r) => r.outcome) };
   }
 
+  /** Cache + client identity: the spec's `id` when it has one (registry
+   *  servers), else its name (config servers). A re-keyed registry server
+   *  changes its credential, so its client must be rebuilt: `forget(id)`. */
+  protected keyOf(server: McpServerSpec): string {
+    return server.id ?? server.name;
+  }
+
+  /** Drop the cached client + tool list of one server (after a credential change). */
+  forget(key: string): void {
+    this.clients.delete(key);
+    this.cache.delete(key);
+  }
+
   private clientFor(server: McpServerSpec): McpClient {
-    let c = this.clients.get(server.name);
+    const key = this.keyOf(server);
+    let c = this.clients.get(key);
     if (!c) {
       c = this.opts.factory(server);
-      this.clients.set(server.name, c);
+      this.clients.set(key, c);
     }
     return c;
   }
 
   private async discover(server: McpServerSpec, client: McpClient, signal?: AbortSignal): Promise<McpToolInfo[]> {
-    const hit = this.cache.get(server.name);
+    const key = this.keyOf(server);
+    const hit = this.cache.get(key);
     const t = this.now();
     if (hit && t - hit.at < this.ttl) return hit.tools;
     const tools = await client.listTools({ signal });
-    this.cache.set(server.name, { at: t, tools });
+    this.cache.set(key, { at: t, tools });
     return tools;
+  }
+}
+
+/** A fixed list of specs — the in-memory implementation (tests, dev). */
+export class StaticMcpToolSource extends DiscoveringMcpToolSource {
+  constructor(
+    private readonly servers: McpServerSpec[],
+    opts: DiscoveringSourceOptions,
+  ) {
+    super(opts);
+  }
+
+  /** The servers an agent may see. Scoping is by configuration only — the
+   *  review agent gets nothing unless a server lists it (item 7). */
+  serversFor(agentName: string): McpServerSpec[] {
+    return this.servers.filter((s) => s.agents.includes(agentName));
+  }
+
+  protected async resolve(agentName: string): Promise<ResolvedServer[]> {
+    return this.serversFor(agentName).map((spec) => ({ spec }));
+  }
+}
+
+/** Several sources as one: outcomes concatenate; a tool whose name an earlier
+ *  source already produced is dropped and its server's outcome says so (the
+ *  runner would otherwise throw on the duplicate — item 12). */
+export class CompositeMcpToolSource implements McpToolSource {
+  constructor(private readonly sources: McpToolSource[]) {}
+
+  async toolsFor(agentName: string, caller: { userId: string; channelId?: string }, opts?: { signal?: AbortSignal }): Promise<McpToolsForRun> {
+    const parts = await Promise.all(this.sources.map((s) => s.toolsFor(agentName, caller, opts)));
+    const seen = new Set<string>();
+    const tools: RunnableTool[] = [];
+    const servers: McpServerOutcome[] = [];
+    for (const part of parts) {
+      const shadowed = new Set<string>();
+      for (const t of part.tools) {
+        if (seen.has(t.name)) {
+          shadowed.add(t.name.split("__")[1] ?? t.name);
+          continue;
+        }
+        seen.add(t.name);
+        tools.push(t);
+      }
+      for (const s of part.servers) {
+        servers.push(shadowed.has(s.server) && s.unavailable === undefined ? { server: s.server, unavailable: "name shadowed by a server from an earlier source (config wins over registry, org over user)" } : s);
+      }
+    }
+    return { tools, servers };
   }
 }
 

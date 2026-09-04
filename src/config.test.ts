@@ -624,3 +624,123 @@ describe("WorkerOverridesBacking (the ConfigDO client)", () => {
     await expect(fake({ document: null, version: 0 }, { down: true }).backing.load()).rejects.toThrow(/config store unreachable: ECONNREFUSED/);
   });
 });
+
+// Feature: features/mcp-tools.md items 11 + 14 + 17 — MCP servers as a Scope setting.
+describe("Scope.mcpServers (MCP servers layered through config)", () => {
+  const MCP_YAML = `${YAML_FIXTURE}
+  "slack:CMCP":
+    mcpServers:
+      notion: { url: "https://mcp.notion.so/mcp", auth: none }
+`.replace("channels:\n", "channels:\n");
+  const withDefaults = `
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+  mcpServers:
+    linear: { url: "https://mcp.linear.app/mcp", auth: bearer, tokenEnv: MCP_LINEAR_TOKEN, agents: [general, coding] }
+channels:
+  "slack:CMCP":
+    mcpServers:
+      notion: { url: "https://mcp.notion.so/mcp", auth: none }
+users:
+  "slack:UX":
+    mcpServers:
+      vanta: { url: "https://mcp.vanta.com/mcp", auth: bearer }
+      linear: { url: "https://evil.example/mcp", auth: none }
+`;
+  void MCP_YAML;
+
+  it("mcpServersFor unions the three tiers, org first, and marks a lower-tier name clash as shadowed", () => {
+    const s = store(withDefaults);
+    const resolved = s.mcpServersFor("slack:CMCP", "slack:UX");
+    expect(resolved.map((r) => [r.kind, r.name, r.source, r.shadowedBy ?? null])).toEqual([
+      ["org", "linear", "config", null],
+      ["channel", "notion", "config", null],
+      ["user", "vanta", "config", null],
+      ["user", "linear", "config", "org"],
+    ]);
+    expect(resolved[0].scopeKey).toBe("org");
+    expect(resolved[1].scopeKey).toBe("channel:slack:CMCP");
+    expect(resolved[2].scopeKey).toBe("user:slack:UX");
+    // Another channel / user sees only the org tier.
+    expect(s.mcpServersFor("slack:COTHER", "slack:UY").map((r) => r.name)).toEqual(["linear"]);
+  });
+
+  it("a runtime `mcp add` into a channel or user that already has STATIC servers layers over them — the pinned entries keep serving", async () => {
+    const s = store(withDefaults);
+    await s.setChannelOverride("slack:CMCP", { mcpServers: { hubspot: { url: "https://mcp.hubspot.com/mcp", auth: "none", addedBy: "slack:UX", addedAt: 1 } } });
+    await s.setUserOverride("slack:UX", { mcpServers: { asana: { url: "https://mcp.asana.com/mcp", auth: "none", addedBy: "slack:UX", addedAt: 2 } } });
+    const resolved = s.mcpServersFor("slack:CMCP", "slack:UX");
+    expect(resolved.map((r) => [r.kind, r.name, r.source])).toEqual([
+      ["org", "linear", "config"],
+      ["channel", "notion", "config"],
+      ["channel", "hubspot", "runtime"],
+      ["user", "vanta", "config"],
+      ["user", "linear", "config"],
+      ["user", "asana", "runtime"],
+    ]);
+    // The runtime half is still only what `mcp add` wrote — the static entries were never copied into the document.
+    expect(s.runtimeScope("channel", "slack:CMCP").mcpServers).toEqual({ hubspot: expect.anything() });
+    expect(s.runtimeScope("user", "slack:UX").mcpServers).toEqual({ asana: expect.anything() });
+    // The effective scopes (`config show`, the dispatcher's config block) name both halves.
+    const shown = s.describe("slack:CMCP", "slack:UX");
+    expect(shown).toMatch(/\*Channel scope:\*.*mcp `notion` `hubspot`/);
+    expect(shown).toMatch(/\*Your scope:\*.*mcp `vanta` `linear` `asana`/);
+    // Removing the runtime entry again leaves the static ones exactly as before.
+    await s.setChannelOverride("slack:CMCP", { mcpServers: undefined });
+    expect(s.mcpServersFor("slack:CMCP", "slack:UX").filter((r) => r.kind === "channel").map((r) => r.name)).toEqual(["notion"]);
+  });
+
+  it("runtime entries layer over static ones per tier; `runtimeScope` is the runtime half only; the org tier is `defaults` + the `org` override", async () => {
+    const s = store(withDefaults);
+    await s.setUserOverride("slack:UY", { mcpServers: { hubspot: { url: "https://mcp.hubspot.com/mcp", auth: "none", addedBy: "slack:UY", addedAt: 1 } } });
+    await s.setOrgOverride({ mcpServers: { github: { url: "https://api.githubcopilot.com/mcp/", auth: "bearer", addedBy: "slack:UADMIN", addedAt: 2 } } });
+    const resolved = s.mcpServersFor("slack:CX", "slack:UY");
+    expect(resolved.map((r) => [r.kind, r.name, r.source])).toEqual([
+      ["org", "linear", "config"],
+      ["org", "github", "runtime"],
+      ["user", "hubspot", "runtime"],
+    ]);
+    expect(s.runtimeScope("org").mcpServers).toEqual({ github: expect.objectContaining({ url: "https://api.githubcopilot.com/mcp/" }) });
+    expect(s.runtimeScope("user", "slack:UX").mcpServers).toBeUndefined(); // static only
+    expect(s.isStaticMcpServer("org", undefined, "linear")).toBe(true);
+    expect(s.isStaticMcpServer("org", undefined, "github")).toBe(false);
+    expect(s.isStaticMcpServer("user", "slack:UX", "vanta")).toBe(true);
+    // `config show` names the servers per tier, never their URLs' query strings.
+    const shown = s.describe("slack:CMCP", "slack:UX");
+    expect(shown).toMatch(/\*Defaults:\*.*mcp `linear` `github`/);
+    expect(shown).toMatch(/\*Channel scope:\*.*mcp `notion`/);
+    expect(shown).toMatch(/\*Your scope:\*.*mcp `vanta` `linear`/);
+  });
+
+  it("validates every tier at load: slug names, http(s) + SSRF-safe URLs, known agents, auth kind, tokenEnv only with bearer, and self-serve agents only outside org", () => {
+    const bad = (yaml: string) => () => store(yaml);
+    expect(bad(withDefaults.replace("notion:", "Bad Name:"))).toThrow(/channels\.slack:CMCP\.mcpServers\.Bad Name: server names are slugs/);
+    expect(bad(withDefaults.replace("https://mcp.notion.so/mcp", "http://169.254.169.254/"))).toThrow(/mcpServers\.notion\.url: .*169\.254/);
+    expect(bad(withDefaults.replace("https://mcp.notion.so/mcp", "ftp://x.example"))).toThrow(/mcpServers\.notion\.url:/);
+    expect(bad(withDefaults.replace('notion: { url: "https://mcp.notion.so/mcp", auth: none }', 'notion: { url: "https://mcp.notion.so/mcp", auth: none, agents: [wizard] }'))).toThrow(/unknown agent "wizard"/);
+    expect(bad(withDefaults.replace('vanta: { url: "https://mcp.vanta.com/mcp", auth: bearer }', 'vanta: { url: "https://mcp.vanta.com/mcp", auth: bearer, agents: [coding] }'))).toThrow(
+      /users\.slack:UX\.mcpServers\.vanta\.agents: a user-scoped server may name general\/research only/,
+    );
+    expect(bad(withDefaults.replace('notion: { url: "https://mcp.notion.so/mcp", auth: none }', 'notion: { url: "https://mcp.notion.so/mcp", auth: none, agents: [review] }'))).toThrow(/a channel-scoped server may name general\/research only/);
+    expect(bad(withDefaults.replace("auth: none }", "auth: oauth }"))).toThrow(/must be \{ url, auth: none\|bearer/);
+    expect(bad(withDefaults.replace("auth: none }", "auth: none, tokenEnv: X }"))).toThrow(/tokenEnv only applies to auth: bearer/);
+    // The org tier may name any agent (coding above) — it loads.
+    expect(store(withDefaults).config.defaults.mcpServers?.linear.agents).toEqual(["general", "coding"]);
+  });
+
+  it("a stored overrides document is held to the same rules, naming the backing", () => {
+    const { cfg } = (() => {
+      const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
+      const cfg = join(dir, "config.yaml");
+      writeFileSync(cfg, YAML_FIXTURE);
+      return { cfg };
+    })();
+    const backing = new InMemoryOverridesBacking({ channels: {}, users: { "slack:UX": { mcpServers: { vanta: { url: "http://localhost:1/mcp", auth: "none" } } } } });
+    expect(() => new ConfigStore(cfg, { backing, initial: backing.document })).toThrow(/overrides \(in-memory\): users\.slack:UX\.mcpServers\.vanta\.url/);
+  });
+});

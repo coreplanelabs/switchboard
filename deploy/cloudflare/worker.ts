@@ -43,7 +43,8 @@ interface Env {
   BRAVE_SEARCH_API_KEY?: string; // web_search backend (Brave); web_fetch works without it
   CF_ANALYTICS_TOKEN?: string; // costs dash: Cloudflare API token, Account Analytics:Read only
   ANTHROPIC_ADMIN_KEY?: string; // costs dash (optional): Anthropic Admin API key for the LLM cost report
-  MEMORY_TOKEN?: string; // durable memory + friction ledger + schedule firings: bearer for the state Worker
+  MEMORY_TOKEN?: string; // durable memory + friction ledger + schedule firings + MCP registry: bearer for the state Worker
+  MCP_CREDENTIAL_KEY?: string; // MCP registry (#394): the bot-only key that seals server credentials before they reach the McpDO
   STATE_WORKER_URL?: string; // var: the state Worker's base URL — where this shim records each scheduled firing (#244)
 }
 

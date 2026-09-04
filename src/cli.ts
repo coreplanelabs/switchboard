@@ -39,7 +39,7 @@ import { buildRunStore, type RunStore } from "./core/runStore.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
-import { buildMcpToolSource } from "./mcp/index.js";
+import { buildMcp } from "./mcp/index.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
@@ -242,10 +242,33 @@ async function main(): Promise<void> {
   let loaded: Promise<{ config: ConfigStore; runStore: RunStore | null }> | undefined;
   const bot = () =>
     (loaded ??= botConfig().then((config) => ({ config, runStore: buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => warn(`[run-history] ${m}`) }) })));
+  // MCP (#394) rides the same config: entries are config scopes, secrets follow
+  // the overrides backing; connect links point at the bot's PUBLIC_BASE_URL.
+  // With `runtimeOverrides.worker` set the CLI and the bot share one ConfigDO
+  // (entries, credentials, tickets), so a CLI-minted link completes on the
+  // bot's page. Without it the CLI is its own deployment on purpose: its
+  // overrides document is `cli-overrides.json` (above), so its secrets file is
+  // the CLI's too — the two processes never write one JSON file, and a ticket
+  // for an entry only the CLI's document holds is never offered to the bot.
+  // Built on first use, behind the same async config open (#409): `mcp list`
+  // waits for it, `deploy plan` never asks.
+  let mcpLoaded: Promise<ReturnType<typeof buildMcp>> | undefined;
+  const mcpWiring = () =>
+    (mcpLoaded ??= bot().then((b) => buildMcp(b.config, process.env, { publicBaseUrl: process.env.PUBLIC_BASE_URL, secretsPath: "./data/cli-mcp-secrets.json", warn: (m) => warn(`[mcp] ${m}`) })));
   const commands = buildCoreCommands(
     () => bot().then((b) => b.config),
     () => bot().then((b) => b.runStore),
-    { registry: defaultRunRegistry, env: process.env, dataDir: "./data", warn, audit: () => {} },
+    {
+      registry: defaultRunRegistry,
+      env: process.env,
+      dataDir: "./data",
+      warn,
+      audit: () => {},
+      mcp: async () => {
+        const w = await mcpWiring();
+        return w.service ?? { unavailable: w.unavailable ?? "MCP is not enabled" };
+      },
+    },
   );
 
   const parsed = parseCliArgv(process.argv.slice(2), commands);
@@ -259,13 +282,14 @@ async function main(): Promise<void> {
   const { config, runStore } = await bot();
   const providers = new ProviderRegistry(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
-  const mcp = buildMcpToolSource(config.config.mcp, process.env);
+  const mcpLoadedWiring = await mcpWiring();
+  const mcp = mcpLoadedWiring.source;
   const runHistoryWriter = runStore
     ? createRunHistoryWriter({ store: runStore, warn, onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
     : undefined;
   // The chat fast path (`runs list`, `friction report`, …) answers from the same
   // catalogue the bot binds — without it those messages would go to the model.
-  await dispatch({ config, providers, skills, mcp, runHistoryWriter, commands }, { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text }, new ConsoleIO());
+  await dispatch({ config, providers, skills, mcp, mcpRegistryOn: mcpLoadedWiring.service !== undefined, runHistoryWriter, commands }, { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text }, new ConsoleIO());
   // Wait for the record write to settle before exiting rather than dropping it.
   await runHistoryWriter?.settled();
 }

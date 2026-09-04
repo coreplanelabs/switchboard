@@ -146,3 +146,24 @@ describe("configAwarenessBlock — custom instructions (#107 phase 2)", () => {
     expect(configAwarenessBlock(base)).not.toMatch(/custom instructions are active/i);
   });
 });
+
+describe("configAwarenessBlock — MCP (#394, features/mcp-tools.md item 17)", () => {
+  it("is absent without `mcp` (byte-identical to before the feature)", () => {
+    expect(configAwarenessBlock(base)).not.toContain("MCP");
+  });
+
+  it("lists the servers connected for this run and the ones that did not answer", () => {
+    const block = configAwarenessBlock({ ...base, mcp: { registryOn: true, served: ["linear", "vanta"], unavailable: ["notion"] } });
+    expect(block).toContain("External MCP servers connected for this run: linear, vanta — their tools are named `mcp__<server>__*` (details: `mcp list`, `mcp show <name>`).");
+    expect(block).toContain("MCP servers configured for this agent that did not answer this run: notion.");
+    expect(block).not.toContain("none connected");
+  });
+
+  it("with the registry on and nothing connected, points the user at `mcp add`; with the registry off and nothing served, says nothing", () => {
+    const on = configAwarenessBlock({ ...base, mcp: { registryOn: true, served: [], unavailable: [] } });
+    expect(on).toContain("External MCP servers: none connected for you or org-wide yet. Anyone can connect one for their own runs with `mcp add <name> --url <url>`");
+    expect(on).toContain("never paste tokens in chat");
+    const off = configAwarenessBlock({ ...base, mcp: { registryOn: false, served: [], unavailable: [] } });
+    expect(off).not.toContain("MCP");
+  });
+});

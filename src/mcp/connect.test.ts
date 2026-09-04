@@ -1,0 +1,63 @@
+import { describe, expect, it } from "vitest";
+import { identityMatches, newTicket, planComplete, planOpen, refusalMessage } from "./connect.js";
+import { MCP_TICKET_TTL_MS, MCP_TOKEN_MAX_CHARS } from "./registry.js";
+
+const NOW = 1_000_000;
+const base = { nonce: "n".repeat(24), serverId: "user:slack:U1/vanta", requesterId: "slack:U1", now: NOW };
+const justin = { sub: "cf-1", email: "justin@coreplane.ai" };
+const other = { sub: "cf-2", email: "someone@else.example" };
+
+describe("connect tickets (features/mcp-tools.md item 15)", () => {
+  it("a ticket lives 10 minutes, starts pending, lowercases the requester email", () => {
+    const t = newTicket({ ...base, requesterEmail: "Justin@CorePlane.ai" });
+    expect(t).toMatchObject({ state: "pending", expiresAt: NOW + MCP_TICKET_TTL_MS, requesterEmail: "justin@coreplane.ai" });
+  });
+
+  it("email-bound: only the matching Access email may open or complete; case-insensitive", () => {
+    const t = newTicket({ ...base, requesterEmail: "justin@coreplane.ai" });
+    expect(identityMatches(t, { sub: "x", email: "JUSTIN@coreplane.ai" })).toBe(true);
+    expect(planOpen(t, other, NOW).ok).toBe(false);
+    expect(planOpen(t, other, NOW)).toEqual({ ok: false, refusal: { kind: "wrong_identity" } });
+    expect(planComplete(t, other, "tok", NOW)).toEqual({ ok: false, refusal: { kind: "wrong_identity" } });
+    const open = planOpen(t, justin, NOW);
+    expect(open.ok && !open.bound && open.ticket.state === "opened").toBe(true);
+  });
+
+  it("unbound: the FIRST opener binds the ticket; anyone else is then refused", () => {
+    const t = newTicket(base);
+    const first = planOpen(t, other, NOW + 1);
+    expect(first.ok && first.bound).toBe(true);
+    const bound = (first as { ticket: typeof t }).ticket;
+    expect(bound.openedBy).toEqual({ sub: "cf-2", email: "someone@else.example", at: NOW + 1 });
+    expect(planOpen(bound, justin, NOW + 2)).toEqual({ ok: false, refusal: { kind: "wrong_identity" } });
+    expect(planComplete(bound, justin, "tok", NOW + 2)).toEqual({ ok: false, refusal: { kind: "wrong_identity" } });
+    const done = planComplete(bound, other, "tok", NOW + 3);
+    expect(done.ok && done.ticket.state === "completed" && done.ticket.completedBy?.sub === "cf-2").toBe(true);
+  });
+
+  it("expired, completed, cancelled, and unknown tickets are refused with distinct reasons", () => {
+    const t = newTicket(base);
+    expect(planOpen(t, justin, NOW + MCP_TICKET_TTL_MS + 1)).toEqual({ ok: false, refusal: { kind: "expired" } });
+    expect(planOpen({ ...t, state: "completed" }, justin, NOW)).toEqual({ ok: false, refusal: { kind: "used" } });
+    expect(planOpen({ ...t, state: "cancelled" }, justin, NOW)).toEqual({ ok: false, refusal: { kind: "cancelled" } });
+    expect(planOpen(null, justin, NOW)).toEqual({ ok: false, refusal: { kind: "not_found" } });
+    // A completed ticket stays used even before its expiry.
+    expect(planComplete({ ...t, state: "completed" }, justin, "tok", NOW)).toEqual({ ok: false, refusal: { kind: "used" } });
+  });
+
+  it("the token is trimmed and must be non-empty, single-line, and under the cap", () => {
+    const t = newTicket({ ...base, requesterEmail: "justin@coreplane.ai" });
+    expect(planComplete(t, justin, "   ", NOW)).toEqual({ ok: false, refusal: { kind: "bad_token", reason: "the token is empty" } });
+    expect(planComplete(t, justin, "a\nb", NOW)).toMatchObject({ ok: false, refusal: { kind: "bad_token" } });
+    expect(planComplete(t, justin, "x".repeat(MCP_TOKEN_MAX_CHARS + 1), NOW)).toMatchObject({ ok: false, refusal: { kind: "bad_token" } });
+    const ok = planComplete(t, justin, "  tok-123  ", NOW);
+    expect(ok.ok && ok.token === "tok-123").toBe(true);
+  });
+
+  it("every refusal has a human sentence that names the next step", () => {
+    for (const kind of ["not_found", "expired", "used", "cancelled", "wrong_identity"] as const) {
+      expect(refusalMessage({ kind })).toMatch(/link|user/);
+    }
+    expect(refusalMessage({ kind: "bad_token", reason: "the token is empty" })).toBe("The token was not accepted: the token is empty.");
+  });
+});

@@ -160,7 +160,7 @@ interface NameLookupClient {
     info(args: {
       user: string;
     }): Promise<{
-      user?: { name?: string; real_name?: string; profile?: { display_name?: string; real_name?: string } };
+      user?: { name?: string; real_name?: string; profile?: { display_name?: string; real_name?: string; email?: string } };
     }>;
   };
 }
@@ -214,6 +214,20 @@ export async function resolveUserName(
     const name = u?.profile?.display_name || u?.profile?.real_name || u?.real_name || u?.name;
     if (name) cachePut(userNameCache, user, name);
     return name || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A user's email (`profile.email`), present only when the app holds
+ *  `users:read.email`; undefined otherwise or on any failure. Uncached: it is
+ *  read once per `mcp add`/`mcp connect` to bind the connect ticket
+ *  (features/mcp-tools.md item 15), never on the message path. */
+export async function resolveUserEmail(client: NameLookupClient, user: string): Promise<string | undefined> {
+  try {
+    const u = (await client.users.info({ user })).user;
+    const email = u?.profile?.email;
+    return typeof email === "string" && email.includes("@") ? email : undefined;
   } catch {
     return undefined;
   }
