@@ -1,10 +1,11 @@
 import { parseModelRef, type Provider } from "../../providers/types.js";
+import type { Actor, ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";
 import type { MemoryConfig, MemoryStore } from "./types.js";
 import { applyBudget, DEFAULT_MEMORY_LIMIT, DEFAULT_MEMORY_TOKENS, renderMemoryBlock, scoreRecord } from "./scorer.js";
 import { listScopeKeys, requestScopeKeys } from "./scope.js";
 import { selectMemoryStore } from "./stores.js";
-import { reflect, shouldReflect, trackReflection, type ReflectGateInput } from "./reflection.js";
+import { reflect, reflectionActor, shouldReflect, trackReflection, type ReflectGateInput } from "./reflection.js";
 
 export type {
   MemoryRecord,
@@ -45,6 +46,7 @@ export {
   buildReflectionInput,
   parseReflection,
   reflect,
+  reflectionActor,
   trackReflection,
   pendingReflectionCount,
   drainReflections,
@@ -67,7 +69,9 @@ export {
  * resolved `<provider>/<model>` strings (AGENTS.md invariant 7). Records are
  * written to the org scope and — per the extractor's `audience` — the
  * requesting user's own scope (#107 PR B) or the run's repo / channel scope
- * (#253).
+ * (#253), each write decided by the authorization policy for the run's
+ * principal under the run's stamped channel visibility (R11: a private or DM
+ * origin never writes org; the fact is narrowed, never widened).
  */
 export function scheduleReflection(input: {
   cfg: MemoryConfig | undefined;
@@ -78,6 +82,10 @@ export function scheduleReflection(input: {
   gate: ReflectGateInput;
   threadKey: string;
   runId: string;
+  /** The run's principal — the actor the writes are decided for (authorization.md item 8). */
+  actor: Actor;
+  /** The run's stamped `channelVisibility` (KTD7): the origin of every fact. */
+  originChannelVisibility: ChannelVisibility;
   /** The requesting user's namespaced id (`slack:U…`) → their memory scope. */
   userId?: string;
   /** The message's namespaced channel id (`slack:C…`) → the channel scope (#253). */
@@ -106,6 +114,8 @@ export function scheduleReflection(input: {
       model,
       store: selectMemoryStore(input.cfg, input.store),
       scopeKeys: requestScopeKeys(input.userId, { channelId: input.channelId, repo: input.repo }),
+      actor: reflectionActor(input.actor, { channelId: input.channelId, repo: input.repo }),
+      originChannelVisibility: input.originChannelVisibility,
       history: input.history,
       request: input.request,
       answer: input.answer,

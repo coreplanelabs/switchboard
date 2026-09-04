@@ -5,14 +5,15 @@ import type { ChannelDirectory, ChannelVisibility } from "./types.js";
 // membership facts come from. `authorize` never calls it: decisions read the
 // stamped resource and the actor's grants only, so a read costs no Slack call.
 //
-// This file holds the static first cut: what a platform-namespaced id says on
+// This file holds the static mapping: what a platform-namespaced id says on
 // its own. Machine channels are `machine`; a Slack DM (`D…`) is `dm`, a Slack
 // private group (`G…`) is `private`; a Slack `C…` channel may be public or
 // private and only `conversations.info` can tell, so it is `unknown` here —
-// and `unknown` is never public (R7): until the Slack adapter supplies a real
-// directory, a `slack:C…` run is readable through channel grants only.
-// Membership is `unknown` for everyone: the static directory proves nothing
-// about who is in a channel.
+// and `unknown` is never public (R7). It is the dispatcher's default (the CLI,
+// the tests); the bot wires `SlackChannelDirectory`
+// (src/channels/slackChannelDirectory.ts), which asks Slack for `C…`/`G…` ids
+// and delegates everything else back here. Membership is `unknown` for
+// everyone: the static directory proves nothing about who is in a channel.
 
 /** The visibility a channel id alone establishes. Pure; the one mapping. */
 export function visibilityOf(channelId: string): ChannelVisibility {

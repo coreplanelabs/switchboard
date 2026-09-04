@@ -49,6 +49,7 @@ import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memo
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource } from "../mcp/source.js";
 import { formatTurnDuration, redactSecrets, type RunEvent } from "./runEvents.js";
+import { resolveChatActor } from "./authz/actor.js";
 import { STATIC_CHANNEL_DIRECTORY } from "./authz/channelDirectory.js";
 import type { ChannelDirectory, ChannelVisibility } from "./authz/types.js";
 import { fitRecordToBudget, MAX_EVENT_BYTES, utf8ByteLength, type RunRecord, type RunStatus } from "./runRecord.js";
@@ -222,10 +223,15 @@ export interface CoreDeps {
    * stamped with its channel's visibility at create, asked of this directory
    * once per run. Default: the static id-based directory (`http:`/`mcp:` →
    * machine, `slack:D…` → dm, `slack:G…` → private, anything else → unknown);
-   * the Slack adapter may supply one that asks `conversations.info`. A
-   * directory failure stamps `unknown`, never a guess (R7).
+   * the bot wires the Slack one (`SlackChannelDirectory`, `conversations.info`
+   * cached per channel per TTL) when the Slack adapter is up. A directory
+   * failure — or an answer slower than `channelDirectoryTimeoutMs` — stamps
+   * `unknown`, never a guess (R7), so a slow directory cannot delay a reply.
    */
   channelDirectory?: ChannelDirectory;
+  /** Bound on one `channelDirectory.info` wait (default `CHANNEL_DIRECTORY_TIMEOUT_MS`).
+   *  Tests that exercise the timeout set it low. */
+  channelDirectoryTimeoutMs?: number;
   /**
    * Where `friction propose` files its proposals. Default: the GitHub REST
    * tracker with the App installation token (App `issues:write`; never a `gh`
@@ -1236,6 +1242,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       gate: { toolCalls, historyTurns: history.length, agentName: resolved.agentName },
       threadKey: msg.threadKey,
       runId: run.id,
+      // The writes are the policy's decision for the run's principal under the
+      // run's stamped origin (authorization.md item 8): the same actor the chat
+      // commands resolve, the same stamp the record carries.
+      actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)),
+      originChannelVisibility: channelVisibility,
       userId: msg.userId,
       channelId: msg.channelId,
       repo: repoCtx.repo,
@@ -1729,15 +1740,46 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean }>(deps
   }
 }
 
+/** The longest a reply waits on the channel directory. The Slack directory
+ *  answers from its cache after the first message per channel per TTL; a cold
+ *  `conversations.info` is one round trip, and a Slack outage must cost the
+ *  user at most this much — the run is then stamped `unknown` (grants-only). */
+export const CHANNEL_DIRECTORY_TIMEOUT_MS = 1500;
+
+const DIRECTORY_TIMED_OUT = Symbol("channel directory timed out");
+
 /** The visibility stamp for a run in `channelId` (authorization KTD7): what the
- *  channel directory says, asked once per run; a directory that throws or
- *  rejects yields `unknown` — never public, never a member (R7). */
+ *  channel directory says, asked once per run and awaited for at most
+ *  `channelDirectoryTimeoutMs`; a directory that throws, rejects, or is too slow
+ *  yields `unknown` — never public, never a member (R7). */
 async function channelVisibilityOf(deps: CoreDeps, channelId: string): Promise<ChannelVisibility> {
-  try {
-    return (await (deps.channelDirectory ?? STATIC_CHANNEL_DIRECTORY).info(channelId)).visibility;
-  } catch (err) {
+  const timeoutMs = deps.channelDirectoryTimeoutMs ?? CHANNEL_DIRECTORY_TIMEOUT_MS;
+  const failed = (err: unknown): ChannelVisibility => {
     console.warn(`[authz] channel directory failed for ${channelId} — stamping unknown: ${err instanceof Error ? err.message : String(err)}`);
     return "unknown";
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Caught BEFORE the race, so a rejection is `unknown` by the same path
+    // whether it lands before the timeout (stamped at once) or after it (the
+    // run is already stamped; the late failure is logged, never left unhandled).
+    const lookup = (deps.channelDirectory ?? STATIC_CHANNEL_DIRECTORY).info(channelId).then((info) => info.visibility, failed);
+    const answer = await Promise.race([
+      lookup,
+      new Promise<typeof DIRECTORY_TIMED_OUT>((resolve) => {
+        timer = setTimeout(() => resolve(DIRECTORY_TIMED_OUT), timeoutMs);
+      }),
+    ]);
+    if (answer === DIRECTORY_TIMED_OUT) {
+      console.warn(`[authz] channel directory timed out after ${timeoutMs} ms for ${channelId} — stamping unknown`);
+      return "unknown";
+    }
+    return answer;
+  } catch (err) {
+    // `info` threw synchronously (a non-async implementation).
+    return failed(err);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
