@@ -205,6 +205,30 @@ describe("runs.get / runs.events / runs.friction", () => {
     expect(getRun).toHaveBeenCalledTimes(1);
     expect(getRun).toHaveBeenCalledWith("fin-x", { include: "messages" });
   });
+
+  it("every handler resolves the `runs` accessor exactly once per invocation (#409, F1)", async () => {
+    const { registry, deps, reg } = await setup();
+    const live = reg.create("coding · acme/live", { agent: "coding", channelId: "http:X", userId: "http:u", threadKey: "http:X:t" });
+    let resolved = 0;
+    const counted: RunsCommandDeps = {
+      runs: () => {
+        resolved++;
+        return deps.runs();
+      },
+    };
+    const invocations: [string, { args?: string[]; options?: Record<string, string> }][] = [
+      ["runs.list", {}],
+      ["runs.get", { args: ["fin-x"] }],
+      ["runs.events", { args: ["fin-x"] }],
+      ["runs.friction", { args: ["fin-x"] }],
+      ["runs.stop", { args: [live.id], options: { mode: "soft" } }],
+    ];
+    for (const [id, input] of invocations) {
+      resolved = 0;
+      expect((await registry.invoke(id, input, readerPinnedX, counted)).ok).toBe(true);
+      expect(resolved, id).toBe(1);
+    }
+  });
 });
 
 describe("runs.stop", () => {
