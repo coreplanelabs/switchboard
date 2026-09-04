@@ -12,12 +12,17 @@ import {
   fitRecordToBudget,
   isRunListItem,
   isRunRecord,
+  isRunVisibilityFilter,
+  matchesVisibility,
   normalizeDiagnosis,
+  normalizeStored,
   storedEventSeqs,
+  toVisibilityFilter,
   utf8ByteLength,
   type RunListItem,
   type RunRecord,
 } from "./runRecord.js";
+import type { Predicate } from "./authz/types.js";
 
 // Feature: features/run-history.md — the node-free run-record contract shared
 // by the bot and the state Worker: the record shape + structural validator,
@@ -38,6 +43,7 @@ function record(over: Partial<RunRecord> = {}): RunRecord {
     channelId: "slack:C1",
     userId: "slack:U1",
     threadKey: "slack:C1:1.0",
+    channelVisibility: "unknown",
     startedAt: 1_000,
     finishedAt: 2_000,
     status: "completed",
@@ -270,5 +276,91 @@ describe("isRunRecord", () => {
     expect(isRunListItem({ ...item, bytes: "big" })).toBe(false);
     expect(isRunListItem({ ...item, id: "has space" })).toBe(false);
     expect(isRunListItem(null)).toBe(false);
+  });
+
+  it("channelVisibility defaults to unknown: a stored record written before the stamp is accepted and normalizes to `unknown` (never public); a known value round-trips; an unknown value is rejected", () => {
+    const { channelVisibility: _v, ...unstamped } = record();
+    expect(isRunRecord(unstamped)).toBe(true);
+    expect(normalizeStored(unstamped as unknown as RunRecord).channelVisibility).toBe("unknown");
+    expect(normalizeStored(record({ channelVisibility: "public" })).channelVisibility).toBe("public");
+    expect(isRunRecord(record({ channelVisibility: "dm" }))).toBe(true);
+    expect(isRunRecord({ ...record(), channelVisibility: "everyone" })).toBe(false);
+    expect(isRunRecord({ ...record(), channelVisibility: 1 })).toBe(false);
+    const { events: _events, ...item } = unstamped;
+    expect(isRunListItem(item)).toBe(true);
+  });
+});
+
+describe("run visibility filter — the wire form of an authz Predicate (authorization.md item 6)", () => {
+  const row = (channelId: string, userId: string, channelVisibility: RunRecord["channelVisibility"], repo?: string) => ({ channelId, userId, channelVisibility, ...(repo ? { repo } : {}) });
+  const pubRow = row("slack:C1", "slack:U1", "public");
+  const privRow = row("slack:G1", "slack:U2", "private", "acme/api");
+  const machineRow = row("http:ops", "http:ci", "machine");
+
+  it("toVisibilityFilter turns sets into sorted arrays and keeps the tree shape", () => {
+    const predicate: Predicate = {
+      kind: "or",
+      of: [
+        { kind: "channels-in", channelIds: new Set(["slack:G1", "http:ops"]) },
+        { kind: "visibility-in", visibilities: new Set(["public"]) },
+        { kind: "and", of: [{ kind: "user-is", userId: "slack:U2" }, { kind: "repos-in", repos: new Set(["z/z", "acme/api"]) }] },
+      ],
+    };
+    expect(toVisibilityFilter(predicate)).toEqual({
+      kind: "or",
+      of: [
+        { kind: "channels-in", channelIds: ["http:ops", "slack:G1"] },
+        { kind: "visibility-in", visibilities: ["public"] },
+        { kind: "and", of: [{ kind: "user-is", userId: "slack:U2" }, { kind: "repos-in", repos: ["acme/api", "z/z"] }] },
+      ],
+    });
+    expect(toVisibilityFilter({ kind: "all" })).toEqual({ kind: "all" });
+    expect(toVisibilityFilter({ kind: "none" })).toEqual({ kind: "none" });
+  });
+
+  it("matchesVisibility is the one truth table: each leaf, or/and, and a row without the stamp is `unknown`", () => {
+    expect(matchesVisibility({ kind: "none" }, pubRow)).toBe(false);
+    expect(matchesVisibility({ kind: "all" }, pubRow)).toBe(true);
+    expect(matchesVisibility({ kind: "channels-in", channelIds: ["slack:G1"] }, privRow)).toBe(true);
+    expect(matchesVisibility({ kind: "channels-in", channelIds: ["slack:G1"] }, pubRow)).toBe(false);
+    expect(matchesVisibility({ kind: "channels-in", channelIds: [] }, pubRow)).toBe(false);
+    expect(matchesVisibility({ kind: "user-is", userId: "slack:U2" }, privRow)).toBe(true);
+    expect(matchesVisibility({ kind: "user-is", userId: "slack:U2" }, pubRow)).toBe(false);
+    expect(matchesVisibility({ kind: "repos-in", repos: ["acme/api"] }, privRow)).toBe(true);
+    expect(matchesVisibility({ kind: "repos-in", repos: ["acme/api"] }, pubRow)).toBe(false);
+    expect(matchesVisibility({ kind: "visibility-in", visibilities: ["public"] }, pubRow)).toBe(true);
+    expect(matchesVisibility({ kind: "visibility-in", visibilities: ["public"] }, privRow)).toBe(false);
+    expect(matchesVisibility({ kind: "visibility-in", visibilities: ["public"] }, machineRow)).toBe(false);
+    expect(matchesVisibility({ kind: "visibility-in", visibilities: ["public"] }, { channelId: "slack:C1", userId: "slack:U1" })).toBe(false);
+    expect(matchesVisibility({ kind: "visibility-in", visibilities: ["unknown"] }, { channelId: "slack:C1", userId: "slack:U1" })).toBe(true);
+    const memberOfOps = { kind: "or" as const, of: [{ kind: "channels-in" as const, channelIds: ["http:ops"] }, { kind: "visibility-in" as const, visibilities: ["public" as const] }] };
+    expect([pubRow, privRow, machineRow].map((r) => matchesVisibility(memberOfOps, r))).toEqual([true, false, true]);
+    expect(matchesVisibility({ kind: "and", of: [{ kind: "user-is", userId: "slack:U2" }, { kind: "repos-in", repos: ["acme/api"] }] }, privRow)).toBe(true);
+    expect(matchesVisibility({ kind: "and", of: [{ kind: "user-is", userId: "slack:U1" }, { kind: "repos-in", repos: ["acme/api"] }] }, privRow)).toBe(false);
+    expect(matchesVisibility({ kind: "and", of: [] }, pubRow)).toBe(false);
+    expect(matchesVisibility({ kind: "or", of: [] }, pubRow)).toBe(false);
+  });
+
+  it("isRunVisibilityFilter accepts every well-formed shape and rejects an unknown kind, a bad list, an unknown visibility, a too-deep tree, or a too-wide list — never treating them as `all`", () => {
+    expect(isRunVisibilityFilter({ kind: "all" })).toBe(true);
+    expect(isRunVisibilityFilter({ kind: "none" })).toBe(true);
+    expect(isRunVisibilityFilter({ kind: "channels-in", channelIds: ["slack:C1"] })).toBe(true);
+    expect(isRunVisibilityFilter({ kind: "channels-in", channelIds: [] })).toBe(true);
+    expect(isRunVisibilityFilter({ kind: "user-is", userId: "slack:U1" })).toBe(true);
+    expect(isRunVisibilityFilter({ kind: "repos-in", repos: ["a/b"] })).toBe(true);
+    expect(isRunVisibilityFilter({ kind: "visibility-in", visibilities: ["public", "dm"] })).toBe(true);
+    expect(isRunVisibilityFilter({ kind: "or", of: [{ kind: "all" }, { kind: "and", of: [{ kind: "none" }] }] })).toBe(true);
+    expect(isRunVisibilityFilter({ kind: "everything" })).toBe(false);
+    expect(isRunVisibilityFilter({ kind: "channels-in", channelIds: "slack:C1" })).toBe(false);
+    expect(isRunVisibilityFilter({ kind: "channels-in", channelIds: [""] })).toBe(false);
+    expect(isRunVisibilityFilter({ kind: "user-is", userId: "" })).toBe(false);
+    expect(isRunVisibilityFilter({ kind: "visibility-in", visibilities: ["everyone"] })).toBe(false);
+    expect(isRunVisibilityFilter({ kind: "or", of: "all" })).toBe(false);
+    expect(isRunVisibilityFilter(null)).toBe(false);
+    expect(isRunVisibilityFilter("all")).toBe(false);
+    let deep: unknown = { kind: "all" };
+    for (let i = 0; i < 12; i++) deep = { kind: "or", of: [deep] };
+    expect(isRunVisibilityFilter(deep)).toBe(false);
+    expect(isRunVisibilityFilter({ kind: "channels-in", channelIds: Array.from({ length: 1001 }, (_, i) => `c${i}`) })).toBe(false);
   });
 });

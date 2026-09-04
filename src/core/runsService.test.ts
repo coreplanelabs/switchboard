@@ -15,6 +15,8 @@ import { createRunsService, type RunActor, type RunsService } from "./runsServic
 const DAY = 86_400_000;
 const NOW = 1_700_000_000_000;
 
+/** Every run is visible: these tests exercise the merge, not the policy (see `visibleTo` below). */
+const ALL = { kind: "all" } as const;
 const call = (summary: string): RunEvent => ({ type: "tool_call", tool: "bash", summary });
 const result = (summary: string): RunEvent => ({ type: "tool_result", tool: "bash", ok: true, summary });
 
@@ -45,6 +47,7 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
     channelId: "slack:C1",
     userId: "slack:U1",
     threadKey: `slack:C1:${id}`,
+    channelVisibility: "unknown",
     startedAt: finishedAt - 10_000,
     finishedAt,
     status: "completed",
@@ -132,7 +135,7 @@ describe("RunsService.listRuns — read merge", () => {
     await store!.put(record(id, NOW, { eventCount: 4, storedEventCount: 4, status: "stopped_soft" }));
     reg.markPersisted(id);
 
-    const before = await svc.listRuns({ status: "all" });
+    const before = await svc.listRuns({ visibleTo: ALL, status: "all" });
     expect(before.runs.map((r) => r.id)).toEqual([id]);
     expect(before.runs[0]).toMatchObject({ finished: true, eventCount: 4, stop: { mode: "soft", state: "stopped" }, persisted: true });
     expect(before.storeUnavailable).toBeUndefined();
@@ -140,7 +143,7 @@ describe("RunsService.listRuns — read merge", () => {
 
     tick(61_000); // past the 60 s TTL: the registry evicts, the store still has it
     expect(reg.size()).toBe(0);
-    const after = await svc.listRuns({ status: "all" });
+    const after = await svc.listRuns({ visibleTo: ALL, status: "all" });
     expect(after.runs.map((r) => r.id)).toEqual([id]);
     expect(after.runs[0]).toMatchObject({ finished: true, eventCount: 4, status: "stopped_soft", persisted: true });
     expect(after.runs[0].stop).toBeUndefined(); // stop state lived only on the registry row
@@ -153,7 +156,7 @@ describe("RunsService.listRuns — read merge", () => {
     // The start-of-run tombstone: terminal in the store while the run is live.
     await store!.put(record(id, NOW, { status: "interrupted", startedAt: NOW, events: [{ type: "input", text: "go", seq: 1 }], eventCount: 1, storedEventCount: 1 }));
 
-    const all = await svc.listRuns({ status: "all" });
+    const all = await svc.listRuns({ visibleTo: ALL, status: "all" });
     expect(all.runs.map((r) => r.id)).toEqual([id]);
     expect(all.runs[0].finished).toBe(false); // never "interrupted" while demonstrably alive
     expect(all.runs[0].status).toBeUndefined();
@@ -161,7 +164,7 @@ describe("RunsService.listRuns — read merge", () => {
     expect(all.runs[0].diagnosis).toBeUndefined();
     expect(all.runs[0].persisted).toBeUndefined(); // the tombstone is not "finished and persisted"
 
-    const finished = await svc.listRuns({ status: "finished" });
+    const finished = await svc.listRuns({ visibleTo: ALL, status: "finished" });
     expect(finished.runs).toEqual([]); // the tombstone must not list a live run as finished
 
     const got = await svc.getRun(id);
@@ -172,7 +175,7 @@ describe("RunsService.listRuns — read merge", () => {
   it("a crash leaves the tombstone as the record (#375): with the registry empty, the interrupted row lists under `finished` and reads as interrupted", async () => {
     const { svc, store } = setup(); // an empty registry = the next container after a crash
     await store!.put(record("dead", NOW, { status: "interrupted", startedAt: NOW }));
-    const finished = await svc.listRuns({ status: "finished" });
+    const finished = await svc.listRuns({ visibleTo: ALL, status: "finished" });
     expect(finished.runs.map((r) => r.id)).toEqual(["dead"]);
     expect(finished.runs[0]).toMatchObject({ finished: true, status: "interrupted", finishedAt: NOW, persisted: true });
     const got = await svc.getRun("dead");
@@ -187,16 +190,16 @@ describe("RunsService.listRuns — read merge", () => {
     reg.finish(done.id);
     await store!.put(record("p1", NOW - DAY));
 
-    const active = await svc.listRuns({ status: "active" });
+    const active = await svc.listRuns({ visibleTo: ALL, status: "active" });
     expect(active.runs.map((r) => r.id)).toEqual([live.id]);
     expect(active.runs[0].finished).toBe(false);
     expect(list).not.toHaveBeenCalled();
 
-    const finished = await svc.listRuns({ status: "finished" });
+    const finished = await svc.listRuns({ visibleTo: ALL, status: "finished" });
     expect(finished.runs.map((r) => r.id)).toEqual([done.id, "p1"]);
     expect(finished.runs.every((r) => r.finished)).toBe(true);
 
-    const all = await svc.listRuns({ status: "all" });
+    const all = await svc.listRuns({ visibleTo: ALL, status: "all" });
     expect(all.runs.map((r) => r.id)).toEqual([live.id, done.id, "p1"]); // unfinished first, then finishedAt desc
     expectNoToken(all);
   });
@@ -210,7 +213,7 @@ describe("RunsService.listRuns — read merge", () => {
     await store!.put(record("a", NOW, { startedAt: NOW - 60_000 })); // finishedAt tie → id desc
     tick(5_000);
     const live = reg.create();
-    const all = await svc.listRuns({ status: "all" });
+    const all = await svc.listRuns({ visibleTo: ALL, status: "all" });
     expect(all.runs.map((r) => r.id)).toEqual([live.id, "b", "a", "late"]);
     expect(all.nextBefore).toBeUndefined(); // short page: the end of the list
   });
@@ -220,18 +223,18 @@ describe("RunsService.listRuns — read merge", () => {
     for (const id of ["p1", "p2", "p3"]) await store!.put(record(id, NOW)); // three siblings, one finishedAt
     await store!.put(record("p0", NOW - DAY));
     const live = reg.create("live");
-    const page1 = await svc.listRuns({ status: "all", limit: 2 });
+    const page1 = await svc.listRuns({ visibleTo: ALL, status: "all", limit: 2 });
     expect(page1.runs.map((r) => r.id)).toEqual([live.id, "p3"]);
     expect(page1.nextBefore).toEqual({ finishedAt: NOW, id: "p3" });
-    const page2 = await svc.listRuns({ status: "all", limit: 2, before: page1.nextBefore!.finishedAt, beforeId: page1.nextBefore!.id });
+    const page2 = await svc.listRuns({ visibleTo: ALL, status: "all", limit: 2, before: page1.nextBefore!.finishedAt, beforeId: page1.nextBefore!.id });
     expect(page2.runs.map((r) => r.id)).toEqual(["p2", "p1"]);
     expect(page2.nextBefore).toEqual({ finishedAt: NOW, id: "p1" });
-    const page3 = await svc.listRuns({ status: "all", limit: 2, ...{ before: page2.nextBefore!.finishedAt, beforeId: page2.nextBefore!.id } });
+    const page3 = await svc.listRuns({ visibleTo: ALL, status: "all", limit: 2, ...{ before: page2.nextBefore!.finishedAt, beforeId: page2.nextBefore!.id } });
     expect(page3.runs.map((r) => r.id)).toEqual(["p0"]);
     expect(page3.nextBefore).toBeUndefined();
     // A full page of live rows only has no store cursor.
     reg.create("live-2");
-    const liveOnly = await svc.listRuns({ status: "active", limit: 2 });
+    const liveOnly = await svc.listRuns({ visibleTo: ALL, status: "active", limit: 2 });
     expect(liveOnly.runs).toHaveLength(2);
     expect(liveOnly.nextBefore).toBeUndefined();
   });
@@ -244,20 +247,20 @@ describe("RunsService.listRuns — read merge", () => {
     const live = reg.create("live", { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U9", threadKey: "slack:C1:9" });
     const bare = reg.create("bare"); // no meta: excluded by an agent/channel filter, kept otherwise
 
-    const coding = await svc.listRuns({ status: "all", agent: "coding" });
+    const coding = await svc.listRuns({ visibleTo: ALL, status: "all", agent: "coding" });
     expect(coding.runs.map((r) => r.id)).toEqual([live.id, "c1", "old"]);
     expect(coding.runs[0]).toMatchObject({ agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U9", threadKey: "slack:C1:9" });
 
-    const c2 = await svc.listRuns({ status: "all", channel: "slack:C2" });
+    const c2 = await svc.listRuns({ visibleTo: ALL, status: "all", channel: "slack:C2" });
     expect(c2.runs.map((r) => r.id)).toEqual(["r1"]);
 
-    const recent = await svc.listRuns({ status: "all", sinceMs: NOW - 3 * DAY });
+    const recent = await svc.listRuns({ visibleTo: ALL, status: "all", sinceMs: NOW - 3 * DAY });
     expect(recent.runs.map((r) => r.id)).toEqual([bare.id, live.id, "c1", "r1"]);
   });
 
   it("a run in both sources projects identically from the live row and the persisted row, except for the finish-only fields", async () => {
     const { reg, tick, svc, store } = setup();
-    const meta = { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:x", repo: "acme/x" };
+    const meta = { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:x", channelVisibility: "unknown" as const, repo: "acme/x" };
     const { id } = reg.create("coding · acme/x", meta);
     reg.publish(id, { type: "input", text: "go" });
     reg.finish(id);
@@ -304,16 +307,16 @@ describe("RunsService.listRuns — read merge", () => {
     const b = reg.create("b");
     reg.finish(b.id);
 
-    const limited = await svc.listRuns({ status: "all", limit: 10 });
+    const limited = await svc.listRuns({ visibleTo: ALL, status: "all", limit: 10 });
     expect(limited.runs).toHaveLength(10);
     // The unfinished row first; then the store's key — `b` finished at NOW like p000, so id desc decides.
     expect(limited.runs.slice(0, 3).map((r) => r.id)).toEqual([a.id, "p000", b.id]);
     expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 12 }));
 
-    const dflt = await svc.listRuns({ status: "all" });
+    const dflt = await svc.listRuns({ visibleTo: ALL, status: "all" });
     expect(dflt.runs).toHaveLength(50);
 
-    const capped = await svc.listRuns({ status: "all", limit: 10_000 });
+    const capped = await svc.listRuns({ visibleTo: ALL, status: "all", limit: 10_000 });
     expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ limit: 200 }));
     expect(capped.runs).toHaveLength(62);
   });
@@ -334,7 +337,7 @@ describe("RunsService.listRuns — read merge", () => {
     };
     const { reg } = testRegistry();
     const bounded = createRunsService({ registry: reg, store });
-    const res = await bounded.listRuns({ status: "all", limit: 10 });
+    const res = await bounded.listRuns({ visibleTo: ALL, status: "all", limit: 10 });
     expect(res.runs).toHaveLength(10);
     expect(store.list).toHaveBeenCalledTimes(1);
     expect(store.list).toHaveBeenCalledWith(expect.objectContaining({ limit: 10 }));
@@ -365,19 +368,19 @@ describe("RunsService.listRuns — read merge", () => {
     const done = reg.create("done");
     reg.finish(done.id);
 
-    const all = await svc.listRuns({ status: "all" });
+    const all = await svc.listRuns({ visibleTo: ALL, status: "all" });
     expect(all.runs.map((r) => r.id)).toEqual([live.id, done.id]); // unfinished first, then by finishedAt
     expect(all.storeUnavailable).toBe(true);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toContain("boom");
     expect(warn.mock.calls[0][0]).not.toContain("tok-");
 
-    const finished = await svc.listRuns({ status: "finished" });
+    const finished = await svc.listRuns({ visibleTo: ALL, status: "finished" });
     expect(finished.runs.map((r) => r.id)).toEqual([done.id]);
     expect(finished.storeUnavailable).toBe(true);
     expect(warn).toHaveBeenCalledTimes(2);
 
-    const active = await svc.listRuns({ status: "active" });
+    const active = await svc.listRuns({ visibleTo: ALL, status: "active" });
     expect(active).toEqual({ runs: [expect.objectContaining({ id: live.id })] });
     expect(broken.list).toHaveBeenCalledTimes(2);
   });
@@ -389,7 +392,7 @@ describe("RunsService.listRuns — read merge", () => {
     reg.finish(run.id, "completed");
     await store!.put(record(run.id, NOW + 5_000, { status: "failed" }));
     reg.markPersisted(run.id);
-    const [row] = (await svc.listRuns({ status: "all" })).runs;
+    const [row] = (await svc.listRuns({ visibleTo: ALL, status: "all" })).runs;
     expect(row).toMatchObject({ id: run.id, status: "failed", finishedAt: NOW + 5_000, persisted: true });
   });
 
@@ -398,7 +401,7 @@ describe("RunsService.listRuns — read merge", () => {
     const run = reg.create("r", { agent: "review", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1" });
     tick(7_000);
     reg.finish(run.id, "failed");
-    const [row] = (await svc.listRuns({ status: "all" })).runs;
+    const [row] = (await svc.listRuns({ visibleTo: ALL, status: "all" })).runs;
     expect(row).toMatchObject({ id: run.id, finished: true, status: "failed", finishedAt: NOW + 7_000, startedAt: NOW });
     const got = await svc.getRun(run.id);
     expect(got.ok && got.value).toMatchObject({ status: "failed", finishedAt: NOW + 7_000 });
@@ -407,7 +410,37 @@ describe("RunsService.listRuns — read merge", () => {
   it("with history off (store null) lists live rows and never reports storeUnavailable", async () => {
     const { reg, svc } = setup(null);
     const live = reg.create();
-    expect(await svc.listRuns({ status: "all" })).toEqual({ runs: [expect.objectContaining({ id: live.id })] });
+    expect(await svc.listRuns({ visibleTo: ALL, status: "all" })).toEqual({ runs: [expect.objectContaining({ id: live.id })] });
+  });
+
+  it("`visibleTo` is pushed down (authorization R6): live rows are filtered by the predicate, the store is asked with its wire form, `all` sends no filter, and `none` touches neither", async () => {
+    const { reg, svc, store } = setup();
+    await store!.put(record("pub", NOW - DAY, { channelId: "slack:C_PUB", userId: "slack:U1", channelVisibility: "public" }));
+    await store!.put(record("priv", NOW - 2 * DAY, { channelId: "slack:G1", userId: "slack:U2", channelVisibility: "private" }));
+    const liveOps = reg.create("ops", { agent: "coding", channelId: "http:ops", userId: "http:ci", threadKey: "http:ops:1", channelVisibility: "machine" });
+    const livePriv = reg.create("priv-live", { agent: "coding", channelId: "slack:G1", userId: "slack:U2", threadKey: "slack:G1:1", channelVisibility: "private" });
+    const unstamped = reg.create("bare", { agent: "coding", channelId: "slack:C_PUB", userId: "slack:U3", threadKey: "slack:C_PUB:2" }); // no stamp = unknown
+    const list = vi.spyOn(store!, "list");
+
+    // A token granted http:ops: its channel, the public runs, its own.
+    const token = await svc.listRuns({ status: "all", visibleTo: { kind: "or", of: [{ kind: "channels-in", channelIds: new Set(["http:ops"]) }, { kind: "visibility-in", visibilities: new Set(["public"]) }, { kind: "user-is", userId: "http:ci" }] } });
+    expect(token.runs.map((r) => r.id)).toEqual([liveOps.id, "pub"]);
+    expect(list.mock.calls[0][0].visibleTo).toEqual({ kind: "or", of: [{ kind: "channels-in", channelIds: ["http:ops"] }, { kind: "visibility-in", visibilities: ["public"] }, { kind: "user-is", userId: "http:ci" }] });
+
+    // The private run's own user: the live and persisted private rows, plus public; never the unstamped one.
+    const owner = await svc.listRuns({ status: "all", visibleTo: { kind: "or", of: [{ kind: "visibility-in", visibilities: new Set(["public"]) }, { kind: "user-is", userId: "slack:U2" }] } });
+    expect(owner.runs.map((r) => r.id)).toEqual([livePriv.id, "pub", "priv"]);
+
+    list.mockClear();
+    expect(await svc.listRuns({ status: "all", visibleTo: { kind: "none" } })).toEqual({ runs: [] });
+    expect(list).not.toHaveBeenCalled();
+    const everything = await svc.listRuns({ status: "all", visibleTo: ALL });
+    expect(everything.runs.map((r) => r.id)).toEqual([unstamped.id, livePriv.id, liveOps.id, "pub", "priv"]);
+    expect(list.mock.calls[0][0]).not.toHaveProperty("visibleTo");
+    // The view carries the stamp so a point read can be authorized on it.
+    expect(everything.runs.find((r) => r.id === "pub")?.channelVisibility).toBe("public");
+    expect(everything.runs.find((r) => r.id === liveOps.id)?.channelVisibility).toBe("machine");
+    expect(everything.runs.find((r) => r.id === unstamped.id)).not.toHaveProperty("channelVisibility");
   });
 });
 
@@ -607,8 +640,8 @@ describe("RunsService — no output carries the capability token", () => {
     reg.publish(id, call("$ ls"));
     await store!.put(record("p1", NOW - DAY));
     const outputs: unknown[] = [
-      await svc.listRuns({ status: "all" }),
-      await svc.listRuns({ status: "active" }),
+      await svc.listRuns({ visibleTo: ALL, status: "all" }),
+      await svc.listRuns({ visibleTo: ALL, status: "active" }),
       await svc.getRun(id, { include: "messages" }),
       await svc.getRun("p1", { include: "messages" }),
       await svc.getRunEvents(id, {}),

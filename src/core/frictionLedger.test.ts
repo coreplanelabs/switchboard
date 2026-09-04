@@ -1,7 +1,8 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Predicate } from "./authz/types.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import {
   DEFAULT_LEDGER_MAX,
@@ -142,6 +143,7 @@ describe("RunStoreFrictionLedger", () => {
       channelId: "slack:C1",
       userId: "slack:U1",
       threadKey: "slack:C1:1",
+      channelVisibility: "unknown",
       startedAt: finishedAt - 1000,
       finishedAt,
       status: "completed",
@@ -174,22 +176,36 @@ describe("RunStoreFrictionLedger", () => {
     expect((await new RunStoreFrictionLedger(store).recent({ sinceMs: NOW - 100 })).map((r) => r.runId)).toEqual(["c", "d"]);
   });
 
-  it("a channel pin (KTD10) keeps only that channel's run-store rows; legacy rows carry no channel and are excluded, and a bare-record ledger yields nothing", async () => {
+  it("recent() takes the actor's predicate (authorization.md item 6): the run store is asked with it as `visibleTo`; legacy rows carry nothing a predicate could check and are excluded under any narrower one; a bare-record ledger yields nothing", async () => {
     const store = new InMemoryRunStore({ now: () => NOW });
-    await store.put(runRecord("x1", NOW - 300, { channelId: "http:x" }));
-    await store.put(runRecord("x2", NOW - 100, { channelId: "http:x" }));
-    await store.put(runRecord("y1", NOW - 200, { channelId: "http:y" }));
+    await store.put(runRecord("x1", NOW - 300, { channelId: "http:x", channelVisibility: "machine" }));
+    await store.put(runRecord("x2", NOW - 100, { channelId: "http:x", channelVisibility: "machine" }));
+    await store.put(runRecord("y1", NOW - 200, { channelId: "http:y", channelVisibility: "machine" }));
+    await store.put(runRecord("p1", NOW - 250, { channelId: "slack:C_PUB", channelVisibility: "public" }));
     const legacy = new InMemoryFrictionLedger();
     await legacy.record(rec("legacy-1", NOW - 150));
     const ledger = new RunStoreFrictionLedger(store, legacy);
-    expect((await ledger.recent({ channel: "http:x" })).map((r) => r.runId)).toEqual(["x1", "x2"]);
-    expect((await ledger.recent({ channel: "http:x", limit: 1 })).map((r) => r.runId)).toEqual(["x2"]);
-    expect(await ledger.recent({ channel: "http:nowhere" })).toEqual([]);
-    expect((await ledger.recent()).map((r) => r.runId)).toEqual(["x1", "y1", "legacy-1", "x2"]);
-    expect(await legacy.recent({ channel: "http:x" })).toEqual([]);
+    const list = vi.spyOn(store, "list");
+    const inX: Predicate = { kind: "channels-in", channelIds: new Set(["http:x"]) };
+    expect((await ledger.recent({ visibleTo: inX })).map((r) => r.runId)).toEqual(["x1", "x2"]);
+    expect(list.mock.calls[0][0].visibleTo).toEqual({ kind: "channels-in", channelIds: ["http:x"] });
+    expect((await ledger.recent({ visibleTo: inX, limit: 1 })).map((r) => r.runId)).toEqual(["x2"]);
+    expect(await ledger.recent({ visibleTo: { kind: "channels-in", channelIds: new Set(["http:nowhere"]) } })).toEqual([]);
+    // member-of as the compiler emits it: the granted channel OR the public runs.
+    const memberOf: Predicate = { kind: "or", of: [inX, { kind: "visibility-in", visibilities: new Set(["public"]) }] };
+    expect((await ledger.recent({ visibleTo: memberOf })).map((r) => r.runId)).toEqual(["x1", "p1", "x2"]);
+    // `none` reads nothing; `all` (and no predicate) unions the legacy rows too, and the store is asked without a filter.
+    list.mockClear();
+    expect(await ledger.recent({ visibleTo: { kind: "none" } })).toEqual([]);
+    expect(list).not.toHaveBeenCalled();
+    expect((await ledger.recent({ visibleTo: { kind: "all" } })).map((r) => r.runId)).toEqual(["x1", "p1", "y1", "legacy-1", "x2"]);
+    expect(list.mock.calls[0][0]).not.toHaveProperty("visibleTo");
+    expect((await ledger.recent()).map((r) => r.runId)).toEqual(["x1", "p1", "y1", "legacy-1", "x2"]);
+    expect(await legacy.recent({ visibleTo: inX })).toEqual([]);
     const file = new FileFrictionLedger(tmpPath());
     await file.record(rec("f1", NOW));
-    expect(await file.recent({ channel: "http:x" })).toEqual([]);
+    expect(await file.recent({ visibleTo: inX })).toEqual([]);
+    expect((await file.recent({ visibleTo: { kind: "all" } })).map((r) => r.runId)).toEqual(["f1"]);
   });
 
   it("projects only { runId, label, agent, finishedAt, diagnosis } — no message text, no ids beyond the run id", async () => {

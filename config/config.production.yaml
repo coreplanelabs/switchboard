@@ -37,6 +37,31 @@ permissions:
   serviceTokens:
     b4a6ef75a577c499ca50844d1a85a67d.access: [runs:read, friction:read, repo:read, memory:read, schedule:read, config:read, help:read, deploy:read]
 
+# One authorization model (features/authorization.md): what an actor may SEE is
+# its `channels` grant, and an ingress token with no `channel` key is granted no
+# channel (OQ4). These entries keep the fleet-wide readers working through the
+# cut; the legacy `permissions` keys above stay until U7 removes them. A native
+# entry REPLACES the legacy translation for the same id, so each lists its
+# actions in full.
+grants:
+  # The scheduled-run identity (#244, #395): the dispatcher sees the shim's
+  # firings as `http:cron`; `channels: all` is what lets the weekly pass analyze
+  # every channel's runs instead of the cron channel's own.
+  http:cron:
+    actions: [friction:read, friction:write, repo:write]
+    channels: all
+  # The same reach for the schedule's own actor (src/core/schedules.ts declares
+  # it; stated here too so the two cannot drift when the shim switches over).
+  schedule:self-improvement:
+    actions: [friction:read, friction:write, repo:write]
+    channels: all
+  # `switchboard-ops` (the Access service token above): read on every group over
+  # every channel — a fleet ops reader, no writes. Kept in step with its
+  # serviceTokens entry (this entry is the one that decides).
+  access:svc:b4a6ef75a577c499ca50844d1a85a67d.access:
+    actions: [runs:read, friction:read, repo:read, memory:read, schedule:read, config:read, help:read, deploy:read]
+    channels: all
+
 execution:
   type: cloudflare
   url: https://switchboard-sandbox.coreplanelabs.dev

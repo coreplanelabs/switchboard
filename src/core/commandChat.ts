@@ -110,9 +110,9 @@ export function parseChatCommand(rawText: string, catalog: ChatCommandCatalog): 
 export interface HandleChatCommandArgs {
   commands: ChatCommands;
   parsed: ParsedChatCommand;
-  /** The message's identity: `userId` becomes the caller id; `channelId` pins a
-   *  machine caller (`http:`/`mcp:`) to its channel (see `chatCallerFor`);
-   *  channel + thread are the caller's `origin`. */
+  /** The message's identity: `userId` becomes the caller id (and, namespaced,
+   *  its `Actor`); channel + thread are the caller's `origin` — context, never
+   *  authority: what the caller may SEE is its actor's grants (authorization.md). */
   msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">;
   config: Pick<ConfigStore, "chatGateFor" | "grantsFor" | "adminsHint">;
   /** Resolves the repo this thread is bound to, lazily — `Caller.origin.repo`
@@ -123,20 +123,13 @@ export interface HandleChatCommandArgs {
   now?: number;
 }
 
-/** Channels whose messages come from a machine credential — an ingress token
- *  (`POST /ingress`, `http:<subject>`) or an MCP session (`mcp:<subject>`).
- *  Such a caller is pinned to its own channel (KTD10): the structured MCP tools
- *  already pin it, and a command sent as TEXT through the same credential must
- *  see exactly the same runs — never the org's. Slack humans (and the local CLI
- *  harness) are people the chat gates already vet; they stay unpinned. */
-export function isMachineChannel(channelId: string): boolean {
-  return channelId.startsWith("http:") || channelId.startsWith("mcp:");
-}
-
 /** The `Caller` a chat message resolves to: the message's user as the id, the
- *  config's chat gates, the channel + thread it came from (`origin`), for a
- *  machine channel the channel pin, and the same identity as an `Actor` whose
- *  grants config names for that user id. */
+ *  config's chat gates, the channel + thread it came from (`origin`), and the
+ *  same identity as an `Actor` whose grants config names for that user id. A
+ *  machine credential speaking as text (`http:<subject>`, `mcp:<subject>`) is
+ *  no longer pinned to the channel it speaks in: what it may see is what its
+ *  grants name — the same answer the structured MCP tools give (authorization.md
+ *  item 7), so one token sees one set of runs on every surface. */
 export function chatCallerFor(msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">, config: Pick<ConfigStore, "chatGateFor" | "grantsFor">, resolveRepo?: () => Promise<string | undefined>): Caller {
   return {
     kind: "chat",
@@ -145,7 +138,6 @@ export function chatCallerFor(msg: Pick<IncomingMessage, "userId" | "channelId" 
     chatGate: config.chatGateFor(msg.userId),
     actor: resolveChatActor(msg, (id) => config.grantsFor(id)),
     origin: { channelId: msg.channelId, threadKey: msg.threadKey, ...(resolveRepo ? { repo: resolveRepo } : {}) },
-    ...(isMachineChannel(msg.channelId) ? { channel: msg.channelId } : {}),
   };
 }
 

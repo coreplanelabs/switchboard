@@ -122,10 +122,10 @@ export interface LegacyTranslation {
  *                               NO allowlist → agent:run:<name> for `everyone`
  *   repos[slug]: [users]      → repos {slug} per listed user (absent → "all" for coding users, `reposOpen`)
  *   token scopes              → actions of the same names, for BOTH `http:<subject>` and `mcp:<subject>`
- *   token channel             → channels {`http:<channel>`} / {`mcp:<channel>`}; no pin → "all" PROVISIONALLY:
- *                               today an unpinned token is pinned per request to the machine channel it
- *                               speaks in (`chatCallerFor`) — "any http:/mcp: channel, never a Slack one",
- *                               which a set of ids cannot say. Decides nothing in U2; OQ4 settles it before U3.
+ *   token channel             → channels {`http:<channel>`} / {`mcp:<channel>`}; no pin → NO channels (OQ4,
+ *                               option a: channels are channels, no machine-channel vocabulary). An unpinned
+ *                               token therefore lists nothing and reads no run until a native `grants`
+ *                               entry names its channels (or `all`) — R12's fourth deliberate change.
  *   serviceTokens[cn]         → `access:svc:<cn>` actions = scopes; channels all
  * An actor named by several keys holds the union; `all` absorbs a list.
  */
@@ -157,7 +157,7 @@ export function translateLegacyConfig(permissions: LegacyPermissions | undefined
 
   for (const entry of Object.values(ingressTokens ?? {})) {
     for (const ns of ["http", "mcp"] as const) {
-      add(`${ns}:${entry.subject}`, { actions: new Set(entry.scopes), channels: entry.channel === undefined ? "all" : new Set([`${ns}:${entry.channel}`]) });
+      add(`${ns}:${entry.subject}`, { actions: new Set(entry.scopes), channels: new Set(entry.channel === undefined ? [] : [`${ns}:${entry.channel}`]) });
     }
   }
 
@@ -215,6 +215,11 @@ export interface GrantsSource {
   agentNames?: readonly string[];
   /** The registered command groups; absent = none (operators translate to no actions). */
   commandGroups?: readonly string[];
+  /** The schedule registry's declared actors (`RunAction.actor`, R9): each
+   *  schedule's grants as the registry states them. The floor for a
+   *  `schedule:<name>` id — a native `grants` entry for the same id replaces
+   *  them (config decides), and the legacy keys never name a schedule. */
+  schedules?: readonly { readonly id: string; readonly grants: Grants }[];
 }
 
 export type GrantsTable = MergedGrants & Pick<LegacyTranslation, "everyone" | "channelConfigOpen" | "reposOpen">;
@@ -229,12 +234,22 @@ export function inheritsEveryone(actorId: string): boolean {
 
 /** The whole merged table plus the legacy gate states — what `ConfigStore`
  *  builds once at load (and warns from). A legacy `slack:` entry already
- *  includes `everyone`; a native entry is exactly what it declares (R7). */
+ *  includes `everyone`; a native entry is exactly what it declares (R7). A
+ *  schedule's registry-declared grants are its floor: a legacy key that names
+ *  the schedule (e.g. `permissions.repoManagement` for the chat gate, until
+ *  U4) ADDS to them like every legacy key adds, and a native entry for the same
+ *  `schedule:<name>` replaces them whole, without an overlap warning (the
+ *  registry is a default, not a second config shape). */
 export function grantsTable(source: GrantsSource): GrantsTable {
   const { serviceTokens, ...permissions } = source.permissions ?? {};
   const legacy = translateLegacyConfig(source.permissions ? permissions : undefined, source.ingressTokens, serviceTokens, { agentNames: source.agentNames ?? [], commandGroups: source.commandGroups ?? [] });
   const withEveryone = new Map([...legacy.grants].map(([id, g]) => [id, inheritsEveryone(id) ? unionGrants(g, legacy.everyone) : g] as const));
-  return { ...mergeGrants(source.grants ?? new Map(), withEveryone), everyone: legacy.everyone, channelConfigOpen: legacy.channelConfigOpen, reposOpen: legacy.reposOpen };
+  const merged = mergeGrants(source.grants ?? new Map(), withEveryone);
+  for (const schedule of source.schedules ?? []) {
+    if (source.grants?.has(schedule.id)) continue;
+    merged.grants.set(schedule.id, unionGrants(merged.grants.get(schedule.id) ?? NO_GRANTS, schedule.grants));
+  }
+  return { ...merged, everyone: legacy.everyone, channelConfigOpen: legacy.channelConfigOpen, reposOpen: legacy.reposOpen };
 }
 
 /** One actor's grants from a built table: its entry; else, for a `slack:` user,

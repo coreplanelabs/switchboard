@@ -56,6 +56,7 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
     channelId: "slack:C1",
     userId: "slack:U1",
     threadKey: "slack:C1:1",
+    channelVisibility: "unknown",
     startedAt: finishedAt - 5000,
     finishedAt,
     status: "completed",
@@ -545,6 +546,87 @@ describe("run history routes", () => {
     // get agrees with list on what is hidden, so the two paths hide the same rows.
     expect((await post("/runs/get", { storeKey: key, id: "f07" })).data).toEqual({ record: null });
     expect(((await post("/runs/get", { storeKey: key, id: "f06" })).data.record as { id: string }).id).toBe("f06");
+  });
+
+  it("list with `visibleTo` (authorization.md item 6): channels-in compiles to an indexed IN filter on the ONE LIMITed page query; visibility-in / user-is / or / and follow the same truth table as the in-memory store; none is an empty page; a bad filter is 400, never `all`", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    await putDirect(key, record("pub", now - 1000, { events: events(1), channelId: "slack:C_PUB", userId: "slack:U1", channelVisibility: "public" }));
+    await putDirect(key, record("priv", now - 2000, { events: events(1), channelId: "slack:G1", userId: "slack:U2", channelVisibility: "private" }));
+    await putDirect(key, record("ops", now - 3000, { events: events(1), channelId: "http:ops", userId: "http:ci", channelVisibility: "machine" }));
+    await putDirect(key, record("dev", now - 4000, { events: events(1), channelId: "mcp:dev", userId: "mcp:ci", channelVisibility: "machine" }));
+    const ids = async (visibleTo: unknown, more: Record<string, unknown> = {}) => {
+      const res = await post("/runs/list", { storeKey: key, visibleTo, ...more });
+      expect(res.status).toBe(200);
+      return (res.data.items as Array<{ id: string }>).map((r) => r.id);
+    };
+    expect(await ids({ kind: "all" })).toEqual(["pub", "priv", "ops", "dev"]);
+    expect(await ids({ kind: "none" })).toEqual([]);
+    expect(await ids({ kind: "channels-in", channelIds: ["http:ops", "mcp:dev"] })).toEqual(["ops", "dev"]);
+    expect(await ids({ kind: "channels-in", channelIds: [] })).toEqual([]);
+    expect(await ids({ kind: "visibility-in", visibilities: ["public"] })).toEqual(["pub"]);
+    expect(await ids({ kind: "user-is", userId: "slack:U2" })).toEqual(["priv"]);
+    // member-of as the compiler emits it for a token granted http:ops, plus its own runs.
+    expect(await ids({ kind: "or", of: [{ kind: "channels-in", channelIds: ["http:ops"] }, { kind: "visibility-in", visibilities: ["public"] }, { kind: "user-is", userId: "http:ci" }] })).toEqual(["pub", "ops"]);
+    expect(await ids({ kind: "and", of: [{ kind: "channels-in", channelIds: ["slack:G1"] }, { kind: "user-is", userId: "slack:U2" }] })).toEqual(["priv"]);
+    expect(await ids({ kind: "and", of: [{ kind: "channels-in", channelIds: ["slack:G1"] }, { kind: "user-is", userId: "slack:U1" }] })).toEqual([]);
+    // ANDed with the plain filters and the cursor.
+    expect(await ids({ kind: "channels-in", channelIds: ["http:ops", "mcp:dev", "slack:C_PUB"] }, { channel: "mcp:dev" })).toEqual(["dev"]);
+    expect(await ids({ kind: "channels-in", channelIds: ["http:ops", "mcp:dev", "slack:C_PUB"] }, { before: now - 1000, beforeId: "pub" })).toEqual(["ops", "dev"]);
+    // The plan: ONE indexed page query carrying the IN, no retention scan.
+    const plan = await runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
+      const seen = spySql(inst);
+      const res = await inst.list({ limit: 5, visibleTo: { kind: "or", of: [{ kind: "channels-in", channelIds: ["http:ops"] }, { kind: "visibility-in", visibilities: ["public"] }] } });
+      return { seen, ids: res.items.map((r) => r.id) };
+    });
+    expect(plan.ids).toEqual(["pub", "ops"]);
+    expect(plan.seen.filter((q) => /FROM runs/.test(q) && /ORDER BY finished_at ASC/.test(q))).toEqual([]);
+    const page = plan.seen.filter((q) => /ORDER BY finished_at DESC/.test(q));
+    expect(page).toHaveLength(1);
+    expect(page[0]).toMatch(/channel_id IN \(\?\)/);
+    expect(page[0]).toMatch(/channel_visibility IN \(\?\)/);
+    expect(page[0]).toMatch(/LIMIT \?/);
+    // Malformed or too wide → 400 with the field named; nothing widens to `all`.
+    expect((await post("/runs/list", { storeKey: key, visibleTo: { kind: "everything" } })).status).toBe(400);
+    expect((await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["everyone"] } })).status).toBe(400);
+    expect((await post("/runs/list", { storeKey: key, visibleTo: { kind: "channels-in", channelIds: Array.from({ length: 95 }, (_, i) => `c${i}`) } })).status).toBe(400);
+    expect((await post("/runs/list", { storeKey: key, visibleTo: { kind: "channels-in", channelIds: Array.from({ length: 90 }, (_, i) => `c${i}`) } })).status).toBe(200);
+  });
+
+  it("a table created before the visibility stamp gains the column with `unknown` for every existing row (the one migration), and a record put without the stamp reads back as `unknown` — never public", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    // Recreate the pre-stamp schema by hand: drop the column, then reconstruct the DO to run the migration.
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      state.storage.sql.exec(`DROP INDEX IF EXISTS runs_visibility_finished`);
+      state.storage.sql.exec(`ALTER TABLE runs DROP COLUMN channel_visibility`);
+      const columns = state.storage.sql.exec<{ name: string }>(`PRAGMA table_info(runs)`).toArray().map((c) => c.name);
+      expect(columns).not.toContain("channel_visibility");
+    });
+    // A row written straight into the old shape (as a pre-migration DO would have left it).
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      const { events: _e, channelVisibility: _v, ...summary } = record("legacy", now - 1000);
+      state.storage.sql.exec(
+        `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, repo, started_at, finished_at, stored_at, status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        summary.id, summary.label ?? null, summary.agent ?? null, summary.model ?? null, summary.channelId, summary.userId, summary.threadKey, null, summary.startedAt, summary.finishedAt, now, summary.status, 0, 0, 0, 100, JSON.stringify(summary.diagnosis), JSON.stringify(summary),
+      );
+      // Simulate the next constructor run: the migration the DO applies on load.
+      const cols = new Set(state.storage.sql.exec<{ name: string }>(`PRAGMA table_info(runs)`).toArray().map((c) => c.name));
+      if (!cols.has("channel_visibility")) state.storage.sql.exec(`ALTER TABLE runs ADD COLUMN channel_visibility TEXT NOT NULL DEFAULT 'unknown'`);
+    });
+    const listed = (await post("/runs/list", { storeKey: key })).data.items as Array<{ id: string; channelVisibility?: string }>;
+    expect(listed.map((r) => r.id)).toEqual(["legacy"]);
+    expect(await runInDurableObject(stubOf(key), async (_i: RunHistoryDO, state) => state.storage.sql.exec<{ v: string }>(`SELECT channel_visibility AS v FROM runs WHERE run_id = 'legacy'`).one().v)).toBe("unknown");
+    expect((await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["public"] } })).data.items).toEqual([]);
+    expect(((await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["unknown"] } })).data.items as Array<{ id: string }>).map((r) => r.id)).toEqual(["legacy"]);
+    // A put without the stamp (an older bot) stores `unknown` too.
+    const { channelVisibility: _cv, ...unstamped } = record("unstamped", now - 500, { events: events(1) });
+    expect((await post("/runs/put", { storeKey: key, record: unstamped })).status).toBe(200);
+    expect(await runInDurableObject(stubOf(key), async (_i: RunHistoryDO, state) => state.storage.sql.exec<{ v: string }>(`SELECT channel_visibility AS v FROM runs WHERE run_id = 'unstamped'`).one().v)).toBe("unknown");
+    // And a stamped put is stored as stamped and filterable.
+    await post("/runs/put", { storeKey: key, record: record("stamped", now - 200, { events: events(1), channelVisibility: "public" }) });
+    expect(((await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["public"] } })).data.items as Array<{ id: string }>).map((r) => r.id)).toEqual(["stamped"]);
   });
 
   it("delete removes the run and all its events; deleting an unknown id is fine", async () => {

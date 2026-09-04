@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { NO_GRANTS } from "../core/authz/types.js";
 import type { RunSummary } from "../core/runRegistry.js";
 import type { ScheduleDef, ScheduleFiring } from "../core/schedules.js";
 
@@ -6,7 +7,7 @@ import type { ScheduleDef, ScheduleFiring } from "../core/schedules.js";
  *  registry's cron values (which move for live receipts, e.g. #197 / #244). */
 export const FIXTURE_SCHEDULES: readonly ScheduleDef[] = [
   { name: "keep-alive", cron: "* * * * *", worker: "bot", internal: true, description: "Container keep-alive. Not a run.", action: { type: "healthz" } },
-  { name: "self-improvement", cron: "0 14 * * 1", worker: "bot", description: "Weekly self-improvement pass.", action: { type: "run", command: "friction propose", identity: "cron", actor: { kind: "schedule", id: "schedule:self-improvement" } } },
+  { name: "self-improvement", cron: "0 14 * * 1", worker: "bot", description: "Weekly self-improvement pass.", action: { type: "run", command: "friction propose", identity: "cron", actor: { kind: "schedule", id: "schedule:self-improvement", grants: NO_GRANTS } } },
   { name: "resident-watchdog", cron: "*/10 * * * *", worker: "resident", description: "Resident watchdog pass.", action: { type: "watchdog" } },
 ];
 import { buildScheduledRows, firingDetailSummary, formatRelative, type FiringsState } from "./scheduledPanel.js";

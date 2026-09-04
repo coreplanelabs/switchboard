@@ -1,4 +1,4 @@
-import type { Actor } from "./authz/types.js";
+import type { Actor, Grants } from "./authz/types.js";
 import { parseIngressTokenMap, tokenForSubject } from "./ingressTokens.js";
 
 // The schedule registry (#244): the ONE catalog of every cron any of our
@@ -40,17 +40,24 @@ export interface RunAction {
   command: string;
   /** The ingress identity (`subject`) whose token the shim presents. */
   identity: string;
-  /** Who the firing IS under the one authorization model (plan U2, R9): the
-   *  `schedule` actor `schedule:<name>`; its grants are `grants["schedule:<name>"]`
-   *  in config.yaml (`ConfigStore.grantsFor`). Declared here; the shim still
-   *  authenticates as `identity` above until the policy units switch it over. */
-  actor: Pick<Actor, "kind" | "id"> & { kind: "schedule"; id: `schedule:${string}` };
+  /** Who the firing IS under the one authorization model (plan U2/U3, R9): the
+   *  `schedule` actor `schedule:<name>` with the grants the registry declares
+   *  for it — the floor `ConfigStore.grantsFor` serves for that id; a native
+   *  `grants["schedule:<name>"]` entry in config.yaml replaces them. The shim
+   *  still authenticates as `identity` above (the dispatcher sees
+   *  `http:<identity>`) until a later unit hands firings to this actor; the
+   *  grants are declared here so that switch is a wiring change, not a policy one. */
+  actor: Pick<Actor, "kind" | "id" | "grants"> & { kind: "schedule"; id: `schedule:${string}` };
 }
 
-/** The `schedule` actor for a run schedule's name. */
-export function scheduleActor(name: string): RunAction["actor"] {
-  return { kind: "schedule", id: `schedule:${name}` };
+/** The `schedule` actor for a run schedule's name, holding exactly `grants`. */
+export function scheduleActor(name: string, grants: Grants): RunAction["actor"] {
+  return { kind: "schedule", id: `schedule:${name}`, grants };
 }
+
+/** What the weekly pass needs: read the fleet's runs (`friction report` is a
+ *  run read across every channel — the #395 fix) and file proposals. No repos. */
+const SELF_IMPROVEMENT_GRANTS: Grants = Object.freeze({ actions: new Set(["friction:read", "friction:write"]), channels: "all", repos: new Set<string>() });
 
 export type ScheduleAction =
   | RunAction
@@ -90,7 +97,7 @@ export const SCHEDULES: readonly ScheduleDef[] = [
     cron: "0 14 * * 1",
     worker: "bot",
     description: "Weekly self-improvement pass (#84): cluster the friction ledger and file deduped `self-improvement` issues. Proposals only.",
-    action: { type: "run", command: "friction propose", identity: CRON_IDENTITY, actor: scheduleActor("self-improvement") },
+    action: { type: "run", command: "friction propose", identity: CRON_IDENTITY, actor: scheduleActor("self-improvement", SELF_IMPROVEMENT_GRANTS) },
   },
   {
     name: "resident-watchdog",

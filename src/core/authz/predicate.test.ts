@@ -10,6 +10,8 @@ import type { Actor, Predicate, Resource, ResourceKind, Rule } from "./types.js"
 // time, for every actor shape, over a corpus spanning every channel visibility.
 
 const A = ACTORS;
+/** `member-of`'s public half as the compiler emits it. */
+const PUBLIC: Predicate = { kind: "visibility-in", visibilities: new Set(["public"]) };
 
 function filterByPredicate<R extends Resource>(records: readonly R[], predicate: Predicate): Set<string> {
   return new Set(records.filter((r) => matchesPredicate(predicate, attributesOf(r))).map(idOf));
@@ -56,10 +58,10 @@ describe("predicateFor ⇔ authorize differential over runs", () => {
       { action: "runs:read", resource: "run", when: [{ kind: "member-of" }, { kind: "is-self" }] },
       { action: "runs:read", resource: "run", when: [{ kind: "all-channels" }] },
     ];
-    it("emits and(channels-in, user-is) for a channel-bound actor", () => {
+    it("emits and(or(channels-in, visibility-in public), user-is) for a channel-bound actor", () => {
       expect(predicateWith(table, A.member, "runs:read", "run")).toEqual({
         kind: "and",
-        of: [{ kind: "channels-in", channelIds: A.member.grants.channels }, { kind: "user-is", userId: A.member.id }],
+        of: [{ kind: "or", of: [{ kind: "channels-in", channelIds: A.member.grants.channels }, PUBLIC] }, { kind: "user-is", userId: A.member.id }],
       });
       expect(predicateWith(table, A.admin, "runs:read", "run")).toEqual({ kind: "all" });
     });
@@ -70,18 +72,28 @@ describe("predicateFor ⇔ authorize differential over runs", () => {
         expect(byPredicate).toEqual(byPoint);
       });
     }
-    it("is not vacuous: the member sees exactly its own runs in its channels", () => {
+    it("is not vacuous: the member sees exactly its own runs in its channels plus the public ones", () => {
       const seen = filterByPredicate(runs, predicateWith(table, A.member, "runs:read", "run"));
-      expect(seen.size).toBe(2 * 2); // 2 member channels × 2 repos, userId = member
+      expect(seen.size).toBe(3 * 2); // (pub1 + priv, granted; pub2, public) × 2 repos, userId = member
     });
   });
-  it("the differential is not vacuous: the member sees some runs and not others", () => {
+  it("the differential is not vacuous: the member sees some runs and not others; a token sees its channel and the public runs; an all-channels actor sees everything", () => {
     const seen = filterByAuthorize(runs, A.member, "runs:read");
     expect(seen.size).toBeGreaterThan(0);
     expect(seen.size).toBeLessThan(runs.length);
     expect(filterByAuthorize(runs, A.admin, "runs:read").size).toBe(runs.length);
     expect(filterByAuthorize(runs, A.schedule, "runs:read").size).toBe(runs.length);
-    expect(filterByAuthorize(runs, A.token, "runs:read")).toEqual(new Set(runs.filter((r) => r.channelId === CHANNELS.http.id).map((r) => r.id)));
+    const isPublic = (r: RunResource) => r.channelVisibility === "public";
+    expect(filterByAuthorize(runs, A.token, "runs:read")).toEqual(new Set(runs.filter((r) => r.channelId === CHANNELS.http.id || isPublic(r)).map((r) => r.id)));
+    // No channel grants at all: the public runs and nothing else (an unpinned token, OQ4 a).
+    expect(filterByAuthorize(runs, actor("service", "http:ci", { actions: new Set(["runs:read"]) }), "runs:read")).toEqual(new Set(runs.filter(isPublic).map((r) => r.id)));
+  });
+  it("a record stamped `unknown` (or not stamped) never matches the public half — for every actor without the channel", () => {
+    const unstamped: RunResource[] = runs.map((r) => ({ ...r, channelVisibility: "unknown" }));
+    for (const [label, a] of DIFFERENTIAL_ACTORS) {
+      expect(filterByPredicate(unstamped, predicateFor(a, "runs:read", "run")), label).toEqual(filterByAuthorize(unstamped, a, "runs:read"));
+    }
+    expect(filterByAuthorize(unstamped, A.nonMember, "runs:read")).toEqual(new Set(unstamped.filter((r) => r.channelId === CHANNELS.pub2.id || r.userId === A.nonMember.id).map((r) => r.id)));
   });
 });
 
@@ -124,20 +136,20 @@ describe("predicateFor: derivation", () => {
     expect(predicateFor(A.admin, "runs:read", "run")).toEqual({ kind: "all" });
     expect(predicateFor(A.schedule, "runs:read", "run")).toEqual({ kind: "all" });
   });
-  it("member-of → channels-in over the actor's channel set; is-self → user-is; rows OR", () => {
+  it("member-of → or(channels-in over the actor's channel set, visibility-in [public]); is-self → user-is; rows OR into ONE flat disjunction", () => {
     expect(predicateFor(A.member, "runs:read", "run")).toEqual({
       kind: "or",
-      of: [{ kind: "channels-in", channelIds: A.member.grants.channels }, { kind: "user-is", userId: A.member.id }],
+      of: [{ kind: "channels-in", channelIds: A.member.grants.channels }, PUBLIC, { kind: "user-is", userId: A.member.id }],
     });
   });
   it("a missing grant sinks its row; a held grant is no constraint", () => {
-    expect(predicateFor(A.member, "runs:write", "run")).toEqual({ kind: "channels-in", channelIds: A.member.grants.channels });
+    expect(predicateFor(A.member, "runs:write", "run")).toEqual({ kind: "or", of: [{ kind: "channels-in", channelIds: A.member.grants.channels }, PUBLIC] });
     expect(predicateFor(A.reader, "runs:write", "run")).toEqual({ kind: "none" });
     expect(predicateFor(A.member, "runs:read", "command")).toEqual({ kind: "all" });
     expect(predicateFor(A.noGrants, "runs:read", "command")).toEqual({ kind: "none" });
   });
-  it("an actor with no channels and no grants keeps only its own runs", () => {
-    expect(predicateFor(A.noGrants, "runs:read", "run")).toEqual({ kind: "user-is", userId: A.noGrants.id });
+  it("an actor with no channels and no grants keeps the public runs and its own", () => {
+    expect(predicateFor(A.noGrants, "runs:read", "run")).toEqual({ kind: "or", of: [PUBLIC, { kind: "user-is", userId: A.noGrants.id }] });
   });
   it("owner-of → repos-in (or all)", () => {
     expect(predicateFor(A.manager, "memory:read", "memory-scope", "repo")).toEqual({ kind: "repos-in", repos: A.manager.grants.repos });
@@ -152,7 +164,7 @@ describe("predicateFor: derivation", () => {
   it("agent actors compile against the intersection and the principal's identity", () => {
     expect(predicateFor(A.agentForNonMember, "runs:read", "run")).toEqual({
       kind: "or",
-      of: [{ kind: "channels-in", channelIds: A.nonMember.grants.channels }, { kind: "user-is", userId: A.nonMember.id }],
+      of: [{ kind: "channels-in", channelIds: A.nonMember.grants.channels }, PUBLIC, { kind: "user-is", userId: A.nonMember.id }],
     });
   });
   it("a placeholder grant cannot be compiled without the record → none", () => {
@@ -172,6 +184,13 @@ describe("predicateFor: derivation", () => {
 
 describe("matchesPredicate", () => {
   const rec = { channelId: CHANNELS.pub1.id, userId: "slack:U2", repo: REPOS[0] };
+  it("visibility-in reads the record's stamp; a missing stamp is `unknown` and never public", () => {
+    expect(matchesPredicate(PUBLIC, { ...rec, channelVisibility: "public" })).toBe(true);
+    expect(matchesPredicate(PUBLIC, { ...rec, channelVisibility: "private" })).toBe(false);
+    expect(matchesPredicate(PUBLIC, { ...rec, channelVisibility: "unknown" })).toBe(false);
+    expect(matchesPredicate(PUBLIC, rec)).toBe(false);
+    expect(matchesPredicate({ kind: "visibility-in", visibilities: new Set(["unknown"]) }, rec)).toBe(true);
+  });
   it("evaluates each shape against a record's attributes", () => {
     expect(matchesPredicate({ kind: "none" }, rec)).toBe(false);
     expect(matchesPredicate({ kind: "all" }, rec)).toBe(true);

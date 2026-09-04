@@ -83,16 +83,17 @@ describe("translateLegacyConfig — the KTD6 table, key by key", () => {
 
   it("ingress token scopes → actions of the same names, for BOTH the http: and the mcp: actor the token can become", () => {
     const { grants: t } = translate(undefined, { tok: { subject: "ci", scopes: ["dispatch", "runs:read"] } });
-    expect(t.get("http:ci")).toEqual(grants({ actions: set("dispatch", "runs:read"), channels: "all" }));
-    expect(t.get("mcp:ci")).toEqual(grants({ actions: set("dispatch", "runs:read"), channels: "all" }));
+    expect(t.get("http:ci")).toEqual(grants({ actions: set("dispatch", "runs:read") }));
+    expect(t.get("mcp:ci")).toEqual(grants({ actions: set("dispatch", "runs:read") }));
   });
 
-  it("ingress token `channel` → the pinned channel in the actor's own namespace (http:<channel> / mcp:<channel>); no pin → every channel (PROVISIONAL: today's per-request machine-channel pin has no grants spelling — OQ4)", () => {
+  it("ingress token `channel` → the pinned channel in the actor's own namespace (http:<channel> / mcp:<channel>); no `channel` → NO channels (OQ4 a, fail-closed: an unpinned token sees no run until config grants it channels)", () => {
     const { grants: t } = translate(undefined, { tok: { subject: "alice", channel: "ops", scopes: ["dispatch"] } });
     expect(t.get("http:alice")?.channels).toEqual(set("http:ops"));
     expect(t.get("mcp:alice")?.channels).toEqual(set("mcp:ops"));
     const unpinned = translate(undefined, { tok: { subject: "alice", scopes: ["dispatch"] } });
-    expect(unpinned.grants.get("http:alice")?.channels).toBe("all");
+    expect(unpinned.grants.get("http:alice")?.channels).toEqual(set());
+    expect(unpinned.grants.get("mcp:alice")?.channels).toEqual(set());
   });
 
   it("two tokens for one subject union their scopes and pins", () => {
@@ -234,10 +235,19 @@ describe("grantsTable / grantsIn / grantsFor — the merged lookup", () => {
     expect(grantsFor("slack:UNKNOWN", {})).toBe(NO_GRANTS);
   });
 
-  it("a schedule actor's grants come from the native block only (no legacy key names schedules)", () => {
-    const parsed = parseGrantsConfig({ "schedule:self-improvement": { actions: ["friction:write"], channels: "all" } });
+  it("a schedule actor's grants are the registry's declared ones (R9) unless the native block names the id — then config wins, without an overlap warning; no legacy key names schedules", () => {
+    const declared = grants({ actions: set("friction:read", "friction:write"), channels: "all" });
+    const schedules = [{ id: "schedule:self-improvement", grants: declared }];
+    expect(grantsFor("schedule:self-improvement", { schedules })).toEqual(declared);
+    expect(grantsFor("schedule:self-improvement", { schedules, permissions: { admins: ["slack:U1"], repoManagement: ["http:cron"] } })).toEqual(declared);
+    // A legacy key naming the schedule (the chat gate needs `repoManagement` until U4) ADDS to the declared floor, never narrows it.
+    expect(grantsFor("schedule:self-improvement", { schedules, permissions: { repoManagement: ["schedule:self-improvement"] } })).toEqual(grants({ actions: set("friction:read", "friction:write", "repo:write"), channels: "all" }));
+    const parsed = parseGrantsConfig({ "schedule:self-improvement": { actions: ["friction:write"], channels: ["slack:C1"] } });
     if (!parsed.ok) throw new Error(parsed.errors.join("; "));
-    expect(grantsFor("schedule:self-improvement", { grants: parsed.grants })).toEqual(grants({ actions: set("friction:write"), channels: "all" }));
+    const table = grantsTable({ grants: parsed.grants, schedules });
+    expect(grantsIn(table, "schedule:self-improvement")).toEqual(grants({ actions: set("friction:write"), channels: set("slack:C1") }));
+    expect(table.overlapping).toEqual([]);
     expect(grantsFor("schedule:self-improvement", { permissions: { admins: ["slack:U1"] } })).toBe(NO_GRANTS);
+    expect(grantsFor("schedule:other", { schedules })).toBe(NO_GRANTS);
   });
 });

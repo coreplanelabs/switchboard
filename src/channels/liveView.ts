@@ -220,7 +220,12 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
    *  tokenless), plus the "Older runs" href when the page was full. */
   const mergedRows = async (live: readonly RunSummary[], cursor?: { before: number; beforeId: string }): Promise<IndexPage> => {
     const tokens = new Map(live.map((s) => [s.id, s.token]));
-    const { runs, nextBefore, storeUnavailable } = await service.listRuns({ status: "all", limit: pageSize, ...(cursor ?? {}) });
+    // The Access-gated index lists every run's METADATA to whoever Access let in
+    // — today's behavior, stated as an explicit `all` rather than inherited. The
+    // per-actor binding of this page (authorization R5 on the HTML surface) is
+    // a spec `[gap]`: it needs the page to carry an actor, which is frontend
+    // work on hold; the `/api/runs.*` path the page's data comes from is bound.
+    const { runs, nextBefore, storeUnavailable } = await service.listRuns({ status: "all", visibleTo: { kind: "all" }, limit: pageSize, ...(cursor ?? {}) });
     // A cursor page holds finished runs only — the service leaves the live rows
     // off it (they all sort ahead of any cursor), so the page is a full page.
     // Only an UNFINISHED row gets its capability token (R10): the seed is data

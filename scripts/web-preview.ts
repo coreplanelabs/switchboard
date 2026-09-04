@@ -4,6 +4,7 @@ import { loadWebAssets } from "../src/channels/webAssets.js";
 import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js";
 import type { RunIndexRowSeed, WebSeed } from "../src/channels/webSeed.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
+import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
 
 // Local visual preview of the web app (web/) with fixture data — no Slack, no
 // config.yaml, no credentials. Build the app first (`npm run build` in web/),
@@ -140,15 +141,19 @@ const COSTS = {
   },
 };
 
+/** The real registry entry's action (identity + declared actor and grants), so the preview row cannot drift from the schedule shape. */
+const SELF_IMPROVEMENT = SCHEDULES.filter(isRunSchedule).find((s) => s.name === "self-improvement");
+if (!SELF_IMPROVEMENT) throw new Error("web-preview: the schedule registry has no `self-improvement` run schedule");
+
 const SCHEDULED = {
   page: "scheduled" as const,
   now: NOW,
   rows: [
     {
-      name: "self-improvement",
-      worker: "bot" as const,
-      action: { type: "run" as const, command: "friction propose", identity: "cron", actor: { kind: "schedule" as const, id: "schedule:self-improvement" as const } },
-      cron: "0 14 * * 1",
+      name: SELF_IMPROVEMENT.name,
+      worker: SELF_IMPROVEMENT.worker,
+      action: SELF_IMPROVEMENT.action,
+      cron: SELF_IMPROVEMENT.cron,
       description: "Weekly self-improvement pass over recent runs.",
       nextFireAt: NOW + 2 * 86_400_000 + 3 * 3_600_000,
       last: { firedAt: NOW - 5 * 86_400_000, outcome: "completed" as const, runId: "hist-1abcdef", runHref: "/runs/hist-1", detail: "🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns · 1 filed" },

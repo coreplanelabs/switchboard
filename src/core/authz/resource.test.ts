@@ -12,11 +12,12 @@ describe("attributesOf", () => {
       userId: "slack:U1",
       repo: "o/r",
       visibility: "private",
+      channelVisibility: "private",
     });
-    expect(attributesOf({ type: "run", id: "r", channelId: "slack:C1", userId: "slack:U1" })).toEqual({ channelId: "slack:C1", userId: "slack:U1", visibility: "unknown" });
+    expect(attributesOf({ type: "run", id: "r", channelId: "slack:C1", userId: "slack:U1" })).toEqual({ channelId: "slack:C1", userId: "slack:U1", visibility: "unknown", channelVisibility: "unknown" });
   });
-  it("channel: its own id and visibility", () => {
-    expect(attributesOf({ type: "channel", id: "slack:C1", visibility: "dm" })).toEqual({ channelId: "slack:C1", visibility: "dm" });
+  it("channel: its own id and visibility — the channel IS the resource, so both visibility attributes are its own", () => {
+    expect(attributesOf({ type: "channel", id: "slack:C1", visibility: "dm" })).toEqual({ channelId: "slack:C1", visibility: "dm", channelVisibility: "dm" });
   });
   it("memory-scope: the id behind the kind's key prefix; org carries nothing but its origin visibility", () => {
     expect(attributesOf(scope("org", "org:coreplanelabs", "public"))).toEqual({ visibility: "public" });

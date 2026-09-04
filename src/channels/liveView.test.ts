@@ -931,6 +931,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       channelId: "slack:C1",
       userId: "slack:U1",
       threadKey: `slack:C1:${id}`,
+      channelVisibility: "unknown",
       startedAt: NOW - 70_000,
       finishedAt: NOW - 60_000,
       status: "completed",
@@ -1348,7 +1349,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const t = fakeReqRes("GET", "/runs?all=1");
       h.handler(t.req, t.res);
       await done(t);
-      expect(list).toHaveBeenCalledWith({ status: "all", limit: INDEX_PAGE_SIZE });
+      expect(list).toHaveBeenCalledWith({ status: "all", visibleTo: { kind: "all" }, limit: INDEX_PAGE_SIZE });
     });
 
     it("a full page seeds an `olderHref` carrying the service's cursor; following it yields the next page with `olderThan`", async () => {

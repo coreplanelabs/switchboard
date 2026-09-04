@@ -41,7 +41,7 @@ flowchart TB
         SLACK["Slack<br/>@switchboard friction report | propose"]
         CLI["CLI<br/>npx tsx src/cli.ts friction propose --dry-run"]
         API["HTTP /api/friction.propose<br/>MCP friction_propose"]
-        CRON["Worker shim cron<br/>Mondays 14:00 UTC<br/>POST /ingress 'friction propose'<br/>as the cron identity"]
+        CRON["Worker shim cron<br/>Mondays 14:00 UTC<br/>POST /ingress 'friction propose'<br/>as the cron identity (granted channels: all)"]
     end
 
     subgraph bot ["Bot process — one Cloudflare Container"]
@@ -89,8 +89,8 @@ sequenceDiagram
     participant SDO as ScheduleDO
 
     Shim->>Bot: POST /ingress "friction propose" (cron bearer)
-    Note over Bot: Auth: caller must be a repo manager (permissions.repoManagement)
-    Bot->>Store: list recent runs (diagnosis rides the listing)
+    Note over Bot: Admission: a repo manager (permissions.repoManagement).<br/>Visibility: the authorization policy — the caller's run-read<br/>predicate (channels: all for the cron) is pushed into the store
+    Bot->>Store: list recent runs the caller may read (diagnosis rides the listing)
     Store-->>Bot: run records, oldest first
     Bot->>Core: clusterFriction(records, minRuns=2)
     Core-->>Bot: ranked patterns (+ long_run outliers)
@@ -106,7 +106,7 @@ sequenceDiagram
     Shim->>SDO: record firing (time, run id, outcome)
 ```
 
-The firing is an ordinary run: it gets a record on `/runs`, its answer is the report text, and the Scheduled panel shows when it fired and what came of it. If the cron identity lacks the repo-management grant, the run finishes `failed` with the refusal as its answer and nothing is filed. If there is no cron token at all, nothing runs and the firing is recorded `misconfigured`.
+The firing is an ordinary run: it gets a record on `/runs`, its answer is the report text, and the Scheduled panel shows when it fired and what came of it. If the cron identity lacks the repo-management grant, the run finishes `failed` with the refusal as its answer and nothing is filed. If it lacks the `channels: all` grant, the pass runs and analyzes 0 runs — the identity is granted it in `config.production.yaml`, and the schedule registry declares the same for the `schedule:self-improvement` actor. If there is no cron token at all, nothing runs and the firing is recorded `misconfigured`.
 
 ## From one slow command to one issue
 
@@ -141,7 +141,9 @@ Notes that matter for reading a filed issue:
 | Slack | `@switchboard friction propose [--dry-run] [--top n] [--min-runs n] [--repo o/n]` | admins and `permissions.repoManagement` |
 | CLI (no bot needed) | `npx tsx src/cli.ts friction propose --dry-run` | local operator; without `--repo` or config it is a pure dry run |
 | HTTP / MCP | `POST /api/friction.propose`, tool `friction_propose` | tokens holding `friction:write` |
-| Schedule | `self-improvement` entry of the schedule registry, `0 14 * * 1` | the `cron` ingress identity, which must be in `permissions.repoManagement` |
+| Schedule | `self-improvement` entry of the schedule registry, `0 14 * * 1` | the `cron` ingress identity, which must be in `permissions.repoManagement` and granted `channels: all` (the native `grants` block) |
+
+Who may CALL a command is the table above; WHAT it analyzes is the [authorization policy](../features/authorization.md): the caller's run-read predicate, pushed into the run store. An admin or the cron sees the fleet; a token granted one channel sees that channel; a caller granted no channel sees only its own runs.
 
 All of these are the same registered command with the same JSON output and the same rendered text. The chat flags are derived from the command's schema, not hand-parsed.
 
@@ -151,10 +153,6 @@ All of these are the same registered command with the same JSON output and the s
 - Change agent prompts, AGENTS.md, config, or sandbox images.
 - Post to a channel when it files. The issues are the notification.
 - Read message text into the ledger. A ledger row carries `{ runId, label, agent, finishedAt, diagnosis }` and nothing else, so an issue body can never leak a conversation or grant live-view access.
-
-## Known gap: the scheduled pass sees no runs
-
-Machine callers (`http:*`, `mcp:*`) are channel-pinned by design: `friction` commands from them analyze only runs from their own channel, so a CI token cannot read another team's runs. The weekly cron arrives as `http:cron`, so it is pinned to the `http:cron` channel, whose only runs are earlier cron firings. The pass therefore runs, completes, and reports "0 runs analyzed" every time. Every issue filed so far came from a human running `friction propose` in Slack or on the CLI. Tracked in [#395](https://github.com/coreplanelabs/switchboard/issues/395); until it lands, run the pass by hand on Mondays.
 
 ## Further reading
 

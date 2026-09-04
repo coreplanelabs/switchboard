@@ -75,7 +75,9 @@ export type ResourceType = Resource["type"];
  *  is a plan-level decision, never a local convenience. */
 export type Condition =
   | { readonly kind: "has-grant"; readonly grant: string }
-  /** actor.grants.channels contains resource.channelId (or is "all"). */
+  /** actor.grants.channels contains resource.channelId (or is "all"), OR the
+   *  resource's channel is `public` (a run's stamped `channelVisibility`, KTD7;
+   *  `unknown` is never public). One definition for both evaluators (U3). */
   | { readonly kind: "member-of" }
   /** resource.userId === actor.id (or the on-behalf-of principal's id). */
   | { readonly kind: "is-self" }
@@ -130,6 +132,10 @@ export type Predicate =
   | { readonly kind: "channels-in"; readonly channelIds: ReadonlySet<string> }
   | { readonly kind: "user-is"; readonly userId: string }
   | { readonly kind: "repos-in"; readonly repos: ReadonlySet<string> }
+  /** The record's stamped `channelVisibility` is one of these (`member-of`'s
+   *  public half, U3). A record without the stamp is `unknown` and never matches
+   *  `visibility-in(["public"])`. */
+  | { readonly kind: "visibility-in"; readonly visibilities: ReadonlySet<ChannelVisibility> }
   /** Rows for one (action, resource type) OR together. */
   | { readonly kind: "or"; readonly of: readonly Predicate[] }
   /** The compilable conditions of ONE row AND together (e.g. member-of ∧ is-self). */

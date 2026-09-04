@@ -73,9 +73,9 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     expect(a).toEqual({ kind: "service", id: "http:alice", grants: grants({ actions: set("dispatch", "runs:read"), channels: set("http:ops") }), origin: { channelId: "http:ops", threadKey: "http:ops:default" } });
   });
 
-  it("ingress token WITHOUT channel → service with every channel (provisional translation, OQ4)", () => {
+  it("ingress token WITHOUT channel → service with NO channel (OQ4 a: an unpinned token is granted nothing until config names its channels)", () => {
     const a = resolveActor({ surface: "http", subjectId: "ci" }, lookup);
-    expect(a).toEqual({ kind: "service", id: "http:ci", grants: grants({ actions: set("dispatch"), channels: "all" }) });
+    expect(a).toEqual({ kind: "service", id: "http:ci", grants: grants({ actions: set("dispatch") }) });
   });
 
   it("MCP token with pin → service `mcp:<subject>` pinned to mcp:<channel>", () => {
@@ -120,6 +120,8 @@ describe("resolveChatActor — a chat message's namespaced user id chooses the s
     expect(resolveChatActor(msg("http:alice", "http:ops"), lookup)).toMatchObject({ kind: "service", id: "http:alice", grants: { channels: set("http:ops") } });
     expect(resolveChatActor(msg("mcp:alice", "mcp:ops"), lookup)).toMatchObject({ kind: "service", id: "mcp:alice" });
     expect(resolveChatActor(msg("cli:local", "cli:local"), lookup)).toMatchObject({ kind: "user", id: "cli:local", grants: ALL_GRANTS });
+    // A schedule firing that reaches chat as `schedule:<name>` is the `schedule` kind (R9), grants by that id.
+    expect(resolveChatActor(msg("schedule:self-improvement", "http:cron"), lookup)).toMatchObject({ kind: "schedule", id: "schedule:self-improvement", grants: { channels: "all" } });
   });
 
   it("an unknown namespace stays a user with the id as given and whatever grants config names for it — never a crash, never widened", () => {

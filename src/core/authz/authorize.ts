@@ -101,7 +101,10 @@ export function evaluateCondition(condition: Condition, grants: Grants, selfId: 
       return grant !== undefined && hasAction(grants.actions, grant);
     }
     case "member-of":
-      return attributes.channelId !== undefined && holds(grants.channels, attributes.channelId);
+      // Granted the channel, or the channel is public (a run's stamped
+      // visibility, KTD7). `unknown` — no stamp, a directory failure — is
+      // never public (R7).
+      return (attributes.channelId !== undefined && holds(grants.channels, attributes.channelId)) || attributes.channelVisibility === "public";
     case "is-self":
       return attributes.userId !== undefined && attributes.userId === selfId;
     case "owner-of":

@@ -1,3 +1,4 @@
+import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { RunEvent } from "./runEvents.js";
 import { FRICTION_CATEGORIES, type CategoryTotals, type FrictionCategory, type FrictionDiagnosis } from "./runFriction.js";
 
@@ -39,6 +40,11 @@ export interface RunRecord {
   channelId: string;
   userId: string;
   threadKey: string;
+  /** How the run's channel may travel (authorization KTD7): stamped at dispatch
+   *  from the `ChannelDirectory`, read by `member-of` (a `public` run is
+   *  readable by everyone). A stored record written before the stamp existed
+   *  reads as `unknown` — never public (`normalizeStored`). */
+  channelVisibility: ChannelVisibility;
   /** `owner/name` for repo runs. */
   repo?: string;
   /** Epoch ms. */
@@ -121,8 +127,110 @@ export interface RunListOptions {
   /** Only runs finished at or after this epoch ms. */
   sinceMs?: number;
   agent?: string;
-  /** Platform-namespaced channel id (`slack:C0123`). */
+  /** Platform-namespaced channel id (`slack:C0123`) — a plain filter the caller asked for. */
   channel?: string;
+  /** What the ACTOR may see (authorization R6): the store predicate compiled
+   *  from the policy, pushed down so no surface loads rows and filters after.
+   *  Absent = no visibility constraint — only a caller that has already decided
+   *  (the dispatcher's own writes, a test) omits it; the read services always
+   *  pass one. */
+  visibleTo?: RunVisibilityFilter;
+}
+
+// ---- visibility filter (the wire form of an authz `Predicate`) ----------------
+
+/** The list-shaped authorization decision as it travels to a store: the authz
+ *  `Predicate` with its sets as arrays, so it fits a JSON body (`/runs/list`) and
+ *  the Worker can compile it to SQL. `channel-prefix` does not exist: channels
+ *  are channels (OQ4, option a). Every store — in-memory, file, the DO — answers
+ *  it with the same truth table as `matchesVisibility`. */
+export type RunVisibilityFilter =
+  | { kind: "none" }
+  | { kind: "all" }
+  | { kind: "channels-in"; channelIds: string[] }
+  | { kind: "user-is"; userId: string }
+  | { kind: "repos-in"; repos: string[] }
+  | { kind: "visibility-in"; visibilities: ChannelVisibility[] }
+  | { kind: "or"; of: RunVisibilityFilter[] }
+  | { kind: "and"; of: RunVisibilityFilter[] };
+
+export const CHANNEL_VISIBILITIES: readonly ChannelVisibility[] = ["public", "private", "dm", "machine", "unknown"];
+
+/** A `Predicate` as the store receives it (sets → sorted arrays, so equal predicates serialize equally). */
+export function toVisibilityFilter(predicate: Predicate): RunVisibilityFilter {
+  switch (predicate.kind) {
+    case "none":
+    case "all":
+      return { kind: predicate.kind };
+    case "channels-in":
+      return { kind: "channels-in", channelIds: [...predicate.channelIds].sort() };
+    case "user-is":
+      return { kind: "user-is", userId: predicate.userId };
+    case "repos-in":
+      return { kind: "repos-in", repos: [...predicate.repos].sort() };
+    case "visibility-in":
+      return { kind: "visibility-in", visibilities: [...predicate.visibilities].sort() };
+    case "or":
+    case "and":
+      return { kind: predicate.kind, of: predicate.of.map(toVisibilityFilter) };
+  }
+}
+
+const MAX_FILTER_DEPTH = 8;
+const MAX_FILTER_IDS = 1000;
+
+function isStringList(v: unknown, max: number): v is string[] {
+  return Array.isArray(v) && v.length <= max && v.every((s) => typeof s === "string" && s.length > 0);
+}
+
+/** Structural check on a filter from outside the process (the `/runs/list`
+ *  body). Bounded in depth and width so a hostile body cannot build an
+ *  unbounded SQL statement; an unknown kind or an unknown visibility is
+ *  rejected, never treated as "all". */
+export function isRunVisibilityFilter(v: unknown, depth = 0): v is RunVisibilityFilter {
+  if (depth > MAX_FILTER_DEPTH || typeof v !== "object" || v === null) return false;
+  const f = v as Record<string, unknown>;
+  switch (f.kind) {
+    case "none":
+    case "all":
+      return true;
+    case "channels-in":
+      return isStringList(f.channelIds, MAX_FILTER_IDS);
+    case "user-is":
+      return typeof f.userId === "string" && f.userId.length > 0;
+    case "repos-in":
+      return isStringList(f.repos, MAX_FILTER_IDS);
+    case "visibility-in":
+      return isStringList(f.visibilities, CHANNEL_VISIBILITIES.length) && f.visibilities.every((s) => (CHANNEL_VISIBILITIES as readonly string[]).includes(s));
+    case "or":
+    case "and":
+      return Array.isArray(f.of) && f.of.length <= MAX_FILTER_IDS && f.of.every((p) => isRunVisibilityFilter(p, depth + 1));
+    default:
+      return false;
+  }
+}
+
+/** The one truth table every store implements: does `row` satisfy the filter?
+ *  A row without `channelVisibility` is `unknown` — never public. */
+export function matchesVisibility(filter: RunVisibilityFilter, row: Pick<RunListItem, "channelId" | "userId"> & { repo?: string; channelVisibility?: ChannelVisibility }): boolean {
+  switch (filter.kind) {
+    case "none":
+      return false;
+    case "all":
+      return true;
+    case "channels-in":
+      return filter.channelIds.includes(row.channelId);
+    case "user-is":
+      return row.userId === filter.userId;
+    case "repos-in":
+      return row.repo !== undefined && filter.repos.includes(row.repo);
+    case "visibility-in":
+      return filter.visibilities.includes(row.channelVisibility ?? "unknown");
+    case "or":
+      return filter.of.some((p) => matchesVisibility(p, row));
+    case "and":
+      return filter.of.length > 0 && filter.of.every((p) => matchesVisibility(p, row));
+  }
 }
 
 /** The list order (`finishedAt` desc, `id` desc) as a cursor predicate: true
@@ -221,9 +329,11 @@ export function normalizeDiagnosis(d: FrictionDiagnosis): FrictionDiagnosis {
 }
 
 /** `normalizeDiagnosis` applied to anything carrying a `diagnosis` — a record or
- *  a listing row — on its way out of a store. */
-export function normalizeStored<T extends { diagnosis: FrictionDiagnosis }>(v: T): T {
-  return { ...v, diagnosis: normalizeDiagnosis(v.diagnosis) };
+ *  a listing row — on its way out of a store, and the `channelVisibility` stamp
+ *  filled with `unknown` for a row written before it existed (fail-closed:
+ *  `unknown` is never public). */
+export function normalizeStored<T extends { diagnosis: FrictionDiagnosis; channelVisibility?: ChannelVisibility }>(v: T): T & { channelVisibility: ChannelVisibility } {
+  return { ...v, diagnosis: normalizeDiagnosis(v.diagnosis), channelVisibility: v.channelVisibility ?? "unknown" };
 }
 
 /** Structural check on a record from outside the process (a Worker response, a
@@ -238,6 +348,8 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (!isOptionalString(r.label) || !isOptionalString(r.agent) || !isOptionalString(r.model) || !isOptionalString(r.repo)) return false;
   if (!isOptionalString(r.activity) || !isOptionalString(r.sourceUrl) || !isOptionalString(r.userName)) return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
+  // Absent on records written before the stamp existed (read as `unknown`); present → a known value.
+  if (r.channelVisibility !== undefined && !CHANNEL_VISIBILITIES.includes(r.channelVisibility as ChannelVisibility)) return false;
   if (!isFiniteNumber(r.startedAt) || !isFiniteNumber(r.finishedAt)) return false;
   if (!RUN_STATUSES.includes(r.status as RunStatus)) return false;
   if (!isFiniteNumber(r.eventCount) || !isFiniteNumber(r.storedEventCount)) return false;

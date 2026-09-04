@@ -50,8 +50,11 @@ export class WorkerFrictionLedger implements FrictionLedger {
 
   /** Throws on any failure: the friction commands turn it into a ⚠️ reply. */
   async recent(opts: LedgerReadOptions = {}): Promise<FrictionRunRecord[]> {
-    if (opts.channel !== undefined) return []; // FrictionDO rows carry no channel: nothing can match a pin
-    const res = await this.post("/friction/recent", { ledgerKey: this.opts.ledgerKey, ...opts });
+    // FrictionDO rows carry no channel, user, or visibility: only a predicate
+    // that admits everything can be honored; anything narrower yields nothing.
+    const { visibleTo, ...query } = opts;
+    if (visibleTo !== undefined && visibleTo.kind !== "all") return [];
+    const res = await this.post("/friction/recent", { ledgerKey: this.opts.ledgerKey, ...query });
     if (!res.ok) throw new Error(`friction worker /recent HTTP ${res.status}${await errorSuffix(res)}`);
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (!Array.isArray(data.records)) throw new Error("friction worker /recent returned no records array");

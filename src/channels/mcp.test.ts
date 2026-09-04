@@ -10,6 +10,7 @@ import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
 import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
+import type { RunRecord } from "../core/runRecord.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { createRunsService } from "../core/runsService.js";
@@ -362,28 +363,31 @@ describe("createMcpHandler (node:http wrapper)", () => {
 
 const NOW = 1_700_000_000_000;
 
-/** One live run (with a `tok-` capability token) and one persisted run behind
- *  the `runs.*` registrations, bound for the adapter. */
+/** One live run (with a `tok-` capability token) and two persisted runs behind
+ *  the `runs.*` registrations, bound for the adapter. The Slack runs are stamped
+ *  `public` so a token with no channel grant still sees them (member-of's
+ *  public half); `fin-2` lives in the machine channel `mcp:dev`. */
 async function commandFixture() {
   let n = 0;
   const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
-  const live = reg.create("coding · acme/live", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t" });
+  const live = reg.create("coding · acme/live", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t", channelVisibility: "public" });
   reg.publish(live.id, { type: "input", text: "live request" });
   const store = new InMemoryRunStore({ now: () => NOW });
   const events: RunEvent[] = [
     { type: "input", text: "please do the thing", seq: 1 },
     { type: "answer", text: "all done", seq: 2 },
   ];
-  await store.put({
-    id: "fin-1",
-    label: "coding · acme/fin-1",
+  const persisted = (id: string, channelId: string, channelVisibility: RunRecord["channelVisibility"], finishedAt: number): RunRecord => ({
+    id,
+    label: `coding · acme/${id}`,
     agent: "coding",
     model: "anthropic/claude",
-    channelId: "slack:C1",
+    channelId,
     userId: "slack:U1",
-    threadKey: "slack:C1:fin-1",
-    startedAt: NOW - 11_000,
-    finishedAt: NOW - 1000,
+    threadKey: `${channelId}:${id}`,
+    channelVisibility,
+    startedAt: finishedAt - 10_000,
+    finishedAt,
     status: "completed",
     eventCount: 2,
     storedEventCount: 2,
@@ -391,6 +395,8 @@ async function commandFixture() {
     events,
     diagnosis: analyzeRunFriction(events),
   });
+  await store.put(persisted("fin-1", "slack:C1", "public", NOW - 1000));
+  await store.put(persisted("fin-2", "mcp:dev", "machine", NOW - 2000));
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
   registerRunsCommands(registry);
   const commands = bindCommands(registry, { runs: async () => createRunsService({ registry: reg, store }) });
@@ -408,16 +414,17 @@ function toolJson(res: { body?: unknown }): unknown {
 }
 
 describe("toCaller — the Caller a tool call runs as carries the mcp: Actor (plan U2)", () => {
-  it("a pinned token → service mcp:<subject>, grants = the token's scopes over mcp:<channel> (from the token map when no lookup is wired); the legacy fields are untouched", () => {
+  it("a pinned token → service mcp:<subject>, grants = the token's scopes over mcp:<channel> (from the token map when no lookup is wired); no `channel` pin on the caller — the grant IS the pin", () => {
     const auth = scoped(["runs:read"], "ops");
     const c = toCaller(auth.tokens.tok, { auth });
-    expect(c).toMatchObject({ kind: "mcp", id: "mcp:alice", scopes: new Set(["runs:read"]), channel: "mcp:ops" });
+    expect(c).toMatchObject({ kind: "mcp", id: "mcp:alice", scopes: new Set(["runs:read"]) });
+    expect(c).not.toHaveProperty("channel");
     expect(c.actor).toEqual({ kind: "service", id: "mcp:alice", grants: { actions: new Set(["runs:read"]), channels: new Set(["mcp:ops"]), repos: new Set() } });
   });
 
-  it("an unpinned token's actor holds every channel; a wired `grantsFor` (ConfigStore) is consulted by the mcp: id", () => {
+  it("an unpinned token's actor holds NO channel (OQ4, option a — fail-closed); a wired `grantsFor` (ConfigStore) is consulted by the mcp: id", () => {
     const auth = scoped(["dispatch"]);
-    expect(toCaller(auth.tokens.tok, { auth }).actor).toEqual({ kind: "service", id: "mcp:alice", grants: { actions: new Set(["dispatch"]), channels: "all", repos: new Set() } });
+    expect(toCaller(auth.tokens.tok, { auth }).actor).toEqual({ kind: "service", id: "mcp:alice", grants: { actions: new Set(["dispatch"]), channels: new Set(), repos: new Set() } });
     const asked: string[] = [];
     const c = toCaller(auth.tokens.tok, { auth, grantsFor: (id) => (asked.push(id), ALL_GRANTS) });
     expect(asked).toEqual(["mcp:alice"]);
@@ -506,10 +513,14 @@ describe("handleMcpRequest — registry commands as tools", () => {
     expect((fin.body as RpcError & { error: { data?: { code: string } } }).error.data?.code).toBe("conflict");
   });
 
-  it("a token-pinned channel becomes the caller's mcp:-namespaced pin (other channels' runs are invisible)", async () => {
-    const { commands } = await commandFixture();
-    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, { auth: scoped(["runs:read"], "ops"), commands });
-    expect((toolJson(res) as { runs: unknown[] }).runs).toEqual([]);
+  it("a token's `channel` is its one channel grant (`mcp:<channel>`): it lists that channel's runs plus the public ones, never another machine channel's; a token with no `channel` lists the public runs only", async () => {
+    const { commands, live } = await commandFixture();
+    const list = async (auth: IngressConfig) => ((toolJson(await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, { auth, commands })) as { runs: { id: string }[] }).runs.map((r) => r.id));
+    expect(await list(scoped(["runs:read"], "ops"))).toEqual([live.id, "fin-1"]);
+    expect(await list(scoped(["runs:read"], "dev"))).toEqual([live.id, "fin-1", "fin-2"]);
+    expect(await list(scoped(["runs:read"]))).toEqual([live.id, "fin-1"]);
+    const get = await handleMcpRequest(rpc("tools/call", { name: "runs_get", arguments: { id: "fin-2" } }), deps, { auth: scoped(["runs:read"], "ops"), commands });
+    expect((get.body as RpcError & { error: { data?: { code: string } } }).error.data?.code).toBe("not_found");
   });
 
   it("a token without the dispatch scope (runs:read only) cannot call `dispatch`: -32001 data.code 'unauthorized', dispatch never called", async () => {

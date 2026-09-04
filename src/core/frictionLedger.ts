@@ -1,7 +1,8 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import type { Predicate } from "./authz/types.js";
 import { isFrictionRunRecord, type FrictionRunRecord } from "./frictionProposals.js";
-import { clone, RUN_LIST_MAX_LIMIT, type RunListItem } from "./runRecord.js";
+import { clone, RUN_LIST_MAX_LIMIT, toVisibilityFilter, type RunListItem, type RunVisibilityFilter } from "./runRecord.js";
 import type { RunStore } from "./runStore.js";
 
 export { isFrictionRunRecord };
@@ -23,12 +24,21 @@ export interface LedgerReadOptions {
   limit?: number;
   /** Keep only runs finished at or after this epoch ms. */
   sinceMs?: number;
-  /** Keep only runs of this platform-namespaced channel (a channel-pinned
-   *  caller, KTD10). A `FrictionRunRecord` carries no channel by design, so
-   *  only a ledger that reads the run store can answer this; a ledger of bare
-   *  records (in-memory, file, legacy FrictionDO rows) contributes NOTHING
-   *  under a pin — fail closed, never a run from another channel. */
-  channel?: string;
+  /** What the ACTOR may see: `predicateFor(actor, "runs:read", "run")`
+   *  (authorization.md item 6 — `friction report` computes over the runs its
+   *  caller can read, OQ2). A `FrictionRunRecord` carries no channel, user, or
+   *  visibility by design, so only a ledger that reads the run store can apply
+   *  a real predicate; a ledger of bare records (in-memory, file, legacy
+   *  FrictionDO rows) answers only a predicate that admits EVERYTHING (`all`)
+   *  and contributes NOTHING under any other — fail closed, never a run the
+   *  actor may not see. Absent = the caller already decided (a test, the
+   *  dispatcher's own bookkeeping): everything. */
+  visibleTo?: Predicate;
+}
+
+/** Whether a predicate lets bare records (no channel to check) through. */
+function admitsEverything(visibleTo: Predicate | undefined): boolean {
+  return visibleTo === undefined || visibleTo.kind === "all";
 }
 
 export interface FrictionLedger {
@@ -46,7 +56,7 @@ export interface LedgerOptions {
 export const DEFAULT_LEDGER_MAX = 500;
 
 function sortAndTrim(records: FrictionRunRecord[], max: number, opts: LedgerReadOptions): FrictionRunRecord[] {
-  if (opts.channel !== undefined) return []; // bare records carry no channel: nothing can match a pin
+  if (!admitsEverything(opts.visibleTo)) return []; // bare records carry no channel: nothing can be shown to match
   let out = [...records].sort((a, b) => a.finishedAt - b.finishedAt || a.runId.localeCompare(b.runId)).slice(-max);
   if (opts.sinceMs !== undefined) out = out.filter((r) => r.finishedAt >= opts.sinceMs!);
   if (opts.limit !== undefined) out = out.slice(-Math.max(0, opts.limit));
@@ -177,13 +187,17 @@ export class RunStoreFrictionLedger implements FrictionLedger {
 
   async recent(opts: LedgerReadOptions = {}): Promise<FrictionRunRecord[]> {
     const max = Math.max(0, opts.limit ?? DEFAULT_LEDGER_MAX);
-    // Under a channel pin the legacy rows are skipped outright (they carry no
-    // channel — see LedgerReadOptions.channel) and only run-store rows of that
-    // channel are read; the final trim then sees rows that already match.
-    const { channel, ...trim } = opts;
+    // Under a predicate that does not admit everything the legacy rows are
+    // skipped outright (they carry nothing a predicate could check — see
+    // LedgerReadOptions.visibleTo) and the run store applies the predicate
+    // itself; the final trim then sees rows that already match. `none` reads
+    // nothing at all.
+    const { visibleTo, ...trim } = opts;
+    if (visibleTo?.kind === "none") return [];
+    const filter = visibleTo !== undefined && visibleTo.kind !== "all" ? toVisibilityFilter(visibleTo) : undefined;
     const [legacyRes, storeRes] = await Promise.allSettled([
-      this.legacy && channel === undefined ? this.legacy.recent(opts) : [],
-      this.newest(max, opts.sinceMs, channel),
+      this.legacy && admitsEverything(visibleTo) ? this.legacy.recent(opts) : [],
+      this.newest(max, opts.sinceMs, filter),
     ]);
     if (storeRes.status === "rejected" && legacyRes.status === "rejected") throw storeRes.reason;
     const describe = (reason: unknown) => (reason instanceof Error ? reason.message : String(reason));
@@ -198,11 +212,11 @@ export class RunStoreFrictionLedger implements FrictionLedger {
   /** The newest `max` runs, newest first, paging by the `{ before, beforeId }`
    *  cursor (the last row's `finishedAt` + `id`, so same-millisecond siblings
    *  are not skipped) since one `list` call returns at most RUN_LIST_MAX_LIMIT rows. */
-  private async newest(max: number, sinceMs: number | undefined, channel: string | undefined): Promise<RunListItem[]> {
+  private async newest(max: number, sinceMs: number | undefined, visibleTo: RunVisibilityFilter | undefined): Promise<RunListItem[]> {
     const out: RunListItem[] = [];
     let cursor: { before: number; beforeId: string } | undefined;
     while (out.length < max) {
-      const page = await this.store.list({ limit: max - out.length, ...cursor, sinceMs, channel });
+      const page = await this.store.list({ limit: max - out.length, ...cursor, sinceMs, ...(visibleTo !== undefined ? { visibleTo } : {}) });
       out.push(...page);
       if (page.length < Math.min(RUN_LIST_MAX_LIMIT, max - out.length + page.length)) break;
       const last = page[page.length - 1];

@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { BootstrapResult } from "../agentEnv/bootstrap.js";
 import { AGENTS } from "../agents/registry.js";
 import { CLI_CALLER, parseCliArgv, runCli, runCommand } from "../cli.js";
+import { ALL_GRANTS } from "./authz/grants.js";
 import { ConfigStore } from "../config.js";
 import { createCommandHttpHandler } from "../channels/commandHttp.js";
 import { handleMcpRequest } from "../channels/mcp.js";
@@ -35,7 +36,7 @@ import {
   type InvokeResult,
 } from "./commandRegistry.js";
 import { cliFlag, jsonSchemaFor, namedToInput, tokenize, toSurfaceNames } from "./commandSurface.js";
-import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
+import { coreCommandGroups, registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
 import type { CoreDeps } from "./dispatcher.js";
 import { RunStoreFrictionLedger } from "./frictionLedger.js";
 import { InMemoryMemoryStore } from "./memory/stores.js";
@@ -159,6 +160,8 @@ defaults:
 permissions:
   admins: ["${POWER}"]
   repoManagement: ["${POWER}"]
+  # The HTTP "power" identity: every group's read + write over every channel (the legacy operator translation).
+  operators: ["access:power"]
 `;
 
 const CONFIG_DIR = (() => {
@@ -170,7 +173,8 @@ let configN = 0;
 /** A fresh config store per fixture: overrides are on-disk state a write changes. */
 function freshConfig(): { store: ConfigStore; overridesPath: string } {
   const overridesPath = join(CONFIG_DIR, `overrides-${++configN}.json`);
-  return { store: new ConfigStore(join(CONFIG_DIR, "config.yaml"), overridesPath, () => {}), overridesPath };
+  // `commandGroups` as production wires it (index.ts): the operators translation grants every registered group.
+  return { store: new ConfigStore(join(CONFIG_DIR, "config.yaml"), overridesPath, () => {}, { commandGroups: coreCommandGroups() }), overridesPath };
 }
 
 // ---- the generic fixture ----------------------------------------------------------------------------
@@ -199,6 +203,7 @@ function record(id: string, finishedAt: number): RunRecord {
     channelId: "slack:C1",
     userId: "slack:U1",
     threadKey: `slack:C1:${id}`,
+    channelVisibility: "public", // public: every fixture caller may read it — conformance is about surfaces, not visibility
     startedAt: finishedAt - 10_000,
     finishedAt,
     status: "completed",
@@ -370,7 +375,7 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
 async function fixture(extra: (registry: CommandRegistry<CoreCommandDeps>) => void = () => {}): Promise<Fixture> {
   let n = 0;
   const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
-  const live = reg.create("coding · acme/live", { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t" });
+  const live = reg.create("coding · acme/live", { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t", channelVisibility: "public" });
   expect(live.id).toBe(FIXTURE.liveRun);
   reg.publish(live.id, { type: "input", text: `live request ${PLANTED_TEXT}` });
   reg.publish(live.id, { type: "tool_call", tool: "bash", summary: "$ pwd" });
@@ -564,7 +569,8 @@ function runOn(surface: Surface, f: Fixture, cmd: CommandDef<unknown>, named: Na
   return surface.run(f, cmd, forCaller(named, surface.caller(who).id), who);
 }
 
-const powerCaller: Caller = { kind: "cli", id: "cli:reference", scopes: "all" };
+/** The reference caller: the local CLI's every-grant actor, so the reference JSON is the unrestricted view. */
+const powerCaller: Caller = { kind: "cli", id: "cli:reference", scopes: "all", actor: { kind: "user", id: "cli:reference", grants: ALL_GRANTS } };
 
 /** `invoke` with the by-name input split by the definition, as this caller. */
 async function reference(f: Fixture, cmd: CommandDef<unknown>, named: Named, caller: Caller): Promise<InvokeResult> {

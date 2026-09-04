@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { analyzeRunFriction } from "./runFriction.js";
-import { DEFAULT_RETENTION_POLICY, type RunRecord } from "./runRecord.js";
+import { DEFAULT_RETENTION_POLICY, type RunListOptions, type RunRecord } from "./runRecord.js";
 import type { RunEvent } from "./runEvents.js";
 import { buildRunStore, FileRunStore, InMemoryRunStore, type RunStore } from "./runStore.js";
 import { WorkerRunStore } from "./runStoreWorker.js";
@@ -28,6 +28,7 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
     channelId: "slack:C1",
     userId: "slack:U1",
     threadKey: "slack:C1:1",
+    channelVisibility: "unknown",
     startedAt: finishedAt - 5000,
     finishedAt,
     status: "completed",
@@ -132,6 +133,22 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       expect((await store.list({ agent: "coding", limit: 5 })).every((r) => r.agent === "coding")).toBe(true);
       expect((await store.list({ channel: "slack:C2", limit: 5 })).every((r) => r.channelId === "slack:C2")).toBe(true);
       expect(await store.list({ sinceMs: NOW - 2500 })).toHaveLength(3);
+    });
+
+    it("list applies `visibleTo` — the actor's predicate — as its own filter, ANDed with the others; a row without the stamp is `unknown` and never public", async () => {
+      const { store } = make();
+      await store.put(record("pub", NOW - 1000, { channelId: "slack:C_PUB", userId: "slack:U1", channelVisibility: "public" }));
+      await store.put(record("priv", NOW - 2000, { channelId: "slack:G1", userId: "slack:U2", channelVisibility: "private" }));
+      await store.put(record("ops", NOW - 3000, { channelId: "http:ops", userId: "http:ci", channelVisibility: "machine" }));
+      await store.put(record("old-style", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:U3", channelVisibility: "unknown" }));
+      const ids = async (visibleTo: RunListOptions["visibleTo"], more: Partial<RunListOptions> = {}) => (await store.list({ visibleTo, ...more })).map((r) => r.id);
+      expect(await ids({ kind: "all" })).toEqual(["pub", "priv", "ops", "old-style"]);
+      expect(await ids({ kind: "none" })).toEqual([]);
+      expect(await ids({ kind: "visibility-in", visibilities: ["public"] })).toEqual(["pub"]);
+      expect(await ids({ kind: "or", of: [{ kind: "channels-in", channelIds: ["http:ops"] }, { kind: "visibility-in", visibilities: ["public"] }] })).toEqual(["pub", "ops"]);
+      expect(await ids({ kind: "or", of: [{ kind: "visibility-in", visibilities: ["public"] }, { kind: "user-is", userId: "slack:U2" }] })).toEqual(["pub", "priv"]);
+      expect(await ids({ kind: "channels-in", channelIds: ["slack:C_PUB"] }, { channel: "http:ops" })).toEqual([]);
+      expect(await ids({ kind: "channels-in", channelIds: ["slack:C_PUB"] })).toEqual(["pub", "old-style"]);
     });
 
     it("events(id, {afterSeq: 10, limit: 5}) returns five events with seq > 10 and a cursor; unknown id → null; a run with no events → an empty page", async () => {

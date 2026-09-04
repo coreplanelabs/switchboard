@@ -137,7 +137,7 @@ describe("authorize: table shape", () => {
     expect(authorize(A.nonMember, "runs:read", run({ channel: "priv", userId: A.nonMember.id }))).toEqual({ allow: true });
   });
   it("conditions AND: a held grant without membership denies", () => {
-    expect(authorize(A.member, "runs:write", run({ channel: "pub2" }))).toEqual({ allow: false, reason: "not-member" });
+    expect(authorize(A.member, "runs:write", run({ channel: "dm" }))).toEqual({ allow: false, reason: "not-member" });
     expect(authorize(A.reader, "runs:write", run({ channel: "pub1" }))).toEqual({ allow: false, reason: "missing-grant" });
   });
   it("an allow carries no reason", () => {
@@ -197,6 +197,21 @@ describe("authorize: fail-closed (R7)", () => {
   });
   it("unknown membership is not membership: an unlisted channel denies", () => {
     expect(authorize(A.member, "runs:read", run({ channel: "dm", userId: "slack:U5" }))).toEqual({ allow: false, reason: "not-member" });
+  });
+  it("member-of's public half (item 4, U3): a run stamped `public` is readable by every actor without a channel grant; `unknown`, `private`, `dm` and `machine` are not", () => {
+    // Every fixture actor NOT granted pub2 (the non-member is — pub2 is its one channel); the run belongs to someone else (U2).
+    for (const a of [A.reader, A.noGrants, A.token, A.manager]) {
+      expect(authorize(a, "runs:read", run({ channel: "pub2", userId: "slack:U2" })), a.id).toEqual({ allow: true });
+      expect(authorize(a, "runs:read", { ...run({ channel: "pub2", userId: "slack:U2" }), channelVisibility: "unknown" }), a.id).toEqual({ allow: false, reason: "not-member" });
+      expect(authorize(a, "runs:read", { ...run({ channel: "pub2", userId: "slack:U2" }), channelVisibility: undefined }), a.id).toEqual({ allow: false, reason: "not-member" });
+    }
+    expect(authorize(A.noGrants, "runs:read", run({ channel: "priv", userId: "slack:U1" })).allow).toBe(false);
+    expect(authorize(A.noGrants, "runs:read", run({ channel: "dm", userId: "slack:U1" })).allow).toBe(false);
+    expect(authorize(A.noGrants, "runs:read", run({ channel: "http", userId: "http:x" })).allow).toBe(false);
+    // The public half is a RUN's stamp: a public origin never makes a memory scope's channel public.
+    expect(authorize(A.noGrants, "memory:write", { ...scope("channel", `channel:${CHANNELS.priv.id}`, "public") }).allow).toBe(false);
+    // …and it needs the write grant too: public makes the member, not the writer.
+    expect(authorize(A.reader, "runs:write", run({ channel: "pub2", userId: "slack:U2" }))).toEqual({ allow: false, reason: "missing-grant" });
   });
   it("a malformed scope key never widens: the relation attribute is missing → deny", () => {
     expect(authorize(A.admin, "memory:read", scope("user", "slack:U1")).allow).toBe(false);

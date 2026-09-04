@@ -3,11 +3,13 @@
 //
 // Per row: every condition becomes a predicate — a grant the actor lacks is
 // `none`, a grant it holds is no constraint (`all`), `member-of` is
-// `channels-in` (or `all` for an all-channels actor), `is-self` is `user-is`,
-// `owner-of` is `repos-in`. A row ANDs its conditions (a `none` sinks the row;
-// `all`s drop out; one relation left is the row's predicate, several are an
-// `and`). Rows OR. A row with an `originVisibility` selector cannot be seen by
-// a store predicate and compiles to `none`.
+// `or(channels-in, visibility-in(["public"]))` — the same two-sided definition
+// `authorize` evaluates (an all-channels actor: `all`; no channel grants: the
+// public half alone) — `is-self` is `user-is`, `owner-of` is `repos-in`. A row
+// ANDs its conditions (a `none` sinks the row; `all`s drop out; one relation
+// left is the row's predicate, several are an `and`). Rows OR, flattened: an
+// `or` inside an `or` is one disjunction. A row with an `originVisibility`
+// selector cannot be seen by a store predicate and compiles to `none`.
 //
 // `matchesPredicate` is the reference evaluator over one record — what an
 // in-memory store runs, and what the differential test checks against
@@ -16,10 +18,26 @@
 import { effectiveGrants, hasAction, holds, isKnownActorKind, principalOf } from "./authorize.js";
 import { POLICY, resolveGrant, ruleTarget } from "./policy.js";
 import { RESOURCE_KINDS, targetOf, type ResourceAttributes } from "./resource.js";
-import type { Action, Actor, Condition, Grants, Predicate, ResourceKind, ResourceType, Rule } from "./types.js";
+import type { Action, Actor, ChannelVisibility, Condition, Grants, Predicate, ResourceKind, ResourceType, Rule } from "./types.js";
 
 const NONE: Predicate = Object.freeze({ kind: "none" });
 const ALL: Predicate = Object.freeze({ kind: "all" });
+/** `member-of`'s public half: every actor is a member of a public channel. */
+const PUBLIC: Predicate = Object.freeze({ kind: "visibility-in", visibilities: new Set<ChannelVisibility>(["public"]) });
+
+/** OR alternatives with nested `or`s flattened; `none`s dropped, one `all` wins. */
+function anyOf(alternatives: readonly Predicate[]): Predicate {
+  const flat: Predicate[] = [];
+  for (const p of alternatives) {
+    if (p.kind === "all") return ALL;
+    if (p.kind === "none") continue;
+    if (p.kind === "or") flat.push(...p.of);
+    else flat.push(p);
+  }
+  if (flat.length === 0) return NONE;
+  if (flat.length === 1) return flat[0]!;
+  return { kind: "or", of: flat };
+}
 
 function compileCondition(condition: Condition, grants: Grants, selfId: string): Predicate {
   switch (condition.kind) {
@@ -31,7 +49,7 @@ function compileCondition(condition: Condition, grants: Grants, selfId: string):
     }
     case "member-of":
       if (grants.channels === "all") return ALL;
-      return grants.channels.size === 0 ? NONE : { kind: "channels-in", channelIds: grants.channels };
+      return anyOf([grants.channels.size === 0 ? NONE : { kind: "channels-in", channelIds: grants.channels }, PUBLIC]);
     case "is-self":
       return { kind: "user-is", userId: selfId };
     case "owner-of":
@@ -70,13 +88,9 @@ export function predicateWith(rules: readonly Rule[], actor: Actor, action: Acti
   for (const rule of rules) {
     if (rule.action !== action || ruleTarget(rule) !== target) continue;
     if (rule.actorKinds && !rule.actorKinds.includes(actor.kind)) continue;
-    const compiled = compileRule(rule, grants, selfId);
-    if (compiled.kind === "all") return ALL;
-    if (compiled.kind !== "none") alternatives.push(compiled);
+    alternatives.push(compileRule(rule, grants, selfId));
   }
-  if (alternatives.length === 0) return NONE;
-  if (alternatives.length === 1) return alternatives[0]!;
-  return { kind: "or", of: alternatives };
+  return anyOf(alternatives);
 }
 
 /** What a list-shaped read of `resourceType` may return to this actor.
@@ -85,8 +99,13 @@ export function predicateFor(actor: Actor, action: Action, resourceType: Resourc
   return predicateWith(POLICY, actor, action, resourceType, kind);
 }
 
+/** What `matchesPredicate` reads off one record: a `RunListItem`, a `RunView`,
+ *  or `attributesOf(resource)` all qualify. A missing `channelVisibility` is
+ *  `unknown` — never public. */
+export type PredicateRecord = Pick<ResourceAttributes, "channelId" | "userId" | "repo" | "channelVisibility">;
+
 /** The reference evaluation of a predicate over one record's attributes. */
-export function matchesPredicate(predicate: Predicate, record: Pick<ResourceAttributes, "channelId" | "userId" | "repo">): boolean {
+export function matchesPredicate(predicate: Predicate, record: PredicateRecord): boolean {
   switch (predicate.kind) {
     case "none":
       return false;
@@ -98,6 +117,8 @@ export function matchesPredicate(predicate: Predicate, record: Pick<ResourceAttr
       return record.userId !== undefined && record.userId === predicate.userId;
     case "repos-in":
       return record.repo !== undefined && holds(predicate.repos, record.repo);
+    case "visibility-in":
+      return predicate.visibilities.has(record.channelVisibility ?? "unknown");
     case "or":
       return predicate.of.some((p) => matchesPredicate(p, record));
     case "and":

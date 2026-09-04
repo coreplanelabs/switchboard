@@ -49,6 +49,8 @@ import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memo
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource } from "../mcp/source.js";
 import { formatTurnDuration, redactSecrets, type RunEvent } from "./runEvents.js";
+import { STATIC_CHANNEL_DIRECTORY } from "./authz/channelDirectory.js";
+import type { ChannelDirectory, ChannelVisibility } from "./authz/types.js";
 import { fitRecordToBudget, MAX_EVENT_BYTES, utf8ByteLength, type RunRecord, type RunStatus } from "./runRecord.js";
 import { markdownOutput } from "./llmOutput/index.js";
 import type { RunHistoryWriter } from "./runHistoryWriter.js";
@@ -215,6 +217,15 @@ export interface CoreDeps {
    * `createRunHistoryWriter` over the selected store (src/index.ts, src/cli.ts).
    */
   runHistoryWriter?: RunHistoryWriter;
+  /**
+   * Channel facts for the run record (authorization KTD4/KTD7): every run is
+   * stamped with its channel's visibility at create, asked of this directory
+   * once per run. Default: the static id-based directory (`http:`/`mcp:` →
+   * machine, `slack:D…` → dm, `slack:G…` → private, anything else → unknown);
+   * the Slack adapter may supply one that asks `conversations.info`. A
+   * directory failure stamps `unknown`, never a guess (R7).
+   */
+  channelDirectory?: ChannelDirectory;
   /**
    * Where `friction propose` files its proposals. Default: the GitHub REST
    * tracker with the App installation token (App `issues:write`; never a `gh`
@@ -739,12 +750,14 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     });
     // The registry redacts and caps the label; `run.label` is the one the record
     // and the friction row carry (never `runLabel`, which may hold a pasted secret).
+    const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
     const run = registry.create(runLabel, {
       agent: agent.name,
       model: resolved.modelRef,
       channelId: msg.channelId,
       userId: msg.userId,
       threadKey: msg.threadKey,
+      channelVisibility,
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
@@ -829,6 +842,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
             agent: agent.name,
             model: resolved.modelRef,
             msg,
+            channelVisibility,
             repo: repoCtx.repo,
             finishedAt: startSnap.startedAt,
             status: "interrupted",
@@ -1147,6 +1161,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
             agent: agent.name,
             model: resolved.modelRef,
             msg,
+            channelVisibility,
             repo: repoCtx.repo,
             finishedAt,
             status: failedAfterFinish && status === "completed" ? "failed" : status,
@@ -1320,6 +1335,7 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
   // The one run record (KTD2): registered and stamped exactly like the main
   // path — input, run_meta, bounded context, the #375 tombstone.
   const registry = deps.runRegistry ?? defaultRunRegistry;
+  const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
   const run = registry.create(
     composeRunLabel({
       agent: agent.name,
@@ -1336,6 +1352,7 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
       channelId: msg.channelId,
       userId: msg.userId,
       threadKey: msg.threadKey,
+      channelVisibility,
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
@@ -1378,6 +1395,7 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
           agent: agent.name,
           model: ctx.modelRef,
           msg,
+          channelVisibility,
           repo: repoCtx.repo,
           finishedAt: startSnap.startedAt,
           status: "interrupted",
@@ -1557,6 +1575,7 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
             agent: agent.name,
             model: ctx.modelRef,
             msg,
+            channelVisibility,
             repo: repoCtx.repo,
             finishedAt,
             status: failedAfterReply && status === "completed" ? "failed" : status,
@@ -1677,9 +1696,10 @@ function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined
  */
 async function runInlineCommandRun<T extends { text: string; ok: boolean }>(deps: CoreDeps, msg: IncomingMessage, command: string, io: ChannelIO, execute: () => Promise<T>): Promise<T> {
   const registry = deps.runRegistry ?? defaultRunRegistry;
+  const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
   const run = registry.create(
     composeRunLabel({ agent: command, channelId: msg.channelId, userId: msg.userId, channelName: msg.channelName, userName: msg.userName, text: msg.text }),
-    { agent: COMMAND_RUN_AGENT, channelId: msg.channelId, userId: msg.userId, threadKey: msg.threadKey },
+    { agent: COMMAND_RUN_AGENT, channelId: msg.channelId, userId: msg.userId, threadKey: msg.threadKey, channelVisibility },
   );
   registry.publish(run.id, { type: "input", text: redactSecrets(msg.text), at: Date.now() });
   let result: T | undefined;
@@ -1703,8 +1723,20 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean }>(deps
       const snap = registry.snapshot(run.id, run.token);
       const finishedAt = snap?.finishedAt ?? Date.now();
       const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
-      deps.runHistoryWriter.write(assembleRunRecord({ run, snap, agent: COMMAND_RUN_AGENT, msg, finishedAt, status, diagnosis }));
+      deps.runHistoryWriter.write(assembleRunRecord({ run, snap, agent: COMMAND_RUN_AGENT, msg, channelVisibility, finishedAt, status, diagnosis }));
     }
+  }
+}
+
+/** The visibility stamp for a run in `channelId` (authorization KTD7): what the
+ *  channel directory says, asked once per run; a directory that throws or
+ *  rejects yields `unknown` — never public, never a member (R7). */
+async function channelVisibilityOf(deps: CoreDeps, channelId: string): Promise<ChannelVisibility> {
+  try {
+    return (await (deps.channelDirectory ?? STATIC_CHANNEL_DIRECTORY).info(channelId)).visibility;
+  } catch (err) {
+    console.warn(`[authz] channel directory failed for ${channelId} — stamping unknown: ${err instanceof Error ? err.message : String(err)}`);
+    return "unknown";
   }
 }
 
@@ -1737,6 +1769,7 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
       sourceUrl: summary.sourceUrl,
       userName: summary.userName,
     },
+    channelVisibility: summary.channelVisibility ?? "unknown",
     repo: summary.repo,
     finishedAt,
     status: "interrupted",
@@ -1791,6 +1824,8 @@ function assembleRunRecord(input: {
   agent?: string;
   model?: string;
   msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey" | "sourceUrl" | "userName">;
+  /** The stamp taken at create (authorization KTD7) — the record carries what the run was stamped with. */
+  channelVisibility: ChannelVisibility;
   repo?: string;
   finishedAt: number;
   status: RunStatus;
@@ -1806,6 +1841,7 @@ function assembleRunRecord(input: {
     channelId: msg.channelId,
     userId: msg.userId,
     threadKey: msg.threadKey,
+    channelVisibility: input.channelVisibility,
     ...(input.repo !== undefined ? { repo: input.repo } : {}),
     startedAt: snap?.startedAt ?? input.finishedAt,
     finishedAt: input.finishedAt,
