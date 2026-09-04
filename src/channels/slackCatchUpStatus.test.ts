@@ -53,6 +53,7 @@ describe("missingBotScopes (pure comparison against the adapter's required set)"
       "channels:history",
       "groups:history",
       "files:read",
+      "files:write",
       "reactions:write",
       "channels:read",
       "groups:read",

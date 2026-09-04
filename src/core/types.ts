@@ -114,6 +114,14 @@ export interface RunReceipt {
 export interface ChannelIO {
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
   reply(text: string): Promise<void>;
+  /**
+   * Post `lead` as the message and `text` as an attached file beside it — for
+   * output too long to read as chat (a 100-tool `mcp show`): the channel's
+   * collapsible container rather than a run of chunked messages. Optional;
+   * a channel without attachments (or one whose upload fails) falls back to
+   * `reply(lead + text)` itself, so callers never branch on the outcome.
+   */
+  attach?(file: { name: string; text: string; lead: string }): Promise<void>;
   /** Create a progress indicator. Adapters may return a no-op handle. */
   status(initial: StatusUpdate): Promise<StatusHandle>;
   /**

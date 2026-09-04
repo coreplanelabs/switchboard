@@ -75,6 +75,13 @@ describe("OAuth transitions (features/mcp-tools.md item 18)", () => {
     expect(isMcpTicket({ ...t, oauth: { keyId: "k1" } })).toBe(false);
     expect(isMcpTicket({ ...t, oauth: "sealed" })).toBe(false);
     expect(isMcpTicket({ ...t, state: "dancing" })).toBe(false);
+    // The completion's outcome (item 19): a count, a warning, or neither — never a negative count or a novel.
+    expect(isMcpTicket({ ...t, state: "completed", outcome: { toolCount: 100 } })).toBe(true);
+    expect(isMcpTicket({ ...t, state: "completed", outcome: { warning: "stored, but the server could not be reached" } })).toBe(true);
+    expect(isMcpTicket({ ...t, state: "completed", outcome: {} })).toBe(true);
+    expect(isMcpTicket({ ...t, outcome: { toolCount: -1 } })).toBe(false);
+    expect(isMcpTicket({ ...t, outcome: { warning: "w".repeat(2_000) } })).toBe(false);
+    expect(isMcpTicket({ ...t, outcome: "100 tools" })).toBe(false);
   });
 
   it("start: planOpen's identity rules (binding an unbound ticket to the starter), then `authorizing` with the sealed record attached", () => {

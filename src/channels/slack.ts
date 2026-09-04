@@ -716,6 +716,27 @@ export class SlackIO implements ChannelIO {
     await this.post(mdToMrkdwn(text));
   }
 
+  /** Long command output as a snippet in the thread: Slack renders an uploaded
+   *  text file as a collapsed preview with an expand control — one message
+   *  instead of a run of 3500-char chunks. Needs the `files:write` scope; a
+   *  failed upload (scope missing, API error) falls back to the chunked reply
+   *  so the output always arrives. */
+  async attach(file: { name: string; text: string; lead: string }): Promise<void> {
+    try {
+      await this.client.files.uploadV2({
+        channel_id: this.ev.channel,
+        thread_ts: this.ev.threadTs,
+        filename: file.name,
+        title: file.name,
+        content: file.text,
+        initial_comment: mdToMrkdwn(file.lead),
+      });
+    } catch (err) {
+      console.warn(`[slack] attach failed (${err instanceof Error ? err.message : String(err)}) — replying as text`);
+      await this.post(mdToMrkdwn(`${file.lead}\n${file.text}`));
+    }
+  }
+
   private async post(mrkdwn: string): Promise<void> {
     for (const chunk of chunkText(mrkdwn, SLACK_MSG_LIMIT)) {
       await this.client.chat.postMessage({

@@ -125,6 +125,8 @@ export interface CompleteOAuthResult {
 }
 
 const TICKET_MINUTES = Math.round(MCP_TICKET_TTL_MS / 60_000);
+/** How often `awaitTicket` re-reads the ticket while the link is out. */
+export const MCP_TICKET_POLL_MS = 3_000;
 
 export class McpService {
   private readonly now: () => number;
@@ -281,7 +283,7 @@ export class McpService {
     const probe = await this.probe({ id: decision.ticket.serverId, name: found.name, url: found.entry.url, agents: found.entry.agents ?? [...MCP_SELF_SERVE_AGENTS], auth: { type: "bearer", token: decision.token } });
     const server = await this.view(found);
     if (probe.kind === "rejected") return { decision, verified: false, server, warning: probe.error };
-    const claimed = await this.viaSecrets(() => this.opts.secrets.transitionTicket(decision.ticket, (ticket as McpTicket).state));
+    const claimed = await this.viaSecrets(() => this.opts.secrets.transitionTicket({ ...decision.ticket, outcome: outcomeOf(probe) }, (ticket as McpTicket).state));
     if (!claimed) return { decision: { ok: false, refusal: { kind: "used" } } };
     const sealed = await sealCredential(key, decision.ticket.serverId, decision.token, this.now());
     await this.viaSecrets(() => this.opts.secrets.putCredential(sealed));
@@ -381,7 +383,7 @@ export class McpService {
     }
     const probe = await this.probe({ id: decision.ticket.serverId, name: found.name, url: found.entry.url, agents: found.entry.agents ?? [...MCP_SELF_SERVE_AGENTS], auth: { type: "bearer", token: cred.accessToken } });
     if (probe.kind === "rejected") return { ok: false, refusal: { kind: "oauth_failed", reason: probe.error }, server };
-    const claimed = await this.viaSecrets(() => this.opts.secrets.transitionTicket(decision.ticket, (ticket as McpTicket).state));
+    const claimed = await this.viaSecrets(() => this.opts.secrets.transitionTicket({ ...decision.ticket, outcome: outcomeOf(probe) }, (ticket as McpTicket).state));
     if (!claimed) return { ok: false, refusal: { kind: "used" }, server };
     await this.storeOAuth(decision.ticket.serverId, cred);
     return { ok: true, server: { ...server, state: "connected" }, ...(probe.kind === "ok" ? { toolCount: probe.toolCount } : { warning: probe.error }) };
@@ -392,6 +394,29 @@ export class McpService {
     const sealed = await sealCredential(key, serverId, JSON.stringify(cred), this.now());
     await this.viaSecrets(() => this.opts.secrets.putCredential(sealed));
     this.source.forget(serverId);
+  }
+
+  /** The thread's follow-up (item 19): wait — bounded by the ticket's own TTL,
+   *  polling the store — for the connect link to be used, and say what
+   *  happened. `completed` → the outcome the completion recorded; the link
+   *  expiring unused → `expired`, unless the server got a credential another
+   *  way (a re-minted link) → `superseded`, which the caller keeps quiet
+   *  about. Never re-probes the server. */
+  async awaitTicket(nonce: string, opts: { sleep?: (ms: number) => Promise<void>; pollMs?: number } = {}): Promise<{ kind: "completed"; outcome: NonNullable<McpTicket["outcome"]> } | { kind: "expired" } | { kind: "cancelled" } | { kind: "superseded" } | { kind: "gone" }> {
+    const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    const pollMs = opts.pollMs ?? MCP_TICKET_POLL_MS;
+    for (;;) {
+      const ticket = await this.viaSecrets(() => this.opts.secrets.getTicket(nonce));
+      if (!ticket) return { kind: "gone" };
+      if (ticket.state === "completed") return { kind: "completed", outcome: ticket.outcome ?? {} };
+      if (ticket.state === "cancelled") return { kind: "cancelled" };
+      if (this.now() > ticket.expiresAt) {
+        const found = this.findByCredentialKey(ticket.serverId);
+        const has = found ? (await this.view(found)).state === "connected" : false;
+        return has ? { kind: "superseded" } : { kind: "expired" };
+      }
+      await sleep(pollMs);
+    }
   }
 
   private callbackUrl(): string {
@@ -577,6 +602,12 @@ export class McpService {
       throw new McpServiceError("unavailable", err instanceof Error ? err.message : String(err));
     }
   }
+}
+
+/** What a completion records on the ticket (item 19): the count when the
+ *  server answered, the verify warning when it could not be reached. */
+function outcomeOf(probe: { kind: "ok"; toolCount: number } | { kind: "error"; error: string } | { kind: "rejected"; error: string }): NonNullable<McpTicket["outcome"]> {
+  return probe.kind === "ok" ? { toolCount: probe.toolCount } : { warning: probe.error };
 }
 
 /** Same length and same bytes, without an early exit on the first difference. */

@@ -340,7 +340,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       const chatCmd = parseChatCommand(msg.text, deps.commands);
       if (chatCmd) {
         const res = await runChatCommand(deps, msg, io, chatCmd);
-        await io.reply(res.text);
+        await replyCommandOutput(io, chatCmd, res.text);
         if (res.followUp) postSettledOutcome(res.followUp, io);
         return;
       }
@@ -1641,6 +1641,20 @@ async function runChatCommand(deps: CoreDeps, msg: IncomingMessage, io: ChannelI
  * state itself is never in doubt (`repo list` / the residents dash read it
  * live), and the acknowledgement says so.
  */
+/** A command reply longer than one chat message can hold (a 100-tool `mcp
+ *  show`) goes out as an attachment where the channel has one: the first line
+ *  as the message, the whole text as a file named after the command. Channels
+ *  without `attach` — and an attach that fails — reply the text as before. */
+export const LONG_COMMAND_REPLY_CHARS = 3_000;
+
+export async function replyCommandOutput(io: ChannelIO, parsed: ParsedChatCommand, text: string): Promise<void> {
+  if (!io.attach || text.length <= LONG_COMMAND_REPLY_CHARS) return io.reply(text);
+  const nl = text.indexOf("\n");
+  const lead = nl === -1 ? text : text.slice(0, nl);
+  const name = parsed.kind === "invoke" ? cliWords(parsed.id).join("-") : "command";
+  await io.attach({ name: `${name}.txt`, text, lead: `${lead}\n_(full output attached — ${text.length.toLocaleString("en-US")} chars)_` });
+}
+
 function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined>, io: ChannelIO): void {
   void followUp()
     .then((outcome) => (outcome ? io.reply(outcome.text) : undefined))
