@@ -25,7 +25,7 @@ Nothing else goes on a criterion: no dates, no receipt links, no "observed live"
 
 | Feature | What it covers |
 |---|---|
-| [routing-and-config.md](routing-and-config.md) | Directives, config layers, thread stickiness, permission gates, config commands, config awareness, custom instructions |
+| [routing-and-config.md](routing-and-config.md) | Directives, config layers, thread stickiness, permission gates, config commands, config awareness, custom instructions, durable runtime overrides (the `OverridesBacking` seam → the state Worker's `ConfigDO` in prod) |
 | [slack-channel.md](slack-channel.md) | Triggers (mention/DM/follow-up), ack reaction, status cards, formatting, attachments |
 | [llm-output.md](llm-output.md) | Typed LLM output contract: per-datatype request/response modules (`OutputType` seam), markdown canonicalization at the answer boundary, raw+canonical in the run record, deterministic retry loop |
 | [run-visibility.md](run-visibility.md) | Typed run-event stream (tool calls + redacted result summaries); live in-channel status card |

@@ -77,8 +77,15 @@ export interface Env {
   SCHEDULES: DurableObjectNamespace<ScheduleDO>;
   /** Run history (#157): one RunHistoryDO per store key (`runs:default`). */
   RUNS: DurableObjectNamespace<RunHistoryDO>;
+  /** Runtime config documents (routing-and-config item 12): ONE ConfigDO (named "config"). */
+  CONFIG: DurableObjectNamespace<ConfigDO>;
   MEMORY_TOKEN?: string;
 }
+
+/** The single ConfigDO's name. */
+const CONFIG_OBJECT = "config";
+/** A config document key: short, lowercase, like `overrides`. */
+const CONFIG_KEY_RE = /^[a-z][a-z0-9-]{0,63}$/;
 
 /** The single ScheduleDO's name — every schedule's firings live in one object. */
 const SCHEDULES_OBJECT = "schedules";
@@ -560,6 +567,80 @@ export class ScheduleDO extends DurableObject<Env> {
     }
     return out;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Durable Object: runtime config documents (features/routing-and-config.md item
+// 10). ONE object, a table of small JSON documents by key — today the bot's
+// `overrides` document (chat-set channel/user settings) — each with a version
+// for optimistic concurrency: a `put` whose `expectedVersion` is stale is a 409,
+// never a silent clobber (the bot and the CLI both write this document).
+
+export class ConfigDO extends DurableObject<Env> {
+  private readonly sql: SqlStorage;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS documents (
+        key TEXT PRIMARY KEY,
+        version INTEGER NOT NULL,
+        body TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  async get(key: string): Promise<{ document: unknown; version: number }> {
+    const row = this.sql.exec<{ version: number; body: string }>(`SELECT version, body FROM documents WHERE key = ?`, key).toArray()[0];
+    if (!row) return { document: null, version: 0 };
+    try {
+      return { document: JSON.parse(row.body) as unknown, version: row.version };
+    } catch {
+      return { document: null, version: row.version };
+    }
+  }
+
+  /** Replace the document iff its stored version equals `expectedVersion`
+   *  (0 = not yet stored). Returns the new version, or the current one on conflict. */
+  async put(key: string, document: unknown, expectedVersion: number, now: number): Promise<{ ok: true; version: number } | { ok: false; version: number }> {
+    let outcome: { ok: true; version: number } | { ok: false; version: number } = { ok: false, version: 0 };
+    this.ctx.storage.transactionSync(() => {
+      const row = this.sql.exec<{ version: number }>(`SELECT version FROM documents WHERE key = ?`, key).toArray()[0];
+      const current = row?.version ?? 0;
+      if (current !== expectedVersion) {
+        outcome = { ok: false, version: current };
+        return;
+      }
+      const next = current + 1;
+      this.sql.exec(`INSERT OR REPLACE INTO documents (key, version, body, updated_at) VALUES (?, ?, ?, ?)`, key, next, JSON.stringify(document), now);
+      outcome = { ok: true, version: next };
+    });
+    return outcome;
+  }
+}
+
+/** Documents are small; a body over this is refused before storage. */
+const MAX_CONFIG_DOCUMENT_BYTES = 256 * 1024;
+
+async function handleConfig(pathname: string, body: unknown, env: Env): Promise<Response> {
+  const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+  if (typeof b.key !== "string" || !CONFIG_KEY_RE.test(b.key)) return json({ error: "key must be a short lowercase slug" }, 400);
+  const dO = env.CONFIG.get(env.CONFIG.idFromName(CONFIG_OBJECT));
+  if (pathname === "/config/get") {
+    return json(await dO.get(b.key));
+  }
+  if (pathname === "/config/put") {
+    if (typeof b.document !== "object" || b.document === null || Array.isArray(b.document)) return json({ error: "document must be a JSON object" }, 400);
+    if (typeof b.expectedVersion !== "number" || !Number.isInteger(b.expectedVersion) || b.expectedVersion < 0) return json({ error: "expectedVersion must be a non-negative integer" }, 400);
+    if (new TextEncoder().encode(JSON.stringify(b.document)).byteLength > MAX_CONFIG_DOCUMENT_BYTES) return json({ error: `document must be at most ${MAX_CONFIG_DOCUMENT_BYTES} bytes` }, 413);
+    const out = await dO.put(b.key, b.document, b.expectedVersion, Date.now());
+    if (!out.ok) return json({ error: "version conflict", version: out.version }, 409);
+    console.log(`[config/put] ${b.key} v${out.version}`);
+    return json({ ok: true, version: out.version });
+  }
+  return json({ error: "not found" }, 404);
 }
 
 function parseScheduleFiring(body: unknown): Validated<ScheduleFiring> {
@@ -1356,8 +1437,10 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, features: ["memory", "friction", "schedules", "runs"] });
+    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, features: ["memory", "friction", "schedules", "runs", "config"] });
     const ROUTES = new Set([
+      "/config/get",
+      "/config/put",
       "/retrieve",
       "/write",
       "/list",
@@ -1417,6 +1500,7 @@ export default {
       return json({ firings });
     }
     if (url.pathname.startsWith("/runs/")) return handleRuns(url.pathname, body, env);
+    if (url.pathname.startsWith("/config/")) return handleConfig(url.pathname, body, env);
 
     if (url.pathname === "/friction/record") {
       const parsed = parseFrictionRecord(body);

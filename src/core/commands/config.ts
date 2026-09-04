@@ -117,9 +117,9 @@ export const configSet = defineCommand({
     if (args.scope === "channel") {
       const channel = targetChannel(caller, options.channel);
       assertMayEditChannel(caller);
-      effective = deps.config.setChannelOverride(channel, patch);
+      effective = await deps.config.setChannelOverride(channel, patch);
     } else {
-      effective = deps.config.setUserOverride(caller.id, patch);
+      effective = await deps.config.setUserOverride(caller.id, patch);
     }
     return { scope: args.scope, effective: summarizeScope(effective) };
   },
@@ -140,9 +140,9 @@ export const configClear = defineCommand({
     if (args.scope === "channel") {
       const channel = targetChannel(caller, options.channel);
       assertMayEditChannel(caller);
-      deps.config.clearChannelOverride(channel);
+      await deps.config.clearChannelOverride(channel);
     } else {
-      deps.config.clearUserOverride(caller.id);
+      await deps.config.clearUserOverride(caller.id);
     }
     return { scope: args.scope, cleared: true };
   },
@@ -191,9 +191,9 @@ export const configInstructions = defineCommand({
     let effective: Scope;
     if (channel !== undefined) {
       assertMayEditChannel(caller);
-      effective = deps.config.setChannelOverride(channel, patch);
+      effective = await deps.config.setChannelOverride(channel, patch);
     } else {
-      effective = deps.config.setUserOverride(caller.id, patch);
+      effective = await deps.config.setUserOverride(caller.id, patch);
     }
     if (text.length === 0) {
       // Deleting the runtime key lets any static config.yaml text show

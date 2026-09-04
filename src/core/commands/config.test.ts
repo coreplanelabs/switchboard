@@ -88,7 +88,7 @@ describe("config show", () => {
 
   it("--channel names another channel; a machine caller must name one (no origin) and needs config:read", async () => {
     const config = store();
-    config.setChannelOverride("slack:COTHER", { agent: "review" });
+    await config.setChannelOverride("slack:COTHER", { agent: "review" });
     const commands = bind(config);
     expect((await say(commands, "config show --channel slack:COTHER", chat(config, "slack:UX"))).text).toContain("agent `review`");
     expect(await commands.invoke("config.show", {}, mcp("config:read"))).toMatchObject({ ok: false, error: "invalid_input", message: "channel: required on this surface — pass --channel <id>" });
@@ -139,7 +139,7 @@ describe("config set", () => {
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
   });
 
-  it("the legacy `key=value` spelling is rejected as `invalid_input` (the grammar is `--key value`), and `instructions` is its own command", () => {
+  it("the legacy `key=value` spelling is rejected as `invalid_input` (the grammar is `--key value`), and `instructions` is its own command", async () => {
     const commands = bind(store());
     expect(parseInvocation(commands.get("config.set")!, ["me", "agent=review"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("unexpected argument: config set takes at most 1") });
     expect(parseInvocation(commands.get("config.set")!, ["me", "--instructions", "x"])).toMatchObject({ kind: "invalid", code: "invalid_input", error: expect.stringContaining("unknown option --instructions") });
@@ -214,7 +214,7 @@ describe("config instructions", () => {
     expect((await say(commands, "config instructions channel", chat(gated, "slack:UX", "slack:CEMPTY"))).text).toMatch(/^No channel instructions are set/);
   });
 
-  it("declares the gates and scopes: show is config:read/open, the writers are config:write with the chat gate open (the channel scope is decided inside)", () => {
+  it("declares the gates and scopes: show is config:read/open, the writers are config:write with the chat gate open (the channel scope is decided inside)", async () => {
     const byId = Object.fromEntries(configCommands.map((c) => [c.id, c]));
     expect(byId["config.show"]).toMatchObject({ scope: "config:read", chatGate: "open", effect: "read" });
     for (const id of ["config.set", "config.clear", "config.instructions"]) expect(byId[id], id).toMatchObject({ scope: "config:write", chatGate: "open", effect: "write" });

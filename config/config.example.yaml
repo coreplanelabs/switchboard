@@ -231,6 +231,16 @@ workspaceDir: ./workspaces
 #     enabled: true
 #     windowMinutes: 30
 
+# Where chat-set runtime overrides (`config set`, `config instructions`, `config clear`)
+# persist (features/routing-and-config.md item 12). Without this block they go to
+# data/overrides.json on the host disk — EPHEMERAL on Cloudflare Containers. In
+# production name the state Worker's ConfigDO (same Worker + bearer as memory and
+# run history); the bot and the CLI then write one versioned document.
+# runtimeOverrides:
+#   worker:
+#     baseUrl: https://switchboard-memory.coreplanelabs.dev
+#     tokenEnv: MEMORY_TOKEN   # default
+
 # Persistent run history (#157, features/run-history.md). Every finished run's
 # record — identity, timing, terminal status, the redacted event stream, the
 # friction diagnosis — is kept for a retention window instead of evicted 60 s
