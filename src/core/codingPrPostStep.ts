@@ -5,17 +5,23 @@
 // explicit seam between them, because the dispatcher publishes the accepted
 // `pr_description` event in between and a hard stop can land mid-observation:
 //
-//   1. `observeCodingWorkspace` — read the workspace's HEAD, branch, upstream
-//      (and, when asked, origin remote) BEFORE the workspace can be released.
+//   1. `observeCodingWorkspace` — read the workspace's HEAD, branch, the
+//      remote's head for that branch (and, when asked, origin remote) BEFORE
+//      the workspace can be released.
 //   2. `runCodingPrPostStep` — given that observation and the run's submitted
 //      `PrDescription`, render the body at the observed head and open or edit
 //      the PR (open-or-edit idempotency lives in githubPulls), publishing the
 //      typed `pr_opened` event and returning the honest reply note.
 //
 // "Pushed" is OBSERVED, never inferred: the branch counts as pushed only when
-// its upstream resolved and matches the observed HEAD. Failure honesty
-// throughout: never a fabricated PR URL, and the branch compare URL is offered
-// only when the upstream match proved the remote branch exists.
+// the remote's own `refs/heads/<branch>` (git ls-remote) is the observed HEAD.
+// The clone's tracking state (`@{u}`) is NOT the proof — a `--depth` /
+// `--single-branch` clone, the cold sandbox's usual shape, never creates the
+// remote-tracking ref for a pushed branch, so `@{u}` fails after a successful
+// `git push -u` (#438: two real pushes reported as "no pushed upstream", no
+// PR opened). `@{u}` is consulted only when the remote probe itself fails.
+// Failure honesty throughout: never a fabricated PR URL, and the branch
+// compare URL is offered only when the remote match proved the branch exists.
 //
 // Base resolution (CodingPrTarget): a bound PR's true base, else the resident
 // binding ref, else the dispatch's resolved ref, else — the true last resort —
@@ -35,28 +41,37 @@ import { shellQuote } from "../execution/shellQuote.js";
 import { resolveBaseRef, resolveBaseRefLazy, type OpenedPullRequest, type PullRequestTarget, type RepoShipInfo } from "../execution/githubPulls.js";
 import { encodeGithubPathSegments, renderPrDescriptionMarkdown, type PrDescription } from "./prDescription.js";
 import { normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
-import type { RunEvent } from "./runEvents.js";
+import { parseExitPrefix, type RunEvent } from "./runEvents.js";
 
 /** What the PR post-step observed in the run's workspace, all read BEFORE the
  *  workspace is released. Every field is undefined when its probe failed. */
 export interface WorkspaceObservation {
   head: string | undefined;
   branch: string | undefined;
-  /** The checked-out branch's upstream commit (`@{u}`) — the proof of a push. */
-  upstream: string | undefined;
+  /** The commit the remote holds for the checked-out branch — the proof of a
+   *  push, read from the remote itself (`git ls-remote --exit-code origin
+   *  refs/heads/<branch>`), so it does not depend on the clone's shape. A
+   *  remote that answers "no such branch" is final (undefined). Only when
+   *  that probe itself fails (network, auth, an unreadable origin) does the
+   *  local record of the last push, `@{u}`, stand in. */
+  remoteHead: string | undefined;
   /** `owner/name` parsed from the origin remote, probed only when asked. */
   remoteRepo: string | undefined;
 }
 
 /**
- * Probe a coding run's workspace — HEAD, branch, upstream, and (when the
- * dispatch resolved no repo) the origin remote — concurrently, at the
- * workspace root first. Cold coding agents clone the repo into a SUBDIRECTORY
- * of the sandbox root (the coding prompt mandates at most ONE clone), so a
- * failed root HEAD probe discovers the single cloned repo and re-probes with
- * `git -C` — the directory shell-quoted AND vetted against a conservative
- * name pattern, never interpolated raw. Best-effort throughout: a failed
- * probe leaves its field undefined and the post-step reports honestly.
+ * Probe a coding run's workspace — HEAD, branch, `@{u}`, and (when the
+ * dispatch resolved no repo) the origin remote — concurrently, then the
+ * remote's head for the observed branch, at the workspace root first. Cold
+ * coding agents clone the repo into a SUBDIRECTORY of the sandbox root (the
+ * coding prompt mandates at most ONE clone), so a failed root HEAD probe
+ * discovers the single cloned repo and re-probes with `git -C` — the
+ * directory shell-quoted AND vetted against a conservative name pattern,
+ * never interpolated raw. The remote probe runs through the same executor as
+ * the agent's own push did, so it authenticates the same way (the sandbox's
+ * forwarded token via `gh auth git-credential`, the resident tree's
+ * credential store). Best-effort throughout: a failed probe leaves its field
+ * undefined and the post-step reports honestly.
  */
 export async function observeCodingWorkspace(
   executor: { exec: (cmd: string) => Promise<string> },
@@ -70,10 +85,19 @@ export async function observeCodingWorkspace(
       probe(`${git} rev-parse @{u}`),
       opts.probeRemote ? probe(`${git} remote get-url origin`) : Promise.resolve(""),
     ]);
+    const branch = parseBranchOutput(branchOut);
+    const upstream = parseRevParseOutput(upstreamOut);
+    let remoteHead: string | undefined = upstream;
+    if (branch !== undefined) {
+      const remote = parseLsRemoteOutput(await probe(`${git} ls-remote --exit-code origin ${shellQuote(`refs/heads/${branch}`)}`), branch);
+      // The remote's answer is the truth when it gave one; only a probe that
+      // failed outright leaves the local record standing.
+      if (remote.kind !== "failed") remoteHead = remote.kind === "found" ? remote.sha : undefined;
+    }
     return {
       head: parseRevParseOutput(headOut),
-      branch: parseBranchOutput(branchOut),
-      upstream: parseRevParseOutput(upstreamOut),
+      branch,
+      remoteHead,
       remoteRepo: parseOriginRemoteOutput(remoteOut),
     };
   };
@@ -136,8 +160,8 @@ export async function runCodingPrPostStep(input: {
   const repo = target.repo ?? observed.remoteRepo;
   const headSha = normalizeHead(observed.head);
   const branch = observed.branch;
-  const upstream = normalizeHead(observed.upstream);
-  const pushed = headSha !== undefined && upstream !== undefined && sameCommit(upstream, headSha);
+  const remoteHead = normalizeHead(observed.remoteHead);
+  const pushed = headSha !== undefined && remoteHead !== undefined && sameCommit(remoteHead, headSha);
   const compareUrl = repo && branch && pushed ? `https://github.com/${repo}/compare/${encodeGithubPathSegments(branch)}` : undefined;
   if (repo === undefined) {
     // Neither the dispatch nor the workspace names a repository — nowhere a
@@ -166,14 +190,14 @@ export async function runCodingPrPostStep(input: {
   }
   if (prDescription && branch !== undefined && headSha !== undefined && !pushed) {
     // A commit sits on a non-base branch, but nothing proves it reached the
-    // remote: no upstream, or an upstream behind the workspace. The note must
-    // not claim a push — and offers no compare URL, which would imply a
-    // remote branch nothing observed.
+    // remote: the remote has no such branch, or holds it at an older commit.
+    // The note must not claim a push — and offers no compare URL, which
+    // would imply a remote branch nothing observed.
     const why =
-      upstream === undefined
-        ? "has no pushed upstream"
-        : `has unpushed commits (its upstream is at ${upstream.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`;
-    console.log(`[pr-post] ${logKey} skipped: push not observed (repo ${repo}, branch ${branch}, head ${headSha.slice(0, 7)}, upstream ${upstream?.slice(0, 7) ?? "none"})`);
+      remoteHead === undefined
+        ? "was not found on the remote"
+        : `has unpushed commits (the remote branch is at ${remoteHead.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`;
+    console.log(`[pr-post] ${logKey} skipped: push not observed (repo ${repo}, branch ${branch}, head ${headSha.slice(0, 7)}, remote ${remoteHead?.slice(0, 7) ?? "none"})`);
     return `⚠️ A PR description was submitted but the branch \`${branch}\` ${why}, so no PR was opened.`;
   }
   if (prDescription && pushedBranch && headSha?.length === 40 && base) {
@@ -227,6 +251,35 @@ function parseBranchOutput(output: string): string | undefined {
   if (!first || first === "HEAD") return undefined;
   if (/\s/.test(first) || /^(exit \d+:|fatal:|error:)/i.test(first)) return undefined;
   return first;
+}
+
+/** One `<sha>\t<ref>` line of `git ls-remote` output. */
+const LS_REMOTE_LINE_RE = /^([0-9a-f]{40})\s+(\S+)$/i;
+
+/** What `git ls-remote --exit-code origin refs/heads/<branch>` said about the
+ *  branch: `found` with the remote's sha when a line names EXACTLY
+ *  `refs/heads/<branch>`; `absent` when the remote answered and the branch is
+ *  not in the answer — git exited 2 (its documented "no matching refs"
+ *  status) OR it listed refs, none of them ours (ls-remote patterns match a
+ *  ref's tail, so a differently-named ref that merely ends with the pattern
+ *  can be the whole exit-0 answer; it never stands in for the branch, and
+ *  its presence is still the remote saying the branch is not there); `failed`
+ *  for anything else — a nonzero exit other than 2 (network, auth, an origin
+ *  the thread user cannot read) or output with no ref line at all — which the
+ *  caller treats as "the remote could not be asked". `found`/`absent` are
+ *  final; only `failed` lets the local `@{u}` stand in. */
+export function parseLsRemoteOutput(output: string, branch: string): { kind: "found"; sha: string } | { kind: "absent" } | { kind: "failed" } {
+  const exit = parseExitPrefix(output);
+  if (exit.failed) return exit.exitCode === 2 ? { kind: "absent" } : { kind: "failed" };
+  const want = `refs/heads/${branch}`;
+  let answered = false;
+  for (const line of output.split(/\r?\n/)) {
+    const m = LS_REMOTE_LINE_RE.exec(line.trim());
+    if (!m) continue;
+    if (m[2] === want) return { kind: "found", sha: m[1].toLowerCase() };
+    answered = true;
+  }
+  return answered ? { kind: "absent" } : { kind: "failed" };
 }
 
 /** The single cloned repo directory from `ls -d *\/.git` output, or undefined.

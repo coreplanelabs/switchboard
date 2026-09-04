@@ -2380,22 +2380,30 @@ describe("coding PR post-step (features/pr-description.md)", () => {
   }
 
   /** A workspace checkout: `git rev-parse HEAD` answers `head`, `--abbrev-ref
-   *  HEAD` answers `branch`, `@{u}` answers `upstream` (defaults to `head` —
-   *  a pushed, up-to-date branch; `null` = no upstream configured), `remote
-   *  get-url origin` answers `remote`; any undefined = the command fails.
-   *  With `cloneDir` the workspace root is NOT a repo (the cold path cloned
-   *  into that subdirectory): root git probes fail, `ls -d *\/.git` finds the
-   *  clone, and only `git -C '<cloneDir>' …` probes answer. A `bindingRef`
-   *  makes the selection a resident one bound to that ref. Records the order
-   *  of exec/release calls. */
-  function codingExecutor(opts: { head?: string; branch?: string; upstream?: string | null; remote?: string; cloneDir?: string; bindingRef?: string } = {}) {
+   *  HEAD` answers `branch`, `ls-remote origin refs/heads/<branch>` answers
+   *  `remoteHead` (defaults to `head` — a pushed, up-to-date branch; `null` =
+   *  the remote has no such branch, exit 2), `remote get-url origin` answers
+   *  `remote`; any undefined = the command fails. With `cloneDir` the
+   *  workspace root is NOT a repo (the cold path cloned into that
+   *  subdirectory): root git probes fail, `ls -d *\/.git` finds the clone, and
+   *  only `git -C '<cloneDir>' …` probes answer — and, like the real cold
+   *  clone (`gh repo clone … -- --depth 50`, single-branch), `@{u}` never
+   *  resolves there even after a successful push (#438); a resident tree is a
+   *  full clone, so its `@{u}` answers `remoteHead`. A `bindingRef` makes the
+   *  selection a resident one bound to that ref. Records the order of
+   *  exec/release calls. */
+  function codingExecutor(opts: { head?: string; branch?: string; remoteHead?: string | null; remote?: string; cloneDir?: string; bindingRef?: string } = {}) {
     const order: string[] = [];
-    const upstream = opts.upstream === null ? undefined : (opts.upstream ?? opts.head);
+    const remoteHead = opts.remoteHead === null ? undefined : (opts.remoteHead ?? opts.head);
     const notARepo = "fatal: not a git repository\nexit 128";
     const git = (cmd: string) => {
       if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return opts.branch ? `${opts.branch}\n` : notARepo;
-      if (/rev-parse @\{u\}/.test(cmd)) return upstream ? `${upstream}\n` : "fatal: no upstream configured for branch\nexit 128";
+      if (/rev-parse @\{u\}/.test(cmd)) {
+        if (opts.cloneDir) return `exit 128:\nfatal: upstream branch 'refs/heads/${opts.branch}' not stored as a remote-tracking branch\n`;
+        return remoteHead ? `${remoteHead}\n` : "exit 128:\nfatal: no upstream configured for branch\n";
+      }
       if (/rev-parse HEAD/.test(cmd)) return opts.head ? `${opts.head}\n` : notARepo;
+      if (/ls-remote --exit-code origin/.test(cmd)) return remoteHead ? `${remoteHead}\trefs/heads/${opts.branch}\n` : "exit 2:\n";
       if (/remote get-url origin/.test(cmd)) return opts.remote ? `${opts.remote}\n` : "error: No such remote 'origin'\nexit 2";
       return "";
     };
@@ -2570,7 +2578,7 @@ describe("coding PR post-step (features/pr-description.md)", () => {
     expect(spy.calls).toHaveLength(0);
     const note = replies.find((r) => r.includes("could not be observed"));
     expect(note).toBeDefined();
-    expect(note).not.toContain("github.com"); // the compare URL is offered only when the upstream match proved the push
+    expect(note).not.toContain("github.com"); // the compare URL is offered only when the remote's head matched HEAD
   });
 
   it("description submitted but no branch is observable (failed probe / detached) → honest failure note without a fabricated URL, no PR call", async () => {
@@ -2695,23 +2703,23 @@ describe("coding PR post-step (features/pr-description.md)", () => {
     expect(replies.some((r) => /PR updated/.test(r))).toBe(true);
   });
 
-  it("no upstream configured → the branch does not count as pushed: no PR call, an honest note, no compare URL", async () => {
+  it("the remote has no such branch → the branch does not count as pushed: no PR call, an honest note, no compare URL", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
-    codingExecutor({ head: HEAD, branch: "feat/x", upstream: null, bindingRef: "main" });
+    codingExecutor({ head: HEAD, branch: "feat/x", remoteHead: null, bindingRef: "main" });
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(spy.calls).toHaveLength(0);
-    const note = replies.find((r) => r.includes("no pushed upstream"));
+    const note = replies.find((r) => r.includes("was not found on the remote"));
     expect(note).toBeDefined();
     expect(note).not.toContain("github.com"); // no proof the branch exists on the remote
   });
 
-  it("upstream behind the workspace HEAD → not pushed: no PR call, the note says the branch has unpushed commits", async () => {
+  it("the remote branch behind the workspace HEAD → not pushed: no PR call, the note says the branch has unpushed commits", async () => {
     const STALE = "0123456789abcdef0123456789abcdef01234567";
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
-    codingExecutor({ head: HEAD, branch: "feat/x", upstream: STALE, bindingRef: "main" });
+    codingExecutor({ head: HEAD, branch: "feat/x", remoteHead: STALE, bindingRef: "main" });
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
     const { io, replies } = fakeIO();
@@ -5606,15 +5614,17 @@ workspaceDir: __WORKDIR__
     return provider;
   }
 
-  /** One round's resident workspace: git probes answer head/branch/upstream;
-   *  `onHeadProbe` fires when the round's HEAD is observed (the head-flip hook
-   *  for multi-round scenarios). */
-  function shipWorkspace(opts: { head: string; branch: string; bindingRef?: string; upstream?: string | null; onHeadProbe?: () => void }) {
-    const upstream = opts.upstream === null ? undefined : (opts.upstream ?? opts.head);
+  /** One round's resident workspace: git probes answer head/branch/remoteHead
+   *  (`ls-remote` and, the tree being a full clone, `@{u}` agree; `null` = the
+   *  remote has no such branch); `onHeadProbe` fires when the round's HEAD is
+   *  observed (the head-flip hook for multi-round scenarios). */
+  function shipWorkspace(opts: { head: string; branch: string; bindingRef?: string; remoteHead?: string | null; onHeadProbe?: () => void }) {
+    const remoteHead = opts.remoteHead === null ? undefined : (opts.remoteHead ?? opts.head);
     const executor = {
       exec: async (cmd: string) => {
         if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${opts.branch}\n`;
-        if (/rev-parse @\{u\}/.test(cmd)) return upstream ? `${upstream}\n` : "fatal: no upstream configured\nexit 128";
+        if (/rev-parse @\{u\}/.test(cmd)) return remoteHead ? `${remoteHead}\n` : "exit 128:\nfatal: no upstream configured\n";
+        if (/ls-remote --exit-code origin/.test(cmd)) return remoteHead ? `${remoteHead}\trefs/heads/${opts.branch}\n` : "exit 2:\n";
         if (/rev-parse HEAD/.test(cmd)) {
           opts.onHeadProbe?.();
           return `${opts.head}\n`;
@@ -6146,7 +6156,7 @@ workspaceDir: __WORKDIR__
   it("round 0 without a PR: the child's clarifying question becomes the reply, the terminal is named, no review round", async () => {
     const provider = shipProvider({ coding: [say("Which login flow did you mean — OAuth or password?")] });
     const { deps, opened } = shipDeps(provider);
-    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH, upstream: null })); // nothing pushed
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH, remoteHead: null })); // nothing pushed
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     const final = replies[replies.length - 1];
@@ -6455,13 +6465,13 @@ workspaceDir: __WORKDIR__
     queueWorkspaces(
       shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
       shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH, upstream: null }), // fix round: same head, push not observed
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH, remoteHead: null }), // fix round: same head, push not observed
     );
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     const final = replies[replies.length - 1];
     expect(final).toContain("no new head");
-    expect(final).toContain("has no pushed upstream"); // the post-step's reason rides the report
+    expect(final).toContain("was not found on the remote"); // the post-step's reason rides the report
     expect(posts).toHaveLength(1); // review round 1 only — never a second review of the same diff
     expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(3);
   });

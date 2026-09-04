@@ -963,10 +963,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // PR post-step. Undefined when unreadable or detached ("HEAD" is not a
     // branch — nothing a PR could be opened from).
     let observedBranch: string | undefined;
-    // That branch's upstream commit (`git rev-parse @{u}`), the post-step's
-    // proof of a push: the branch counts as pushed only when this matches the
-    // observed HEAD. Undefined when no upstream is configured or unreadable.
-    let observedUpstream: string | undefined;
+    // The commit the remote holds for that branch (`git ls-remote origin
+    // refs/heads/<branch>`), the post-step's proof of a push: the branch
+    // counts as pushed only when this matches the observed HEAD. Undefined
+    // when the remote has no such branch or could not be asked.
+    let observedRemoteHead: string | undefined;
     // `owner/name` parsed from the workspace's origin remote, probed only when
     // the dispatch resolved no repo (the agent discovered the repo itself) —
     // the PR-open repo of last resort.
@@ -1051,7 +1052,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       }
       // PR post-step observation (features/pr-description.md item 5): for a
       // writable coding run, read the workspace HEAD, its branch name, and
-      // that branch's upstream NOW — after the model is done, BEFORE the
+      // the remote's head for that branch NOW — after the model is done, BEFORE the
       // finally below can release the workspace (a resident re-attach would
       // show the ref's current tip, not what this run pushed). The cold path
       // clones into a SUBDIRECTORY of the workspace root, so a failed root
@@ -1065,7 +1066,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         const observed = await observeCodingWorkspace(executor, { probeRemote: repoCtx.repo === undefined });
         observedHead = observed.head;
         observedBranch = observed.branch;
-        observedUpstream = observed.upstream;
+        observedRemoteHead = observed.remoteHead;
         observedRemoteRepo = observed.remoteRepo;
       }
       // The accepted PrDescription is a fact of the run: publish it as a typed
@@ -1091,7 +1092,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // hard stop observed nothing above and posts nothing.
       if (isCodingPrRun && run.control.requested !== "hard") {
         prNote = await runCodingPrPostStep({
-          observed: { head: observedHead, branch: observedBranch, upstream: observedUpstream, remoteRepo: observedRemoteRepo },
+          observed: { head: observedHead, branch: observedBranch, remoteHead: observedRemoteHead, remoteRepo: observedRemoteRepo },
           description: prDescription,
           target: { repo: repoCtx.repo, baseRef: repoCtx.baseRef, bindingRef: binding?.ref, resolvedRef: repoCtx.ref },
           openPullRequest: deps.openPullRequest ?? openPullRequest,
