@@ -1,0 +1,142 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+import { CommandRegistry, flag, type CommandDef } from "../core/commandRegistry.js";
+import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
+import { cell, docCommands, GENERATED_REGIONS, renderApiRoutes, renderChatCommands, renderCliCommands, usageFor } from "./reference.js";
+import { declaredRegions } from "./regions.js";
+
+/** A hand-built catalogue: one command per shape the renderers must handle. */
+function fixture(): CommandDef<unknown>[] {
+  return [
+    {
+      id: "thing.show",
+      args: [{ name: "scope", schema: z.enum(["me", "channel"]), describe: "whose" }],
+      options: z.object({ dryRun: flag.optional(), limit: z.coerce.number().int().optional() }),
+      scope: "thing:read",
+      chatGate: "open",
+      effect: "read",
+      describe: "Show a thing; per-agent forms take --models.<agent>.",
+      handler: async () => null,
+    },
+    {
+      id: "thing.wipe",
+      args: [{ name: "id", schema: z.string(), describe: "which" }],
+      scope: "thing:write",
+      chatGate: "repoManager",
+      effect: "write",
+      describe: "Wipe it.",
+      handler: async () => null,
+    },
+    {
+      id: "local.only",
+      scope: "local:write",
+      chatGate: "operator",
+      effect: "write",
+      surfaces: { chat: false, http: false, mcp: false },
+      describe: "Operator-only, terminal-only.",
+      handler: async () => null,
+    },
+  ] as unknown as CommandDef<unknown>[];
+}
+
+const docs = docCommands(fixture());
+
+describe("usageFor", () => {
+  it("prints an enum positional as its values, since a table has no help text under it", () => {
+    expect(usageFor(fixture()[0])).toContain("thing show <me|channel>");
+  });
+
+  it("keeps the argument's name when its schema is not an enum, and brackets optional flags", () => {
+    expect(usageFor(fixture()[1])).toBe("thing wipe <id>");
+    expect(usageFor(fixture()[0])).toBe("thing show <me|channel> [--dry-run] [--limit <integer>]");
+  });
+});
+
+describe("cell", () => {
+  it("escapes a pipe so it cannot end the cell", () => {
+    expect(cell("a|b")).toBe("a\\|b");
+  });
+
+  it("escapes angle brackets in prose (a bare <agent> is a tag to GitHub and a component to Vue)", () => {
+    expect(cell("takes --models.<agent>")).toBe("takes --models.&lt;agent&gt;");
+  });
+
+  it("leaves angle brackets inside an inline code span alone, where an entity would render literally", () => {
+    expect(cell("pass `--mode <soft>` please")).toBe("pass `--mode <soft>` please");
+  });
+
+  it("flattens newlines, which would end the row", () => {
+    expect(cell("a\n\nb")).toBe("a b");
+  });
+});
+
+describe("renderCliCommands", () => {
+  const out = renderCliCommands(docs);
+
+  it("sections by group in registration order", () => {
+    expect(out.indexOf("### `thing`")).toBeGreaterThanOrEqual(0);
+    expect(out.indexOf("### `thing`")).toBeLessThan(out.indexOf("### `local`"));
+  });
+
+  it("collapses the all-surfaces case to two words so the narrow ones stand out", () => {
+    expect(out).toContain("| `thing wipe <id>` | Wipe it. | every surface |");
+    expect(out).toContain("CLI only");
+  });
+});
+
+describe("renderChatCommands", () => {
+  const out = renderChatCommands(docs);
+
+  it("omits commands opted out of chat", () => {
+    expect(out).not.toContain("local only");
+  });
+
+  it("states who may run each one, in the vocabulary of the permissions reference", () => {
+    expect(out).toContain("| `thing wipe <id>` | Wipe it. | repo managers (`repoManagement`) |");
+    expect(out).toContain("| Command | What it does | Who can run it |");
+  });
+});
+
+describe("renderApiRoutes", () => {
+  const out = renderApiRoutes(docs);
+
+  it("gives a write POST only and a read either verb", () => {
+    expect(out).toContain("| `/api/thing.wipe` | `POST` | `thing:write` |");
+    expect(out).toContain("| `/api/thing.show` | `GET`, `POST` | `thing:read` |");
+  });
+
+  it("omits commands with no HTTP surface", () => {
+    expect(out).not.toContain("/api/local.only");
+  });
+});
+
+describe("the real catalogue", () => {
+  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+  registerCoreCommands(registry);
+  const real = docCommands(registry.list() as CommandDef<unknown>[]);
+
+  it("renders every registered command into the CLI table — including the groups a hand-written table had gone stale on", () => {
+    const out = renderCliCommands(real);
+    for (const cmd of real) expect(out).toContain(`\`${cmd.usage.replace(/\|/g, "\\|")}\``);
+    expect(out).toContain("### `mcp`");
+    expect(out).toContain("deploy restart");
+  });
+
+  it("emits no unescaped pipe inside a table row (each row must have the column count its header declares)", () => {
+    for (const body of [renderCliCommands(real), renderChatCommands(real), renderApiRoutes(real)]) {
+      const rows = body.split("\n").filter((l) => l.startsWith("|") && !/^\|[-|]+\|$/.test(l));
+      const widths = new Set(rows.map((r) => r.replace(/\\\|/g, "").split("|").length));
+      expect([...widths].every((w) => w === 5 || w === 6)).toBe(true);
+    }
+  });
+});
+
+describe("GENERATED_REGIONS", () => {
+  it("matches the markers actually present in each docs page (a renamed marker fails here, not silently)", () => {
+    for (const [file, regions] of Object.entries(GENERATED_REGIONS)) {
+      const text = readFileSync(new URL(`../../docs/${file}`, import.meta.url), "utf8");
+      expect(declaredRegions(text).sort()).toEqual(Object.keys(regions).sort());
+    }
+  });
+});

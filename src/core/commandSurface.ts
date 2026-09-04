@@ -293,8 +293,10 @@ export function namedToInput(cmd: CommandShape, named: Record<string, unknown>, 
 
 // ---- help ----------------------------------------------------------------------
 
-/** `soft|hard`, `true|false`, `integer`, `string` — from the JSON schema. */
-function typeHint(schema: z.ZodType): string {
+/** `soft|hard`, `true|false`, `integer`, `string` — from the JSON schema.
+ *  Exported so the reference-docs generator (`src/docs/reference.ts`) prints
+ *  the same value vocabulary the help output does, from one implementation. */
+export function typeHint(schema: z.ZodType): string {
   const js = jsonSchemaOf(schema) as { enum?: unknown[]; type?: string; anyOf?: { type?: string; enum?: unknown[] }[] };
   if (js.enum) return js.enum.map(String).join("|");
   if (js.anyOf) {

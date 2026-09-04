@@ -18,6 +18,45 @@ Every route below sits behind Cloudflare Access (browser session or, for machine
 | `GET /mcp/connect/<nonce>` | The one-time MCP credential-paste form | Bound to whoever mints it or first opens it; single use, expires in 10 minutes |
 | `GET /healthz` | `{ok, inFlight, draining, catchUp}` | **Not** Access-gated — this is the process health probe, meant to be hit by the deploy tooling and the container platform |
 
+## Command routes (`/api/<group>.<verb>`)
+
+Every registered command has an HTTP twin behind the same Access gate, plus an MCP tool of the same name — one definition, every surface ([explanation](../explanation/one-command-many-surfaces.md)). A write is `POST`-only; a read takes either verb (`GET` with a kebab-case query string, `POST` with a camelCase JSON body). The `Scope` column is what an operator identity or service token must hold.
+
+<!-- generated:api-routes · npm run docs:gen — generated from the code, do not edit by hand -->
+
+| Route | Methods | Scope | What it does |
+|---|---|---|---|
+| `/api/help.show` | `GET`, `POST` | `help:read` | What Switchboard can do: agents, per-request directives, and every chat command. |
+| `/api/config.show` | `GET`, `POST` | `config:read` | The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted. |
+| `/api/config.set` | `POST` | `config:write` | Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.&lt;agent&gt; / --efforts.&lt;agent&gt;. |
+| `/api/config.clear` | `POST` | `config:write` | Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again. |
+| `/api/config.instructions` | `POST` | `config:write` | Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions. |
+| `/api/runs.list` | `GET`, `POST` | `runs:read` | List runs (live and persisted, newest first) — metadata only, never message text. |
+| `/api/runs.get` | `GET`, `POST` | `runs:read` | One run's record; `--include messages` adds its events with free text wrapped as untrusted content. |
+| `/api/runs.events` | `GET`, `POST` | `runs:read` | A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content. |
+| `/api/runs.friction` | `GET`, `POST` | `runs:read` | One run's friction diagnosis (live: computed now; persisted: as stored). |
+| `/api/runs.stop` | `POST` | `runs:write` | Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor. |
+| `/api/friction.report` | `GET`, `POST` | `friction:read` | Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted. |
+| `/api/friction.propose` | `POST` | `friction:write` | Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues. |
+| `/api/repo.list` | `GET`, `POST` | `repo:read` | Every onboarded resident repo with its live state, ref, sha, and last refresh. |
+| `/api/repo.onboard` | `POST` | `repo:write` | Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated). |
+| `/api/repo.offboard` | `POST` | `repo:write` | Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only). |
+| `/api/repo.reconfigure` | `POST` | `repo:write` | Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach). |
+| `/api/repo.rebuild` | `POST` | `repo:write` | Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only). |
+| `/api/repo.test` | `POST` | `repo:exec` | Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch). |
+| `/api/repo.build` | `POST` | `repo:exec` | Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch). |
+| `/api/memory.list` | `GET`, `POST` | `memory:read` | Your own memory records and the shared org / repo / channel records, with ids — what influences your runs. |
+| `/api/memory.forget` | `POST` | `memory:write` | Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights). |
+| `/api/mcp.list` | `GET`, `POST` | `mcp:read` | External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. |
+| `/api/mcp.add` | `POST` | `mcp:write` | Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat. |
+| `/api/mcp.connect` | `POST` | `mcp:write` | A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes. |
+| `/api/mcp.show` | `GET`, `POST` | `mcp:read` | One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential. |
+| `/api/mcp.remove` | `POST` | `mcp:write` | Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights). |
+| `/api/schedule.list` | `GET`, `POST` | `schedule:read` | Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did. |
+| `/api/deploy.plan` | `GET`, `POST` | `deploy:read` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. |
+
+<!-- /generated:api-routes -->
+
 ## Screenshots
 
 **Residents index** — every onboarded repo, its state, last activity:
