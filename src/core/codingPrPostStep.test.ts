@@ -113,6 +113,28 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).toContain("PR opened");
   });
 
+  // Review nit (PR #425, F1): the fetch fires here BECAUSE we don't yet know
+  // whether the observed branch IS the default branch — that's exactly what
+  // this test proves out. Once fetched, the "sat on the base branch, nothing
+  // pushed" guard must win over "PR opened": no PR call, no compare-URL note,
+  // same as if a candidate had named "main" as the base from the start.
+  it("GitHub's fetched default branch equals the observed branch → nothing pushed, no PR call (the branch never left the default)", async () => {
+    const spy = openSpy();
+    const fetchRepoInfo = vi.fn(async () => ({ defaultBranch: "main" }) as RepoShipInfo);
+    const note = await runCodingPrPostStep({
+      observed: observation({ branch: "main" }),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
+      openPullRequest: spy.fn,
+      fetchRepoInfo,
+      publish: () => {},
+      logKey: "t",
+    });
+    expect(fetchRepoInfo).toHaveBeenCalledTimes(1);
+    expect(spy.calls).toHaveLength(0);
+    expect(note).toBeUndefined();
+  });
+
   it("no explicit base signal AND the GitHub fetch also comes back empty → no PR call, the note names the missing base with the compare URL", async () => {
     const spy = openSpy();
     const note = await runCodingPrPostStep({
