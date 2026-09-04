@@ -90,9 +90,19 @@ const say = define({
   handler: async ({ args }) => ({ scope: args.scope, text: args.text ?? null }),
 });
 
+const url = define({
+  id: "demo.url",
+  options: z.object({ url: z.string().url().describe("an http(s) url") }),
+  scope: "demo:read",
+  chatGate: "open",
+  effect: "read",
+  describe: "takes a url option — what Slack link markup must not break",
+  handler: async ({ options }) => ({ url: options.url }),
+});
+
 function demoRegistry() {
   const registry = new CommandRegistry<Deps>({ audit: () => {} });
-  for (const cmd of [echo, hidden, missing, config, whoami, say] as CommandDef<Deps>[]) registry.register(cmd);
+  for (const cmd of [echo, hidden, missing, config, whoami, say, url] as CommandDef<Deps>[]) registry.register(cmd);
   return registry;
 }
 
@@ -127,6 +137,18 @@ describe("parseChatCommand", () => {
     expect(parseChatCommand('  demo echo --status="all"  ', registry)).toEqual({ kind: "invoke", id: "demo.echo", input: { args: [], options: { status: "all" } } });
     expect(parseChatCommand("demo echo --status 'all'", registry)).toEqual({ kind: "invoke", id: "demo.echo", input: { args: [], options: { status: "all" } } });
     expect(parseChatCommand("demo echo", registry)).toEqual({ kind: "invoke", id: "demo.echo", input: { args: [], options: {} } });
+  });
+
+  it("unwraps Slack link markup before binding: `<url>`, auto-link `<url|label>` and a custom-labelled link all bind the bare url, with `&amp;`/`&lt;`/`&gt;` restored; a mention stays out of the tail", () => {
+    // Slack delivers every pasted URL as `<https://…>` (and a client that
+    // renders labels as `<url|label>`) — a `--url` value must survive that.
+    expect(parseChatCommand("demo url --url <https://mcp.example.com/mcp>", registry)).toEqual({ kind: "invoke", id: "demo.url", input: { args: [], options: { url: "https://mcp.example.com/mcp" } } });
+    expect(parseChatCommand("demo url --url <https://mcp.example.com/mcp|mcp.example.com/mcp>", registry)).toEqual({ kind: "invoke", id: "demo.url", input: { args: [], options: { url: "https://mcp.example.com/mcp" } } });
+    expect(parseChatCommand("demo url --url <https://mcp.example.com/mcp?a=1&amp;b=2|the server>", registry)).toEqual({ kind: "invoke", id: "demo.url", input: { args: [], options: { url: "https://mcp.example.com/mcp?a=1&b=2" } } });
+    // All three entities Slack escapes in message text are restored, not just `&amp;`.
+    expect(parseChatCommand("demo url --url <https://mcp.example.com/mcp?q=a&lt;b&gt;c&amp;d>", registry)).toEqual({ kind: "invoke", id: "demo.url", input: { args: [], options: { url: "https://mcp.example.com/mcp?q=a<b>c&d" } } });
+    // Only http(s) links unwrap; a leading mention (or any other `<…>`) is left to the grammar as before.
+    expect(parseChatCommand("demo say me see <@U123> and <#C456|general>", registry)).toEqual({ kind: "invoke", id: "demo.say", input: { args: ["me", "see <@U123> and <#C456|general>"], options: {} } });
   });
 
   it("binds positionals, including free text with Slack smart quotes", () => {

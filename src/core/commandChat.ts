@@ -55,13 +55,27 @@ function chatExposed(cmd: { surfaces?: CommandSurfaces }): boolean {
   return cmd.surfaces?.chat !== false;
 }
 
+/** Slack wraps every URL a person types as `<url>` (or `<url|label>` when a
+ *  client attaches a label), and escapes `&`, `<` and `>` inside it as
+ *  `&amp;`, `&lt;` and `&gt;` — the only three entities Slack message text
+ *  carries. A command value like `--url https://…` must bind to the bare url,
+ *  so http(s) links are unwrapped — label dropped, those entities restored —
+ *  before the grammar sees the text. Only http(s) links: mentions, channels and
+ *  `<!here>` stay as they are (they are prose to the grammar, never a value). */
+export function unwrapChatLinks(text: string): string {
+  return text.replace(/<(https?:\/\/[^<>|\s]+)(?:\|[^<>]*)?>/g, (_m, url: string) => url.replace(/&(amp|lt|gt);/g, (_e, name: string) => SLACK_ENTITIES[name as keyof typeof SLACK_ENTITIES]));
+}
+
+const SLACK_ENTITIES = { amp: "&", lt: "<", gt: ">" } as const;
+
 /**
  * `<group> <verb> …` → the command id and its bound input, a help/usage reply,
  * or null when the message is not a chat command: prose, an id that is not
  * registered, or one that opted out of chat (`surfaces.chat: false`). The bare
  * word `help` is `help show`; `<group> help` lists the group's chat commands.
  */
-export function parseChatCommand(text: string, catalog: ChatCommandCatalog): ParsedChatCommand | null {
+export function parseChatCommand(rawText: string, catalog: ChatCommandCatalog): ParsedChatCommand | null {
+  const text = unwrapChatLinks(rawText);
   const trimmed = text.trim();
   const exposed = catalog.list().filter(chatExposed);
   if (/^help$/i.test(trimmed)) return exposed.some((c) => c.id === HELP_COMMAND_ID) ? { kind: "invoke", id: HELP_COMMAND_ID, input: { args: [], options: {} } } : null;
