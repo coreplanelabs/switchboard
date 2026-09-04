@@ -68,6 +68,7 @@ const FORWARDED_OPTIONAL = [
   "SWITCHBOARD_INGRESS_TOKENS",
   "BRAVE_SEARCH_API_KEY",
   "MEMORY_TOKEN",
+  "MCP_CREDENTIAL_KEY",
 ] as const satisfies readonly (keyof Env)[];
 
 /** The container's environment, computed from the Worker env AT START TIME.
