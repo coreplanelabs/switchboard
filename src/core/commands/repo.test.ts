@@ -424,14 +424,33 @@ describe("provisioning follow-up (item 52): repo onboard / repo rebuild settle",
     expect(slept).toEqual([SETTLE_POLL_MS, SETTLE_POLL_MS]);
   });
 
-  it("down: reports the resident's own reason and names the two commands that fix a bad table", async () => {
-    const reason = "provision-failed at install: exit 1: npm error code EOVERRIDE";
-    const c = { ...mockClient(), status: statusSequence({ state: "down", reason, inFlight: 0 }) };
-    const out = await settleProvisioning(depsOf({ admin: c, sleep }), "coreplanelabs/nominal");
-    expect(out).toEqual({
-      ok: false,
-      text: `❌ \`coreplanelabs/nominal\` failed to provision: ${reason}\nFix the command table with \`repo reconfigure coreplanelabs/nominal --install "…" --build "…" --test "…"\`, then \`repo rebuild coreplanelabs/nominal\`.`,
-    });
+  it("down at install/build/test: reports the resident's own reason and names the two commands that fix a bad table", async () => {
+    for (const step of ["install", "build", "test"]) {
+      const reason = `provision-failed at ${step}: exit 1: npm error code EOVERRIDE`;
+      const c = { ...mockClient(), status: statusSequence({ state: "down", reason, inFlight: 0 }) };
+      const out = await settleProvisioning(depsOf({ admin: c, sleep }), "coreplanelabs/nominal");
+      expect(out).toEqual({
+        ok: false,
+        text: `❌ \`coreplanelabs/nominal\` failed to provision: ${reason}\nFix the command table with \`repo reconfigure coreplanelabs/nominal --install "…" --build "…" --test "…"\`, then \`repo rebuild coreplanelabs/nominal\`.`,
+      });
+    }
+  });
+
+  it("down elsewhere (snapshot, clone, timeout, no reason): a retry hint, never the command-table hint (#416)", async () => {
+    for (const reason of [
+      "provision-failed at snapshot: put: Please look at https://www.cloudflarestatus.com for issues or contact customer support. (10043)",
+      "provision-failed at clone: exit 128: fatal: could not read Username",
+      "provision-timeout: provisioning did not reach warm within its budget",
+      undefined,
+    ]) {
+      const c = { ...mockClient(), status: statusSequence({ state: "down", ...(reason ? { reason } : {}), inFlight: 0 }) };
+      const out = await settleProvisioning(depsOf({ admin: c, sleep }), "coreplanelabs/infrastructure");
+      expect(out.ok).toBe(false);
+      expect(out.text).toBe(
+        `❌ \`coreplanelabs/infrastructure\` failed to provision: ${reason ?? "no reason recorded"}\nNot a command-table failure — retry with \`repo rebuild coreplanelabs/infrastructure\`; if it recurs, the resident or Cloudflare side is at fault (\`repo list\` shows the live state).`,
+      );
+      expect(out.text).not.toContain("repo reconfigure");
+    }
   });
 
   it("rebuild: a real rebuild settles like onboard; --dry-run has no follow-up", async () => {
