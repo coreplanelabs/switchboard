@@ -98,6 +98,10 @@ export interface McpTicket {
    *  while the person is at the authorization server. Set when the ticket
    *  enters `authorizing`; opaque to the Worker. */
   oauth?: { keyId: string; sealed: string };
+  /** Set with `completed` (item 19): what the completion found, so the thread
+   *  that asked can be told without re-probing — the bridged tool count, or
+   *  the verify warning when the server could not be reached. */
+  outcome?: { toolCount?: number; warning?: string };
 }
 
 export const MCP_TICKET_TTL_MS = 10 * 60_000;
@@ -115,6 +119,12 @@ export const MCP_SERVERS_PER_SCOPE_MAX = 32;
 
 const isStr = (v: unknown, max = 4_096): v is string => typeof v === "string" && v.length > 0 && v.length <= max;
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+function isOutcome(v: unknown): v is NonNullable<McpTicket["outcome"]> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const o = v as Record<string, unknown>;
+  return (o.toolCount === undefined || (isNum(o.toolCount) && o.toolCount >= 0)) && (o.warning === undefined || isStr(o.warning, 1_024));
+}
 
 /** Shape only (the config layer adds the semantic checks: SSRF, known agents, tier rules). */
 export function isMcpServerEntry(v: unknown): v is McpServerEntry {
@@ -151,7 +161,8 @@ export function isMcpTicket(v: unknown): v is McpTicket {
     MCP_TICKET_STATES.includes(t.state as McpTicketState) &&
     actor(t.openedBy) &&
     actor(t.completedBy) &&
-    (t.oauth === undefined || (!!t.oauth && typeof t.oauth === "object" && isStr((t.oauth as { keyId?: unknown }).keyId, 64) && isStr((t.oauth as { sealed?: unknown }).sealed, 64 * 1024)))
+    (t.oauth === undefined || (!!t.oauth && typeof t.oauth === "object" && isStr((t.oauth as { keyId?: unknown }).keyId, 64) && isStr((t.oauth as { sealed?: unknown }).sealed, 64 * 1024))) &&
+    (t.outcome === undefined || isOutcome(t.outcome))
   );
 }
 

@@ -7,7 +7,7 @@ import { InMemoryMcpClient } from "../../mcp/fake.js";
 import { importCredentialKey } from "../../mcp/sealed.js";
 import { InMemoryMcpSecretStore } from "../../mcp/secretStore.js";
 import { McpService } from "../../mcp/service.js";
-import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
+import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker, type JsonValue } from "../commandRegistry.js";
 import { MCP_COMMANDS, MCP_OFF_MESSAGE, registerMcpCommands, type McpCommandDeps } from "./mcp.js";
 
 // features/mcp-tools.md items 13–15: the `mcp.*` commands are thin writes into
@@ -153,5 +153,48 @@ describe("mcp.* commands", () => {
     expect(rekey).toContain("https://switchboard.test/mcp/connect/nonce-00000000000000000002");
     expect(rekey).not.toContain("SECRET");
     expect(JSON.stringify(await inv.invoke("mcp.list", {}, chat(ALICE)))).not.toContain("SECRET");
+  });
+});
+
+describe("mcp.* commands — the connect follow-up (settle, item 19)", () => {
+  const URL_ = "https://mcp.vanta.com/mcp";
+  const bindWith = (svc: McpService, sleep: (ms: number) => Promise<void>): CommandInvoker => {
+    const registry = new CommandRegistry<McpCommandDeps>({ audit: () => {} });
+    registerMcpCommands(registry);
+    return bindCommands(registry, { mcp: { service: async () => svc, sleep } });
+  };
+  const settle = async (inv: CommandInvoker, id: string, value: JsonValue) => inv.settle(id, value, chat(ALICE));
+
+  it("`mcp add` and `mcp connect` settle; a link that gets used settles to the connected sentence with the tool count", async () => {
+    const { svc } = service();
+    const inv = bindWith(svc, async () => {
+      await svc.completeTicket("nonce-00000000000000000001", { sub: "cf", email: "a@x.example" }, "tok-1");
+    });
+    expect(inv.settles("mcp.add")).toBe(true);
+    expect(inv.settles("mcp.connect")).toBe(true);
+    expect(inv.settles("mcp.list")).toBe(false);
+    const added = await inv.invoke("mcp.add", { args: ["vanta"], options: { url: URL_, auth: "bearer" } }, chat(ALICE));
+    expect(added.ok).toBe(true);
+    expect(await settle(inv, "mcp.add", (added as { ok: true; value: JsonValue }).value)).toEqual({ ok: true, text: "✅ `vanta` is connected — 1 tool. Your runs can use it now." });
+  });
+
+  it("an `auth: none` add (no link) settles to nothing; an unused link settles to the expired sentence naming `mcp connect`; a superseded link settles to nothing", async () => {
+    const { svc } = service();
+    const inv = bindWith(svc, async () => {});
+    const none = await inv.invoke("mcp.add", { args: ["deepwiki"], options: { url: "https://mcp.deepwiki.com/mcp", auth: "none" } }, chat(ALICE));
+    expect(await settle(inv, "mcp.add", (none as { ok: true; value: JsonValue }).value)).toBeUndefined();
+    const added = await inv.invoke("mcp.add", { args: ["vanta"], options: { url: URL_, auth: "bearer" } }, chat(ALICE));
+    // Time passes past the TTL with the link unused (the service clock is fixed: expire the ticket by hand).
+    const t = (await svc.secrets.getTicket("nonce-00000000000000000001"))!;
+    await svc.secrets.putTicket({ ...t, expiresAt: 1 });
+    expect(await settle(inv, "mcp.add", (added as { ok: true; value: JsonValue }).value)).toEqual({ ok: false, text: "⌛ The connect link for `vanta` expired unused. `mcp connect vanta` mints a new one." });
+    // A newer link that did connect makes the old one's expiry silent.
+    const again = await inv.invoke("mcp.connect", { args: ["vanta"] }, chat(ALICE));
+    await svc.completeTicket("nonce-00000000000000000002", { sub: "cf", email: "a@x.example" }, "tok-1");
+    const third = await inv.invoke("mcp.connect", { args: ["vanta"] }, chat(ALICE));
+    const t3 = (await svc.secrets.getTicket("nonce-00000000000000000003"))!;
+    await svc.secrets.putTicket({ ...t3, expiresAt: 1 });
+    expect(await settle(inv, "mcp.connect", (third as { ok: true; value: JsonValue }).value)).toBeUndefined();
+    expect(await settle(inv, "mcp.connect", (again as { ok: true; value: JsonValue }).value)).toEqual({ ok: true, text: "✅ `vanta` is connected — 1 tool. Your runs can use it now." });
   });
 });

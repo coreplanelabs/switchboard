@@ -28,6 +28,8 @@ export interface McpCommandDeps {
   mcp: {
     /** The MCP service, or the operator-facing reason it is off. */
     service(): Promise<McpService | { unavailable: string }>;
+    /** Clock for the connect follow-up's poll (`settle`); default: real timers. */
+    sleep?(ms: number): Promise<void>;
   };
 }
 
@@ -70,6 +72,35 @@ async function via<T>(fn: () => Promise<T> | T): Promise<T> {
   } catch (err) {
     if (err instanceof McpServiceError) throw new CommandError(err.code, err.message);
     throw new CommandError("unavailable", err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** The connect follow-up (`settle`, features/mcp-tools.md item 19): an `add`
+ *  or `connect` that handed out a link gets a SECOND reply in the thread when
+ *  the link is used — connected with the tool count (or the verify warning),
+ *  or expired unused with the way to a new link. A link superseded by a newer
+ *  one that did connect says nothing. Nothing is probed here: the completion
+ *  recorded the outcome on the ticket. */
+async function settleConnect(deps: McpCommandDeps, output: JsonValue): Promise<{ ok: boolean; text: string } | undefined> {
+  const o = output as JsonObject;
+  if (typeof o.connectUrl !== "string") return undefined; // nothing deferred: auth none, or no link
+  const nonce = o.connectUrl.slice(o.connectUrl.lastIndexOf("/") + 1);
+  const name = String((o.server as JsonObject).name);
+  const svc = await deps.mcp.service();
+  if ("unavailable" in svc) return undefined;
+  const r = await svc.awaitTicket(nonce, deps.mcp.sleep ? { sleep: deps.mcp.sleep } : {});
+  switch (r.kind) {
+    case "completed": {
+      const count = typeof r.outcome.toolCount === "number" ? ` — ${r.outcome.toolCount} tool${r.outcome.toolCount === 1 ? "" : "s"}` : "";
+      const warn = r.outcome.warning ? `\n⚠️ ${r.outcome.warning}` : "";
+      return { ok: true, text: `✅ \`${name}\` is connected${count}. Your runs can use it now.${warn}` };
+    }
+    case "expired":
+      return { ok: false, text: `⌛ The connect link for \`${name}\` expired unused. \`mcp connect ${name}\` mints a new one.` };
+    case "cancelled":
+      return { ok: false, text: `The connect link for \`${name}\` was cancelled.` };
+    default:
+      return undefined; // superseded by a newer link that connected, or the ticket is gone
   }
 }
 
@@ -145,6 +176,7 @@ export const mcpAdd = defineCommand({
   effect: "write",
   describe: "Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.",
   render: renderAdd,
+  settle: (output, { deps }) => settleConnect(deps, output),
   handler: async ({ args, options, caller, deps }) => {
     const svc = await serviceOf(deps);
     const actor = actorOf(caller);
@@ -162,6 +194,7 @@ export const mcpConnect = defineCommand({
   effect: "write",
   describe: "A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.",
   render: renderAdd,
+  settle: (output, { deps }) => settleConnect(deps, output),
   handler: async ({ args, options, caller, deps }) => {
     const svc = await serviceOf(deps);
     const actor = actorOf(caller);

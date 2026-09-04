@@ -809,3 +809,38 @@ describe("dedupeDelivery (redelivery guard, #346)", () => {
     expect(state.was("C0BQS7KPJHK", TS)).toBe(true);
   });
 });
+
+describe("SlackIO.attach (features/slack-channel.md item 10)", () => {
+  const ev = { channel: "C1", user: "U1", text: "hi", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
+  const file = { name: "mcp-show.txt", text: "Tools (100):\n" + "  - `tool` — long\n".repeat(400), lead: "• `vanta` (user) ✅ connected\n_(full output attached — 8,000 chars)_" };
+
+  it("uploads the text as a snippet in the thread with the lead (in mrkdwn) as the comment — one call, no chunked messages", async () => {
+    const uploadV2 = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
+    const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
+    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    await new SlackIO(client, ev).attach(file);
+    expect(uploadV2).toHaveBeenCalledTimes(1);
+    expect(uploadV2.mock.calls[0][0]).toMatchObject({ channel_id: "C1", thread_ts: "1.0", filename: "mcp-show.txt", title: "mcp-show.txt", content: file.text });
+    expect(String(uploadV2.mock.calls[0][0].initial_comment)).toContain("_(full output attached — 8,000 chars)_");
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it("a failed upload (missing files:write, an API error) falls back to the chunked text reply carrying lead + text — the output always arrives", async () => {
+    const uploadV2 = vi.fn(async (_opts: Record<string, unknown>) => {
+      throw new Error("An API error occurred: missing_scope");
+    });
+    const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
+    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await new SlackIO(client, ev).attach(file);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(postMessage.mock.calls.length).toBeGreaterThan(1);
+    const texts = postMessage.mock.calls.map((c) => String(c[0].text));
+    expect(texts[0]).toContain("`vanta` (user)");
+    expect(texts.join("")).toContain("Tools (100):");
+    for (const c of postMessage.mock.calls) expect(c[0]).toMatchObject({ channel: "C1", thread_ts: "1.0" });
+  });
+});

@@ -436,3 +436,54 @@ describe("McpService — OAuth (item 18)", () => {
     expect(await h.secrets.getCredential("user:slack:UALICE/vanta")).toBeNull();
   });
 });
+
+describe("McpService — the connect follow-up (item 19)", () => {
+  const VANTA = "https://mcp.vanta.com/mcp";
+  const NONCE1 = "nonce-00000000000000000001";
+  const noSleep = { sleep: async () => {} };
+
+  it("a bearer completion records the tool count on the claimed ticket; an OAuth completion does too; a server that could not be reached records the verify warning instead", async () => {
+    const h = harness();
+    await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA, auth: "bearer" });
+    await h.service.completeTicket(NONCE1, justin, "tok-1");
+    expect((await h.secrets.getTicket(NONCE1))?.outcome).toEqual({ toolCount: 2 });
+    const o = harness({ oauth: { server: VANTA } });
+    await o.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
+    const started = (await o.service.startOAuth(NONCE1, justin)) as { ok: true; redirectUrl: string };
+    const state = new URL(started.redirectUrl).searchParams.get("state") as string;
+    expect((await o.service.completeOAuth(justin, { state, code: o.as.issueCode(started.redirectUrl) })).ok).toBe(true);
+    expect((await o.secrets.getTicket(NONCE1))?.outcome).toEqual({ toolCount: 2 });
+    const down = harness({ serverDown: true });
+    await down.service.add(alice, ME(alice), { name: "vanta", url: VANTA, auth: "bearer" });
+    await down.service.completeTicket(NONCE1, justin, "tok-1");
+    expect((await down.secrets.getTicket(NONCE1))?.outcome).toEqual({ warning: expect.stringMatching(/could not be reached/) });
+  });
+
+  it("awaitTicket: completed → the recorded outcome; cancelled; gone; expired unused → `expired`; expired but the server holds a credential from a newer link → `superseded`; it polls (sleeps) while pending", async () => {
+    const h = harness();
+    await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA, auth: "bearer" });
+    let polls = 0;
+    const waiting = h.service.awaitTicket(NONCE1, {
+      sleep: async () => {
+        polls += 1;
+        if (polls === 3) await h.service.completeTicket(NONCE1, justin, "tok-1");
+      },
+    });
+    expect(await waiting).toEqual({ kind: "completed", outcome: { toolCount: 2 } });
+    expect(polls).toBe(3);
+    expect(await h.service.awaitTicket("nonce-00000000000000000099", noSleep)).toEqual({ kind: "gone" });
+    // A second link, never used: after its TTL it is expired — but vanta IS connected (the first link), so the follow-up stays quiet.
+    await h.service.connect(alice, ME(alice), "vanta");
+    h.tick(MCP_TICKET_TTL_MS + 1);
+    expect(await h.service.awaitTicket("nonce-00000000000000000002", noSleep)).toEqual({ kind: "superseded" });
+    // A server with no credential whose link expires → expired.
+    const cold = harness();
+    await cold.service.add(alice, ME(alice), { name: "vanta", url: VANTA, auth: "bearer" });
+    cold.tick(MCP_TICKET_TTL_MS + 1);
+    expect(await cold.service.awaitTicket(NONCE1, noSleep)).toEqual({ kind: "expired" });
+    // Cancelled tickets are named.
+    const t = (await cold.secrets.getTicket(NONCE1))!;
+    await cold.secrets.putTicket({ ...t, state: "cancelled" });
+    expect(await cold.service.awaitTicket(NONCE1, noSleep)).toEqual({ kind: "cancelled" });
+  });
+});

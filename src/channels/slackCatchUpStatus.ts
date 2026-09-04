@@ -23,6 +23,7 @@ export const REQUIRED_BOT_SCOPES: readonly string[] = [
   "channels:history",
   "groups:history",
   "files:read",
+  "files:write", // long command output attached as a snippet (ChannelIO.attach); without it the adapter falls back to chunked messages
   "reactions:write",
   "channels:read",
   "groups:read",
