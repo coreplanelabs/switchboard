@@ -3,9 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigStore, InMemoryOverridesBacking } from "../config.js";
-import { InMemoryMcpClient } from "./fake.js";
-import { MCP_TICKET_TTL_MS } from "./registry.js";
-import { importCredentialKey } from "./sealed.js";
+import { fakeAuthorizationServer, InMemoryMcpClient, type FakeAuthorizationServerOptions } from "./fake.js";
+import { MCP_TICKET_TTL_MS, type McpTicket } from "./registry.js";
+import { importCredentialKey, openCredential } from "./sealed.js";
 import { InMemoryMcpSecretStore } from "./secretStore.js";
 import { McpService, McpServiceError, type McpActor, type McpTarget } from "./service.js";
 import type { McpServerSpec } from "./types.js";
@@ -27,6 +27,7 @@ channels:
   "slack:CSTATIC":
     mcpServers:
       notion: { url: "https://mcp.notion.so/mcp", auth: none }
+      compliance: { url: "https://mcp.vanta.com/mcp", auth: oauth }
 permissions:
   admins: ["slack:UADMIN"]
   repoManagement: ["slack:UADMIN"]
@@ -41,7 +42,7 @@ const ME = (a: McpActor): McpTarget => ({ kind: "user", id: a.id });
 const ORG: McpTarget = { kind: "org" };
 const CH = (id: string): McpTarget => ({ kind: "channel", id });
 
-function harness(opts: { key?: boolean; publicBaseUrl?: string; email?: Record<string, string>; rejectTokens?: string[]; serverDown?: boolean; env?: Record<string, string> } = {}) {
+function harness(opts: { key?: boolean; publicBaseUrl?: string; email?: Record<string, string>; rejectTokens?: string[]; serverDown?: boolean; env?: Record<string, string>; oauth?: FakeAuthorizationServerOptions; fetch?: false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "swb-mcp-"));
   const cfg = join(dir, "config.yaml");
   writeFileSync(cfg, YAML);
@@ -51,11 +52,15 @@ function harness(opts: { key?: boolean; publicBaseUrl?: string; email?: Record<s
   let t = 1_000_000;
   let n = 0;
   const clients: Array<{ spec: McpServerSpec; client: InMemoryMcpClient }> = [];
+  // The fake authorization server (item 18) doubles as the auth-detection
+  // target; without `oauth`, every server answers 401 with no metadata → bearer.
+  const as = fakeAuthorizationServer(opts.oauth ?? { server: "https://mcp.vanta.com/mcp", metadata: false });
   const service = new McpService({
     config,
     secrets,
     key: opts.key === false ? undefined : KEY,
     publicBaseUrl: opts.publicBaseUrl === undefined ? "https://switchboard.test" : opts.publicBaseUrl || undefined,
+    ...(opts.fetch === false ? {} : { fetch: as.fetch }),
     env: opts.env ?? { MCP_GITHUB_TOKEN: "ghp_static" },
     resolveEmail: opts.email ? async (id) => opts.email![id] : undefined,
     now: () => t,
@@ -68,7 +73,7 @@ function harness(opts: { key?: boolean; publicBaseUrl?: string; email?: Record<s
       return client;
     },
   });
-  return { config, backing, secrets, service, clients, tick: (ms: number) => (t += ms), now: () => t };
+  return { config, backing, secrets, service, clients, as, tick: (ms: number) => (t += ms), now: () => t };
 }
 
 const code = async (p: Promise<unknown> | (() => unknown)) => {
@@ -126,7 +131,7 @@ describe("McpService — tiers and authorization (items 13–14)", () => {
     await h.service.add(alice, ME(alice), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "none" });
     await h.service.add(bob, ME(bob), { name: "secretive", url: "https://s.example/mcp", auth: "none" });
     const seen = await h.service.list(alice, "slack:CSTATIC");
-    expect(seen.map((s) => `${s.scope}/${s.name}/${s.state}/${s.source}`)).toEqual(["org/github/static/config", "channel/notion/connected/config", "user/vanta/connected/runtime"]);
+    expect(seen.map((s) => `${s.scope}/${s.name}/${s.state}/${s.source}`)).toEqual(["org/github/static/config", "channel/notion/connected/config", "channel/compliance/awaiting_credential/config", "user/vanta/connected/runtime"]);
     expect((await h.service.list(bob, "slack:COTHER")).map((s) => s.name)).toEqual(["github", "secretive"]);
     expect(await code(h.service.remove(alice, ORG, "github"))).toBe("conflict"); // pinned in config.yaml
     expect(await code(h.service.remove(alice, ME(alice), "secretive"))).toBe("not_found"); // bob's
@@ -278,5 +283,156 @@ describe("McpService — the run-time view (item 17)", () => {
       throw new Error("DO offline");
     };
     expect((await h.service.resolveForRun("general", { userId: alice.id }))[1]).toEqual({ name: "vanta", unavailable: "secret store: DO offline" });
+  });
+});
+
+describe("McpService — OAuth (item 18)", () => {
+  const VANTA = "https://mcp.vanta.com/mcp";
+  const NONCE1 = "nonce-00000000000000000001";
+  const startFlow = async (h: ReturnType<typeof harness>, nonce = NONCE1) => {
+    const started = (await h.service.startOAuth(nonce, justin)) as { ok: true; redirectUrl: string };
+    expect(started.ok).toBe(true);
+    return { redirectUrl: started.redirectUrl, state: new URL(started.redirectUrl).searchParams.get("state") as string, code: h.as.issueCode(started.redirectUrl) };
+  };
+  const tokenFor = async (h: ReturnType<typeof harness>) => {
+    const hit = (await h.service.resolveForRun("general", { userId: alice.id })).find((s) => ("spec" in s ? s.spec.name : s.name) === "vanta");
+    return hit && "spec" in hit ? hit.spec.auth?.token : hit;
+  };
+
+  it("add without --auth detects it from the server: 401 + metadata → oauth with a connect link; 2xx → none; 401 without metadata → bearer; unreachable → invalid_input; an explicit --auth never probes", async () => {
+    const h = harness({ oauth: { server: VANTA } });
+    expect(await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA })).toMatchObject({ detected: "oauth", server: { auth: "oauth", state: "awaiting_credential" }, connectUrl: `https://switchboard.test/mcp/connect/${NONCE1}` });
+    expect(h.backing.document?.users[alice.id].mcpServers?.vanta.auth).toBe("oauth");
+    expect(await harness({ oauth: { server: VANTA, initializeStatus: 200 } }).service.add(alice, ME(alice), { name: "vanta", url: VANTA })).toMatchObject({ detected: "none", server: { state: "connected" } });
+    expect(await harness({ oauth: { server: VANTA, metadata: false } }).service.add(alice, ME(alice), { name: "vanta", url: VANTA })).toMatchObject({ detected: "bearer" });
+    expect(await code(harness({ oauth: { server: VANTA, down: true } }).service.add(alice, ME(alice), { name: "vanta", url: VANTA }))).toBe("invalid_input");
+    const explicit = harness({ oauth: { server: VANTA, down: true } });
+    expect(await explicit.service.add(alice, ME(alice), { name: "vanta", url: VANTA, auth: "none" })).toMatchObject({ server: { auth: "none" } });
+    expect(explicit.as.calls).toHaveLength(0);
+    // Without a fetch wired, detection is impossible and says so.
+    expect(await code(harness({ fetch: false }).service.add(alice, ME(alice), { name: "vanta", url: VANTA }))).toBe("invalid_input");
+  });
+
+  it("startOAuth: discovers, registers Switchboard as a public client, seals the PKCE record onto the ticket (now `authorizing`), returns the authorization URL; only the ticket's owner may start; a bearer server's ticket is refused", async () => {
+    const h = harness({ oauth: { server: VANTA }, email: { [alice.id]: "justin@coreplane.ai" } });
+    await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
+    expect(await h.service.startOAuth(NONCE1, stranger)).toMatchObject({ ok: false, refusal: { kind: "wrong_identity" } });
+    const { redirectUrl } = await startFlow(h);
+    const u = new URL(redirectUrl);
+    expect(u.origin + u.pathname).toBe("https://as.example.com/oauth/authorize");
+    expect(Object.fromEntries(u.searchParams)).toMatchObject({ client_id: "client-1", redirect_uri: "https://switchboard.test/mcp/oauth/callback", code_challenge_method: "S256", resource: "https://mcp.vanta.com/mcp", scope: "mcp-api.all:write" });
+    expect(u.searchParams.get("state")).toMatch(new RegExp(`^${NONCE1}\\.`));
+    const ticket = await h.secrets.getTicket(NONCE1);
+    expect(ticket).toMatchObject({ state: "authorizing", oauth: { keyId: "k1" } });
+    expect(JSON.stringify(ticket)).not.toMatch(/code_verifier|client-1/);
+    expect(h.as.registrations[0]).toMatchObject({ client_name: "Switchboard", redirect_uris: ["https://switchboard.test/mcp/oauth/callback"], client_uri: "https://switchboard.test" });
+    await h.service.add(alice, ME(alice), { name: "linear", url: "https://mcp.linear.app/mcp", auth: "bearer" });
+    expect(await h.service.startOAuth("nonce-00000000000000000002", justin)).toMatchObject({ ok: false, refusal: { kind: "oauth_failed", reason: expect.stringMatching(/does not sign in with OAuth/) } });
+    expect(await h.service.startOAuth("nonce-00000000000000000009", justin)).toMatchObject({ ok: false, refusal: { kind: "not_found" } });
+  });
+
+  it("startOAuth failures are sentences and leave the ticket untouched", async () => {
+    const h = harness({ oauth: { server: VANTA, registrationStatus: 400 } });
+    await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
+    expect(await h.service.startOAuth(NONCE1, justin)).toMatchObject({ ok: false, refusal: { kind: "oauth_failed", reason: expect.stringMatching(/registration was refused/) } });
+    expect((await h.secrets.getTicket(NONCE1))?.state).toBe("pending");
+  });
+
+  it("startOAuth's CAS losing is named for what happened: a ticket cancelled underneath is `cancelled`, one another start moved is `oauth_failed` asking for the button again — never `wrong_identity`, and the winner's pending record survives", async () => {
+    const h = harness({ oauth: { server: VANTA } });
+    await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
+    // The race: between the read and the CAS, the stored ticket changes hands.
+    const raceWith = (mutate: (cur: McpTicket) => McpTicket) => {
+      const real = h.secrets.transitionTicket.bind(h.secrets);
+      let raced = false;
+      h.secrets.transitionTicket = async (ticket, from) => {
+        if (!raced) {
+          raced = true;
+          h.secrets.tickets.set(ticket.nonce, mutate(h.secrets.tickets.get(ticket.nonce)!));
+        }
+        return real(ticket, from);
+      };
+    };
+    raceWith((cur) => ({ ...cur, state: "cancelled" }));
+    expect(await h.service.startOAuth(NONCE1, justin)).toMatchObject({ ok: false, refusal: { kind: "cancelled" } });
+    await h.service.connect(alice, ME(alice), "vanta");
+    raceWith((cur) => ({ ...cur, state: "authorizing", oauth: { keyId: "k1", sealed: "the-other-tab" } }));
+    expect(await h.service.startOAuth("nonce-00000000000000000002", justin)).toMatchObject({ ok: false, refusal: { kind: "oauth_failed", reason: expect.stringMatching(/changed while sign-in was starting/) } });
+    expect(h.secrets.tickets.get("nonce-00000000000000000002")).toMatchObject({ state: "authorizing", oauth: { sealed: "the-other-tab" } });
+  });
+
+  it("completeOAuth: the owner returns with code + the exact state → code exchanged with the sealed verifier, token probed against the server, ticket claimed, credential sealed as the OAuth set; runs get the access token as a bearer", async () => {
+    const h = harness({ oauth: { server: VANTA } });
+    await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
+    const { state, code: c } = await startFlow(h);
+    expect(await h.service.completeOAuth(justin, { state, code: c })).toMatchObject({ ok: true, toolCount: 2, server: { state: "connected" } });
+    expect((await h.secrets.getTicket(NONCE1))?.state).toBe("completed");
+    const sealed = await h.secrets.getCredential("user:slack:UALICE/vanta");
+    expect(sealed?.sealed).toBeTruthy();
+    expect(sealed!.sealed).not.toContain("at-1");
+    expect(JSON.parse(await openCredential(KEY, sealed!))).toMatchObject({ kind: "oauth", accessToken: "at-1", refreshToken: "rt-1", clientId: "client-1" });
+    expect(await tokenFor(h)).toBe("at-1");
+    expect(h.clients.at(-1)?.spec.auth).toEqual({ type: "bearer", token: "at-1" });
+    // The ticket is spent: the callback cannot run twice.
+    expect(await h.service.completeOAuth(justin, { state, code: c })).toMatchObject({ ok: false, refusal: { kind: "used" } });
+  });
+
+  it("completeOAuth refusals: a stranger; a mismatched or malformed state; an `error` from the authorization server; a code the server rejects; a token the MCP server rejects — nothing stored, the ticket stays `authorizing`; a ticket that never started is `not_authorizing`", async () => {
+    const h = harness({ oauth: { server: VANTA }, rejectTokens: ["at-1"] });
+    await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
+    const { state, code: c } = await startFlow(h);
+    expect(await h.service.completeOAuth(stranger, { state, code: c })).toMatchObject({ ok: false, refusal: { kind: "wrong_identity" } });
+    expect(await h.service.completeOAuth(justin, { state: `${NONCE1}.wrong`, code: c })).toMatchObject({ ok: false, refusal: { kind: "oauth_failed", reason: expect.stringMatching(/state/) } });
+    expect(await h.service.completeOAuth(justin, { state: "no-dot", code: c })).toMatchObject({ ok: false, refusal: { kind: "not_found" } });
+    expect(await h.service.completeOAuth(justin, { state, error: "access_denied", errorDescription: "user cancelled" })).toMatchObject({ ok: false, refusal: { kind: "oauth_failed", reason: expect.stringMatching(/access_denied.*user cancelled/) } });
+    // The state is proven before the server's error is relayed: a wrong state carrying an `error` is a state mismatch, not that error.
+    expect(await h.service.completeOAuth(justin, { state: `${NONCE1}.wrong`, error: "access_denied" })).toMatchObject({ ok: false, refusal: { kind: "oauth_failed", reason: expect.stringMatching(/state/) } });
+    expect(await h.service.completeOAuth(justin, { state, code: "never-issued" })).toMatchObject({ ok: false, refusal: { kind: "oauth_failed", reason: expect.stringMatching(/invalid_grant/) } });
+    expect(await h.service.completeOAuth(justin, { state, code: c })).toMatchObject({ ok: false, refusal: { kind: "oauth_failed", reason: expect.stringMatching(/rejected the token/) } });
+    expect(await h.secrets.getCredential("user:slack:UALICE/vanta")).toBeNull();
+    expect((await h.secrets.getTicket(NONCE1))?.state).toBe("authorizing");
+    await h.service.add(alice, ME(alice), { name: "other", url: VANTA, auth: "oauth" });
+    expect(await h.service.completeOAuth(justin, { state: "nonce-00000000000000000002.x", code: "c" })).toMatchObject({ ok: false, refusal: { kind: "not_authorizing" } });
+  });
+
+  it("run time: a live token is used as is; inside the refresh skew it is refreshed ONCE for N concurrent runs, stored back, the cached client rebuilt; a revoked refresh token is a named `unavailable`", async () => {
+    const h = harness({ oauth: { server: VANTA } });
+    await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
+    const { state, code: c } = await startFlow(h);
+    expect((await h.service.completeOAuth(justin, { state, code: c })).ok).toBe(true);
+    expect(await tokenFor(h)).toBe("at-1");
+    h.tick(3600_000 - 30_000); // inside the 60 s skew
+    expect(await Promise.all([tokenFor(h), tokenFor(h), tokenFor(h)])).toEqual(["at-2", "at-2", "at-2"]);
+    expect(h.as.tokenRequests.filter((r) => r.grant_type === "refresh_token")).toHaveLength(1);
+    expect(JSON.parse(await openCredential(KEY, (await h.secrets.getCredential("user:slack:UALICE/vanta"))!))).toMatchObject({ accessToken: "at-2", refreshToken: "rt-1", expiresAt: h.now() + 3600_000 });
+    expect(await tokenFor(h)).toBe("at-2");
+    expect(h.as.tokenRequests.filter((r) => r.grant_type === "refresh_token")).toHaveLength(1);
+    h.as.revokeRefreshTokens();
+    h.tick(3600_000);
+    expect(await tokenFor(h)).toMatchObject({ name: "vanta", unavailable: expect.stringMatching(/invalid_grant/) });
+  });
+
+  it("a static `auth: oauth` server in config.yaml is connected the same way: `connect --scope channel` mints the link, the callback seals the channel's credential, runs in that channel get the token; a static bearer without tokenEnv cannot be connected (it is not a stored credential)", async () => {
+    const h = harness({ oauth: { server: "https://mcp.vanta.com/mcp" } });
+    const link = await h.service.connect(alice, CH("slack:CSTATIC"), "compliance");
+    expect(link).toMatchObject({ server: { auth: "oauth", source: "config", state: "awaiting_credential" }, connectUrl: `https://switchboard.test/mcp/connect/${NONCE1}` });
+    const { state, code: c } = await startFlow(h);
+    expect((await h.service.completeOAuth(justin, { state, code: c })).ok).toBe(true);
+    expect(await h.secrets.getCredential("channel:slack:CSTATIC/compliance")).toBeTruthy();
+    const inChannel = (await h.service.resolveForRun("general", { userId: bob.id, channelId: "slack:CSTATIC" })).find((s) => "spec" in s && s.spec.name === "compliance") as { spec: McpServerSpec };
+    expect(inChannel.spec.auth).toEqual({ type: "bearer", token: "at-1" });
+    expect(await code(h.service.connect(admin, ORG, "github"))).toBe("invalid_input"); // tokenEnv — nothing stored to re-key
+  });
+
+  it("connect re-keys an oauth server with a fresh link; list/show report the state and never a credential; remove drops the sealed set", async () => {
+    const h = harness({ oauth: { server: VANTA } });
+    await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
+    expect((await h.service.connect(alice, ME(alice), "vanta")).connectUrl).toBe("https://switchboard.test/mcp/connect/nonce-00000000000000000002");
+    expect((await h.service.list(alice, undefined)).find((s) => s.name === "vanta")).toMatchObject({ auth: "oauth", state: "awaiting_credential" });
+    const { state, code: c } = await startFlow(h, "nonce-00000000000000000002");
+    expect((await h.service.completeOAuth(justin, { state, code: c })).ok).toBe(true);
+    expect(JSON.stringify(await h.service.show(alice, ME(alice), "vanta"))).not.toMatch(/at-1|rt-1|client-1/);
+    await h.service.remove(alice, ME(alice), "vanta");
+    expect(await h.secrets.getCredential("user:slack:UALICE/vanta")).toBeNull();
   });
 });

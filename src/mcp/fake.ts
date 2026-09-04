@@ -170,3 +170,166 @@ function lowerHeaders(h: HeadersInit | undefined): Record<string, string> {
   for (const [k, v] of Object.entries(h)) out[k.toLowerCase()] = String(v);
   return out;
 }
+
+// ---- a fake authorization server (item 18) --------------------------------------------
+//
+// Shaped like Vanta's: RFC 9728 resource metadata at the ROOT well-known path
+// (the path-inserted form 404s), RFC 8414 metadata with the path inserted
+// after the host, dynamic registration, PKCE S256 checked for real,
+// authorization_code + refresh_token, `token_endpoint_auth_methods_supported:
+// ["none"]`. There is no browser: a test mints the code the authorization
+// endpoint would have redirected with — `issueCode(authorizationUrl)` binds it
+// to that request's `code_challenge`, `codeFor(verifier)` to a verifier the
+// test picked. Tokens are `at-<n>` / `rt-<n>`; every request is recorded.
+
+export interface FakeAuthorizationServerOptions {
+  /** The MCP server URL (the protected resource). */
+  server: string;
+  /** What the server answers to an unauthenticated initialize (default 401 with a resource_metadata hint). */
+  initializeStatus?: number;
+  /** No metadata anywhere (a plain bearer server). */
+  metadata?: boolean;
+  /** The server is its own authorization server: no resource metadata, RFC 8414 at the server's origin. */
+  selfIssued?: boolean;
+  /** Override the `authorization_servers` list in the resource metadata. */
+  authorizationServers?: string[];
+  codeChallengeMethods?: string[];
+  grantTypes?: string[];
+  tokenEndpoint?: string;
+  registrationStatus?: number;
+  tokenType?: string;
+  /** Issue a new refresh token on every refresh. */
+  rotateRefresh?: boolean;
+  /** Every request fails at the transport. */
+  down?: boolean;
+  /** `expires_in` on token responses (default 3600). */
+  expiresIn?: number;
+}
+
+export interface FakeCall {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: string;
+}
+
+export function fakeAuthorizationServer(opts: FakeAuthorizationServerOptions) {
+  const server = new URL(opts.server);
+  const serverPath = server.pathname.replace(/\/+$/, "");
+  const asOrigin = opts.selfIssued ? server.origin : "https://as.example.com";
+  const asPath = opts.selfIssued ? "" : "/mcp";
+  const tokenEndpoint = opts.tokenEndpoint ?? `${asOrigin}/oauth/token`;
+  const calls: FakeCall[] = [];
+  const registrations: Record<string, unknown>[] = [];
+  const tokenRequests: Record<string, string>[] = [];
+  /** code → the S256 challenge it was issued for */
+  const codes = new Map<string, string>();
+  const refreshTokens = new Set<string>(["rt-1"]);
+  let issued = 0;
+  let tokens = 0;
+  let refreshes = 1;
+
+  const json = (status: number, body: unknown, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+  const s256 = async (verifier: string) => {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+    let s = "";
+    for (const b of digest) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  };
+  /** What the authorization endpoint would redirect with for this request. */
+  const issueCode = (authorizationUrl: string): string => {
+    const challenge = new URL(authorizationUrl).searchParams.get("code_challenge");
+    if (!challenge) throw new Error("authorization URL carries no code_challenge");
+    const code = `code-${++issued}`;
+    codes.set(code, challenge);
+    return code;
+  };
+  const codeFor = async (verifier: string): Promise<string> => {
+    const code = `code-${++issued}`;
+    codes.set(code, await s256(verifier));
+    return code;
+  };
+
+  const fetchImpl = async (input: string, init?: RequestInit): Promise<Response> => {
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries((init?.headers as Record<string, string>) ?? {})) headers[k.toLowerCase()] = v;
+    const body = typeof init?.body === "string" ? init.body : undefined;
+    const method = (init?.method ?? "GET").toUpperCase();
+    calls.push({ url: input, method, headers, ...(body !== undefined ? { body } : {}) });
+    if (opts.down) throw new Error("ECONNREFUSED");
+    const u = new URL(input);
+    const path = `${u.origin}${u.pathname}`;
+    // The MCP server itself.
+    if (path === `${server.origin}${serverPath}`) {
+      const status = opts.initializeStatus ?? 401;
+      if (status >= 200 && status < 300) return json(status, { jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "fake", version: "0" } } });
+      const hint = opts.metadata === false || opts.selfIssued ? "" : `, resource_metadata="${server.origin}/.well-known/oauth-protected-resource"`;
+      return json(status, { error: "invalid_token" }, status === 401 || status === 403 ? { "www-authenticate": `Bearer error="invalid_token"${hint}` } : {});
+    }
+    if (opts.metadata === false) return json(404, { error: "not_found" });
+    // RFC 9728 — root form only (the path-inserted form is not served, like Vanta).
+    if (!opts.selfIssued && path === `${server.origin}/.well-known/oauth-protected-resource`) {
+      return json(200, { resource: server.origin, authorization_servers: opts.authorizationServers ?? [`${asOrigin}${asPath}`], scopes_supported: ["mcp-api.all:write"] });
+    }
+    // RFC 8414 — path inserted after the host.
+    if (path === `${asOrigin}/.well-known/oauth-authorization-server${asPath}`) {
+      return json(200, {
+        issuer: `${asOrigin}${asPath}`,
+        authorization_endpoint: `${asOrigin}/oauth/authorize`,
+        token_endpoint: tokenEndpoint,
+        registration_endpoint: `${asOrigin}/oauth/register`,
+        scopes_supported: ["mcp-api.all:write"],
+        response_types_supported: ["code"],
+        grant_types_supported: opts.grantTypes ?? ["authorization_code", "refresh_token"],
+        token_endpoint_auth_methods_supported: ["none"],
+        code_challenge_methods_supported: opts.codeChallengeMethods ?? ["S256"],
+      });
+    }
+    if (path === `${asOrigin}/oauth/register`) {
+      const req = JSON.parse(body ?? "{}") as Record<string, unknown>;
+      registrations.push(req);
+      if (opts.registrationStatus && opts.registrationStatus >= 400) return json(opts.registrationStatus, { error: "invalid_client_metadata" });
+      return json(201, { client_id: "client-1", redirect_uris: req.redirect_uris });
+    }
+    if (path === tokenEndpoint.replace(/\?.*$/, "")) {
+      const form = Object.fromEntries(new URLSearchParams(body ?? "")) as Record<string, string>;
+      tokenRequests.push(form);
+      const issue = (refresh: string) => {
+        tokens += 1;
+        return json(200, { access_token: `at-${tokens}`, token_type: opts.tokenType ?? "Bearer", expires_in: opts.expiresIn ?? 3600, refresh_token: refresh, scope: "mcp-api.all:write" });
+      };
+      if (form.grant_type === "authorization_code") {
+        const challenge = form.code ? codes.get(form.code) : undefined;
+        if (!challenge || !form.code_verifier || (await s256(form.code_verifier)) !== challenge) return json(400, { error: "invalid_grant", error_description: "bad code or verifier" });
+        if (form.client_id !== "client-1" || !form.redirect_uri) return json(400, { error: "invalid_client" });
+        codes.delete(form.code); // single use
+        return issue("rt-1");
+      }
+      if (form.grant_type === "refresh_token") {
+        if (!form.refresh_token || !refreshTokens.has(form.refresh_token)) return json(400, { error: "invalid_grant", error_description: "unknown refresh token" });
+        if (opts.rotateRefresh) {
+          refreshTokens.delete(form.refresh_token);
+          refreshes += 1;
+          refreshTokens.add(`rt-${refreshes}`);
+          return issue(`rt-${refreshes}`);
+        }
+        return issue(form.refresh_token);
+      }
+      return json(400, { error: "unsupported_grant_type" });
+    }
+    return json(404, { error: "not_found" });
+  };
+
+  return {
+    fetch: fetchImpl,
+    calls,
+    registrations,
+    tokenRequests,
+    issueCode,
+    codeFor,
+    /** Every refresh token stops working (the person revoked access). */
+    revokeRefreshTokens: () => refreshTokens.clear(),
+    tokenEndpoint,
+    authorizationEndpoint: `${asOrigin}/oauth/authorize`,
+  };
+}

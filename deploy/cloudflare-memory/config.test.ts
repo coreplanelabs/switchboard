@@ -101,9 +101,14 @@ describe("ConfigDO secrets + tickets (features/mcp-tools.md items 15–16)", () 
     expect((await post("/config/tickets/transition", { ticket: first, fromState: "pending" })).data).toEqual({ ok: true, applied: true });
     expect((await post("/config/tickets/transition", { ticket: second, fromState: "pending" })).data).toEqual({ ok: true, applied: false });
     expect(((await post("/config/tickets/get", { nonce })).data.ticket as { openedBy: { sub: string } }).openedBy.sub).toBe("cf-a");
-    const done = { ...first, state: "completed", completedBy: { sub: "cf-a", at: 4 } };
-    expect((await post("/config/tickets/transition", { ticket: done, fromState: "opened" })).data).toEqual({ ok: true, applied: true });
-    expect((await post("/config/tickets/transition", { ticket: done, fromState: "opened" })).data).toEqual({ ok: true, applied: false });
+    // OAuth (item 18): opened → authorizing carries the sealed pending record, opaque here; the callback then claims it.
+    const authorizing = { ...first, state: "authorizing", oauth: { keyId: "k1", sealed: "c2VhbGVk" } };
+    expect((await post("/config/tickets/transition", { ticket: authorizing, fromState: "opened" })).data).toEqual({ ok: true, applied: true });
+    expect(((await post("/config/tickets/get", { nonce })).data.ticket as { state: string; oauth: { sealed: string } }).oauth.sealed).toBe("c2VhbGVk");
+    const done = { ...authorizing, state: "completed", completedBy: { sub: "cf-a", at: 4 } };
+    expect((await post("/config/tickets/transition", { ticket: done, fromState: "opened" })).data).toEqual({ ok: true, applied: false }); // it is authorizing now
+    expect((await post("/config/tickets/transition", { ticket: done, fromState: "authorizing" })).data).toEqual({ ok: true, applied: true });
+    expect((await post("/config/tickets/transition", { ticket: done, fromState: "authorizing" })).data).toEqual({ ok: true, applied: false });
     expect((await post("/config/tickets/transition", { ticket: done, fromState: "done" })).status).toBe(400);
     expect((await post("/config/tickets/transition", { ticket: { nonce: "short" }, fromState: "pending" })).status).toBe(400);
   });

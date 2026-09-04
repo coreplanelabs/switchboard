@@ -1,7 +1,24 @@
 import { AGENTS } from "../agents/registry.js";
 import type { ConfigStore, ResolvedMcpServer, Scope } from "../config.js";
-import { assertUrlAllowed, BlockedUrlError } from "../tools/web.js";
-import { newTicket, planComplete, planOpen, type CompleteDecision, type ConnectIdentity, type OpenDecision } from "./connect.js";
+import { assertUrlAllowed, BlockedUrlError, type FetchLike } from "../tools/web.js";
+import { newTicket, planCallback, planComplete, planOpen, planStart, type CallbackRefusal, type CompleteDecision, type ConnectIdentity, type OpenDecision, type TicketRefusal } from "./connect.js";
+import {
+  authorizationUrl,
+  detectAuth,
+  discover,
+  exchangeCode,
+  isOAuthPending,
+  needsRefresh,
+  nonceOfState,
+  OAuthError,
+  oauthState,
+  parseStoredCredential,
+  pkce,
+  refreshCredential,
+  registerClient,
+  type OAuthCredential,
+  type OAuthPending,
+} from "./oauth.js";
 import {
   MCP_AGENTS_MAX,
   MCP_SELF_SERVE_AGENTS,
@@ -48,8 +65,12 @@ export interface McpServiceOptions {
   /** The sealing key; absent → bearer servers without `tokenEnv` cannot be added or used (named at the point of failure). */
   key?: CredentialKey;
   factory: McpClientFactory;
-  /** `PUBLIC_BASE_URL` — where connect links point; absent → bearer adds are refused. */
+  /** `PUBLIC_BASE_URL` — where connect links point; absent → bearer/oauth adds are refused. */
   publicBaseUrl?: string;
+  /** The SSRF-pinned fetch for auth detection and the OAuth exchanges (item
+   *  18); absent → `mcp add` needs an explicit `--auth` and oauth servers
+   *  cannot be connected. */
+  fetch?: FetchLike;
   env: Record<string, string | undefined>;
   /** Resolve a chat user's email so a ticket binds to it; undefined → bind-on-first-open. */
   resolveEmail?: (userId: string) => Promise<string | undefined>;
@@ -78,14 +99,29 @@ export interface AddInput {
   name: string;
   url: string;
   agents?: string[];
-  auth: McpAuthKind;
+  /** Absent → detected with one unauthenticated `initialize` (item 18). */
+  auth?: McpAuthKind;
 }
 
 export interface AddResult {
   server: McpServerView;
+  /** Set when `auth` was detected rather than given. */
+  detected?: McpAuthKind;
   connectUrl?: string;
   expiresAt?: number;
   expiresInMinutes?: number;
+}
+
+/** What the connect page gets back from `startOAuth`. */
+export type StartOAuthResult = { ok: true; redirectUrl: string; server: McpServerView } | { ok: false; refusal: TicketRefusal | { kind: "oauth_failed"; reason: string }; server?: McpServerView };
+
+/** What the connect page gets back from `completeOAuth` — shaped like `completeTicket`'s result. */
+export interface CompleteOAuthResult {
+  ok: boolean;
+  refusal?: CallbackRefusal | { kind: "oauth_failed"; reason: string };
+  toolCount?: number;
+  warning?: string;
+  server?: McpServerView;
 }
 
 const TICKET_MINUTES = Math.round(MCP_TICKET_TTL_MS / 60_000);
@@ -141,7 +177,8 @@ export class McpService {
       throw new McpServiceError("invalid_input", `url: ${err instanceof BlockedUrlError ? err.message : "expected an http(s) URL"}`);
     }
     const agents = this.checkAgents(target.kind, input.agents);
-    if (input.auth === "bearer") this.requireBearerSupport();
+    const auth = input.auth ?? (await this.detect(input.url));
+    if (auth !== "none") this.requireCredentialSupport(auth);
     const runtime = this.opts.config.runtimeScope(target.kind, target.id);
     if (runtime.mcpServers?.[input.name] || this.opts.config.isStaticMcpServer(target.kind, target.id, input.name)) {
       throw new McpServiceError("conflict", `an MCP server named "${input.name}" already exists in this scope — remove it first or pick another name`);
@@ -156,20 +193,25 @@ export class McpService {
     const higher = this.opts.config.mcpServersFor(target.kind === "channel" ? (target.id as string) : `none:${actor.id}`, actor.id).find((r) => r.name === input.name && ranks(r.kind) < ranks(target.kind));
     if (higher) throw new McpServiceError("conflict", `"${input.name}" is already an ${higher.kind}-scoped MCP server; pick another name`);
     if (Object.keys(runtime.mcpServers ?? {}).length >= MCP_SERVERS_PER_SCOPE_MAX) throw new McpServiceError("invalid_input", `this scope already has ${MCP_SERVERS_PER_SCOPE_MAX} servers`);
-    const entry: McpServerEntry = { url: input.url, agents, auth: input.auth, addedBy: actor.id, addedAt: this.now() };
+    const entry: McpServerEntry = { url: input.url, agents, auth, addedBy: actor.id, addedAt: this.now() };
     await this.writeServers(target, { ...runtime.mcpServers, [input.name]: entry });
     const view = serverView(scopeKey, input.name, entry, { hasCredential: false, source: "runtime" });
-    if (input.auth === "none") return { server: view };
+    const detected = input.auth === undefined ? { detected: auth } : {};
+    if (auth === "none") return { server: view, ...detected };
     const ticket = await this.mintTicket(mcpCredentialKey(scopeKey, input.name), actor);
-    return { server: view, connectUrl: this.connectUrl(ticket), expiresAt: ticket.expiresAt, expiresInMinutes: TICKET_MINUTES };
+    return { server: view, ...detected, connectUrl: this.connectUrl(ticket), expiresAt: ticket.expiresAt, expiresInMinutes: TICKET_MINUTES };
   }
 
-  /** A fresh connect link for a runtime bearer server (first connect, or a re-key). */
+  /** A fresh connect link for a runtime bearer/oauth server (first connect, or a re-key). */
   async connect(actor: McpActor, target: McpTarget, name: string): Promise<AddResult> {
     const { scopeKey, entry, source } = this.owned(target, name);
-    if (entry.auth !== "bearer") throw new McpServiceError("invalid_input", `"${name}" needs no credential (auth: ${entry.auth})`);
-    if (source === "config") throw new McpServiceError("invalid_input", `"${name}" is pinned in config.yaml with tokenEnv — its bearer is an environment variable on the bot, not a stored credential`);
-    this.requireBearerSupport();
+    if (entry.auth === "none") throw new McpServiceError("invalid_input", `"${name}" needs no credential (auth: none)`);
+    // A static bearer with `tokenEnv` has no stored credential to (re)key. A
+    // static oauth entry does: its sign-in is completed at run time like a
+    // runtime one — `source` alone is not the refusal.
+    if (entry.tokenEnv) throw new McpServiceError("invalid_input", `"${name}" is pinned in config.yaml with tokenEnv — its bearer is an environment variable on the bot, not a stored credential`);
+    if (source === "config" && entry.auth === "bearer") throw new McpServiceError("invalid_input", `"${name}" is pinned in config.yaml as a bearer server — give it a tokenEnv there, or add it at run time with \`mcp add\` to paste a token`);
+    this.requireCredentialSupport(entry.auth);
     const ticket = await this.mintTicket(mcpCredentialKey(scopeKey, name), actor);
     const has = (await this.viaSecrets(() => this.opts.secrets.getCredential(mcpCredentialKey(scopeKey, name)))) !== null;
     return { server: serverView(scopeKey, name, entry, { hasCredential: has, source }), connectUrl: this.connectUrl(ticket), expiresAt: ticket.expiresAt, expiresInMinutes: TICKET_MINUTES };
@@ -234,7 +276,8 @@ export class McpService {
     if (!decision.ok) return { decision };
     const found = this.findByCredentialKey(decision.ticket.serverId);
     if (!found) return { decision: { ok: false, refusal: { kind: "not_found" } } };
-    const key = this.requireBearerSupport();
+    if (found.entry.auth !== "bearer") return { decision: { ok: false, refusal: { kind: "bad_token", reason: `"${found.name}" signs in with OAuth — use the button, not a pasted token` } }, server: await this.view(found) };
+    const key = this.requireCredentialSupport("bearer");
     const probe = await this.probe({ id: decision.ticket.serverId, name: found.name, url: found.entry.url, agents: found.entry.agents ?? [...MCP_SELF_SERVE_AGENTS], auth: { type: "bearer", token: decision.token } });
     const server = await this.view(found);
     if (probe.kind === "rejected") return { decision, verified: false, server, warning: probe.error };
@@ -244,6 +287,135 @@ export class McpService {
     await this.viaSecrets(() => this.opts.secrets.putCredential(sealed));
     this.source.forget(decision.ticket.serverId);
     return { decision, verified: true, server: { ...server, state: "connected" }, ...(probe.kind === "ok" ? { toolCount: probe.toolCount } : { warning: probe.error }) };
+  }
+
+  // ---- OAuth (item 18) ------------------------------------------------------------
+
+  /** POST action=start on the connect page: discover the server's authorization
+   *  server, register Switchboard as a public client, mint PKCE + `state`, seal
+   *  the pending record onto the ticket (CAS from the state we read), and hand
+   *  back the authorization URL for the browser. Every failure is a sentence;
+   *  the ticket is untouched unless the CAS succeeded. */
+  async startOAuth(nonce: string, identity: ConnectIdentity): Promise<StartOAuthResult> {
+    const ticket = await this.viaSecrets(() => this.opts.secrets.getTicket(nonce));
+    const found = ticket ? this.findByCredentialKey(ticket.serverId) : undefined;
+    if (!found || !ticket) return { ok: false, refusal: { kind: "not_found" } };
+    const server = await this.view(found);
+    if (found.entry.auth !== "oauth") return { ok: false, refusal: { kind: "oauth_failed", reason: `"${found.name}" does not sign in with OAuth (auth: ${found.entry.auth})` }, server };
+    const key = this.requireCredentialSupport("oauth");
+    const fetchImpl = this.opts.fetch as FetchLike;
+    let redirectUrl: string;
+    let pending: OAuthPending;
+    try {
+      const discovery = await discover(fetchImpl, found.entry.url);
+      const redirectUri = this.callbackUrl();
+      const client = await registerClient(fetchImpl, discovery, redirectUri, this.opts.publicBaseUrl);
+      const { verifier, challenge } = await pkce();
+      pending = {
+        state: oauthState(nonce),
+        codeVerifier: verifier,
+        clientId: client.clientId,
+        ...(client.clientSecret ? { clientSecret: client.clientSecret } : {}),
+        tokenEndpoint: discovery.tokenEndpoint,
+        redirectUri,
+        resource: discovery.resource,
+        ...(discovery.scopes ? { scope: discovery.scopes.join(" ") } : {}),
+      };
+      redirectUrl = authorizationUrl(discovery, pending, challenge);
+    } catch (err) {
+      if (err instanceof OAuthError || err instanceof BlockedUrlError) return { ok: false, refusal: { kind: "oauth_failed", reason: err.message }, server };
+      throw err;
+    }
+    const sealed = await sealCredential(key, `ticket:${nonce}`, JSON.stringify(pending), this.now());
+    const decision = planStart(ticket, identity, { keyId: sealed.keyId, sealed: sealed.sealed }, this.now());
+    if (!decision.ok) return { ok: false, refusal: decision.refusal, server };
+    const applied = await this.viaSecrets(() => this.opts.secrets.transitionTicket(decision.ticket, ticket.state));
+    if (!applied) return { ok: false, refusal: await this.startLostRace(nonce, identity), server };
+    return { ok: true, redirectUrl, server };
+  }
+
+  /** The CAS lost: the ticket moved between the read and the write. Re-read
+   *  it and say what actually happened — cancelled, expired, completed, bound
+   *  to someone else — and when it is still startable (another start of the
+   *  same owner won, or a GET bound it), ask for the button again rather than
+   *  overwriting the winner's pending record. */
+  private async startLostRace(nonce: string, identity: ConnectIdentity): Promise<TicketRefusal | { kind: "oauth_failed"; reason: string }> {
+    const current = await this.viaSecrets(() => this.opts.secrets.getTicket(nonce));
+    const replanned = planOpen(current, identity, this.now());
+    if (!replanned.ok) return replanned.refusal;
+    return { kind: "oauth_failed", reason: "the connect link changed while sign-in was starting (opened again elsewhere); press the button once more" };
+  }
+
+  /** GET /mcp/oauth/callback: the browser is back with `code` + `state` (or an
+   *  `error`). Who/when is `planCallback`'s call; the `state` must equal the
+   *  sealed pending record's; the code is exchanged, the token set probed
+   *  against the server, the ticket claimed (CAS), the credential sealed. A
+   *  failed exchange or a rejected token stores nothing and leaves the ticket
+   *  `authorizing` for another attempt from the connect link. */
+  async completeOAuth(identity: ConnectIdentity, params: { state?: string; code?: string; error?: string; errorDescription?: string }): Promise<CompleteOAuthResult> {
+    const nonce = params.state ? nonceOfState(params.state) : undefined;
+    if (!nonce) return { ok: false, refusal: { kind: "not_found" } };
+    const ticket = await this.viaSecrets(() => this.opts.secrets.getTicket(nonce));
+    const decision = planCallback(ticket, identity, this.now());
+    if (!decision.ok) return { ok: false, refusal: decision.refusal };
+    const found = this.findByCredentialKey(decision.ticket.serverId);
+    if (!found || found.entry.auth !== "oauth") return { ok: false, refusal: { kind: "not_found" } };
+    const server = await this.view(found);
+    const key = this.requireCredentialSupport("oauth");
+    let pending: unknown;
+    try {
+      pending = JSON.parse(await openCredential(key, { serverId: `ticket:${nonce}`, keyId: (ticket as McpTicket).oauth!.keyId, sealed: (ticket as McpTicket).oauth!.sealed, updatedAt: 0 }));
+    } catch (err) {
+      return { ok: false, refusal: { kind: "oauth_failed", reason: `the pending authorization could not be read (${err instanceof Error ? err.message : String(err)})` }, server };
+    }
+    if (!isOAuthPending(pending) || !constantTimeEqual(pending.state, params.state ?? "")) return { ok: false, refusal: { kind: "oauth_failed", reason: "the returned state does not match the one this link started with" }, server };
+    // Only a return that proved it is ours gets its `error` relayed.
+    if (params.error) return { ok: false, refusal: { kind: "oauth_failed", reason: `the authorization server answered "${params.error}"${params.errorDescription ? ` (${params.errorDescription})` : ""}` }, server };
+    if (!params.code) return { ok: false, refusal: { kind: "oauth_failed", reason: "the authorization server returned no code" }, server };
+    let cred: OAuthCredential;
+    try {
+      cred = await exchangeCode(this.opts.fetch as FetchLike, pending, params.code, this.now());
+    } catch (err) {
+      if (err instanceof OAuthError || err instanceof BlockedUrlError) return { ok: false, refusal: { kind: "oauth_failed", reason: err.message }, server };
+      throw err;
+    }
+    const probe = await this.probe({ id: decision.ticket.serverId, name: found.name, url: found.entry.url, agents: found.entry.agents ?? [...MCP_SELF_SERVE_AGENTS], auth: { type: "bearer", token: cred.accessToken } });
+    if (probe.kind === "rejected") return { ok: false, refusal: { kind: "oauth_failed", reason: probe.error }, server };
+    const claimed = await this.viaSecrets(() => this.opts.secrets.transitionTicket(decision.ticket, (ticket as McpTicket).state));
+    if (!claimed) return { ok: false, refusal: { kind: "used" }, server };
+    await this.storeOAuth(decision.ticket.serverId, cred);
+    return { ok: true, server: { ...server, state: "connected" }, ...(probe.kind === "ok" ? { toolCount: probe.toolCount } : { warning: probe.error }) };
+  }
+
+  private async storeOAuth(serverId: string, cred: OAuthCredential): Promise<void> {
+    const key = this.requireCredentialSupport("oauth");
+    const sealed = await sealCredential(key, serverId, JSON.stringify(cred), this.now());
+    await this.viaSecrets(() => this.opts.secrets.putCredential(sealed));
+    this.source.forget(serverId);
+  }
+
+  private callbackUrl(): string {
+    return `${(this.opts.publicBaseUrl ?? "").replace(/\/+$/, "")}/mcp/oauth/callback`;
+  }
+
+  /** In-flight refreshes by server id, so N concurrent runs refresh once. */
+  private readonly refreshing = new Map<string, Promise<OAuthCredential>>();
+
+  /** A usable access token for the run: the stored one while it lives, else
+   *  a refreshed set (stored back, the cached client dropped so it is rebuilt
+   *  with the new header). */
+  private freshOAuth(serverId: string, cred: OAuthCredential): Promise<OAuthCredential> {
+    if (!needsRefresh(cred, this.now())) return Promise.resolve(cred);
+    let inflight = this.refreshing.get(serverId);
+    if (!inflight) {
+      inflight = (async () => {
+        const next = await refreshCredential(this.opts.fetch as FetchLike, cred, this.now());
+        await this.storeOAuth(serverId, next);
+        return next;
+      })().finally(() => this.refreshing.delete(serverId));
+      this.refreshing.set(serverId, inflight);
+    }
+    return inflight;
   }
 
   // ---- the run-time view ----------------------------------------------------------
@@ -280,10 +452,25 @@ export class McpService {
     return list;
   }
 
-  private requireBearerSupport(): CredentialKey {
-    if (!this.opts.key) throw new McpServiceError("unavailable", "bearer-authenticated MCP servers need the credential key (MCP_CREDENTIAL_KEY) on the bot — it is not set");
+  /** What a sealed credential needs: the key, and a public base URL for the
+   *  connect page (and, for OAuth, the callback + the fetch that talks to the
+   *  authorization server). Named at the point of failure. */
+  private requireCredentialSupport(auth: Exclude<McpAuthKind, "none">): CredentialKey {
+    if (!this.opts.key) throw new McpServiceError("unavailable", `${auth}-authenticated MCP servers need the credential key (MCP_CREDENTIAL_KEY) on the bot — it is not set`);
     if (!this.opts.publicBaseUrl) throw new McpServiceError("unavailable", "connect links need PUBLIC_BASE_URL on the bot — it is not set");
+    if (auth === "oauth" && !this.opts.fetch) throw new McpServiceError("unavailable", "OAuth MCP servers need the web fetch on the bot — this process was wired without one");
     return this.opts.key;
+  }
+
+  /** `mcp add` without `--auth`: one unauthenticated `initialize` decides (item 18). */
+  private async detect(url: string): Promise<McpAuthKind> {
+    if (!this.opts.fetch) throw new McpServiceError("invalid_input", "auth: pass --auth oauth|bearer|none (this process cannot probe the server)");
+    try {
+      return (await detectAuth(this.opts.fetch, url)).auth;
+    } catch (err) {
+      if (err instanceof OAuthError || err instanceof BlockedUrlError) throw new McpServiceError("invalid_input", `auth: could not be detected — ${err.message}`);
+      throw err;
+    }
   }
 
   private connectUrl(ticket: McpTicket): string {
@@ -341,7 +528,7 @@ export class McpService {
   }
 
   private async view(r: ResolvedMcpServer): Promise<McpServerView> {
-    const hasCredential = r.entry.auth === "bearer" && !r.entry.tokenEnv ? (await this.viaSecrets(() => this.opts.secrets.getCredential(mcpCredentialKey(r.scopeKey, r.name)))) !== null : false;
+    const hasCredential = r.entry.auth !== "none" && !r.entry.tokenEnv ? (await this.viaSecrets(() => this.opts.secrets.getCredential(mcpCredentialKey(r.scopeKey, r.name)))) !== null : false;
     return serverView(r.scopeKey, r.name, r.entry, { hasCredential, source: r.source });
   }
 
@@ -362,7 +549,10 @@ export class McpService {
     }
     if (!sealed) return { name: r.name, unavailable: "no credential stored — run `mcp connect`" };
     try {
-      return { spec: { ...base, auth: { type: "bearer", token: await openCredential(this.opts.key, sealed) } } };
+      const stored = parseStoredCredential(await openCredential(this.opts.key, sealed));
+      if (stored.kind === "bearer") return { spec: { ...base, auth: { type: "bearer", token: stored.token } } };
+      const fresh = await this.freshOAuth(id, stored);
+      return { spec: { ...base, auth: { type: "bearer", token: fresh.accessToken } } };
     } catch (err) {
       return { name: r.name, unavailable: err instanceof Error ? err.message : String(err) };
     }
@@ -387,6 +577,15 @@ export class McpService {
       throw new McpServiceError("unavailable", err instanceof Error ? err.message : String(err));
     }
   }
+}
+
+/** Same length and same bytes, without an early exit on the first difference. */
+function constantTimeEqual(a: string, b: string): boolean {
+  const x = new TextEncoder().encode(a);
+  const y = new TextEncoder().encode(b);
+  let diff = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  return diff === 0;
 }
 
 /** Tier precedence: lower rank wins a name clash. */

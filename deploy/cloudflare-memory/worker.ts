@@ -24,7 +24,7 @@ import {
   type StoredRunEvent,
 } from "../../src/core/runRecord.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
-import { isMcpTicket, isSealedCredential, type McpTicket, type McpTicketState, type SealedCredential } from "../../src/mcp/registry.ts";
+import { isMcpTicket, isSealedCredential, MCP_TICKET_STATES, type McpTicket, type McpTicketState, type SealedCredential } from "../../src/mcp/registry.ts";
 
 // Memory Worker: the durable backend behind the bot's WorkerMemoryStore
 // (src/core/memory/workerStore.ts) — cross-session memory PR3 (#85). One
@@ -691,7 +691,7 @@ function parseStored<T>(text: string, guard: (v: unknown) => v is T): T | null {
 const MAX_CONFIG_DOCUMENT_BYTES = 256 * 1024;
 
 const CONFIG_ROUTES = new Set(["/config/get", "/config/put", "/config/secrets/put", "/config/secrets/get", "/config/secrets/delete", "/config/tickets/put", "/config/tickets/get", "/config/tickets/transition"]);
-const TICKET_STATES: ReadonlySet<string> = new Set<McpTicketState>(["pending", "opened", "completed", "cancelled"]);
+const TICKET_STATES: ReadonlySet<string> = new Set<McpTicketState>(MCP_TICKET_STATES);
 
 async function handleConfig(pathname: string, body: unknown, env: Env): Promise<Response> {
   const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;

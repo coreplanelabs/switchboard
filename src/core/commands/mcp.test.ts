@@ -44,6 +44,8 @@ function service() {
     factory: () => new InMemoryMcpClient([{ name: "search", inputSchema: {}, annotations: { readOnlyHint: true } }]),
     publicBaseUrl: "https://switchboard.test",
     env: {},
+    // Auth detection (item 18): every server here answers 401 without OAuth metadata → `bearer`.
+    fetch: async () => new Response("", { status: 401 }),
     now: () => 1_000_000,
     nonce: () => `nonce-${String(++n).padStart(20, "0")}`,
   });

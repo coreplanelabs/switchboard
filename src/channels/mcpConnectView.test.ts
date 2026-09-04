@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigStore, InMemoryOverridesBacking } from "../config.js";
-import { InMemoryMcpClient } from "../mcp/fake.js";
+import { fakeAuthorizationServer, InMemoryMcpClient, type FakeAuthorizationServerOptions } from "../mcp/fake.js";
 import { MCP_TOKEN_MAX_CHARS } from "../mcp/registry.js";
 import { importCredentialKey } from "../mcp/sealed.js";
 import { InMemoryMcpSecretStore } from "../mcp/secretStore.js";
@@ -22,18 +22,20 @@ const alice: McpActor = { id: "slack:U1", orgAdmin: false, channelAdmin: true };
 const ME = { kind: "user" as const, id: alice.id };
 const KEY_ID = "user:slack:U1/vanta";
 
-function harness(opts: { rejectTokens?: string[]; email?: string } = {}) {
+function harness(opts: { rejectTokens?: string[]; email?: string; oauth?: FakeAuthorizationServerOptions } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "swb-connect-"));
   const cfg = join(dir, "config.yaml");
   writeFileSync(cfg, YAML);
   const config = new ConfigStore(cfg, { backing: new InMemoryOverridesBacking(), initial: undefined }, () => {});
   const secrets = new InMemoryMcpSecretStore();
   let n = 0;
+  const as = fakeAuthorizationServer(opts.oauth ?? { server: "https://mcp.vanta.com/mcp" });
   const service = new McpService({
     config,
     secrets,
     key: importCredentialKey("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
     publicBaseUrl: "https://switchboard.test",
+    fetch: as.fetch,
     env: {},
     resolveEmail: opts.email ? async () => opts.email : undefined,
     now: () => 1_000_000,
@@ -46,7 +48,8 @@ function harness(opts: { rejectTokens?: string[]; email?: string } = {}) {
   });
   const handler = createMcpConnectViewHandler({ registry: () => service, publicOrigin: "https://switchboard.test" });
   const addVanta = (url = "https://mcp.vanta.com/mcp") => service.add(alice, ME, { name: "vanta", url, auth: "bearer" });
-  return { secrets, service, handler, addVanta };
+  const addOAuth = (url = "https://mcp.vanta.com/mcp") => service.add(alice, ME, { name: "vanta", url, auth: "oauth" });
+  return { secrets, service, handler, addVanta, addOAuth, as };
 }
 
 async function serve(handler: ReturnType<typeof createMcpConnectViewHandler>): Promise<{ server: Server; base: string }> {
@@ -187,6 +190,127 @@ describe("POST /mcp/connect/<nonce>", () => {
       const res = await post(base, NONCE1, "token=x", { "x-test-sub": "cf-x", "x-test-email": "x@else.example" });
       expect(res.status).toBe(403);
       expect(await h.secrets.getCredential(KEY_ID)).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe("OAuth on the connect page (item 18)", () => {
+  const CALLBACK = "/mcp/oauth/callback";
+
+  it("the callback path rides the same gate; GET only", async () => {
+    expect(isConnectPath(CALLBACK)).toBe(true);
+    expect(isConnectPath("/mcp/oauth")).toBe(false);
+    const h = harness();
+    const { server, base } = await serve(h.handler);
+    try {
+      const res = await post(base, CALLBACK, "x=1");
+      expect(res.status).toBe(405);
+      expect(res.headers.get("allow")).toBe("GET");
+      const bare = await fetch(`${base}${CALLBACK}`);
+      expect(bare.status).toBe(400);
+      expect(await bare.text()).toContain("carries nothing to finish");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("GET shows a sign-in button (no token field) for an oauth server; POST action=start answers 303 to the authorization server with PKCE + state; the ticket is `authorizing`", async () => {
+    const h = harness();
+    await h.addOAuth();
+    const { server, base } = await serve(h.handler);
+    try {
+      const page = await fetch(`${base}${NONCE1}`);
+      expect(page.status).toBe(200);
+      const html = await page.text();
+      expect(html).toContain("Continue to mcp.vanta.com");
+      expect(html).toContain('name="action" value="start"');
+      expect(html).not.toContain('name="token"');
+      const started = await post(base, NONCE1, "action=start");
+      expect(started.status).toBe(303);
+      const location = new URL(started.headers.get("location") as string);
+      expect(location.origin + location.pathname).toBe("https://as.example.com/oauth/authorize");
+      expect(location.searchParams.get("code_challenge_method")).toBe("S256");
+      expect(location.searchParams.get("redirect_uri")).toBe("https://switchboard.test/mcp/oauth/callback");
+      expect((await h.secrets.getTicket("nonce-00000000000000000001"))?.state).toBe("authorizing");
+      // Cross-site posts cannot start a sign-in either.
+      expect((await post(base, NONCE1, "action=start", { "sec-fetch-site": "cross-site" })).status).toBe(403);
+      // A stranger cannot start it.
+      expect((await post(base, NONCE1, "action=start", { "x-test-sub": "cf-other", "x-test-email": "other@else.example" })).status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("the callback with the right state + code connects the server (tools counted); the ticket is spent; a second callback is 410", async () => {
+    const h = harness();
+    await h.addOAuth();
+    const { server, base } = await serve(h.handler);
+    try {
+      const started = await post(base, NONCE1, "action=start");
+      const auth = started.headers.get("location") as string;
+      const state = new URL(auth).searchParams.get("state") as string;
+      const code = h.as.issueCode(auth);
+      const done = await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(state)}&code=${code}`);
+      expect(done.status).toBe(200);
+      const html = await done.text();
+      expect(html).toContain("is connected");
+      expect(html).toContain("<strong>1</strong> tool");
+      expect(html).not.toMatch(/at-1|rt-1|client-1/);
+      expect(await h.secrets.getCredential(KEY_ID)).toBeTruthy();
+      expect((await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(state)}&code=${code}`)).status).toBe(410);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("callback refusals: a stranger (403), a wrong state (502, nothing stored), the authorization server's error (502), a code the server rejects (502); the connect link still works for a retry", async () => {
+    const h = harness();
+    await h.addOAuth();
+    const { server, base } = await serve(h.handler);
+    try {
+      const started = await post(base, NONCE1, "action=start");
+      const auth = started.headers.get("location") as string;
+      const state = new URL(auth).searchParams.get("state") as string;
+      const nonce = "nonce-00000000000000000001";
+      expect((await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(state)}&code=c`, { headers: { "x-test-sub": "cf-other", "x-test-email": "other@else.example" } })).status).toBe(403);
+      const wrong = await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(`${nonce}.nope`)}&code=c`);
+      expect(wrong.status).toBe(502);
+      expect(await wrong.text()).toContain("state does not match");
+      const denied = await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(state)}&error=access_denied&error_description=nope`);
+      expect(denied.status).toBe(502);
+      expect(await denied.text()).toContain("access_denied");
+      const badCode = await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(state)}&code=never`);
+      expect(badCode.status).toBe(502);
+      expect(await badCode.text()).toContain("invalid_grant");
+      expect(await h.secrets.getCredential(KEY_ID)).toBeNull();
+      // The link still opens: the person can start again.
+      expect((await fetch(`${base}${NONCE1}`)).status).toBe(200);
+      expect((await post(base, NONCE1, "action=start")).status).toBe(303);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("a pasted token on an oauth server's link is refused with the button re-shown; action=start on a bearer server's link is a 502 naming the auth kind", async () => {
+    const h = harness();
+    await h.addOAuth();
+    const { server, base } = await serve(h.handler);
+    try {
+      const res = await post(base, NONCE1, "token=abc");
+      expect(res.status).toBe(400);
+      expect(await res.text()).toContain("signs in with OAuth");
+      const bearer = harness();
+      await bearer.addVanta();
+      const s2 = await serve(bearer.handler);
+      try {
+        const started = await post(s2.base, NONCE1, "action=start");
+        expect(started.status).toBe(502);
+        expect(await started.text()).toContain("does not sign in with OAuth");
+      } finally {
+        s2.server.close();
+      }
     } finally {
       server.close();
     }

@@ -10,8 +10,9 @@ export { MCP_OFF_MESSAGE };
 // config layers (`Scope.mcpServers`), the way `config instructions` is a thin
 // write into `Scope.instructions`.
 //   mcp list [--channel <id>]
-//   mcp add <name> --url <url> [--scope <me|channel|org>] [--agents a,b] [--auth <bearer|none>] [--channel <id>]
-//   mcp connect <name> [--scope …] [--channel <id>]   — a fresh one-time credential link
+//   mcp add <name> --url <url> [--scope <me|channel|org>] [--agents a,b] [--auth <oauth|bearer|none>] [--channel <id>]
+//                                                      — auth omitted → detected from the server (item 18)
+//   mcp connect <name> [--scope …] [--channel <id>]   — a fresh one-time credential/sign-in link
 //   mcp show <name> [--scope …] [--channel <id>]      — the entry + a live tools/list probe
 //   mcp remove <name> [--scope …] [--channel <id>]
 // Scope `me` is self-serve; `channel` is the `channelConfig` gate (as `config
@@ -88,10 +89,13 @@ function renderList(output: JsonValue): string {
 
 function renderAdd(output: JsonValue): string {
   const o = output as JsonObject;
-  const head = renderServerLine(o.server as JsonObject);
-  if (typeof o.connectUrl !== "string") return `${head}\nConnected — no credential needed.`;
+  const server = o.server as JsonObject;
+  const head = renderServerLine(server);
+  const detected = typeof o.detected === "string" ? `\nDetected auth: ${o.detected} (pass --auth to override).` : "";
+  if (typeof o.connectUrl !== "string") return `${head}${detected}\nConnected — no credential needed.`;
   const minutes = typeof o.expiresInMinutes === "number" ? o.expiresInMinutes : 10;
-  return `${head}\nTo finish, open this link and paste the server's token (only you can complete it; it expires in ${minutes} min): ${o.connectUrl}`;
+  const step = server.auth === "oauth" ? "sign in to the server" : "paste the server's token";
+  return `${head}${detected}\nTo finish, open this link and ${step} (only you can complete it; it expires in ${minutes} min): ${o.connectUrl}`;
 }
 
 function renderShow(output: JsonValue): string {
@@ -133,19 +137,19 @@ export const mcpAdd = defineCommand({
       .transform((s) => s.split(",").map((a) => a.trim()).filter(Boolean))
       .optional()
       .describe("comma-separated agents that may use it (default general,research; only org servers may name coding/review/ship)"),
-    auth: z.enum(["bearer", "none"]).optional().describe("how the server authenticates: `bearer` (default — you get a one-time link to paste the token) or `none`"),
+    auth: z.enum(["oauth", "bearer", "none"]).optional().describe("how the server authenticates: `oauth` (you sign in on a one-time link), `bearer` (you paste a token on a one-time link), or `none`; omit to detect it from the server"),
     channel: channelOption,
   }),
   scope: "mcp:write",
   chatGate: "open",
   effect: "write",
-  describe: "Register an external MCP server for yourself, this channel, or the org — a bearer token is entered on a one-time link, never in chat.",
+  describe: "Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.",
   render: renderAdd,
   handler: async ({ args, options, caller, deps }) => {
     const svc = await serviceOf(deps);
     const actor = actorOf(caller);
     const target = await via(() => svc.target(actor, options.scope ?? "me", channelOf(caller, options.channel)));
-    return (await via(() => svc.add(actor, target, { name: args.name, url: options.url, agents: options.agents, auth: options.auth ?? "bearer" }))) as unknown as JsonObject;
+    return (await via(() => svc.add(actor, target, { name: args.name, url: options.url, agents: options.agents, ...(options.auth ? { auth: options.auth } : {}) }))) as unknown as JsonObject;
   },
 });
 
@@ -156,7 +160,7 @@ export const mcpConnect = defineCommand({
   scope: "mcp:write",
   chatGate: "open",
   effect: "write",
-  describe: "A fresh one-time link to enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.",
+  describe: "A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.",
   render: renderAdd,
   handler: async ({ args, options, caller, deps }) => {
     const svc = await serviceOf(deps);
