@@ -257,14 +257,21 @@ function listWords(words: readonly string[]): string {
  * The provisioning follow-up (item 52): after an onboard or rebuild is accepted
  * (202, state `onboarding`), poll `/status` until the resident leaves
  * `onboarding` and say what happened — `warm`, or `down` with the resident's
- * own reason and the two commands that fix a bad table. Bounded by
+ * own reason plus the hint that fits it: the two commands that fix a bad
+ * table when the failure was at install/build/test (a step the table
+ * controls), a plain retry otherwise (clone, snapshot, timeout — the
+ * resident's or Cloudflare's side; live 2026-09-04 a snapshot `put` 10043
+ * got the table hint and misled). Bounded by
  * `SETTLE_MAX_MS`; a resident still onboarding then is reported as such (not
  * silently dropped), and every transport/404 outcome is a sentence too.
  */
 export async function settleProvisioning(deps: RepoCommandDeps, slug: string): Promise<{ ok: boolean; text: string }> {
   const sleep = deps.repo.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const resource = repoResourceId(slug);
-  const fix = `Fix the command table with \`repo reconfigure ${slug} --install "…" --build "…" --test "…"\`, then \`repo rebuild ${slug}\`.`;
+  const hint = (reason: string): string =>
+    /provision-failed at (install|build|test)\b/.test(reason)
+      ? `Fix the command table with \`repo reconfigure ${slug} --install "…" --build "…" --test "…"\`, then \`repo rebuild ${slug}\`.`
+      : `Not a command-table failure — retry with \`repo rebuild ${slug}\`; if it recurs, the resident or Cloudflare side is at fault (\`repo list\` shows the live state).`;
   for (let elapsed = 0; elapsed <= SETTLE_MAX_MS; elapsed += SETTLE_POLL_MS) {
     if (elapsed > 0) await sleep(SETTLE_POLL_MS);
     const api = await deps.repo.admin();
@@ -280,7 +287,10 @@ export async function settleProvisioning(deps: RepoCommandDeps, slug: string): P
     const state = str(r.data.state);
     if (state === "onboarding") continue;
     if (state === "warm") return { ok: true, text: `✅ \`${slug}\` is warm — provisioned and attach-ready.` };
-    if (state === "down") return { ok: false, text: `❌ \`${slug}\` failed to provision: ${str(r.data.reason ?? "no reason recorded")}\n${fix}` };
+    if (state === "down") {
+      const reason = str(r.data.reason ?? "no reason recorded");
+      return { ok: false, text: `❌ \`${slug}\` failed to provision: ${reason}\n${hint(reason)}` };
+    }
     return { ok: true, text: `ℹ️ \`${slug}\` left \`onboarding\` and is \`${state}\`${r.data.reason ? ` (${str(r.data.reason)})` : ""}.` };
   }
   return { ok: false, text: `⏳ \`${slug}\` is still onboarding after ${Math.round(SETTLE_MAX_MS / 60_000)} min — provisioning is slow or stuck; \`repo list\` shows the live state, and the resident watchdog marks a stuck onboard \`down\` at its deadline.` };
