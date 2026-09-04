@@ -95,12 +95,18 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       expect(await store.list({})).toEqual([]);
     });
 
-    it("list is newest-first, capped at 200 (default 50), with a `before` cursor and filters", async () => {
+    // 30 s timeout, not the 5 s default: the FileRunStore variant's 205 puts
+    // each re-read the index, stat every kept record (compact's intact check),
+    // and rewrite the index — O(n) I/O per put by design (self-healing index).
+    // ~300 ms on an idle SSD, but on a busy runner it has blown the default
+    // timeout twice now (a CI runner at 260 records; a resident review worktree
+    // under build contention, #403). The generous ceiling keeps the test's
+    // coverage without racing the disk.
+    it("list is newest-first, capped at 200 (default 50), with a `before` cursor and filters", { timeout: 30_000 }, async () => {
       const { store } = make();
       // 205 records: the fewest that prove the 200 cap AND a non-empty second
       // page. One pre-built event list + diagnosis is shared across every record
-      // so each put is one small write (the file store writes to disk; this test
-      // timed out on a slow CI runner at 260 records with per-record analysis).
+      // so each put is one small write.
       const evs = events(1);
       const diagnosis = analyzeRunFriction(evs);
       for (let i = 0; i < 205; i++) {
