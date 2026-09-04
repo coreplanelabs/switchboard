@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { CommandError, commandDefiner, wrapUntrusted, type Caller, type CommandDef, type CommandRegistry, type JsonValue } from "../commandRegistry.js";
+import { authorize } from "../authz/authorize.js";
+import { predicateFor } from "../authz/predicate.js";
+import type { Action, Actor, Resource } from "../authz/types.js";
+import { actorOf, CommandError, commandDefiner, wrapUntrusted, type Caller, type CommandDef, type CommandRegistry, type JsonValue } from "../commandRegistry.js";
 import type { RunEvent } from "../runEvents.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../runRecord.js";
 import { MAX_EVENTS_PAGE, type Result, type RunRecordView, type RunsService } from "../runsService.js";
@@ -8,9 +11,13 @@ import { MAX_EVENTS_PAGE, type Result, type RunRecordView, type RunsService } fr
 // arguments/options plus the resolved caller into `RunsService` calls.
 // Everything a surface can learn about a run comes through here. Two rules the
 // service does not enforce because they are about the CALLER, not the run:
-//   - a channel-pinned caller (`caller.channel`, a namespaced id such as
-//     `http:ops`) sees only runs whose `channelId` equals the pin — other runs
-//     are `not_found`, never revealed (KTD10);
+//   - what the caller may SEE is the authorization policy (authorization.md
+//     items 5–7, R1/R5/R6): a point read authorizes `runs:read` (or `runs:write`
+//     for `stop`) against the run's own attributes — channel, user, stamped
+//     visibility — and a deny is `not_found`, byte-identical to a missing run
+//     (KTD8; the reason goes to the audit line only); a list hands the store
+//     `predicateFor(actor, "runs:read", "run")` so nothing is loaded and
+//     filtered afterwards. No channel id is compared by hand here.
 //   - stored free text (message bodies, tool summaries) leaves wrapped as
 //     untrusted content (KTD17). `runs.list` carries none of it by construction.
 // None of these commands starts a run (KTD16); `runs.stop` only ends one.
@@ -18,9 +25,20 @@ import { MAX_EVENTS_PAGE, type Result, type RunRecordView, type RunsService } fr
 // `runs events <id> [--after-seq n] [--limit n]`, `runs friction <id>`,
 // `runs stop <id> --mode soft|hard`, `runs list [--status …] [--agent …] …`.
 
+/** One denied point read, for the audit line: who, what, why — never which run
+ *  (existence is not revealed even to the log, and the reason is a bare token). */
+export interface RunReadDenied {
+  commandId: string;
+  actorId: string;
+  action: Action;
+  reason: string;
+}
+
 export interface RunsCommandDeps {
   /** Resolved on first use: the CLI opens the run store lazily behind an async config open. */
   runs(): Promise<RunsService>;
+  /** Where a denied point read is recorded (KTD8). Default: one JSON line on `console.log`. */
+  denied?: (entry: RunReadDenied) => void;
 }
 
 const defineCommand = commandDefiner<RunsCommandDeps>();
@@ -34,20 +52,34 @@ function unwrap<T>(res: Result<T>): T {
   throw new CommandError(res.error, res.error === "not_found" ? "run not found" : "run already finished");
 }
 
-/** The run as this caller may see it — ONE fetch serves both the visibility check
- *  and the payload. A channel-pinned caller's run must sit in its channel; any
- *  other run (or none) is the same `not_found`, so existence is never revealed. */
-async function getVisibleRun(runs: RunsService, id: string, caller: Caller, opts: { include?: "messages" } = {}): Promise<RunRecordView> {
-  const view = unwrap(await runs.getRun(id, opts));
-  if (caller.channel !== undefined && view.channelId !== caller.channel) throw new CommandError("not_found", "run not found");
-  return view;
+/** The run as a typed `Resource`: exactly the attributes the policy rows read.
+ *  A view without the stamp is `unknown` — never public. */
+function runResource(view: RunRecordView): Resource {
+  return {
+    type: "run",
+    id: view.id,
+    channelId: view.channelId ?? "",
+    userId: view.userId ?? "",
+    ...(view.repo !== undefined ? { repo: view.repo } : {}),
+    channelVisibility: view.channelVisibility ?? "unknown",
+  };
 }
 
-/** For the commands whose payload is not the run view (events, friction, stop):
- *  a pinned caller must be able to see the run before the real read/write; an
- *  unpinned caller skips the lookup — the payload call's own `not_found` covers it. */
-async function assertVisible(runs: RunsService, id: string, caller: Caller): Promise<void> {
-  if (caller.channel !== undefined) await getVisibleRun(runs, id, caller);
+const logDenied = (entry: RunReadDenied): void => console.log(JSON.stringify({ audit: "authz", ...entry }));
+
+/** The run as this caller may see it — ONE fetch serves both the authorization
+ *  and the payload. `authorize(actor, action, run)` decides on the run's own
+ *  attributes (R1); a deny is the same `not_found` an unknown id gives, so
+ *  existence is never revealed (KTD8), and its reason reaches the audit line only. */
+async function getVisibleRun(runs: RunsService, id: string, caller: Caller, action: Action, deps: RunsCommandDeps, commandId: string, opts: { include?: "messages" } = {}): Promise<RunRecordView> {
+  const view = unwrap(await runs.getRun(id, opts));
+  const actor: Actor = actorOf(caller);
+  const decision = authorize(actor, action, runResource(view));
+  if (!decision.allow) {
+    (deps.denied ?? logDenied)({ commandId, actorId: actor.id, action, reason: decision.reason });
+    throw new CommandError("not_found", "run not found");
+  }
+  return view;
 }
 
 function wrapEvent(e: RunEvent): RunEvent {
@@ -85,14 +117,10 @@ export const runsList = defineCommand({
   effect: "read",
   describe: "List runs (live and persisted, newest first) — metadata only, never message text.",
   handler: async ({ options, caller, deps }) => {
-    let channel = options.channel;
-    if (caller.channel !== undefined) {
-      // Pinned callers may only ever ask about their own channel.
-      if (channel !== undefined && channel !== caller.channel) return { runs: [] };
-      channel = caller.channel;
-    }
-    const { channel: _ignored, ...rest } = options;
-    return asJson(await (await deps.runs()).listRuns({ ...rest, ...(channel !== undefined ? { channel } : {}) }));
+    // The policy, compiled for this actor, is the store's filter (R6); the
+    // `channel` option is a plain filter the caller asked for on top of it.
+    const visibleTo = predicateFor(actorOf(caller), "runs:read", "run");
+    return asJson(await (await deps.runs()).listRuns({ ...options, visibleTo }));
   },
 });
 
@@ -106,7 +134,7 @@ export const runsGet = defineCommand({
   surfaces: { chat: false },
   describe: "One run's record; `--include messages` adds its events with free text wrapped as untrusted content.",
   handler: async ({ args, options, caller, deps }) => {
-    const view = await getVisibleRun(await deps.runs(), args.id, caller, options.include ? { include: options.include } : {});
+    const view = await getVisibleRun(await deps.runs(), args.id, caller, "runs:read", deps, "runs.get", options.include ? { include: options.include } : {});
     if (view.events) view.events = view.events.map(wrapEvent);
     return asJson(view);
   },
@@ -126,7 +154,7 @@ export const runsEvents = defineCommand({
   describe: "A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content.",
   handler: async ({ args, options, caller, deps }) => {
     const runs = await deps.runs();
-    await assertVisible(runs, args.id, caller);
+    await getVisibleRun(runs, args.id, caller, "runs:read", deps, "runs.events");
     const page = unwrap(await runs.getRunEvents(args.id, { afterSeq: options.afterSeq, limit: options.limit }));
     return asJson({ ...page, events: page.events.map(wrapEvent) });
   },
@@ -142,7 +170,7 @@ export const runsFriction = defineCommand({
   describe: "One run's friction diagnosis (live: computed now; persisted: as stored).",
   handler: async ({ args, caller, deps }) => {
     const runs = await deps.runs();
-    await assertVisible(runs, args.id, caller);
+    await getVisibleRun(runs, args.id, caller, "runs:read", deps, "runs.friction");
     return asJson(unwrap(await runs.getRunFriction(args.id)));
   },
 });
@@ -157,7 +185,7 @@ export const runsStop = defineCommand({
   describe: "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor.",
   handler: async ({ args, options, caller, deps }) => {
     const runs = await deps.runs();
-    await assertVisible(runs, args.id, caller);
+    await getVisibleRun(runs, args.id, caller, "runs:write", deps, "runs.stop");
     return asJson(unwrap(await runs.stopRun(args.id, options.mode, { kind: caller.kind, id: caller.id })));
   },
 });

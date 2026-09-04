@@ -77,6 +77,7 @@ function record(id: string, finishedAt: number): RunRecord {
     channelId: "slack:C1",
     userId: "slack:U1",
     threadKey: `slack:C1:${id}`,
+    channelVisibility: "public", // every adapter caller may read a public run: the contract is about transport, not visibility
     startedAt: finishedAt - 10_000,
     finishedAt,
     status: "completed",
@@ -91,7 +92,7 @@ function record(id: string, finishedAt: number): RunRecord {
 async function fixture() {
   let n = 0;
   const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
-  const live = reg.create("coding · acme/live", { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t" });
+  const live = reg.create("coding · acme/live", { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t", channelVisibility: "public" });
   reg.publish(live.id, { type: "input", text: "live request" });
   reg.publish(live.id, { type: "tool_call", tool: "bash", summary: "$ pwd" });
   const store = new InMemoryRunStore({ now: () => NOW });

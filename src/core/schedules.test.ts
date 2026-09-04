@@ -100,12 +100,16 @@ describe("schedule registry", () => {
     expect(SCHEDULES.filter(isRunSchedule).map((s) => s.name)).toEqual(["self-improvement"]);
   });
 
-  it("every run schedule declares its `schedule` actor as schedule:<name> (plan U2, R9) — grants come from config, not the registry", () => {
+  it("every run schedule declares its `schedule` actor as schedule:<name> WITH its grants (plan U3, R9): self-improvement reads the fleet's runs and files proposals, no repos, no exec", () => {
     for (const s of SCHEDULES.filter(isRunSchedule)) {
-      expect(s.action.actor).toEqual({ kind: "schedule", id: `schedule:${s.name}` });
-      expect(s.action.actor).not.toHaveProperty("grants");
+      expect(s.action.actor).toMatchObject({ kind: "schedule", id: `schedule:${s.name}` });
+      expect(s.action.actor.grants).toBeDefined();
     }
-    expect(selfImprovement.action.actor.id).toBe("schedule:self-improvement");
+    expect(selfImprovement.action.actor).toEqual({
+      kind: "schedule",
+      id: "schedule:self-improvement",
+      grants: { actions: new Set(["friction:read", "friction:write"]), channels: "all", repos: new Set() },
+    });
   });
 });
 

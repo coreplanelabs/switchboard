@@ -8,6 +8,7 @@ import {
   applyRetention,
   clampRetentionPolicy,
   isRunRecord,
+  isRunVisibilityFilter,
   normalizeStored,
   RUN_EVENTS_DEFAULT_PAGE,
   RUN_EVENTS_MAX_PAGE,
@@ -21,6 +22,7 @@ import {
   type RunListItem,
   type RunListOptions,
   type RunRecord,
+  type RunVisibilityFilter,
   type StoredRunEvent,
 } from "../../src/core/runRecord.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
@@ -861,6 +863,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         channel_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
         thread_key TEXT NOT NULL,
+        channel_visibility TEXT NOT NULL DEFAULT 'unknown',
         repo TEXT,
         started_at INTEGER NOT NULL,
         finished_at INTEGER NOT NULL,
@@ -884,6 +887,18 @@ export class RunHistoryDO extends DurableObject<Env> {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+    `);
+    // The one column migration this DO has (authorization KTD7): a table
+    // created before the visibility stamp gains the column with `unknown` for
+    // every existing row — so a run written before the stamp is never public.
+    // Then the indexes the visibility predicate's leaves walk (`channel_id IN`,
+    // `channel_visibility IN`, `user_id =`), each ordered like the page.
+    const columns = new Set(this.sql.exec<{ name: string }>(`PRAGMA table_info(runs)`).toArray().map((c) => c.name));
+    if (!columns.has("channel_visibility")) this.sql.exec(`ALTER TABLE runs ADD COLUMN channel_visibility TEXT NOT NULL DEFAULT 'unknown'`);
+    this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS runs_channel_finished ON runs(channel_id, finished_at DESC, run_id DESC);
+      CREATE INDEX IF NOT EXISTS runs_visibility_finished ON runs(channel_visibility, finished_at DESC, run_id DESC);
+      CREATE INDEX IF NOT EXISTS runs_user_finished ON runs(user_id, finished_at DESC, run_id DESC);
     `);
   }
 
@@ -1015,12 +1030,13 @@ export class RunHistoryDO extends DurableObject<Env> {
         existing !== undefined &&
         sameStoredVersion({ eventCount: existing.event_count, finishedAt: existing.finished_at, bytes: existing.bytes }, { eventCount: stored.eventCount, finishedAt, bytes });
       this.sql.exec(
-        `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, repo, started_at, finished_at, stored_at, status,
+        `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, channel_visibility, repo, started_at, finished_at, stored_at, status,
                            event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
            label = excluded.label, agent = excluded.agent, model = excluded.model, channel_id = excluded.channel_id,
-           user_id = excluded.user_id, thread_key = excluded.thread_key, repo = excluded.repo, started_at = excluded.started_at,
+           user_id = excluded.user_id, thread_key = excluded.thread_key, channel_visibility = excluded.channel_visibility,
+           repo = excluded.repo, started_at = excluded.started_at,
            finished_at = excluded.finished_at, stored_at = excluded.stored_at, status = excluded.status,
            event_count = excluded.event_count, stored_event_count = excluded.stored_event_count, truncated = excluded.truncated,
            bytes = excluded.bytes, diagnosis_json = excluded.diagnosis_json, summary_json = excluded.summary_json`,
@@ -1031,6 +1047,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         stored.channelId,
         stored.userId,
         stored.threadKey,
+        stored.channelVisibility ?? "unknown",
         stored.repo ?? null,
         stored.startedAt,
         finishedAt,
@@ -1151,10 +1168,18 @@ export class RunHistoryDO extends DurableObject<Env> {
    * `applyRetention`, the same function `put`/`alarm` trim with) and the rows
    * walked until the page fills; the kept set is the newest prefix of the
    * in-cutoff order, so the walk stops at the first row outside it.
+   *
+   * `visibleTo` — the caller's authorization predicate (authorization.md item
+   * 6) — is compiled into the same WHERE clause (`visibilitySql`): its leaves
+   * become `channel_id IN (…)`, `channel_visibility IN (…)`, `user_id = ?`,
+   * `repo IN (…)`, each backed by an index, so the actor's view is one more
+   * indexed filter on the page query, never a post-filter. `none` answers an
+   * empty page without a query.
    */
   async list(q: RunListOptions): Promise<{ items: RunListItem[]; nextBefore?: { finishedAt: number; id: string } }> {
     const now = Date.now();
     const limit = clampListLimit(q.limit);
+    if (q.visibleTo?.kind === "none") return { items: [] };
     const { policy } = this.policyState();
     const cutoff = now - policy.retentionDays * 86_400_000;
     const inPolicy = this.sql.exec<{ n: number; b: number }>(`SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b FROM runs WHERE finished_at >= ?`, cutoff).one();
@@ -1172,6 +1197,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       where.push(`channel_id = ?`);
       params.push(q.channel);
     }
+    if (q.visibleTo !== undefined && q.visibleTo.kind !== "all") where.push(visibilitySql(q.visibleTo, params));
     const select = `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE ${where.join(" AND ")} ORDER BY finished_at DESC, run_id DESC`;
     // `LIMIT` holds on the over-bound path too: the kept set is the newest
     // prefix of this same ordering, so the first `limit` rows are the page (or
@@ -1194,6 +1220,38 @@ export class RunHistoryDO extends DurableObject<Env> {
 }
 
 type EventRow = { seq: number; json: string };
+
+/** A visibility filter as one SQL boolean over the `runs` columns, its values
+ *  appended to `params` — the same truth table as `matchesVisibility`
+ *  (runRecord.ts). An empty `IN ()` list and an empty `or` are `0` (nothing),
+ *  an empty `and` is `0` too (fail-closed, like the reference evaluator). The
+ *  body validator (`isRunVisibilityFilter`) already bounded depth and width. */
+function visibilitySql(f: RunVisibilityFilter, params: (string | number)[]): string {
+  const inList = (column: string, values: readonly string[]): string => {
+    if (values.length === 0) return "0";
+    params.push(...values);
+    return `${column} IN (${values.map(() => "?").join(",")})`;
+  };
+  switch (f.kind) {
+    case "none":
+      return "0";
+    case "all":
+      return "1";
+    case "channels-in":
+      return inList("channel_id", f.channelIds);
+    case "visibility-in":
+      return inList("channel_visibility", f.visibilities);
+    case "repos-in":
+      return inList("repo", f.repos);
+    case "user-is":
+      params.push(f.userId);
+      return "user_id = ?";
+    case "or":
+      return f.of.length === 0 ? "0" : `(${f.of.map((p) => visibilitySql(p, params)).join(" OR ")})`;
+    case "and":
+      return f.of.length === 0 ? "0" : `(${f.of.map((p) => visibilitySql(p, params)).join(" AND ")})`;
+  }
+}
 
 /** Event rows → stored events. A corrupt row is skipped, never fatal — the rest of the run still reads. */
 function parseEventRows(rows: readonly EventRow[]): StoredRunEvent[] {
@@ -1317,7 +1375,38 @@ function parseRunList(body: unknown): Validated<{ storeKey: string; query: RunLi
     if (typeof v !== "string" || v.length > MAX_KEY_CHARS) return invalid(`${field} must be a string of at most ${MAX_KEY_CHARS} characters`);
     query[field] = v;
   }
+  if (b.visibleTo !== undefined) {
+    // A malformed filter is a 400, never "all": the bot degrades to live rows
+    // rather than the DO widening what an actor may see.
+    if (!isRunVisibilityFilter(b.visibleTo)) return invalid("visibleTo must be a run visibility filter");
+    if (boundParameters(b.visibleTo) > DO_MAX_BOUND_PARAMETERS - RUN_LIST_BASE_PARAMETERS) return invalid(`visibleTo names more than ${DO_MAX_BOUND_PARAMETERS - RUN_LIST_BASE_PARAMETERS} ids`);
+    query.visibleTo = b.visibleTo;
+  }
   return { ok: true, value: { storeKey: key.value, query } };
+}
+
+/** Parameters the page query binds before any filter: the cursor pair (3) and the age floor (1),
+ *  plus `agent`, `channel`, and the LIMIT at most — the headroom `visibleTo` must fit under. */
+const RUN_LIST_BASE_PARAMETERS = 7;
+
+/** How many `?` a filter binds (one per id, one per user). */
+function boundParameters(f: RunVisibilityFilter): number {
+  switch (f.kind) {
+    case "none":
+    case "all":
+      return 0;
+    case "channels-in":
+      return f.channelIds.length;
+    case "visibility-in":
+      return f.visibilities.length;
+    case "repos-in":
+      return f.repos.length;
+    case "user-is":
+      return 1;
+    case "or":
+    case "and":
+      return f.of.reduce((n, p) => n + boundParameters(p), 0);
+  }
 }
 
 // ---------------------------------------------------------------------------

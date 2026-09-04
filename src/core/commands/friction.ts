@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { GithubIssueTracker, type IssueTracker } from "../../execution/githubIssues.js";
-import { CommandError, commandDefiner, flag, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
+import { predicateFor } from "../authz/predicate.js";
+import { actorOf, CommandError, commandDefiner, flag, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
 import type { FrictionLedger } from "../frictionLedger.js";
 import { clusterFriction, type FrictionRunRecord } from "../frictionProposals.js";
 import { parseRunEventLines } from "../runEventLines.js";
@@ -26,9 +27,13 @@ import { countTruncatedInputs, formatSelfImprovementReport, runSelfImprovement, 
 // Gates (R13, unchanged): `report` is open in chat and needs `friction:read`
 // elsewhere; `propose` files to GitHub, so chat keeps the fail-closed
 // repo-management set (`repoManager` = admins ∪ permissions.repoManagement)
-// and machine callers need `friction:write`. A channel-pinned caller (KTD10)
-// analyzes only its channel's runs — the ledger enforces the pin, and a ledger
-// of bare records (no run store) contributes nothing under one.
+// and machine callers need `friction:write`. WHAT either analyzes is the
+// authorization policy (authorization.md item 6, OQ2): the runs the actor may
+// read — `predicateFor(actor, "runs:read", "run")` handed to the ledger, which
+// pushes it into the run store; an `all-channels` holder (an admin, the
+// self-improvement schedule) analyzes the fleet, a token its granted channels,
+// and a ledger of bare records (no run store) contributes nothing under any
+// narrower predicate. No channel is compared here.
 // Neither command starts an agent run (KTD16): `propose` opens issues for a
 // human to triage; it never opens PRs or merges. In chat the dispatcher records
 // each invocation as an inline run (#244) so a scheduled firing leaves a trace.
@@ -82,6 +87,10 @@ async function recentRecords(ledger: FrictionLedger, query: Parameters<FrictionL
 const asJson = (r: SelfImprovementReport): JsonValue => r as unknown as JsonValue;
 const render = (output: JsonValue): string => formatSelfImprovementReport(output as unknown as SelfImprovementReport);
 
+/** The runs this caller may analyze: its run-read predicate (a `friction`
+ *  report is a read of runs, whatever surface asks). */
+const visibleRuns = (caller: Caller) => predicateFor(actorOf(caller), "runs:read", "run");
+
 export const frictionReport = defineCommand({
   id: "friction.report",
   options: z.object({
@@ -95,7 +104,7 @@ export const frictionReport = defineCommand({
   describe: "Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.",
   render,
   handler: async ({ options, caller, deps }) => {
-    const records = await recentRecords(await ledgerOf(deps), { sinceMs: options.sinceMs, limit: options.limit, channel: caller.channel });
+    const records = await recentRecords(await ledgerOf(deps), { sinceMs: options.sinceMs, limit: options.limit, visibleTo: visibleRuns(caller) });
     return asJson({
       runsAnalyzed: records.length,
       patterns: clusterFriction(records, { minRuns: options.minRuns ?? (await deps.friction.config())?.minRuns }),
@@ -130,7 +139,7 @@ export const frictionPropose = defineCommand({
     try {
       return asJson(
         await runSelfImprovement({
-          records: await recentRecords(ledger, { channel: caller.channel }),
+          records: await recentRecords(ledger, { visibleTo: visibleRuns(caller) }),
           tracker: deps.friction.tracker ?? new GithubIssueTracker(),
           repo,
           label: cfg?.label,

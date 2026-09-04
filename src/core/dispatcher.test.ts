@@ -4805,6 +4805,36 @@ describe("run history write path (#157 U4)", () => {
     expect(bareRec).not.toHaveProperty("userName");
   });
 
+  it("channel visibility stamp (authorization KTD7): the run's meta and its record carry what the channel directory says at dispatch — the static default maps the id (slack:C… → unknown, slack:D… → dm, http: → machine); an injected directory is asked once per run; a failing directory stamps `unknown`", async () => {
+    const { deps, store, writer, registry } = wired(capturingProvider());
+    await dispatch(deps, msg("hello there"), fakeIO().io);
+    await writer.settled();
+    expect(registry.getById("run-h")?.channelVisibility).toBe("unknown"); // the fixture speaks in a slack:C… channel
+    expect((await store.get("run-h"))!.channelVisibility).toBe("unknown");
+
+    const dm = wired(capturingProvider(), { registry: new RunRegistry({ genId: () => "run-dm", genToken: () => "tok" }) });
+    await dispatch(dm.deps, { ...msg("hello there"), channelId: "slack:D0AB", threadKey: "slack:D0AB:1" }, fakeIO().io);
+    await dm.writer.settled();
+    expect((await dm.store.get("run-dm"))!.channelVisibility).toBe("dm");
+
+    const asked: string[] = [];
+    const injected = wired(capturingProvider(), { registry: new RunRegistry({ genId: () => "run-i", genToken: () => "tok" }) });
+    injected.deps.channelDirectory = { info: async (id) => (asked.push(id), { visibility: "public" }), isMember: async () => "unknown" };
+    await dispatch(injected.deps, msg("hello there"), fakeIO().io);
+    await injected.writer.settled();
+    expect(asked).toEqual(["slack:CX"]);
+    expect(injected.registry.getById("run-i")?.channelVisibility).toBe("public");
+    expect((await injected.store.get("run-i"))!.channelVisibility).toBe("public");
+
+    const failing = wired(capturingProvider(), { registry: new RunRegistry({ genId: () => "run-f", genToken: () => "tok" }) });
+    failing.deps.channelDirectory = { info: async () => { throw new Error("slack down"); }, isMember: async () => "unknown" };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await dispatch(failing.deps, msg("hello there"), fakeIO().io);
+    await failing.writer.settled();
+    expect((await failing.store.get("run-f"))!.channelVisibility).toBe("unknown");
+    expect(warn.mock.calls.some(([line]) => String(line).includes("[authz] channel directory failed for slack:CX"))).toBe(true);
+  });
+
   it("a completed run ends as one stored record: status completed, eventCount = published count, events include the user and assistant messages, identity fields set", async () => {
     const { deps, store, writer, registry } = wired(capturingProvider());
     const { io, replies } = fakeIO();

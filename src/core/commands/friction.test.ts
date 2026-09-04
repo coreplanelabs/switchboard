@@ -1,5 +1,10 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { ConfigStore } from "../../config.js";
 import { InMemoryIssueTracker } from "../../execution/githubIssues.js";
+import { chatCallerFor } from "../commandChat.js";
 import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
 import { jsonSchemaFor } from "../commandSurface.js";
 import { InMemoryFrictionLedger, RunStoreFrictionLedger, type FrictionLedger } from "../frictionLedger.js";
@@ -52,13 +57,20 @@ function bind(deps: Partial<FrictionCommandDeps["friction"]> = {}): { commands: 
   return { commands, tracker };
 }
 
-const chat = (userId: string, gates: { repoManager: boolean }): Caller => ({
+/** A chat caller with the given gates whose actor sees EVERY channel — the
+ *  in-memory ledger holds bare records (no channel), which only an all-channels
+ *  actor can be shown (authorization.md item 6). `channels` narrows that. */
+const chat = (userId: string, gates: { repoManager: boolean }, channels: "all" | Set<string> = "all"): Caller => ({
   kind: "chat",
   id: userId,
   scopes: new Set(),
   chatGate: (gate) => (gate === "open" ? true : gate === "repoManager" ? gates.repoManager : false),
+  actor: { kind: "user", id: userId, grants: { actions: new Set(), channels, repos: new Set() } },
 });
-const mcp = (...scopes: string[]): Caller => ({ kind: "mcp", id: "mcp:alice", scopes: new Set(scopes) });
+/** A machine caller with the given scopes over every channel (an ops token granted `channels: all`). */
+const mcp = (...scopes: string[]): Caller => ({ kind: "mcp", id: "mcp:alice", scopes: new Set(scopes), actor: { kind: "service", id: "mcp:alice", grants: { actions: new Set(scopes), channels: "all", repos: new Set() } } });
+/** The same token WITHOUT a channel grant (unpinned, OQ4 a): admitted to the command, shown no run. */
+const mcpNoChannels = (...scopes: string[]): Caller => ({ ...mcp(...scopes), actor: { kind: "service", id: "mcp:alice", grants: { actions: new Set(scopes), channels: new Set(), repos: new Set() } } });
 
 /** A seeded ledger whose newest record was diagnosed on a head-truncated stream. */
 async function truncatedLedger() {
@@ -83,13 +95,17 @@ function reportOf(res: Invoked): SelfImprovementReport {
 }
 
 describe("friction.report", () => {
-  it("is open to any chat caller and renders the exact pre-migration reply (AE10)", async () => {
+  it("is open to any chat caller and renders the exact pre-migration reply (AE10) for an actor that sees every channel; a caller with no channel grants is admitted too and analyzes 0 runs (OQ2: the aggregate is per-actor)", async () => {
     const { commands, tracker } = bind({ ledger: ledgerDep(await seededLedger()) });
     for (const caller of [chat("slack:UADMIN", { repoManager: true }), chat("slack:UNOBODY", { repoManager: false })]) {
       const res = await commands.invoke("friction.report", {}, caller);
       expect(res.ok, caller.id).toBe(true);
       expect(text(commands, "friction.report", res)).toBe(GOLDEN_REPORT);
     }
+    const nobody = await commands.invoke("friction.report", {}, chat("slack:UNOBODY", { repoManager: false }, new Set()));
+    expect(nobody.ok).toBe(true);
+    expect(reportOf(nobody).runsAnalyzed).toBe(0);
+    expect(text(commands, "friction.report", nobody)).toMatch(/^🔍 0 runs analyzed/);
     expect(tracker.calls).toEqual([]);
   });
 
@@ -115,19 +131,23 @@ describe("friction.report", () => {
     expect((bad as { message: string }).message).not.toContain("zero");
   });
 
-  it("a channel-pinned caller analyzes only its channel's runs (KTD10): channel-Y labels never appear", async () => {
+  /** A run store with runs across a machine channel, a Slack channel, and a
+   *  second machine channel — the fleet the fixture actors see differently. */
+  async function fleetStore() {
     const NOW = 1_700_000_000_000;
     const store = new InMemoryRunStore({ now: () => NOW });
-    const record = (id: string, channelId: string): RunRecord => {
+    const record = (id: string, channelId: string, channelVisibility: RunRecord["channelVisibility"]): RunRecord => {
       const events = lockfileEvents();
+      const scope = channelId.replace(/^[a-z]+:/, "");
       return {
         id,
-        label: `coding · ${channelId === "http:x" ? "x-repo" : "y-repo"}/${id}`,
+        label: `coding · ${scope}-repo/${id}`,
         agent: "coding",
         model: "m",
         channelId,
         userId: "slack:U1",
         threadKey: `${channelId}:${id}`,
+        channelVisibility,
         startedAt: NOW - 60_000,
         finishedAt: NOW - 1000,
         status: "completed",
@@ -138,12 +158,20 @@ describe("friction.report", () => {
         diagnosis: analyzeRunFriction(events),
       };
     };
-    for (const id of ["x1", "x2"]) await store.put(record(id, "http:x"));
-    for (const id of ["y1", "y2"]) await store.put(record(id, "http:y"));
-    const legacy = await seededLedger(); // legacy rows carry no channel → excluded under a pin
+    for (const id of ["x1", "x2"]) await store.put(record(id, "http:x", "machine"));
+    for (const id of ["y1", "y2"]) await store.put(record(id, "http:y", "machine"));
+    for (const id of ["s1", "s2"]) await store.put(record(id, "slack:C1", "unknown"));
+    await store.put(record("cron1", "http:cron", "machine"));
+    return store;
+  }
+
+  it("analyzes only the runs the actor can see (authorization.md item 6, OQ2): a token granted one channel sees that channel; an all-channels actor sees the fleet; legacy bare rows count only for an all-channels actor", async () => {
+    const store = await fleetStore();
+    const legacy = await seededLedger(); // legacy rows carry no channel → excluded under any narrower predicate
     const { commands } = bind({ ledger: ledgerDep(new RunStoreFrictionLedger(store, legacy)) });
 
-    const pinned = await commands.invoke("friction.report", { options: { minRuns: "1" } }, { ...mcp("friction:read"), channel: "http:x" });
+    const tokenX: Caller = { ...mcp("friction:read"), actor: { kind: "service", id: "mcp:alice", grants: { actions: new Set(["friction:read"]), channels: new Set(["http:x"]), repos: new Set() } } };
+    const pinned = await commands.invoke("friction.report", { options: { minRuns: "1" } }, tokenX);
     expect(pinned.ok).toBe(true);
     const report = reportOf(pinned);
     expect(report.runsAnalyzed).toBe(2);
@@ -152,8 +180,34 @@ describe("friction.report", () => {
     expect(JSON.stringify(report)).not.toContain("y-repo");
     expect(JSON.stringify(report)).not.toContain("acme/r1");
 
-    const unpinned = await commands.invoke("friction.report", { options: { minRuns: "1" } }, mcp("friction:read"));
-    expect(reportOf(unpinned).runsAnalyzed).toBe(6);
+    const fleet: Caller = { ...mcp("friction:read"), actor: { kind: "service", id: "mcp:alice", grants: { actions: new Set(["friction:read"]), channels: "all", repos: new Set() } } };
+    expect(reportOf(await commands.invoke("friction.report", { options: { minRuns: "1" } }, fleet)).runsAnalyzed).toBe(7 + 2);
+
+    // No channel grants at all (an unpinned token, OQ4 a): nothing to analyze — never the runs of the channel it speaks in.
+    const nothing = await commands.invoke("friction.report", { options: { minRuns: "1" } }, mcpNoChannels("friction:read"));
+    expect(reportOf(nothing)).toMatchObject({ runsAnalyzed: 0, patterns: [] });
+  });
+
+  it("the self-improvement schedule actor analyzes every channel's runs (R12 a, #395): the registry's declared grants hold all-channels, so a firing from the cron channel sees the fleet, not its own firings", async () => {
+    const store = await fleetStore();
+    const { commands, tracker } = bind({ ledger: ledgerDep(new RunStoreFrictionLedger(store)) });
+    const dir = mkdtempSync(join(tmpdir(), "swb-friction-authz-"));
+    writeFileSync(join(dir, "config.yaml"), "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\npermissions:\n  admins: [\"slack:UADMIN\"]\n  repoManagement: [\"schedule:self-improvement\"]\n");
+    const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"), () => {}, { commandGroups: ["friction"] });
+    // The firing as chat sees it: the schedule actor speaking in the cron's machine channel.
+    const firing = chatCallerFor({ userId: "schedule:self-improvement", channelId: "http:cron", threadKey: "http:cron:self-improvement-1" }, config);
+    expect(firing.actor).toMatchObject({ kind: "schedule", id: "schedule:self-improvement", grants: { channels: "all" } });
+
+    const report = reportOf(await commands.invoke("friction.report", { options: { minRuns: "1" } }, firing));
+    expect(report.runsAnalyzed).toBe(7); // x1 x2 y1 y2 s1 s2 cron1 — the fleet, not the one cron firing
+    const scopes = new Set(report.patterns.flatMap((p) => p.examples.map((e) => e.label?.split(" · ")[1]?.split("/")[0])));
+    expect(scopes).toContain("C1-repo"); // a Slack channel's run — invisible to the pinned http:cron caller of old
+    expect(scopes.size).toBeGreaterThan(1); // examples span channels, not one
+
+    const proposed = reportOf(await commands.invoke("friction.propose", { options: { minRuns: "1", top: "1" } }, firing));
+    expect(proposed.runsAnalyzed).toBe(7);
+    expect(proposed.filed).toHaveLength(1);
+    expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
   });
 });
 

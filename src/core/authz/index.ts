@@ -5,6 +5,8 @@
 export { authorize, effectiveGrants, principalOf } from "./authorize.js";
 export type { DenyReason } from "./authorize.js";
 export { matchesPredicate, predicateFor } from "./predicate.js";
+export type { PredicateRecord } from "./predicate.js";
+export { STATIC_CHANNEL_DIRECTORY, StaticChannelDirectory, visibilityOf } from "./channelDirectory.js";
 export { POLICY, validatePolicy } from "./policy.js";
 export { attributesOf } from "./resource.js";
 export type { ResourceAttributes } from "./resource.js";

@@ -1,6 +1,8 @@
+import { matchesPredicate } from "./authz/predicate.js";
+import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { RunActor, RunEvent, StopMode } from "./runEvents.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
-import { clampListLimit, RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, utf8ByteLength, type RunListItem, type RunRecord } from "./runRecord.js";
+import { clampListLimit, RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, toVisibilityFilter, utf8ByteLength, type RunListItem, type RunRecord } from "./runRecord.js";
 import type { RunRegistry, RunSnapshot, RunStopStatus, RunSubscriber, RunFinishListener, RunSummary, StopRequestResult, Unsubscribe } from "./runRegistry.js";
 import type { RunStore } from "./runStore.js";
 
@@ -10,10 +12,16 @@ import type { RunStore } from "./runStore.js";
 // the 60 s TTL) and the durable `RunStore` (finished runs for the retention
 // window), and it is the boundary where the registry's capability token stops:
 // nothing this module returns carries `token` (KTD7 — `RunSummary` never leaves
-// the core). Who may call is decided one layer up (the command registry's scopes
-// and chat gates, the Cloudflare Access gate); this service assumes an
-// authorized caller, except `authorizeLive`, which IS the token check for the
-// live SSE/HTML path (KTD6) and is synchronous so that path stays byte-identical.
+// the core). Who may CALL is decided one layer up (the command registry's scopes
+// and chat gates, the Cloudflare Access gate). What a caller may SEE in a list
+// arrives as `visibleTo` — the authorization policy compiled to a store
+// predicate (`predicateFor`, authorization.md item 6) — and is pushed down: live
+// rows are filtered by the reference evaluator, the store receives the same
+// predicate as its filter, and nothing is loaded to be dropped afterwards (R6).
+// Point reads return the run as stored; the command that asked authorizes it
+// against the run's own attributes (KTD8: a deny is `not_found`). The one check
+// this service makes itself is `authorizeLive`, the capability-token gate for
+// the live SSE/HTML path (KTD6), synchronous so that path stays byte-identical.
 
 export type { RunActor } from "./runEvents.js";
 
@@ -38,6 +46,8 @@ export interface RunView {
   channelId?: string;
   userId?: string;
   threadKey?: string;
+  /** The stamped visibility (authorization KTD7); absent on a hand-built live row = `unknown`. */
+  channelVisibility?: ChannelVisibility;
   repo?: string;
   startedAt: number;
   /** Absent while the run is live. */
@@ -71,8 +81,12 @@ export type RunListStatus = "active" | "finished" | "all";
 
 export interface ListRunsOptions {
   status: RunListStatus;
+  /** What the caller may see: `predicateFor(actor, "runs:read", "run")`. REQUIRED —
+   *  a list never runs without a decision; `{ kind: "all" }` is an explicit choice
+   *  the caller makes for an actor holding every channel. `none` touches nothing. */
+  visibleTo: Predicate;
   agent?: string;
-  /** Platform-namespaced channel id (`slack:C0123`). */
+  /** Platform-namespaced channel id (`slack:C0123`) — a filter the caller asked for, ANDed with `visibleTo`. */
   channel?: string;
   /** Only runs finished (or, while live, started) at or after this epoch ms. */
   sinceMs?: number;
@@ -167,6 +181,7 @@ function liveView(s: RunSummary): RunView {
     ...(s.channelId !== undefined ? { channelId: s.channelId } : {}),
     ...(s.userId !== undefined ? { userId: s.userId } : {}),
     ...(s.threadKey !== undefined ? { threadKey: s.threadKey } : {}),
+    ...(s.channelVisibility !== undefined ? { channelVisibility: s.channelVisibility } : {}),
     ...(s.repo !== undefined ? { repo: s.repo } : {}),
     startedAt: s.startedAt,
     finished: s.finished,
@@ -240,7 +255,10 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   return {
     async listRuns(opts) {
       const limit = clampListLimit(opts.limit);
+      // `none` is decided here, once: no live row qualifies and the store is not asked.
+      if (opts.visibleTo.kind === "none") return { runs: [] };
       const matches = (r: RunView): boolean =>
+        matchesPredicate(opts.visibleTo, r) &&
         (opts.agent === undefined || r.agent === opts.agent) &&
         (opts.channel === undefined || r.channelId === opts.channel) &&
         (opts.sinceMs === undefined || (r.finishedAt ?? r.startedAt) >= opts.sinceMs);
@@ -270,6 +288,9 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         try {
           const rows = await store.list({
             limit: Math.min(RUN_LIST_MAX_LIMIT, limit + live.length),
+            // The policy rides down as the store's own filter (R6): `all` is no
+            // constraint and is omitted so the store's query is unchanged for it.
+            ...(opts.visibleTo.kind !== "all" ? { visibleTo: toVisibilityFilter(opts.visibleTo) } : {}),
             ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
             ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
             ...(opts.sinceMs !== undefined ? { sinceMs: opts.sinceMs } : {}),

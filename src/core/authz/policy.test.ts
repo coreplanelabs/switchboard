@@ -42,15 +42,16 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
   },
   "runs:read run [all-channels]": {
     allow: [[A.admin, foreignPrivRun], [A.schedule, run({ channel: "dm", userId: "slack:U5" })]],
-    deny: [[A.nonMember, foreignPrivRun], [A.reader, run({ channel: "pub2", userId: "slack:U5" })]],
+    deny: [[A.nonMember, foreignPrivRun], [A.reader, run({ channel: "dm", userId: "slack:U5" })]],
   },
   "runs:read run [is-self]": {
     allow: [[A.nonMember, run({ channel: "priv", userId: A.nonMember.id })], [A.noGrants, run({ channel: "dm", userId: A.noGrants.id })]],
-    deny: [[A.nonMember, foreignPrivRun], [A.noGrants, run({ channel: "pub1", userId: "slack:U1" })]],
+    deny: [[A.nonMember, foreignPrivRun], [A.noGrants, run({ channel: "dm", userId: "slack:U1" })]],
   },
   "runs:write run [has-grant(runs:write) & member-of]": {
-    allow: [[A.member, run({ channel: "pub1", userId: "slack:U5" })], [A.token, run({ channel: "http", userId: "http:other" })]],
-    deny: [[A.reader, run({ channel: "pub1", userId: "slack:U5" })], [A.member, run({ channel: "pub2", userId: "slack:U5" })]],
+    // pub2 is PUBLIC: every actor is a member of it (item 4), so the non-member case is the dm run.
+    allow: [[A.member, run({ channel: "pub2", userId: "slack:U5" })], [A.token, run({ channel: "http", userId: "http:other" })]],
+    deny: [[A.reader, run({ channel: "pub1", userId: "slack:U5" })], [A.member, run({ channel: "dm", userId: "slack:U5" })]],
   },
   "runs:write run [has-grant(runs:write) & all-channels]": {
     allow: [[A.admin, foreignPrivRun]],

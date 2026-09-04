@@ -74,7 +74,7 @@ const whoami = define({
   chatGate: "open",
   effect: "read",
   describe: "the caller as the adapter resolved it",
-  handler: async ({ caller }) => ({ kind: caller.kind, id: caller.id, channel: caller.channel ?? null }),
+  handler: async ({ caller }) => ({ kind: caller.kind, id: caller.id, actor: caller.actor ? `${caller.actor.kind} ${caller.actor.id}` : null }),
 });
 
 const say = define({
@@ -214,12 +214,12 @@ describe("parseChatCommand", () => {
 });
 
 describe("chatCallerFor", () => {
-  it("carries the message's channel + thread as `origin` (never as the pin) and the lazy repo resolver when given", async () => {
+  it("carries the message's channel + thread as `origin` (context, never authority) and the lazy repo resolver when given", async () => {
     const { chatCallerFor } = await import("./commandChat.js");
     const config = configStore(ADMIN_YAML);
     const c = chatCallerFor(msg("x", "slack:UX"), config);
     expect(c.origin).toEqual({ channelId: "slack:CX", threadKey: "slack:CX:1.0" });
-    expect(c.channel).toBeUndefined();
+    expect(c).not.toHaveProperty("channel");
     const resolve = async () => "acme/api";
     expect(chatCallerFor(msg("x"), config, resolve).origin?.repo).toBe(resolve);
   });
@@ -235,8 +235,11 @@ describe("chatCallerFor", () => {
     expect([...(plain!.grants.actions as Set<string>)].every((a) => a.startsWith("agent:run:"))).toBe(true);
     expect(plain!.grants.actions).toContain("agent:run:general");
     const machine = chatCallerFor({ userId: "http:cron", channelId: "http:cron", threadKey: "http:cron:t" }, config);
-    expect(machine.channel).toBe("http:cron");
+    expect(machine).not.toHaveProperty("channel");
     expect(machine.actor).toMatchObject({ kind: "service", id: "http:cron", origin: { channelId: "http:cron", threadKey: "http:cron:t" } });
+    // A schedule firing that reaches chat as its `schedule:` actor (R9): the registry's declared grants, kind `schedule`.
+    const schedule = chatCallerFor({ userId: "schedule:self-improvement", channelId: "http:cron", threadKey: "http:cron:t" }, config);
+    expect(schedule.actor).toMatchObject({ kind: "schedule", id: "schedule:self-improvement", grants: { actions: new Set(["friction:read", "friction:write"]), channels: "all" } });
   });
 });
 
@@ -308,14 +311,14 @@ describe("handleChatCommand", () => {
     expect(deps.hits).toEqual([]);
   });
 
-  it("a machine caller's chat command is channel-pinned: an `http:`/`mcp:` message pins `caller.channel` to its channelId; a Slack human stays unpinned", async () => {
+  it("every chat caller carries its Actor and no channel pin: a machine credential speaking as text (`http:`/`mcp:`) is a service actor whose grants — not the channel it speaks in — decide what it sees (authorization.md item 7)", async () => {
     const { commands, config } = setup();
     const parsed = parseChatCommand("demo whoami", commands)!;
     const via = (channelId: string, userId: string) => handleChatCommand({ commands, parsed, msg: { channelId, userId, threadKey: `${channelId}:t` }, config });
-    expect(await via("http:ops", "http:ops")).toBe("kind: chat\nid: http:ops\nchannel: http:ops");
-    expect(await via("mcp:alice", "mcp:alice")).toBe("kind: chat\nid: mcp:alice\nchannel: mcp:alice");
-    expect(await via("slack:CX", "slack:UX")).toBe("kind: chat\nid: slack:UX\nchannel: null");
-    expect(await via("cli:local", "cli:local")).toBe("kind: chat\nid: cli:local\nchannel: null");
+    expect(await via("http:ops", "http:ops")).toBe("kind: chat\nid: http:ops\nactor: service http:ops");
+    expect(await via("mcp:alice", "mcp:alice")).toBe("kind: chat\nid: mcp:alice\nactor: service mcp:alice");
+    expect(await via("slack:CX", "slack:UX")).toBe("kind: chat\nid: slack:UX\nactor: user slack:UX");
+    expect(await via("cli:local", "cli:local")).toBe("kind: chat\nid: cli:local\nactor: user cli:local");
   });
 
   it("a caller with no admins configured is refused (isOperator is fail-closed)", async () => {
@@ -341,6 +344,7 @@ describe("runs list on chat (KTD18)", () => {
       channelId: "slack:D0PRIVATE",
       userId: "slack:UOWNER",
       threadKey: `slack:D0PRIVATE:${id}`,
+      channelVisibility: "unknown",
       startedAt: finishedAt - 65_000,
       finishedAt,
       status: "completed",

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Actor } from "./authz/types.js";
+import { NO_GRANTS, type Actor } from "./authz/types.js";
 
 // Command registry (#157, U6 — KD2/KTD1; typed model KTD20): the ONE seam
 // behind every operator surface. The lowest level is plain TypeScript: a
@@ -50,21 +50,22 @@ export type CommandSurfaces = Partial<Record<SurfaceName, false>>;
  * `id` is platform-namespaced (invariant 4): `access:<sub>` (browser session),
  * `access:svc:<common_name>` (Access service token), `mcp:<subject>`,
  * `cli:local`, `slack:U…`. `scopes` is the token's explicit grant, or `"all"`
- * for the local CLI. `channel` is a namespaced pin (`http:<channel>`): every
- * run-derived read is filtered to it. `chatGate` resolves a command's
- * `ChatGate` for a chat caller (`ConfigStore.chatGateFor`); absent = refused.
- * `actor` is the same identity as the one authorization model sees it
- * (`src/core/authz/`): kind, namespaced id, and grants from config. Every
- * production adapter sets it; it decides nothing yet — `scopes`, `channel`
- * and `chatGate` still do — until the policy units (U3/U4) replace them, at
- * which point `Caller` becomes `Actor`. Optional only so hand-built callers in
- * existing tests need not carry it in the meantime.
+ * for the local CLI. `chatGate` resolves a command's `ChatGate` for a chat
+ * caller (`ConfigStore.chatGateFor`); absent = refused. `actor` is the same
+ * identity as the one authorization model sees it (`src/core/authz/`): kind,
+ * namespaced id, and grants from config. Every production adapter sets it, and
+ * since U3 it is what decides run VISIBILITY — `runs.*` and `friction.*` call
+ * `authorize` / `predicateFor` on it (the former `channel` pin is gone: a
+ * machine token's channels are its grants). `scopes` and `chatGate` still admit
+ * a caller to a command until U4 turns the gates into policy rows, at which
+ * point `Caller` becomes `Actor`. Optional only so hand-built callers in
+ * existing tests need not carry it in the meantime; a handler that needs it
+ * reads `actorOf(caller)`, which is `NO_GRANTS` for a caller without one (R7).
  */
 export interface Caller {
   kind: "access" | "mcp" | "cli" | "chat";
   id: string;
   scopes: ReadonlySet<string> | "all";
-  channel?: string;
   chatGate?: (gate: ChatGate) => boolean;
   actor?: Actor;
   /** Where a chat caller is speaking from: the message's namespaced channel
@@ -72,9 +73,16 @@ export interface Caller {
    *  scope), its thread key (the workspace a local deterministic op runs in),
    *  and — resolved lazily, only when a command asks — the repo the thread is
    *  bound to (the repo memory scope; costs a history fetch and a GitHub call).
-   *  Context, NOT an authorization pin — that is `channel`. Absent for machine
+   *  Context, NOT authority (authorization.md item 1). Absent for machine
    *  surfaces. */
   origin?: { channelId: string; threadKey: string; repo?: () => Promise<string | undefined> };
+}
+
+/** The `Actor` a handler decides against (authorization R1). A caller its
+ *  adapter left without one — only hand-built callers in tests — holds
+ *  `NO_GRANTS`: it sees no run and passes no grant check (R7). */
+export function actorOf(caller: Caller): Actor {
+  return caller.actor ?? { kind: "user", id: caller.id, grants: NO_GRANTS };
 }
 
 /** One positional argument: `name` addresses it on the JSON surfaces (HTTP

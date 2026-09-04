@@ -12,6 +12,7 @@ import type { ChatGate } from "./core/commandRegistry.js";
 import { grantsIn, grantsTable, parseGrantsConfig, type GrantsConfig, type GrantsTable } from "./core/authz/grants.js";
 import type { Grants } from "./core/authz/types.js";
 import type { IngressTokenMap } from "./core/ingressTokens.js";
+import { isRunSchedule, SCHEDULES } from "./core/schedules.js";
 import { AGENTS } from "./agents/registry.js";
 import { assertUrlAllowed } from "./tools/web.js";
 import { isMcpServerEntry, MCP_SELF_SERVE_AGENTS, MCP_SERVER_NAME_MAX, MCP_SERVER_NAME_RE, MCP_SERVERS_PER_SCOPE_MAX, type McpServerEntry } from "./mcp/registry.js";
@@ -456,7 +457,15 @@ export class ConfigStore {
   ) {
     this.config = typeof config === "string" ? loadAppConfig(config, warn) : config.validated;
     // The native block already passed `validateConfig` (either path above); this parse just builds the table.
-    this.grants = grantsTable({ grants: validateGrants(this.config.grants), permissions: this.config.permissions, ingressTokens: options.ingressTokens, agentNames: Object.keys(AGENTS), commandGroups: options.commandGroups });
+    this.grants = grantsTable({
+      grants: validateGrants(this.config.grants),
+      permissions: this.config.permissions,
+      ingressTokens: options.ingressTokens,
+      agentNames: Object.keys(AGENTS),
+      commandGroups: options.commandGroups,
+      // The schedule registry's declared actors (R9): the floor for `schedule:<name>` ids.
+      schedules: SCHEDULES.filter(isRunSchedule).map((s) => s.action.actor),
+    });
     if (this.grants.overlapping.length > 0) {
       warn(`config.yaml: grants and permissions both name ${this.grants.overlapping.map((id) => `"${id}"`).join(", ")} — the grants entry wins; remove the permissions/token entry (one identity, one shape)`);
     }

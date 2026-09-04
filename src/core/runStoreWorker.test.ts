@@ -17,6 +17,7 @@ function record(id: string, evs: RunEvent[] = events(3)): RunRecord {
     channelId: "slack:C1",
     userId: "slack:U1",
     threadKey: "slack:C1:1",
+    channelVisibility: "unknown",
     startedAt: NOW - 5000,
     finishedAt: NOW,
     status: "completed",

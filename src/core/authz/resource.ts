@@ -16,8 +16,14 @@ export interface ResourceAttributes {
   readonly repo?: string;
   /** Agent name. */
   readonly name?: string;
-  /** Visibility of the channel the resource originated in; absent → `unknown` (fail-closed, KTD7). */
+  /** Visibility of the channel the resource originated in; absent → `unknown` (fail-closed, KTD7).
+   *  Read by the `originVisibility` row selector. */
   readonly visibility: ChannelVisibility;
+  /** Visibility of the channel the resource IS or LIVES IN — a `run`'s stamped
+   *  `channelVisibility`, a `channel`'s own — read by `member-of`'s public half.
+   *  Absent on every other target: a memory scope's origin visibility says
+   *  where a fact came from, never that its scope is public. */
+  readonly channelVisibility?: ChannelVisibility;
 }
 
 export type AttributeName = Exclude<keyof ResourceAttributes, "visibility">;
@@ -79,15 +85,18 @@ function scopeId(key: string, prefix: "user" | "channel" | "repo"): string | und
 
 export function attributesOf(resource: Resource): ResourceAttributes {
   switch (resource.type) {
-    case "run":
+    case "run": {
+      const visibility = resource.channelVisibility ?? "unknown";
       return {
         channelId: resource.channelId,
         userId: resource.userId,
         ...(resource.repo !== undefined ? { repo: resource.repo } : {}),
-        visibility: resource.channelVisibility ?? "unknown",
+        visibility,
+        channelVisibility: visibility,
       };
+    }
     case "channel":
-      return { channelId: resource.id, visibility: resource.visibility };
+      return { channelId: resource.id, visibility: resource.visibility, channelVisibility: resource.visibility };
     case "memory-scope": {
       const visibility = resource.originChannelVisibility ?? "unknown";
       switch (resource.kind) {

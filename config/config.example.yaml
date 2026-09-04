@@ -82,6 +82,11 @@ defaults:
 #   # MCP / HTTP-ingress bearer tokens live in the SWITCHBOARD_INGRESS_TOKENS env
 #   # var (JSON `{ "<token>": { "subject", "channel"?, "scopes"? } }`); `scopes`
 #   # defaults to ["dispatch"] — the ingress endpoint only, no registry command.
+#   # `channel` is the ONE channel the token may read runs from (`http:<channel>`
+#   # over /ingress, `mcp:<channel>` over MCP). A token WITHOUT `channel` may read
+#   # NO run — not even the channel it speaks in — until a `grants` entry below
+#   # names its channels (or `all`). Channels are channels: there is no
+#   # machine-channel shorthand (features/authorization.md item 11, OQ4).
 
 # One authorization model (docs/plans/2026-09-03-001-feat-authorization-model-plan.md):
 # what ANY actor may do, in one shape, keyed by its platform-namespaced id —
@@ -106,12 +111,17 @@ defaults:
 #     channels: all                     # sees runs from every channel
 #   http:ci:                            # an ingress token's subject, as http: …
 #     actions: [dispatch, runs:read]
-#     channels: [http:ops]              # … pinned to the channel its runs live in
+#     channels: [http:ops]              # … the channels whose runs it may read (a
+#                                       # token with no `channel` key and no entry
+#                                       # here reads none — the fail-closed default)
 #   mcp:ci:                             # … and the same subject over MCP
 #     actions: [dispatch, runs:read]
 #     channels: [mcp:ops]
-#   schedule:self-improvement:          # the weekly cron (src/core/schedules.ts)
-#     actions: [friction:write]
+#   http:cron:                          # the identity the shim fires schedules as
+#     actions: [friction:read, friction:write, repo:write]
+#     channels: all                     # the weekly pass analyzes the whole fleet
+#   schedule:self-improvement:          # the weekly cron's own actor (src/core/schedules.ts
+#     actions: [friction:write]         # declares its grants; an entry here REPLACES them)
 #     channels: all                     # analyzes the whole fleet, not one channel
 
 # Where agent tools execute. "local" runs them on the bot host (dev/CLI);
@@ -215,7 +225,8 @@ workspaceDir: ./workspaces
 # through /ingress as the `cron` identity — give that identity a token in
 # SWITCHBOARD_INGRESS_TOKENS ({"…": {"subject": "cron", "channel": "cron"}}) and
 # grant it what its command needs (`friction propose` → permissions.repoManagement
-# must list `http:cron`). The shim records each firing on the state Worker's
+# must list `http:cron`, and `grants.http:cron.channels: all` so the pass reads
+# the fleet's runs, not the cron channel's own). The shim records each firing on the state Worker's
 # ScheduleDO; this block tells the /runs "Scheduled" panel where to read them.
 # Without it the panel lists the schedules with no firing history.
 # schedules:

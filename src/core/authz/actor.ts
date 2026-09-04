@@ -72,10 +72,10 @@ export function resolveActor(input: ActorInput, grantsFor: GrantsLookup): Actor 
   return { kind: kindFor(input.surface), id, grants: grantsFor(id), ...(origin ? { origin } : {}) };
 }
 
-const CHAT_SURFACES: Readonly<Record<string, ActorSurface>> = { slack: "slack", http: "http", mcp: "mcp", cli: "cli" };
+const CHAT_SURFACES: Readonly<Record<string, ActorSurface>> = { slack: "slack", http: "http", mcp: "mcp", cli: "cli", schedule: "schedule" };
 
 /** A chat message's `userId` is already namespaced by its adapter (`slack:U…`,
- *  `http:<subject>`, `mcp:<subject>`, `cli:local`): the prefix picks the surface.
+ *  `http:<subject>`, `mcp:<subject>`, `cli:local`, `schedule:<name>`): the prefix picks the surface.
  *  A namespace this module does not know stays a `user` with the id as given —
  *  its grants are whatever config names for that id, never a guess. */
 export function resolveChatActor(msg: { userId: string; channelId: string; threadKey: string }, grantsFor: GrantsLookup): Actor {

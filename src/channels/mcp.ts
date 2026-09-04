@@ -100,16 +100,17 @@ function mcpExposed(commands: CommandInvoker | undefined): CommandDef<unknown>[]
 }
 
 /** R9: the Caller an MCP bearer identity resolves to — the token's explicit
- *  scopes, its pinned channel as the `mcp:`-namespaced pin (the same
- *  namespace `toIncomingMessage` gives a dispatch's channelId), and the same
- *  identity as a `service` `Actor` with the grants config names for `mcp:<subject>`. */
+ *  scopes and the same identity as a `service` `Actor` with the grants config
+ *  names for `mcp:<subject>`. A token's `channel` reaches the actor as its one
+ *  channel grant (`mcp:<channel>`, the namespace `toIncomingMessage` gives a
+ *  dispatch's channelId) through that translation; an unpinned token holds no
+ *  channel and sees no run (authorization.md item 9). */
 export function toCaller(identity: IngressIdentity, options: Pick<McpOptions, "auth" | "grantsFor">): Caller {
   const lookup: GrantsLookup = options.grantsFor ?? ((id) => grantsFor(id, { ingressTokens: options.auth.tokens }));
   return {
     kind: "mcp",
     id: `${PLATFORM}:${identity.subject}`,
     scopes: new Set(identity.scopes),
-    ...(identity.channel !== undefined ? { channel: `${PLATFORM}:${identity.channel}` } : {}),
     actor: resolveActor({ surface: "mcp", subjectId: identity.subject }, lookup),
   };
 }

@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { redactAndCap, sanitizeActor, serializedOnce, type RunActor, type RunEvent, type StopMode } from "./runEvents.js";
+import type { ChannelVisibility } from "./authz/types.js";
 import type { RunStatus } from "./runRecord.js";
 import { utf8ByteLength } from "./runRecord.js";
 
@@ -84,6 +85,10 @@ export interface RunMeta {
   channelId: string;
   userId: string;
   threadKey: string;
+  /** The channel's visibility as the `ChannelDirectory` reported it at dispatch
+   *  (authorization KTD7) — what `member-of` reads on a live run. The dispatcher
+   *  always stamps it; a hand-built run without it is `unknown`, never public. */
+  channelVisibility?: ChannelVisibility;
   /** `owner/name` for repo runs. */
   repo?: string;
   /** A link back to the message that started the run (`IncomingMessage.sourceUrl`),
@@ -126,6 +131,8 @@ export interface RunSummary {
   channelId?: string;
   userId?: string;
   threadKey?: string;
+  /** `RunMeta.channelVisibility`; absent = `unknown`. */
+  channelVisibility?: ChannelVisibility;
   repo?: string;
   finished: boolean;
   startedAt: number;
@@ -604,6 +611,7 @@ export class RunRegistry {
       ...(m?.agent !== undefined ? { agent: m.agent } : {}),
       ...(m?.model !== undefined ? { model: m.model } : {}),
       ...(m ? { channelId: m.channelId, userId: m.userId, threadKey: m.threadKey } : {}),
+      ...(m?.channelVisibility !== undefined ? { channelVisibility: m.channelVisibility } : {}),
       ...(m?.repo !== undefined ? { repo: m.repo } : {}),
       ...(m?.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
       ...(m?.userName !== undefined ? { userName: m.userName } : {}),
