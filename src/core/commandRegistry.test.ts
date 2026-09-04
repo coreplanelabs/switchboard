@@ -422,6 +422,21 @@ describe("untrusted wrapping and rendering", () => {
     expect(renderCompact("runs.list", { runs: [] })).not.toContain(banner);
   });
 
+  it("renderCompact on the chat surface renders runs.list as one bullet per run — short id in a code span, agent · status · duration — never padded columns (they collapse in a proportional font); the banner and the empty case are the same as text", () => {
+    const banner = "⚠ history store unavailable — showing live runs only";
+    const now = 1_000_000;
+    const runs = [
+      { id: "abcdefgh1234", agent: "coding", startedAt: now - 90_000, finishedAt: now, finished: true, status: "completed" },
+      { id: "zyxwvutsrqponmlk", agent: "review", startedAt: now - 30_000, finished: false, stop: { mode: "soft", state: "stopping" } },
+    ];
+    const chat = renderCompact("runs.list", { runs, storeUnavailable: true }, { now, surface: "chat" });
+    expect(chat.split("\n")).toEqual(["• `abcdefgh` — coding · completed · 1m 30s", "• `zyxwvuts` — review · stopping · 30s", banner]);
+    expect(chat).not.toMatch(/\S {2,}\S/);
+    expect(renderCompact("runs.list", { runs: [] }, { surface: "chat" })).toBe("(no runs)");
+    // The same rows on the text surface keep their aligned columns.
+    expect(renderCompact("runs.list", { runs }, { now, surface: "text" }).split("\n")[0]).toMatch(/^abcdefgh\s{2,}coding\s{2,}completed\s{2,}1m 30s$/);
+  });
+
   it("renderCompact renders an empty list and generic objects as key: value lines", () => {
     expect(renderCompact("runs.list", { runs: [] })).toBe("(no runs)");
     expect(renderCompact("runs.stop", { id: "r1", mode: "soft", state: "stopping" })).toBe("id: r1\nmode: soft\nstate: stopping");

@@ -5430,7 +5430,7 @@ describe("registry chat commands in the fast-path chain (U13, KTD19)", () => {
     await dispatch(deps, msg("runs list --status active", "slack:UADMIN"), io);
     expect(invoked).toEqual(["runs.list"]);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toMatch(/^live0001\s+coding\s+active\s+\d+s$/);
+    expect(replies[0]).toMatch(/^• `live0001` — coding · active · \d+s$/);
     expect(replies[0]).not.toMatch(/slack:D|UOWNER|<!channel>|tok-secret/);
     expect(provider.requests).toHaveLength(0);
     expect(history).not.toHaveBeenCalled();

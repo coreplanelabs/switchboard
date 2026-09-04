@@ -507,11 +507,11 @@ export function renderText(cmd: Pick<CommandDef<unknown>, "id" | "render" | "ren
  * `runs.list` is special-cased per KTD18: short id, agent, status, duration —
  * never channel, user, thread, or label. Everything else is `key: value` lines.
  */
-export function renderCompact(commandId: string, output: JsonValue, opts: { now?: number } = {}): string {
+export function renderCompact(commandId: string, output: JsonValue, opts: { now?: number; surface?: "chat" | "text" } = {}): string {
   if (commandId === "runs.list" && isObject(output) && Array.isArray(output.runs)) {
     const runs = output.runs.filter(isObject);
     const now = opts.now ?? Date.now();
-    const lines = runs.length === 0 ? ["(no runs)"] : runs.map((r) => renderRunLine(r, now));
+    const lines = runs.length === 0 ? ["(no runs)"] : runs.map((r) => renderRunLine(r, now, opts.surface ?? "text"));
     // The service degraded to live rows: say so, or a reader takes a short list for the truth.
     if (output.storeUnavailable === true) lines.push(STORE_UNAVAILABLE_BANNER);
     return lines.join("\n");
@@ -525,7 +525,11 @@ export function renderCompact(commandId: string, output: JsonValue, opts: { now?
   return typeof output === "string" ? output : JSON.stringify(output);
 }
 
-function renderRunLine(r: JsonObject, now: number): string {
+/** One run as `runs.list` shows it (KTD18: short id, agent, status, duration —
+ *  nothing else). Text = aligned columns for a terminal; chat = one bullet with
+ *  the id in a code span and ` · ` between the fields, because padded columns
+ *  collapse in a proportional font. */
+function renderRunLine(r: JsonObject, now: number, surface: "chat" | "text"): string {
   const id = typeof r.id === "string" ? r.id.slice(0, 8) : "?";
   const agent = typeof r.agent === "string" ? r.agent : "-";
   const startedAt = typeof r.startedAt === "number" ? r.startedAt : undefined;
@@ -533,6 +537,7 @@ function renderRunLine(r: JsonObject, now: number): string {
   const stop = isObject(r.stop) && typeof r.stop.state === "string" ? r.stop.state : undefined;
   const status = r.finished === true ? (typeof r.status === "string" ? r.status : "finished") : (stop ?? "active");
   const duration = startedAt === undefined ? "-" : formatDuration((finishedAt ?? now) - startedAt);
+  if (surface === "chat") return `• \`${id}\` — ${agent} · ${status} · ${duration}`;
   return `${id.padEnd(8)}  ${agent.padEnd(8)}  ${status.padEnd(12)}  ${duration}`.trimEnd();
 }
 

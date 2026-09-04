@@ -367,7 +367,7 @@ describe("runs list on chat (KTD18)", () => {
     const parsed = parseChatCommand("runs list --status all", commands);
     expect(parsed).toEqual({ kind: "invoke", id: "runs.list", input: { args: [], options: { status: "all" } } });
     const reply = await handleChatCommand({ commands, parsed: parsed!, msg: msg("runs list --status all", "slack:UADMIN"), config, now: NOW });
-    expect(reply.split("\n")).toEqual(["live0001  review    active        0s", "fin00001  coding    completed     1m 5s"]);
+    expect(reply.split("\n")).toEqual(["• `live0001` — review · active · 0s", "• `fin00001` — coding · completed · 1m 5s"]);
     expect(reply).not.toMatch(/slack:D|UOWNER|threadKey|acme|<!channel>|tok-secret|please do/);
   });
 

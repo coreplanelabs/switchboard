@@ -685,6 +685,15 @@ function lastInvoke(f: Fixture, cmd: CommandDef<unknown>): { caller: Caller; par
   return { caller: last.caller, parsed: parsed.ok ? { args: parsed.args, options: parsed.options } : undefined };
 }
 
+/** Chat renders in a proportional font (Slack): a run of two or more spaces
+ *  between words is a padded column that will collapse into ragged whitespace
+ *  (`help` 2026-08-30, `<group> help` and `runs list` 2026-09-04). Leading
+ *  indentation is allowed; interior padding is not. */
+function assertChatShape(text: string, label: string): void {
+  const padded = text.split("\n").filter((line) => /\S {2,}\S/.test(line));
+  expect(padded, `${label}: chat text pads columns (collapses in a proportional font) — give the command a chat shape: ${JSON.stringify(padded[0])}`).toEqual([]);
+}
+
 function assertNoSecrets(wire: string, f: Fixture, label: string): void {
   for (const fragment of [...SECRET_FRAGMENTS, f.liveToken]) expect(wire, `${label}: leaks ${fragment}`).not.toContain(fragment);
 }
@@ -959,6 +968,7 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
       const parsed = parseChatCommand(`${toSurfaceNames(cmd.id).chat} --help`, f.commands);
       expect(parsed?.kind).toBe("reply");
       check(parsed?.kind === "reply" ? parsed.text : "", "chat --help");
+      assertChatShape(parsed?.kind === "reply" ? parsed.text : "", "chat --help");
     }
   });
 
@@ -997,6 +1007,7 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
           expect(normalized, `${where}: invoke JSON differs from the first machine surface's (beyond the caller's own id)`).toEqual(firstJson);
         } else {
           expect(out.text, `${where}: chat reply`).toBe(renderText(cmd, ref.value, { now: NOW, surface: "chat" }));
+          assertChatShape(out.text ?? "", `${where}: chat reply`);
         }
         assertNoSecrets(out.wire, f, where);
       }
