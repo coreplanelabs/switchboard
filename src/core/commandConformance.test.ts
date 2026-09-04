@@ -294,6 +294,7 @@ function fakeMcpService(): McpService {
     factory: () => new InMemoryMcpClient([{ name: "search_issues", inputSchema: {}, annotations: { readOnlyHint: true } }]),
     publicBaseUrl: "https://switchboard.test",
     env: {},
+    fetch: async () => new Response("", { status: 401 }), // auth detection → bearer (item 18)
     now: () => NOW,
     nonce: () => "fixed-nonce-0123456789abcdef",
   });

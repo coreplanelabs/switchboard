@@ -85,9 +85,47 @@ export function planComplete(ticket: McpTicket | null, identity: ConnectIdentity
   };
 }
 
+// ---- OAuth (item 18): two more transitions on the same ticket ----------------------
+//
+//   pending/opened --start--> authorizing --callback--> completed
+//
+// `start` is the POST from the connect page's button: the identity rules are
+// `planOpen`'s (binding an unbound ticket to the starter), and the ticket
+// leaves with the sealed pending record the service produced. `callback` is
+// the browser returning from the authorization server: only an `authorizing`
+// ticket, only its owner, and only once. Neither verifies the OAuth `state` —
+// the service does, against the sealed record — these decide WHO and WHEN.
+
+export type StartDecision = { ok: true; ticket: McpTicket; bound: boolean } | { ok: false; refusal: TicketRefusal };
+
+/** POST action=start: may this identity begin the authorization? Returns the
+ *  `authorizing` ticket (with `oauth` attached) for the service to CAS in. */
+export function planStart(ticket: McpTicket | null, identity: ConnectIdentity, oauth: McpTicket["oauth"], now: number): StartDecision {
+  const opened = planOpen(ticket, identity, now);
+  if (!opened.ok) return opened;
+  return { ok: true, bound: opened.bound, ticket: { ...opened.ticket, state: "authorizing", oauth } };
+}
+
+export type CallbackRefusal = TicketRefusal | { kind: "not_authorizing" };
+export type CallbackDecision = { ok: true; ticket: McpTicket } | { ok: false; refusal: CallbackRefusal };
+
+/** GET callback: may this identity finish the authorization this ticket started? */
+export function planCallback(ticket: McpTicket | null, identity: ConnectIdentity, now: number): CallbackDecision {
+  const r = refuse(ticket, now);
+  if (r) return { ok: false, refusal: r };
+  const t = ticket as McpTicket;
+  if (!identityMatches(t, identity)) return { ok: false, refusal: { kind: "wrong_identity" } };
+  if (t.state !== "authorizing" || !t.oauth) return { ok: false, refusal: { kind: "not_authorizing" } };
+  return { ok: true, ticket: { ...t, state: "completed", completedBy: { sub: identity.sub, ...(identity.email ? { email: identity.email } : {}), at: now } } };
+}
+
 /** Human wording for each refusal — the page shows exactly this. */
-export function refusalMessage(r: TicketRefusal | { kind: "bad_token"; reason: string }): string {
+export function refusalMessage(r: CallbackRefusal | { kind: "bad_token"; reason: string } | { kind: "oauth_failed"; reason: string }): string {
   switch (r.kind) {
+    case "not_authorizing":
+      return "This sign-in did not start from a connect link, or the link was opened again since. Open the connect link and try again.";
+    case "oauth_failed":
+      return `Sign-in with the server did not complete: ${r.reason}.`;
     case "not_found":
       return "This connect link is not known. Ask for a new one with `mcp connect <name>`.";
     case "expired":

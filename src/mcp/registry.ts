@@ -7,7 +7,11 @@
 // never a record in a parallel store. Credentials are never part of an entry:
 // they are sealed blobs keyed by `<scopeKey>/<name>`, opened only by the bot.
 
-export type McpAuthKind = "none" | "bearer";
+/** `none`: no Authorization header. `bearer`: a static token — `tokenEnv` on
+ *  the bot, or one pasted on the connect page and sealed. `oauth`: OAuth 2.1
+ *  (item 18) — the connect page sends the person to the server's authorization
+ *  server; the sealed credential is the token set the callback exchanged. */
+export type McpAuthKind = "none" | "bearer" | "oauth";
 
 /** One server as a scope carries it. `tokenEnv` is the static-config way to
  *  supply a bearer (an env var on the bot); without it a bearer server's token
@@ -69,7 +73,9 @@ export interface SealedCredential {
 
 /** The connect flow's state machine (item 15). One ticket per `mcp add`/
  *  `mcp connect`; single use; bound to the requester. */
-export type McpTicketState = "pending" | "opened" | "completed" | "cancelled";
+export type McpTicketState = "pending" | "opened" | "authorizing" | "completed" | "cancelled";
+/** Every state, for the Worker's route validation — one list, both ends. */
+export const MCP_TICKET_STATES: readonly McpTicketState[] = ["pending", "opened", "authorizing", "completed", "cancelled"];
 
 export interface McpTicket {
   nonce: string;
@@ -87,6 +93,11 @@ export interface McpTicket {
    *  bound and the completion must come from the same identity. */
   openedBy?: { sub: string; email?: string; at: number };
   completedBy?: { sub: string; email?: string; at: number };
+  /** OAuth (item 18): the pending authorization — PKCE verifier, client id,
+   *  `state`, endpoints — sealed under the bot's key (AAD `ticket:<nonce>`)
+   *  while the person is at the authorization server. Set when the ticket
+   *  enters `authorizing`; opaque to the Worker. */
+  oauth?: { keyId: string; sealed: string };
 }
 
 export const MCP_TICKET_TTL_MS = 10 * 60_000;
@@ -112,7 +123,7 @@ export function isMcpServerEntry(v: unknown): v is McpServerEntry {
   return (
     isStr(e.url, MCP_URL_MAX) &&
     (e.agents === undefined || (Array.isArray(e.agents) && e.agents.length > 0 && e.agents.length <= MCP_AGENTS_MAX && e.agents.every((a) => isStr(a, 32)))) &&
-    (e.auth === "none" || e.auth === "bearer") &&
+    (e.auth === "none" || e.auth === "bearer" || e.auth === "oauth") &&
     (e.tokenEnv === undefined || isStr(e.tokenEnv, 128)) &&
     (e.addedBy === undefined || isStr(e.addedBy, 260)) &&
     (e.addedAt === undefined || isNum(e.addedAt))
@@ -137,9 +148,10 @@ export function isMcpTicket(v: unknown): v is McpTicket {
     (t.requesterEmail === undefined || isStr(t.requesterEmail, 320)) &&
     isNum(t.createdAt) &&
     isNum(t.expiresAt) &&
-    (t.state === "pending" || t.state === "opened" || t.state === "completed" || t.state === "cancelled") &&
+    MCP_TICKET_STATES.includes(t.state as McpTicketState) &&
     actor(t.openedBy) &&
-    actor(t.completedBy)
+    actor(t.completedBy) &&
+    (t.oauth === undefined || (!!t.oauth && typeof t.oauth === "object" && isStr((t.oauth as { keyId?: unknown }).keyId, 64) && isStr((t.oauth as { sealed?: unknown }).sealed, 64 * 1024)))
   );
 }
 

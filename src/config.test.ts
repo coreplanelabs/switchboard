@@ -727,7 +727,10 @@ users:
       /users\.slack:UX\.mcpServers\.vanta\.agents: a user-scoped server may name general\/research only/,
     );
     expect(bad(withDefaults.replace('notion: { url: "https://mcp.notion.so/mcp", auth: none }', 'notion: { url: "https://mcp.notion.so/mcp", auth: none, agents: [review] }'))).toThrow(/a channel-scoped server may name general\/research only/);
-    expect(bad(withDefaults.replace("auth: none }", "auth: oauth }"))).toThrow(/must be \{ url, auth: none\|bearer/);
+    expect(bad(withDefaults.replace("auth: none }", "auth: magic }"))).toThrow(/must be \{ url, auth: none\|bearer\|oauth/);
+    // oauth is a valid static kind (item 18): the credential is the connect page's, so no tokenEnv.
+    expect(bad(withDefaults.replace("auth: none }", "auth: oauth }"))).not.toThrow();
+    expect(bad(withDefaults.replace("auth: none }", "auth: oauth, tokenEnv: X }"))).toThrow(/tokenEnv only applies to auth: bearer/);
     expect(bad(withDefaults.replace("auth: none }", "auth: none, tokenEnv: X }"))).toThrow(/tokenEnv only applies to auth: bearer/);
     // The org tier may name any agent (coding above) — it loads.
     expect(store(withDefaults).config.defaults.mcpServers?.linear.agents).toEqual(["general", "coding"]);

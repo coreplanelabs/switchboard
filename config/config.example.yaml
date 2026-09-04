@@ -287,3 +287,4 @@ workspaceDir: ./workspaces
 #   "slack:C0123":
 #     mcpServers:
 #       notion: { url: https://mcp.notion.so/mcp, auth: none }   # general/research only
+#       vanta: { url: https://mcp.vanta.com/mcp, auth: oauth }   # OAuth 2.1: a channel-config holder signs in once via `mcp connect vanta --scope channel`

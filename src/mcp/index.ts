@@ -60,11 +60,13 @@ export function buildMcp(
   let key: CredentialKey | undefined;
   if (rawKey) key = importCredentialKey(rawKey);
   else opts.warn?.(`${settings.credentialKeyEnv} is not set — bearer MCP servers without tokenEnv cannot be added or used until it is (openssl rand -base64 32)`);
+  const webFetch = makeWebCapability(env).fetch;
   const service = new McpService({
     config,
     secrets,
     key,
-    factory: httpMcpClientFactory(makeWebCapability(env).fetch),
+    factory: httpMcpClientFactory(webFetch),
+    fetch: webFetch,
     publicBaseUrl: opts.publicBaseUrl,
     env,
     resolveEmail: opts.resolveEmail,

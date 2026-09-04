@@ -873,7 +873,7 @@ export function validateMcpServers(
     if (Object.keys(servers).length > MCP_SERVERS_PER_SCOPE_MAX) throw new Error(`${source}: ${path} has more than ${MCP_SERVERS_PER_SCOPE_MAX} servers`);
     for (const [name, raw] of Object.entries(servers)) {
       if (!MCP_SERVER_NAME_RE.test(name)) throw new Error(`${source}: ${path}.${name}: server names are slugs (lowercase letters, digits, dashes; ≤ ${MCP_SERVER_NAME_MAX} chars)`);
-      if (!isMcpServerEntry(raw)) throw new Error(`${source}: ${path}.${name} must be { url, auth: none|bearer, agents?, tokenEnv? }`);
+      if (!isMcpServerEntry(raw)) throw new Error(`${source}: ${path}.${name} must be { url, auth: none|bearer|oauth, agents?, tokenEnv? }`);
       try {
         assertUrlAllowed(raw.url);
       } catch (err) {

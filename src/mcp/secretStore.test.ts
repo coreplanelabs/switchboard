@@ -24,6 +24,11 @@ function contract(name: string, make: () => McpSecretStore) {
       expect(await s.getTicket(ticket.nonce)).toBeNull();
       await s.putTicket(ticket);
       expect(await s.getTicket(ticket.nonce)).toEqual(ticket);
+      // An OAuth ticket (item 18): the `authorizing` state and the sealed pending record round-trip verbatim.
+      const authorizing: McpTicket = { ...ticket, state: "authorizing", openedBy: { sub: "cf", at: 2 }, oauth: { keyId: "k1", sealed: "c2VhbGVk" } };
+      await s.putTicket(authorizing);
+      expect(await s.getTicket(ticket.nonce)).toEqual(authorizing);
+      await s.putTicket(ticket);
       await s.putTicket({ ...ticket, state: "opened" });
       expect((await s.getTicket(ticket.nonce))?.state).toBe("opened");
       expect(typeof s.describe()).toBe("string");
