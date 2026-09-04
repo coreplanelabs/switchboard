@@ -37,8 +37,30 @@ describe("AppShell", () => {
     expect(wrapper.find("#body").text()).toBe("hello");
   });
 
-  it("offers the phone hamburger (nav + theme in one touch menu) beside the sm+ inline nav", () => {
+  it("offers the phone hamburger (nav + docs + theme in one touch menu) beside the sm+ inline nav", () => {
     const wrapper = mountApp(AppShell, { props: { title: "Live runs", nav: "runs" } });
     expect(wrapper.find('button[aria-label="Menu"]').exists()).toBe(true);
+  });
+
+  it("links to the docs at /docs in a new tab, without adding a fourth entry to the section nav", () => {
+    const wrapper = mountApp(AppShell, { props: { title: "Live runs", nav: "runs" } });
+    const docs = wrapper.find("a.docs-link");
+    expect(docs.exists()).toBe(true);
+    // The app knows the path, never the docs hostname — the server owns where
+    // /docs resolves to (src/core/docsLink.ts).
+    expect(docs.attributes("href")).toBe("/docs");
+    expect(docs.attributes("target")).toBe("_blank");
+    expect(docs.attributes("rel")).toContain("noopener");
+    expect(docs.attributes("aria-label")).toBe("Docs");
+    expect(wrapper.findAll("nav.site a")).toHaveLength(3);
+  });
+
+  it("puts the docs in the phone menu too, as its own group above the sections", () => {
+    const wrapper = mountApp(AppShell, { props: { title: "Live runs", nav: "runs" } });
+    // The header holds two dropdowns (theme, hamburger); this is the hamburger.
+    const menu = wrapper.findAllComponents({ name: "DropdownMenu" }).find((c) => c.find('button[aria-label="Menu"]').exists());
+    const items = menu?.props("items") as { label: string; to?: string; target?: string }[][];
+    expect(items[0]).toEqual([expect.objectContaining({ label: "Docs", to: "/docs", target: "_blank" })]);
+    expect(items[1].map((i) => i.label)).toEqual(["Runs", "Residents", "Costs"]);
   });
 });

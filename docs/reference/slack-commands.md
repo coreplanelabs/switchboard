@@ -22,77 +22,94 @@ Placed right after the mention, before the request text:
 
 Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix #42`.
 
-## Config
+## Every command you can run in chat
 
-| Command | Effect |
+One table per group. "Who can run it" is the command's chat gate resolved against `permissions` — see [reference: permissions](permissions.md) for what each set defaults to. A registered command that is deliberately not exposed to chat (`deploy all`, `deploy restart`, `env bootstrap`, `friction analyze`, and the paged `runs get|events|friction` reads) is absent from this table and reachable on the [CLI](cli.md), over HTTP, or as an MCP tool instead.
+
+<!-- generated:chat-commands · npm run docs:gen — generated from the code, do not edit by hand -->
+
+### `help`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `help show` | What Switchboard can do: agents, per-request directives, and every chat command. | anyone |
+
+### `config`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `config show [--channel <string>]` | The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted. | anyone |
+| `config set <channel\|me> [--agent <string>] [--model <string>] [--models <object>] [--effort <low\|medium\|high\|xhigh\|max>] [--efforts <object>] [--channel <string>]` | Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.&lt;agent&gt; / --efforts.&lt;agent&gt;. | anyone |
+| `config clear <channel\|me> [--channel <string>]` | Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again. | anyone |
+| `config instructions <channel\|me> [text…] [--channel <string>]` | Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions. | anyone |
+
+### `runs`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `runs list [--status <active\|finished\|all>] [--agent <string>] [--channel <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]` | List runs (live and persisted, newest first) — metadata only, never message text. | admins |
+| `runs stop <id> --mode <soft\|hard>` | Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor. | admins |
+
+### `friction`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `friction report [--since-ms <integer>] [--limit <integer>] [--min-runs <integer>]` | Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted. | anyone |
+| `friction propose [--dry-run] [--top <integer>] [--min-runs <integer>] [--repo <string>]` | Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues. | repo managers (`repoManagement`) |
+
+### `repo`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `repo list` | Every onboarded resident repo with its live state, ref, sha, and last refresh. | anyone |
+| `repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--evict-coldest]` | Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated). | repo managers (`repoManagement`) |
+| `repo offboard <slug> [--dry-run]` | Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only). | repo managers (`repoManagement`) |
+| `repo reconfigure <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>]` | Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach). | repo managers (`repoManagement`) |
+| `repo rebuild <slug> [--dry-run]` | Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only). | repo managers (`repoManagement`) |
+| `repo test <slug> [ref]` | Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch). | anyone allowed to run `coding` |
+| `repo build <slug> [ref]` | Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch). | anyone allowed to run `coding` |
+
+### `memory`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `memory list [query…] [--scope <me\|org\|repo\|channel\|all>] [--limit <integer>] [--repo <string>]` | Your own memory records and the shared org / repo / channel records, with ids — what influences your runs. | anyone |
+| `memory forget <id>` | Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights). | anyone |
+
+### `mcp`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `mcp list [--channel <string>]` | External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. | anyone |
+| `mcp add <name> --url <string> [--scope <me\|channel\|org>] [--agents <string>] [--auth <oauth\|bearer\|none>] [--channel <string>]` | Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat. | anyone |
+| `mcp connect <name> [--scope <me\|channel\|org>] [--channel <string>]` | A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes. | anyone |
+| `mcp show <name> [--scope <me\|channel\|org>] [--channel <string>]` | One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential. | anyone |
+| `mcp remove <name> [--scope <me\|channel\|org>] [--channel <string>]` | Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights). | anyone |
+
+### `schedule`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `schedule list` | Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did. | anyone |
+
+### `deploy`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `deploy plan [--only <string>] [--skip <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. | admins |
+
+<!-- /generated:chat-commands -->
+
+## Where each group is explained
+
+| Group | The narrative version |
 |---|---|
-| `config show` | what's active right now, and why |
-| `config set me --model <p/m>` / `--models.<agent> <p/m>` / `--effort <e>` / `--efforts.<agent> <e>` / `--agent <name>` | your personal defaults |
-| `config set channel --agent <name>` / `--model …` / `--efforts.<agent> …` | this channel's defaults (needs `channelConfig`) |
-| `config clear me` / `config clear channel` | drop the overrides at that scope |
-| `config instructions me "<text>"` / `config instructions channel "<text>"` | free-text advisory instructions (≤2000 chars); empty string clears |
+| `config` | [how-to: configure your defaults](../how-to/configure-your-defaults.md), [explanation: config layers](../explanation/config-layers.md) |
+| `mcp` | [how-to: connect an MCP server](../how-to/connect-an-mcp-server.md) |
+| `repo` | [how-to: onboard a repo](../how-to/onboard-a-repo.md) |
+| `runs` | [how-to: watch a run and check spend](../how-to/watch-a-run-and-check-spend.md) |
+| `friction` | [explanation: how Switchboard improves itself](../self-improvement-architecture.md) |
 
-Full precedence and rationale: [how-to: configure your defaults](../how-to/configure-your-defaults.md), [explanation: config layers](../explanation/config-layers.md).
+## Repo commands run no model turns
 
-## MCP servers
-
-| Command | Effect |
-|---|---|
-| `mcp add <name> --url <url> [--auth bearer\|none]` | register a server (self-serve, your scope) |
-| `mcp connect <name>` | re-mint a connect link for an existing server |
-| `mcp list` | servers visible to you: org + this channel + your own |
-| `mcp show <name>` | that server's tools |
-| `mcp remove <name>` | remove one you own |
-
-Details: [how-to: connect an MCP server](../how-to/connect-an-mcp-server.md).
-
-## Resident repos
-
-| Command | Effect |
-|---|---|
-| `repo list` | every onboarded repo and its lifecycle state (open to everyone) |
-| `repo onboard <owner/name> [--ref <ref>] [--test <cmd>] [--build <cmd>] [--install <cmd>]` | provision an always-warm environment (gated: `repoManagement`) |
-| `repo reconfigure <owner/name> <key>=<value>...` | change its test/build/install command |
-| `repo offboard <owner/name> [--dry-run]` | tear it down |
-| `repo rebuild <owner/name>` | discard and reprovision from scratch |
-
-Details: [how-to: onboard a repo](../how-to/onboard-a-repo.md).
-
-## Runs
-
-| Command | Effect |
-|---|---|
-| `runs list [--status all\|active]` | recent runs |
-| `runs get <id>` | one run's summary |
-| `runs events <id>` | its full event stream |
-| `runs friction <id>` | why it was slow, if it was |
-| `runs stop <id> --mode soft\|hard` | stop it — `soft` lets it wrap up, `hard` aborts mid-call |
-
-## Friction and self-improvement
-
-| Command | Effect |
-|---|---|
-| `friction report [--since-ms n] [--limit n] [--min-runs n]` | recurring friction patterns across recent runs (open to everyone, read-only) |
-| `friction propose [--dry-run] [--top n] [--min-runs n] [--repo o/n]` | file the top patterns as labeled GitHub issues (gated: admins/`repoManagement`) |
-
-## Memory
-
-| Command | Effect |
-|---|---|
-| `memory list [words…] [--scope me\|org\|repo\|channel\|all] [--limit n] [--repo o/n]` | search what's remembered |
-| `memory forget <id>` | soft-delete a record (own scope: free; shared scopes: admin-gated) |
-
-## Schedule
-
-| Command | Effect |
-|---|---|
-| `schedule list` | every cron job Switchboard runs, and when it last fired |
-
-## Repo commands (no model turn)
-
-| Command | Effect |
-|---|---|
-| `repo test <owner/name> [<ref>]` | run the repo's onboarded test command, report pass/fail — zero model calls |
-| `repo build <owner/name> [<ref>]` | same, for the build command |
-
-Natural-language equivalents ("run the tests on main in acme/api") are recognized too and route to the same zero-turn operation.
+`repo test` and `repo build` run the repo's onboarded command and report pass/fail with zero model calls — an operation, not an agent run. Natural-language equivalents ("run the tests on main in acme/api") are recognized too and route to the same zero-turn operation.

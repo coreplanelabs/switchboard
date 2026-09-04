@@ -1,0 +1,17 @@
+{
+  "name": "@coreplane/switchboard-docs-worker",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "npm --prefix ../../docs run build",
+    "deploy": "npm run build && wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail switchboard-docs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.120.1"
+  }
+}

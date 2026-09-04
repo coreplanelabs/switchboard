@@ -53,6 +53,6 @@ If you're touching the dashboard: `cd web && npm run typecheck && npm test`.
 
 ## Next
 
-- **Point it at Slack for real:** the root [README's Setup section](../../README.md#setup) walks through creating the Slack app and wiring tokens — nothing above changes.
+- **Point it at Slack for real:** the root [README's Setup section](https://github.com/coreplanelabs/switchboard/blob/main/README.md#setup) walks through creating the Slack app and wiring tokens — nothing above changes.
 - **Understand what just ran:** [how a request flows](../explanation/how-a-request-flows.md).
 - **Extend it:** [add a provider or agent](../how-to/add-a-provider-or-agent.md).

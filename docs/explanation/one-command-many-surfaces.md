@@ -57,4 +57,4 @@ Adding a new operator command means writing one zod schema and one handler. It s
 ## See also
 
 - [Reference: CLI](../reference/cli.md) and [reference: Slack commands](../reference/slack-commands.md) — the derived surfaces, as they exist today.
-- [`features/command-registry.md`](../../features/command-registry.md) — the full behavioral contract, every edge case, every test.
+- [`features/command-registry.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/command-registry.md) — the full behavioral contract, every edge case, every test.

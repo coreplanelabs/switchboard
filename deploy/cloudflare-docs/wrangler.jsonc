@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "switchboard-docs",
+  "compatibility_date": "2026-08-01",
+  // coreplane-infra account — same as the other three Workers.
+  "account_id": "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
+  // ASSETS ONLY: no `main`, so there is no Worker script, no Durable Object,
+  // and no container. Nothing here can be mid-rollout or draining, which is
+  // exactly why CI may deploy it on every docs change while the bot's own
+  // deploy stays hand-driven and preflighted (AGENTS.md, features/docs-site.md).
+  "assets": {
+    "directory": "../../docs/.vitepress/dist",
+    // VitePress emits clean URLs (`/reference/cli.html`), so /reference/cli must
+    // resolve to it; a miss serves the built 404 page, not an empty 404.
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  // workers.dev is DISABLED for the same reason as the bot: Cloudflare Access
+  // can only front a real zone hostname, and the docs sit behind the same SSO
+  // as the dashboards — a live workers.dev copy would be an un-SSO'd twin.
+  // The Access application for this hostname is created in the Zero Trust
+  // dashboard by hand (wrangler's token has no Access scope).
+  "workers_dev": false,
+  "routes": [{ "pattern": "docs.switchboard.coreplanelabs.dev", "custom_domain": true }],
+  "observability": { "enabled": true }
+}

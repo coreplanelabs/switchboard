@@ -17,6 +17,10 @@
     "cli": "tsx src/cli.ts",
     "skills:sync": "tsx scripts/skills-sync.ts",
     "skills:check": "tsx scripts/skills-sync.ts --check",
+    "docs:gen": "tsx scripts/docs-gen.ts",
+    "docs:check": "tsx scripts/docs-gen.ts --check",
+    "docs:dev": "npm --prefix docs run dev",
+    "docs:build": "npm --prefix docs run build",
     "web:preview": "tsx scripts/web-preview.ts"
   },
   "dependencies": {

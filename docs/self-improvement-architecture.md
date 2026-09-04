@@ -1,6 +1,6 @@
 # How Switchboard improves itself
 
-A human-first tour of the self-improvement loop: what it watches, what it remembers, what it files, and where every piece runs. The behavioral contract with tests and validation criteria is [`features/self-improvement.md`](../features/self-improvement.md); the per-run diagnosis it builds on is [`features/run-friction.md`](../features/run-friction.md). This page is the map, those are the law.
+A human-first tour of the self-improvement loop: what it watches, what it remembers, what it files, and where every piece runs. The behavioral contract with tests and validation criteria is [`features/self-improvement.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/self-improvement.md); the per-run diagnosis it builds on is [`features/run-friction.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/run-friction.md). This page is the map, those are the law.
 
 **In one sentence:** after every agent run Switchboard diagnoses where the time went, remembers that diagnosis, and once a week (or on demand) looks for friction that keeps recurring across runs and files each recurring pattern as a labeled GitHub issue with evidence and a suggested fix, for a human to triage.
 
@@ -158,8 +158,8 @@ Machine callers (`http:*`, `mcp:*`) are channel-pinned by design: `friction` com
 
 ## Further reading
 
-- [`features/self-improvement.md`](../features/self-improvement.md): the contract, every edge case, and the validation criteria with their tests.
-- [`features/run-friction.md`](../features/run-friction.md): the per-run diagnosis, its categories, thresholds, and the `friction analyze` CLI for one saved stream.
-- [`features/run-history.md`](../features/run-history.md): where the diagnoses persist and for how long.
-- [`features/command-registry.md`](../features/command-registry.md): why one command definition serves Slack, HTTP, MCP, and the CLI.
+- [`features/self-improvement.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/self-improvement.md): the contract, every edge case, and the validation criteria with their tests.
+- [`features/run-friction.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/run-friction.md): the per-run diagnosis, its categories, thresholds, and the `friction analyze` CLI for one saved stream.
+- [`features/run-history.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/run-history.md): where the diagnoses persist and for how long.
+- [`features/command-registry.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/command-registry.md): why one command definition serves Slack, HTTP, MCP, and the CLI.
 - Filed proposals: [issues labeled `self-improvement`](https://github.com/coreplanelabs/switchboard/issues?q=label%3Aself-improvement).

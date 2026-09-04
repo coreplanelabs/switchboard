@@ -59,6 +59,90 @@ jobs:
       # The server refuses to boot without the built manifest — prove it builds.
       - run: npm run build
 
+  docs:
+    name: docs generator check + site build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            docs/package-lock.json
+      - run: npm ci
+      # The generated regions of docs/reference/* must match the command
+      # registry — a stale table is a red build, not a docs bug found later
+      # (features/docs-site.md items 6-8).
+      - run: npm run docs:check
+      - name: build the docs site
+        working-directory: docs
+        # A dead internal link fails this build (ignoreDeadLinks: false), so a
+        # renamed or deleted page cannot merge with links still pointing at it.
+        run: |
+          npm ci
+          npm run build
+
+  docs-deploy:
+    name: deploy the docs site
+    # Only after the site is proven to build, and only for main.
+    needs: docs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # An assets-only Worker (deploy/cloudflare-docs/): no container, no Durable
+    # Object, nothing that can be mid-rollout — which is why this one deploy is
+    # safe to automate while the bot's stays hand-driven and preflighted.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Two commits: enough to see what this push changed.
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            docs/package-lock.json
+            deploy/cloudflare-docs/package-lock.json
+      # Deploy only when this push actually touched the docs or their build.
+      # Fails OPEN (deploys) when the diff cannot be computed, so the published
+      # site is never silently older than main.
+      - id: touched
+        run: |
+          if ! range=$(git rev-parse HEAD^ 2>/dev/null); then
+            echo "no parent commit — deploying"
+            echo "docs=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$range" HEAD)
+          echo "$changed"
+          if echo "$changed" | grep -qE '^(docs/|deploy/cloudflare-docs/)'; then
+            echo "docs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: no docs changes in this push
+        if: steps.touched.outputs.docs != 'true'
+        run: echo "::notice::docs untouched by this push — nothing to deploy"
+      - name: missing CLOUDFLARE_API_TOKEN
+        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN == ''
+        # A red main on every docs edit would be worse than a loud skip: the
+        # token is a one-time repository-secret setup (features/docs-site.md).
+        run: echo "::warning::docs changed but CLOUDFLARE_API_TOKEN is not set — skipping the deploy"
+      - name: build + deploy
+        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != ''
+        working-directory: deploy/cloudflare-docs
+        # `npm run deploy` builds docs/ first, so the upload can never be a
+        # stale dist. CLOUDFLARE_ACCOUNT_ID is deliberately NOT set — the
+        # account is pinned in wrangler.jsonc and the env var would override it.
+        run: |
+          npm ci
+          npm --prefix ../../docs ci
+          npm run deploy
+
   bot-worker:
     name: bot worker typecheck + deploy preflight tests
     runs-on: ubuntu-latest
