@@ -16,9 +16,23 @@
 // its upstream resolved and matches the observed HEAD. Failure honesty
 // throughout: never a fabricated PR URL, and the branch compare URL is offered
 // only when the upstream match proved the remote branch exists.
+//
+// Base resolution (CodingPrTarget): a bound PR's true base, else the resident
+// binding ref, else the dispatch's resolved ref, else — the true last resort —
+// the repo's own default branch fetched from GitHub (resolveBaseRefLazy,
+// githubPulls.ts). That fetch is the fix for a live incident (2026-09-04): a
+// bare issue-link coding run has no PR/explicit ref, and when the
+// resident attach ALSO fails for a reason other than needs-ref (an infra
+// fault, not-onboarded, a probe outage), the fresh-sandbox fallback carries no
+// binding either — all three fields undefined, no PR openable, though the run
+// pushed real work. agent:ship (shipPipeline.ts) hit the identical gap and
+// closed it with `fetchRepoShipInfo`'s default_branch; resolveBaseRef /
+// resolveBaseRefLazy in githubPulls.ts is that ONE mechanism, shared by both
+// callers instead of two copies of "ask GitHub when nothing else names a
+// base".
 
 import { shellQuote } from "../execution/shellQuote.js";
-import type { OpenedPullRequest, PullRequestTarget } from "../execution/githubPulls.js";
+import { resolveBaseRef, resolveBaseRefLazy, type OpenedPullRequest, type PullRequestTarget, type RepoShipInfo } from "../execution/githubPulls.js";
 import { encodeGithubPathSegments, renderPrDescriptionMarkdown, type PrDescription } from "./prDescription.js";
 import { normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import type { RunEvent } from "./runEvents.js";
@@ -74,7 +88,14 @@ export async function observeCodingWorkspace(
  *  `repo` may be undefined (an agent-discovered repo — the observation's
  *  origin remote is the repo of last resort); the base is the PR's true base
  *  ref when the thread's context came from a PR, else the thread's resident
- *  binding ref, else the dispatch's resolved ref. */
+ *  binding ref, else the dispatch's resolved ref, else — when a description
+ *  was actually submitted — the repo's own default branch fetched from
+ *  GitHub (resolveBaseRefLazy, githubPulls.ts; the true base of last resort,
+ *  shared with agent:ship's own resolution in shipPipeline.ts). None of these
+ *  three fields alone is reliable: a resident attach that fails for a reason
+ *  OTHER than needs-ref (an infra fault, not-onboarded, a probe outage) drops
+ *  `bindingRef` with no equivalent fallback of its own — live incident
+ *  2026-09-04 — which is exactly the case the GitHub fetch closes. */
 export interface CodingPrTarget {
   /** `owner/name` the dispatch resolved, or undefined (agent-discovered repo). */
   repo: string | undefined;
@@ -83,7 +104,7 @@ export interface CodingPrTarget {
   baseRef: string | undefined;
   /** The thread's resident binding ref, when the round ran on a resident. */
   bindingRef: string | undefined;
-  /** The dispatch's resolved ref — the base of last resort. */
+  /** The dispatch's resolved ref — the base of last resort before a GitHub fetch. */
   resolvedRef: string | undefined;
 }
 
@@ -102,6 +123,11 @@ export async function runCodingPrPostStep(input: {
   description: PrDescription | undefined;
   target: CodingPrTarget;
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /** The repo's default branch — the PR base of last resort, fetched via
+   *  GitHub (githubPulls.ts' fetchRepoShipInfo; shared with agent:ship's own
+   *  base resolution) ONLY when a description was submitted AND none of
+   *  `target`'s three fields already name a base. Never called otherwise. */
+  fetchRepoInfo: (repo: string) => Promise<RepoShipInfo | undefined>;
   /** Publish hook into the run's event stream (the registry). */
   publish: (event: RunEvent) => void;
   logKey: string;
@@ -111,10 +137,8 @@ export async function runCodingPrPostStep(input: {
   const headSha = normalizeHead(observed.head);
   const branch = observed.branch;
   const upstream = normalizeHead(observed.upstream);
-  const base = target.baseRef ?? target.bindingRef ?? target.resolvedRef;
   const pushed = headSha !== undefined && upstream !== undefined && sameCommit(upstream, headSha);
   const compareUrl = repo && branch && pushed ? `https://github.com/${repo}/compare/${encodeGithubPathSegments(branch)}` : undefined;
-  const pushedBranch = branch !== undefined && branch !== base && pushed;
   if (repo === undefined) {
     // Neither the dispatch nor the workspace names a repository — nowhere a
     // PR could be opened. Said plainly when a description was submitted;
@@ -125,6 +149,14 @@ export async function runCodingPrPostStep(input: {
     }
     return undefined;
   }
+  // Base resolution (CodingPrTarget's doc comment): the GitHub fetch is the
+  // true last resort, tried ONLY when a description was submitted — every
+  // branch below that skips silently or reports without opening a PR never
+  // needed a base in the first place, so a repo with no PR/resident/explicit
+  // ref never pays for a network call it won't use.
+  const candidates = [target.baseRef, target.bindingRef, target.resolvedRef];
+  const base = prDescription ? await resolveBaseRefLazy(candidates, repo, input.fetchRepoInfo) : resolveBaseRef(candidates, undefined);
+  const pushedBranch = branch !== undefined && branch !== base && pushed;
   if (prDescription && branch !== undefined && branch === base) {
     // The workspace sat on the base branch: nothing was pushed to open a PR
     // from, and a compare-URL note would mislead — the agent's own report
@@ -160,7 +192,11 @@ export async function runCodingPrPostStep(input: {
     }
   }
   if (prDescription && pushedBranch && !base) {
-    console.log(`[pr-post] ${logKey} skipped: no base branch resolvable (repo ${repo}, branch ${branch})`);
+    // Every explicit signal AND the GitHub default-branch fetch came back
+    // empty (githubPulls.ts' fetchRepoShipInfo — no App credential, the repo
+    // lookup failed, or it answered with no default_branch). Genuinely rare:
+    // this is the last resort's own failure mode, not the common case.
+    console.log(`[pr-post] ${logKey} skipped: no base branch resolvable, even after a GitHub default-branch lookup (repo ${repo}, branch ${branch})`);
     return `⚠️ A PR description was submitted but no base branch is known for this thread, so no PR was opened — compare & open manually: ${compareUrl}`;
   }
   if (prDescription) {

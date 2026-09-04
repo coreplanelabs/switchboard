@@ -1081,6 +1081,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
           description: prDescription,
           target: { repo: repoCtx.repo, baseRef: repoCtx.baseRef, bindingRef: binding?.ref, resolvedRef: repoCtx.ref },
           openPullRequest: deps.openPullRequest ?? openPullRequest,
+          fetchRepoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
           publish: (e) => registry.publish(run.id, e),
           logKey: msg.threadKey,
         });
@@ -1507,6 +1508,7 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
         fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
         prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
+        fetchRepoShipInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
       },
       redactDescription: redactPrDescription,
       logKey: msg.threadKey,

@@ -202,6 +202,33 @@ export interface RepoShipInfo {
   defaultBranch?: string;
 }
 
+/** The PR base of last resort: explicit candidates in priority order, else the
+ *  repo's own default branch. Pure/sync — for a caller that already holds a
+ *  RepoShipInfo for another reason (agent:ship's preflight fetches it
+ *  unconditionally for the auto-merge gate, spec item 9). `resolveBaseRefLazy`
+ *  below is for a caller with no other reason to fetch one. Shared so "ask
+ *  GitHub for the default branch" stays one mechanism, not one per caller. */
+export function resolveBaseRef(candidates: Array<string | undefined>, defaultBranch: string | undefined): string | undefined {
+  return candidates.find((c): c is string => c !== undefined) ?? defaultBranch;
+}
+
+/** Same resolution, but fetches the repo's default branch itself — ONLY when
+ *  none of the explicit candidates already name one, so a run that already
+ *  knows its base (a bound PR, a resident binding, an explicit ref) never
+ *  pays for a GitHub call it doesn't need. `fetchInfo` is never awaited past
+ *  a failure: an unreachable/unauthorized lookup just leaves no last resort,
+ *  same as `fetchRepoShipInfo` itself. */
+export async function resolveBaseRefLazy(
+  candidates: Array<string | undefined>,
+  repo: string,
+  fetchInfo: (repo: string) => Promise<RepoShipInfo | undefined>,
+): Promise<string | undefined> {
+  const explicit = candidates.find((c): c is string => c !== undefined);
+  if (explicit) return explicit;
+  const info = await fetchInfo(repo).catch(() => undefined);
+  return info?.defaultBranch;
+}
+
 /** GET /repos/{repo} → the ship-gate facts, or undefined when the credential
  *  is missing, the fetch fails, or the answer is malformed. Never throws. */
 export async function fetchRepoShipInfo(repo: string): Promise<RepoShipInfo | undefined> {

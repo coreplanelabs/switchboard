@@ -2489,13 +2489,36 @@ describe("coding PR post-step (features/pr-description.md)", () => {
     expect(spy.calls[0].base).toBe("main");
   });
 
-  // Characterization (U4): the no-base branch of the post-step — nothing at
-  // dispatch resolved a ref, no resident binding, so there is no base to open
-  // the PR against. Honest note naming the missing base, the compare URL (the
-  // push WAS proven), and no PR call.
-  it("description submitted + pushed branch but NO base resolvable → no PR call; the note says no base branch is known, with the compare URL", async () => {
+  // Live incident (2026-09-04): a bare issue-link coding run resolves no
+  // ref and no PR, and the resident attach fails for a reason OTHER than
+  // needs-ref (an infra fault, not-onboarded, a probe outage) — so the
+  // fresh-sandbox fallback carries no binding either. All three of the
+  // post-step's base fields are undefined even though the run genuinely
+  // pushed. The fix: the repo's own default branch, fetched from GitHub
+  // (fetchRepoShipInfo, shared with agent:ship's identical last resort), is
+  // consulted before giving up.
+  it("no ref/PR/binding resolves a base, but GitHub's default branch does → the PR opens against it", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
     deps.resolveRepoContext = () => ({ repo: "acme/api" }); // no ref resolved
+    deps.fetchRepoShipInfo = vi.fn(async () => ({ defaultBranch: "main" }));
+    codingExecutor({ head: HEAD, branch: "feat/x" }); // no bindingRef → no binding ref either
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].base).toBe("main");
+    expect(replies.some((r) => /PR opened/.test(r))).toBe(true);
+  });
+
+  // Characterization (U4, extended by the 2026-09-04 fix): the no-base branch of the post-step
+  // survives even the GitHub last resort — the repo lookup itself found no
+  // default branch (or failed). Honest note naming the missing base, the
+  // compare URL (the push WAS proven), and no PR call.
+  it("description submitted + pushed branch but NO base resolvable, even from GitHub → no PR call; the note says no base branch is known, with the compare URL", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    deps.resolveRepoContext = () => ({ repo: "acme/api" }); // no ref resolved
+    deps.fetchRepoShipInfo = vi.fn(async () => undefined); // the last resort also comes up empty
     codingExecutor({ head: HEAD, branch: "feat/x" }); // no bindingRef → no binding ref either
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
