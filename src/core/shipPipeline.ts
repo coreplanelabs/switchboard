@@ -27,7 +27,7 @@ import type { Effort } from "../effort.js";
 import { runAgent } from "../runner.js";
 import type { ChatMessage, Provider } from "../providers/types.js";
 import type { ExecutorFactoryOptions } from "../execution/factory.js";
-import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget, RepoShipInfo } from "../execution/githubPulls.js";
+import { resolveBaseRef, type OpenedPullRequest, type PullRequestFacts, type PullRequestTarget, type RepoShipInfo } from "../execution/githubPulls.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { ToolContext } from "../tools/workspace.js";
 import type { WebCapability } from "../tools/web.js";
@@ -291,7 +291,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
           // PR) against the default branch. repoCtx.baseRef carries the same
           // fact when the thread context resolved the PR; the default branch
           // is the last resort.
-          base: facts.baseRef ?? repoCtx.baseRef ?? info.defaultBranch,
+          base: resolveBaseRef([facts.baseRef, repoCtx.baseRef], info.defaultBranch),
           resume: {
             pr: repoCtx.pr,
             headSha: facts.headSha ?? repoCtx.headSha,
@@ -316,7 +316,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   const ref = repoCtx.ref && repoCtx.ref.toLowerCase() !== repo.toLowerCase() ? repoCtx.ref : undefined;
   return {
     ok: true,
-    entry: { repo, branch: shipBranchName(task, input.threadKey), base: ref ?? info.defaultBranch },
+    entry: { repo, branch: shipBranchName(task, input.threadKey), base: resolveBaseRef([ref], info.defaultBranch) },
   };
 }
 
@@ -421,6 +421,11 @@ export interface ShipGithub {
   fetchPrHead: FetchPrHead;
   fetchPrCommits: FetchPrCommits;
   prFacts: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
+  /** The repo's default branch — the PR base of last resort (resolveBaseRefLazy,
+   *  githubPulls.ts), threaded into the pipeline's own runCodingPrPostStep call
+   *  below. In practice `entry.base` is already resolved by shipPreflight, so
+   *  this fires only on the rare resume where that lookup itself failed. */
+  fetchRepoShipInfo: (repo: string) => Promise<RepoShipInfo | undefined>;
 }
 
 export interface ShipPipelineInput {
@@ -733,6 +738,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         // resident binding ref, which ship bound to the HEAD branch itself.
         target: { repo: entry.repo, baseRef: entry.base, bindingRef: undefined, resolvedRef: undefined },
         openPullRequest: github.openPullRequest,
+        fetchRepoInfo: github.fetchRepoShipInfo,
         publish: (e) => {
           if (e.type === "pr_opened") opened = { number: e.number, url: e.url, created: e.created };
           input.publish(e);

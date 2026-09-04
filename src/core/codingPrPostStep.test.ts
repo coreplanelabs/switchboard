@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import type { OpenedPullRequest, PullRequestTarget } from "../execution/githubPulls.js";
+import type { OpenedPullRequest, PullRequestTarget, RepoShipInfo } from "../execution/githubPulls.js";
 import type { RunEvent } from "./runEvents.js";
 import { observeCodingWorkspace, runCodingPrPostStep, type WorkspaceObservation } from "./codingPrPostStep.js";
+
+// A base is already known from `target` in most of the tests below — the
+// GitHub fetch must stay LAZY (never called) whenever one of the three
+// fields already resolves it. Throwing here would be silently swallowed
+// (resolveBaseRefLazy .catch()s it), so laziness is asserted with
+// `.not.toHaveBeenCalled()`, not by relying on the throw to fail a test.
+const unreachable = async (): Promise<RepoShipInfo | undefined> => {
+  throw new Error("fetchRepoInfo must not be called when a base is already known");
+};
 
 // Feature: features/pr-description.md item 5 — the coding PR post-step as a
 // callable unit (agent:ship plan U4): given a workspace observation and the
@@ -45,11 +54,13 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
   it("description + observed pushed branch → PR opened from typed values, pr_opened published, note carries the URL", async () => {
     const spy = openSpy();
     const events: RunEvent[] = [];
+    const fetchRepoInfo = vi.fn(unreachable);
     const note = await runCodingPrPostStep({
       observed: observation(),
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
+      fetchRepoInfo,
       publish: (e) => events.push(e),
       logKey: "t",
     });
@@ -57,6 +68,8 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(spy.calls[0]).toMatchObject({ repo: "acme/api", headBranch: "feat/x", base: "main", title: DESCRIPTION.title });
     expect(events.some((e) => e.type === "pr_opened")).toBe(true);
     expect(note).toContain("https://github.com/acme/api/pull/7");
+    // A binding ref already resolved the base — the GitHub last resort never fires.
+    expect(fetchRepoInfo).not.toHaveBeenCalled();
   });
 
   it("the base falls to the PR's true base ref first (a fix round repushes the PR's own head branch)", async () => {
@@ -66,25 +79,71 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: "main", bindingRef: "feat/x", resolvedRef: "feat/x" },
       openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
       publish: () => {},
       logKey: "t",
     });
     expect(spy.calls[0]?.base).toBe("main");
   });
 
-  it("no base resolvable → no PR call, the note names the missing base with the compare URL", async () => {
+  // Live incident (2026-09-04): a bare issue-link coding run has no
+  // bound PR and no explicit ref, and the resident attach failed for an infra
+  // reason (not needs-ref) — target's three fields were ALL undefined, so no
+  // PR could open despite a real push. The fix: the repo's own default branch,
+  // fetched from GitHub, is the true last resort (resolveBaseRefLazy,
+  // githubPulls.ts) — shared with agent:ship's identical resolution.
+  it("no explicit base signal anywhere, but GitHub's default branch resolves one → PR opens against it", async () => {
+    const spy = openSpy();
+    const fetchRepoInfo = vi.fn(async (repo: string): Promise<RepoShipInfo | undefined> => {
+      expect(repo).toBe("acme/api");
+      return { defaultBranch: "main" };
+    });
+    const note = await runCodingPrPostStep({
+      observed: observation(),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
+      openPullRequest: spy.fn,
+      fetchRepoInfo,
+      publish: () => {},
+      logKey: "t",
+    });
+    expect(fetchRepoInfo).toHaveBeenCalledTimes(1);
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0]?.base).toBe("main");
+    expect(note).toContain("PR opened");
+  });
+
+  it("no explicit base signal AND the GitHub fetch also comes back empty → no PR call, the note names the missing base with the compare URL", async () => {
     const spy = openSpy();
     const note = await runCodingPrPostStep({
       observed: observation(),
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
       openPullRequest: spy.fn,
+      fetchRepoInfo: async () => undefined,
       publish: () => {},
       logKey: "t",
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toContain("no base branch");
     expect(note).toContain("https://github.com/acme/api/compare/feat/x");
+  });
+
+  it("a failing GitHub fetch degrades honestly — no PR call, same note as a genuinely empty answer", async () => {
+    const spy = openSpy();
+    const note = await runCodingPrPostStep({
+      observed: observation(),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: async () => {
+        throw new Error("network down");
+      },
+      publish: () => {},
+      logKey: "t",
+    });
+    expect(spy.calls).toHaveLength(0);
+    expect(note).toContain("no base branch");
   });
 
   it("an unproven push (upstream behind) → honest note, no PR call, no compare URL", async () => {
@@ -94,6 +153,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
       publish: () => {},
       logKey: "t",
     });
@@ -102,18 +162,34 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).not.toContain("github.com");
   });
 
-  it("no description and nothing pushed → nothing to report (undefined note)", async () => {
+  it("no description and nothing pushed → nothing to report (undefined note), no GitHub fetch", async () => {
     const spy = openSpy();
     const note = await runCodingPrPostStep({
       observed: observation({ branch: "main", upstream: undefined }),
       description: undefined,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
       publish: () => {},
       logKey: "t",
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toBeUndefined();
+  });
+
+  it("no description submitted, no base signal anywhere → no GitHub fetch (never needed for a run with nothing to open)", async () => {
+    const spy = openSpy();
+    const fetchRepoInfo = vi.fn(unreachable);
+    await runCodingPrPostStep({
+      observed: observation({ branch: "main", upstream: undefined }),
+      description: undefined,
+      target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
+      openPullRequest: spy.fn,
+      fetchRepoInfo,
+      publish: () => {},
+      logKey: "t",
+    });
+    expect(fetchRepoInfo).not.toHaveBeenCalled();
   });
 
   it("no repo anywhere (none at dispatch, no origin remote) → honest note when a description was submitted", async () => {
@@ -123,6 +199,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       description: DESCRIPTION,
       target: { repo: undefined, baseRef: undefined, bindingRef: undefined, resolvedRef: "main" },
       openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
       publish: () => {},
       logKey: "t",
     });
