@@ -112,7 +112,7 @@ import {
 } from "../../src/execution/residentRefresh.js";
 import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
 import { describeStepFailure, stepFailureLog, type StepResult } from "../../src/execution/residentStepReport.js";
-import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
+import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 
 /** The commit this bundle was built from, injected by the deploy
  *  (`deploy/bin/build-stamp.mjs`; `unknown` when nobody stamped it). Answered
@@ -120,6 +120,9 @@ import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
  *  outside without auth, and stamped on test overrides so they die with the
  *  build that set them (gc.ts). Nothing to bump: it follows the tree. */
 const BUILD = injectedBuildStamp();
+/** The identity stored test overrides are expired against — see `buildId`:
+ *  the commit alone cannot tell two builds of one dirty tree apart. */
+const BUILD_ID = buildId(BUILD);
 
 interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
@@ -832,7 +835,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  interleave with an onboard. */
   async limits(): Promise<EffectiveLimits> {
     const stored = await this.ctx.storage.get<StoredTestOverrides>(TEST_OVERRIDES_KEY);
-    return effectiveLimits(stored, BUILD.commit, { cap: RESIDENT_CAP, floorS: LRU_FLOOR_S });
+    return effectiveLimits(stored, BUILD_ID, { cap: RESIDENT_CAP, floorS: LRU_FLOOR_S });
   }
 
   /** Admin-only by construction (reached solely via /debug set-test-overrides,
@@ -844,7 +847,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       await this.ctx.storage.put(TEST_OVERRIDES_KEY, {
         ...overrides,
         setAt: new Date().toISOString(),
-        build: BUILD.commit,
+        build: BUILD_ID,
       } satisfies StoredTestOverrides);
     }
     return this.limits();
@@ -3815,8 +3818,8 @@ export default {
     const url = new URL(request.url);
 
     // Unauthenticated wake ping for `npm run deploy` — touches no DO, no data.
-    // `u` tracks the last shipped unit so a deploy's propagation is provable
-    // from the outside without auth.
+    // `build` names the commit this bundle was deployed from, so a deploy's
+    // propagation is provable from the outside without auth.
     if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, build: BUILD });
 
     // Auth precedes existence: unknown paths demand admin before revealing

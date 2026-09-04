@@ -53,6 +53,29 @@ export function resolveBuildStamp(commit: unknown, builtAt: unknown): BuildStamp
   return { commit: trimmed === "" ? UNKNOWN_COMMIT : trimmed, ...(at === "" ? {} : { builtAt: at }) };
 }
 
+/** The identity a stored artifact compares itself against — the commit, plus
+ *  the build's own timestamp when there is one.
+ *
+ *  Not the commit alone: two builds of the same DIRTY tree carry the same
+ *  `<sha>-dirty` commit, and a redeploy of the same clean commit is still a
+ *  later build. The resident's test overrides (`gc.ts` `effectiveLimits`,
+ *  resident-repos item 49(c)) are expired by "a different build wrote this",
+ *  so a coarser identity leaves a forgotten admin cap alive across exactly the
+ *  deploys that were meant to clear it. `builtAt` is injected once per deploy,
+ *  so every isolate of one deployed version agrees — an override set through
+ *  one isolate is still honored by its siblings.
+ *
+ *  An UN-stamped bundle (`wrangler dev`, a bare `wrangler deploy`) therefore
+ *  shares one id across all of its builds, and an override does not expire
+ *  between them. That is deliberate, not an oversight: with nothing injected
+ *  there is no value that differs per build yet is stable per deployment —
+ *  anything generated at module load would differ per ISOLATE, so overrides
+ *  would vanish between siblings of one deployment, which is the worse
+ *  failure. Stamped deploys are the case the guard rail exists for. */
+export function buildId(stamp: BuildStamp): string {
+  return stamp.builtAt === undefined ? stamp.commit : `${stamp.commit}@${stamp.builtAt}`;
+}
+
 /** The stamp this bundle was built with. Reading an undeclared identifier is a
  *  ReferenceError, and `typeof` is the one operator that tolerates one — so it
  *  gates both reads, and an un-stamped bundle answers `unknown` instead of

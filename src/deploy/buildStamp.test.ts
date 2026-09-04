@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildStamp, defineArgs, spawnOutcome, DEFINE_COMMIT, DEFINE_BUILT_AT } from "../../deploy/bin/build-stamp.mjs";
-import { injectedBuildStamp, resolveBuildStamp, UNKNOWN_COMMIT } from "./buildStamp.js";
+import { buildId, injectedBuildStamp, resolveBuildStamp, UNKNOWN_COMMIT } from "./buildStamp.js";
 
 // Feature: features/execution.md item 13 — every Worker script reports the
 // commit it was built from on its own /healthz, injected at deploy time. This
@@ -33,6 +33,30 @@ describe("resolveBuildStamp (what a Worker reports)", () => {
       commit: "161930a",
       builtAt: "2026-09-04T19:02:01.000Z",
     });
+  });
+});
+
+describe("buildId (what a stored artifact compares against)", () => {
+  it("distinguishes two builds of the same dirty tree — the same commit, different builds", () => {
+    const a = buildId({ commit: "161930a-dirty", builtAt: "2026-09-04T19:02:01.000Z" });
+    const b = buildId({ commit: "161930a-dirty", builtAt: "2026-09-04T21:40:00.000Z" });
+    expect(a).not.toBe(b);
+  });
+
+  it("distinguishes a redeploy of the SAME clean commit — still a later build", () => {
+    expect(buildId({ commit: "161930a", builtAt: "2026-09-04T19:02:01.000Z" })).not.toBe(
+      buildId({ commit: "161930a", builtAt: "2026-09-04T23:00:09.000Z" }),
+    );
+  });
+
+  it("is stable for one deployed version, so sibling isolates agree", () => {
+    const stamp = { commit: "161930a", builtAt: "2026-09-04T19:02:01.000Z" };
+    expect(buildId(stamp)).toBe(buildId({ ...stamp }));
+    expect(buildId(stamp)).toBe("161930a@2026-09-04T19:02:01.000Z");
+  });
+
+  it("falls back to the commit alone when nothing stamped a time", () => {
+    expect(buildId({ commit: UNKNOWN_COMMIT })).toBe(UNKNOWN_COMMIT);
   });
 });
 
