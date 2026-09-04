@@ -37,8 +37,14 @@ describe("auth + routing", () => {
   it("GET /healthz is open", async () => {
     const res = await SELF.fetch(`${BASE}/healthz`);
     expect(res.status).toBe(200);
-    // `features` lets the bot's boot probe see which routes this deploy carries (#157).
-    expect(await res.json()).toEqual({ ok: true, features: ["memory", "friction", "schedules", "runs", "config"] });
+    // `features` lets the bot's boot probe see which routes this deploy carries (#157);
+    // `build` names the commit the deploy injected (features/execution.md item 13) —
+    // this bundle carries no `--define`, so it must say `unknown` rather than break.
+    expect(await res.json()).toEqual({
+      ok: true,
+      build: { commit: "unknown" },
+      features: ["memory", "friction", "schedules", "runs", "config"],
+    });
   });
 
   it("refuses a missing, malformed, or wrong bearer with 401 and touches no data", async () => {

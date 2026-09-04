@@ -4,6 +4,7 @@
 //   POST /exec   { command, timeoutMs? } -> { stdout, stderr, exitCode }
 //   POST /read   { path }            -> { content }
 //   POST /write  { path, content }   -> { ok: true }
+//   GET  /healthz                    -> { ok: true, build: { commit, builtAt? } }
 //
 // Every request carries:
 //   Authorization: Bearer <SANDBOX_TOKEN>   (wrangler secret put SANDBOX_TOKEN)
@@ -16,6 +17,7 @@
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
+import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 
 export class SwitchboardSandbox extends Sandbox {
   // SDK 0.3.x caches its default ExecutionSession in Durable Object memory
@@ -76,11 +78,22 @@ const WORKDIR = "/workspace";
 // once /exec streamed heartbeats — headers go out immediately.
 const EXEC_TIMEOUT_SECS = 280;
 
+/** The commit this bundle was built from, injected by the deploy
+ *  (`deploy/bin/build-stamp.mjs`) and answered on GET /healthz as `build`. */
+const BUILD = injectedBuildStamp();
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const auth = request.headers.get("authorization");
     if (!env.SANDBOX_TOKEN || auth !== `Bearer ${env.SANDBOX_TOKEN}`) {
       return json({ error: "unauthorized" }, 401);
+    }
+    // Build identity, behind the SAME bearer as everything else: this Worker
+    // authenticates every request and gains no unauthenticated surface for a
+    // stamp (features/execution.md item 13). It needs no thread, so it answers
+    // before the X-Thread-Key check — and it is the one GET here.
+    if (request.method === "GET" && new URL(request.url).pathname === "/healthz") {
+      return json({ ok: true, build: BUILD });
     }
     if (request.method !== "POST") return json({ error: "POST only" }, 405);
 

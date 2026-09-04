@@ -25,6 +25,11 @@ import {
 } from "../../src/core/runRecord.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
 import { isMcpTicket, isSealedCredential, MCP_TICKET_STATES, type McpTicket, type McpTicketState, type SealedCredential } from "../../src/mcp/registry.ts";
+import { injectedBuildStamp } from "../../src/deploy/buildStamp.ts";
+
+/** The commit this bundle was built from, injected by the deploy
+ *  (`deploy/bin/build-stamp.mjs`) and answered on GET /healthz as `build`. */
+const BUILD = injectedBuildStamp();
 
 // Memory Worker: the durable backend behind the bot's WorkerMemoryStore
 // (src/core/memory/workerStore.ts) — cross-session memory PR3 (#85). One
@@ -64,7 +69,7 @@ import { isMcpTicket, isSealedCredential, MCP_TICKET_STATES, type McpTicket, typ
 //   POST /runs/events {storeKey, id, afterSeq?, limit?} → {events: (RunEvent & {seq})[] | null, nextAfterSeq?}
 //                       (`events: null` when the run is unknown or hidden by retention; `seq` is the registry's stamp)
 //   POST /runs/delete {storeKey, id} → {ok: true, deleted}
-//   GET  /healthz → {ok: true, features: ["memory", "friction", "schedules", "runs"]}
+//   GET  /healthz → {ok: true, build: {commit, builtAt?}, features: ["memory", "friction", "schedules", "runs", "config"]}
 //
 // SECURITY: bearer comparison is constant-time (same helper as the resident
 // Worker); an unset/empty secret grants nothing (fail closed); every body field
@@ -1542,7 +1547,7 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, features: ["memory", "friction", "schedules", "runs", "config"] });
+    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, build: BUILD, features: ["memory", "friction", "schedules", "runs", "config"] });
     const ROUTES = new Set([
       ...CONFIG_ROUTES,
       "/retrieve",

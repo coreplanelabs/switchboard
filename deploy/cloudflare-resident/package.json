@@ -6,7 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "deploy": "node preflight.mjs && wrangler deploy && npm run wake",
+    "deploy": "node preflight.mjs && node ../bin/build-stamp.mjs && npm run wake",
     "preflight": "node preflight.mjs",
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit worker.ts --skipLibCheck --target es2022 --module es2022 --moduleResolution bundler --types ./node_modules/@cloudflare/workers-types",

@@ -6,7 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "deploy": "wrangler deploy",
+    "deploy": "node ../bin/build-stamp.mjs",
     "dev": "wrangler dev",
     "typegen": "wrangler types",
     "tail": "wrangler tail switchboard-sandbox",
