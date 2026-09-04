@@ -31,14 +31,14 @@ export type AttributeName = Exclude<keyof ResourceAttributes, "visibility">;
 /** The kinds each kinded resource type takes. Types absent here are not kinded. */
 export const RESOURCE_KINDS: { readonly [T in ResourceType]?: readonly KindOf<T>[] } = {
   "memory-scope": ["org", "user", "repo", "channel"],
-  "config-scope": ["channel", "user"],
+  "config-scope": ["channel", "user", "org"],
 };
 
 /** A resource type, or `type/kind` for the kinded ones — the unit a rule row targets. */
 export type Target =
   | Exclude<ResourceType, "memory-scope" | "config-scope">
   | `memory-scope/${"org" | "user" | "repo" | "channel"}`
-  | `config-scope/${"channel" | "user"}`;
+  | `config-scope/${"channel" | "user" | "org"}`;
 
 export const TARGET_ATTRIBUTES: Readonly<Record<Target, readonly AttributeName[]>> = {
   run: ["channelId", "userId", "repo"],
@@ -50,6 +50,7 @@ export const TARGET_ATTRIBUTES: Readonly<Record<Target, readonly AttributeName[]
   repo: ["repo"],
   "config-scope/channel": ["channelId"],
   "config-scope/user": ["userId"],
+  "config-scope/org": [],
   agent: ["name"],
   command: [],
 };
@@ -120,9 +121,15 @@ export function attributesOf(resource: Resource): ResourceAttributes {
     case "repo":
       return { repo: `${resource.owner}/${resource.name}`, visibility: "unknown" };
     case "config-scope":
-      return resource.kind === "channel"
-        ? { channelId: resource.id, visibility: "unknown" }
-        : { userId: resource.id, visibility: "unknown" };
+      switch (resource.kind) {
+        case "channel":
+          return { channelId: resource.id, visibility: "unknown" };
+        case "user":
+          return { userId: resource.id, visibility: "unknown" };
+        case "org":
+          return { visibility: "unknown" };
+      }
+      break;
     case "agent":
       return { name: resource.name, visibility: "unknown" };
     case "command":

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { BOT_HEALTH_URL, formatPlan, type DeployPlan } from "../../deploy/plan.js";
 import type { DeployRunResult } from "../../deploy/run.js";
 import { CommandRegistry, bindCommands, renderText, type Caller } from "../commandRegistry.js";
+import { callerWith } from "../testing/callers.js";
 import { parseInvocation } from "../commandSurface.js";
 import { BOT_ADMIN_RESTART_URL, RESTART_TOKEN_ENV, type RestartPlan } from "../../deploy/restart.js";
 import type { RestartRunResult } from "../../deploy/run.js";
@@ -12,9 +13,10 @@ import { deployAll, deployPlan, deployRestart, registerDeployCommands, type Depl
 // the former `npm run deploy:all`), sharing one option set so the plan you read
 // is the plan you run. The runner is injected; nothing here spawns a process.
 
-const cli: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
-const admin: Caller = { kind: "chat", id: "slack:UADMIN", scopes: new Set(), chatGate: () => true };
-const mcp = (...scopes: string[]): Caller => ({ kind: "mcp", id: "mcp:alice", scopes: new Set(scopes) });
+const cli: Caller = callerWith("cli", "cli:local", "all");
+/** A Slack admin: every grant. */
+const admin: Caller = callerWith("chat", "slack:UADMIN", "all");
+const mcp = (...actions: string[]): Caller => callerWith("mcp", "mcp:alice", actions);
 
 const neverRestarts = async (): Promise<RestartRunResult> => {
   throw new Error("must not restart");
@@ -96,9 +98,9 @@ describe("deploy.plan", () => {
 
   it("is operator-gated in chat, deploy:read on machine surfaces, and exposed everywhere; deploy.all is CLI-only", async () => {
     const { commands } = neverRuns();
-    expect(deployPlan).toMatchObject({ scope: "deploy:read", chatGate: "operator", effect: "read" });
+    expect(deployPlan).toMatchObject({ action: "deploy:read", effect: "read" });
     expect(deployPlan.surfaces).toBeUndefined();
-    expect(deployAll).toMatchObject({ scope: "deploy:write", chatGate: "operator", effect: "write", surfaces: { chat: false, mcp: false, http: false } });
+    expect(deployAll).toMatchObject({ action: "deploy:write", effect: "write", surfaces: { chat: false, mcp: false, http: false } });
     expect(await commands.invoke("deploy.plan", {}, mcp("runs:read"))).toMatchObject({ ok: false, error: "unauthorized" });
     expect((await commands.invoke("deploy.plan", {}, mcp("deploy:read"))).ok).toBe(true);
     expect(await commands.invoke("deploy.all", {}, admin)).toMatchObject({ ok: false, error: "not_found" });
@@ -157,7 +159,7 @@ describe("deploy.restart", () => {
 
   it("is CLI-only, deploy:write, operator-gated — like deploy.all", async () => {
     const { commands } = neverRuns();
-    expect(deployRestart).toMatchObject({ scope: "deploy:write", chatGate: "operator", effect: "write", surfaces: { chat: false, mcp: false, http: false } });
+    expect(deployRestart).toMatchObject({ action: "deploy:write", effect: "write", surfaces: { chat: false, mcp: false, http: false } });
     expect(await commands.invoke("deploy.restart", {}, admin)).toMatchObject({ ok: false, error: "not_found" });
     expect(await commands.invoke("deploy.restart", {}, mcp("deploy:write"))).toMatchObject({ ok: false, error: "not_found" });
   });

@@ -12,8 +12,12 @@ import {
   overridesBackingFor,
   WorkerOverridesBacking,
   type AppConfig,
+  type ConfigStoreOptions,
   type Overrides,
 } from "./config.js";
+import { hasAction } from "./core/authz/authorize.js";
+import { ALL_GRANTS } from "./core/authz/grants.js";
+import { NO_GRANTS } from "./core/authz/types.js";
 import { resolveShipCaps, SHIP_DEFAULT_MAX_MINUTES, SHIP_DEFAULT_MAX_ROUNDS } from "./core/shipPipeline.js";
 
 // Feature: features/routing-and-config.md — layered resolution & permission gates.
@@ -261,48 +265,63 @@ describe("repo management gate (canManageRepos)", () => {
   });
 });
 
-// Feature: features/command-registry.md — the chat gate the command registry
-// resolves a `slack:U…` caller against. `isOperator` is FAIL-CLOSED: only
-// `permissions.admins` qualify, and no admins means no operators.
-describe("operator gate (isOperator, chatGateFor)", () => {
-  it("isOperator is true only for admins", async () => {
+// Feature: features/authorization.md item 9 — `grantsFor` is the ONE lookup the
+// command registry's policy table decides on; the legacy `permissions.*` keys
+// translate to grants at load. FAIL-CLOSED: only `permissions.admins` hold
+// everything, and no admins means nobody does.
+describe("grantsFor — the legacy keys as the grants the policy table decides on", () => {
+  const holds = (s: ConfigStore, id: string, action: string) => hasAction(s.grantsFor(id).actions, action);
+  const storeWith = (yaml: string, options: ConfigStoreOptions) => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, yaml);
+    return new ConfigStore(cfg, join(dir, "overrides.json"), () => {}, options);
+  };
+
+  it("admins hold every action, channel, and repo; a plain user holds the open chat commands (runs:read is an operator command — admins only)", async () => {
     const s = store();
-    expect(s.isOperator("slack:UADMIN")).toBe(true);
-    expect(s.isOperator("slack:UDEV")).toBe(false);
-    expect(s.isOperator("slack:URANDOM")).toBe(false);
+    expect(s.grantsFor("slack:UADMIN")).toEqual(ALL_GRANTS);
+    for (const id of ["slack:UDEV", "slack:URANDOM"]) {
+      expect(holds(s, id, "runs:read"), id).toBe(false);
+      expect(holds(s, id, "help:read"), id).toBe(true);
+      expect(s.grantsFor(id).channels, id).toEqual(new Set());
+    }
   });
 
-  it("isOperator is false for everyone when permissions.admins is absent", async () => {
+  it("no admins configured → nobody holds everything (fail-closed)", async () => {
     const s = store(YAML_FIXTURE.replace(/permissions:[\s\S]*$/, ""));
-    expect(s.isOperator("slack:UADMIN")).toBe(false);
-    expect(s.isOperator("slack:URANDOM")).toBe(false);
+    expect(s.grantsFor("slack:UADMIN")).not.toEqual(ALL_GRANTS);
+    expect(holds(s, "slack:UADMIN", "runs:read")).toBe(false);
+    expect(holds(s, "slack:URANDOM", "runs:read")).toBe(false);
   });
 
-  it("chatGateFor resolves open → everyone, operator → admins, repoManager → canManageRepos", async () => {
+  it("repoManagement → repo:write + friction:write for the listed (admins hold them through `all`), nothing for the rest", async () => {
     const s = store(YAML_FIXTURE + `  repoManagement: ["slack:UDEV"]\n`);
-    const admin = s.chatGateFor("slack:UADMIN");
-    const dev = s.chatGateFor("slack:UDEV");
-    const rando = s.chatGateFor("slack:URANDOM");
-    expect([admin("open"), dev("open"), rando("open")]).toEqual([true, true, true]);
-    expect([admin("operator"), dev("operator"), rando("operator")]).toEqual([true, false, false]);
-    expect([admin("repoManager"), dev("repoManager"), rando("repoManager")]).toEqual([true, true, false]);
+    expect([holds(s, "slack:UADMIN", "repo:write"), holds(s, "slack:UDEV", "repo:write"), holds(s, "slack:URANDOM", "repo:write")]).toEqual([true, true, false]);
+    expect(holds(s, "slack:UDEV", "friction:write")).toBe(true);
   });
 
-  it("chatGateFor resolves channelConfig → canEditChannelConfig (open when unconfigured) and agentRun → canRunAgent(user, coding)", async () => {
+  it("channelConfig → config:write: absent → every Slack user; present → admins and the listed; agents.coding → agent:run:coding for UDEV and admins, every agent when unrestricted", async () => {
     const open = store(YAML_FIXTURE.replace("  channelConfig: []\n", ""));
-    expect([open.chatGateFor("slack:UADMIN")("channelConfig"), open.chatGateFor("slack:URANDOM")("channelConfig")]).toEqual([true, true]);
+    expect([holds(open, "slack:UADMIN", "config:write"), holds(open, "slack:URANDOM", "config:write")]).toEqual([true, true]);
     const closed = store(YAML_FIXTURE.replace("  channelConfig: []\n", `  channelConfig: ["slack:UDEV"]\n`));
-    expect([closed.chatGateFor("slack:UADMIN")("channelConfig"), closed.chatGateFor("slack:UDEV")("channelConfig"), closed.chatGateFor("slack:URANDOM")("channelConfig")]).toEqual([true, true, false]);
+    expect([holds(closed, "slack:UADMIN", "config:write"), holds(closed, "slack:UDEV", "config:write"), holds(closed, "slack:URANDOM", "config:write")]).toEqual([true, true, false]);
+    expect(holds(store(), "slack:URANDOM", "config:write")).toBe(false); // the fixture's `channelConfig: []`
     // the fixture restricts `coding` to UDEV (admins always pass)
-    expect([open.chatGateFor("slack:UADMIN")("agentRun"), open.chatGateFor("slack:UDEV")("agentRun"), open.chatGateFor("slack:URANDOM")("agentRun")]).toEqual([true, true, false]);
+    expect([holds(open, "slack:UADMIN", "agent:run:coding"), holds(open, "slack:UDEV", "agent:run:coding"), holds(open, "slack:URANDOM", "agent:run:coding")]).toEqual([true, true, false]);
     const unrestricted = store(YAML_FIXTURE.replace(`  agents:\n    coding: ["slack:UDEV"]\n`, ""));
-    expect(unrestricted.chatGateFor("slack:URANDOM")("agentRun")).toBe(true); // no allowlist → the agent is open
+    expect(holds(unrestricted, "slack:URANDOM", "agent:run:coding")).toBe(true); // no allowlist → the agent is open
   });
 
-  it("permissions.operators is parsed as the Access-identity write allowlist", async () => {
-    const s = store(YAML_FIXTURE + `  operators: ["access:alice@example.com"]\n`);
-    expect(s.operatorIdentities()).toEqual(["access:alice@example.com"]);
-    expect(store().operatorIdentities()).toEqual([]);
+  it("permissions.operators → every registered group's read + write over every channel; an unlisted Access browser session holds the reads; a service token exactly its scopes", async () => {
+    const s = storeWith(YAML_FIXTURE + `  operators: ["access:alice@example.com"]\n  serviceTokens:\n    reader-bot: [runs:read]\n`, { commandGroups: ["runs", "friction"] });
+    expect(s.grantsFor("access:alice@example.com")).toEqual({ actions: new Set(["runs:read", "runs:write", "friction:read", "friction:write"]), channels: "all", repos: new Set() });
+    expect(s.grantsFor("access:stranger")).toEqual({ actions: new Set(["runs:read", "friction:read"]), channels: new Set(), repos: new Set() });
+    expect(s.grantsFor("access:svc:reader-bot")).toEqual({ actions: new Set(["runs:read"]), channels: "all", repos: new Set() });
+    expect(s.grantsFor("access:svc:stranger")).toBe(NO_GRANTS);
+    // Without the catalogue's groups the store cannot spell a group read: an operator holds channels only, a browser nothing.
+    expect(store(YAML_FIXTURE + `  operators: ["access:alice@example.com"]\n`).grantsFor("access:alice@example.com")).toEqual({ actions: new Set(), channels: "all", repos: new Set() });
+    expect(store().grantsFor("access:stranger")).toBe(NO_GRANTS);
   });
 
   it("no admins configured at all → nobody may manage repos (still closed)", async () => {

@@ -157,7 +157,8 @@ describe("predicateFor: derivation", () => {
     expect(predicateFor(A.member, "memory:read", "memory-scope", "repo")).toEqual({ kind: "none" });
   });
   it("an open row → all; an actor-kind-selected row is skipped for other kinds", () => {
-    expect(predicateFor(A.noGrants, "friction:read", "command")).toEqual({ kind: "all" });
+    expect(predicateFor(A.noGrants, "config:write", "command")).toEqual({ kind: "all" }); // the user-only open row
+    expect(predicateFor(A.dispatchOnly, "config:write", "command")).toEqual({ kind: "none" }); // a service needs the grant
     expect(predicateFor(A.schedule, "schedule:fire", "command")).toEqual({ kind: "all" });
     expect(predicateFor(A.admin, "schedule:fire", "command")).toEqual({ kind: "none" });
   });

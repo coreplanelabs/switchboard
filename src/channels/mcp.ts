@@ -33,7 +33,9 @@ import {
 // arguments + options (all addressed by name, camelCase — KTD21),
 // result text = one header line + the JSON object `invoke` returned, errors as
 // JSON-RPC errors carrying `data.code`. No per-command code lives here; the
-// registry authorizes from the token's `scopes` (default `dispatch` only).
+// registry authorizes the `mcp:<subject>` actor over the policy table, whose
+// grants are the token's `scopes` translated (default `dispatch` only — no
+// registry command).
 //
 // Auth is REUSED wholesale from the HTTP ingress adapter (http.ts): the same
 // fail-closed, constant-time bearer-token machinery and the same
@@ -99,18 +101,17 @@ function mcpExposed(commands: CommandInvoker | undefined): CommandDef<unknown>[]
   return (commands?.list() ?? []).filter((c) => CommandRegistry.exposedTo(c, "mcp"));
 }
 
-/** R9: the Caller an MCP bearer identity resolves to — the token's explicit
- *  scopes and the same identity as a `service` `Actor` with the grants config
- *  names for `mcp:<subject>`. A token's `channel` reaches the actor as its one
- *  channel grant (`mcp:<channel>`, the namespace `toIncomingMessage` gives a
- *  dispatch's channelId) through that translation; an unpinned token holds no
- *  channel and sees no run (authorization.md item 9). */
+/** R9: the Caller an MCP bearer identity resolves to — the `service` Actor
+ *  `mcp:<subject>` with the grants config names for it: the token's scopes as
+ *  actions, and its `channel` as its one channel grant (`mcp:<channel>`, the
+ *  namespace `toIncomingMessage` gives a dispatch's channelId); an unpinned
+ *  token holds no channel and sees no run (authorization.md item 9). Nothing
+ *  here decides what it may do (KTD3). */
 export function toCaller(identity: IngressIdentity, options: Pick<McpOptions, "auth" | "grantsFor">): Caller {
   const lookup: GrantsLookup = options.grantsFor ?? ((id) => grantsFor(id, { ingressTokens: options.auth.tokens }));
   return {
     kind: "mcp",
     id: `${PLATFORM}:${identity.subject}`,
-    scopes: new Set(identity.scopes),
     actor: resolveActor({ surface: "mcp", subjectId: identity.subject }, lookup),
   };
 }

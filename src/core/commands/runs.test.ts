@@ -8,6 +8,7 @@ import { ALL_GRANTS, grantsFor } from "../authz/grants.js";
 import type { Actor } from "../authz/types.js";
 import { chatCallerFor } from "../commandChat.js";
 import { CommandRegistry, UNTRUSTED_OPEN, type Caller } from "../commandRegistry.js";
+import { callerWith } from "../testing/callers.js";
 import { jsonSchemaFor } from "../commandSurface.js";
 import type { IngressTokenMap } from "../ingressTokens.js";
 import type { RunEvent } from "../runEvents.js";
@@ -80,17 +81,18 @@ const TOKENS: IngressTokenMap = {
   "tok-ci": { subject: "ci", scopes: ["runs:read", "runs:write"] },
 };
 
-const cli: Caller = { kind: "cli", id: "cli:local", scopes: "all", actor: CLI_ACTOR };
+const cli: Caller = { kind: "cli", id: "cli:local", actor: CLI_ACTOR };
 /** A machine reader granted every channel natively (an ops token). */
-const reader: Caller = { kind: "mcp", id: "mcp:reader", scopes: set("runs:read", "runs:write"), actor: actor("service", "mcp:reader", set("runs:read", "runs:write"), "all") };
+const reader: Caller = { kind: "mcp", id: "mcp:reader", actor: actor("service", "mcp:reader", set("runs:read", "runs:write"), "all") };
 /** A token pinned to channel X by its `channel` key: its one channel grant is `mcp:X`. */
-const pinnedX: Caller = { kind: "mcp", id: "mcp:x-bot", scopes: set("runs:read", "runs:write"), actor: resolveActor({ surface: "mcp", subjectId: "x-bot" }, (id) => grantsFor(id, { ingressTokens: TOKENS })) };
+const pinnedX: Caller = { kind: "mcp", id: "mcp:x-bot", actor: resolveActor({ surface: "mcp", subjectId: "x-bot" }, (id) => grantsFor(id, { ingressTokens: TOKENS })) };
 /** A token WITHOUT a `channel` key: no channel grant at all (OQ4, option a). */
-const unpinned: Caller = { kind: "mcp", id: "mcp:ci", scopes: set("runs:read", "runs:write"), actor: resolveActor({ surface: "mcp", subjectId: "ci" }, (id) => grantsFor(id, { ingressTokens: TOKENS })) };
-const dispatchOnly: Caller = { kind: "mcp", id: "mcp:agent", scopes: set("dispatch"), actor: actor("service", "mcp:agent", set("dispatch"), set()) };
-const chatOperator: Caller = { kind: "chat", id: "slack:UADMIN", scopes: set(), chatGate: () => true, actor: { kind: "user", id: "slack:UADMIN", grants: ALL_GRANTS } };
+const unpinned: Caller = { kind: "mcp", id: "mcp:ci", actor: resolveActor({ surface: "mcp", subjectId: "ci" }, (id) => grantsFor(id, { ingressTokens: TOKENS })) };
+const dispatchOnly: Caller = { kind: "mcp", id: "mcp:agent", actor: actor("service", "mcp:agent", set("dispatch"), set()) };
+/** A Slack admin: every grant. */
+const chatOperator: Caller = { kind: "chat", id: "slack:UADMIN", actor: { kind: "user", id: "slack:UADMIN", grants: ALL_GRANTS } };
 /** An Access operator configured NATIVELY without `channels: all` (OQ1): every runs action, no channel membership. */
-const accessOperator: Caller = { kind: "access", id: "access:op-2", scopes: set("runs:read", "runs:write"), actor: actor("user", "access:op-2", set("runs:read", "runs:write"), set()) };
+const accessOperator: Caller = { kind: "access", id: "access:op-2", actor: actor("user", "access:op-2", set("runs:read", "runs:write"), set()) };
 
 function value<T>(res: { ok: true; value: unknown } | { ok: false }): T {
   if (!res.ok) throw new Error(`expected ok, got ${JSON.stringify(res)}`);
@@ -99,15 +101,14 @@ function value<T>(res: { ok: true; value: unknown } | { ok: false }): T {
 const ids = (res: { ok: true; value: unknown } | { ok: false }) => value<{ runs: { id: string }[] }>(res).runs.map((r) => r.id);
 
 describe("runs.* registrations", () => {
-  it("registers the five commands with the declared scopes, gates, and chat opt-outs", () => {
+  it("registers the five commands with the declared actions and chat opt-outs", () => {
     const byId = Object.fromEntries(runsCommands.map((c) => [c.id, c]));
     expect(Object.keys(byId).sort()).toEqual(["runs.events", "runs.friction", "runs.get", "runs.list", "runs.stop"]);
     for (const id of ["runs.list", "runs.get", "runs.events", "runs.friction"]) {
-      expect(byId[id].scope).toBe("runs:read");
+      expect(byId[id].action).toBe("runs:read");
       expect(byId[id].effect).toBe("read");
-      expect(byId[id].chatGate).toBe("operator");
     }
-    expect(byId["runs.stop"]).toMatchObject({ scope: "runs:write", effect: "write", chatGate: "operator" });
+    expect(byId["runs.stop"]).toMatchObject({ action: "runs:write", effect: "write" });
     expect(byId["runs.list"].surfaces?.chat).toBeUndefined();
     for (const id of ["runs.get", "runs.events", "runs.friction"]) expect(byId[id].surfaces?.chat).toBe(false);
   });
@@ -178,9 +179,10 @@ describe("runs.list", () => {
     expect(list).toHaveBeenCalledTimes(1);
     expect(list.mock.calls[0][0].visibleTo).toEqual({ kind: "or", of: [{ kind: "channels-in", channelIds: ["mcp:X"] }, { kind: "visibility-in", visibilities: ["public"] }, { kind: "user-is", userId: "mcp:x-bot" }] });
     list.mockClear();
-    // An actor the table cannot place (unknown kind) → `none`: no store call, an empty page.
+    // An actor the table cannot place (unknown kind) is refused at the door — the registry's own `authorize` says
+    // `unknown-actor-kind` before any handler runs — so the store is never asked (its predicate would be `none` anyway).
     const bogus: Caller = { ...reader, actor: { kind: "bogus" as Actor["kind"], id: "mcp:reader", grants: ALL_GRANTS } };
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, bogus, deps))).toEqual([]);
+    expect(await registry.invoke("runs.list", { options: { status: "all" } }, bogus, deps)).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
     expect(list).not.toHaveBeenCalled();
     // `all` is no constraint: the store's own query is unchanged for an all-channels actor.
     await registry.invoke("runs.list", { options: { status: "all" } }, reader, deps);
@@ -219,9 +221,9 @@ describe("channel visibility (authorization.md items 5–7)", () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-runs-authz-"));
     writeFileSync(join(dir, "config.yaml"), "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\npermissions:\n  admins: [\"slack:UADMIN\"]\n");
     const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"), () => {}, { ingressTokens: TOKENS, commandGroups: ["runs"] });
-    const spokenInX = { ...chatCallerFor({ userId: "mcp:ci", channelId: "mcp:X", threadKey: "mcp:X:t" }, config), chatGate: () => true };
+    const spokenInX = chatCallerFor({ userId: "mcp:ci", channelId: "mcp:X", threadKey: "mcp:X:t" }, config);
     expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, spokenInX, deps))).toEqual(["fin-pub"]); // not fin-x: the channel it speaks in grants nothing
-    const pinnedSpokenInY = { ...chatCallerFor({ userId: "mcp:x-bot", channelId: "mcp:Y", threadKey: "mcp:Y:t" }, config), chatGate: () => true };
+    const pinnedSpokenInY = chatCallerFor({ userId: "mcp:x-bot", channelId: "mcp:Y", threadKey: "mcp:Y:t" }, config);
     expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, pinnedSpokenInY, deps))).toEqual(["fin-x", "fin-pub"]); // its grant, not the channel it speaks in
   });
 
@@ -250,14 +252,14 @@ describe("channel visibility (authorization.md items 5–7)", () => {
     expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, chatOperator, deps))).toEqual(["fin-x", "fin-y", "fin-priv", "fin-pub"]);
   });
 
-  it("a run is its user's own: the DM/private run's user reads it without a channel grant (is-self); a caller without an actor holds NO_GRANTS and sees the public run only", async () => {
+  it("a run is its user's own: the DM/private run's user reads it without a channel grant (is-self); a reader with no channel grant sees the public run only", async () => {
     const { registry, deps } = await setup();
-    const owner: Caller = { kind: "access", id: "access:u9", scopes: set("runs:read"), actor: actor("user", "slack:U9", set("runs:read"), set()) };
+    const owner: Caller = { kind: "access", id: "access:u9", actor: actor("user", "slack:U9", set("runs:read"), set()) };
     expect(await registry.invoke("runs.get", { args: ["fin-priv"], options: {} }, owner, deps)).toMatchObject({ ok: true });
     expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, owner, deps))).toEqual(["fin-priv", "fin-pub"]);
-    const actorless: Caller = { kind: "mcp", id: "mcp:ghost", scopes: set("runs:read") };
-    expect(await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, actorless, deps)).toMatchObject({ ok: false, error: "not_found" });
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, actorless, deps))).toEqual(["fin-pub"]);
+    const noChannels: Caller = callerWith("mcp", "mcp:ghost", { actions: set("runs:read") });
+    expect(await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, noChannels, deps)).toMatchObject({ ok: false, error: "not_found" });
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, noChannels, deps))).toEqual(["fin-pub"]);
   });
 
   it("a live run without a stamp is `unknown` — never public: only a channel grant, all-channels, or its own user reads it", async () => {
@@ -364,7 +366,7 @@ describe("runs.stop", () => {
     const { reg, registry, deps } = await setup();
     const { id } = reg.create("x", { channelId: "mcp:Y", userId: "mcp:u", threadKey: "mcp:Y:t", channelVisibility: "machine" });
     expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, pinnedX, deps)).toMatchObject({ ok: false, error: "not_found" });
-    const writerY: Caller = { kind: "mcp", id: "mcp:y-bot", scopes: set("runs:read", "runs:write"), actor: actor("service", "mcp:y-bot", set("runs:read", "runs:write"), set("mcp:Y")) };
+    const writerY: Caller = { kind: "mcp", id: "mcp:y-bot", actor: actor("service", "mcp:y-bot", set("runs:read", "runs:write"), set("mcp:Y")) };
     expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, writerY, deps)).toMatchObject({ ok: true });
   });
 

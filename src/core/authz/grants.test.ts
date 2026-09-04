@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { ALL_GRANTS, grantsFor, grantsIn, grantsTable, mergeGrants, parseGrantsConfig, translateLegacyConfig, type GrantsConfig, type LegacyVocabulary } from "./grants.js";
+import { ALL_GRANTS, browserReadActions, CHAT_OPEN_ACTIONS, grantsFor, grantsIn, grantsTable, legacyBaseline, mergeGrants, parseGrantsConfig, translateLegacyConfig, type GrantsConfig, type LegacyVocabulary } from "./grants.js";
 import { NO_GRANTS, type Grants } from "./types.js";
 
-// Feature: docs/plans/2026-09-03-001-feat-authorization-model-plan.md — U2 (R7, R8, KTD6).
-// The legacy `permissions.*` / token keys translate to `Grants` by ONE table;
-// the native `grants` block resolves to the same shape; native wins on conflict.
+// Feature: docs/plans/2026-09-03-001-feat-authorization-model-plan.md — U2 (R7, R8, KTD6),
+// U4 (KTD5: the `open` chat gate and a browser session's implicit reads are
+// translation baselines). The legacy `permissions.*` / token keys translate to
+// `Grants` by ONE table; the native `grants` block resolves to the same shape;
+// native wins on conflict.
 
 const set = (...names: string[]) => new Set(names);
 const grants = (g: Partial<Grants>): Grants => ({ actions: set(), channels: set(), repos: set(), ...g });
-/** Every agent restricted, no command groups: the table with no "everyone" baseline. */
+/** What every Slack user holds with no `channelConfig` key: the open chat commands + `config:write`. */
+const OPEN = [...CHAT_OPEN_ACTIONS, "config:write"];
+/** Every agent restricted, no command groups: the table with no agent in the "everyone" baseline. */
 const NONE: LegacyVocabulary = { agentNames: [], commandGroups: [] };
 const VOCAB: LegacyVocabulary = { agentNames: ["general", "coding", "review"], commandGroups: ["runs", "friction", "repo", "config"] };
 const translate = (p: Parameters<typeof translateLegacyConfig>[0], tokens?: Parameters<typeof translateLegacyConfig>[1], svc?: Parameters<typeof translateLegacyConfig>[2], vocab = NONE) => translateLegacyConfig(p, tokens, svc, vocab);
@@ -35,21 +39,29 @@ describe("translateLegacyConfig — the KTD6 table, key by key", () => {
     expect(translate({ repoManagement: [] }).grants.size).toBe(0);
   });
 
-  it("permissions.channelConfig → config:write; ABSENT → the gate is reported open, no grant is invented; empty → closed, no grant", () => {
+  it("permissions.channelConfig → config:write for the listed; ABSENT → every Slack user holds config:write (open-when-absent); present and empty → nobody but admins", () => {
     const listed = translate({ channelConfig: ["slack:UCFG"] });
     expect(listed.grants.get("slack:UCFG")).toEqual(grants({ actions: set("config:write") }));
-    expect(listed.channelConfigOpen).toBe(false);
+    expect(listed.everyone.actions).not.toContain("config:write");
     const absent = translate({});
-    expect(absent.channelConfigOpen).toBe(true);
+    expect(absent.everyone.actions).toContain("config:write");
     expect(absent.grants.size).toBe(0);
     const empty = translate({ channelConfig: [] });
-    expect(empty.channelConfigOpen).toBe(false);
+    expect(empty.everyone.actions).not.toContain("config:write");
     expect(empty.grants.size).toBe(0);
   });
 
-  it("the open-when-absent / fail-closed asymmetry: channelConfig absent = open flag, repoManagement absent = nothing at all", () => {
+  it("the `open` chat gate → CHAT_OPEN_ACTIONS for everyone: the reads every Slack user had, plus memory:write and mcp:write; never runs, deploy, env, repo:write, friction:write, or an exec", () => {
+    const { everyone } = translate({ channelConfig: [] });
+    expect(everyone).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS) }));
+    expect(CHAT_OPEN_ACTIONS).toEqual(["help:read", "config:read", "repo:read", "friction:read", "memory:read", "mcp:read", "schedule:read", "memory:write", "mcp:write"]);
+    for (const closed of ["runs:read", "runs:write", "deploy:read", "deploy:write", "env:write", "repo:write", "repo:exec", "friction:write"]) expect(everyone.actions, closed).not.toContain(closed);
+  });
+
+  it("the open-when-absent / fail-closed asymmetry: channelConfig absent = config:write for everyone, repoManagement absent = nothing at all", () => {
     const t = translate({ admins: ["slack:UADMIN"] });
-    expect(t.channelConfigOpen).toBe(true);
+    expect(t.everyone.actions).toContain("config:write");
+    expect(t.everyone.actions).not.toContain("repo:write");
     expect([...t.grants.keys()]).toEqual(["slack:UADMIN"]);
   });
 
@@ -58,14 +70,14 @@ describe("translateLegacyConfig — the KTD6 table, key by key", () => {
     // (repos absent → the coding user also gets every repo, see the KD7 case below)
     expect(t.get("slack:UDEV")).toEqual(grants({ actions: set("agent:run:coding", "agent:run:review"), repos: "all" }));
     expect(t.get("slack:UREV")).toEqual(grants({ actions: set("agent:run:review") }));
-    // `general` has no allowlist → it is what everyone holds, not a per-user entry.
-    expect(everyone).toEqual(grants({ actions: set("agent:run:general") }));
+    // `general` has no allowlist → it is what everyone holds (with the open commands), not a per-user entry.
+    expect(everyone).toEqual(grants({ actions: set(...OPEN, "agent:run:general") }));
   });
 
-  it("an agent with NO allowlist → agent:run:<name> for everyone (canRunAgent is true for anyone); every agent restricted → everyone holds nothing", () => {
-    expect(translate({}, undefined, undefined, VOCAB).everyone).toEqual(grants({ actions: set("agent:run:general", "agent:run:coding", "agent:run:review") }));
-    expect(translate({ agents: { general: [], coding: [], review: [] } }, undefined, undefined, VOCAB).everyone).toEqual(NO_GRANTS);
-    expect(translate({}).everyone).toEqual(NO_GRANTS);
+  it("an agent with NO allowlist → agent:run:<name> for everyone (canRunAgent is true for anyone); every agent restricted → everyone holds the open commands only", () => {
+    expect(translate({}, undefined, undefined, VOCAB).everyone).toEqual(grants({ actions: set(...OPEN, "agent:run:general", "agent:run:coding", "agent:run:review") }));
+    expect(translate({ agents: { general: [], coding: [], review: [] } }, undefined, undefined, VOCAB).everyone).toEqual(grants({ actions: set(...OPEN) }));
+    expect(translate({}).everyone).toEqual(grants({ actions: set(...OPEN) }));
   });
 
   it("permissions.repos → repos per listed user (slugs as given — validateConfig lowercases them at load)", () => {
@@ -116,8 +128,33 @@ describe("translateLegacyConfig — the KTD6 table, key by key", () => {
     expect(admin.grants.get("slack:U1")).toEqual(ALL_GRANTS);
   });
 
-  it("nothing configured → an empty table, nothing for everyone, the channelConfig gate open and repos open", () => {
-    expect(translate(undefined)).toEqual({ grants: new Map(), everyone: NO_GRANTS, channelConfigOpen: true, reposOpen: true });
+  it("nothing configured → an empty table, the open baseline (channelConfig absent → config:write too) for everyone, repos open", () => {
+    expect(translate(undefined)).toEqual({ grants: new Map(), everyone: grants({ actions: set(...OPEN) }), reposOpen: true });
+  });
+});
+
+describe("the legacy baselines — what an id inherits by its namespace (KTD5/KTD6/KTD10)", () => {
+  const table = { everyone: grants({ actions: set(...OPEN) }), browserReads: grants({ actions: browserReadActions(["runs", "friction"]) }) };
+
+  it("slack: → everyone; access:<sub> → every group's read; access:svc:, http:, mcp:, schedule: → nothing", () => {
+    expect(legacyBaseline("slack:U1", table)).toBe(table.everyone);
+    expect(legacyBaseline("access:alice", table)).toBe(table.browserReads);
+    for (const id of ["access:svc:ci", "http:ci", "mcp:ci", "schedule:x", "cli:local"]) expect(legacyBaseline(id, table), id).toBe(NO_GRANTS);
+  });
+
+  it("browserReadActions is every `<group>:read`, never a write or an exec; no groups → nothing", () => {
+    expect(browserReadActions(["runs", "repo"])).toEqual(set("runs:read", "repo:read"));
+    expect(browserReadActions([])).toEqual(set());
+  });
+
+  it("a legacy-listed Access identity has its reads unioned in; an unlisted one holds the reads alone; a service token never inherits them", () => {
+    const source = { permissions: { repoManagement: ["access:bob"], serviceTokens: { bot: ["runs:write"] } }, commandGroups: ["runs", "repo"] };
+    expect(grantsFor("access:bob", source)).toEqual(grants({ actions: set("repo:write", "friction:write", "runs:read", "repo:read") }));
+    expect(grantsFor("access:stranger", source)).toEqual(grants({ actions: set("runs:read", "repo:read") }));
+    expect(grantsFor("access:svc:bot", source)).toEqual(grants({ actions: set("runs:write"), channels: "all" }));
+    expect(grantsFor("access:svc:stranger", source)).toBe(NO_GRANTS);
+    // No command groups known → a browser session holds nothing (fail-closed).
+    expect(grantsFor("access:stranger", {})).toBe(NO_GRANTS);
   });
 });
 
@@ -187,13 +224,13 @@ describe("the native/legacy DIFFERENTIAL — one deployment written both ways re
     agentNames: ["general", "coding", "review"],
     commandGroups: ["runs", "friction"],
   };
-  // `general` is unrestricted, so every legacy `slack:` user holds agent:run:general — the native block must say so per user; credentials and jobs do not inherit it.
+  // Every legacy `slack:` user holds the open chat commands and, `general` being unrestricted, agent:run:general — the native block must say so per user; credentials and jobs do not inherit it. `channelConfig` is present, so `config:write` is per-user.
   const native: GrantsConfig = {
     "slack:UADMIN": { actions: "all", channels: "all", repos: "all" },
     "access:op-1": { actions: ["runs:read", "runs:write", "friction:read", "friction:write"], channels: "all" },
-    "slack:UMGR": { actions: ["repo:write", "friction:write", "agent:run:general"] },
-    "slack:UCFG": { actions: ["config:write", "agent:run:general"] },
-    "slack:UDEV": { actions: ["agent:run:coding", "agent:run:general"], repos: ["acme/api"] },
+    "slack:UMGR": { actions: [...CHAT_OPEN_ACTIONS, "repo:write", "friction:write", "agent:run:general"] },
+    "slack:UCFG": { actions: [...CHAT_OPEN_ACTIONS, "config:write", "agent:run:general"] },
+    "slack:UDEV": { actions: [...CHAT_OPEN_ACTIONS, "agent:run:coding", "agent:run:general"], repos: ["acme/api"] },
     "access:svc:reader-bot": { actions: ["runs:read"], channels: "all" },
     "http:ci": { actions: ["dispatch", "runs:read"], channels: ["http:ops"] },
     "mcp:ci": { actions: ["dispatch", "runs:read"], channels: ["mcp:ops"] },
@@ -208,31 +245,32 @@ describe("the native/legacy DIFFERENTIAL — one deployment written both ways re
     for (const id of parsed.grants.keys()) expect(grantsFor(id, { grants: parsed.grants }), id).toEqual(grantsFor(id, legacy));
   });
 
-  it("an actor neither shape names: an unlisted slack: user gets what everyone holds (the unrestricted agents); the native block, being explicit, gives nothing", () => {
-    expect(grantsFor("slack:UNOBODY", legacy)).toEqual(grants({ actions: set("agent:run:general") }));
-    expect(grantsFor("slack:UNOBODY", { grants: new Map() })).toBe(NO_GRANTS);
-    expect(grantsFor("slack:UNOBODY", { ...legacy, permissions: { ...legacy.permissions, agents: { general: [], coding: [], review: [] } } })).toBe(NO_GRANTS);
+  it("an actor neither shape names: an unlisted slack: user gets what everyone holds (the open commands, the unrestricted agents); a native-only deployment, being explicit, gives nothing", () => {
+    expect(grantsFor("slack:UNOBODY", legacy)).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general") }));
+    expect(grantsFor("slack:UNOBODY", { grants: new Map() })).toEqual(grants({ actions: set(...OPEN) }));
+    expect(grantsFor("slack:UNOBODY", { ...legacy, permissions: { ...legacy.permissions, agents: { general: [], coding: [], review: [] } } })).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS) }));
   });
 
-  it("the everyone baseline is for slack: users only — an unlisted schedule, Access identity, service token, or ingress subject is NO_GRANTS (fail-closed)", () => {
-    for (const id of ["schedule:x", "access:svc:x", "access:stranger", "http:stranger", "mcp:stranger"]) expect(grantsFor(id, legacy), id).toBe(NO_GRANTS);
-    // …and a listed credential does not have it unioned in either.
+  it("the everyone baseline is for slack: users; a browser session inherits the reads; an unlisted schedule, service token, or ingress subject is NO_GRANTS (fail-closed)", () => {
+    for (const id of ["schedule:x", "access:svc:x", "http:stranger", "mcp:stranger"]) expect(grantsFor(id, legacy), id).toBe(NO_GRANTS);
+    expect(grantsFor("access:stranger", legacy)).toEqual(grants({ actions: set("runs:read", "friction:read") }));
+    // …and a listed credential does not have a baseline unioned in either.
     expect(grantsFor("http:ci", legacy).actions).toEqual(set("dispatch", "runs:read"));
-    expect(grantsFor("slack:UMGR", legacy).actions).toEqual(set("repo:write", "friction:write", "agent:run:general"));
+    expect(grantsFor("slack:UMGR", legacy).actions).toEqual(set(...CHAT_OPEN_ACTIONS, "repo:write", "friction:write", "agent:run:general"));
   });
 });
 
 describe("grantsTable / grantsIn / grantsFor — the merged lookup", () => {
-  it("native wins for an id both shapes name and the id is reported; an absent actor is NO_GRANTS", () => {
+  it("native wins for an id both shapes name and the id is reported; an unlisted slack: user holds the baseline, an unlisted credential nothing", () => {
     const parsed = parseGrantsConfig({ "slack:UADMIN": { actions: ["runs:read"] } });
     if (!parsed.ok) throw new Error(parsed.errors.join("; "));
     const source = { grants: parsed.grants, permissions: { admins: ["slack:UADMIN"], repoManagement: ["slack:UMGR"] } };
     const table = grantsTable(source);
     expect(table.overlapping).toEqual(["slack:UADMIN"]);
     expect(grantsIn(table, "slack:UADMIN")).toEqual(grants({ actions: set("runs:read") }));
-    expect(grantsFor("slack:UMGR", source)).toEqual(grants({ actions: set("repo:write", "friction:write") }));
-    expect(grantsFor("slack:UNKNOWN", source)).toBe(NO_GRANTS);
-    expect(grantsFor("slack:UNKNOWN", {})).toBe(NO_GRANTS);
+    expect(grantsFor("slack:UMGR", source)).toEqual(grants({ actions: set(...OPEN, "repo:write", "friction:write") }));
+    expect(grantsFor("slack:UNKNOWN", source)).toEqual(grants({ actions: set(...OPEN) }));
+    expect(grantsFor("mcp:unknown", source)).toBe(NO_GRANTS);
   });
 
   it("a schedule actor's grants are the registry's declared ones (R9) unless the native block names the id — then config wins, without an overlap warning; no legacy key names schedules", () => {

@@ -114,7 +114,7 @@ export interface HandleChatCommandArgs {
    *  its `Actor`); channel + thread are the caller's `origin` — context, never
    *  authority: what the caller may SEE is its actor's grants (authorization.md). */
   msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">;
-  config: Pick<ConfigStore, "chatGateFor" | "grantsFor" | "adminsHint">;
+  config: Pick<ConfigStore, "grantsFor" | "adminsHint">;
   /** Resolves the repo this thread is bound to, lazily — `Caller.origin.repo`
    *  for the commands that ask (the dispatcher supplies history + the
    *  production resolver). Absent → no repo scope. */
@@ -123,19 +123,18 @@ export interface HandleChatCommandArgs {
   now?: number;
 }
 
-/** The `Caller` a chat message resolves to: the message's user as the id, the
- *  config's chat gates, the channel + thread it came from (`origin`), and the
- *  same identity as an `Actor` whose grants config names for that user id. A
- *  machine credential speaking as text (`http:<subject>`, `mcp:<subject>`) is
- *  no longer pinned to the channel it speaks in: what it may see is what its
- *  grants name — the same answer the structured MCP tools give (authorization.md
- *  item 7), so one token sees one set of runs on every surface. */
-export function chatCallerFor(msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">, config: Pick<ConfigStore, "chatGateFor" | "grantsFor">, resolveRepo?: () => Promise<string | undefined>): Caller {
+/** The `Caller` a chat message resolves to: the message's user as the id and
+ *  as the `Actor` the policy table decides on (its grants are what config names
+ *  for that user id — `ConfigStore.grantsFor`), and the channel + thread it
+ *  came from (`origin`). The adapter makes no authorization decision (KTD3):
+ *  a machine credential speaking as text (`http:<subject>`, `mcp:<subject>`)
+ *  is admitted by its grants like its tool call and sees the runs its grants
+ *  name — not the channel it speaks in (authorization.md item 7), so one token
+ *  gets one answer on every surface. */
+export function chatCallerFor(msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">, config: Pick<ConfigStore, "grantsFor">, resolveRepo?: () => Promise<string | undefined>): Caller {
   return {
     kind: "chat",
     id: msg.userId,
-    scopes: new Set(),
-    chatGate: config.chatGateFor(msg.userId),
     actor: resolveChatActor(msg, (id) => config.grantsFor(id)),
     origin: { channelId: msg.channelId, threadKey: msg.threadKey, ...(resolveRepo ? { repo: resolveRepo } : {}) },
   };
@@ -158,9 +157,11 @@ export interface ChatCommandResult {
 }
 
 /** One line per error code; the shared wording every chat command uses. A
- *  refusal the registry decided (the caller failed the command's gate) is the
- *  fixed "is restricted" line; one the command decided about the request (the
- *  channel scope, another user's memory, a repo allowlist) carries its reason. */
+ *  refusal the registry decided (the policy table denied the caller the
+ *  command's action) is the fixed "is restricted" line; one the command
+ *  decided about the request (the channel scope, another user's memory, a repo
+ *  allowlist) carries its reason. The deny reason itself never reaches a reply
+ *  (KTD8): it is on the audit line. */
 export function chatErrorLine(id: string, error: InvokeErrorCode, message: string, config: Pick<ConfigStore, "adminsHint">, decidedBy: "registry" | "handler" = "registry"): string {
   const name = chatForm(id);
   switch (error) {

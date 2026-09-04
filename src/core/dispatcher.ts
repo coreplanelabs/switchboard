@@ -364,8 +364,8 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // `recognizeOperation` admits ("run the tests on main in acme/api") are
     // TRANSLATED into the registry's `repo.test` / `repo.build` — the very
     // command `repo test acme/api main` is — so one handler executes, one gate
-    // sequence applies (the `agentRun` chat gate = canRunAgent(coding), the
-    // implicit target agent; canUseRepo inside), and zero model turns are
+    // sequence applies (the policy table on `agent { coding }` — the right to run
+    // the implicit target agent; canUseRepo inside), and zero model turns are
     // spent. Natural language is an accelerator, not a promise: when the op
     // cannot serve (`not_found` — the repo has no resident; `unavailable` — no
     // backend or a backend failure) the agent still gets the ask, while a

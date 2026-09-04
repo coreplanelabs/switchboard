@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CommandRegistry, flag, type CommandDef } from "../core/commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
-import { cell, docCommands, GENERATED_REGIONS, renderApiRoutes, renderChatCommands, renderCliCommands, usageFor } from "./reference.js";
+import { cell, docCommands, GENERATED_REGIONS, renderApiRoutes, renderChatCommands, renderCliCommands, usageFor, whoMayRun } from "./reference.js";
 import { declaredRegions } from "./regions.js";
 
 /** A hand-built catalogue: one command per shape the renderers must handle. */
@@ -13,8 +13,7 @@ function fixture(): CommandDef<unknown>[] {
       id: "thing.show",
       args: [{ name: "scope", schema: z.enum(["me", "channel"]), describe: "whose" }],
       options: z.object({ dryRun: flag.optional(), limit: z.coerce.number().int().optional() }),
-      scope: "thing:read",
-      chatGate: "open",
+      action: "repo:read",
       effect: "read",
       describe: "Show a thing; per-agent forms take --models.<agent>.",
       handler: async () => null,
@@ -22,16 +21,14 @@ function fixture(): CommandDef<unknown>[] {
     {
       id: "thing.wipe",
       args: [{ name: "id", schema: z.string(), describe: "which" }],
-      scope: "thing:write",
-      chatGate: "repoManager",
+      action: "repo:write",
       effect: "write",
       describe: "Wipe it.",
       handler: async () => null,
     },
     {
       id: "local.only",
-      scope: "local:write",
-      chatGate: "operator",
+      action: "deploy:write",
       effect: "write",
       surfaces: { chat: false, http: false, mcp: false },
       describe: "Operator-only, terminal-only.",
@@ -92,18 +89,36 @@ describe("renderChatCommands", () => {
     expect(out).not.toContain("local only");
   });
 
-  it("states who may run each one, in the vocabulary of the permissions reference", () => {
+  it("states who may run each one, in the vocabulary of the permissions reference — decided by the policy table, not asserted by the definition", () => {
+    expect(out).toContain("| `thing show <me\\|channel> [--dry-run] [--limit <integer>]` | Show a thing; per-agent forms take --models.&lt;agent&gt;. | anyone |");
     expect(out).toContain("| `thing wipe <id>` | Wipe it. | repo managers (`repoManagement`) |");
     expect(out).toContain("| Command | What it does | Who can run it |");
+  });
+});
+
+describe("whoMayRun", () => {
+  const cmd = (action: string, resource?: CommandDef<unknown>["resource"]): Pick<CommandDef<unknown>, "id" | "action" | "resource"> => ({ id: "x.y", action: action as CommandDef<unknown>["action"], ...(resource ? { resource } : {}) });
+
+  it("labels the narrowest Slack reader the table admits: the open baseline, the coding right, repo management, admins", () => {
+    expect(whoMayRun(cmd("help:read"))).toBe("anyone");
+    expect(whoMayRun(cmd("config:write"))).toBe("anyone"); // a person's own scope; the channel scope is the handler's question
+    expect(whoMayRun(cmd("repo:exec", () => ({ type: "agent", name: "coding" })))).toBe("anyone allowed to run `coding`");
+    expect(whoMayRun(cmd("friction:write"))).toBe("repo managers (`repoManagement`)");
+    expect(whoMayRun(cmd("runs:read"))).toBe("admins");
+  });
+
+  it("a command whose action has no row is nobody's — the docs say so instead of guessing", () => {
+    expect(whoMayRun(cmd("thing:read"))).toBe("nobody in Slack");
   });
 });
 
 describe("renderApiRoutes", () => {
   const out = renderApiRoutes(docs);
 
-  it("gives a write POST only and a read either verb", () => {
-    expect(out).toContain("| `/api/thing.wipe` | `POST` | `thing:write` |");
-    expect(out).toContain("| `/api/thing.show` | `GET`, `POST` | `thing:read` |");
+  it("gives a write POST only and a read either verb, with the action a token needs", () => {
+    expect(out).toContain("| `/api/thing.wipe` | `POST` | `repo:write` |");
+    expect(out).toContain("| `/api/thing.show` | `GET`, `POST` | `repo:read` |");
+    expect(out).toContain("| Route | Methods | Action | What it does |");
   });
 
   it("omits commands with no HTTP surface", () => {

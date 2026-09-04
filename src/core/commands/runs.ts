@@ -2,7 +2,7 @@ import { z } from "zod";
 import { authorize } from "../authz/authorize.js";
 import { predicateFor } from "../authz/predicate.js";
 import type { Action, Actor, Resource } from "../authz/types.js";
-import { actorOf, CommandError, commandDefiner, wrapUntrusted, type Caller, type CommandDef, type CommandRegistry, type JsonValue } from "../commandRegistry.js";
+import { CommandError, commandDefiner, wrapUntrusted, type Caller, type CommandDef, type CommandRegistry, type JsonValue } from "../commandRegistry.js";
 import type { RunEvent } from "../runEvents.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../runRecord.js";
 import { MAX_EVENTS_PAGE, type Result, type RunRecordView, type RunsService } from "../runsService.js";
@@ -73,7 +73,7 @@ const logDenied = (entry: RunReadDenied): void => console.log(JSON.stringify({ a
  *  existence is never revealed (KTD8), and its reason reaches the audit line only. */
 async function getVisibleRun(runs: RunsService, id: string, caller: Caller, action: Action, deps: RunsCommandDeps, commandId: string, opts: { include?: "messages" } = {}): Promise<RunRecordView> {
   const view = unwrap(await runs.getRun(id, opts));
-  const actor: Actor = actorOf(caller);
+  const actor: Actor = caller.actor;
   const decision = authorize(actor, action, runResource(view));
   if (!decision.allow) {
     (deps.denied ?? logDenied)({ commandId, actorId: actor.id, action, reason: decision.reason });
@@ -112,14 +112,13 @@ export const runsList = defineCommand({
     before: z.coerce.number().int().nonnegative().optional().describe("page cursor: runs finished before this epoch ms"),
     beforeId: runId.optional().describe("page cursor tie-breaker: the last id of the previous page"),
   }),
-  scope: "runs:read",
-  chatGate: "operator",
+  action: "runs:read",
   effect: "read",
   describe: "List runs (live and persisted, newest first) — metadata only, never message text.",
   handler: async ({ options, caller, deps }) => {
     // The policy, compiled for this actor, is the store's filter (R6); the
     // `channel` option is a plain filter the caller asked for on top of it.
-    const visibleTo = predicateFor(actorOf(caller), "runs:read", "run");
+    const visibleTo = predicateFor(caller.actor, "runs:read", "run");
     return asJson(await (await deps.runs()).listRuns({ ...options, visibleTo }));
   },
 });
@@ -128,8 +127,7 @@ export const runsGet = defineCommand({
   id: "runs.get",
   args: [idArg],
   options: z.object({ include: z.enum(["messages"]).optional().describe("add the run's events, free text wrapped as untrusted content") }),
-  scope: "runs:read",
-  chatGate: "operator",
+  action: "runs:read",
   effect: "read",
   surfaces: { chat: false },
   describe: "One run's record; `--include messages` adds its events with free text wrapped as untrusted content.",
@@ -147,8 +145,7 @@ export const runsEvents = defineCommand({
     afterSeq: z.coerce.number().int().nonnegative().optional().describe("events with seq greater than this"),
     limit: positiveInt.max(MAX_EVENTS_PAGE).optional().describe(`page size (max ${MAX_EVENTS_PAGE})`),
   }),
-  scope: "runs:read",
-  chatGate: "operator",
+  action: "runs:read",
   effect: "read",
   surfaces: { chat: false },
   describe: "A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content.",
@@ -163,8 +160,7 @@ export const runsEvents = defineCommand({
 export const runsFriction = defineCommand({
   id: "runs.friction",
   args: [idArg],
-  scope: "runs:read",
-  chatGate: "operator",
+  action: "runs:read",
   effect: "read",
   surfaces: { chat: false },
   describe: "One run's friction diagnosis (live: computed now; persisted: as stored).",
@@ -179,8 +175,7 @@ export const runsStop = defineCommand({
   id: "runs.stop",
   args: [idArg],
   options: z.object({ mode: z.enum(["soft", "hard"]).describe("soft = finish the current step; hard = abort now") }),
-  scope: "runs:write",
-  chatGate: "operator",
+  action: "runs:write",
   effect: "write",
   describe: "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor.",
   handler: async ({ args, options, caller, deps }) => {

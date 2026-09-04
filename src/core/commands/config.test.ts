@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigStore, MAX_INSTRUCTIONS_LENGTH } from "../../config.js";
+import { chatCallerFor } from "../commandChat.js";
 import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
+import { callerWith } from "../testing/callers.js";
 import { parseInvocation, tokenize } from "../commandSurface.js";
 import { configCommands, registerConfigCommands, type ConfigCommandDeps } from "./config.js";
 
@@ -53,14 +55,9 @@ function configDeps(config: ConfigStore) {
   };
 }
 
-const chat = (config: ConfigStore, userId: string, channelId = "slack:CX"): Caller => ({
-  kind: "chat",
-  id: userId,
-  scopes: new Set(),
-  chatGate: config.chatGateFor(userId),
-  origin: { channelId, threadKey: `${channelId}:1.0` },
-});
-const mcp = (...scopes: string[]): Caller => ({ kind: "mcp", id: "mcp:alice", scopes: new Set(scopes) });
+/** The Caller the chat adapter resolves for a Slack person under this config (its grants are the legacy keys translated). */
+const chat = (config: ConfigStore, userId: string, channelId = "slack:CX"): Caller => chatCallerFor({ userId, channelId, threadKey: `${channelId}:1.0` }, config);
+const mcp = (...actions: string[]): Caller => callerWith("mcp", "mcp:alice", actions);
 
 /** A chat line through the shared grammar → the invoke result + rendered text. */
 async function say(commands: CommandInvoker, text: string, caller: Caller) {
@@ -146,11 +143,17 @@ describe("config set", () => {
     expect(parseInvocation(commands.get("config.set")!, ["me", "--models.coding", "x/y"])).toEqual({ kind: "invoke", input: { args: ["me"], options: { models: { coding: "x/y" } } } });
   });
 
-  it("machine callers need config:write; a browser Access session without an operators entry cannot write", async () => {
+  it("a credential needs config:write for any scope; a person always has their own scope — an Access browser session without an operators entry writes `me`, never `channel`", async () => {
     const commands = bind(store());
-    expect(await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, mcp("config:read"))).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, mcp("config:read"))).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
     expect((await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, mcp("config:write"))).ok).toBe(true);
-    expect(await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, { kind: "access", id: "access:u", scopes: new Set() })).toMatchObject({ ok: false, error: "unauthorized" });
+    // A dispatch-only token is refused before the scope is even looked at.
+    expect(await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, mcp("dispatch"))).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
+    // The one deliberate change of plan U4: a browser session may write ITS OWN scope (`config-scope/user` is the user's,
+    // and nothing dispatches as an Access identity); the channel scope stays the channel-config right it never held.
+    const browser = callerWith("access", "access:u", ["config:read"]);
+    expect((await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, browser)).ok).toBe(true);
+    expect(await commands.invoke("config.set", { args: ["channel"], options: { agent: "review", channel: "slack:CX" } }, browser)).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "handler", message: "Channel config changes are restricted." });
   });
 });
 
@@ -214,9 +217,12 @@ describe("config instructions", () => {
     expect((await say(commands, "config instructions channel", chat(gated, "slack:UX", "slack:CEMPTY"))).text).toMatch(/^No channel instructions are set/);
   });
 
-  it("declares the gates and scopes: show is config:read/open, the writers are config:write with the chat gate open (the channel scope is decided inside)", async () => {
+  it("declares the actions: show is config:read, the writers are config:write (the channel scope is decided inside, on config-scope/channel)", async () => {
     const byId = Object.fromEntries(configCommands.map((c) => [c.id, c]));
-    expect(byId["config.show"]).toMatchObject({ scope: "config:read", chatGate: "open", effect: "read" });
-    for (const id of ["config.set", "config.clear", "config.instructions"]) expect(byId[id], id).toMatchObject({ scope: "config:write", chatGate: "open", effect: "write" });
+    expect(byId["config.show"]).toMatchObject({ action: "config:read", effect: "read" });
+    for (const id of ["config.set", "config.clear", "config.instructions"]) {
+      expect(byId[id], id).toMatchObject({ action: "config:write", effect: "write" });
+      expect(byId[id].resource, id).toBeUndefined();
+    }
   });
 });

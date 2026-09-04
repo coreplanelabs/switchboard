@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
+import { CHAT_OPEN_ACTIONS } from "../authz/grants.js";
 import { CommandRegistry, bindCommands, renderText, type Caller } from "../commandRegistry.js";
+import { callerWith } from "../testing/callers.js";
 import { helpShow, registerHelpCommands, type HelpCommandDeps } from "./help.js";
 
 // Feature: features/command-registry.md (phase 4b, KTD25): `help show` — the
 // help text derived from the agent registry and the command catalogue, never
 // hand-written; the bare word `help` in chat is this command.
 
-const chat: Caller = { kind: "chat", id: "slack:UX", scopes: new Set(), chatGate: (g) => g === "open" };
+/** A plain Slack user: the open chat commands. */
+const chat: Caller = callerWith("chat", "slack:UX", CHAT_OPEN_ACTIONS);
 
 describe("help.show", () => {
   it("lists the agents, the directive syntax, and every chat-exposed command from the catalogue it is bound to (hidden ones omitted)", async () => {
@@ -34,7 +37,7 @@ describe("help.show", () => {
     expect(text).toContain("  runs list   — list runs");
     expect(text).toContain("  config set  — set config");
     expect(text).not.toContain("runs get");
-    expect(helpShow).toMatchObject({ scope: "help:read", chatGate: "open", effect: "read" });
+    expect(helpShow).toMatchObject({ action: "help:read", effect: "read" });
   });
 
   it("chat rendering (surface: chat): one bold header per group, one bullet per chat-exposed command, no column padding — the aligned columns collapse in Slack's proportional font", async () => {

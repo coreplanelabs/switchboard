@@ -1,6 +1,14 @@
 import { z } from "zod";
-import { acceptsUndefined, type CommandDef, type SurfaceName } from "../commandRegistry.js";
-import { camelToKebab, cliFlag, isBooleanSchema, jsonSchemaFor } from "../commandSurface.js";
+import { AGENTS } from "../../agents/registry.js";
+import { authorize } from "../authz/authorize.js";
+import { grantsFor, type GrantsSource } from "../authz/grants.js";
+import { POLICY, ruleTarget } from "../authz/policy.js";
+import { targetOfResource } from "../authz/resource.js";
+import type { Actor } from "../authz/types.js";
+import { acceptsUndefined, resourceOf, type Caller, type CommandDef, type SurfaceName } from "../commandRegistry.js";
+import { camelToKebab, cliFlag, isBooleanSchema, jsonSchemaFor, namedToInput } from "../commandSurface.js";
+import { coreCommandGroups } from "../commands/all.js";
+import { callerWith } from "./callers.js";
 
 // Pure helpers for the registry-driven conformance suite
 // (src/core/commandConformance.test.ts, features/command-registry.md item 25).
@@ -304,15 +312,24 @@ export interface CommandSnapshot {
   args: { name: string; type: string; required: boolean; rest?: true }[];
   options: { name: string; type: string; required: boolean; values?: unknown[] }[];
   surfaces: string[];
-  scope: string;
-  chatGate: string;
+  action: string;
+  /** The policy target `authorize` decides on: `command`, or the resolver's (`agent`). */
+  resource: string;
   effect: string;
 }
 
+/** The policy target a command's `resource` resolver names for the given input
+ *  (`command` when it has none). */
+export function resourceTargetOf(cmd: Pick<CommandDef<unknown>, "id" | "resource">, named: Named, caller: Caller): string {
+  const input = namedToInput(cmd as CommandDef<unknown>, named, "camel");
+  return targetOfResource(resourceOf(cmd, "error" in input ? {} : input, caller));
+}
+
 /** A stable, sorted description of the catalogue: ids, argument and option
- *  names + kinds, exposed surfaces, scope, chat gate, effect. Checked in as a
- *  snapshot — a new or changed command must update it deliberately. */
+ *  names + kinds, exposed surfaces, action, policy target, effect. Checked in
+ *  as a snapshot — a new or changed command must update it deliberately. */
 export function catalogueSnapshot(cmds: readonly CommandDef<unknown>[]): CommandSnapshot[] {
+  const probe = callerWith("cli", "cli:snapshot");
   return [...cmds]
     .sort((a, b) => a.id.localeCompare(b.id))
     .map((cmd) => ({
@@ -323,8 +340,8 @@ export function catalogueSnapshot(cmds: readonly CommandDef<unknown>[]): Command
         return { name, type: kindOf(s), required: !acceptsUndefined(s), ...(values.length > 0 ? { values } : {}) };
       }),
       surfaces: (["chat", "cli", "http", "mcp"] as const).filter((s) => cmd.surfaces?.[s] !== false),
-      scope: cmd.scope,
-      chatGate: cmd.chatGate,
+      action: cmd.action,
+      resource: resourceTargetOf(cmd, {}, probe),
       effect: cmd.effect,
     }));
 }
@@ -524,7 +541,144 @@ export interface MatrixCommand {
 
 export interface ConformanceMatrix {
   commands: MatrixCommand[];
+  authorization: AuthorizationMatrix;
   summary: { commands: number; surfaces: number; variants: number; cells: number };
+}
+
+// ---- authorization (R13): the fixed actor set × every command, decided by the table --------------
+// Every gate is a policy row (features/authorization.md). The suite derives
+// the expected admission of each command for each actor here — `authorize` over
+// the resource the command names for its happy-path input — and drives the real
+// adapters as those identities to check they agree. The roles are a legacy
+// `permissions.*` + ingress-token deployment (`AUTHZ_SOURCE`), translated by the
+// same `grantsFor` config uses; the suite's AUTHZ config.yaml mirrors it.
+
+export interface AuthzRole {
+  /** Platform-namespaced actor id; its prefix says which surface carries it (`carriedBy`). */
+  id: string;
+  /** Column header in the matrix. */
+  column: string;
+}
+
+/** Every `<group>:read` / `<group>:write` of the catalogue — what the read-only and write-only tokens hold. */
+export const AUTHZ_READS: readonly string[] = coreCommandGroups().map((g) => `${g}:read`);
+export const AUTHZ_WRITES: readonly string[] = coreCommandGroups().map((g) => `${g}:write`);
+
+export const AUTHZ_ROLES: readonly AuthzRole[] = [
+  { id: "slack:UADMIN", column: "Slack admin" },
+  { id: "slack:UPLAIN", column: "Slack user" },
+  { id: "slack:UREPO", column: "Slack repoManagement" },
+  { id: "slack:UCHAN", column: "Slack channelConfig" },
+  { id: "mcp:dispatch", column: "token: dispatch only" },
+  { id: "mcp:reader", column: "token: every read" },
+  { id: "mcp:writer", column: "token: every write" },
+  { id: "access:svc:reader", column: "service token: every read" },
+  { id: "access:visitor", column: "browser: unlisted" },
+  { id: "access:operator", column: "browser: operator" },
+  { id: "cli:local", column: "cli" },
+];
+
+/** The legacy keys that name the roles — `permissions` as the suite's AUTHZ config.yaml spells them. */
+export const AUTHZ_PERMISSIONS: NonNullable<GrantsSource["permissions"]> = {
+  admins: ["slack:UADMIN"],
+  repoManagement: ["slack:UREPO"],
+  channelConfig: ["slack:UCHAN"],
+  operators: ["access:operator"],
+  serviceTokens: { reader: [...AUTHZ_READS] },
+};
+
+/** `SWITCHBOARD_INGRESS_TOKENS` for the token roles (the bearer is the role's subject). */
+export const AUTHZ_INGRESS_TOKENS: NonNullable<GrantsSource["ingressTokens"]> = {
+  dispatch: { subject: "dispatch", scopes: ["dispatch"] },
+  reader: { subject: "reader", scopes: [...AUTHZ_READS] },
+  writer: { subject: "writer", scopes: [...AUTHZ_WRITES] },
+};
+
+export const AUTHZ_SOURCE: GrantsSource = {
+  permissions: AUTHZ_PERMISSIONS,
+  ingressTokens: AUTHZ_INGRESS_TOKENS,
+  agentNames: Object.keys(AGENTS),
+  commandGroups: coreCommandGroups(),
+};
+
+/** The surface an actor id is carried by: `slack:` chat, `mcp:` MCP, `access:` HTTP (browser or service token), `cli:` the CLI. */
+export function carriedBy(id: string): Caller["kind"] {
+  if (id.startsWith("slack:")) return "chat";
+  if (id.startsWith("mcp:")) return "mcp";
+  if (id.startsWith("access:")) return "access";
+  return "cli";
+}
+
+/** The `Actor` a role resolves to under `AUTHZ_SOURCE` — the CLI's one caller holds everything. */
+export function roleActor(role: AuthzRole): Actor {
+  return callerWith(carriedBy(role.id), role.id, role.id === "cli:local" ? "all" : grantsFor(role.id, AUTHZ_SOURCE)).actor;
+}
+
+/** The `Caller` a role drives a command as: its actor, plus a chat origin for Slack roles. */
+export function roleCaller(role: AuthzRole, origin: { channelId: string; threadKey: string }): Caller {
+  const actor = roleActor(role);
+  const kind = carriedBy(role.id);
+  return { kind, id: role.id, actor: kind === "chat" ? { ...actor, origin } : actor, ...(kind === "chat" ? { origin } : {}) };
+}
+
+export interface AuthorizationRow {
+  id: string;
+  action: string;
+  /** The policy target decided on for the happy-path input. */
+  resource: string;
+  /** Role id → admitted by the table. */
+  cells: Record<string, boolean>;
+}
+
+export interface AuthorizationMatrix {
+  roles: readonly AuthzRole[];
+  rows: AuthorizationRow[];
+}
+
+const MATRIX_ORIGIN = { channelId: "slack:CX", threadKey: "slack:CX:t1" };
+
+/** The table's decision for one command × role on the happy-path input. */
+export function admits(cmd: CommandDef<unknown>, role: AuthzRole): boolean {
+  const caller = roleCaller(role, MATRIX_ORIGIN);
+  const happy = variantsOf(cmd).variants.find((v) => v.name === "required-only")!;
+  const input = namedToInput(cmd, forCaller(happy.named, role.id), "camel");
+  return authorize(caller.actor, cmd.action, resourceOf(cmd, "error" in input ? {} : input, caller)).allow;
+}
+
+export function buildAuthorizationMatrix(catalogue: readonly CommandDef<unknown>[]): AuthorizationMatrix {
+  const rows = [...catalogue]
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map<AuthorizationRow>((cmd) => {
+      const happy = variantsOf(cmd).variants.find((v) => v.name === "required-only")!;
+      return { id: cmd.id, action: cmd.action, resource: resourceTargetOf(cmd, happy.named, roleCaller(AUTHZ_ROLES[0]!, MATRIX_ORIGIN)), cells: Object.fromEntries(AUTHZ_ROLES.map((role) => [role.id, admits(cmd, role)])) };
+    });
+  return { roles: AUTHZ_ROLES, rows };
+}
+
+/** One line per command whose action has NO policy row on the resource it
+ *  authorizes — the loud failure a new command hits until the table names it. */
+export function policyGaps(catalogue: readonly CommandDef<unknown>[]): string[] {
+  const probe = callerWith("cli", "cli:probe");
+  return catalogue
+    .filter((cmd) => {
+      const target = resourceTargetOf(cmd, variantsOf(cmd).variants.find((v) => v.name === "required-only")?.named ?? {}, probe);
+      return !POLICY.some((rule) => rule.action === cmd.action && ruleTarget(rule) === target);
+    })
+    .map((cmd) => `${cmd.id}: no policy row for ${cmd.action} on ${resourceTargetOf(cmd, {}, probe)} — add one to src/core/authz/policy.ts (with its allow + deny cases in policy.test.ts)`);
+}
+
+export function renderAuthorizationMatrix(matrix: AuthorizationMatrix): string[] {
+  const out = [
+    "### Authorization (every surface asks the same table)",
+    "",
+    `Admission = \`authorize(actor, action, resource)\` over \`src/core/authz/policy.ts\` for the happy-path input, one column per actor of the fixed set (a legacy \`permissions.*\` + token deployment translated by \`grantsFor\`). ✅ admitted, ⛔ refused as \`unauthorized\` before parse. Refusals the DATA decides (the \`channel\` scope of \`config set\`, an MCP tier, a shared memory record) are the handler's and are asserted in the command tests, not here.`,
+    "",
+    `| Command | Action | Resource | ${matrix.roles.map((r) => r.column).join(" | ")} |`,
+    `|---|---|---|${matrix.roles.map(() => ":-:").join("|")}|`,
+  ];
+  for (const row of matrix.rows) out.push(`| \`${row.id}\` | \`${row.action}\` | \`${row.resource}\` | ${matrix.roles.map((r) => (row.cells[r.id] ? "✅" : "⛔")).join(" | ")} |`);
+  out.push("");
+  return out;
 }
 
 export function buildConformanceMatrix(catalogue: readonly CommandDef<unknown>[]): ConformanceMatrix {
@@ -548,7 +702,7 @@ export function buildConformanceMatrix(catalogue: readonly CommandDef<unknown>[]
     });
   const variants = commands.reduce((n, c) => n + c.rows.length, 0);
   const cells = commands.reduce((n, c) => n + c.rows.reduce((m, r) => m + Object.values(r.cells).filter((x) => x.kind !== "not-exposed").length, 0), 0);
-  return { commands, summary: { commands: commands.length, surfaces: SURFACE_METAS.length, variants, cells } };
+  return { commands, authorization: buildAuthorizationMatrix(catalogue), summary: { commands: commands.length, surfaces: SURFACE_METAS.length, variants, cells } };
 }
 
 /** The assertions applied to every exercised cell, for the matrix's closing table. */
@@ -556,7 +710,7 @@ export const CROSS_CUTTING_ASSERTIONS: ReadonlyArray<{ name: string; assertion: 
   { name: "Name mapping", assertion: "`/api/<group>.<verb>`, the MCP tool `group_verb`, the CLI words `group verb`, and the chat form all resolve to this one command; an opted-out surface does not expose it (404 / no tool / usage / not a chat command)." },
   { name: "Schema exactness", assertion: "The MCP `inputSchema` is exactly `jsonSchemaFor(cmd)`: properties = the declared arguments + options, `required` = the non-optional ones, `additionalProperties: false`, enum values and defaults intact." },
   { name: "Help completeness", assertion: "CLI `--help` and chat `--help` name every `<argument>`, every `--option` flag, and the description." },
-  { name: "Auth before parse", assertion: "A caller without the command's scope gets `unauthorized` (HTTP 403) even for a malformed input — the value is never parsed; chat admission equals `chatGateFor(user)(gate)`; a chat caller with no gate resolver is refused (fail-closed)." },
+  { name: "Auth before parse", assertion: "Admission on every surface equals `authorize(caller.actor, cmd.action, resource)` over the policy table (the Authorization table below): a refused caller gets `unauthorized` (HTTP 403) even for a malformed input — the value is never parsed; a credential with no grants is refused on every command (fail-closed)." },
   { name: "Caller is what the adapter resolved", assertion: "The `Caller` the registry saw has the surface's kind and id (`access:<sub>`, `mcp:<subject>`, `cli:local`, the Slack user) and, in chat, the message's channel as its origin." },
   { name: "POST-only writes", assertion: "A write command over HTTP GET is 405 and never invoked; a read leaves the fixture fingerprint (runs, memory, config overrides, tracker, executors) byte-identical." },
   { name: "Same parsed input", assertion: "Every surface binds to the identical parsed `{ args, options }` (modulo the caller's own id)." },
@@ -587,6 +741,7 @@ export function renderConformanceMatrix(matrix: ConformanceMatrix): string {
     for (const row of cmd.rows) out.push(`| ${renderVariantCell(row)} | \`${mdCell(row.input)}\` | ${SURFACE_METAS.map((s) => CELL_TEXT[row.cells[s.key].kind]).join(" | ")} |`);
     out.push("");
   }
+  out.push(...renderAuthorizationMatrix(matrix.authorization));
   out.push("### Cross-cutting assertions (every exercised cell)", "", "| Assertion | What is checked |", "|---|---|");
   for (const a of CROSS_CUTTING_ASSERTIONS) out.push(`| ${a.name} | ${mdCell(a.assertion)} |`);
   out.push("");

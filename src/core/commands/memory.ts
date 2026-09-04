@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { authorize } from "../authz/authorize.js";
 import { CommandError, commandDefiner, wrapUntrusted, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
 import { deriveScopeKey, requestScopeKeys, selectMemoryStore } from "../memory/index.js";
 import type { MemoryConfig, MemoryRecord, MemoryStore } from "../memory/types.js";
@@ -63,10 +64,10 @@ async function viaStore<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /** Whether this caller may forget SHARED records (org, repo, channel): the
- *  local CLI (every scope) or a chat caller the fail-closed repo-management
- *  gate admits. */
+ *  repo-management right — the policy table's `repo:write` row, fail-closed
+ *  (admins, `permissions.repoManagement`, a token minted with it, the local CLI). */
 function isOrgAdmin(caller: Caller): boolean {
-  return caller.scopes === "all" || caller.chatGate?.("repoManager") === true;
+  return authorize(caller.actor, "repo:write", { type: "command", id: "memory.forget" }).allow;
 }
 
 /** The shared scope keys (#253) — the same derivers the read/write paths use. */
@@ -126,8 +127,7 @@ export const memoryList = defineCommand({
       .optional()
       .describe("the repo whose scope to list (default: the repo this thread is bound to)"),
   }),
-  scope: "memory:read",
-  chatGate: "open",
+  action: "memory:read",
   effect: "read",
   describe: "Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.",
   render: renderList,
@@ -185,8 +185,7 @@ export const memoryList = defineCommand({
 export const memoryForget = defineCommand({
   id: "memory.forget",
   args: [{ name: "id", schema: memoryId, describe: "the record id (`mem:<scope>:<n>`, from `memory list`)" }],
-  scope: "memory:write",
-  chatGate: "open",
+  action: "memory:write",
   effect: "write",
   describe: "Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).",
   render: (output) => {

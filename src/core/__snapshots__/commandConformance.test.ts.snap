@@ -1,8 +1,9 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`command conformance — catalogue fences > catalogue snapshot: id, arguments, options (names + kinds + enum values), surfaces, scope, chat gate, effect — update deliberately 1`] = `
+exports[`command conformance — catalogue fences > catalogue snapshot: id, arguments, options (names + kinds + enum values), surfaces, action, policy target, effect — update deliberately 1`] = `
 [
   {
+    "action": "config:write",
     "args": [
       {
         "name": "scope",
@@ -10,7 +11,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "enum",
       },
     ],
-    "chatGate": "open",
     "effect": "write",
     "id": "config.clear",
     "options": [
@@ -20,7 +20,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "config:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -29,6 +29,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "config:write",
     "args": [
       {
         "name": "scope",
@@ -42,7 +43,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "open",
     "effect": "write",
     "id": "config.instructions",
     "options": [
@@ -52,7 +52,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "config:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -61,6 +61,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "config:write",
     "args": [
       {
         "name": "scope",
@@ -68,7 +69,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "enum",
       },
     ],
-    "chatGate": "open",
     "effect": "write",
     "id": "config.set",
     "options": [
@@ -110,7 +110,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "config:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -119,8 +119,8 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "config:read",
     "args": [],
-    "chatGate": "open",
     "effect": "read",
     "id": "config.show",
     "options": [
@@ -130,7 +130,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "config:read",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -139,8 +139,8 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "deploy:write",
     "args": [],
-    "chatGate": "operator",
     "effect": "write",
     "id": "deploy.all",
     "options": [
@@ -175,14 +175,14 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "integer",
       },
     ],
-    "scope": "deploy:write",
+    "resource": "command",
     "surfaces": [
       "cli",
     ],
   },
   {
+    "action": "deploy:read",
     "args": [],
-    "chatGate": "operator",
     "effect": "read",
     "id": "deploy.plan",
     "options": [
@@ -217,7 +217,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "integer",
       },
     ],
-    "scope": "deploy:read",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -226,8 +226,8 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "deploy:write",
     "args": [],
-    "chatGate": "operator",
     "effect": "write",
     "id": "deploy.restart",
     "options": [
@@ -255,14 +255,14 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "integer",
       },
     ],
-    "scope": "deploy:write",
+    "resource": "command",
     "surfaces": [
       "cli",
     ],
   },
   {
+    "action": "env:write",
     "args": [],
-    "chatGate": "operator",
     "effect": "write",
     "id": "env.bootstrap",
     "options": [
@@ -292,12 +292,13 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "env:write",
+    "resource": "command",
     "surfaces": [
       "cli",
     ],
   },
   {
+    "action": "friction:read",
     "args": [
       {
         "name": "source",
@@ -305,7 +306,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "open",
     "effect": "read",
     "id": "friction.analyze",
     "options": [
@@ -320,14 +320,14 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "boolean",
       },
     ],
-    "scope": "friction:read",
+    "resource": "command",
     "surfaces": [
       "cli",
     ],
   },
   {
+    "action": "friction:write",
     "args": [],
-    "chatGate": "repoManager",
     "effect": "write",
     "id": "friction.propose",
     "options": [
@@ -352,7 +352,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "friction:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -361,8 +361,8 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "friction:read",
     "args": [],
-    "chatGate": "open",
     "effect": "read",
     "id": "friction.report",
     "options": [
@@ -382,7 +382,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "integer",
       },
     ],
-    "scope": "friction:read",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -391,12 +391,12 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "help:read",
     "args": [],
-    "chatGate": "open",
     "effect": "read",
     "id": "help.show",
     "options": [],
-    "scope": "help:read",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -405,6 +405,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "mcp:write",
     "args": [
       {
         "name": "name",
@@ -412,7 +413,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "open",
     "effect": "write",
     "id": "mcp.add",
     "options": [
@@ -452,7 +452,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "mcp:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -461,6 +461,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "mcp:write",
     "args": [
       {
         "name": "name",
@@ -468,7 +469,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "open",
     "effect": "write",
     "id": "mcp.connect",
     "options": [
@@ -488,7 +488,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "mcp:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -497,8 +497,8 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "mcp:read",
     "args": [],
-    "chatGate": "open",
     "effect": "read",
     "id": "mcp.list",
     "options": [
@@ -508,7 +508,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "mcp:read",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -517,6 +517,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "mcp:write",
     "args": [
       {
         "name": "name",
@@ -524,7 +525,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "open",
     "effect": "write",
     "id": "mcp.remove",
     "options": [
@@ -544,7 +544,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "mcp:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -553,6 +553,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "mcp:read",
     "args": [
       {
         "name": "name",
@@ -560,7 +561,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "open",
     "effect": "read",
     "id": "mcp.show",
     "options": [
@@ -580,7 +580,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "mcp:read",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -589,6 +589,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "memory:write",
     "args": [
       {
         "name": "id",
@@ -596,11 +597,10 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "open",
     "effect": "write",
     "id": "memory.forget",
     "options": [],
-    "scope": "memory:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -609,6 +609,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "memory:read",
     "args": [
       {
         "name": "query",
@@ -617,7 +618,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "open",
     "effect": "read",
     "id": "memory.list",
     "options": [
@@ -644,7 +644,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "memory:read",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -653,6 +653,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "repo:exec",
     "args": [
       {
         "name": "slug",
@@ -665,11 +666,10 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "agentRun",
     "effect": "write",
     "id": "repo.build",
     "options": [],
-    "scope": "repo:exec",
+    "resource": "agent",
     "surfaces": [
       "chat",
       "cli",
@@ -678,12 +678,12 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "repo:read",
     "args": [],
-    "chatGate": "open",
     "effect": "read",
     "id": "repo.list",
     "options": [],
-    "scope": "repo:read",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -692,6 +692,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "repo:write",
     "args": [
       {
         "name": "slug",
@@ -699,7 +700,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "repoManager",
     "effect": "write",
     "id": "repo.offboard",
     "options": [
@@ -709,7 +709,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "boolean",
       },
     ],
-    "scope": "repo:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -718,6 +718,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "repo:write",
     "args": [
       {
         "name": "slug",
@@ -725,7 +726,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "repoManager",
     "effect": "write",
     "id": "repo.onboard",
     "options": [
@@ -755,7 +755,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "boolean",
       },
     ],
-    "scope": "repo:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -764,6 +764,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "repo:write",
     "args": [
       {
         "name": "slug",
@@ -771,7 +772,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "repoManager",
     "effect": "write",
     "id": "repo.rebuild",
     "options": [
@@ -781,7 +781,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "boolean",
       },
     ],
-    "scope": "repo:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -790,6 +790,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "repo:write",
     "args": [
       {
         "name": "slug",
@@ -797,7 +798,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "repoManager",
     "effect": "write",
     "id": "repo.reconfigure",
     "options": [
@@ -822,7 +822,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "repo:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -831,6 +831,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "repo:exec",
     "args": [
       {
         "name": "slug",
@@ -843,11 +844,10 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "agentRun",
     "effect": "write",
     "id": "repo.test",
     "options": [],
-    "scope": "repo:exec",
+    "resource": "agent",
     "surfaces": [
       "chat",
       "cli",
@@ -856,6 +856,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "runs:read",
     "args": [
       {
         "name": "id",
@@ -863,7 +864,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "operator",
     "effect": "read",
     "id": "runs.events",
     "options": [
@@ -878,7 +878,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "integer",
       },
     ],
-    "scope": "runs:read",
+    "resource": "command",
     "surfaces": [
       "cli",
       "http",
@@ -886,6 +886,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "runs:read",
     "args": [
       {
         "name": "id",
@@ -893,11 +894,10 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "operator",
     "effect": "read",
     "id": "runs.friction",
     "options": [],
-    "scope": "runs:read",
+    "resource": "command",
     "surfaces": [
       "cli",
       "http",
@@ -905,6 +905,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "runs:read",
     "args": [
       {
         "name": "id",
@@ -912,7 +913,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "operator",
     "effect": "read",
     "id": "runs.get",
     "options": [
@@ -925,7 +925,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         ],
       },
     ],
-    "scope": "runs:read",
+    "resource": "command",
     "surfaces": [
       "cli",
       "http",
@@ -933,8 +933,8 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "runs:read",
     "args": [],
-    "chatGate": "operator",
     "effect": "read",
     "id": "runs.list",
     "options": [
@@ -979,7 +979,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "scope": "runs:read",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -988,6 +988,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "runs:write",
     "args": [
       {
         "name": "id",
@@ -995,7 +996,6 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
     ],
-    "chatGate": "operator",
     "effect": "write",
     "id": "runs.stop",
     "options": [
@@ -1009,7 +1009,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         ],
       },
     ],
-    "scope": "runs:write",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",
@@ -1018,12 +1018,12 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "schedule:read",
     "args": [],
-    "chatGate": "open",
     "effect": "read",
     "id": "schedule.list",
     "options": [],
-    "scope": "schedule:read",
+    "resource": "command",
     "surfaces": [
       "chat",
       "cli",

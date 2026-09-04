@@ -31,9 +31,15 @@ const repo = (slug: string): Resource => {
 const agent = (name: string): Resource => ({ type: "agent", name });
 const channelConfig = (id: string): Resource => ({ type: "config-scope", kind: "channel", id });
 const userConfig = (id: string): Resource => ({ type: "config-scope", kind: "user", id });
+const orgConfig: Resource = { type: "config-scope", kind: "org" };
 
 const A = ACTORS;
 const foreignPrivRun = run({ channel: "priv", userId: "slack:U5" });
+
+/** The `<action> command [has-grant(<action>)]` shape every command row has (plan U4). */
+const commandRow = (action: string, commandId: string, allow: readonly Actor[], deny: readonly Actor[]) => ({
+  [`${action} command [has-grant(${action})]`]: { allow: allow.map((a): Case => [a, command(commandId)]), deny: deny.map((a): Case => [a, command(commandId)]) },
+});
 
 const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> = {
   "runs:read run [member-of]": {
@@ -65,25 +71,30 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
     allow: [[A.member, command("runs.stop")], [A.admin, command("runs.stop")]],
     deny: [[A.reader, command("runs.stop")], [A.noGrants, command("runs.stop")]],
   },
-  "friction:read command []": {
-    allow: [[A.noGrants, command("friction.report")], [A.token, command("friction.report")]],
-    deny: [[A.bogus, command("friction.report")]],
-  },
+  // `friction report` is what every Slack user holds; a token holding only run scopes is not admitted.
+  ...commandRow("friction:read", "friction.report", [A.chatUser, A.browser, A.operator], [A.token, A.noGrants, A.dispatchOnly]),
   "friction:write command [has-grant(friction:write)]": {
     allow: [[A.schedule, command("friction.propose")], [A.manager, command("friction.propose")]],
-    deny: [[A.member, command("friction.propose")], [A.noGrants, command("friction.propose")]],
+    deny: [[A.member, command("friction.propose")], [A.noGrants, command("friction.propose")], [A.chatUser, command("friction.propose")]],
   },
-  "repo:read command []": {
-    allow: [[A.noGrants, command("repo.list")], [A.token, command("repo.list")]],
-    deny: [[A.bogus, command("repo.list")]],
-  },
+  ...commandRow("repo:read", "repo.list", [A.chatUser, A.browser, A.admin], [A.token, A.noGrants, A.dispatchOnly]),
   "repo:write repo [has-grant(repo:write)]": {
     allow: [[A.manager, repo(REPOS[0])], [A.admin, repo(REPOS[1])]],
     deny: [[A.member, repo(REPOS[0])], [A.noGrants, repo(REPOS[0])]],
   },
   "repo:write command [has-grant(repo:write)]": {
-    allow: [[A.manager, command("repo.onboard")]],
-    deny: [[A.member, command("repo.onboard")], [A.schedule, command("repo.onboard")]],
+    allow: [[A.manager, command("repo.onboard")], [A.operator, command("repo.onboard")]],
+    deny: [[A.member, command("repo.onboard")], [A.schedule, command("repo.onboard")], [A.chatUser, command("repo.onboard")], [A.browser, command("repo.onboard")]],
+  },
+  // `repo test|build`: the right to run the coding agent (the `agentRun` chat gate)…
+  "repo:exec agent [has-grant(agent:run:{name})]": {
+    allow: [[A.agentUser, agent("coding")], [A.allAgents, agent("coding")], [A.admin, agent("coding")]],
+    deny: [[A.agentUser, agent("review")], [A.chatUser, agent("coding")], [A.operator, agent("coding")], [A.browser, agent("coding")]],
+  },
+  // …or the exec grant a token was minted with; `write` never implies `exec`.
+  "repo:exec agent [has-grant(repo:exec)]": {
+    allow: [[A.manager, agent("coding")], [A.admin, agent("coding")]],
+    deny: [[A.operator, agent("coding")], [A.dispatchOnly, agent("coding")], [A.browser, agent("coding")]],
   },
   "repo:exec repo [has-grant(repo:exec) & owner-of]": {
     allow: [[A.manager, repo(REPOS[0])], [A.admin, repo(REPOS[1])]],
@@ -93,9 +104,21 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
     allow: [[A.manager, repo(REPOS[0])], [A.admin, repo(REPOS[1])]],
     deny: [[A.manager, repo(REPOS[1])], [A.noGrants, repo(REPOS[0])]],
   },
-  "config:write config-scope/channel [has-grant(config:write) & member-of]": {
-    allow: [[A.member, channelConfig("slack:C_PUB1")], [A.admin, channelConfig("slack:C_PRIV")]],
-    deny: [[A.member, channelConfig("slack:C_PUB2")], [A.reader, channelConfig("slack:C_PUB1")]],
+  ...commandRow("config:read", "config.show", [A.chatUser, A.browser, A.operator], [A.dispatchOnly, A.noGrants, A.token]),
+  // `config set|clear|instructions`: a person always has their own scope to write…
+  "config:write command [] kinds=user": {
+    allow: [[A.chatUserGated, command("config.set")], [A.browser, command("config.set")], [A.noGrants, command("config.set")]],
+    deny: [[A.dispatchOnly, command("config.set")], [A.token, command("config.set")], [A.schedule, command("config.set")]],
+  },
+  // …a credential needs the grant.
+  "config:write command [has-grant(config:write)]": {
+    allow: [[A.operator, command("config.set")], [A.member, command("config.set")]],
+    deny: [[A.dispatchOnly, command("config.set")], [A.token, command("config.set")], [A.mcpWriter, command("config.set")]],
+  },
+  // The channel-config right: `permissions.channelConfig` (absent → everyone), admins, operators, tokens minted with it.
+  "config:write config-scope/channel [has-grant(config:write)]": {
+    allow: [[A.member, channelConfig("slack:C_PUB1")], [A.chatUser, channelConfig("slack:C_PUB2")], [A.admin, channelConfig("slack:C_PRIV")], [A.operator, channelConfig("slack:C_PRIV")]],
+    deny: [[A.chatUserGated, channelConfig("slack:C_PUB1")], [A.reader, channelConfig("slack:C_PUB1")], [A.browser, channelConfig("slack:C_PUB1")], [A.mcpWriter, channelConfig("slack:C_PUB1")]],
   },
   "config:write config-scope/user [is-self]": {
     allow: [[A.member, userConfig(A.member.id)], [A.noGrants, userConfig(A.noGrants.id)]],
@@ -105,6 +128,35 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
     allow: [[A.agentUser, agent("coding")], [A.allAgents, agent("review")], [A.admin, agent("ship")]],
     deny: [[A.agentUser, agent("review")], [A.noGrants, agent("coding")]],
   },
+  ...commandRow("help:read", "help.show", [A.chatUser, A.browser, A.admin], [A.dispatchOnly, A.noGrants, A.token]),
+  ...commandRow("schedule:read", "schedule.list", [A.chatUser, A.browser, A.operator], [A.dispatchOnly, A.noGrants, A.token]),
+  ...commandRow("deploy:read", "deploy.plan", [A.admin, A.browser, A.operator], [A.chatUser, A.dispatchOnly, A.token]),
+  ...commandRow("deploy:write", "deploy.all", [A.admin, A.operator], [A.chatUser, A.browser, A.dispatchOnly]),
+  ...commandRow("env:write", "env.bootstrap", [A.admin, A.operator], [A.chatUser, A.browser, A.dispatchOnly]),
+  ...commandRow("mcp:read", "mcp.list", [A.chatUser, A.browser, A.operator], [A.dispatchOnly, A.noGrants, A.token]),
+  ...commandRow("mcp:write", "mcp.add", [A.chatUser, A.mcpWriter, A.operator], [A.browser, A.dispatchOnly, A.noGrants]),
+  // A CHANNEL's MCP servers: the channel-config right for a person…
+  "mcp:write config-scope/channel [has-grant(config:write)]": {
+    allow: [[A.chatUser, channelConfig("slack:C_PUB1")], [A.admin, channelConfig("slack:C_PUB1")], [A.operator, channelConfig("slack:C_PUB1")]],
+    deny: [[A.chatUserGated, channelConfig("slack:C_PUB1")], [A.browser, channelConfig("slack:C_PUB1")], [A.dispatchOnly, channelConfig("slack:C_PUB1")]],
+  },
+  // …`mcp:write` itself for a credential (a person holding mcp:write is not admitted by this row).
+  "mcp:write config-scope/channel [has-grant(mcp:write)] kinds=service": {
+    allow: [[A.mcpWriter, channelConfig("slack:C_PUB1")]],
+    deny: [[A.chatUserGated, channelConfig("slack:C_PUB1")], [A.dispatchOnly, channelConfig("slack:C_PUB1")], [A.token, channelConfig("slack:C_PUB1")]],
+  },
+  // ORG-wide MCP servers: the repo-management right for a person…
+  "mcp:write config-scope/org [has-grant(repo:write)]": {
+    allow: [[A.manager, orgConfig], [A.admin, orgConfig], [A.operator, orgConfig]],
+    deny: [[A.chatUser, orgConfig], [A.browser, orgConfig], [A.dispatchOnly, orgConfig]],
+  },
+  // …`mcp:write` itself for a credential (a chat user holds mcp:write for the command, never the org tier).
+  "mcp:write config-scope/org [has-grant(mcp:write)] kinds=service": {
+    allow: [[A.mcpWriter, orgConfig]],
+    deny: [[A.chatUser, orgConfig], [A.dispatchOnly, orgConfig], [A.token, orgConfig]],
+  },
+  ...commandRow("memory:read", "memory.list", [A.chatUser, A.browser, A.operator], [A.dispatchOnly, A.noGrants, A.token]),
+  ...commandRow("memory:write", "memory.forget", [A.chatUser, A.operator, A.admin], [A.browser, A.dispatchOnly, A.noGrants]),
   "memory:read memory-scope/org []": {
     allow: [[A.noGrants, scope("org", "org:coreplanelabs")]],
     deny: [[A.bogus, scope("org", "org:coreplanelabs")]],
@@ -197,9 +249,9 @@ describe("validatePolicy (closed vocabulary, KTD1)", () => {
     expect(bad({ action: "agent:run", resource: "agent", when: [{ kind: "has-grant", grant: "" }] })).toThrow(/has-grant needs a grant name/);
   });
   it("the distributed Rule type refuses a wrong, missing, or misplaced kind at compile time; the runtime check agrees", () => {
-    // @ts-expect-error — `org` is a memory-scope kind, not a config-scope kind
-    const crossed: Rule = { action: "config:write", resource: "config-scope", resourceKind: "org", when: [] };
-    expect(() => validatePolicy([crossed])).toThrow(/unknown resourceKind org/);
+    // @ts-expect-error — `repo` is a memory-scope kind, not a config-scope kind
+    const crossed: Rule = { action: "config:write", resource: "config-scope", resourceKind: "repo", when: [] };
+    expect(() => validatePolicy([crossed])).toThrow(/unknown resourceKind repo/);
     // @ts-expect-error — kinded resources REQUIRE resourceKind
     const missing: Rule = { action: "memory:read", resource: "memory-scope", when: [] };
     expect(() => validatePolicy([missing])).toThrow(/must name a resourceKind/);

@@ -5,8 +5,10 @@ import { describe, expect, it } from "vitest";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import { ConfigStore } from "../config.js";
 import { CLI_CALLER, parseCliArgv, runCommand } from "../cli.js";
-import { NO_GRANTS } from "../core/authz/types.js";
-import { handleChatCommand, parseChatCommand } from "../core/commandChat.js";
+import { grantsFor } from "../core/authz/grants.js";
+import { chatCallerFor, handleChatCommand, parseChatCommand } from "../core/commandChat.js";
+import { coreCommandGroups } from "../core/commands/all.js";
+import { callerWith } from "../core/testing/callers.js";
 import { renderText, type Caller, type CommandDef, type CommandInvoker } from "../core/commandRegistry.js";
 import { buildCoreCommands } from "../core/commandCatalogue.js";
 import { camelToKebab, cliFlag, httpPath, jsonSchemaFor, mcpToolName, toSurfaceNames } from "../core/commandSurface.js";
@@ -179,11 +181,14 @@ function fakeReqRes(method: string, url: string, headers: IncomingHttpHeaders = 
   return { req: req as unknown as IncomingMessage, res: res as unknown as ServerResponse, status: () => status, text: () => out.join("") };
 }
 
+/** An unlisted Access browser session holds every group's read (the legacy translation). */
+const BROWSER_GRANTS = { commandGroups: coreCommandGroups() };
+
 const httpRow: AdapterRow = {
   name: "http",
-  caller: { kind: "access", id: "access:user-1", scopes: new Set() },
+  caller: callerWith("access", "access:user-1", grantsFor("access:user-1", BROWSER_GRANTS)),
   async call(f, id, named) {
-    const handler = createCommandHttpHandler(f.commands, { operatorIdentities: () => [], serviceTokenScopes: () => [], grantsFor: () => NO_GRANTS, devBypassActive: false });
+    const handler = createCommandHttpHandler(f.commands, { grantsFor: (actorId) => grantsFor(actorId, BROWSER_GRANTS), devBypassActive: false });
     // A query string spells option keys in kebab-case (`?since-ms=…`); argument names are what they are.
     const query = new URLSearchParams(Object.entries(named).map(([k, v]) => [camelToKebab(k), v]));
     const t = fakeReqRes("GET", `${httpPath(id)}?${query.toString()}`);
@@ -197,7 +202,7 @@ const MCP_SCOPES = ["runs:read", "friction:read", "repo:read"];
 
 const mcpRow: AdapterRow = {
   name: "mcp",
-  caller: { kind: "mcp", id: "mcp:alice", scopes: new Set(MCP_SCOPES) },
+  caller: callerWith("mcp", "mcp:alice", MCP_SCOPES),
   async call(f, id, named) {
     const res = await handleMcpRequest(
       {
@@ -313,7 +318,7 @@ describe.each(rows)("adapter contract for migrated commands — $name", (row) =>
 // ---- the chat row ------------------------------------------------------------
 
 describe("adapter contract — chat", () => {
-  const caller = (config: ConfigStore, userId: string): Caller => ({ kind: "chat", id: userId, scopes: new Set(), chatGate: config.chatGateFor(userId) });
+  const caller = (config: ConfigStore, userId: string): Caller => chatCallerFor({ userId, channelId: "slack:CX", threadKey: "slack:CX:t" }, config);
 
   it("`runs list --status all` renders renderText(invoke JSON) for the same caller; no token anywhere", async () => {
     const f = await fixture();

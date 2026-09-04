@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { GithubIssueTracker, type IssueTracker } from "../../execution/githubIssues.js";
 import { predicateFor } from "../authz/predicate.js";
-import { actorOf, CommandError, commandDefiner, flag, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
+import { CommandError, commandDefiner, flag, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
 import type { FrictionLedger } from "../frictionLedger.js";
 import { clusterFriction, type FrictionRunRecord } from "../frictionProposals.js";
 import { parseRunEventLines } from "../runEventLines.js";
@@ -89,7 +89,7 @@ const render = (output: JsonValue): string => formatSelfImprovementReport(output
 
 /** The runs this caller may analyze: its run-read predicate (a `friction`
  *  report is a read of runs, whatever surface asks). */
-const visibleRuns = (caller: Caller) => predicateFor(actorOf(caller), "runs:read", "run");
+const visibleRuns = (caller: Caller) => predicateFor(caller.actor, "runs:read", "run");
 
 export const frictionReport = defineCommand({
   id: "friction.report",
@@ -98,8 +98,7 @@ export const frictionReport = defineCommand({
     limit: positiveInt.optional().describe("newest n runs (default: the ledger's retained window)"),
     minRuns: positiveInt.optional().describe("distinct runs a pattern must recur in (default selfImprovement.minRuns, else 2)"),
   }),
-  scope: "friction:read",
-  chatGate: "open",
+  action: "friction:read",
   effect: "read",
   describe: "Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.",
   render,
@@ -126,8 +125,7 @@ export const frictionPropose = defineCommand({
     minRuns: positiveInt.optional().describe("distinct runs a pattern must recur in (default selfImprovement.minRuns, else 2)"),
     repo: repoSlug.optional().describe("owner/name to dedupe against and file into (default selfImprovement.repo)"),
   }),
-  scope: "friction:write",
-  chatGate: "repoManager",
+  action: "friction:write",
   effect: "write",
   describe: "Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.",
   render,
@@ -176,8 +174,7 @@ export const frictionAnalyze = defineCommand({
     slowMs: z.coerce.number().nonnegative().optional().describe("a tool call slower than this many ms is a slow-tool finding"),
     inProgress: flag.optional().describe("the capture was taken mid-run: a trailing call without a result is still executing, not a dead run"),
   }),
-  scope: "friction:read",
-  chatGate: "open",
+  action: "friction:read",
   effect: "read",
   surfaces: { chat: false, mcp: false, http: false },
   describe: "Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.",

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MANIFEST_PATH } from "../../agentEnv/bootstrap.js";
 import { CommandRegistry, bindCommands, renderText, type Caller } from "../commandRegistry.js";
+import { callerWith } from "../testing/callers.js";
 import { parseInvocation } from "../commandSurface.js";
 import { envBootstrap, registerEnvCommands, type EnvCommandDeps } from "./env.js";
 
@@ -9,7 +10,7 @@ import { envBootstrap, registerEnvCommands, type EnvCommandDeps } from "./env.js
 // registry command. The host half (op read, the 600 file) is injected; the
 // command owns the option grammar, the log lines, and never lets a value out.
 
-const cli: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
+const cli: Caller = callerWith("cli", "cli:local", "all");
 
 function bind() {
   const registry = new CommandRegistry<EnvCommandDeps>({ audit: () => {} });
@@ -60,8 +61,8 @@ describe("env.bootstrap", () => {
 
   it("is CLI-only and operator-gated: absent from chat, MCP, and HTTP", async () => {
     const { commands } = bind();
-    expect(envBootstrap).toMatchObject({ scope: "env:write", chatGate: "operator", effect: "write", surfaces: { chat: false, mcp: false, http: false } });
-    expect(await commands.invoke("env.bootstrap", { options: { env: "uat", service: "api" } }, { kind: "chat", id: "slack:U", scopes: new Set(), chatGate: () => true })).toMatchObject({ ok: false, error: "not_found" });
-    expect(await commands.invoke("env.bootstrap", { options: { env: "uat", service: "api" } }, { kind: "mcp", id: "mcp:a", scopes: new Set(["env:write"]) })).toMatchObject({ ok: false, error: "not_found" });
+    expect(envBootstrap).toMatchObject({ action: "env:write", effect: "write", surfaces: { chat: false, mcp: false, http: false } });
+    expect(await commands.invoke("env.bootstrap", { options: { env: "uat", service: "api" } }, callerWith("chat", "slack:U", "all"))).toMatchObject({ ok: false, error: "not_found" });
+    expect(await commands.invoke("env.bootstrap", { options: { env: "uat", service: "api" } }, callerWith("mcp", "mcp:a", ["env:write"]))).toMatchObject({ ok: false, error: "not_found" });
   });
 });

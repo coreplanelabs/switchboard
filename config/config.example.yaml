@@ -68,25 +68,31 @@ defaults:
 #                                   # absent OR empty = ADMINS ONLY — these
 #                                   # commands provision billable always-on
 #                                   # compute and bind GitHub credentials
-#   # Command registry over HTTP (/api/<group>.<verb>, features/command-registry.md).
-#   # Chat callers are gated by `admins` (operator commands) and `repoManagement`
-#   # (friction propose); these two keys cover the machine surfaces:
+#   # Command registry (features/command-registry.md item 6, features/authorization.md):
+#   # ONE policy table decides every command on every surface from what the caller
+#   # HOLDS. Every Slack user holds the open commands (help/config/repo/friction/
+#   # memory/mcp/schedule reads, memory + mcp writes); `admins` hold everything;
+#   # `repoManagement` adds repo:write + friction:write; `channelConfig` adds
+#   # config:write. These two keys cover the Access surface:
 #   operators: [access:<sub>]       # Cloudflare Access browser identities granted
-#                                   # every `*:write` scope (runs stop, friction
-#                                   # propose) over /api. Every Access identity
-#                                   # holds `*:read` implicitly; absent = nobody
+#                                   # every group's `read` + `write` action (runs
+#                                   # stop, friction propose) over /api — never an
+#                                   # exec. Every Access browser identity holds
+#                                   # every `*:read` implicitly; absent = nobody
 #                                   # may write from a browser session.
 #   serviceTokens:                  # Access service tokens (their `common_name`
-#     reader-bot: [runs:read]       # claim) → the exact scopes they hold; unlisted
-#     ops-bot: [runs:read, runs:write, friction:read]   # = no scopes at all.
+#     reader-bot: [runs:read]       # claim) → the exact actions they hold; unlisted
+#     ops-bot: [runs:read, runs:write, friction:read]   # = nothing at all.
 #   # MCP / HTTP-ingress bearer tokens live in the SWITCHBOARD_INGRESS_TOKENS env
 #   # var (JSON `{ "<token>": { "subject", "channel"?, "scopes"? } }`); `scopes`
-#   # defaults to ["dispatch"] — the ingress endpoint only, no registry command.
-#   # `channel` is the ONE channel the token may read runs from (`http:<channel>`
-#   # over /ingress, `mcp:<channel>` over MCP). A token WITHOUT `channel` may read
-#   # NO run — not even the channel it speaks in — until a `grants` entry below
-#   # names its channels (or `all`). Channels are channels: there is no
-#   # machine-channel shorthand (features/authorization.md item 11, OQ4).
+#   # defaults to ["dispatch"] — the ingress endpoint only, no registry command —
+#   # and are the token's grants on every surface, a text command through
+#   # /ingress included. `channel` is the ONE channel the token may read runs
+#   # from (`http:<channel>` over /ingress, `mcp:<channel>` over MCP). A token
+#   # WITHOUT `channel` may read NO run — not even the channel it speaks in —
+#   # until a `grants` entry below names its channels (or `all`). Channels are
+#   # channels: there is no machine-channel shorthand (features/authorization.md
+#   # item 11, OQ4).
 
 # One authorization model (docs/plans/2026-09-03-001-feat-authorization-model-plan.md):
 # what ANY actor may do, in one shape, keyed by its platform-namespaced id —
@@ -224,9 +230,11 @@ workspaceDir: ./workspaces
 # cron the Cloudflare Worker shim runs; a `run` schedule fires as an ordinary run
 # through /ingress as the `cron` identity — give that identity a token in
 # SWITCHBOARD_INGRESS_TOKENS ({"…": {"subject": "cron", "channel": "cron"}}) and
-# grant it what its command needs (`friction propose` → permissions.repoManagement
-# must list `http:cron`, and `grants.http:cron.channels: all` so the pass reads
-# the fleet's runs, not the cron channel's own). The shim records each firing on the state Worker's
+# grant it what its command needs (`friction propose` → `friction:write`: list
+# `http:cron` in permissions.repoManagement, or give the token the scope — a text
+# command through /ingress is decided from the token's grants like a tool call —
+# and `grants.http:cron.channels: all` so the pass reads the fleet's runs, not
+# the cron channel's own). The shim records each firing on the state Worker's
 # ScheduleDO; this block tells the /runs "Scheduled" panel where to read them.
 # Without it the panel lists the schedules with no firing history.
 # schedules:

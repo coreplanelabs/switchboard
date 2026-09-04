@@ -50,8 +50,7 @@ export function chatCommandList(commands: readonly CommandShape[]): string[] {
 
 export const helpShow = defineCommand({
   id: "help.show",
-  scope: "help:read",
-  chatGate: "open",
+  action: "help:read",
   effect: "read",
   describe: "What Switchboard can do: agents, per-request directives, and every chat command.",
   render: (output) => helpFrame(output, (commands) => [catalogueText(commands)]),

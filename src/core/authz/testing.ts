@@ -2,7 +2,11 @@
 // and a run corpus spanning every channel visibility and several users.
 // Test-only; not re-exported by index.ts.
 
+import { browserReadActions, CHAT_OPEN_ACTIONS } from "./grants.js";
 import type { Actor, ActorKind, ChannelVisibility, Grants, Resource } from "./types.js";
+
+/** The command groups the fixture's operator and browser translate over (a subset of the catalogue's). */
+export const COMMAND_GROUPS = ["runs", "friction", "repo", "config", "memory", "mcp", "schedule", "deploy", "help", "env"] as const;
 
 export function grants(over: Partial<Grants> = {}): Grants {
   return {
@@ -99,6 +103,19 @@ export const ACTORS = {
   agentUser: actor("user", "slack:U4", { actions: new Set(["agent:run:coding"]) }),
   /** A user allowed to run every agent through the wildcard. */
   allAgents: actor("user", "slack:U4", { actions: new Set(["agent:run:*"]) }),
+  /** A plain Slack user under the legacy keys: the `open` chat commands, and
+   *  `config:write` because `permissions.channelConfig` is absent. */
+  chatUser: actor("user", "slack:U6", { actions: new Set([...CHAT_OPEN_ACTIONS, "config:write"]) }),
+  /** The same user once `permissions.channelConfig` is present and does not name them. */
+  chatUserGated: actor("user", "slack:U7", { actions: new Set(CHAT_OPEN_ACTIONS) }),
+  /** An unlisted Access browser session: every group's read, nothing else. */
+  browser: actor("user", "access:viewer", { actions: browserReadActions(COMMAND_GROUPS) }),
+  /** An Access operator (`permissions.operators`): every read + write, fleet-wide, never exec. */
+  operator: actor("user", "access:op", { actions: new Set(COMMAND_GROUPS.flatMap((g) => [`${g}:read`, `${g}:write`])), channels: "all" }),
+  /** A default ingress token: the `dispatch` scope alone (no registry command). */
+  dispatchOnly: actor("service", "mcp:agent", { actions: new Set(["dispatch"]), channels: "all" }),
+  /** A token an admin minted with `mcp:write` (manages MCP servers in any tier). */
+  mcpWriter: actor("service", "mcp:tools", { actions: new Set(["mcp:write"]), channels: "all" }),
   /** Ingress token pinned to its machine channel (the `channel` config key). */
   token: actor("service", "http:ops", { actions: new Set(["runs:read", "runs:write"]), channels: new Set([CHANNELS.http.id]) }),
   /** The self-improvement cron: fleet-wide reads (the #395 fix). */

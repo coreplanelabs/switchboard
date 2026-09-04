@@ -12,14 +12,18 @@ import {
   parseInput,
   renderCompact,
   renderText,
+  resourceOf,
   wrapUntrusted,
   type AuditEntry,
   type Caller,
 } from "./commandRegistry.js";
+import { callerWith } from "./testing/callers.js";
 
 // Feature: features/command-registry.md — the one seam every surface adapts,
 // in its typed form (KTD20): positional `args` + named `options`, both
-// inferred into the handler.
+// inferred into the handler. Authorization is the policy table's
+// (features/authorization.md): the demo commands declare REAL actions so the
+// real rows decide, and the callers hold exactly the grants config would give.
 
 type Deps = { hits: string[]; seen?: unknown };
 const define = commandDefiner<Deps>();
@@ -27,8 +31,7 @@ const define = commandDefiner<Deps>();
 const echo = define({
   id: "demo.echo",
   options: z.object({ status: z.enum(["active", "finished", "all"]), limit: z.coerce.number().int().positive().optional() }),
-  scope: "demo:read",
-  chatGate: "operator",
+  action: "runs:read",
   effect: "read",
   describe: "echoes its parsed options",
   handler: async ({ options, deps }) => {
@@ -40,8 +43,7 @@ const echo = define({
 const fail = define({
   id: "demo.fail",
   options: z.object({ code: z.enum(["not_found", "conflict", "unavailable", "boom"]) }),
-  scope: "demo:write",
-  chatGate: "operator",
+  action: "runs:write",
   effect: "write",
   describe: "throws the named error",
   handler: async ({ options }) => {
@@ -52,8 +54,7 @@ const fail = define({
 
 const chatless = define({
   id: "demo.machine",
-  scope: "demo:read",
-  chatGate: "open",
+  action: "runs:read",
   effect: "read",
   surfaces: { chat: false },
   describe: "not for chat",
@@ -62,8 +63,7 @@ const chatless = define({
 
 const frictionWrite = define({
   id: "friction.propose",
-  scope: "friction:write",
-  chatGate: "repoManager",
+  action: "friction:write",
   effect: "write",
   describe: "dummy friction write",
   handler: async () => ({ proposed: 0 }),
@@ -85,8 +85,7 @@ const typed = define({
       .refine((s) => /^[\w.-]+\/[\w.-]+$/.test(s), "expected an owner/name slug")
       .optional(),
   }),
-  scope: "demo:read",
-  chatGate: "open",
+  action: "runs:read",
   effect: "read",
   describe: "typed",
   handler: async ({ args, options, deps }) => {
@@ -115,20 +114,34 @@ function setup() {
 
 const opts = (options: Record<string, unknown>) => ({ options });
 
-const cli: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
-const mcpDispatchOnly: Caller = { kind: "mcp", id: "mcp:agent", scopes: new Set(["dispatch"]) };
-const mcpDemoRead: Caller = { kind: "mcp", id: "mcp:agent", scopes: new Set(["demo:read"]) };
-const browser: Caller = { kind: "access", id: "access:alice@example.com", scopes: new Set() };
-const browserOperator: Caller = { kind: "access", id: "access:alice@example.com", scopes: new Set(["demo:write"]) };
-const svcToken: Caller = { kind: "access", id: "access:svc:ci", scopes: new Set(["demo:write"]) };
-const chatOperator: Caller = { kind: "chat", id: "slack:UADMIN", scopes: new Set(), chatGate: (g) => g === "open" || g === "operator" };
-const chatRandom: Caller = { kind: "chat", id: "slack:URANDOM", scopes: new Set(), chatGate: (g) => g === "open" };
+/** The local CLI: every grant. */
+const cli: Caller = callerWith("cli", "cli:local", "all");
+/** A default ingress token: `dispatch` alone. */
+const mcpDispatchOnly: Caller = callerWith("mcp", "mcp:agent", ["dispatch"]);
+const mcpRunsRead: Caller = callerWith("mcp", "mcp:agent", ["runs:read"]);
+/** An unlisted Access browser session: every group's read, as the translation gives it. */
+const browser: Caller = callerWith("access", "access:alice@example.com", ["runs:read"]);
+/** Listed in `permissions.operators`: reads and writes. */
+const browserOperator: Caller = callerWith("access", "access:alice@example.com", ["runs:read", "runs:write"]);
+/** An Access service token: exactly its scopes, no implicit reads. */
+const svcToken: Caller = callerWith("access", "access:svc:ci", ["runs:write"]);
+/** A Slack admin (`permissions.admins`): everything. */
+const chatOperator: Caller = callerWith("chat", "slack:UADMIN", "all");
+/** A plain Slack user: the open chat baseline, no run grants. */
+const chatRandom: Caller = callerWith("chat", "slack:URANDOM", ["help:read", "config:read"]);
 
 describe("defineCommand — definition-time checks", () => {
-  const base = { scope: "x:read" as const, chatGate: "open" as const, effect: "read" as const, describe: "d", handler: async () => ({}) };
+  const base = { action: "x:read" as const, effect: "read" as const, describe: "d", handler: async () => ({}) };
 
   it("rejects an id that is not <group>.<verb>", () => {
     for (const id of ["runs", "Runs.list", "runs.list.all", "runs_list"]) expect(() => defineCommand({ ...base, id })).toThrow(/<group>\.<verb>/);
+  });
+
+  it("rejects the retired `scope` and `chatGate` fields (the policy table decides now) and a malformed action", () => {
+    expect(() => defineCommand({ ...base, id: "a.b", chatGate: "open" } as never)).toThrow(/a\.b: `chatGate` is gone — declare `action`/);
+    expect(() => defineCommand({ ...base, id: "a.b", scope: "x:read" } as never)).toThrow(/a\.b: `scope` is gone/);
+    for (const action of ["x:delete", "read", "X:read", "x:read:more", ""]) expect(() => defineCommand({ ...base, id: "a.b", action } as never), action).toThrow(/action must be <group>:read\|write\|exec/);
+    expect(() => defineCommand({ ...base, id: "a.b", action: "x:exec" })).not.toThrow();
   });
 
   it("rejects a required argument after an optional one, a rest argument that is not last, and a name shared by an argument and an option", () => {
@@ -202,8 +215,7 @@ describe("CommandRegistry.invoke — auth before parse", () => {
     const probe = define({
       id: "demo.probe",
       options: z.object({ status: z.string().refine(() => (parses++, true)) }),
-      scope: "demo:read",
-      chatGate: "operator",
+      action: "runs:read",
       effect: "read",
       describe: "counts parses",
       handler: async ({ deps }) => {
@@ -226,10 +238,11 @@ describe("CommandRegistry.invoke — auth before parse", () => {
     expect(res).toEqual({ ok: true, value: { status: "all" } });
   });
 
-  it("chat caller without a chatGate resolver is refused (fail-closed)", async () => {
+  it("a chat caller holding no grant for the action is refused (fail-closed); the same decision for the same actor on any surface", async () => {
     const { registry, deps } = setup();
-    const res = await registry.invoke("demo.echo", opts({ status: "all" }), { kind: "chat", id: "slack:U1", scopes: new Set() }, deps);
-    expect(res).toMatchObject({ ok: false, error: "unauthorized" });
+    const nobody = callerWith("chat", "slack:U1", []);
+    expect(await registry.invoke("demo.echo", opts({ status: "all" }), nobody, deps)).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
+    expect(await registry.invoke("demo.echo", opts({ status: "all" }), { ...nobody, kind: "access" }, deps)).toMatchObject({ ok: false, error: "unauthorized" });
   });
 
   it("dispatch-only MCP caller is refused on a read and a write command", async () => {
@@ -239,35 +252,35 @@ describe("CommandRegistry.invoke — auth before parse", () => {
     expect(deps.hits).toEqual([]);
   });
 
-  it("MCP caller holding the exact scope passes; a different scope of the same effect does not", async () => {
+  it("MCP caller holding the exact action passes; a different read of another group does not", async () => {
     const { registry, deps } = setup();
-    expect(await registry.invoke("demo.echo", opts({ status: "all" }), mcpDemoRead, deps)).toMatchObject({ ok: true });
-    const other: Caller = { kind: "mcp", id: "mcp:x", scopes: new Set(["runs:read"]) };
+    expect(await registry.invoke("demo.echo", opts({ status: "all" }), mcpRunsRead, deps)).toMatchObject({ ok: true });
+    const other: Caller = callerWith("mcp", "mcp:x", ["friction:read"]);
     expect(await registry.invoke("demo.echo", opts({ status: "all" }), other, deps)).toMatchObject({ ok: false, error: "unauthorized" });
   });
 
   it("a runs:write caller is refused on a friction:write command", async () => {
     const { registry, deps } = setup();
-    const runsWriter: Caller = { kind: "mcp", id: "mcp:x", scopes: new Set(["runs:write"]) };
+    const runsWriter: Caller = callerWith("mcp", "mcp:x", ["runs:write"]);
     expect(await registry.invoke("friction.propose", {}, runsWriter, deps)).toMatchObject({ ok: false, error: "unauthorized" });
-    const frictionWriter: Caller = { kind: "mcp", id: "mcp:x", scopes: new Set(["friction:write"]) };
+    const frictionWriter: Caller = callerWith("mcp", "mcp:x", ["friction:write"]);
     expect(await registry.invoke("friction.propose", {}, frictionWriter, deps)).toEqual({ ok: true, value: { proposed: 0 } });
   });
 
-  it("browser Access identity holds every read scope implicitly, write only when granted", async () => {
+  it("browser Access identity: the reads its translation gives, a write only when granted (permissions.operators)", async () => {
     const { registry, deps } = setup();
     expect(await registry.invoke("demo.echo", opts({ status: "all" }), browser, deps)).toMatchObject({ ok: true });
     expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), browser, deps)).toMatchObject({ ok: false, error: "unauthorized" });
     expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), browserOperator, deps)).toMatchObject({ ok: false, error: "conflict" });
   });
 
-  it("an Access service token is a machine caller: no implicit read scopes", async () => {
+  it("an Access service token is a machine caller: no implicit reads", async () => {
     const { registry, deps } = setup();
     expect(await registry.invoke("demo.echo", opts({ status: "all" }), svcToken, deps)).toMatchObject({ ok: false, error: "unauthorized" });
     expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), svcToken, deps)).toMatchObject({ ok: false, error: "conflict" });
   });
 
-  it("scopes 'all' (cli:local) passes every command", async () => {
+  it("every grant (cli:local) passes every command", async () => {
     const { registry, deps } = setup();
     expect(await registry.invoke("demo.echo", opts({ status: "all" }), cli, deps)).toMatchObject({ ok: true });
     expect(await registry.invoke("friction.propose", {}, cli, deps)).toMatchObject({ ok: true });
@@ -339,7 +352,7 @@ describe("CommandRegistry.invoke — parse and error mapping", () => {
 });
 
 describe("CommandRegistry audit line", () => {
-  it("emits one line per invocation with command, caller, effect, outcome — and no payload", async () => {
+  it("emits one line per invocation with command, caller, effect, outcome — the table's deny reason on a registry refusal — and no payload", async () => {
     const { registry, audit, deps } = setup();
     await registry.invoke("demo.echo", opts({ status: "all", limit: 7 }), cli, deps);
     await registry.invoke("demo.echo", opts({ status: "all" }), chatRandom, deps);
@@ -347,10 +360,18 @@ describe("CommandRegistry audit line", () => {
     expect(audit).toHaveBeenCalledTimes(3);
     expect(audit.mock.calls.map(([e]) => e)).toEqual([
       { commandId: "demo.echo", callerKind: "cli", callerId: "cli:local", effect: "read", outcome: "ok" },
-      { commandId: "demo.echo", callerKind: "chat", callerId: "slack:URANDOM", effect: "read", outcome: "unauthorized" },
+      { commandId: "demo.echo", callerKind: "chat", callerId: "slack:URANDOM", effect: "read", outcome: "unauthorized", reason: "missing-grant" },
       { commandId: "demo.fail", callerKind: "cli", callerId: "cli:local", effect: "write", outcome: "conflict" },
     ]);
     expect(JSON.stringify(audit.mock.calls)).not.toMatch(/limit|"7"|status/);
+  });
+
+  it("the deny reason is the audit line's, never the reply's (KTD8)", async () => {
+    const { registry, audit, deps } = setup();
+    const res = await registry.invoke("demo.echo", opts({ status: "all" }), chatRandom, deps);
+    expect(res).toMatchObject({ ok: false, error: "unauthorized", message: "slack:URANDOM is not allowed to run demo.echo" });
+    expect(JSON.stringify(res)).not.toContain("missing-grant");
+    expect(audit.mock.calls[0]?.[0].reason).toBe("missing-grant");
   });
 
   it("defaults to one JSON line on console.log", async () => {
@@ -414,14 +435,13 @@ describe("untrusted wrapping and rendering", () => {
   });
 });
 
-describe("who decided a failure (phase 4b): registry vs handler; the wider CommandError vocabulary; the exec scope", () => {
+describe("who decided a failure (phase 4b): registry vs handler; the wider CommandError vocabulary; the exec class and the resolved resource", () => {
   type D = Record<string, never>;
   const define = commandDefiner<D>();
   const dataGated = define({
     id: "demo.gated",
     args: [{ name: "scope", schema: z.enum(["me", "channel"]), describe: "scope" }],
-    scope: "demo:write",
-    chatGate: "open",
+    action: "config:write",
     effect: "write",
     describe: "refuses the channel scope on data",
     handler: async ({ args }) => {
@@ -430,13 +450,15 @@ describe("who decided a failure (phase 4b): registry vs handler; the wider Comma
       return {};
     },
   });
-  const op = define({ id: "demo.exec", scope: "demo:exec", chatGate: "agentRun", effect: "write", describe: "an op", handler: async () => ({ ran: true }) });
+  /** A deterministic op: the table decides on `agent { coding }`, as `repo.test|build` declare. */
+  const op = define({ id: "demo.exec", action: "repo:exec", resource: () => ({ type: "agent", name: "coding" }), effect: "write", describe: "an op", handler: async () => ({ ran: true }) });
   const registry = new CommandRegistry<D>({ audit: () => {} });
   registry.register(dataGated);
   registry.register(op);
-  const chatOpen: Caller = { kind: "chat", id: "slack:U1", scopes: new Set(), chatGate: (g) => g === "open" };
+  /** A plain Slack user: the config write commands admit any person (their own scope is theirs). */
+  const chatOpen: Caller = callerWith("chat", "slack:U1", ["config:read"]);
 
-  it("a gate/scope refusal or a schema failure is `decidedBy: registry`; a CommandError the handler threw is `decidedBy: handler` with its own message", async () => {
+  it("a table refusal or a schema failure is `decidedBy: registry`; a CommandError the handler threw is `decidedBy: handler` with its own message", async () => {
     expect(await registry.invoke("demo.exec", {}, chatOpen, {})).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
     expect(await registry.invoke("demo.gated", { args: ["nope"] }, chatOpen, {})).toMatchObject({ ok: false, error: "invalid_input", decidedBy: "registry" });
     expect(await registry.invoke("demo.gated", { args: ["channel"] }, chatOpen, {})).toMatchObject({ ok: false, error: "unauthorized", status: 403, decidedBy: "handler", message: "Channel config changes are restricted." });
@@ -444,23 +466,40 @@ describe("who decided a failure (phase 4b): registry vs handler; the wider Comma
     expect(await registry.invoke("demo.nope", {}, chatOpen, {})).toMatchObject({ ok: false, error: "not_found", decidedBy: "registry" });
   });
 
-  it("`<group>:exec` is a third scope class: a machine caller needs it exactly (write does not imply exec); a chat caller passes through `agentRun`", async () => {
-    const mcp = (...scopes: string[]): Caller => ({ kind: "mcp", id: "mcp:a", scopes: new Set(scopes) });
-    expect(await registry.invoke("demo.exec", {}, mcp("demo:write"), {})).toMatchObject({ ok: false, error: "unauthorized" });
-    expect(await registry.invoke("demo.exec", {}, mcp("demo:read"), {})).toMatchObject({ ok: false, error: "unauthorized" });
-    expect((await registry.invoke("demo.exec", {}, mcp("demo:exec"), {})).ok).toBe(true);
-    expect((await registry.invoke("demo.exec", {}, { kind: "chat", id: "slack:U1", scopes: new Set(), chatGate: (g) => g === "agentRun" }, {})).ok).toBe(true);
-    // A browser Access session holds reads implicitly, never exec.
-    expect(await registry.invoke("demo.exec", {}, { kind: "access", id: "access:u", scopes: new Set() }, {})).toMatchObject({ ok: false, error: "unauthorized" });
+  it("`<group>:exec` is a third class decided on the resolved `agent`: a credential needs the exec grant exactly (write does not imply exec); a person passes by the right to run the agent", async () => {
+    const mcp = (...actions: string[]): Caller => callerWith("mcp", "mcp:a", actions);
+    expect(await registry.invoke("demo.exec", {}, mcp("repo:write"), {})).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("demo.exec", {}, mcp("repo:read"), {})).toMatchObject({ ok: false, error: "unauthorized" });
+    expect((await registry.invoke("demo.exec", {}, mcp("repo:exec"), {})).ok).toBe(true);
+    expect((await registry.invoke("demo.exec", {}, callerWith("chat", "slack:U1", ["agent:run:coding"]), {})).ok).toBe(true);
+    // A browser Access session holds reads, never exec.
+    expect(await registry.invoke("demo.exec", {}, callerWith("access", "access:u", ["repo:read"]), {})).toMatchObject({ ok: false, error: "unauthorized" });
+  });
+
+  it("`refuses` decides early only for a command whose resource is the command itself; a resolver command waits for the input", () => {
+    expect(CommandRegistry.refuses(dataGated as never, callerWith("mcp", "mcp:a", ["dispatch"]))).toBe(true);
+    expect(CommandRegistry.refuses(dataGated as never, callerWith("mcp", "mcp:a", ["config:write"]))).toBe(false);
+    expect(CommandRegistry.refuses(op as never, callerWith("mcp", "mcp:a", ["dispatch"]))).toBe(false);
+  });
+
+  it("`resourceOf`: the resolver sees a normalized raw input (a malformed half is empty), the default is the command itself", () => {
+    const seen: unknown[] = [];
+    const probe = { id: "x.y", resource: (input: unknown) => (seen.push(input), { type: "command" as const, id: "x.y" }) };
+    resourceOf(probe, { args: "nope" as never, options: [] as never }, cli);
+    resourceOf(probe, { args: ["a"], options: { k: 1 } }, cli);
+    expect(seen).toEqual([
+      { args: [], options: {} },
+      { args: ["a"], options: { k: 1 } },
+    ]);
+    expect(resourceOf({ id: "runs.list" }, {}, cli)).toEqual({ type: "command", id: "runs.list" });
   });
 });
 
 describe("settle — the deferred outcome of an accepted command (resident-repos item 52)", () => {
-  const caller: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
+  const caller: Caller = callerWith("cli", "cli:local", "all");
   const settling = define({
     id: "demo.provision",
-    scope: "demo:write",
-    chatGate: "operator",
+    action: "runs:write",
     effect: "write",
     describe: "accepts now, settles later",
     handler: async () => ({ accepted: true }),
@@ -471,8 +510,7 @@ describe("settle — the deferred outcome of an accepted command (resident-repos
   });
   const throwing = define({
     id: "demo.unsettled",
-    scope: "demo:write",
-    chatGate: "operator",
+    action: "runs:write",
     effect: "write",
     describe: "settle throws",
     handler: async () => ({}),

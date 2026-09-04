@@ -35,6 +35,7 @@ describe("attributesOf", () => {
     expect(attributesOf({ type: "repo", owner: "o", name: "r" })).toEqual({ repo: "o/r", visibility: "unknown" });
     expect(attributesOf({ type: "config-scope", kind: "channel", id: "slack:C1" })).toEqual({ channelId: "slack:C1", visibility: "unknown" });
     expect(attributesOf({ type: "config-scope", kind: "user", id: "slack:U1" })).toEqual({ userId: "slack:U1", visibility: "unknown" });
+    expect(attributesOf({ type: "config-scope", kind: "org" })).toEqual({ visibility: "unknown" });
     expect(attributesOf({ type: "agent", name: "coding" })).toEqual({ name: "coding", visibility: "unknown" });
     expect(attributesOf({ type: "command", id: "runs.list" })).toEqual({ visibility: "unknown" });
   });
@@ -47,7 +48,8 @@ describe("targetOf", () => {
     expect(targetOf("memory-scope")).toBeUndefined();
     expect(targetOf("memory-scope", "org")).toBe("memory-scope/org");
     expect(targetOf("memory-scope", "channel")).toBe("memory-scope/channel");
-    expect(targetOf("config-scope", "org")).toBeUndefined();
+    expect(targetOf("config-scope", "org")).toBe("config-scope/org");
+    expect(targetOf("config-scope", "repo")).toBeUndefined();
     expect(targetOf("nope")).toBeUndefined();
   });
   it("targetOfResource reads the kind off the resource", () => {

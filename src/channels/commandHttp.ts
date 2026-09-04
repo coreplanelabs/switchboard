@@ -7,7 +7,8 @@ import { MAX_BODY_BYTES, readBody } from "./http.js";
 
 // Generic HTTP adapter for the command registry (#157 U7 — R7/R9/R10, KTD13/
 // KTD15): `/api/<group>.<verb>` for every registered command, with NO
-// per-command code. Its only logic is transport: resolve the Caller from the
+// per-command code. Its only logic is transport: resolve the Caller (identity
+// only — the policy table decides, features/authorization.md) from the
 // Access identity the gate in index.ts already verified, enforce write safety,
 // map the by-name query/body onto the definition's `{ args, options }`
 // (`namedToInput` — kebab-case query keys, camelCase JSON keys), pass it to
@@ -26,12 +27,11 @@ import { MAX_BODY_BYTES, readBody } from "./http.js";
 // Authorization happens before the body is buffered (readBody with a cap).
 
 export interface CommandHttpOptions {
-  /** `permissions.operators`: Access identities (`access:<sub>`) granted `*:write`. */
-  operatorIdentities: () => string[];
-  /** `permissions.serviceTokens[<common_name>]`: a service token's exact scopes. */
-  serviceTokenScopes: (commonName: string) => string[];
   /** Grants by actor id (`ConfigStore.grantsFor`) for the `Caller.actor` every
-   *  `/api` call carries — `access:<sub>` or `access:svc:<common_name>`. */
+   *  `/api` call carries — `access:<sub>` (a browser session: every group's
+   *  read implicitly, writes when `permissions.operators` lists it) or
+   *  `access:svc:<common_name>` (exactly its `permissions.serviceTokens`
+   *  scopes). The translation is config's; the adapter only names the id. */
   grantsFor: GrantsLookup;
   /** True when the Access gate is admitting requests WITHOUT a JWT
    *  (`ACCESS_DEV_BYPASS` with no Access config). Enables the loopback rule. */
@@ -112,25 +112,16 @@ export function serviceTokenAllowed(pathname: string, identity: AccessIdentity):
 }
 
 /**
- * R9: the Caller an Access identity resolves to. A browser session is
- * `access:<sub>` with every read implicitly (the registry grants that) and the
- * registry's write scopes iff `permissions.operators` lists the id. A service
- * token is `access:svc:<common_name>` holding exactly its configured scopes.
- * Both carry the same identity as an `Actor` (a browser session is a `user`,
- * a service token a `service`) with the grants config names for that id.
+ * R9: the Caller an Access identity resolves to — the same identity as an
+ * `Actor` the policy table decides on: a browser session is the `user`
+ * `access:<sub>`, a service token the `service` `access:svc:<common_name>`,
+ * each with the grants config names for that id (`opts.grantsFor`). Nothing
+ * here decides what either may do (KTD3).
  */
-export function callerFor(identity: AccessIdentity, commands: CommandInvoker, opts: CommandHttpOptions): Caller {
+export function callerFor(identity: AccessIdentity, opts: Pick<CommandHttpOptions, "grantsFor">): Caller {
   const id = callerIdFor(identity);
-  if (isServiceToken(identity)) {
-    return { kind: "access", id, scopes: new Set(opts.serviceTokenScopes(identity.commonName)), actor: resolveActor({ surface: "access-service", subjectId: identity.commonName }, opts.grantsFor) };
-  }
-  const writeScopes = opts.operatorIdentities().includes(id)
-    ? commands
-        .list()
-        .filter((c) => c.effect === "write")
-        .map((c) => c.scope)
-    : [];
-  return { kind: "access", id, scopes: new Set(writeScopes), actor: resolveActor({ surface: "access-browser", subjectId: identity.sub }, opts.grantsFor) };
+  if (isServiceToken(identity)) return { kind: "access", id, actor: resolveActor({ surface: "access-service", subjectId: identity.commonName }, opts.grantsFor) };
+  return { kind: "access", id, actor: resolveActor({ surface: "access-browser", subjectId: identity.sub }, opts.grantsFor) };
 }
 
 function hostOf(url: string | undefined): string | undefined {
@@ -248,10 +239,11 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
       return;
     }
 
-    // Authorize BEFORE buffering (KTD15). `invoke` re-checks; this only spares
-    // an unauthorized caller's body from being read.
-    const caller = callerFor(identity, commands, opts);
-    if (!CommandRegistry.authorizes(cmd, caller)) {
+    // Refuse BEFORE buffering where the table can decide without the input
+    // (KTD15). `invoke` re-checks in every case; this only spares an
+    // unauthorized caller's body from being read.
+    const caller = callerFor(identity, opts);
+    if (CommandRegistry.refuses(cmd, caller)) {
       refuse(res, ERROR_STATUS.unauthorized, "unauthorized", `${caller.id} is not allowed to run ${cmd.id}`);
       return;
     }

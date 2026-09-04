@@ -1,16 +1,21 @@
 // The mechanical half of docs/reference/* — rendered from the command registry.
 //
 // Every command is registered once (`src/core/commands/all.ts`) with its args,
-// options, scope, chat gate, effect, and per-surface opt-outs. That registration
-// IS the reference material: a hand-written table can only ever be a copy of it
-// that rots (the pre-generator table had no `mcp` group and no `deploy restart`).
-// So the tables come from the registry, `npm run docs:gen` writes them into the
-// generated regions, and CI's `docs:check` fails when the two disagree.
+// options, action, effect, and per-surface opt-outs; who may run it is the
+// policy table's answer (`src/core/authz/policy.ts`, features/authorization.md).
+// That registration IS the reference material: a hand-written table can only
+// ever be a copy of it that rots (the pre-generator table had no `mcp` group and
+// no `deploy restart`). So the tables come from the registry, `npm run docs:gen`
+// writes them into the generated regions, and CI's `docs:check` fails when the
+// two disagree.
 //
 // Pure: strings in, markdown out. No fs, no clock, no registry construction.
 import type { z } from "zod";
-import type { ChatGate, CommandDef, CommandScope, SurfaceName } from "../core/commandRegistry.js";
-import { acceptsUndefined } from "../core/commandRegistry.js";
+import { authorize } from "../core/authz/authorize.js";
+import { CHAT_OPEN_ACTIONS } from "../core/authz/grants.js";
+import type { Actor } from "../core/authz/types.js";
+import type { CommandAction, CommandDef, SurfaceName } from "../core/commandRegistry.js";
+import { acceptsUndefined, resourceOf } from "../core/commandRegistry.js";
 import { chatForm, cliFlag, httpPath, isBooleanSchema, mcpToolName, typeHint } from "../core/commandSurface.js";
 
 /** Everything the docs need about one command, flattened out of its definition. */
@@ -21,8 +26,9 @@ export interface DocCommand {
   /** `config set <me|channel> [--agent <string>]` — enum values inlined. */
   usage: string;
   describe: string;
-  scope: CommandScope;
-  gate: ChatGate;
+  action: CommandAction;
+  /** Who may run it in Slack, in the vocabulary of docs/reference/permissions.md (`whoMayRun`). */
+  who: string;
   effect: "read" | "write";
   surfaces: readonly SurfaceName[];
   httpPath: string;
@@ -39,14 +45,29 @@ const SURFACE_LABEL: Readonly<Record<SurfaceName, string>> = {
   mcp: "MCP",
 };
 
-/** The chat gate as a reader of `permissions` knows it (docs/reference/permissions.md). */
-const GATE_LABEL: Readonly<Record<ChatGate, string>> = {
-  open: "anyone",
-  operator: "admins",
-  repoManager: "repo managers (`repoManagement`)",
-  channelConfig: "channel config (`channelConfig`)",
-  agentRun: "anyone allowed to run `coding`",
-};
+const slackUser = (id: string, extra: readonly string[]): Actor => ({ kind: "user", id, grants: { actions: new Set([...CHAT_OPEN_ACTIONS, "config:write", ...extra]), channels: new Set(), repos: new Set() } });
+
+/** The Slack readers a command's "Who can run it" is decided for, narrowest
+ *  first, each labelled as docs/reference/permissions.md names the set: a plain
+ *  user (the open baseline, `permissions.channelConfig` absent), one allowed to
+ *  run the coding agent, a repo manager, an admin. The label is the first the
+ *  policy table admits — the same `authorize` the registry asks. */
+const SLACK_READERS: ReadonlyArray<{ label: string; actor: Actor }> = [
+  { label: "anyone", actor: slackUser("slack:UDOC", []) },
+  { label: "anyone allowed to run `coding`", actor: slackUser("slack:UDOC", ["agent:run:coding"]) },
+  { label: "repo managers (`repoManagement`)", actor: slackUser("slack:UDOC", ["repo:write", "friction:write"]) },
+  { label: "admins", actor: { kind: "user", id: "slack:UDOC", grants: { actions: "all", channels: "all", repos: "all" } } },
+];
+
+/** Who may run a command in Slack, as the policy table decides it for the
+ *  command's own resource (the command, or what its `resource` resolver names
+ *  for an empty input) — never a label the definition asserts about itself.
+ *  A command no reader passes is "nobody in Slack" (a row is missing). */
+export function whoMayRun(cmd: Pick<CommandDef<unknown>, "id" | "action" | "resource">): string {
+  const caller = { kind: "chat" as const, id: "slack:UDOC", actor: SLACK_READERS[0]!.actor };
+  const resource = resourceOf(cmd, {}, caller);
+  return SLACK_READERS.find((r) => authorize(r.actor, cmd.action, resource).allow)?.label ?? "nobody in Slack";
+}
 
 /** `<me|channel>` for an enum, `<slug>` otherwise; `[…]` when optional, `…` for rest. */
 function argForm(arg: { name: string; schema: z.ZodType; rest?: true }): string {
@@ -84,8 +105,8 @@ export function docCommands(cmds: readonly CommandDef<unknown>[]): DocCommand[] 
       verb,
       usage: usageFor(cmd),
       describe: cmd.describe,
-      scope: cmd.scope,
-      gate: cmd.chatGate,
+      action: cmd.action,
+      who: whoMayRun(cmd),
       effect: cmd.effect,
       surfaces: ALL_SURFACES.filter((s) => cmd.surfaces?.[s] !== false),
       httpPath: httpPath(cmd.id),
@@ -155,19 +176,20 @@ export function renderCliCommands(cmds: readonly DocCommand[]): string {
  *  absent by construction, not by an author remembering to leave them out. */
 export function renderChatCommands(cmds: readonly DocCommand[]): string {
   const sections = byGroup(cmds.filter((c) => c.surfaces.includes("chat"))).map(({ group, commands }) => {
-    const rows = commands.map((c) => [code(c.usage), cell(c.describe), cell(GATE_LABEL[c.gate])]);
+    const rows = commands.map((c) => [code(c.usage), cell(c.describe), cell(c.who)]);
     return `### \`${group}\`\n\n${table(["Command", "What it does", "Who can run it"], rows)}`;
   });
   return sections.join("\n\n");
 }
 
 /** docs/reference/dashboard-routes.md — the `/api/<group>.<verb>` twin of every
- *  command. Methods are the registry's own rule: a write is POST-only. */
+ *  command. Methods are the registry's own rule: a write is POST-only; the
+ *  action is the grant a token or Access identity needs for it. */
 export function renderApiRoutes(cmds: readonly DocCommand[]): string {
   const rows = cmds
     .filter((c) => c.surfaces.includes("http"))
-    .map((c) => [code(c.httpPath), c.effect === "write" ? "`POST`" : "`GET`, `POST`", code(c.scope), cell(c.describe)]);
-  return table(["Route", "Methods", "Scope", "What it does"], rows);
+    .map((c) => [code(c.httpPath), c.effect === "write" ? "`POST`" : "`GET`, `POST`", code(c.action), cell(c.describe)]);
+  return table(["Route", "Methods", "Action", "What it does"], rows);
 }
 
 /** Every generated region in docs/, keyed by the file that carries it. The

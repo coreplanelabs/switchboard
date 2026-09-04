@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { CHAT_OPEN_ACTIONS } from "../authz/grants.js";
 import { CommandRegistry, bindCommands, renderText, type Caller } from "../commandRegistry.js";
+import { callerWith } from "../testing/callers.js";
 import { InMemoryScheduleStore } from "../scheduleStore.js";
 import { SCHEDULES, type ScheduleDef } from "../schedules.js";
 import { registerScheduleCommands, scheduleList, type ScheduleCommandDeps } from "./schedule.js";
@@ -10,8 +12,9 @@ import { registerScheduleCommands, scheduleList, type ScheduleCommandDeps } from
 // /runs "Scheduled" panel.
 
 const NOW = Date.UTC(2026, 7, 30, 12, 0); // Sunday 2026-08-30 12:00 UTC
-const chat: Caller = { kind: "chat", id: "slack:UX", scopes: new Set(), chatGate: (g) => g === "open" };
-const mcp = (...scopes: string[]): Caller => ({ kind: "mcp", id: "mcp:alice", scopes: new Set(scopes) });
+/** A plain Slack user: the open chat commands. */
+const chat: Caller = callerWith("chat", "slack:UX", CHAT_OPEN_ACTIONS);
+const mcp = (...actions: string[]): Caller => callerWith("mcp", "mcp:alice", actions);
 
 function bind(deps: Partial<ScheduleCommandDeps["schedule"]> = {}) {
   const registry = new CommandRegistry<ScheduleCommandDeps>({ audit: () => {} });
@@ -65,7 +68,7 @@ describe("schedule.list", () => {
 
   it("is open in chat and schedule:read on machine surfaces", async () => {
     const commands = bind();
-    expect(scheduleList).toMatchObject({ scope: "schedule:read", chatGate: "open", effect: "read" });
+    expect(scheduleList).toMatchObject({ action: "schedule:read", effect: "read" });
     expect(await commands.invoke("schedule.list", {}, mcp("runs:read"))).toMatchObject({ ok: false, error: "unauthorized" });
     expect((await commands.invoke("schedule.list", {}, mcp("schedule:read"))).ok).toBe(true);
   });
