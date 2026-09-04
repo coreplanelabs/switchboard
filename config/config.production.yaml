@@ -136,3 +136,20 @@ costs:
 ship:
   maxRounds: 4
   maxMinutes: 40
+
+# Durable runtime overrides (routing-and-config item 12, #405): `config set`,
+# `mcp add`, and the other runtime writes go to the state Worker's ConfigDO
+# (switchboard-memory, same MEMORY_TOKEN bearer) instead of the container's
+# ephemeral data/overrides.json, so they survive a redeploy or restart.
+runtimeOverrides:
+  worker:
+    baseUrl: https://switchboard-memory.coreplanelabs.dev
+    tokenEnv: MEMORY_TOKEN
+
+# External MCP servers as agent tools (#394, features/mcp-tools.md): turns the
+# `mcp.*` commands on. No static servers here — teams add their own with
+# `mcp add` (org/channel/user tiers on the config scopes). Credentials entered on
+# the connect page are sealed with the bot-only MCP_CREDENTIAL_KEY secret and
+# stored beside the overrides above.
+mcp:
+  credentialKeyEnv: MCP_CREDENTIAL_KEY
