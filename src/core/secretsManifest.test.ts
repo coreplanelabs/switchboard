@@ -46,6 +46,19 @@ describe("deploy/secrets.manifest.json", () => {
     }
   });
 
+  it("every bot secret reaches the container: the shim forwards each manifest `bot` entry (a secret on the Worker the container never sees is a silent misconfiguration — MCP_CREDENTIAL_KEY, 2026-09-04)", () => {
+    const src = readFileSync(resolve(ROOT, "deploy/cloudflare/worker.ts"), "utf8");
+    const fn = /function containerEnv\(env: Env\)[\s\S]*?\n\}/.exec(src);
+    if (!fn) throw new Error("deploy/cloudflare/worker.ts: no containerEnv()");
+    const list = /const FORWARDED_OPTIONAL = \[([\s\S]*?)\]/.exec(src);
+    if (!list) throw new Error("deploy/cloudflare/worker.ts: no FORWARDED_OPTIONAL");
+    const forwarded = new Set([...list[1].matchAll(/"([A-Z][A-Z0-9_]*)"/g)].map((m) => m[1]));
+    for (const m of fn[0].matchAll(/^\s*([A-Z][A-Z0-9_]*): env\.\1,/gm)) forwarded.add(m[1]);
+    for (const s of manifest.secrets) {
+      if (s.workers.includes("bot")) expect(forwarded, `${s.name} is put on the bot Worker but never forwarded into the container`).toContain(s.name);
+    }
+  });
+
   it("no Worker directory still carries a secrets.txt (the manifest replaced them)", () => {
     for (const dir of Object.values(WORKERS)) {
       expect(() => readFileSync(resolve(ROOT, "deploy", dir, "secrets.txt"))).toThrow();
