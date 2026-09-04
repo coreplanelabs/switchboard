@@ -143,7 +143,7 @@ Notes that matter for reading a filed issue:
 | HTTP / MCP | `POST /api/friction.propose`, tool `friction_propose` | tokens holding `friction:write` |
 | Schedule | `self-improvement` entry of the schedule registry, `0 14 * * 1` | the `cron` ingress identity, which must be in `permissions.repoManagement` and granted `channels: all` (the native `grants` block) |
 
-Who may CALL a command is the table above; WHAT it analyzes is the [authorization policy](../features/authorization.md): the caller's run-read predicate, pushed into the run store. An admin or the cron sees the fleet; a token granted one channel sees that channel; a caller granted no channel sees only its own runs.
+Who may CALL a command is the table above; WHAT it analyzes is the [authorization policy](https://github.com/coreplanelabs/switchboard/blob/main/features/authorization.md): the caller's run-read predicate, pushed into the run store. An admin or the cron sees the fleet; a token granted one channel sees that channel; a caller granted no channel sees only its own runs.
 
 All of these are the same registered command with the same JSON output and the same rendered text. The chat flags are derived from the command's schema, not hand-parsed.
 
