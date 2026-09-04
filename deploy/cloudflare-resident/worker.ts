@@ -111,6 +111,7 @@ import {
   type RefreshOutcome,
 } from "../../src/execution/residentRefresh.js";
 import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
+import { describeStepFailure, stepFailureLog, type StepResult } from "../../src/execution/residentStepReport.js";
 
 /** Build marker: answered by GET /healthz (`u`) so a deploy's edge propagation
  *  is provable from outside, and stamped on test overrides so they die with
@@ -487,9 +488,10 @@ function isRuntimeReplacement(err: unknown): boolean {
 function runtimeReplacedErr(err: RuntimeReplacedError): ThreadErr {
   return { error: err.message, status: 409, reason: "runtime-replaced" };
 }
-/** Trailing slice of command output for error reasons — enough to diagnose,
- *  small enough to live in a lifecycle `reason`. */
-const tail = (s: string, n = 400): string => s.trim().slice(-n);
+/** Trailing slice of one string for an error reason. Command RESULTS are not
+ *  described here — `describeStepFailure` owns that, because choosing between
+ *  the two streams is what lost a diagnosis (residentStepReport.ts). */
+const tail = (s: string, n: number): string => s.trim().slice(-n);
 
 // ---------------------------------------------------------------------------
 // GitHub App auth (KTD12) — Worker/DO scope only; the private key never
@@ -1116,12 +1118,13 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Shared success gate for run/threadRun results: a non-zero exit or a
    *  timeout becomes the step's named StepError; success hands back stdout. */
-  private assertOk(
-    r: { stdout: string; stderr: string; exitCode: number; timedOut: boolean },
-    step: string,
-  ): string {
+  private assertOk(r: StepResult, step: string): string {
     if (r.exitCode !== 0 || r.timedOut) {
-      throw new StepError(step, `exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}: ${tail(r.stderr || r.stdout)}`);
+      // The stored reason has room for a tail of each stream; the log gets the
+      // error block itself, because a reason nobody can act on is how a whole
+      // diagnosis was lost once (residentStepReport.ts).
+      console.log(stepFailureLog(step, r));
+      throw new StepError(step, describeStepFailure(r));
     }
     return r.stdout;
   }
@@ -2434,15 +2437,14 @@ export class ResidentDO extends Sandbox<Env> {
    *  and parse its tagged output. A failure throws the StepError the old
    *  per-spawn code would have thrown: the step comes from the script's
    *  `err=` tag (falling back to `fallbackStep` when the script died before
-   *  tagging), the message from stderr, exactly like assertOk. */
+   *  tagging), the message from both streams, exactly like assertOk. */
   private async runDepScript(script: string, fallbackStep: string, timeoutMs: number) {
     const r = await this.run(["sh", "-c", script], { timeoutMs });
     const parsed = parseDepCacheScriptOutput(r.stdout);
     if (r.exitCode !== 0 || r.timedOut) {
-      throw new StepError(
-        parsed.failedStep ?? fallbackStep,
-        `exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}: ${tail(r.stderr || r.stdout)}`,
-      );
+      const step = parsed.failedStep ?? fallbackStep;
+      console.log(stepFailureLog(step, r));
+      throw new StepError(step, describeStepFailure(r));
     }
     return parsed;
   }
@@ -2700,7 +2702,7 @@ export class ResidentDO extends Sandbox<Env> {
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       throw err;
     }
-    if (r.exitCode !== 0 || r.timedOut) return { error: `read-failed: ${tail(r.stderr || r.stdout)}`, status: 404 };
+    if (r.exitCode !== 0 || r.timedOut) return { error: `read-failed: ${describeStepFailure(r)}`, status: 404 };
     const truncated = r.stdout.length > READ_CONTENT_CAP;
     return { content: truncated ? r.stdout.slice(0, READ_CONTENT_CAP) : r.stdout, truncated };
   }
