@@ -6,7 +6,7 @@ import { AGENTS } from "../agents/registry.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { LocalExecutor } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
-import { makeExecutor, resetResidentProbeCache, type ExecutorFactoryOptions } from "./factory.js";
+import { makeExecutor, resetResidentProbeCache, residentOnboardedProbe, residentSlugsLister, type ExecutorFactoryOptions } from "./factory.js";
 import { resolveGithubToken } from "./githubApp.js";
 
 // The sandbox's GitHub credential is minted per toolset (least-privilege), so
@@ -186,7 +186,7 @@ describe("makeExecutor resident selection", () => {
     expect(executor).toBeInstanceOf(ResidentExecutor);
     // The warm path is POSITIVELY named (never inferable only from the absence
     // of a fallback note): ref@short-sha of the attached worktree.
-    expect(note).toBe("resident · master@abc");
+    expect(note).toBe("resident · jshttp/vary · master@abc");
     // The attach answer rides along for the dispatcher (#282): the worktree
     // path for the prompt, the attached sha for the pre-run head check.
     expect(binding).toEqual({ ref: "master", sha: "abc", workspace: "/workspace/threads/x/master" });
@@ -207,7 +207,7 @@ describe("makeExecutor resident selection", () => {
     const { executor, note, resident } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: undefined });
     expect(executor).toBeInstanceOf(ResidentExecutor);
     expect(resident).toBe(true);
-    expect(note).toBe("resident · master@abc1234 (repo default — no branch named)");
+    expect(note).toBe("resident · jshttp/vary · master@abc1234 (repo default — no branch named)");
     expect(calls).toEqual(["/status", "/attach", "/attach"]);
     expect(bodies[1]?.refHint).toBeUndefined(); // first attach: nothing named
     expect(bodies[2]?.refHint).toBe("master"); // re-attach on the resident's default
@@ -264,7 +264,7 @@ describe("makeExecutor resident selection", () => {
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(ResidentExecutor);
     expect(resident).toBe(true);
-    expect(note).toBe("resident refreshing · master@abc — attached to the last snapshot");
+    expect(note).toBe("resident refreshing · jshttp/vary · master@abc — attached to the last snapshot");
     expect(calls).toEqual(["/status", "/attach"]);
   });
 
@@ -277,7 +277,7 @@ describe("makeExecutor resident selection", () => {
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(ResidentExecutor);
     expect(resident).toBe(true);
-    expect(note).toBe("resident degraded (github-unreachable: fetch timed out) · master@abc — attached to the last snapshot");
+    expect(note).toBe("resident degraded (github-unreachable: fetch timed out) · jshttp/vary · master@abc — attached to the last snapshot");
   });
 
   // Review finding on #162: a refresh that failed INSIDE the rebuild lock
@@ -398,5 +398,103 @@ describe("makeExecutor resident selection", () => {
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "");
     stubFetch();
     await expect(makeExecutor(residentOpts(), repoCtx())).rejects.toThrow(/RESIDENT_OPERATOR_TOKEN is not set/);
+  });
+});
+
+// resident-repos.md item 29: the resolver's onboarded probe tells a refusal
+// (`false`: 404 not-onboarded, a non-transport HTTP error) from a registry
+// that did not answer (`"unreachable"`: transport failure/timeout, and the
+// outage window it opens) — the resolver refuses an explicit address loudly
+// on the latter instead of treating silence as "not onboarded".
+describe("residentOnboardedProbe", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetResidentProbeCache();
+  });
+  const cfg = { baseUrl: "https://resident.example" };
+  const env = { RESIDENT_OPERATOR_TOKEN: "op-tok" } as NodeJS.ProcessEnv;
+  const answer = (status: number, body: unknown = {}) => vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status })));
+
+  it("true for any lifecycle state of an onboarded resource, false for 404 not-onboarded and for a non-transport HTTP error", async () => {
+    answer(200, { state: "down", reason: "provision-failed" });
+    await expect(residentOnboardedProbe(cfg, env)?.("acme/api")).resolves.toBe(true);
+    answer(404);
+    await expect(residentOnboardedProbe(cfg, env)?.("acme/api")).resolves.toBe(false);
+    answer(500, { error: "boom" });
+    await expect(residentOnboardedProbe(cfg, env)?.("acme/api")).resolves.toBe(false);
+  });
+
+  it("\"unreachable\" for a transport failure — and for the outage window it opens", async () => {
+    const fn = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    vi.stubGlobal("fetch", fn);
+    const probe = residentOnboardedProbe(cfg, env);
+    await expect(probe?.("acme/api")).resolves.toBe("unreachable");
+    await expect(probe?.("acme/web")).resolves.toBe("unreachable");
+    expect(fn).toHaveBeenCalledTimes(1); // the second answer came from the outage window
+  });
+
+  it("undefined without the resident config or the operator bearer", () => {
+    expect(residentOnboardedProbe(undefined, env)).toBeUndefined();
+    expect(residentOnboardedProbe(cfg, {} as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+});
+
+// resident-repos.md item 29: the registry listing the repo resolver uses to
+// turn a bare `in <name>` address into an onboarded `owner/name`. Read with
+// the ADMIN bearer (`/residents` is read-scoped, which the operator bearer
+// does not open); every failure answers undefined — a name then binds
+// nothing, never a guess.
+describe("residentSlugsLister", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetResidentProbeCache();
+  });
+  const cfg = { baseUrl: "https://resident.example/" };
+  const env = { RESIDENT_ADMIN_TOKEN: "admin-tok" } as NodeJS.ProcessEnv;
+
+  function stubFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
+    const fn = vi.fn(async (url: unknown, init?: RequestInit) => handler(String(url), init));
+    vi.stubGlobal("fetch", fn);
+    return fn;
+  }
+
+  it("lists onboarded slugs from GET /residents with the admin bearer — `repo:` prefixes stripped, lowercased", async () => {
+    const fn = stubFetch(
+      () => new Response(JSON.stringify({ cap: 6, residents: [{ resource: "repo:Acme/API", state: "warm" }, { resource: "repo:acme/web" }, { resource: "svc:other" }, {}] })),
+    );
+    const list = residentSlugsLister(cfg, env);
+    await expect(list?.()).resolves.toEqual(["acme/api", "acme/web"]);
+    expect(fn).toHaveBeenCalledTimes(1);
+    const [url, init] = fn.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://resident.example/residents");
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer admin-tok");
+  });
+
+  it("is undefined without the resident config or the admin bearer (names are then ignored by the resolver)", () => {
+    expect(residentSlugsLister(undefined, env)).toBeUndefined();
+    expect(residentSlugsLister(cfg, {} as NodeJS.ProcessEnv)).toBeUndefined();
+    expect(residentSlugsLister({ ...cfg, adminTokenEnv: "OTHER" }, env)).toBeUndefined();
+    expect(residentSlugsLister({ ...cfg, adminTokenEnv: "OTHER" }, { OTHER: "x" } as NodeJS.ProcessEnv)).toBeDefined();
+  });
+
+  it("a non-2xx answer or a body without a residents array is no answer (undefined)", async () => {
+    stubFetch(() => new Response(JSON.stringify({ error: "nope" }), { status: 500 }));
+    await expect(residentSlugsLister(cfg, env)?.()).resolves.toBeUndefined();
+    stubFetch(() => new Response("not json"));
+    await expect(residentSlugsLister(cfg, env)?.()).resolves.toBeUndefined();
+    stubFetch(() => new Response(JSON.stringify({ residents: "x" })));
+    await expect(residentSlugsLister(cfg, env)?.()).resolves.toBeUndefined();
+  });
+
+  it("a transport failure answers undefined AND opens the shared probe outage window (the next call skips the fetch)", async () => {
+    const fn = stubFetch(() => {
+      throw new TypeError("fetch failed");
+    });
+    const list = residentSlugsLister(cfg, env);
+    await expect(list?.()).resolves.toBeUndefined();
+    await expect(list?.()).resolves.toBeUndefined();
+    expect(fn).toHaveBeenCalledTimes(1); // second call answered from the outage window
   });
 });

@@ -6,7 +6,7 @@ import { AGENTS, getAgent, type AgentDef } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives, type RequestDirectives, type ThreadDirectives } from "../directives.js";
 import { runAgent } from "../runner.js";
 import { makeWebCapability } from "../tools/web.js";
-import { residentOnboardedProbe } from "../execution/factory.js";
+import { residentOnboardedProbe, residentSlugsLister } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
 import type { ProviderRegistry } from "../providers/registry.js";
@@ -428,7 +428,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       ? Promise.resolve(
           deps.resolveRepoContext
             ? deps.resolveRepoContext(msg, history)
-            : resolveRepoContext(msg, history, residentOnboardedProbe(deps.config.config.execution?.resident)),
+            : resolveRepoContext(
+                msg,
+                history,
+                residentOnboardedProbe(deps.config.config.execution?.resident),
+                residentSlugsLister(deps.config.config.execution?.resident),
+              ),
         ).then((ctx) => ctx ?? {})
       : Promise.resolve({});
     repoCtxP.catch(() => {});
@@ -499,6 +504,23 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         `📦 \`${slug}\` is not onboarded as a resident, so I did not start a *${agent.name}* run for it. ` +
           `${onboardHint} for a warm, deps-ready environment, or name the repository by URL ` +
           `(https://github.com/${slug}) to run in a cold per-thread sandbox.`,
+      );
+      return;
+    }
+
+    // Unverified gate (item 29, the F2 of #445): the registry did not ANSWER
+    // for the repo this message addressed (or, in a fresh thread, for its only
+    // candidate). Running anyway would mean guessing a repo — in a bound
+    // thread, the thread's OLD one: exactly the wrong-repo run addressing
+    // exists to end. Say so and stop; the user retries in a minute or names
+    // the repo by URL.
+    if (needsRepo && !repoCtx.repo && repoCtx.unverifiedRepo) {
+      const slug = repoCtx.unverifiedRepo;
+      console.log(`[dispatch] ${msg.threadKey} not started: repo could not be verified (${slug}: resident registry unreachable)`);
+      await card.done({ title: `📦 ${label} · not started (repo could not be verified)` });
+      await io.reply(
+        `⚠️ I couldn't verify that \`${slug}\` is an onboarded repo — the resident registry didn't answer — so I did not start a *${agent.name}* run rather than guess which repo you meant. ` +
+          `Try again in a minute, or name the repository by URL (https://github.com/${slug}) to run in a cold per-thread sandbox.`,
       );
       return;
     }
@@ -2263,7 +2285,12 @@ async function resolveRepoForCommand(deps: CoreDeps, msg: IncomingMessage, histo
     return (
       (await (deps.resolveRepoContext
         ? deps.resolveRepoContext(msg, history)
-        : resolveRepoContext(msg, history, residentOnboardedProbe(deps.config.config.execution?.resident)))) ?? {}
+        : resolveRepoContext(
+            msg,
+            history,
+            residentOnboardedProbe(deps.config.config.execution?.resident),
+            residentSlugsLister(deps.config.config.execution?.resident),
+          ))) ?? {}
     );
   } catch {
     return {};

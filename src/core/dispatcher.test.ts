@@ -793,6 +793,25 @@ describe("resident repo dispatch", () => {
     expect(statuses[statuses.length - 1].title).toContain("not started");
   });
 
+  // #445 F2: the registry did not ANSWER for the repo the message addressed.
+  // Guessing — in a bound thread, the thread's old repo — is the wrong-repo
+  // run addressing exists to end, so the dispatcher says so and stops.
+  it("unverified repo (registry unreachable) + a repo-needing agent → one could-not-verify reply, no run", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.resolveRepoContext = () => ({ unverifiedRepo: "coreplanelabs/nominal" });
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:coding in coreplanelabs/nominal: fix the consent page", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("couldn't verify");
+    expect(replies[0]).toContain("coreplanelabs/nominal");
+    expect(replies[0]).not.toContain("not onboarded"); // silence is not a refusal
+    expect(replies[0]).toMatch(/github\.com/); // the URL form still binds a real repo
+    expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(statuses[statuses.length - 1].title).toContain("could not be verified");
+  });
+
   // `repo onboard` is admin-gated (canManageRepos, fail-closed): a non-admin
   // told to run it would just hit 🚫 next — point them at the admins instead.
   it("a non-admin gets the not-onboarded reply with an ask-an-admin hint, never a command they cannot run (#316)", async () => {
@@ -1313,7 +1332,7 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     expect(provider.requests).toHaveLength(1); // the run happened
     const last = statuses[statuses.length - 1];
     expect(last.title).toContain("✅");
-    expect(last.title).toContain("resident · main@f2fe51e (repo default — no branch named)");
+    expect(last.title).toContain("resident · acme/api · main@f2fe51e (repo default — no branch named)");
   });
 
   it('the thread answer "on main" rebinds via re-attach and runs', async () => {
