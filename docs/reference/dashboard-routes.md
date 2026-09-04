@@ -24,7 +24,7 @@ Every registered command has an HTTP twin behind the same Access gate, plus an M
 
 <!-- generated:api-routes · npm run docs:gen — generated from the code, do not edit by hand -->
 
-| Route | Methods | Scope | What it does |
+| Route | Methods | Action | What it does |
 |---|---|---|---|
 | `/api/help.show` | `GET`, `POST` | `help:read` | What Switchboard can do: agents, per-request directives, and every chat command. |
 | `/api/config.show` | `GET`, `POST` | `config:read` | The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted. |

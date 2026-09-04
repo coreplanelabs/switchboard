@@ -42,13 +42,14 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerEnvCommands(registry);
 }
 
-/** The `<group>` of every registered command's scope, once each, sorted — the
- *  vocabulary `permissions.operators` translates over (`src/core/authz/grants.ts`:
- *  every `<group>:read` + `<group>:write`). Derived from the catalogue so a new
- *  group is covered automatically; handed to `ConfigStore` at startup because
- *  `config.ts` cannot import the catalogue (the config commands import it). */
+/** The `<group>` of every registered command's action, once each, sorted — the
+ *  vocabulary `permissions.operators` (every `<group>:read` + `<group>:write`)
+ *  and an Access browser session's implicit reads (every `<group>:read`)
+ *  translate over (`src/core/authz/grants.ts`). Derived from the catalogue so a
+ *  new group is covered automatically; handed to `ConfigStore` at startup
+ *  because `config.ts` cannot import the catalogue (the config commands import it). */
 export function coreCommandGroups(): string[] {
   const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
   registerCoreCommands(registry);
-  return [...new Set(registry.list().map((c) => c.scope.slice(0, c.scope.indexOf(":"))))].sort();
+  return [...new Set(registry.list().map((c) => c.action.slice(0, c.action.indexOf(":"))))].sort();
 }

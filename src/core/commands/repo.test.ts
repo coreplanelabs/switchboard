@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
+import { callerWith } from "../testing/callers.js";
 import { parseInvocation } from "../commandSurface.js";
 import type { OperationResult, Operations } from "../operations.js";
 import type { ResidentAdminClient, ResidentAdminResponse } from "../residentAdmin.js";
@@ -104,16 +105,12 @@ const inspecting =
   async () => ({ ok: true, facts });
 const PNPM_ROOT = { entries: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"], packageJson: { scripts: { test: "turbo test -- run" } } };
 
-/** A chat caller admitted through exactly the given gates (`open` always). */
-const chat = (userId: string, gates: Array<"repoManager" | "agentRun"> = []): Caller => ({
-  kind: "chat",
-  id: userId,
-  scopes: new Set(),
-  chatGate: (gate) => gate === "open" || gates.includes(gate as "repoManager"),
-  origin: { channelId: "slack:CX", threadKey: "slack:CX:1.0" },
-});
+/** A Slack person holding `repo:read` like everyone, plus the grants of the named rights:
+ *  `repoManager` → `repo:write` (permissions.repoManagement), `agentRun` → `agent:run:coding`. */
+const chat = (userId: string, gates: Array<"repoManager" | "agentRun"> = []): Caller =>
+  callerWith("chat", userId, { actions: new Set(["repo:read", ...(gates.includes("repoManager") ? ["repo:write"] : []), ...(gates.includes("agentRun") ? ["agent:run:coding"] : [])]) }, { origin: { channelId: "slack:CX", threadKey: "slack:CX:1.0" } });
 const admin = chat("slack:UADMIN", ["repoManager", "agentRun"]);
-const mcp = (...scopes: string[]): Caller => ({ kind: "mcp", id: "mcp:alice", scopes: new Set(scopes) });
+const mcp = (...actions: string[]): Caller => callerWith("mcp", "mcp:alice", actions);
 
 /** Send a chat line through the shared grammar (what the dispatcher does) and render the reply. */
 async function say(commands: CommandInvoker, text: string, caller: Caller) {
@@ -178,7 +175,7 @@ describe("repo.list", () => {
     expect(await commands.invoke("repo.list", {}, mcp("dispatch"))).toMatchObject({ ok: false, error: "unauthorized", status: 403 });
     expect(await commands.invoke("repo.list", {}, mcp("runs:read"))).toMatchObject({ ok: false, error: "unauthorized" });
     expect((await commands.invoke("repo.list", {}, mcp("repo:read"))).ok).toBe(true);
-    expect(repoList).toMatchObject({ scope: "repo:read", chatGate: "open", effect: "read" });
+    expect(repoList).toMatchObject({ action: "repo:read", effect: "read" });
   });
 });
 
@@ -191,9 +188,12 @@ describe("gates (KTD9 fail-closed) and scopes", () => {
     }
     for (const fn of [c.onboard, c.offboard, c.reconfigure, c.rebuild]) expect(fn).not.toHaveBeenCalled();
     const byId = Object.fromEntries(repoCommands.map((cmd) => [cmd.id, cmd]));
-    for (const id of ["repo.onboard", "repo.offboard", "repo.reconfigure", "repo.rebuild"]) expect(byId[id], id).toMatchObject({ scope: "repo:write", chatGate: "repoManager", effect: "write" });
-    expect(byId["repo.test"]).toMatchObject({ scope: "repo:exec", chatGate: "agentRun", effect: "write" });
-    expect(byId["repo.build"]).toMatchObject({ scope: "repo:exec", chatGate: "agentRun", effect: "write" });
+    for (const id of ["repo.onboard", "repo.offboard", "repo.reconfigure", "repo.rebuild"]) expect(byId[id], id).toMatchObject({ action: "repo:write", effect: "write" });
+    // The deterministic ops are decided on `agent { coding }` (the implicit target agent), not on the command.
+    for (const id of ["repo.test", "repo.build"]) {
+      expect(byId[id], id).toMatchObject({ action: "repo:exec", effect: "write" });
+      expect(byId[id].resource?.({ args: ["acme/api"], options: {} }, admin), id).toEqual({ type: "agent", name: "coding" });
+    }
   });
 
   it("machine callers: repo:read cannot onboard, repo:write can; repo:write cannot run tests, repo:exec can", async () => {
@@ -530,7 +530,7 @@ describe("repo test / repo build (deterministic ops, U6/KTD8)", () => {
     expect((await say(failing, "repo build acme/api", admin)).text).toBe("❌ test failed (exit 1)\n```\n1 failing\n```");
   });
 
-  it("the chat gate is `agentRun` (canRunAgent coding): a user without coding access is refused by the registry, the op never runs", async () => {
+  it("the table decides on `agent { coding }` (the agentRun gate as a row): a user without coding access is refused by the registry, the op never runs", async () => {
     const { ops, calls } = fakeOps(OK_RESULT);
     expect(await bind({ ops }).invoke("repo.test", { args: ["acme/api", "main"] }, chat("slack:UX"))).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
     expect(calls).toHaveLength(0);

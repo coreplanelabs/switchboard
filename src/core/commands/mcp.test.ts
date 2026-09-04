@@ -8,6 +8,7 @@ import { importCredentialKey } from "../../mcp/sealed.js";
 import { InMemoryMcpSecretStore } from "../../mcp/secretStore.js";
 import { McpService } from "../../mcp/service.js";
 import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker, type JsonValue } from "../commandRegistry.js";
+import { callerWith } from "../testing/callers.js";
 import { MCP_COMMANDS, MCP_OFF_MESSAGE, registerMcpCommands, type McpCommandDeps } from "./mcp.js";
 
 // features/mcp-tools.md items 13–15: the `mcp.*` commands are thin writes into
@@ -58,15 +59,12 @@ function bind(svc: McpService | { unavailable: string }): CommandInvoker {
   return bindCommands(registry, { mcp: { service: async () => svc } });
 }
 
-const chat = (id: string, opts: { admin?: boolean; channelConfig?: boolean } = {}): Caller => ({
-  kind: "chat",
-  id,
-  scopes: new Set(),
-  chatGate: (g) => (g === "open" ? true : g === "repoManager" ? opts.admin === true || id === ADMIN : g === "channelConfig" ? opts.channelConfig !== false : false),
-  origin: { channelId: "slack:CX", threadKey: "slack:CX:1" },
-});
-const machine = (scopes: string[]): Caller => ({ kind: "mcp", id: "mcp:svc", scopes: new Set(scopes) });
-const cli: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
+/** A Slack person: the open chat commands, `config:write` unless `channelConfig: false` (the
+ *  `permissions.channelConfig` key present and not naming them), everything for an admin. */
+const chat = (id: string, opts: { admin?: boolean; channelConfig?: boolean } = {}): Caller =>
+  callerWith("chat", id, opts.admin === true || id === ADMIN ? "all" : { actions: new Set(["mcp:read", "mcp:write", ...(opts.channelConfig !== false ? ["config:write"] : [])]) }, { origin: { channelId: "slack:CX", threadKey: "slack:CX:1" } });
+const machine = (actions: string[]): Caller => callerWith("mcp", "mcp:svc", actions);
+const cli: Caller = callerWith("cli", "cli:local", "all");
 
 async function text(inv: CommandInvoker, id: string, input: { args?: unknown[]; options?: Record<string, unknown> }, caller: Caller) {
   const res = await inv.invoke(id, input, caller);
@@ -77,8 +75,9 @@ async function text(inv: CommandInvoker, id: string, input: { args?: unknown[]; 
 describe("mcp.* commands", () => {
   it("registers five commands on the typed model", () => {
     expect(MCP_COMMANDS.map((c) => c.id)).toEqual(["mcp.list", "mcp.add", "mcp.connect", "mcp.show", "mcp.remove"]);
-    expect(MCP_COMMANDS.every((c) => c.chatGate === "open")).toBe(true);
-    expect(MCP_COMMANDS.map((c) => c.scope)).toEqual(["mcp:read", "mcp:write", "mcp:write", "mcp:read", "mcp:write"]);
+    expect(MCP_COMMANDS.map((c) => c.action)).toEqual(["mcp:read", "mcp:write", "mcp:write", "mcp:read", "mcp:write"]);
+    // The tiers are the handler's question about `config-scope`; the command itself names no resource.
+    expect(MCP_COMMANDS.every((c) => c.resource === undefined)).toBe(true);
   });
 
   it("MCP off → `unavailable` with the standard sentence on every command", async () => {

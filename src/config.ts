@@ -8,7 +8,6 @@ import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
 import type { ShipConfig } from "./core/shipPipeline.js";
-import type { ChatGate } from "./core/commandRegistry.js";
 import { grantsIn, grantsTable, parseGrantsConfig, type GrantsConfig, type GrantsTable } from "./core/authz/grants.js";
 import type { Grants } from "./core/authz/types.js";
 import type { IngressTokenMap } from "./core/ingressTokens.js";
@@ -87,14 +86,15 @@ export interface Permissions {
   /**
    * Cloudflare Access identities (`access:<sub>`) allowed `*:write` commands
    * over HTTP (`runs.stop`, …). Browser Access sessions hold every `*:read`
-   * scope implicitly; writes require being listed here (KTD10). Chat
-   * operators are `admins`, not this list.
+   * grant implicitly; writes require being listed here (KTD10). Chat
+   * operators are `admins`, not this list. Translated to grants at load
+   * (`src/core/authz/grants.ts`); the policy table decides.
    */
   operators?: string[];
   /**
    * Cloudflare Access service tokens (the machine credential for `/api/*`),
    * keyed by the token's `common_name` claim, each mapped to the exact command
-   * scopes it holds (`runs:read`, `runs:write`, …). No implicit scopes: an
+   * actions it holds (`runs:read`, `runs:write`, …). No implicit grants: an
    * unlisted service token holds nothing (KTD10/KTD13).
    */
   serviceTokens?: Record<string, string[]>;
@@ -655,53 +655,13 @@ export class ConfigStore {
     return this.config.permissions?.repoManagement?.includes(userId) ?? false;
   }
 
-  /**
-   * The `operator` chat gate of the command registry (KTD10): FAIL-CLOSED —
-   * true iff `permissions.admins` lists the user; no admins, no operators.
-   * Public on purpose (unlike `isAdmin`) so the registry can name its gate.
-   */
-  isOperator(userId: string): boolean {
-    return this.isAdmin(userId);
-  }
-
-  /** Resolves a command's `ChatGate` for one chat caller: `open` → everyone,
-   *  `operator` → `isOperator`, `repoManager` → `canManageRepos`, `channelConfig`
-   *  → `canEditChannelConfig` (open when unconfigured), `agentRun` →
-   *  `canRunAgent(userId, "coding")`. */
-  chatGateFor(userId: string): (gate: ChatGate) => boolean {
-    return (gate) => {
-      switch (gate) {
-        case "open":
-          return true;
-        case "operator":
-          return this.isOperator(userId);
-        case "repoManager":
-          return this.canManageRepos(userId);
-        case "channelConfig":
-          return this.canEditChannelConfig(userId);
-        case "agentRun":
-          return this.canRunAgent(userId, "coding");
-      }
-    };
-  }
-
-  /** The one grants lookup (plan U2, R8): what `grants[<actorId>]` declares,
-   *  else the legacy keys translated (`translateLegacyConfig`), else nothing.
-   *  Attached to every `Caller.actor`; decides nothing until the policy units. */
+  /** The one grants lookup (plan U2/U4, R8): what `grants[<actorId>]` declares,
+   *  else the legacy keys translated (`translateLegacyConfig` — `permissions.*`,
+   *  ingress token `scopes`/`channel`, `serviceTokens`, the chat `open`
+   *  baseline, a browser session's implicit reads), else nothing. Attached to
+   *  every `Caller.actor`: the ONLY thing `authorize` reads about a caller. */
   grantsFor(actorId: string): Grants {
     return grantsIn(this.grants, actorId);
-  }
-
-  /** `permissions.operators`: Access identities granted `*:write` over HTTP. */
-  operatorIdentities(): string[] {
-    return [...(this.config.permissions?.operators ?? [])];
-  }
-
-  /** `permissions.serviceTokens[<common_name>]`: the exact scopes an Access
-   *  service token holds; `[]` (nothing) when it is not listed. */
-  serviceTokenScopes(commonName: string): string[] {
-    const scopes = this.config.permissions?.serviceTokens?.[commonName];
-    return Array.isArray(scopes) ? scopes.filter((s): s is string => typeof s === "string") : [];
   }
 
   /** Who to ask when denied — for actionable error messages. */

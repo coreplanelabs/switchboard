@@ -12,8 +12,8 @@ import type { RunStore } from "./runStore.js";
 // the 60 s TTL) and the durable `RunStore` (finished runs for the retention
 // window), and it is the boundary where the registry's capability token stops:
 // nothing this module returns carries `token` (KTD7 — `RunSummary` never leaves
-// the core). Who may CALL is decided one layer up (the command registry's scopes
-// and chat gates, the Cloudflare Access gate). What a caller may SEE in a list
+// the core). Who may CALL is decided one layer up (the command registry's policy
+// table, the Cloudflare Access gate). What a caller may SEE in a list
 // arrives as `visibleTo` — the authorization policy compiled to a store
 // predicate (`predicateFor`, authorization.md item 6) — and is pushed down: live
 // rows are filtered by the reference evaluator, the store receives the same

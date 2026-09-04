@@ -6,6 +6,7 @@ import { ConfigStore } from "../../config.js";
 import { InMemoryIssueTracker } from "../../execution/githubIssues.js";
 import { chatCallerFor } from "../commandChat.js";
 import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
+import { callerWith } from "../testing/callers.js";
 import { jsonSchemaFor } from "../commandSurface.js";
 import { InMemoryFrictionLedger, RunStoreFrictionLedger, type FrictionLedger } from "../frictionLedger.js";
 import type { FrictionRunRecord } from "../frictionProposals.js";
@@ -57,20 +58,16 @@ function bind(deps: Partial<FrictionCommandDeps["friction"]> = {}): { commands: 
   return { commands, tracker };
 }
 
-/** A chat caller with the given gates whose actor sees EVERY channel — the
- *  in-memory ledger holds bare records (no channel), which only an all-channels
- *  actor can be shown (authorization.md item 6). `channels` narrows that. */
-const chat = (userId: string, gates: { repoManager: boolean }, channels: "all" | Set<string> = "all"): Caller => ({
-  kind: "chat",
-  id: userId,
-  scopes: new Set(),
-  chatGate: (gate) => (gate === "open" ? true : gate === "repoManager" ? gates.repoManager : false),
-  actor: { kind: "user", id: userId, grants: { actions: new Set(), channels, repos: new Set() } },
-});
-/** A machine caller with the given scopes over every channel (an ops token granted `channels: all`). */
-const mcp = (...scopes: string[]): Caller => ({ kind: "mcp", id: "mcp:alice", scopes: new Set(scopes), actor: { kind: "service", id: "mcp:alice", grants: { actions: new Set(scopes), channels: "all", repos: new Set() } } });
+/** A Slack person holding `friction:read` like everyone (+ the repo-management
+ *  grants when `repoManager`) whose actor sees EVERY channel — the in-memory
+ *  ledger holds bare records (no channel), which only an all-channels actor can
+ *  be shown (authorization.md item 6). `channels` narrows that. */
+const chat = (userId: string, gates: { repoManager: boolean }, channels: "all" | Set<string> = "all"): Caller =>
+  callerWith("chat", userId, { actions: new Set(["friction:read", ...(gates.repoManager ? ["friction:write", "repo:write"] : [])]), channels });
+/** A machine caller with the given actions over every channel (an ops token granted `channels: all`). */
+const mcp = (...actions: string[]): Caller => callerWith("mcp", "mcp:alice", actions);
 /** The same token WITHOUT a channel grant (unpinned, OQ4 a): admitted to the command, shown no run. */
-const mcpNoChannels = (...scopes: string[]): Caller => ({ ...mcp(...scopes), actor: { kind: "service", id: "mcp:alice", grants: { actions: new Set(scopes), channels: new Set(), repos: new Set() } } });
+const mcpNoChannels = (...actions: string[]): Caller => callerWith("mcp", "mcp:alice", { actions: new Set(actions) });
 
 /** A seeded ledger whose newest record was diagnosed on a head-truncated stream. */
 async function truncatedLedger() {
@@ -293,10 +290,10 @@ describe("scopes on machine surfaces (AE12)", () => {
     expect(tracker.issues("coreplanelabs/switchboard")).toEqual([]);
   });
 
-  it("declares the R13 gates and derives a JSON schema (dryRun accepts a boolean or its string form)", () => {
+  it("declares the R13 actions and derives a JSON schema (dryRun accepts a boolean or its string form)", () => {
     const byId = Object.fromEntries(frictionCommands.map((c) => [c.id, c]));
-    expect(byId["friction.report"]).toMatchObject({ scope: "friction:read", chatGate: "open", effect: "read" });
-    expect(byId["friction.propose"]).toMatchObject({ scope: "friction:write", chatGate: "repoManager", effect: "write" });
+    expect(byId["friction.report"]).toMatchObject({ action: "friction:read", effect: "read" });
+    expect(byId["friction.propose"]).toMatchObject({ action: "friction:write", effect: "write" });
     const schema = jsonSchemaFor(byId["friction.propose"]) as { properties: Record<string, unknown> };
     expect(Object.keys(schema.properties).sort()).toEqual(["dryRun", "minRuns", "repo", "top"]);
     expect(JSON.stringify(schema.properties.dryRun)).toContain('"boolean"');
@@ -312,7 +309,7 @@ describe("friction.analyze (CLI only) — the former frictionCli", () => {
     "event: end",
     "data: {}",
   ].join("\n");
-  const cli: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
+  const cli: Caller = callerWith("cli", "cli:local", "all");
 
   function bindAnalyze(files: Record<string, string>) {
     return bind({

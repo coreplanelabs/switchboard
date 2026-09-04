@@ -4778,7 +4778,7 @@ describe("run history write path (#157 U4)", () => {
     };
   }
 
-  function wired(provider: Provider, over: { registry?: RunRegistry; store?: RunStore; sleep?: (ms: number) => Promise<void> } = {}) {
+  function wired(provider: Provider, over: { registry?: RunRegistry; store?: RunStore; sleep?: (ms: number) => Promise<void>; yaml?: string } = {}) {
     const registry = over.registry ?? new RunRegistry({ genId: () => "run-h", genToken: () => "tok" });
     const store = over.store ?? new InMemoryRunStore();
     const warnings: string[] = [];
@@ -4788,7 +4788,7 @@ describe("run history write path (#157 U4)", () => {
       onPersisted: (id) => registry.markPersisted(id),
       sleep: over.sleep ?? (async () => {}),
     });
-    const deps = makeDeps(YAML_FIXTURE, provider);
+    const deps = makeDeps(over.yaml ?? YAML_FIXTURE, provider);
     deps.runRegistry = registry;
     deps.runHistoryWriter = writer;
     return { deps, registry, store, writer, warnings };
@@ -4898,10 +4898,10 @@ describe("run history write path (#157 U4)", () => {
     expect(rec!.diagnosis.truncatedInput).toBe(true);
   });
 
-  it("an inline `friction report` run is persisted like an agent run: agent `command`, the caller's identity, status from `ok`, events [input, answer]", async () => {
+  it("an inline `friction report` run is persisted like an agent run: agent `command`, the caller's identity, status from `ok`, events [input, answer] — the `http:cron` identity holds `friction:read` (a machine identity's text command needs the grant its tool call would, features/authorization.md)", async () => {
     let n = 0;
     const registry = new RunRegistry({ genId: () => `cmd-${++n}`, genToken: () => "tok" });
-    const { deps, store, writer } = wired(capturingProvider(), { registry });
+    const { deps, store, writer } = wired(capturingProvider(), { registry, yaml: YAML_FIXTURE.replace("permissions:\n", 'grants:\n  "http:cron":\n    actions: [friction:read]\npermissions:\n') });
     deps.frictionLedger = new InMemoryFrictionLedger();
     wireCommands(deps);
     const ok = fakeIO();

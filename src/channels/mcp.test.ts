@@ -414,11 +414,12 @@ function toolJson(res: { body?: unknown }): unknown {
 }
 
 describe("toCaller — the Caller a tool call runs as carries the mcp: Actor (plan U2)", () => {
-  it("a pinned token → service mcp:<subject>, grants = the token's scopes over mcp:<channel> (from the token map when no lookup is wired); no `channel` pin on the caller — the grant IS the pin", () => {
+  it("a pinned token → service mcp:<subject>, grants = the token's scopes over mcp:<channel> (from the token map when no lookup is wired); neither `scopes` nor a `channel` pin on the caller — the actor's grants ARE the pin", () => {
     const auth = scoped(["runs:read"], "ops");
     const c = toCaller(auth.tokens.tok, { auth });
-    expect(c).toMatchObject({ kind: "mcp", id: "mcp:alice", scopes: new Set(["runs:read"]) });
+    expect(c).toEqual({ kind: "mcp", id: "mcp:alice", actor: c.actor });
     expect(c).not.toHaveProperty("channel");
+    expect(c).not.toHaveProperty("scopes");
     expect(c.actor).toEqual({ kind: "service", id: "mcp:alice", grants: { actions: new Set(["runs:read"]), channels: new Set(["mcp:ops"]), repos: new Set() } });
   });
 
@@ -449,8 +450,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
     const registry = new CommandRegistry<unknown>({ audit: () => {} });
     registry.register({
       id: "hidden.cmd",
-      scope: "hidden:read",
-      chatGate: "open",
+      action: "hidden:read",
       effect: "read",
       surfaces: { mcp: false },
       describe: "not for MCP",
@@ -467,7 +467,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
     const body = toolJson(res) as { runs: { id: string }[] };
     expect(body.runs.map((r) => r.id).sort()).toEqual(["fin-1", "live-1"]);
     expect(JSON.stringify(res.body)).not.toContain("tok-");
-    const direct = await commands.invoke("runs.list", { options: { status: "all" } }, { kind: "mcp", id: "mcp:alice", scopes: new Set(["runs:read"]) });
+    const direct = await commands.invoke("runs.list", { options: { status: "all" } }, toCaller(scoped(["runs:read"]).tokens.tok, { auth: scoped(["runs:read"]) }));
     expect(body).toEqual(direct.ok ? direct.value : null);
   });
 

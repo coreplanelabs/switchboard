@@ -52,8 +52,8 @@ async function fixture() {
 }
 
 describe("CLI_CALLER — the local operator", () => {
-  it("is cli:local with every scope, and the same identity as the cli:local Actor holding every grant (plan U2)", () => {
-    expect(CLI_CALLER).toEqual({ kind: "cli", id: "cli:local", scopes: "all", actor: { kind: "user", id: "cli:local", grants: { actions: "all", channels: "all", repos: "all" } } });
+  it("is cli:local, the cli:local Actor holding every grant — the one input the policy table reads about it (plan U2/U4)", () => {
+    expect(CLI_CALLER).toEqual({ kind: "cli", id: "cli:local", actor: { kind: "user", id: "cli:local", grants: { actions: "all", channels: "all", repos: "all" } } });
   });
 });
 

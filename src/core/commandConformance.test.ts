@@ -8,10 +8,13 @@ import { z } from "zod";
 import type { BootstrapResult } from "../agentEnv/bootstrap.js";
 import { AGENTS } from "../agents/registry.js";
 import { CLI_CALLER, parseCliArgv, runCli, runCommand } from "../cli.js";
-import { ALL_GRANTS } from "./authz/grants.js";
 import { ConfigStore } from "../config.js";
-import { createCommandHttpHandler } from "../channels/commandHttp.js";
-import { handleMcpRequest } from "../channels/mcp.js";
+import { callerFor, createCommandHttpHandler } from "../channels/commandHttp.js";
+import { handleMcpRequest, toCaller } from "../channels/mcp.js";
+import { resolveChatActor } from "./authz/actor.js";
+import { authorize } from "./authz/authorize.js";
+import { NO_GRANTS } from "./authz/types.js";
+import { callerWith } from "./testing/callers.js";
 import type { DeployPlan } from "../deploy/plan.js";
 import type { RestartPlan } from "../deploy/restart.js";
 import type { DeployRunResult, RestartRunResult } from "../deploy/run.js";
@@ -25,6 +28,7 @@ import {
   commandDefiner,
   parseInput,
   renderText,
+  resourceOf,
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
   UNTRUSTED_PREAMBLE,
@@ -54,8 +58,14 @@ import { InMemoryScheduleStore } from "./scheduleStore.js";
 import { importCredentialKey, InMemoryMcpClient, InMemoryMcpSecretStore, McpService, type McpServerEntry } from "../mcp/index.js";
 import { InMemoryOverridesBacking, type Overrides } from "../config.js";
 import {
+  admits,
+  AUTHZ_INGRESS_TOKENS,
+  AUTHZ_PERMISSIONS,
+  AUTHZ_ROLES,
+  buildAuthorizationMatrix,
   buildConformanceMatrix,
   CALLER_ID,
+  carriedBy,
   catalogueSnapshot,
   COMMAND_FIXTURES,
   CROSS_CUTTING_ASSERTIONS,
@@ -66,10 +76,13 @@ import {
   FIXTURE,
   forCaller,
   parseCatalogueTable,
+  policyGaps,
   QUOTED_SAMPLE,
   quoteChatToken,
+  renderAuthorizationMatrix,
   renderConformanceMatrix,
   renderVariantCell,
+  roleActor,
   schemaPropertyNames,
   SURFACE_METAS,
   toArgv,
@@ -78,6 +91,7 @@ import {
   UNKNOWN_OPTION,
   variantsOf,
   withCallerToken,
+  type AuthzRole,
   type Named,
   type SurfaceMeta,
   type Variant,
@@ -96,9 +110,11 @@ import {
 //      every surface uses for that fault (`invalid_input`, whether the grammar
 //      or the registry saw it first), names the field and never echoes the
 //      submitted value;
-//   4. auth: no scope → refused before parse on every machine surface; the chat
-//      gate is enforced; writes are POST-only; reads never mutate the fixture;
-//      the Caller the registry saw is the one the adapter resolved;
+//   4. auth: admission on every surface is `authorize(actor, action, resource)`
+//      over the policy table — a fixed actor set × every command is derived from
+//      the table and checked against the real adapters (R13); a credential with
+//      no grants is refused before parse; writes are POST-only; reads never
+//      mutate the fixture; the Caller the registry saw is the adapter's;
 //   5. output hygiene: no capability token or planted secret; stored free text
 //      wrapped as untrusted on machine surfaces;
 //   6. every surface yields the identical `invoke` JSON (chat: `renderText` of it)
@@ -148,7 +164,7 @@ const NOBODY = "slack:UNOBODY";
 /** The channel a chat caller speaks from (its `origin`) — deliberately not the fixture's `--channel`. */
 const CHAT_CHANNEL = "slack:CX";
 
-const CONFIG_YAML = `
+const BASE_YAML = `
 providers:
   anthropic:
     type: anthropic
@@ -157,30 +173,49 @@ defaults:
   agent: general
   models:
     general: anthropic/general-model
-permissions:
+`;
+
+/** The generic fixture's deployment: one Slack admin, no `channelConfig` (open-when-absent), and the
+ *  HTTP power caller granted everything NATIVELY (an `admins` entry would also change `adminsHint`,
+ *  which the cross-surface JSON comparison folds by caller id). */
+const CONFIG_YAML = `${BASE_YAML}permissions:
   admins: ["${POWER}"]
   repoManagement: ["${POWER}"]
-  # The HTTP "power" identity: every group's read + write over every channel (the legacy operator translation).
-  operators: ["access:power"]
+grants:
+  "access:power":
+    actions: all
+    channels: all
+    repos: all
+`;
+
+/** The authorization matrix's deployment: `AUTHZ_PERMISSIONS`, spelled as config.yaml. */
+const AUTHZ_YAML = `${BASE_YAML}permissions:
+  admins: ${JSON.stringify(AUTHZ_PERMISSIONS.admins)}
+  repoManagement: ${JSON.stringify(AUTHZ_PERMISSIONS.repoManagement)}
+  channelConfig: ${JSON.stringify(AUTHZ_PERMISSIONS.channelConfig)}
+  operators: ${JSON.stringify(AUTHZ_PERMISSIONS.operators)}
+  serviceTokens: ${JSON.stringify(AUTHZ_PERMISSIONS.serviceTokens)}
 `;
 
 const CONFIG_DIR = (() => {
   const dir = mkdtempSync(join(tmpdir(), "swb-conformance-"));
   writeFileSync(join(dir, "config.yaml"), CONFIG_YAML);
+  writeFileSync(join(dir, "authz.yaml"), AUTHZ_YAML);
   return dir;
 })();
 let configN = 0;
-/** A fresh config store per fixture: overrides are on-disk state a write changes. */
-function freshConfig(): { store: ConfigStore; overridesPath: string } {
+/** A fresh config store per fixture: overrides are on-disk state a write changes.
+ *  The store knows the catalogue's groups (operators, browser reads) and the
+ *  matrix's ingress tokens, as the bot's does at startup. */
+function freshConfig(yaml: "config" | "authz" = "config"): { store: ConfigStore; overridesPath: string } {
   const overridesPath = join(CONFIG_DIR, `overrides-${++configN}.json`);
-  // `commandGroups` as production wires it (index.ts): the operators translation grants every registered group.
-  return { store: new ConfigStore(join(CONFIG_DIR, "config.yaml"), overridesPath, () => {}, { commandGroups: coreCommandGroups() }), overridesPath };
+  return { store: new ConfigStore(join(CONFIG_DIR, `${yaml}.yaml`), overridesPath, () => {}, { commandGroups: coreCommandGroups(), ingressTokens: AUTHZ_INGRESS_TOKENS }), overridesPath };
 }
 
 // ---- the generic fixture ----------------------------------------------------------------------------
 
 /** Every caller id the suite drives a command as — each gets its own memory scope. */
-const CALLER_IDS = ["access:power", "access:svc:svc-none", "mcp:power", "mcp:nobody", CLI_CALLER.id, "cli:nobody", "cli:reference", POWER, NOBODY];
+const CALLER_IDS = [...new Set(["access:power", "access:svc:svc-none", "mcp:power", "mcp:nobody", CLI_CALLER.id, "cli:nobody", "cli:reference", POWER, NOBODY, ...AUTHZ_ROLES.map((r) => r.id)])];
 
 const RESIDENTS = {
   cap: 6,
@@ -371,8 +406,8 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
   };
 }
 
-/** `extra` registers commands beside the catalogue (the fence's self-test). */
-async function fixture(extra: (registry: CommandRegistry<CoreCommandDeps>) => void = () => {}): Promise<Fixture> {
+/** `extra` registers commands beside the catalogue (the fence's self-test); `yaml` picks the deployment. */
+async function fixture(extra: (registry: CommandRegistry<CoreCommandDeps>) => void = () => {}, yaml: "config" | "authz" = "config"): Promise<Fixture> {
   let n = 0;
   const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
   const live = reg.create("coding · acme/live", { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t", channelVisibility: "public" });
@@ -383,7 +418,7 @@ async function fixture(extra: (registry: CommandRegistry<CoreCommandDeps>) => vo
   await store.put(record(FIXTURE.persistedRun, NOW - 1000));
   await store.put(record("fin-2", NOW - 2000));
   const tracker = new InMemoryIssueTracker();
-  const { store: config, overridesPath } = freshConfig();
+  const { store: config, overridesPath } = freshConfig(yaml);
   const memory = new InMemoryMemoryStore(MEMORY_SEED.map((r) => ({ ...r })), { now: () => NOW });
   const schedules = new InMemoryScheduleStore();
   await schedules.record({ schedule: "self-improvement", firedAt: NOW - 60_000, runId: "run-sched-1", outcome: "completed", detail: "filed 0 issues" });
@@ -420,7 +455,7 @@ const CATALOGUE: CommandDef<unknown>[] = (() => {
   return registry.list() as CommandDef<unknown>[];
 })();
 
-const ALL_SCOPES = [...new Set(CATALOGUE.map((c) => c.scope))];
+const ALL_ACTIONS = [...new Set(CATALOGUE.map((c) => c.action))];
 
 // ---- the surfaces ---------------------------------------------------------------------------------
 
@@ -478,7 +513,8 @@ function httpOutcome(status: number, text: string): Outcome {
 
 const httpIdentity = (who: Who) => (who === "power" ? { sub: "power" } : { sub: "", commonName: "svc-none" });
 const httpCaller = (who: Who) => ({ kind: "access" as const, id: who === "power" ? "access:power" : "access:svc:svc-none" });
-const httpHandler = (f: Fixture) => createCommandHttpHandler(f.commands, { operatorIdentities: () => ["access:power"], serviceTokenScopes: () => [], grantsFor: (id) => f.config.grantsFor(id), devBypassActive: false });
+const httpOptions = (f: Fixture) => ({ grantsFor: (id: string) => f.config.grantsFor(id), devBypassActive: false });
+const httpHandler = (f: Fixture) => createCommandHttpHandler(f.commands, httpOptions(f));
 
 const httpGet: Surface = {
   meta: meta("httpGet"),
@@ -511,17 +547,24 @@ const mcp: Surface = {
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toSurfaceNames(cmd.id).mcp, arguments: named } }),
       },
       {} as CoreDeps,
-      { auth: { tokens: { power: { subject: "power", scopes: ALL_SCOPES }, nobody: { subject: "nobody", scopes: ["dispatch"] } } }, commands: f.commands },
+      { auth: { tokens: { power: { subject: "power", scopes: ALL_ACTIONS }, nobody: { subject: "nobody", scopes: ["dispatch"] } } }, commands: f.commands },
     );
-    const wire = JSON.stringify(res.body);
-    const body = res.body as { result?: { content: { text: string }[] }; error?: { message: string; data?: { code: InvokeErrorCode } } };
-    if (body.error) return { ok: false, code: body.error.data?.code, text: body.error.message, wire };
-    const text = body.result!.content[0].text;
-    return { ok: true, json: JSON.parse(text.slice(text.indexOf("\n") + 1)), wire };
+    return mcpOutcome(res.body);
   },
 };
 
-const cliCaller = (who: Who): Caller => (who === "power" ? CLI_CALLER : { kind: "cli", id: "cli:nobody", scopes: new Set() });
+function mcpOutcome(raw: unknown): Outcome {
+  const wire = JSON.stringify(raw);
+  const body = raw as { result?: { content: { text: string }[] }; error?: { message: string; data?: { code: InvokeErrorCode } } };
+  if (body.error) return { ok: false, code: body.error.data?.code, text: body.error.message, wire };
+  const text = body.result!.content[0].text;
+  return { ok: true, json: JSON.parse(text.slice(text.indexOf("\n") + 1)), wire };
+}
+
+/** The CLI has ONE real caller (`cli:local`, every grant); `cli:nobody` is a
+ *  synthetic no-grants credential driven through this adapter so the
+ *  registry's fail-closed path is exercised on this surface too. */
+const cliCaller = (who: Who): Caller => (who === "power" ? CLI_CALLER : { kind: "cli", id: "cli:nobody", actor: { kind: "service", id: "cli:nobody", grants: NO_GRANTS } });
 
 const cli: Surface = {
   meta: meta("cli"),
@@ -560,6 +603,60 @@ const chat: Surface = {
 const SURFACES: Surface[] = [httpGet, httpPost, mcp, cli, chat];
 expect(SURFACES.map((s) => s.meta.key)).toEqual(SURFACE_METAS.map((m) => m.key));
 
+// ---- the fixed actor set (R13), driven through the surface that carries each id ------------------
+
+/** The Access identity an `access:` role authenticates as: a service token by common_name, else a browser sub. */
+function httpIdentityOf(role: AuthzRole): { sub: string; commonName?: string } {
+  return role.id.startsWith("access:svc:") ? { sub: "", commonName: role.id.slice("access:svc:".length) } : { sub: role.id.slice("access:".length) };
+}
+
+/** Drive `cmd` with `named` as `role` on the surface its id is carried by. */
+async function runAsRole(f: Fixture, cmd: CommandDef<unknown>, named: Named, role: AuthzRole): Promise<Outcome> {
+  const input = forCaller(named, role.id);
+  switch (carriedBy(role.id)) {
+    case "chat": {
+      const text = toChatText(toSurfaceNames(cmd.id).cli, toArgv(cmd, input));
+      const parsed = parseChatCommand(text, f.commands);
+      if (!parsed) throw new Error(`chat did not recognize "${text}"`);
+      if (parsed.kind === "reply") return { ok: false, code: parsed.error, text: parsed.text, wire: parsed.text };
+      const res = await invokeChatCommand({ commands: f.commands, parsed, msg: { channelId: CHAT_CHANNEL, userId: role.id, threadKey: `${CHAT_CHANNEL}:t1` }, config: f.config, now: NOW });
+      return { ok: res.ok, code: res.error, text: res.text, wire: res.text };
+    }
+    case "access": {
+      const t = cmd.effect === "write" ? fakeReqRes("POST", toSurfaceNames(cmd.id).http, JSON.stringify(input), { "content-type": "application/json" }) : fakeReqRes("GET", `${toSurfaceNames(cmd.id).http}?${toKebabQuery(input).toString()}`);
+      await httpHandler(f)(t.req, t.res, httpIdentityOf(role));
+      return httpOutcome(t.status(), t.text());
+    }
+    case "mcp": {
+      const res = await handleMcpRequest(
+        { method: "POST", headers: { authorization: `Bearer ${role.id.slice("mcp:".length)}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toSurfaceNames(cmd.id).mcp, arguments: input } }) },
+        {} as CoreDeps,
+        { auth: { tokens: AUTHZ_INGRESS_TOKENS }, commands: f.commands, grantsFor: (id) => f.config.grantsFor(id) },
+      );
+      return mcpOutcome(res.body);
+    }
+    case "cli": {
+      const parsed = parseCliArgv([...toSurfaceNames(cmd.id).cli, ...toArgv(cmd, input), "--json"], f.commands);
+      if (parsed.kind !== "command" && parsed.kind !== "invalid") throw new Error(`cli parsed ${parsed.kind} for ${cmd.id}`);
+      const out = await runCli(f.commands, parsed, CLI_CALLER);
+      if (out.exitCode !== 0) {
+        const m = /^error \((\w+)\): (.*)$/s.exec(out.stderr);
+        return { ok: false, code: m?.[1] as InvokeErrorCode, status: out.exitCode, text: m?.[2], wire: out.stdout + out.stderr };
+      }
+      return { ok: true, json: JSON.parse(out.stdout), wire: out.stdout + out.stderr };
+    }
+  }
+}
+
+/** Whether the REGISTRY refused this outcome (the table said no): `unauthorized`
+ *  with nothing recorded (an HTTP refusal before the body) or a recorded
+ *  `decidedBy: registry`. A handler's own `unauthorized` is not the table's. */
+function registryRefused(f: Fixture, out: Outcome): boolean {
+  if (out.code !== "unauthorized") return false;
+  const last = f.recorded[f.recorded.length - 1];
+  return last === undefined || (!last.result.ok && last.result.decidedBy === "registry");
+}
+
 function surfacesFor(cmd: CommandDef<unknown>, variant?: Variant): Surface[] {
   return SURFACES.filter((s) => exposedOn(cmd, s.meta, variant));
 }
@@ -570,7 +667,7 @@ function runOn(surface: Surface, f: Fixture, cmd: CommandDef<unknown>, named: Na
 }
 
 /** The reference caller: the local CLI's every-grant actor, so the reference JSON is the unrestricted view. */
-const powerCaller: Caller = { kind: "cli", id: "cli:reference", scopes: "all", actor: { kind: "user", id: "cli:reference", grants: ALL_GRANTS } };
+const powerCaller: Caller = callerWith("cli", "cli:reference", "all");
 
 /** `invoke` with the by-name input split by the definition, as this caller. */
 async function reference(f: Fixture, cmd: CommandDef<unknown>, named: Named, caller: Caller): Promise<InvokeResult> {
@@ -639,7 +736,7 @@ describe("command conformance — catalogue fences", () => {
     expect(CATALOGUE.length).toBeGreaterThan(0);
   });
 
-  it("catalogue snapshot: id, arguments, options (names + kinds + enum values), surfaces, scope, chat gate, effect — update deliberately", () => {
+  it("catalogue snapshot: id, arguments, options (names + kinds + enum values), surfaces, action, policy target, effect — update deliberately", () => {
     expect(catalogueSnapshot(CATALOGUE)).toMatchSnapshot();
   });
 
@@ -657,12 +754,47 @@ describe("command conformance — catalogue fences", () => {
     for (const id of Object.keys(COMMAND_FIXTURES)) expect(ids.has(id), `COMMAND_FIXTURES["${id}"] names no registered command`).toBe(true);
   });
 
+  it("authorization: every command's action has a policy row on the resource it authorizes (features/authorization.md item 4)", () => {
+    expect(policyGaps(CATALOGUE)).toEqual([]);
+  });
+
+  it("authorization: a command whose action has no policy row fails loudly, by name", () => {
+    const define = commandDefiner<CoreCommandDeps>();
+    const orphan = define({ id: "demo.norow", action: "demo:read", effect: "read", describe: "no row names demo:read", handler: async () => ({}) });
+    const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+    registerCoreCommands(registry);
+    registry.register(orphan);
+    expect(policyGaps(registry.list() as CommandDef<unknown>[])).toEqual([expect.stringMatching(/^demo\.norow: no policy row for demo:read on command/)]);
+    // …and the registry refuses it for everyone, the local CLI included: no row → deny (R7).
+    expect(authorize(CLI_CALLER.actor, orphan.action, { type: "command", id: orphan.id })).toEqual({ allow: false, reason: "no-rule" });
+  });
+
+  it("authorization: the fixed actor set resolves through the real adapters to the actors the matrix decides for (grants from config, never from the adapter)", async () => {
+    const f = await fixture(() => {}, "authz");
+    for (const role of AUTHZ_ROLES) {
+      const expected = roleActor(role);
+      const resolved = (() => {
+        switch (carriedBy(role.id)) {
+          case "chat":
+            return resolveChatActor({ userId: role.id, channelId: CHAT_CHANNEL, threadKey: `${CHAT_CHANNEL}:t1` }, (id) => f.config.grantsFor(id));
+          case "access":
+            return callerFor(httpIdentityOf(role), httpOptions(f)).actor;
+          case "mcp":
+            return toCaller(AUTHZ_INGRESS_TOKENS[role.id.slice("mcp:".length)]!, { auth: { tokens: AUTHZ_INGRESS_TOKENS }, grantsFor: (id) => f.config.grantsFor(id) }).actor;
+          case "cli":
+            return CLI_CALLER.actor;
+        }
+      })();
+      expect({ kind: resolved.kind, id: resolved.id, grants: resolved.grants }, role.column).toEqual({ kind: expected.kind, id: expected.id, grants: expected.grants });
+    }
+  });
+
   it("the fence is live: a command with an unfakeable dependency or an unsampleable field is listed by name", async () => {
     const define = commandDefiner<CoreCommandDeps>();
+    // Real actions, so the real rows admit the power caller and the fence measures the FIXTURE, not the table.
     const needsDeps = define({
       id: "demo.needs",
-      scope: "demo:read",
-      chatGate: "open",
+      action: "runs:read",
       effect: "read",
       describe: "needs a dependency the fixture lacks",
       handler: async () => {
@@ -672,8 +804,7 @@ describe("command conformance — catalogue fences", () => {
     const unsampleable = define({
       id: "demo.strict",
       args: [{ name: "ticket", schema: z.string().regex(/^ZZ-\d{9}$/), describe: "ticket" }],
-      scope: "demo:read",
-      chatGate: "open",
+      action: "runs:read",
       effect: "read",
       describe: "an argument no generic sample satisfies",
       handler: async () => ({}),
@@ -687,7 +818,7 @@ describe("command conformance — catalogue fences", () => {
     expect(failures).toEqual([expect.stringMatching(/^demo\.needs: happy path .*unavailable/), expect.stringMatching(/^demo\.strict: no sample for ticket/)]);
   });
 
-  it("scripts/command-conformance-matrix.ts prints this suite's matrix: one row per variant the suite runs, one exercised cell per surface it drives", () => {
+  it("scripts/command-conformance-matrix.ts prints this suite's matrix: one row per variant the suite runs, one exercised cell per surface it drives, one authorization row per command", () => {
     const script = readFileSync(join(here, "..", "..", "scripts", "command-conformance-matrix.ts"), "utf8");
     expect(script).toContain("buildConformanceMatrix");
     expect(script).toContain("renderConformanceMatrix");
@@ -702,8 +833,10 @@ describe("command conformance — catalogue fences", () => {
       expect(matrix.commands.find((c) => c.id === cmd.id)?.rows.map((r) => r.variant), cmd.id).toEqual(vs.map((v) => v.name));
     }
     expect(matrix.summary).toEqual({ commands: CATALOGUE.length, surfaces: SURFACES.length, variants, cells });
+    expect(matrix.authorization.rows.map((r) => r.id)).toEqual(CATALOGUE.map((c) => c.id).sort());
     const md = renderConformanceMatrix(matrix);
-    expect(md.split("\n").filter((l) => /^\| [^-|]/.test(l) && !l.startsWith("| Variant") && !l.startsWith("| Assertion")).length).toBe(variants + CROSS_CUTTING_ASSERTIONS.length);
+    expect(md.split("\n").filter((l) => /^\| [^-|]/.test(l) && !l.startsWith("| Variant") && !l.startsWith("| Assertion") && !l.startsWith("| Command")).length).toBe(variants + CATALOGUE.length + CROSS_CUTTING_ASSERTIONS.length);
+    expect(md).toContain(renderAuthorizationMatrix(matrix.authorization).join("\n"));
   });
 
   it("one error vocabulary: no matrix row has two exposed cells that disagree — a rejected row names its one code and every exposed cell is ⛔, an accepted row is all ✅", () => {
@@ -778,7 +911,7 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
     const list = await handleMcpRequest(
       { method: "POST", headers: { authorization: "Bearer power" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) },
       {} as CoreDeps,
-      { auth: { tokens: { power: { subject: "power", scopes: ALL_SCOPES } } }, commands: f.commands },
+      { auth: { tokens: { power: { subject: "power", scopes: ALL_ACTIONS } } }, commands: f.commands },
     );
     const tools = (list.body as { result: { tools: { name: string; inputSchema: unknown }[] } }).result.tools;
     const tool = tools.find((t) => t.name === names.mcp);
@@ -897,12 +1030,12 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
     }
   });
 
-  it("auth: a caller without the scope is refused BEFORE parse on every machine surface (a malformed input still gets unauthorized, not invalid_input); the chat gate matches config; writes are POST-only", async () => {
+  it("auth: a credential without the grant is refused BEFORE parse on every machine surface (a malformed input still gets unauthorized, not invalid_input); chat admission is the table's decision for the message's actor; writes are POST-only", async () => {
     const happy = variants.find((v) => v.name === "required-only")!;
     const malformed: Named = { ...happy.named, [UNKNOWN_OPTION]: "x" };
     for (const surface of surfacesFor(cmd).filter((s) => s.meta.machine)) {
       const f = await fixture();
-      // The CLI's grammar runs before invoke (its one real caller holds every scope), so it gets the well-formed input.
+      // The CLI's grammar runs before invoke (its one real caller holds every grant), so it gets the well-formed input.
       const out = await runOn(surface, f, cmd, surface === cli ? happy.named : malformed, "nobody");
       expect(out.ok, `${cmd.id} via ${surface.meta.column}: nobody was admitted`).toBe(false);
       expect(out.code, `${cmd.id} via ${surface.meta.column}: ${out.wire}`).toBe("unauthorized");
@@ -913,18 +1046,24 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
     }
     if (cmd.surfaces?.chat !== false) {
       const f = await fixture();
-      const admitted = f.config.chatGateFor(NOBODY)(cmd.chatGate);
+      // What the table says for the actor the chat adapter resolves for NOBODY (the plain Slack user's baseline grants).
+      const msg = { userId: NOBODY, channelId: CHAT_CHANNEL, threadKey: `${CHAT_CHANNEL}:t1` };
+      const nobody: Caller = { kind: "chat", id: NOBODY, actor: resolveChatActor(msg, (id) => f.config.grantsFor(id)), origin: msg };
+      const input = namedToInput(cmd, forCaller(happy.named, NOBODY), "camel");
+      if ("error" in input) throw new Error(input.error);
+      const admitted = authorize(nobody.actor, cmd.action, resourceOf(cmd, input, nobody)).allow;
       const out = await runOn(chat, f, cmd, happy.named, "nobody");
-      expect(out.ok, `${cmd.id} chat gate ${cmd.chatGate}: nobody admitted=${admitted}, got ${out.wire}`).toBe(admitted);
+      expect(out.ok, `${cmd.id} (${cmd.action}): nobody admitted=${admitted}, got ${out.wire}`).toBe(admitted);
       if (!admitted) {
         expect(out.code).toBe("unauthorized");
         expect(out.text).toMatch(/^🚫 `.+` is restricted\. Ask /);
         expect(f.executed).toEqual([]);
       }
-      // A chat caller with no gate resolver is refused regardless of the gate (fail-closed).
-      const bare = await reference(await fixture(), cmd, happy.named, { kind: "chat", id: NOBODY, scopes: new Set() });
-      expect(bare).toMatchObject({ ok: false, error: "unauthorized" });
     }
+    // A credential holding no grant at all is refused whatever the surface (fail-closed, R7) — driven as a CLI
+    // caller, the one surface every command is exposed on.
+    const bare = await reference(await fixture(), cmd, happy.named, { kind: "cli", id: "cli:nothing", actor: { kind: "service", id: "cli:nothing", grants: NO_GRANTS } });
+    expect(bare).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
     if (cmd.surfaces?.http !== false) {
       const f = await fixture();
       const t = fakeReqRes("GET", `${toSurfaceNames(cmd.id).http}?${toKebabQuery(forCaller(happy.named, "access:power")).toString()}`);
@@ -934,6 +1073,28 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
       if (cmd.effect === "write") {
         expect(f.recorded).toEqual([]);
         expect(f.executed).toEqual([]);
+      }
+    }
+  });
+
+  it("authorization (R13): for every actor of the fixed set, the surface that carries it admits or refuses exactly as `authorize` over the policy table says; a refusal is `unauthorized` before parse with nothing executed", async () => {
+    const happy = variants.find((v) => v.name === "required-only")!;
+    const row = buildAuthorizationMatrix([cmd]).rows[0]!;
+    for (const role of AUTHZ_ROLES.filter((r) => CommandRegistry.exposedTo(cmd, carriedBy(r.id)))) {
+      const admitted = admits(cmd, role);
+      expect(row.cells[role.id], `${cmd.id} × ${role.column}: matrix cell`).toBe(admitted);
+      const f = await fixture(() => {}, "authz");
+      const out = await runAsRole(f, cmd, happy.named, role);
+      const where = `${cmd.id} (${cmd.action} on ${row.resource}) × ${role.column}`;
+      if (admitted) {
+        expect(registryRefused(f, out), `${where}: the table admits, the surface refused: ${out.wire}`).toBe(false);
+      } else {
+        expect(registryRefused(f, out), `${where}: the table refuses, the surface admitted: ${out.wire}`).toBe(true);
+        if (carriedBy(role.id) === "access") expect(out.status, where).toBe(403);
+        if (carriedBy(role.id) === "chat") expect(out.text, where).toMatch(/^🚫 `.+` is restricted\. Ask /);
+        expect(f.recorded.filter((r) => r.result.ok), where).toEqual([]);
+        expect(f.executed, where).toEqual([]);
+        assertNoSecrets(out.wire, f, where);
       }
     }
   });

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { MCP_SERVER_NAME_PATTERN } from "../../mcp/config.js";
 import { MCP_OFF_MESSAGE, McpServiceError, type McpActor, type McpService } from "../../mcp/service.js";
+import { authorize } from "../authz/authorize.js";
 import { CommandError, commandDefiner, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
 
 export { MCP_OFF_MESSAGE };
@@ -47,17 +48,17 @@ async function serviceOf(deps: McpCommandDeps): Promise<McpService> {
   return svc;
 }
 
-/** Who may manage ORG servers: the local CLI (every scope), a machine caller
- *  whose token an admin minted with `mcp:write`, or a chat caller the
- *  fail-closed repo-management gate admits. CHANNEL servers: the `channelConfig`
- *  gate for chat callers (open when unconfigured); machine callers already
- *  passed the command's write scope. */
-function actorOf(caller: Caller): McpActor {
-  const machineWrite = caller.scopes instanceof Set && caller.scopes.has("mcp:write");
+/** Who may manage ORG servers and who may manage a CHANNEL's: the policy
+ *  table's `mcp:write` rows on `config-scope { org }` / `config-scope { channel }`
+ *  — the repo-management right (`repo:write`, fail-closed) resp. the
+ *  channel-config right (`config:write`) for a person; `mcp:write` itself for
+ *  a credential an admin minted with it. `channel` is the target channel when
+ *  the caller named one (or speaks from one); the row reads no attribute of it. */
+function actorOf(caller: Caller, channel: string | undefined): McpActor {
   return {
     id: caller.id,
-    orgAdmin: caller.scopes === "all" || machineWrite || caller.chatGate?.("repoManager") === true,
-    channelAdmin: caller.kind !== "chat" || caller.chatGate?.("channelConfig") === true,
+    orgAdmin: authorize(caller.actor, "mcp:write", { type: "config-scope", kind: "org" }).allow,
+    channelAdmin: authorize(caller.actor, "mcp:write", { type: "config-scope", kind: "channel", id: channel ?? "" }).allow,
   };
 }
 
@@ -145,14 +146,14 @@ function renderShow(output: JsonValue): string {
 export const mcpList = defineCommand({
   id: "mcp.list",
   options: z.object({ channel: channelOption }),
-  scope: "mcp:read",
-  chatGate: "open",
+  action: "mcp:read",
   effect: "read",
   describe: "External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.",
   render: renderList,
   handler: async ({ options, caller, deps }) => {
     const svc = await serviceOf(deps);
-    const servers = await via(() => svc.list(actorOf(caller), channelOf(caller, options.channel)));
+    const channel = channelOf(caller, options.channel);
+    const servers = await via(() => svc.list(actorOf(caller, channel), channel));
     return { servers } as unknown as JsonObject;
   },
 });
@@ -171,16 +172,16 @@ export const mcpAdd = defineCommand({
     auth: z.enum(["oauth", "bearer", "none"]).optional().describe("how the server authenticates: `oauth` (you sign in on a one-time link), `bearer` (you paste a token on a one-time link), or `none`; omit to detect it from the server"),
     channel: channelOption,
   }),
-  scope: "mcp:write",
-  chatGate: "open",
+  action: "mcp:write",
   effect: "write",
   describe: "Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.",
   render: renderAdd,
   settle: (output, { deps }) => settleConnect(deps, output),
   handler: async ({ args, options, caller, deps }) => {
     const svc = await serviceOf(deps);
-    const actor = actorOf(caller);
-    const target = await via(() => svc.target(actor, options.scope ?? "me", channelOf(caller, options.channel)));
+    const channel = channelOf(caller, options.channel);
+    const actor = actorOf(caller, channel);
+    const target = await via(() => svc.target(actor, options.scope ?? "me", channel));
     return (await via(() => svc.add(actor, target, { name: args.name, url: options.url, agents: options.agents, ...(options.auth ? { auth: options.auth } : {}) }))) as unknown as JsonObject;
   },
 });
@@ -189,16 +190,16 @@ export const mcpConnect = defineCommand({
   id: "mcp.connect",
   args: [nameArg],
   options: z.object({ scope: scopeOption, channel: channelOption }),
-  scope: "mcp:write",
-  chatGate: "open",
+  action: "mcp:write",
   effect: "write",
   describe: "A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.",
   render: renderAdd,
   settle: (output, { deps }) => settleConnect(deps, output),
   handler: async ({ args, options, caller, deps }) => {
     const svc = await serviceOf(deps);
-    const actor = actorOf(caller);
-    const target = await via(() => svc.target(actor, options.scope ?? "me", channelOf(caller, options.channel)));
+    const channel = channelOf(caller, options.channel);
+    const actor = actorOf(caller, channel);
+    const target = await via(() => svc.target(actor, options.scope ?? "me", channel));
     return (await via(() => svc.connect(actor, target, args.name))) as unknown as JsonObject;
   },
 });
@@ -207,18 +208,17 @@ export const mcpShow = defineCommand({
   id: "mcp.show",
   args: [nameArg],
   options: z.object({ scope: scopeOption, channel: channelOption }),
-  scope: "mcp:read",
-  chatGate: "open",
+  action: "mcp:read",
   effect: "read",
   describe: "One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.",
   render: renderShow,
   handler: async ({ args, options, caller, deps }) => {
     const svc = await serviceOf(deps);
-    const actor = actorOf(caller);
+    const channelId = channelOf(caller, options.channel);
+    const actor = actorOf(caller, channelId);
     // Seeing is open: org and channel entries are visible to everyone who can
     // run there, so `show` resolves the tier without the management gates.
     const word = options.scope ?? "me";
-    const channelId = channelOf(caller, options.channel);
     const target = word === "org" ? { kind: "org" as const } : word === "channel" ? { kind: "channel" as const, id: channelId } : { kind: "user" as const, id: actor.id };
     if (target.kind === "channel" && !target.id) throw new CommandError("invalid_input", "channel: required on this surface — pass --channel <id>");
     return (await via(() => svc.show(actor, target, args.name))) as unknown as JsonObject;
@@ -229,14 +229,14 @@ export const mcpRemove = defineCommand({
   id: "mcp.remove",
   args: [nameArg],
   options: z.object({ scope: scopeOption, channel: channelOption }),
-  scope: "mcp:write",
-  chatGate: "open",
+  action: "mcp:write",
   effect: "write",
   describe: "Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).",
   handler: async ({ args, options, caller, deps }) => {
     const svc = await serviceOf(deps);
-    const actor = actorOf(caller);
-    const target = await via(() => svc.target(actor, options.scope ?? "me", channelOf(caller, options.channel)));
+    const channel = channelOf(caller, options.channel);
+    const actor = actorOf(caller, channel);
+    const target = await via(() => svc.target(actor, options.scope ?? "me", channel));
     return (await via(() => svc.remove(actor, target, args.name))) as unknown as JsonObject;
   },
 });

@@ -1,13 +1,27 @@
 // THE policy table (plan U1, KTD1, KTD5). Data, not code.
 //
-// Every gate Switchboard has today — command chat gates, machine token scopes,
-// the machine-caller channel pin, `canRunAgent` / `canUseRepo` /
-// `canManageRepos` / `canEditChannelConfig` — is a row here, written in the
-// closed condition vocabulary of `types.ts`. Rows for one (action, target)
-// OR; conditions inside a row AND; no row → deny. `validatePolicy` runs at
-// module load so a row that reads an attribute its resource cannot carry, or
-// names a condition outside the vocabulary, fails the import — the table is
-// closed by construction, not by review.
+// Every gate Switchboard had — command chat gates, machine token scopes, the
+// machine-caller channel pin, `canRunAgent` / `canUseRepo` / `canManageRepos`
+// / `canEditChannelConfig` — is a row here, written in the closed condition
+// vocabulary of `types.ts`. Rows for one (action, target) OR; conditions
+// inside a row AND; no row → deny. `validatePolicy` runs at module load so a
+// row that reads an attribute its resource cannot carry, or names a condition
+// outside the vocabulary, fails the import — the table is closed by
+// construction, not by review.
+//
+// COMMANDS (U4). `CommandRegistry.invoke` asks `authorize(caller.actor,
+// cmd.action, resource)` for every command on every surface, where the
+// resource is `command { id }` unless the definition resolves one from the
+// input (`repo.test|build` → `agent { coding }`). One rule shape covers what
+// three mechanisms used to decide: the grant admits the command — a Slack user
+// holds the grants of the commands the `open` chat gate admitted
+// (`CHAT_OPEN_ACTIONS` in grants.ts), an Access browser session every
+// `<group>:read`, an admin everything, a token or service token exactly its
+// scopes — so a `dispatch`-only token is refused on every registry command and
+// a `runs:write` token on `friction:write` by the same row that lets an
+// operator through. Where a handler's refusal depends on the DATA (the
+// `channel` scope of `config set`, the tier of `mcp add`), the handler asks the
+// table about that resource (`config-scope`) and keeps its own reply text.
 //
 // Grant placeholders: a `has-grant` grant may name a resource attribute in
 // braces (`agent:run:{name}`); it is filled from the resource before the
@@ -37,23 +51,41 @@ export const POLICY: readonly Rule[] = [
   { action: "runs:write", resource: "command", when: [grant("runs:write")] },
 
   // ── friction ─────────────────────────────────────────────────────────────
-  // `friction report` is open in chat today; what it reports is the store predicate's job (OQ2).
-  { action: "friction:read", resource: "command", when: [] },
+  // `friction report` is what every Slack user holds (CHAT_OPEN_ACTIONS); what
+  // it reports is the store predicate's job (OQ2). A token needs the grant.
+  { action: "friction:read", resource: "command", when: [grant("friction:read")] },
   // `friction propose` files issues: the repo-management gate (KTD6 → friction:write).
   { action: "friction:write", resource: "command", when: [grant("friction:write")] },
 
   // ── repos ────────────────────────────────────────────────────────────────
-  { action: "repo:read", resource: "command", when: [] },
+  { action: "repo:read", resource: "command", when: [grant("repo:read")] },
   { action: "repo:write", resource: "repo", when: [grant("repo:write")] },
   { action: "repo:write", resource: "command", when: [grant("repo:write")] },
-  // `repo test|build`: the exec grant on a repo the actor may use (KTD30).
+  // `repo test|build` run the repo's onboarded command as the coding agent with
+  // zero model turns: admitted by the right to run that agent (the `agentRun`
+  // chat gate) or by the exec grant a token was minted with; `write` never
+  // implies `exec`. The per-repo allowlist (KD7) is the handler's own check.
+  { action: "repo:exec", resource: "agent", when: [grant("agent:run:{name}")] },
+  { action: "repo:exec", resource: "agent", when: [grant("repo:exec")] },
+  // The exec grant on a repo the actor may use (KTD30, not yet asked by a command).
   { action: "repo:exec", resource: "repo", when: [grant("repo:exec"), OWNER_OF] },
   // Binding a run to a repo; open-when-absent today → grants.repos = "all" (KTD6).
   { action: "repo:use", resource: "repo", when: [OWNER_OF] },
 
   // ── config ───────────────────────────────────────────────────────────────
-  // Channel config: the grant plus membership of the target channel (KTD5).
-  { action: "config:write", resource: "config-scope", resourceKind: "channel", when: [grant("config:write"), MEMBER_OF] },
+  // `config show`: the read grant.
+  { action: "config:read", resource: "command", when: [grant("config:read")] },
+  // `config set|clear|instructions`: a person always has their own scope to
+  // write (`me`), whichever list names them; a credential needs the grant. The
+  // `channel` scope is the handler's question about `config-scope/channel`.
+  { action: "config:write", resource: "command", actorKinds: ["user"], when: [] },
+  { action: "config:write", resource: "command", when: [grant("config:write")] },
+  // Channel config: the `permissions.channelConfig` right as a grant (KTD6 —
+  // absent → every Slack user holds it; admins, Access operators, and tokens
+  // minted with `config:write` hold it too). Membership is NOT a condition
+  // here: a chat user may target another channel with `--channel`, and no
+  // adapter proves channel membership yet (plan U5, the directory).
+  { action: "config:write", resource: "config-scope", resourceKind: "channel", when: [grant("config:write")] },
   // A user edits only their own scope.
   { action: "config:write", resource: "config-scope", resourceKind: "user", when: [IS_SELF] },
 
@@ -61,7 +93,31 @@ export const POLICY: readonly Rule[] = [
   // `agent:run:*` covers every agent through wildcard coverage (grants.ts).
   { action: "agent:run", resource: "agent", when: [grant("agent:run:{name}")] },
 
+  // ── help / schedules / deploy / env ──────────────────────────────────────
+  { action: "help:read", resource: "command", when: [grant("help:read")] },
+  { action: "schedule:read", resource: "command", when: [grant("schedule:read")] },
+  { action: "deploy:read", resource: "command", when: [grant("deploy:read")] },
+  { action: "deploy:write", resource: "command", when: [grant("deploy:write")] },
+  { action: "env:write", resource: "command", when: [grant("env:write")] },
+
+  // ── mcp (external MCP servers live in the three config tiers) ────────────
+  { action: "mcp:read", resource: "command", when: [grant("mcp:read")] },
+  { action: "mcp:write", resource: "command", when: [grant("mcp:write")] },
+  // A CHANNEL's servers: the channel-config right for a person; a credential
+  // an admin minted with `mcp:write` manages any tier it can name.
+  { action: "mcp:write", resource: "config-scope", resourceKind: "channel", when: [grant("config:write")] },
+  { action: "mcp:write", resource: "config-scope", resourceKind: "channel", actorKinds: ["service"], when: [grant("mcp:write")] },
+  // ORG-wide servers reach the coding/review agents: the repo-management right
+  // (`repo:write`, KTD9 fail-closed) for a person; `mcp:write` for a credential.
+  { action: "mcp:write", resource: "config-scope", resourceKind: "org", when: [grant("repo:write")] },
+  { action: "mcp:write", resource: "config-scope", resourceKind: "org", actorKinds: ["service"], when: [grant("mcp:write")] },
+
   // ── memory ───────────────────────────────────────────────────────────────
+  // `memory list` / `memory forget`: the grant admits the command; which
+  // records a caller may reach is the handler's scope-key check (invariant 4),
+  // and forgetting a SHARED record is the repo-management right (`repo:write`).
+  { action: "memory:read", resource: "command", when: [grant("memory:read")] },
+  { action: "memory:write", resource: "command", when: [grant("memory:write")] },
   // Reads are unchanged (R11): org is shared; the rest are relations.
   { action: "memory:read", resource: "memory-scope", resourceKind: "org", when: [] },
   { action: "memory:read", resource: "memory-scope", resourceKind: "user", when: [IS_SELF] },

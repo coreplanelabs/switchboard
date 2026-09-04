@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { NO_GRANTS, type Actor } from "./authz/types.js";
+import { authorize } from "./authz/authorize.js";
+import type { Actor, Resource } from "./authz/types.js";
 
 // Command registry (#157, U6 — KD2/KTD1; typed model KTD20): the ONE seam
 // behind every operator surface. The lowest level is plain TypeScript: a
@@ -19,7 +20,15 @@ import { NO_GRANTS, type Actor } from "./authz/types.js";
 // an unauthorized caller learns nothing about the schema, and error text names
 // the argument/option and the expected type — never the submitted value.
 //
-// KTD16 — NO COMMAND MAY START AN AGENT RUN. The scope/gate vocabulary has no
+// AUTHORIZE is ONE question on every surface (features/authorization.md, plan
+// U4): `authorize(caller.actor, cmd.action, resource)` over the policy table in
+// `src/core/authz/policy.ts`, where `resource` is `command { id }` unless the
+// definition resolves one from the input (`CommandDef.resource`). The registry
+// compares no scopes, resolves no chat gate, and asks no surface-specific
+// question: who the caller is (`Caller.actor`, resolved by the adapter from
+// what it proved) and what the command does (`action`) are the only inputs.
+//
+// KTD16 — NO COMMAND MAY START AN AGENT RUN. The action vocabulary has no
 // class that authorizes a run; anything that runs an agent goes through
 // `dispatch()` in `src/core/dispatcher.ts`, where invariant 3 (the resolved-agent
 // permission gate) lives. A handler that reaches for the runner is a bug. The
@@ -30,16 +39,12 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue | undefined };
 export type JsonObject = { [key: string]: JsonValue | undefined };
 
-/** `<group>:read` | `<group>:write` | `<group>:exec` — what a machine caller's
- *  token must list. `exec` is the deterministic-operation class (`repo:exec`
- *  runs a repo's onboarded test/build command; no model, no agent run). */
-export type CommandScope = `${string}:read` | `${string}:write` | `${string}:exec`;
-/** How a chat caller (`slack:U…`) is admitted (`ConfigStore.chatGateFor`):
- *  `open` → everyone; `operator` → `permissions.admins` (fail-closed);
- *  `repoManager` → the repo-management set (`canManageRepos`); `channelConfig` →
- *  `canEditChannelConfig` (open when `permissions.channelConfig` is absent);
- *  `agentRun` → `canRunAgent(userId, "coding")`. */
-export type ChatGate = "open" | "operator" | "repoManager" | "channelConfig" | "agentRun";
+/** `<group>:read` | `<group>:write` | `<group>:exec` — what a command DOES, and
+ *  the name of the grant an actor needs for it (features/authorization.md item
+ *  2). `exec` is the deterministic-operation class (`repo:exec` runs a repo's
+ *  onboarded test/build command; no model, no agent run); `write` never
+ *  implies it. */
+export type CommandAction = `${string}:read` | `${string}:write` | `${string}:exec`;
 export type CommandEffect = "read" | "write";
 export type SurfaceName = "chat" | "mcp" | "http" | "cli";
 /** Per-surface opt-outs; a surface absent here is exposed. */
@@ -47,27 +52,20 @@ export type CommandSurfaces = Partial<Record<SurfaceName, false>>;
 
 /**
  * Who is calling, as the adapter resolved it — never as the request claims.
- * `id` is platform-namespaced (invariant 4): `access:<sub>` (browser session),
+ * `kind` is the SURFACE (what a command may opt out of); `id` is platform-
+ * namespaced (invariant 4): `access:<sub>` (browser session),
  * `access:svc:<common_name>` (Access service token), `mcp:<subject>`,
- * `cli:local`, `slack:U…`. `scopes` is the token's explicit grant, or `"all"`
- * for the local CLI. `chatGate` resolves a command's `ChatGate` for a chat
- * caller (`ConfigStore.chatGateFor`); absent = refused. `actor` is the same
- * identity as the one authorization model sees it (`src/core/authz/`): kind,
- * namespaced id, and grants from config. Every production adapter sets it, and
- * since U3 it is what decides run VISIBILITY — `runs.*` and `friction.*` call
- * `authorize` / `predicateFor` on it (the former `channel` pin is gone: a
- * machine token's channels are its grants). `scopes` and `chatGate` still admit
- * a caller to a command until U4 turns the gates into policy rows, at which
- * point `Caller` becomes `Actor`. Optional only so hand-built callers in
- * existing tests need not carry it in the meantime; a handler that needs it
- * reads `actorOf(caller)`, which is `NO_GRANTS` for a caller without one (R7).
+ * `cli:local`, `slack:U…`. `actor` is the same identity as the authorization
+ * model sees it (`src/core/authz/`): kind, namespaced id, and the grants config
+ * names for that id — the ONLY input `authorize` reads about the caller, for
+ * admission here and for run VISIBILITY in `runs.*` / `friction.*` (which call
+ * `authorize` / `predicateFor` on it; there is no channel pin — a machine
+ * token's channels are its grants).
  */
 export interface Caller {
   kind: "access" | "mcp" | "cli" | "chat";
   id: string;
-  scopes: ReadonlySet<string> | "all";
-  chatGate?: (gate: ChatGate) => boolean;
-  actor?: Actor;
+  actor: Actor;
   /** Where a chat caller is speaking from: the message's namespaced channel
    *  (the default target of channel-scoped config commands, the channel memory
    *  scope), its thread key (the workspace a local deterministic op runs in),
@@ -76,13 +74,6 @@ export interface Caller {
    *  Context, NOT authority (authorization.md item 1). Absent for machine
    *  surfaces. */
   origin?: { channelId: string; threadKey: string; repo?: () => Promise<string | undefined> };
-}
-
-/** The `Actor` a handler decides against (authorization R1). A caller its
- *  adapter left without one — only hand-built callers in tests — holds
- *  `NO_GRANTS`: it sees no run and passes no grant check (R7). */
-export function actorOf(caller: Caller): Actor {
-  return caller.actor ?? { kind: "user", id: caller.id, grants: NO_GRANTS };
 }
 
 /** One positional argument: `name` addresses it on the JSON surfaces (HTTP
@@ -122,8 +113,14 @@ export interface CommandDef<D, A extends readonly ArgDef[] = readonly ArgDef[], 
   args?: A;
   /** Named, camelCase keys; absent = none. Unknown keys are rejected on every surface. */
   options?: O;
-  scope: CommandScope;
-  chatGate: ChatGate;
+  /** What the command does — the action `authorize` decides on every surface. */
+  action: CommandAction;
+  /** The resource the caller must be authorized for, when it is not the command
+   *  itself: resolved from the RAW input (authorization runs before parsing, so
+   *  the values are unvalidated strings — read them, never trust them) and the
+   *  caller. Absent → `command { id }`. `repo.test|build` resolve `agent {
+   *  coding }`: the op runs as the coding agent, so the right to run it decides. */
+  resource?(input: RawInput, caller: Caller): Resource;
   effect: CommandEffect;
   surfaces?: CommandSurfaces;
   describe: string;
@@ -159,10 +156,22 @@ export interface CommandInput {
   options?: Record<string, unknown>;
 }
 
+/** `CommandInput` with both halves present and of the right shape — what a
+ *  `resource` resolver receives before parsing (anything malformed is `[]` / `{}`). */
+export interface RawInput {
+  readonly args: readonly unknown[];
+  readonly options: Readonly<Record<string, unknown>>;
+}
+
 /** The ONE shape of a command id — `<group>.<verb>`, lowercase — checked at
  *  registration and by the HTTP adapter's path lookup (`/api/<id>`). */
 export const COMMAND_ID = /^[a-z][a-z0-9]*\.[a-z][a-z0-9]*$/;
+/** The ONE shape of a command action — `<group>:read|write|exec`, lowercase. */
+export const COMMAND_ACTION = /^[a-z][a-z0-9]*:(read|write|exec)$/;
 const CAMEL_KEY = /^[a-z][A-Za-z0-9]*$/;
+/** Definition fields the policy table replaced (plan U4); refused so a stale
+ *  registration fails at definition time, not silently at authorize time. */
+const RETIRED_FIELDS = ["scope", "chatGate"] as const;
 
 /** A boolean option as text surfaces send it: a real boolean (the grammar's
  *  `--dry-run` / `--no-dry-run`, MCP JSON) or the strings `"true"`/`"false"`
@@ -179,6 +188,10 @@ export const flag = z.union([z.boolean(), z.enum(["true", "false"]).transform((v
  */
 export function defineCommand<D, const A extends readonly ArgDef[] = readonly [], O extends OptionsSchema = NoOptions>(def: CommandDef<D, A, O>): CommandDef<D, A, O> {
   if (!COMMAND_ID.test(def.id)) throw new Error(`command id must be <group>.<verb> (lowercase): ${def.id}`);
+  for (const retired of RETIRED_FIELDS) {
+    if (retired in def) throw new Error(`${def.id}: \`${retired}\` is gone — declare \`action\` and let the policy table decide (features/authorization.md)`);
+  }
+  if (typeof def.action !== "string" || !COMMAND_ACTION.test(def.action)) throw new Error(`${def.id}: action must be <group>:read|write|exec (lowercase), got ${String(def.action)}`);
   const args = def.args ?? [];
   let optionalSeen = false;
   args.forEach((arg, i) => {
@@ -236,8 +249,8 @@ export const ERROR_STATUS: Readonly<Record<InvokeErrorCode, number>> = {
   internal: 500,
 };
 
-/** A failure says WHO decided it: `registry` — the id was unknown, the caller
- *  failed the command's gate/scope, or the input failed its schema (the message
+/** A failure says WHO decided it: `registry` — the id was unknown, the policy
+ *  table denied the caller the command's action, or the input failed its schema (the message
  *  is the registry's, e.g. `slack:U1 is not allowed to run runs.list`); `handler`
  *  — the command itself threw a `CommandError` about the request (the message
  *  is the command's own, meant for the caller: `You're not on the allowlist for
@@ -252,6 +265,10 @@ export interface AuditEntry {
   callerId: string;
   effect: CommandEffect;
   outcome: "ok" | InvokeErrorCode;
+  /** Why the policy table denied (`missing-grant`, `no-rule`, …) when the
+   *  registry refused — a machine token naming no resource (KTD8). A handler's
+   *  own `unauthorized` carries none. */
+  reason?: string;
 }
 
 export interface CommandRegistryOptions {
@@ -292,11 +309,14 @@ export class CommandRegistry<D> {
     return cmd.surfaces?.[SURFACE_FOR_KIND[kind]] !== false;
   }
 
-  /** The same decision `invoke` makes first, exposed so a transport can refuse
-   *  an unauthorized caller BEFORE buffering a request body (KTD15). `invoke`
-   *  still re-checks; this is an early exit, not a substitute. */
-  static authorizes(cmd: CommandDef<unknown>, caller: Caller): boolean {
-    return authorize(cmd, caller);
+  /** True when the policy table refuses this caller the command WHATEVER the
+   *  input — so a transport can answer 403 before buffering a request body
+   *  (KTD15). A command whose resource depends on the input (`resource`) is
+   *  not decided here: `invoke` decides it once the input is in hand. `invoke`
+   *  re-checks in every case; this is an early exit, not a substitute. */
+  static refuses(cmd: CommandDef<unknown>, caller: Caller): boolean {
+    if (cmd.resource) return false;
+    return !authorize(caller.actor, cmd.action, { type: "command", id: cmd.id }).allow;
   }
 
   async invoke(id: string, input: CommandInput, caller: Caller, deps: D): Promise<InvokeResult> {
@@ -307,12 +327,13 @@ export class CommandRegistry<D> {
       this.audit({ commandId: id, callerKind: caller.kind, callerId: caller.id, effect: cmd?.effect ?? "read", outcome: "not_found" });
       return fail("not_found", `unknown command: ${id}`);
     }
-    const done = (res: InvokeResult): InvokeResult => {
-      this.audit({ commandId: cmd.id, callerKind: caller.kind, callerId: caller.id, effect: cmd.effect, outcome: res.ok ? "ok" : res.error });
+    const done = (res: InvokeResult, reason?: string): InvokeResult => {
+      this.audit({ commandId: cmd.id, callerKind: caller.kind, callerId: caller.id, effect: cmd.effect, outcome: res.ok ? "ok" : res.error, ...(reason === undefined ? {} : { reason }) });
       return res;
     };
 
-    if (!authorize(cmd, caller)) return done(fail("unauthorized", `${caller.id} is not allowed to run ${cmd.id}`));
+    const decision = authorize(caller.actor, cmd.action, resourceOf(cmd, input, caller));
+    if (!decision.allow) return done(fail("unauthorized", `${caller.id} is not allowed to run ${cmd.id}`), decision.reason);
 
     const parsed = parseInput(cmd, input);
     if (!parsed.ok) return done(fail("invalid_input", parsed.message));
@@ -376,29 +397,16 @@ function fail(error: InvokeErrorCode, message: string, decidedBy: "registry" | "
   return { ok: false, error, status: ERROR_STATUS[error], message, decidedBy };
 }
 
-/**
- * KTD10. `"all"` passes anything. Machine callers (`mcp:*`, `access:svc:*`)
- * hold exactly what their token lists. A browser Access identity holds every
- * `*:read` implicitly and `*:write` only when granted (`permissions.operators`).
- * A chat caller passes the command's chat gate through the resolver its adapter
- * attached; no resolver means refused.
- */
-function authorize(cmd: CommandDef<unknown>, caller: Caller): boolean {
-  if (caller.scopes === "all") return true;
-  switch (caller.kind) {
-    case "chat":
-      return caller.chatGate?.(cmd.chatGate) === true;
-    case "access":
-      if (isServiceToken(caller)) return caller.scopes.has(cmd.scope);
-      return cmd.effect === "read" ? true : caller.scopes.has(cmd.scope);
-    case "mcp":
-    case "cli":
-      return caller.scopes.has(cmd.scope);
-  }
+/** The RAW input as a resolver sees it: a malformed half is empty, never a throw. */
+export function rawInput(input: CommandInput): RawInput {
+  const args = typeof input === "object" && input !== null && Array.isArray(input.args) ? input.args : [];
+  const options = typeof input === "object" && input !== null && typeof input.options === "object" && input.options !== null && !Array.isArray(input.options) ? input.options : {};
+  return { args, options };
 }
 
-function isServiceToken(caller: Caller): boolean {
-  return caller.id.startsWith("access:svc:");
+/** What `authorize` decides on for this invocation: the command's resolved resource, else the command itself. */
+export function resourceOf(cmd: Pick<CommandDef<unknown>, "id" | "resource">, input: CommandInput, caller: Caller): Resource {
+  return cmd.resource ? cmd.resource(rawInput(input), caller) : { type: "command", id: cmd.id };
 }
 
 type ParsedInput = { ok: true; args: Record<string, unknown>; options: Record<string, unknown> } | { ok: false; message: string };

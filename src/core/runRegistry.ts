@@ -21,8 +21,8 @@ import { utf8ByteLength } from "./runRecord.js";
 // compared in constant time — the gate behind the live URL, kept as defense in
 // depth for the HTML/SSE routes. The operator: the token-free `getById` /
 // `snapshotById` / `requestStopById` grant the same reads to `RunsService`,
-// whose callers are authorized ONE LAYER UP (the command registry's scopes and
-// chat gates plus the Cloudflare Access gate). Nothing in this file decides who
+// whose callers are authorized ONE LAYER UP (the command registry's policy table
+// plus the Cloudflare Access gate). Nothing in this file decides who
 // an operator is; it only trusts that its token-free callers already did.
 
 /**

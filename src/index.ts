@@ -325,8 +325,6 @@ async function main() {
     // claims all of /api/* and answers its own 404. Under the dev bypass it
     // serves loopback callers on a localhost deployment only. ---
     const commandHttp = createCommandHttpHandler(commands, {
-      operatorIdentities: () => config.operatorIdentities(),
-      serviceTokenScopes: (cn) => config.serviceTokenScopes(cn),
       grantsFor: (id) => config.grantsFor(id),
       devBypassActive,
       publicBaseUrl,

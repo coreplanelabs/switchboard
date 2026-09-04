@@ -27,8 +27,7 @@ const define = commandDefiner<Deps>();
 const echo = define({
   id: "demo.echo",
   options: z.object({ status: z.enum(["active", "finished", "all"]).describe("which"), limit: z.coerce.number().int().positive().optional().describe("how many") }),
-  scope: "demo:read",
-  chatGate: "operator",
+  action: "runs:read",
   effect: "read",
   describe: "echoes its parsed options",
   handler: async ({ options, deps }) => {
@@ -39,8 +38,7 @@ const echo = define({
 
 const hidden = define({
   id: "demo.hidden",
-  scope: "demo:read",
-  chatGate: "open",
+  action: "runs:read",
   effect: "read",
   surfaces: { chat: false },
   describe: "not for chat",
@@ -50,8 +48,7 @@ const hidden = define({
 const missing = define({
   id: "demo.missing",
   args: [{ name: "id", schema: z.string(), describe: "an id" }],
-  scope: "demo:read",
-  chatGate: "open",
+  action: "runs:read",
   effect: "read",
   describe: "always not found",
   handler: async () => {
@@ -61,8 +58,7 @@ const missing = define({
 
 const config = define({
   id: "config.show",
-  scope: "config:read",
-  chatGate: "open",
+  action: "config:read",
   effect: "read",
   describe: "pretends to be the legacy config command",
   handler: async () => ({ shadowed: true }),
@@ -70,8 +66,7 @@ const config = define({
 
 const whoami = define({
   id: "demo.whoami",
-  scope: "demo:read",
-  chatGate: "open",
+  action: "help:read",
   effect: "read",
   describe: "the caller as the adapter resolved it",
   handler: async ({ caller }) => ({ kind: caller.kind, id: caller.id, actor: caller.actor ? `${caller.actor.kind} ${caller.actor.id}` : null }),
@@ -83,8 +78,7 @@ const say = define({
     { name: "scope", schema: z.enum(["me", "channel"]), describe: "scope" },
     { name: "text", schema: z.string().optional(), describe: "free text", rest: true },
   ],
-  scope: "demo:read",
-  chatGate: "open",
+  action: "runs:read",
   effect: "read",
   describe: "echoes free text",
   handler: async ({ args }) => ({ scope: args.scope, text: args.text ?? null }),
@@ -93,8 +87,7 @@ const say = define({
 const url = define({
   id: "demo.url",
   options: z.object({ url: z.string().url().describe("an http(s) url") }),
-  scope: "demo:read",
-  chatGate: "open",
+  action: "runs:read",
   effect: "read",
   describe: "takes a url option — what Slack link markup must not break",
   handler: async ({ options }) => ({ url: options.url }),
@@ -171,13 +164,13 @@ describe("parseChatCommand", () => {
     expect(parseChatCommand("help", registry)).toBeNull();
     expect(parseChatCommand("help me", registry)).toBeNull();
     const withHelp = demoRegistry();
-    withHelp.register(define({ id: HELP_COMMAND_ID, scope: "help:read", chatGate: "open", effect: "read", describe: "help", handler: async () => ({}) }));
+    withHelp.register(define({ id: HELP_COMMAND_ID, action: "help:read", effect: "read", describe: "help", handler: async () => ({}) }));
     expect(parseChatCommand("help", withHelp)).toEqual({ kind: "invoke", id: "help.show", input: { args: [], options: {} } });
     expect(parseChatCommand("  Help  ", withHelp)).toEqual({ kind: "invoke", id: "help.show", input: { args: [], options: {} } });
     expect(parseChatCommand("help show", withHelp)).toEqual({ kind: "invoke", id: "help.show", input: { args: [], options: {} } });
     expect(parseChatCommand("help me", withHelp)).toBeNull();
     const hiddenHelp = demoRegistry();
-    hiddenHelp.register(define({ id: HELP_COMMAND_ID, scope: "help:read", chatGate: "open", effect: "read", surfaces: { chat: false }, describe: "help", handler: async () => ({}) }));
+    hiddenHelp.register(define({ id: HELP_COMMAND_ID, action: "help:read", effect: "read", surfaces: { chat: false }, describe: "help", handler: async () => ({}) }));
     expect(parseChatCommand("help", hiddenHelp)).toBeNull();
   });
 
@@ -207,7 +200,7 @@ describe("parseChatCommand", () => {
 
   it("a group's verbs are recognized independently: a registered verb binds, an unregistered sibling is prose", () => {
     const repo = new CommandRegistry<Deps>({ audit: () => {} });
-    repo.register(define({ id: "repo.list", scope: "repo:read", chatGate: "open", effect: "read", describe: "list", handler: async () => ({}) }));
+    repo.register(define({ id: "repo.list", action: "repo:read", effect: "read", describe: "list", handler: async () => ({}) }));
     expect(parseChatCommand("repo list", repo)).toEqual({ kind: "invoke", id: "repo.list", input: { args: [], options: {} } });
     expect(parseChatCommand("repo onboard acme/api", repo)).toBeNull();
   });
@@ -224,16 +217,17 @@ describe("chatCallerFor", () => {
     expect(chatCallerFor(msg("x"), config, resolve).origin?.repo).toBe(resolve);
   });
 
-  it("carries the message's user as an Actor with the grants config names for it (plan U2): admin → everything, a plain user → the unrestricted agents only, a machine channel's user → a service actor", async () => {
+  it("carries the message's user as the Actor the table decides on (plan U2/U4): admin → everything, a plain user → the open chat commands + the unrestricted agents, a machine channel's user → a service actor", async () => {
     const { chatCallerFor } = await import("./commandChat.js");
-    const { ALL_GRANTS } = await import("./authz/grants.js");
+    const { ALL_GRANTS, CHAT_OPEN_ACTIONS } = await import("./authz/grants.js");
     const config = configStore(ADMIN_YAML);
     expect(chatCallerFor(msg("x", "slack:UADMIN"), config).actor).toEqual({ kind: "user", id: "slack:UADMIN", grants: ALL_GRANTS, origin: { channelId: "slack:CX", threadKey: "slack:CX:1.0" } });
     const plain = chatCallerFor(msg("x", "slack:UX"), config).actor;
     expect(plain).toMatchObject({ kind: "user", id: "slack:UX", grants: { channels: new Set(), repos: new Set() } });
-    // No agent is restricted in ADMIN_YAML → every registered agent is open to this user (canRunAgent today).
-    expect([...(plain!.grants.actions as Set<string>)].every((a) => a.startsWith("agent:run:"))).toBe(true);
-    expect(plain!.grants.actions).toContain("agent:run:general");
+    // The `open` chat gate as grants, `config:write` (no channelConfig key), and — no agent being restricted in ADMIN_YAML — every registered agent (canRunAgent today).
+    for (const a of [...CHAT_OPEN_ACTIONS, "config:write", "agent:run:general"]) expect(plain.grants.actions, a).toContain(a);
+    expect([...(plain.grants.actions as Set<string>)].every((a) => a.startsWith("agent:run:") || a === "config:write" || CHAT_OPEN_ACTIONS.includes(a))).toBe(true);
+    expect(plain.grants.actions).not.toContain("runs:read");
     const machine = chatCallerFor({ userId: "http:cron", channelId: "http:cron", threadKey: "http:cron:t" }, config);
     expect(machine).not.toHaveProperty("channel");
     expect(machine.actor).toMatchObject({ kind: "service", id: "http:cron", origin: { channelId: "http:cron", threadKey: "http:cron:t" } });
@@ -283,8 +277,7 @@ describe("handleChatCommand", () => {
     registry.register(
       define({
         id: "demo.mine",
-        scope: "demo:read",
-        chatGate: "open",
+        action: "help:read",
         effect: "read",
         describe: "refuses on data",
         handler: async () => {
@@ -311,8 +304,9 @@ describe("handleChatCommand", () => {
     expect(deps.hits).toEqual([]);
   });
 
-  it("every chat caller carries its Actor and no channel pin: a machine credential speaking as text (`http:`/`mcp:`) is a service actor whose grants — not the channel it speaks in — decide what it sees (authorization.md item 7)", async () => {
-    const { commands, config } = setup();
+  it("every chat caller carries its Actor and no channel pin: a machine credential speaking as text (`http:`/`mcp:`) is a service actor whose grants — not the channel it speaks in — decide what it may run and see (authorization.md item 7)", async () => {
+    // A machine identity's text command needs the grant its tool call would (the native `grants` block names it).
+    const { commands, config } = setup(`${ADMIN_YAML}grants:\n  "http:ops":\n    actions: [help:read]\n  "mcp:alice":\n    actions: [help:read]\n`);
     const parsed = parseChatCommand("demo whoami", commands)!;
     const via = (channelId: string, userId: string) => handleChatCommand({ commands, parsed, msg: { channelId, userId, threadKey: `${channelId}:t` }, config });
     expect(await via("http:ops", "http:ops")).toBe("kind: chat\nid: http:ops\nactor: service http:ops");
@@ -321,7 +315,7 @@ describe("handleChatCommand", () => {
     expect(await via("cli:local", "cli:local")).toBe("kind: chat\nid: cli:local\nactor: user cli:local");
   });
 
-  it("a caller with no admins configured is refused (isOperator is fail-closed)", async () => {
+  it("a caller with no admins configured is refused (no admins → nobody holds runs:read; fail-closed)", async () => {
     const { commands, deps, config } = setup(ADMIN_YAML.replace('  admins: ["slack:UADMIN"]\n', ""));
     const reply = await run(commands, config, "demo echo --status all", "slack:UX");
     expect(reply).toContain("🚫");

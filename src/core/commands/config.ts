@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { formatConfigDescription, MAX_INSTRUCTIONS_LENGTH, type ConfigDescription, type ConfigStore, type Scope } from "../../config.js";
 import { EFFORT_LEVELS, type Effort } from "../../effort.js";
+import { authorize } from "../authz/authorize.js";
 import { CommandError, commandDefiner, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
 
 // The `config.*` registrations (phase 4b): runtime config on the typed model.
@@ -10,14 +11,16 @@ import { CommandError, commandDefiner, type Caller, type CommandDef, type Comman
 //   config instructions <channel|me> [text…] [--channel <id>]
 // The caller's own channel (`caller.origin`) is the default target; `--channel`
 // names another (or is required where there is no origin — a machine surface).
-// `me` is the caller's own user scope, always open (pointing yourself at a
-// restricted agent is harmless: the run-time agent gate still applies). The
-// `channel` scope affects everyone in the channel, so it rides `channelConfig`
-// (open when `permissions.channelConfig` is absent): a gate the DATA decides —
-// the command declares `open` and the handler asks the caller's resolver for
-// `channelConfig` only when the channel scope is named. Dotted option keys
-// (`--models.coding x`) nest on every surface (KTD21). None of this reaches a
-// model or starts a run.
+// `me` is the caller's own user scope: a person always has it (pointing
+// yourself at a restricted agent is harmless: the run-time agent gate still
+// applies), a credential needs `config:write` — the `config:write` rows on
+// `command` in the policy table. The `channel` scope affects everyone in the
+// channel, so it is a refusal the DATA decides: the handler asks the same
+// table about `config-scope { channel }` only when that scope is named
+// (`permissions.channelConfig` translated: absent → every Slack user holds
+// `config:write`; admins, Access operators, and tokens minted with it too).
+// Dotted option keys (`--models.coding x`) nest on every surface (KTD21). None
+// of this reaches a model or starts a run.
 
 /** The store's reads and writes, each behind an async accessor: the config is
  *  opened asynchronously (its overrides backing may be the state Worker,
@@ -53,10 +56,10 @@ function targetChannel(caller: Caller, channel: string | undefined): string {
   return target;
 }
 
-/** The channel scope affects everyone in the channel: the `channelConfig` gate
- *  (chat), or the command's own write scope (machine callers already passed it). */
-function assertMayEditChannel(caller: Caller): void {
-  if (caller.kind === "chat" && caller.chatGate?.("channelConfig") !== true) throw new CommandError("unauthorized", "Channel config changes are restricted.");
+/** The channel scope affects everyone in the channel: the policy table's
+ *  `config:write` row on `config-scope { channel }` (the channel-config right). */
+function assertMayEditChannel(caller: Caller, channel: string): void {
+  if (!authorize(caller.actor, "config:write", { type: "config-scope", kind: "channel", id: channel }).allow) throw new CommandError("unauthorized", "Channel config changes are restricted.");
 }
 
 /** Scope as shown in replies: instructions are elided to their length so a
@@ -73,8 +76,7 @@ const who = (scope: "channel" | "me") => (scope === "channel" ? "channel" : "you
 export const configShow = defineCommand({
   id: "config.show",
   options: z.object({ channel: channelOption }),
-  scope: "config:read",
-  chatGate: "open",
+  action: "config:read",
   effect: "read",
   describe: "The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.",
   render: (output) => formatConfigDescription(output as unknown as ConfigDescription),
@@ -94,8 +96,7 @@ export const configSet = defineCommand({
     efforts: z.record(z.string(), effort).optional().describe("per-agent effort: --efforts.<agent> low|medium|high"),
     channel: channelOption,
   }),
-  scope: "config:write",
-  chatGate: "open",
+  action: "config:write",
   effect: "write",
   describe: "Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.",
   render: (output) => {
@@ -124,7 +125,7 @@ export const configSet = defineCommand({
     let effective: Scope;
     if (args.scope === "channel") {
       const channel = targetChannel(caller, options.channel);
-      assertMayEditChannel(caller);
+      assertMayEditChannel(caller, channel);
       effective = await deps.config.setChannelOverride(channel, patch);
     } else {
       effective = await deps.config.setUserOverride(caller.id, patch);
@@ -139,15 +140,14 @@ export const configClear = defineCommand({
   id: "config.clear",
   args: [scopeArg],
   options: z.object({ channel: channelOption }),
-  scope: "config:write",
-  chatGate: "open",
+  action: "config:write",
   effect: "write",
   describe: "Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.",
   render: (output) => `Cleared ${who((output as JsonObject).scope as "channel" | "me")} overrides.`,
   handler: async ({ args, options, caller, deps }) => {
     if (args.scope === "channel") {
       const channel = targetChannel(caller, options.channel);
-      assertMayEditChannel(caller);
+      assertMayEditChannel(caller, channel);
       await deps.config.clearChannelOverride(channel);
     } else {
       await deps.config.clearUserOverride(caller.id);
@@ -164,8 +164,7 @@ export const configInstructions = defineCommand({
   id: "config.instructions",
   args: [scopeArg, { name: "text", schema: z.string().optional(), describe: 'the instructions; omit to show the current text, pass "" to clear', rest: true }],
   options: z.object({ channel: channelOption }),
-  scope: "config:write",
-  chatGate: "open",
+  action: "config:write",
   effect: "write",
   describe: "Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.",
   render: (output) => {
@@ -198,7 +197,7 @@ export const configInstructions = defineCommand({
     const patch: Scope = { instructions: text.length > 0 ? text : undefined };
     let effective: Scope;
     if (channel !== undefined) {
-      assertMayEditChannel(caller);
+      assertMayEditChannel(caller, channel);
       effective = await deps.config.setChannelOverride(channel, patch);
     } else {
       effective = await deps.config.setUserOverride(caller.id, patch);

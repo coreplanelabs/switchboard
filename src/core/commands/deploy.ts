@@ -60,8 +60,7 @@ const planJson = (plan: DeployPlan): JsonValue => plan as unknown as JsonValue;
 export const deployPlan = defineCommand({
   id: "deploy.plan",
   options: deployOptions,
-  scope: "deploy:read",
-  chatGate: "operator",
+  action: "deploy:read",
   effect: "read",
   describe: "The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed.",
   render: (output) => formatPlan(output as unknown as DeployPlan),
@@ -75,8 +74,7 @@ export const deployPlan = defineCommand({
 export const deployAll = defineCommand({
   id: "deploy.all",
   options: deployOptions,
-  scope: "deploy:write",
-  chatGate: "operator",
+  action: "deploy:write",
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe: "Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and the bot's drain until the new container is live.",
@@ -104,8 +102,7 @@ const restartOptions = z.object({
 export const deployRestart = defineCommand({
   id: "deploy.restart",
   options: restartOptions,
-  scope: "deploy:write",
-  chatGate: "operator",
+  action: "deploy:write",
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe: "Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): refused while runs are in flight unless --force; done once /healthz answers with a later startedAt.",

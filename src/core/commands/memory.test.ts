@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CommandRegistry, bindCommands, renderText, UNTRUSTED_OPEN, type Caller, type CommandInvoker } from "../commandRegistry.js";
+import { callerWith } from "../testing/callers.js";
 import { InMemoryMemoryStore } from "../memory/stores.js";
 import type { MemoryConfig, MemoryRecord, MemoryStore } from "../memory/types.js";
 import { MEMORY_OFF_MESSAGE, registerMemoryCommands, scopeKeyOfMemoryId, type MemoryCommandDeps } from "./memory.js";
@@ -42,15 +43,10 @@ function bind(store: MemoryStore | undefined = seeded(), cfg: MemoryConfig | und
 }
 
 /** A Slack person in channel C1; `admin` passes the repo-management gate; `repo` binds the thread's repo lazily. */
-const chat = (userId: string, opts: { admin?: boolean; repo?: string; channelId?: string } = {}): Caller => ({
-  kind: "chat",
-  id: userId,
-  scopes: new Set(),
-  chatGate: (gate) => gate === "open" || (gate === "repoManager" && opts.admin === true),
-  origin: { channelId: opts.channelId ?? "slack:C1", threadKey: "slack:C1:1.0", repo: async () => opts.repo },
-});
-const cli: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
-const mcp = (...scopes: string[]): Caller => ({ kind: "mcp", id: "mcp:alice", scopes: new Set(scopes) });
+const chat = (userId: string, opts: { admin?: boolean; repo?: string; channelId?: string } = {}): Caller =>
+  callerWith("chat", userId, opts.admin ? "all" : { actions: new Set(["memory:read", "memory:write"]) }, { origin: { channelId: opts.channelId ?? "slack:C1", threadKey: "slack:C1:1.0", repo: async () => opts.repo } });
+const cli: Caller = callerWith("cli", "cli:local", "all");
+const mcp = (...actions: string[]): Caller => callerWith("mcp", "mcp:alice", actions);
 
 async function list(commands: CommandInvoker, caller: Caller, input: { args?: string[]; options?: Record<string, unknown> } = {}) {
   const res = await commands.invoke("memory.list", input, caller);

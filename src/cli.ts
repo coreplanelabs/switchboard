@@ -45,7 +45,7 @@ import { buildMcp } from "./mcp/index.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
-export const CLI_CALLER: Caller = { kind: "cli", id: CLI_ACTOR.id, scopes: "all", actor: CLI_ACTOR };
+export const CLI_CALLER: Caller = { kind: "cli", id: CLI_ACTOR.id, actor: CLI_ACTOR };
 
 export const USAGE = [
   "usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]",

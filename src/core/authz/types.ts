@@ -63,7 +63,10 @@ export type Resource =
   | { readonly type: "channel"; readonly id: string; readonly visibility: ChannelVisibility }
   | { readonly type: "memory-scope"; readonly key: string; readonly kind: "org" | "user" | "repo" | "channel"; readonly originChannelVisibility?: ChannelVisibility }
   | { readonly type: "repo"; readonly owner: string; readonly name: string }
+  /** A config tier (routing-and-config: a channel's or a user's scope, or the
+   *  org-wide defaults — the three tiers MCP servers live in as well). */
   | { readonly type: "config-scope"; readonly kind: "channel" | "user"; readonly id: string }
+  | { readonly type: "config-scope"; readonly kind: "org" }
   | { readonly type: "agent"; readonly name: string }
   /** List-shaped actions with no single resource (`runs.list`, `friction.report`). */
   | { readonly type: "command"; readonly id: string };

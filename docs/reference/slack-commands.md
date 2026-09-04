@@ -24,7 +24,7 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 
 ## Every command you can run in chat
 
-One table per group. "Who can run it" is the command's chat gate resolved against `permissions` — see [reference: permissions](permissions.md) for what each set defaults to. A registered command that is deliberately not exposed to chat (`deploy all`, `deploy restart`, `env bootstrap`, `friction analyze`, and the paged `runs get|events|friction` reads) is absent from this table and reachable on the [CLI](cli.md), over HTTP, or as an MCP tool instead.
+One table per group. "Who can run it" is what the authorization policy decides for a Slack user holding each `permissions` set (the narrowest set admitted is named) — see [reference: permissions](permissions.md) for what each set defaults to. A registered command that is deliberately not exposed to chat (`deploy all`, `deploy restart`, `env bootstrap`, `friction analyze`, and the paged `runs get|events|friction` reads) is absent from this table and reachable on the [CLI](cli.md), over HTTP, or as an MCP tool instead.
 
 <!-- generated:chat-commands · npm run docs:gen — generated from the code, do not edit by hand -->
 

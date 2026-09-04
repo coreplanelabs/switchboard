@@ -119,7 +119,7 @@ describe("authorize: table shape", () => {
   it("no row for the (action, resource) → deny no-rule", () => {
     expect(authorize(A.admin, "runs:read", { type: "channel", id: CHANNELS.pub1.id, visibility: "public" })).toEqual({ allow: false, reason: "no-rule" });
     expect(authorize(A.admin, "runs:delete", run())).toEqual({ allow: false, reason: "no-rule" });
-    expect(authorize(A.admin, "memory:read", { type: "command", id: "memory.list" })).toEqual({ allow: false, reason: "no-rule" });
+    expect(authorize(A.admin, "agent:run", { type: "command", id: "x" })).toEqual({ allow: false, reason: "no-rule" });
   });
   it("an empty table denies everything with no-rule", () => {
     expect(authorizeWith([], A.admin, "runs:read", run())).toEqual({ allow: false, reason: "no-rule" });
@@ -148,8 +148,9 @@ describe("authorize: table shape", () => {
 });
 
 describe("authorize: fail-closed (R7)", () => {
+  /** A row with no condition whose selectors admit a plain `user` (the only way a grant-less user gets in). */
   const openRows = (action: string, target: string) =>
-    POLICY.some((r) => r.action === action && ruleTarget(r) === target && r.when.length === 0 && !r.actorKinds && !r.originVisibility);
+    POLICY.some((r) => r.action === action && ruleTarget(r) === target && r.when.length === 0 && (!r.actorKinds || r.actorKinds.includes("user")) && !r.originVisibility);
 
   /** A resource of the row's target that belongs to someone else, in a channel the actor is not in. */
   function foreign(rule: Rule): Resource {
@@ -172,6 +173,8 @@ describe("authorize: fail-closed (R7)", () => {
         return { type: "config-scope", kind: "channel", id: CHANNELS.priv.id };
       case "config-scope/user":
         return { type: "config-scope", kind: "user", id: "slack:U1" };
+      case "config-scope/org":
+        return { type: "config-scope", kind: "org" };
       case "agent":
         return { type: "agent", name: "coding" };
       case "command":
@@ -180,7 +183,7 @@ describe("authorize: fail-closed (R7)", () => {
     throw new Error(`no fixture for ${String(ruleTarget(rule))}`);
   }
 
-  it("NO_GRANTS user: denied on every row except the open, unselected ones", () => {
+  it("NO_GRANTS user: denied on every row except the open ones a user may pass — the shared org memory read, and the config write commands (a person's own scope is theirs; the channel scope is a separate row)", () => {
     const seen: string[] = [];
     for (const rule of POLICY) {
       const target = ruleTarget(rule)!;
@@ -188,7 +191,13 @@ describe("authorize: fail-closed (R7)", () => {
       expect(decision.allow, `${rule.action} on ${target}`).toBe(openRows(rule.action, target));
       if (decision.allow) seen.push(`${rule.action} ${target}`);
     }
-    expect([...new Set(seen)].sort()).toEqual(["friction:read command", "memory:read memory-scope/org", "repo:read command"]);
+    expect([...new Set(seen)].sort()).toEqual(["config:write command", "memory:read memory-scope/org"]);
+  });
+  it("a NO_GRANTS credential (service) is denied on every command row — the user-only open row does not admit it", () => {
+    const credential = actor("service", "mcp:nothing");
+    for (const rule of POLICY.filter((r) => r.resource === "command")) {
+      expect(authorize(credential, rule.action, { type: "command", id: "x" }).allow, `${rule.action} on command`).toBe(false);
+    }
   });
   it("NO_GRANTS user still reads and writes its OWN scopes (is-self is a relation, not a grant)", () => {
     expect(authorize(A.noGrants, "runs:read", run({ channel: "priv", userId: A.noGrants.id }))).toEqual({ allow: true });

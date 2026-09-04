@@ -7,16 +7,20 @@ import type { RepoInspector } from "../../execution/githubRepoInspect.js";
 
 // The `repo.*` registrations (#157 R13 + phase 4b): the whole repo surface on
 // ONE typed model.
-//   repo list                                  — the live resident registry (open)
+//   repo list                                  — the live resident registry (`repo:read`,
+//                                                what every Slack user holds)
 //   repo onboard <slug> [--ref] [--test] [--build] [--install] [--evict-coldest]
-//   repo offboard <slug> [--dry-run]           — `repoManager` gate (KTD9 fail-closed:
-//   repo reconfigure <slug> [--ref] [--test…]    admins ∪ permissions.repoManagement),
-//   repo rebuild <slug> [--dry-run]              `repo:write` on machine surfaces
+//   repo offboard <slug> [--dry-run]           — `repo:write`: the repo-management right
+//   repo reconfigure <slug> [--ref] [--test…]    (KTD9 fail-closed: admins ∪
+//   repo rebuild <slug> [--dry-run]              permissions.repoManagement, or a token
+//                                                minted with it)
 //   repo test <slug> [ref] / repo build <slug> [ref]
-//                                              — deterministic ops (U6/KTD8): `agentRun`
-//                                                gate (= canRunAgent(coding), the implicit
-//                                                target agent) + the per-repo allowlist
-//                                                inside; `repo:exec` on machine surfaces
+//                                              — deterministic ops (U6/KTD8): `repo:exec`
+//                                                decided on `agent { coding }` (the implicit
+//                                                target agent — the right to run it, or the
+//                                                exec grant) + the per-repo allowlist inside
+// Every gate is a policy row (features/authorization.md); the handlers hold no
+// identity comparison of their own.
 // The handlers are thin: typed args/options → the resident Worker's admin
 // routes, or the `Operations` backend (resident `/op` or local). Nothing here
 // starts an agent run (KTD16): a deterministic op runs the repo's ONBOARDED
@@ -131,8 +135,7 @@ export function renderResidentList(data: Record<string, unknown>): string {
 
 export const repoList = defineCommand({
   id: "repo.list",
-  scope: "repo:read",
-  chatGate: "open",
+  action: "repo:read",
   effect: "read",
   describe: "Every onboarded resident repo with its live state, ref, sha, and last refresh.",
   render: (output) => renderResidentList(output as Record<string, unknown>),
@@ -155,8 +158,7 @@ export const repoOnboard = defineCommand({
     install: command.optional().describe("the repo's install command (default: detected from the root lockfile / packageManager — pnpm, yarn, bun, or npm; none without a package.json)"),
     evictColdest: flag.optional().describe("over the resident cap, offboard the coldest eligible warm resident instead of failing (#50)"),
   }),
-  scope: "repo:write",
-  chatGate: "repoManager",
+  action: "repo:write",
   effect: "write",
   describe: "Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated).",
   render: (output) => {
@@ -306,8 +308,7 @@ export const repoOffboard = defineCommand({
   id: "repo.offboard",
   args: [slugArg],
   options: dryRunOptions,
-  scope: "repo:write",
-  chatGate: "repoManager",
+  action: "repo:write",
   effect: "write",
   describe: "Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only).",
   render: (output) => {
@@ -346,8 +347,7 @@ export const repoRebuild = defineCommand({
   id: "repo.rebuild",
   args: [slugArg],
   options: dryRunOptions,
-  scope: "repo:write",
-  chatGate: "repoManager",
+  action: "repo:write",
   effect: "write",
   describe: "Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only).",
   render: (output) => {
@@ -399,8 +399,7 @@ export const repoReconfigure = defineCommand({
     build: command.optional().describe("new build command"),
     install: command.optional().describe("new install command"),
   }),
-  scope: "repo:write",
-  chatGate: "repoManager",
+  action: "repo:write",
   effect: "write",
   describe: "Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach).",
   render: (output) => {
@@ -454,8 +453,11 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
   return defineCommand({
     id: `repo.${op}`,
     args: [slugArg, { name: "ref", schema: gitRef.optional(), describe: "branch to run on (default: the resident's default ref)" }],
-    scope: "repo:exec",
-    chatGate: "agentRun",
+    action: "repo:exec",
+    // The op runs as the coding agent (the implicit target of a deterministic
+    // op), so the table decides on `agent { coding }`: the right to run that
+    // agent, or the exec grant a token was minted with (policy.ts).
+    resource: () => ({ type: "agent", name: "coding" }),
     effect: "write",
     describe: `Run the repo's onboarded ${op} command with zero model turns (needs coding-agent access; the ref must be a plausible branch).`,
     render: renderOp,

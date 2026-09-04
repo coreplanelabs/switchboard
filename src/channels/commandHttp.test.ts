@@ -12,6 +12,7 @@ import { createRunsService } from "../core/runsService.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import { ALL_GRANTS, grantsFor } from "../core/authz/grants.js";
 import { NO_GRANTS } from "../core/authz/types.js";
+import { callerWith } from "../core/testing/callers.js";
 import { callerFor, callerIdFor, createCommandHttpHandler, isCommandPath, isLocalhostBase, serviceTokenAllowed, type CommandHttpOptions } from "./commandHttp.js";
 
 // Feature: features/command-registry.md — the generic HTTP adapter for `/api/*`
@@ -62,9 +63,7 @@ async function fixture(over: Partial<CommandHttpOptions> = {}) {
   registerRunsCommands(registry);
   const commands: CommandInvoker = bindCommands(registry, { runs: async () => runs });
   const opts: CommandHttpOptions = {
-    operatorIdentities: () => ["access:op-1"],
-    serviceTokenScopes: (cn) => (cn === "reader-bot" ? ["runs:read"] : []),
-    // The same two legacy keys, as `ConfigStore.grantsFor` would translate them.
+    // The two legacy keys, as `ConfigStore.grantsFor` translates them: an operator, one service token; every other browser session holds the reads.
     grantsFor: (id) => grantsFor(id, { permissions: { operators: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } }, commandGroups: ["runs"] }),
     devBypassActive: false,
     ...over,
@@ -172,8 +171,8 @@ describe("createCommandHttpHandler — read commands", () => {
     const body = t.json() as { runs: { id: string }[] };
     expect(body.runs.map((r) => r.id).sort()).toEqual(["fin-1", "live-1"]);
     expect(t.text()).not.toContain("tok-");
-    // The adapter passes `invoke`'s object through untouched (the same actor: a browser identity config names nothing for).
-    const direct = await commands.invoke("runs.list", { options: { status: "all" } }, { kind: "access", id: "access:user-1", scopes: new Set(), actor: { kind: "user", id: "access:user-1", grants: NO_GRANTS } });
+    // The adapter passes `invoke`'s object through untouched (the same actor: an unlisted browser session holds the group reads and no channel).
+    const direct = await commands.invoke("runs.list", { options: { status: "all" } }, callerWith("access", "access:user-1", { actions: new Set(["runs:read"]) }));
     expect(body).toEqual(direct.ok ? direct.value : null);
   });
 
@@ -352,10 +351,7 @@ describe("createCommandHttpHandler — caller resolution (R9)", () => {
   });
 
   it("a service token with runs:write stops a run as actor access:svc:<common_name>", async () => {
-    const { handler, reg, live } = await fixture({
-      serviceTokenScopes: (cn) => (cn === "ops-bot" ? ["runs:read", "runs:write"] : []),
-      grantsFor: (id) => grantsFor(id, { permissions: { serviceTokens: { "ops-bot": ["runs:read", "runs:write"] } } }),
-    });
+    const { handler, reg, live } = await fixture({ grantsFor: (id) => grantsFor(id, { permissions: { serviceTokens: { "ops-bot": ["runs:read", "runs:write"] } } }) });
     const t = stopPost(live.id);
     await handler(t.req, t.res, { sub: "", commonName: "ops-bot" });
     expect(t.status).toBe(200);
@@ -425,9 +421,7 @@ describe("createCommandHttpHandler — dev bypass (KTD13)", () => {
     await handler(t.req, t.res, { sub: "dev-bypass" });
     expect(t.status).toBe(403);
     const ok = createCommandHttpHandler((await fixture()).commands, {
-      operatorIdentities: () => [],
-      serviceTokenScopes: () => [],
-      grantsFor: () => NO_GRANTS,
+      grantsFor: (id) => grantsFor(id, { commandGroups: ["runs"] }),
       devBypassActive: true,
       publicBaseUrl: "http://localhost:3000",
     });
@@ -468,23 +462,21 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
     expect(callerIdFor(readerBot)).not.toBe("access:");
   });
 
-  it("callerFor carries the same identity as an Actor: browser sub → user access:<sub>, service token → service access:svc:<cn>, grants from the lookup (plan U2)", async () => {
-    const { commands } = await fixture();
-    const opts: CommandHttpOptions = {
-      operatorIdentities: () => ["access:op-1"],
-      serviceTokenScopes: (cn) => (cn === "reader-bot" ? ["runs:read"] : []),
-      grantsFor: (id) => grantsFor(id, { permissions: { admins: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } } }),
-      devBypassActive: false,
+  it("callerFor carries the identity as the Actor the table decides on: browser sub → user access:<sub>, service token → service access:svc:<cn>, grants from the lookup (plan U2/U4) — nothing else", async () => {
+    const opts: Pick<CommandHttpOptions, "grantsFor"> = {
+      grantsFor: (id) => grantsFor(id, { permissions: { admins: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } }, commandGroups: ["runs"] }),
     };
-    expect(callerFor({ sub: "op-1" }, commands, opts).actor).toEqual({ kind: "user", id: "access:op-1", grants: ALL_GRANTS });
-    expect(callerFor(browser, commands, opts).actor).toEqual({ kind: "user", id: "access:user-1", grants: NO_GRANTS });
-    expect(callerFor(readerBot, commands, opts).actor).toEqual({ kind: "service", id: "access:svc:reader-bot", grants: { actions: new Set(["runs:read"]), channels: "all", repos: new Set() } });
-    // The legacy fields the registry still decides on are untouched.
-    expect(callerFor(browser, commands, opts)).toMatchObject({ kind: "access", id: "access:user-1", scopes: new Set() });
+    expect(callerFor({ sub: "op-1" }, opts).actor).toEqual({ kind: "user", id: "access:op-1", grants: ALL_GRANTS });
+    // An unlisted browser session: the reads its translation gives, nothing the adapter added.
+    expect(callerFor(browser, opts).actor).toEqual({ kind: "user", id: "access:user-1", grants: { actions: new Set(["runs:read"]), channels: new Set(), repos: new Set() } });
+    expect(callerFor(readerBot, opts).actor).toEqual({ kind: "service", id: "access:svc:reader-bot", grants: { actions: new Set(["runs:read"]), channels: "all", repos: new Set() } });
+    expect(callerFor(browser, opts)).toEqual({ kind: "access", id: "access:user-1", actor: callerFor(browser, opts).actor });
+    // No lookup knowledge → no grants (fail-closed).
+    expect(callerFor(browser, { grantsFor: () => NO_GRANTS }).actor.grants).toBe(NO_GRANTS);
   });
 
   it("is the id callerFor's Caller carries", async () => {
-    const { handler, reg } = await fixture({ serviceTokenScopes: () => ["runs:write"], grantsFor: (id) => grantsFor(id, { permissions: { serviceTokens: { "reader-bot": ["runs:write"] } } }) });
+    const { handler, reg } = await fixture({ grantsFor: (id) => grantsFor(id, { permissions: { serviceTokens: { "reader-bot": ["runs:write"] } } }) });
     const live = reg.create("x", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:x" });
     const t = stopPost(live.id);
     await handler(t.req, t.res, readerBot);
