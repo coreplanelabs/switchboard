@@ -46,6 +46,8 @@ The default agent just answers. Point it at a real task and it hands off to a sp
 @switchboard agent:coding in acme/api: add a retry to the webhook sender
 ```
 
+`in acme/api` names the target. Any onboarded repo can be addressed by its full `owner/name` anywhere in the request, or by just its name right after the directives (`agent:coding in api: …`) when only one onboarded repo is called that; naming a repo this way also moves a thread that was on another repo. The status card shows which repo the run bound (`resident · acme/api · main@…`), so check it if the answer looks like it came from the wrong place. A name that isn't an onboarded repo is treated as ordinary prose, and if the registry can't be reached to check, Switchboard says so and starts nothing rather than guess.
+
 This one opens a pull request. While it works, the status card links to a **live run page** — click it to watch the agent's steps (files read, commands run, tests) as they happen, not just the final answer. See [watch a run and check spend](../how-to/watch-a-run-and-check-spend.md).
 
 ## When you're stuck

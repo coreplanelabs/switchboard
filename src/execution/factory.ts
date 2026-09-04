@@ -182,8 +182,8 @@ export async function makeExecutor(
 }
 
 /** Attach to a serviceable resident and name the result POSITIVELY: the note
- *  reads `resident · <ref>@<sha7>` (warm) or `resident <state> (<reason>) ·
- *  <ref>@<sha7> — attached to the last snapshot` (refreshing/degraded, #162)
+ *  reads `resident · <owner/name> · <ref>@<sha7>` (warm) or `resident <state>
+ *  (<reason>) · <owner/name> · <ref>@<sha7> — attached to the last snapshot` (refreshing/degraded, #162)
  *  so a reader can tell the resident path from Slack alone, never only from
  *  the absence of a fallback note (KTD10 in both directions). Needs-ref (no binding for this thread, no branch named): when
  *  the resident's 409 names its default branch, bind to it ONCE here and say
@@ -226,8 +226,11 @@ async function openResident(
   }
   // The note is the binding at open time — the worktree the run STARTS on. A
   // mid-run re-attach (evicted worktree) may move to a newer sha; that later
-  // state is `executor.binding`, not the card's opening line.
-  const where = `${binding.ref}@${binding.sha.slice(0, 7)}`;
+  // state is `executor.binding`, not the card's opening line. It NAMES the
+  // repo: a run that bound the wrong repo (2026-09-04, a nominal request on
+  // the switchboard resident) must be readable from the card, not only from a
+  // sha nobody recognizes.
+  const where = `${opts.resource.replace(/^repo:/, "")} · ${binding.ref}@${binding.sha.slice(0, 7)}`;
   const why = byDefault ? " (repo default — no branch named)" : "";
   return {
     executor,
@@ -241,19 +244,59 @@ async function openResident(
  *  2026-08-29 prose-slug guard): one operator `GET /status` per candidate,
  *  through the same negative cache as executor selection. `true` for any
  *  lifecycle state of an onboarded resource — even `down` is a real repo;
- *  `not-onboarded` and every unreachable/error answer are `false`
- *  (fail-closed: a bare token never binds a repo on the strength of an error).
- *  Undefined when the resident is not configured or its bearer is unset —
- *  the resolver then binds weak tokens unvetted, as in local/dev. */
+ *  `not-onboarded` (and a non-transport HTTP error) is `false`; a registry
+ *  that did not ANSWER — transport failure, timeout, outage window — is
+ *  `"unreachable"`, so the resolver can refuse an explicit address loudly
+ *  instead of treating silence as a refusal (both are fail-closed: neither
+ *  ever binds a repo). Undefined when the resident is not configured or its
+ *  bearer is unset — the resolver then binds weak tokens unvetted, as in
+ *  local/dev. */
 export function residentOnboardedProbe(
   cfg: ResidentExecutionConfig | undefined,
   env: NodeJS.ProcessEnv = process.env,
-): ((slug: string) => Promise<boolean>) | undefined {
+): ((slug: string) => Promise<boolean | "unreachable">) | undefined {
   const token = cfg?.baseUrl ? env[cfg.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN"] : undefined;
   if (!cfg?.baseUrl || !token) return undefined;
   return async (slug) => {
     const probe = await probeResident(cfg, token, repoResourceId(slug));
+    if (probe.kind === "unreachable" && probe.transport) return "unreachable";
     return probe.kind === "status" && probe.state !== "not-onboarded";
+  };
+}
+
+/** The repo resolver's registry listing — every onboarded `owner/name` — for
+ *  resolving a bare `in <name>` address (resident-repos.md item 29). ONE
+ *  `GET /residents` per call, read with the ADMIN bearer (the route is
+ *  read-scoped; the operator bearer does not open it) through the same
+ *  negative cache as the probes. Any failure — no bearer, an outage window, a
+ *  non-2xx, a malformed body — answers undefined: a name then binds nothing,
+ *  never a guess. Undefined when the resident is not configured or the admin
+ *  bearer is unset (local/dev): names are ignored, slug addressing still works. */
+export function residentSlugsLister(
+  cfg: ResidentExecutionConfig | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): (() => Promise<string[] | undefined>) | undefined {
+  const token = cfg?.baseUrl ? env[cfg.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN"] : undefined;
+  if (!cfg?.baseUrl || !token) return undefined;
+  return async () => {
+    if (probeOutage && Date.now() < probeOutage.until) return undefined;
+    let res: Response;
+    try {
+      res = await fetch(`${cfg.baseUrl.replace(/\/$/, "")}/residents`, {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(cfg.probeTimeoutMs ?? 2000),
+      });
+    } catch (err) {
+      probeOutage = { until: Date.now() + PROBE_OUTAGE_WINDOW_MS, error: err instanceof Error ? err.message : String(err) };
+      return undefined;
+    }
+    if (!res.ok) return undefined;
+    const data = (await res.json().catch(() => ({}))) as { residents?: unknown };
+    if (!Array.isArray(data.residents)) return undefined;
+    return data.residents
+      .map((rec) => (typeof rec === "object" && rec !== null ? String((rec as { resource?: unknown }).resource ?? "") : ""))
+      .filter((resource) => resource.startsWith("repo:"))
+      .map((resource) => resource.slice("repo:".length).toLowerCase());
   };
 }
 

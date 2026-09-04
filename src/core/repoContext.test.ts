@@ -559,10 +559,12 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
       await expect(resolveRepoContext(msg(payload), boundHistory, probe)).resolves.toEqual({
         repo: "coreplanelabs/switchboard",
       });
-      // The payload slug is never even a candidate: the override guard is
-      // absolute, not probe-dependent — only the thread's repo is vetted.
+      // A prose slug is never even a candidate — only the thread's repo is
+      // vetted. The one exception is an ADDRESS: `in try/catch` is probed once
+      // (item 29), refused, and changes nothing; never more than that.
       expect(probe).toHaveBeenCalledWith("coreplanelabs/switchboard");
-      expect(probe).not.toHaveBeenCalledWith(expect.stringMatching(/review-post|catch|spec/));
+      expect(probe).not.toHaveBeenCalledWith(expect.stringMatching(/review-post|spec/));
+      expect(probe.mock.calls.length).toBeLessThanOrEqual(2);
       expect(fn).not.toHaveBeenCalled();
     });
 
@@ -630,6 +632,138 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
     await expect(resolveRepoContext(msg("also check acme/other"), h, probe)).resolves.toEqual({
       repo: "acme/api",
     });
+  });
+});
+
+// Addressed repos (resident-repos.md item 29, the 2026-09-04 wrong-repo run):
+// `in <owner/name>` / `in <name>` names the TARGET of a request. Vetted
+// against the resident registry, an addressed repo is a STRONG signal — it
+// binds a fresh thread and rebinds a bound one — because a registry-confirmed
+// repo is unambiguous in a way a prose slug (`features/memory.md`) never is.
+// A bare NAME resolves only through the registry listing and only when exactly
+// one onboarded repo carries it ("in nominal" → coreplanelabs/nominal); an
+// unknown or ambiguous name is prose and binds nothing.
+describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind once the registry vets them", () => {
+  const onboarded = ["acme/api", "acme/web", "acme/nominal"];
+  const probe = vi.fn(async (slug: string) => onboarded.includes(slug));
+  const slugs = vi.fn(async () => onboarded);
+  // A thread bound by URL to acme/api (no PR, so no inherited-PR fetch).
+  const boundToApi = [{ role: "user" as const, text: "look at https://github.com/acme/api first" }];
+
+  it("`in <slug>` naming an onboarded repo rebinds a URL-bound thread", async () => {
+    await expect(resolveRepoContext(msg("agent:coding in acme/web: fix the login page"), boundToApi, probe, slugs)).resolves.toEqual({ repo: "acme/web" });
+  });
+
+  it("`in <slug>` naming a repo the probe refuses does NOT rebind — the thread's repo stays, nothing rejected", async () => {
+    await expect(resolveRepoContext(msg("agent:coding in acme/nope: fix it"), boundToApi, probe, slugs)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("an onboarded slug that is merely mentioned (not addressed with `in`) still never rebinds — the #167 guard stands", async () => {
+    await expect(resolveRepoContext(msg("also check acme/web"), boundToApi, probe, slugs)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("an addressed slug inside a code span is a path being talked about, not an address", async () => {
+    await expect(resolveRepoContext(msg("the bug is in `acme/web` (the module), re-run"), boundToApi, probe, slugs)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("`in <name>`: a bare repo name carried by exactly one onboarded resident binds it in a fresh thread", async () => {
+    await expect(resolveRepoContext(msg("agent:coding in nominal, the consent page is impossibly long"), [], probe, slugs)).resolves.toEqual({
+      repo: "acme/nominal",
+    });
+  });
+
+  it("`in <name>` rebinds a URL-bound thread too (the target was named explicitly)", async () => {
+    await expect(resolveRepoContext(msg("agent:coding in nominal: same fix there"), boundToApi, probe, slugs)).resolves.toEqual({ repo: "acme/nominal" });
+  });
+
+  it("an ambiguous name (two owners) binds nothing — fresh thread stays repo-less, a bound thread keeps its repo", async () => {
+    const two = vi.fn(async () => ["acme/nominal", "beta/nominal"]);
+    await expect(resolveRepoContext(msg("agent:coding in nominal: fix"), [], probe, two)).resolves.toEqual({});
+    await expect(resolveRepoContext(msg("agent:coding in nominal: fix"), boundToApi, probe, two)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("a bare name counts only in the directive position — `in api` deep in prose never rebinds, even when a repo is called api (#445 F1)", async () => {
+    await expect(resolveRepoContext(msg("the crash is in api, see the logs"), boundToApi.map((h) => ({ ...h, text: "look at https://github.com/acme/web first" })), probe, slugs)).resolves.toEqual({ repo: "acme/web" });
+    await expect(resolveRepoContext(msg("the crash is in api, see the logs"), [], probe, slugs)).resolves.toEqual({});
+    // Directives and a mention may precede it; anything else is prose.
+    await expect(resolveRepoContext(msg("<@U0BQNU1AD27> agent:coding model:anthropic/claude-fable-5 in api: fix it"), [], probe, slugs)).resolves.toEqual({ repo: "acme/api" });
+    await expect(resolveRepoContext(msg("please work in api: fix it"), [], probe, slugs)).resolves.toEqual({});
+    // A slug is unambiguous enough to be addressed anywhere.
+    await expect(resolveRepoContext(msg("the crash is in acme/web, see the logs"), boundToApi, probe, slugs)).resolves.toEqual({ repo: "acme/web" });
+  });
+
+  it("the registry did not ANSWER for an addressed slug in the current message → unverifiedRepo, never a fall back to the thread's old repo (#445 F2)", async () => {
+    const down = vi.fn(async (): Promise<boolean | "unreachable"> => "unreachable");
+    await expect(resolveRepoContext(msg("agent:coding in acme/web: fix it"), boundToApi, down, slugs)).resolves.toEqual({ unverifiedRepo: "acme/web" });
+    await expect(resolveRepoContext(msg("agent:coding in acme/web: fix it"), [], down, slugs)).resolves.toEqual({ unverifiedRepo: "acme/web" });
+    // A probe that throws is "did not answer" too — not a refusal.
+    const throwing = vi.fn(async (): Promise<boolean> => {
+      throw new Error("ECONNRESET");
+    });
+    await expect(resolveRepoContext(msg("agent:coding in acme/web: fix it"), boundToApi, throwing, slugs)).resolves.toEqual({ unverifiedRepo: "acme/web" });
+    // A URL in the same message still wins — it needs no vetting.
+    await expect(resolveRepoContext(msg("agent:coding in acme/web: see https://github.com/acme/nominal"), boundToApi, down, slugs)).resolves.toEqual({ repo: "acme/nominal" });
+  });
+
+  it("an unanswered address in HISTORY is no answer: older strong signals still bind; a fresh thread's unvetted weak slug reports unverifiedRepo, not rejectedRepo", async () => {
+    const down = vi.fn(async (): Promise<boolean | "unreachable"> => "unreachable");
+    const h = [...boundToApi, { role: "user" as const, text: "agent:coding in acme/web: port it" }];
+    await expect(resolveRepoContext(msg("now run the tests"), h, down, slugs)).resolves.toEqual({ repo: "acme/api" });
+    await expect(resolveRepoContext(msg("agent:coding fix login in acme/web"), [], down, slugs)).resolves.toEqual({ unverifiedRepo: "acme/web" });
+  });
+
+  it("an unknown name is prose (`in production`): nothing bound, nothing rejected", async () => {
+    await expect(resolveRepoContext(msg("deploy it in production please"), [], probe, slugs)).resolves.toEqual({});
+    await expect(resolveRepoContext(msg("deploy it in production please"), boundToApi, probe, slugs)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("no registry lister → names are ignored; slug addressing still works", async () => {
+    await expect(resolveRepoContext(msg("agent:coding in nominal: fix"), [], probe)).resolves.toEqual({});
+    await expect(resolveRepoContext(msg("agent:coding in acme/web: fix"), boundToApi, probe)).resolves.toEqual({ repo: "acme/web" });
+  });
+
+  it("a lister that fails is no answer: the addressed name binds nothing and the thread's repo stays", async () => {
+    const failing = vi.fn(async (): Promise<string[] | undefined> => {
+      throw new Error("resident admin unreachable");
+    });
+    await expect(resolveRepoContext(msg("agent:coding in nominal: fix"), boundToApi, probe, failing)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("without a probe (local/dev, no registry) nothing can be vetted: an addressed slug stays weak — binds a fresh thread, never rebinds a bound one", async () => {
+    await expect(resolveRepoContext(msg("agent:coding in acme/web: fix"), [])).resolves.toEqual({ repo: "acme/web" });
+    await expect(resolveRepoContext(msg("agent:coding in acme/web: fix"), boundToApi)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("the registry is listed at most once per resolution, however many names the thread carries", async () => {
+    const lister = vi.fn(async () => onboarded);
+    const h = [
+      { role: "user" as const, text: "agent:coding in nominal: fix the page" },
+      { role: "user" as const, text: "and in web the same" },
+    ];
+    await expect(resolveRepoContext(msg("in nominal again: run the tests"), h, probe, lister)).resolves.toEqual({ repo: "acme/nominal" });
+    expect(lister).toHaveBeenCalledTimes(1);
+  });
+
+  it("an address in HISTORY binds the follow-up (the thread's binding is derived from every user turn)", async () => {
+    const h = [{ role: "user" as const, text: "agent:coding in nominal, the consent page is impossibly long" }];
+    await expect(resolveRepoContext(msg("now run the tests"), h, probe, slugs)).resolves.toEqual({ repo: "acme/nominal" });
+  });
+
+  it("last strong wins across URLs and addresses alike", async () => {
+    const url = { role: "user" as const, text: "look at https://github.com/acme/api first" };
+    const addressed = { role: "user" as const, text: "agent:coding in acme/web: port it" };
+    await expect(resolveRepoContext(msg("go"), [url, addressed], probe, slugs)).resolves.toEqual({ repo: "acme/web" });
+    await expect(resolveRepoContext(msg("go"), [url, addressed, url], probe, slugs)).resolves.toEqual({ repo: "acme/api" });
+  });
+
+  it("repoFromThread (sync): an addressed slug the predicate confirms counts strong; names cannot be resolved without the registry and are ignored", () => {
+    const isOnboarded = (slug: string) => onboarded.includes(slug);
+    expect(repoFromThread([...boundToApi, { role: "user", text: "agent:coding in acme/web: port it" }], isOnboarded)).toBe("acme/web");
+    expect(repoFromThread([...boundToApi, { role: "user", text: "agent:coding in acme/nope: port it" }], isOnboarded)).toBe("acme/api");
+    expect(repoFromThread([...boundToApi, { role: "user", text: "agent:coding in nominal: port it" }], isOnboarded)).toBe("acme/api");
+    // No predicate (local/dev): nothing can be vetted, so an addressed slug stays weak like any other.
+    expect(repoFromThread([...boundToApi, { role: "user", text: "agent:coding in acme/web: port it" }])).toBe("acme/api");
+    expect(repoFromThread([...boundToApi, { role: "user", text: "also check acme/web" }])).toBe("acme/api");
   });
 });
 

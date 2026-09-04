@@ -35,6 +35,28 @@ import { normalizeHead } from "./reviewedHead.js";
 // probe (`isResident`) confirms it names an onboarded resource. No probe
 // (local/dev, tests) → binds as before: there is no registry to consult.
 //
+// ADDRESSED repos are the third strength (2026-09-04: a thread bound to
+// switchboard by an issue link kept every later `in coreplanelabs/nominal`
+// run on the switchboard resident — the bare slug was weak, so it could not
+// rebind — and the opening `in nominal` carried no signal at all, so that run
+// went cold): a token right after the word `in` names the TARGET of the
+// request — `in owner/name` anywhere in the message, or a bare `in name` in
+// the DIRECTIVE position only (`agent:coding in nominal, …`: nothing but
+// directives or mentions before it — "the crash is in api, see the logs" is
+// prose even when a repo is called `api`). Once the registry vets it, it is
+// STRONG: it binds a fresh thread and rebinds a bound one, like a URL. The
+// vetting is what keeps the #167 guard intact — `in features/memory.md` is
+// refused by the probe and changes nothing, and a merely-mentioned onboarded
+// slug ("also check acme/web") is still weak. A bare NAME resolves only
+// through the registry listing (`residentSlugs`) and only when exactly one
+// onboarded repo carries it; unknown or ambiguous names are prose. No probe
+// (local/dev) → nothing can be vetted: an addressed slug stays the weak token
+// it always was (`in try/catch` is prose too) and names bind nothing. A
+// registry that does not ANSWER is not a refusal: when the current message
+// addresses a slug and the probe is unreachable, the resolver reports
+// `unverifiedRepo` and binds nothing — never a silent fall back to the
+// thread's old repo, which is the wrong-repo run this strength exists to end.
+//
 // Ref extraction is deliberately conservative (KTD6: ref binding is
 // explicit-or-ask-once, never a silent guess): explicit forms only —
 // "on branch X" / `branch:X`, "on X" where X is a well-known default branch
@@ -80,9 +102,20 @@ export interface RepoContext {
    *  resident probe — the first refused one, in resolution order (#316). The
    *  dispatcher turns it into a "not onboarded" reply instead of a repo-less
    *  run. Never set alongside `repo`; never set for a thread that already has
-   *  a repo (prose slugs there are never even probed — #289); never set
+   *  a repo (prose slugs there are never even probed — #289; only an
+   *  `in <slug>` address costs one probe, refused or not); never set
    *  without a probe (local/dev binds unvetted). */
   rejectedRepo?: string;
+  /** Set when NO repo could be bound because a candidate could not be VETTED —
+   *  the resident registry did not answer (transport failure, outage window,
+   *  a probe that threw) — as opposed to refusing it: the first such
+   *  candidate, in resolution order. An explicitly addressed `in <slug>` in
+   *  the current message that cannot be vetted sets this even in a bound
+   *  thread, instead of falling back to the thread's old repo (the wrong-repo
+   *  run of 2026-09-04). The dispatcher turns it into a "could not verify,
+   *  try again" reply. Never set alongside `repo`; outranks `rejectedRepo`
+   *  when both would apply (a registry that was down cannot have refused). */
+  unverifiedRepo?: string;
 }
 
 // GitHub owner: alphanumeric + hyphens, no leading/trailing hyphen, ≤39.
@@ -110,6 +143,13 @@ function stripPunct(token: string): string {
   return token.replace(/^[("'`<[{*]+/, "").replace(/[)"'`>\]}.,;:!?*]+$/, "");
 }
 
+/** A request's lead-in token: an inline directive (`agent:coding`,
+ *  `model:anthropic/x`) or a Slack mention (`<@U…>`, `<@U…|name>`) — what may
+ *  stand before `in <name>` for the bare name to count as the address. */
+function isDirectiveOrMention(token: string): boolean {
+  return /^[a-z]+:\S+$/i.test(token) || /^<@[^>\s]+>$/.test(token);
+}
+
 /** "owner/name" (optionally with a ".git" suffix) → lowercase slug, or undefined. */
 function slugOf(token: string): string | undefined {
   const parts = token.replace(/\.git$/i, "").split("/");
@@ -132,7 +172,14 @@ interface Signals {
   /** ambiguous "on <owner/name-shaped>" token (slug or slashy branch) —
    *  original case kept; resolved against repo presence by the caller */
   onSlug?: string;
+  /** The request's addressed target: the first token after the word `in`
+   *  (outside code) — a lowercase `owner/name` slug, or a bare lowercase name
+   *  the caller resolves through the registry listing. */
+  addressed?: Addressed;
 }
+
+/** `in <owner/name>` → `{ slug }`; `in <name>` → `{ name }`. */
+type Addressed = { slug: string; name?: undefined } | { name: string; slug?: undefined };
 
 /** Pure, sync signal extraction from one message text (no network). */
 function extractSignals(rawText: string): Signals {
@@ -194,6 +241,16 @@ function extractSignals(rawText: string): Signals {
     if (!t || t.includes("://") || t.toLowerCase().startsWith("github.com/")) continue;
     const prev = i > 0 ? stripPunct(tokens[i - 1]).toLowerCase() : "";
     if (prev === "branch") continue; // keyword form, handled above
+    // "in X": the addressed target — a slug anywhere, or a bare name for the
+    // registry to resolve when nothing but directives/mentions precede the
+    // `in` (the compose position; a bare word deeper in prose is prose).
+    // Recorded beside the weak-slug scan below (the slug still lands in
+    // `repo` as before); code spans are paths being talked about.
+    if (prev === "in" && !inCode[i] && !out.addressed) {
+      const slug = slugOf(t);
+      if (slug) out.addressed = { slug };
+      else if (!t.includes("/") && NAME_RE.test(t) && tokens.slice(0, i - 1).every(isDirectiveOrMention)) out.addressed = { name: t.toLowerCase() };
+    }
     if (prev === "on") {
       if (!out.ref && WELL_KNOWN_REFS.has(t)) out.ref = t;
       else if (!out.onSlug && slugOf(t) && validRef(t)) out.onSlug = t;
@@ -222,18 +279,32 @@ function extractSignals(rawText: string): Signals {
  *  recognition + repo resolution), so memoize per reference. */
 interface ThreadSignals {
   repo?: string;
-  /** true once a strong signal (URL / `owner/name#N`) bound the repo */
+  /** true once a strong signal (URL / `owner/name#N` / a vetted address) bound the repo */
   repoStrong?: boolean;
   /** Last user-turn PR reference (URL or `owner/name#N`), any repo; the
    *  resolver checks it against the resolved repo. */
   pr?: { repo: string; number: number };
+  /** Every user turn's binding-relevant signal, in order: a strong repo (URL,
+   *  `owner/name#N`) or an address (`in <slug>` / `in <name>`) still to be
+   *  vetted. The async resolver walks these from the last one back, vetting
+   *  addresses against the registry, so "last strong wins" holds across
+   *  URLs and addresses alike. */
+  events: ThreadEvent[];
 }
+
+type ThreadEvent = { strong: string } | { addressed: Addressed };
 
 /** Sync "is this slug an onboarded resident?" predicate for the history scan
  *  (`repoFromThread`), and its async twin for the resolver. Injected by the
- *  dispatcher from the resident config; absent → weak tokens bind unvetted. */
+ *  dispatcher from the resident config; absent → weak tokens bind unvetted.
+ *  The async probe distinguishes a registry that REFUSED (`false`) from one
+ *  that did not ANSWER (`"unreachable"`: transport failure, outage window) —
+ *  a throw counts as the latter. */
 export type ResidentPredicate = (slug: string) => boolean;
-export type ResidentProbe = (slug: string) => Promise<boolean>;
+export type ResidentProbe = (slug: string) => Promise<boolean | "unreachable">;
+/** The registry listing — every onboarded `owner/name` — for resolving a bare
+ *  `in <name>` address. Undefined (or a throw) = no answer: names bind nothing. */
+export type ResidentSlugs = () => Promise<string[] | undefined>;
 
 const threadSignalsCache = new WeakMap<Array<{ role: string; text: string }>, ThreadSignals>();
 
@@ -241,11 +312,18 @@ function threadSignals(history: Array<{ role: string; text: string }>, isResiden
   // Only the unvetted scan is memoized: a predicate can change the answer.
   const cached = isResident ? undefined : threadSignalsCache.get(history);
   if (cached) return cached;
-  const out: ThreadSignals = {};
+  const out: ThreadSignals = { events: [] };
   for (const h of history) {
     if (h.role !== "user") continue;
     const s = extractSignals(h.text);
-    const strong = s.pr?.repo ?? (s.repoStrong ? s.repo : undefined);
+    let strong = s.pr?.repo ?? (s.repoStrong ? s.repo : undefined);
+    if (strong) out.events.push({ strong });
+    else if (s.addressed) out.events.push({ addressed: s.addressed });
+    // Sync view (repoFromThread): an addressed slug counts strong only when a
+    // predicate confirms it — unvetted (no registry) it stays the weak token
+    // it always was; a bare name cannot be resolved without the listing and
+    // is ignored here.
+    if (!strong && s.addressed?.slug && isResident && safePredicate(isResident, s.addressed.slug)) strong = s.addressed.slug;
     if (strong) {
       out.repo = strong;
       out.repoStrong = true;
@@ -271,22 +349,29 @@ function safePredicate(isResident: ResidentPredicate, slug: string): boolean {
   }
 }
 
-async function safeProbe(isResident: ResidentProbe | undefined, slug: string): Promise<boolean> {
-  if (!isResident) return true; // no registry to consult → bind as before
+/** The probe's answer with a throw folded into "unreachable" (the registry did
+ *  not answer — never a refusal, never a bind); no probe → true (no registry
+ *  to consult → bind as before). */
+async function safeProbe(isResident: ResidentProbe | undefined, slug: string): Promise<boolean | "unreachable"> {
+  if (!isResident) return true;
   try {
-    return (await isResident(slug)) === true;
+    const answer = await isResident(slug);
+    return answer === true || answer === "unreachable" ? answer : false;
   } catch {
-    return false;
+    return "unreachable";
   }
 }
 
 /**
  * The repo this thread already established (its binding): the last user turn
- * with a STRONG repo signal wins; a bare slug binds only a thread nothing has
- * bound yet — and, when a predicate is supplied, only if it names an onboarded
- * resident (like `lastThreadDirectives` — derived from history on every
- * message, never stored, restart-safe). A PR URL in history contributes its
- * repo part only, never a fetch.
+ * with a STRONG repo signal wins — a URL, `owner/name#N`, or an addressed
+ * `in <owner/name>` the predicate confirms (trusted when there is none); a
+ * bare slug binds only a thread nothing has bound yet — and, when a predicate
+ * is supplied, only if it names an onboarded resident (like
+ * `lastThreadDirectives` — derived from history on every message, never
+ * stored, restart-safe). A PR URL in history contributes its repo part only,
+ * never a fetch. Bare `in <name>` addresses need the registry listing and are
+ * resolved only by the async `resolveRepoContext`.
  */
 export function repoFromThread(
   history: Array<{ role: string; text: string }>,
@@ -304,25 +389,69 @@ export async function resolveRepoContext(
   msg: { text: string },
   history: Array<{ role: string; text: string }> = [],
   isResident?: ResidentProbe,
+  residentSlugs?: ResidentSlugs,
 ): Promise<RepoContext> {
   const s = extractSignals(msg.text);
   const thread = threadSignals(history);
-  // Strong signal in this message → it (re)binds. Else the thread's repo,
-  // whatever its strength — a bare slug in this message (a file path, a phrase)
-  // is NEVER a repo switch. A weakly-bound thread repo is vetted by the probe
-  // (it was itself a bare token once); only if the thread has no repo at all
-  // may this message's bare slug bind — vetted too. No probe → unvetted.
-  const strongNow = s.pr?.repo ?? (s.repoStrong ? s.repo : undefined);
-  let repo = strongNow ?? (thread.repoStrong ? thread.repo : undefined);
   // The first bare candidate the probe refused, remembered so the dispatcher
   // can say why nothing was bound (#316) — only meaningful when `repo` stays
   // unset; cleared below the moment anything binds.
   let rejected: string | undefined;
+  // The first candidate the registry did not ANSWER for (unreachable) — kept
+  // apart from `rejected`: a registry that was down cannot have refused.
+  let unverified: string | undefined;
+  // One probe per candidate per resolution: an addressed slug is vetted as an
+  // address first and may be consulted again as a weak token below (#289's
+  // "never probed twice" holds, the registry is not hammered on retries).
+  const vetted = new Map<string, Promise<boolean | "unreachable">>();
   const vet = async (cand: string): Promise<boolean> => {
-    if (await safeProbe(isResident, cand)) return true;
-    rejected ??= cand;
+    let p = vetted.get(cand);
+    if (!p) {
+      p = safeProbe(isResident, cand);
+      vetted.set(cand, p);
+    }
+    const answer = await p;
+    if (answer === true) return true;
+    if (answer === "unreachable") unverified ??= cand;
+    else rejected ??= cand;
     return false;
   };
+  // The registry listing, fetched at most once per resolution and only when
+  // an address is a bare name; a lister that fails or is absent answers
+  // nothing, and a name that is not carried by exactly one onboarded repo is
+  // prose.
+  let slugsOnce: Promise<string[] | undefined> | undefined;
+  const listSlugs = (): Promise<string[] | undefined> => {
+    if (!residentSlugs) return Promise.resolve(undefined);
+    slugsOnce ??= residentSlugs().catch(() => undefined);
+    return slugsOnce;
+  };
+  const resolveAddressed = async (a: Addressed): Promise<string | undefined> => {
+    // Unvetted (no probe), an addressed slug is the weak token it always was —
+    // `in try/catch` is ordinary prose, and only the registry can tell.
+    if (a.slug !== undefined) return isResident && (await vet(a.slug)) ? a.slug : undefined;
+    const matches = ((await listSlugs()) ?? []).filter((slug) => slug.split("/")[1] === a.name);
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+  // Strong signal in this message → it (re)binds: a URL, `owner/name#N`, or an
+  // address the registry vets. Else the thread's LAST strong signal, walking
+  // its turns backwards and vetting addresses the same way. Else the thread's
+  // weak repo, vetted (it was itself a bare token once); only if the thread
+  // has no repo at all may this message's bare slug bind — vetted too. A bare
+  // slug in this message that is not addressed (a file path, a phrase) is
+  // NEVER a repo switch. No probe → unvetted.
+  const strongNow = s.pr?.repo ?? (s.repoStrong ? s.repo : undefined) ?? (s.addressed ? await resolveAddressed(s.addressed) : undefined);
+  // An explicitly addressed slug the registry could not be asked about is a
+  // stop, not a fall-through: running on the thread's old repo instead would
+  // be the wrong-repo run this strength exists to end. Refuse loudly.
+  if (strongNow === undefined && s.addressed?.slug !== undefined && unverified === s.addressed.slug) {
+    return { unverifiedRepo: s.addressed.slug };
+  }
+  let repo = strongNow;
+  for (let i = thread.events.length - 1; repo === undefined && i >= 0; i--) {
+    const ev = thread.events[i];
+    repo = "strong" in ev ? ev.strong : await resolveAddressed(ev.addressed);
+  }
   if (!repo && thread.repo && (await vet(thread.repo))) repo = thread.repo;
   if (!repo && s.repo && (await vet(s.repo))) repo = s.repo;
   let ref = s.ref;
@@ -340,7 +469,10 @@ export async function resolveRepoContext(
       if (cand && (await vet(cand))) repo = cand;
     }
   }
-  if (repo) rejected = undefined;
+  if (repo) {
+    rejected = undefined;
+    unverified = undefined;
+  }
 
   // PR head — one REST call whenever the CURRENT message names a PR of the
   // resolved repo, regardless of any ref phrasing beside it. The PR is the
@@ -361,6 +493,7 @@ export async function resolveRepoContext(
 
   const out: RepoContext = {};
   if (repo) out.repo = repo;
+  else if (unverified) out.unverifiedRepo = unverified;
   else if (rejected) out.rejectedRepo = rejected;
   if (ref) out.ref = ref;
   // PR for the deterministic review post-step. Named in the current message →
