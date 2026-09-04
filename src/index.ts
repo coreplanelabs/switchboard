@@ -22,7 +22,9 @@ import {
 } from "./channels/accessAuth.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
-import { buildMcpToolSource } from "./mcp/index.js";
+import { buildMcp } from "./mcp/index.js";
+import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
+import { resolveUserEmail } from "./channels/slack.js";
 import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { buildFrictionLedger, WorkerFrictionLedger } from "./core/frictionLedgerWorker.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
@@ -79,7 +81,19 @@ async function main() {
   // `mcp.servers` list, validated loudly here (a bad URL or a missing bearer
   // env var stops startup), served per run by ONE source whose clients ride
   // the SSRF-pinned web fetch. No servers → undefined → requests unchanged.
-  const mcp = buildMcpToolSource(config.config.mcp, process.env);
+  // External MCP servers (#394, features/mcp-tools.md): entries live in the
+  // config scopes (already loaded above); credentials and connect tickets go
+  // where the overrides go (the ConfigDO, or a file); `mcp add|list|…` and the
+  // Access-gated connect page work off ONE service, and its servers are the
+  // per-run tool source. Requester emails come from Slack once the app exists.
+  let slackEmailLookup: ((userId: string) => Promise<string | undefined>) | undefined;
+  const mcpWiring = buildMcp(config, process.env, {
+    publicBaseUrl: process.env.PUBLIC_BASE_URL,
+    resolveEmail: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
+    warn: (m) => console.warn(`[mcp] ${m}`),
+  });
+  const mcp = mcpWiring.source;
+  console.log(`[mcp] ${mcpWiring.service ? `on (secrets: ${mcpWiring.service.secrets.describe()})` : `off — ${mcpWiring.unavailable}`}`);
   // Cross-session memory (#85): ONE store instance shared by every channel so
   // what the reflection pass writes after a run is what the next run reads.
   // Durable WorkerMemoryStore when memory.worker (+ its bearer) is configured;
@@ -134,7 +148,7 @@ async function main() {
       })
       .catch((err: unknown) => console.warn(`[run-history] /healthz probe of ${base} failed: ${err instanceof Error ? err.message : String(err)}`));
   }
-  const deps: CoreDeps = { config, providers, skills, mcp, memory, frictionLedger, runHistoryWriter };
+  const deps: CoreDeps = { config, providers, skills, mcp, mcpRegistryOn: mcpWiring.service !== undefined, memory, frictionLedger, runHistoryWriter };
   // --- command registry (#157 U6/U7/U9): the ONE core catalogue (`buildCoreCommands`,
   // shared with src/cli.ts), bound ONCE; every adapter
   // (HTTP /api/*, MCP tools, chat) exposes the same registrations over the same
@@ -156,12 +170,17 @@ async function main() {
     tracker: deps.issueTracker,
     memory: () => memory,
     scheduleStore,
+    mcp: () => mcpWiring.service ?? { unavailable: mcpWiring.unavailable ?? "MCP is not enabled" },
   });
   // The same bound registry serves HTTP, MCP, and the chat fast path (U13): one
   // registration, every surface.
   deps.commands = commands;
   // --- end command registry ---
   const { app } = createSlackApp(deps);
+  // Connect tickets bind to the requester's email when Slack can tell us
+  // (`users:read.email`); without the scope the lookup yields undefined and the
+  // ticket binds to the first Access identity that opens it instead.
+  slackEmailLookup = (userId) => (userId.startsWith("slack:") ? resolveUserEmail(app.client, userId.slice("slack:".length)) : Promise.resolve(undefined));
 
   // Work in flight = agent runs + the background memory reflections they spawn
   // + run-history writes still retrying (#157 KTD4: a record lost at SIGTERM is
@@ -303,6 +322,7 @@ async function main() {
       publicBaseUrl,
     });
     const commandHttpState = `GET|POST /api/<group>.<verb> (${commands.list().length} commands)`;
+    const mcpConnectView = createMcpConnectViewHandler({ registry: () => mcpWiring.service, publicOrigin: publicBaseUrl ? new URL(publicBaseUrl).origin : undefined });
     // --- end command registry over HTTP ---
     // A service token is a command-surface credential only (`serviceTokenAllowed`):
     // it can never load /runs* (live capability tokens), /residents* or /costs*.
@@ -334,7 +354,7 @@ async function main() {
       // /runs/:id, and /runs/:id/events, and still applies its own per-run
       // capability-token check — defense in depth). Non-/runs paths below are
       // unchanged and not gated.
-      if (isCommandPath(path) || path === "/runs" || path.startsWith("/runs/") || path === "/residents" || path.startsWith("/residents/") || path === "/costs" || path === "/costs.json" || path.startsWith("/costs/")) {
+      if (isCommandPath(path) || isConnectPath(path) || path === "/runs" || path.startsWith("/runs/") || path === "/residents" || path.startsWith("/residents/") || path === "/costs" || path === "/costs.json" || path.startsWith("/costs/")) {
         requireAccessForRuns(req.headers, { config: accessConfig, verify: accessVerify, devBypass: accessDevBypass })
           .then((gate) => {
             if (!gate.ok) {
@@ -355,6 +375,8 @@ async function main() {
             if (isCommandPath(path)) return commandHttp(req, res, gate.identity);
             // --- end /api/* ---
             if (liveView(req, res, { identity: callerIdFor(gate.identity) })) return;
+            // --- /mcp/connect/<nonce> (#394): the credential page, identity-bound. ---
+            if (mcpConnectView(req, res, gate.identity)) return;
             if (residentsView(req, res)) return;
             if (costsView(req, res)) return;
             res.writeHead(200, { "content-type": "text/plain" });

@@ -35,7 +35,7 @@ import { SHIP_PR_AUTHOR, shipBranchName, shipTaskText } from "./shipPipeline.js"
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
 import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
-import { ConfigMcpToolSource, InMemoryMcpClient } from "../mcp/index.js";
+import { StaticMcpToolSource, InMemoryMcpClient } from "../mcp/index.js";
 import { InMemoryFrictionLedger, RunStoreFrictionLedger } from "./frictionLedger.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
@@ -5923,6 +5923,24 @@ workspaceDir: __WORKDIR__
     expect(reviewSystem).not.toContain("SHIP PIPELINE BRANCH CONTRACT"); // review children are readonly — no branch work
   });
 
+  it("ship rounds carry no MCP line in the config block: they receive no MCP tools, so advertising `mcp add` there would mislead", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider);
+    deps.mcp = new StaticMcpToolSource([], { factory: () => new InMemoryMcpClient([]) });
+    deps.mcpRegistryOn = true;
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const { io } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(provider.requests.length).toBeGreaterThan(0);
+    for (const r of provider.requests) {
+      expect(r.system ?? "").not.toContain("External MCP servers");
+      expect(r.system ?? "").not.toContain("mcp add");
+    }
+  });
+
   it("branch binding (KTD12): every round attaches the ship branch, review/fix rounds at the pinned head", async () => {
     let currentHead = HEAD_A;
     const provider = shipProvider({
@@ -6565,7 +6583,7 @@ describe("MCP tools (#394, features/mcp-tools.md)", () => {
       },
     ]);
     if (opts.fail) client.failListWith = opts.fail;
-    const source = new ConfigMcpToolSource([{ name: "linear", url: "https://mcp.linear.app/mcp", agents: ["general", "research"] }], { factory: () => client });
+    const source = new StaticMcpToolSource([{ name: "linear", url: "https://mcp.linear.app/mcp", agents: ["general", "research"] }], { factory: () => client });
     return { client, source };
   }
 

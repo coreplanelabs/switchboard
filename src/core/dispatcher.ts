@@ -187,6 +187,10 @@ export interface CoreDeps {
    * `ConfigMcpToolSource` over `mcp.servers` (src/index.ts, src/cli.ts).
    */
   mcp?: McpToolSource;
+  /** Whether the self-serve surface (`mcp add …`) is on — the config awareness
+   *  block tells the model so it points users at it instead of answering "I
+   *  cannot load MCPs" (features/mcp-tools.md item 17). */
+  mcpRegistryOn?: boolean;
   /**
    * The GitHub API behind the `github_*` tools (features/github-tools.md).
    * Absent → the production REST client on the App credential; tests inject an
@@ -243,7 +247,7 @@ export interface CoreDeps {
  *  reconfigure`), a deterministic op executed (`repo.test|build`). Config
  *  replies, `help`, listings, and usage/help replies are not runs. */
 export function isInlineRunCommand(id: string): boolean {
-  return id.startsWith("friction.") || id === "memory.forget" || /^repo\.(onboard|offboard|rebuild|reconfigure|test|build)$/.test(id);
+  return id.startsWith("friction.") || id === "memory.forget" || /^repo\.(onboard|offboard|rebuild|reconfigure|test|build)$/.test(id) || /^mcp\.(add|connect|remove)$/.test(id);
 }
 
 /** Floor between two edits of a run's status card (see `coalesceStatus`). Below
@@ -632,7 +636,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // that does not answer contributes no tools and is named in the MCP block
     // (and, once the run is registered, in an `mcp_unavailable` note). No
     // source, or nothing scoped → no tools, no block, request unchanged.
-    const mcpForRun = deps.mcp ? await deps.mcp.toolsFor(agent.name, { userId: msg.userId }) : undefined;
+    const mcpForRun = deps.mcp ? await deps.mcp.toolsFor(agent.name, { userId: msg.userId, channelId: msg.channelId }) : undefined;
     const mcpBlock = mcpForRun ? mcpGuidanceBlock(mcpForRun.servers) : undefined;
 
     // Config awareness (routing-and-config behavior 8): tell the model the
@@ -651,6 +655,15 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       messageDirective: { agent: directives.agent, model: directives.model, effort: directives.effort },
       threadDirective: { agent: sticky.agent, model: sticky.model, effort: sticky.effort },
       canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
+      ...(deps.mcp
+        ? {
+            mcp: {
+              registryOn: deps.mcpRegistryOn === true,
+              served: (mcpForRun?.servers ?? []).filter((s) => s.toolCount !== undefined).map((s) => s.server),
+              unavailable: (mcpForRun?.servers ?? []).filter((s) => s.unavailable !== undefined).map((s) => s.server),
+            },
+          }
+        : {}),
     });
 
     // Self-description (routing-and-config behavior 11): what Switchboard is —
@@ -1440,6 +1453,9 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
       messageDirective: { agent: directives.agent, model: directives.model, effort: directives.effort },
       threadDirective: { agent: ctx.sticky.agent, model: ctx.sticky.model, effort: ctx.sticky.effort },
       canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
+      // No `mcp` here: ship rounds receive no MCP tools yet (features/mcp-tools.md
+      // roadmap), and a line inviting `mcp add` into a run that could not use
+      // the result would mislead. The line arrives with the tools.
     }),
     about: selfDescriptionBlock(AGENTS),
     instructions: instructionsBlock,

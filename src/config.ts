@@ -10,6 +10,8 @@ import type { RunHistoryConfig } from "./core/runStore.js";
 import type { ShipConfig } from "./core/shipPipeline.js";
 import type { ChatGate } from "./core/commandRegistry.js";
 import { AGENTS } from "./agents/registry.js";
+import { assertUrlAllowed } from "./tools/web.js";
+import { isMcpServerEntry, MCP_SELF_SERVE_AGENTS, MCP_SERVER_NAME_MAX, MCP_SERVER_NAME_RE, MCP_SERVERS_PER_SCOPE_MAX, type McpServerEntry } from "./mcp/registry.js";
 
 // Configuration is layered. Lowest to highest precedence:
 //   1. defaults (config.yaml `defaults`, incl. per-agent default models)
@@ -37,6 +39,17 @@ export interface Scope {
    * because it rides every turn.
    */
   instructions?: string;
+  /**
+   * External MCP servers this scope contributes to runs (features/mcp-tools.md
+   * items 11–17), by name. Runs see the UNION of the org (`defaults`), channel,
+   * and user tiers; a name present in more than one tier resolves to the
+   * highest-trust tier (org > channel > user) — the opposite of the other
+   * settings, because an org server is an admin's decision a user must not
+   * shadow. Channel and user entries may name `general`/`research` only.
+   * Static entries supply a bearer via `tokenEnv`; runtime entries (added with
+   * `mcp add`) get their credential from the sealed secret store.
+   */
+  mcpServers?: Record<string, McpServerEntry>;
 }
 
 /** Upper bound on one scope's `instructions` text (prepended to every turn). */
@@ -93,6 +106,8 @@ export interface AppConfig {
      *  definition's effort, else the provider's default */
     efforts?: Record<string, Effort>;
     maxTokens?: number;
+    /** Org-wide MCP servers pinned by the operator (features/mcp-tools.md item 11). */
+    mcpServers?: Record<string, McpServerEntry>;
   };
   channels?: Record<string, Scope>;
   users?: Record<string, Scope>;
@@ -186,6 +201,9 @@ export interface SlackConfig {
 export interface Overrides {
   channels: Record<string, Scope>;
   users: Record<string, Scope>;
+  /** Org-wide runtime settings (today: `mcpServers` added with `mcp add --scope org`);
+   *  layered over `defaults`. Optional so documents written before it existed load. */
+  org?: Scope;
 }
 
 /**
@@ -339,6 +357,18 @@ export class WorkerOverridesBacking implements OverridesBacking {
   }
 }
 
+/** One MCP server as `mcpServersFor` resolves it for a run. */
+export interface ResolvedMcpServer {
+  name: string;
+  kind: "org" | "channel" | "user";
+  /** `org` | `channel:<id>` | `user:<id>` — with the name, the credential key. */
+  scopeKey: string;
+  entry: McpServerEntry;
+  source: "config" | "runtime";
+  /** Set when a higher-trust tier already contributed this name; this entry is not used. */
+  shadowedBy?: string;
+}
+
 export interface ResolvedRequest {
   agentName: string;
   modelRef: string; // provider/model
@@ -420,6 +450,7 @@ export class ConfigStore {
     doc.users ??= {};
     validateInstructions(doc, `overrides (${this.backing.describe()})`);
     validateScopeEfforts(doc, `overrides (${this.backing.describe()})`);
+    validateMcpServers({ channels: doc.channels, users: doc.users, defaults: doc.org }, `overrides (${this.backing.describe()})`);
     return doc;
   }
 
@@ -428,12 +459,67 @@ export class ConfigStore {
     return this.backing.describe();
   }
 
+  /** The org tier: static `defaults.mcpServers` under the runtime `org` override. */
+  private orgScope(): Scope {
+    return layerScope({ mcpServers: this.config.defaults.mcpServers }, this.overrides.org);
+  }
+
+  /** The RUNTIME half of one scope (what `mcp add|remove` edit), never the
+   *  static config merged in — so removing a runtime server cannot "remove" a
+   *  static one, and static entries never get copied into the document. */
+  runtimeScope(kind: "org" | "channel" | "user", id?: string): Scope {
+    if (kind === "org") return { ...this.overrides.org };
+    if (!id) throw new Error(`${kind} scope needs an id`);
+    return { ...(kind === "channel" ? this.overrides.channels[id] : this.overrides.users[id]) };
+  }
+
+  /** Whether an entry with this name exists in the STATIC config of the scope
+   *  (so `mcp remove` can say "that one is pinned in config.yaml"). */
+  isStaticMcpServer(kind: "org" | "channel" | "user", id: string | undefined, name: string): boolean {
+    const scope = kind === "org" ? this.config.defaults : kind === "channel" ? this.config.channels?.[id ?? ""] : this.config.users?.[id ?? ""];
+    return scope?.mcpServers?.[name] !== undefined;
+  }
+
+  async setOrgOverride(patch: Scope): Promise<Scope> {
+    await this.write((o) => {
+      o.org = mergeScope(o.org, patch);
+    });
+    return this.orgScope();
+  }
+
+  /**
+   * The MCP servers a run in `channelId` requested by `userId` may use
+   * (features/mcp-tools.md item 17): the union of the three tiers, highest
+   * trust first; a name that appears in a lower tier too is reported once with
+   * `shadowedBy` so the run notes can say why the user's copy was ignored.
+   */
+  mcpServersFor(channelId: string, userId: string): ResolvedMcpServer[] {
+    const tiers: Array<{ kind: "org" | "channel" | "user"; scopeKey: string; scope: Scope; staticEntries: Record<string, McpServerEntry> | undefined }> = [
+      { kind: "org", scopeKey: "org", scope: this.orgScope(), staticEntries: this.config.defaults.mcpServers },
+      { kind: "channel", scopeKey: `channel:${channelId}`, scope: this.channelScope(channelId), staticEntries: this.config.channels?.[channelId]?.mcpServers },
+      { kind: "user", scopeKey: `user:${userId}`, scope: this.userScope(userId), staticEntries: this.config.users?.[userId]?.mcpServers },
+    ];
+    const out: ResolvedMcpServer[] = [];
+    const seen = new Map<string, string>(); // name → scopeKey that won
+    for (const tier of tiers) {
+      for (const [name, entry] of Object.entries(tier.scope.mcpServers ?? {})) {
+        const winner = seen.get(name);
+        const isStatic = tier.staticEntries?.[name] !== undefined && tier.staticEntries[name] === entry;
+        const resolved: ResolvedMcpServer = { name, kind: tier.kind, scopeKey: tier.scopeKey, entry, source: isStatic ? "config" : "runtime" };
+        if (winner) resolved.shadowedBy = winner;
+        else seen.set(name, tier.scopeKey);
+        out.push(resolved);
+      }
+    }
+    return out;
+  }
+
   private channelScope(channelId: string): Scope {
-    return { ...this.config.channels?.[channelId], ...this.overrides.channels[channelId] };
+    return layerScope(this.config.channels?.[channelId], this.overrides.channels[channelId]);
   }
 
   private userScope(userId: string): Scope {
-    return { ...this.config.users?.[userId], ...this.overrides.users[userId] };
+    return layerScope(this.config.users?.[userId], this.overrides.users[userId]);
   }
 
   /**
@@ -659,6 +745,7 @@ export class ConfigStore {
       defaults: { agent: this.config.defaults.agent, models: this.config.defaults.models, ...(this.config.defaults.efforts ? { efforts: this.config.defaults.efforts } : {}) },
       channel: this.channelScope(channelId),
       user: this.userScope(userId),
+      org: this.orgScope(),
       restrictedAgents: this.restrictedAgentsFor(userId),
       channelConfigRestricted: !this.canEditChannelConfig(userId),
       adminsHint: this.adminsHint(),
@@ -686,6 +773,21 @@ function validateInstructions(layer: { channels?: Record<string, Scope>; users?:
   }
 }
 
+/**
+ * One tier's effective scope: the static config under its runtime override.
+ * Every setting is replaced whole by the override — except `mcpServers`, which
+ * merges per name: the runtime map holds only what `mcp add` wrote (it never
+ * copies the static entries in), so a plain spread would make the first
+ * `mcp add` into a scope with pinned servers hide them from every run.
+ */
+function layerScope(stat: Scope | undefined, runtime: Scope | undefined): Scope {
+  const mcpServers = { ...stat?.mcpServers, ...runtime?.mcpServers };
+  const merged: Scope = { ...stat, ...runtime };
+  if (Object.keys(mcpServers).length > 0) merged.mcpServers = mcpServers;
+  else delete merged.mcpServers;
+  return merged;
+}
+
 function mergeScope(current: Scope | undefined, patch: Scope): Scope {
   const merged: Record<string, unknown> = { ...current, ...patch };
   for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key];
@@ -697,6 +799,8 @@ export interface ConfigDescription {
   defaults: { agent: string; models: Record<string, string>; efforts?: Record<string, Effort> };
   channel: Scope;
   user: Scope;
+  /** The org tier's runtime-visible settings (today `mcpServers`), for `config show`. */
+  org?: Scope;
   restrictedAgents: string[];
   channelConfigRestricted: boolean;
   adminsHint: string;
@@ -708,7 +812,8 @@ export function formatConfigDescription(d: ConfigDescription): string {
   const defaults =
     `agent \`${d.defaults.agent}\`, models ${fmtModels(d.defaults.models)}` +
     (d.defaults.efforts && Object.keys(d.defaults.efforts).length > 0 ? `, efforts ${fmtModels(d.defaults.efforts)}` : "");
-  const lines = [`*Effective for you in this channel:* ${effective}`, `*Defaults:* ${defaults}`, `*Channel scope:* ${fmtScope(d.channel)}`, `*Your scope:* ${fmtScope(d.user)}`];
+  const orgMcp = d.org?.mcpServers && Object.keys(d.org.mcpServers).length > 0 ? `, mcp ${Object.keys(d.org.mcpServers).map((n) => `\`${n}\``).join(" ")}` : "";
+  const lines = [`*Effective for you in this channel:* ${effective}`, `*Defaults:* ${defaults}${orgMcp}`, `*Channel scope:* ${fmtScope(d.channel)}`, `*Your scope:* ${fmtScope(d.user)}`];
   const channelInstructions = d.channel.instructions?.trim();
   if (channelInstructions) lines.push(`*Channel instructions:* ${channelInstructions}`);
   const userInstructions = d.user.instructions?.trim();
@@ -725,6 +830,7 @@ function fmtScope(s: Scope): string {
   if (s.models && Object.keys(s.models).length > 0) parts.push(`models ${fmtModels(s.models)}`);
   if (s.effort) parts.push(`effort \`${s.effort}\``);
   if (s.efforts && Object.keys(s.efforts).length > 0) parts.push(`efforts ${fmtModels(s.efforts)}`);
+  if (s.mcpServers && Object.keys(s.mcpServers).length > 0) parts.push(`mcp ${Object.keys(s.mcpServers).map((n) => `\`${n}\``).join(" ")}`);
   return parts.length > 0 ? parts.join(", ") : "_none_";
 }
 
@@ -749,6 +855,45 @@ function validateScopeEfforts(
   }
 }
 
+/**
+ * Every `mcpServers` map a config layer can carry (features/mcp-tools.md items
+ * 11 + 14), static or stored: names are slugs, URLs http(s) and not an internal
+ * address (the same guard `web_fetch` uses), agents known, `auth` known, a
+ * bearer's `tokenEnv` a name — and a channel or user entry may reach the
+ * self-serve agents only. The chat command enforces the same on write; this
+ * holds files and stored documents to the rule at load.
+ */
+export function validateMcpServers(
+  layer: { channels?: Record<string, Scope>; users?: Record<string, Scope>; defaults?: { mcpServers?: Record<string, unknown> } | Scope },
+  source: string,
+): void {
+  const check = (path: string, tier: "org" | "channel" | "user", servers: Record<string, unknown> | undefined) => {
+    if (servers === undefined) return;
+    if (typeof servers !== "object" || servers === null || Array.isArray(servers)) throw new Error(`${source}: ${path} must be a mapping of name → server`);
+    if (Object.keys(servers).length > MCP_SERVERS_PER_SCOPE_MAX) throw new Error(`${source}: ${path} has more than ${MCP_SERVERS_PER_SCOPE_MAX} servers`);
+    for (const [name, raw] of Object.entries(servers)) {
+      if (!MCP_SERVER_NAME_RE.test(name)) throw new Error(`${source}: ${path}.${name}: server names are slugs (lowercase letters, digits, dashes; ≤ ${MCP_SERVER_NAME_MAX} chars)`);
+      if (!isMcpServerEntry(raw)) throw new Error(`${source}: ${path}.${name} must be { url, auth: none|bearer, agents?, tokenEnv? }`);
+      try {
+        assertUrlAllowed(raw.url);
+      } catch (err) {
+        throw new Error(`${source}: ${path}.${name}.url: ${err instanceof Error ? err.message : "not an http(s) URL"}`);
+      }
+      for (const a of raw.agents ?? []) {
+        if (!AGENTS[a]) throw new Error(`${source}: ${path}.${name}.agents: unknown agent "${a}"`);
+        if (tier !== "org" && !MCP_SELF_SERVE_AGENTS.includes(a)) {
+          throw new Error(`${source}: ${path}.${name}.agents: a ${tier}-scoped server may name ${MCP_SELF_SERVE_AGENTS.join("/")} only — "${a}" takes an org-wide server (defaults.mcpServers)`);
+        }
+      }
+      if (raw.tokenEnv !== undefined && raw.auth !== "bearer") throw new Error(`${source}: ${path}.${name}.tokenEnv only applies to auth: bearer`);
+    }
+  };
+  check("defaults.mcpServers", "org", layer.defaults?.mcpServers as Record<string, unknown> | undefined);
+  for (const [kind, scopes] of [["channels", layer.channels], ["users", layer.users]] as const) {
+    for (const [id, scope] of Object.entries(scopes ?? {})) check(`${kind}.${id}.mcpServers`, kind === "channels" ? "channel" : "user", scope.mcpServers as Record<string, unknown> | undefined);
+  }
+}
+
 function fmtModels(m: Record<string, string>): string {
   return Object.entries(m)
     .map(([k, v]) => `\`${k}=${v}\``)
@@ -757,6 +902,7 @@ function fmtModels(m: Record<string, string>): string {
 
 function validateConfig(cfg: AppConfig, warn: (message: string) => void): void {
   validateScopeEfforts(cfg, "config.yaml");
+  validateMcpServers(cfg, "config.yaml");
   if (!cfg.providers || Object.keys(cfg.providers).length === 0) {
     throw new Error("config.yaml must define at least one provider");
   }

@@ -30,6 +30,11 @@ export interface ConfigAwarenessInput {
   threadDirective: DirectiveSet;
   /** Whether the invoking user may run `config set channel`. */
   canEditChannelConfig: boolean;
+  /** External MCP servers (#394, features/mcp-tools.md item 17): whether the
+   *  self-serve registry is on, and which servers answered / did not for THIS
+   *  run — so an agent never says "I cannot load MCPs" when a user can add one.
+   *  Absent → no line (byte-identical to before the feature). */
+  mcp?: { registryOn: boolean; served: string[]; unavailable: string[] };
 }
 
 type DirectiveSet = { agent?: string; model?: string; effort?: Effort };
@@ -65,6 +70,17 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
       `Custom instructions are active for this run (${withInstructions.join(", ")}) — see the block below. ` +
         "They are advisory prompt content and did not affect the agent/model/permission resolution above.",
     );
+  }
+
+  if (i.mcp) {
+    const { registryOn, served, unavailable } = i.mcp;
+    if (served.length > 0) lines.push(`External MCP servers connected for this run: ${served.join(", ")} — their tools are named \`mcp__<server>__*\` (details: \`mcp list\`, \`mcp show <name>\`).`);
+    if (unavailable.length > 0) lines.push(`MCP servers configured for this agent that did not answer this run: ${unavailable.join(", ")}.`);
+    if (registryOn && served.length === 0 && unavailable.length === 0) {
+      lines.push(
+        "External MCP servers: none connected for you or org-wide yet. Anyone can connect one for their own runs with `mcp add <name> --url <url>` (a one-time link takes the token; never paste tokens in chat); admins add org-wide ones with `--scope org`. `mcp list` shows what exists.",
+      );
+    }
   }
 
   const channelGate = i.canEditChannelConfig

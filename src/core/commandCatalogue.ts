@@ -12,6 +12,7 @@ import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
 import { selectFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
 import { buildFrictionLedger } from "./frictionLedgerWorker.js";
 import type { MemoryStore } from "./memory/types.js";
+import { MCP_OFF_MESSAGE, type McpService } from "../mcp/service.js";
 import type { Operations } from "./operations.js";
 import { residentAdminFromConfig, type ResidentAdminClient } from "./residentAdmin.js";
 import type { RunRegistry } from "./runRegistry.js";
@@ -51,6 +52,9 @@ export interface CoreCommandWiring {
   memory?: () => MemoryStore | undefined;
   /** Where scheduled firings are recorded; absent → `schedule list` shows no history. */
   scheduleStore?: ScheduleStore;
+  /** The MCP service (#394) behind `mcp.*`, or why MCP is off; absent → the
+   *  commands answer `unavailable` with the standard sentence. */
+  mcp?: () => Promise<McpService | { unavailable: string }> | McpService | { unavailable: string };
   /** The resident admin client; default: from `execution.resident` + its bearer (per call). */
   residentAdmin?: () => ResidentAdminClient | undefined;
   /** `repo onboard`'s root inspection (resident-repos item 52); default: GitHub
@@ -158,6 +162,7 @@ export function buildCoreCommands(config: Provided<ConfigStore>, store: Provided
         return wiring.memory?.();
       },
     },
+    mcp: { service: async () => (await wiring.mcp?.()) ?? { unavailable: MCP_OFF_MESSAGE } },
     schedule: { schedules: SCHEDULES, store: wiring.scheduleStore, now: wiring.now ?? Date.now },
     deploy: {
       run: (plan) => runDeployPlan(plan, { log: (l) => console.log(l), warn: (l) => console.error(l), stream: (c) => process.stdout.write(c) }),

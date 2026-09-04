@@ -406,6 +406,8 @@ export const FIXTURE = {
   channel: "slack:C1",
   /** The caller's own memory record; the only user scope a caller can reach is its own. */
   ownMemoryRecord: `mem:user:${CALLER_ID}:1`,
+  /** The seeded MCP server (auth none) present in every tier the suite asks for. */
+  mcpServer: "linear",
 } as const;
 
 /** Hints by FIELD NAME: a value the fixture honors (an id that exists, a slug
@@ -424,6 +426,10 @@ export const FIELD_HINTS: SampleHints = {
   // config.set: per-agent maps keyed by a real agent name.
   models: { general: "anthropic/general-model" },
   efforts: { general: "low" },
+  // mcp.*: the seeded server and a URL the SSRF guard admits.
+  name: FIXTURE.mcpServer,
+  url: "https://mcp.example.com/mcp",
+  agents: "general,research",
 };
 
 /** Commands the generic fixture cannot drive on its own: `hints` override a
@@ -437,6 +443,11 @@ export const COMMAND_FIXTURES: Readonly<Record<string, { hints?: SampleHints; ba
   "repo.reconfigure": { baseline: { ref: "main" }, why: "at least one change is required (a bare `repo reconfigure <slug>` is `nothing to reconfigure`)" },
   "memory.forget": { hints: { id: FIXTURE.ownMemoryRecord }, why: "the record must exist in the CALLER's own scope — the generic `id` hint is a run id" },
   "deploy.restart": { hints: { only: "bot" }, why: "`--only` is an enum of the one restartable Worker (`bot`) — the generic `only` hint (`memory`) is a deploy target" },
+  "mcp.add": { hints: { name: "notion" }, baseline: { channel: FIXTURE.channel }, why: "the generic `name` hint is the seeded server (a duplicate); `--scope channel` needs a channel on machine surfaces" },
+  "mcp.connect": { baseline: { channel: FIXTURE.channel }, why: "`--scope channel` needs a channel on machine surfaces" },
+  "mcp.show": { baseline: { channel: FIXTURE.channel }, why: "as mcp.connect" },
+  "mcp.remove": { baseline: { channel: FIXTURE.channel }, why: "as mcp.connect" },
+  "mcp.list": { baseline: { channel: FIXTURE.channel }, why: "a machine caller has no origin channel" },
 };
 
 /** The suite's variants for one command: `exhaustiveVariants` over the shared

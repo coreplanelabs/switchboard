@@ -50,6 +50,8 @@ import { InMemoryRunStore } from "./runStore.js";
 import { createRunsService } from "./runsService.js";
 import { SCHEDULES } from "./schedules.js";
 import { InMemoryScheduleStore } from "./scheduleStore.js";
+import { importCredentialKey, InMemoryMcpClient, InMemoryMcpSecretStore, McpService, type McpServerEntry } from "../mcp/index.js";
+import { InMemoryOverridesBacking, type Overrides } from "../config.js";
 import {
   buildConformanceMatrix,
   CALLER_ID,
@@ -266,6 +268,37 @@ interface Stubs {
  *  Anything that would execute (resident admin writes, deterministic ops, the
  *  deploy runner, the env bootstrap, the run-stream source) RECORDS the call
  *  into `executed` and answers a plausible shape. */
+/** The MCP service (#394) over a THROWAWAY config store per call: the seeded
+ *  `linear` server (auth none) exists in the org tier, the fixture channel, and
+ *  every caller's own tier — so each surface's caller finds "its" server under
+ *  the default `me` scope and the outputs fold by caller id like memory's —
+ *  and a write (`mcp add`) lands in a document nobody else reads, so `add`
+ *  never conflicts with itself across surfaces and `remove` leaves the seed
+ *  for the next one. In-memory client (no network); fixed nonce + clock so
+ *  `connect`/`add` answer identically everywhere. */
+function fakeMcpService(): McpService {
+  // Bearer without a stored credential (`awaiting_credential`): `connect` mints a
+  // link for it, `show` reports the missing credential, `remove` drops it.
+  const linear = (addedBy: string): McpServerEntry => ({ url: "https://mcp.linear.app/mcp", auth: "bearer", agents: ["general", "research"], addedBy, addedAt: NOW - 60_000 });
+  const doc: Overrides = {
+    org: { mcpServers: { linear: linear("slack:USEED") } },
+    channels: { [FIXTURE.channel]: { mcpServers: { linear: linear("slack:USEED") } } },
+    users: Object.fromEntries(CALLER_IDS.map((id) => [id, { mcpServers: { linear: linear(id) } }])),
+  };
+  const backing = new InMemoryOverridesBacking(doc);
+  const config = new ConfigStore(join(CONFIG_DIR, "config.yaml"), { backing, initial: structuredClone(doc) }, () => {});
+  return new McpService({
+    config,
+    secrets: new InMemoryMcpSecretStore(),
+    key: importCredentialKey("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+    factory: () => new InMemoryMcpClient([{ name: "search_issues", inputSchema: {}, annotations: { readOnlyHint: true } }]),
+    publicBaseUrl: "https://switchboard.test",
+    env: {},
+    now: () => NOW,
+    nonce: () => "fixed-nonce-0123456789abcdef",
+  });
+}
+
 function fakeDeps(s: Stubs): CoreCommandDeps {
   const exec = <T>(what: string, value: T): T => {
     s.executed.push(what);
@@ -313,6 +346,7 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
     },
     repo: { admin: async () => admin, operations: async () => operations, canUseRepo: async () => true },
     memory: { config: async () => ({ enabled: true }), store: s.memory },
+    mcp: { service: async () => fakeMcpService() },
     schedule: { schedules: SCHEDULES, store: s.schedules, now: () => NOW },
     deploy: {
       run: async (plan: DeployPlan): Promise<DeployRunResult> =>
