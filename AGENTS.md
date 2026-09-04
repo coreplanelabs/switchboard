@@ -1,6 +1,6 @@
 # Switchboard — agent guide
 
-Agent gateway: messages arrive over a channel, get routed to an agent, which runs on an inference provider and executes tools through an executor. Slack is one channel, not the architecture. Human-facing docs and diagrams: [README.md](README.md) — keep both in sync when you change architecture.
+Agent gateway: messages arrive over a channel, get routed to an agent, which runs on an inference provider and executes tools through an executor. Slack is one channel, not the architecture. Engineering docs and diagrams: [README.md](README.md) — keep both in sync when you change architecture. Human-facing docs (tutorials/how-to/reference/explanation, for people who use, watch, or run Switchboard rather than build it): [docs/README.md](docs/README.md) — update these too when a change affects what a Slack user, a dashboard viewer, or an operator sees or does.
 
 ## Invariants (do not break)
 
