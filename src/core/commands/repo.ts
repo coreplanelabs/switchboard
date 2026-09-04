@@ -31,13 +31,13 @@ import type { RepoInspector } from "../../execution/githubRepoInspect.js";
  *  operator-facing reason when the resident is not configured. */
 export interface RepoCommandDeps {
   repo: {
-    admin(): ResidentAdminClient | { unavailable: string };
+    admin(): Promise<ResidentAdminClient | { unavailable: string }>;
     /** The deterministic-op backend for this caller (resident-backed when a
      *  resident is configured, local for local execution), or null when none
      *  exists (a per-thread remote backend has no op surface). */
-    operations(caller: Caller): Operations | null;
+    operations(caller: Caller): Promise<Operations | null>;
     /** Per-repo access for resident environments (KD7, open-when-absent). */
-    canUseRepo(callerId: string, slug: string): boolean;
+    canUseRepo(callerId: string, slug: string): Promise<boolean>;
     /** Reads the repo root before `onboard` chooses a command table (item 52).
      *  Absent, or a named failure → the npm fallback table WITH a warning in
      *  the reply; the table is never silently assumed. */
@@ -74,8 +74,8 @@ const slugArg = { name: "slug", schema: repoSlug, describe: "GitHub owner/name o
 
 // ---- shared -------------------------------------------------------------------
 
-function adminOf(deps: RepoCommandDeps): ResidentAdminClient {
-  const api = deps.repo.admin();
+async function adminOf(deps: RepoCommandDeps): Promise<ResidentAdminClient> {
+  const api = await deps.repo.admin();
   if ("unavailable" in api) throw new CommandError("unavailable", api.unavailable);
   return api;
 }
@@ -137,7 +137,7 @@ export const repoList = defineCommand({
   describe: "Every onboarded resident repo with its live state, ref, sha, and last refresh.",
   render: (output) => renderResidentList(output as Record<string, unknown>),
   handler: async ({ deps }) => {
-    const res = await call(() => adminOf(deps).residents());
+    const res = await call(async () => (await adminOf(deps)).residents());
     if (res.status !== 200) throw new CommandError("unavailable", `repo list failed (HTTP ${res.status}): ${String(res.data.error ?? "unknown error")}`);
     return res.data as JsonValue;
   },
@@ -210,7 +210,7 @@ export const repoOnboard = defineCommand({
       ...(options.build !== undefined ? { build: options.build } : {}),
       ...(options.install !== undefined ? { install: options.install } : {}),
     };
-    const r = await call(() => adminOf(deps).onboard({ resource: repoResourceId(args.slug), commands, defaultRef, ...(options.evictColdest ? { evictColdest: true } : {}) }));
+    const r = await call(async () => (await adminOf(deps)).onboard({ resource: repoResourceId(args.slug), commands, defaultRef, ...(options.evictColdest ? { evictColdest: true } : {}) }));
     if (r.status !== 202) {
       // Over the cap with --evict-coldest and nothing eligible: the resident
       // itemizes why each one was kept (#50) — relay it so the admin can
@@ -267,7 +267,7 @@ export async function settleProvisioning(deps: RepoCommandDeps, slug: string): P
   const fix = `Fix the command table with \`repo reconfigure ${slug} --install "…" --build "…" --test "…"\`, then \`repo rebuild ${slug}\`.`;
   for (let elapsed = 0; elapsed <= SETTLE_MAX_MS; elapsed += SETTLE_POLL_MS) {
     if (elapsed > 0) await sleep(SETTLE_POLL_MS);
-    const api = deps.repo.admin();
+    const api = await deps.repo.admin();
     if ("unavailable" in api) return { ok: false, text: `⚠️ Cannot follow \`${slug}\`'s provisioning: ${api.unavailable}` };
     let r: ResidentAdminResponse;
     try {
@@ -326,7 +326,7 @@ export const repoOffboard = defineCommand({
   },
   handler: async ({ args, options, deps }) => {
     const dryRun = options.dryRun ?? false;
-    const r = await call(() => adminOf(deps).offboard(repoResourceId(args.slug), dryRun));
+    const r = await call(async () => (await adminOf(deps)).offboard(repoResourceId(args.slug), dryRun));
     if (r.status !== 200) throw residentFailure(r);
     return { ...(r.data as JsonObject), slug: args.slug, dryRun };
   },
@@ -372,7 +372,7 @@ export const repoRebuild = defineCommand({
   },
   handler: async ({ args, options, deps }) => {
     const dryRun = options.dryRun ?? false;
-    const r = await call(() => adminOf(deps).rebuild(repoResourceId(args.slug), dryRun));
+    const r = await call(async () => (await adminOf(deps)).rebuild(repoResourceId(args.slug), dryRun));
     if (r.status !== 200 && r.status !== 202) throw residentFailure(r);
     return { ...(r.data as JsonObject), slug: args.slug, dryRun };
   },
@@ -404,7 +404,7 @@ export const repoReconfigure = defineCommand({
     if (Object.keys(commands).length === 0 && options.ref === undefined) {
       throw new CommandError("invalid_input", "nothing to reconfigure: pass --ref and/or --test / --build / --install");
     }
-    const api = adminOf(deps);
+    const api = await adminOf(deps);
     const body: Record<string, unknown> = { resource: repoResourceId(args.slug) };
     if (Object.keys(commands).length > 0) {
       // The resident's /reconfigure REPLACES the whole command table (KTD9), so
@@ -451,8 +451,8 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
     render: renderOp,
     handler: async ({ args, caller, deps }) => {
       // KD7: the same per-repo allowlist a coding run against this repo passes.
-      if (!deps.repo.canUseRepo(caller.id, args.slug)) throw new CommandError("unauthorized", `You're not on the allowlist for the \`${args.slug}\` repo environment.`);
-      const ops = deps.repo.operations(caller);
+      if (!(await deps.repo.canUseRepo(caller.id, args.slug))) throw new CommandError("unauthorized", `You're not on the allowlist for the \`${args.slug}\` repo environment.`);
+      const ops = await deps.repo.operations(caller);
       if (!ops) throw new CommandError("unavailable", NO_OPS_BACKEND_MESSAGE);
       const req = { repo: args.slug, ...(args.ref !== undefined ? { ref: args.ref } : {}) };
       const result = await ops.run(op, req).catch((err: unknown) => ({ kind: "error" as const, message: err instanceof Error ? err.message : String(err) }));

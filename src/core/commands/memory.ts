@@ -22,7 +22,7 @@ import type { MemoryConfig, MemoryRecord, MemoryStore } from "../memory/types.js
 export interface MemoryCommandDeps {
   memory: {
     /** The live `memory` config section (read per call: config reloads). */
-    config(): MemoryConfig | undefined;
+    config(): Promise<MemoryConfig | undefined>;
     /** The process's store (index.ts shares the one the reflection pass writes
      *  to); absent → the in-process fallback `selectMemoryStore` picks. */
     store?: MemoryStore;
@@ -47,8 +47,8 @@ export function scopeKeyOfMemoryId(id: string): string | undefined {
 
 const memoryId = z.string().refine((id) => scopeKeyOfMemoryId(id) !== undefined, "expected a memory id like mem:<scope>:<n> (see `memory list`)");
 
-function storeOf(deps: MemoryCommandDeps): MemoryStore {
-  const cfg = deps.memory.config();
+async function storeOf(deps: MemoryCommandDeps): Promise<MemoryStore> {
+  const cfg = await deps.memory.config();
   if (!cfg?.enabled) throw new CommandError("unavailable", MEMORY_OFF_MESSAGE);
   return selectMemoryStore(cfg, deps.memory.store);
 }
@@ -132,7 +132,7 @@ export const memoryList = defineCommand({
   describe: "Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.",
   render: renderList,
   handler: async ({ args, options, caller, deps }) => {
-    const store = storeOf(deps);
+    const store = await storeOf(deps);
     const keys = requestScopeKeys(caller.id);
     // #344: the chat-documented "scope word first" form (`memory list org
     // deploy`). A leading bare scope word is the scope when --scope is absent;
@@ -194,7 +194,7 @@ export const memoryForget = defineCommand({
     return `🧹 Forgot \`${String(o.id)}\` (\`${String(o.scope)}\`). It no longer influences any run; the row is kept for provenance.`;
   },
   handler: async ({ args, caller, deps }) => {
-    const store = storeOf(deps);
+    const store = await storeOf(deps);
     const keys = requestScopeKeys(caller.id);
     const target = scopeKeyOfMemoryId(args.id) as string;
     if (target === keys.user) {

@@ -295,24 +295,24 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
   return {
     help: { agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })), commands: () => s.commands() },
     config: {
-      describeConfig: (c, u) => s.config.describeConfig(c, u),
-      scopes: (c, u) => s.config.scopes(c, u),
+      describeConfig: async (c, u) => s.config.describeConfig(c, u),
+      scopes: async (c, u) => s.config.scopes(c, u),
       setChannelOverride: (c, p) => s.config.setChannelOverride(c, p),
       setUserOverride: (u, p) => s.config.setUserOverride(u, p),
       clearChannelOverride: (c) => s.config.clearChannelOverride(c),
       clearUserOverride: (u) => s.config.clearUserOverride(u),
       agentNames: () => Object.keys(AGENTS),
     },
-    runs: createRunsService({ registry: s.reg, store: s.store }),
+    runs: async () => createRunsService({ registry: s.reg, store: s.store }),
     friction: {
-      ledger: new RunStoreFrictionLedger(s.store),
+      ledger: async () => new RunStoreFrictionLedger(s.store),
       tracker: s.tracker,
-      config: () => ({ repo: "acme/fixture" }),
+      config: async () => ({ repo: "acme/fixture" }),
       // A read of an input stream, not an executor: not recorded in `executed`.
       readSource: async () => record("cap-1", NOW).events.map((e) => JSON.stringify(e)).join("\n"),
     },
-    repo: { admin: () => admin, operations: () => operations, canUseRepo: () => true },
-    memory: { config: () => ({ enabled: true }), store: s.memory },
+    repo: { admin: async () => admin, operations: async () => operations, canUseRepo: async () => true },
+    memory: { config: async () => ({ enabled: true }), store: s.memory },
     schedule: { schedules: SCHEDULES, store: s.schedules, now: () => NOW },
     deploy: {
       run: async (plan: DeployPlan): Promise<DeployRunResult> =>

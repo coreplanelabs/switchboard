@@ -49,7 +49,7 @@ async function setup() {
   const runs = createRunsService({ registry: reg, store });
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
   registerRunsCommands(registry);
-  const deps: RunsCommandDeps = { runs };
+  const deps: RunsCommandDeps = { runs: async () => runs };
   return { reg, store, registry, deps };
 }
 
@@ -198,7 +198,7 @@ describe("runs.get / runs.events / runs.friction", () => {
 
   it("a channel-pinned runs.get fetches the run once — the visibility check reuses the payload's view", async () => {
     const { registry, deps } = await setup();
-    const getRun = vi.spyOn(deps.runs, "getRun");
+    const getRun = vi.spyOn(await deps.runs(), "getRun");
     const out = value<{ id: string; events?: unknown[] }>(await registry.invoke("runs.get", { args: ["fin-x"], options: { include: "messages" } }, readerPinnedX, deps));
     expect(out.id).toBe("fin-x");
     expect(out.events).toHaveLength(4);
