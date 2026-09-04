@@ -83,6 +83,37 @@ defaults:
 #   # var (JSON `{ "<token>": { "subject", "channel"?, "scopes"? } }`); `scopes`
 #   # defaults to ["dispatch"] — the ingress endpoint only, no registry command.
 
+# One authorization model (docs/plans/2026-09-03-001-feat-authorization-model-plan.md):
+# what ANY actor may do, in one shape, keyed by its platform-namespaced id —
+# `slack:U…`, `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
+# `access:svc:<common_name>`, `schedule:<name>`. Each entry has up to three
+# axes; every axis is a list of names or the explicit word `all`, and an ABSENT
+# axis is the empty set (fail-closed). Accepted alongside `permissions` above
+# during the changeover: `permissions.*` and token `scopes`/`channel` translate
+# to the same grants at load, an actor named by BOTH shapes takes the `grants`
+# entry (and is warned about at startup), and the legacy keys go away one
+# release later. An unknown id prefix or a misspelled `all` fails the load.
+# grants:
+#   slack:U0123ADMIN:                   # an admin, spelled out
+#     actions: all
+#     channels: all
+#     repos: all
+#   slack:U0456DEV:
+#     actions: [agent:run:coding, repo:write, friction:write]
+#     repos: [acme/api]                 # the repos this user may use
+#   access:svc:ops-bot:                 # an Access service token (its common_name)
+#     actions: [runs:read, runs:write, friction:read]
+#     channels: all                     # sees runs from every channel
+#   http:ci:                            # an ingress token's subject, as http: …
+#     actions: [dispatch, runs:read]
+#     channels: [http:ops]              # … pinned to the channel its runs live in
+#   mcp:ci:                             # … and the same subject over MCP
+#     actions: [dispatch, runs:read]
+#     channels: [mcp:ops]
+#   schedule:self-improvement:          # the weekly cron (src/core/schedules.ts)
+#     actions: [friction:write]
+#     channels: all                     # analyzes the whole fleet, not one channel
+
 # Where agent tools execute. "local" runs them on the bot host (dev/CLI);
 # "e2b" runs each thread's tools in its own E2B micro-VM — the repo checkout
 # and GH_TOKEN live in the sandbox, never on the bot host. Recommended for

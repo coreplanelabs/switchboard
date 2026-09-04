@@ -30,6 +30,8 @@ import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { openConfigStore, type ConfigStore } from "./config.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
+import { coreCommandGroups } from "./core/commands/all.js";
+import { CLI_ACTOR } from "./core/authz/actor.js";
 import { CommandError, CommandRegistry, renderText, type Caller, type CommandInput, type CommandInvoker, type InvokeErrorCode } from "./core/commandRegistry.js";
 import { catalogueText, chatForm, helpText, parseInvocation, type GrammarRejection } from "./core/commandSurface.js";
 import { dispatch } from "./core/dispatcher.js";
@@ -43,7 +45,7 @@ import { buildMcp } from "./mcp/index.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
-export const CLI_CALLER: Caller = { kind: "cli", id: "cli:local", scopes: "all" };
+export const CLI_CALLER: Caller = { kind: "cli", id: CLI_ACTOR.id, scopes: "all", actor: CLI_ACTOR };
 
 export const USAGE = [
   "usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]",
@@ -199,7 +201,10 @@ export async function loadBotConfig(
   // The same backing the bot uses (`runtimeOverrides.worker` → the ConfigDO), so
   // `config set` from the CLI and from Slack write ONE document; the file is
   // the fallback for a config without a state Worker.
-  return openConfigStore(configPath, { overridesPath, env: opts.env ?? process.env, warn: opts.warn ?? ((m) => console.error(m)), ...(opts.fetch ? { fetch: opts.fetch } : {}) });
+  // No ingress tokens: the CLI is `cli:local` (every grant) and never resolves
+  // an `http:`/`mcp:` actor; the command groups keep `permissions.operators`
+  // translating the same way the bot does.
+  return openConfigStore(configPath, { overridesPath, env: opts.env ?? process.env, warn: opts.warn ?? ((m) => console.error(m)), commandGroups: coreCommandGroups(), ...(opts.fetch ? { fetch: opts.fetch } : {}) });
 }
 
 /** What `main()` binds the commands to: the bot config, opened ONCE. The open

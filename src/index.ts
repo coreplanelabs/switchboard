@@ -41,6 +41,7 @@ import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters (#157 U7) ---
 import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { callerIdFor, createCommandHttpHandler, isCommandPath, isLocalhostBase, isLoopbackAddress, serviceTokenAllowed } from "./channels/commandHttp.js";
+import { coreCommandGroups } from "./core/commands/all.js";
 // --- end command registry adapters ---
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
@@ -67,10 +68,15 @@ async function main() {
   // `deploy/cloudflare/write-build.mjs` into the image; "unknown" when built by hand.
   const build = readBuildInfo(process.env.SWITCHBOARD_BUILD_INFO ?? "./build.json");
   console.log(`[build] ${build.commit}${build.builtAt ? ` @ ${build.builtAt}` : ""}`);
+  // The ingress token map is read once, here: it authenticates POST /ingress
+  // and POST /mcp below, AND its `scopes`/`channel` translate to grants for the
+  // `http:`/`mcp:` actors (one authorization model, U2), so the config store
+  // needs it — together with the command groups `permissions.operators` spans.
+  const auth = parseIngressTokens(process.env);
   // Runtime overrides (`config set …`) live where `runtimeOverrides.worker`
   // says — the state Worker's ConfigDO in prod, so a container restart keeps
   // them (features/routing-and-config.md item 12); the JSON file otherwise.
-  const config = await openConfigStore(CONFIG_PATH, { overridesPath: OVERRIDES_PATH, env: process.env });
+  const config = await openConfigStore(CONFIG_PATH, { overridesPath: OVERRIDES_PATH, env: process.env, ingressTokens: auth.tokens, commandGroups: coreCommandGroups() });
   console.log(`[config] runtime overrides: ${config.overridesLocation()}`);
   const providers = new ProviderRegistry(config.config.providers);
   // Bundled skills (#100): loaded once from the seeded `skills/` dir and shared
@@ -204,9 +210,8 @@ async function main() {
   // streamable-HTTP (JSON-RPC 2.0). With no tokens configured BOTH are
   // fail-closed disabled.
   if (process.env.PORT) {
-    const auth = parseIngressTokens(process.env);
     const ingress = createIngressHandler(deps, { auth });
-    const mcp = createMcpHandler(deps, { auth, commands });
+    const mcp = createMcpHandler(deps, { auth, commands, grantsFor: (id) => config.grantsFor(id) });
     // Scheduled jobs (#244) arrive through /ingress like any other caller: the
     // Worker shim (deploy/cloudflare/worker.ts) POSTs each `run` schedule's
     // command as the `cron` identity — the `cron` entry of the same token map —
@@ -318,6 +323,7 @@ async function main() {
     const commandHttp = createCommandHttpHandler(commands, {
       operatorIdentities: () => config.operatorIdentities(),
       serviceTokenScopes: (cn) => config.serviceTokenScopes(cn),
+      grantsFor: (id) => config.grantsFor(id),
       devBypassActive,
       publicBaseUrl,
     });

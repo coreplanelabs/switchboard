@@ -147,7 +147,7 @@ const SCHEDULED = {
     {
       name: "self-improvement",
       worker: "bot" as const,
-      action: { type: "run" as const, command: "friction propose", identity: "cron" },
+      action: { type: "run" as const, command: "friction propose", identity: "cron", actor: { kind: "schedule" as const, id: "schedule:self-improvement" as const } },
       cron: "0 14 * * 1",
       description: "Weekly self-improvement pass over recent runs.",
       nextFireAt: NOW + 2 * 86_400_000 + 3 * 3_600_000,

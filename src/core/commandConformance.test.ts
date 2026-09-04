@@ -472,7 +472,7 @@ function httpOutcome(status: number, text: string): Outcome {
 
 const httpIdentity = (who: Who) => (who === "power" ? { sub: "power" } : { sub: "", commonName: "svc-none" });
 const httpCaller = (who: Who) => ({ kind: "access" as const, id: who === "power" ? "access:power" : "access:svc:svc-none" });
-const httpHandler = (f: Fixture) => createCommandHttpHandler(f.commands, { operatorIdentities: () => ["access:power"], serviceTokenScopes: () => [], devBypassActive: false });
+const httpHandler = (f: Fixture) => createCommandHttpHandler(f.commands, { operatorIdentities: () => ["access:power"], serviceTokenScopes: () => [], grantsFor: (id) => f.config.grantsFor(id), devBypassActive: false });
 
 const httpGet: Surface = {
   meta: meta("httpGet"),

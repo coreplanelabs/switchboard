@@ -223,6 +223,21 @@ describe("chatCallerFor", () => {
     const resolve = async () => "acme/api";
     expect(chatCallerFor(msg("x"), config, resolve).origin?.repo).toBe(resolve);
   });
+
+  it("carries the message's user as an Actor with the grants config names for it (plan U2): admin → everything, a plain user → the unrestricted agents only, a machine channel's user → a service actor", async () => {
+    const { chatCallerFor } = await import("./commandChat.js");
+    const { ALL_GRANTS } = await import("./authz/grants.js");
+    const config = configStore(ADMIN_YAML);
+    expect(chatCallerFor(msg("x", "slack:UADMIN"), config).actor).toEqual({ kind: "user", id: "slack:UADMIN", grants: ALL_GRANTS, origin: { channelId: "slack:CX", threadKey: "slack:CX:1.0" } });
+    const plain = chatCallerFor(msg("x", "slack:UX"), config).actor;
+    expect(plain).toMatchObject({ kind: "user", id: "slack:UX", grants: { channels: new Set(), repos: new Set() } });
+    // No agent is restricted in ADMIN_YAML → every registered agent is open to this user (canRunAgent today).
+    expect([...(plain!.grants.actions as Set<string>)].every((a) => a.startsWith("agent:run:"))).toBe(true);
+    expect(plain!.grants.actions).toContain("agent:run:general");
+    const machine = chatCallerFor({ userId: "http:cron", channelId: "http:cron", threadKey: "http:cron:t" }, config);
+    expect(machine.channel).toBe("http:cron");
+    expect(machine.actor).toMatchObject({ kind: "service", id: "http:cron", origin: { channelId: "http:cron", threadKey: "http:cron:t" } });
+  });
 });
 
 describe("handleChatCommand", () => {

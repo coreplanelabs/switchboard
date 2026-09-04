@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders } from "node:http";
-import { createMcpHandler, handleMcpRequest, McpIO } from "./mcp.js";
+import { createMcpHandler, handleMcpRequest, McpIO, toCaller } from "./mcp.js";
+import { ALL_GRANTS } from "../core/authz/grants.js";
 import type { DispatchFn, IngressConfig, IngressIdentity } from "./http.js";
 import type { CoreDeps } from "../core/dispatcher.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
@@ -405,6 +406,24 @@ function toolJson(res: { body?: unknown }): unknown {
   expect(nl).toBeGreaterThan(0);
   return JSON.parse(text.slice(nl + 1));
 }
+
+describe("toCaller — the Caller a tool call runs as carries the mcp: Actor (plan U2)", () => {
+  it("a pinned token → service mcp:<subject>, grants = the token's scopes over mcp:<channel> (from the token map when no lookup is wired); the legacy fields are untouched", () => {
+    const auth = scoped(["runs:read"], "ops");
+    const c = toCaller(auth.tokens.tok, { auth });
+    expect(c).toMatchObject({ kind: "mcp", id: "mcp:alice", scopes: new Set(["runs:read"]), channel: "mcp:ops" });
+    expect(c.actor).toEqual({ kind: "service", id: "mcp:alice", grants: { actions: new Set(["runs:read"]), channels: new Set(["mcp:ops"]), repos: new Set() } });
+  });
+
+  it("an unpinned token's actor holds every channel; a wired `grantsFor` (ConfigStore) is consulted by the mcp: id", () => {
+    const auth = scoped(["dispatch"]);
+    expect(toCaller(auth.tokens.tok, { auth }).actor).toEqual({ kind: "service", id: "mcp:alice", grants: { actions: new Set(["dispatch"]), channels: "all", repos: new Set() } });
+    const asked: string[] = [];
+    const c = toCaller(auth.tokens.tok, { auth, grantsFor: (id) => (asked.push(id), ALL_GRANTS) });
+    expect(asked).toEqual(["mcp:alice"]);
+    expect(c.actor?.grants).toBe(ALL_GRANTS);
+  });
+});
 
 describe("handleMcpRequest — registry commands as tools", () => {
   it("tools/list = dispatch + every registered command with a derived inputSchema (runs_list has the status enum)", async () => {

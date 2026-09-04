@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
 import { COMMAND_ID, CommandRegistry, ERROR_STATUS, type Caller, type CommandDef, type CommandInvoker, type InvokeErrorCode } from "../core/commandRegistry.js";
 import { namedToInput } from "../core/commandSurface.js";
 import { isServiceToken, type AccessIdentity } from "./accessAuth.js";
@@ -29,6 +30,9 @@ export interface CommandHttpOptions {
   operatorIdentities: () => string[];
   /** `permissions.serviceTokens[<common_name>]`: a service token's exact scopes. */
   serviceTokenScopes: (commonName: string) => string[];
+  /** Grants by actor id (`ConfigStore.grantsFor`) for the `Caller.actor` every
+   *  `/api` call carries — `access:<sub>` or `access:svc:<common_name>`. */
+  grantsFor: GrantsLookup;
   /** True when the Access gate is admitting requests WITHOUT a JWT
    *  (`ACCESS_DEV_BYPASS` with no Access config). Enables the loopback rule. */
   devBypassActive: boolean;
@@ -112,11 +116,13 @@ export function serviceTokenAllowed(pathname: string, identity: AccessIdentity):
  * `access:<sub>` with every read implicitly (the registry grants that) and the
  * registry's write scopes iff `permissions.operators` lists the id. A service
  * token is `access:svc:<common_name>` holding exactly its configured scopes.
+ * Both carry the same identity as an `Actor` (a browser session is a `user`,
+ * a service token a `service`) with the grants config names for that id.
  */
 export function callerFor(identity: AccessIdentity, commands: CommandInvoker, opts: CommandHttpOptions): Caller {
   const id = callerIdFor(identity);
   if (isServiceToken(identity)) {
-    return { kind: "access", id, scopes: new Set(opts.serviceTokenScopes(identity.commonName)) };
+    return { kind: "access", id, scopes: new Set(opts.serviceTokenScopes(identity.commonName)), actor: resolveActor({ surface: "access-service", subjectId: identity.commonName }, opts.grantsFor) };
   }
   const writeScopes = opts.operatorIdentities().includes(id)
     ? commands
@@ -124,7 +130,7 @@ export function callerFor(identity: AccessIdentity, commands: CommandInvoker, op
         .filter((c) => c.effect === "write")
         .map((c) => c.scope)
     : [];
-  return { kind: "access", id, scopes: new Set(writeScopes) };
+  return { kind: "access", id, scopes: new Set(writeScopes), actor: resolveActor({ surface: "access-browser", subjectId: identity.sub }, opts.grantsFor) };
 }
 
 function hostOf(url: string | undefined): string | undefined {

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import { ConfigStore } from "../config.js";
 import { CLI_CALLER, parseCliArgv, runCommand } from "../cli.js";
+import { NO_GRANTS } from "../core/authz/types.js";
 import { handleChatCommand, parseChatCommand } from "../core/commandChat.js";
 import { renderText, type Caller, type CommandDef, type CommandInvoker } from "../core/commandRegistry.js";
 import { buildCoreCommands } from "../core/commandCatalogue.js";
@@ -181,7 +182,7 @@ const httpRow: AdapterRow = {
   name: "http",
   caller: { kind: "access", id: "access:user-1", scopes: new Set() },
   async call(f, id, named) {
-    const handler = createCommandHttpHandler(f.commands, { operatorIdentities: () => [], serviceTokenScopes: () => [], devBypassActive: false });
+    const handler = createCommandHttpHandler(f.commands, { operatorIdentities: () => [], serviceTokenScopes: () => [], grantsFor: () => NO_GRANTS, devBypassActive: false });
     // A query string spells option keys in kebab-case (`?since-ms=…`); argument names are what they are.
     const query = new URLSearchParams(Object.entries(named).map(([k, v]) => [camelToKebab(k), v]));
     const t = fakeReqRes("GET", `${httpPath(id)}?${query.toString()}`);

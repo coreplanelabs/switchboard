@@ -1,4 +1,4 @@
-import type { CommandRegistry } from "../commandRegistry.js";
+import { CommandRegistry } from "../commandRegistry.js";
 import { registerConfigCommands, type ConfigCommandDeps } from "./config.js";
 import { registerDeployCommands, type DeployCommandDeps } from "./deploy.js";
 import { registerEnvCommands, type EnvCommandDeps } from "./env.js";
@@ -40,4 +40,15 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerScheduleCommands(registry);
   registerDeployCommands(registry);
   registerEnvCommands(registry);
+}
+
+/** The `<group>` of every registered command's scope, once each, sorted — the
+ *  vocabulary `permissions.operators` translates over (`src/core/authz/grants.ts`:
+ *  every `<group>:read` + `<group>:write`). Derived from the catalogue so a new
+ *  group is covered automatically; handed to `ConfigStore` at startup because
+ *  `config.ts` cannot import the catalogue (the config commands import it). */
+export function coreCommandGroups(): string[] {
+  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+  registerCoreCommands(registry);
+  return [...new Set(registry.list().map((c) => c.scope.slice(0, c.scope.indexOf(":"))))].sort();
 }
