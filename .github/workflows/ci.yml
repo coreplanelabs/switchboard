@@ -60,7 +60,7 @@ jobs:
       - run: npm run build
 
   docs:
-    name: docs generator check + site build
+    name: docs check + site build + deploy dry-run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +71,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             docs/package-lock.json
+            deploy/cloudflare-docs/package-lock.json
       - run: npm ci
       # The generated regions of docs/reference/* must match the command
       # registry — a stale table is a red build, not a docs bug found later
@@ -83,6 +84,30 @@ jobs:
         run: |
           npm ci
           npm run build
+      # The build proves the ARTIFACT; these two steps prove the DEPLOY would be
+      # accepted. Without them the first thing to look at wrangler.jsonc or at
+      # the assets directory is the push to main, after review is over.
+      - name: the built site is complete
+        run: |
+          set -e
+          for page in index.html 404.html tutorials/index.html how-to/index.html \
+                      reference/index.html explanation/index.html reference/cli.html; do
+            test -f "docs/.vitepress/dist/$page" || { echo "missing: $page"; exit 1; }
+          done
+          # Working documents, deliberately unpublished (srcExclude).
+          test ! -d docs/.vitepress/dist/plans || { echo "plans/ must not be published"; exit 1; }
+          echo "pages present: $(find docs/.vitepress/dist -name '*.html' | wc -l)"
+      - name: the docs Worker config would deploy
+        working-directory: deploy/cloudflare-docs
+        # --dry-run needs no credentials: it validates wrangler.jsonc, resolves
+        # `assets.directory` against the tree just built, and reads every file
+        # it would upload — so a wrong path or a broken config is a red PR, not
+        # a red main. It uploads nothing and touches no account.
+        env:
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          npm ci
+          npx wrangler deploy --dry-run
 
   docs-deploy:
     name: deploy the docs site
