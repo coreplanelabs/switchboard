@@ -15,6 +15,7 @@ declare module 'vue' {
     AppShell: typeof import('./src/components/AppShell.vue')['default']
     CallCard: typeof import('./src/components/run/CallCard.vue')['default']
     CostChart: typeof import('./src/components/costs/CostChart.vue')['default']
+    DocsLink: typeof import('./src/components/DocsLink.vue')['default']
     GithubMark: typeof import('./src/components/GithubMark.vue')['default']
     MarkdownText: typeof import('./src/components/MarkdownText.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']

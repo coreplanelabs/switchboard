@@ -35,6 +35,7 @@ import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
+import { DOCS_BASE_URL, docsRedirectTarget } from "./core/docsLink.js";
 import { activeRunCount, DEPLOY_RESTART_NOTICE, setShutdownNotice, writeAbandonedRunRecords, type CoreDeps } from "./core/dispatcher.js";
 import { buildScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
@@ -297,6 +298,9 @@ async function main() {
     // the ONE localhost rule (shared with commandHttp); a malformed
     // PUBLIC_BASE_URL is "not localhost", never a boot crash.
     const publicBaseUrl = process.env.PUBLIC_BASE_URL;
+    // Where /docs* sends a caller. Deploy-constant (src/core/docsLink.ts);
+    // DOCS_BASE_URL points it at a local `npm run docs:dev` instead.
+    const docsBaseUrl = process.env.DOCS_BASE_URL ?? DOCS_BASE_URL;
     const devBypassActive = accessConfig === null && accessDevBypass;
     const liveView = createLiveViewHandler({
       shell,
@@ -405,6 +409,17 @@ async function main() {
         res.end();
         return;
       }
+      // /docs* → the docs site (deploy/cloudflare-docs/), subpath preserved.
+      // Public like `/`: it discloses only the docs hostname, and the docs site
+      // itself sits behind the same Cloudflare Access as the dashboards, so an
+      // unauthenticated follower meets the SSO login there. This is the stable
+      // in-product path the dashboard header links to — see src/core/docsLink.ts.
+      const docsTarget = docsRedirectTarget(path, docsBaseUrl);
+      if (docsTarget) {
+        res.writeHead(302, { location: docsTarget });
+        res.end();
+        return;
+      }
       // The favicon fallback (live-view item 21): the runs index carries its own
       // inline data: icon, but every other page — and any bookmark — asks here,
       // and the catch-all used to answer with a text/plain "ok". Public like /:
@@ -434,7 +449,7 @@ async function main() {
       // (~seconds) for an external prober to land inside the window itself.
       httpListeningAt = Date.now();
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${commandHttpState}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${commandHttpState} + /docs → ${docsBaseUrl}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       );
     });
