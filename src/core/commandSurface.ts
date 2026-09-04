@@ -321,24 +321,35 @@ export function usageLine(cmd: CommandShape): string {
   return parts.join(" ");
 }
 
-/** The whole help for one command: description, usage, one line per argument
- *  and option (zod `.describe()` texts). */
+/** One argument or option as help shows it: the form (`<id>`, `--mode <soft|hard>`,
+ *  `--dry-run`) and its description with the `(optional)`/`(required)` marker. */
+export interface HelpRow {
+  form: string;
+  describe: string;
+}
+
+/** The content of a command's help — what every surface's `…HelpText` lays out.
+ *  Arguments are optional by exception (`(optional)` when the schema accepts
+ *  undefined); options are optional by default (`(required)` when it does not). */
+export function helpRows(cmd: CommandShape): { arguments: HelpRow[]; options: HelpRow[] } {
+  const args = (cmd.args ?? []).map((a) => ({ form: `<${a.name}>`, describe: `${a.describe}${acceptsUndefined(a.schema) ? " (optional)" : ""}` }));
+  const options = (Object.entries(cmd.options?.shape ?? {}) as [string, z.ZodType][]).map(([key, schema]) => ({
+    form: isBooleanSchema(schema) ? cliFlag(key) : `${cliFlag(key)} <${typeHint(schema)}>`,
+    describe: [schema.description, acceptsUndefined(schema) ? undefined : "(required)"].filter(Boolean).join(" "),
+  }));
+  return { arguments: args, options };
+}
+
+/** The whole help for one command, terminal shape: description, usage, one
+ *  column-aligned line per argument and option (zod `.describe()` texts). */
 export function helpText(cmd: CommandShape): string {
+  const rows = helpRows(cmd);
+  const width = Math.max(0, ...[...rows.arguments, ...rows.options].map((r) => r.form.length));
   const lines = [cmd.describe, `usage: ${usageLine(cmd)}`];
-  const args = cmd.args ?? [];
-  const opts = Object.entries(cmd.options?.shape ?? {}) as [string, z.ZodType][];
-  const width = Math.max(0, ...args.map((a) => a.name.length + 2), ...opts.map(([k, s]) => (isBooleanSchema(s) ? cliFlag(k) : `${cliFlag(k)} <${typeHint(s)}>`).length));
-  if (args.length > 0) {
-    lines.push("arguments:");
-    for (const a of args) lines.push(`  ${`<${a.name}>`.padEnd(width)}  ${a.describe}${acceptsUndefined(a.schema) ? " (optional)" : ""}`);
-  }
-  if (opts.length > 0) {
-    lines.push("options:");
-    for (const [key, schema] of opts) {
-      const form = isBooleanSchema(schema) ? cliFlag(key) : `${cliFlag(key)} <${typeHint(schema)}>`;
-      const desc = [schema.description, acceptsUndefined(schema) ? undefined : "(required)"].filter(Boolean).join(" ");
-      lines.push(`  ${form.padEnd(width)}  ${desc}`.trimEnd());
-    }
+  for (const [header, section] of [["arguments:", rows.arguments], ["options:", rows.options]] as const) {
+    if (section.length === 0) continue;
+    lines.push(header);
+    for (const r of section) lines.push(`  ${r.form.padEnd(width)}  ${r.describe}`.trimEnd());
   }
   return lines.join("\n");
 }
@@ -347,6 +358,29 @@ export function helpText(cmd: CommandShape): string {
 export function catalogueText(cmds: readonly CommandShape[]): string {
   const width = Math.max(0, ...cmds.map((c) => chatForm(c.id).length));
   return cmds.map((c) => `  ${chatForm(c.id).padEnd(width)}  — ${c.describe}`).join("\n");
+}
+
+// Chat (Slack) renders in a proportional font, where the padded columns of
+// `helpText`/`catalogueText` collapse into ragged runs of spaces (2026-08-30 for
+// the bare `help`, 2026-09-04 for `<group> help` and `--help`). The chat shapes
+// carry the same derived content as bullets with the form in a code span.
+
+/** One bullet per command: `• \`runs list\` — describe`. */
+export function chatCatalogueText(cmds: readonly CommandShape[]): string {
+  return cmds.map((c) => `• \`${chatForm(c.id)}\` — ${c.describe}`).join("\n");
+}
+
+/** The same `helpRows` in chat shape: description, usage in a code span, a
+ *  bold section header and one bullet per argument and option. */
+export function chatHelpText(cmd: CommandShape): string {
+  const rows = helpRows(cmd);
+  const lines = [cmd.describe, `usage: \`${usageLine(cmd)}\``];
+  for (const [header, section] of [["*arguments*", rows.arguments], ["*options*", rows.options]] as const) {
+    if (section.length === 0) continue;
+    lines.push(header);
+    for (const r of section) lines.push(r.describe ? `• \`${r.form}\` — ${r.describe}` : `• \`${r.form}\``);
+  }
+  return lines.join("\n");
 }
 
 /** Which of `cmds` share `group` — for `<group> help`. */

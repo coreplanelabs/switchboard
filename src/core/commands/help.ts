@@ -1,5 +1,5 @@
 import { commandDefiner, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
-import { catalogueText, chatForm, cliWords, type CommandShape } from "../commandSurface.js";
+import { catalogueText, chatCatalogueText, chatForm, cliWords, type CommandShape } from "../commandSurface.js";
 
 // `help.show` (phase 4b): the one help text, DERIVED — the agents from the
 // agent registry, the per-request directive syntax, and the chat catalogue
@@ -37,15 +37,15 @@ function helpFrame(output: JsonValue, commandList: (commands: CommandShape[]) =>
 }
 
 /** Chat's command list: one bold header per group (first-appearance order),
- *  one bullet per command, no column padding — aligned columns collapse in a
- *  proportional font (Slack, 2026-08-30). */
+ *  then the group's `chatCatalogueText` bullets — the same shape `<group> help`
+ *  replies with. */
 export function chatCommandList(commands: readonly CommandShape[]): string[] {
   const groups = new Map<string, CommandShape[]>();
   for (const c of commands) {
     const group = cliWords(c.id)[0];
     groups.set(group, [...(groups.get(group) ?? []), c]);
   }
-  return [...groups].flatMap(([group, cmds]) => [`*${group}*`, ...cmds.map((c) => `• \`${chatForm(c.id)}\` — ${c.describe}`)]);
+  return [...groups].flatMap(([group, cmds]) => [`*${group}*`, ...chatCatalogueText(cmds).split("\n")]);
 }
 
 export const helpShow = defineCommand({
