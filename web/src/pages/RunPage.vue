@@ -291,6 +291,19 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           </span>
         </h2>
         <MarkdownText :text="state.request.text" />
+        <!-- Follow-ups steered into this run (features/thread-admission.md
+             item 2): the same run, more input — listed under the request in
+             arrival order, each with who sent it and when. -->
+        <ol v-if="state.followUps.length" id="followups" class="mt-3 space-y-2 border-t border-default pt-2.5">
+          <li v-for="(f, i) in state.followUps" :key="i" class="followup">
+            <div class="mb-1 flex items-baseline gap-2 text-xs text-muted">
+              <span class="font-semibold uppercase tracking-wider">↪ follow-up</span>
+              <span class="ts select-none text-dimmed" :title="fmtTimeTitle(f.at)">{{ fmtTime(f.at) }}</span>
+              <span v-if="f.source?.user" class="source ml-auto">{{ f.source.user }}</span>
+            </div>
+            <MarkdownText :text="f.text" />
+          </li>
+        </ol>
         <!-- What the run is about (item 19/21): agent · model · effort · linked
              repo · branch tag · GitHub-marked #PR. The branch is a fact, not a
              destination; the sha is gone for the same reason. -->

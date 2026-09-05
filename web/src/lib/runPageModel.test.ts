@@ -29,6 +29,17 @@ describe("request / context / answer / placeholder", () => {
     expect(m.state.request?.source?.channel).toBe("dev");
   });
 
+  it("a later input is a steered follow-up listed under the request — it never replaces it (one run, several inputs)", () => {
+    const m = model();
+    m.handle(input);
+    m.handle({ type: "input", text: "also the numbers", at: 2000, source: { user: "bob", url: "https://acme.slack.com/y" } });
+    m.handle({ type: "input", text: "and a chart", at: 3000 });
+    expect(m.state.request?.text).toBe("fix the build");
+    expect(m.state.followUps.map((f) => f.text)).toEqual(["also the numbers", "and a chart"]);
+    expect(m.state.followUps[0].source?.user).toBe("bob");
+    expect(m.state.followUps[1].source).toBeUndefined();
+  });
+
   it("collects context turns outside the log", () => {
     const m = model();
     m.handle({ type: "context", text: "earlier turn", at: 5 });
