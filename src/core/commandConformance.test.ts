@@ -176,8 +176,8 @@ defaults:
 `;
 
 /** The generic fixture's deployment: one Slack admin, no `channelConfig` (open-when-absent), and the
- *  HTTP power caller granted everything NATIVELY (an `admins` entry would also change `adminsHint`,
- *  which the cross-surface JSON comparison folds by caller id). */
+ *  HTTP power caller granted everything NATIVELY (`adminsHint`, folded by caller id in the
+ *  cross-surface comparison, names Slack admins only, so the hint reads the same on every surface). */
 const CONFIG_YAML = `${BASE_YAML}permissions:
   admins: ["${POWER}"]
   repoManagement: ["${POWER}"]

@@ -14,39 +14,33 @@ defaults:
     coding: anthropic/claude-fable-5
     review: anthropic/claude-fable-5
 
-permissions:
-  admins: [slack:U0BMRFRLT1P] # justin
-  # The scheduled-run identity (#244): the Worker shim fires `friction propose`
-  # through /ingress as the `cron` entry of SWITCHBOARD_INGRESS_TOKENS, which the
-  # dispatcher sees as `http:cron`. `friction propose` sits behind the fail-closed
-  # repo-management gate, so the identity is granted here — this also lets it run
-  # `repo onboard/offboard/rebuild`, which only the shim can trigger (it holds the
-  # token) and only with the registry's command text.
-  repoManagement: [http:cron]
-  # No agents block: every agent is open to the whole workspace (an absent
-  # allowlist key means unrestricted, enforced in ConfigService.canRunAgent).
-  channelConfig: [] # admins only
-  # Cloudflare Access service tokens (#157 phase 2, features/access-gate.md):
-  # keyed by the token's `common_name` claim = its Client ID; the value is the
-  # exact scope list it holds (unlisted tokens authenticate but hold nothing).
-  # Service tokens are served /api/* only — never /runs*, /residents*, /costs*.
-  # `switchboard-ops` (1Password, Employee vault: "Switchboard:
-  # ACCESS_SERVICE_TOKEN switchboard-ops"): read on every command group; no
-  # write/exec — stopping runs, filing proposals, memory forget and repo
-  # mutations stay with humans until a token is explicitly granted them.
-  serviceTokens:
-    b4a6ef75a577c499ca50844d1a85a67d.access: [runs:read, friction:read, repo:read, memory:read, schedule:read, config:read, help:read, deploy:read]
-
-# One authorization model (features/authorization.md): what an actor may SEE is
-# its `channels` grant, and an ingress token with no `channel` key is granted no
-# channel (OQ4). These entries keep the fleet-wide readers working through the
-# cut; the legacy `permissions` keys above stay until U7 removes them. A native
-# entry REPLACES the legacy translation for the same id, so each lists its
-# actions in full.
+# One authorization model (features/authorization.md item 9): what ANY actor may
+# do, in one shape, keyed by its platform-namespaced id. Every axis is a list of
+# names or the explicit word `all`; an ABSENT axis is the empty set (fail-closed).
+# This file is native-only (authz U7 step 1, #452): there is no `permissions`
+# block, so nothing here is translated — what an actor holds is exactly what its
+# entry says, plus the baselines every deployment has: every Slack user holds the
+# open chat commands and may run every agent (no agent is restricted here), and
+# an Access browser session holds every command group's read. `config:write` is
+# in NO baseline — `config set channel` is admins only — and `runs:read` is not
+# in the chat baseline, so an unlisted Slack user reads no run. Each entry lists
+# its actions in full; src/config.production.test.ts holds the per-actor goldens.
 grants:
-  # The scheduled-run identity (#244, #395): the dispatcher sees the shim's
-  # firings as `http:cron`; `channels: all` is what lets the weekly pass analyze
-  # every channel's runs instead of the cron channel's own.
+  # justin — everything on every axis: every action (agent:run:* included),
+  # every channel's runs, every repo.
+  slack:U0BMRFRLT1P:
+    actions: all
+    channels: all
+    repos: all
+  # The scheduled-run identity (#244, #395): the Worker shim fires `friction
+  # propose` through /ingress as the `cron` entry of SWITCHBOARD_INGRESS_TOKENS,
+  # which the dispatcher sees as `http:cron`. `friction:write` is what `friction
+  # propose` needs; `repo:write` also lets it run `repo onboard/offboard/rebuild`,
+  # which only the shim can trigger (it holds the token) and only with the
+  # registry's command text. `channels: all` is what lets the weekly pass analyze
+  # every channel's runs instead of the cron channel's own. (`dispatch` — the
+  # right to start a run through /ingress — is the token's own `scopes`, not a
+  # grant.)
   http:cron:
     actions: [friction:read, friction:write, repo:write]
     channels: all
@@ -55,9 +49,14 @@ grants:
   schedule:self-improvement:
     actions: [friction:read, friction:write, repo:write]
     channels: all
-  # `switchboard-ops` (the Access service token above): read on every group over
-  # every channel — a fleet ops reader, no writes. Kept in step with its
-  # serviceTokens entry (this entry is the one that decides).
+  # Cloudflare Access service token `switchboard-ops` (#157 phase 2,
+  # features/access-gate.md; 1Password, Employee vault: "Switchboard:
+  # ACCESS_SERVICE_TOKEN switchboard-ops"), keyed by the token's `common_name`
+  # claim = its Client ID. Read on every command group over every channel — a
+  # fleet ops reader, no write/exec: stopping runs, filing proposals, memory
+  # forget and repo mutations stay with humans until a token is explicitly
+  # granted them. Service tokens are served /api/* only — never /runs*,
+  # /residents*, /costs* — and an unlisted one authenticates but holds nothing.
   access:svc:b4a6ef75a577c499ca50844d1a85a67d.access:
     actions: [runs:read, friction:read, repo:read, memory:read, schedule:read, config:read, help:read, deploy:read]
     channels: all

@@ -29,7 +29,8 @@ import { CommandError, commandDefiner, type Caller, type CommandDef, type Comman
  *  waits (#409). No classification of commands anywhere. */
 export interface ConfigCommandDeps {
   config: {
-    describeConfig(channelId: string, userId: string): Promise<ConfigDescription>;
+    /** Everything `config show` reports but `channelConfigRestricted`, which is the caller's actor's to decide (`mayEditChannel`). */
+    describeConfig(channelId: string, userId: string): Promise<Omit<ConfigDescription, "channelConfigRestricted">>;
     scopes(channelId: string, userId: string): Promise<{ channel: Scope; user: Scope }>;
     setChannelOverride(channelId: string, patch: Scope): Promise<Scope>;
     setUserOverride(userId: string, patch: Scope): Promise<Scope>;
@@ -58,8 +59,12 @@ function targetChannel(caller: Caller, channel: string | undefined): string {
 
 /** The channel scope affects everyone in the channel: the policy table's
  *  `config:write` row on `config-scope { channel }` (the channel-config right). */
+function mayEditChannel(caller: Caller, channel: string): boolean {
+  return authorize(caller.actor, "config:write", { type: "config-scope", kind: "channel", id: channel }).allow;
+}
+
 function assertMayEditChannel(caller: Caller, channel: string): void {
-  if (!authorize(caller.actor, "config:write", { type: "config-scope", kind: "channel", id: channel }).allow) throw new CommandError("unauthorized", "Channel config changes are restricted.");
+  if (!mayEditChannel(caller, channel)) throw new CommandError("unauthorized", "Channel config changes are restricted.");
 }
 
 /** Scope as shown in replies: instructions are elided to their length so a
@@ -80,7 +85,12 @@ export const configShow = defineCommand({
   effect: "read",
   describe: "The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.",
   render: (output) => formatConfigDescription(output as unknown as ConfigDescription),
-  handler: async ({ options, caller, deps }) => (await deps.config.describeConfig(targetChannel(caller, options.channel), caller.id)) as unknown as JsonValue,
+  handler: async ({ options, caller, deps }) => {
+    const channel = targetChannel(caller, options.channel);
+    // The same question `config set channel` asks, answered for THIS caller's actor — the CLI's `all`, a token's grants, a Slack user's — never for an id the store looks up on its own.
+    const description: ConfigDescription = { ...(await deps.config.describeConfig(channel, caller.id)), channelConfigRestricted: !mayEditChannel(caller, channel) };
+    return description as unknown as JsonValue;
+  },
 });
 
 // ---- config set --------------------------------------------------------------------

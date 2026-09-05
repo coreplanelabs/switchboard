@@ -29,7 +29,10 @@ export function agentRunAction(agent: string): string {
  *  policy rows (plan U4, KTD5): what EVERY Slack user holds. A command group not
  *  listed here is closed to chat users until config grants it (fail-closed, R7).
  *  `config:write` is not here: it is the `permissions.channelConfig` right and
- *  joins the baseline only while that key is absent (open-when-absent). */
+ *  joins the baseline only while a legacy `permissions` block is present WITHOUT
+ *  that key (open-when-absent). A deployment with no `permissions` block has
+ *  nothing to be absent from: it holds `config:write` where its `grants` say so
+ *  and nowhere else (R7 — production since authz U7 step 1). */
 export const CHAT_OPEN_ACTIONS: readonly string[] = ["help:read", "config:read", "repo:read", "friction:read", "memory:read", "mcp:read", "schedule:read", "memory:write", "mcp:write"];
 
 /** What an Access browser session holds implicitly (KTD6/KTD10): every registered
@@ -115,13 +118,20 @@ export interface LegacyTranslation {
   /** What EVERY Slack user holds under the legacy keys, listed or not: the
    *  `open` chat commands (`CHAT_OPEN_ACTIONS`), `agent:run:<name>` for each
    *  agent without an allowlist (`canRunAgent` is true for anyone there), and
-   *  `config:write` while `permissions.channelConfig` is absent
-   *  (`canEditChannelConfig`'s open-when-absent). */
+   *  `config:write` while a `permissions` block is present without
+   *  `channelConfig` (`canEditChannelConfig`'s open-when-absent — a rule about
+   *  a legacy block's missing key; no block, no rule). */
   everyone: Grants;
   /** `permissions.repos` ABSENT (KD7): every repo is open to every allowed
    *  coding-agent user. Listed coding users receive `repos: "all"`; the flag
    *  says the same for users no list names. */
   reposOpen: boolean;
+  /** The ids a `permissions.*` key names (`serviceTokens` included) — the
+   *  legacy entries an operator can delete from config.yaml once a native
+   *  entry replaces them. Ingress-token ids are NOT here: a token-map entry is
+   *  the credential itself, and a native entry for its `http:`/`mcp:` id is how
+   *  a token is granted channels (#453), not a second copy to remove. */
+  fromPermissions: ReadonlySet<string>;
 }
 
 /**
@@ -129,7 +139,8 @@ export interface LegacyTranslation {
  *   admins                    → all / all / all
  *   operators                 → every `<group>:read` + `<group>:write` (never `:exec`); channels all
  *   repoManagement            → repo:write, friction:write (absent/empty → nothing; KTD9)
- *   channelConfig             → config:write for the listed; ABSENT → config:write for `everyone`
+ *   channelConfig             → config:write for the listed; ABSENT from a present `permissions` block → config:write
+ *                               for `everyone`; no `permissions` block at all → for nobody by baseline (native only)
  *   (the `open` chat gate)    → CHAT_OPEN_ACTIONS for `everyone`
  *   agents.<name>: [users]    → agent:run:<name> for those users; an agent with
  *                               NO allowlist → agent:run:<name> for `everyone`
@@ -144,7 +155,13 @@ export interface LegacyTranslation {
  */
 export function translateLegacyConfig(permissions: LegacyPermissions | undefined, ingressTokens: IngressTokenMap | undefined, accessServiceTokens: Record<string, string[]> | undefined, vocabulary: LegacyVocabulary): LegacyTranslation {
   const table = new Map<string, Grants>();
-  const add = (actorId: string, g: Partial<Grants>) => table.set(actorId, unionGrants(table.get(actorId) ?? NO_GRANTS, { ...NO_GRANTS, ...g }));
+  const fromPermissions = new Set<string>();
+  const union = (actorId: string, g: Partial<Grants>) => table.set(actorId, unionGrants(table.get(actorId) ?? NO_GRANTS, { ...NO_GRANTS, ...g }));
+  /** A `permissions.*` key naming `actorId`: unioned in AND recorded as deletable. */
+  const add = (actorId: string, g: Partial<Grants>) => {
+    fromPermissions.add(actorId);
+    union(actorId, g);
+  };
   const p = permissions ?? {};
 
   for (const id of p.admins ?? []) add(id, ALL_GRANTS);
@@ -157,9 +174,12 @@ export function translateLegacyConfig(permissions: LegacyPermissions | undefined
   for (const [agent, users] of Object.entries(restricted)) {
     for (const id of users) add(id, { actions: new Set([agentRunAction(agent)]) });
   }
+  // `config:write` is open-when-absent only for a legacy block that omits the
+  // key; with no `permissions` block there is no legacy rule to apply (R7).
+  const channelConfigOpen = permissions !== undefined && p.channelConfig === undefined;
   const everyone: Grants = {
     ...NO_GRANTS,
-    actions: new Set([...CHAT_OPEN_ACTIONS, ...(p.channelConfig === undefined ? ["config:write"] : []), ...vocabulary.agentNames.filter((a) => restricted[a] === undefined).map(agentRunAction)]),
+    actions: new Set([...CHAT_OPEN_ACTIONS, ...(channelConfigOpen ? ["config:write"] : []), ...vocabulary.agentNames.filter((a) => restricted[a] === undefined).map(agentRunAction)]),
   };
 
   const reposOpen = p.repos === undefined;
@@ -173,7 +193,7 @@ export function translateLegacyConfig(permissions: LegacyPermissions | undefined
 
   for (const entry of Object.values(ingressTokens ?? {})) {
     for (const ns of ["http", "mcp"] as const) {
-      add(`${ns}:${entry.subject}`, { actions: new Set(entry.scopes), channels: new Set(entry.channel === undefined ? [] : [`${ns}:${entry.channel}`]) });
+      union(`${ns}:${entry.subject}`, { actions: new Set(entry.scopes), channels: new Set(entry.channel === undefined ? [] : [`${ns}:${entry.channel}`]) });
     }
   }
 
@@ -184,7 +204,7 @@ export function translateLegacyConfig(permissions: LegacyPermissions | undefined
     add(`access:svc:${commonName}`, { actions: new Set(scopes.filter((s): s is string => typeof s === "string")), channels: "all" });
   }
 
-  return { grants: table, everyone, reposOpen };
+  return { grants: table, everyone, reposOpen, fromPermissions };
 }
 
 function unionSet(a: GrantSet, b: GrantSet): GrantSet {
@@ -238,8 +258,14 @@ export interface GrantsSource {
   schedules?: readonly { readonly id: string; readonly grants: Grants }[];
 }
 
-export type GrantsTable = MergedGrants &
+export type GrantsTable = Pick<MergedGrants, "grants"> &
   Pick<LegacyTranslation, "everyone" | "reposOpen"> & {
+    /** Ids a `permissions.*` key AND the native block both name — the native
+     *  entry won and the legacy one is deletable, so `ConfigStore` warns. An
+     *  ingress token's `http:`/`mcp:` id with a native entry beside it is not
+     *  here (`LegacyTranslation.fromPermissions`): that pairing is the intended
+     *  way to grant a token channels, not a duplicate. */
+    overlapping: string[];
     /** What every Access browser session holds under the legacy rules: each registered group's read. */
     browserReads: Grants;
   };
@@ -273,7 +299,7 @@ export function grantsTable(source: GrantsSource): GrantsTable {
     if (source.grants?.has(schedule.id)) continue;
     merged.grants.set(schedule.id, unionGrants(merged.grants.get(schedule.id) ?? NO_GRANTS, schedule.grants));
   }
-  return { ...merged, ...baselines, reposOpen: legacy.reposOpen };
+  return { grants: merged.grants, overlapping: merged.overlapping.filter((id) => legacy.fromPermissions.has(id)), ...baselines, reposOpen: legacy.reposOpen };
 }
 
 /** One actor's grants from a built table: its entry; else the legacy baseline

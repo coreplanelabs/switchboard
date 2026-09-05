@@ -49,15 +49,19 @@ defaults:
 #   slack:U0123456789:
 #     model: openai/gpt-5
 
-# Authorization (optional — absent means everything is open).
-# Enforcement is at run time against the resolved agent, so allowlists can't
-# be bypassed via directives or config scopes.
+# Authorization — the LEGACY keys (translated to grants at load; removed one
+# release after the `grants` block below, features/authorization.md item 9).
+# Absent allowlists are open; `repoManagement` and everything below `grants`
+# are fail-closed. Enforcement is at run time against the resolved agent, so
+# allowlists can't be bypassed via directives or config scopes.
 # permissions:
 #   admins: [slack:U0123ADMIN]            # bypass all restrictions below
 #   agents:
 #     coding: [slack:U0456DEV]            # only these users (+ admins) may run coding
 #   channelConfig: []               # who may run `config set/clear channel`;
-#                                   # empty = admins only; key absent = everyone
+#                                   # empty = admins only; key absent from this
+#                                   # block = everyone; no `permissions` block at
+#                                   # all = only those `grants` gives config:write
 #   repos:                          # per-repo access for resident environments;
 #     acme/api: [slack:U0456DEV]    # map or key absent = open to every allowed
 #                                   # coding-agent user; a listed repo refuses

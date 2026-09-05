@@ -8,6 +8,7 @@ import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
 import type { ShipConfig } from "./core/shipPipeline.js";
+import { hasAction } from "./core/authz/authorize.js";
 import { grantsIn, grantsTable, parseGrantsConfig, type GrantsConfig, type GrantsTable } from "./core/authz/grants.js";
 import type { Grants } from "./core/authz/types.js";
 import type { IngressTokenMap } from "./core/ingressTokens.js";
@@ -65,7 +66,9 @@ export interface Permissions {
   agents?: Record<string, string[]>;
   /**
    * If present, only these users (+ admins) may run `config set channel` /
-   * `config clear channel`. Empty list = admins only. Absent = everyone.
+   * `config clear channel`. Empty list = admins only. Absent from a present
+   * `permissions` block = everyone. With no `permissions` block at all the
+   * right is held only where `grants` says so (native deployments, R7).
    */
   channelConfig?: string[];
   /**
@@ -467,7 +470,7 @@ export class ConfigStore {
       schedules: SCHEDULES.filter(isRunSchedule).map((s) => s.action.actor),
     });
     if (this.grants.overlapping.length > 0) {
-      warn(`config.yaml: grants and permissions both name ${this.grants.overlapping.map((id) => `"${id}"`).join(", ")} — the grants entry wins; remove the permissions/token entry (one identity, one shape)`);
+      warn(`config.yaml: grants and permissions both name ${this.grants.overlapping.map((id) => `"${id}"`).join(", ")} — the grants entry wins; remove the permissions entry (one identity, one shape)`);
     }
 
     let initial: Overrides | undefined;
@@ -617,12 +620,17 @@ export class ConfigStore {
   }
 
   // ---- permissions ---------------------------------------------------------
-  // Absent config = open. Enforcement happens at run time against the
-  // *resolved* agent, so no config layer (including "config set me") can
-  // bypass an agent allowlist.
+  // The agent and repo allowlists are open when absent. Enforcement happens at
+  // run time against the *resolved* agent, so no config layer (including
+  // "config set me") can bypass an allowlist. Who is an admin, who manages
+  // repos, and who edits channel config are read from the grants table — the
+  // same answer for `permissions.admins` translated and for a native entry —
+  // so a deployment without a `permissions` block (production) keeps them.
 
+  /** Holds everything on every axis: `permissions.admins` translated, or a
+   *  native entry spelling `all` three times. */
   private isAdmin(userId: string): boolean {
-    return this.config.permissions?.admins?.includes(userId) ?? false;
+    return holdsEverything(this.grantsFor(userId));
   }
 
   canRunAgent(userId: string, agentName: string): boolean {
@@ -638,21 +646,21 @@ export class ConfigStore {
     return this.isAdmin(userId) || allowlist.includes(userId);
   }
 
+  /** The channel-config right, as the policy table's `config:write` row on
+   *  `config-scope { channel }` reads it: `permissions.channelConfig`
+   *  translated (open when a legacy block omits the key), or a native grant. */
   canEditChannelConfig(userId: string): boolean {
-    const allowlist = this.config.permissions?.channelConfig;
-    if (!allowlist) return true; // key absent = everyone
-    return this.isAdmin(userId) || allowlist.includes(userId);
+    return hasAction(this.grantsFor(userId).actions, "config:write");
   }
 
   /**
-   * Repo-management gate (KTD9): FAIL-CLOSED, deliberately diverging from
-   * canEditChannelConfig's open-when-absent — no `repoManagement` config means
-   * admins only, because `repo onboard`/`rebuild` provision billable always-on
-   * compute and bind GitHub credentials. Session-settled decision (KTD9).
+   * Repo-management gate (KTD9): FAIL-CLOSED — the `repo:write` grant, which
+   * `permissions.repoManagement` translates to and admins hold through `all`;
+   * no key and no grant means admins only, because `repo onboard`/`rebuild`
+   * provision billable always-on compute and bind GitHub credentials.
    */
   canManageRepos(userId: string): boolean {
-    if (this.isAdmin(userId)) return true;
-    return this.config.permissions?.repoManagement?.includes(userId) ?? false;
+    return hasAction(this.grantsFor(userId).actions, "repo:write");
   }
 
   /** The one grants lookup (plan U2/U4, R8): what `grants[<actorId>]` declares,
@@ -664,9 +672,12 @@ export class ConfigStore {
     return grantsIn(this.grants, actorId);
   }
 
-  /** Who to ask when denied — for actionable error messages. */
+  /** Who to ask when denied — for actionable error messages: the Slack users
+   *  who hold everything (`isAdmin`), in the table's order. Slack only because
+   *  the hint is a `<@…>` mention in a chat reply; a credential granted
+   *  everything (`access:`, `http:`) is not someone to ask. */
   adminsHint(): string {
-    const admins = this.config.permissions?.admins ?? [];
+    const admins = [...this.grants.grants].filter(([id, g]) => id.startsWith("slack:") && holdsEverything(g)).map(([id]) => id);
     return admins.length > 0 ? admins.map((u) => `<@${u}>`).join(", ") : "an admin";
   }
 
@@ -745,8 +756,11 @@ export class ConfigStore {
   }
 
   /** What `config show` reports for one user in one channel — structured; the
-   *  text surfaces render it with `formatConfigDescription`. */
-  describeConfig(channelId: string, userId: string): ConfigDescription {
+   *  text surfaces render it with `formatConfigDescription`. Everything but
+   *  `channelConfigRestricted`: that is the policy table's answer for the
+   *  caller's ACTOR (`config:write` on `config-scope { channel }`), which the
+   *  store cannot see — the `config.show` handler adds it. */
+  describeConfig(channelId: string, userId: string): Omit<ConfigDescription, "channelConfigRestricted"> {
     const resolved = this.resolve({ channelId, userId, request: {} });
     return {
       effective: { agent: resolved.agentName, model: resolved.modelRef, ...(resolved.effort ? { effort: resolved.effort } : {}) },
@@ -755,14 +769,13 @@ export class ConfigStore {
       user: this.userScope(userId),
       org: this.orgScope(),
       restrictedAgents: this.restrictedAgentsFor(userId),
-      channelConfigRestricted: !this.canEditChannelConfig(userId),
       adminsHint: this.adminsHint(),
     };
   }
 
-  /** `config show` as text. */
+  /** `config show` as text for a Slack user id (whose actor IS the store's grants for it). */
   describe(channelId: string, userId: string): string {
-    return formatConfigDescription(this.describeConfig(channelId, userId));
+    return formatConfigDescription({ ...this.describeConfig(channelId, userId), channelConfigRestricted: !this.canEditChannelConfig(userId) });
   }
 
 }
@@ -810,6 +823,7 @@ export interface ConfigDescription {
   /** The org tier's runtime-visible settings (today `mcpServers`), for `config show`. */
   org?: Scope;
   restrictedAgents: string[];
+  /** The caller may not `config set channel` here — `authorize(caller.actor, "config:write", config-scope { channel })` denied. */
   channelConfigRestricted: boolean;
   adminsHint: string;
 }
@@ -906,6 +920,11 @@ function fmtModels(m: Record<string, string>): string {
   return Object.entries(m)
     .map(([k, v]) => `\`${k}=${v}\``)
     .join(" ");
+}
+
+/** `all` on every axis — what `permissions.admins` translates to (`ALL_GRANTS`). */
+function holdsEverything(g: Grants): boolean {
+  return g.actions === "all" && g.channels === "all" && g.repos === "all";
 }
 
 /** Validates in place (throws on the first fatal finding, `warn`s the rest) and
