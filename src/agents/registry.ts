@@ -1,6 +1,7 @@
 // Agent definitions. An agent is a system prompt + toolset + turn budget.
 import type { Effort } from "../effort.js";
 import type { CacheTtl } from "../providers/types.js";
+import type { FollowUpPolicy } from "../core/threadAdmission.js";
 // Which model runs it is resolved separately by the config layers, so any
 // agent can run on any configured provider/model.
 
@@ -34,6 +35,13 @@ export interface AgentDef {
    *  discovery, no gh CLI. Selected by the dispatcher AFTER executor
    *  resolution via RunOptions.system; the shared AgentDef is never mutated. */
   residentSystem?: string;
+  /** What a thread follow-up does while a run of this agent is in flight
+   *  (features/thread-admission.md): `steer` (default) folds it into the live
+   *  run at its next step; `refuse` answers it with a pointer to the live run
+   *  and does not run it — for agents whose run is a unit of work rather than
+   *  a conversation (a PR review, a ship pipeline). Never a second concurrent
+   *  run in one thread either way. */
+  followUps?: FollowUpPolicy;
 }
 
 // Every PR the coding agent ships carries a rich description by default —
@@ -248,6 +256,7 @@ export const AGENTS: Record<string, AgentDef> = {
   },
   review: {
     name: "review",
+    followUps: "refuse", // a review is one pass over one head; a mid-run nudge is a re-review, sent after it ends
     description: "Reviews PRs and produces high-quality findings. Read-only.",
     system: REVIEW_SYSTEM,
     residentSystem: REVIEW_SYSTEM_RESIDENT,
@@ -260,6 +269,7 @@ export const AGENTS: Record<string, AgentDef> = {
   },
   ship: {
     name: "ship",
+    followUps: "refuse", // a deterministic round pipeline; nothing mid-flight can take a nudge
     description: "Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.",
     // Never sent to a model: `agent:ship` forks inside dispatch() into the
     // pipeline orchestrator (src/core/shipPipeline.ts), whose child rounds run

@@ -3,6 +3,7 @@ import type { Effort } from "./effort.js";
 import { toolResultText, type ChatMessage, type ContentPart, type Provider } from "./providers/types.js";
 import { parseExitPrefix, prepareToolResult, redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
 import type { RunControl } from "./core/runRegistry.js";
+import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
 import { ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
 
@@ -57,6 +58,13 @@ export interface RunOptions {
   /** Bound on the finale's single write-up call (default 3 min); injectable so
    *  tests can prove the timeout path without waiting. */
   finaleTimeoutMs?: number;
+  /** Follow-ups steered into this run by the dispatcher while it is in flight
+   *  (features/thread-admission.md). Drained at every step boundary the loop
+   *  is about to cross — never mid-step, never when the loop is ending — and
+   *  appended to the next user turn. Whatever is left when the loop ends is the
+   *  dispatcher's to run as a fresh turn. Absent (CLI, tests) → the loop is
+   *  byte-identical to a run without follow-ups. */
+  inbox?: FollowUpInbox;
 }
 
 /** The static toolset plus this run's extra tools. A duplicate name is a
@@ -200,6 +208,33 @@ async function runLoop(
   // update_status-only turns don't consume the turn budget (bookkeeping,
   // not work); the absolute iteration cap still bounds the loop.
   let turn = 0;
+  // The loop condition below, as a predicate over a prospective (turn,
+  // iteration): "would the loop take another step from here?" — what decides
+  // whether a pending follow-up is drained now (it would be read by that step)
+  // or left for the dispatcher (the loop is ending; a fresh turn runs it).
+  const wouldStep = (turns: number, iteration: number) =>
+    turns < opts.agent.maxTurns && iteration < opts.agent.maxTurns * 2 && now() < deadline && !control?.requested;
+  // Follow-ups steered into this run (features/thread-admission.md item 2):
+  // everything pending becomes ONE text part (plus the inputs' attachments) on
+  // the next user turn, each input recorded on the stream as it is consumed.
+  const pendingFollowUps = () => (opts.inbox?.size ?? 0) > 0;
+  const drainFollowUps = (): ContentPart[] => {
+    const inputs: FollowUpInput[] = opts.inbox?.drain() ?? [];
+    for (const input of inputs) {
+      const source = {
+        ...(input.sourceUrl ? { url: input.sourceUrl } : {}),
+        ...(input.userName ? { user: input.userName } : {}),
+      };
+      emit({ type: "input", text: redactSecrets(input.text), ...(Object.keys(source).length > 0 ? { source } : {}) });
+      note("follow_up", `follow-up folded in: ${redactSecrets(followUpSnippet(input))}`);
+    }
+    const parts: ContentPart[] = [{ type: "text", text: followUpPrompt(inputs) }];
+    for (const input of inputs) {
+      for (const img of input.images ?? []) parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
+      for (const doc of input.documents ?? []) parts.push({ type: "document", mediaType: doc.mediaType, data: doc.data, ...(doc.name ? { name: doc.name } : {}) });
+    }
+    return parts;
+  };
   // A requested stop (soft or hard) ends the loop before the NEXT step — the
   // step already in flight completes (soft) or is abandoned (hard, via the race
   // above). Checked as a loop condition so a stop can never start a new step.
@@ -228,6 +263,18 @@ async function runLoop(
       const text = collectText(result.content);
       if (result.stopReason === "max_tokens") {
         return text + "\n\n_(output truncated: hit the token limit)_";
+      }
+      // A follow-up landed while the model wrote this answer (thread-admission
+      // item 3): the answer is superseded — it becomes narration on the
+      // stream, the follow-up the next user turn, and the loop goes on. Only
+      // when another step is allowed: at a budget or a stop the answer stands
+      // and the follow-up stays in the inbox for the dispatcher's fresh turn.
+      if (pendingFollowUps() && wouldStep(turn + 1, iteration + 1)) {
+        turn++;
+        if (text) emit({ type: "assistant", text: redactSecrets(text) });
+        messages.push({ role: "assistant", content: result.content });
+        messages.push({ role: "user", content: drainFollowUps() });
+        continue;
       }
       return text || "_(no response)_";
     }
@@ -330,12 +377,18 @@ async function runLoop(
         text: `⏱ Time budget: about ${minutesLeft} minute(s) of tool time remain before cutoff. Finish your current check and start consolidating your answer; prefer writing up over starting new exploration.`,
       });
     }
+    // Pending follow-ups ride on this turn — after the results, before the
+    // step that reads them — but only if that step will happen: a loop about to
+    // end (budget, stop, dead sandbox) leaves them unconsumed for a fresh turn
+    // rather than burying them in a write-up that can no longer act.
+    const dead = execTracker.consecutiveInfraFailures >= MAX_CONSECUTIVE_INFRA_FAILURES;
+    if (pendingFollowUps() && !dead && wouldStep(turn, iteration + 1)) results.push(...drainFollowUps());
     messages.push({ role: "user", content: results });
 
     // Results are appended (every tool_use has its tool_result, so the finale
     // call stays valid) — now check exec health and bail out of a dead sandbox
     // before issuing another command into it.
-    if (execTracker.consecutiveInfraFailures >= MAX_CONSECUTIVE_INFRA_FAILURES) {
+    if (dead) {
       sandboxDead = true;
       break;
     }

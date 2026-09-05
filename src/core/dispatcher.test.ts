@@ -27,6 +27,7 @@ import {
 } from "./dispatcher.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { RunControl, RunRegistry, activityOfEvents } from "./runRegistry.js";
+import { ThreadAdmission } from "./threadAdmission.js";
 import type { RunEvent } from "./runEvents.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
@@ -6871,5 +6872,250 @@ describe("MCP tools (#394, features/mcp-tools.md)", () => {
     expect(provider.requests[0].system).toContain("- linear: unavailable (HTTP 503)");
     const events = [...runIds].flatMap((id) => registry.snapshotById(id)?.events ?? []);
     expect(events).toContainEqual(expect.objectContaining({ type: "run_note", kind: "mcp_unavailable", summary: "MCP server linear unavailable: HTTP 503" }));
+  });
+});
+
+// Feature: features/thread-admission.md — ONE live run per thread. A thread
+// reply while a run is in flight is steered into that run (its inbox; the
+// runner reads it at the next step) or refused with a pointer to the live run —
+// never started as a second, rival run in the same thread/workspace. What the
+// run never consumed is run as a fresh turn when it ends by itself, and
+// answered with a note when an operator stopped it.
+describe("thread admission (features/thread-admission.md)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  /** A provider whose FIRST call waits until the test settles it (answer or
+   *  throw; a hard stop's abort settles it with a late answer); every later
+   *  call answers `answer <n>` at once. Requests are snapshotted per call. */
+  function gatedProvider() {
+    const requests: CompletionRequest[] = [];
+    let calls = 0;
+    let settle!: { answer: (text: string) => void; fail: (err: Error) => void };
+    const first = new Promise<CompletionResult>((resolve, reject) => {
+      settle = { answer: (text) => resolve({ content: [{ type: "text", text }], stopReason: "end_turn" }), fail: reject };
+    });
+    let onFirst!: () => void;
+    const firstStarted = new Promise<void>((r) => (onFirst = r));
+    const provider: Provider = {
+      name: "gated",
+      async complete(req) {
+        requests.push({ ...req, messages: structuredClone(req.messages) });
+        if (calls++ === 0) {
+          req.signal?.addEventListener("abort", () => settle.answer("late"));
+          onFirst();
+          return first;
+        }
+        return { content: [{ type: "text", text: `answer ${calls}` }], stopReason: "end_turn" };
+      },
+    };
+    return { provider, requests, firstStarted, settle: () => settle };
+  }
+
+  const threadMsg = (text: string, user = "slack:UX") => ({ ...msg(text, user), sourceUrl: "https://slack.example/p2", userName: user.slice(6).toLowerCase() });
+
+  it("a thread reply while a run is in flight is steered: no second run, the follow-up reaches the live run at its next step, the reply says where it went", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted; // the run is registered and its first model call is in flight
+    const second = fakeIO();
+    await dispatch(deps, threadMsg("and also include the numbers", "slack:UY"), second.io);
+    // No rival run: still exactly one, and the follow-up got the ack, not a card.
+    expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
+    expect(second.statuses).toEqual([]);
+    expect(second.replies).toHaveLength(1);
+    expect(second.replies[0]).toMatch(/^↪ Folded into the \*general\* run already in flight/);
+    expect(second.replies[0]).toContain("<https://sb.example/runs/r1?t=t|live run>");
+    // The live run reads it at its next step: the answer it was writing is
+    // superseded, the follow-up is the next user turn, the run's answer follows it.
+    settle().answer("first draft");
+    await run;
+    expect(requests).toHaveLength(2);
+    const last = requests[1].messages.at(-1)!;
+    expect(last.role).toBe("user");
+    expect((last.content[0] as { text: string }).text).toContain("and also include the numbers");
+    expect(first.replies).toEqual(["answer 2"]);
+    // On the record: the follow-up as an `input` (from whom) and the note.
+    const events = registry.snapshotById("r1")?.events ?? [];
+    expect(events).toContainEqual(expect.objectContaining({ type: "input", text: "and also include the numbers", source: expect.objectContaining({ user: "uy" }) }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "run_note", kind: "follow_up" }));
+    expect(deps.admission!.size).toBe(0); // released
+  });
+
+  it("a follow-up naming a DIFFERENT agent is refused with a pointer to the live run — no second run", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const second = fakeIO();
+    await dispatch(deps, threadMsg("agent:research look up the numbers"), second.io);
+    expect(registry.listActive()).toHaveLength(1);
+    expect(second.statuses).toEqual([]);
+    expect(second.replies[0]).toMatch(/^⏳ A \*general\* run is already in flight/);
+    expect(second.replies[0]).toContain("`agent:research`");
+    settle().answer("done");
+    await run;
+    expect(requests).toHaveLength(1); // nothing was folded in
+    expect(first.replies).toEqual(["done"]);
+  });
+
+  it("a follow-up into a non-steerable agent's run is refused (review/ship refuse; coding/general/research steer)", async () => {
+    expect(AGENTS.review.followUps).toBe("refuse");
+    expect(AGENTS.ship.followUps).toBe("refuse");
+    expect(AGENTS.coding.followUps).toBeUndefined();
+    expect(AGENTS.general.followUps).toBeUndefined();
+    expect(AGENTS.research.followUps).toBeUndefined();
+  });
+
+  it("registry commands still answer inline while a run is in flight in the thread (they never start a run)", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const second = fakeIO();
+    await dispatch(deps, threadMsg("help"), second.io);
+    expect(second.replies).toHaveLength(1);
+    expect(second.replies[0]).not.toMatch(/^↪/);
+    expect(second.replies[0]).toContain("help");
+    settle().answer("done");
+    await run;
+  });
+
+  it("the follow-up's sender must be allowed to run the live agent — the allowlist refusal, never a steer", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "", release: async () => ({ released: true }) };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("agent:coding fix it", "slack:UADMIN"), first.io);
+    await firstStarted;
+    const second = fakeIO();
+    await dispatch(deps, threadMsg("also fix the tests", "slack:UX"), second.io); // UX may not run coding
+    expect(second.replies[0]).toContain("not on the allowlist");
+    expect(deps.admission!.get("slack:CX:1.0")?.inbox.size).toBe(0);
+    settle().answer("done");
+    await run;
+    expect(requests).toHaveLength(1);
+  });
+
+  it("what the run never consumed runs as a fresh turn when the run ends by itself (here: it failed before its next step)", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const second = fakeIO();
+    await dispatch(deps, threadMsg("and also the numbers", "slack:UY"), second.io);
+    expect(second.replies[0]).toMatch(/^↪/);
+    settle().fail(new Error("provider exploded"));
+    await run;
+    // The first run failed and said so; the follow-up was NOT lost with it: it
+    // ran as its own turn, on its own sender's channel handle.
+    expect(first.replies.some((r) => r.includes("provider exploded"))).toBe(true);
+    expect(second.replies.at(-1)).toBe("answer 2");
+    expect(second.statuses.length).toBeGreaterThan(0); // its own card
+    expect(requests).toHaveLength(2);
+    expect((requests[1].messages.at(-1)!.content[0] as { text: string }).text).toBe("and also the numbers");
+    const runs = registry.listActive();
+    expect(runs.map((r) => r.id).sort()).toEqual(["r1", "r2"]);
+    expect(runs.find((r) => r.id === "r2")?.userId).toBe("slack:UY");
+    expect(deps.admission!.size).toBe(0);
+  });
+
+  it("after an operator stop, an unconsumed follow-up is not run — its sender is told the run was stopped before reading it", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, requests, firstStarted } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const second = fakeIO();
+    await dispatch(deps, threadMsg("and also the numbers", "slack:UY"), second.io);
+    expect(registry.requestStop("r1", "t", "hard")).toEqual({ ok: true, mode: "hard" });
+    await run;
+    expect(first.replies.some((r) => r.includes("aborted"))).toBe(true);
+    expect(second.replies).toHaveLength(2);
+    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this follow-up/);
+    expect(requests).toHaveLength(1);
+    expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
+  });
+
+  it("two follow-ups during one run: both folded, one ack each; the fresh turn after a failure merges them into ONE request", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const a = fakeIO();
+    const b = fakeIO();
+    await dispatch(deps, threadMsg("add the numbers", "slack:UY"), a.io);
+    await dispatch(deps, threadMsg("and a chart", "slack:UZ"), b.io);
+    expect(a.replies[0]).toMatch(/^↪/);
+    expect(b.replies[0]).toMatch(/^↪/);
+    settle().fail(new Error("boom"));
+    await run;
+    expect(requests).toHaveLength(2);
+    expect((requests[1].messages.at(-1)!.content[0] as { text: string }).text).toMatch(/^add the numbers\s+and a chart$/);
+    expect(b.replies.at(-1)).toBe("answer 2"); // the most recent sender's handle carries the fresh turn
+    expect(a.replies).toHaveLength(1);
+    expect(registry.listActive().find((r) => r.id === "r2")?.userId).toBe("slack:UZ");
+  });
+
+  it("a run that THREW after an operator stop was requested still counts as stopped: its follow-up is not run (review F1 on #456)", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const second = fakeIO();
+    await dispatch(deps, threadMsg("and also the numbers", "slack:UY"), second.io);
+    expect(registry.requestStop("r1", "t", "soft")).toEqual({ ok: true, mode: "soft" });
+    settle().fail(new Error("finale exploded")); // the in-flight call fails AFTER the stop
+    await run;
+    expect(first.replies.some((r) => r.includes("finale exploded"))).toBe(true);
+    expect(second.replies).toHaveLength(2);
+    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this follow-up/);
+    expect(requests).toHaveLength(1); // no fresh turn
+    expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
   });
 });
