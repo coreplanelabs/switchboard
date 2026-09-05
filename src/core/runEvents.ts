@@ -36,7 +36,11 @@ export type RunNoteKind =
   /** An MCP server configured for this agent did not answer discovery
    *  (features/mcp-tools.md item 8); the run proceeds without its tools. One
    *  note per server, published by the dispatcher before the first turn. */
-  | "mcp_unavailable";
+  | "mcp_unavailable"
+  /** A thread follow-up steered into this run was folded into its next step
+   *  (features/thread-admission.md item 2). Published by the runner as it
+   *  drains the inbox, beside an `input` event carrying the follow-up itself. */
+  | "follow_up";
 
 /** How an operator asked a run to stop (#101): `soft` — take no new steps and
  *  wrap up through the normal finale; `hard` — abort the in-flight call now, no

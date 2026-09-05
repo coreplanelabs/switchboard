@@ -7,6 +7,7 @@ import { ExecInfraError } from "./execution/executor.js";
 import type { RunEvent } from "./core/runEvents.js";
 import { runAgent } from "./runner.js";
 import { InMemorySkillStore } from "./skills/index.js";
+import { FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
 
 // Feature: features/run-loop.md — turn/time budgets and forced write-up.
 
@@ -1301,5 +1302,143 @@ describe("extra tools (MCP, #394 — features/mcp-tools.md item 12)", () => {
       }),
     ).rejects.toThrow('extra tool "bash" collides');
     expect(provider.requests.length).toBe(0);
+  });
+});
+
+// Feature: features/thread-admission.md items 2–3 — a follow-up steered into a
+// live run is read at the next step boundary: appended to the tool-results
+// user turn (no new step is started for it, nothing in flight is interrupted),
+// recorded as an `input` event + a `follow_up` note, and a follow-up that lands
+// while the model was writing its final answer turns that answer into narration
+// and the follow-up into the next user turn instead of ending the run.
+describe("follow-up inbox (features/thread-admission.md)", () => {
+  const followUp = (text: string, over: Partial<FollowUpInput> = {}): FollowUpInput => ({ text, userId: "slack:U2", userName: "bob", sourceUrl: "https://s/2", at: 5, ...over });
+  const lastUserContent = (req: CompletionRequest) => req.messages[req.messages.length - 1].content;
+
+  it("a follow-up pushed during a tool step rides on that step's tool-results turn, after the results, with the header", async () => {
+    const inbox = new FollowUpInbox();
+    let calls = 0;
+    const provider = scripted([bashUse("t1"), text("done")]);
+    const inner = provider.complete.bind(provider);
+    provider.complete = async (req) => {
+      // Arrives while the first model call is in flight — before its tool runs.
+      if (calls++ === 0) inbox.push(followUp("also remove the anon flow"));
+      return inner(req);
+    };
+    const events: RunEvent[] = [];
+    const answer = await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox, onEvent: (e) => events.push(e) });
+    expect(answer).toBe("done");
+    const content = lastUserContent(provider.requests[1]);
+    expect(content[0]).toMatchObject({ type: "tool_result", toolUseId: "t1" });
+    expect(content[1]).toMatchObject({ type: "text" });
+    const textPart = content[1] as { type: "text"; text: string };
+    expect(textPart.text).toMatch(/^↪ Follow-up from the thread/);
+    expect(textPart.text).toContain("also remove the anon flow");
+    // Recorded: the input (who/where) and a note the card shows.
+    expect(events.find((e) => e.type === "input")).toMatchObject({ type: "input", text: "also remove the anon flow", source: { user: "bob", url: "https://s/2" } });
+    expect(events.find((e) => e.type === "run_note" && e.kind === "follow_up")).toMatchObject({ summary: expect.stringContaining("also remove the anon flow") });
+    // Consumed exactly once.
+    expect(inbox.size).toBe(0);
+    expect(lastUserContent(provider.requests[0]).some((p) => p.type === "text" && p.text.includes("Follow-up"))).toBe(false);
+  });
+
+  it("two follow-ups drained together arrive as ONE text part listing both, one input event each", async () => {
+    const inbox = new FollowUpInbox();
+    let calls = 0;
+    const provider = scripted([bashUse("t1"), text("done")]);
+    const inner = provider.complete.bind(provider);
+    provider.complete = async (req) => {
+      if (calls++ === 0) {
+        inbox.push(followUp("first"));
+        inbox.push(followUp("second"));
+      }
+      return inner(req);
+    };
+    const events: RunEvent[] = [];
+    await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox, onEvent: (e) => events.push(e) });
+    const texts = lastUserContent(provider.requests[1]).filter((p) => p.type === "text");
+    expect(texts).toHaveLength(1);
+    expect((texts[0] as { text: string }).text).toContain("- first\n- second");
+    expect(events.filter((e) => e.type === "input")).toHaveLength(2);
+  });
+
+  it("a follow-up's images ride along as image parts after its text", async () => {
+    const inbox = new FollowUpInbox();
+    let calls = 0;
+    const provider = scripted([bashUse("t1"), text("done")]);
+    const inner = provider.complete.bind(provider);
+    provider.complete = async (req) => {
+      if (calls++ === 0) inbox.push(followUp("see the screenshot", { images: [{ mediaType: "image/png", data: "QUJD" }] }));
+      return inner(req);
+    };
+    await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox });
+    const content = lastUserContent(provider.requests[1]);
+    expect(content.map((p) => p.type)).toEqual(["tool_result", "text", "image"]);
+    expect(content[2]).toEqual({ type: "image", mediaType: "image/png", data: "QUJD" });
+  });
+
+  it("a follow-up that lands while the model wrote its final answer restarts the loop: the answer becomes narration, the follow-up the next turn", async () => {
+    const inbox = new FollowUpInbox();
+    let calls = 0;
+    const provider = scripted([text("first answer"), text("second answer")]);
+    const inner = provider.complete.bind(provider);
+    provider.complete = async (req) => {
+      if (calls++ === 0) inbox.push(followUp("one more thing"));
+      return inner(req);
+    };
+    const events: RunEvent[] = [];
+    const answer = await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox, onEvent: (e) => events.push(e) });
+    expect(answer).toBe("second answer");
+    expect(provider.requests).toHaveLength(2);
+    const msgs = provider.requests[1].messages;
+    expect(msgs[msgs.length - 2]).toEqual({ role: "assistant", content: [{ type: "text", text: "first answer" }] });
+    expect(msgs[msgs.length - 1].role).toBe("user");
+    expect((msgs[msgs.length - 1].content[0] as { text: string }).text).toContain("one more thing");
+    // The superseded answer is on the record as narration, never as the answer.
+    expect(events.find((e) => e.type === "assistant")).toMatchObject({ text: "first answer" });
+  });
+
+  it("when the budget allows no further step, the answer stands and the follow-up stays unconsumed for a fresh turn", async () => {
+    const inbox = new FollowUpInbox();
+    let calls = 0;
+    // maxTurns 2: the bash step spends one turn; a restart would need a second,
+    // and that is the budget — so the answer stands.
+    const provider = scripted([bashUse("t1"), text("answer")]);
+    const inner = provider.complete.bind(provider);
+    provider.complete = async (req) => {
+      if (calls++ === 1) inbox.push(followUp("one more thing"));
+      return inner(req);
+    };
+    const answer = await runAgent({ provider, model: "m", agent: agent({ maxTurns: 2 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox });
+    expect(answer).toBe("answer");
+    expect(provider.requests).toHaveLength(2); // no restart, no finale
+    expect(inbox.size).toBe(1);
+    expect(JSON.stringify(provider.requests)).not.toContain("one more thing");
+  });
+
+  it("without an inbox, or with an empty one, the requests are byte-identical to the plain loop", async () => {
+    const plain = scripted([bashUse("t1"), text("done")]);
+    await runAgent({ provider: plain, model: "m", agent: agent(), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor } });
+    const withInbox = scripted([bashUse("t1"), text("done")]);
+    await runAgent({ provider: withInbox, model: "m", agent: agent(), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox: new FollowUpInbox() });
+    expect(JSON.stringify(withInbox.requests)).toBe(JSON.stringify(plain.requests));
+  });
+
+  it("a soft stop leaves a pending follow-up unconsumed (the dispatcher decides what happens to it)", async () => {
+    const inbox = new FollowUpInbox();
+    const control = new RunControl();
+    let calls = 0;
+    const provider = scripted([bashUse("t1"), text("summary")]);
+    const inner = provider.complete.bind(provider);
+    provider.complete = async (req) => {
+      if (calls++ === 0) {
+        control.requestStop("soft");
+        inbox.push(followUp("late thought"));
+      }
+      return inner(req);
+    };
+    await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox, control });
+    expect(inbox.size).toBe(1);
+    expect(JSON.stringify(provider.requests)).not.toContain("late thought");
   });
 });

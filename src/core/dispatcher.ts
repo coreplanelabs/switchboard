@@ -48,7 +48,8 @@ import { recognizeOperation } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource } from "../mcp/source.js";
-import { formatTurnDuration, redactSecrets, type RunEvent } from "./runEvents.js";
+import { formatTurnDuration, redactSecrets, type RunEvent, type StopMode } from "./runEvents.js";
+import { decideFollowUp, mergeFollowUps, refusalReply, steerAck, ThreadAdmission, type FollowUpInput, type LiveThread } from "./threadAdmission.js";
 import { resolveChatActor } from "./authz/actor.js";
 import { STATIC_CHANNEL_DIRECTORY } from "./authz/channelDirectory.js";
 import type { ChannelDirectory, ChannelVisibility } from "./authz/types.js";
@@ -64,7 +65,7 @@ import type { GithubCapability } from "../tools/github.js";
 import { invokeChatCommand, parseChatCommand, type ChatCommandResult, type ChatCommands, type ParsedChatCommand } from "./commandChat.js";
 import { toMarkdownDocument } from "./markdownDocument.js";
 import { cliWords } from "./commandSurface.js";
-import { activityOfEvents, defaultRunRegistry, type RunHandle, type RunRegistry, type RunSnapshot, type RunSummary } from "./runRegistry.js";
+import { activityOfEvents, defaultRunRegistry, type RunControl, type RunHandle, type RunRegistry, type RunSnapshot, type RunSummary } from "./runRegistry.js";
 import { coalesceStatus } from "./statusCoalescer.js";
 import type { Provider } from "../providers/types.js";
 import type {
@@ -103,6 +104,13 @@ export interface CoreDeps {
    * /runs endpoints (src/index.ts) share one instance. Injectable for tests.
    */
   runRegistry?: RunRegistry;
+  /**
+   * Thread admission (features/thread-admission.md): the per-process map of
+   * threads with a run in flight, so a follow-up in such a thread is steered
+   * into that run or refused instead of starting a rival one. Defaults to the
+   * process-wide singleton; injectable for tests.
+   */
+  admission?: ThreadAdmission<DispatchFollowUp>;
   /**
    * Posts a review comment back to a PR (issue #69). Called after a `review`
    * run against a resolved PR, unless the request opted out. Default: the real
@@ -300,6 +308,19 @@ function githubCapabilityFor(deps: CoreDeps, userId: string): GithubCapability {
 // In-flight run tracking so the process can drain before exiting (restarts
 // must not kill runs mid-flight — see index.ts signal handling).
 let activeRuns = 0;
+
+/** A follow-up as the dispatcher admits it: the runner's `FollowUpInput` plus
+ *  the message and channel handle it arrived on — what a fresh turn needs if
+ *  the live run ends without consuming it (features/thread-admission.md item 4). */
+export type DispatchFollowUp = FollowUpInput & { msg: IncomingMessage; io: ChannelIO };
+
+/** The process-wide admission map (one bot process = one map; the registry's
+ *  singleton is the same shape of default). */
+const defaultAdmission = new ThreadAdmission<DispatchFollowUp>();
+
+/** The note a follow-up's sender gets when the run it was folded into was
+ *  stopped by an operator before its next step read it. */
+const FOLLOW_UP_DROPPED_BY_STOP = "⛔ The run this was folded into was stopped before it read this follow-up, so it was not run. Re-send it to run it fresh.";
 export function activeRunCount(): number {
   return activeRuns;
 }
@@ -336,6 +357,16 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
   // becomes the run card, so the outer catch closes ONLY a card that setup
   // left open — a run failure is closed (with its checklist) by the run loop.
   let setupCard: StatusHandle | undefined;
+  // Thread admission (features/thread-admission.md): the slot this dispatch
+  // holds on its thread while its run is in flight, claimed after the agent
+  // gate below and released in the outer finally — where whatever follow-ups
+  // the run never consumed are run as a fresh turn (or, after an operator
+  // stop, answered with a note). `liveControl` is the registered run's stop
+  // control, read in the finally — never cached from a return value, so a run
+  // that THREW after a stop was requested still counts as stopped.
+  const admission = deps.admission ?? defaultAdmission;
+  let admitted: LiveThread<DispatchFollowUp> | undefined;
+  let liveControl: RunControl | undefined;
   try {
     // Stage A — the ONE text-only fast path (#157 U13/KTD19, phase 4b): a
     // message that names a registered, chat-exposed command (`<group> <verb>
@@ -415,6 +446,50 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     }
 
     const agent = getAgent(resolved.agentName);
+
+    // Thread admission (features/thread-admission.md item 1): ONE live run per
+    // thread. Claimed HERE — after the agent gate (a follow-up's sender must be
+    // allowed to run the live agent, exactly like a first message) and before
+    // anything slow (the setup card, repo resolution, the executor attach), so
+    // no window exists in which two runs can attach the same per-thread
+    // workspace. A thread with a run in flight either folds this message into
+    // that run (its inbox; the runner reads it at the next step boundary) or
+    // refuses it with a pointer to the live run — a different agent asked for
+    // explicitly, or an agent whose run takes no mid-flight input. Either way
+    // this dispatch ends here: no card, no run, no workspace.
+    const claim = admission.claim(msg.threadKey, { agent: agent.name, policy: agent.followUps ?? "steer" });
+    if (claim.kind === "live") {
+      // The gate above ran against THIS message's resolved agent; a steered
+      // follow-up is read by the LIVE agent, so its sender must be allowed to
+      // run that one too (invariant 3 — no path runs an agent for a user the
+      // allowlist excludes, and "run" includes "is heard by").
+      if (!deps.config.canRunAgent(msg.userId, claim.live.agent)) {
+        await io.reply(`🚫 You're not on the allowlist for the \`${claim.live.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`);
+        return;
+      }
+      const decision = decideFollowUp(claim.live, { agent: directives.agent });
+      if (decision.kind === "refuse") {
+        console.log(`[dispatch] ${msg.threadKey} follow-up refused (${decision.reason}): ${claim.live.agent} run in flight`);
+        await io.reply(refusalReply(claim.live, decision, directives.agent, Date.now()));
+        return;
+      }
+      claim.live.inbox.push({
+        text: directives.text,
+        userId: msg.userId,
+        ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+        ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+        ...(msg.images !== undefined ? { images: msg.images } : {}),
+        ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
+        at: Date.now(),
+        msg,
+        io,
+      });
+      console.log(`[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending)`);
+      await io.reply(steerAck(claim.live, Date.now()));
+      return;
+    }
+    admitted = claim.live;
+
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
     const provider = deps.providers.get(providerName);
 
@@ -563,6 +638,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         history,
         repoCtx,
         memoryBlockP,
+        live: admitted,
       });
       return;
     }
@@ -842,6 +918,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     });
     const liveUrl = liveViewLink(run.id, run.token);
     const liveLink = liveUrl ? { url: liveUrl, label: "Live run" } : undefined;
+    // The thread's live slot now names its run: a follow-up's ack/refusal can
+    // link the run page (thread-admission item 1), and the finally reads this
+    // control to tell a stopped run from one that ended by itself (item 4).
+    admitted.runId = run.id;
+    if (liveUrl) admitted.runLink = liveUrl;
+    liveControl = run.control;
     // The thread context fed to the model follows the request as `context`
     // events (#157, KD1) — text only, attachments as metadata lines, bounded to
     // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
@@ -1041,6 +1123,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         onProgress,
         onEvent,
         control: run.control, // operator stop from /runs (#101)
+        inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
       });
       // Reviewed-head settle (features/agent-review.md items 8 + 12,
       // settleReviewedHead in reviewRound.ts): for a PR review, read the
@@ -1315,6 +1398,36 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // its record is written as `failed`, never `completed`.
     writeHistory(true);
   } finally {
+    // Thread admission (features/thread-admission.md item 4): free the thread,
+    // and settle what the run never consumed. A run that ended by itself (an
+    // answer, a budget, a failure, a dead sandbox) hands its unconsumed
+    // follow-ups on as ONE fresh turn — on the most recent sender's channel
+    // handle, so the reply lands where they asked — never a silent drop. A run
+    // an operator stopped does not: the stop meant "no more work here", and
+    // each sender is told their follow-up was not run. The fresh turn is an
+    // ordinary dispatch: it claims the thread itself, and a follow-up arriving
+    // during it steers into it.
+    if (admitted) {
+      const pending = admission.release(msg.threadKey, admitted);
+      if (pending.length > 0) {
+        const stopMode: StopMode | undefined = liveControl?.requested;
+        if (stopMode) {
+          console.log(`[dispatch] ${msg.threadKey} ${pending.length} follow-up(s) dropped: run stopped (${stopMode})`);
+          for (const p of pending) await p.io.reply(FOLLOW_UP_DROPPED_BY_STOP).catch(() => {});
+        } else {
+          const merged = mergeFollowUps(pending)!;
+          const last = pending[pending.length - 1];
+          console.log(`[dispatch] ${msg.threadKey} ${pending.length} unconsumed follow-up(s) → fresh turn`);
+          // Pinned to the agent the follow-ups were addressed to: they were
+          // admitted as input FOR this run's agent (a different one would have
+          // been refused), so the fresh turn must not fall back to whatever the
+          // thread's history or the channel default resolves to.
+          await dispatch(deps, { ...last.msg, ...merged, text: `agent:${admitted.agent} ${merged.text}` }, last.io).catch((err: unknown) =>
+            console.error(`[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`),
+          );
+        }
+      }
+    }
     activeRuns--;
   }
 }
@@ -1336,6 +1449,10 @@ interface ShipBranchContext {
   history: HistoryItem[];
   repoCtx: RepoContext;
   memoryBlockP: Promise<string | undefined>;
+  /** The thread's admission slot this dispatch holds (thread-admission item
+   *  1): the ship branch names its run on it once registered, so a refused
+   *  follow-up in a live ship thread links the run page like any other. */
+  live: LiveThread<DispatchFollowUp>;
 }
 
 /**
@@ -1448,6 +1565,8 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
     `${icon ?? SPINNER_GLYPHS[frame++ % SPINNER_GLYPHS.length]} ${label} · ${Math.round((Date.now() - ctx.startedAt) / 1000)}s`;
   const liveUrl = liveViewLink(run.id, run.token);
   const liveLink = liveUrl ? { url: liveUrl, label: "Live run" } : undefined;
+  ctx.live.runId = run.id;
+  if (liveUrl) ctx.live.runLink = liveUrl;
   let checklist: string | undefined;
   let lastActivity: string | undefined;
   // The round header is orchestrator-owned (spec item 12): its OWN variable,
