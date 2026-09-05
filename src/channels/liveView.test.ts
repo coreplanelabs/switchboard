@@ -10,12 +10,15 @@ import {
   serveIndexEvents,
   withOmittedMarkers,
   type IndexRow,
+  type LiveViewContext,
   type LiveViewDeps,
   type SseSink,
 } from "./liveView.js";
 import { makeShellRenderer, type ShellRenderer } from "./webShell.js";
 import { SEED_ELEMENT_ID, type RunHistorySeed, type RunLiveSeed, type RunNotFoundSeed, type RunsIndexSeed, type ScheduledSeed, type WebSeed } from "./webSeed.js";
-import { isLoopbackAddress } from "./commandHttp.js";
+import { accessActor, isLoopbackAddress } from "./commandHttp.js";
+import { grantsFor, type GrantsSource } from "../core/authz/grants.js";
+import { NO_GRANTS, predicateFor } from "../core/authz/index.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
@@ -61,10 +64,23 @@ function fixedRegistry() {
   return new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
 }
 
+/** The viewer every handler call below reads as unless a test says otherwise:
+ *  a fleet admin resolved through the real Access resolver (`accessActor` over
+ *  `grantsFor`, the path index.ts takes) — every channel, so the index and the
+ *  history routes show what they always showed. The authz block passes its own
+ *  viewers. */
+const ADMIN: LiveViewContext = { actor: accessActor({ sub: "admin" }, (id) => grantsFor(id, { permissions: { admins: ["access:admin"] } })) };
+
+type Handler = ReturnType<typeof createLiveViewHandler>;
+/** `createLiveViewHandler` with `ctx` defaulting to the admin viewer. */
+function adminByDefault(handler: Handler): (req: Parameters<Handler>[0], res: Parameters<Handler>[1], ctx?: LiveViewContext) => boolean {
+  return (req, res, ctx = ADMIN) => handler(req, res, ctx);
+}
+
 /** The handler over a registry alone — run history off (store: null), the
  *  live-only shape every token-path test below exercises. */
 function liveOnlyHandler(registry: RunRegistry) {
-  return createLiveViewHandler({ shell, service: createRunsService({ registry, store: null }), index: registry, retention: null });
+  return adminByDefault(createLiveViewHandler({ shell, service: createRunsService({ registry, store: null }), index: registry, retention: null }));
 }
 
 /** An SseSink that records everything written, for socket-free assertions. */
@@ -300,7 +316,7 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
 describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
   const NOW = Date.UTC(2026, 7, 29, 12, 0);
   function panelHandler(registry: RunRegistry, options: Pick<LiveViewDeps, "scheduled">) {
-    return createLiveViewHandler({ shell, service: createRunsService({ registry, store: null }), index: registry, retention: null, now: () => NOW, ...options });
+    return adminByDefault(createLiveViewHandler({ shell, service: createRunsService({ registry, store: null }), index: registry, retention: null, now: () => NOW, ...options }));
   }
   function pageFor(options: Pick<LiveViewDeps, "scheduled">, url = "/runs/scheduled", method = "GET") {
     const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
@@ -362,6 +378,24 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
     expect(si?.nextFireAt).toBe(Date.UTC(2026, 7, 31, 14, 0)); // next fire, Monday
     expect(rows.some((r) => r.name === "resident-watchdog")).toBe(true);
     expect(rows.some((r) => r.name === "keep-alive")).toBe(false); // internal plumbing stays off the dashboard
+  });
+
+  it("links a live firing with its token only for a viewer who may read that run — an unlisted browser session gets the bare tokenless href (authorization.md items 5–7, #428)", async () => {
+    const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
+    registry.create("friction · #cron · cron", { channelId: "http:cron", userId: "http:cron", threadKey: "http:cron:1", channelVisibility: "machine" });
+    const store = new InMemoryScheduleStore();
+    await store.record({ schedule: "self-improvement", firedAt: NOW - 60_000, outcome: "completed", runId: "run-live", detail: "🔍 8 runs analyzed" });
+    const handler = panelHandler(registry, { scheduled: { schedules: FIXTURE_SCHEDULES, store } });
+    const alice: LiveViewContext = { actor: accessActor({ sub: "alice" }, (id) => grantsFor(id, { commandGroups: ["runs"] })) };
+    const hrefFor = async (ctx?: LiveViewContext) => {
+      let body = "";
+      const res = { writeHead: () => {}, write: () => {}, end: (c?: string) => void (body += c ?? "") };
+      handler({ method: "GET", url: "/runs/scheduled", headers: {}, on: () => {} } as never, res as never, ctx);
+      await tick();
+      return (scheduledSeedOf(body).rows ?? []).find((r) => r.name === "self-improvement")?.last?.runHref;
+    };
+    expect(await hrefFor(alice)).toBe("/runs/run-live");
+    expect(await hrefFor()).toBe("/runs/run-live?t=tok-live");
   });
 
   it("no store → the seed lists the schedules and says history is unavailable (not 'never fired')", async () => {
@@ -975,6 +1009,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       get ended() {
         return ended;
       },
+      fireClose: () => listeners.close?.forEach((cb) => cb()),
     };
   }
 
@@ -994,15 +1029,17 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}`, now });
     const store = opts.store === undefined ? new InMemoryRunStore({ now }) : opts.store;
     const service = createRunsService({ registry, store });
-    const handler = createLiveViewHandler({
-      shell,
-      service,
-      index: registry,
-      retention: opts.retention === undefined ? { retentionDays: 30 } : opts.retention,
-      ...(opts.devBypass ? { devBypass: opts.devBypass } : {}),
-      ...(opts.audit ? { audit: opts.audit } : {}),
-      ...(opts.indexPageSize !== undefined ? { indexPageSize: opts.indexPageSize } : {}),
-    });
+    const handler = adminByDefault(
+      createLiveViewHandler({
+        shell,
+        service,
+        index: registry,
+        retention: opts.retention === undefined ? { retentionDays: 30 } : opts.retention,
+        ...(opts.devBypass ? { devBypass: opts.devBypass } : {}),
+        ...(opts.audit ? { audit: opts.audit } : {}),
+        ...(opts.indexPageSize !== undefined ? { indexPageSize: opts.indexPageSize } : {}),
+      }),
+    );
     return { registry, store, service, handler, tick: (ms: number) => (clock += ms) };
   }
 
@@ -1069,17 +1106,17 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(seed.events[0]).toMatchObject({ text: payload }); // …and the payload survives as data
     });
 
-    it("emits one audit line per history page/events read with the route, run id and identity — never content", async () => {
+    it("emits one audit line per history page/events read with the route, run id and the viewer's actor id — never content", async () => {
       const audit = vi.fn();
       const h = harness({ audit });
       await h.store!.put(record("r1"));
       const page = fakeReqRes("GET", "/runs/r1");
-      h.handler(page.req, page.res, { identity: "access:alice" });
+      h.handler(page.req, page.res);
       await done(page);
       const events = fakeReqRes("GET", "/runs/r1/events");
       h.handler(events.req, events.res);
       await done(events);
-      expect(audit.mock.calls).toEqual([[{ route: "page", runId: "r1", identity: "access:alice" }], [{ route: "events", runId: "r1" }]]);
+      expect(audit.mock.calls).toEqual([[{ route: "page", runId: "r1", identity: "access:admin" }], [{ route: "events", runId: "r1", identity: "access:admin" }]]);
       for (const [entry] of audit.mock.calls) expect(JSON.stringify(entry)).not.toContain("please run it");
     });
   });
@@ -1349,6 +1386,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const t = fakeReqRes("GET", "/runs?all=1");
       h.handler(t.req, t.res);
       await done(t);
+      // `visibleTo` is the admin viewer's predicate — every channel compiles to `all`.
       expect(list).toHaveBeenCalledWith({ status: "all", visibleTo: { kind: "all" }, limit: INDEX_PAGE_SIZE });
     });
 
@@ -1449,6 +1487,140 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     it("isLoopbackAddress recognizes v4, v6 and mapped loopback only", () => {
       expect(["127.0.0.1", "::1", "::ffff:127.0.0.1"].map(isLoopbackAddress)).toEqual([true, true, true]);
       expect(["10.0.0.1", "203.0.113.9", undefined, ""].map(isLoopbackAddress)).toEqual([false, false, false, false]);
+    });
+  });
+
+  // Feature: features/authorization.md items 5–7 on the HTML surface (#428).
+  // The viewer is the Access identity's actor (index.ts resolves it with the
+  // same `accessActor` /api/* uses): the index lists through the actor's
+  // predicate, and a tokenless read of a finished run is `authorize`d against
+  // the run's own attributes — a deny is the same 404 as an unknown id (KTD8).
+  describe("the viewer's actor binds the index and the tokenless history routes (authorization.md items 5–7, #428)", () => {
+    // Grants as config resolves them for the Access surface: alice is an
+    // unlisted browser session (every group's read, no channel grants), bob is
+    // granted the private channel natively, the admin holds everything.
+    const SOURCE: GrantsSource = {
+      permissions: { admins: ["access:admin"] },
+      grants: new Map([["access:bob", { actions: new Set(["runs:read"]), channels: new Set(["slack:G_PRIV"]), repos: new Set<string>() }]]),
+      commandGroups: ["runs"],
+    };
+    const viewer = (sub: string): LiveViewContext => ({ actor: accessActor({ sub }, (id) => grantsFor(id, SOURCE)) });
+    const alice = viewer("alice");
+    const bob = viewer("bob");
+    const admin = viewer("admin");
+    /** A viewer config names nothing for — not even the browser read baseline (R7's `NO_GRANTS`). */
+    const nobody: LiveViewContext = { actor: accessActor({ sub: "nobody" }, () => NO_GRANTS) };
+    const PUBLIC = { channelId: "slack:C_PUB", channelVisibility: "public" } as const;
+    const PRIVATE = { channelId: "slack:G_PRIV", channelVisibility: "private" } as const;
+    const meta = (channel: typeof PUBLIC | typeof PRIVATE, threadKey: string) => ({ ...channel, userId: "slack:U1", threadKey });
+
+    async function index(h: ReturnType<typeof harness>, url: string, ctx: LiveViewContext) {
+      const t = fakeReqRes("GET", url);
+      h.handler(t.req, t.res, ctx);
+      await done(t);
+      expect(t.status).toBe(200);
+      return { ids: indexSeedOf(t.body()).rows.map((r) => r.id).sort(), body: t.body() };
+    }
+    async function request(h: ReturnType<typeof harness>, url: string, ctx: LiveViewContext, method = "GET") {
+      const t = fakeReqRes(method, url);
+      h.handler(t.req, t.res, ctx);
+      await done(t);
+      return t;
+    }
+
+    it("`/runs?all=1` lists an unlisted browser session only the public runs, a native channel grant adds that channel, the admin lists the fleet — the actor's predicate rides down to the service, never a filter after loading", async () => {
+      const h = harness();
+      await h.store!.put(record("pub", PUBLIC));
+      await h.store!.put(record("priv", PRIVATE));
+      await h.store!.put(record("unk")); // stamped `unknown` — never public (R7)
+      const list = vi.spyOn(h.service, "listRuns");
+      expect((await index(h, "/runs?all=1", alice)).ids).toEqual(["pub"]);
+      expect((await index(h, "/runs?all=1", bob)).ids).toEqual(["priv", "pub"]);
+      expect((await index(h, "/runs?all=1", admin)).ids).toEqual(["priv", "pub", "unk"]);
+      expect(list.mock.calls.map(([opts]) => opts.visibleTo)).toEqual([alice, bob, admin].map((v) => predicateFor(v.actor, "runs:read", "run")));
+    });
+
+    it("the default `/runs` and its `?stream=1` feed carry only the live runs the viewer may read: a hidden run's row, token, upserts and eviction never reach the page", async () => {
+      const h = harness();
+      const pub = h.registry.create("public one", meta(PUBLIC, "t1"));
+      const priv = h.registry.create("private one", meta(PRIVATE, "t2"));
+      const dflt = await index(h, "/runs", alice);
+      expect(dflt.ids).toEqual([pub.id]);
+      expect(dflt.body).toContain(pub.token);
+      expect(dflt.body).not.toContain(priv.token);
+      expect((await index(h, "/runs", admin)).ids).toEqual([priv.id, pub.id].sort());
+
+      const feed = fakeReqRes("GET", "/runs?stream=1");
+      h.handler(feed.req, feed.res, alice);
+      expect(feed.status).toBe(200);
+      expect(feed.body()).toContain(`"id":"${pub.id}"`);
+      expect(feed.body()).not.toContain(`"id":"${priv.id}"`); // the replay on connect is filtered too
+      h.registry.publish(priv.id, call("private step"));
+      h.registry.publish(pub.id, call("public step"));
+      expect(feed.body()).toContain("public step");
+      expect(feed.body()).not.toContain("private step");
+      // Eviction: the hidden run's `removed` never names its id; the visible run's arrives.
+      h.registry.finish(priv.id);
+      h.registry.finish(pub.id);
+      h.tick(120_000);
+      h.registry.create("sweeper", meta(PUBLIC, "t3")); // create() sweeps the TTL-expired runs
+      const removed = [...feed.body().matchAll(/"type":"removed","id":"([^"]+)"/g)].map((m) => m[1]);
+      expect(removed).toEqual([pub.id]);
+      expect(feed.body()).not.toContain(`"${priv.id}"`);
+      feed.fireClose();
+    });
+
+    it("a tokenless finished run the viewer may not read is the same 404 as an unknown id — the page byte-identical, events and friction the text body, the stop's 409 a 404 — with the reason on the audit line and never in the reply (KTD8)", async () => {
+      const audit = vi.fn();
+      const h = harness({ audit });
+      await h.store!.put(record("priv", PRIVATE));
+      const denied = await request(h, "/runs/priv", alice);
+      const unknown = await request(h, "/runs/nope", alice);
+      expect(denied.status).toBe(404);
+      expect(denied.body()).toBe(unknown.body()); // byte-identical: existence never revealed
+      expect(seedOf(denied.body())).toEqual({ page: "runNotFound", retentionDays: 30 });
+      for (const url of ["/runs/priv/events", "/runs/priv/friction"]) {
+        const t = await request(h, url, alice);
+        expect([url, t.status, t.body()]).toEqual([url, 404, "run not found"]);
+      }
+      const stop = await request(h, "/runs/priv/stop?mode=soft", alice, "POST");
+      expect([stop.status, stop.body()]).toEqual([404, "run not found"]);
+      // Who, which route, why — never the run id, never in the reply.
+      expect(audit.mock.calls.map(([e]) => e)).toEqual(["page", "events", "friction", "stop"].map((route) => ({ route, identity: "access:alice", denied: "not-member" })));
+      expect(denied.body()).not.toContain("not-member");
+      // A native member and the admin read it; the admin's tokenless stop is the 409 a finished run gives.
+      expect((await request(h, "/runs/priv", bob)).status).toBe(200);
+      expect((await request(h, "/runs/priv", admin)).status).toBe(200);
+      expect((await request(h, "/runs/priv/stop?mode=soft", admin, "POST")).status).toBe(409);
+      expect(audit.mock.calls.slice(4).map(([e]) => e)).toEqual([
+        { route: "page", runId: "priv", identity: "access:bob" },
+        { route: "page", runId: "priv", identity: "access:admin" },
+      ]);
+    });
+
+    it("a viewer without the `runs:read` grant at all — what `/api/runs.*` refuses outright — sees an empty index and a 404 on every tokenless route even for a PUBLIC run; a capability token still opens the live page, stream and stop (the token IS the capability)", async () => {
+      const audit = vi.fn();
+      const h = harness({ audit });
+      await h.store!.put(record("pub", PUBLIC));
+      const live = h.registry.create("public live", meta(PUBLIC, "t9"));
+      h.registry.publish(live.id, call("$ npm test"));
+      expect((await index(h, "/runs", nobody)).ids).toEqual([]);
+      expect((await index(h, "/runs?all=1", nobody)).ids).toEqual([]);
+      expect((await request(h, "/runs/pub", nobody)).status).toBe(404);
+      expect((await request(h, "/runs/pub/events", nobody)).status).toBe(404);
+      expect(audit.mock.calls.map(([e]) => e)).toEqual(["page", "events"].map((route) => ({ route, identity: "access:nobody", denied: "missing-grant" })));
+
+      const page = await request(h, `/runs/${live.id}?t=${live.token}`, nobody);
+      expect(page.status).toBe(200);
+      expect(page.body()).toBe((await request(h, `/runs/${live.id}?t=${live.token}`, admin)).body());
+      expect(runSeedOf(page.body())).toMatchObject({ mode: "live", eventsUrl: `/runs/${live.id}/events?t=${live.token}` });
+      expect((await request(h, `/runs/${live.id}/friction?t=${live.token}`, nobody)).status).toBe(200);
+      const stream = fakeReqRes("GET", `/runs/${live.id}/events?t=${live.token}`);
+      h.handler(stream.req, stream.res, nobody);
+      expect(stream.status).toBe(200);
+      expect(stream.body()).toContain("$ npm test");
+      stream.fireClose();
+      expect((await request(h, `/runs/${live.id}/stop?t=${live.token}&mode=soft`, nobody, "POST")).status).toBe(200);
     });
   });
 });

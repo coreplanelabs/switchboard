@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
+import type { Actor } from "../core/authz/types.js";
 import { COMMAND_ID, CommandRegistry, ERROR_STATUS, type Caller, type CommandDef, type CommandInvoker, type InvokeErrorCode } from "../core/commandRegistry.js";
 import { namedToInput } from "../core/commandSurface.js";
 import { isServiceToken, type AccessIdentity } from "./accessAuth.js";
@@ -90,13 +91,28 @@ function commandIdFromPath(pathname: string): string | undefined {
 }
 
 /**
- * The ONE caller-id mapping for an Access identity, shared by the `/api`
- * Caller and the `/runs` history-read audit line: a browser session is
- * `access:<sub>`; a service token is `access:svc:<common_name>` — never a bare
- * `access:` (its `sub` is empty).
+ * The ONE caller-id mapping for an Access identity — the `Caller.id` the `/api`
+ * audit line prints, and the id `accessActor` gives the same identity: a
+ * browser session is `access:<sub>`; a service token is
+ * `access:svc:<common_name>` — never a bare `access:` (its `sub` is empty).
  */
 export function callerIdFor(identity: AccessIdentity): string {
   return isServiceToken(identity) ? `access:svc:${identity.commonName}` : `access:${identity.sub}`;
+}
+
+/**
+ * R9: the `Actor` an Access identity resolves to — the ONE resolver for every
+ * surface the Access gate fronts: `/api/*` here (through `callerFor`) and the
+ * `/runs` pages (index.ts hands it to the live-view handler as `ctx.actor`,
+ * features/authorization.md item 1). A browser session is the `user`
+ * `access:<sub>`, a service token the `service` `access:svc:<common_name>`,
+ * each with the grants config names for that id (`grantsFor`). Nothing here
+ * decides what either may do (KTD3).
+ */
+export function accessActor(identity: AccessIdentity, grantsFor: GrantsLookup): Actor {
+  return isServiceToken(identity)
+    ? resolveActor({ surface: "access-service", subjectId: identity.commonName }, grantsFor)
+    : resolveActor({ surface: "access-browser", subjectId: identity.sub }, grantsFor);
 }
 
 /**
@@ -111,17 +127,10 @@ export function serviceTokenAllowed(pathname: string, identity: AccessIdentity):
   return !isServiceToken(identity) || isCommandPath(pathname);
 }
 
-/**
- * R9: the Caller an Access identity resolves to — the same identity as an
- * `Actor` the policy table decides on: a browser session is the `user`
- * `access:<sub>`, a service token the `service` `access:svc:<common_name>`,
- * each with the grants config names for that id (`opts.grantsFor`). Nothing
- * here decides what either may do (KTD3).
- */
+/** The `/api` Caller for an Access identity: its caller id and the `Actor`
+ *  the policy table decides on (`accessActor`). */
 export function callerFor(identity: AccessIdentity, opts: Pick<CommandHttpOptions, "grantsFor">): Caller {
-  const id = callerIdFor(identity);
-  if (isServiceToken(identity)) return { kind: "access", id, actor: resolveActor({ surface: "access-service", subjectId: identity.commonName }, opts.grantsFor) };
-  return { kind: "access", id, actor: resolveActor({ surface: "access-browser", subjectId: identity.sub }, opts.grantsFor) };
+  return { kind: "access", id: callerIdFor(identity), actor: accessActor(identity, opts.grantsFor) };
 }
 
 function hostOf(url: string | undefined): string | undefined {

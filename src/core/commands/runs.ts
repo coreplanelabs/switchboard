@@ -1,11 +1,11 @@
 import { z } from "zod";
 import { authorize } from "../authz/authorize.js";
 import { predicateFor } from "../authz/predicate.js";
-import type { Action, Actor, Resource } from "../authz/types.js";
+import type { Action, Actor } from "../authz/types.js";
 import { CommandError, commandDefiner, wrapUntrusted, type Caller, type CommandDef, type CommandRegistry, type JsonValue } from "../commandRegistry.js";
 import type { RunEvent } from "../runEvents.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../runRecord.js";
-import { MAX_EVENTS_PAGE, type Result, type RunRecordView, type RunsService } from "../runsService.js";
+import { MAX_EVENTS_PAGE, runResource, type Result, type RunRecordView, type RunsService } from "../runsService.js";
 
 // The `runs.*` registrations (#157 R8/R9): thin wrappers that translate typed
 // arguments/options plus the resolved caller into `RunsService` calls.
@@ -50,19 +50,6 @@ const idArg = { name: "id", schema: runId, describe: "run id" } as const;
 function unwrap<T>(res: Result<T>): T {
   if (res.ok) return res.value;
   throw new CommandError(res.error, res.error === "not_found" ? "run not found" : "run already finished");
-}
-
-/** The run as a typed `Resource`: exactly the attributes the policy rows read.
- *  A view without the stamp is `unknown` — never public. */
-function runResource(view: RunRecordView): Resource {
-  return {
-    type: "run",
-    id: view.id,
-    channelId: view.channelId ?? "",
-    userId: view.userId ?? "",
-    ...(view.repo !== undefined ? { repo: view.repo } : {}),
-    channelVisibility: view.channelVisibility ?? "unknown",
-  };
 }
 
 const logDenied = (entry: RunReadDenied): void => console.log(JSON.stringify({ audit: "authz", ...entry }));
