@@ -46,6 +46,15 @@ export function depCacheMaterialization(dir: DepCacheDir): DepCacheMaterializati
  *  entries. Nested dot dirs OTHER than `.cache` (a vendored `.github`, a
  *  package's `.bin`) stay shared: they are package content, not caches.
  *
+ *  The ONE top-level dot entry that is package content, not a cache, is
+ *  `.pnpm` — pnpm's virtual store, where every installed package's files
+ *  actually live (the top-level entries are symlinks into it). It is
+ *  immutable after install, exactly like the packages it holds, so it stays
+ *  hardlinked; a `.cache` nested inside it is still a cache and still copied.
+ *  2026-09-05: swapping it for a plain copy made every thread tree of a pnpm
+ *  workspace a full 2.6 GB copy of its dependencies and a fresh attach ~190 s
+ *  (nominal), and one thread filled the old 8 GB resident disk (#448).
+ *
  *  `mutableCacheFindArgv` is the exact `find` the Worker runs to enumerate
  *  those paths; `mutableCachePaths` turns its output lines into the list to
  *  replace, dropping anything already covered by a listed ancestor (the
@@ -59,6 +68,10 @@ export function mutableCacheFindArgv(nodeModulesDir: string): string[] {
   return ["find", nodeModulesDir, "-mindepth", "1", "(", "-path", `${nodeModulesDir}/.*`, "-o", "-type", "d", "-name", ".cache", ")"];
 }
 
+/** Top-level dot entries of node_modules that hold PACKAGE CONTENT rather than
+ *  a tool's cache — shared like any package, never copied per thread. */
+const PACKAGE_STORE_ENTRIES: ReadonlySet<string> = new Set([".pnpm"]);
+
 export function mutableCachePaths(nodeModulesDir: string, findOutputLines: readonly string[]): string[] {
   const root = nodeModulesDir.replace(/\/+$/, "");
   const candidates = findOutputLines
@@ -67,7 +80,7 @@ export function mutableCachePaths(nodeModulesDir: string, findOutputLines: reado
     .filter((l) => {
       const rel = l.slice(root.length + 1);
       const parts = rel.split("/");
-      if (parts.length === 1) return parts[0].startsWith(".");
+      if (parts.length === 1) return parts[0].startsWith(".") && !PACKAGE_STORE_ENTRIES.has(parts[0]);
       return parts[parts.length - 1] === ".cache";
     })
     .sort((a, b) => a.length - b.length);

@@ -57,6 +57,26 @@ describe("mutableCachePaths (tool-managed paths inside a hardlinked node_modules
     ];
     expect(mutableCachePaths(ROOT, listing)).toEqual([`${ROOT}/.cache`, `${ROOT}/.vite`, `${ROOT}/.prisma`, `${ROOT}/.bin`, `${ROOT}/.package-lock.json`]);
   });
+  // 2026-09-05: the nominal resident (a pnpm workspace) took ~190 s per fresh
+  // attach and every thread tree cost 2.6 GB of real disk — `.pnpm`, pnpm's
+  // virtual store holding ALL package content, is a top-level dot entry and
+  // was being swapped for a plain copy, undoing the hardlink sharing for 100%
+  // of the dependency bytes (and filling the old 8 GB disk with one thread).
+  it("pnpm's `.pnpm` store is package content, never a cache: it stays hardlinked, while a `.cache` nested inside it is still copied", () => {
+    const listing = [
+      `${ROOT}/.pnpm`,
+      `${ROOT}/.pnpm/lodash@4.17.21/node_modules/lodash`,
+      `${ROOT}/.pnpm/node_modules/.bin`,
+      `${ROOT}/.pnpm/some-loader@1.0.0/node_modules/some-loader/.cache`,
+      `${ROOT}/.modules.yaml`,
+      `${ROOT}/.bin`,
+    ];
+    expect(mutableCachePaths(ROOT, listing)).toEqual([
+      `${ROOT}/.pnpm/some-loader@1.0.0/node_modules/some-loader/.cache`,
+      `${ROOT}/.modules.yaml`,
+      `${ROOT}/.bin`,
+    ]);
+  });
   it("a .cache directory nested inside a package (recursive) is mutable too", () => {
     expect(mutableCachePaths(ROOT, [`${ROOT}/some-loader/.cache`, `${ROOT}/some-loader/lib`])).toEqual([`${ROOT}/some-loader/.cache`]);
   });
