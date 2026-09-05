@@ -149,6 +149,25 @@ describe("followUpPrompt / followUpSnippet", () => {
     expect(many).toContain("- first\n- second");
   });
 
+  it("superseded: the header says the just-written answer was not delivered and demands one complete answer", () => {
+    const p = followUpPrompt([input("also X")], { superseded: true });
+    expect(p).toContain("That answer was NOT delivered");
+    expect(p).toContain("covers the original request AND this follow-up");
+    expect(p.endsWith("also X")).toBe(true);
+    expect(followUpPrompt([input("also X")])).not.toContain("NOT delivered");
+  });
+
+  it("five follow-ups drain as one bulleted list in arrival order, and both headers count them", () => {
+    const five = ["a", "b", "c", "d", "e"].map((t, i) => input(t, { at: i }));
+    const plain = followUpPrompt(five);
+    expect(plain).toMatch(/^↪ 5 follow-ups from the thread, sent while you were working\. Take them into account/);
+    expect(plain.endsWith("- a\n- b\n- c\n- d\n- e")).toBe(true);
+    const superseded = followUpPrompt(five, { superseded: true });
+    expect(superseded).toMatch(/^↪ 5 follow-ups from the thread, sent while you were writing your answer\./);
+    expect(superseded).toContain("covers the original request AND all of these follow-ups");
+    expect(superseded.endsWith("- a\n- b\n- c\n- d\n- e")).toBe(true);
+  });
+
   it("the snippet is one line, capped with an ellipsis", () => {
     expect(followUpSnippet(input("a\n  b   c"))).toBe("a b c");
     expect(followUpSnippet(input("x".repeat(100)), 20)).toBe(`${"x".repeat(19)}…`);
