@@ -83,6 +83,17 @@ describe("config show", () => {
     expect(res.ok && res.value).toMatchObject({ effective: { agent: "general" }, restrictedAgents: ["coding"], channelConfigRestricted: false });
   });
 
+  it("channelConfigRestricted is decided for the CALLER's actor (the config:write row `config set channel` asks), not for an id the store looks up: the CLI's `all` is never restricted, a token without config:write is, the admin is not — under a `channelConfig: []` store", async () => {
+    const gated = store(YAML.replace("permissions:\n", "permissions:\n  channelConfig: []\n"));
+    const commands = bind(gated);
+    const show = (caller: Caller) => commands.invoke("config.show", { args: [], options: { channel: "slack:CX" } }, caller);
+    expect(await show(callerWith("cli", "cli:local", "all"))).toMatchObject({ ok: true, value: { channelConfigRestricted: false } });
+    expect(await show(mcp("config:read"))).toMatchObject({ ok: true, value: { channelConfigRestricted: true } });
+    expect(await show(mcp("config:read", "config:write"))).toMatchObject({ ok: true, value: { channelConfigRestricted: false } });
+    expect(await show(chat(gated, "slack:UADMIN"))).toMatchObject({ ok: true, value: { channelConfigRestricted: false } });
+    expect(await show(chat(gated, "slack:UX"))).toMatchObject({ ok: true, value: { channelConfigRestricted: true } });
+  });
+
   it("--channel names another channel; a machine caller must name one (no origin) and needs config:read", async () => {
     const config = store();
     await config.setChannelOverride("slack:COTHER", { agent: "review" });

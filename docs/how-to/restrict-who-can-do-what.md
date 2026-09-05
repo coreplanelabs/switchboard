@@ -40,7 +40,7 @@ permissions:
   channelConfig: []    # empty list = admins only. Omit the key entirely = everyone.
 ```
 
-Careful with the difference: **key absent** → open; **key present but empty** → admins only. This is the one place an empty list and a missing key mean opposite things — everywhere else, listing zero people isn't meaningfully different from not writing the key.
+Careful with the difference: **key absent** (from a `permissions` block you do write) → open; **key present but empty** → admins only. A config with no `permissions` block at all — native `grants` only — gives `config:write` to nobody but the actors whose `grants` entry carries it. This is the one place an empty list and a missing key mean opposite things — everywhere else, listing zero people isn't meaningfully different from not writing the key.
 
 ## The one gate that's locked by default: repoManagement
 

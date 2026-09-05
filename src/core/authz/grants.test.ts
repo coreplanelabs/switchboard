@@ -128,8 +128,15 @@ describe("translateLegacyConfig — the KTD6 table, key by key", () => {
     expect(admin.grants.get("slack:U1")).toEqual(ALL_GRANTS);
   });
 
-  it("nothing configured → an empty table, the open baseline (channelConfig absent → config:write too) for everyone, repos open", () => {
-    expect(translate(undefined)).toEqual({ grants: new Map(), everyone: grants({ actions: set(...OPEN) }), reposOpen: true });
+  it("no `permissions` block at all → an empty table, the open baseline WITHOUT config:write (no legacy block, no open-when-absent rule), repos open; an EMPTY block still opens it", () => {
+    expect(translate(undefined)).toEqual({ grants: new Map(), everyone: grants({ actions: set(...CHAT_OPEN_ACTIONS) }), reposOpen: true, fromPermissions: new Set() });
+    expect(translate({}).everyone).toEqual(grants({ actions: set(...OPEN) }));
+  });
+
+  it("fromPermissions names the ids the `permissions.*` keys (serviceTokens included) grant — never an ingress token's, whose entry is its credential", () => {
+    const t = translate({ admins: ["slack:UADMIN"], repoManagement: ["http:cron"] }, { tok: { subject: "ci", scopes: ["dispatch"] } }, { "reader-bot": ["runs:read"] });
+    expect([...t.fromPermissions].sort()).toEqual(["access:svc:reader-bot", "http:cron", "slack:UADMIN"]);
+    expect(t.grants.has("http:ci")).toBe(true);
   });
 });
 
@@ -245,9 +252,9 @@ describe("the native/legacy DIFFERENTIAL — one deployment written both ways re
     for (const id of parsed.grants.keys()) expect(grantsFor(id, { grants: parsed.grants }), id).toEqual(grantsFor(id, legacy));
   });
 
-  it("an actor neither shape names: an unlisted slack: user gets what everyone holds (the open commands, the unrestricted agents); a native-only deployment, being explicit, gives nothing", () => {
+  it("an actor neither shape names: an unlisted slack: user gets what everyone holds (the open commands, the unrestricted agents); a native-only deployment, being explicit, adds nothing — not even config:write", () => {
     expect(grantsFor("slack:UNOBODY", legacy)).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general") }));
-    expect(grantsFor("slack:UNOBODY", { grants: new Map() })).toEqual(grants({ actions: set(...OPEN) }));
+    expect(grantsFor("slack:UNOBODY", { grants: new Map() })).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS) }));
     expect(grantsFor("slack:UNOBODY", { ...legacy, permissions: { ...legacy.permissions, agents: { general: [], coding: [], review: [] } } })).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS) }));
   });
 
@@ -271,6 +278,16 @@ describe("grantsTable / grantsIn / grantsFor — the merged lookup", () => {
     expect(grantsFor("slack:UMGR", source)).toEqual(grants({ actions: set(...OPEN, "repo:write", "friction:write") }));
     expect(grantsFor("slack:UNKNOWN", source)).toEqual(grants({ actions: set(...OPEN) }));
     expect(grantsFor("mcp:unknown", source)).toBe(NO_GRANTS);
+  });
+
+  it("the overlap reported is what config can delete: a serviceTokens entry beside a native one is; an ingress token's id beside its native entry (#453) is not, though native still wins", () => {
+    const parsed = parseGrantsConfig({ "http:ci": { actions: ["dispatch", "runs:read"], channels: "all" }, "access:svc:ops": { actions: ["runs:read"], channels: "all" } });
+    if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+    const table = grantsTable({ grants: parsed.grants, ingressTokens: { tok: { subject: "ci", channel: "ops", scopes: ["dispatch"] } }, permissions: { serviceTokens: { ops: ["runs:read", "runs:write"] } } });
+    expect(table.overlapping).toEqual(["access:svc:ops"]);
+    expect(grantsIn(table, "http:ci")).toEqual(grants({ actions: set("dispatch", "runs:read"), channels: "all" }));
+    expect(grantsIn(table, "mcp:ci")).toEqual(grants({ actions: set("dispatch"), channels: set("mcp:ops") })); // the token's own translation, no native entry
+    expect(grantsIn(table, "access:svc:ops")).toEqual(grants({ actions: set("runs:read"), channels: "all" }));
   });
 
   it("a schedule actor's grants are the registry's declared ones (R9) unless the native block names the id — then config wins, without an overlap warning; no legacy key names schedules", () => {

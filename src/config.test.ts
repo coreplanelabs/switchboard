@@ -446,6 +446,27 @@ describe("grants config — the native shape beside the legacy keys (plan U2, R7
     warnings.length = 0;
     load(`${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch]\n`, (m) => warnings.push(m));
     expect(warnings).toEqual([]);
+    // An ingress token's id with a native entry beside it is the intended way to grant it channels (#453) — not a duplicate to warn about.
+    const s2 = load(`${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch, runs:read]\n    channels: all\n`, (m) => warnings.push(m), { ingressTokens: { tok: { subject: "ci", channel: "ops", scopes: ["dispatch"] } } });
+    expect(warnings).toEqual([]);
+    expect(s2.grantsFor("http:ci")).toEqual({ actions: set("dispatch", "runs:read"), channels: "all", repos: set() });
+  });
+
+  it("the permission helpers answer from the grants table, so a native-only config (no `permissions` block) keeps its admin: adminsHint names them, they manage repos and edit channel config, an unlisted user does neither", () => {
+    const NATIVE_ONLY = YAML_FIXTURE.replace(/permissions:[\s\S]*$/, "") + `grants:\n  "slack:UNATIVE":\n    actions: all\n    channels: all\n    repos: all\n  "slack:UMGR":\n    actions: [repo:write]\n`;
+    const s = load(NATIVE_ONLY);
+    expect(s.adminsHint()).toBe("<@slack:UNATIVE>");
+    expect([s.canManageRepos("slack:UNATIVE"), s.canManageRepos("slack:UMGR"), s.canManageRepos("slack:URANDOM")]).toEqual([true, true, false]);
+    // No legacy block → no open-when-absent: `config:write` is the admin's alone.
+    expect([s.canEditChannelConfig("slack:UNATIVE"), s.canEditChannelConfig("slack:URANDOM")]).toEqual([true, false]);
+    expect(s.grantsFor("slack:URANDOM").actions).not.toContain("config:write");
+    // A native admin bypasses the (still legacy) agent allowlist like a listed one.
+    const restricted = load(NATIVE_ONLY + `permissions:\n  agents:\n    coding: ["slack:UDEV"]\n`);
+    expect([restricted.canRunAgent("slack:UNATIVE", "coding"), restricted.canRunAgent("slack:URANDOM", "coding")]).toEqual([true, false]);
+    // The same three answers under the legacy block, so neither shape changes them.
+    const legacy = store();
+    expect(legacy.adminsHint()).toBe("<@slack:UADMIN>");
+    expect([legacy.canManageRepos("slack:UADMIN"), legacy.canEditChannelConfig("slack:UADMIN"), legacy.canEditChannelConfig("slack:URANDOM")]).toEqual([true, true, false]);
   });
 });
 

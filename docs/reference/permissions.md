@@ -18,7 +18,7 @@ IDs are platform-namespaced: `slack:U0123` (a user), `access:<sub>` (a Cloudflar
 
 Both take a list of ids. They do **not** default the same way:
 
-- `channelConfig` **absent** → open to everyone. `channelConfig: []` → admins only. Writing the key at all, even empty, locks it.
+- `channelConfig` **absent** (from a `permissions` block you do write) → open to everyone. `channelConfig: []` → admins only. Writing the key at all, even empty, locks it. A config with **no `permissions` block at all** — one that uses only the native `grants` block — has no legacy rule to apply: `config set channel` is held only by whoever `grants` gives `config:write` (admins through `actions: all`).
 - `repoManagement` is admins-only whether the key is **absent or empty** — there's no way to write it as "open to everyone," on purpose. `repo onboard`/`rebuild` bind real GitHub credentials and provision real, billable, always-on compute; a typo that leaves this open is a different order of mistake than a typo that leaves channel config open.
 
 ## Machine-surface scopes
