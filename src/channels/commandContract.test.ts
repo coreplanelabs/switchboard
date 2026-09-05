@@ -328,7 +328,7 @@ describe("adapter contract — chat", () => {
     expect(direct.ok).toBe(true);
     if (!direct.ok) throw new Error("unreachable");
     const reply = await handleChatCommand({ commands: f.commands, parsed: parsed!, msg: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:t" }, config: f.config, now: NOW });
-    expect(reply).toBe(renderText(f.commands.get("runs.list")!, direct.value, { now: NOW }));
+    expect(reply).toBe(renderText(f.commands.get("runs.list")!, direct.value, { now: NOW, surface: "chat" }));
     expect(reply.split("\n")).toHaveLength(3);
     expect(reply).not.toContain("tok-");
     expect(JSON.stringify(direct.value)).not.toContain("tok-");
@@ -341,7 +341,7 @@ describe("adapter contract — chat", () => {
     const direct = await f.commands.invoke("runs.list", { options: { status: "active" } }, caller(f.config, "slack:UADMIN"));
     if (!direct.ok) throw new Error("unreachable");
     const reply = await handleChatCommand({ commands: f.commands, parsed: parsed!, msg: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:t" }, config: f.config, now: NOW });
-    expect(reply).toBe(renderText(f.commands.get("runs.list")!, direct.value, { now: NOW }));
+    expect(reply).toBe(renderText(f.commands.get("runs.list")!, direct.value, { now: NOW, surface: "chat" }));
     expect(reply.split("\n")).toHaveLength(1);
     expect(reply).toContain(f.liveId.slice(0, 8));
     expect(reply).not.toContain("expected one of");
