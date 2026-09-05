@@ -1,8 +1,9 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import { authorize, matchesPredicate, predicateFor, type Actor, type Decision, type Predicate, type Resource } from "../core/authz/index.js";
 import type { StopMode } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
-import type { RunRegistry, RunSummary } from "../core/runRegistry.js";
-import type { RunListCursor, RunsService } from "../core/runsService.js";
+import type { IndexSubscriber, RunRegistry, RunSummary, Unsubscribe } from "../core/runRegistry.js";
+import { runResource, type RunListCursor, type RunsService, type RunView } from "../core/runsService.js";
 import type { ScheduleDef } from "../core/schedules.js";
 import type { ScheduleStore } from "../core/scheduleStore.js";
 import { STORE_UNAVAILABLE_BANNER } from "../core/commandRegistry.js";
@@ -30,9 +31,15 @@ export type IndexRow = RunIndexRowSeed;
 // and the stop control. A wrong/missing token on a live run — or an unknown run
 // — is a 404 (never reveal existence). A FINISHED run (still in the registry, or
 // persisted in the run store — #157) is served tokenless in history mode to the
-// Access-authenticated viewer, through the same page renderer. Events are
-// already redacted + capped upstream (runEvents.ts); this layer adds no data and
-// re-exposes nothing.
+// Access-authenticated viewer, through the same page renderer — and only when
+// the policy table lets that viewer's ACTOR read it (features/authorization.md
+// items 5–7, #428): index.ts resolves the Access identity with the same
+// `accessActor` the `/api/*` adapter uses and hands it in as `ctx.actor`; the
+// index lists through `predicateFor(actor, "runs:read", "run")`, a tokenless
+// read is `authorize`d against the run's own attributes, and a deny renders
+// exactly like an unknown id (KTD8 — the reason reaches the audit line only).
+// Events are already redacted + capped upstream (runEvents.ts); this layer adds
+// no data and re-exposes nothing.
 //
 // SSE (not WebSocket) because the flow is strictly one-directional server→page,
 // EventSource auto-reconnects, and it needs no handshake or extra dependency.
@@ -86,13 +93,18 @@ export function parseStopMode(raw: string | null): StopMode | null {
   return raw === "soft" || raw === "hard" ? raw : null;
 }
 
-/** One audit line per persisted-run page/events read (R9): who read which run
- *  on which route — never any content. */
-export interface HistoryReadAudit {
-  route: "page" | "events";
-  runId: string;
-  identity?: string;
-}
+/** The tokenless routes that read a finished run. */
+export type HistoryReadRoute = "page" | "events" | "friction" | "stop";
+
+/** One audit line per tokenless read of a finished run (R9). An allowed
+ *  page/events read says who read which run on which route — never any
+ *  content. A read the table refused says who was refused on which route and
+ *  why (`authorize`'s reason, KTD8: the audit line's, never the reply's) — and
+ *  never which run, so the log reveals no more existence than the 404 does
+ *  (the same shape `runs.*` logs). */
+export type HistoryReadAudit =
+  | { route: "page" | "events"; runId: string; identity: string }
+  | { route: HistoryReadRoute; identity: string; denied: string };
 
 export interface LiveViewDeps {
   /** The bound web-app shell (webShell.ts): title + seed → the HTML document. */
@@ -112,7 +124,8 @@ export interface LiveViewDeps {
    *  and `requireAccessForRuns`). The token-gated live path is unaffected.
    *  Absent → no gate. */
   devBypass?: { active: () => boolean; isLoopback: (req: HttpRequest) => boolean };
-  /** Receives one entry per persisted-run page/events read. Default: console.log. */
+  /** Receives one entry per allowed page/events history read and per refused
+   *  tokenless read. Default: console.log. */
   audit?: (entry: HistoryReadAudit) => void;
   /** The "Scheduled" panel on the index (#244): the schedule registry to list
    *  and, optionally, the store holding each schedule's firings. Absent → no
@@ -147,9 +160,55 @@ export function olderRunsHref(cursor: RunListCursor): string {
   return `/runs?all=1&before=${cursor.finishedAt}&beforeId=${encodeURIComponent(cursor.id)}`;
 }
 
-/** Per-request context the server passes in: the Access identity it verified. */
+/** Per-request context the server passes in after the Access gate: the viewer
+ *  as the `Actor` the policy table decides on — the verified Access identity
+ *  resolved by `accessActor` (commandHttp.ts), the one resolver for every
+ *  surface the gate fronts. The handler makes no decision of its own: it asks
+ *  `authorize` / `predicateFor` with this actor (authorization.md item 1). */
 export interface LiveViewContext {
-  identity?: string;
+  actor: Actor;
+}
+
+/** The command rows the `/api` twins of these routes are admitted by first
+ *  (`runs.list` for the index, `runs.get` for a run read): the actor must hold
+ *  `runs:read` at all before any run row is consulted, so the HTML surface is
+ *  never wider than `/api/runs.*` for the same identity. */
+const RUNS_LIST: Resource = { type: "command", id: "runs.list" };
+const RUNS_GET: Resource = { type: "command", id: "runs.get" };
+const NONE: Predicate = { kind: "none" };
+
+/** What the viewer may list (authorization.md item 6): nothing unless the actor
+ *  is admitted to run reads, else the store predicate over its channels. */
+function readableRuns(actor: Actor): Predicate {
+  return authorize(actor, "runs:read", RUNS_LIST).allow ? predicateFor(actor, "runs:read", "run") : NONE;
+}
+
+/** The table's decision on ONE finished run the viewer asked for tokenless
+ *  (authorization.md item 5): admitted to run reads, and allowed this run by
+ *  its own attributes — channel, user, stamped visibility (R1). */
+function readDecision(actor: Actor, view: RunView): Decision {
+  const admitted = authorize(actor, "runs:read", RUNS_GET);
+  return admitted.allow ? authorize(actor, "runs:read", runResource(view)) : admitted;
+}
+
+/**
+ * The runs-index feed as ONE viewer may see it: an `upsert` for a run outside
+ * the predicate is dropped, and so is that run's later `removed` — the page
+ * never learns the id of a run it was not shown. Every live run is stamped at
+ * `create()`, so one decision per run holds for its whole life; `shown` is
+ * bounded by the registry's live set (an id leaves it with its `removed`).
+ */
+export function visibleIndexFeed(subscribeIndex: (onEvent: IndexSubscriber) => Unsubscribe, visibleTo: Predicate): (onEvent: IndexSubscriber) => Unsubscribe {
+  return (onEvent) => {
+    const shown = new Set<string>();
+    return subscribeIndex((ev) => {
+      if (ev.type === "upsert") {
+        if (!matchesPredicate(visibleTo, ev.run)) return;
+        shown.add(ev.run.id);
+      } else if (!shown.delete(ev.id)) return;
+      onEvent(ev);
+    });
+  };
 }
 
 const NOT_FOUND = "run not found";
@@ -170,8 +229,14 @@ const JSON_NO_STORE = { "content-type": "application/json; charset=utf-8", "cach
  *   POST /runs/:id/stop?t=…&mode=soft|hard → ask the run to stop (#101): 200 JSON, 400 bad
  *        mode, 404 bad/missing token on a live run or unknown run, 409 finished/persisted
  * The live routes are token-gated via the registry (`authorizeLive`, synchronous
- * — KTD6); the tokenless history routes and the index are Access-gated at the
- * edge (index.ts gates every method under /runs*). Unknown, expired, and
+ * — KTD6) and ignore the viewer's actor: the token IS the capability. The
+ * tokenless history routes and the index are Access-gated at the edge (index.ts
+ * gates every method under /runs*) AND bound to the viewer's actor (`ctx.actor`):
+ * the index — default live rows, `?all=1`, the `?stream=1` feed, the Scheduled
+ * tab's live links — lists what `readableRuns` allows, and a tokenless read of
+ * a finished run is `readDecision`-ed on the run's own attributes; a deny is
+ * the same 404 an unknown id gets, on every route, and the 409 a tokenless stop
+ * gives a finished run is withheld the same way. Unknown, expired, denied and
  * wrong-token-on-live lookups share one 404 body (R4/R10). `?stream=1` (a query
  * flag, not a new path) selects the feed so it never collides with `/runs/<id>`
  * where an id could legitimately be "events" or "stream".
@@ -188,9 +253,17 @@ async function loadFirings(store: ScheduleStore): Promise<FiringsState> {
   }
 }
 
-export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, res: ServerResponse, ctx?: LiveViewContext) => boolean {
+export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, res: ServerResponse, ctx: LiveViewContext) => boolean {
   const { service, index } = deps;
   const audit = deps.audit ?? ((entry) => console.log(`[runs] history read ${JSON.stringify(entry)}`));
+  /** True when the table lets `actor` read this finished run tokenless; a deny
+   *  is audited here (route, actor, reason — never the run) and the caller
+   *  renders it exactly as an unknown id (KTD8). */
+  const readable = (actor: Actor, view: RunView, route: HistoryReadRoute): boolean => {
+    const decision = readDecision(actor, view);
+    if (!decision.allow) audit({ route, identity: actor.id, denied: decision.reason });
+    return decision.allow;
+  };
   const text = (res: ServerResponse, status: number, body: string) => {
     res.writeHead(status, TEXT);
     res.end(body);
@@ -215,17 +288,14 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
     olderThan?: number;
   }
   /** `?all=1`: one full page of the service's live ∪ finished ∪ persisted rows
-   *  (the service's cap, never its 50-row default), with the live rows'
-   *  capability tokens re-attached for their hrefs (finished rows stay
-   *  tokenless), plus the "Older runs" href when the page was full. */
-  const mergedRows = async (live: readonly RunSummary[], cursor?: { before: number; beforeId: string }): Promise<IndexPage> => {
+   *  the viewer may see (the service's cap, never its 50-row default), with the
+   *  live rows' capability tokens re-attached for their hrefs (finished rows
+   *  stay tokenless), plus the "Older runs" href when the page was full. */
+  const mergedRows = async (live: readonly RunSummary[], visibleTo: Predicate, cursor?: { before: number; beforeId: string }): Promise<IndexPage> => {
     const tokens = new Map(live.map((s) => [s.id, s.token]));
-    // The Access-gated index lists every run's METADATA to whoever Access let in
-    // — today's behavior, stated as an explicit `all` rather than inherited. The
-    // per-actor binding of this page (authorization R5 on the HTML surface) is
-    // a spec `[gap]`: it needs the page to carry an actor, which is frontend
-    // work on hold; the `/api/runs.*` path the page's data comes from is bound.
-    const { runs, nextBefore, storeUnavailable } = await service.listRuns({ status: "all", visibleTo: { kind: "all" }, limit: pageSize, ...(cursor ?? {}) });
+    // The viewer's predicate is the store's own filter (R6): the service hands
+    // it down and nothing is loaded to be dropped afterwards.
+    const { runs, nextBefore, storeUnavailable } = await service.listRuns({ status: "all", visibleTo, limit: pageSize, ...(cursor ?? {}) });
     // A cursor page holds finished runs only — the service leaves the live rows
     // off it (they all sort ahead of any cursor), so the page is a full page.
     // Only an UNFINISHED row gets its capability token (R10): the seed is data
@@ -259,20 +329,25 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
 
     // The index has NO token gate — Cloudflare Access is the "who" gate in front
     // of it. It renders the per-run capability links, so it must only be exposed
-    // behind Access (see features/live-view.md). The default view is the live
-    // registry only (R11: never a store read); `?all=1` merges the service's
-    // finished + persisted rows in, keeping the live rows' token hrefs.
+    // behind Access (see features/live-view.md) — and it renders them only for
+    // the runs the viewer's actor may read: the default live rows, the `?all=1`
+    // page and the `?stream=1` feed all go through the ONE predicate, so a
+    // capability link for a run the viewer may not read never reaches the page.
+    // The default view is the live registry only (R11: never a store read);
+    // `?all=1` merges the service's finished + persisted rows in, keeping the
+    // live rows' token hrefs.
     if (route.kind === "index") {
       const all = url.searchParams.get("all") === "1";
       if (all && historyReadForbidden(req)) {
         text(res, 403, "forbidden");
         return true;
       }
+      const visibleTo = readableRuns(ctx.actor);
       if (url.searchParams.get("stream") === "1") {
-        serveIndexEvents((onEvent) => index.subscribeIndex(onEvent), nodeSseSink(req, res), () => startSseHeartbeat(req, res));
+        serveIndexEvents(visibleIndexFeed((onEvent) => index.subscribeIndex(onEvent), visibleTo), nodeSseSink(req, res), () => startSseHeartbeat(req, res));
         return true;
       }
-      const live = index.listActive();
+      const live = index.listActive().filter((s) => matchesPredicate(visibleTo, s));
       const render = (page: IndexPage) => {
         const liveCount = page.rows.filter((r) => !r.finished).length;
         // The tab title carries the live count (item 21); the page keeps it
@@ -297,15 +372,18 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
         render({ rows: live.filter((s) => !s.finished) });
         return true;
       }
-      run(res, async () => render(await mergedRows(live, parseIndexCursor(url.searchParams))));
+      run(res, async () => render(await mergedRows(live, visibleTo, parseIndexCursor(url.searchParams))));
       return true;
     }
 
     // The Scheduled tab (#244, item 18): the registry's schedules with each one's
     // last firing; a live firing links with its token, so the panel reads the
-    // live rows. Without a firing store the history is "unavailable" (never
-    // "never fired"); without a schedule registry the tab says so (200, not 404).
-    // Same Access gate as the index, no token, GET-only, no feed.
+    // live rows — only those the viewer may read, so it never hands out a token
+    // for a run the viewer could not open (a finished firing links tokenless,
+    // to the bound run page). Without a firing store the history is
+    // "unavailable" (never "never fired"); without a schedule registry the tab
+    // says so (200, not 404). Same Access gate as the index, no token, GET-only,
+    // no feed.
     if (route.kind === "scheduled") {
       const scheduled = deps.scheduled;
       if (!scheduled) {
@@ -313,7 +391,8 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
         res.end(deps.shell("Scheduled runs", { page: "scheduled", now: now(), rows: null }));
         return true;
       }
-      const live = index.listActive();
+      const visibleTo = readableRuns(ctx.actor);
+      const live = index.listActive().filter((s) => matchesPredicate(visibleTo, s));
       const render = (firings: FiringsState) => {
         const t = now();
         const seed: ScheduledSeed = {
@@ -400,9 +479,12 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
     }
 
     // ── History path: no token, or one the registry refused. Only a FINISHED run
-    // is readable here (R10: a live run keeps requiring its token — a wrong
-    // token on it is the same 404 as an unknown run); a finished run still in
-    // the registry and a persisted one render identically through the service.
+    // the viewer's actor may read is readable here (R10: a live run keeps
+    // requiring its token — a wrong token on it is the same 404 as an unknown
+    // run; a finished run the table denies is that same 404 too); a finished run
+    // still in the registry and a persisted one render identically through the
+    // service.
+    const actor = ctx.actor;
     if (route.kind === "stop") {
       const mode = parseStopMode(url.searchParams.get("mode"));
       if (!mode) {
@@ -410,8 +492,10 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
         return true;
       }
       run(res, async () => {
+        // The 409 says "this run exists and is over" — a fact only a viewer who
+        // may read the run is told.
         const found = await service.getRun(route.id);
-        if (!found.ok || !found.value.finished) text(res, 404, NOT_FOUND);
+        if (!found.ok || !found.value.finished || !readable(actor, found.value, "stop")) text(res, 404, NOT_FOUND);
         else text(res, 409, "run already finished");
       });
       return true;
@@ -424,13 +508,15 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
 
     if (route.kind === "friction") {
       run(res, async () => {
-        const found = await service.getRunFriction(route.id);
-        if (!found.ok || !found.value.finished) {
+        // The summary row carries what the decision reads; the diagnosis is fetched only for an allowed viewer.
+        const found = await service.getRun(route.id);
+        const friction = found.ok && found.value.finished && readable(actor, found.value, "friction") ? await service.getRunFriction(route.id) : null;
+        if (!friction?.ok || !friction.value.finished) {
           text(res, 404, NOT_FOUND);
           return;
         }
         res.writeHead(200, JSON_NO_STORE);
-        res.end(JSON.stringify(found.value));
+        res.end(JSON.stringify(friction.value));
       });
       return true;
     }
@@ -438,9 +524,9 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
     run(res, async () => {
       // ONE record read serves both the page and the stored replay: the record
       // already holds every event, so the events route never re-reads it page
-      // by page.
+      // by page. The same read carries the attributes the decision needs.
       const found = await service.getRun(route.id, { include: "messages" });
-      if (!found.ok || !found.value.finished) {
+      if (!found.ok || !found.value.finished || !readable(actor, found.value, route.kind)) {
         if (route.kind === "events") {
           // the same 404 shape the live stream writes
           const sink = nodeSseSink(req, res);
@@ -456,7 +542,7 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
         return;
       }
       const view = found.value;
-      audit({ route: route.kind === "page" ? "page" : "events", runId: route.id, ...(ctx?.identity ? { identity: ctx.identity } : {}) });
+      audit({ route: route.kind === "page" ? "page" : "events", runId: route.id, identity: actor.id });
       if (route.kind === "page") {
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(

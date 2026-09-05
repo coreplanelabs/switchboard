@@ -42,7 +42,7 @@ import { buildScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters (#157 U7) ---
 import { buildCoreCommands } from "./core/commandCatalogue.js";
-import { callerIdFor, createCommandHttpHandler, isCommandPath, isLocalhostBase, isLoopbackAddress, serviceTokenAllowed } from "./channels/commandHttp.js";
+import { accessActor, createCommandHttpHandler, isCommandPath, isLocalhostBase, isLoopbackAddress, serviceTokenAllowed } from "./channels/commandHttp.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 // --- end command registry adapters ---
 
@@ -296,7 +296,13 @@ async function main() {
     // (null → history off, live-only). Live routes stay token-gated (capability
     // token in the URL); finished/persisted runs are served tokenless to the
     // Access-authenticated viewer, so — like the index — they must only be
-    // exposed behind Access. KTD13: under the dev bypass, history reads are
+    // exposed behind Access, and both are bound to that viewer's actor
+    // (features/authorization.md items 5–7, #428): the gate's identity is
+    // resolved with the SAME `accessActor` the /api adapter uses and handed to
+    // the handler as `ctx.actor` below, so the index lists and the run page
+    // reads exactly what `/api/runs.*` would for that identity — under the dev
+    // bypass that identity is `access:dev-bypass`, granted like any other
+    // browser session. KTD13: under the dev bypass, history reads are
     // served only to a loopback client with no remote PUBLIC_BASE_URL. The
     // bypass is in effect only when Access is NOT configured (the same rule
     // `requireAccessForRuns` applies and `commandHttp` is wired with below):
@@ -389,7 +395,7 @@ async function main() {
             // --- /api/* (#157 U7): the command handler owns everything under it. ---
             if (isCommandPath(path)) return commandHttp(req, res, gate.identity);
             // --- end /api/* ---
-            if (liveView(req, res, { identity: callerIdFor(gate.identity) })) return;
+            if (liveView(req, res, { actor: accessActor(gate.identity, (id) => config.grantsFor(id)) })) return;
             // --- /mcp/connect/<nonce> (#394): the credential page, identity-bound. ---
             if (mcpConnectView(req, res, gate.identity)) return;
             if (residentsView(req, res)) return;

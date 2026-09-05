@@ -1,5 +1,5 @@
 import { matchesPredicate } from "./authz/predicate.js";
-import type { ChannelVisibility, Predicate } from "./authz/types.js";
+import type { ChannelVisibility, Predicate, Resource } from "./authz/types.js";
 import type { RunActor, RunEvent, StopMode } from "./runEvents.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
 import { clampListLimit, RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, toVisibilityFilter, utf8ByteLength, type RunListItem, type RunRecord } from "./runRecord.js";
@@ -75,6 +75,21 @@ export interface RunView {
 /** `getRun`'s shape: the view plus, only with `include: "messages"`, the events. */
 export interface RunRecordView extends RunView {
   events?: RunEvent[];
+}
+
+/** The run as the typed `Resource` the policy rows read (authorization.md
+ *  item 3) — exactly its channel, user, repo and stamped visibility — for the
+ *  point-read `authorize` every surface makes on a view (`runs.*`, the
+ *  tokenless run page). A view without the stamp is `unknown`, never public. */
+export function runResource(view: RunView): Resource {
+  return {
+    type: "run",
+    id: view.id,
+    channelId: view.channelId ?? "",
+    userId: view.userId ?? "",
+    ...(view.repo !== undefined ? { repo: view.repo } : {}),
+    channelVisibility: view.channelVisibility ?? "unknown",
+  };
 }
 
 export type RunListStatus = "active" | "finished" | "all";
