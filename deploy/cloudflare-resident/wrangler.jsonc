@@ -27,22 +27,34 @@
       // match the @cloudflare/sandbox version in package.json EXACTLY (no
       // 'latest' tag exists) — bump both together.
       "image": "./Dockerfile",
-      // Custom 1 vCPU / 4 GiB / 8 GB (was standard-1 = ½ vCPU / 4 GiB / 8 GB).
-      // Cloudflare bills vCPU on ACTIVE use only; memory and disk bill on the
-      // provisioned size for every second the container is awake. A resident
-      // is effectively always-on (10-min refresh alarm < 20m sleepAfter), so
-      // memory is the 24/7 line item (memory-only: ~$26/mo at 4 GiB, ~$39/mo
-      // at 6 GiB; the old ~$52 assumed the whole instance, vCPU included) and
-      // the extra vCPU costs nothing until a run uses it. 2026-08-29: a
-      // resident pinned at 100% of ½ vCPU with 2.2 GiB in use — CPU-bound,
-      // memory fine — so we doubled CPU and kept memory. Deliberately NOT
-      // standard-2: that adds 2 GiB nobody uses for +50% on the always-on
-      // cost. 4 GiB fits 1-2 simultaneous test-running threads, which matches
-      // observed concurrency; /detach on run finish keeps threads from piling
-      // up. Grow memory only if resident OOMs actually appear. Custom-type
-      // constraints: whole vCPUs 1-4, >=3 GiB per vCPU, <=2 GB disk per GiB.
-      // (The thread-sandbox Worker is standard-3 — it lives only for one run.)
-      "instance_type": { "vcpu": 1, "memory_mib": 4096, "disk_mb": 8000 },
+      // Custom 1 vCPU / 8 GiB / 16 GB. This ONE type is every resident's
+      // container (one DO per repo, one container class), so it is sized for
+      // the largest onboarded repo — and the disk is the binding constraint,
+      // not memory: Cloudflare caps disk at 2 GB per GiB of memory, so 16 GB
+      // of disk requires 8 GiB. The sizing is arithmetic over measured parts,
+      // checked by instanceSizing.test.ts against this file: 2026-09-04 the
+      // nominal resident filled the previous 8 GB in 45 min (provision 21:02Z,
+      // one thread attached 21:44Z, ENOSPC at 21:50Z) — nominal at that day's
+      // main measures 357 MB of history, a 75 MB tree and 2.1 GB of pnpm
+      // node_modules; a resident holds the mirror, the warm checkout, and one
+      // FULL clone per active thread (deps hardlinked, but a thread whose
+      // lockfile differs installs its own 2.1 GB under its own user's pnpm
+      // store), plus the ~0.5 GB OS image on the same filesystem and the
+      // refresh snapshot in flight. Three deps-installing threads: ~12.7 GB.
+      // 8 GB was the platform default, never a budget.
+      //
+      // Cost: vCPU bills on ACTIVE use only; memory and disk bill on the
+      // provisioned size while awake, and a resident is effectively always-on
+      // (10-min refresh alarm < 20m sleepAfter) — memory-only ~$52/mo at
+      // 8 GiB vs ~$26/mo at 4 GiB, per resident. History: standard-1 (½ vCPU /
+      // 4 GiB / 8 GB) → 2026-08-29 doubled CPU (a resident pinned at 100% of
+      // ½ vCPU, memory fine) → 2026-09-04 doubled memory for the disk it
+      // unlocks. nominal's console build asks for a 16 GB node heap, so if
+      // `build` ever becomes a real command this is still not the ceiling.
+      // Custom-type constraints: whole vCPUs 1-4, >=3 GiB per vCPU, <=2 GB
+      // disk per GiB. (The thread-sandbox Worker is standard-3 — it lives only
+      // for one run.)
+      "instance_type": { "vcpu": 1, "memory_mib": 8192, "disk_mb": 16000 },
       // Platform ceiling only. The enforced cap is RESIDENT_CAP (6) in
       // worker.ts — deliberately below this so an onboard is always refused
       // atomically by the registry, never by a platform scheduling failure.
