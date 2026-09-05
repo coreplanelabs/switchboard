@@ -100,11 +100,14 @@ describe("resident instance type (deploy/cloudflare-resident/wrangler.jsonc)", (
   // source, so re-measuring a part is a one-line edit here and nowhere else.
   // For the record, at the 2026-09-04 inputs: incident 7654 MB, target 12718 MB.
 
-  it("the previous 8 GB did not fit the incident's shape — one thread with its own deps install plus a snapshot in flight", () => {
-    // image + mirror + checkout + one thread tree + its own deps + staging,
-    // against 8000 MB provisioned (7.3 GiB usable): no headroom, and any
-    // second thread or leftover from a failed provision tips it over — which
-    // is what happened.
+  it("the previous 8 GB did not fit the incident's shape — one thread carrying a full copy of the deps plus a snapshot in flight", () => {
+    // image + mirror + checkout + one thread tree + a full copy of its deps +
+    // staging, against 8000 MB provisioned (7.3 GiB usable): no headroom, and
+    // any second thread or leftover from a failed provision tips it over —
+    // which is what happened. The copy is modeled as "a thread whose lockfile
+    // differs installs its own deps"; on 2026-09-04 it was in fact EVERY pnpm
+    // thread, because the mutable-cache swap copied `node_modules/.pnpm`
+    // (residentDepCache.ts, fixed 2026-09-05) — same bytes either way.
     const previousDiskMb = 8000;
     expect(requiredDiskMb(NOMINAL, 1, 1)).toBeGreaterThan(previousDiskMb * 0.9);
   });
