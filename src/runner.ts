@@ -218,7 +218,7 @@ async function runLoop(
   // everything pending becomes ONE text part (plus the inputs' attachments) on
   // the next user turn, each input recorded on the stream as it is consumed.
   const pendingFollowUps = () => (opts.inbox?.size ?? 0) > 0;
-  const drainFollowUps = (): ContentPart[] => {
+  const drainFollowUps = (superseded = false): ContentPart[] => {
     const inputs: FollowUpInput[] = opts.inbox?.drain() ?? [];
     for (const input of inputs) {
       const source = {
@@ -228,7 +228,7 @@ async function runLoop(
       emit({ type: "input", text: redactSecrets(input.text), ...(Object.keys(source).length > 0 ? { source } : {}) });
       note("follow_up", `follow-up folded in: ${redactSecrets(followUpSnippet(input))}`);
     }
-    const parts: ContentPart[] = [{ type: "text", text: followUpPrompt(inputs) }];
+    const parts: ContentPart[] = [{ type: "text", text: followUpPrompt(inputs, { superseded }) }];
     for (const input of inputs) {
       for (const img of input.images ?? []) parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
       for (const doc of input.documents ?? []) parts.push({ type: "document", mediaType: doc.mediaType, data: doc.data, ...(doc.name ? { name: doc.name } : {}) });
@@ -266,14 +266,17 @@ async function runLoop(
       }
       // A follow-up landed while the model wrote this answer (thread-admission
       // item 3): the answer is superseded — it becomes narration on the
-      // stream, the follow-up the next user turn, and the loop goes on. Only
-      // when another step is allowed: at a budget or a stop the answer stands
-      // and the follow-up stays in the inbox for the dispatcher's fresh turn.
+      // stream, the follow-up the next user turn, and the loop goes on. The
+      // follow-up prompt says so (`superseded`): the thread never saw that
+      // answer, so the next one must cover the original request too, not be
+      // an increment on it. Only when another step is allowed: at a budget or
+      // a stop the answer stands and the follow-up stays in the inbox for the
+      // dispatcher's fresh turn.
       if (pendingFollowUps() && wouldStep(turn + 1, iteration + 1)) {
         turn++;
         if (text) emit({ type: "assistant", text: redactSecrets(text) });
         messages.push({ role: "assistant", content: result.content });
-        messages.push({ role: "user", content: drainFollowUps() });
+        messages.push({ role: "user", content: drainFollowUps(true) });
         continue;
       }
       return text || "_(no response)_";

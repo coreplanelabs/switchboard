@@ -1393,9 +1393,30 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
     const msgs = provider.requests[1].messages;
     expect(msgs[msgs.length - 2]).toEqual({ role: "assistant", content: [{ type: "text", text: "first answer" }] });
     expect(msgs[msgs.length - 1].role).toBe("user");
-    expect((msgs[msgs.length - 1].content[0] as { text: string }).text).toContain("one more thing");
+    const prompt = (msgs[msgs.length - 1].content[0] as { text: string }).text;
+    expect(prompt).toContain("one more thing");
+    // The model is told the answer it just wrote was NOT delivered and that the
+    // next one must cover the original request too (live 2026-09-05: without
+    // this the thread got only "Perfect addition. Let me add that detail…").
+    expect(prompt).toContain("That answer was NOT delivered");
+    expect(prompt).toContain("covers the original request AND this follow-up");
     // The superseded answer is on the record as narration, never as the answer.
     expect(events.find((e) => e.type === "assistant")).toMatchObject({ text: "first answer" });
+  });
+
+  it("a follow-up riding a tool turn does NOT carry the superseded wording — nothing was displaced", async () => {
+    const inbox = new FollowUpInbox();
+    let calls = 0;
+    const provider = scripted([bashUse("t1"), text("done")]);
+    const inner = provider.complete.bind(provider);
+    provider.complete = async (req) => {
+      if (calls++ === 0) inbox.push(followUp("also this"));
+      return inner(req);
+    };
+    await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox });
+    const prompt = (lastUserContent(provider.requests[1])[1] as { text: string }).text;
+    expect(prompt).toContain("sent while you were working");
+    expect(prompt).not.toContain("NOT delivered");
   });
 
   it("when the budget allows no further step, the answer stands and the follow-up stays unconsumed for a fresh turn", async () => {

@@ -152,12 +152,26 @@ export function refusalReply(live: LiveThread, decision: { reason: "agent_mismat
   return `${head}\nA *${live.agent}* run does not take follow-ups mid-flight — wait for it to finish, then re-send (or stop it from the live run page).`;
 }
 
-const FOLLOW_UP_HEADER = "↪ Follow-up from the thread, sent while you were working. Take it into account from here on; it may narrow, widen or redirect the task:";
+/** The header for follow-ups drained on a tool turn: the model is mid-task. */
+const followUpHeader = (n: number) =>
+  n > 1
+    ? `↪ ${n} follow-ups from the thread, sent while you were working. Take them into account from here on; they may narrow, widen or redirect the task:`
+    : "↪ Follow-up from the thread, sent while you were working. Take it into account from here on; it may narrow, widen or redirect the task:";
 
-/** The text block the runner hands the model for a batch of drained follow-ups. */
-export function followUpPrompt(inputs: FollowUpInput[]): string {
+/** The header when the follow-ups landed on a finished answer (item 3): that
+ *  answer was never delivered — the thread has seen nothing yet — so the model
+ *  must not write an increment on top of it (live 2026-09-05: "Perfect
+ *  addition. Let me add that detail…" was the ONLY reply the thread got). */
+const supersededHeader = (n: number) =>
+  `↪ ${n > 1 ? `${n} follow-ups` : "Follow-up"} from the thread, sent while you were writing your answer. That answer was NOT delivered — the thread has not seen it, and it will not be sent. Write ONE complete answer now that covers the original request AND ${n > 1 ? "all of these follow-ups" : "this follow-up"}:`;
+
+/** The text block the runner hands the model for a batch of drained follow-ups
+ *  (any count: one is quoted as is, several are a bulleted list in arrival
+ *  order). `superseded`: the batch displaced a final answer rather than riding
+ *  a tool turn. */
+export function followUpPrompt(inputs: FollowUpInput[], opts: { superseded?: boolean } = {}): string {
   const body = inputs.map((i) => (inputs.length > 1 ? `- ${i.text}` : i.text)).join("\n");
-  return `${FOLLOW_UP_HEADER}\n\n${body}`;
+  return `${opts.superseded ? supersededHeader(inputs.length) : followUpHeader(inputs.length)}\n\n${body}`;
 }
 
 /** A short, single-line snippet of a follow-up for cards and run notes. */
