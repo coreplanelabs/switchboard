@@ -6934,7 +6934,7 @@ describe("thread admission (features/thread-admission.md)", () => {
     expect(second.statuses).toEqual([]);
     expect(second.replies).toHaveLength(1);
     expect(second.replies[0]).toMatch(/^↪ Folded into the \*general\* run already in flight/);
-    expect(second.replies[0]).toContain("<https://sb.example/runs/r1?t=t|live run>");
+    expect(second.replies[0]).toContain(" · https://sb.example/runs/r1?t=t"); // bare URL: the reply path escapes mrkdwn <url|label>
     // The live run reads it at its next step: the answer it was writing is
     // superseded, the follow-up is the next user turn, the run's answer follows it.
     settle().answer("first draft");

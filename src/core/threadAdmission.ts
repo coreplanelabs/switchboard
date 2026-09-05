@@ -132,7 +132,11 @@ export function decideFollowUp(live: LiveThread, requested: { agent?: string }):
 }
 
 const elapsed = (live: LiveThread, now: number) => `${Math.max(0, Math.round((now - live.startedAt) / 1000))}s`;
-const linkSuffix = (live: LiveThread) => (live.runLink ? ` · <${live.runLink}|live run>` : "");
+// A bare URL, never mrkdwn `<url|label>`: `ChannelIO.reply` escapes `<`/`>`
+// (live 2026-09-05 the label form arrived as literal `&lt;…|live run&gt;`),
+// and Slack auto-links a bare URL — the same convention as the review
+// verdict's run link.
+const linkSuffix = (live: LiveThread) => (live.runLink ? ` · ${live.runLink}` : "");
 
 /** The one-line reply a steered follow-up gets: where it went. */
 export function steerAck(live: LiveThread, now: number): string {

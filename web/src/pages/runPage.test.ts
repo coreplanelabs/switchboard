@@ -50,6 +50,31 @@ afterEach(() => {
 });
 
 describe("RunPage — history mode", () => {
+  // features/thread-admission.md item 2: a steered follow-up is a second `input`
+  // on the same run — listed under the request, never in its place.
+  it("keeps the first input as the Request and lists later inputs as follow-ups under it (one run, several inputs)", () => {
+    const { factory } = fakeEventSourceFactory();
+    const w = mountApp(RunPage, {
+      seed: historySeed([
+        input,
+        call("c1", "$ npm test", 3000),
+        { type: "input", text: "also the **numbers**", at: 3500, source: { user: "bob", url: "https://acme.slack.com/archives/C1/p2" } },
+        { type: "run_note", kind: "follow_up", summary: "follow-up folded in: also the numbers", at: 3500 },
+        result("c1", { at: 4000 }),
+        { type: "answer", text: "done", at: 5000 },
+      ] as LiveFrame[], { status: "completed", durationMs: 4000 }),
+      eventSource: factory,
+    });
+    expect(w.find("#request").text()).toContain("fix the"); // the original stays the request
+    expect(w.find("#request .source").text()).toContain("justin");
+    const followUps = w.findAll("#followups .followup");
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0].text()).toContain("follow-up");
+    expect(followUps[0].text()).toContain("bob");
+    expect(followUps[0].find("strong").text()).toBe("numbers"); // markdown, same renderer
+    expect(w.findAll("#request").length).toBe(1); // never a second request block
+  });
+
   it("seeds the whole record through the ONE fold: request (with source), steps, cards, answer; no stream, no stop controls", () => {
     const { created, factory } = fakeEventSourceFactory();
     const w = mountApp(RunPage, {

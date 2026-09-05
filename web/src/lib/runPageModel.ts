@@ -118,7 +118,12 @@ export interface AnswerVm {
 
 export interface RunPageModel {
   state: {
+    /** The FIRST `input` event — what started the run. */
     request: RequestVm | null;
+    /** Every later `input`: a thread follow-up steered into this run
+     *  (features/thread-admission.md item 2), listed under the request. One
+     *  run, several inputs — never a second request block. */
+    followUps: RequestVm[];
     meta: MetaVm | null;
     context: ContextTurnVm[];
     log: LogItem[];
@@ -180,6 +185,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
 
   const state: RunPageModel["state"] = reactive({
     request: null,
+    followUps: [],
     meta: null,
     context: [],
     log: [],
@@ -306,9 +312,15 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
   function apply(change: TimelineChange): void {
     state.placeholder = false;
     switch (change.kind) {
-      case "input":
-        state.request = { text: change.text, at: change.at, ...(change.source ? { source: change.source } : {}) };
+      case "input": {
+        const vm: RequestVm = { text: change.text, at: change.at, ...(change.source ? { source: change.source } : {}) };
+        // The first input is the request; a later one is a steered follow-up
+        // and must never replace it (live 2026-09-05: the header showed the
+        // follow-up as THE request).
+        if (state.request) state.followUps.push(vm);
+        else state.request = vm;
         return;
+      }
       case "step":
         addStep(change.step);
         return;

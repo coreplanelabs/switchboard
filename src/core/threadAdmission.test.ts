@@ -103,17 +103,25 @@ describe("decideFollowUp", () => {
 describe("replies", () => {
   const live: LiveThread = { agent: "coding", policy: "steer", inbox: new FollowUpInbox(), startedAt: 10_000, runLink: "https://sb/runs/r1?t=x" };
 
-  it("the steer ack names the agent, the elapsed time and links the live run", () => {
+  it("the steer ack names the agent, the elapsed time and carries the live run's URL bare (the reply path escapes mrkdwn `<url|label>`)", () => {
     const ack = steerAck(live, 73_000);
     expect(ack).toContain("*coding*");
     expect(ack).toContain("63s");
-    expect(ack).toContain("<https://sb/runs/r1?t=x|live run>");
+    expect(ack).toContain(" · https://sb/runs/r1?t=x");
+    expect(ack).not.toMatch(/[<>]/);
     expect(ack).toMatch(/^↪ /);
   });
 
-  it("without a run link (setup still in progress) the ack has no dangling link", () => {
+  it("the refusal carries the same bare URL", () => {
+    const text = refusalReply(live, { reason: "agent_mismatch" }, "review", 20_000);
+    expect(text).toContain(" · https://sb/runs/r1?t=x");
+    expect(text).not.toMatch(/[<>]/);
+  });
+
+  it("without a run link (setup still in progress) the ack has no dangling separator or link", () => {
     const ack = steerAck({ ...live, runLink: undefined }, 20_000);
-    expect(ack).not.toContain("<");
+    expect(ack).not.toContain("·");
+    expect(ack).not.toContain("http");
     expect(ack).toContain("10s");
   });
 
