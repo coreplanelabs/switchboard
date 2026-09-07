@@ -1,0 +1,1 @@
+receipt for #455: a reply into a live review run is folded in, not refused (PR #511)
