@@ -10,6 +10,10 @@ import type { CallVm } from "../../lib/runPageModel";
 const props = defineProps<{ call: CallVm }>();
 
 function toggle(): void {
+  // `open` is UI state on the page's own view-model object, shared with the
+  // Expand-all / Collapse-all control above the log; the model is the single
+  // source of truth for it, so the card writes there rather than emitting.
+  // eslint-disable-next-line vue/no-mutating-props -- see above
   props.call.open = !props.call.open;
 }
 </script>

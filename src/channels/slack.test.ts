@@ -471,7 +471,7 @@ describe("fetchImages (attachment ingestion within budgets)", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
-        throw "string failure"; // eslint-disable-line no-throw-literal
+        throw "string failure";
       }),
     );
     const { images, skipped } = await fetchImages([png("a.png")], 10);

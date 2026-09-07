@@ -331,7 +331,7 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<Catch
   const { client, botUserId } = opts;
   const record = opts.record ?? recordCatchUpOutcome;
 
-  let channels: string[] = [];
+  let channels: string[];
   try {
     channels = await listChannels(client);
   } catch (err) {

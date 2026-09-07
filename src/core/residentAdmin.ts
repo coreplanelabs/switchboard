@@ -48,6 +48,7 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
       throw new Error(
         `resident admin ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
           "The operation may still have run in the resident; check `repo list` before re-running it.",
+        { cause: err },
       );
     }
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;

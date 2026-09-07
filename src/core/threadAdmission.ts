@@ -194,9 +194,7 @@ export function followUpSnippet(input: FollowUpInput, max = 80): string {
  * joined in arrival order, attachments concatenated, identity from the last
  * (most recent) input. Empty input → undefined (nothing to run).
  */
-export function mergeFollowUps(
-  inputs: FollowUpInput[],
-):
+export function mergeFollowUps(inputs: FollowUpInput[]):
   | {
       text: string;
       userId: string;

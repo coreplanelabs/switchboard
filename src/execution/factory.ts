@@ -230,6 +230,7 @@ async function openResident(
       if (again instanceof ResidentNeedsRefError) {
         throw new Error(
           `resident attach: ${opts.resource} refused its own default ref "${err.defaultRef}" (${again.message})`,
+          { cause: again },
         );
       }
       throw again;

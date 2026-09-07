@@ -179,7 +179,9 @@ export class WorkerMcpSecretStore implements McpSecretStore {
         signal: AbortSignal.timeout(MCP_SECRET_WORKER_TIMEOUT_MS),
       });
     } catch (err) {
-      throw new Error(`MCP secret store unreachable: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(`MCP secret store unreachable: ${err instanceof Error ? err.message : String(err)}`, {
+        cause: err,
+      });
     }
     if (!res.ok) throw new Error(`MCP secret store answered HTTP ${res.status} on ${path}`);
     const body: unknown = await res.json().catch(() => undefined);

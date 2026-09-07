@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AGENTS, type AgentDef } from "../agents/registry.js";
+import { AGENTS } from "../agents/registry.js";
 import { resetResidentProbeCache } from "../execution/factory.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import {

@@ -7561,7 +7561,7 @@ workspaceDir: __WORKDIR__
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     const final = replies[replies.length - 1];
     expect(final).toMatch(/Unaddressed \(no disposition\):[\s\S]*F1 src\/auth\.ts — missing rate limit/);
-    expect(final).toMatch(/Declined \(disposition recorded\):\n  - none/);
+    expect(final).toMatch(/Declined \(disposition recorded\):\n {2}- none/);
   });
 });
 

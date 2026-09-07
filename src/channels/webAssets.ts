@@ -54,6 +54,7 @@ export function loadWebAssets(distDir: string): WebAssets {
   } catch (err) {
     throw new Error(
       `web app manifest not found under ${distDir} — build it first (npm run build in web/): ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
     );
   }
   const entryChunk = Object.values(manifest).find((c) => c.isEntry);

@@ -184,6 +184,7 @@ describe("renderMemoryBlock", () => {
     // No fabricated blank-line turn, and no control chars survive (the single
     // \n line joiners are legitimate; \r, \x07, etc. are not).
     expect(block).not.toContain("\n\n");
+    // eslint-disable-next-line no-control-regex -- asserting the control characters are gone
     expect(block).not.toMatch(/[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029]/);
     // The sanitized text is present as a single-line bullet, with the echoed
     // closing delimiter escaped so it cannot forge the fence.

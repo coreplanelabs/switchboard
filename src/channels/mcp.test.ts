@@ -5,7 +5,6 @@ import { ALL_GRANTS } from "../core/authz/grants.js";
 import type { DispatchFn, IngressConfig, IngressIdentity } from "./http.js";
 import type { CoreDeps } from "../core/dispatcher.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
-import { z } from "zod";
 import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
 import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
 import type { RunEvent } from "../core/runEvents.js";

@@ -372,7 +372,7 @@ export class WorkerOverridesBacking implements OverridesBacking {
         signal: AbortSignal.timeout(CONFIG_WORKER_TIMEOUT_MS),
       });
     } catch (err) {
-      throw new Error(`config store unreachable: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(`config store unreachable: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
     }
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (res.status === 409) {
@@ -1003,7 +1003,12 @@ export function validateMcpServers(
       try {
         assertUrlAllowed(raw.url);
       } catch (err) {
-        throw new Error(`${source}: ${path}.${name}.url: ${err instanceof Error ? err.message : "not an http(s) URL"}`);
+        throw new Error(
+          `${source}: ${path}.${name}.url: ${err instanceof Error ? err.message : "not an http(s) URL"}`,
+          {
+            cause: err,
+          },
+        );
       }
       for (const a of raw.agents ?? []) {
         if (!AGENTS[a]) throw new Error(`${source}: ${path}.${name}.agents: unknown agent "${a}"`);

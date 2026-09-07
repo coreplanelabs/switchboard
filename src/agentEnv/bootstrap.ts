@@ -196,7 +196,7 @@ export function parseManifest(text: string): AgentEnvManifest {
   try {
     raw = JSON.parse(stripJsonc(text));
   } catch (e) {
-    throw new Error(`agent-env manifest is not valid JSONC: ${(e as Error).message}`);
+    throw new Error(`agent-env manifest is not valid JSONC: ${(e as Error).message}`, { cause: e });
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error('agent-env manifest must be a JSON object of { <env>: { <service>: { <NAME>: "op://…" } } }');

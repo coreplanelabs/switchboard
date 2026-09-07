@@ -62,7 +62,7 @@ export function residentSlug(record: ResidentRecordView): string {
  *  container before its first cycle) or the field is malformed. The shape is
  *  the resident's `DiskSample` (KiB; a `parts` value may be null = unmeasured,
  *  rendered "?"), validated field by field — the view displays, never trusts. */
-export interface ResidentDiskView extends DiskSample {}
+export type ResidentDiskView = DiskSample;
 
 const kib = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
 const kibMap = (v: unknown): Record<string, number> => {

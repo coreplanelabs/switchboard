@@ -121,7 +121,7 @@ describe("makeResidentAdminClient (real fetch client)", () => {
   });
 
   it("residentAdminFromConfig: no execution.resident → names the config; no bearer → names the env var; both set → the real client with the bearer", async () => {
-    const NO_RESIDENT = YAML_FIXTURE.replace(/  resident:[\s\S]*$/m, "");
+    const NO_RESIDENT = YAML_FIXTURE.replace(/ {2}resident:[\s\S]*$/m, "");
     expect(residentAdminFromConfig(store(NO_RESIDENT), {})).toEqual({
       unavailable: expect.stringContaining("execution.resident"),
     });

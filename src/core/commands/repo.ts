@@ -558,12 +558,10 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
       const ops = await deps.repo.operations(caller);
       if (!ops) throw new CommandError("unavailable", NO_OPS_BACKEND_MESSAGE);
       const req = { repo: args.slug, ...(args.ref !== undefined ? { ref: args.ref } : {}) };
-      const result = await ops
-        .run(op, req)
-        .catch((err: unknown) => ({
-          kind: "error" as const,
-          message: err instanceof Error ? err.message : String(err),
-        }));
+      const result = await ops.run(op, req).catch((err: unknown) => ({
+        kind: "error" as const,
+        message: err instanceof Error ? err.message : String(err),
+      }));
       switch (result.kind) {
         case "result":
           return {

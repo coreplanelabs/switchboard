@@ -124,6 +124,7 @@ describe("summarizeToolResult", () => {
       "\x1b[32m✓\x1b[39m src/tools/skills.test.ts \x1b[2m(\x1b[22m\x1b[2m9 tests\x1b[22m\x1b[2m)\x1b[22m \x1b[32m 11\x1b[2mms\x1b[22m\x1b[39m\nline2",
     );
     expect(s).toContain("✓ src/tools/skills.test.ts (9 tests)  11ms");
+    // eslint-disable-next-line no-control-regex -- asserting the ANSI escapes are gone
     expect(s).not.toMatch(/\x1b|\[\d+m/);
   });
 

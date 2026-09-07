@@ -3,15 +3,17 @@
 // amber transitional, red failed/down, grey finished/unknown. The label is the
 // accessible name; `tip` adds the shared tooltip.
 
-const props = defineProps<{
-  tone: "green" | "amber" | "red" | "grey";
+type Tone = "green" | "amber" | "red" | "grey";
+
+defineProps<{
+  tone: Tone;
   label: string;
   tip?: string;
   /** Live rows breathe (reduced-motion turns it off). */
   pulse?: boolean;
 }>();
 
-const TONE: Record<typeof props.tone, string> = {
+const TONE: Record<Tone, string> = {
   green: "bg-green-600",
   amber: "bg-yellow-600",
   red: "bg-red-500",

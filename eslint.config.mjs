@@ -49,6 +49,19 @@ export default tseslint.config(
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" },
       ],
+      // A binding captured by a closure before its single later assignment
+      // (wiring resolved after construction) legitimately needs `let`.
+      "prefer-const": ["error", { ignoreReadBeforeAssign: true }],
+    },
+  },
+  {
+    // Tests and test helpers: doubles reach into SDK shapes through `any`, and a
+    // test file may define several throwaway components. Production code keeps
+    // both rules.
+    files: ["**/*.test.ts", "**/*.test.mjs", "web/src/testing/**"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
+      "vue/one-component-per-file": "off",
     },
   },
   prettier,

@@ -129,14 +129,14 @@ onUnmounted(() => {
     <RunsTabs current="runs" />
 
     <div class="toolbar mb-1.5 flex items-center gap-4 px-2 text-xs text-muted">
-      <span class="count tabular-nums" id="livecount">{{ liveCount }} running</span>
+      <span id="livecount" class="count tabular-nums">{{ liveCount }} running</span>
       <span class="filter ml-auto inline-flex items-center gap-1.5">
         <label
           class="toggle inline-flex cursor-pointer select-none items-center gap-1.5 text-toned hover:text-highlighted"
         >
           <input
-            type="checkbox"
             id="showdone"
+            type="checkbox"
             class="accent-green-600"
             :checked="showAll"
             aria-describedby="retention"
@@ -151,7 +151,7 @@ onUnmounted(() => {
             >?</span
           >
         </UTooltip>
-        <span class="sr-only" id="retention">{{ retention }}</span>
+        <span id="retention" class="sr-only">{{ retention }}</span>
       </span>
     </div>
 

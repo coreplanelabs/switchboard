@@ -85,7 +85,7 @@ describe("splitRunLabel", () => {
     for (const fn of [formatElapsed, splitRunLabel]) {
       const src = String(fn);
       expect(src).not.toMatch(/\brequire\(|\bimport\b/);
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+
       expect(typeof new Function(`var __name = function (f) { return f; }; return (${src});`)()).toBe("function");
     }
   });

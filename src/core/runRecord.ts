@@ -520,7 +520,7 @@ export function fitRecordToBudget(record: RunRecord, maxBytes: number = MAX_RECO
     if (takeHead) head++;
     else tail++;
   }
-  let kept = [...events.slice(0, head), ...events.slice(events.length - tail)];
+  const kept = [...events.slice(0, head), ...events.slice(events.length - tail)];
   while (kept.length > 0 && measure(kept) > maxBytes) {
     // Estimate was optimistic (should not happen; defensive): drop from the center.
     kept.splice(Math.floor(kept.length / 2), 1);

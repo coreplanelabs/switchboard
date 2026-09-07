@@ -94,7 +94,7 @@ export function bridgeMcpTools(
             bytes: 0,
           });
           const message = err instanceof McpError ? err.message : err instanceof Error ? err.message : String(err);
-          throw new Error(`MCP ${server.name}/${t.name} failed: ${message}`);
+          throw new Error(`MCP ${server.name}/${t.name} failed: ${message}`, { cause: err });
         }
         const text = renderContent(result);
         const clipped = clip(text, MCP_RESULT_CAP);

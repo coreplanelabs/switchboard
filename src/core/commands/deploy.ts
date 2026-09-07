@@ -64,10 +64,7 @@ const positiveInt = z.coerce.number().int().positive();
  *  characters, and never a leading `-`: that would reach git's argv looking like an option. */
 const gitRef = z
   .string()
-  .regex(
-    /^[A-Za-z0-9_.\/^~@{}][A-Za-z0-9_.\/^~@{}-]{0,199}$/,
-    "expected a git revision (a sha, tag, branch, or HEAD^)",
-  );
+  .regex(/^[A-Za-z0-9_./^~@{}][A-Za-z0-9_./^~@{}-]{0,199}$/, "expected a git revision (a sha, tag, branch, or HEAD^)");
 
 const deployOptions = z.object({
   only: workerList

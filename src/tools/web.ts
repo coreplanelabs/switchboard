@@ -1,6 +1,6 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { Agent, fetch as undiciFetch } from "undici";
-import type { RunnableTool, ToolContext } from "./workspace.js";
+import type { RunnableTool } from "./workspace.js";
 
 // Provider-agnostic web tools (Area 5 / R16): URL reading (web_fetch) and web
 // search (web_search). These do network I/O in the bot process directly — NOT

@@ -65,7 +65,7 @@ function ser(n: FakeNode): string {
 }
 
 function render(text: string): { html: string; root: FakeNode } {
-  const { doc, node } = makeDoc();
+  const { node } = makeDoc();
   const root = node("div");
   renderMarkdownInto(root as unknown as HTMLElement, text);
   return { html: ser(root).replace(/^<div>|<\/div>$/g, ""), root };

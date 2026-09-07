@@ -278,7 +278,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           <span id="state" class="dur text-xs tabular-nums text-muted">{{ endDuration }}</span>
         </template>
         <template v-else>
-          <span class="pulse text-[1.1em] leading-none" :class="pulseCls" id="statedot">∿</span>
+          <span id="statedot" class="pulse text-[1.1em] leading-none" :class="pulseCls">∿</span>
           <span id="state" class="text-xs tabular-nums" :class="stopError ? 'text-bad' : 'text-muted'">{{
             headerText
           }}</span>
@@ -286,7 +286,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       </span>
     </template>
     <template #actions>
-      <span v-if="!actionsHidden" class="actions flex gap-1.5" id="actions">
+      <span v-if="!actionsHidden" id="actions" class="actions flex gap-1.5">
         <UTooltip text="Soft stop: no new steps, the agent writes up what it has">
           <UButton
             size="xs"
@@ -367,8 +367,8 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
              destination; the sha is gone for the same reason. -->
         <div
           v-if="state.meta"
-          class="runmeta mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 border-t border-default pt-2.5 text-xs text-muted"
           id="runmeta"
+          class="runmeta mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 border-t border-default pt-2.5 text-xs text-muted"
         >
           <span class="agent text-[0.68rem] font-semibold uppercase tracking-wider text-toned">{{
             state.meta.agent
@@ -509,8 +509,8 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         <!-- The live tail: what is happening right now, always last while connected. -->
         <li
           v-if="tailVisible"
-          class="tail mt-10 flex items-center gap-3 border-t border-dashed border-accented py-3 pl-6 pr-8 text-[0.8rem] text-muted"
           id="tail"
+          class="tail mt-10 flex items-center gap-3 border-t border-dashed border-accented py-3 pl-6 pr-8 text-[0.8rem] text-muted"
         >
           <span class="pulse text-[1.1em] leading-none text-info motion-safe:animate-pulse">∿</span>
           <span class="verb text-toned">{{ THINKING[verbIndex] }}…</span>

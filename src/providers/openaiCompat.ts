@@ -85,7 +85,7 @@ export class OpenAICompatProvider implements Provider {
       content.push({ type: "text", text: choice.message.content });
     }
     for (const tc of choice.message.tool_calls ?? []) {
-      let input: unknown = {};
+      let input: unknown;
       try {
         input = JSON.parse(tc.function.arguments || "{}");
       } catch {

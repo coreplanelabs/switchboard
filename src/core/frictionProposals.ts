@@ -1,5 +1,4 @@
 import {
-  FRICTION_CATEGORIES,
   formatMs,
   isSetupInstallCommand,
   type FrictionCategory,

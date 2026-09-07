@@ -303,12 +303,12 @@ const REDACT: Array<{ re: RegExp; replace: string }> = [
   // URL / connection-string basic-auth: scheme://user:password@host
   // Anchored to the start of a scheme-character run (not `\b`): one attempt per
   // run keeps a long pasted token linear, and `1https://u:p@h` still redacts.
-  { re: /(?<![a-z0-9+.\-])([a-z0-9+.\-]+:\/\/)([^\s:/@]+):([^\s:/@]+)@/gi, replace: "$1$2:«redacted»@" },
+  { re: /(?<![a-z0-9+.-])([a-z0-9+.-]+:\/\/)([^\s:/@]+):([^\s:/@]+)@/gi, replace: "$1$2:«redacted»@" },
   // curl -u user:pass
   { re: /(^|\s)(-u|--user)(\s+|=)\S+:\S+/g, replace: "$1$2$3«redacted»" },
   // HTTP auth headers (Bearer / Basic / token) and bare Bearer tokens
-  { re: /\b(Authorization\s*:\s*)(Bearer|Basic|token)\s+[A-Za-z0-9._~+/=\-]{8,}/gi, replace: "$1$2 «redacted»" },
-  { re: /\b[Bb]earer\s+[A-Za-z0-9._~+/\-]{12,}=*/g, replace: "Bearer «redacted»" },
+  { re: /\b(Authorization\s*:\s*)(Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]{8,}/gi, replace: "$1$2 «redacted»" },
+  { re: /\b[Bb]earer\s+[A-Za-z0-9._~+/-]{12,}=*/g, replace: "Bearer «redacted»" },
   // Cookies (whole header value)
   { re: /\b((?:Set-)?Cookie\s*:\s*)[^\r\n]+/gi, replace: "$1«redacted»" },
   // Provider / cloud token formats
@@ -319,7 +319,7 @@ const REDACT: Array<{ re: RegExp; replace: string }> = [
   { re: /sk-ant-[A-Za-z0-9_-]{16,}/g, replace: "«redacted-anthropic-key»" },
   { re: /sk-(?:proj-)?[A-Za-z0-9_-]{16,}/g, replace: "«redacted-api-key»" },
   { re: /AKIA[0-9A-Z]{16}/g, replace: "«redacted-aws-key»" },
-  { re: /AIza[0-9A-Za-z_\-]{35}/g, replace: "«redacted-gcp-key»" },
+  { re: /AIza[0-9A-Za-z_-]{35}/g, replace: "«redacted-gcp-key»" },
   { re: /\b(?:whsec|sk_live|sk_test|rk_live|pk_live)_[A-Za-z0-9]{16,}/g, replace: "«redacted-stripe-key»" },
 ];
 
@@ -372,7 +372,7 @@ export function redactSecrets(text: string): string {
 // shows the bare `[32m` remainder, so strip the whole sequence before display.
 const ANSI_RE =
   // eslint-disable-next-line no-control-regex
-  /\x1b\[[0-?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]|[\x00-\x08\x0b-\x1f\x7f]/g;
+  /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]|[\x00-\x08\x0b-\x1f\x7f]/g;
 
 /** Remove terminal escape/control sequences, leaving printable text, `\n`, `\t`.
  *  Callers strip BEFORE redactSecrets: an escape embedded mid-token would

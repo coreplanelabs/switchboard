@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { BootstrapResult } from "../agentEnv/bootstrap.js";
 import { AGENTS } from "../agents/registry.js";
-import { CLI_CALLER, parseCliArgv, runCli, runCommand } from "../cli.js";
+import { CLI_CALLER, parseCliArgv, runCli } from "../cli.js";
 import { ConfigStore } from "../config.js";
 import { callerFor, createCommandHttpHandler } from "../channels/commandHttp.js";
 import { handleMcpRequest, toCaller } from "../channels/mcp.js";
@@ -70,7 +70,6 @@ import {
   AUTHZ_ROLES,
   buildAuthorizationMatrix,
   buildConformanceMatrix,
-  CALLER_ID,
   carriedBy,
   catalogueSnapshot,
   COMMAND_FIXTURES,

@@ -1,11 +1,5 @@
 import { z } from "zod";
-import {
-  acceptsUndefined,
-  type ArgDef,
-  type CommandDef,
-  type CommandInput,
-  type InvokeErrorCode,
-} from "./commandRegistry.js";
+import { acceptsUndefined, type CommandDef, type CommandInput, type InvokeErrorCode } from "./commandRegistry.js";
 
 // Everything a surface shows for a command, DERIVED from its definition (#157
 // KTD20/KTD21). This is the only place a surface name or a grammar exists:

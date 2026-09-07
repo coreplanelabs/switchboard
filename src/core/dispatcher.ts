@@ -89,7 +89,6 @@ import {
   type RunSummary,
 } from "./runRegistry.js";
 import { coalesceStatus } from "./statusCoalescer.js";
-import type { Provider } from "../providers/types.js";
 import type {
   ChannelIO,
   DocumentAttachment,
@@ -2409,7 +2408,7 @@ export function humanizeMessageText(text: string): string {
 function markdownEmphasis(text: string): string {
   const parts = text.split(/(```[\s\S]*?```|`[^`\n]*`)/);
   for (let i = 0; i < parts.length; i += 2) {
-    parts[i] = parts[i].replace(/(^|[\s(\[{"'>])\*(\S(?:[^*\n]*?\S)?)\*(?=$|[\s)\]}.,!?:;"'<])/gm, "$1**$2**");
+    parts[i] = parts[i].replace(/(^|[\s([{"'>])\*(\S(?:[^*\n]*?\S)?)\*(?=$|[\s)\]}.,!?:;"'<])/gm, "$1**$2**");
   }
   return parts.join("");
 }

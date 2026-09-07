@@ -613,6 +613,7 @@ export async function mintRepoScopedToken(env: Env, slug: string): Promise<strin
     const aborted = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
     throw new Error(
       `github-token-mint-failed: ${aborted ? "timed out after 10s contacting api.github.com" : errMsg(err)}`,
+      { cause: err },
     );
   }
   if (!res.ok) {
