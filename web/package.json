@@ -27,7 +27,7 @@
     "@vue/test-utils": "^2.5.0",
     "happy-dom": "^20.0.0",
     "license-checker-rseidelsohn": "^5.0.1",
-    "typescript": "^5.7.0",
+    "typescript": "^7.0.2",
     "vite": "^8.2.2",
     "vitest": "^4.1.11",
     "vue-tsc": "^3.3.11"
