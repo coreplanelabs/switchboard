@@ -115,11 +115,11 @@ describe("resident prompt variants", () => {
   });
 });
 
-// Feature: features/validated-review.md (R14 distilled diffs, R15 validated
-// review). The resident prompts gain two behaviors: coding includes a distilled
-// diff digest in the PR body; review actually RUNS the project's tests/build in
-// the warm worktree and reports what it ran + pass/fail.
-describe("validated-review prompt behavior (resident variants)", () => {
+// Feature: features/distilled-diffs.md (R14). The resident prompts use the
+// digest two ways: coding lets it shape the submitted PR description; review
+// orients with it before reading. Review READS the code — it never runs the
+// project's tests or build (CI's verify gate does that, item 7).
+describe("distilled-diffs prompt behavior (resident variants)", () => {
   it("coding resident: calls diff_digest to inform the submitted description (R14)", () => {
     const sys = AGENTS.coding.residentSystem!;
     expect(sys).toContain("diff_digest");
@@ -129,15 +129,24 @@ describe("validated-review prompt behavior (resident variants)", () => {
     expect(sys).toMatch(/not the raw diff/i);
   });
 
-  it("review resident: runs tests + build and reports what it ran + pass/fail (R15)", () => {
-    const sys = AGENTS.review.residentSystem!;
-    expect(sys).toMatch(/run .*(test|build)/i);
-    expect(sys).toMatch(/pass\/fail/i);
-    // uses the digest to orient
-    expect(sys).toContain("diff_digest");
-    // stays read-only: still no commits/pushes
-    expect(sys).toMatch(/read-only/i);
-    expect(sys).toMatch(/do not (modify|commit)/i);
+  it("review prompts read the code and never run the project's tests or build — CI does (item 7)", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
+      expect(sys).toMatch(/do not run the project's tests or build/i);
+      expect(sys).toMatch(/CI/);
+      // no instruction to run them, no ask to report pass/fail
+      expect(sys).not.toMatch(/RUN the project's tests/);
+      expect(sys).not.toMatch(/npm test/);
+      expect(sys).not.toMatch(/pass\/fail/i);
+      // "read and test" would still imply testing
+      expect(sys).not.toMatch(/read and test/);
+      // stays read-only: still no commits/pushes
+      expect(sys).toMatch(/read-only/i);
+      expect(sys).toMatch(/do not (modify|commit)/i);
+    }
+  });
+
+  it("review resident: orients with the digest", () => {
+    expect(AGENTS.review.residentSystem!).toContain("diff_digest");
   });
 
   it("review resident keeps the gather-once discipline", () => {
