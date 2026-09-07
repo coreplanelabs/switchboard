@@ -9,7 +9,7 @@
     "deploy": "node preflight.mjs && node ../bin/build-stamp.mjs && npm run wake",
     "preflight": "node preflight.mjs",
     "dev": "wrangler dev",
-    "typecheck": "tsc --noEmit worker.ts --skipLibCheck --target es2022 --module es2022 --moduleResolution bundler --types ./node_modules/@cloudflare/workers-types",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "typegen": "wrangler types",
     "tail": "wrangler tail switchboard-resident",
@@ -21,7 +21,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260810.1",
-    "typescript": "^5.7.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.120.1"
   }
