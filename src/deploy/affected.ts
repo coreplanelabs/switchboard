@@ -5,8 +5,9 @@ import { WORKERS, type WorkerDef, type WorkerName } from "./plan.js";
 // only" is a claim; this module works from facts: the commit each Worker is
 // serving (`build.commit` on its /healthz), the paths that changed between
 // that and HEAD, and each Worker's real inputs — the relative-import closure
-// of its `worker.ts`, its own directory, the PRODUCTION half of its lockfile,
-// and for the bot the sources its Dockerfile COPYs. Tests, docs, CI and the
+// of its `worker.ts`, its own directory, its workspace's PRODUCTION closure in
+// the one root lockfile, and for the bot the sources its Dockerfile COPYs and
+// installs. Tests, docs, CI and the
 // deploy tooling are an explicit inert list. Anything neither claimed nor
 // inert is unclassified, and an unclassified path makes every Worker unsure:
 // the fleet deploys and the report says which path to classify. A missed
@@ -41,7 +42,16 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
     rule: "repo metadata",
     test: /^(\.gitignore|\.nvmrc|\.env\.example|LICENSE|NOTICE|docker-compose\.yml|fly\.toml|tsconfig\.scripts\.json|release-please-config\.json|\.release-please-manifest\.json|switchboard\.png)$/,
   },
+  { rule: "lint and format config", test: /^(\.prettierignore|\.prettierrc(\.json)?|eslint\.config\.[cm]?js)$/ },
+  // One npm workspace, one lockfile (#496): a per-workspace lockfile in a diff
+  // is the retired file disappearing, never a dependency changing — the root
+  // lockfile is judged instead (`ROOT_LOCKFILE`, per Worker by its workspace).
+  { rule: "retired per-workspace lockfile", test: /^(deploy\/[^/]+|web|docs)\/package-lock\.json$/ },
 ];
+
+/** The one lockfile (npm workspaces, #496). Judged per Worker: the dependency
+ *  closure of ITS workspace(s), not the file as a whole. */
+export const ROOT_LOCKFILE = "package-lock.json";
 
 export type PathClass =
   { kind: "input"; workers: WorkerName[] } | { kind: "inert"; rule: string } | { kind: "unclassified" };
@@ -159,10 +169,41 @@ export async function importClosure(
 
 // ---- lockfiles and package.json --------------------------------------------------------------------
 
-/** The PRODUCTION dependency set of a `package-lock.json` (v2/v3 `packages`
- *  map): every entry not marked `dev`, keyed by its node_modules path.
- *  `undefined` when the text is not a lockfile — the caller fails open. */
-export function productionDependencies(lockfileText: string | undefined): Map<string, string> | undefined {
+interface LockPackage {
+  version?: unknown;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
+}
+
+/** npm's own resolution over the lockfile's `packages` keys: the nearest
+ *  `node_modules/<name>` walking up from `fromPath` (a nested install first,
+ *  the hoisted one last). `undefined` when no entry resolves. */
+function resolveLockPackage(packages: Record<string, LockPackage>, fromPath: string, name: string): string | undefined {
+  let dir = fromPath;
+  for (;;) {
+    const key = dir ? `${dir}/node_modules/${name}` : `node_modules/${name}`;
+    if (key in packages) return key;
+    if (dir === "") return undefined;
+    const i = dir.lastIndexOf("/node_modules/");
+    dir = i >= 0 ? dir.slice(0, i) : "";
+  }
+}
+
+/**
+ * The dependency closure of one npm workspace in the ROOT `package-lock.json`
+ * (v2/v3 `packages` map), as `{ lockfile path → version }` — what wrangler
+ * bundles for that Worker (`includeDev: false`), or what an image's `npm ci`
+ * installs for it (`includeDev: true`; the toolchain builds the artifact).
+ * The workspace itself is `""` for the root package, else its directory.
+ * `undefined` when the text is not a lockfile or the workspace is not in it —
+ * the caller fails open.
+ */
+export function workspaceDependencies(
+  lockfileText: string | undefined,
+  workspace: string,
+  { includeDev }: { includeDev: boolean },
+): Map<string, string> | undefined {
   if (lockfileText === undefined) return undefined;
   let parsed: unknown;
   try {
@@ -172,15 +213,41 @@ export function productionDependencies(lockfileText: string | undefined): Map<st
   }
   const packages = (parsed as { packages?: unknown } | null)?.packages;
   if (typeof packages !== "object" || packages === null) return undefined;
+  const all = packages as Record<string, LockPackage>;
+  const root = all[workspace];
+  if (typeof root !== "object" || root === null) return undefined;
   const out = new Map<string, string>();
-  for (const [key, value] of Object.entries(packages as Record<string, { version?: unknown; dev?: unknown }>)) {
-    if (key === "" || value?.dev === true) continue;
-    out.set(key, typeof value?.version === "string" ? value.version : "?");
+  const queue: { from: string; names: string[] }[] = [
+    {
+      from: workspace,
+      names: Object.keys({
+        ...root.dependencies,
+        ...root.optionalDependencies,
+        ...(includeDev ? root.devDependencies : {}),
+      }),
+    },
+  ];
+  while (queue.length > 0) {
+    const { from, names } = queue.shift()!;
+    for (const name of names) {
+      const key = resolveLockPackage(all, from, name);
+      if (key === undefined) {
+        // Not in the lockfile at all: record the fact so a diff shows it.
+        out.set(`${from ? `${from}/` : ""}node_modules/${name}`, "unresolved");
+        continue;
+      }
+      if (out.has(key)) continue;
+      const pkg = all[key];
+      out.set(key, typeof pkg.version === "string" ? pkg.version : "?");
+      // Inside the closure only production edges matter: a dependency's own
+      // devDependencies are never installed.
+      queue.push({ from: key, names: Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies }) });
+    }
   }
   return out;
 }
 
-const depName = (key: string) => key.replace(/^node_modules\//, "");
+const depName = (key: string) => key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length);
 
 /** Human lines for what moved between two production dependency sets; empty when nothing did. */
 export function prodDepsDiff(before: Map<string, string>, after: Map<string, string>): string[] {
@@ -364,6 +431,24 @@ export async function computeAffected(
         for (const u of closure.unresolved)
           reasons.push(`unsure: import ${u.specifier} from ${u.from || "(entry)"} resolves to no file`);
         for (const path of changed) {
+          if (path === ROOT_LOCKFILE) {
+            // One lockfile for every workspace: judged per Worker by the
+            // dependency closure of ITS workspace(s), never by the file as a whole.
+            const [beforeText, afterText] = [await probe.fileAt(baseRef, path), await readHead(path)];
+            for (const { workspace, includeDev } of w.inputs.lockfile) {
+              const kind = includeDev ? "dependencies" : "production dependencies";
+              const label = workspace === "" ? "the root package" : workspace;
+              const before = workspaceDependencies(beforeText, workspace, { includeDev });
+              const after = workspaceDependencies(afterText, workspace, { includeDev });
+              if (!before || !after)
+                reasons.push(`${path}: ${kind} of ${label} could not be read — treated as changed`);
+              else {
+                const moved = prodDepsDiff(before, after);
+                if (moved.length > 0) reasons.push(`${path}: ${kind} of ${label} changed — ${moved.join(", ")}`);
+              }
+            }
+            continue;
+          }
           const cls = classifyPath(path, workers);
           if (cls.kind === "inert") continue;
           if (cls.kind === "unclassified") {
@@ -371,16 +456,7 @@ export async function computeAffected(
             continue;
           }
           if (cls.workers.includes(w.name)) {
-            if (w.inputs.prodDepsLockfiles.includes(path)) {
-              const before = productionDependencies(await probe.fileAt(baseRef, path));
-              const after = productionDependencies(await readHead(path));
-              if (!before || !after)
-                reasons.push(`${path}: production dependencies could not be read — treated as changed`);
-              else {
-                const moved = prodDepsDiff(before, after);
-                if (moved.length > 0) reasons.push(`${path}: production dependencies changed — ${moved.join(", ")}`);
-              }
-            } else if (path === "package.json" || path.endsWith("/package.json")) {
+            if (path === "package.json" || path.endsWith("/package.json")) {
               // A Worker dir's own package.json: its devDependencies are the toolchain, not the bundle.
               const ignoreDevDependencies = path === `${w.dir}/package.json`;
               if (

@@ -33,11 +33,20 @@ export const BOT_HEALTH_URL = "https://switchboard.coreplanelabs.dev/healthz";
 
 /** What a Worker is built from, beyond the import closure of its `entry`
  *  (features/release-and-deploy.md item 5). `paths`: a dir prefix (ends with
- *  `/`) or an exact file. `prodDepsLockfiles`: lockfiles judged by their
- *  PRODUCTION dependency set only — a devDependency bump changes no bundle. */
+ *  `/`) or an exact file. `lockfile`: how the ONE root `package-lock.json`
+ *  (npm workspaces, #496) is judged for this Worker — the dependency closure
+ *  of each named workspace (`""` = the root package): production only for a
+ *  wrangler bundle (a devDependency bump changes no bundle), dev included for
+ *  an image whose `npm ci` installs the toolchain that builds the artifact. */
 export interface WorkerInputs {
   paths: readonly string[];
-  prodDepsLockfiles: readonly string[];
+  lockfile: readonly LockfileWorkspace[];
+}
+
+export interface LockfileWorkspace {
+  /** The workspace directory as the lockfile keys it; `""` is the root package. */
+  workspace: string;
+  includeDev: boolean;
 }
 
 /** "One of these env vars must be set" — the resident preflight takes any bearer scope. */
@@ -82,7 +91,10 @@ export const WORKERS: readonly WorkerDef[] = [
     dir: "deploy/cloudflare-memory",
     entry: "deploy/cloudflare-memory/worker.ts",
     healthUrl: "https://switchboard-memory.coreplanelabs.dev/healthz",
-    inputs: { paths: ["deploy/cloudflare-memory/"], prodDepsLockfiles: ["deploy/cloudflare-memory/package-lock.json"] },
+    inputs: {
+      paths: ["deploy/cloudflare-memory/"],
+      lockfile: [{ workspace: "deploy/cloudflare-memory", includeDev: false }],
+    },
     why: "state Worker — DO migrations land before the bot writes to them",
   },
   {
@@ -93,15 +105,17 @@ export const WORKERS: readonly WorkerDef[] = [
     healthUrl: BOT_HEALTH_URL,
     // The Worker shim's dir, plus everything the root Dockerfile COPYs into the
     // image (src/, web/, config/, skills/, the package files, the tsconfigs)
-    // and the two files that decide what it copies. The root lockfile is a
-    // WHOLE-file input: tsc and vite are devDependencies that build the artifact.
+    // and the two files that decide what it copies. The lockfile counts for
+    // the root package and web INCLUDING devDependencies (the Dockerfile's
+    // `npm ci --include-workspace-root --workspace web`: tsc and vite build
+    // the artifact) plus the shim's own production closure (wrangler bundles
+    // it); another workspace's dependency moving (the resident's SDK) does not.
     inputs: {
       paths: [
         "deploy/cloudflare/",
         "Dockerfile",
         ".dockerignore",
         "package.json",
-        "package-lock.json",
         "tsconfig.json",
         "tsconfig.build.json",
         "src/",
@@ -109,7 +123,11 @@ export const WORKERS: readonly WorkerDef[] = [
         "config/",
         "skills/",
       ],
-      prodDepsLockfiles: ["deploy/cloudflare/package-lock.json"],
+      lockfile: [
+        { workspace: "", includeDev: true },
+        { workspace: "web", includeDev: true },
+        { workspace: "deploy/cloudflare", includeDev: false },
+      ],
     },
     preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: BOT_HEALTH_URL },
     liveGate: { healthUrl: BOT_HEALTH_URL },
@@ -123,7 +141,7 @@ export const WORKERS: readonly WorkerDef[] = [
     healthUrl: "https://switchboard-resident.coreplanelabs.dev/healthz",
     inputs: {
       paths: ["deploy/cloudflare-resident/"],
-      prodDepsLockfiles: ["deploy/cloudflare-resident/package-lock.json"],
+      lockfile: [{ workspace: "deploy/cloudflare-resident", includeDev: false }],
     },
     preflight: { forceEnv: "RESIDENT_DEPLOY_FORCE" },
     requiredEnv: [{ anyOf: RESIDENT_BEARER_ENVS }],
@@ -138,7 +156,7 @@ export const WORKERS: readonly WorkerDef[] = [
     healthBearerEnv: "SANDBOX_TOKEN",
     inputs: {
       paths: ["deploy/cloudflare-sandbox/"],
-      prodDepsLockfiles: ["deploy/cloudflare-sandbox/package-lock.json"],
+      lockfile: [{ workspace: "deploy/cloudflare-sandbox", includeDev: false }],
     },
     why: "per-thread exec proxy — stateless per run",
   },

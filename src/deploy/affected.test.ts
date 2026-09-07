@@ -9,8 +9,8 @@ import {
   importSpecifiers,
   packageJsonChangeKind,
   prodDepsDiff,
-  productionDependencies,
   resolveImportCandidates,
+  workspaceDependencies,
   type AffectedProbe,
   type AffectedReport,
 } from "./affected.js";
@@ -33,6 +33,57 @@ const TAG = sha("c");
 
 type Tree = Record<string, string>;
 
+type LockPkg = {
+  version?: string;
+  dev?: boolean;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+};
+
+/** The one root lockfile of an npm workspace, shaped like ours: the root package
+ *  and web install their toolchain, the resident hoists the current sandbox SDK,
+ *  the sandbox Worker keeps its own older SDK nested (a different major), and
+ *  the containers package is nested there too because the versions clash. */
+const ROOT_LOCK_PACKAGES: Record<string, LockPkg> = {
+  "": { dependencies: { zod: "^4.0.0" }, devDependencies: { vitest: "^5.0.0", typescript: "^7.0.2" } },
+  web: { dependencies: { vue: "^3.5.0" }, devDependencies: { vite: "^7.0.0" } },
+  "deploy/cloudflare": {
+    dependencies: { "@cloudflare/containers": "^0.3.7" },
+    devDependencies: { wrangler: "^4.120.1" },
+  },
+  "deploy/cloudflare-memory": { devDependencies: { wrangler: "^4.120.1" } },
+  "deploy/cloudflare-resident": {
+    dependencies: { "@cloudflare/sandbox": "0.13.0" },
+    devDependencies: { wrangler: "^4.120.1" },
+  },
+  "deploy/cloudflare-sandbox": {
+    dependencies: { "@cloudflare/sandbox": "0.3.7" },
+    devDependencies: { wrangler: "^4.120.1" },
+  },
+  "deploy/cloudflare-sandbox/node_modules/@cloudflare/sandbox": {
+    version: "0.3.7",
+    dependencies: { "@cloudflare/containers": "^0.0.28" },
+  },
+  "deploy/cloudflare-sandbox/node_modules/@cloudflare/containers": { version: "0.0.28" },
+  "node_modules/@cloudflare/sandbox": { version: "0.13.0", dependencies: { "@cloudflare/containers": "^0.3.7" } },
+  "node_modules/@cloudflare/containers": { version: "0.3.7" },
+  "node_modules/zod": { version: "4.0.0" },
+  "node_modules/vue": { version: "3.5.0" },
+  "node_modules/vite": { version: "7.0.0", dev: true },
+  "node_modules/vitest": { version: "5.0.0", dev: true },
+  "node_modules/typescript": { version: "7.0.2", dev: true },
+  "node_modules/wrangler": { version: "4.120.1", dev: true },
+};
+
+function lock(packages: Record<string, LockPkg>): string {
+  return JSON.stringify({ name: "x", lockfileVersion: 3, packages: { "": { name: "x" }, ...packages } });
+}
+
+/** The root lockfile with some packages' versions moved. */
+function lockWith(changes: Record<string, LockPkg>): string {
+  return lock({ ...ROOT_LOCK_PACKAGES, ...changes });
+}
+
 /** The smallest repo shaped like ours: four Worker entries importing a few src/ modules. */
 const BASE_TREE: Tree = {
   "deploy/cloudflare-memory/worker.ts":
@@ -52,33 +103,18 @@ const BASE_TREE: Tree = {
   "src/execution/shellQuote.ts": "export const shellQuote = (s: string) => s;\n",
   "src/index.ts": "export const bot = 1;\n",
   "package.json": JSON.stringify({ name: "switchboard", version: "0.1.0", dependencies: { zod: "^4.0.0" } }),
-  "package-lock.json": lock({
-    "node_modules/zod": { version: "4.0.0" },
-    "node_modules/vitest": { version: "5.0.0", dev: true },
-  }),
+  "package-lock.json": lock(ROOT_LOCK_PACKAGES),
   "web/package.json": JSON.stringify({ name: "web", version: "0.1.0" }),
   "deploy/cloudflare-resident/package.json": JSON.stringify({
     name: "resident",
     dependencies: { "@cloudflare/sandbox": "0.13.0" },
   }),
-  "deploy/cloudflare-resident/package-lock.json": lock({
-    "node_modules/@cloudflare/sandbox": { version: "0.13.0" },
-    "node_modules/vitest": { version: "4.1.11", dev: true },
-    "node_modules/wrangler": { version: "4.120.1", dev: true },
-  }),
   "deploy/cloudflare-resident/wrangler.jsonc": '{ "name": "switchboard-resident" }',
   "deploy/cloudflare-resident/Dockerfile": "FROM docker.io/cloudflare/sandbox:0.13.0\n",
-  "deploy/cloudflare-memory/package-lock.json": lock({ "node_modules/vitest": { version: "4.1.11", dev: true } }),
-  "deploy/cloudflare-sandbox/package-lock.json": lock({ "node_modules/@cloudflare/sandbox": { version: "0.3.0" } }),
-  "deploy/cloudflare/package-lock.json": lock({ "node_modules/@cloudflare/containers": { version: "0.3.7" } }),
   "docs/how-to/x.md": "# x\n",
   "features/execution.md": "# spec\n",
   "src/core/drain.test.ts": "test\n",
 };
-
-function lock(packages: Record<string, { version: string; dev?: boolean }>): string {
-  return JSON.stringify({ name: "x", lockfileVersion: 3, packages: { "": { name: "x" }, ...packages } });
-}
 
 interface FakeRepo {
   /** Every commit's full tree; `HEAD` is always present. */
@@ -161,9 +197,18 @@ describe("classifyPath", () => {
       ".release-please-manifest.json",
       "CHANGELOG.md",
       "switchboard.png",
+      ".prettierrc.json",
+      ".prettierignore",
+      "eslint.config.mjs",
+      // One root lockfile since #496: a per-workspace one in a diff is the retired file disappearing.
+      "deploy/cloudflare-resident/package-lock.json",
+      "web/package-lock.json",
+      "docs/package-lock.json",
     ]) {
       expect(classifyPath(p), p).toMatchObject({ kind: "inert" });
     }
+    // The root lockfile is nobody's whole-file input: it is judged per Worker by workspace.
+    expect(classifyPath("package-lock.json")).toEqual({ kind: "unclassified" });
   });
 
   it("a Worker's own directory, its wrangler config and Dockerfile are its inputs; the bot's image inputs are the root Dockerfile, .dockerignore, package files, tsconfigs, src/, web/, config/ and skills/", () => {
@@ -172,10 +217,6 @@ describe("classifyPath", () => {
     expect(classifyPath("deploy/cloudflare-resident/Dockerfile")).toEqual({ kind: "input", workers: ["resident"] });
     expect(classifyPath("deploy/cloudflare-resident/gc.ts")).toEqual({ kind: "input", workers: ["resident"] });
     expect(classifyPath("deploy/cloudflare-resident/tsconfig.json")).toEqual({ kind: "input", workers: ["resident"] });
-    expect(classifyPath("deploy/cloudflare-resident/package-lock.json")).toEqual({
-      kind: "input",
-      workers: ["resident"],
-    });
     expect(classifyPath("deploy/cloudflare-memory/worker.ts")).toEqual({ kind: "input", workers: ["memory"] });
     expect(classifyPath("deploy/cloudflare-sandbox/Dockerfile")).toEqual({ kind: "input", workers: ["sandbox"] });
     expect(classifyPath("deploy/cloudflare/worker.ts")).toEqual({ kind: "input", workers: ["bot"] });
@@ -183,7 +224,6 @@ describe("classifyPath", () => {
       "Dockerfile",
       ".dockerignore",
       "package.json",
-      "package-lock.json",
       "tsconfig.json",
       "tsconfig.build.json",
       "src/index.ts",
@@ -296,33 +336,90 @@ describe("importClosure", () => {
   });
 });
 
-describe("lockfile production dependencies", () => {
-  it("a devDependency bump changes nothing; a production dependency moving, appearing or disappearing is a named change", () => {
-    const before = productionDependencies(BASE_TREE["deploy/cloudflare-resident/package-lock.json"])!;
-    expect([...before.entries()]).toEqual([["node_modules/@cloudflare/sandbox", "0.13.0"]]);
-    const devBump = productionDependencies(
-      lock({
-        "node_modules/@cloudflare/sandbox": { version: "0.13.0" },
-        "node_modules/vitest": { version: "5.0.0", dev: true },
-      }),
+describe("lockfile workspace dependencies", () => {
+  const rootLock = BASE_TREE["package-lock.json"];
+
+  it("resolves a workspace's closure the way npm does — nested before hoisted, transitively, production edges only inside — and production-only leaves the toolchain out", () => {
+    expect([
+      ...workspaceDependencies(rootLock, "deploy/cloudflare-resident", { includeDev: false })!.entries(),
+    ]).toEqual([
+      ["node_modules/@cloudflare/sandbox", "0.13.0"],
+      ["node_modules/@cloudflare/containers", "0.3.7"],
+    ]);
+    // The sandbox Worker's own SDK is nested (a different major), and so is its containers dep.
+    expect([...workspaceDependencies(rootLock, "deploy/cloudflare-sandbox", { includeDev: false })!.entries()]).toEqual(
+      [
+        ["deploy/cloudflare-sandbox/node_modules/@cloudflare/sandbox", "0.3.7"],
+        ["deploy/cloudflare-sandbox/node_modules/@cloudflare/containers", "0.0.28"],
+      ],
+    );
+    expect([...workspaceDependencies(rootLock, "deploy/cloudflare-memory", { includeDev: false })!.keys()]).toEqual([]);
+    // The bot image installs the root package's toolchain too.
+    expect([...workspaceDependencies(rootLock, "", { includeDev: true })!.keys()]).toEqual([
+      "node_modules/zod",
+      "node_modules/vitest",
+      "node_modules/typescript",
+    ]);
+    expect([...workspaceDependencies(rootLock, "", { includeDev: false })!.keys()]).toEqual(["node_modules/zod"]);
+  });
+
+  it("a devDependency bump is no production change; a production dependency moving, appearing or disappearing is a named change", () => {
+    const before = workspaceDependencies(rootLock, "deploy/cloudflare-resident", { includeDev: false })!;
+    const devBump = workspaceDependencies(
+      lockWith({ "node_modules/wrangler": { version: "4.121.0", dev: true } }),
+      "deploy/cloudflare-resident",
+      { includeDev: false },
     )!;
     expect(prodDepsDiff(before, devBump)).toEqual([]);
-    const moved = productionDependencies(
-      lock({
-        "node_modules/@cloudflare/sandbox": { version: "0.14.0" },
+    const moved = workspaceDependencies(
+      lockWith({
+        "deploy/cloudflare-resident": { dependencies: { "@cloudflare/sandbox": "0.14.0", "left-pad": "^1.0.0" } },
+        "node_modules/@cloudflare/sandbox": { version: "0.14.0", dependencies: { "@cloudflare/containers": "^0.3.7" } },
         "node_modules/left-pad": { version: "1.0.0" },
       }),
+      "deploy/cloudflare-resident",
+      { includeDev: false },
     )!;
     expect(prodDepsDiff(before, moved)).toEqual(["@cloudflare/sandbox 0.13.0 → 0.14.0", "+ left-pad 1.0.0"]);
     expect(prodDepsDiff(moved, before)).toEqual(["@cloudflare/sandbox 0.14.0 → 0.13.0", "− left-pad"]);
+    // A dependency named but absent from the lockfile is recorded as unresolved, never dropped.
+    const dangling = workspaceDependencies(
+      lockWith({ "deploy/cloudflare-memory": { dependencies: { ghost: "^1.0.0" } } }),
+      "deploy/cloudflare-memory",
+      { includeDev: false },
+    )!;
+    expect([...dangling.entries()]).toEqual([["deploy/cloudflare-memory/node_modules/ghost", "unresolved"]]);
   });
 
-  it("an unreadable or missing lockfile is not a dependency set — the caller treats it as a change (fail open)", () => {
-    expect(productionDependencies(undefined)).toBeUndefined();
-    expect(productionDependencies("not json")).toBeUndefined();
-    expect(productionDependencies(JSON.stringify({ lockfileVersion: 3 }))).toBeUndefined();
-    // The root entry ("") is the package itself, not a dependency.
-    expect([...productionDependencies(lock({}))!.keys()]).toEqual([]);
+  it("an unreadable lockfile or an unknown workspace is not a dependency set — the caller treats it as a change (fail open)", () => {
+    expect(workspaceDependencies(undefined, "", { includeDev: false })).toBeUndefined();
+    expect(workspaceDependencies("not json", "", { includeDev: false })).toBeUndefined();
+    expect(workspaceDependencies(JSON.stringify({ lockfileVersion: 3 }), "", { includeDev: false })).toBeUndefined();
+    expect(workspaceDependencies(rootLock, "deploy/cloudflare-queue", { includeDev: false })).toBeUndefined();
+  });
+
+  it("the real root lockfile: every Worker's workspace resolves, and the resident's and the sandbox's closures each carry that Worker's own pinned SDK", () => {
+    const real = readFileSync(join(REPO_ROOT, "package-lock.json"), "utf8");
+    for (const w of WORKERS) {
+      for (const { workspace, includeDev } of w.inputs.lockfile) {
+        expect(
+          workspaceDependencies(real, workspace, { includeDev }),
+          `${w.name}: ${workspace || "root"}`,
+        ).toBeDefined();
+      }
+    }
+    for (const dir of ["deploy/cloudflare-resident", "deploy/cloudflare-sandbox"]) {
+      const pinned = (
+        JSON.parse(readFileSync(join(REPO_ROOT, dir, "package.json"), "utf8")) as {
+          dependencies: Record<string, string>;
+        }
+      ).dependencies["@cloudflare/sandbox"];
+      const closure = workspaceDependencies(real, dir, { includeDev: false })!;
+      const sdk = [...closure.entries()].filter(([k]) => k.endsWith("node_modules/@cloudflare/sandbox"));
+      expect(sdk, dir).toHaveLength(1);
+      // An exact pin in package.json (no range operator) is the version the lockfile resolves.
+      if (/^\d/.test(pinned)) expect(sdk[0][1], dir).toBe(pinned);
+    }
   });
 });
 
@@ -566,16 +663,18 @@ describe("computeAffected", () => {
     });
   });
 
-  it("the resident Dockerfile, wrangler config and a production dependency bump reach only the resident; a devDependency bump in its lockfile reaches nothing", async () => {
+  it("the resident Dockerfile, wrangler config and its SDK moving in the root lockfile reach only the resident — not the bot, not the sandbox's nested copy; a devDependency bump in its workspace reaches nothing", async () => {
     const prodBump = withChanges({
       "deploy/cloudflare-resident/package.json": JSON.stringify({
         name: "resident",
         dependencies: { "@cloudflare/sandbox": "0.14.0" },
       }),
-      "deploy/cloudflare-resident/package-lock.json": lock({
-        "node_modules/@cloudflare/sandbox": { version: "0.14.0" },
-        "node_modules/vitest": { version: "4.1.11", dev: true },
-        "node_modules/wrangler": { version: "4.120.1", dev: true },
+      "package-lock.json": lockWith({
+        "deploy/cloudflare-resident": {
+          dependencies: { "@cloudflare/sandbox": "0.14.0" },
+          devDependencies: { wrangler: "^4.120.1" },
+        },
+        "node_modules/@cloudflare/sandbox": { version: "0.14.0", dependencies: { "@cloudflare/containers": "^0.3.7" } },
       }),
     });
     const a = await computeAffected(
@@ -583,19 +682,22 @@ describe("computeAffected", () => {
     );
     expect(a.selected).toEqual(["resident"]);
     expect(a.workers.find((w) => w.name === "resident")!.reasons).toEqual([
-      "deploy/cloudflare-resident/package-lock.json: production dependencies changed — @cloudflare/sandbox 0.13.0 → 0.14.0",
       "deploy/cloudflare-resident/package.json",
+      "package-lock.json: production dependencies of deploy/cloudflare-resident changed — @cloudflare/sandbox 0.13.0 → 0.14.0",
     ]);
 
+    // The resident workspace's wrangler (a devDependency) moves: no bundle changes anywhere.
     const devBump = withChanges({
       "deploy/cloudflare-resident/package.json": JSON.stringify({
         name: "resident",
         dependencies: { "@cloudflare/sandbox": "0.13.0" },
-        devDependencies: { vitest: "^5.0.0" },
+        devDependencies: { wrangler: "^4.121.0" },
       }),
-      "deploy/cloudflare-resident/package-lock.json": lock({
-        "node_modules/@cloudflare/sandbox": { version: "0.13.0" },
-        "node_modules/vitest": { version: "5.0.0", dev: true },
+      "package-lock.json": lockWith({
+        "deploy/cloudflare-resident": {
+          dependencies: { "@cloudflare/sandbox": "0.13.0" },
+          devDependencies: { wrangler: "^4.121.0" },
+        },
         "node_modules/wrangler": { version: "4.121.0", dev: true },
       }),
     });
@@ -640,17 +742,35 @@ describe("computeAffected", () => {
     );
     expect(b.selected).toEqual(["bot"]);
     expect(b.workers.find((w) => w.name === "bot")!.reasons).toEqual(["package.json"]);
-    // The root lockfile is a whole-file input: the toolchain (tsc, vite) builds the image's artifact.
-    const lockOnly = withChanges({
-      "package-lock.json": lock({
-        "node_modules/zod": { version: "4.0.0" },
-        "node_modules/vitest": { version: "5.1.0", dev: true },
-      }),
+    // The root package's toolchain (tsc, vite, vitest) is installed into the image build: a bump is a bot input.
+    const toolchain = withChanges({
+      "package-lock.json": lockWith({ "node_modules/vitest": { version: "5.1.0", dev: true } }),
     });
     const c = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: lockOnly, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+      fakeProbe({ trees: { [HEAD]: toolchain, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
     );
     expect(c.selected).toEqual(["bot"]);
+    expect(c.workers.find((w) => w.name === "bot")!.reasons).toEqual([
+      "package-lock.json: dependencies of the root package changed — vitest 5.0.0 → 5.1.0",
+    ]);
+    // web's build tool moves: the image rebuilds web/dist with it.
+    const vite = withChanges({
+      "package-lock.json": lockWith({ "node_modules/vite": { version: "7.1.0", dev: true } }),
+    });
+    const d = await computeAffected(
+      fakeProbe({ trees: { [HEAD]: vite, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+    );
+    expect(d.workers.find((w) => w.name === "bot")!.reasons).toEqual([
+      "package-lock.json: dependencies of web changed — vite 7.0.0 → 7.1.0",
+    ]);
+    // The shim's wrangler (a devDependency of deploy/cloudflare) moving is nobody's input.
+    const shimTool = withChanges({
+      "package-lock.json": lockWith({ "node_modules/wrangler": { version: "4.121.0", dev: true } }),
+    });
+    const e = await computeAffected(
+      fakeProbe({ trees: { [HEAD]: shimTool, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+    );
+    expect(e.selected).toEqual([]);
   });
 
   it("an unresolvable import in a Worker's closure makes that Worker unsure, whatever changed", async () => {

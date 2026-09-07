@@ -71,7 +71,19 @@ describe("WORKERS / DEPLOY_ORDER", () => {
         /^https:\/\/switchboard(-memory|-resident|-sandbox)?\.coreplanelabs\.dev\/healthz$/,
       );
       expect(w.inputs.paths, w.name).toContain(`${w.dir}/`);
-      expect(w.inputs.prodDepsLockfiles, w.name).toEqual([`${w.dir}/package-lock.json`]);
+      // One root lockfile: each Worker is judged by its own workspace's closure; only the
+      // bot (an image whose `npm ci` installs the toolchain) counts devDependencies, for the
+      // root package and web plus its own shim.
+      expect(w.inputs.lockfile, w.name).toEqual(
+        w.name === "bot"
+          ? [
+              { workspace: "", includeDev: true },
+              { workspace: "web", includeDev: true },
+              { workspace: "deploy/cloudflare", includeDev: false },
+            ]
+          : [{ workspace: w.dir, includeDev: false }],
+      );
+      expect(w.inputs.paths, w.name).not.toContain("package-lock.json");
     }
     expect(WORKERS.map((w) => w.healthBearerEnv)).toEqual([undefined, undefined, undefined, "SANDBOX_TOKEN"]);
     expect(WORKERS.find((w) => w.name === "bot")!.healthUrl).toBe(BOT_HEALTH_URL);
