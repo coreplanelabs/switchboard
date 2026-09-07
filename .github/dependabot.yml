@@ -18,6 +18,9 @@ updates:
       minor-and-patch:
         update-types: ["minor", "patch"]
     open-pull-requests-limit: 10
+    # PR titles are conventional (the `title` check): `chore(deps): bump …`.
+    commit-message:
+      prefix: "chore(deps)"
     ignore:
       # Types follow the runtime: the Node major moves with the image, CI and
       # .nvmrc in one deliberate change (#497), not one package at a time.
@@ -50,6 +53,8 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    commit-message:
+      prefix: "ci(deps)"
 
   - package-ecosystem: docker
     directories:
@@ -59,6 +64,8 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    commit-message:
+      prefix: "chore(deps)"
     ignore:
       # The bot runtime moves to an LTS line deliberately, together with CI,
       # .nvmrc and @types/node (#497).

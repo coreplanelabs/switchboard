@@ -28,6 +28,10 @@ interface Workflow {
   jobs: Record<string, Job>;
 }
 
+// The workflows that gate a pull request. pr-title.yml is separate from ci.yml
+// only because it must re-run when the title is edited (see its header); it is
+// held to the same rule.
+const GATE_WORKFLOWS = [".github/workflows/ci.yml", ".github/workflows/pr-title.yml"];
 const ci = parse(read(".github/workflows/ci.yml")) as Workflow;
 const rootPkg = JSON.parse(read("package.json")) as { scripts: Record<string, string>; workspaces: string[] };
 
@@ -40,8 +44,10 @@ function runLines(step: Step): string[] {
     .filter((l) => l.length > 0 && !l.startsWith("#"));
 }
 
-describe("ci.yml runs only the repository's own scripts", () => {
-  const jobs = Object.entries(ci.jobs);
+describe("the gate workflows run only the repository's own scripts", () => {
+  const jobs = GATE_WORKFLOWS.flatMap((file) =>
+    Object.entries((parse(read(file)) as Workflow).jobs).map(([name, job]) => [`${file} → ${name}`, job] as const),
+  );
 
   it("has jobs", () => {
     expect(jobs.length).toBeGreaterThan(3);
@@ -101,10 +107,22 @@ describe("ci.yml runs only the repository's own scripts", () => {
     expect(cachingJobs).toBeGreaterThan(0);
   });
 
-  it("runs on pull requests, pushes to main, and the merge queue", () => {
+  it("ci.yml runs on pull requests, pushes to main, and the merge queue", () => {
     expect(ci.on).toHaveProperty("pull_request");
     expect(ci.on).toHaveProperty("push");
     expect(ci.on).toHaveProperty("merge_group");
+  });
+
+  it("pr-title.yml re-runs when a title is edited and is present in the merge queue", () => {
+    const wf = parse(read(".github/workflows/pr-title.yml")) as Workflow & {
+      on: { pull_request: { types: string[] } };
+    };
+    // A required status must exist for the queue's merge group too, or the
+    // queue waits forever on an "expected" check that never reports.
+    expect(wf.on).toHaveProperty("merge_group");
+    expect(wf.on.pull_request.types).toEqual(expect.arrayContaining(["opened", "edited", "synchronize", "reopened"]));
+    // The job name is the identifier the branch ruleset requires.
+    expect(Object.keys(wf.jobs)).toEqual(["title"]);
   });
 });
 
