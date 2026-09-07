@@ -8,7 +8,10 @@ import { E2BExecutor } from "./e2b.js";
 // The SDK constructor is private and network-bound, so the executor is built
 // on its prototype with a stubbed `sbx` — the same seam the class itself uses.
 
-type RunFn = (cmd: string, opts: { cwd: string; timeoutMs: number }) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+type RunFn = (
+  cmd: string,
+  opts: { cwd: string; timeoutMs: number },
+) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 
 function e2bWith(run: RunFn): { ex: E2BExecutor; run: ReturnType<typeof vi.fn> } {
   const spy = vi.fn(run);

@@ -10,7 +10,13 @@ export type IndexRow = RunIndexRowSeed;
 
 /** Display words, not the enum: succeeded / failed / killed / stopped early. */
 export function statusLabel(status: string): string {
-  return status === "completed" ? "succeeded" : status === "stopped_soft" ? "stopped early" : status === "stopped_hard" ? "killed" : status;
+  return status === "completed"
+    ? "succeeded"
+    : status === "stopped_soft"
+      ? "stopped early"
+      : status === "stopped_hard"
+        ? "killed"
+        : status;
 }
 
 /** The stop badge: "stopping (soft)" while in flight; once stopped, the same
@@ -120,8 +126,13 @@ export function safeSourceUrl(run: IndexRow): string {
  *  eviction and no ghost row survives a reload. */
 export type FeedAction = { op: "upsert"; run: IndexRow } | { op: "remove"; id: string } | { op: "keep" };
 
-export function feedAction(ev: { type?: string; run?: IndexRow; id?: string }, showAll: boolean, persisted: boolean): FeedAction {
-  if (ev.type === "upsert" && ev.run) return !showAll && ev.run.finished ? { op: "remove", id: ev.run.id } : { op: "upsert", run: ev.run };
+export function feedAction(
+  ev: { type?: string; run?: IndexRow; id?: string },
+  showAll: boolean,
+  persisted: boolean,
+): FeedAction {
+  if (ev.type === "upsert" && ev.run)
+    return !showAll && ev.run.finished ? { op: "remove", id: ev.run.id } : { op: "upsert", run: ev.run };
   if (ev.type === "removed" && ev.id) return showAll && persisted ? { op: "keep" } : { op: "remove", id: ev.id };
   return { op: "keep" };
 }
@@ -140,7 +151,9 @@ export function mergeRow(prev: IndexRow | undefined, run: IndexRow): IndexRow {
 
 /** When the row leaves (finishedAt + retention), or undefined. */
 export function expiresAt(run: IndexRow, retentionMs: number | undefined): number | undefined {
-  return run.finished && typeof run.finishedAt === "number" && typeof retentionMs === "number" ? run.finishedAt + retentionMs : undefined;
+  return run.finished && typeof run.finishedAt === "number" && typeof retentionMs === "number"
+    ? run.finishedAt + retentionMs
+    : undefined;
 }
 
 export const LEAVING_WINDOW_MS = 86_400_000;

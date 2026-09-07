@@ -14,13 +14,19 @@ import {
 // is produced by code from the structured verdict, never by the model's prose.
 describe("review verdict → post body", () => {
   it("approve → body starts with the exact `LGTM:` token and the summary", () => {
-    const body = buildReviewPostBody("Looks fine.\n- nit: rename x", { verdict: "approve", summary: "no blocking issues" });
+    const body = buildReviewPostBody("Looks fine.\n- nit: rename x", {
+      verdict: "approve",
+      summary: "no blocking issues",
+    });
     expect(body.startsWith(`${LGTM_TOKEN} no blocking issues\n\n`)).toBe(true);
     expect(body).toContain("Looks fine.");
   });
 
   it("request_changes → never starts with LGTM, even if the prose does", () => {
-    const body = buildReviewPostBody("LGTM overall but one blocker...", { verdict: "request_changes", summary: "null deref in handler" });
+    const body = buildReviewPostBody("LGTM overall but one blocker...", {
+      verdict: "request_changes",
+      summary: "null deref in handler",
+    });
     expect(body.startsWith(`${CHANGES_TOKEN} null deref in handler\n\n`)).toBe(true);
     expect(body.startsWith("LGTM")).toBe(false);
   });
@@ -223,9 +229,22 @@ describe("review verdict → post body", () => {
       summary: "ok",
       head: sha.toLowerCase(),
     });
-    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: " e8e43f4 " })).toEqual({ verdict: "approve", summary: "ok", head: "e8e43f4" });
-    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: "HEAD" })).toEqual({ verdict: "approve", summary: "ok" });
-    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: "e8e43f" })).toEqual({ verdict: "approve", summary: "ok" });
-    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: 42 })).toEqual({ verdict: "approve", summary: "ok" });
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: " e8e43f4 " })).toEqual({
+      verdict: "approve",
+      summary: "ok",
+      head: "e8e43f4",
+    });
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: "HEAD" })).toEqual({
+      verdict: "approve",
+      summary: "ok",
+    });
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: "e8e43f" })).toEqual({
+      verdict: "approve",
+      summary: "ok",
+    });
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: 42 })).toEqual({
+      verdict: "approve",
+      summary: "ok",
+    });
   });
 });

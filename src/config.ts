@@ -15,7 +15,14 @@ import type { IngressTokenMap } from "./core/ingressTokens.js";
 import { isRunSchedule, SCHEDULES } from "./core/schedules.js";
 import { AGENTS } from "./agents/registry.js";
 import { assertUrlAllowed } from "./tools/web.js";
-import { isMcpServerEntry, MCP_SELF_SERVE_AGENTS, MCP_SERVER_NAME_MAX, MCP_SERVER_NAME_RE, MCP_SERVERS_PER_SCOPE_MAX, type McpServerEntry } from "./mcp/registry.js";
+import {
+  isMcpServerEntry,
+  MCP_SELF_SERVE_AGENTS,
+  MCP_SERVER_NAME_MAX,
+  MCP_SERVER_NAME_RE,
+  MCP_SERVERS_PER_SCOPE_MAX,
+  type McpServerEntry,
+} from "./mcp/registry.js";
 
 // Configuration is layered. Lowest to highest precedence:
 //   1. defaults (config.yaml `defaults`, incl. per-agent default models)
@@ -337,12 +344,17 @@ export class WorkerOverridesBacking implements OverridesBacking {
     this.version = typeof body.version === "number" ? body.version : 0;
     const doc = body.document;
     if (doc === null || doc === undefined) return undefined;
-    if (typeof doc !== "object" || Array.isArray(doc)) throw new Error(`config store returned a non-object overrides document`);
+    if (typeof doc !== "object" || Array.isArray(doc))
+      throw new Error(`config store returned a non-object overrides document`);
     return doc as Overrides;
   }
 
   async save(overrides: Overrides): Promise<void> {
-    const body = await this.post("/config/put", { key: OVERRIDES_DOCUMENT_KEY, document: overrides, expectedVersion: this.version });
+    const body = await this.post("/config/put", {
+      key: OVERRIDES_DOCUMENT_KEY,
+      document: overrides,
+      expectedVersion: this.version,
+    });
     this.version = typeof body.version === "number" ? body.version : this.version + 1;
   }
 
@@ -399,7 +411,10 @@ export interface ResolvedRequest {
  *  JSON file at `overridesPath`. The Worker bearer comes from `tokenEnv`
  *  (default `MEMORY_TOKEN`); a configured Worker without its bearer is a
  *  startup error, never a silent fall back to the ephemeral file. */
-export function overridesBackingFor(config: AppConfig, opts: { overridesPath: string; env: Record<string, string | undefined>; fetch?: typeof fetch }): OverridesBacking {
+export function overridesBackingFor(
+  config: AppConfig,
+  opts: { overridesPath: string; env: Record<string, string | undefined>; fetch?: typeof fetch },
+): OverridesBacking {
   const worker = config.runtimeOverrides?.worker;
   if (!worker) return new FileOverridesBacking(opts.overridesPath);
   const tokenEnv = worker.tokenEnv ?? "MEMORY_TOKEN";
@@ -430,13 +445,21 @@ export interface ConfigStoreOptions {
  *  pick the overrides backing from it, load the document, construct. */
 export async function openConfigStore(
   configPath: string,
-  opts: { overridesPath: string; env: Record<string, string | undefined>; warn?: (message: string) => void; fetch?: typeof fetch } & ConfigStoreOptions,
+  opts: {
+    overridesPath: string;
+    env: Record<string, string | undefined>;
+    warn?: (message: string) => void;
+    fetch?: typeof fetch;
+  } & ConfigStoreOptions,
 ): Promise<ConfigStore> {
   const warn = opts.warn ?? ((m: string) => console.warn(m));
   const config = loadAppConfig(configPath, warn);
   const backing = overridesBackingFor(config, opts);
   const initial = await backing.load();
-  return new ConfigStore({ validated: config }, { backing, initial }, warn, { ingressTokens: opts.ingressTokens, commandGroups: opts.commandGroups });
+  return new ConfigStore({ validated: config }, { backing, initial }, warn, {
+    ingressTokens: opts.ingressTokens,
+    commandGroups: opts.commandGroups,
+  });
 }
 
 export class ConfigStore {
@@ -470,7 +493,9 @@ export class ConfigStore {
       schedules: SCHEDULES.filter(isRunSchedule).map((s) => s.action.actor),
     });
     if (this.grants.overlapping.length > 0) {
-      warn(`config.yaml: grants and permissions both name ${this.grants.overlapping.map((id) => `"${id}"`).join(", ")} — the grants entry wins; remove the permissions entry (one identity, one shape)`);
+      warn(
+        `config.yaml: grants and permissions both name ${this.grants.overlapping.map((id) => `"${id}"`).join(", ")} — the grants entry wins; remove the permissions entry (one identity, one shape)`,
+      );
     }
 
     let initial: Overrides | undefined;
@@ -494,7 +519,10 @@ export class ConfigStore {
     doc.users ??= {};
     validateInstructions(doc, `overrides (${this.backing.describe()})`);
     validateScopeEfforts(doc, `overrides (${this.backing.describe()})`);
-    validateMcpServers({ channels: doc.channels, users: doc.users, defaults: doc.org }, `overrides (${this.backing.describe()})`);
+    validateMcpServers(
+      { channels: doc.channels, users: doc.users, defaults: doc.org },
+      `overrides (${this.backing.describe()})`,
+    );
     return doc;
   }
 
@@ -520,7 +548,12 @@ export class ConfigStore {
   /** Whether an entry with this name exists in the STATIC config of the scope
    *  (so `mcp remove` can say "that one is pinned in config.yaml"). */
   isStaticMcpServer(kind: "org" | "channel" | "user", id: string | undefined, name: string): boolean {
-    const scope = kind === "org" ? this.config.defaults : kind === "channel" ? this.config.channels?.[id ?? ""] : this.config.users?.[id ?? ""];
+    const scope =
+      kind === "org"
+        ? this.config.defaults
+        : kind === "channel"
+          ? this.config.channels?.[id ?? ""]
+          : this.config.users?.[id ?? ""];
     return scope?.mcpServers?.[name] !== undefined;
   }
 
@@ -538,10 +571,25 @@ export class ConfigStore {
    * `shadowedBy` so the run notes can say why the user's copy was ignored.
    */
   mcpServersFor(channelId: string, userId: string): ResolvedMcpServer[] {
-    const tiers: Array<{ kind: "org" | "channel" | "user"; scopeKey: string; scope: Scope; staticEntries: Record<string, McpServerEntry> | undefined }> = [
+    const tiers: Array<{
+      kind: "org" | "channel" | "user";
+      scopeKey: string;
+      scope: Scope;
+      staticEntries: Record<string, McpServerEntry> | undefined;
+    }> = [
       { kind: "org", scopeKey: "org", scope: this.orgScope(), staticEntries: this.config.defaults.mcpServers },
-      { kind: "channel", scopeKey: `channel:${channelId}`, scope: this.channelScope(channelId), staticEntries: this.config.channels?.[channelId]?.mcpServers },
-      { kind: "user", scopeKey: `user:${userId}`, scope: this.userScope(userId), staticEntries: this.config.users?.[userId]?.mcpServers },
+      {
+        kind: "channel",
+        scopeKey: `channel:${channelId}`,
+        scope: this.channelScope(channelId),
+        staticEntries: this.config.channels?.[channelId]?.mcpServers,
+      },
+      {
+        kind: "user",
+        scopeKey: `user:${userId}`,
+        scope: this.userScope(userId),
+        staticEntries: this.config.users?.[userId]?.mcpServers,
+      },
     ];
     const out: ResolvedMcpServer[] = [];
     const seen = new Map<string, string>(); // name → scopeKey that won
@@ -549,7 +597,13 @@ export class ConfigStore {
       for (const [name, entry] of Object.entries(tier.scope.mcpServers ?? {})) {
         const winner = seen.get(name);
         const isStatic = tier.staticEntries?.[name] !== undefined && tier.staticEntries[name] === entry;
-        const resolved: ResolvedMcpServer = { name, kind: tier.kind, scopeKey: tier.scopeKey, entry, source: isStatic ? "config" : "runtime" };
+        const resolved: ResolvedMcpServer = {
+          name,
+          kind: tier.kind,
+          scopeKey: tier.scopeKey,
+          entry,
+          source: isStatic ? "config" : "runtime",
+        };
         if (winner) resolved.shadowedBy = winner;
         else seen.set(name, tier.scopeKey);
         out.push(resolved);
@@ -590,8 +644,7 @@ export class ConfigStore {
     const ch = this.channelScope(opts.channelId);
     const us = this.userScope(opts.userId);
 
-    const agentName =
-      opts.request.agent ?? us.agent ?? ch.agent ?? this.config.defaults.agent;
+    const agentName = opts.request.agent ?? us.agent ?? ch.agent ?? this.config.defaults.agent;
 
     const modelRef =
       opts.request.model ??
@@ -603,9 +656,7 @@ export class ConfigStore {
       this.config.defaults.models["general"];
 
     if (!modelRef) {
-      throw new Error(
-        `No model configured for agent "${agentName}" — set defaults.models.${agentName} in config.yaml`,
-      );
+      throw new Error(`No model configured for agent "${agentName}" — set defaults.models.${agentName} in config.yaml`);
     }
 
     const effort =
@@ -677,7 +728,9 @@ export class ConfigStore {
    *  the hint is a `<@…>` mention in a chat reply; a credential granted
    *  everything (`access:`, `http:`) is not someone to ask. */
   adminsHint(): string {
-    const admins = [...this.grants.grants].filter(([id, g]) => id.startsWith("slack:") && holdsEverything(g)).map(([id]) => id);
+    const admins = [...this.grants.grants]
+      .filter(([id, g]) => id.startsWith("slack:") && holdsEverything(g))
+      .map(([id]) => id);
     return admins.length > 0 ? admins.map((u) => `<@${u}>`).join(", ") : "an admin";
   }
 
@@ -763,8 +816,16 @@ export class ConfigStore {
   describeConfig(channelId: string, userId: string): Omit<ConfigDescription, "channelConfigRestricted"> {
     const resolved = this.resolve({ channelId, userId, request: {} });
     return {
-      effective: { agent: resolved.agentName, model: resolved.modelRef, ...(resolved.effort ? { effort: resolved.effort } : {}) },
-      defaults: { agent: this.config.defaults.agent, models: this.config.defaults.models, ...(this.config.defaults.efforts ? { efforts: this.config.defaults.efforts } : {}) },
+      effective: {
+        agent: resolved.agentName,
+        model: resolved.modelRef,
+        ...(resolved.effort ? { effort: resolved.effort } : {}),
+      },
+      defaults: {
+        agent: this.config.defaults.agent,
+        models: this.config.defaults.models,
+        ...(this.config.defaults.efforts ? { efforts: this.config.defaults.efforts } : {}),
+      },
       channel: this.channelScope(channelId),
       user: this.userScope(userId),
       org: this.orgScope(),
@@ -775,14 +836,22 @@ export class ConfigStore {
 
   /** `config show` as text for a Slack user id (whose actor IS the store's grants for it). */
   describe(channelId: string, userId: string): string {
-    return formatConfigDescription({ ...this.describeConfig(channelId, userId), channelConfigRestricted: !this.canEditChannelConfig(userId) });
+    return formatConfigDescription({
+      ...this.describeConfig(channelId, userId),
+      channelConfigRestricted: !this.canEditChannelConfig(userId),
+    });
   }
-
 }
 
 /** Every scope's `instructions` (both kinds, either file) must be a string within the cap. */
-function validateInstructions(layer: { channels?: Record<string, Scope>; users?: Record<string, Scope> }, source: string): void {
-  for (const [kind, scopes] of [["channels", layer.channels], ["users", layer.users]] as const) {
+function validateInstructions(
+  layer: { channels?: Record<string, Scope>; users?: Record<string, Scope> },
+  source: string,
+): void {
+  for (const [kind, scopes] of [
+    ["channels", layer.channels],
+    ["users", layer.users],
+  ] as const) {
     for (const [id, scope] of Object.entries(scopes ?? {})) {
       if (scope.instructions !== undefined && typeof scope.instructions !== "string") {
         throw new Error(`${source}: ${kind}.${id}.instructions must be a string`);
@@ -833,14 +902,27 @@ export function formatConfigDescription(d: ConfigDescription): string {
   const effective = `agent \`${d.effective.agent}\`, model \`${d.effective.model}\`${d.effective.effort ? `, effort \`${d.effective.effort}\`` : ""}`;
   const defaults =
     `agent \`${d.defaults.agent}\`, models ${fmtModels(d.defaults.models)}` +
-    (d.defaults.efforts && Object.keys(d.defaults.efforts).length > 0 ? `, efforts ${fmtModels(d.defaults.efforts)}` : "");
-  const orgMcp = d.org?.mcpServers && Object.keys(d.org.mcpServers).length > 0 ? `, mcp ${Object.keys(d.org.mcpServers).map((n) => `\`${n}\``).join(" ")}` : "";
-  const lines = [`*Effective for you in this channel:* ${effective}`, `*Defaults:* ${defaults}${orgMcp}`, `*Channel scope:* ${fmtScope(d.channel)}`, `*Your scope:* ${fmtScope(d.user)}`];
+    (d.defaults.efforts && Object.keys(d.defaults.efforts).length > 0
+      ? `, efforts ${fmtModels(d.defaults.efforts)}`
+      : "");
+  const orgMcp =
+    d.org?.mcpServers && Object.keys(d.org.mcpServers).length > 0
+      ? `, mcp ${Object.keys(d.org.mcpServers)
+          .map((n) => `\`${n}\``)
+          .join(" ")}`
+      : "";
+  const lines = [
+    `*Effective for you in this channel:* ${effective}`,
+    `*Defaults:* ${defaults}${orgMcp}`,
+    `*Channel scope:* ${fmtScope(d.channel)}`,
+    `*Your scope:* ${fmtScope(d.user)}`,
+  ];
   const channelInstructions = d.channel.instructions?.trim();
   if (channelInstructions) lines.push(`*Channel instructions:* ${channelInstructions}`);
   const userInstructions = d.user.instructions?.trim();
   if (userInstructions) lines.push(`*Your instructions:* ${userInstructions}`);
-  if (d.restrictedAgents.length > 0) lines.push(`*Not available to you:* ${d.restrictedAgents.map((a) => `\`${a}\``).join(", ")} (ask ${d.adminsHint})`);
+  if (d.restrictedAgents.length > 0)
+    lines.push(`*Not available to you:* ${d.restrictedAgents.map((a) => `\`${a}\``).join(", ")} (ask ${d.adminsHint})`);
   if (d.channelConfigRestricted) lines.push(`*Note:* channel config changes are restricted (ask ${d.adminsHint})`);
   return lines.join("\n");
 }
@@ -852,7 +934,12 @@ function fmtScope(s: Scope): string {
   if (s.models && Object.keys(s.models).length > 0) parts.push(`models ${fmtModels(s.models)}`);
   if (s.effort) parts.push(`effort \`${s.effort}\``);
   if (s.efforts && Object.keys(s.efforts).length > 0) parts.push(`efforts ${fmtModels(s.efforts)}`);
-  if (s.mcpServers && Object.keys(s.mcpServers).length > 0) parts.push(`mcp ${Object.keys(s.mcpServers).map((n) => `\`${n}\``).join(" ")}`);
+  if (s.mcpServers && Object.keys(s.mcpServers).length > 0)
+    parts.push(
+      `mcp ${Object.keys(s.mcpServers)
+        .map((n) => `\`${n}\``)
+        .join(" ")}`,
+    );
   return parts.length > 0 ? parts.join(", ") : "_none_";
 }
 
@@ -860,7 +947,11 @@ function fmtScope(s: Scope): string {
  *  (static scopes, `defaults.efforts`, a hand-edited overrides.json). The chat
  *  command validates on write; this holds the files to the same rule at load. */
 function validateScopeEfforts(
-  layer: { channels?: Record<string, Scope>; users?: Record<string, Scope>; defaults?: { efforts?: Record<string, unknown> } },
+  layer: {
+    channels?: Record<string, Scope>;
+    users?: Record<string, Scope>;
+    defaults?: { efforts?: Record<string, unknown> };
+  },
   source: string,
 ): void {
   const check = (path: string, value: unknown) => {
@@ -869,7 +960,10 @@ function validateScopeEfforts(
     }
   };
   for (const [agent, value] of Object.entries(layer.defaults?.efforts ?? {})) check(`defaults.efforts.${agent}`, value);
-  for (const [kind, scopes] of [["channels", layer.channels], ["users", layer.users]] as const) {
+  for (const [kind, scopes] of [
+    ["channels", layer.channels],
+    ["users", layer.users],
+  ] as const) {
     for (const [id, scope] of Object.entries(scopes ?? {})) {
       check(`${kind}.${id}.effort`, scope.effort);
       for (const [agent, value] of Object.entries(scope.efforts ?? {})) check(`${kind}.${id}.efforts.${agent}`, value);
@@ -886,16 +980,26 @@ function validateScopeEfforts(
  * holds files and stored documents to the rule at load.
  */
 export function validateMcpServers(
-  layer: { channels?: Record<string, Scope>; users?: Record<string, Scope>; defaults?: { mcpServers?: Record<string, unknown> } | Scope },
+  layer: {
+    channels?: Record<string, Scope>;
+    users?: Record<string, Scope>;
+    defaults?: { mcpServers?: Record<string, unknown> } | Scope;
+  },
   source: string,
 ): void {
   const check = (path: string, tier: "org" | "channel" | "user", servers: Record<string, unknown> | undefined) => {
     if (servers === undefined) return;
-    if (typeof servers !== "object" || servers === null || Array.isArray(servers)) throw new Error(`${source}: ${path} must be a mapping of name → server`);
-    if (Object.keys(servers).length > MCP_SERVERS_PER_SCOPE_MAX) throw new Error(`${source}: ${path} has more than ${MCP_SERVERS_PER_SCOPE_MAX} servers`);
+    if (typeof servers !== "object" || servers === null || Array.isArray(servers))
+      throw new Error(`${source}: ${path} must be a mapping of name → server`);
+    if (Object.keys(servers).length > MCP_SERVERS_PER_SCOPE_MAX)
+      throw new Error(`${source}: ${path} has more than ${MCP_SERVERS_PER_SCOPE_MAX} servers`);
     for (const [name, raw] of Object.entries(servers)) {
-      if (!MCP_SERVER_NAME_RE.test(name)) throw new Error(`${source}: ${path}.${name}: server names are slugs (lowercase letters, digits, dashes; ≤ ${MCP_SERVER_NAME_MAX} chars)`);
-      if (!isMcpServerEntry(raw)) throw new Error(`${source}: ${path}.${name} must be { url, auth: none|bearer|oauth, agents?, tokenEnv? }`);
+      if (!MCP_SERVER_NAME_RE.test(name))
+        throw new Error(
+          `${source}: ${path}.${name}: server names are slugs (lowercase letters, digits, dashes; ≤ ${MCP_SERVER_NAME_MAX} chars)`,
+        );
+      if (!isMcpServerEntry(raw))
+        throw new Error(`${source}: ${path}.${name} must be { url, auth: none|bearer|oauth, agents?, tokenEnv? }`);
       try {
         assertUrlAllowed(raw.url);
       } catch (err) {
@@ -904,15 +1008,26 @@ export function validateMcpServers(
       for (const a of raw.agents ?? []) {
         if (!AGENTS[a]) throw new Error(`${source}: ${path}.${name}.agents: unknown agent "${a}"`);
         if (tier !== "org" && !MCP_SELF_SERVE_AGENTS.includes(a)) {
-          throw new Error(`${source}: ${path}.${name}.agents: a ${tier}-scoped server may name ${MCP_SELF_SERVE_AGENTS.join("/")} only — "${a}" takes an org-wide server (defaults.mcpServers)`);
+          throw new Error(
+            `${source}: ${path}.${name}.agents: a ${tier}-scoped server may name ${MCP_SELF_SERVE_AGENTS.join("/")} only — "${a}" takes an org-wide server (defaults.mcpServers)`,
+          );
         }
       }
-      if (raw.tokenEnv !== undefined && raw.auth !== "bearer") throw new Error(`${source}: ${path}.${name}.tokenEnv only applies to auth: bearer`);
+      if (raw.tokenEnv !== undefined && raw.auth !== "bearer")
+        throw new Error(`${source}: ${path}.${name}.tokenEnv only applies to auth: bearer`);
     }
   };
   check("defaults.mcpServers", "org", layer.defaults?.mcpServers as Record<string, unknown> | undefined);
-  for (const [kind, scopes] of [["channels", layer.channels], ["users", layer.users]] as const) {
-    for (const [id, scope] of Object.entries(scopes ?? {})) check(`${kind}.${id}.mcpServers`, kind === "channels" ? "channel" : "user", scope.mcpServers as Record<string, unknown> | undefined);
+  for (const [kind, scopes] of [
+    ["channels", layer.channels],
+    ["users", layer.users],
+  ] as const) {
+    for (const [id, scope] of Object.entries(scopes ?? {}))
+      check(
+        `${kind}.${id}.mcpServers`,
+        kind === "channels" ? "channel" : "user",
+        scope.mcpServers as Record<string, unknown> | undefined,
+      );
   }
 }
 
@@ -975,21 +1090,29 @@ function validateShip(ship: ShipConfig): void {
   if (typeof ship !== "object" || ship === null) throw new Error("config.yaml: ship must be a mapping");
   for (const key of ["maxRounds", "maxMinutes"] as const) {
     const v = ship[key];
-    if (v !== undefined && (!Number.isInteger(v) || v < 1)) throw new Error(`config.yaml: ship.${key} must be an integer >= 1`);
+    if (v !== undefined && (!Number.isInteger(v) || v < 1))
+      throw new Error(`config.yaml: ship.${key} must be an integer >= 1`);
   }
 }
 
 /** `runHistory` (features/run-history.md, KTD14): retention bounds are enforced
  *  at load so a typo cannot silently become "keep nothing"; the Worker URL must
  *  be https: because the bearer rides every request. */
-function validateRunHistory(rh: RunHistoryConfig, si: SelfImprovementConfig | undefined, warn: (message: string) => void): void {
+function validateRunHistory(
+  rh: RunHistoryConfig,
+  si: SelfImprovementConfig | undefined,
+  warn: (message: string) => void,
+): void {
   if (typeof rh !== "object" || rh === null) throw new Error("config.yaml: runHistory must be a mapping");
   for (const key of ["retentionDays", "maxRuns"] as const) {
     const v = rh[key];
-    if (v !== undefined && (!Number.isInteger(v) || (v as number) < 1)) throw new Error(`config.yaml: runHistory.${key} must be an integer >= 1`);
+    if (v !== undefined && (!Number.isInteger(v) || (v as number) < 1))
+      throw new Error(`config.yaml: runHistory.${key} must be an integer >= 1`);
   }
-  if (rh.maxBytes !== undefined && (!Number.isInteger(rh.maxBytes) || rh.maxBytes < 1)) throw new Error("config.yaml: runHistory.maxBytes must be an integer >= 1");
-  if (rh.store !== undefined && rh.store !== "worker" && rh.store !== "file") throw new Error('config.yaml: runHistory.store must be "worker" or "file"');
+  if (rh.maxBytes !== undefined && (!Number.isInteger(rh.maxBytes) || rh.maxBytes < 1))
+    throw new Error("config.yaml: runHistory.maxBytes must be an integer >= 1");
+  if (rh.store !== undefined && rh.store !== "worker" && rh.store !== "file")
+    throw new Error('config.yaml: runHistory.store must be "worker" or "file"');
   if (rh.worker !== undefined) {
     let url: URL | undefined;
     try {
@@ -997,7 +1120,8 @@ function validateRunHistory(rh: RunHistoryConfig, si: SelfImprovementConfig | un
     } catch {
       url = undefined;
     }
-    if (!url || url.protocol !== "https:") throw new Error("config.yaml: runHistory.worker.baseUrl must be an https: URL");
+    if (!url || url.protocol !== "https:")
+      throw new Error("config.yaml: runHistory.worker.baseUrl must be an https: URL");
   }
   if (si?.ledgerMax !== undefined) {
     warn(
@@ -1010,16 +1134,19 @@ function validateRunHistory(rh: RunHistoryConfig, si: SelfImprovementConfig | un
 /** `runtimeOverrides` (routing-and-config item 12): a mapping; `worker.baseUrl` https; `tokenEnv` a name. */
 function validateRuntimeOverrides(ro: AppConfig["runtimeOverrides"]): void {
   if (ro !== undefined) {
-    if (typeof ro !== "object" || ro === null || Array.isArray(ro)) throw new Error("config.yaml: runtimeOverrides must be a mapping");
+    if (typeof ro !== "object" || ro === null || Array.isArray(ro))
+      throw new Error("config.yaml: runtimeOverrides must be a mapping");
     if (ro.worker !== undefined) {
-      if (typeof ro.worker !== "object" || ro.worker === null) throw new Error("config.yaml: runtimeOverrides.worker must be a mapping with baseUrl");
+      if (typeof ro.worker !== "object" || ro.worker === null)
+        throw new Error("config.yaml: runtimeOverrides.worker must be a mapping with baseUrl");
       let url: URL | undefined;
       try {
         url = new URL(String(ro.worker.baseUrl));
       } catch {
         url = undefined;
       }
-      if (!url || url.protocol !== "https:") throw new Error("config.yaml: runtimeOverrides.worker.baseUrl must be an https: URL");
+      if (!url || url.protocol !== "https:")
+        throw new Error("config.yaml: runtimeOverrides.worker.baseUrl must be an https: URL");
       if (ro.worker.tokenEnv !== undefined && (typeof ro.worker.tokenEnv !== "string" || !ro.worker.tokenEnv)) {
         throw new Error("config.yaml: runtimeOverrides.worker.tokenEnv must be an environment variable name");
       }

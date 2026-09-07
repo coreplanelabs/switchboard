@@ -46,13 +46,7 @@ describe("frontend stack", () => {
     const wrapper = mountWithUi(
       defineComponent({
         render: () =>
-          h(UApp, () =>
-            h(
-              USlideover,
-              { open: true, title: "Run details" },
-              { body: () => h("p", "slideout body") },
-            ),
-          ),
+          h(UApp, () => h(USlideover, { open: true, title: "Run details" }, { body: () => h("p", "slideout body") })),
       }),
     );
     await wrapper.vm.$nextTick();

@@ -36,7 +36,8 @@ import { PermanentStoreError, RouteMissingError } from "./runStoreWorker.js";
 /** Nominal backoff before retry 1 and retry 2; each is jittered ±50%. */
 export const RUN_HISTORY_RETRY_DELAYS_MS: readonly number[] = [1000, 4000];
 
-export const ROUTE_MISSING_MESSAGE = "[run-history] state Worker has no /runs/put — deploy the state Worker with run-history routes before this bot version";
+export const ROUTE_MISSING_MESSAGE =
+  "[run-history] state Worker has no /runs/put — deploy the state Worker with run-history routes before this bot version";
 
 export interface RunHistoryWriter {
   /** Persist a record in the background. Never throws; never blocks.

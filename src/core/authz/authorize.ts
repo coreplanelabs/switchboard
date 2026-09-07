@@ -94,7 +94,12 @@ export function isKnownActorKind(kind: string): boolean {
   return (ACTOR_KINDS as readonly string[]).includes(kind);
 }
 
-export function evaluateCondition(condition: Condition, grants: Grants, selfId: string, attributes: ResourceAttributes): boolean {
+export function evaluateCondition(
+  condition: Condition,
+  grants: Grants,
+  selfId: string,
+  attributes: ResourceAttributes,
+): boolean {
   switch (condition.kind) {
     case "has-grant": {
       const grant = resolveGrant(condition.grant, attributes);
@@ -104,7 +109,10 @@ export function evaluateCondition(condition: Condition, grants: Grants, selfId: 
       // Granted the channel, or the channel is public (a run's stamped
       // visibility, KTD7). `unknown` — no stamp, a directory failure — is
       // never public (R7).
-      return (attributes.channelId !== undefined && holds(grants.channels, attributes.channelId)) || attributes.channelVisibility === "public";
+      return (
+        (attributes.channelId !== undefined && holds(grants.channels, attributes.channelId)) ||
+        attributes.channelVisibility === "public"
+      );
     case "is-self":
       return attributes.userId !== undefined && attributes.userId === selfId;
     case "owner-of":
@@ -139,7 +147,9 @@ export function authorizeWith(rules: readonly Rule[], actor: Actor, action: Acti
   const forKind = named.filter((rule) => !rule.actorKinds || rule.actorKinds.includes(actor.kind));
   if (forKind.length === 0) return deny("actor-kind");
   const attributes = attributesOf(resource);
-  const forOrigin = forKind.filter((rule) => !rule.originVisibility || rule.originVisibility.includes(attributes.visibility));
+  const forOrigin = forKind.filter(
+    (rule) => !rule.originVisibility || rule.originVisibility.includes(attributes.visibility),
+  );
   if (forOrigin.length === 0) return deny("origin-visibility");
   const grants = effectiveGrants(actor);
   const selfId = principalOf(actor).id;

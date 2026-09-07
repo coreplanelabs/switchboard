@@ -43,7 +43,10 @@ function plain(res: ServerResponse, status: number, body: string, extra: Record<
  * billing sources are read live per request; an upstream failure is a 502
  * carrying a capped reason, never a 500.
  */
-export function createCostsViewHandler(service: CostsService | undefined, shell: ShellRenderer): (req: HttpRequest, res: ServerResponse) => boolean {
+export function createCostsViewHandler(
+  service: CostsService | undefined,
+  shell: ShellRenderer,
+): (req: HttpRequest, res: ServerResponse) => boolean {
   return (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const route = parseCostsRoute(url.pathname);
@@ -54,7 +57,11 @@ export function createCostsViewHandler(service: CostsService | undefined, shell:
       return true;
     }
     if (!service) {
-      plain(res, 503, "Cost reporting isn't configured — set costs.cloudflareAccountId + costs.groups in config and the CF_ANALYTICS_TOKEN secret to enable this view.");
+      plain(
+        res,
+        503,
+        "Cost reporting isn't configured — set costs.cloudflareAccountId + costs.groups in config and the CF_ANALYTICS_TOKEN secret to enable this view.",
+      );
       return true;
     }
     const groups = service.groups();

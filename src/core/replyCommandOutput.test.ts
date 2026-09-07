@@ -14,7 +14,11 @@ const help: ParsedChatCommand = { kind: "reply", text: "usage…" };
 function io(withAttach: boolean) {
   const reply = vi.fn(async (_text: string) => {});
   const attach = vi.fn(async (_file: { name: string; text: string; lead: string }) => {});
-  const base: ChannelIO = { reply, status: async () => ({ update: async () => {}, done: async () => {} }) as never, history: async () => [] };
+  const base: ChannelIO = {
+    reply,
+    status: async () => ({ update: async () => {}, done: async () => {} }) as never,
+    history: async () => [],
+  };
   return { io: withAttach ? { ...base, attach } : base, reply, attach };
 }
 
@@ -29,7 +33,11 @@ describe("replyCommandOutput", () => {
     const file = attach.mock.calls[0][0];
     expect(file.name).toBe("mcp-show.md");
     // `•` -> `-`, one line per fact kept by hard breaks; nothing dropped
-    expect(file.text.startsWith("- `vanta` (user) ✅ connected — https://mcp.vanta.com/mcp  \nTools (100):  \n  - `tool_0` — ")).toBe(true);
+    expect(
+      file.text.startsWith(
+        "- `vanta` (user) ✅ connected — https://mcp.vanta.com/mcp  \nTools (100):  \n  - `tool_0` — ",
+      ),
+    ).toBe(true);
     expect(file.text.split("\n")).toHaveLength(long.split("\n").length);
     expect(file.text).toContain("`tool_99`");
     expect(file.lead.startsWith("• `vanta` (user) ✅ connected — https://mcp.vanta.com/mcp\n")).toBe(true);

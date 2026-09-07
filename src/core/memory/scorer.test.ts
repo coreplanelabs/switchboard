@@ -80,11 +80,13 @@ describe("recencyScore", () => {
 describe("scoreRecord", () => {
   it("keyword relevance dominates recency (α > β)", () => {
     // rMore matches both query tokens but is old; rFewer matches one but is new.
-    const rMore = rec({ createdAt: NOW - 3 * RECENCY_TAU_MS, keywords: ["deploy", "rollback"], text: "deploy then rollback" });
+    const rMore = rec({
+      createdAt: NOW - 3 * RECENCY_TAU_MS,
+      keywords: ["deploy", "rollback"],
+      text: "deploy then rollback",
+    });
     const rFewer = rec({ createdAt: NOW, keywords: ["deploy"], text: "deploy notes" });
-    expect(scoreRecord(rMore, "deploy rollback", NOW)).toBeGreaterThan(
-      scoreRecord(rFewer, "deploy rollback", NOW),
-    );
+    expect(scoreRecord(rMore, "deploy rollback", NOW)).toBeGreaterThan(scoreRecord(rFewer, "deploy rollback", NOW));
   });
   it("breaks keyword ties by recency (newer ranks higher)", () => {
     const newer = rec({ createdAt: NOW, keywords: ["deploy"], text: "deploy A" });

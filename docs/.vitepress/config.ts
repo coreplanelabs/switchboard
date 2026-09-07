@@ -16,7 +16,8 @@ const GITHUB_REPO = "https://github.com/coreplanelabs/switchboard";
 export default withMermaid(
   defineConfig({
     title: "Switchboard",
-    description: "Agents in Slack, on the CLI, over HTTP and MCP — docs for whoever uses, watches, or runs Switchboard.",
+    description:
+      "Agents in Slack, on the CLI, over HTTP and MCP — docs for whoever uses, watches, or runs Switchboard.",
     // Dated implementation plans are working documents for the repo, not pages.
     srcExclude: ["plans/**"],
     // GitHub renders a directory's README.md when you browse to the directory;

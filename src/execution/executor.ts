@@ -127,9 +127,7 @@ export class ExecHealthTracker implements Executor {
 const MAX_OUTPUT = 120_000;
 
 export function truncate(s: string): string {
-  return s.length > MAX_OUTPUT
-    ? s.slice(0, MAX_OUTPUT) + `\n...[truncated ${s.length - MAX_OUTPUT} chars]`
-    : s;
+  return s.length > MAX_OUTPUT ? s.slice(0, MAX_OUTPUT) + `\n...[truncated ${s.length - MAX_OUTPUT} chars]` : s;
 }
 
 /** Runs everything on the local host inside a confined workspace directory. */
@@ -241,7 +239,12 @@ function runBash(
   cwd: string,
   signal?: AbortSignal,
   timeoutMs: number = BASH_TIMEOUT_MS,
-): Promise<{ stdout: string; stderr: string; timedOut: boolean; error: { code?: number | string; message: string } | null }> {
+): Promise<{
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  error: { code?: number | string; message: string } | null;
+}> {
   const started = Date.now();
   return new Promise((res) => {
     execFile(

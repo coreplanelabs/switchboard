@@ -27,7 +27,15 @@
 // braces (`agent:run:{name}`); it is filled from the resource before the
 // lookup, and the validator checks the attribute exists on that target.
 
-import { CHANNEL_VISIBILITIES, RESOURCE_KINDS, RESOURCE_TYPES, TARGET_ATTRIBUTES, targetOf, type AttributeName, type Target } from "./resource.js";
+import {
+  CHANNEL_VISIBILITIES,
+  RESOURCE_KINDS,
+  RESOURCE_TYPES,
+  TARGET_ATTRIBUTES,
+  targetOf,
+  type AttributeName,
+  type Target,
+} from "./resource.js";
 import type { ActorKind, Condition, Rule } from "./types.js";
 
 const grant = (g: string): Condition => ({ kind: "has-grant", grant: g });
@@ -106,11 +114,23 @@ export const POLICY: readonly Rule[] = [
   // A CHANNEL's servers: the channel-config right for a person; a credential
   // an admin minted with `mcp:write` manages any tier it can name.
   { action: "mcp:write", resource: "config-scope", resourceKind: "channel", when: [grant("config:write")] },
-  { action: "mcp:write", resource: "config-scope", resourceKind: "channel", actorKinds: ["service"], when: [grant("mcp:write")] },
+  {
+    action: "mcp:write",
+    resource: "config-scope",
+    resourceKind: "channel",
+    actorKinds: ["service"],
+    when: [grant("mcp:write")],
+  },
   // ORG-wide servers reach the coding/review agents: the repo-management right
   // (`repo:write`, KTD9 fail-closed) for a person; `mcp:write` for a credential.
   { action: "mcp:write", resource: "config-scope", resourceKind: "org", when: [grant("repo:write")] },
-  { action: "mcp:write", resource: "config-scope", resourceKind: "org", actorKinds: ["service"], when: [grant("mcp:write")] },
+  {
+    action: "mcp:write",
+    resource: "config-scope",
+    resourceKind: "org",
+    actorKinds: ["service"],
+    when: [grant("mcp:write")],
+  },
 
   // ── memory ───────────────────────────────────────────────────────────────
   // `memory list` / `memory forget`: the grant admits the command; which
@@ -124,7 +144,13 @@ export const POLICY: readonly Rule[] = [
   { action: "memory:read", resource: "memory-scope", resourceKind: "channel", when: [MEMBER_OF] },
   { action: "memory:read", resource: "memory-scope", resourceKind: "repo", when: [OWNER_OF] },
   // Writes: a fact from a private/dm/unknown origin has NO org row (R11).
-  { action: "memory:write", resource: "memory-scope", resourceKind: "org", originVisibility: ["public", "machine"], when: [] },
+  {
+    action: "memory:write",
+    resource: "memory-scope",
+    resourceKind: "org",
+    originVisibility: ["public", "machine"],
+    when: [],
+  },
   { action: "memory:write", resource: "memory-scope", resourceKind: "user", when: [IS_SELF] },
   { action: "memory:write", resource: "memory-scope", resourceKind: "channel", when: [MEMBER_OF] },
   { action: "memory:write", resource: "memory-scope", resourceKind: "repo", when: [OWNER_OF] },
@@ -136,7 +162,13 @@ export const POLICY: readonly Rule[] = [
 
 export const ACTOR_KINDS: readonly ActorKind[] = ["user", "service", "schedule", "agent"];
 
-export const CONDITION_KINDS: readonly Condition["kind"][] = ["has-grant", "member-of", "is-self", "owner-of", "all-channels"];
+export const CONDITION_KINDS: readonly Condition["kind"][] = [
+  "has-grant",
+  "member-of",
+  "is-self",
+  "owner-of",
+  "all-channels",
+];
 
 const REQUIRED_ATTRIBUTE: Readonly<Partial<Record<Condition["kind"], AttributeName>>> = {
   "member-of": "channelId",
@@ -152,7 +184,10 @@ export function grantPlaceholders(grantName: string): string[] {
 }
 
 /** Fill a grant's placeholders from the resource; `undefined` when an attribute is missing. */
-export function resolveGrant(grantName: string, attributes: Readonly<Partial<Record<AttributeName, string>>>): string | undefined {
+export function resolveGrant(
+  grantName: string,
+  attributes: Readonly<Partial<Record<AttributeName, string>>>,
+): string | undefined {
   let missing = false;
   const resolved = grantName.replace(PLACEHOLDER, (_m, key: string) => {
     const value = attributes[key as AttributeName];
@@ -186,35 +221,47 @@ export function validatePolicy(rules: readonly Rule[]): void {
   for (const rule of rules as readonly unknown[]) {
     if (typeof rule !== "object" || rule === null) throw new PolicyError("row is not an object", rule);
     const r = rule as Rule;
-    if (typeof r.action !== "string" || r.action.length === 0) throw new PolicyError("action must be a non-empty string", rule);
-    if (!RESOURCE_TYPES.includes(r.resource)) throw new PolicyError(`unknown resource type ${String(r.resource)}`, rule);
+    if (typeof r.action !== "string" || r.action.length === 0)
+      throw new PolicyError("action must be a non-empty string", rule);
+    if (!RESOURCE_TYPES.includes(r.resource))
+      throw new PolicyError(`unknown resource type ${String(r.resource)}`, rule);
     // The distributed `Rule` type already ties `resourceKind` to its resource; these
     // runtime checks stay because a table may arrive untyped (config, a test, a future loader).
     const kinds: readonly string[] | undefined = RESOURCE_KINDS[r.resource];
-    if (kinds && r.resourceKind === undefined) throw new PolicyError(`${r.resource} rows must name a resourceKind (${kinds.join("|")})`, rule);
-    if (!kinds && r.resourceKind !== undefined) throw new PolicyError(`${r.resource} is not kinded; resourceKind is not allowed`, rule);
+    if (kinds && r.resourceKind === undefined)
+      throw new PolicyError(`${r.resource} rows must name a resourceKind (${kinds.join("|")})`, rule);
+    if (!kinds && r.resourceKind !== undefined)
+      throw new PolicyError(`${r.resource} is not kinded; resourceKind is not allowed`, rule);
     const target = ruleTarget(r);
     if (!target) throw new PolicyError(`unknown resourceKind ${String(r.resourceKind)}`, rule);
     if (r.actorKinds !== undefined) {
-      if (!Array.isArray(r.actorKinds) || r.actorKinds.length === 0) throw new PolicyError("actorKinds must be a non-empty array", rule);
-      for (const kind of r.actorKinds) if (!ACTOR_KINDS.includes(kind)) throw new PolicyError(`unknown actor kind ${String(kind)}`, rule);
+      if (!Array.isArray(r.actorKinds) || r.actorKinds.length === 0)
+        throw new PolicyError("actorKinds must be a non-empty array", rule);
+      for (const kind of r.actorKinds)
+        if (!ACTOR_KINDS.includes(kind)) throw new PolicyError(`unknown actor kind ${String(kind)}`, rule);
     }
     if (r.originVisibility !== undefined) {
-      if (!Array.isArray(r.originVisibility) || r.originVisibility.length === 0) throw new PolicyError("originVisibility must be a non-empty array", rule);
-      for (const v of r.originVisibility) if (!CHANNEL_VISIBILITIES.includes(v)) throw new PolicyError(`unknown visibility ${String(v)}`, rule);
+      if (!Array.isArray(r.originVisibility) || r.originVisibility.length === 0)
+        throw new PolicyError("originVisibility must be a non-empty array", rule);
+      for (const v of r.originVisibility)
+        if (!CHANNEL_VISIBILITIES.includes(v)) throw new PolicyError(`unknown visibility ${String(v)}`, rule);
     }
     if (!Array.isArray(r.when)) throw new PolicyError("when must be an array", rule);
     const carried = TARGET_ATTRIBUTES[target];
     for (const condition of r.when as readonly unknown[]) {
-      if (typeof condition !== "object" || condition === null) throw new PolicyError("condition is not an object", rule);
+      if (typeof condition !== "object" || condition === null)
+        throw new PolicyError("condition is not an object", rule);
       const c = condition as Condition;
       if (!CONDITION_KINDS.includes(c.kind)) throw new PolicyError(`unknown condition ${String(c.kind)}`, rule);
       const needs = REQUIRED_ATTRIBUTE[c.kind];
-      if (needs && !carried.includes(needs)) throw new PolicyError(`${c.kind} needs ${needs}, which ${target} cannot carry`, rule);
+      if (needs && !carried.includes(needs))
+        throw new PolicyError(`${c.kind} needs ${needs}, which ${target} cannot carry`, rule);
       if (c.kind === "has-grant") {
-        if (typeof c.grant !== "string" || c.grant.length === 0) throw new PolicyError("has-grant needs a grant name", rule);
+        if (typeof c.grant !== "string" || c.grant.length === 0)
+          throw new PolicyError("has-grant needs a grant name", rule);
         for (const attribute of grantPlaceholders(c.grant)) {
-          if (!carried.includes(attribute as AttributeName)) throw new PolicyError(`grant placeholder {${attribute}} is not an attribute of ${target}`, rule);
+          if (!carried.includes(attribute as AttributeName))
+            throw new PolicyError(`grant placeholder {${attribute}} is not an attribute of ${target}`, rule);
         }
       }
     }

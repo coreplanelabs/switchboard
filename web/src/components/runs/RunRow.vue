@@ -47,10 +47,14 @@ const sourceUrl = computed(() => safeSourceUrl(props.run));
 const expires = computed(() => expiresAt(props.run, props.retentionMs));
 const leaving = computed(() => expires.value !== undefined && expires.value - props.now <= LEAVING_WINDOW_MS);
 const stoppable = computed(() => !props.run.finished && !props.run.stop);
-const outcome = computed(() => (props.run.finished && props.run.status && props.run.status !== "completed" ? statusLabel(props.run.status) : ""));
+const outcome = computed(() =>
+  props.run.finished && props.run.status && props.run.status !== "completed" ? statusLabel(props.run.status) : "",
+);
 // The stop badge while a stop is in flight — and for a finished row with no
 // record status yet (a registry summary), where it is the outcome.
-const stopBadge = computed(() => (props.run.stop && !(props.run.finished && props.run.status) ? stopLabel(props.run.stop) : ""));
+const stopBadge = computed(() =>
+  props.run.stop && !(props.run.finished && props.run.status) ? stopLabel(props.run.stop) : "",
+);
 
 const AGENT_HUE: Record<ReturnType<typeof agentHue>, string> = {
   coding: "text-ok bg-ok/8 border-ok/25",
@@ -67,18 +71,31 @@ const disabled = reactive({ soft: false, hard: false });
  *  source mark is hover-revealed) and Stop/Kill. */
 const stopMenuItems = computed(() => [
   ...(sourceUrl.value
-    ? [{ label: `Open ${SURFACE_NAME[src.value.kind] ?? src.value.kind} thread`, icon: "i-lucide-external-link", to: sourceUrl.value, target: "_blank" }]
+    ? [
+        {
+          label: `Open ${SURFACE_NAME[src.value.kind] ?? src.value.kind} thread`,
+          icon: "i-lucide-external-link",
+          to: sourceUrl.value,
+          target: "_blank",
+        },
+      ]
     : []),
   ...(stoppable.value
     ? [
         { label: "Stop (soft)", icon: "i-lucide-octagon-pause", onSelect: () => requestStop("soft") },
-        { label: "Kill (hard)", icon: "i-lucide-octagon-x", color: "error" as const, onSelect: () => requestStop("hard") },
+        {
+          label: "Kill (hard)",
+          icon: "i-lucide-octagon-x",
+          color: "error" as const,
+          onSelect: () => requestStop("hard"),
+        },
       ]
     : []),
 ]);
 
 function requestStop(mode: "soft" | "hard"): void {
-  if (mode === "hard" && !browser.confirm("Hard stop: abort this run now with no summary and free its sandbox?")) return;
+  if (mode === "hard" && !browser.confirm("Hard stop: abort this run now with no summary and free its sandbox?"))
+    return;
   disabled[mode] = true;
   fetch(stopHref(props.run, mode), { method: "POST", credentials: "same-origin" })
     .then((r) => {
@@ -152,9 +169,12 @@ function onRowClick(ev: MouseEvent): void {
           >{{ repo.slice(repo.indexOf("/") + 1) }}</a
         >
       </UTooltip>
-      <span v-else class="scope min-w-0 shrink-0 truncate font-semibold max-sm:order-3" :class="run.finished ? 'text-toned' : 'text-highlighted'">{{
-        parts.scope
-      }}</span>
+      <span
+        v-else
+        class="scope min-w-0 shrink-0 truncate font-semibold max-sm:order-3"
+        :class="run.finished ? 'text-toned' : 'text-highlighted'"
+        >{{ parts.scope }}</span
+      >
       <span
         v-if="parts.snippet !== undefined"
         class="snippet min-w-0 truncate text-muted max-sm:order-6 max-sm:basis-full max-sm:whitespace-normal max-sm:pl-5 max-sm:text-[0.8rem] max-sm:leading-snug max-sm:line-clamp-2 sm:flex-1"
@@ -177,7 +197,9 @@ function onRowClick(ev: MouseEvent): void {
         <SourceMark :kind="src.kind" :tip="sourceTip(run)" :url="sourceUrl || undefined" />
       </span>
       <UTooltip v-if="leaving && expires !== undefined" :text="`removed at ${formatLocalIso(expires)}`">
-        <span class="expires pointer-events-auto shrink-0 text-xs tabular-nums text-warn max-sm:order-11">gone {{ formatDateTime(expires, now) }}</span>
+        <span class="expires pointer-events-auto shrink-0 text-xs tabular-nums text-warn max-sm:order-11"
+          >gone {{ formatDateTime(expires, now) }}</span
+        >
       </UTooltip>
       <UTooltip :text="run.finished ? 'start to finish' : 'running for'">
         <span
@@ -187,16 +209,34 @@ function onRowClick(ev: MouseEvent): void {
         >
       </UTooltip>
       <span class="hidden text-xs text-dimmed max-sm:order-8 max-sm:inline" aria-hidden="true">·</span>
-      <span class="count shrink-0 text-right text-xs tabular-nums max-sm:order-9 max-sm:text-dimmed sm:min-w-[6em] sm:text-muted">
+      <span
+        class="count shrink-0 text-right text-xs tabular-nums max-sm:order-9 max-sm:text-dimmed sm:min-w-[6em] sm:text-muted"
+      >
         {{ run.eventCount }} event{{ run.eventCount === 1 ? "" : "s" }}
       </span>
       <span class="actions hidden min-w-[7.6em] shrink-0 justify-end gap-1.5 whitespace-nowrap sm:flex">
         <template v-if="stoppable">
           <UTooltip text="Soft stop: no new steps, the agent writes up what it has">
-            <UButton class="pointer-events-auto" size="xs" color="neutral" variant="outline" label="Stop" :disabled="disabled.soft" @click="requestStop('soft')" />
+            <UButton
+              class="pointer-events-auto"
+              size="xs"
+              color="neutral"
+              variant="outline"
+              label="Stop"
+              :disabled="disabled.soft"
+              @click="requestStop('soft')"
+            />
           </UTooltip>
           <UTooltip text="Hard stop: abort now, no summary, free the sandbox">
-            <UButton class="pointer-events-auto" size="xs" color="error" variant="outline" label="Kill" :disabled="disabled.hard" @click="requestStop('hard')" />
+            <UButton
+              class="pointer-events-auto"
+              size="xs"
+              color="error"
+              variant="outline"
+              label="Kill"
+              :disabled="disabled.hard"
+              @click="requestStop('hard')"
+            />
           </UTooltip>
         </template>
       </span>

@@ -55,8 +55,14 @@ const rec = (runId: string, finishedAt: number, over: Record<string, unknown> = 
 describe("friction ledger routes", () => {
   it("record → recent round-trips records oldest-first, isolated per ledger key", async () => {
     const key = ledger();
-    expect((await post("/friction/record", { ledgerKey: key, record: rec("b", 200) })).data).toEqual({ ok: true, retained: 1 });
-    expect((await post("/friction/record", { ledgerKey: key, record: rec("a", 100) })).data).toEqual({ ok: true, retained: 2 });
+    expect((await post("/friction/record", { ledgerKey: key, record: rec("b", 200) })).data).toEqual({
+      ok: true,
+      retained: 1,
+    });
+    expect((await post("/friction/record", { ledgerKey: key, record: rec("a", 100) })).data).toEqual({
+      ok: true,
+      retained: 2,
+    });
     const { status, data } = await post("/friction/recent", { ledgerKey: key });
     expect(status).toBe(200);
     expect((data.records as Array<{ runId: string }>).map((r) => r.runId)).toEqual(["a", "b"]);
@@ -68,12 +74,19 @@ describe("friction ledger routes", () => {
     const key = ledger();
     for (let i = 1; i <= 5; i++) await post("/friction/record", { ledgerKey: key, record: rec(`r${i}`, i * 100) });
     await post("/friction/record", { ledgerKey: key, record: rec("r3", 300, { diagnosis: diagnosis("replaced") }) });
-    const all = (await post("/friction/recent", { ledgerKey: key })).data.records as Array<{ runId: string; diagnosis: { verdict: string } }>;
+    const all = (await post("/friction/recent", { ledgerKey: key })).data.records as Array<{
+      runId: string;
+      diagnosis: { verdict: string };
+    }>;
     expect(all.map((r) => r.runId)).toEqual(["r1", "r2", "r3", "r4", "r5"]);
     expect(all[2].diagnosis.verdict).toBe("replaced");
-    const limited = (await post("/friction/recent", { ledgerKey: key, limit: 2 })).data.records as Array<{ runId: string }>;
+    const limited = (await post("/friction/recent", { ledgerKey: key, limit: 2 })).data.records as Array<{
+      runId: string;
+    }>;
     expect(limited.map((r) => r.runId)).toEqual(["r4", "r5"]);
-    const since = (await post("/friction/recent", { ledgerKey: key, sinceMs: 300 })).data.records as Array<{ runId: string }>;
+    const since = (await post("/friction/recent", { ledgerKey: key, sinceMs: 300 })).data.records as Array<{
+      runId: string;
+    }>;
     expect(since.map((r) => r.runId)).toEqual(["r3", "r4", "r5"]);
   });
 
@@ -82,7 +95,8 @@ describe("friction ledger routes", () => {
     // Record 505 runs; the DO trims on every write so the table never exceeds 500.
     let retained = 0;
     for (let i = 1; i <= 505; i++) {
-      retained = (await post("/friction/record", { ledgerKey: key, record: rec(`r${String(i).padStart(4, "0")}`, i) })).data.retained as number;
+      retained = (await post("/friction/record", { ledgerKey: key, record: rec(`r${String(i).padStart(4, "0")}`, i) }))
+        .data.retained as number;
     }
     expect(retained).toBe(500);
     const all = (await post("/friction/recent", { ledgerKey: key })).data.records as Array<{ runId: string }>;
@@ -97,7 +111,9 @@ describe("friction ledger routes", () => {
     expect((await post("/friction/record", { ledgerKey: key, record: { runId: "a" } })).data).toEqual({
       error: "record must be a FrictionRunRecord (runId, finishedAt, diagnosis)",
     });
-    expect((await post("/friction/record", { ledgerKey: key, record: rec("a", "1" as unknown as number) })).status).toBe(400);
+    expect(
+      (await post("/friction/record", { ledgerKey: key, record: rec("a", "1" as unknown as number) })).status,
+    ).toBe(400);
     expect((await post("/friction/record", { ledgerKey: key, record: rec("", 1) })).status).toBe(400); // empty run id: no PK identity
     const huge = rec("a", 1, { label: "x".repeat(70_000) });
     expect((await post("/friction/record", { ledgerKey: key, record: huge })).status).toBe(400);
@@ -109,8 +125,13 @@ describe("friction ledger routes", () => {
 
   it("refuses without the bearer, and non-POST is 405", async () => {
     const key = ledger();
-    expect((await post("/friction/record", { ledgerKey: key, record: rec("a", 1) }, { "content-type": "application/json" })).status).toBe(401);
-    expect((await post("/friction/recent", { ledgerKey: key }, { ...AUTH, authorization: "Bearer wrong" })).status).toBe(401);
+    expect(
+      (await post("/friction/record", { ledgerKey: key, record: rec("a", 1) }, { "content-type": "application/json" }))
+        .status,
+    ).toBe(401);
+    expect(
+      (await post("/friction/recent", { ledgerKey: key }, { ...AUTH, authorization: "Bearer wrong" })).status,
+    ).toBe(401);
     expect((await SELF.fetch(`${BASE}/friction/recent`, { headers: AUTH })).status).toBe(405);
   });
 });

@@ -14,15 +14,18 @@ export interface ConnectIdentity {
 }
 
 export type TicketRefusal =
-  | { kind: "not_found" }
-  | { kind: "expired" }
-  | { kind: "used" }
-  | { kind: "cancelled" }
-  | { kind: "wrong_identity" };
+  { kind: "not_found" } | { kind: "expired" } | { kind: "used" } | { kind: "cancelled" } | { kind: "wrong_identity" };
 
 export type OpenDecision = { ok: true; ticket: McpTicket; bound: boolean } | { ok: false; refusal: TicketRefusal };
 
-export function newTicket(input: { nonce: string; serverId: string; requesterId: string; requesterEmail?: string; now: number; ttlMs?: number }): McpTicket {
+export function newTicket(input: {
+  nonce: string;
+  serverId: string;
+  requesterId: string;
+  requesterEmail?: string;
+  now: number;
+  ttlMs?: number;
+}): McpTicket {
   return {
     nonce: input.nonce,
     serverId: input.serverId,
@@ -57,17 +60,32 @@ export function planOpen(ticket: McpTicket | null, identity: ConnectIdentity, no
   const t = ticket as McpTicket;
   if (!identityMatches(t, identity)) return { ok: false, refusal: { kind: "wrong_identity" } };
   if (!t.requesterEmail && !t.openedBy) {
-    return { ok: true, bound: true, ticket: { ...t, state: "opened", openedBy: { sub: identity.sub, ...(identity.email ? { email: identity.email } : {}), at: now } } };
+    return {
+      ok: true,
+      bound: true,
+      ticket: {
+        ...t,
+        state: "opened",
+        openedBy: { sub: identity.sub, ...(identity.email ? { email: identity.email } : {}), at: now },
+      },
+    };
   }
   return { ok: true, bound: false, ticket: t.state === "pending" ? { ...t, state: "opened" } : t };
 }
 
-export type CompleteDecision = { ok: true; ticket: McpTicket; token: string } | { ok: false; refusal: TicketRefusal | { kind: "bad_token"; reason: string } };
+export type CompleteDecision =
+  | { ok: true; ticket: McpTicket; token: string }
+  | { ok: false; refusal: TicketRefusal | { kind: "bad_token"; reason: string } };
 
 /** POST: may this identity complete the ticket with this token? Returns the
  *  completed ticket for the service to CLAIM (a compare-and-swap from the
  *  state it read) before sealing the credential. */
-export function planComplete(ticket: McpTicket | null, identity: ConnectIdentity, rawToken: string, now: number): CompleteDecision {
+export function planComplete(
+  ticket: McpTicket | null,
+  identity: ConnectIdentity,
+  rawToken: string,
+  now: number,
+): CompleteDecision {
   const r = refuse(ticket, now);
   if (r) return { ok: false, refusal: r };
   const t = ticket as McpTicket;
@@ -76,12 +94,21 @@ export function planComplete(ticket: McpTicket | null, identity: ConnectIdentity
   // the same rule as opening; a bound one must be completed by its opener.
   const token = rawToken.trim();
   if (!token) return { ok: false, refusal: { kind: "bad_token", reason: "the token is empty" } };
-  if (token.length > MCP_TOKEN_MAX_CHARS) return { ok: false, refusal: { kind: "bad_token", reason: `the token is longer than ${MCP_TOKEN_MAX_CHARS} characters` } };
-  if (/[\r\n\0]/.test(token)) return { ok: false, refusal: { kind: "bad_token", reason: "the token contains a line break" } };
+  if (token.length > MCP_TOKEN_MAX_CHARS)
+    return {
+      ok: false,
+      refusal: { kind: "bad_token", reason: `the token is longer than ${MCP_TOKEN_MAX_CHARS} characters` },
+    };
+  if (/[\r\n\0]/.test(token))
+    return { ok: false, refusal: { kind: "bad_token", reason: "the token contains a line break" } };
   return {
     ok: true,
     token,
-    ticket: { ...t, state: "completed", completedBy: { sub: identity.sub, ...(identity.email ? { email: identity.email } : {}), at: now } },
+    ticket: {
+      ...t,
+      state: "completed",
+      completedBy: { sub: identity.sub, ...(identity.email ? { email: identity.email } : {}), at: now },
+    },
   };
 }
 
@@ -100,7 +127,12 @@ export type StartDecision = { ok: true; ticket: McpTicket; bound: boolean } | { 
 
 /** POST action=start: may this identity begin the authorization? Returns the
  *  `authorizing` ticket (with `oauth` attached) for the service to CAS in. */
-export function planStart(ticket: McpTicket | null, identity: ConnectIdentity, oauth: McpTicket["oauth"], now: number): StartDecision {
+export function planStart(
+  ticket: McpTicket | null,
+  identity: ConnectIdentity,
+  oauth: McpTicket["oauth"],
+  now: number,
+): StartDecision {
   const opened = planOpen(ticket, identity, now);
   if (!opened.ok) return opened;
   return { ok: true, bound: opened.bound, ticket: { ...opened.ticket, state: "authorizing", oauth } };
@@ -116,11 +148,20 @@ export function planCallback(ticket: McpTicket | null, identity: ConnectIdentity
   const t = ticket as McpTicket;
   if (!identityMatches(t, identity)) return { ok: false, refusal: { kind: "wrong_identity" } };
   if (t.state !== "authorizing" || !t.oauth) return { ok: false, refusal: { kind: "not_authorizing" } };
-  return { ok: true, ticket: { ...t, state: "completed", completedBy: { sub: identity.sub, ...(identity.email ? { email: identity.email } : {}), at: now } } };
+  return {
+    ok: true,
+    ticket: {
+      ...t,
+      state: "completed",
+      completedBy: { sub: identity.sub, ...(identity.email ? { email: identity.email } : {}), at: now },
+    },
+  };
 }
 
 /** Human wording for each refusal — the page shows exactly this. */
-export function refusalMessage(r: CallbackRefusal | { kind: "bad_token"; reason: string } | { kind: "oauth_failed"; reason: string }): string {
+export function refusalMessage(
+  r: CallbackRefusal | { kind: "bad_token"; reason: string } | { kind: "oauth_failed"; reason: string },
+): string {
   switch (r.kind) {
     case "not_authorizing":
       return "This sign-in did not start from a connect link, or the link was opened again since. Open the connect link and try again.";

@@ -47,7 +47,10 @@ export interface WebAssets {
 export function loadWebAssets(distDir: string): WebAssets {
   let manifest: Record<string, ManifestChunk>;
   try {
-    manifest = JSON.parse(readFileSync(join(distDir, ".vite", "manifest.json"), "utf8")) as Record<string, ManifestChunk>;
+    manifest = JSON.parse(readFileSync(join(distDir, ".vite", "manifest.json"), "utf8")) as Record<
+      string,
+      ManifestChunk
+    >;
   } catch (err) {
     throw new Error(
       `web app manifest not found under ${distDir} — build it first (npm run build in web/): ${err instanceof Error ? err.message : String(err)}`,

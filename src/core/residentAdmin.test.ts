@@ -3,7 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../config.js";
-import { makeResidentAdminClient, parseSlug, repoResourceId, residentAdminFromConfig, validRef, type ResidentAdminClient } from "./residentAdmin.js";
+import {
+  makeResidentAdminClient,
+  parseSlug,
+  repoResourceId,
+  residentAdminFromConfig,
+  validRef,
+  type ResidentAdminClient,
+} from "./residentAdmin.js";
 
 // Feature: features/resident-repos.md (item 32) — the bot's client for the
 // resident Worker's admin routes, its config-driven construction, and the two
@@ -97,7 +104,10 @@ describe("makeResidentAdminClient (real fetch client)", () => {
   it("status(resource) is GET /status?resource=<encoded> with the bearer (item 52: what the provisioning follow-up polls)", async () => {
     const { calls } = stubFetch({ body: { state: "onboarding", reason: "", inFlight: 0 } });
     const client = makeResidentAdminClient("https://resident.example", "admin-tok");
-    expect(await client.status("repo:acme/api")).toEqual({ status: 200, data: { state: "onboarding", reason: "", inFlight: 0 } });
+    expect(await client.status("repo:acme/api")).toEqual({
+      status: 200,
+      data: { state: "onboarding", reason: "", inFlight: 0 },
+    });
     expect(calls[0].init.method).toBe("GET");
     expect(new URL(calls[0].url).pathname + new URL(calls[0].url).search).toBe("/status?resource=repo%3Aacme%2Fapi");
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer admin-tok");
@@ -112,8 +122,12 @@ describe("makeResidentAdminClient (real fetch client)", () => {
 
   it("residentAdminFromConfig: no execution.resident → names the config; no bearer → names the env var; both set → the real client with the bearer", async () => {
     const NO_RESIDENT = YAML_FIXTURE.replace(/  resident:[\s\S]*$/m, "");
-    expect(residentAdminFromConfig(store(NO_RESIDENT), {})).toEqual({ unavailable: expect.stringContaining("execution.resident") });
-    expect(residentAdminFromConfig(store(), { RESIDENT_ADMIN_TOKEN: "" })).toEqual({ unavailable: expect.stringContaining("RESIDENT_ADMIN_TOKEN") });
+    expect(residentAdminFromConfig(store(NO_RESIDENT), {})).toEqual({
+      unavailable: expect.stringContaining("execution.resident"),
+    });
+    expect(residentAdminFromConfig(store(), { RESIDENT_ADMIN_TOKEN: "" })).toEqual({
+      unavailable: expect.stringContaining("RESIDENT_ADMIN_TOKEN"),
+    });
     const { calls } = stubFetch({ body: { cap: 8, count: 0, residents: [] } });
     const api = residentAdminFromConfig(store(), { RESIDENT_ADMIN_TOKEN: "admin-tok" });
     expect("unavailable" in api).toBe(false);

@@ -32,8 +32,22 @@ const input = {
   source: { channel: "dev", user: "justin", url: "https://acme.slack.com/archives/C1/p1" },
 };
 const assistant = (text: string, at: number) => ({ type: "assistant", text, at });
-const call = (id: string, summary: string, at: number, tool = "bash") => ({ type: "tool_call", callId: id, tool, summary, at });
-const result = (id: string, over: Record<string, unknown> = {}) => ({ type: "tool_result", callId: id, tool: "bash", ok: true, summary: "", output: "out", ...over });
+const call = (id: string, summary: string, at: number, tool = "bash") => ({
+  type: "tool_call",
+  callId: id,
+  tool,
+  summary,
+  at,
+});
+const result = (id: string, over: Record<string, unknown> = {}) => ({
+  type: "tool_result",
+  callId: id,
+  tool: "bash",
+  ok: true,
+  summary: "",
+  output: "out",
+  ...over,
+});
 
 function mountLive() {
   const { created, factory } = fakeEventSourceFactory();
@@ -55,14 +69,22 @@ describe("RunPage — history mode", () => {
   it("keeps the first input as the Request and lists later inputs as follow-ups under it (one run, several inputs)", () => {
     const { factory } = fakeEventSourceFactory();
     const w = mountApp(RunPage, {
-      seed: historySeed([
-        input,
-        call("c1", "$ npm test", 3000),
-        { type: "input", text: "also the **numbers**", at: 3500, source: { user: "bob", url: "https://acme.slack.com/archives/C1/p2" } },
-        { type: "run_note", kind: "follow_up", summary: "follow-up folded in: also the numbers", at: 3500 },
-        result("c1", { at: 4000 }),
-        { type: "answer", text: "done", at: 5000 },
-      ] as LiveFrame[], { status: "completed", durationMs: 4000 }),
+      seed: historySeed(
+        [
+          input,
+          call("c1", "$ npm test", 3000),
+          {
+            type: "input",
+            text: "also the **numbers**",
+            at: 3500,
+            source: { user: "bob", url: "https://acme.slack.com/archives/C1/p2" },
+          },
+          { type: "run_note", kind: "follow_up", summary: "follow-up folded in: also the numbers", at: 3500 },
+          result("c1", { at: 4000 }),
+          { type: "answer", text: "done", at: 5000 },
+        ] as LiveFrame[],
+        { status: "completed", durationMs: 4000 },
+      ),
       eventSource: factory,
     });
     expect(w.find("#request").text()).toContain("fix the"); // the original stays the request
@@ -78,13 +100,16 @@ describe("RunPage — history mode", () => {
   it("seeds the whole record through the ONE fold: request (with source), steps, cards, answer; no stream, no stop controls", () => {
     const { created, factory } = fakeEventSourceFactory();
     const w = mountApp(RunPage, {
-      seed: historySeed([
-        input,
-        assistant("running tests", 2000),
-        call("c1", "$ npm test", 3000),
-        result("c1", { ok: false, exitCode: 1, output: "boom", at: 4000 }),
-        { type: "answer", text: "gave up", at: 5000 },
-      ] as LiveFrame[], { status: "failed", durationMs: 4000 }),
+      seed: historySeed(
+        [
+          input,
+          assistant("running tests", 2000),
+          call("c1", "$ npm test", 3000),
+          result("c1", { ok: false, exitCode: 1, output: "boom", at: 4000 }),
+          { type: "answer", text: "gave up", at: 5000 },
+        ] as LiveFrame[],
+        { status: "failed", durationMs: 4000 },
+      ),
       eventSource: factory,
     });
     expect(created).toHaveLength(0); // history opens no EventSource
@@ -126,7 +151,9 @@ describe("RunPage — history mode", () => {
 
   it("renders hostile model text as data, never markup", () => {
     const w = mountApp(RunPage, {
-      seed: historySeed([{ type: "input", text: '<img src=x onerror=alert(1)> and <script>alert(1)</script>', at: 1 } as LiveFrame]),
+      seed: historySeed([
+        { type: "input", text: "<img src=x onerror=alert(1)> and <script>alert(1)</script>", at: 1 } as LiveFrame,
+      ]),
     });
     expect(w.find("#request img").exists()).toBe(false);
     expect(w.find("#request script").exists()).toBe(false);
@@ -137,7 +164,17 @@ describe("RunPage — history mode", () => {
     const w = mountApp(RunPage, {
       seed: historySeed([
         input,
-        { type: "run_meta", agent: "review", model: "anthropic/claude-fable-5", effort: "high", repo: "acme/web", ref: "main", pr: 12, headSha: "0123456789abcdef0123456789abcdef01234567", at: 1 },
+        {
+          type: "run_meta",
+          agent: "review",
+          model: "anthropic/claude-fable-5",
+          effort: "high",
+          repo: "acme/web",
+          ref: "main",
+          pr: 12,
+          headSha: "0123456789abcdef0123456789abcdef01234567",
+          at: 1,
+        },
       ] as LiveFrame[]),
     });
     const meta = w.find("#runmeta");
@@ -155,14 +192,20 @@ describe("RunPage — history mode", () => {
     for (const a of meta.findAll("a")) expect(a.attributes("target")).toBe("_blank");
 
     const hostile = mountApp(RunPage, {
-      seed: historySeed([input, { type: "run_meta", agent: "review", model: "m", repo: "javascript:alert(1)//x", at: 1 }] as LiveFrame[]),
+      seed: historySeed([
+        input,
+        { type: "run_meta", agent: "review", model: "m", repo: "javascript:alert(1)//x", at: 1 },
+      ] as LiveFrame[]),
     });
     expect(hostile.find("#runmeta").findAll("a")).toHaveLength(0);
   });
 
   it("collects context turns into the collapsed Context block with a count", () => {
     const w = mountApp(RunPage, {
-      seed: historySeed([{ type: "context", text: "earlier", at: 1 }, { type: "context", text: "another", at: 2 }] as LiveFrame[]),
+      seed: historySeed([
+        { type: "context", text: "earlier", at: 1 },
+        { type: "context", text: "another", at: 2 },
+      ] as LiveFrame[]),
     });
     expect(w.find("#context summary").text()).toContain("(2 turns)");
     expect(w.find("#context").text()).toContain("earlier");
@@ -196,7 +239,15 @@ describe("RunPage — history mode", () => {
       seed: historySeed([
         assistant("work", 1),
         call("q1", "update_status …", 2, "update_status"),
-        { type: "skill_use", skill: "pdf", description: "Fill PDFs", agent: "coding", bodyBytes: 2048, source: "https://example.com/x", at: 3 },
+        {
+          type: "skill_use",
+          skill: "pdf",
+          description: "Fill PDFs",
+          agent: "coding",
+          bodyBytes: 2048,
+          source: "https://example.com/x",
+          at: 3,
+        },
       ] as LiveFrame[]),
     });
     const quiet = w.find(".quiet");
@@ -268,7 +319,13 @@ describe("RunPage — history mode", () => {
 
   it("the fold toggle opens every card (and future ones), then closes them; icon state flips", async () => {
     const w = mountApp(RunPage, {
-      seed: historySeed([assistant("work", 1), call("c1", "$ a", 2), call("c2", "$ b", 3), result("c1"), result("c2")] as LiveFrame[]),
+      seed: historySeed([
+        assistant("work", 1),
+        call("c1", "$ a", 2),
+        call("c2", "$ b", 3),
+        result("c1"),
+        result("c2"),
+      ] as LiveFrame[]),
     });
     const fold = w.find("#fold");
     expect(fold.text()).toContain("Expand all");
@@ -362,7 +419,10 @@ describe("RunPage — live mode", () => {
     es().emitOpen();
     const buttons = wrapper.findAll("#actions button");
     await buttons[0].trigger("click");
-    expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=soft", { method: "POST", credentials: "same-origin" });
+    expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=soft", {
+      method: "POST",
+      credentials: "same-origin",
+    });
     await vi.waitFor(() => expect(wrapper.find("#actions").exists()).toBe(false)); // one request is enough
     expect(wrapper.find("#state").text()).toBe("stopping (soft)");
     es().emitNamed("end");
@@ -378,7 +438,10 @@ describe("RunPage — live mode", () => {
     expect(fetch).not.toHaveBeenCalled();
     confirmSpy.mockReturnValue(true);
     await wrapper.findAll("#actions button")[1].trigger("click");
-    expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", { method: "POST", credentials: "same-origin" });
+    expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+      method: "POST",
+      credentials: "same-origin",
+    });
     await vi.waitFor(() => expect(wrapper.find("#actions").exists()).toBe(false));
     es().emitNamed("end");
     await wrapper.vm.$nextTick();
@@ -398,7 +461,10 @@ describe("RunPage — live mode", () => {
   it("a stop note from the stream marks the run stopping for every viewer", async () => {
     const { wrapper, es } = mountLive();
     es().emitOpen();
-    es().emitMessage({ type: "run_note", summary: "stop requested (soft)", kind: "stop_requested", mode: "soft", at: 5 }, "1");
+    es().emitMessage(
+      { type: "run_note", summary: "stop requested (soft)", kind: "stop_requested", mode: "soft", at: 5 },
+      "1",
+    );
     await wrapper.vm.$nextTick();
     expect(wrapper.find("#state").text()).toBe("stopping (soft)");
     expect(wrapper.find("#actions").exists()).toBe(false);
@@ -411,7 +477,16 @@ describe("RunPage — live mode", () => {
 // module itself is tested in src/modules/pr-review/; this is the wiring.
 describe("PR-review panel wiring", () => {
   const inputFrame = { ...input, type: "input" } as const;
-  const runMeta = { type: "run_meta", agent: "review", model: "anthropic/m", repo: "acme/api", ref: "patch-1", pr: 42, headSha: "e".repeat(40), at: 2 } as const;
+  const runMeta = {
+    type: "run_meta",
+    agent: "review",
+    model: "anthropic/m",
+    repo: "acme/api",
+    ref: "patch-1",
+    pr: 42,
+    headSha: "e".repeat(40),
+    at: 2,
+  } as const;
   const artifact = {
     type: "review_artifact",
     artifact: "reading_diff",
@@ -423,7 +498,9 @@ describe("PR-review panel wiring", () => {
   } as const;
 
   it("a history run with artifacts shows the button; opening it renders the panel with the PR link and the rendered diff", async () => {
-    const wrapper = mountApp(RunPage, { seed: historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "looks correct", at: 9 }]) });
+    const wrapper = mountApp(RunPage, {
+      seed: historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "looks correct", at: 9 }]),
+    });
     const button = wrapper.find('[data-testid="reading-diff-button"]');
     expect(button.exists()).toBe(true);
     await button.trigger("click");
@@ -450,7 +527,9 @@ describe("PR-review panel wiring", () => {
   });
 
   it("a run without artifacts (a coding run, or reading diffs off) has no button", () => {
-    const wrapper = mountApp(RunPage, { seed: historySeed([inputFrame, runMeta, { type: "answer", text: "done", at: 9 }]) });
+    const wrapper = mountApp(RunPage, {
+      seed: historySeed([inputFrame, runMeta, { type: "answer", text: "done", at: 9 }]),
+    });
     expect(wrapper.find('[data-testid="reading-diff-button"]').exists()).toBe(false);
     wrapper.unmount();
   });

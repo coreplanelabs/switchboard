@@ -140,7 +140,14 @@ interface PendingCall {
  *  receipt (`turn`), which sits above the step it produced but is not one. */
 type NarrativeEvent = Extract<RunEvent, { type: "input" | "context" | "assistant" | "answer" | "turn" | "run_meta" }>;
 function isNarrative(ev: RunEvent): ev is NarrativeEvent {
-  return ev.type === "input" || ev.type === "context" || ev.type === "assistant" || ev.type === "answer" || ev.type === "turn" || ev.type === "run_meta";
+  return (
+    ev.type === "input" ||
+    ev.type === "context" ||
+    ev.type === "assistant" ||
+    ev.type === "answer" ||
+    ev.type === "turn" ||
+    ev.type === "run_meta"
+  );
 }
 
 /** Analyze a run's event stream. Pure and deterministic; never mutates `events`. */
@@ -239,7 +246,13 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       endModelTurn(ev, index, typeof ev.summary === "string" ? ev.summary : ev.tool);
       toolCalls++;
       if (failedCalls.has(`${ev.tool} ${ev.summary}`)) {
-        findings.push({ category: "retry", severity: "low", summary: `retried after failure: ${ev.summary}`, tool: ev.tool, eventIndex: index });
+        findings.push({
+          category: "retry",
+          severity: "low",
+          summary: `retried after failure: ${ev.summary}`,
+          tool: ev.tool,
+          eventIndex: index,
+        });
       }
       const queue = pending.get(ev.tool) ?? [];
       queue.push({ index, event: ev });
@@ -262,7 +275,15 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
         // An infra-level failure is the sandbox, not the command: classify once,
         // as infra — but name the command that was running, so "the sandbox died
         // during installs" is readable from the findings alone.
-        findings.push(timed({ category: "infra_failure", severity: "high", summary: `exec infrastructure failed during ${callSummary} → ${ev.summary}`, tool: ev.tool, eventIndex: anchor }));
+        findings.push(
+          timed({
+            category: "infra_failure",
+            severity: "high",
+            summary: `exec infrastructure failed during ${callSummary} → ${ev.summary}`,
+            tool: ev.tool,
+            eventIndex: anchor,
+          }),
+        );
         return;
       }
       if (ev.tool === "bash" && isSetupInstallCommand(callSummary)) {
@@ -270,30 +291,42 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
         // still setup cost — so the category total is the true install bill.
         const slow = durationMs !== undefined && durationMs >= slowToolMs;
         const label = !ev.ok ? "install failed" : slow ? "slow install" : "install";
-        findings.push(timed({
-          category: "setup_install",
-          severity: !ev.ok ? "high" : slow ? "medium" : "low",
-          summary: `${label}: ${callSummary}${!ev.ok ? ` → ${ev.summary}` : ""}`,
-          tool: ev.tool,
-          eventIndex: anchor,
-        }));
+        findings.push(
+          timed({
+            category: "setup_install",
+            severity: !ev.ok ? "high" : slow ? "medium" : "low",
+            summary: `${label}: ${callSummary}${!ev.ok ? ` → ${ev.summary}` : ""}`,
+            tool: ev.tool,
+            eventIndex: anchor,
+          }),
+        );
         return;
       }
       if (!ev.ok) {
         // A failure that was ALSO slow cost more than a fast one: high once it
         // crosses the slow threshold (the same bar slow_tool uses).
         const slowFailure = durationMs !== undefined && durationMs >= slowToolMs;
-        findings.push(timed({ category: "failed_tool", severity: slowFailure ? "high" : "medium", summary: `${callSummary} → ${ev.summary}`, tool: ev.tool, eventIndex: anchor }));
+        findings.push(
+          timed({
+            category: "failed_tool",
+            severity: slowFailure ? "high" : "medium",
+            summary: `${callSummary} → ${ev.summary}`,
+            tool: ev.tool,
+            eventIndex: anchor,
+          }),
+        );
         return;
       }
       if (durationMs !== undefined && durationMs >= slowToolMs) {
-        findings.push(timed({
-          category: "slow_tool",
-          severity: durationMs >= 2 * slowToolMs ? "high" : "medium",
-          summary: `took ${formatMs(durationMs)}: ${callSummary}`,
-          tool: ev.tool,
-          eventIndex: anchor,
-        }));
+        findings.push(
+          timed({
+            category: "slow_tool",
+            severity: durationMs >= 2 * slowToolMs ? "high" : "medium",
+            summary: `took ${formatMs(durationMs)}: ${callSummary}`,
+            tool: ev.tool,
+            eventIndex: anchor,
+          }),
+        );
       }
       return;
     }
@@ -306,13 +339,28 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
         findings.push({ category: "wrap_up", severity: "medium", summary: ev.summary, eventIndex: index });
         return;
       case "time_budget_exhausted":
-        findings.push({ category: "budget_hit", severity: "high", summary: `budget hit (time): ${ev.summary}`, eventIndex: index });
+        findings.push({
+          category: "budget_hit",
+          severity: "high",
+          summary: `budget hit (time): ${ev.summary}`,
+          eventIndex: index,
+        });
         return;
       case "turn_budget_exhausted":
-        findings.push({ category: "budget_hit", severity: "high", summary: `budget hit (turns): ${ev.summary}`, eventIndex: index });
+        findings.push({
+          category: "budget_hit",
+          severity: "high",
+          summary: `budget hit (turns): ${ev.summary}`,
+          eventIndex: index,
+        });
         return;
       case "sandbox_dead":
-        findings.push({ category: "infra_failure", severity: "high", summary: `sandbox dead: ${ev.summary}`, eventIndex: index });
+        findings.push({
+          category: "infra_failure",
+          severity: "high",
+          summary: `sandbox dead: ${ev.summary}`,
+          eventIndex: index,
+        });
         return;
     }
   });
@@ -370,8 +418,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
 function verdictOf(d: FrictionDiagnosis): string {
   if (d.findings.length === 0) return "no friction detected";
   const ranked = FRICTION_CATEGORIES.filter((c) => d.byCategory[c].count > 0).sort(
-    (a, b) =>
-      d.byCategory[b].durationMs - d.byCategory[a].durationMs || d.byCategory[b].count - d.byCategory[a].count,
+    (a, b) => d.byCategory[b].durationMs - d.byCategory[a].durationMs || d.byCategory[b].count - d.byCategory[a].count,
   );
   const top = ranked[0];
   const t = d.byCategory[top];
@@ -402,7 +449,9 @@ export function formatFrictionReport(d: FrictionDiagnosis): string {
   lines.push(totals.join(" · "), "", "category         count  time");
   for (const c of FRICTION_CATEGORIES) {
     const t = d.byCategory[c];
-    lines.push(`${c.padEnd(16)} ${String(t.count).padStart(5)}  ${t.count && d.hasTimings ? formatMs(t.durationMs) : "-"}`);
+    lines.push(
+      `${c.padEnd(16)} ${String(t.count).padStart(5)}  ${t.count && d.hasTimings ? formatMs(t.durationMs) : "-"}`,
+    );
   }
   if (d.findings.length > 0) {
     lines.push("", "findings (stream order):");

@@ -62,7 +62,11 @@ const NL_BUILD_RE = /^build\s+(\S+)(?:\s+in\s+(\S+))?$/i;
  * <owner/name>" tail or the thread's established repo (message or history —
  * the same sources as repoContext). Anything else → null.
  */
-export function recognizeOperation(text: string, history: Array<{ role: string; text: string }>, opts: { allowNatural: boolean }): RecognizedOp | null {
+export function recognizeOperation(
+  text: string,
+  history: Array<{ role: string; text: string }>,
+  opts: { allowNatural: boolean },
+): RecognizedOp | null {
   if (!opts.allowNatural) return null;
 
   // Trailing "." / "!" are stripped; a trailing "?" is a question → no match.

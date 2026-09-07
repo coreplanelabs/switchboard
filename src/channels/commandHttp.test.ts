@@ -13,7 +13,15 @@ import type { AccessIdentity } from "./accessAuth.js";
 import { ALL_GRANTS, grantsFor } from "../core/authz/grants.js";
 import { NO_GRANTS } from "../core/authz/types.js";
 import { callerWith } from "../core/testing/callers.js";
-import { callerFor, callerIdFor, createCommandHttpHandler, isCommandPath, isLocalhostBase, serviceTokenAllowed, type CommandHttpOptions } from "./commandHttp.js";
+import {
+  callerFor,
+  callerIdFor,
+  createCommandHttpHandler,
+  isCommandPath,
+  isLocalhostBase,
+  serviceTokenAllowed,
+  type CommandHttpOptions,
+} from "./commandHttp.js";
 
 // Feature: features/command-registry.md — the generic HTTP adapter for `/api/*`
 // (R7/R9/R10, KTD13/KTD15). No per-command code: every registered command is
@@ -52,19 +60,36 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
 async function fixture(over: Partial<CommandHttpOptions> = {}) {
   let n = 0;
   const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
-  const live = reg.create("coding · acme/live", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t", channelVisibility: "public" });
+  const live = reg.create("coding · acme/live", {
+    agent: "coding",
+    channelId: "slack:C1",
+    userId: "slack:U1",
+    threadKey: "slack:C1:t",
+    channelVisibility: "public",
+  });
   reg.publish(live.id, { type: "input", text: "live request" });
   const store = new InMemoryRunStore({ now: () => NOW });
   await store.put(record("fin-1", NOW - 1000));
   // A finished run from a private Slack group (authorization R5): visible to all-channels holders and its own user only.
-  await store.put(record("fin-priv", NOW - 2000, { channelId: "slack:G_PRIV", userId: "slack:U7", threadKey: "slack:G_PRIV:fin-priv", channelVisibility: "private" }));
+  await store.put(
+    record("fin-priv", NOW - 2000, {
+      channelId: "slack:G_PRIV",
+      userId: "slack:U7",
+      threadKey: "slack:G_PRIV:fin-priv",
+      channelVisibility: "private",
+    }),
+  );
   const runs = createRunsService({ registry: reg, store });
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
   registerRunsCommands(registry);
   const commands: CommandInvoker = bindCommands(registry, { runs: async () => runs });
   const opts: CommandHttpOptions = {
     // The two legacy keys, as `ConfigStore.grantsFor` translates them: an operator, one service token; every other browser session holds the reads.
-    grantsFor: (id) => grantsFor(id, { permissions: { operators: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } }, commandGroups: ["runs"] }),
+    grantsFor: (id) =>
+      grantsFor(id, {
+        permissions: { operators: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } },
+        commandGroups: ["runs"],
+      }),
     devBypassActive: false,
     ...over,
   };
@@ -136,7 +161,12 @@ const readerBot: AccessIdentity = { sub: "", commonName: "reader-bot" };
 const unknownBot: AccessIdentity = { sub: "", commonName: "nobody" };
 
 const stopPost = (id: string, headers: IncomingHttpHeaders = {}, body = JSON.stringify({ id, mode: "soft" })) =>
-  fakeReqRes({ method: "POST", url: "/api/runs.stop", headers: { "content-type": "application/json", ...headers }, body });
+  fakeReqRes({
+    method: "POST",
+    url: "/api/runs.stop",
+    headers: { "content-type": "application/json", ...headers },
+    body,
+  });
 
 function stopNotes(reg: RunRegistry, id: string): RunEvent[] {
   return (reg.snapshotById(id)?.events ?? []).filter((e) => e.type === "run_note" && e.kind === "stop_requested");
@@ -144,7 +174,17 @@ function stopNotes(reg: RunRegistry, id: string): RunEvent[] {
 
 describe("isCommandPath (the ONE gate predicate, KTD13)", () => {
   it("claims /api and everything under /api/, including sloppy and encoded spellings", () => {
-    for (const p of ["/api", "/api/", "/api/runs.list", "/api/unknown.cmd", "//api/runs.list", "/api/runs.list/", "/%61pi/runs.list", "/api%2Fruns.list", "/API/runs.list"]) {
+    for (const p of [
+      "/api",
+      "/api/",
+      "/api/runs.list",
+      "/api/unknown.cmd",
+      "//api/runs.list",
+      "/api/runs.list/",
+      "/%61pi/runs.list",
+      "/api%2Fruns.list",
+      "/API/runs.list",
+    ]) {
       expect(isCommandPath(p), p).toBe(true);
     }
   });
@@ -155,7 +195,8 @@ describe("isCommandPath (the ONE gate predicate, KTD13)", () => {
   });
 
   it("leaves other paths alone", () => {
-    for (const p of ["/", "/runs", "/runs/abc", "/apiary", "/healthz", "/mcp", "/ingress"]) expect(isCommandPath(p), p).toBe(false);
+    for (const p of ["/", "/runs", "/runs/abc", "/apiary", "/healthz", "/mcp", "/ingress"])
+      expect(isCommandPath(p), p).toBe(false);
   });
 });
 
@@ -172,13 +213,22 @@ describe("createCommandHttpHandler — read commands", () => {
     expect(body.runs.map((r) => r.id).sort()).toEqual(["fin-1", "live-1"]);
     expect(t.text()).not.toContain("tok-");
     // The adapter passes `invoke`'s object through untouched (the same actor: an unlisted browser session holds the group reads and no channel).
-    const direct = await commands.invoke("runs.list", { options: { status: "all" } }, callerWith("access", "access:user-1", { actions: new Set(["runs:read"]) }));
+    const direct = await commands.invoke(
+      "runs.list",
+      { options: { status: "all" } },
+      callerWith("access", "access:user-1", { actions: new Set(["runs:read"]) }),
+    );
     expect(body).toEqual(direct.ok ? direct.value : null);
   });
 
   it("POST JSON is accepted for a read command; query strings coerce like JSON", async () => {
     const { handler } = await fixture();
-    const post = fakeReqRes({ method: "POST", url: "/api/runs.list", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "all", limit: 1 }) });
+    const post = fakeReqRes({
+      method: "POST",
+      url: "/api/runs.list",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "all", limit: 1 }),
+    });
     await handler(post.req, post.res, browser);
     const get = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all&limit=1" });
     await handler(get.req, get.res, browser);
@@ -217,11 +267,21 @@ describe("createCommandHttpHandler — read commands", () => {
 
   it("a non-JSON POST body → 400 invalid_input; a non-JSON content-type → 415", async () => {
     const { handler } = await fixture();
-    const bad = fakeReqRes({ method: "POST", url: "/api/runs.list", headers: { "content-type": "application/json" }, body: "[1,2" });
+    const bad = fakeReqRes({
+      method: "POST",
+      url: "/api/runs.list",
+      headers: { "content-type": "application/json" },
+      body: "[1,2",
+    });
     await handler(bad.req, bad.res, browser);
     expect(bad.status).toBe(400);
     expect(bad.json().code).toBe("invalid_input");
-    const form = fakeReqRes({ method: "POST", url: "/api/runs.list", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "status=all" });
+    const form = fakeReqRes({
+      method: "POST",
+      url: "/api/runs.list",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "status=all",
+    });
     await handler(form.req, form.res, browser);
     expect(form.status).toBe(415);
     expect(form.bodyRead).toBe(false);
@@ -229,7 +289,12 @@ describe("createCommandHttpHandler — read commands", () => {
 
   it("an oversized body → 413 without invoking", async () => {
     const { handler } = await fixture({ maxBodyBytes: 8 });
-    const t = fakeReqRes({ method: "POST", url: "/api/runs.list", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "all" }) });
+    const t = fakeReqRes({
+      method: "POST",
+      url: "/api/runs.list",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "all" }),
+    });
     await handler(t.req, t.res, browser);
     expect(t.status).toBe(413);
     expect(t.destroyed).toBe(true);
@@ -292,7 +357,11 @@ describe("createCommandHttpHandler — write safety (KTD15, AE8)", () => {
 
   it("a write POST without content-type: application/json → 415, nothing published", async () => {
     const { handler, reg, live } = await fixture();
-    const t = fakeReqRes({ method: "POST", url: "/api/runs.stop", body: JSON.stringify({ id: live.id, mode: "soft" }) });
+    const t = fakeReqRes({
+      method: "POST",
+      url: "/api/runs.stop",
+      body: JSON.stringify({ id: live.id, mode: "soft" }),
+    });
     await handler(t.req, t.res, operator);
     expect(t.status).toBe(415);
     expect(stopNotes(reg, live.id)).toHaveLength(0);
@@ -351,11 +420,16 @@ describe("createCommandHttpHandler — caller resolution (R9)", () => {
   });
 
   it("a service token with runs:write stops a run as actor access:svc:<common_name>", async () => {
-    const { handler, reg, live } = await fixture({ grantsFor: (id) => grantsFor(id, { permissions: { serviceTokens: { "ops-bot": ["runs:read", "runs:write"] } } }) });
+    const { handler, reg, live } = await fixture({
+      grantsFor: (id) => grantsFor(id, { permissions: { serviceTokens: { "ops-bot": ["runs:read", "runs:write"] } } }),
+    });
     const t = stopPost(live.id);
     await handler(t.req, t.res, { sub: "", commonName: "ops-bot" });
     expect(t.status).toBe(200);
-    expect((stopNotes(reg, live.id)[0] as { actor?: unknown }).actor).toEqual({ kind: "access", id: "access:svc:ops-bot" });
+    expect((stopNotes(reg, live.id)[0] as { actor?: unknown }).actor).toEqual({
+      kind: "access",
+      id: "access:svc:ops-bot",
+    });
   });
 });
 
@@ -365,7 +439,10 @@ describe("createCommandHttpHandler — the Access API is bound by channel visibi
   const nativeGrants = (id: string) =>
     id === "access:op-2"
       ? { actions: new Set(["runs:read", "runs:write"]), channels: new Set<string>(), repos: new Set<string>() }
-      : grantsFor(id, { permissions: { operators: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } }, commandGroups: ["runs"] });
+      : grantsFor(id, {
+          permissions: { operators: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } },
+          commandGroups: ["runs"],
+        });
 
   it("an Access operator without all-channels gets 404 not_found on a private-channel run, byte-identical to a run that does not exist (R12 b); the legacy operator (all-channels) reads it", async () => {
     const { handler } = await fixture({ grantsFor: nativeGrants });
@@ -440,8 +517,18 @@ describe("createCommandHttpHandler — dev bypass (KTD13)", () => {
 
 describe("serviceTokenAllowed — a service token is a command-surface credential only", () => {
   it("admits a service token on /api/* (every spelling isCommandPath claims) and nowhere else", () => {
-    for (const p of ["/api/runs.list", "/api", "//api/runs.list", "/API/runs.list"]) expect(serviceTokenAllowed(p, readerBot), p).toBe(true);
-    for (const p of ["/runs", "/runs?all=1", "/runs/live-1/events", "/runs/live-1/stop", "/residents", "/costs", "/costs.json", "/costs/prod"]) {
+    for (const p of ["/api/runs.list", "/api", "//api/runs.list", "/API/runs.list"])
+      expect(serviceTokenAllowed(p, readerBot), p).toBe(true);
+    for (const p of [
+      "/runs",
+      "/runs?all=1",
+      "/runs/live-1/events",
+      "/runs/live-1/stop",
+      "/residents",
+      "/costs",
+      "/costs.json",
+      "/costs/prod",
+    ]) {
       expect(serviceTokenAllowed(p, readerBot), p).toBe(false);
       expect(serviceTokenAllowed(p, unknownBot), p).toBe(false);
     }
@@ -464,24 +551,50 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
 
   it("callerFor carries the identity as the Actor the table decides on: browser sub → user access:<sub>, service token → service access:svc:<cn>, grants from the lookup (plan U2/U4) — nothing else", async () => {
     const opts: Pick<CommandHttpOptions, "grantsFor"> = {
-      grantsFor: (id) => grantsFor(id, { permissions: { admins: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } }, commandGroups: ["runs"] }),
+      grantsFor: (id) =>
+        grantsFor(id, {
+          permissions: { admins: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } },
+          commandGroups: ["runs"],
+        }),
     };
     expect(callerFor({ sub: "op-1" }, opts).actor).toEqual({ kind: "user", id: "access:op-1", grants: ALL_GRANTS });
     // An unlisted browser session: the reads its translation gives, nothing the adapter added.
-    expect(callerFor(browser, opts).actor).toEqual({ kind: "user", id: "access:user-1", grants: { actions: new Set(["runs:read"]), channels: new Set(), repos: new Set() } });
-    expect(callerFor(readerBot, opts).actor).toEqual({ kind: "service", id: "access:svc:reader-bot", grants: { actions: new Set(["runs:read"]), channels: "all", repos: new Set() } });
-    expect(callerFor(browser, opts)).toEqual({ kind: "access", id: "access:user-1", actor: callerFor(browser, opts).actor });
+    expect(callerFor(browser, opts).actor).toEqual({
+      kind: "user",
+      id: "access:user-1",
+      grants: { actions: new Set(["runs:read"]), channels: new Set(), repos: new Set() },
+    });
+    expect(callerFor(readerBot, opts).actor).toEqual({
+      kind: "service",
+      id: "access:svc:reader-bot",
+      grants: { actions: new Set(["runs:read"]), channels: "all", repos: new Set() },
+    });
+    expect(callerFor(browser, opts)).toEqual({
+      kind: "access",
+      id: "access:user-1",
+      actor: callerFor(browser, opts).actor,
+    });
     // No lookup knowledge → no grants (fail-closed).
     expect(callerFor(browser, { grantsFor: () => NO_GRANTS }).actor.grants).toBe(NO_GRANTS);
   });
 
   it("is the id callerFor's Caller carries", async () => {
-    const { handler, reg } = await fixture({ grantsFor: (id) => grantsFor(id, { permissions: { serviceTokens: { "reader-bot": ["runs:write"] } } }) });
-    const live = reg.create("x", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:x" });
+    const { handler, reg } = await fixture({
+      grantsFor: (id) => grantsFor(id, { permissions: { serviceTokens: { "reader-bot": ["runs:write"] } } }),
+    });
+    const live = reg.create("x", {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:x",
+    });
     const t = stopPost(live.id);
     await handler(t.req, t.res, readerBot);
     expect(t.status).toBe(200);
-    expect((stopNotes(reg, live.id)[0] as { actor?: unknown }).actor).toEqual({ kind: "access", id: callerIdFor(readerBot) });
+    expect((stopNotes(reg, live.id)[0] as { actor?: unknown }).actor).toEqual({
+      kind: "access",
+      id: callerIdFor(readerBot),
+    });
   });
 });
 

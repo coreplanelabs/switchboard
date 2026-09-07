@@ -27,7 +27,13 @@ import type { Effort } from "../effort.js";
 import { runAgent } from "../runner.js";
 import type { ChatMessage, Provider } from "../providers/types.js";
 import type { ExecutorFactoryOptions } from "../execution/factory.js";
-import { resolveBaseRef, type OpenedPullRequest, type PullRequestFacts, type PullRequestTarget, type RepoShipInfo } from "../execution/githubPulls.js";
+import {
+  resolveBaseRef,
+  type OpenedPullRequest,
+  type PullRequestFacts,
+  type PullRequestTarget,
+  type RepoShipInfo,
+} from "../execution/githubPulls.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { ToolContext } from "../tools/workspace.js";
 import type { WebCapability } from "../tools/web.js";
@@ -113,7 +119,11 @@ export function shipTaskText(requestText: string, repo: string): string {
   t = t.replace(new RegExp(`\\bin\\s+${slug}\\s*:?`, "gi"), " ");
   t = t.replace(new RegExp(`\\b${slug}(#\\d+)?\\b`, "gi"), " ");
   t = t.replace(/\b[a-z0-9][\w.-]*\/[\w.-]+#\d+\b/gi, " ");
-  return t.replace(/\s+/g, " ").trim().replace(/^[:,\-—.\s]+/, "").trim();
+  return t
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[:,\-—.\s]+/, "")
+    .trim();
 }
 
 /**
@@ -152,8 +162,7 @@ export interface ShipEntry {
 }
 
 export type ShipPreflightResult =
-  | { ok: true; entry: ShipEntry }
-  | { ok: false; where: string; card: string; reply: string };
+  { ok: true; entry: ShipEntry } | { ok: false; where: string; card: string; reply: string };
 
 export interface ShipPreflightInput {
   /** Platform-namespaced channel id (AGENTS.md invariant 4) — the prefix IS
@@ -349,7 +358,8 @@ export function buildShipReviewTurn(input: {
   }
   const findings = input.prior.findings.map(formatFinding).join("\n") || "(none recorded)";
   const dispositions =
-    input.prior.dispositions.map((d) => `${d.findingId}: ${d.disposition}${d.note ? ` — ${d.note}` : ""}`).join("\n") || "(none recorded)";
+    input.prior.dispositions.map((d) => `${d.findingId}: ${d.disposition}${d.note ? ` — ${d.note}` : ""}`).join("\n") ||
+    "(none recorded)";
   return (
     `Re-review pull request ${input.where}${at} — review round ${input.round} of this ship pipeline. ` +
     `Load the \`re-review-delta\` skill: narrow your READING to the delta since the previously reviewed head and verify each prior finding's disposition, ` +
@@ -362,7 +372,8 @@ export function buildShipReviewTurn(input: {
  *  file:line, title) plus the review prose, and the loop contract — every
  *  severity gets a disposition, description resubmitted, branch repushed. */
 export function buildShipFixTurn(input: { where: string; findings: Finding[]; review: string }): string {
-  const findings = input.findings.map(formatFinding).join("\n") || "(the review listed no structured findings — address its prose)";
+  const findings =
+    input.findings.map(formatFinding).join("\n") || "(the review listed no structured findings — address its prose)";
   return (
     `The review of ${input.where} requested changes. Load the \`address-review-findings\` skill and address EVERY finding below, nits included: ` +
     `record one disposition per finding with submit_dispositions (fixed|declined, with a note), squash to coherent commits, ` +
@@ -520,7 +531,10 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
   const deadlineAt = now() + caps.maxMinutes * 60_000;
   const remainingMs = () => deadlineAt - now();
   /** Never mutate the shared AgentDef — children run a clipped COPY. */
-  const clip = (def: AgentDef): AgentDef => ({ ...def, maxMinutes: Math.min(def.maxMinutes, Math.max(remainingMs(), 0) / 60_000) });
+  const clip = (def: AgentDef): AgentDef => ({
+    ...def,
+    maxMinutes: Math.min(def.maxMinutes, Math.max(remainingMs(), 0) / 60_000),
+  });
 
   /** Findings per review round and dispositions per fix round, both keyed by
    *  the REVIEW round they belong to. Finding ids are only unique WITHIN one
@@ -552,7 +566,8 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
   let lastFindings: Finding[] = [];
   let reviewRounds = 0;
   let prNumber = entry.resume?.pr;
-  let prUrl = entry.resume?.url ?? (prNumber !== undefined ? `https://github.com/${entry.repo}/pull/${prNumber}` : undefined);
+  let prUrl =
+    entry.resume?.url ?? (prNumber !== undefined ? `https://github.com/${entry.repo}/pull/${prNumber}` : undefined);
   let lastReviewHead: string | undefined = entry.resume?.headSha;
 
   const roundsLine = () => `${reviewRounds} review round${reviewRounds === 1 ? "" : "s"}`;
@@ -609,13 +624,18 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     const unaddressed = lastFindings.filter((f) => !withDisposition(f));
     const claimedFixed = lastFindings.filter((f) => withDisposition(f)?.disposition === "fixed");
     const list = (items: Finding[], note?: (f: Finding) => string) =>
-      items.length > 0 ? items.map((f) => `  - ${formatFinding(f)}${note ? ` — ${note(f)}` : ""}`).join("\n") : "  - none";
+      items.length > 0
+        ? items.map((f) => `  - ${formatFinding(f)}${note ? ` — ${note(f)}` : ""}`).join("\n")
+        : "  - none";
     const lines = [
       `Open findings from the last review (${lastFindings.length}):`,
       `Declined (disposition recorded):\n${list(declined, (f) => withDisposition(f)?.note || "no note")}`,
       `Unaddressed (no disposition):\n${list(unaddressed)}`,
     ];
-    if (claimedFixed.length > 0) lines.push(`Claimed fixed but still flagged:\n${list(claimedFixed, (f) => withDisposition(f)?.note || "no note")}`);
+    if (claimedFixed.length > 0)
+      lines.push(
+        `Claimed fixed but still flagged:\n${list(claimedFixed, (f) => withDisposition(f)?.note || "no note")}`,
+      );
     return lines.join("\n");
   };
 
@@ -628,7 +648,9 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     ].join("\n\n"),
   });
   const wallClockCap = () =>
-    capOutcome(`the remaining pipeline time (~${Math.max(0, Math.round(remainingMs() / 60_000))} min of the ${caps.maxMinutes}-minute budget) cannot hold another round`);
+    capOutcome(
+      `the remaining pipeline time (~${Math.max(0, Math.round(remainingMs() / 60_000))} min of the ${caps.maxMinutes}-minute budget) cannot hold another round`,
+    );
 
   // ---- one coding child (round 0, and every fix round) ----------------------
   const runCodingChild = async (opts: {
@@ -639,7 +661,13 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     const spec = input.child("coding");
     const ws = await attachRoundWorkspace({
       factory: input.factory,
-      round: { threadKey: input.threadKey, agent: spec.agent, repo: entry.repo, ref: entry.branch, headSha: opts.attachHeadSha },
+      round: {
+        threadKey: input.threadKey,
+        agent: spec.agent,
+        repo: entry.repo,
+        ref: entry.branch,
+        headSha: opts.attachHeadSha,
+      },
       logKey,
     });
     const { executor, resident, binding, note } = ws.selection;
@@ -719,11 +747,16 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       });
       // A hard stop tore the work down mid-flight — observe nothing, post nothing.
       const pushedBranch = pushes.branch();
-      if (control.requested !== "hard") observed = await observeCodingWorkspace(executor, { probeRemote: false, ...(pushedBranch !== undefined ? { pushedBranch } : {}) });
+      if (control.requested !== "hard")
+        observed = await observeCodingWorkspace(executor, {
+          probeRemote: false,
+          ...(pushedBranch !== undefined ? { pushedBranch } : {}),
+        });
     } finally {
       await ws.release({ hardStopped: control.requested === "hard" });
     }
-    if (description) input.publish({ type: "pr_description", description: input.redactDescription(description), at: now() });
+    if (description)
+      input.publish({ type: "pr_description", description: input.redactDescription(description), at: now() });
     // Branch contract enforced structurally, before any PR write: a child
     // whose head branch (the one it pushed, else the one it ended on) is not
     // the pipeline branch pushed work this pipeline cannot reach (the thread
@@ -772,7 +805,11 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     let pinned = normalizeHead(await github.fetchPrHead(pr).catch(() => undefined));
     // Unknown head is a guaranteed downstream refusal — reuse the extracted
     // pre-flight so the refusal reply has ONE wording.
-    const pf = checkPrHeadPreflight({ agent: spec.agent, requestText: "", repoCtx: { repo: entry.repo, pr: prNumber, headSha: pinned } });
+    const pf = checkPrHeadPreflight({
+      agent: spec.agent,
+      requestText: "",
+      repoCtx: { repo: entry.repo, pr: prNumber, headSha: pinned },
+    });
     if (!pf.ok) return { refusal: pf.reply };
     const ws = await attachRoundWorkspace({
       factory: input.factory,
@@ -925,7 +962,9 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     // approving review recorded them (an approve with no fix round — round 1,
     // or a resume straight to LGTM — has none). Never the flat all-rounds
     // set, where a reused finding id would resurrect a stale decline.
-    const declined = [...(dispositionsByRound.get(reviewRounds - 1)?.values() ?? [])].filter((d) => d.disposition === "declined");
+    const declined = [...(dispositionsByRound.get(reviewRounds - 1)?.values() ?? [])].filter(
+      (d) => d.disposition === "declined",
+    );
     return {
       status: "completed",
       reply: [
@@ -995,7 +1034,9 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         : "the coding round ended without submitting a PR description (a clarifying question, a budget write-up, or an unproven push ends the pipeline here)";
       return {
         status: "aborted",
-        reply: [r0.answer, r0.prNote, `⚠️ Ship ended at round 0: ${terminal}. No review round ran.`, reissue()].filter(Boolean).join("\n\n"),
+        reply: [r0.answer, r0.prNote, `⚠️ Ship ended at round 0: ${terminal}. No review round ran.`, reissue()]
+          .filter(Boolean)
+          .join("\n\n"),
       };
     }
     emitRound(0, "coding", "pr_opened");
@@ -1057,7 +1098,9 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       return stoppedOutcome(
         [
           rv.answer,
-          rv.reviewPost?.posted ? "ℹ️ A changes-requested review was posted this round before the stop — its findings stand on the PR." : undefined,
+          rv.reviewPost?.posted
+            ? "ℹ️ A changes-requested review was posted this round before the stop — its findings stand on the PR."
+            : undefined,
         ]
           .filter(Boolean)
           .join("\n\n"),
@@ -1072,7 +1115,14 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         {
           role: "user",
           content: [
-            { type: "text", text: buildShipFixTurn({ where: `${entry.repo}#${prNumber}`, findings: lastFindings, review: rv.answer ?? "" }) },
+            {
+              type: "text",
+              text: buildShipFixTurn({
+                where: `${entry.repo}#${prNumber}`,
+                findings: lastFindings,
+                review: rv.answer ?? "",
+              }),
+            },
           ],
         },
       ],
@@ -1122,8 +1172,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     if (fixHead !== undefined && reviewedAt !== undefined && sameCommit(fixHead, reviewedAt)) {
       const roundDispositions = dispositionsByRound.get(reviewRounds);
       const allDeclined =
-        lastFindings.length > 0 &&
-        lastFindings.every((f) => roundDispositions?.get(f.id)?.disposition === "declined");
+        lastFindings.length > 0 && lastFindings.every((f) => roundDispositions?.get(f.id)?.disposition === "declined");
       if (!allDeclined) {
         emitRound(reviewRounds, "coding", "aborted");
         return abortOutcome(

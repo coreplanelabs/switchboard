@@ -14,10 +14,26 @@ export function formatLocalIso(at: number, offsetMinutes?: number): string {
   // Shift the instant by the offset, then read the fields as UTC: the zone's
   // wall-clock without depending on the runtime zone for any field but `off`.
   var d = new Date(at - off * 60000);
-  function p(n: number): string { return (n < 10 ? "0" : "") + n; }
+  function p(n: number): string {
+    return (n < 10 ? "0" : "") + n;
+  }
   var sign = off <= 0 ? "+" : "-";
   var abs = Math.abs(off);
-  return d.getUTCFullYear() + "-" + p(d.getUTCMonth() + 1) + "-" + p(d.getUTCDate()) +
-    "T" + p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) + ":" + p(d.getUTCSeconds()) +
-    sign + p(Math.floor(abs / 60)) + ":" + p(abs % 60);
+  return (
+    d.getUTCFullYear() +
+    "-" +
+    p(d.getUTCMonth() + 1) +
+    "-" +
+    p(d.getUTCDate()) +
+    "T" +
+    p(d.getUTCHours()) +
+    ":" +
+    p(d.getUTCMinutes()) +
+    ":" +
+    p(d.getUTCSeconds()) +
+    sign +
+    p(Math.floor(abs / 60)) +
+    ":" +
+    p(abs % 60)
+  );
 }

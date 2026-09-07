@@ -42,12 +42,18 @@ export const MEAT_TIMEOUT_S_DEFAULT = 240;
  *  flip providers on a deployed bot without a config rebuild; an unrecognized
  *  env value is ignored. Absent everything → `git`: the artifact costs one git
  *  command and the panel can rely on it existing. */
-export function resolveReadingDiff(cfg: ReadingDiffConfig | undefined, env: Record<string, string | undefined>): ResolvedReadingDiff | null {
+export function resolveReadingDiff(
+  cfg: ReadingDiffConfig | undefined,
+  env: Record<string, string | undefined>,
+): ResolvedReadingDiff | null {
   const envRaw = env.SWITCHBOARD_READING_DIFF?.trim().toLowerCase();
   const envChoice = envRaw === "git" || envRaw === "meat" || envRaw === "off" ? envRaw : undefined;
   const choice = envChoice ?? cfg?.provider ?? "git";
   if (choice === "off") return null;
-  const timeout = typeof cfg?.meatTimeoutS === "number" && cfg.meatTimeoutS > 0 ? Math.floor(cfg.meatTimeoutS) : MEAT_TIMEOUT_S_DEFAULT;
+  const timeout =
+    typeof cfg?.meatTimeoutS === "number" && cfg.meatTimeoutS > 0
+      ? Math.floor(cfg.meatTimeoutS)
+      : MEAT_TIMEOUT_S_DEFAULT;
   return { provider: choice, meatTimeoutS: timeout, ...(cfg?.meatModel ? { meatModel: cfg.meatModel } : {}) };
 }
 
@@ -55,7 +61,12 @@ export function resolveReadingDiff(cfg: ReadingDiffConfig | undefined, env: Reco
  *  (base falls back to the repository's default branch via `origin/HEAD`),
  *  quoted into one inert token; `--end-of-options` keeps a hostile ref from
  *  being parsed as a git option (same discipline as `diff_digest`). */
-export function readingDiffCommand(provider: ReadingDiffProviderName, baseRef: string | undefined, meatModel?: string, meatTimeoutS = MEAT_TIMEOUT_S_DEFAULT): string {
+export function readingDiffCommand(
+  provider: ReadingDiffProviderName,
+  baseRef: string | undefined,
+  meatModel?: string,
+  meatTimeoutS = MEAT_TIMEOUT_S_DEFAULT,
+): string {
   const range = shellQuote(`origin/${baseRef ?? "HEAD"}...HEAD`);
   if (provider === "git") return `git diff --no-color --end-of-options ${range}`;
   // meat's runtime bound is enforced HERE, on the producer (coreutils timeout;
@@ -207,7 +218,9 @@ export async function produceReadingDiff(
         truncated: capped.truncated,
         // meat's summary is model prose generated FROM the diff — same hygiene.
         ...(meat.summary ? { summary: sanitize(meat.summary) } : {}),
-        ...(meat.inputTokens !== undefined && meat.outputTokens !== undefined ? { meatTokens: { input: meat.inputTokens, output: meat.outputTokens } } : {}),
+        ...(meat.inputTokens !== undefined && meat.outputTokens !== undefined
+          ? { meatTokens: { input: meat.inputTokens, output: meat.outputTokens } }
+          : {}),
       };
     }
     if (out.trim() === "" || failedOutput(out)) return null;

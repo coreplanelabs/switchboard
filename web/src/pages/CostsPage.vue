@@ -49,9 +49,12 @@ function monthDay(date: string): string {
             aria-current="page"
             >{{ g }}</span
           >
-          <a v-else class="rounded-md px-2.5 py-1 text-xs text-muted no-underline hover:bg-elevated hover:text-highlighted" :href="`/costs/${g}`">{{
-            g
-          }}</a>
+          <a
+            v-else
+            class="rounded-md px-2.5 py-1 text-xs text-muted no-underline hover:bg-elevated hover:text-highlighted"
+            :href="`/costs/${g}`"
+            >{{ g }}</a
+          >
         </template>
       </nav>
       <p class="text-sm tabular-nums text-muted">
@@ -67,7 +70,9 @@ function monthDay(date: string): string {
       <div class="grid gap-0.5 rounded-md border border-default bg-elevated px-4 py-3.5">
         <span class="text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">Yesterday</span>
         <span class="text-2xl font-medium tabular-nums">{{ tiles.yesterday ? usd(tiles.yesterday.total) : "—" }}</span>
-        <span class="text-xs text-muted">{{ tiles.yesterday ? `${tiles.yesterday.date} · last full day` : "no full day in range" }}</span>
+        <span class="text-xs text-muted">{{
+          tiles.yesterday ? `${tiles.yesterday.date} · last full day` : "no full day in range"
+        }}</span>
       </div>
       <div class="grid gap-0.5 rounded-md border border-default bg-elevated px-4 py-3.5">
         <span class="text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">7-day average</span>
@@ -80,9 +85,13 @@ function monthDay(date: string): string {
         <span class="text-xs text-muted">7-day rate × 30.4, before plan fees and included allowances</span>
       </div>
       <div class="grid gap-0.5 rounded-md border border-default bg-elevated px-4 py-3.5">
-        <span class="text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">{{ report.llmAvailable ? "LLM share" : "LLM spend" }}</span>
+        <span class="text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">{{
+          report.llmAvailable ? "LLM share" : "LLM spend"
+        }}</span>
         <span class="text-2xl font-medium tabular-nums">{{ report.llmAvailable ? `${tiles.llmShare}%` : "—" }}</span>
-        <span class="text-xs text-muted">{{ report.llmAvailable ? "of the range total" : "LLM spend not configured" }}</span>
+        <span class="text-xs text-muted">{{
+          report.llmAvailable ? "of the range total" : "LLM spend not configured"
+        }}</span>
       </div>
     </section>
 
@@ -102,8 +111,8 @@ function monthDay(date: string): string {
       <!-- The billing-method prose lives in the collapsed footer; only an
            actionable gap stays on the card. -->
       <p v-if="!report.llmAvailable" class="text-xs text-warn">
-        LLM spend not configured — set <code>ANTHROPIC_ADMIN_KEY</code> and the group's <code>anthropicWorkspaceId</code> to
-        layer it in.
+        LLM spend not configured — set <code>ANTHROPIC_ADMIN_KEY</code> and the group's
+        <code>anthropicWorkspaceId</code> to layer it in.
       </p>
     </section>
 
@@ -118,7 +127,10 @@ function monthDay(date: string): string {
             <td class="px-2.5 py-1.5 text-right">{{ usd(row.usd) }}</td>
             <td class="px-2.5 py-1.5 text-right">{{ Math.round(row.percent) }}%</td>
             <td class="w-2/5 px-2.5 py-1.5">
-              <i class="block h-2.5 rounded-xs bg-primary opacity-75" :style="{ width: `${row.percent.toFixed(1)}%` }" />
+              <i
+                class="block h-2.5 rounded-xs bg-primary opacity-75"
+                :style="{ width: `${row.percent.toFixed(1)}%` }"
+              />
             </td>
           </tr>
         </tbody>
@@ -135,7 +147,11 @@ function monthDay(date: string): string {
             <thead>
               <tr>
                 <th class="border-b border-muted px-2.5 py-1.5 text-left text-xs font-medium text-muted">Date</th>
-                <th v-for="s in series" :key="s" class="border-b border-muted px-2.5 py-1.5 text-right text-xs font-medium text-muted">
+                <th
+                  v-for="s in series"
+                  :key="s"
+                  class="border-b border-muted px-2.5 py-1.5 text-right text-xs font-medium text-muted"
+                >
                   {{ s }}
                 </th>
                 <th class="border-b border-muted px-2.5 py-1.5 text-right text-xs font-medium text-muted">Total</th>
@@ -145,9 +161,13 @@ function monthDay(date: string): string {
               <tr v-for="d in report.days" :key="d.date">
                 <td class="border-b border-muted px-2.5 py-1.5" :title="d.date">
                   {{ monthDay(d.date) }}
-                  <span v-if="report.range.partialLastDay && d.date === report.range.to" class="text-xs text-dimmed">(partial day)</span>
+                  <span v-if="report.range.partialLastDay && d.date === report.range.to" class="text-xs text-dimmed"
+                    >(partial day)</span
+                  >
                 </td>
-                <td v-for="s in series" :key="s" class="border-b border-muted px-2.5 py-1.5 text-right">{{ usd(valueOf(d, s), 3) }}</td>
+                <td v-for="s in series" :key="s" class="border-b border-muted px-2.5 py-1.5 text-right">
+                  {{ usd(valueOf(d, s), 3) }}
+                </td>
                 <td class="border-b border-muted px-2.5 py-1.5 text-right font-semibold">{{ usd(d.total, 3) }}</td>
               </tr>
             </tbody>
@@ -155,8 +175,8 @@ function monthDay(date: string): string {
         </div>
       </details>
       <p class="text-xs text-muted">
-        Machine-readable twin: <code class="rounded bg-accented px-1 py-0.5">GET /costs/{{ report.group }}.json</code> (same
-        Access gate).
+        Machine-readable twin:
+        <code class="rounded bg-accented px-1 py-0.5">GET /costs/{{ report.group }}.json</code> (same Access gate).
       </p>
     </section>
 
@@ -167,21 +187,23 @@ function monthDay(date: string): string {
         <summary class="cursor-pointer text-muted">How these numbers are computed</summary>
         <div class="mt-2 grid gap-1.5">
           <div>
-            <b>Live.</b> Both billing sources are read live from this page — nothing cached, nothing stored. Cloudflare bills
-            vCPU on active use only; memory and disk bill on the provisioned size for every second a container is awake. LLM
-            spend is the Anthropic Admin API cost report for this group's workspace (gross, USD).
+            <b>Live.</b> Both billing sources are read live from this page — nothing cached, nothing stored. Cloudflare
+            bills vCPU on active use only; memory and disk bill on the provisioned size for every second a container is
+            awake. LLM spend is the Anthropic Admin API cost report for this group's workspace (gross, USD).
           </div>
           <div>
-            <b>Method.</b> Cloudflare GraphQL Analytics <code>containersUsageAdaptiveGroups</code> (cpuTimeSec, allocatedMemory,
-            allocatedDisk per app per UTC day), <code>durableObjectsPeriodicGroups</code> (billable <code>duration</code> GB-s per
-            namespace) and <code>durableObjectsInvocationsAdaptiveGroups</code> (requests per Worker). Prices: vCPU $0.000020/s,
-            memory $0.0000025/GiB-s, disk $0.00000007/GB-s, DO duration $12.50 per million GB-s, DO requests $0.15/M. Gross list
-            price — plan fees and included allowances are not subtracted.
+            <b>Method.</b> Cloudflare GraphQL Analytics <code>containersUsageAdaptiveGroups</code> (cpuTimeSec,
+            allocatedMemory, allocatedDisk per app per UTC day), <code>durableObjectsPeriodicGroups</code> (billable
+            <code>duration</code> GB-s per namespace) and <code>durableObjectsInvocationsAdaptiveGroups</code> (requests
+            per Worker). Prices: vCPU $0.000020/s, memory $0.0000025/GiB-s, disk $0.00000007/GB-s, DO duration $12.50
+            per million GB-s, DO requests $0.15/M. Gross list price — plan fees and included allowances are not
+            subtracted.
           </div>
           <div>
             <b>Scope.</b> Only the container apps, DO namespaces and Workers mapped to this group in
-            <code>costs.groups.{{ report.group }}</code>; everything else in the account is excluded. Not included: R2 (resident
-            snapshots), DO SQLite storage, Workers requests, Access — each is cents a month at current volume.
+            <code>costs.groups.{{ report.group }}</code
+            >; everything else in the account is excluded. Not included: R2 (resident snapshots), DO SQLite storage,
+            Workers requests, Access — each is cents a month at current volume.
           </div>
         </div>
       </details>

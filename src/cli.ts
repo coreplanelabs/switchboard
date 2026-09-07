@@ -32,7 +32,15 @@ import { openConfigStore, type ConfigStore } from "./config.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 import { CLI_ACTOR } from "./core/authz/actor.js";
-import { CommandError, CommandRegistry, renderText, type Caller, type CommandInput, type CommandInvoker, type InvokeErrorCode } from "./core/commandRegistry.js";
+import {
+  CommandError,
+  CommandRegistry,
+  renderText,
+  type Caller,
+  type CommandInput,
+  type CommandInvoker,
+  type InvokeErrorCode,
+} from "./core/commandRegistry.js";
 import { catalogueText, chatForm, helpText, parseInvocation, type GrammarRejection } from "./core/commandSurface.js";
 import { dispatch } from "./core/dispatcher.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
@@ -75,17 +83,27 @@ const WORD = /^[a-z][a-z0-9]*$/;
  * transport concern, not grammar. `ask` is parsed here because it is the CLI's
  * own built-in; everything else goes to `parseInvocation` unchanged.
  */
-export function parseCliArgv(argv: readonly string[], commands: Pick<CommandInvoker, "list" | "get">, now: () => number = Date.now): CliInvocation {
+export function parseCliArgv(
+  argv: readonly string[],
+  commands: Pick<CommandInvoker, "list" | "get">,
+  now: () => number = Date.now,
+): CliInvocation {
   // A bare `help` is the catalogue; `help show …` is the registered command like any other `<group> <verb>`.
-  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h" || (argv[0] === "help" && argv.length === 1)) return { kind: "catalogue" };
+  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h" || (argv[0] === "help" && argv.length === 1))
+    return { kind: "catalogue" };
   if (argv[0] === "ask") return parseAsk(argv.slice(1), now);
   const json = argv.includes("--json");
   const rest = argv.filter((a) => a !== "--json");
   const [group, verb, ...tail] = rest;
-  if (!group || !verb || !WORD.test(group) || !WORD.test(verb)) return { kind: "usage", error: `${USAGE}\n  expected <group> <verb>` };
+  if (!group || !verb || !WORD.test(group) || !WORD.test(verb))
+    return { kind: "usage", error: `${USAGE}\n  expected <group> <verb>` };
   const id = `${group}.${verb}`;
   const cmd = commands.get(id);
-  if (!cmd || !CommandRegistry.exposedTo(cmd, "cli")) return { kind: "usage", error: `${USAGE}\n  unknown command: ${group} ${verb}\n\ncommands:\n${cliCatalogue(commands)}` };
+  if (!cmd || !CommandRegistry.exposedTo(cmd, "cli"))
+    return {
+      kind: "usage",
+      error: `${USAGE}\n  unknown command: ${group} ${verb}\n\ncommands:\n${cliCatalogue(commands)}`,
+    };
   const bound = parseInvocation(cmd, tail);
   switch (bound.kind) {
     case "help":
@@ -141,15 +159,36 @@ function errorLine(code: InvokeErrorCode, message: string): string {
  * any other failure; success prints the exact `invoke` JSON (`--json`) or
  * `renderText` of it.
  */
-export async function runCommand(commands: CommandInvoker, parsed: Extract<CliInvocation, { kind: "command" }>, caller: Caller, opts: { now?: number } = {}): Promise<CommandRunOutput> {
+export async function runCommand(
+  commands: CommandInvoker,
+  parsed: Extract<CliInvocation, { kind: "command" }>,
+  caller: Caller,
+  opts: { now?: number } = {},
+): Promise<CommandRunOutput> {
   const cmd = commands.get(parsed.id);
   const result = await commands.invoke(parsed.id, parsed.input, caller);
-  if (!result.ok) return { exitCode: result.error === "invalid_input" ? 2 : 1, stdout: "", stderr: errorLine(result.error, result.message) };
-  return { exitCode: 0, stdout: parsed.json ? JSON.stringify(result.value, null, 2) : renderText(cmd ?? { id: parsed.id }, result.value, opts), stderr: "" };
+  if (!result.ok)
+    return {
+      exitCode: result.error === "invalid_input" ? 2 : 1,
+      stdout: "",
+      stderr: errorLine(result.error, result.message),
+    };
+  return {
+    exitCode: 0,
+    stdout: parsed.json
+      ? JSON.stringify(result.value, null, 2)
+      : renderText(cmd ?? { id: parsed.id }, result.value, opts),
+    stderr: "",
+  };
 }
 
 /** What every non-`ask` invocation prints — the pure half `main()` and the tests share. */
-export async function runCli(commands: CommandInvoker, parsed: Exclude<CliInvocation, { kind: "ask" }>, caller: Caller, opts: { now?: number } = {}): Promise<CommandRunOutput> {
+export async function runCli(
+  commands: CommandInvoker,
+  parsed: Exclude<CliInvocation, { kind: "ask" }>,
+  caller: Caller,
+  opts: { now?: number } = {},
+): Promise<CommandRunOutput> {
   switch (parsed.kind) {
     case "usage":
       return { exitCode: 2, stdout: "", stderr: parsed.error };
@@ -174,7 +213,8 @@ class ConsoleIO implements ChannelIO {
   async status(initial: StatusUpdate): Promise<StatusHandle> {
     console.error(initial.title);
     return {
-      update: (f) => console.error([f.title, f.link?.url, f.detail].filter(Boolean).join(" | ").split("\n").join(" | ")),
+      update: (f) =>
+        console.error([f.title, f.link?.url, f.detail].filter(Boolean).join(" | ").split("\n").join(" | ")),
       done: async (f) => console.error(f.title),
     };
   }
@@ -189,13 +229,21 @@ class ConsoleIO implements ChannelIO {
  *  A command that does ask for it in such a checkout fails `unavailable`
  *  naming the path and the env var, never with an ENOENT stack. */
 export function missingBotConfig(configPath: string): CommandError {
-  return new CommandError("unavailable", `bot config not found at ${configPath} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`);
+  return new CommandError(
+    "unavailable",
+    `bot config not found at ${configPath} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`,
+  );
 }
 
 export async function loadBotConfig(
   configPath: string,
   overridesPath: string,
-  opts: { env?: Record<string, string | undefined>; exists?: (path: string) => boolean; warn?: (message: string) => void; fetch?: typeof fetch } = {},
+  opts: {
+    env?: Record<string, string | undefined>;
+    exists?: (path: string) => boolean;
+    warn?: (message: string) => void;
+    fetch?: typeof fetch;
+  } = {},
 ): Promise<ConfigStore> {
   if (!(opts.exists ?? existsSync)(configPath)) throw missingBotConfig(configPath);
   // The same backing the bot uses (`runtimeOverrides.worker` → the ConfigDO), so
@@ -204,7 +252,13 @@ export async function loadBotConfig(
   // No ingress tokens: the CLI is `cli:local` (every grant) and never resolves
   // an `http:`/`mcp:` actor; the command groups keep `permissions.operators`
   // translating the same way the bot does.
-  return openConfigStore(configPath, { overridesPath, env: opts.env ?? process.env, warn: opts.warn ?? ((m) => console.error(m)), commandGroups: coreCommandGroups(), ...(opts.fetch ? { fetch: opts.fetch } : {}) });
+  return openConfigStore(configPath, {
+    overridesPath,
+    env: opts.env ?? process.env,
+    warn: opts.warn ?? ((m) => console.error(m)),
+    commandGroups: coreCommandGroups(),
+    ...(opts.fetch ? { fetch: opts.fetch } : {}),
+  });
 }
 
 /** What `main()` binds the commands to: the bot config, opened ONCE. The open
@@ -218,12 +272,23 @@ export async function loadBotConfig(
 export function bindBotConfig(
   configPath: string,
   overridesPath: string,
-  opts: { env?: Record<string, string | undefined>; exists?: (path: string) => boolean; warn?: (message: string) => void; fetch?: typeof fetch } = {},
+  opts: {
+    env?: Record<string, string | undefined>;
+    exists?: (path: string) => boolean;
+    warn?: (message: string) => void;
+    fetch?: typeof fetch;
+  } = {},
 ): () => Promise<ConfigStore> {
   const opening = loadBotConfig(configPath, overridesPath, opts).then(
     (config) => ({ config }),
     (err: unknown) => ({
-      error: err instanceof CommandError ? err : new CommandError("unavailable", `bot config at ${configPath} could not be opened: ${err instanceof Error ? err.message : String(err)}`),
+      error:
+        err instanceof CommandError
+          ? err
+          : new CommandError(
+              "unavailable",
+              `bot config at ${configPath} could not be opened: ${err instanceof Error ? err.message : String(err)}`,
+            ),
     }),
   );
   return async () => {
@@ -246,7 +311,13 @@ async function main(): Promise<void> {
   const botConfig = bindBotConfig(CONFIG_PATH, "./data/cli-overrides.json");
   let loaded: Promise<{ config: ConfigStore; runStore: RunStore | null }> | undefined;
   const bot = () =>
-    (loaded ??= botConfig().then((config) => ({ config, runStore: buildRunStore(config.config.runHistory, process.env, { dataDir: "./data", warn: (m) => warn(`[run-history] ${m}`) }) })));
+    (loaded ??= botConfig().then((config) => ({
+      config,
+      runStore: buildRunStore(config.config.runHistory, process.env, {
+        dataDir: "./data",
+        warn: (m) => warn(`[run-history] ${m}`),
+      }),
+    })));
   // MCP (#394) rides the same config: entries are config scopes, secrets follow
   // the overrides backing; connect links point at the bot's PUBLIC_BASE_URL.
   // With `runtimeOverrides.worker` set the CLI and the bot share one ConfigDO
@@ -259,7 +330,13 @@ async function main(): Promise<void> {
   // waits for it, `deploy plan` never asks.
   let mcpLoaded: Promise<ReturnType<typeof buildMcp>> | undefined;
   const mcpWiring = () =>
-    (mcpLoaded ??= bot().then((b) => buildMcp(b.config, process.env, { publicBaseUrl: process.env.PUBLIC_BASE_URL, secretsPath: "./data/cli-mcp-secrets.json", warn: (m) => warn(`[mcp] ${m}`) })));
+    (mcpLoaded ??= bot().then((b) =>
+      buildMcp(b.config, process.env, {
+        publicBaseUrl: process.env.PUBLIC_BASE_URL,
+        secretsPath: "./data/cli-mcp-secrets.json",
+        warn: (m) => warn(`[mcp] ${m}`),
+      }),
+    ));
   const commands = buildCoreCommands(
     () => bot().then((b) => b.config),
     () => bot().then((b) => b.runStore),
@@ -294,7 +371,19 @@ async function main(): Promise<void> {
     : undefined;
   // The chat fast path (`runs list`, `friction report`, …) answers from the same
   // catalogue the bot binds — without it those messages would go to the model.
-  await dispatch({ config, providers, skills, mcp, mcpRegistryOn: mcpLoadedWiring.service !== undefined, runHistoryWriter, commands }, { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text }, new ConsoleIO());
+  await dispatch(
+    {
+      config,
+      providers,
+      skills,
+      mcp,
+      mcpRegistryOn: mcpLoadedWiring.service !== undefined,
+      runHistoryWriter,
+      commands,
+    },
+    { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text },
+    new ConsoleIO(),
+  );
   // Wait for the record write to settle before exiting rather than dropping it.
   await runHistoryWriter?.settled();
 }

@@ -90,7 +90,7 @@ export const REFLECTION_SYSTEM = [
   '{"facts":[{"text":"...","keywords":["..."],"confidence":0.0-1.0,"audience":"org"|"user"|"repo"|"channel","supersedes":"<existing id, optional>"}],"summary":"..."}',
   `Rules: at most ${MAX_REFLECTION_FACTS} facts. Each fact is ONE self-contained sentence that will still be true and useful in a future, unrelated thread`,
   "(commands, conventions, decisions, preferences, architecture). Ignore ephemeral or one-off details (timestamps, transient errors, chit-chat).",
-  "PR-specific state is ephemeral by definition — PR numbers, commit SHAs, test counts, CI results, review verdicts, \"approved at …\", what a given PR changes — and must never become a fact; only a convention or decision that outlives the PR may.",
+  'PR-specific state is ephemeral by definition — PR numbers, commit SHAs, test counts, CI results, review verdicts, "approved at …", what a given PR changes — and must never become a fact; only a convention or decision that outlives the PR may.',
   "Never include secrets, tokens, passwords, or keys — omit the fact instead.",
   '`audience` is "user" when the fact is about the requesting person specifically (their preferences, habits, personal conventions, their own setup — write it as "this user …"),',
   '"repo" when the fact is specific to the repository this thread worked in (its code, conventions, commands, layout), "channel" when it is about what this channel is for or how it works,',
@@ -120,9 +120,7 @@ export function buildReflectionInput(input: ReflectionInput): string {
     transcript = `…(earlier turns omitted)…\n\n${transcript.slice(-MAX_TRANSCRIPT_CHARS)}`;
   }
   const existing =
-    input.existing.length === 0
-      ? "(none)"
-      : input.existing.map((r) => `- ${r.id} [${r.kind}]: ${r.text}`).join("\n");
+    input.existing.length === 0 ? "(none)" : input.existing.map((r) => `- ${r.id} [${r.kind}]: ${r.text}`).join("\n");
   return redactSecrets(`EXISTING records for this resource:\n${existing}\n\nTHREAD:\n${transcript}`);
 }
 
@@ -192,7 +190,12 @@ function parseFact(raw: unknown, prov: ReflectionProvenance, knownIds: Set<strin
   const text = cleanText(f.text);
   if (!text) return undefined;
   const confidence = f.confidence;
-  if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < MIN_REFLECTION_CONFIDENCE || confidence > 1) {
+  if (
+    typeof confidence !== "number" ||
+    !Number.isFinite(confidence) ||
+    confidence < MIN_REFLECTION_CONFIDENCE ||
+    confidence > 1
+  ) {
     return undefined;
   }
   const keywords = parseKeywords(f.keywords);
@@ -323,7 +326,13 @@ type Placement =
  *  to the first scope the run has AND the table allows; any other denial, or
  *  no allowed narrower scope, drops the candidate — never a wider scope, never
  *  silently (the caller logs the reason token). */
-function placeCandidate(cand: RoutedCandidate, actor: Actor, origin: ChannelVisibility, keys: RequestScopeKeys, scopeOf: Map<string, string>): Placement {
+function placeCandidate(
+  cand: RoutedCandidate,
+  actor: Actor,
+  origin: ChannelVisibility,
+  keys: RequestScopeKeys,
+  scopeOf: Map<string, string>,
+): Placement {
   const routed = routeCandidate(cand, keys, scopeOf);
   const decision = authorize(actor, "memory:write", scopeResource(routed, origin));
   if (decision.allow) return { kind: "write", target: routed };
@@ -346,7 +355,9 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
     const query = `${deps.request} ${deps.answer}`.slice(0, MAX_RETRIEVE_QUERY_CHARS);
     const existing = (
       await Promise.all(
-        listScopeKeys(deps.scopeKeys).map((scopeKey) => deps.store.retrieve({ scopeKey, query, limit: EXISTING_LIMIT })),
+        listScopeKeys(deps.scopeKeys).map((scopeKey) =>
+          deps.store.retrieve({ scopeKey, query, limit: EXISTING_LIMIT }),
+        ),
       )
     ).flat();
     const text = buildReflectionInput({ history: deps.history, request: deps.request, answer: deps.answer, existing });
@@ -394,8 +405,10 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
       if (!batch) byScope.set(placement.target.key, (batch = []));
       batch.push(record);
     }
-    if (narrowed.size > 0) warn(`write narrowed by policy: ${[...narrowed].map(([line, n]) => `${n}× ${line}`).join(", ")}`);
-    if (dropped.length > 0) warn(`write denied by policy, ${dropped.length} candidate(s) dropped: ${dropped.join(", ")}`);
+    if (narrowed.size > 0)
+      warn(`write narrowed by policy: ${[...narrowed].map(([line, n]) => `${n}× ${line}`).join(", ")}`);
+    if (dropped.length > 0)
+      warn(`write denied by policy, ${dropped.length} candidate(s) dropped: ${dropped.join(", ")}`);
     for (const [scopeKey, records] of byScope) await deps.store.write(scopeKey, records);
   } catch (err) {
     warn(`reflection failed: ${err instanceof Error ? err.message : String(err)}`);

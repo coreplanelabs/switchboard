@@ -23,9 +23,7 @@ const cand: MemoryCandidate = { kind: "fact", text: "x", sourceThreadKey: "slack
 
 type Call = { url: string; init: RequestInit };
 
-function fakeFetch(
-  respond: (call: Call) => Response | Promise<Response>,
-): { fetch: typeof fetch; calls: Call[] } {
+function fakeFetch(respond: (call: Call) => Response | Promise<Response>): { fetch: typeof fetch; calls: Call[] } {
   const calls: Call[] = [];
   const f = (async (input: string | URL | Request, init?: RequestInit) => {
     const call = { url: String(input), init: init ?? {} };
@@ -58,7 +56,11 @@ describe("WorkerMemoryStore.retrieve", () => {
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers.authorization).toBe("Bearer secret-token");
     expect(headers["content-type"]).toBe("application/json");
-    expect(JSON.parse(calls[0].init.body as string)).toEqual({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      scopeKey: "org:coreplanelabs",
+      query: "deploy",
+      limit: 8,
+    });
     expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -123,7 +125,11 @@ describe("WorkerMemoryStore.list / forget (#278)", () => {
   it("list sends `query` only when a filter is given (#293)", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ records: [] }));
     await store(fetch).list("org:coreplanelabs", 20, "deploy command");
-    expect(JSON.parse(String(calls[0].init.body))).toEqual({ scopeKey: "org:coreplanelabs", limit: 20, query: "deploy command" });
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({
+      scopeKey: "org:coreplanelabs",
+      limit: 20,
+      query: "deploy command",
+    });
     await store(fetch).list("org:coreplanelabs", 20);
     expect(JSON.parse(String(calls[1].init.body))).toEqual({ scopeKey: "org:coreplanelabs", limit: 20 });
   });
@@ -137,7 +143,10 @@ describe("WorkerMemoryStore.list / forget (#278)", () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ ok: true, forgotten: true }));
     expect(await store(fetch).forget("org:coreplanelabs", "mem:org:coreplanelabs:0")).toBe(true);
     expect(calls[0].url).toBe("https://memory.example/forget");
-    expect(JSON.parse(String(calls[0].init.body))).toEqual({ scopeKey: "org:coreplanelabs", id: "mem:org:coreplanelabs:0" });
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({
+      scopeKey: "org:coreplanelabs",
+      id: "mem:org:coreplanelabs:0",
+    });
     const miss = fakeFetch(() => jsonRes({ ok: true, forgotten: false }));
     expect(await store(miss.fetch).forget("org:coreplanelabs", "mem:org:coreplanelabs:99")).toBe(false);
   });

@@ -36,7 +36,10 @@ function fakeResponse(opts: {
     text: async () => opts.text ?? "",
     json: async () => opts.json,
     ...(opts.bytes
-      ? { arrayBuffer: async () => opts.bytes!.buffer.slice(opts.bytes!.byteOffset, opts.bytes!.byteOffset + opts.bytes!.byteLength) }
+      ? {
+          arrayBuffer: async () =>
+            opts.bytes!.buffer.slice(opts.bytes!.byteOffset, opts.bytes!.byteOffset + opts.bytes!.byteLength),
+        }
       : {}),
   } as unknown as Response;
 }
@@ -114,25 +117,44 @@ describe("makeSsrfLookup (connect-time SSRF guard)", () => {
     });
 
   it("passes a public resolution and pins the address", async () => {
-    const r = await call(makeSsrfLookup(async () => ["93.184.216.34"]), "example.com", {});
+    const r = await call(
+      makeSsrfLookup(async () => ["93.184.216.34"]),
+      "example.com",
+      {},
+    );
     expect(r.err).toBeNull();
     expect(r.address).toBe("93.184.216.34");
   });
   it("refuses when ANY resolved IP is internal (the real rebinding gap)", async () => {
-    const r = await call(makeSsrfLookup(async () => ["93.184.216.34", "10.0.0.5"]), "evil.example", {});
+    const r = await call(
+      makeSsrfLookup(async () => ["93.184.216.34", "10.0.0.5"]),
+      "evil.example",
+      {},
+    );
     expect(r.err).toBeInstanceOf(BlockedUrlError);
   });
   it("refuses an internal-only resolution", async () => {
-    const r = await call(makeSsrfLookup(async () => ["169.254.169.254"]), "meta", {});
+    const r = await call(
+      makeSsrfLookup(async () => ["169.254.169.254"]),
+      "meta",
+      {},
+    );
     expect(r.err).toBeInstanceOf(BlockedUrlError);
   });
   it("supports the (hostname, callback) 2-arg form", async () => {
-    const r = await call(makeSsrfLookup(async () => ["8.8.8.8"]), "dns");
+    const r = await call(
+      makeSsrfLookup(async () => ["8.8.8.8"]),
+      "dns",
+    );
     expect(r.err).toBeNull();
     expect(r.address).toBe("8.8.8.8");
   });
   it("returns all addresses when options.all is set", async () => {
-    const r = await call(makeSsrfLookup(async () => ["8.8.8.8", "1.1.1.1"]), "dns", { all: true });
+    const r = await call(
+      makeSsrfLookup(async () => ["8.8.8.8", "1.1.1.1"]),
+      "dns",
+      { all: true },
+    );
     expect(r.err).toBeNull();
     expect(r.address).toEqual([
       { address: "8.8.8.8", family: 4 },
@@ -169,7 +191,9 @@ describe("web_fetch tool", () => {
     // Production pins/validates the connect IP in the dispatcher; a hostname
     // resolving to internal fails the fetch with a BlockedUrlError cause.
     const fetchSpy = vi.fn<FetchLike>(async () => {
-      throw new Error("fetch failed", { cause: new BlockedUrlError("host evil.example resolves to blocked address 10.0.0.5") });
+      throw new Error("fetch failed", {
+        cause: new BlockedUrlError("host evil.example resolves to blocked address 10.0.0.5"),
+      });
     });
     const out = await webFetchTool.run({ url: "http://evil.example/" }, ctxWith({ fetch: fetchSpy }));
     expect(out).toMatch(/refused/i);
@@ -187,7 +211,9 @@ describe("web_fetch tool", () => {
 
   it("strips HTML to readable text", async () => {
     const html = "<html><head><style>.a{}</style></head><body><script>evil()</script><p>Hi &amp; bye</p></body></html>";
-    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "text/html; charset=utf-8" }, text: html }));
+    const fetchSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "text/html; charset=utf-8" }, text: html }),
+    );
     const out = await webFetchTool.run({ url: "https://example.com" }, ctxWith({ fetch: fetchSpy }));
     expect(out).toContain("Hi & bye");
     expect(out).not.toContain("evil()");
@@ -196,7 +222,9 @@ describe("web_fetch tool", () => {
 
   it("truncates oversized responses", async () => {
     const big = "a".repeat(2_000_000);
-    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "text/plain" }, text: big }));
+    const fetchSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "text/plain" }, text: big }),
+    );
     const out = await webFetchTool.run({ url: "https://example.com" }, ctxWith({ fetch: fetchSpy }));
     expect(out).toContain("[truncated]");
     // Body capped to ~MAX_FETCH_BYTES (1_000_000) + a short header — far below the 2 MB input.
@@ -244,7 +272,9 @@ describe("web_fetch tool: binary links become model-visible blocks (M1b)", () =>
   const pdf = new Uint8Array(Buffer.from("%PDF-1.4 fake"));
 
   it("returns an image/* URL as an image content part the model can see", async () => {
-    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "image/png" }, bytes: png }));
+    const fetchSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "image/png" }, bytes: png }),
+    );
     const out = await webFetchTool.run({ url: "https://example.com/pic.png" }, ctxWith({ fetch: fetchSpy }));
     expect(Array.isArray(out)).toBe(true);
     const parts = out as Exclude<typeof out, string>;
@@ -253,13 +283,17 @@ describe("web_fetch tool: binary links become model-visible blocks (M1b)", () =>
   });
 
   it("normalizes the content-type (parameters stripped, case-folded) before classifying", async () => {
-    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "Image/JPEG; charset=binary" }, bytes: png }));
+    const fetchSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "Image/JPEG; charset=binary" }, bytes: png }),
+    );
     const parts = await webFetchTool.run({ url: "https://example.com/a" }, ctxWith({ fetch: fetchSpy }));
     expect((parts as Exclude<typeof parts, string>)[1]).toMatchObject({ type: "image", mediaType: "image/jpeg" });
   });
 
   it("returns an application/pdf URL as a document content part named after the path", async () => {
-    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "application/pdf" }, bytes: pdf }));
+    const fetchSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "application/pdf" }, bytes: pdf }),
+    );
     const out = await webFetchTool.run({ url: "https://example.com/docs/spec.pdf?v=2" }, ctxWith({ fetch: fetchSpy }));
     const parts = out as Exclude<typeof out, string>;
     expect(parts[1]).toEqual({
@@ -271,7 +305,9 @@ describe("web_fetch tool: binary links become model-visible blocks (M1b)", () =>
   });
 
   it("a text URL still returns plain text (no regression)", async () => {
-    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "text/plain" }, text: "hello" }));
+    const fetchSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "text/plain" }, text: "hello" }),
+    );
     const out = await webFetchTool.run({ url: "https://example.com/t" }, ctxWith({ fetch: fetchSpy }));
     expect(typeof out).toBe("string");
     expect(out).toContain("hello");
@@ -279,20 +315,26 @@ describe("web_fetch tool: binary links become model-visible blocks (M1b)", () =>
 
   it("refuses an oversize image/PDF with a message instead of a truncated block", async () => {
     const bigImg = new Uint8Array(5 * 1024 * 1024 + 1);
-    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "image/png" }, bytes: bigImg }));
+    const fetchSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "image/png" }, bytes: bigImg }),
+    );
     const out = await webFetchTool.run({ url: "https://example.com/big.png" }, ctxWith({ fetch: fetchSpy }));
     expect(typeof out).toBe("string");
     expect(out).toMatch(/too large/i);
     expect(out).not.toContain("AAAA");
 
     const bigPdf = new Uint8Array(10 * 1024 * 1024 + 1);
-    const pdfSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "application/pdf" }, bytes: bigPdf }));
+    const pdfSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "application/pdf" }, bytes: bigPdf }),
+    );
     const out2 = await webFetchTool.run({ url: "https://example.com/big.pdf" }, ctxWith({ fetch: pdfSpy }));
     expect(out2).toMatch(/too large/i);
   });
 
   it("names an image type the model cannot consume instead of sending it", async () => {
-    const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ headers: { "content-type": "image/svg+xml" }, bytes: png }));
+    const fetchSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "image/svg+xml" }, bytes: png }),
+    );
     const out = await webFetchTool.run({ url: "https://example.com/logo.svg" }, ctxWith({ fetch: fetchSpy }));
     expect(typeof out).toBe("string");
     expect(out).toMatch(/unsupported image type/i);
@@ -303,13 +345,21 @@ describe("web_fetch tool: binary links become model-visible blocks (M1b)", () =>
     const never = vi.fn<FetchLike>(async () => {
       throw new Error("must not fetch");
     });
-    expect(await webFetchTool.run({ url: "http://169.254.169.254/x.png" }, ctxWith({ fetch: never }))).toMatch(/refused/i);
+    expect(await webFetchTool.run({ url: "http://169.254.169.254/x.png" }, ctxWith({ fetch: never }))).toMatch(
+      /refused/i,
+    );
     expect(never).not.toHaveBeenCalled();
     const connect = vi.fn<FetchLike>(async () => {
-      throw new Error("fetch failed", { cause: new BlockedUrlError("host evil.example resolves to blocked address 10.0.0.5") });
+      throw new Error("fetch failed", {
+        cause: new BlockedUrlError("host evil.example resolves to blocked address 10.0.0.5"),
+      });
     });
-    expect(await webFetchTool.run({ url: "http://evil.example/x.pdf" }, ctxWith({ fetch: connect }))).toMatch(/refused/i);
-    const redirect = vi.fn<FetchLike>(async () => fakeResponse({ status: 302, headers: { location: "http://10.0.0.1/x.png" } }));
+    expect(await webFetchTool.run({ url: "http://evil.example/x.pdf" }, ctxWith({ fetch: connect }))).toMatch(
+      /refused/i,
+    );
+    const redirect = vi.fn<FetchLike>(async () =>
+      fakeResponse({ status: 302, headers: { location: "http://10.0.0.1/x.png" } }),
+    );
     expect(await webFetchTool.run({ url: "https://example.com/r" }, ctxWith({ fetch: redirect }))).toMatch(/refused/i);
     expect(redirect).toHaveBeenCalledOnce();
   });
@@ -354,7 +404,13 @@ describe("web_search tool", () => {
   });
 
   it("reports a generic search failure", async () => {
-    const web = { search: { search: async () => { throw new Error("boom"); } } as WebSearch };
+    const web = {
+      search: {
+        search: async () => {
+          throw new Error("boom");
+        },
+      } as WebSearch,
+    };
     const out = await webSearchTool.run({ query: "x" }, ctxWith(web));
     expect(out).toMatch(/web_search failed/i);
   });

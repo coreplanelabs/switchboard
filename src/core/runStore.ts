@@ -165,7 +165,8 @@ export class InMemoryRunStore implements RunStore {
     if (!isValidRunId(record.id)) return { ok: true, retained: this.records.size, stored: false, rewritten: false };
     const bytes = utf8ByteLength(JSON.stringify(record));
     const prev = this.records.get(record.id);
-    const rewritten = prev !== undefined && !sameStoredVersion({ ...prev.record, bytes: prev.bytes }, { ...record, bytes });
+    const rewritten =
+      prev !== undefined && !sameStoredVersion({ ...prev.record, bytes: prev.bytes }, { ...record, bytes });
     this.records.set(record.id, { record: clone(record), bytes });
     const kept = new Set(this.retained().map((r) => r.id));
     for (const id of [...this.records.keys()]) if (!kept.has(id)) this.records.delete(id);
@@ -294,12 +295,16 @@ export class FileRunStore implements RunStore {
     const kept = applyRetention(index, this.policy, this.now()).filter((r) => this.fileIntact(r));
     const keptIds = new Set(kept.map((r) => r.id));
     for (const item of index) if (!keptIds.has(item.id)) rmSync(this.recordPath(item.id), { force: true });
-    this.writeAtomic(join(this.dir, INDEX_FILE), kept.map((r) => JSON.stringify(r)).join("\n") + (kept.length ? "\n" : ""));
+    this.writeAtomic(
+      join(this.dir, INDEX_FILE),
+      kept.map((r) => JSON.stringify(r)).join("\n") + (kept.length ? "\n" : ""),
+    );
     return kept;
   }
 
   async put(record: RunRecord): Promise<PutResult> {
-    if (!isValidRunId(record.id)) return { ok: true, retained: this.readIndex().length, stored: false, rewritten: false };
+    if (!isValidRunId(record.id))
+      return { ok: true, retained: this.readIndex().length, stored: false, rewritten: false };
     this.ensureDir();
     const content = JSON.stringify(record);
     const bytes = utf8ByteLength(content);
@@ -410,7 +415,11 @@ export interface BuildRunStoreDeps {
  * - a `worker` without its bearer → null with a warning naming the env var
  *   (history off rather than a silent host-disk fallback: the file store is an opt-in).
  */
-export function buildRunStore(cfg: RunHistoryConfig | undefined, env: Record<string, string | undefined>, deps: BuildRunStoreDeps): RunStore | null {
+export function buildRunStore(
+  cfg: RunHistoryConfig | undefined,
+  env: Record<string, string | undefined>,
+  deps: BuildRunStoreDeps,
+): RunStore | null {
   if (!cfg) return null;
   const now = deps.now ?? Date.now;
   const policy = retentionPolicyOf(cfg);
@@ -429,10 +438,18 @@ export function buildRunStore(cfg: RunHistoryConfig | undefined, env: Record<str
   const tokenEnv = worker.tokenEnv ?? DEFAULT_RUN_STORE_TOKEN_ENV;
   const token = env[tokenEnv]?.trim();
   if (!token) {
-    deps.warn(`runHistory.worker is configured but ${tokenEnv} is unset — run history is off. Set ${tokenEnv} to the state Worker's bearer.`);
+    deps.warn(
+      `runHistory.worker is configured but ${tokenEnv} is unset — run history is off. Set ${tokenEnv} to the state Worker's bearer.`,
+    );
     return null;
   }
-  return new WorkerRunStore({ baseUrl: worker.baseUrl, token, storeKey: RUN_STORE_KEY, policy, policyUpdatedAt: now() });
+  return new WorkerRunStore({
+    baseUrl: worker.baseUrl,
+    token,
+    storeKey: RUN_STORE_KEY,
+    policy,
+    policyUpdatedAt: now(),
+  });
 }
 
 export { DEFAULT_RETENTION_POLICY };

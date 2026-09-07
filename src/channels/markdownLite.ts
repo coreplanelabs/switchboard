@@ -222,7 +222,14 @@ export function renderMarkdownInto(root: MdElement, text: string): void {
         continue;
       }
       const p: string[] = [];
-      while (i < src.length && !/^\s*$/.test(src[i]) && !BLOCK_START_RE.test(src[i]) && !LIST_RE.test(src[i]) && !isTableStart(src, i)) p.push(src[i++]);
+      while (
+        i < src.length &&
+        !/^\s*$/.test(src[i]) &&
+        !BLOCK_START_RE.test(src[i]) &&
+        !LIST_RE.test(src[i]) &&
+        !isTableStart(src, i)
+      )
+        p.push(src[i++]);
       // Progress guarantee: a line that LOOKS like a block start but matched no
       // block above (a bare `# ` heading marker, a `>` past the quote-depth cap)
       // would otherwise leave `p` empty and `i` unmoved — an infinite loop that

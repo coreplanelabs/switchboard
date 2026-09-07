@@ -390,8 +390,24 @@ describe("run-visibility events", () => {
       onEvent: (e) => events.push(e),
     });
     expect(events.filter((e) => e.type !== "turn")).toEqual([
-      { type: "tool_call", tool: "bash", summary: expect.stringContaining("echo hi"), command: "echo hi", callId: "t1", at: expect.any(Number) },
-      { type: "tool_result", tool: "bash", ok: true, summary: expect.stringContaining("ok"), callId: "t1", exitCode: 0, output: "ok", at: expect.any(Number) },
+      {
+        type: "tool_call",
+        tool: "bash",
+        summary: expect.stringContaining("echo hi"),
+        command: "echo hi",
+        callId: "t1",
+        at: expect.any(Number),
+      },
+      {
+        type: "tool_result",
+        tool: "bash",
+        ok: true,
+        summary: expect.stringContaining("ok"),
+        callId: "t1",
+        exitCode: 0,
+        output: "ok",
+        at: expect.any(Number),
+      },
     ]);
   });
 
@@ -399,8 +415,13 @@ describe("run-visibility events", () => {
   // use_skill load lands in the stream as a stamped `skill_use` event between
   // its own tool_call and tool_result.
   it("a tool's ctx.publish reaches onEvent, stamped and ordered with the tool events", async () => {
-    const skills = new InMemorySkillStore([{ name: "tdd", description: "test first", body: "BODY", agents: ["coding"], source: "https://example.com/tdd" }]);
-    const useSkill: CompletionResult = { content: [{ type: "tool_use", id: "s1", name: "use_skill", input: { name: "tdd" } }], stopReason: "tool_use" };
+    const skills = new InMemorySkillStore([
+      { name: "tdd", description: "test first", body: "BODY", agents: ["coding"], source: "https://example.com/tdd" },
+    ]);
+    const useSkill: CompletionResult = {
+      content: [{ type: "tool_use", id: "s1", name: "use_skill", input: { name: "tdd" } }],
+      stopReason: "tool_use",
+    };
     const events: RunEvent[] = [];
     await runAgent({
       provider: scripted([useSkill, text("done")]),
@@ -410,7 +431,11 @@ describe("run-visibility events", () => {
       toolContext: { executor: fakeExecutor, skills, agentName: "coding" },
       onEvent: (e) => events.push(e),
     });
-    expect(events.filter((e) => e.type !== "turn").map((e) => e.type)).toEqual(["tool_call", "skill_use", "tool_result"]);
+    expect(events.filter((e) => e.type !== "turn").map((e) => e.type)).toEqual([
+      "tool_call",
+      "skill_use",
+      "tool_result",
+    ]);
     expect(events.find((e) => e.type === "skill_use")).toEqual({
       type: "skill_use",
       skill: "tdd",
@@ -440,7 +465,12 @@ describe("run-visibility events", () => {
   });
 
   it("marks a failing tool with ok:false", async () => {
-    const boom: Executor = { ...fakeExecutor, exec: async () => { throw new Error("kaboom"); } };
+    const boom: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        throw new Error("kaboom");
+      },
+    };
     const events: RunEvent[] = [];
     await runAgent({
       provider: scripted([bashUse("t1"), text("done")]),
@@ -471,7 +501,10 @@ describe("run-visibility events", () => {
   });
 
   it("carries the bash exit code and marks a nonzero exit as ok:false (the executor's `exit N:` prefix)", async () => {
-    const failing: Executor = { ...fakeExecutor, exec: async () => "exit 128:\nfatal: not a git repository\n--- stderr ---\nmore" };
+    const failing: Executor = {
+      ...fakeExecutor,
+      exec: async () => "exit 128:\nfatal: not a git repository\n--- stderr ---\nmore",
+    };
     const events: RunEvent[] = [];
     await runAgent({
       provider: scripted([bashUse("t1"), text("done")]),
@@ -515,7 +548,10 @@ describe("run-visibility events", () => {
 
   it("carries the redacted, escape-stripped tool output (bounded) alongside the one-line summary", async () => {
     const secret = "ghp_" + "C".repeat(36);
-    const chatty: Executor = { ...fakeExecutor, exec: async () => `\x1b[1mline one\x1b[0m\nline two token=${secret}\nline three` };
+    const chatty: Executor = {
+      ...fakeExecutor,
+      exec: async () => `\x1b[1mline one\x1b[0m\nline two token=${secret}\nline three`,
+    };
     const events: RunEvent[] = [];
     await runAgent({
       provider: scripted([bashUse("t1"), text("done")]),
@@ -534,7 +570,10 @@ describe("run-visibility events", () => {
     const events: RunEvent[] = [];
     await runAgent({
       provider: scripted([
-        { content: [{ type: "tool_use", id: "t1", name: "use_skill", input: { name: "code-review-and-quality" } }], stopReason: "tool_use" },
+        {
+          content: [{ type: "tool_use", id: "t1", name: "use_skill", input: { name: "code-review-and-quality" } }],
+          stopReason: "tool_use",
+        },
         text("done"),
       ]),
       model: "m",
@@ -543,7 +582,11 @@ describe("run-visibility events", () => {
       toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
     });
-    expect(events.find((e) => e.type === "tool_call")).toMatchObject({ type: "tool_call", tool: "use_skill", summary: "use_skill code-review-and-quality" });
+    expect(events.find((e) => e.type === "tool_call")).toMatchObject({
+      type: "tool_call",
+      tool: "use_skill",
+      summary: "use_skill code-review-and-quality",
+    });
   });
 
   it("redacts a secret in a long bash command before capping (no fragment leak)", async () => {
@@ -644,7 +687,10 @@ describe("tool results carrying non-text parts (M1b)", () => {
   it("passes a parts-array tool result through to the provider verbatim and summarizes it as text", async () => {
     const events: RunEvent[] = [];
     const provider = scripted([
-      { content: [{ type: "tool_use", id: "w1", name: "web_fetch", input: { url: "https://example.com/pic.png" } }], stopReason: "tool_use" },
+      {
+        content: [{ type: "tool_use", id: "w1", name: "web_fetch", input: { url: "https://example.com/pic.png" } }],
+        stopReason: "tool_use",
+      },
       text("done"),
     ]);
     const web = {
@@ -691,7 +737,13 @@ describe("run-friction signals in the event stream (#84)", () => {
   it("stamps every event with `at` from the injectable clock", async () => {
     let t = 1000;
     const events: RunEvent[] = [];
-    const ticking: Executor = { ...fakeExecutor, exec: async () => { t += 500; return "ok"; } };
+    const ticking: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        t += 500;
+        return "ok";
+      },
+    };
     await runAgent({
       provider: scripted([bashUse("t1"), text("done")]),
       model: "m",
@@ -702,7 +754,12 @@ describe("run-friction signals in the event stream (#84)", () => {
       now: () => t,
     });
     // turn (model call, instant here) · tool_call · tool_result · final turn
-    expect(events.map((e) => [e.type, e.at])).toEqual([["turn", 1000], ["tool_call", 1000], ["tool_result", 1500], ["turn", 1500]]);
+    expect(events.map((e) => [e.type, e.at])).toEqual([
+      ["turn", 1000],
+      ["tool_call", 1000],
+      ["tool_result", 1500],
+      ["turn", 1500],
+    ]);
   });
 
   it("marks an ExecInfraError result with infra:true; an ordinary tool error is NOT marked", async () => {
@@ -736,7 +793,11 @@ describe("run-friction signals in the event stream (#84)", () => {
     let calls = 0;
     const advancing: Executor = {
       ...fakeExecutor,
-      exec: async () => { calls++; if (calls === 1) t = 8 * 60_000; return "ok"; },
+      exec: async () => {
+        calls++;
+        if (calls === 1) t = 8 * 60_000;
+        return "ok";
+      },
     };
     const events: RunEvent[] = [];
     await runAgent({
@@ -756,7 +817,13 @@ describe("run-friction signals in the event stream (#84)", () => {
   it("emits time_budget_exhausted when the wall clock ran out", async () => {
     let t = 0;
     const events: RunEvent[] = [];
-    const slow: Executor = { ...fakeExecutor, exec: async () => { t = 11 * 60_000; return "ok"; } };
+    const slow: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        t = 11 * 60_000;
+        return "ok";
+      },
+    };
     await runAgent({
       provider: scripted([bashUse("t1"), text("late")]),
       model: "m",
@@ -772,7 +839,12 @@ describe("run-friction signals in the event stream (#84)", () => {
   });
 
   it("emits sandbox_dead when consecutive infra failures abort the run", async () => {
-    const dead: Executor = { ...fakeExecutor, exec: async () => { throw new ExecInfraError("worker gone"); } };
+    const dead: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        throw new ExecInfraError("worker gone");
+      },
+    };
     const events: RunEvent[] = [];
     await runAgent({
       provider: scripted([bashUse("t1"), bashUse("t2"), bashUse("t3"), text("x")]),
@@ -1040,7 +1112,13 @@ describe("model turn events (features/live-view.md item 15)", () => {
     const events: RunEvent[] = [];
     let t = 1_000;
     const provider = scripted([bashUse("t1"), text("done")]);
-    const slow: Provider = { name: "slow", complete: async (req) => { t += 5_000; return provider.complete(req); } };
+    const slow: Provider = {
+      name: "slow",
+      complete: async (req) => {
+        t += 5_000;
+        return provider.complete(req);
+      },
+    };
     await runAgent({
       provider: slow,
       model: "m",
@@ -1059,7 +1137,10 @@ describe("model turn events (features/live-view.md item 15)", () => {
   it("carries the provider's token usage when it reports one, and omits the field when it does not", async () => {
     const events: RunEvent[] = [];
     await runAgent({
-      provider: scripted([withUsage(bashUse("t1"), { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 }), text("done")]),
+      provider: scripted([
+        withUsage(bashUse("t1"), { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 }),
+        text("done"),
+      ]),
       model: "m",
       agent: agent(),
       messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
@@ -1075,7 +1156,13 @@ describe("model turn events (features/live-view.md item 15)", () => {
     const events: RunEvent[] = [];
     await runAgent({
       provider: scripted([
-        { content: [{ type: "text", text: "Looking." }, { type: "tool_use", id: "t1", name: "bash", input: { command: "ls" } }], stopReason: "tool_use" },
+        {
+          content: [
+            { type: "text", text: "Looking." },
+            { type: "tool_use", id: "t1", name: "bash", input: { command: "ls" } },
+          ],
+          stopReason: "tool_use",
+        },
         text("done"),
       ]),
       model: "m",
@@ -1121,7 +1208,12 @@ describe("runAgent tool concurrency", () => {
       readFile: (path) => gate(`contents of ${path}`),
       writeFile: async () => "Wrote",
     };
-    return { executor, peak: () => peak, inFlight: () => inFlight, release: () => waiters.splice(0).forEach((r) => r()) };
+    return {
+      executor,
+      peak: () => peak,
+      inFlight: () => inFlight,
+      release: () => waiters.splice(0).forEach((r) => r()),
+    };
   }
   const reads = (paths: string[]): CompletionResult => ({
     content: paths.map((p, i) => ({ type: "tool_use" as const, id: `r${i}`, name: "read_file", input: { path: p } })),
@@ -1239,15 +1331,33 @@ describe("model-call hygiene (features/run-loop.md item 11)", () => {
   });
   it("omits cacheTtl when the agent does not set one (provider default)", async () => {
     const provider = scripted([text("done")]);
-    await runAgent({ provider, model: "m", agent: agent(), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor } });
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+    });
     expect(provider.requests[0]).not.toHaveProperty("cacheTtl");
   });
   it("echoes the model's thinking blocks back in the assistant turn, unchanged and in order", async () => {
     const provider = scripted([
-      { content: [{ type: "thinking", thinking: "", signature: "sig" }, { type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } }], stopReason: "tool_use" },
+      {
+        content: [
+          { type: "thinking", thinking: "", signature: "sig" },
+          { type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } },
+        ],
+        stopReason: "tool_use",
+      },
       text("done"),
     ]);
-    await runAgent({ provider, model: "m", agent: agent(), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor } });
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+    });
     const assistant = provider.requests[1].messages.find((m) => m.role === "assistant");
     expect(assistant?.content[0]).toEqual({ type: "thinking", thinking: "", signature: "sig" });
   });
@@ -1263,7 +1373,10 @@ describe("extra tools (MCP, #394 — features/mcp-tools.md item 12)", () => {
 
   it("merges per-run tools with the static toolset and dispatches calls to them", async () => {
     const provider = scripted([
-      { content: [{ type: "tool_use", id: "x1", name: "mcp__linear__search", input: { q: "bug" } }], stopReason: "tool_use" },
+      {
+        content: [{ type: "tool_use", id: "x1", name: "mcp__linear__search", input: { q: "bug" } }],
+        stopReason: "tool_use",
+      },
       text("done"),
     ]);
     const answer = await runAgent({
@@ -1283,8 +1396,21 @@ describe("extra tools (MCP, #394 — features/mcp-tools.md item 12)", () => {
     const a = scripted([text("a")]);
     const b = scripted([text("b")]);
     const messages: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "go" }] }];
-    await runAgent({ provider: a, model: "m", agent: agent({ toolset: "none" }), messages, toolContext: { executor: fakeExecutor } });
-    await runAgent({ provider: b, model: "m", agent: agent({ toolset: "none" }), messages, toolContext: { executor: fakeExecutor }, extraTools: [] });
+    await runAgent({
+      provider: a,
+      model: "m",
+      agent: agent({ toolset: "none" }),
+      messages,
+      toolContext: { executor: fakeExecutor },
+    });
+    await runAgent({
+      provider: b,
+      model: "m",
+      agent: agent({ toolset: "none" }),
+      messages,
+      toolContext: { executor: fakeExecutor },
+      extraTools: [],
+    });
     expect(JSON.stringify(a.requests[0])).toBe(JSON.stringify(b.requests[0]));
     expect(a.requests[0].tools).toBeUndefined();
   });
@@ -1312,7 +1438,14 @@ describe("extra tools (MCP, #394 — features/mcp-tools.md item 12)", () => {
 // while the model was writing its final answer turns that answer into narration
 // and the follow-up into the next user turn instead of ending the run.
 describe("follow-up inbox (features/thread-admission.md)", () => {
-  const followUp = (text: string, over: Partial<FollowUpInput> = {}): FollowUpInput => ({ text, userId: "slack:U2", userName: "bob", sourceUrl: "https://s/2", at: 5, ...over });
+  const followUp = (text: string, over: Partial<FollowUpInput> = {}): FollowUpInput => ({
+    text,
+    userId: "slack:U2",
+    userName: "bob",
+    sourceUrl: "https://s/2",
+    at: 5,
+    ...over,
+  });
   const lastUserContent = (req: CompletionRequest) => req.messages[req.messages.length - 1].content;
 
   it("a follow-up pushed during a tool step rides on that step's tool-results turn, after the results, with the header", async () => {
@@ -1326,7 +1459,15 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
       return inner(req);
     };
     const events: RunEvent[] = [];
-    const answer = await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox, onEvent: (e) => events.push(e) });
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      inbox,
+      onEvent: (e) => events.push(e),
+    });
     expect(answer).toBe("done");
     const content = lastUserContent(provider.requests[1]);
     expect(content[0]).toMatchObject({ type: "tool_result", toolUseId: "t1" });
@@ -1335,11 +1476,19 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
     expect(textPart.text).toMatch(/^↪ Follow-up from the thread/);
     expect(textPart.text).toContain("also remove the anon flow");
     // Recorded: the input (who/where) and a note the card shows.
-    expect(events.find((e) => e.type === "input")).toMatchObject({ type: "input", text: "also remove the anon flow", source: { user: "bob", url: "https://s/2" } });
-    expect(events.find((e) => e.type === "run_note" && e.kind === "follow_up")).toMatchObject({ summary: expect.stringContaining("also remove the anon flow") });
+    expect(events.find((e) => e.type === "input")).toMatchObject({
+      type: "input",
+      text: "also remove the anon flow",
+      source: { user: "bob", url: "https://s/2" },
+    });
+    expect(events.find((e) => e.type === "run_note" && e.kind === "follow_up")).toMatchObject({
+      summary: expect.stringContaining("also remove the anon flow"),
+    });
     // Consumed exactly once.
     expect(inbox.size).toBe(0);
-    expect(lastUserContent(provider.requests[0]).some((p) => p.type === "text" && p.text.includes("Follow-up"))).toBe(false);
+    expect(lastUserContent(provider.requests[0]).some((p) => p.type === "text" && p.text.includes("Follow-up"))).toBe(
+      false,
+    );
   });
 
   it("two follow-ups drained together arrive as ONE text part listing both, one input event each", async () => {
@@ -1355,7 +1504,15 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
       return inner(req);
     };
     const events: RunEvent[] = [];
-    await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox, onEvent: (e) => events.push(e) });
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      inbox,
+      onEvent: (e) => events.push(e),
+    });
     const texts = lastUserContent(provider.requests[1]).filter((p) => p.type === "text");
     expect(texts).toHaveLength(1);
     expect((texts[0] as { text: string }).text).toContain("- first\n- second");
@@ -1368,10 +1525,18 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
     const provider = scripted([bashUse("t1"), text("done")]);
     const inner = provider.complete.bind(provider);
     provider.complete = async (req) => {
-      if (calls++ === 0) inbox.push(followUp("see the screenshot", { images: [{ mediaType: "image/png", data: "QUJD" }] }));
+      if (calls++ === 0)
+        inbox.push(followUp("see the screenshot", { images: [{ mediaType: "image/png", data: "QUJD" }] }));
       return inner(req);
     };
-    await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox });
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      inbox,
+    });
     const content = lastUserContent(provider.requests[1]);
     expect(content.map((p) => p.type)).toEqual(["tool_result", "text", "image"]);
     expect(content[2]).toEqual({ type: "image", mediaType: "image/png", data: "QUJD" });
@@ -1387,7 +1552,15 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
       return inner(req);
     };
     const events: RunEvent[] = [];
-    const answer = await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox, onEvent: (e) => events.push(e) });
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      inbox,
+      onEvent: (e) => events.push(e),
+    });
     expect(answer).toBe("second answer");
     expect(provider.requests).toHaveLength(2);
     const msgs = provider.requests[1].messages;
@@ -1413,7 +1586,14 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
       if (calls++ === 0) inbox.push(followUp("also this"));
       return inner(req);
     };
-    await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox });
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      inbox,
+    });
     const prompt = (lastUserContent(provider.requests[1])[1] as { text: string }).text;
     expect(prompt).toContain("sent while you were working");
     expect(prompt).not.toContain("NOT delivered");
@@ -1430,7 +1610,14 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
       if (calls++ === 1) inbox.push(followUp("one more thing"));
       return inner(req);
     };
-    const answer = await runAgent({ provider, model: "m", agent: agent({ maxTurns: 2 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox });
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 2 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      inbox,
+    });
     expect(answer).toBe("answer");
     expect(provider.requests).toHaveLength(2); // no restart, no finale
     expect(inbox.size).toBe(1);
@@ -1439,9 +1626,22 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
 
   it("without an inbox, or with an empty one, the requests are byte-identical to the plain loop", async () => {
     const plain = scripted([bashUse("t1"), text("done")]);
-    await runAgent({ provider: plain, model: "m", agent: agent(), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor } });
+    await runAgent({
+      provider: plain,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+    });
     const withInbox = scripted([bashUse("t1"), text("done")]);
-    await runAgent({ provider: withInbox, model: "m", agent: agent(), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox: new FollowUpInbox() });
+    await runAgent({
+      provider: withInbox,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      inbox: new FollowUpInbox(),
+    });
     expect(JSON.stringify(withInbox.requests)).toBe(JSON.stringify(plain.requests));
   });
 
@@ -1458,7 +1658,15 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
       }
       return inner(req);
     };
-    await runAgent({ provider, model: "m", agent: agent({ maxTurns: 3 }), messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], toolContext: { executor: fakeExecutor }, inbox, control });
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      inbox,
+      control,
+    });
     expect(inbox.size).toBe(1);
     expect(JSON.stringify(provider.requests)).not.toContain("late thought");
   });

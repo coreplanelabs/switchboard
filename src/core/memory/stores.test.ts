@@ -85,7 +85,11 @@ describe("InMemoryMemoryStore.list / forget (#278)", () => {
     const store = seed();
     expect(await store.forget("org:coreplanelabs", "b")).toBe(true);
     expect((await store.list("org:coreplanelabs", 10)).map((r) => r.id)).toEqual(["c", "a"]);
-    expect((await store.retrieve({ scopeKey: "org:coreplanelabs", query: "middle deploy note", limit: 10 })).map((r) => r.id)).not.toContain("b");
+    expect(
+      (await store.retrieve({ scopeKey: "org:coreplanelabs", query: "middle deploy note", limit: 10 })).map(
+        (r) => r.id,
+      ),
+    ).not.toContain("b");
   });
 
   it("forget: unknown id, foreign-scope id, or an already non-active record → false, nothing changes", async () => {
@@ -101,7 +105,9 @@ describe("InMemoryMemoryStore.list / forget (#278)", () => {
   it("a forgotten record is no longer a dedup target: re-asserting its text creates a fresh active record", async () => {
     const store = seed();
     await store.forget("org:coreplanelabs", "b");
-    await store.write("org:coreplanelabs", [{ kind: "fact", text: "middle deploy note", sourceThreadKey: "slack:C1:2.0" }]);
+    await store.write("org:coreplanelabs", [
+      { kind: "fact", text: "middle deploy note", sourceThreadKey: "slack:C1:2.0" },
+    ]);
     const ids = (await store.list("org:coreplanelabs", 10)).map((r) => r.id);
     expect(ids).toHaveLength(3);
     expect(ids).not.toContain("b");
@@ -221,7 +227,9 @@ describe("InMemoryMemoryStore.write", () => {
     const store = new InMemoryMemoryStore([], { now: () => NOW });
     await store.write("org:coreplanelabs", [cand]);
     const [old] = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
-    await store.write("org:coreplanelabs", [{ ...cand, text: "The deploy command is npm run deploy", supersedes: old.id }]);
+    await store.write("org:coreplanelabs", [
+      { ...cand, text: "The deploy command is npm run deploy", supersedes: old.id },
+    ]);
     expect(old.status).toBe("active");
     const out = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
     expect(out).toHaveLength(1);
@@ -293,7 +301,12 @@ describe("selectMemoryStore", () => {
 // Feature: features/memory.md — per-scope cap (#253): applied on write in the
 // in-process store; evicted rows are soft-deleted and invisible everywhere.
 describe("InMemoryMemoryStore per-scope cap (#253)", () => {
-  const c = (text: string): MemoryCandidate => ({ kind: "fact", text, keywords: [text], sourceThreadKey: "slack:C1:1.0" });
+  const c = (text: string): MemoryCandidate => ({
+    kind: "fact",
+    text,
+    keywords: [text],
+    sourceThreadKey: "slack:C1:1.0",
+  });
 
   it("a write that pushes a scope past the cap evicts the least recently used records down to the cap — in one batch", async () => {
     let t = NOW;
@@ -329,11 +342,18 @@ describe("InMemoryMemoryStore per-scope cap (#253)", () => {
 
   it("the cap counts ACTIVE records only: superseded/forgotten rows do not consume it, and no cap means no eviction", async () => {
     const store = new InMemoryMemoryStore(
-      [rec({ id: "s", text: "s", status: "superseded" }), rec({ id: "f", text: "f", status: "forgotten" }), rec({ id: "a", text: "a" })],
+      [
+        rec({ id: "s", text: "s", status: "superseded" }),
+        rec({ id: "f", text: "f", status: "forgotten" }),
+        rec({ id: "a", text: "a" }),
+      ],
       { now: () => NOW, cap: 2 },
     );
     await store.write("org:coreplanelabs", [c("b")]);
-    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.id).sort()).toEqual(["a", "mem:org:coreplanelabs:0"]);
+    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.id).sort()).toEqual([
+      "a",
+      "mem:org:coreplanelabs:0",
+    ]);
     const uncapped = new InMemoryMemoryStore([], { now: () => NOW });
     for (let i = 0; i < 12; i++) await uncapped.write("org:coreplanelabs", [c(`n${i}`)]);
     expect(await uncapped.list("org:coreplanelabs", 50)).toHaveLength(12);

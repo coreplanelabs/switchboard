@@ -6,7 +6,13 @@ import { AGENTS } from "../agents/registry.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { LocalExecutor } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
-import { makeExecutor, resetResidentProbeCache, residentOnboardedProbe, residentSlugsLister, type ExecutorFactoryOptions } from "./factory.js";
+import {
+  makeExecutor,
+  resetResidentProbeCache,
+  residentOnboardedProbe,
+  residentSlugsLister,
+  type ExecutorFactoryOptions,
+} from "./factory.js";
 import { resolveGithubToken } from "./githubApp.js";
 
 // The sandbox's GitHub credential is minted per toolset (least-privilege), so
@@ -169,7 +175,10 @@ describe("makeExecutor resident selection", () => {
   it("ctx.repo undefined → per-thread path with ZERO probe calls (total input contract)", async () => {
     stubEnvs();
     const { fn } = stubFetch();
-    const { executor, note, binding } = await makeExecutor(residentOpts(), { threadKey: "slack:CX:1.0", agent: AGENTS.coding });
+    const { executor, note, binding } = await makeExecutor(residentOpts(), {
+      threadKey: "slack:CX:1.0",
+      agent: AGENTS.coding,
+    });
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(note).toBeUndefined();
     expect(binding).toBeUndefined(); // nothing attached on the per-thread path
@@ -180,7 +189,15 @@ describe("makeExecutor resident selection", () => {
     stubEnvs();
     const { calls } = stubFetch(
       { body: { state: "warm", reason: "" } },
-      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2", deps: "hardlink" } },
+      {
+        body: {
+          workspace: "/workspace/threads/x/master",
+          ref: "master",
+          sha: "abc",
+          user: "worker2",
+          deps: "hardlink",
+        },
+      },
     );
     const { executor, note, resident, binding } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(ResidentExecutor);
@@ -201,8 +218,19 @@ describe("makeExecutor resident selection", () => {
     stubEnvs();
     const { calls, bodies } = stubFetch(
       { body: { state: "warm", reason: "" } },
-      { status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref", defaultRef: "master" } },
-      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc1234def", user: "worker2", deps: "hardlink" } },
+      {
+        status: 409,
+        body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref", defaultRef: "master" },
+      },
+      {
+        body: {
+          workspace: "/workspace/threads/x/master",
+          ref: "master",
+          sha: "abc1234def",
+          user: "worker2",
+          deps: "hardlink",
+        },
+      },
     );
     const { executor, note, resident } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: undefined });
     expect(executor).toBeInstanceOf(ResidentExecutor);
@@ -218,8 +246,19 @@ describe("makeExecutor resident selection", () => {
   // decides from the agent's declared toolset — never from the prompt.
   it("a readonly-toolset agent attaches with readonly:true; a full-toolset agent's body has no readonly field", async () => {
     stubEnvs();
-    const attachOk = { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2", deps: "hardlink" };
-    const { bodies } = stubFetch({ body: { state: "warm", reason: "" } }, { body: attachOk }, { body: { state: "warm", reason: "" } }, { body: attachOk });
+    const attachOk = {
+      workspace: "/workspace/threads/x/master",
+      ref: "master",
+      sha: "abc",
+      user: "worker2",
+      deps: "hardlink",
+    };
+    const { bodies } = stubFetch(
+      { body: { state: "warm", reason: "" } },
+      { body: attachOk },
+      { body: { state: "warm", reason: "" } },
+      { body: attachOk },
+    );
     await makeExecutor(residentOpts(), { ...repoCtx(), agent: AGENTS.review });
     expect(bodies[1]?.readonly).toBe(true);
     await makeExecutor(residentOpts(), repoCtx()); // AGENTS.coding
@@ -231,10 +270,29 @@ describe("makeExecutor resident selection", () => {
   // re-review cloned a stale tip); no resolved head → no field (older body).
   it("a resolved headSha is sent as the attach body's sha; absent headSha sends no sha field", async () => {
     stubEnvs();
-    const attachOk = { workspace: "/workspace/threads/x/master", ref: "master", sha: "47c4230692cbc5961682532afb822e9c2f1f40b7", user: "worker2", deps: "hardlink" };
-    const { bodies } = stubFetch({ body: { state: "warm", reason: "" } }, { body: attachOk }, { body: { state: "warm", reason: "" } }, { body: attachOk });
-    await makeExecutor(residentOpts(), { ...repoCtx(), agent: AGENTS.review, headSha: "47c4230692cbc5961682532afb822e9c2f1f40b7" });
-    expect(bodies[1]).toMatchObject({ refHint: "master", readonly: true, sha: "47c4230692cbc5961682532afb822e9c2f1f40b7" });
+    const attachOk = {
+      workspace: "/workspace/threads/x/master",
+      ref: "master",
+      sha: "47c4230692cbc5961682532afb822e9c2f1f40b7",
+      user: "worker2",
+      deps: "hardlink",
+    };
+    const { bodies } = stubFetch(
+      { body: { state: "warm", reason: "" } },
+      { body: attachOk },
+      { body: { state: "warm", reason: "" } },
+      { body: attachOk },
+    );
+    await makeExecutor(residentOpts(), {
+      ...repoCtx(),
+      agent: AGENTS.review,
+      headSha: "47c4230692cbc5961682532afb822e9c2f1f40b7",
+    });
+    expect(bodies[1]).toMatchObject({
+      refHint: "master",
+      readonly: true,
+      sha: "47c4230692cbc5961682532afb822e9c2f1f40b7",
+    });
     await makeExecutor(residentOpts(), repoCtx());
     expect(bodies[3]).not.toHaveProperty("sha");
   });
@@ -259,7 +317,15 @@ describe("makeExecutor resident selection", () => {
     stubEnvs();
     const { calls } = stubFetch(
       { body: { state: "refreshing", reason: "" } },
-      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2", deps: "hardlink" } },
+      {
+        body: {
+          workspace: "/workspace/threads/x/master",
+          ref: "master",
+          sha: "abc",
+          user: "worker2",
+          deps: "hardlink",
+        },
+      },
     );
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(ResidentExecutor);
@@ -272,12 +338,22 @@ describe("makeExecutor resident selection", () => {
     stubEnvs();
     stubFetch(
       { body: { state: "degraded", reason: "github-unreachable: fetch timed out" } },
-      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2", deps: "hardlink" } },
+      {
+        body: {
+          workspace: "/workspace/threads/x/master",
+          ref: "master",
+          sha: "abc",
+          user: "worker2",
+          deps: "hardlink",
+        },
+      },
     );
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(ResidentExecutor);
     expect(resident).toBe(true);
-    expect(note).toBe("resident degraded (github-unreachable: fetch timed out) · jshttp/vary · master@abc — attached to the last snapshot");
+    expect(note).toBe(
+      "resident degraded (github-unreachable: fetch timed out) · jshttp/vary · master@abc — attached to the last snapshot",
+    );
   });
 
   // Review finding on #162: a refresh that failed INSIDE the rebuild lock
@@ -286,11 +362,15 @@ describe("makeExecutor resident selection", () => {
   // degraded reasons stay cold until the next cycle rebuilds.
   it("degraded by an in-rebuild failure (install-failed) → per-thread fallback, no attach", async () => {
     stubEnvs();
-    const { calls } = stubFetch({ body: { state: "degraded", reason: "install-failed: npm ERR! ERESOLVE unable to resolve dependency tree" } });
+    const { calls } = stubFetch({
+      body: { state: "degraded", reason: "install-failed: npm ERR! ERESOLVE unable to resolve dependency tree" },
+    });
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(resident).toBeFalsy();
-    expect(note).toBe("resident degraded (install-failed: npm ERR! ERESOLVE unable to resolve dependency tree) — using fresh sandbox");
+    expect(note).toBe(
+      "resident degraded (install-failed: npm ERR! ERESOLVE unable to resolve dependency tree) — using fresh sandbox",
+    );
     expect(calls).toEqual(["/status"]);
   });
 
@@ -311,11 +391,16 @@ describe("makeExecutor resident selection", () => {
     stubEnvs();
     const reason =
       "disk-pressure: need 2.47 GiB for a new tree (install), but 3.10 GiB free minus the 2.76 GiB reserve (snapshot staging 1.76 GiB + floor 1.00 GiB) leaves 0.34 GiB — short by 2.13 GiB; evicted 1 idle tree(s) (0.52 GiB back): slack:C1:old; kept 1: slack:C1:busy (2 operation(s) in flight)";
-    const { calls } = stubFetch({ body: { state: "warm", reason: "" } }, { status: 503, body: { error: reason, state: "warm", reason: "disk-pressure" } });
+    const { calls } = stubFetch(
+      { body: { state: "warm", reason: "" } },
+      { status: 503, body: { error: reason, state: "warm", reason: "disk-pressure" } },
+    );
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(resident).toBeFalsy();
-    expect(note).toBe(`resident attach failed (resident attach failed for repo:jshttp/vary: ${reason}) — using fresh sandbox`);
+    expect(note).toBe(
+      `resident attach failed (resident attach failed for repo:jshttp/vary: ${reason}) — using fresh sandbox`,
+    );
     expect(calls).toEqual(["/status", "/attach"]);
   });
 
@@ -425,7 +510,11 @@ describe("residentOnboardedProbe", () => {
   });
   const cfg = { baseUrl: "https://resident.example" };
   const env = { RESIDENT_OPERATOR_TOKEN: "op-tok" } as NodeJS.ProcessEnv;
-  const answer = (status: number, body: unknown = {}) => vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status })));
+  const answer = (status: number, body: unknown = {}) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(body), { status })),
+    );
 
   it("true for any lifecycle state of an onboarded resource, false for 404 not-onboarded and for a non-transport HTTP error", async () => {
     answer(200, { state: "down", reason: "provision-failed" });
@@ -436,7 +525,7 @@ describe("residentOnboardedProbe", () => {
     await expect(residentOnboardedProbe(cfg, env)?.("acme/api")).resolves.toBe(false);
   });
 
-  it("\"unreachable\" for a transport failure — and for the outage window it opens", async () => {
+  it('"unreachable" for a transport failure — and for the outage window it opens', async () => {
     const fn = vi.fn(async () => {
       throw new TypeError("fetch failed");
     });
@@ -474,7 +563,18 @@ describe("residentSlugsLister", () => {
 
   it("lists onboarded slugs from GET /residents with the admin bearer — `repo:` prefixes stripped, lowercased", async () => {
     const fn = stubFetch(
-      () => new Response(JSON.stringify({ cap: 6, residents: [{ resource: "repo:Acme/API", state: "warm" }, { resource: "repo:acme/web" }, { resource: "svc:other" }, {}] })),
+      () =>
+        new Response(
+          JSON.stringify({
+            cap: 6,
+            residents: [
+              { resource: "repo:Acme/API", state: "warm" },
+              { resource: "repo:acme/web" },
+              { resource: "svc:other" },
+              {},
+            ],
+          }),
+        ),
     );
     const list = residentSlugsLister(cfg, env);
     await expect(list?.()).resolves.toEqual(["acme/api", "acme/web"]);

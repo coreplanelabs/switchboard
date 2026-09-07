@@ -45,7 +45,11 @@ const SURFACE_LABEL: Readonly<Record<SurfaceName, string>> = {
   mcp: "MCP",
 };
 
-const slackUser = (id: string, extra: readonly string[]): Actor => ({ kind: "user", id, grants: { actions: new Set([...CHAT_OPEN_ACTIONS, "config:write", ...extra]), channels: new Set(), repos: new Set() } });
+const slackUser = (id: string, extra: readonly string[]): Actor => ({
+  kind: "user",
+  id,
+  grants: { actions: new Set([...CHAT_OPEN_ACTIONS, "config:write", ...extra]), channels: new Set(), repos: new Set() },
+});
 
 /** The Slack readers a command's "Who can run it" is decided for, narrowest
  *  first, each labelled as docs/reference/permissions.md names the set: a plain
@@ -56,7 +60,10 @@ const SLACK_READERS: ReadonlyArray<{ label: string; actor: Actor }> = [
   { label: "anyone", actor: slackUser("slack:UDOC", []) },
   { label: "anyone allowed to run `coding`", actor: slackUser("slack:UDOC", ["agent:run:coding"]) },
   { label: "repo managers (`repoManagement`)", actor: slackUser("slack:UDOC", ["repo:write", "friction:write"]) },
-  { label: "admins", actor: { kind: "user", id: "slack:UDOC", grants: { actions: "all", channels: "all", repos: "all" } } },
+  {
+    label: "admins",
+    actor: { kind: "user", id: "slack:UDOC", grants: { actions: "all", channels: "all", repos: "all" } },
+  },
 ];
 
 /** Who may run a command in Slack, as the policy table decides it for the
@@ -188,14 +195,21 @@ export function renderChatCommands(cmds: readonly DocCommand[]): string {
 export function renderApiRoutes(cmds: readonly DocCommand[]): string {
   const rows = cmds
     .filter((c) => c.surfaces.includes("http"))
-    .map((c) => [code(c.httpPath), c.effect === "write" ? "`POST`" : "`GET`, `POST`", code(c.action), cell(c.describe)]);
+    .map((c) => [
+      code(c.httpPath),
+      c.effect === "write" ? "`POST`" : "`GET`, `POST`",
+      code(c.action),
+      cell(c.describe),
+    ]);
   return table(["Route", "Methods", "Action", "What it does"], rows);
 }
 
 /** Every generated region in docs/, keyed by the file that carries it. The
  *  generator walks exactly this table — a region added here without a marker in
  *  the file (or the reverse) is a `docs:check` failure. */
-export const GENERATED_REGIONS: Readonly<Record<string, Readonly<Record<string, (cmds: readonly DocCommand[]) => string>>>> = {
+export const GENERATED_REGIONS: Readonly<
+  Record<string, Readonly<Record<string, (cmds: readonly DocCommand[]) => string>>>
+> = {
   "reference/cli.md": { "cli-commands": renderCliCommands },
   "reference/slack-commands.md": { "chat-commands": renderChatCommands },
   "reference/dashboard-routes.md": { "api-routes": renderApiRoutes },

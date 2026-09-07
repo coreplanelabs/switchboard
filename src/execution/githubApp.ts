@@ -45,9 +45,7 @@ const cache = new Map<GithubTokenScope, CachedToken>();
 
 export function githubAppConfigured(): boolean {
   return Boolean(
-    process.env.GITHUB_APP_ID &&
-      process.env.GITHUB_APP_PRIVATE_KEY &&
-      process.env.GITHUB_APP_INSTALLATION_ID,
+    process.env.GITHUB_APP_ID && process.env.GITHUB_APP_PRIVATE_KEY && process.env.GITHUB_APP_INSTALLATION_ID,
   );
 }
 
@@ -87,10 +85,11 @@ async function mintInstallationToken(scope: GithubTokenScope): Promise<string> {
   };
   if (body) headers["content-type"] = "application/json";
 
-  const res = await fetch(
-    `https://api.github.com/app/installations/${installationId}/access_tokens`,
-    { method: "POST", headers, ...(body ? { body } : {}) },
-  );
+  const res = await fetch(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
+    method: "POST",
+    headers,
+    ...(body ? { body } : {}),
+  });
   if (!res.ok) {
     const errBody = await res.text().catch(() => "");
     throw new Error(`GitHub App token mint failed: HTTP ${res.status} ${errBody.slice(0, 300)}`);

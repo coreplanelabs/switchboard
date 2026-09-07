@@ -15,7 +15,12 @@ const DAY = 86_400_000;
 const NOW = 1_800_000_000_000;
 
 function events(n: number, size = 20): RunEvent[] {
-  return Array.from({ length: n }, (_, i) => ({ type: "tool_call", tool: "bash", summary: `step ${i} ${"x".repeat(size)}`, at: NOW - 1000 + i }));
+  return Array.from({ length: n }, (_, i) => ({
+    type: "tool_call",
+    tool: "bash",
+    summary: `step ${i} ${"x".repeat(size)}`,
+    at: NOW - 1000 + i,
+  }));
 }
 
 function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): RunRecord {
@@ -103,50 +108,81 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
     // timeout twice now (a CI runner at 260 records; a resident review worktree
     // under build contention, #403). The generous ceiling keeps the test's
     // coverage without racing the disk.
-    it("list is newest-first, capped at 200 (default 50), with a `before` cursor and filters", { timeout: 30_000 }, async () => {
-      const { store } = make();
-      // 205 records: the fewest that prove the 200 cap AND a non-empty second
-      // page. One pre-built event list + diagnosis is shared across every record
-      // so each put is one small write.
-      const evs = events(1);
-      const diagnosis = analyzeRunFriction(evs);
-      for (let i = 0; i < 205; i++) {
-        await store.put(
-          record(`r${String(i).padStart(3, "0")}`, NOW - i * 1000, {
-            agent: i % 2 ? "review" : "coding",
-            channelId: i % 3 ? "slack:C1" : "slack:C2",
-            events: evs,
-            eventCount: 1,
-            storedEventCount: 1,
-            diagnosis,
-          }),
+    it(
+      "list is newest-first, capped at 200 (default 50), with a `before` cursor and filters",
+      { timeout: 30_000 },
+      async () => {
+        const { store } = make();
+        // 205 records: the fewest that prove the 200 cap AND a non-empty second
+        // page. One pre-built event list + diagnosis is shared across every record
+        // so each put is one small write.
+        const evs = events(1);
+        const diagnosis = analyzeRunFriction(evs);
+        for (let i = 0; i < 205; i++) {
+          await store.put(
+            record(`r${String(i).padStart(3, "0")}`, NOW - i * 1000, {
+              agent: i % 2 ? "review" : "coding",
+              channelId: i % 3 ? "slack:C1" : "slack:C2",
+              events: evs,
+              eventCount: 1,
+              storedEventCount: 1,
+              diagnosis,
+            }),
+          );
+        }
+        const dflt = await store.list({});
+        expect(dflt).toHaveLength(50);
+        expect(dflt[0].id).toBe("r000");
+        const capped = await store.list({ limit: 1000 });
+        expect(capped).toHaveLength(200);
+        const page2 = await store.list({ limit: 200, before: capped[199].finishedAt });
+        expect(page2).toHaveLength(5);
+        expect(page2[0].id).toBe("r200");
+        expect((await store.list({ agent: "coding", limit: 5 })).every((r) => r.agent === "coding")).toBe(true);
+        expect((await store.list({ channel: "slack:C2", limit: 5 })).every((r) => r.channelId === "slack:C2")).toBe(
+          true,
         );
-      }
-      const dflt = await store.list({});
-      expect(dflt).toHaveLength(50);
-      expect(dflt[0].id).toBe("r000");
-      const capped = await store.list({ limit: 1000 });
-      expect(capped).toHaveLength(200);
-      const page2 = await store.list({ limit: 200, before: capped[199].finishedAt });
-      expect(page2).toHaveLength(5);
-      expect(page2[0].id).toBe("r200");
-      expect((await store.list({ agent: "coding", limit: 5 })).every((r) => r.agent === "coding")).toBe(true);
-      expect((await store.list({ channel: "slack:C2", limit: 5 })).every((r) => r.channelId === "slack:C2")).toBe(true);
-      expect(await store.list({ sinceMs: NOW - 2500 })).toHaveLength(3);
-    });
+        expect(await store.list({ sinceMs: NOW - 2500 })).toHaveLength(3);
+      },
+    );
 
     it("list applies `visibleTo` — the actor's predicate — as its own filter, ANDed with the others; a row without the stamp is `unknown` and never public", async () => {
       const { store } = make();
-      await store.put(record("pub", NOW - 1000, { channelId: "slack:C_PUB", userId: "slack:U1", channelVisibility: "public" }));
-      await store.put(record("priv", NOW - 2000, { channelId: "slack:G1", userId: "slack:U2", channelVisibility: "private" }));
-      await store.put(record("ops", NOW - 3000, { channelId: "http:ops", userId: "http:ci", channelVisibility: "machine" }));
-      await store.put(record("old-style", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:U3", channelVisibility: "unknown" }));
-      const ids = async (visibleTo: RunListOptions["visibleTo"], more: Partial<RunListOptions> = {}) => (await store.list({ visibleTo, ...more })).map((r) => r.id);
+      await store.put(
+        record("pub", NOW - 1000, { channelId: "slack:C_PUB", userId: "slack:U1", channelVisibility: "public" }),
+      );
+      await store.put(
+        record("priv", NOW - 2000, { channelId: "slack:G1", userId: "slack:U2", channelVisibility: "private" }),
+      );
+      await store.put(
+        record("ops", NOW - 3000, { channelId: "http:ops", userId: "http:ci", channelVisibility: "machine" }),
+      );
+      await store.put(
+        record("old-style", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:U3", channelVisibility: "unknown" }),
+      );
+      const ids = async (visibleTo: RunListOptions["visibleTo"], more: Partial<RunListOptions> = {}) =>
+        (await store.list({ visibleTo, ...more })).map((r) => r.id);
       expect(await ids({ kind: "all" })).toEqual(["pub", "priv", "ops", "old-style"]);
       expect(await ids({ kind: "none" })).toEqual([]);
       expect(await ids({ kind: "visibility-in", visibilities: ["public"] })).toEqual(["pub"]);
-      expect(await ids({ kind: "or", of: [{ kind: "channels-in", channelIds: ["http:ops"] }, { kind: "visibility-in", visibilities: ["public"] }] })).toEqual(["pub", "ops"]);
-      expect(await ids({ kind: "or", of: [{ kind: "visibility-in", visibilities: ["public"] }, { kind: "user-is", userId: "slack:U2" }] })).toEqual(["pub", "priv"]);
+      expect(
+        await ids({
+          kind: "or",
+          of: [
+            { kind: "channels-in", channelIds: ["http:ops"] },
+            { kind: "visibility-in", visibilities: ["public"] },
+          ],
+        }),
+      ).toEqual(["pub", "ops"]);
+      expect(
+        await ids({
+          kind: "or",
+          of: [
+            { kind: "visibility-in", visibilities: ["public"] },
+            { kind: "user-is", userId: "slack:U2" },
+          ],
+        }),
+      ).toEqual(["pub", "priv"]);
       expect(await ids({ kind: "channels-in", channelIds: ["slack:C_PUB"] }, { channel: "http:ops" })).toEqual([]);
       expect(await ids({ kind: "channels-in", channelIds: ["slack:C_PUB"] })).toEqual(["pub", "old-style"]);
     });
@@ -170,7 +206,9 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
     it("events keep the registry seq they were published with: a record whose events carry seq 2001..7000 pages from afterSeq 6500 by that seq", async () => {
       const { store } = make();
       const stamped = events(5000).map((e, i) => ({ ...e, seq: 2001 + i }));
-      await store.put(record("trimmed", NOW, { events: stamped, eventCount: 7000, storedEventCount: 5000, truncated: true }));
+      await store.put(
+        record("trimmed", NOW, { events: stamped, eventCount: 7000, storedEventCount: 5000, truncated: true }),
+      );
       const page = await store.events("trimmed", { afterSeq: 6500, limit: 100 });
       expect(page!.events.map((e) => e.seq)).toEqual(Array.from({ length: 100 }, (_, i) => 6501 + i));
       expect((page!.events[0] as { summary: string }).summary).toMatch(/^step 4500 /);
@@ -178,7 +216,10 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       const tail = await store.events("trimmed", { afterSeq: 6995 });
       expect(tail!.events.map((e) => e.seq)).toEqual([6996, 6997, 6998, 6999, 7000]);
       expect(tail!.nextAfterSeq).toBeUndefined();
-      expect(await store.events("trimmed", { afterSeq: 1000, limit: 2 })).toMatchObject({ events: [{ seq: 2001 }, { seq: 2002 }], nextAfterSeq: 2002 });
+      expect(await store.events("trimmed", { afterSeq: 1000, limit: 2 })).toMatchObject({
+        events: [{ seq: 2001 }, { seq: 2002 }],
+        nextAfterSeq: 2002,
+      });
       expect((await store.get("trimmed"))!.events.map((e) => e.seq).slice(0, 3)).toEqual([2001, 2002, 2003]);
     });
 
@@ -247,11 +288,17 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
 
 contract("InMemoryRunStore", (policy) => {
   const clock = { now: NOW };
-  return { store: new InMemoryRunStore({ policy: { ...DEFAULT_RETENTION_POLICY, ...policy }, now: () => clock.now }), clock };
+  return {
+    store: new InMemoryRunStore({ policy: { ...DEFAULT_RETENTION_POLICY, ...policy }, now: () => clock.now }),
+    clock,
+  };
 });
 contract("FileRunStore", (policy) => {
   const clock = { now: NOW };
-  return { store: new FileRunStore(tmpDir(), { policy: { ...DEFAULT_RETENTION_POLICY, ...policy }, now: () => clock.now }), clock };
+  return {
+    store: new FileRunStore(tmpDir(), { policy: { ...DEFAULT_RETENTION_POLICY, ...policy }, now: () => clock.now }),
+    clock,
+  };
 });
 
 describe("FileRunStore", () => {
@@ -384,7 +431,9 @@ describe("buildRunStore", () => {
 
   it("worker without its bearer → null + a warning naming the env var", () => {
     const d = deps();
-    expect(buildRunStore({ store: "worker", worker: { baseUrl: "https://state.example", tokenEnv: "RUNS_TOKEN" } }, {}, d)).toBeNull();
+    expect(
+      buildRunStore({ store: "worker", worker: { baseUrl: "https://state.example", tokenEnv: "RUNS_TOKEN" } }, {}, d),
+    ).toBeNull();
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("RUNS_TOKEN");
     expect(timers).toEqual([]);
@@ -392,7 +441,9 @@ describe("buildRunStore", () => {
 
   it("worker with its bearer → WorkerRunStore (default env MEMORY_TOKEN), no timer", () => {
     const d = deps();
-    expect(buildRunStore({ worker: { baseUrl: "https://state.example" } }, { MEMORY_TOKEN: "tok" }, d)).toBeInstanceOf(WorkerRunStore);
+    expect(buildRunStore({ worker: { baseUrl: "https://state.example" } }, { MEMORY_TOKEN: "tok" }, d)).toBeInstanceOf(
+      WorkerRunStore,
+    );
     expect(warnings).toEqual([]);
     expect(timers).toEqual([]);
   });

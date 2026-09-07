@@ -33,11 +33,18 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
   { rule: "deploy tooling", test: /^deploy\/[^/]+\/preflight(\.test)?\.mjs$/ },
   { rule: "deploy tooling", test: /^deploy\/cloudflare\/write-build\.mjs$/ },
   { rule: "docs Worker (its own CI deploy)", test: /^deploy\/cloudflare-docs\// },
-  { rule: "operator manifests (a new secret is a `wrangler secret put`, not a deploy)", test: /^deploy\/(secrets\.manifest\.json|agent-env\.jsonc|agent-env-bootstrap\.sh)$/ },
-  { rule: "repo metadata", test: /^(\.gitignore|\.nvmrc|\.env\.example|LICENSE|NOTICE|docker-compose\.yml|fly\.toml|tsconfig\.scripts\.json|release-please-config\.json|\.release-please-manifest\.json|switchboard\.png)$/ },
+  {
+    rule: "operator manifests (a new secret is a `wrangler secret put`, not a deploy)",
+    test: /^deploy\/(secrets\.manifest\.json|agent-env\.jsonc|agent-env-bootstrap\.sh)$/,
+  },
+  {
+    rule: "repo metadata",
+    test: /^(\.gitignore|\.nvmrc|\.env\.example|LICENSE|NOTICE|docker-compose\.yml|fly\.toml|tsconfig\.scripts\.json|release-please-config\.json|\.release-please-manifest\.json|switchboard\.png)$/,
+  },
 ];
 
-export type PathClass = { kind: "input"; workers: WorkerName[] } | { kind: "inert"; rule: string } | { kind: "unclassified" };
+export type PathClass =
+  { kind: "input"; workers: WorkerName[] } | { kind: "inert"; rule: string } | { kind: "unclassified" };
 
 /** Who claims a path: an inert rule, the Workers whose declared inputs cover
  *  it (a dir prefix ends with `/`, anything else is an exact file), or nobody.
@@ -45,7 +52,9 @@ export type PathClass = { kind: "input"; workers: WorkerName[] } | { kind: "iner
 export function classifyPath(path: string, workers: readonly WorkerDef[] = WORKERS): PathClass {
   const inert = INERT_RULES.find((r) => r.test.test(path));
   if (inert) return { kind: "inert", rule: inert.rule };
-  const claimed = workers.filter((w) => w.inputs.paths.some((p) => (p.endsWith("/") ? path.startsWith(p) : path === p))).map((w) => w.name);
+  const claimed = workers
+    .filter((w) => w.inputs.paths.some((p) => (p.endsWith("/") ? path.startsWith(p) : path === p)))
+    .map((w) => w.name);
   return claimed.length > 0 ? { kind: "input", workers: claimed } : { kind: "unclassified" };
 }
 
@@ -64,7 +73,11 @@ function stripComments(source: string): string {
 export function importSpecifiers(source: string): string[] {
   const text = stripComments(source);
   const found: { index: number; spec: string }[] = [];
-  for (const re of [/\b(?:import|export)\b[^'";]*?\bfrom\s*['"]([^'"]+)['"]/g, /\bimport\s*['"]([^'"]+)['"]/g, /\bimport\(\s*['"]([^'"]+)['"]\s*\)/g]) {
+  for (const re of [
+    /\b(?:import|export)\b[^'";]*?\bfrom\s*['"]([^'"]+)['"]/g,
+    /\bimport\s*['"]([^'"]+)['"]/g,
+    /\bimport\(\s*['"]([^'"]+)['"]\s*\)/g,
+  ]) {
     for (const m of text.matchAll(re)) found.push({ index: m.index ?? 0, spec: m[1] });
   }
   const out: string[] = [];
@@ -111,7 +124,10 @@ export interface ImportClosure {
  *  commit: `git show <ref>:<path>`, or the filesystem). Type-only imports are
  *  followed too — the file is part of the program, and over-inclusion is the
  *  safe direction. */
-export async function importClosure(entry: string, read: (path: string) => Promise<string | undefined>): Promise<ImportClosure> {
+export async function importClosure(
+  entry: string,
+  read: (path: string) => Promise<string | undefined>,
+): Promise<ImportClosure> {
   const entrySource = await read(entry);
   if (entrySource === undefined) return { files: [], unresolved: [{ from: "", specifier: entry }] };
   const sources = new Map<string, string>([[entry, entrySource]]);
@@ -197,14 +213,19 @@ function canonicalJson(value: unknown): string {
  *  production dependencies; the toolchain never enters the bundle) — the
  *  caller passes `ignoreDevDependencies` for those. Anything unparsable or
  *  newly present is a change: fail open. */
-export function packageJsonChangeKind(before: string | undefined, after: string | undefined, { ignoreDevDependencies = false } = {}): "unchanged" | "inert-only" | "changed" {
+export function packageJsonChangeKind(
+  before: string | undefined,
+  after: string | undefined,
+  { ignoreDevDependencies = false } = {},
+): "unchanged" | "inert-only" | "changed" {
   if (before === after) return "unchanged";
   if (before === undefined || after === undefined) return "changed";
   try {
     const a = JSON.parse(before) as Record<string, unknown>;
     const b = JSON.parse(after) as Record<string, unknown>;
     if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) return "changed";
-    const strip = ({ version: _v, devDependencies, ...rest }: Record<string, unknown>) => (ignoreDevDependencies ? rest : { ...rest, devDependencies });
+    const strip = ({ version: _v, devDependencies, ...rest }: Record<string, unknown>) =>
+      ignoreDevDependencies ? rest : { ...rest, devDependencies };
     if (canonicalJson(strip(a)) !== canonicalJson(strip(b))) return "changed";
     return canonicalJson(a) === canonicalJson(b) ? "unchanged" : "inert-only";
   } catch {
@@ -232,7 +253,11 @@ export interface AffectedProbe {
   fileAt(ref: string, path: string): Promise<string | undefined>;
 }
 
-export type AffectedBase = { kind: "live"; commit: string } | { kind: "release"; tag: string; commit: string } | { kind: "ref"; ref: string } | { kind: "none"; reason: string };
+export type AffectedBase =
+  | { kind: "live"; commit: string }
+  | { kind: "release"; tag: string; commit: string }
+  | { kind: "ref"; ref: string }
+  | { kind: "none"; reason: string };
 
 export interface WorkerAffected {
   name: WorkerName;
@@ -256,14 +281,20 @@ export interface AffectedReport {
 const short = (commit: string) => commit.slice(0, 7);
 
 /** Judge a live commit as a base: only a plain hex commit that is an ancestor of HEAD. */
-async function liveBase(probe: AffectedProbe, worker: WorkerName, head: string): Promise<{ base: AffectedBase } | { reason: string }> {
+async function liveBase(
+  probe: AffectedProbe,
+  worker: WorkerName,
+  head: string,
+): Promise<{ base: AffectedBase } | { reason: string }> {
   const live = await probe.liveCommit(worker);
   if (!("commit" in live)) return { reason: `/healthz: ${live.error}` };
   const c = live.commit.trim();
   if (c === "unknown") return { reason: 'serving commit "unknown" — the image was built without a stamp' };
   if (c.endsWith("-dirty")) return { reason: `serving ${short(c)}-dirty — a dirty build is not a commit` };
-  if (!/^[0-9a-f]{7,40}$/.test(c)) return { reason: `serving an unrecognizable build identity ${JSON.stringify(c.slice(0, 40))}` };
-  if (!(await probe.isAncestor(c, head))) return { reason: `live commit ${short(c)} is not an ancestor of HEAD ${short(head)}` };
+  if (!/^[0-9a-f]{7,40}$/.test(c))
+    return { reason: `serving an unrecognizable build identity ${JSON.stringify(c.slice(0, 40))}` };
+  if (!(await probe.isAncestor(c, head)))
+    return { reason: `live commit ${short(c)} is not an ancestor of HEAD ${short(head)}` };
   return { base: { kind: "live", commit: c } };
 }
 
@@ -273,7 +304,11 @@ async function liveBase(probe: AffectedProbe, worker: WorkerName, head: string):
  * from that base to HEAD, and which of them are its inputs. Then the fleet-wide
  * rule: an unclassified path anywhere makes every Worker unsure.
  */
-export async function computeAffected(probe: AffectedProbe, opts: { base?: string } = {}, workers: readonly WorkerDef[] = WORKERS): Promise<AffectedReport> {
+export async function computeAffected(
+  probe: AffectedProbe,
+  opts: { base?: string } = {},
+  workers: readonly WorkerDef[] = WORKERS,
+): Promise<AffectedReport> {
   const head = await probe.head();
   let lastRelease: Promise<{ tag: string; commit: string } | undefined> | undefined;
   const fallback = () => (lastRelease ??= probe.lastRelease());
@@ -295,7 +330,10 @@ export async function computeAffected(probe: AffectedProbe, opts: { base?: strin
     if (!/^[0-9a-f]{40}$/.test(head)) {
       // No HEAD to judge against (not a git checkout, or git failed): nothing
       // below can be trusted, and "no input changed" must never be the answer.
-      base = { kind: "none", reason: `HEAD could not be read (${JSON.stringify(head.slice(0, 40))}) — not a git checkout?` };
+      base = {
+        kind: "none",
+        reason: `HEAD could not be read (${JSON.stringify(head.slice(0, 40))}) — not a git checkout?`,
+      };
       reasons.push(`unsure: ${base.reason}`);
     } else if (opts.base !== undefined) {
       base = { kind: "ref", ref: opts.base };
@@ -318,10 +356,13 @@ export async function computeAffected(probe: AffectedProbe, opts: { base?: strin
       if (changed === undefined) {
         // A failed diff is not an empty diff: the base may not exist in this
         // checkout (a typo'd --base, a shallow clone). Unsure, never "skip".
-        reasons.push(`unsure: git diff ${baseRef.length === 40 ? short(baseRef) : baseRef}..HEAD failed — is the base in this checkout?`);
+        reasons.push(
+          `unsure: git diff ${baseRef.length === 40 ? short(baseRef) : baseRef}..HEAD failed — is the base in this checkout?`,
+        );
       } else if (changed.length > 0) {
         const closure = await importClosure(w.entry, readHead);
-        for (const u of closure.unresolved) reasons.push(`unsure: import ${u.specifier} from ${u.from || "(entry)"} resolves to no file`);
+        for (const u of closure.unresolved)
+          reasons.push(`unsure: import ${u.specifier} from ${u.from || "(entry)"} resolves to no file`);
         for (const path of changed) {
           const cls = classifyPath(path, workers);
           if (cls.kind === "inert") continue;
@@ -333,7 +374,8 @@ export async function computeAffected(probe: AffectedProbe, opts: { base?: strin
             if (w.inputs.prodDepsLockfiles.includes(path)) {
               const before = productionDependencies(await probe.fileAt(baseRef, path));
               const after = productionDependencies(await readHead(path));
-              if (!before || !after) reasons.push(`${path}: production dependencies could not be read — treated as changed`);
+              if (!before || !after)
+                reasons.push(`${path}: production dependencies could not be read — treated as changed`);
               else {
                 const moved = prodDepsDiff(before, after);
                 if (moved.length > 0) reasons.push(`${path}: production dependencies changed — ${moved.join(", ")}`);
@@ -341,7 +383,12 @@ export async function computeAffected(probe: AffectedProbe, opts: { base?: strin
             } else if (path === "package.json" || path.endsWith("/package.json")) {
               // A Worker dir's own package.json: its devDependencies are the toolchain, not the bundle.
               const ignoreDevDependencies = path === `${w.dir}/package.json`;
-              if (packageJsonChangeKind(await probe.fileAt(baseRef, path), await readHead(path), { ignoreDevDependencies }) === "changed") reasons.push(path);
+              if (
+                packageJsonChangeKind(await probe.fileAt(baseRef, path), await readHead(path), {
+                  ignoreDevDependencies,
+                }) === "changed"
+              )
+                reasons.push(path);
             } else {
               reasons.push(path);
             }
@@ -357,7 +404,8 @@ export async function computeAffected(probe: AffectedProbe, opts: { base?: strin
   const unclassifiedPaths = [...unclassified].sort();
   if (unclassifiedPaths.length > 0) {
     for (const w of judged) {
-      for (const p of unclassifiedPaths) w.reasons.push(`unsure: unclassified path ${p} — no rule claims it (src/deploy/affected.ts)`);
+      for (const p of unclassifiedPaths)
+        w.reasons.push(`unsure: unclassified path ${p} — no rule claims it (src/deploy/affected.ts)`);
       w.decision = "deploy";
     }
   }
@@ -390,8 +438,11 @@ function describeBase(base: AffectedBase, code: (s: string) => string): string {
 
 /** A reason with its path(s) in code spans; `unsure:` lines stay prose. */
 function markdownReason(reason: string): string {
-  if (reason.startsWith("unsure:")) return reason.replace(/(unclassified path |import )(\S+)/, (_m, pre: string, p: string) => `${pre}\`${p}\``);
-  return reason.replace(/^(\S+?)(?=$| \(imported by |: production dependencies)/, "`$1`").replace(/\(imported by (\S+)\)/, "(imported by `$1`)");
+  if (reason.startsWith("unsure:"))
+    return reason.replace(/(unclassified path |import )(\S+)/, (_m, pre: string, p: string) => `${pre}\`${p}\``);
+  return reason
+    .replace(/^(\S+?)(?=$| \(imported by |: production dependencies)/, "`$1`")
+    .replace(/\(imported by (\S+)\)/, "(imported by `$1`)");
 }
 
 function capped(reasons: string[], render: (r: string) => string, sep: string): string {
@@ -412,20 +463,36 @@ export function formatAffectedMarkdown(report: Omit<AffectedReport, "markdown">)
     const why = w.reasons.length === 0 ? "no input changed" : capped(w.reasons, markdownReason, "<br>");
     return `| ${w.name} | ${decision} | ${describeBase(w.base, code)} | ${why.replace(/\|/g, "\\|")} |`;
   });
-  const unclassified = report.unclassified.length === 0 ? "Unclassified paths: none." : `**Unclassified paths (every Worker deploys):** ${report.unclassified.map(code).join(", ")} — add a rule in \`src/deploy/affected.ts\`.`;
-  return [headline, "", "| Worker | Decision | Judged against | Why |", "|---|---|---|---|", ...rows, "", unclassified].join("\n");
+  const unclassified =
+    report.unclassified.length === 0
+      ? "Unclassified paths: none."
+      : `**Unclassified paths (every Worker deploys):** ${report.unclassified.map(code).join(", ")} — add a rule in \`src/deploy/affected.ts\`.`;
+  return [
+    headline,
+    "",
+    "| Worker | Decision | Judged against | Why |",
+    "|---|---|---|---|",
+    ...rows,
+    "",
+    unclassified,
+  ].join("\n");
 }
 
 /** The same report as plain lines, for `deploy plan` on the CLI and in chat
  *  (bullets, never padded columns — the chat shape the conformance suite holds). */
 export function formatAffectedText(report: Omit<AffectedReport, "markdown">): string {
   const lines = [
-    report.selected.length === 0 ? `Affected: nothing to deploy — every Worker already serves this tree's inputs (HEAD ${short(report.head)})` : `Affected: ${report.selected.join(", ")} (HEAD ${short(report.head)}; judged per Worker against what it serves)`,
+    report.selected.length === 0
+      ? `Affected: nothing to deploy — every Worker already serves this tree's inputs (HEAD ${short(report.head)})`
+      : `Affected: ${report.selected.join(", ")} (HEAD ${short(report.head)}; judged per Worker against what it serves)`,
   ];
   for (const w of report.workers) {
     const why = w.reasons.length === 0 ? "no input changed" : capped(w.reasons, (r) => r, "; ");
     lines.push(`  - ${w.name}: ${w.decision} — ${describeBase(w.base, (s) => s)} — ${why}`);
   }
-  if (report.unclassified.length > 0) lines.push(`  - UNCLASSIFIED (every Worker deploys): ${report.unclassified.join(", ")} — add a rule in src/deploy/affected.ts`);
+  if (report.unclassified.length > 0)
+    lines.push(
+      `  - UNCLASSIFIED (every Worker deploys): ${report.unclassified.join(", ")} — add a rule in src/deploy/affected.ts`,
+    );
   return lines.join("\n");
 }

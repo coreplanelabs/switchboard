@@ -65,7 +65,21 @@ export function mutableCacheFindArgv(nodeModulesDir: string): string[] {
   // are dropped by mutableCachePaths' ancestor rule. Deliberately not
   // `-maxdepth`: GNU find applies -maxdepth GLOBALLY even inside parentheses
   // (with a warning), which would cap the nested .cache search at depth 1.
-  return ["find", nodeModulesDir, "-mindepth", "1", "(", "-path", `${nodeModulesDir}/.*`, "-o", "-type", "d", "-name", ".cache", ")"];
+  return [
+    "find",
+    nodeModulesDir,
+    "-mindepth",
+    "1",
+    "(",
+    "-path",
+    `${nodeModulesDir}/.*`,
+    "-o",
+    "-type",
+    "d",
+    "-name",
+    ".cache",
+    ")",
+  ];
 }
 
 /** Top-level dot entries of node_modules that hold PACKAGE CONTENT rather than
@@ -212,7 +226,12 @@ export function parseDepCacheScriptOutput(stdout: string): DepCacheScriptParse {
  *  `chown -Rh` to the thread user (-h: a postinstall-planted symlink is
  *  re-owned as a LINK, never followed to an out-of-tree target). Same steps,
  *  same order, same flags as the old per-spawn loop. */
-export function mutableCacheSwapScript(srcRoot: string, dstRoot: string, user: string, paths: readonly string[]): string {
+export function mutableCacheSwapScript(
+  srcRoot: string,
+  dstRoot: string,
+  user: string,
+  paths: readonly string[],
+): string {
   const owner = shellQuote(`${user}:${user}`);
   const root = dstRoot.replace(/\/+$/, "");
   const lines: string[] = [];

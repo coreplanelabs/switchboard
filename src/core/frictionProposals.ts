@@ -157,15 +157,78 @@ const SEGMENT_SPLIT = /&&|\|\||;|\||&/;
 /** Quoted string literals: prose to the shell, not command words. */
 const QUOTED = /"(?:[^"\\]|\\.)*"|'[^']*'/g;
 /** Programs that carry no information about what the step IS. */
-const NOISE_PROGRAMS = new Set(["cd", "echo", "export", "printf", "tail", "head", "grep", "sed", "awk", "wc", "sort", "uniq", "cat", "tee", "cut", "tr", "xargs", "sleep", "set", "source", "pushd", "popd", "true", "time", "exit"]);
+const NOISE_PROGRAMS = new Set([
+  "cd",
+  "echo",
+  "export",
+  "printf",
+  "tail",
+  "head",
+  "grep",
+  "sed",
+  "awk",
+  "wc",
+  "sort",
+  "uniq",
+  "cat",
+  "tee",
+  "cut",
+  "tr",
+  "xargs",
+  "sleep",
+  "set",
+  "source",
+  "pushd",
+  "popd",
+  "true",
+  "time",
+  "exit",
+]);
 /** Wrappers whose NEXT word is the real program. */
 const WRAPPER_PROGRAMS = new Set(["sudo", "corepack", "exec", "nice", "nohup", "env"]);
 /** Programs whose first non-flag argument is a subcommand worth keeping. */
-const SUBCOMMAND_PROGRAMS = new Set(["npm", "pnpm", "yarn", "bun", "npx", "git", "gh", "cargo", "go", "pip", "pip3", "poetry", "uv", "docker", "make", "apt", "apt-get", "apk", "brew", "bundle", "gem", "kubectl", "wrangler", "terraform"]);
+const SUBCOMMAND_PROGRAMS = new Set([
+  "npm",
+  "pnpm",
+  "yarn",
+  "bun",
+  "npx",
+  "git",
+  "gh",
+  "cargo",
+  "go",
+  "pip",
+  "pip3",
+  "poetry",
+  "uv",
+  "docker",
+  "make",
+  "apt",
+  "apt-get",
+  "apk",
+  "brew",
+  "bundle",
+  "gem",
+  "kubectl",
+  "wrangler",
+  "terraform",
+]);
 /** `npm run <script>` / `yarn <script>` — the script name is the identity. */
 const RUN_SUBCOMMANDS = new Set(["run", "run-script", "exec"]);
 /** Install flags that only change verbosity/telemetry, not what is installed. */
-const QUIET_FLAGS = new Set(["--silent", "--quiet", "-q", "-s", "--no-audit", "--no-fund", "--no-progress", "--progress=false", "-y", "--yes", "--prefer-offline"]);
+const QUIET_FLAGS = new Set([
+  "--silent",
+  "--quiet",
+  "-q",
+  "-s",
+  "--no-audit",
+  "--no-fund",
+  "--no-progress",
+  "--progress=false",
+  "-y",
+  "--yes",
+  "--prefer-offline",
+]);
 const MAX_SEGMENTS = 4;
 
 /** Split a command summary (`$ …`, result tail already cut) into shell segments
@@ -173,7 +236,12 @@ const MAX_SEGMENTS = 4;
 function segments(summary: string): string[][] {
   let s = summary.replace(RESULT_TAIL, "").trim();
   if (s.startsWith("$ ")) s = s.slice(2);
-  s = s.replace(QUOTED, '""').replace(/[()]/g, " ").replace(URL_RE, "<url>").replace(SHA_RE, "<sha>").replace(NUMBER_RE, "<n>");
+  s = s
+    .replace(QUOTED, '""')
+    .replace(/[()]/g, " ")
+    .replace(URL_RE, "<url>")
+    .replace(SHA_RE, "<sha>")
+    .replace(NUMBER_RE, "<n>");
   return s
     .split(SEGMENT_SPLIT)
     .map((seg) =>
@@ -184,7 +252,8 @@ function segments(summary: string): string[][] {
     )
     .map((words) => {
       // Leading env assignments (`FOO=1 cmd`) and wrappers (`sudo cmd`).
-      while (words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]) || WRAPPER_PROGRAMS.has(words[0]))) words.shift();
+      while (words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]) || WRAPPER_PROGRAMS.has(words[0])))
+        words.shift();
       return words;
     })
     .filter((words) => words.length > 0);
@@ -310,7 +379,14 @@ export function clusterFriction(records: readonly FrictionRunRecord[], opts: Clu
   const ordered = [...records].sort((a, b) => a.finishedAt - b.finishedAt || a.runId.localeCompare(b.runId));
   const acc = new Map<string, Accumulator>();
 
-  const add = (key: string, kind: PatternKind, signature: string, rec: FrictionRunRecord, example: Omit<PatternExample, "runId" | "label" | "finishedAt">, durationMs: number) => {
+  const add = (
+    key: string,
+    kind: PatternKind,
+    signature: string,
+    rec: FrictionRunRecord,
+    example: Omit<PatternExample, "runId" | "label" | "finishedAt">,
+    durationMs: number,
+  ) => {
     let a = acc.get(key);
     if (!a) {
       a = { kind, signature, runIds: new Set(), occurrences: 0, durationMs: 0, severity: "low", examples: [] };
@@ -320,7 +396,12 @@ export function clusterFriction(records: readonly FrictionRunRecord[], opts: Clu
     a.occurrences++;
     a.durationMs += durationMs;
     a.severity = maxSeverity(a.severity, example.severity);
-    a.examples.push({ runId: rec.runId, ...(rec.label !== undefined ? { label: rec.label } : {}), finishedAt: rec.finishedAt, ...example });
+    a.examples.push({
+      runId: rec.runId,
+      ...(rec.label !== undefined ? { label: rec.label } : {}),
+      finishedAt: rec.finishedAt,
+      ...example,
+    });
   };
 
   for (const rec of ordered) {
@@ -331,7 +412,11 @@ export function clusterFriction(records: readonly FrictionRunRecord[], opts: Clu
         f.category,
         key.slice(key.indexOf(":") + 1),
         rec,
-        { summary: typeof f.summary === "string" ? f.summary : String(f.summary), severity: f.severity, ...(f.durationMs !== undefined ? { durationMs: f.durationMs } : {}) },
+        {
+          summary: typeof f.summary === "string" ? f.summary : String(f.summary),
+          severity: f.severity,
+          ...(f.durationMs !== undefined ? { durationMs: f.durationMs } : {}),
+        },
         f.durationMs ?? 0,
       );
     }
@@ -363,8 +448,19 @@ export function clusterFriction(records: readonly FrictionRunRecord[], opts: Clu
   const patterns: FrictionPattern[] = [];
   for (const [key, a] of acc) {
     if (a.runIds.size < minRuns) continue;
-    const examples = [...a.examples].sort((x, y) => y.finishedAt - x.finishedAt || y.runId.localeCompare(x.runId)).slice(0, MAX_EXAMPLES);
-    patterns.push({ key, kind: a.kind, signature: a.signature, runIds: [...a.runIds], occurrences: a.occurrences, durationMs: a.durationMs, severity: a.severity, examples });
+    const examples = [...a.examples]
+      .sort((x, y) => y.finishedAt - x.finishedAt || y.runId.localeCompare(x.runId))
+      .slice(0, MAX_EXAMPLES);
+    patterns.push({
+      key,
+      kind: a.kind,
+      signature: a.signature,
+      runIds: [...a.runIds],
+      occurrences: a.occurrences,
+      durationMs: a.durationMs,
+      severity: a.severity,
+      examples,
+    });
   }
   return patterns.sort(
     (x, y) =>
@@ -445,7 +541,8 @@ function proposalBody(p: FrictionPattern, runsAnalyzed: number): string {
   // examples, so this is set difference, not arithmetic on the counts).
   const shown = new Set(p.examples.map((e) => e.runId));
   const rest = p.runIds.filter((id) => !shown.has(id));
-  const more = rest.length > 0 ? `\n_…and ${rest.length} more run(s): ${rest.map((id) => `\`${id}\``).join(", ")}_` : "";
+  const more =
+    rest.length > 0 ? `\n_…and ${rest.length} more run(s): ${rest.map((id) => `\`${id}\``).join(", ")}_` : "";
   return [
     proposalMarker(p.key),
     "",
@@ -498,7 +595,7 @@ function suggestedFix(p: FrictionPattern): string {
       if (failing) {
         parts.push(
           lockfile
-            ? "2. The install FAILS: `--frozen-lockfile` refuses a lockfile that is out of date with `package.json`. Regenerate and commit the lockfile in the target repo, or document the correct install command in its AGENTS.md / the resident command table (`repo reconfigure <owner/name> install=\"…\"`)."
+            ? '2. The install FAILS: `--frozen-lockfile` refuses a lockfile that is out of date with `package.json`. Regenerate and commit the lockfile in the target repo, or document the correct install command in its AGENTS.md / the resident command table (`repo reconfigure <owner/name> install="…"`).'
             : "2. The install FAILS (see evidence) — fix the root cause in the target repo (prerequisites, registry access, the right package manager) and document the working command in its AGENTS.md / the resident command table so the agent stops rediscovering it.",
         );
       }
@@ -559,7 +656,10 @@ export interface DedupeResult {
 
 /** Split proposals by whether an open issue already carries their marker. The
  *  marker — not the title — is the identity: titles change with run counts. */
-export function dedupeProposals(proposals: readonly ImprovementProposal[], open: readonly ExistingIssue[]): DedupeResult {
+export function dedupeProposals(
+  proposals: readonly ImprovementProposal[],
+  open: readonly ExistingIssue[],
+): DedupeResult {
   const byKey = new Map<string, ExistingIssue>();
   for (const issue of open) {
     const key = findProposalKey(issue.body ?? "");

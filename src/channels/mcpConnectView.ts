@@ -49,13 +49,20 @@ export interface ConnectViewDeps {
 }
 
 /** Returns true when the request was for this view (handled), false to fall through. */
-export function createMcpConnectViewHandler(deps: ConnectViewDeps): (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity) => boolean {
+export function createMcpConnectViewHandler(
+  deps: ConnectViewDeps,
+): (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity) => boolean {
   return (req, res, identity) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (!isConnectPath(url.pathname)) return false;
     const svc = deps.registry();
     if (!svc) {
-      page(res, 503, "MCP registry not configured", "<p>The MCP server registry is not configured on this deployment.</p>");
+      page(
+        res,
+        503,
+        "MCP registry not configured",
+        "<p>The MCP server registry is not configured on this deployment.</p>",
+      );
       return true;
     }
     const method = (req.method ?? "GET").toUpperCase();
@@ -73,7 +80,13 @@ export function createMcpConnectViewHandler(deps: ConnectViewDeps): (req: Incomi
       svc
         .openTicket(route.nonce, identity)
         .then(({ decision, server }) => {
-          if (!decision.ok) return page(res, statusFor(decision.refusal.kind), "Connect link unavailable", `<p>${esc(refusalMessage(decision.refusal))}</p>`);
+          if (!decision.ok)
+            return page(
+              res,
+              statusFor(decision.refusal.kind),
+              "Connect link unavailable",
+              `<p>${esc(refusalMessage(decision.refusal))}</p>`,
+            );
           if (!server) return page(res, 404, "Server missing", "<p>The server this link was for no longer exists.</p>");
           return page(res, 200, `Connect ${server.name}`, entryForm(server, route.nonce));
         })
@@ -99,16 +112,33 @@ export function createMcpConnectViewHandler(deps: ConnectViewDeps): (req: Incomi
 }
 
 /** Bearer: the pasted token. */
-async function complete(svc: McpService, nonce: string, identity: AccessIdentity, token: string, res: ServerResponse): Promise<void> {
+async function complete(
+  svc: McpService,
+  nonce: string,
+  identity: AccessIdentity,
+  token: string,
+  res: ServerResponse,
+): Promise<void> {
   const { decision, verified, toolCount, warning, server } = await svc.completeTicket(nonce, identity, token);
   if (!decision.ok) {
     const message = refusalMessage(decision.refusal);
     // A bad token keeps the form up for a retry; a ticket refusal ends it.
-    if (decision.refusal.kind === "bad_token" && server) return page(res, 400, "Token not accepted", `<p class="err">${esc(message)}</p>${entryForm(server, nonce)}`);
-    return page(res, statusFor(decision.refusal.kind), "Connect link unavailable", `<p class="err">${esc(message)}</p>`);
+    if (decision.refusal.kind === "bad_token" && server)
+      return page(res, 400, "Token not accepted", `<p class="err">${esc(message)}</p>${entryForm(server, nonce)}`);
+    return page(
+      res,
+      statusFor(decision.refusal.kind),
+      "Connect link unavailable",
+      `<p class="err">${esc(message)}</p>`,
+    );
   }
   if (verified === false) {
-    return page(res, 400, "Token rejected by the server", `<p class="err">${esc(warning ?? "the server rejected the token")}</p><p>Nothing was stored. Check the token and try again.</p>${server ? entryForm(server, nonce) : ""}`);
+    return page(
+      res,
+      400,
+      "Token rejected by the server",
+      `<p class="err">${esc(warning ?? "the server rejected the token")}</p><p>Nothing was stored. Check the token and try again.</p>${server ? entryForm(server, nonce) : ""}`,
+    );
   }
   return connected(res, server, toolCount, warning);
 }
@@ -118,7 +148,13 @@ async function start(svc: McpService, nonce: string, identity: AccessIdentity, r
   const result = await svc.startOAuth(nonce, identity);
   if (!result.ok) {
     const message = refusalMessage(result.refusal);
-    if (result.refusal.kind === "oauth_failed" && result.server) return page(res, 502, "Sign-in could not start", `<p class="err">${esc(message)}</p><p>Nothing was stored.</p>${entryForm(result.server, nonce)}`);
+    if (result.refusal.kind === "oauth_failed" && result.server)
+      return page(
+        res,
+        502,
+        "Sign-in could not start",
+        `<p class="err">${esc(message)}</p><p>Nothing was stored.</p>${entryForm(result.server, nonce)}`,
+      );
     return page(res, statusFor(result.refusal.kind), "Connect link unavailable", `<p class="err">${esc(message)}</p>`);
   }
   // Not a 303: Chrome checks a redirect that follows a form post against
@@ -144,27 +180,58 @@ function callback(svc: McpService, params: URLSearchParams, identity: AccessIden
   };
   const state = short("state");
   if (!state || !nonceOfState(state)) {
-    page(res, 400, "Not a sign-in return", "<p>This page is where an MCP server's sign-in returns to; it carries nothing to finish.</p>");
+    page(
+      res,
+      400,
+      "Not a sign-in return",
+      "<p>This page is where an MCP server's sign-in returns to; it carries nothing to finish.</p>",
+    );
     return;
   }
   svc
-    .completeOAuth(identity, { state, code: short("code"), error: short("error"), errorDescription: short("error_description") })
+    .completeOAuth(identity, {
+      state,
+      code: short("code"),
+      error: short("error"),
+      errorDescription: short("error_description"),
+    })
     .then((result) => {
       if (!result.ok) {
         const refusal = result.refusal ?? { kind: "not_found" as const };
         const message = refusalMessage(refusal);
-        const retry = result.server && refusal.kind === "oauth_failed" ? `<p>Nothing was stored. Open the connect link again to retry.</p>` : "";
-        return page(res, refusal.kind === "oauth_failed" ? 502 : statusFor(refusal.kind), "Sign-in did not complete", `<p class="err">${esc(message)}</p>${retry}`);
+        const retry =
+          result.server && refusal.kind === "oauth_failed"
+            ? `<p>Nothing was stored. Open the connect link again to retry.</p>`
+            : "";
+        return page(
+          res,
+          refusal.kind === "oauth_failed" ? 502 : statusFor(refusal.kind),
+          "Sign-in did not complete",
+          `<p class="err">${esc(message)}</p>${retry}`,
+        );
       }
       return connected(res, result.server, result.toolCount, result.warning);
     })
     .catch((err) => failure(res, err));
 }
 
-function connected(res: ServerResponse, server: McpServerView | undefined, toolCount: number | undefined, warning: string | undefined): void {
-  const tools = typeof toolCount === "number" ? `<p>The server answered with <strong>${toolCount}</strong> tool${toolCount === 1 ? "" : "s"}.</p>` : "";
+function connected(
+  res: ServerResponse,
+  server: McpServerView | undefined,
+  toolCount: number | undefined,
+  warning: string | undefined,
+): void {
+  const tools =
+    typeof toolCount === "number"
+      ? `<p>The server answered with <strong>${toolCount}</strong> tool${toolCount === 1 ? "" : "s"}.</p>`
+      : "";
   const warn = warning ? `<p class="warn">${esc(warning)}</p>` : "";
-  page(res, 200, `Connected ${server?.name ?? ""}`, `<p>✅ <strong>${esc(server?.name ?? "server")}</strong> is connected. Your runs can use its tools now.</p>${tools}${warn}<p>You can close this tab.</p>`);
+  page(
+    res,
+    200,
+    `Connected ${server?.name ?? ""}`,
+    `<p>✅ <strong>${esc(server?.name ?? "server")}</strong> is connected. Your runs can use its tools now.</p>${tools}${warn}<p>You can close this tab.</p>`,
+  );
 }
 
 function methodNotAllowed(res: ServerResponse, allow: string): boolean {
@@ -195,7 +262,9 @@ function sameOrigin(req: IncomingMessage, publicOrigin: string | undefined): boo
   if (typeof origin !== "string" || !origin) return true; // same-origin form posts may omit it; Sec-Fetch-Site covered it above
   const expected = publicOrigin ?? `https://${String(req.headers.host ?? "")}`;
   try {
-    return new URL(origin).origin === new URL(expected).origin || new URL(origin).host === String(req.headers.host ?? "");
+    return (
+      new URL(origin).origin === new URL(expected).origin || new URL(origin).host === String(req.headers.host ?? "")
+    );
   } catch {
     return false;
   }
@@ -279,5 +348,8 @@ function failure(res: ServerResponse, err: unknown): void {
 }
 
 function esc(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
+  return s.replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string,
+  );
 }

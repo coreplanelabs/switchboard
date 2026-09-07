@@ -1,7 +1,22 @@
 import { z } from "zod";
-import { CommandError, commandDefiner, flag, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
+import {
+  CommandError,
+  commandDefiner,
+  flag,
+  type Caller,
+  type CommandDef,
+  type CommandRegistry,
+  type JsonObject,
+  type JsonValue,
+} from "../commandRegistry.js";
 import type { Operations, OpName } from "../operations.js";
-import { parseSlug, repoResourceId, validRef, type ResidentAdminClient, type ResidentAdminResponse } from "../residentAdmin.js";
+import {
+  parseSlug,
+  repoResourceId,
+  validRef,
+  type ResidentAdminClient,
+  type ResidentAdminResponse,
+} from "../residentAdmin.js";
 import { NO_OP_COMMAND, NPM_FALLBACK_COMMANDS, detectCommands, type DetectedCommands } from "../repoToolchain.js";
 import { formatDiskGauge } from "../../execution/residentDiskBudget.js";
 import type { RepoInspector } from "../../execution/githubRepoInspect.js";
@@ -72,7 +87,9 @@ export const repoSlug = z
   .refine((s) => parseSlug(s) !== undefined, "expected a GitHub owner/name slug")
   .transform((s) => parseSlug(s) as string);
 /** The resident's strict branch-ref pattern — a hostile ref never reaches any backend (KTD8). */
-export const gitRef = z.string().refine((s) => validRef(s) !== undefined, "expected a plausible git branch ref (e.g. main)");
+export const gitRef = z
+  .string()
+  .refine((s) => validRef(s) !== undefined, "expected a plausible git branch ref (e.g. main)");
 const command = z.string().min(1);
 
 const slugArg = { name: "slug", schema: repoSlug, describe: "GitHub owner/name of the repo" } as const;
@@ -98,12 +115,20 @@ async function call<T>(fn: () => Promise<T>): Promise<T> {
  *  409/429 → `conflict`, 400 → `invalid_input`, anything else → `unavailable`;
  *  the message carries the status and the resident's own `error` text. */
 function residentFailure(r: ResidentAdminResponse, extra: string[] = []): CommandError {
-  const code = r.status === 404 ? "not_found" : r.status === 409 || r.status === 429 ? "conflict" : r.status === 400 ? "invalid_input" : "unavailable";
+  const code =
+    r.status === 404
+      ? "not_found"
+      : r.status === 409 || r.status === 429
+        ? "conflict"
+        : r.status === 400
+          ? "invalid_input"
+          : "unavailable";
   return new CommandError(code, [`HTTP ${r.status}: ${String(r.data.error ?? "unknown error")}`, ...extra].join("\n"));
 }
 
 const n = (v: unknown): string => String(typeof v === "number" ? v : (v ?? "?"));
-const obj = (v: unknown): Record<string, unknown> => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+const obj = (v: unknown): Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 const str = (v: unknown): string => (typeof v === "string" ? v : String(v ?? "?"));
 
 // ---- repo list ------------------------------------------------------------------
@@ -111,18 +136,23 @@ const str = (v: unknown): string => (typeof v === "string" ? v : String(v ?? "?"
 /** The `repo list` reply, rendered from the resident Worker's `/residents` body. */
 export function renderResidentList(data: Record<string, unknown>): string {
   const residents = (data.residents as Array<Record<string, unknown>> | undefined) ?? [];
-  if (residents.length === 0) return `No repos onboarded (0/${n(data.cap)}). Onboard one with \`repo onboard <owner/name>\`.`;
+  if (residents.length === 0)
+    return `No repos onboarded (0/${n(data.cap)}). Onboard one with \`repo onboard <owner/name>\`.`;
   const lines = residents.map((rec) => {
     const live = obj(rec.live);
     const slug = String(rec.resource ?? "").replace(/^repo:/, "");
     const state = String(live.state ?? "unknown");
     const reason = String(live.reason ?? "");
     const sha = typeof live.sha === "string" && live.sha ? ` · sha \`${live.sha.slice(0, 8)}\`` : "";
-    const refreshed = typeof live.lastRefreshAt === "string" && live.lastRefreshAt ? ` · refreshed ${live.lastRefreshAt}` : "";
+    const refreshed =
+      typeof live.lastRefreshAt === "string" && live.lastRefreshAt ? ` · refreshed ${live.lastRefreshAt}` : "";
     // Item 55: the disk gauge from the resident's last sample (`live.disk`),
     // the same used/total (pct) reading as /residents and the watchdog line.
     const d = obj(live.disk);
-    const disk = typeof d.usedKiB === "number" && typeof d.totalKiB === "number" ? ` · disk ${formatDiskGauge({ usedKiB: d.usedKiB, totalKiB: d.totalKiB })}` : "";
+    const disk =
+      typeof d.usedKiB === "number" && typeof d.totalKiB === "number"
+        ? ` · disk ${formatDiskGauge({ usedKiB: d.usedKiB, totalKiB: d.totalKiB })}`
+        : "";
     return `• \`${slug}\` — *${state}*${reason ? ` (${reason})` : ""} · ref \`${String(rec.defaultRef ?? "?")}\`${sha}${refreshed}${disk}`;
   });
   const out = [`*Resident repos* (${n(data.count)}/${n(data.cap)}):`, ...lines];
@@ -146,7 +176,11 @@ export const repoList = defineCommand({
   render: (output) => renderResidentList(output as Record<string, unknown>),
   handler: async ({ deps }) => {
     const res = await call(async () => (await adminOf(deps)).residents());
-    if (res.status !== 200) throw new CommandError("unavailable", `repo list failed (HTTP ${res.status}): ${String(res.data.error ?? "unknown error")}`);
+    if (res.status !== 200)
+      throw new CommandError(
+        "unavailable",
+        `repo list failed (HTTP ${res.status}): ${String(res.data.error ?? "unknown error")}`,
+      );
     return res.data as JsonValue;
   },
 });
@@ -158,10 +192,22 @@ export const repoOnboard = defineCommand({
   args: [slugArg],
   options: z.object({
     ref: gitRef.optional().describe(`default branch to keep warm (default ${DEFAULT_REF})`),
-    test: command.optional().describe("the repo's test command (default: detected from the repo root — `<pm> test`, or a no-op without a test script)"),
-    build: command.optional().describe("the repo's build command (default: detected — `<pm> run build`, or a no-op without a build script)"),
-    install: command.optional().describe("the repo's install command (default: detected from the root lockfile / packageManager — pnpm, yarn, bun, or npm; none without a package.json)"),
-    evictColdest: flag.optional().describe("over the resident cap, offboard the coldest eligible warm resident instead of failing (#50)"),
+    test: command
+      .optional()
+      .describe(
+        "the repo's test command (default: detected from the repo root — `<pm> test`, or a no-op without a test script)",
+      ),
+    build: command
+      .optional()
+      .describe("the repo's build command (default: detected — `<pm> run build`, or a no-op without a build script)"),
+    install: command
+      .optional()
+      .describe(
+        "the repo's install command (default: detected from the root lockfile / packageManager — pnpm, yarn, bun, or npm; none without a package.json)",
+      ),
+    evictColdest: flag
+      .optional()
+      .describe("over the resident cap, offboard the coldest eligible warm resident instead of failing (#50)"),
   }),
   action: "repo:write",
   effect: "write",
@@ -217,13 +263,23 @@ export const repoOnboard = defineCommand({
       ...(options.build !== undefined ? { build: options.build } : {}),
       ...(options.install !== undefined ? { install: options.install } : {}),
     };
-    const r = await call(async () => (await adminOf(deps)).onboard({ resource: repoResourceId(args.slug), commands, defaultRef, ...(options.evictColdest ? { evictColdest: true } : {}) }));
+    const r = await call(async () =>
+      (await adminOf(deps)).onboard({
+        resource: repoResourceId(args.slug),
+        commands,
+        defaultRef,
+        ...(options.evictColdest ? { evictColdest: true } : {}),
+      }),
+    );
     if (r.status !== 202) {
       // Over the cap with --evict-coldest and nothing eligible: the resident
       // itemizes why each one was kept (#50) — relay it so the admin can
       // offboard by hand with the facts in front of them.
-      const rejected = r.status === 429 && Array.isArray(r.data.rejected) ? (r.data.rejected as Array<Record<string, unknown>>) : [];
-      const reasons = rejected.filter((x) => typeof x.resource === "string" && typeof x.why === "string").map((x) => `• \`${String(x.resource).replace(/^repo:/, "")}\` — ${String(x.why)}`);
+      const rejected =
+        r.status === 429 && Array.isArray(r.data.rejected) ? (r.data.rejected as Array<Record<string, unknown>>) : [];
+      const reasons = rejected
+        .filter((x) => typeof x.resource === "string" && typeof x.why === "string")
+        .map((x) => `• \`${String(x.resource).replace(/^repo:/, "")}\` — ${String(x.why)}`);
       throw residentFailure(r, reasons);
     }
     return {
@@ -282,15 +338,24 @@ export async function settleProvisioning(deps: RepoCommandDeps, slug: string): P
   for (let elapsed = 0; elapsed <= SETTLE_MAX_MS; elapsed += SETTLE_POLL_MS) {
     if (elapsed > 0) await sleep(SETTLE_POLL_MS);
     const api = await deps.repo.admin();
-    if ("unavailable" in api) return { ok: false, text: `⚠️ Cannot follow \`${slug}\`'s provisioning: ${api.unavailable}` };
+    if ("unavailable" in api)
+      return { ok: false, text: `⚠️ Cannot follow \`${slug}\`'s provisioning: ${api.unavailable}` };
     let r: ResidentAdminResponse;
     try {
       r = await api.status(resource);
     } catch (err) {
-      return { ok: false, text: `⚠️ Lost track of \`${slug}\`'s provisioning (${err instanceof Error ? err.message : String(err)}) — check \`repo list\`.` };
+      return {
+        ok: false,
+        text: `⚠️ Lost track of \`${slug}\`'s provisioning (${err instanceof Error ? err.message : String(err)}) — check \`repo list\`.`,
+      };
     }
-    if (r.status === 404) return { ok: false, text: `⚠️ \`${slug}\` is no longer onboarded — it was offboarded while provisioning.` };
-    if (r.status !== 200) return { ok: false, text: `⚠️ Lost track of \`${slug}\`'s provisioning (HTTP ${r.status}: ${str(r.data.error ?? "unknown error")}) — check \`repo list\`.` };
+    if (r.status === 404)
+      return { ok: false, text: `⚠️ \`${slug}\` is no longer onboarded — it was offboarded while provisioning.` };
+    if (r.status !== 200)
+      return {
+        ok: false,
+        text: `⚠️ Lost track of \`${slug}\`'s provisioning (HTTP ${r.status}: ${str(r.data.error ?? "unknown error")}) — check \`repo list\`.`,
+      };
     const state = str(r.data.state);
     if (state === "onboarding") continue;
     if (state === "warm") return { ok: true, text: `✅ \`${slug}\` is warm — provisioned and attach-ready.` };
@@ -298,9 +363,15 @@ export async function settleProvisioning(deps: RepoCommandDeps, slug: string): P
       const reason = str(r.data.reason ?? "no reason recorded");
       return { ok: false, text: `❌ \`${slug}\` failed to provision: ${reason}\n${hint(reason)}` };
     }
-    return { ok: true, text: `ℹ️ \`${slug}\` left \`onboarding\` and is \`${state}\`${r.data.reason ? ` (${str(r.data.reason)})` : ""}.` };
+    return {
+      ok: true,
+      text: `ℹ️ \`${slug}\` left \`onboarding\` and is \`${state}\`${r.data.reason ? ` (${str(r.data.reason)})` : ""}.`,
+    };
   }
-  return { ok: false, text: `⏳ \`${slug}\` is still onboarding after ${Math.round(SETTLE_MAX_MS / 60_000)} min — provisioning is slow or stuck; \`repo list\` shows the live state, and the resident watchdog marks a stuck onboard \`down\` at its deadline.` };
+  return {
+    ok: false,
+    text: `⏳ \`${slug}\` is still onboarding after ${Math.round(SETTLE_MAX_MS / 60_000)} min — provisioning is slow or stuck; \`repo list\` shows the live state, and the resident watchdog marks a stuck onboard \`down\` at its deadline.`,
+  };
 }
 
 // ---- repo offboard / rebuild -------------------------------------------------------
@@ -315,13 +386,17 @@ export const repoOffboard = defineCommand({
   options: dryRunOptions,
   action: "repo:write",
   effect: "write",
-  describe: "Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only).",
+  describe:
+    "Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only).",
   render: (output) => {
     const o = output as JsonObject;
     const slug = str(o.slug);
     if (o.dryRun === true) {
       const w = obj(o.wouldRemove);
-      const ids = Array.isArray(w.snapshotBackupIds) && w.snapshotBackupIds.length > 0 ? ` (ids ${(w.snapshotBackupIds as string[]).join(", ")})` : "";
+      const ids =
+        Array.isArray(w.snapshotBackupIds) && w.snapshotBackupIds.length > 0
+          ? ` (ids ${(w.snapshotBackupIds as string[]).join(", ")})`
+          : "";
       return [
         `🧪 *Dry run* — offboarding \`${slug}\` would remove:`,
         `• the registry record + ${n(w.schedules)} pending schedule(s)`,
@@ -406,7 +481,8 @@ export const repoReconfigure = defineCommand({
   }),
   action: "repo:write",
   effect: "write",
-  describe: "Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach).",
+  describe:
+    "Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach).",
   render: (output) => {
     const o = output as JsonObject;
     const changed = Object.entries(obj(o.changed)).map(([k, v]) => `${k} → \`${str(v)}\``);
@@ -414,7 +490,8 @@ export const repoReconfigure = defineCommand({
   },
   handler: async ({ args, options, deps }) => {
     const commands: Record<string, string> = {};
-    for (const key of ["test", "build", "install"] as const) if (options[key] !== undefined) commands[key] = options[key];
+    for (const key of ["test", "build", "install"] as const)
+      if (options[key] !== undefined) commands[key] = options[key];
     if (Object.keys(commands).length === 0 && options.ref === undefined) {
       throw new CommandError("invalid_input", "nothing to reconfigure: pass --ref and/or --test / --build / --install");
     }
@@ -427,7 +504,8 @@ export const repoReconfigure = defineCommand({
       if (list.status !== 200) throw residentFailure(list);
       const residents = (list.data.residents as Array<Record<string, unknown>> | undefined) ?? [];
       const record = residents.find((rec) => rec.resource === repoResourceId(args.slug));
-      if (!record) throw new CommandError("not_found", `\`${args.slug}\` is not onboarded — \`repo onboard ${args.slug}\` first.`);
+      if (!record)
+        throw new CommandError("not_found", `\`${args.slug}\` is not onboarded — \`repo onboard ${args.slug}\` first.`);
       body.commands = { ...obj(record.commands), ...commands };
     }
     if (options.ref !== undefined) body.defaultRef = options.ref;
@@ -439,7 +517,8 @@ export const repoReconfigure = defineCommand({
 
 // ---- repo test / repo build (deterministic ops, U6/KTD8) -----------------------------------
 
-export const NO_OPS_BACKEND_MESSAGE = "Deterministic ops need a backend: configure `execution.resident` (with its operator token) or local execution.";
+export const NO_OPS_BACKEND_MESSAGE =
+  "Deterministic ops need a backend: configure `execution.resident` (with its operator token) or local execution.";
 
 /** Failures usually speak from the END of the output — keep the tail. */
 function clipOpOutput(output: string): string {
@@ -457,7 +536,10 @@ function renderOp(output: JsonValue): string {
 function defineOp(op: Extract<OpName, "test" | "build">) {
   return defineCommand({
     id: `repo.${op}`,
-    args: [slugArg, { name: "ref", schema: gitRef.optional(), describe: "branch to run on (default: the resident's default ref)" }],
+    args: [
+      slugArg,
+      { name: "ref", schema: gitRef.optional(), describe: "branch to run on (default: the resident's default ref)" },
+    ],
     action: "repo:exec",
     // The op runs as the coding agent (the implicit target of a deterministic
     // op), so the table decides on `agent { coding }`: the right to run that
@@ -468,18 +550,36 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
     render: renderOp,
     handler: async ({ args, caller, deps }) => {
       // KD7: the same per-repo allowlist a coding run against this repo passes.
-      if (!(await deps.repo.canUseRepo(caller.id, args.slug))) throw new CommandError("unauthorized", `You're not on the allowlist for the \`${args.slug}\` repo environment.`);
+      if (!(await deps.repo.canUseRepo(caller.id, args.slug)))
+        throw new CommandError(
+          "unauthorized",
+          `You're not on the allowlist for the \`${args.slug}\` repo environment.`,
+        );
       const ops = await deps.repo.operations(caller);
       if (!ops) throw new CommandError("unavailable", NO_OPS_BACKEND_MESSAGE);
       const req = { repo: args.slug, ...(args.ref !== undefined ? { ref: args.ref } : {}) };
-      const result = await ops.run(op, req).catch((err: unknown) => ({ kind: "error" as const, message: err instanceof Error ? err.message : String(err) }));
+      const result = await ops
+        .run(op, req)
+        .catch((err: unknown) => ({
+          kind: "error" as const,
+          message: err instanceof Error ? err.message : String(err),
+        }));
       switch (result.kind) {
         case "result":
-          return { op, ...req, ok: result.ok, summary: result.summary, ...(result.output !== undefined ? { output: result.output } : {}) };
+          return {
+            op,
+            ...req,
+            ok: result.ok,
+            summary: result.summary,
+            ...(result.output !== undefined ? { output: result.output } : {}),
+          };
         case "refused":
           throw new CommandError("conflict", result.reason);
         case "not-onboarded":
-          throw new CommandError("not_found", `\`${args.slug}\` is not onboarded as a resident, so \`repo ${op}\` has nothing to run against — \`repo onboard ${args.slug}\` first, or ask the coding agent directly.`);
+          throw new CommandError(
+            "not_found",
+            `\`${args.slug}\` is not onboarded as a resident, so \`repo ${op}\` has nothing to run against — \`repo onboard ${args.slug}\` first, or ask the coding agent directly.`,
+          );
         case "error":
           throw new CommandError("unavailable", result.message);
       }
@@ -490,7 +590,15 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
 export const repoTest = defineOp("test");
 export const repoBuild = defineOp("build");
 
-export const repoCommands: readonly CommandDef<RepoCommandDeps>[] = [repoList, repoOnboard, repoOffboard, repoReconfigure, repoRebuild, repoTest, repoBuild] as unknown as CommandDef<RepoCommandDeps>[];
+export const repoCommands: readonly CommandDef<RepoCommandDeps>[] = [
+  repoList,
+  repoOnboard,
+  repoOffboard,
+  repoReconfigure,
+  repoRebuild,
+  repoTest,
+  repoBuild,
+] as unknown as CommandDef<RepoCommandDeps>[];
 
 export function registerRepoCommands<D extends RepoCommandDeps>(registry: CommandRegistry<D>): void {
   for (const cmd of repoCommands) registry.register(cmd as unknown as CommandDef<D>);

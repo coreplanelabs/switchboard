@@ -10,7 +10,13 @@ import { APP_NAME, catchUpWarnings, decide } from "./preflight.mjs";
 // draining instance or a rollout still in progress.
 
 const health = (inFlight, draining = false) => ({ ok: true, payload: { ok: true, inFlight, draining } });
-const apps = (state, name = APP_NAME) => ({ ok: true, payload: [{ name: "other-app", state: "active" }, { name, state }] });
+const apps = (state, name = APP_NAME) => ({
+  ok: true,
+  payload: [
+    { name: "other-app", state: "active" },
+    { name, state },
+  ],
+});
 
 describe("bot deploy preflight — decide()", () => {
   it("idle bot, settled container app → allow, not forced", () => {
@@ -81,13 +87,25 @@ describe("bot deploy preflight — decide()", () => {
 // surfaced as a WARNING at deploy time; never a refusal, the deploy may be the fix.
 describe("bot deploy preflight — catchUpWarnings()", () => {
   it("nothing to say when the catch-up is healthy or the payload predates the field", () => {
-    expect(catchUpWarnings({ ok: true, inFlight: 0, draining: false, catchUp: { lastRunAt: "x", channels: 3, missed: 0, skippedChannels: 0 } })).toEqual([]);
+    expect(
+      catchUpWarnings({
+        ok: true,
+        inFlight: 0,
+        draining: false,
+        catchUp: { lastRunAt: "x", channels: 3, missed: 0, skippedChannels: 0 },
+      }),
+    ).toEqual([]);
     expect(catchUpWarnings({ ok: true, inFlight: 0, draining: false })).toEqual([]);
     expect(catchUpWarnings("ok")).toEqual([]);
   });
 
   it("names a whole-scan error and the missing scopes", () => {
-    const w = catchUpWarnings({ ok: true, inFlight: 0, draining: false, catchUp: { error: "missing_scope", missingScopes: ["channels:read", "groups:read"] } });
+    const w = catchUpWarnings({
+      ok: true,
+      inFlight: 0,
+      draining: false,
+      catchUp: { error: "missing_scope", missingScopes: ["channels:read", "groups:read"] },
+    });
     expect(w).toHaveLength(2);
     expect(w[0]).toContain("missing_scope");
     expect(w[1]).toContain("channels:read, groups:read");
@@ -98,7 +116,10 @@ describe("bot deploy preflight — catchUpWarnings()", () => {
   });
 
   it("decide() carries the warnings in an allowed message without refusing", () => {
-    const d = decide({ health: { ok: true, payload: { ok: true, inFlight: 0, draining: false, catchUp: { error: "missing_scope" } } }, apps: apps("active") });
+    const d = decide({
+      health: { ok: true, payload: { ok: true, inFlight: 0, draining: false, catchUp: { error: "missing_scope" } } },
+      apps: apps("active"),
+    });
     expect(d.allow).toBe(true);
     expect(d.forced).toBe(false);
     expect(d.warnings).toHaveLength(1);
@@ -107,7 +128,13 @@ describe("bot deploy preflight — catchUpWarnings()", () => {
   });
 
   it("a refusal still lists the catch-up warnings", () => {
-    const d = decide({ health: { ok: true, payload: { ok: true, inFlight: 1, draining: false, catchUp: { missingScopes: ["groups:read"] } } }, apps: apps("active") });
+    const d = decide({
+      health: {
+        ok: true,
+        payload: { ok: true, inFlight: 1, draining: false, catchUp: { missingScopes: ["groups:read"] } },
+      },
+      apps: apps("active"),
+    });
     expect(d.allow).toBe(false);
     expect(d.message).toContain("groups:read");
   });

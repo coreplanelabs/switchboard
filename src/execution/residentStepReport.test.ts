@@ -47,9 +47,7 @@ describe("describeStepFailure", () => {
   });
 
   it("says so when a step failed with no output at all, instead of an empty tail", () => {
-    expect(describeStepFailure({ stdout: "", stderr: "", exitCode: 137, timedOut: false })).toBe(
-      "exit 137: no output",
-    );
+    expect(describeStepFailure({ stdout: "", stderr: "", exitCode: 137, timedOut: false })).toBe("exit 137: no output");
   });
 
   it("names a timeout, which an exit code alone cannot express", () => {

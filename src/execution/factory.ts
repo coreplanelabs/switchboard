@@ -116,10 +116,7 @@ export function resetResidentProbeCache(): void {
   probeOutage = undefined;
 }
 
-export async function makeExecutor(
-  opts: ExecutorFactoryOptions,
-  ctx: ExecutorContext,
-): Promise<ExecutorSelection> {
+export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorContext): Promise<ExecutorSelection> {
   // Agents declare the resources they need (KD2). No repo declared → nothing
   // to provision: no workspace dir, no sandbox created or reconnected, no
   // credential required. The general agent (toolset "none") lands here.
@@ -151,14 +148,26 @@ export async function makeExecutor(
       try {
         // Non-warm but serviceable: the note says so (KTD10) while the run
         // still gets the worktree it came for; openResident adds ref@sha.
-        const nonWarm = probe.state === "warm" ? undefined : `${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`;
+        const nonWarm =
+          probe.state === "warm" ? undefined : `${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`;
         // Read-only agents (the review toolset) get a read-only worktree —
         // decided from the agent's declared toolset, never from the prompt
         // (features/resident-repos.md item 50).
         const readonly = ctx.agent.toolset === "readonly" ? true : undefined;
         // The resolved PR head rides along so the resident fetches a mirror
         // whose ref tip lags it (item 51) instead of cloning a stale tip.
-        return await openResident({ baseUrl: resident.baseUrl, token, resource, threadKey: ctx.threadKey, refHint: ctx.ref, readonly, sha: ctx.headSha }, nonWarm);
+        return await openResident(
+          {
+            baseUrl: resident.baseUrl,
+            token,
+            resource,
+            threadKey: ctx.threadKey,
+            refHint: ctx.ref,
+            readonly,
+            sha: ctx.headSha,
+          },
+          nonWarm,
+        );
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
         note = `resident attach failed (${err instanceof Error ? err.message : String(err)}) — using fresh sandbox`;
@@ -219,7 +228,9 @@ async function openResident(
       binding = await executor.attach();
     } catch (again) {
       if (again instanceof ResidentNeedsRefError) {
-        throw new Error(`resident attach: ${opts.resource} refused its own default ref "${err.defaultRef}" (${again.message})`);
+        throw new Error(
+          `resident attach: ${opts.resource} refused its own default ref "${err.defaultRef}" (${again.message})`,
+        );
       }
       throw again;
     }
@@ -236,7 +247,9 @@ async function openResident(
     executor,
     resident: true,
     binding,
-    note: nonWarm ? `resident ${nonWarm} · ${where}${why} — attached to the last snapshot` : `resident · ${where}${why}`,
+    note: nonWarm
+      ? `resident ${nonWarm} · ${where}${why} — attached to the last snapshot`
+      : `resident · ${where}${why}`,
   };
 }
 
@@ -287,14 +300,19 @@ export function residentSlugsLister(
         signal: AbortSignal.timeout(cfg.probeTimeoutMs ?? 2000),
       });
     } catch (err) {
-      probeOutage = { until: Date.now() + PROBE_OUTAGE_WINDOW_MS, error: err instanceof Error ? err.message : String(err) };
+      probeOutage = {
+        until: Date.now() + PROBE_OUTAGE_WINDOW_MS,
+        error: err instanceof Error ? err.message : String(err),
+      };
       return undefined;
     }
     if (!res.ok) return undefined;
     const data = (await res.json().catch(() => ({}))) as { residents?: unknown };
     if (!Array.isArray(data.residents)) return undefined;
     return data.residents
-      .map((rec) => (typeof rec === "object" && rec !== null ? String((rec as { resource?: unknown }).resource ?? "") : ""))
+      .map((rec) =>
+        typeof rec === "object" && rec !== null ? String((rec as { resource?: unknown }).resource ?? "") : "",
+      )
       .filter((resource) => resource.startsWith("repo:"))
       .map((resource) => resource.slice("repo:".length).toLowerCase());
   };

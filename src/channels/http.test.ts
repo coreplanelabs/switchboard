@@ -33,8 +33,12 @@ function fakeDispatch(reply = "the answer") {
 }
 
 /** Fixture identities carry the parser's default scopes unless a test says otherwise. */
-const authConfig = (tokens: Record<string, Omit<IngressIdentity, "scopes"> & Partial<Pick<IngressIdentity, "scopes">>>): IngressConfig => ({
-  tokens: Object.fromEntries(Object.entries(tokens).map(([t, id]) => [t, { ...id, scopes: id.scopes ?? ["dispatch"] }])),
+const authConfig = (
+  tokens: Record<string, Omit<IngressIdentity, "scopes"> & Partial<Pick<IngressIdentity, "scopes">>>,
+): IngressConfig => ({
+  tokens: Object.fromEntries(
+    Object.entries(tokens).map(([t, id]) => [t, { ...id, scopes: id.scopes ?? ["dispatch"] }]),
+  ),
 });
 const bearer = (token: string): IncomingHttpHeaders => ({ authorization: `Bearer ${token}` });
 
@@ -229,7 +233,11 @@ describe("handleIngressRequest — the dispatch scope (fail-closed)", () => {
   it("a default-scoped token (no scopes in the env → ['dispatch']) still dispatches", async () => {
     const d = fakeDispatch("ok");
     const auth = parseIngressTokens({ SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ tok: { subject: "alice" } }) });
-    const res = await handleIngressRequest({ method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "hi" }) }, deps, { auth, dispatch: d.fn });
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "hi" }) },
+      deps,
+      { auth, dispatch: d.fn },
+    );
     expect(res.status).toBe(200);
     expect(d.calls).toHaveLength(1);
   });
@@ -353,7 +361,12 @@ describe("createIngressHandler (node:http wrapper)", () => {
     const destroy = vi.fn();
     const req = Object.assign(iter(), { method: "POST", headers: bearer("wrong-token"), destroy });
     let statusCode = 0;
-    const res = { writeHead: (c: number) => { statusCode = c; }, end: () => {} };
+    const res = {
+      writeHead: (c: number) => {
+        statusCode = c;
+      },
+      end: () => {},
+    };
     const handler = createIngressHandler(deps, { auth: authConfig({ tok: { subject: "alice" } }), dispatch: d.fn });
     handler(
       req as unknown as Parameters<ReturnType<typeof createIngressHandler>>[0],
@@ -367,7 +380,9 @@ describe("createIngressHandler (node:http wrapper)", () => {
 });
 
 describe("authorizeRequest (header-only gate)", () => {
-  const opts = (tokens: Parameters<typeof authConfig>[0] = { tok: { subject: "alice" } }) => ({ auth: authConfig(tokens) });
+  const opts = (tokens: Parameters<typeof authConfig>[0] = { tok: { subject: "alice" } }) => ({
+    auth: authConfig(tokens),
+  });
   it("405 on non-POST", () => {
     expect(authorizeRequest("GET", bearer("tok"), opts())).toMatchObject({ status: 405 });
   });
@@ -379,14 +394,19 @@ describe("authorizeRequest (header-only gate)", () => {
     expect(authorizeRequest("POST", bearer("nope"), opts())).toMatchObject({ status: 401 });
   });
   it("returns the identity for a valid token", () => {
-    expect(authorizeRequest("POST", bearer("tok"), opts())).toEqual({ identity: { subject: "alice", channel: undefined, scopes: ["dispatch"] } });
+    expect(authorizeRequest("POST", bearer("tok"), opts())).toEqual({
+      identity: { subject: "alice", channel: undefined, scopes: ["dispatch"] },
+    });
   });
 });
 
 describe("parseIngressTokens (env → config, fail-closed)", () => {
   it("parses a valid JSON token map", () => {
     const cfg = parseIngressTokens({
-      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ s3cr3t: { subject: "alice", channel: "ops" }, t2: { subject: "bob" } }),
+      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({
+        s3cr3t: { subject: "alice", channel: "ops" },
+        t2: { subject: "bob" },
+      }),
     });
     expect(cfg.tokens).toEqual({
       s3cr3t: { subject: "alice", channel: "ops", scopes: ["dispatch"] },
@@ -427,7 +447,9 @@ describe("parseIngressTokens (scopes)", () => {
 
   it("accepts an explicit scopes array of non-empty strings", () => {
     const cfg = parseIngressTokens({
-      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ t: { subject: "ci", channel: "ops", scopes: ["dispatch", "runs:read"] } }),
+      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({
+        t: { subject: "ci", channel: "ops", scopes: ["dispatch", "runs:read"] },
+      }),
     });
     expect(cfg.tokens.t).toEqual({ subject: "ci", channel: "ops", scopes: ["dispatch", "runs:read"] });
   });
@@ -447,7 +469,10 @@ describe("parseIngressTokens (scopes)", () => {
 });
 
 describe("run receipt in the response (#244)", () => {
-  const options = (dispatch: DispatchFn) => ({ auth: authConfig({ tok: { subject: "cron", channel: "cron" } }), dispatch });
+  const options = (dispatch: DispatchFn) => ({
+    auth: authConfig({ tok: { subject: "cron", channel: "cron" } }),
+    dispatch,
+  });
   const request = { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "friction propose" }) };
 
   it("carries `run: {id, status}` when the core finished a run for the request — never the view token", async () => {
@@ -466,7 +491,10 @@ describe("run receipt in the response (#244)", () => {
       io.runFinished?.({ id: "run-2", status: "failed" });
       await io.reply("🚫 restricted");
     };
-    expect((await handleIngressRequest(request, deps, options(dispatch))).body).toEqual({ reply: "🚫 restricted", run: { id: "run-2", status: "failed" } });
+    expect((await handleIngressRequest(request, deps, options(dispatch))).body).toEqual({
+      reply: "🚫 restricted",
+      run: { id: "run-2", status: "failed" },
+    });
   });
 
   it("omits `run` entirely when the request produced no run (a config reply)", async () => {

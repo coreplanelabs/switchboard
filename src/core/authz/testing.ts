@@ -6,7 +6,18 @@ import { browserReadActions, CHAT_OPEN_ACTIONS } from "./grants.js";
 import type { Actor, ActorKind, ChannelVisibility, Grants, Resource } from "./types.js";
 
 /** The command groups the fixture's operator and browser translate over (a subset of the catalogue's). */
-export const COMMAND_GROUPS = ["runs", "friction", "repo", "config", "memory", "mcp", "schedule", "deploy", "help", "env"] as const;
+export const COMMAND_GROUPS = [
+  "runs",
+  "friction",
+  "repo",
+  "config",
+  "memory",
+  "mcp",
+  "schedule",
+  "deploy",
+  "help",
+  "env",
+] as const;
 
 export function grants(over: Partial<Grants> = {}): Grants {
   return {
@@ -49,8 +60,14 @@ export function run(over: Partial<RunResource> & { channel?: keyof typeof CHANNE
   };
 }
 
-export function scope(kind: ScopeResource["kind"], key: string, originChannelVisibility?: ChannelVisibility): ScopeResource {
-  return originChannelVisibility ? { type: "memory-scope", kind, key, originChannelVisibility } : { type: "memory-scope", kind, key };
+export function scope(
+  kind: ScopeResource["kind"],
+  key: string,
+  originChannelVisibility?: ChannelVisibility,
+): ScopeResource {
+  return originChannelVisibility
+    ? { type: "memory-scope", kind, key, originChannelVisibility }
+    : { type: "memory-scope", kind, key };
 }
 
 /** 6 channels × 5 users × 2 repos = 60 runs, deterministic. */
@@ -69,7 +86,8 @@ export function runFixture(): RunResource[] {
 /** Every memory scope the fixture can name, org in each origin visibility. */
 export function scopeFixture(): ScopeResource[] {
   const scopes: ScopeResource[] = [];
-  for (const visibility of ["public", "private", "dm", "machine", "unknown"] as const) scopes.push(scope("org", "org:coreplanelabs", visibility));
+  for (const visibility of ["public", "private", "dm", "machine", "unknown"] as const)
+    scopes.push(scope("org", "org:coreplanelabs", visibility));
   scopes.push(scope("org", "org:coreplanelabs"));
   for (const userId of USERS) scopes.push(scope("user", `user:${userId}`));
   for (const channel of Object.values(CHANNELS)) scopes.push(scope("channel", `channel:${channel.id}`));
@@ -111,17 +129,35 @@ export const ACTORS = {
   /** An unlisted Access browser session: every group's read, nothing else. */
   browser: actor("user", "access:viewer", { actions: browserReadActions(COMMAND_GROUPS) }),
   /** An Access operator (`permissions.operators`): every read + write, fleet-wide, never exec. */
-  operator: actor("user", "access:op", { actions: new Set(COMMAND_GROUPS.flatMap((g) => [`${g}:read`, `${g}:write`])), channels: "all" }),
+  operator: actor("user", "access:op", {
+    actions: new Set(COMMAND_GROUPS.flatMap((g) => [`${g}:read`, `${g}:write`])),
+    channels: "all",
+  }),
   /** A default ingress token: the `dispatch` scope alone (no registry command). */
   dispatchOnly: actor("service", "mcp:agent", { actions: new Set(["dispatch"]), channels: "all" }),
   /** A token an admin minted with `mcp:write` (manages MCP servers in any tier). */
   mcpWriter: actor("service", "mcp:tools", { actions: new Set(["mcp:write"]), channels: "all" }),
   /** Ingress token pinned to its machine channel (the `channel` config key). */
-  token: actor("service", "http:ops", { actions: new Set(["runs:read", "runs:write"]), channels: new Set([CHANNELS.http.id]) }),
+  token: actor("service", "http:ops", {
+    actions: new Set(["runs:read", "runs:write"]),
+    channels: new Set([CHANNELS.http.id]),
+  }),
   /** The self-improvement cron: fleet-wide reads (the #395 fix). */
-  schedule: actor("schedule", "schedule:self-improvement", { actions: new Set(["runs:read", "friction:write"]), channels: "all" }),
+  schedule: actor("schedule", "schedule:self-improvement", {
+    actions: new Set(["runs:read", "friction:write"]),
+    channels: "all",
+  }),
   /** An agent holding everything, acting for the non-member (R2: never exceeds the principal). */
-  agentForNonMember: actor("agent", "agent:coding", { actions: "all", channels: "all", repos: "all" }, { onBehalfOf: nonMember }),
+  agentForNonMember: actor(
+    "agent",
+    "agent:coding",
+    { actions: "all", channels: "all", repos: "all" },
+    { onBehalfOf: nonMember },
+  ),
   /** An actor whose kind is outside the vocabulary. */
-  bogus: { kind: "bogus" as ActorKind, id: "bogus:1", grants: grants({ actions: "all", channels: "all", repos: "all" }) } as Actor,
+  bogus: {
+    kind: "bogus" as ActorKind,
+    id: "bogus:1",
+    grants: grants({ actions: "all", channels: "all", repos: "all" }),
+  } as Actor,
 } as const;

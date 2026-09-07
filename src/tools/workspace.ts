@@ -1,7 +1,12 @@
 import { z } from "zod";
 import type { ToolDef, ToolResultContent } from "../providers/types.js";
 import { parsePrDescription, type PrDescription } from "../core/prDescription.js";
-import { parseDispositionsInput, parseVerdictInput, type FindingDisposition, type ReviewVerdict } from "../core/reviewVerdict.js";
+import {
+  parseDispositionsInput,
+  parseVerdictInput,
+  type FindingDisposition,
+  type ReviewVerdict,
+} from "../core/reviewVerdict.js";
 import { clampBashTimeout, type ExecOptions, type Executor } from "../execution/executor.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { distillDiff } from "../core/diffDigest.js";
@@ -116,7 +121,10 @@ export const bashTool: RunnableTool = {
         ? { timeoutMs: clampBashTimeout(requested) }
         : {}),
     };
-    return ctx.executor.exec(String(input.command ?? ""), (opts.signal !== undefined || opts.timeoutMs !== undefined) ? opts : undefined);
+    return ctx.executor.exec(
+      String(input.command ?? ""),
+      opts.signal !== undefined || opts.timeoutMs !== undefined ? opts : undefined,
+    );
   },
 };
 
@@ -138,8 +146,7 @@ export const readFileTool: RunnableTool = {
 
 export const writeFileTool: RunnableTool = {
   name: "write_file",
-  description:
-    "Write a file in the workspace (creates parent directories). Path is relative to the workspace root.",
+  description: "Write a file in the workspace (creates parent directories). Path is relative to the workspace root.",
   inputSchema: {
     type: "object",
     properties: {
@@ -221,18 +228,31 @@ export const submitVerdictTool: RunnableTool = {
     properties: {
       verdict: { type: "string", enum: ["approve", "request_changes"], description: "approve | request_changes" },
       summary: { type: "string", description: "One-line rationale shown right after the verdict token" },
-      head: { type: "string", description: "Output of `git rev-parse HEAD` in the checkout you reviewed (the commit the review is about)" },
+      head: {
+        type: "string",
+        description: "Output of `git rev-parse HEAD` in the checkout you reviewed (the commit the review is about)",
+      },
       findings: {
         type: "array",
         description: "Every issue you report, one entry each, in the order reported — rendered under the verdict line",
         items: {
           type: "object",
           properties: {
-            id: { type: "string", description: 'Stable id assigned in order: "F1", "F2", … — dispositions reference it' },
-            severity: { type: "string", enum: ["blocking", "major", "minor", "nit"], description: "blocking | major | minor | nit" },
+            id: {
+              type: "string",
+              description: 'Stable id assigned in order: "F1", "F2", … — dispositions reference it',
+            },
+            severity: {
+              type: "string",
+              enum: ["blocking", "major", "minor", "nit"],
+              description: "blocking | major | minor | nit",
+            },
             file: { type: "string", description: "Repo-relative file the finding points at" },
             line: { type: "integer", description: "1-based line number, when the finding points at one" },
-            title: { type: "string", description: "One line naming the issue (the full explanation goes in your review text)" },
+            title: {
+              type: "string",
+              description: "One line naming the issue (the full explanation goes in your review text)",
+            },
           },
           required: ["id", "severity", "file", "title"],
         },
@@ -247,7 +267,9 @@ export const submitVerdictTool: RunnableTool = {
     const notes: string[] = [];
     if (verdict.findings) notes.push(`${verdict.findings.length} finding${verdict.findings.length === 1 ? "" : "s"}`);
     if (verdict.droppedFindings?.length) notes.push(`dropped: ${verdict.droppedFindings.join("; ")}`);
-    return notes.length ? `verdict recorded: ${verdict.verdict} (${notes.join("; ")})` : `verdict recorded: ${verdict.verdict}`;
+    return notes.length
+      ? `verdict recorded: ${verdict.verdict} (${notes.join("; ")})`
+      : `verdict recorded: ${verdict.verdict}`;
   },
 };
 
@@ -300,7 +322,8 @@ export const submitDispositionsTool: RunnableTool = {
     // No sink means no ship fix round is listening (features/agent-ship.md
     // item 6): a "recorded" ack here would be a false success the model
     // relays to the user — say the truth instead.
-    if (!ctx.onDispositions) return "no ship fix round is active here — dispositions were not recorded (they apply only when addressing a ship review's findings)";
+    if (!ctx.onDispositions)
+      return "no ship fix round is active here — dispositions were not recorded (they apply only when addressing a ship review's findings)";
     ctx.onDispositions(parsed.dispositions);
     const drops = parsed.dropped.length ? ` (dropped: ${parsed.dropped.join("; ")})` : "";
     return `dispositions recorded: ${parsed.dispositions.length}${drops}; a later call replaces this one`;
@@ -327,8 +350,14 @@ export const submitPrDescriptionTool: RunnableTool = {
     type: "object",
     properties: {
       title: { type: "string", description: "The PR title — one line naming the change" },
-      tldr: { type: "string", description: "Two sentences for a naive reader with zero context: what and why it matters" },
-      whatWhy: { type: "string", description: "The change and its motivation, with the triggering issue/request hyperlinked" },
+      tldr: {
+        type: "string",
+        description: "Two sentences for a naive reader with zero context: what and why it matters",
+      },
+      whatWhy: {
+        type: "string",
+        description: "The change and its motivation, with the triggering issue/request hyperlinked",
+      },
       tour: {
         type: "array",
         description: "Reader-first walkthrough steps in reading order (load the pr-tour skill first)",
@@ -354,7 +383,8 @@ export const submitPrDescriptionTool: RunnableTool = {
       },
       remaining: {
         type: "array",
-        description: "Every touched file the Tour steps did not cover, one note each ([] when the Tour covers everything)",
+        description:
+          "Every touched file the Tour steps did not cover, one note each ([] when the Tour covers everything)",
         items: {
           type: "object",
           properties: { path: { type: "string" }, note: { type: "string" } },
@@ -444,8 +474,31 @@ export const updateStatusTool: RunnableTool = {
 // `assistant` (general) and `full` (coding); the read-only review agent and
 // the research agent never mutate GitHub.
 export const TOOLSETS: Record<string, RunnableTool[]> = {
-  full: [bashTool, readFileTool, writeFileTool, updateStatusTool, submitPrDescriptionTool, submitDispositionsTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool, ...GITHUB_READ_TOOLS, ...GITHUB_ISSUE_WRITE_TOOLS],
-  readonly: [bashTool, readFileTool, updateStatusTool, submitVerdictTool, webFetchTool, diffDigestTool, listSkillsTool, useSkillTool, ...GITHUB_READ_TOOLS],
+  full: [
+    bashTool,
+    readFileTool,
+    writeFileTool,
+    updateStatusTool,
+    submitPrDescriptionTool,
+    submitDispositionsTool,
+    webFetchTool,
+    diffDigestTool,
+    listSkillsTool,
+    useSkillTool,
+    ...GITHUB_READ_TOOLS,
+    ...GITHUB_ISSUE_WRITE_TOOLS,
+  ],
+  readonly: [
+    bashTool,
+    readFileTool,
+    updateStatusTool,
+    submitVerdictTool,
+    webFetchTool,
+    diffDigestTool,
+    listSkillsTool,
+    useSkillTool,
+    ...GITHUB_READ_TOOLS,
+  ],
   web: [webFetchTool, webSearchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
   /** The general agent: no workspace, no shell — GitHub reads + issue writes
    *  and URL reading, so a plain mention can answer from the repos and act on

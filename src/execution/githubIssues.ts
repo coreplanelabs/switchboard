@@ -85,7 +85,10 @@ export class GithubIssueTracker implements IssueTracker {
       );
       if (collect(await res.json()) < PER_PAGE) break;
     }
-    const newest = await this.request("GET", `/repos/${repo}/issues?state=open&sort=created&direction=desc&per_page=${NEWEST_UNFILTERED}`);
+    const newest = await this.request(
+      "GET",
+      `/repos/${repo}/issues?state=open&sort=created&direction=desc&per_page=${NEWEST_UNFILTERED}`,
+    );
     collect(await newest.json());
     return [...seen.values()];
   }
@@ -107,14 +110,24 @@ export class GithubIssueTracker implements IssueTracker {
     if (this.knownLabels.has(key)) return;
     const probe = await this.request("GET", `/repos/${repo}/labels/${encodeURIComponent(label)}`, undefined, [404]);
     if (probe.status === 404) {
-      await this.request("POST", `/repos/${repo}/labels`, { name: label, color: LABEL_COLOR, description: LABEL_DESCRIPTION }, [422]);
+      await this.request(
+        "POST",
+        `/repos/${repo}/labels`,
+        { name: label, color: LABEL_COLOR, description: LABEL_DESCRIPTION },
+        [422],
+      );
     }
     this.knownLabels.add(key);
   }
 
   /** One REST call. Non-2xx (other than `tolerate`d statuses) throws with the
    *  status and the start of GitHub's message. */
-  private async request(method: "GET" | "POST", path: string, body?: unknown, tolerate: number[] = []): Promise<Response> {
+  private async request(
+    method: "GET" | "POST",
+    path: string,
+    body?: unknown,
+    tolerate: number[] = [],
+  ): Promise<Response> {
     const token = await this.token();
     if (!token) throw new Error("no GitHub credential available to file issues (configure the GitHub App or GH_TOKEN)");
     const res = await this.fetchImpl(`https://api.github.com${path}`, {

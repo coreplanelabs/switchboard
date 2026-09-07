@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { TOOL_OUTPUT_CAP, type RunEvent, parseExitPrefix, prepareToolOutput, prepareToolResult, redactAndCap, redactSecrets, serializedOnce, summarizeToolResult } from "./runEvents.js";
+import {
+  TOOL_OUTPUT_CAP,
+  type RunEvent,
+  parseExitPrefix,
+  prepareToolOutput,
+  prepareToolResult,
+  redactAndCap,
+  redactSecrets,
+  serializedOnce,
+  summarizeToolResult,
+} from "./runEvents.js";
 
 // Feature: features/run-visibility.md — the run-event stream and its redaction.
 
@@ -110,7 +120,9 @@ describe("summarizeToolResult", () => {
   });
 
   it("strips ANSI color/style escapes so vitest-style output reads as plain text", () => {
-    const s = summarizeToolResult("\x1b[32m✓\x1b[39m src/tools/skills.test.ts \x1b[2m(\x1b[22m\x1b[2m9 tests\x1b[22m\x1b[2m)\x1b[22m \x1b[32m 11\x1b[2mms\x1b[22m\x1b[39m\nline2");
+    const s = summarizeToolResult(
+      "\x1b[32m✓\x1b[39m src/tools/skills.test.ts \x1b[2m(\x1b[22m\x1b[2m9 tests\x1b[22m\x1b[2m)\x1b[22m \x1b[32m 11\x1b[2mms\x1b[22m\x1b[39m\nline2",
+    );
     expect(s).toContain("✓ src/tools/skills.test.ts (9 tests)  11ms");
     expect(s).not.toMatch(/\x1b|\[\d+m/);
   });
@@ -186,7 +198,10 @@ describe("prepareToolOutput", () => {
 
 describe("prepareToolResult", () => {
   it("equals summarizeToolResult + prepareToolOutput, from one redaction pass", () => {
-    const raw = "\x1b[32mok\x1b[0m token=abcd1234efgh\n" + "x".repeat(TOOL_OUTPUT_CAP + 1000) + "\nAuthorization: Bearer abcdefghijklmnop";
+    const raw =
+      "\x1b[32mok\x1b[0m token=abcd1234efgh\n" +
+      "x".repeat(TOOL_OUTPUT_CAP + 1000) +
+      "\nAuthorization: Bearer abcdefghijklmnop";
     expect(prepareToolResult(raw)).toEqual({ summary: summarizeToolResult(raw), output: prepareToolOutput(raw) });
     expect(prepareToolResult(raw).summary).toContain("«redacted»");
     expect(prepareToolResult(raw).output).not.toContain("abcd1234efgh");

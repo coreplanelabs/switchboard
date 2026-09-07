@@ -52,7 +52,10 @@ export interface RequestScopeKeys {
   channel?: string;
 }
 
-export function requestScopeKeys(userId: string | undefined, ctx: Pick<ScopeContext, "repo" | "channelId"> = {}): RequestScopeKeys {
+export function requestScopeKeys(
+  userId: string | undefined,
+  ctx: Pick<ScopeContext, "repo" | "channelId"> = {},
+): RequestScopeKeys {
   const keys: RequestScopeKeys = { org: deriveScopeKey("org") };
   if (userId) keys.user = deriveScopeKey("user", { userId });
   if (ctx.repo) keys.repo = deriveScopeKey("repo", { repo: ctx.repo });

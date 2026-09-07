@@ -35,16 +35,27 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.general.system).toContain("agent:coding");
     expect(AGENTS.general.system).toContain("agent:review");
     expect(AGENTS.general.system).toContain("agent:research");
-    for (const tool of ["github_repos", "github_file", "github_issue_create", "github_issue_update", "github_issue_delete", "web_fetch"]) expect(AGENTS.general.system).toContain(tool);
+    for (const tool of [
+      "github_repos",
+      "github_file",
+      "github_issue_create",
+      "github_issue_update",
+      "github_issue_delete",
+      "web_fetch",
+    ])
+      expect(AGENTS.general.system).toContain(tool);
     expect(AGENTS.general.system).not.toMatch(/NO tools/i);
-    expect(AGENTS.general.system).toMatch(/cannot run commands, clone repositories, edit code, or review pull requests/);
+    expect(AGENTS.general.system).toMatch(
+      /cannot run commands, clone repositories, edit code, or review pull requests/,
+    );
     expect(AGENTS.general.system).toMatch(/never claim an action you did not perform/);
   });
 
   it("research's prompt names the GitHub read tools and forbids concluding a private repo is inaccessible from a public 404", () => {
     // Live failure 2026-09-01: research reported "repo is private, inaccessible"
     // for our own repo after a public-web 404, with the App credential unused.
-    for (const tool of ["github_repos", "github_tree", "github_file", "github_search_code", "github_issue_list"]) expect(AGENTS.research.system).toContain(tool);
+    for (const tool of ["github_repos", "github_tree", "github_file", "github_search_code", "github_issue_list"])
+      expect(AGENTS.research.system).toContain(tool);
     expect(AGENTS.research.system).toMatch(/never conclude a repo is inaccessible from a public-web 404/);
     expect(AGENTS.research.system).not.toContain("github_issue_create");
   });
@@ -229,8 +240,24 @@ describe("review prompts: structured findings through submit_verdict (agent-ship
 // the submitted object's fields — sections map 1:1 — plus the rules that keep
 // it honest; nothing in it tells the agent to write body markdown anymore.
 describe("coding prompts: the PR-description content contract (submitted object)", () => {
-  const SECTIONS = ["**TL;DR**", "**What & why**", "**Tour**", "**Decisions**", "**Risks & implications**", "**Validation**"];
-  const FIELDS = ["**title**", "`tldr`", "`whatWhy`", "`tour`", "`remaining`", "`decisions`", "`risks`", "`validation`"];
+  const SECTIONS = [
+    "**TL;DR**",
+    "**What & why**",
+    "**Tour**",
+    "**Decisions**",
+    "**Risks & implications**",
+    "**Validation**",
+  ];
+  const FIELDS = [
+    "**title**",
+    "`tldr`",
+    "`whatWhy`",
+    "`tour`",
+    "`remaining`",
+    "`decisions`",
+    "`risks`",
+    "`validation`",
+  ];
 
   it("both coding prompts map every rendered section to its object field", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {

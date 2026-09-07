@@ -106,7 +106,11 @@ export interface CommandContext<A extends readonly ArgDef[], O extends OptionsSc
   deps: D;
 }
 
-export interface CommandDef<D, A extends readonly ArgDef[] = readonly ArgDef[], O extends OptionsSchema = OptionsSchema> {
+export interface CommandDef<
+  D,
+  A extends readonly ArgDef[] = readonly ArgDef[],
+  O extends OptionsSchema = OptionsSchema,
+> {
   /** `<group>.<verb>`; every surface name derives from it (`commandSurface.ts`). */
   id: string;
   /** Positional, ordered; absent = none. */
@@ -186,17 +190,24 @@ export const flag = z.union([z.boolean(), z.enum(["true", "false"]).transform((v
  * TypeScript cannot infer `A`/`O` once `D` is given explicitly, so a command
  * module fixes its deps once with `commandDefiner<D>()`.
  */
-export function defineCommand<D, const A extends readonly ArgDef[] = readonly [], O extends OptionsSchema = NoOptions>(def: CommandDef<D, A, O>): CommandDef<D, A, O> {
+export function defineCommand<D, const A extends readonly ArgDef[] = readonly [], O extends OptionsSchema = NoOptions>(
+  def: CommandDef<D, A, O>,
+): CommandDef<D, A, O> {
   if (!COMMAND_ID.test(def.id)) throw new Error(`command id must be <group>.<verb> (lowercase): ${def.id}`);
   for (const retired of RETIRED_FIELDS) {
-    if (retired in def) throw new Error(`${def.id}: \`${retired}\` is gone — declare \`action\` and let the policy table decide (features/authorization.md)`);
+    if (retired in def)
+      throw new Error(
+        `${def.id}: \`${retired}\` is gone — declare \`action\` and let the policy table decide (features/authorization.md)`,
+      );
   }
-  if (typeof def.action !== "string" || !COMMAND_ACTION.test(def.action)) throw new Error(`${def.id}: action must be <group>:read|write|exec (lowercase), got ${String(def.action)}`);
+  if (typeof def.action !== "string" || !COMMAND_ACTION.test(def.action))
+    throw new Error(`${def.id}: action must be <group>:read|write|exec (lowercase), got ${String(def.action)}`);
   const args = def.args ?? [];
   let optionalSeen = false;
   args.forEach((arg, i) => {
     if (!CAMEL_KEY.test(arg.name)) throw new Error(`${def.id}: argument names are camelCase (got ${arg.name})`);
-    if (arg.rest && i !== args.length - 1) throw new Error(`${def.id}: only the last argument may be free text (rest), got ${arg.name}`);
+    if (arg.rest && i !== args.length - 1)
+      throw new Error(`${def.id}: only the last argument may be free text (rest), got ${arg.name}`);
     const optional = acceptsUndefined(arg.schema);
     if (optionalSeen && !optional) throw new Error(`${def.id}: required argument ${arg.name} follows an optional one`);
     optionalSeen ||= optional;
@@ -209,7 +220,12 @@ export function defineCommand<D, const A extends readonly ArgDef[] = readonly []
 }
 
 /** `defineCommand` with the deps type fixed, so args/options still infer. */
-export function commandDefiner<D>(): <const A extends readonly ArgDef[] = readonly [], O extends OptionsSchema = NoOptions>(def: CommandDef<D, A, O>) => CommandDef<D, A, O> {
+export function commandDefiner<D>(): <
+  const A extends readonly ArgDef[] = readonly [],
+  O extends OptionsSchema = NoOptions,
+>(
+  def: CommandDef<D, A, O>,
+) => CommandDef<D, A, O> {
   return (def) => defineCommand(def);
 }
 
@@ -256,7 +272,9 @@ export const ERROR_STATUS: Readonly<Record<InvokeErrorCode, number>> = {
  *  is the command's own, meant for the caller: `You're not on the allowlist for
  *  the \`acme/api\` repo environment.`). Chat renders a registry refusal with
  *  the shared "is restricted" line and a handler refusal with its message. */
-export type InvokeResult = { ok: true; value: JsonValue } | { ok: false; error: InvokeErrorCode; status: number; message: string; decidedBy: "registry" | "handler" };
+export type InvokeResult =
+  | { ok: true; value: JsonValue }
+  | { ok: false; error: InvokeErrorCode; status: number; message: string; decidedBy: "registry" | "handler" };
 
 /** The one structured line per invocation — identity and outcome, never the payload. */
 export interface AuditEntry {
@@ -278,7 +296,12 @@ export interface CommandRegistryOptions {
   logError?: (commandId: string, err: unknown) => void;
 }
 
-const SURFACE_FOR_KIND: Readonly<Record<Caller["kind"], SurfaceName>> = { access: "http", mcp: "mcp", cli: "cli", chat: "chat" };
+const SURFACE_FOR_KIND: Readonly<Record<Caller["kind"], SurfaceName>> = {
+  access: "http",
+  mcp: "mcp",
+  cli: "cli",
+  chat: "chat",
+};
 
 export class CommandRegistry<D> {
   private readonly commands = new Map<string, CommandDef<D>>();
@@ -324,22 +347,41 @@ export class CommandRegistry<D> {
     // A command that is not exposed on the caller's surface does not exist there.
     if (!cmd || !CommandRegistry.exposedTo(cmd, caller.kind)) {
       // Unknown ids are audited too: a probe is worth a line.
-      this.audit({ commandId: id, callerKind: caller.kind, callerId: caller.id, effect: cmd?.effect ?? "read", outcome: "not_found" });
+      this.audit({
+        commandId: id,
+        callerKind: caller.kind,
+        callerId: caller.id,
+        effect: cmd?.effect ?? "read",
+        outcome: "not_found",
+      });
       return fail("not_found", `unknown command: ${id}`);
     }
     const done = (res: InvokeResult, reason?: string): InvokeResult => {
-      this.audit({ commandId: cmd.id, callerKind: caller.kind, callerId: caller.id, effect: cmd.effect, outcome: res.ok ? "ok" : res.error, ...(reason === undefined ? {} : { reason }) });
+      this.audit({
+        commandId: cmd.id,
+        callerKind: caller.kind,
+        callerId: caller.id,
+        effect: cmd.effect,
+        outcome: res.ok ? "ok" : res.error,
+        ...(reason === undefined ? {} : { reason }),
+      });
       return res;
     };
 
     const decision = authorize(caller.actor, cmd.action, resourceOf(cmd, input, caller));
-    if (!decision.allow) return done(fail("unauthorized", `${caller.id} is not allowed to run ${cmd.id}`), decision.reason);
+    if (!decision.allow)
+      return done(fail("unauthorized", `${caller.id} is not allowed to run ${cmd.id}`), decision.reason);
 
     const parsed = parseInput(cmd, input);
     if (!parsed.ok) return done(fail("invalid_input", parsed.message));
 
     try {
-      const value = await cmd.handler({ args: parsed.args as ArgValues<readonly ArgDef[]>, options: parsed.options, caller, deps });
+      const value = await cmd.handler({
+        args: parsed.args as ArgValues<readonly ArgDef[]>,
+        options: parsed.options,
+        caller,
+        deps,
+      });
       return done({ ok: true, value });
     } catch (err) {
       if (err instanceof CommandError) return done(fail(err.code, err.message, "handler"));
@@ -400,16 +442,28 @@ function fail(error: InvokeErrorCode, message: string, decidedBy: "registry" | "
 /** The RAW input as a resolver sees it: a malformed half is empty, never a throw. */
 export function rawInput(input: CommandInput): RawInput {
   const args = typeof input === "object" && input !== null && Array.isArray(input.args) ? input.args : [];
-  const options = typeof input === "object" && input !== null && typeof input.options === "object" && input.options !== null && !Array.isArray(input.options) ? input.options : {};
+  const options =
+    typeof input === "object" &&
+    input !== null &&
+    typeof input.options === "object" &&
+    input.options !== null &&
+    !Array.isArray(input.options)
+      ? input.options
+      : {};
   return { args, options };
 }
 
 /** What `authorize` decides on for this invocation: the command's resolved resource, else the command itself. */
-export function resourceOf(cmd: Pick<CommandDef<unknown>, "id" | "resource">, input: CommandInput, caller: Caller): Resource {
+export function resourceOf(
+  cmd: Pick<CommandDef<unknown>, "id" | "resource">,
+  input: CommandInput,
+  caller: Caller,
+): Resource {
   return cmd.resource ? cmd.resource(rawInput(input), caller) : { type: "command", id: cmd.id };
 }
 
-type ParsedInput = { ok: true; args: Record<string, unknown>; options: Record<string, unknown> } | { ok: false; message: string };
+type ParsedInput =
+  { ok: true; args: Record<string, unknown>; options: Record<string, unknown> } | { ok: false; message: string };
 
 /**
  * Validate an adapter's untyped `{ args, options }` against the definition.
@@ -420,12 +474,16 @@ type ParsedInput = { ok: true; args: Record<string, unknown>; options: Record<st
  * expectation only; the submitted value never appears (it may be a secret).
  */
 export function parseInput(cmd: Pick<CommandDef<unknown>, "args" | "options">, input: CommandInput): ParsedInput {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) return { ok: false, message: "input: expected { args, options }" };
+  if (typeof input !== "object" || input === null || Array.isArray(input))
+    return { ok: false, message: "input: expected { args, options }" };
   const given = input.args ?? [];
   if (!Array.isArray(given)) return { ok: false, message: "args: expected an array" };
   const declared = cmd.args ?? [];
   if (given.length > declared.length) {
-    return { ok: false, message: `unexpected argument: ${declared.length === 0 ? "takes none" : `takes at most ${declared.length}`}, ${given.length} given` };
+    return {
+      ok: false,
+      message: `unexpected argument: ${declared.length === 0 ? "takes none" : `takes at most ${declared.length}`}, ${given.length} given`,
+    };
   }
   const args: Record<string, unknown> = {};
   const problems: string[] = [];
@@ -440,7 +498,8 @@ export function parseInput(cmd: Pick<CommandDef<unknown>, "args" | "options">, i
     else problems.push(...res.error.issues.map((issue) => describeIssue(issue, arg.name)));
   });
   const rawOptions = input.options ?? {};
-  if (typeof rawOptions !== "object" || rawOptions === null || Array.isArray(rawOptions)) return { ok: false, message: "options: expected an object" };
+  if (typeof rawOptions !== "object" || rawOptions === null || Array.isArray(rawOptions))
+    return { ok: false, message: "options: expected an object" };
   const opts = (cmd.options ?? z.object({})).strict().safeParse(rawOptions);
   if (!opts.success) problems.push(...opts.error.issues.map((issue) => describeIssue(issue)));
   if (problems.length > 0) return { ok: false, message: problems.join("; ") };
@@ -496,7 +555,11 @@ export const STORE_UNAVAILABLE_BANNER = "⚠ history store unavailable — showi
  *  chat and CLI share, so both print the same text for the same JSON — except
  *  where a command declares `renderChat` and the caller says `surface: "chat"`
  *  (the CLI's aligned columns do not survive a proportional font). */
-export function renderText(cmd: Pick<CommandDef<unknown>, "id" | "render" | "renderChat">, output: JsonValue, opts: { now?: number; surface?: "chat" | "text" } = {}): string {
+export function renderText(
+  cmd: Pick<CommandDef<unknown>, "id" | "render" | "renderChat">,
+  output: JsonValue,
+  opts: { now?: number; surface?: "chat" | "text" } = {},
+): string {
   if (opts.surface === "chat" && cmd.renderChat) return cmd.renderChat(output);
   return cmd.render ? cmd.render(output) : renderCompact(cmd.id, output, opts);
 }
@@ -507,7 +570,11 @@ export function renderText(cmd: Pick<CommandDef<unknown>, "id" | "render" | "ren
  * `runs.list` is special-cased per KTD18: short id, agent, status, duration —
  * never channel, user, thread, or label. Everything else is `key: value` lines.
  */
-export function renderCompact(commandId: string, output: JsonValue, opts: { now?: number; surface?: "chat" | "text" } = {}): string {
+export function renderCompact(
+  commandId: string,
+  output: JsonValue,
+  opts: { now?: number; surface?: "chat" | "text" } = {},
+): string {
   if (commandId === "runs.list" && isObject(output) && Array.isArray(output.runs)) {
     const runs = output.runs.filter(isObject);
     const now = opts.now ?? Date.now();

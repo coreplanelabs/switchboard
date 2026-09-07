@@ -55,23 +55,34 @@ const firstCallAt = computed(() => {
          clear of the clock. -->
     <div class="head flex items-baseline gap-x-6 pb-1.5 pr-3">
       <div class="min-w-0 flex-1">
-        <div v-if="step.turn" class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 text-xs tabular-nums text-dimmed">
-          <span class="thought" :class="step.turn.quick ? '' : 'text-warn'" :title="step.turn.label">thought {{ step.turn.chip }}</span>
+        <div
+          v-if="step.turn"
+          class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 text-xs tabular-nums text-dimmed"
+        >
+          <span class="thought" :class="step.turn.quick ? '' : 'text-warn'" :title="step.turn.label"
+            >thought {{ step.turn.chip }}</span
+          >
           <span v-for="(f, i) in step.turn.facts" :key="i" class="fact">{{ f }}</span>
         </div>
         <MarkdownText v-else-if="step.narration !== null" :text="step.narration" />
         <!-- Neither a turn nor prose to head the row: the filler says why. -->
         <span v-else class="nonar font-sans text-sm italic text-dimmed">{{ step.note }}</span>
       </div>
-      <span v-if="step.at !== undefined" class="ts shrink-0 select-none text-xs tabular-nums text-dimmed" :title="formatLocalIso(step.at)">{{
-        formatClock(step.at)
-      }}</span>
+      <span
+        v-if="step.at !== undefined"
+        class="ts shrink-0 select-none text-xs tabular-nums text-dimmed"
+        :title="formatLocalIso(step.at)"
+        >{{ formatClock(step.at) }}</span
+      >
     </div>
     <!-- Prose that follows a cost head sits flush left under it. -->
     <div v-if="step.turn && step.narration !== null" class="narration flex items-baseline gap-3 pb-1.5 pr-3">
       <MarkdownText :text="step.narration" />
     </div>
-    <div v-else-if="step.turn && step.narration === null && !step.turn.facts.length" class="narration flex items-baseline gap-3 pb-1.5 pr-3">
+    <div
+      v-else-if="step.turn && step.narration === null && !step.turn.facts.length"
+      class="narration flex items-baseline gap-3 pb-1.5 pr-3"
+    >
       <span class="nonar flex-1 font-sans text-sm italic text-dimmed">{{ step.note }}</span>
     </div>
 
@@ -88,12 +99,16 @@ const firstCallAt = computed(() => {
             :class="step.groupOpen ? 'rotate-90' : ''"
             >❯</span
           >
-          <span class="gcount font-semibold text-highlighted">{{ tally.n }} {{ tally.n === 1 ? "call" : "calls" }}</span>
+          <span class="gcount font-semibold text-highlighted"
+            >{{ tally.n }} {{ tally.n === 1 ? "call" : "calls" }}</span
+          >
           <span v-if="tally.ok" class="gok text-ok">✓ {{ tally.ok }}</span>
           <span v-if="tally.bad" class="gbad text-bad">✗ {{ tally.bad }}</span>
           <span v-if="tally.infra" class="ginfra text-warn">⚠ {{ tally.infra }}</span>
           <span v-if="tally.running" class="grun text-info">{{ tally.running }} running</span>
-          <span v-if="tally.ms > 0" class="gtime ml-auto text-xs tabular-nums text-muted">{{ formatElapsed(tally.ms) }}</span>
+          <span v-if="tally.ms > 0" class="gtime ml-auto text-xs tabular-nums text-muted">{{
+            formatElapsed(tally.ms)
+          }}</span>
         </summary>
         <div class="gbody flex flex-col gap-2 pb-1 pt-2">
           <StepItems :items="step.items" />

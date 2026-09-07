@@ -8,7 +8,13 @@ import { LocalOperations } from "../execution/executor.js";
 import { localWorkspaceDir } from "../execution/factory.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { ResidentOperations } from "../execution/resident.js";
-import { CommandRegistry, bindCommands, type Caller, type CommandInvoker, type CommandRegistryOptions } from "./commandRegistry.js";
+import {
+  CommandRegistry,
+  bindCommands,
+  type Caller,
+  type CommandInvoker,
+  type CommandRegistryOptions,
+} from "./commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
 import { selectFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
 import { buildFrictionLedger } from "./frictionLedgerWorker.js";
@@ -75,7 +81,11 @@ export interface CoreCommandWiring {
  *  resident-backed wherever a resident service is configured (operator
  *  bearer), local for local execution (the caller's thread workspace — dev/CLI),
  *  else none (a per-thread remote backend has no deterministic-op surface). */
-export function defaultOperations(config: ConfigStore, env: Record<string, string | undefined>, caller: Caller): Operations | null {
+export function defaultOperations(
+  config: ConfigStore,
+  env: Record<string, string | undefined>,
+  caller: Caller,
+): Operations | null {
   const execution = config.config.execution;
   const resident = execution?.resident;
   if (resident?.baseUrl) {
@@ -83,7 +93,9 @@ export function defaultOperations(config: ConfigStore, env: Record<string, strin
     return token ? new ResidentOperations({ baseUrl: resident.baseUrl, token }) : null;
   }
   if (!execution?.type || execution.type === "local") {
-    return new LocalOperations(localWorkspaceDir(config.config.workspaceDir ?? "./workspaces", caller.origin?.threadKey ?? caller.id));
+    return new LocalOperations(
+      localWorkspaceDir(config.config.workspaceDir ?? "./workspaces", caller.origin?.threadKey ?? caller.id),
+    );
   }
   return null;
 }
@@ -122,7 +134,11 @@ function once<T>(provided: Provided<T>): () => Promise<T> {
       }));
 }
 
-export function buildCoreCommands(config: Provided<ConfigStore>, store: Provided<RunStore | null>, wiring: CoreCommandWiring): CommandInvoker {
+export function buildCoreCommands(
+  config: Provided<ConfigStore>,
+  store: Provided<RunStore | null>,
+  wiring: CoreCommandWiring,
+): CommandInvoker {
   const registry = new CommandRegistry<CoreCommandDeps>(wiring.audit ? { audit: wiring.audit } : {});
   registerCoreCommands(registry);
   const warn = (prefix: string) => (m: string) => wiring.warn(`[${prefix}] ${m}`);
@@ -131,12 +147,25 @@ export function buildCoreCommands(config: Provided<ConfigStore>, store: Provided
   const ledger = once(
     async () =>
       wiring.frictionLedger ??
-      selectFrictionLedger(await runStore(), buildFrictionLedger((await cfg()).config.selfImprovement, wiring.env, { dataDir: wiring.dataDir, warn: warn("friction") }), warn("friction")),
+      selectFrictionLedger(
+        await runStore(),
+        buildFrictionLedger((await cfg()).config.selfImprovement, wiring.env, {
+          dataDir: wiring.dataDir,
+          warn: warn("friction"),
+        }),
+        warn("friction"),
+      ),
   );
-  const runs = once(async () => wiring.runs ?? createRunsService({ registry: wiring.registry, store: await runStore() }));
-  const admin = async (): Promise<ResidentAdminClient | { unavailable: string }> => wiring.residentAdmin?.() ?? residentAdminFromConfig(await cfg(), wiring.env);
+  const runs = once(
+    async () => wiring.runs ?? createRunsService({ registry: wiring.registry, store: await runStore() }),
+  );
+  const admin = async (): Promise<ResidentAdminClient | { unavailable: string }> =>
+    wiring.residentAdmin?.() ?? residentAdminFromConfig(await cfg(), wiring.env);
   const deps: CoreCommandDeps = {
-    help: { agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })), commands: () => registry.list() },
+    help: {
+      agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })),
+      commands: () => registry.list(),
+    },
     config: {
       describeConfig: async (c, u) => (await cfg()).describeConfig(c, u),
       scopes: async (c, u) => (await cfg()).scopes(c, u),
@@ -155,7 +184,8 @@ export function buildCoreCommands(config: Provided<ConfigStore>, store: Provided
     },
     repo: {
       admin,
-      operations: async (caller) => (wiring.operations ? wiring.operations(caller) : defaultOperations(await cfg(), wiring.env, caller)),
+      operations: async (caller) =>
+        wiring.operations ? wiring.operations(caller) : defaultOperations(await cfg(), wiring.env, caller),
       canUseRepo: async (callerId, slug) => (await cfg()).canUseRepo(callerId, slug),
       inspect: wiring.repoInspector ?? githubRepoInspector(),
     },
@@ -168,7 +198,12 @@ export function buildCoreCommands(config: Provided<ConfigStore>, store: Provided
     mcp: { service: async () => (await wiring.mcp?.()) ?? { unavailable: MCP_OFF_MESSAGE } },
     schedule: { schedules: SCHEDULES, store: wiring.scheduleStore, now: wiring.now ?? Date.now },
     deploy: {
-      run: (plan) => runDeployPlan(plan, { log: (l) => console.log(l), warn: (l) => console.error(l), stream: (c) => process.stdout.write(c) }),
+      run: (plan) =>
+        runDeployPlan(plan, {
+          log: (l) => console.log(l),
+          warn: (l) => console.error(l),
+          stream: (c) => process.stdout.write(c),
+        }),
       restart: (plan) => runBotRestart(plan, { log: (l) => console.log(l), warn: (l) => console.error(l) }),
       checkout: { hasNodeModules },
       affected: wiring.affected ?? computeAffectedOnHost,

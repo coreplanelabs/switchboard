@@ -1,8 +1,22 @@
 import { z } from "zod";
-import { formatConfigDescription, MAX_INSTRUCTIONS_LENGTH, type ConfigDescription, type ConfigStore, type Scope } from "../../config.js";
+import {
+  formatConfigDescription,
+  MAX_INSTRUCTIONS_LENGTH,
+  type ConfigDescription,
+  type ConfigStore,
+  type Scope,
+} from "../../config.js";
 import { EFFORT_LEVELS, type Effort } from "../../effort.js";
 import { authorize } from "../authz/authorize.js";
-import { CommandError, commandDefiner, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
+import {
+  CommandError,
+  commandDefiner,
+  type Caller,
+  type CommandDef,
+  type CommandRegistry,
+  type JsonObject,
+  type JsonValue,
+} from "../commandRegistry.js";
 
 // The `config.*` registrations (phase 4b): runtime config on the typed model.
 //   config show [--channel <id>]
@@ -43,7 +57,11 @@ export interface ConfigCommandDeps {
 
 const defineCommand = commandDefiner<ConfigCommandDeps>();
 
-const scopeArg = { name: "scope", schema: z.enum(["channel", "me"]), describe: "`channel` (everyone here) or `me` (your own runs)" } as const;
+const scopeArg = {
+  name: "scope",
+  schema: z.enum(["channel", "me"]),
+  describe: "`channel` (everyone here) or `me` (your own runs)",
+} as const;
 const channelOption = z.string().optional().describe("target channel (default: the channel you are speaking in)");
 
 const effort = z.enum(EFFORT_LEVELS);
@@ -64,14 +82,17 @@ function mayEditChannel(caller: Caller, channel: string): boolean {
 }
 
 function assertMayEditChannel(caller: Caller, channel: string): void {
-  if (!mayEditChannel(caller, channel)) throw new CommandError("unauthorized", "Channel config changes are restricted.");
+  if (!mayEditChannel(caller, channel))
+    throw new CommandError("unauthorized", "Channel config changes are restricted.");
 }
 
 /** Scope as shown in replies: instructions are elided to their length so a
  *  2000-char paragraph isn't echoed every time someone changes their model. */
 function summarizeScope(s: Scope): JsonObject {
   const { instructions, ...rest } = s;
-  return (instructions === undefined ? rest : { ...rest, instructions: `<${instructions.length} chars>` }) as JsonObject;
+  return (
+    instructions === undefined ? rest : { ...rest, instructions: `<${instructions.length} chars>` }
+  ) as JsonObject;
 }
 
 const who = (scope: "channel" | "me") => (scope === "channel" ? "channel" : "your");
@@ -83,12 +104,16 @@ export const configShow = defineCommand({
   options: z.object({ channel: channelOption }),
   action: "config:read",
   effect: "read",
-  describe: "The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.",
+  describe:
+    "The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.",
   render: (output) => formatConfigDescription(output as unknown as ConfigDescription),
   handler: async ({ options, caller, deps }) => {
     const channel = targetChannel(caller, options.channel);
     // The same question `config set channel` asks, answered for THIS caller's actor — the CLI's `all`, a token's grants, a Slack user's — never for an id the store looks up on its own.
-    const description: ConfigDescription = { ...(await deps.config.describeConfig(channel, caller.id)), channelConfigRestricted: !mayEditChannel(caller, channel) };
+    const description: ConfigDescription = {
+      ...(await deps.config.describeConfig(channel, caller.id)),
+      channelConfigRestricted: !mayEditChannel(caller, channel),
+    };
     return description as unknown as JsonValue;
   },
 });
@@ -108,7 +133,8 @@ export const configSet = defineCommand({
   }),
   action: "config:write",
   effect: "write",
-  describe: "Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.",
+  describe:
+    "Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.",
   render: (output) => {
     const o = output as JsonObject;
     return `Updated ${who(o.scope as "channel" | "me")} scope. Now: ${JSON.stringify(o.effective)}`;
@@ -117,7 +143,8 @@ export const configSet = defineCommand({
     const agents = deps.config.agentNames();
     const patch: Scope = {};
     if (options.agent !== undefined) {
-      if (!agents.includes(options.agent)) throw new CommandError("invalid_input", `agent: expected one of ${agents.join(", ")}`);
+      if (!agents.includes(options.agent))
+        throw new CommandError("invalid_input", `agent: expected one of ${agents.join(", ")}`);
       patch.agent = options.agent;
     }
     if (options.model !== undefined) patch.model = options.model;
@@ -126,12 +153,21 @@ export const configSet = defineCommand({
       ["efforts", options.efforts],
     ] as const) {
       if (!map) continue;
-      for (const agent of Object.keys(map)) if (!agents.includes(agent)) throw new CommandError("invalid_input", `${key}.${agent}: expected an agent name (one of ${agents.join(", ")})`);
+      for (const agent of Object.keys(map))
+        if (!agents.includes(agent))
+          throw new CommandError(
+            "invalid_input",
+            `${key}.${agent}: expected an agent name (one of ${agents.join(", ")})`,
+          );
     }
     if (options.models) patch.models = options.models;
     if (options.effort !== undefined) patch.effort = options.effort as Effort;
     if (options.efforts) patch.efforts = options.efforts as Record<string, Effort>;
-    if (Object.keys(patch).length === 0) throw new CommandError("invalid_input", "nothing to set: pass --agent, --model, --models.<agent>, --effort, or --efforts.<agent>");
+    if (Object.keys(patch).length === 0)
+      throw new CommandError(
+        "invalid_input",
+        "nothing to set: pass --agent, --model, --models.<agent>, --effort, or --efforts.<agent>",
+      );
     let effective: Scope;
     if (args.scope === "channel") {
       const channel = targetChannel(caller, options.channel);
@@ -152,7 +188,8 @@ export const configClear = defineCommand({
   options: z.object({ channel: channelOption }),
   action: "config:write",
   effect: "write",
-  describe: "Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.",
+  describe:
+    "Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.",
   render: (output) => `Cleared ${who((output as JsonObject).scope as "channel" | "me")} overrides.`,
   handler: async ({ args, options, caller, deps }) => {
     if (args.scope === "channel") {
@@ -172,11 +209,20 @@ const quote = (text: string) => `> ${text.replace(/\n/g, "\n> ")}`;
 
 export const configInstructions = defineCommand({
   id: "config.instructions",
-  args: [scopeArg, { name: "text", schema: z.string().optional(), describe: 'the instructions; omit to show the current text, pass "" to clear', rest: true }],
+  args: [
+    scopeArg,
+    {
+      name: "text",
+      schema: z.string().optional(),
+      describe: 'the instructions; omit to show the current text, pass "" to clear',
+      rest: true,
+    },
+  ],
   options: z.object({ channel: channelOption }),
   action: "config:write",
   effect: "write",
-  describe: "Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.",
+  describe:
+    "Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.",
   render: (output) => {
     const o = output as JsonObject;
     const scope = o.scope as "channel" | "me";
@@ -188,7 +234,9 @@ export const configInstructions = defineCommand({
           ? `Current ${w} instructions:\n${quote(current)}\nTo clear: \`config instructions ${scope} ""\``
           : `No ${w} instructions are set. Example: \`config instructions ${scope} "Always reply in bullet points"\``;
       case "clear":
-        return current ? `Cleared ${w} instructions. The static config text now applies:\n${quote(current)}` : `Cleared ${w} instructions.`;
+        return current
+          ? `Cleared ${w} instructions. The static config text now applies:\n${quote(current)}`
+          : `Cleared ${w} instructions.`;
       default:
         return `Updated ${w} instructions (advisory prompt content — they never change agent, model, or permissions):\n${quote(current ?? "")}`;
     }
@@ -198,10 +246,14 @@ export const configInstructions = defineCommand({
     const scopes = await deps.config.scopes(channel ?? caller.origin?.channelId ?? "", caller.id);
     const current = (args.scope === "channel" ? scopes.channel : scopes.user).instructions?.trim();
     // No value at all only SHOWS the current text (a peek must never clear).
-    if (args.text === undefined) return { scope: args.scope, action: "show", ...(current ? { instructions: current } : {}) };
+    if (args.text === undefined)
+      return { scope: args.scope, action: "show", ...(current ? { instructions: current } : {}) };
     const text = args.text.trim();
     if (text.length > MAX_INSTRUCTIONS_LENGTH) {
-      throw new CommandError("invalid_input", `text: too long (${text.length} characters). Instructions ride on every turn, so they're capped at ${MAX_INSTRUCTIONS_LENGTH} characters.`);
+      throw new CommandError(
+        "invalid_input",
+        `text: too long (${text.length} characters). Instructions ride on every turn, so they're capped at ${MAX_INSTRUCTIONS_LENGTH} characters.`,
+      );
     }
     // An explicit empty value clears just the instructions, leaving agent/model intact.
     const patch: Scope = { instructions: text.length > 0 ? text : undefined };
@@ -222,7 +274,12 @@ export const configInstructions = defineCommand({
   },
 });
 
-export const configCommands: readonly CommandDef<ConfigCommandDeps>[] = [configShow, configSet, configClear, configInstructions] as unknown as CommandDef<ConfigCommandDeps>[];
+export const configCommands: readonly CommandDef<ConfigCommandDeps>[] = [
+  configShow,
+  configSet,
+  configClear,
+  configInstructions,
+] as unknown as CommandDef<ConfigCommandDeps>[];
 
 export function registerConfigCommands<D extends ConfigCommandDeps>(registry: CommandRegistry<D>): void {
   for (const cmd of configCommands) registry.register(cmd as unknown as CommandDef<D>);

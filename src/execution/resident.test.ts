@@ -76,9 +76,17 @@ describe("ResidentExecutor.exec", () => {
     await expect(ex.exec("false")).resolves.toMatch(/^exit 2:\nboom/);
   });
 
-  it("needs:\"attach\" (evicted/recycled worktree) re-attaches once and retries the command", async () => {
+  it('needs:"attach" (evicted/recycled worktree) re-attaches once and retries the command', async () => {
     const { fn, calls } = stubFetch(
-      { body: { error: "worktree-missing: disk was recycled", needs: "attach", stdout: "", stderr: "worktree-missing", exitCode: 127 } },
+      {
+        body: {
+          error: "worktree-missing: disk was recycled",
+          needs: "attach",
+          stdout: "",
+          stderr: "worktree-missing",
+          exitCode: 127,
+        },
+      },
       { body: ATTACH_OK },
       { raw: "  " + JSON.stringify({ stdout: "recovered", stderr: "", exitCode: 0, truncated: false }) },
     );
@@ -90,11 +98,21 @@ describe("ResidentExecutor.exec", () => {
     expect(sentBody(calls[2]).command).toBe("echo recovered");
   });
 
-  it("a second needs:\"attach\" after re-attach is a legible ExecInfraError, not a loop", async () => {
+  it('a second needs:"attach" after re-attach is a legible ExecInfraError, not a loop', async () => {
     stubFetch(
-      { body: { error: "evicted: worktree was evicted", needs: "attach", stdout: "", stderr: "evicted", exitCode: 127 } },
+      {
+        body: { error: "evicted: worktree was evicted", needs: "attach", stdout: "", stderr: "evicted", exitCode: 127 },
+      },
       { body: ATTACH_OK },
-      { body: { error: "worktree-missing: still gone", needs: "attach", stdout: "", stderr: "worktree-missing", exitCode: 127 } },
+      {
+        body: {
+          error: "worktree-missing: still gone",
+          needs: "attach",
+          stdout: "",
+          stderr: "worktree-missing",
+          exitCode: 127,
+        },
+      },
     );
     const ex = new ResidentExecutor(OPTS);
     const err = await ex.exec("echo x").catch((e: unknown) => e);
@@ -111,7 +129,15 @@ describe("ResidentExecutor.exec", () => {
     // It re-attaches (proves the new isolate serves the thread) and hands the
     // named outcome to the model as ordinary output — not an ExecInfraError.
     const { fn, calls } = stubFetch(
-      { body: { error: "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran", reason: "runtime-replaced", stdout: "", stderr: "runtime-replaced", exitCode: 127 } },
+      {
+        body: {
+          error: "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran",
+          reason: "runtime-replaced",
+          stdout: "",
+          stderr: "runtime-replaced",
+          exitCode: 127,
+        },
+      },
       { body: ATTACH_OK },
     );
     const ex = new ResidentExecutor(OPTS);
@@ -123,7 +149,13 @@ describe("ResidentExecutor.exec", () => {
   });
 
   it("a second runtime-replaced in a row (no success between) is an ExecInfraError — a flapping resident, not one deploy", async () => {
-    const replaced = { error: "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran", reason: "runtime-replaced", stdout: "", stderr: "runtime-replaced", exitCode: 127 };
+    const replaced = {
+      error: "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran",
+      reason: "runtime-replaced",
+      stdout: "",
+      stderr: "runtime-replaced",
+      exitCode: 127,
+    };
     stubFetch({ body: replaced }, { body: ATTACH_OK }, { body: replaced });
     const ex = new ResidentExecutor(OPTS);
     await expect(ex.exec("echo a")).resolves.toMatch(/runtime-replaced/);
@@ -133,7 +165,13 @@ describe("ResidentExecutor.exec", () => {
   });
 
   it("a successful op between two runtime-replaced outcomes resets the streak (each is a one-off deploy)", async () => {
-    const replaced = { error: "runtime-replaced: deploy", reason: "runtime-replaced", stdout: "", stderr: "runtime-replaced", exitCode: 127 };
+    const replaced = {
+      error: "runtime-replaced: deploy",
+      reason: "runtime-replaced",
+      stdout: "",
+      stderr: "runtime-replaced",
+      exitCode: 127,
+    };
     stubFetch(
       { body: replaced },
       { body: ATTACH_OK },
@@ -206,7 +244,15 @@ describe("ResidentExecutor infra classification through ExecHealthTracker (#92)"
     stubFetch(
       { body: { error: "evicted", needs: "attach", stdout: "", stderr: "evicted", exitCode: 127 } },
       { body: ATTACH_OK },
-      { body: { error: "worktree-missing: still gone", needs: "attach", stdout: "", stderr: "worktree-missing", exitCode: 127 } },
+      {
+        body: {
+          error: "worktree-missing: still gone",
+          needs: "attach",
+          stdout: "",
+          stderr: "worktree-missing",
+          exitCode: 127,
+        },
+      },
     );
     const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
     const err = await tracker.exec("echo x").catch((e: unknown) => e);
@@ -216,7 +262,15 @@ describe("ResidentExecutor infra classification through ExecHealthTracker (#92)"
 
   it("a single runtime-replaced (one deploy) never counts toward fail-fast", async () => {
     stubFetch(
-      { body: { error: "runtime-replaced: deploy", reason: "runtime-replaced", stdout: "", stderr: "runtime-replaced", exitCode: 127 } },
+      {
+        body: {
+          error: "runtime-replaced: deploy",
+          reason: "runtime-replaced",
+          stdout: "",
+          stderr: "runtime-replaced",
+          exitCode: 127,
+        },
+      },
       { body: ATTACH_OK },
     );
     const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
@@ -243,7 +297,7 @@ describe("ResidentExecutor.readFile / writeFile", () => {
     expect(sentBody(calls[0])).toMatchObject({ path: "docs/x.txt", content: "hello", resource: OPTS.resource });
   });
 
-  it("a 409 needs:\"attach\" on read re-attaches once and retries", async () => {
+  it('a 409 needs:"attach" on read re-attaches once and retries', async () => {
     const { calls } = stubFetch(
       { status: 409, body: { error: "not-attached: no live worktree", needs: "attach" } },
       { body: ATTACH_OK },
@@ -267,7 +321,7 @@ describe("ResidentExecutor.readFile / writeFile", () => {
     expect((err as Error).message).toMatch(/2 times in a row/);
   });
 
-  it("runtime-replaced then needs:\"attach\" on the retried read (deploy + evicted worktree) is the precise worktree-unavailable infra error", async () => {
+  it('runtime-replaced then needs:"attach" on the retried read (deploy + evicted worktree) is the precise worktree-unavailable infra error', async () => {
     stubFetch(
       { status: 409, body: { error: "runtime-replaced: deploy", reason: "runtime-replaced" } },
       { body: ATTACH_OK },
@@ -317,9 +371,21 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
   });
 
   it("records the attach result's ref@sha as the thread binding (the positive 'resident' marker's source)", async () => {
-    stubFetch({ body: { workspace: "/workspace/threads/t/master", ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", user: "worker2", deps: "hardlink" } });
+    stubFetch({
+      body: {
+        workspace: "/workspace/threads/t/master",
+        ref: "master",
+        sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05",
+        user: "worker2",
+        deps: "hardlink",
+      },
+    });
     const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
-    expect(ex.binding).toEqual({ ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", workspace: "/workspace/threads/t/master" });
+    expect(ex.binding).toEqual({
+      ref: "master",
+      sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05",
+      workspace: "/workspace/threads/t/master",
+    });
   });
 
   it("a 200 attach answer without a string `workspace` still binds — the path is just unknown (#282: the path is advisory for the prompt)", async () => {
@@ -331,11 +397,16 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
 
   it("a 200 attach answer missing ref/sha is a legible error, never a half-bound executor", async () => {
     stubFetch({ body: { workspace: "/workspace/threads/t/master", user: "worker2" } });
-    await expect(ResidentExecutor.open({ ...OPTS, refHint: "master" })).rejects.toThrow(/malformed answer.*missing ref\/sha/);
+    await expect(ResidentExecutor.open({ ...OPTS, refHint: "master" })).rejects.toThrow(
+      /malformed answer.*missing ref\/sha/,
+    );
   });
 
-  it("409 needs:\"ref\" carries the resident's defaultRef when the Worker names one (bind-by-default), undefined otherwise", async () => {
-    stubFetch({ status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref", defaultRef: "master" } });
+  it('409 needs:"ref" carries the resident\'s defaultRef when the Worker names one (bind-by-default), undefined otherwise', async () => {
+    stubFetch({
+      status: 409,
+      body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref", defaultRef: "master" },
+    });
     const err = (await ResidentExecutor.open(OPTS).catch((e: unknown) => e)) as ResidentNeedsRefError;
     expect(err).toBeInstanceOf(ResidentNeedsRefError);
     expect(err.defaultRef).toBe("master");
@@ -344,12 +415,12 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(older.defaultRef).toBeUndefined();
   });
 
-  it("409 needs:\"ref\" on open tells the user to name a branch", async () => {
+  it('409 needs:"ref" on open tells the user to name a branch', async () => {
     stubFetch({ status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref" } });
     await expect(ResidentExecutor.open(OPTS)).rejects.toThrow(/branch/i);
   });
 
-  it("409 needs:\"ref\" is a TYPED error the dispatcher can catch for the ask-once flow (U7)", async () => {
+  it('409 needs:"ref" is a TYPED error the dispatcher can catch for the ask-once flow (U7)', async () => {
     stubFetch({ status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref" } });
     const err = await ResidentExecutor.open(OPTS).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ResidentNeedsRefError);
@@ -400,7 +471,14 @@ describe("ResidentOperations.run", () => {
 
   it("a failing op is a RESULT (ok:false with the named summary), not an error", async () => {
     stubFetch({
-      body: { ok: false, op: "test", summary: "test failed (exit 1) on repo:jshttp/vary @ master (1220b9c4)", stdout: "", stderr: "1 failing", exitCode: 1 },
+      body: {
+        ok: false,
+        op: "test",
+        summary: "test failed (exit 1) on repo:jshttp/vary @ master (1220b9c4)",
+        stdout: "",
+        stderr: "1 failing",
+        exitCode: 1,
+      },
     });
     const res = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
     expect(res).toMatchObject({ kind: "result", ok: false });
@@ -416,7 +494,10 @@ describe("ResidentOperations.run", () => {
   it("an op-refused error (mutating command-table entry) is a named refusal", async () => {
     stubFetch({
       status: 409,
-      body: { error: 'op-refused: the "test" command-table entry is marked effects: mutating — the modelless op path executes readonly entries only' },
+      body: {
+        error:
+          'op-refused: the "test" command-table entry is marked effects: mutating — the modelless op path executes readonly entries only',
+      },
     });
     const res = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
     expect(res).toMatchObject({ kind: "refused" });
@@ -424,7 +505,11 @@ describe("ResidentOperations.run", () => {
   });
 
   it("an in-body error (e.g. unknown-ref over the 200 stream) is kind error, never a fake result", async () => {
-    stubFetch({ raw: " \n" + JSON.stringify({ error: 'unknown-ref: ref "nope" does not resolve in the mirror (even after a fetch)' }) });
+    stubFetch({
+      raw:
+        " \n" +
+        JSON.stringify({ error: 'unknown-ref: ref "nope" does not resolve in the mirror (even after a fetch)' }),
+    });
     const res = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary", ref: "nope" });
     expect(res).toMatchObject({ kind: "error" });
     if (res.kind === "error") expect(res.message).toContain("unknown-ref");
@@ -483,7 +568,10 @@ describe("ResidentExecutor.release — return the thread's pool user when a run 
   });
 
   it('"if-clean" POSTs force:false and a kept (dirty) worktree comes back released:false with the reason', async () => {
-    const { calls } = stubFetch({ body: ATTACH_OK }, { body: { released: false, reason: "dirty: 2 uncommitted change(s)" } });
+    const { calls } = stubFetch(
+      { body: ATTACH_OK },
+      { body: { released: false, reason: "dirty: 2 uncommitted change(s)" } },
+    );
     const ex = await ResidentExecutor.open(OPTS);
     const r = await ex.release("if-clean");
     expect(r).toEqual({ released: false, reason: "dirty: 2 uncommitted change(s)" });
@@ -518,7 +606,10 @@ describe("ResidentExecutor.moveTo", () => {
   it("re-attaches with the new sha and answers the sha the worktree is now at", async () => {
     const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
     const OLD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
-    const { calls } = stubFetch({ body: { ...ATTACH_OK, sha: OLD } }, { body: { ...ATTACH_OK, sha: NEW, recreated: true } });
+    const { calls } = stubFetch(
+      { body: { ...ATTACH_OK, sha: OLD } },
+      { body: { ...ATTACH_OK, sha: NEW, recreated: true } },
+    );
     const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master", readonly: true, sha: OLD });
     await expect(ex.moveTo(NEW)).resolves.toEqual({ sha: NEW });
     expect(calls.map(route)).toEqual(["/attach", "/attach"]);
@@ -564,7 +655,9 @@ describe("ResidentExecutor per-call timeout", () => {
 
   it("the retried command after a re-attach carries the same timeoutMs", async () => {
     const { calls } = stubFetch(
-      { body: { error: "evicted: worktree was evicted", needs: "attach", stdout: "", stderr: "evicted", exitCode: 127 } },
+      {
+        body: { error: "evicted: worktree was evicted", needs: "attach", stdout: "", stderr: "evicted", exitCode: 127 },
+      },
       { body: ATTACH_OK },
       { body: OK },
     );

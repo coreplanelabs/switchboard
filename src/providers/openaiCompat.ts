@@ -19,9 +19,7 @@ interface OAIToolCall {
   function: { name: string; arguments: string };
 }
 
-type OAIContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
+type OAIContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
 
 interface OAIMessage {
   role: "system" | "user" | "assistant" | "tool";

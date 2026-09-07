@@ -59,9 +59,21 @@ export type Action = string;
 export type ChannelVisibility = "public" | "private" | "dm" | "machine" | "unknown";
 
 export type Resource =
-  | { readonly type: "run"; readonly id: string; readonly channelId: string; readonly userId: string; readonly repo?: string; readonly channelVisibility?: ChannelVisibility }
+  | {
+      readonly type: "run";
+      readonly id: string;
+      readonly channelId: string;
+      readonly userId: string;
+      readonly repo?: string;
+      readonly channelVisibility?: ChannelVisibility;
+    }
   | { readonly type: "channel"; readonly id: string; readonly visibility: ChannelVisibility }
-  | { readonly type: "memory-scope"; readonly key: string; readonly kind: "org" | "user" | "repo" | "channel"; readonly originChannelVisibility?: ChannelVisibility }
+  | {
+      readonly type: "memory-scope";
+      readonly key: string;
+      readonly kind: "org" | "user" | "repo" | "channel";
+      readonly originChannelVisibility?: ChannelVisibility;
+    }
   | { readonly type: "repo"; readonly owner: string; readonly name: string }
   /** A config tier (routing-and-config: a channel's or a user's scope, or the
    *  org-wide defaults — the three tiers MCP servers live in as well). */
@@ -92,7 +104,8 @@ export type Condition =
 /** The `kind` discriminator of a kinded resource type (`memory-scope`,
  *  `config-scope`); `never` for the others, so a row cannot carry a kind its
  *  resource does not have. */
-export type KindOf<T extends ResourceType> = Extract<Resource, { readonly type: T }> extends { readonly kind: infer K } ? K : never;
+export type KindOf<T extends ResourceType> =
+  Extract<Resource, { readonly type: T }> extends { readonly kind: infer K } ? K : never;
 
 /** Every kind any kinded resource has (distributed per type — a conditional over the whole union would be `never`). */
 export type ResourceKind = { [T in ResourceType]: KindOf<T> }[ResourceType];

@@ -47,13 +47,18 @@ describe("requestScopeKeys", () => {
       repo: "repo:acme/api",
       channel: "channel:slack:C0123",
     });
-    expect(listScopeKeys(keys)).toEqual(["org:coreplanelabs", "repo:acme/api", "channel:slack:C0123", "user:slack:U0123"]);
+    expect(listScopeKeys(keys)).toEqual([
+      "org:coreplanelabs",
+      "repo:acme/api",
+      "channel:slack:C0123",
+      "user:slack:U0123",
+    ]);
     expect(requestScopeKeys("slack:U0123", { channelId: "slack:C0123" })).toEqual({
       org: "org:coreplanelabs",
       user: "user:slack:U0123",
       channel: "channel:slack:C0123",
     });
-    expect(requestScopeKeys(undefined, { repo: "" , channelId: "" })).toEqual({ org: "org:coreplanelabs" });
+    expect(requestScopeKeys(undefined, { repo: "", channelId: "" })).toEqual({ org: "org:coreplanelabs" });
   });
 
   it("degrades to org-only when the request carries no user identity", () => {

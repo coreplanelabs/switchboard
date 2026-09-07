@@ -85,6 +85,8 @@ describe("recognizeOperation — natural language (conservative explicit forms o
   });
 
   it("natural forms are disabled when the message carries explicit directives", () => {
-    expect(recognizeOperation("run the tests on master in jshttp/vary", NO_HISTORY, { allowNatural: false })).toBeNull();
+    expect(
+      recognizeOperation("run the tests on master in jshttp/vary", NO_HISTORY, { allowNatural: false }),
+    ).toBeNull();
   });
 });

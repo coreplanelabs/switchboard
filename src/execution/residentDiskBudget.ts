@@ -103,7 +103,12 @@ export function parseDu(stdout: string): Map<string, number> {
 /** Fold the two probes into the persisted sample. `df` is authoritative for
  *  total/used/free; the `du` lines itemize `used`, and whatever they do not
  *  cover is `other` (never negative — a du that raced a delete is clamped). */
-export function assembleDiskSample(input: { at: string; df: { totalKiB: number; usedKiB: number; freeKiB: number }; du: ReadonlyMap<string, number>; layout: DiskLayout }): DiskSample {
+export function assembleDiskSample(input: {
+  at: string;
+  df: { totalKiB: number; usedKiB: number; freeKiB: number };
+  du: ReadonlyMap<string, number>;
+  layout: DiskLayout;
+}): DiskSample {
   const { du, layout } = input;
   const get = (path: string): number | null => du.get(path) ?? null;
   const deps = get(`${layout.checkoutDir}/node_modules`);
@@ -221,7 +226,8 @@ export interface AdmissionMath {
   headroomKiB: number;
 }
 
-export type AdmissionVerdict = { fits: true; math: AdmissionMath } | { fits: false; math: AdmissionMath; shortfallKiB: number };
+export type AdmissionVerdict =
+  { fits: true; math: AdmissionMath } | { fits: false; math: AdmissionMath; shortfallKiB: number };
 
 /** The admission test: `free − reserve ≥ projected`. With an unmeasured
  *  projection (`null`) the tree is admitted only while the free space clears
@@ -255,7 +261,11 @@ export function checkDiskAdmission(input: {
  *  answer when `df` answered, else the previous RAW reading plus the bytes the
  *  evicted tree was measured at (unknown size → nothing added). Always raw —
  *  `checkDiskAdmission` deducts the commitments itself. */
-export function rawFreeAfterEviction(previousRawFreeKiB: number, probe: { freeKiB: number } | null, freedKiB: number | null): number {
+export function rawFreeAfterEviction(
+  previousRawFreeKiB: number,
+  probe: { freeKiB: number } | null,
+  freedKiB: number | null,
+): number {
   return probe ? probe.freeKiB : previousRawFreeKiB + (freedKiB ?? 0);
 }
 
@@ -294,7 +304,12 @@ export type DiskKeepWhy = "busy" | "default-ref" | "recent" | "dirty" | "request
  *  Cleanliness is NOT decided here — it needs the container (as the thread
  *  user), so the Worker checks each candidate in this order and keeps a dirty
  *  or unreadable one (`dirty`), exactly like the sweep. */
-export function orderEvictionCandidates(input: { candidates: readonly DiskEvictionCandidate[]; now: number; requestingThreadKey: string; minIdleMs?: number }): {
+export function orderEvictionCandidates(input: {
+  candidates: readonly DiskEvictionCandidate[];
+  now: number;
+  requestingThreadKey: string;
+  minIdleMs?: number;
+}): {
   order: DiskEvictionCandidate[];
   kept: Array<{ threadKey: string; why: DiskKeepWhy; detail: string }>;
 } {
@@ -316,7 +331,11 @@ export function orderEvictionCandidates(input: { candidates: readonly DiskEvicti
     }
     const idleMs = input.now - Date.parse(c.lastAttachAt);
     if (!(idleMs >= minIdle)) {
-      kept.push({ threadKey: c.threadKey, why: "recent", detail: `attached ${formatAgo(idleMs)} ago (floor ${formatAgo(minIdle)})` });
+      kept.push({
+        threadKey: c.threadKey,
+        why: "recent",
+        detail: `attached ${formatAgo(idleMs)} ago (floor ${formatAgo(minIdle)})`,
+      });
       continue;
     }
     order.push(c);
@@ -373,9 +392,12 @@ export function diskPressureReason(input: {
   ];
   if (input.evicted.length > 0) {
     const freed = input.evicted.reduce((a, e) => a + (e.freedKiB ?? 0), 0);
-    parts.push(`evicted ${input.evicted.length} idle tree(s) (${formatGiB(freed)} back): ${input.evicted.map((e) => e.threadKey).join(", ")}`);
+    parts.push(
+      `evicted ${input.evicted.length} idle tree(s) (${formatGiB(freed)} back): ${input.evicted.map((e) => e.threadKey).join(", ")}`,
+    );
   } else parts.push("evicted nothing");
-  if (input.kept.length > 0) parts.push(`kept ${input.kept.length}: ${input.kept.map((k) => `${k.threadKey} (${k.detail})`).join(", ")}`);
+  if (input.kept.length > 0)
+    parts.push(`kept ${input.kept.length}: ${input.kept.map((k) => `${k.threadKey} (${k.detail})`).join(", ")}`);
   return parts.join("; ");
 }
 

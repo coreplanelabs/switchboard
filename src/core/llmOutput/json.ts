@@ -41,7 +41,8 @@ function jsonValueEquals(a: unknown, b: unknown): boolean {
 export function jsonOutput<T>(schema: z.ZodType<T>, opts: { name?: string; requestHint?: string } = {}): OutputType<T> {
   return {
     name: opts.name ?? "json",
-    requestHint: opts.requestHint ?? "Reply with ONLY a JSON object matching the required schema — no prose, no code fence.",
+    requestHint:
+      opts.requestHint ?? "Reply with ONLY a JSON object matching the required schema — no prose, no code fence.",
     parse(raw): ParseOutcome<T> {
       let value: unknown;
       try {
@@ -61,7 +62,12 @@ export function jsonOutput<T>(schema: z.ZodType<T>, opts: { name?: string; reque
       // (whitespace, key order) and strips a fence by design, so a byte diff
       // against the raw text would always fire. It reports true only when the
       // schema transformed or stripped something the model actually sent.
-      return { ok: true, value: parsed.data, canonical: JSON.stringify(parsed.data), changed: !jsonValueEquals(parsed.data, value) };
+      return {
+        ok: true,
+        value: parsed.data,
+        canonical: JSON.stringify(parsed.data),
+        changed: !jsonValueEquals(parsed.data, value),
+      };
     },
     retryable: (_failure: OutputFailure) => true,
     maxRetries: JSON_MAX_RETRIES,

@@ -6,9 +6,33 @@ import type { ScheduleDef, ScheduleFiring } from "../core/schedules.js";
 /** A registry-shaped fixture: the panel tests must not depend on the production
  *  registry's cron values (which move for live receipts, e.g. #197 / #244). */
 export const FIXTURE_SCHEDULES: readonly ScheduleDef[] = [
-  { name: "keep-alive", cron: "* * * * *", worker: "bot", internal: true, description: "Container keep-alive. Not a run.", action: { type: "healthz" } },
-  { name: "self-improvement", cron: "0 14 * * 1", worker: "bot", description: "Weekly self-improvement pass.", action: { type: "run", command: "friction propose", identity: "cron", actor: { kind: "schedule", id: "schedule:self-improvement", grants: NO_GRANTS } } },
-  { name: "resident-watchdog", cron: "*/10 * * * *", worker: "resident", description: "Resident watchdog pass.", action: { type: "watchdog" } },
+  {
+    name: "keep-alive",
+    cron: "* * * * *",
+    worker: "bot",
+    internal: true,
+    description: "Container keep-alive. Not a run.",
+    action: { type: "healthz" },
+  },
+  {
+    name: "self-improvement",
+    cron: "0 14 * * 1",
+    worker: "bot",
+    description: "Weekly self-improvement pass.",
+    action: {
+      type: "run",
+      command: "friction propose",
+      identity: "cron",
+      actor: { kind: "schedule", id: "schedule:self-improvement", grants: NO_GRANTS },
+    },
+  },
+  {
+    name: "resident-watchdog",
+    cron: "*/10 * * * *",
+    worker: "resident",
+    description: "Resident watchdog pass.",
+    action: { type: "watchdog" },
+  },
 ];
 import { buildScheduledRows, firingDetailSummary, formatRelative, type FiringsState } from "./scheduledPanel.js";
 
@@ -34,13 +58,27 @@ describe("buildScheduledRows", () => {
     const rows = buildScheduledRows(FIXTURE_SCHEDULES, none, [], NOW);
     expect(rows.map((r) => r.name)).toEqual(["self-improvement", "resident-watchdog"]);
     const [si, wd] = rows;
-    expect(si).toMatchObject({ worker: "bot", cron: "0 14 * * 1", action: { type: "run", command: "friction propose", identity: "cron" }, nextFireAt: Date.UTC(2026, 7, 31, 14, 0) });
+    expect(si).toMatchObject({
+      worker: "bot",
+      cron: "0 14 * * 1",
+      action: { type: "run", command: "friction propose", identity: "cron" },
+      nextFireAt: Date.UTC(2026, 7, 31, 14, 0),
+    });
     expect(si.last).toBeUndefined();
-    expect(wd).toMatchObject({ worker: "resident", cron: "*/10 * * * *", action: { type: "watchdog" }, nextFireAt: Date.UTC(2026, 7, 29, 12, 40) });
+    expect(wd).toMatchObject({
+      worker: "resident",
+      cron: "*/10 * * * *",
+      action: { type: "watchdog" },
+      nextFireAt: Date.UTC(2026, 7, 29, 12, 40),
+    });
   });
 
   it("a firing for a non-run schedule attaches without a run link", () => {
-    const f = firing({ schedule: "resident-watchdog", runId: undefined, detail: "3/10 residents · 0 re-armed · 0 timed out · 0 errors" });
+    const f = firing({
+      schedule: "resident-watchdog",
+      runId: undefined,
+      detail: "3/10 residents · 0 re-armed · 0 timed out · 0 errors",
+    });
     const [, wd] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [f] }, [], NOW);
     expect(wd.last).toEqual({ firedAt: f.firedAt, outcome: "completed", detail: f.detail });
   });
@@ -57,24 +95,50 @@ describe("buildScheduledRows", () => {
   });
 
   it("links the run WITH its capability token while it is live in the registry", () => {
-    const [si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing()] }, [liveRun("run-abc12345")], NOW);
+    const [si] = buildScheduledRows(
+      FIXTURE_SCHEDULES,
+      { ok: true, firings: [firing()] },
+      [liveRun("run-abc12345")],
+      NOW,
+    );
     expect(si.last?.runHref).toBe("/runs/run-abc12345?t=tok");
   });
 
   it("a firing without a run (misconfigured / ingress-error) has no run id or link", () => {
-    const [si] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing({ runId: undefined, outcome: "ingress-error", detail: "HTTP 503 disabled" })] }, [], NOW);
+    const [si] = buildScheduledRows(
+      FIXTURE_SCHEDULES,
+      { ok: true, firings: [firing({ runId: undefined, outcome: "ingress-error", detail: "HTTP 503 disabled" })] },
+      [],
+      NOW,
+    );
     expect(si.last).toEqual({ firedAt: firing().firedAt, outcome: "ingress-error", detail: "HTTP 503 disabled" });
   });
 
   it("ignores firings for schedules no longer in the registry; unavailable history → rows without `last`", () => {
-    const rows = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing({ schedule: "retired" })] }, [], NOW);
+    const rows = buildScheduledRows(
+      FIXTURE_SCHEDULES,
+      { ok: true, firings: [firing({ schedule: "retired" })] },
+      [],
+      NOW,
+    );
     expect(rows.every((r) => r.last === undefined)).toBe(true);
-    const unavailable = buildScheduledRows(FIXTURE_SCHEDULES, { ok: false, reason: "schedules.worker not configured" }, [], NOW);
+    const unavailable = buildScheduledRows(
+      FIXTURE_SCHEDULES,
+      { ok: false, reason: "schedules.worker not configured" },
+      [],
+      NOW,
+    );
     expect(unavailable.every((r) => r.last === undefined)).toBe(true);
   });
 
   it("an unparseable cron in a schedule yields no next fire rather than a crash", () => {
-    const bad: ScheduleDef = { name: "broken", cron: "nope", worker: "bot", description: "x", action: { type: "healthz" } };
+    const bad: ScheduleDef = {
+      name: "broken",
+      cron: "nope",
+      worker: "bot",
+      description: "x",
+      action: { type: "healthz" },
+    };
     expect(buildScheduledRows([bad], none, [], NOW)[0].nextFireAt).toBeUndefined();
   });
 
@@ -86,18 +150,20 @@ describe("buildScheduledRows", () => {
 
 describe("firingDetailSummary", () => {
   it("the detail is the reply's facts, not its title: a leading `*Title* —` and emoji are dropped, long text is cut", () => {
-    expect(firingDetailSummary("🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns · 1 filed")).toBe("244 runs analyzed · 23 recurring patterns · 1 filed");
+    expect(firingDetailSummary("🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns · 1 filed")).toBe(
+      "244 runs analyzed · 23 recurring patterns · 1 filed",
+    );
     expect(firingDetailSummary("🔍 109 runs analyzed — filed 2")).toBe("109 runs analyzed — filed 2");
     expect(firingDetailSummary("HTTP 401 unauthorized")).toBe("HTTP 401 unauthorized");
     // legacy records flattened the whole reply into one line: cut at a sentence-ish width
-    const legacy = "🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns 1. `slow_tool:npm test` — 22 runs · 23× · 29m 9s · high 2. `slow_tool:npm test, npm run build` — 18 runs · 18× · 27m 26s · high 3. more";
+    const legacy =
+      "🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns 1. `slow_tool:npm test` — 22 runs · 23× · 29m 9s · high 2. `slow_tool:npm test, npm run build` — 18 runs · 18× · 27m 26s · high 3. more";
     expect(firingDetailSummary(legacy)).toBe("244 runs analyzed · 23 recurring patterns"); // the head ends where the list begins
     const long = firingDetailSummary("x".repeat(200));
     expect(long.length).toBe(121);
     expect(long.endsWith("…")).toBe(true);
     expect(firingDetailSummary("   ")).toBe("");
   });
-
 });
 
 describe("outcome vocabulary (shared with the web page)", () => {

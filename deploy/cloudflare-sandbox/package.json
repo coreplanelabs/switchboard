@@ -14,7 +14,9 @@
     "tail": "wrangler tail switchboard-sandbox",
     "secrets": "node ../bin/put-secrets.mjs sandbox"
   },
-  "dependencies": { "@cloudflare/sandbox": "^0.12.9" },
+  "dependencies": {
+    "@cloudflare/sandbox": "^0.12.9"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260904.1",
     "typescript": "^5.9.3",

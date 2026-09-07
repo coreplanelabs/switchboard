@@ -53,7 +53,10 @@ export function prLinks(pr: PrRef): { pr?: string; files?: string; commit?: stri
     out.files = `${base}/pull/${pr.number}/files`;
   }
   if (pr.headSha && SHA_RE.test(pr.headSha)) {
-    out.commit = pr.number !== undefined && out.pr ? `${base}/pull/${pr.number}/commits/${pr.headSha}` : `${base}/commit/${pr.headSha}`;
+    out.commit =
+      pr.number !== undefined && out.pr
+        ? `${base}/pull/${pr.number}/commits/${pr.headSha}`
+        : `${base}/commit/${pr.headSha}`;
   }
   return out;
 }

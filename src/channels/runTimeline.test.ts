@@ -5,7 +5,13 @@ import { createRunTimeline, type TimelineChange } from "./runTimeline.js";
 // stream into steps (the model's prose + the calls it explains) and call cards
 // (command + its result, with truthful status/exit/size/duration facts).
 
-const call = (id: string, command: string, at?: number) => ({ type: "tool_call", tool: "bash", summary: `$ ${command}`, callId: id, at });
+const call = (id: string, command: string, at?: number) => ({
+  type: "tool_call",
+  tool: "bash",
+  summary: `$ ${command}`,
+  callId: id,
+  at,
+});
 const result = (id: string, over: Record<string, unknown> = {}) => ({
   type: "tool_result",
   tool: "bash",
@@ -32,7 +38,10 @@ describe("createRunTimeline — grouping", () => {
     const t = createRunTimeline();
     t.push(call("a", "ls"));
     const [step] = t.push({ type: "assistant", text: "Let me look at the diff.", at: 5 });
-    expect(step).toMatchObject({ kind: "step", step: { index: 1, narration: { text: "Let me look at the diff.", at: 5 } } });
+    expect(step).toMatchObject({
+      kind: "step",
+      step: { index: 1, narration: { text: "Let me look at the diff.", at: 5 } },
+    });
     expect(kinds(t.push(call("b", "git diff")))).toEqual(["call"]);
     expect(t.steps()[1].calls.map((c) => c.title)).toEqual(["git diff"]);
     expect(t.steps()[0].calls).toHaveLength(1); // the earlier step is untouched
@@ -63,7 +72,11 @@ describe("createRunTimeline — grouping", () => {
     const changes = t.push(result("ghost", { summary: "exit 1: (40 chars, 3 lines)", ok: false, exitCode: 1 }));
     expect(kinds(changes)).toEqual(["step", "call"]);
     const c = changes[1];
-    expect(c.kind === "call" && c.call).toMatchObject({ title: "bash", status: "failed", facts: ["exit 1", "3 lines"] });
+    expect(c.kind === "call" && c.call).toMatchObject({
+      title: "bash",
+      status: "failed",
+      facts: ["exit 1", "3 lines"],
+    });
     expect(t.pending()).toBeNull();
   });
 
@@ -71,9 +84,9 @@ describe("createRunTimeline — grouping", () => {
     const t = createRunTimeline();
     expect(t.push({ type: "input", text: "review #1", at: 1 })).toEqual([{ kind: "input", text: "review #1", at: 1 }]);
     expect(t.push({ type: "answer", text: "LGTM", at: 9 })).toEqual([{ kind: "answer", text: "LGTM", at: 9 }]);
-    expect(t.push({ type: "run_note", kind: "stop_requested", summary: "stop requested", mode: "soft", at: 3 })).toEqual([
-      { kind: "note", text: "stop requested", noteKind: "stop_requested", mode: "soft", at: 3 },
-    ]);
+    expect(
+      t.push({ type: "run_note", kind: "stop_requested", summary: "stop requested", mode: "soft", at: 3 }),
+    ).toEqual([{ kind: "note", text: "stop requested", noteKind: "stop_requested", mode: "soft", at: 3 }]);
     expect(t.push({ type: "run_note", kind: "wrap_up", summary: "wrap up" })).toEqual([
       { kind: "note", text: "wrap up", noteKind: "wrap_up", mode: undefined, at: undefined },
     ]);
@@ -201,7 +214,7 @@ describe("createRunTimeline — classification (open-by-default rules key on the
 
   it("the most specific kind wins over incidental read verbs in the same pipeline", () => {
     expect(tagOf("git diff origin/main...HEAD | head -50")).toEqual(["git"]);
-    expect(tagOf("(npm test 2>&1 | tail -25; echo \"TEST EXIT: $?\")")).toEqual(["tests"]);
+    expect(tagOf('(npm test 2>&1 | tail -25; echo "TEST EXIT: $?")')).toEqual(["tests"]);
   });
 
   it("non-shell calls are tagged with their tool name", () => {
@@ -243,7 +256,7 @@ describe("createRunTimeline — classification (open-by-default rules key on the
 
   it("a quoted cd path with spaces is a hop too (review nit on #214)", () => {
     const t = createRunTimeline();
-    t.push(call("a", "cd \"/my dir/checkout\" && npm test"));
+    t.push(call("a", 'cd "/my dir/checkout" && npm test'));
     t.push(call("b", "cd '/my dir' ; git status"));
     expect(t.steps()[0].calls[0]).toMatchObject({ headline: "npm test …", tags: ["tests"] });
     expect(t.steps()[0].calls[1]).toMatchObject({ headline: "git status …", tags: ["git"] });
@@ -262,7 +275,9 @@ describe("createRunTimeline — inlinable into the run page", () => {
 
   it("re-evaluates from its source with identical behavior (the String(fn) round trip)", () => {
     const shim = "var __name = function (fn) { return fn; };";
-    const again = new Function(`${shim}\n${String(createRunTimeline)}\nreturn createRunTimeline;`)() as typeof createRunTimeline;
+    const again = new Function(
+      `${shim}\n${String(createRunTimeline)}\nreturn createRunTimeline;`,
+    )() as typeof createRunTimeline;
     const t = again();
     t.push({ type: "assistant", text: "hi", at: 1 });
     t.push(call("a", "ls", 2));
@@ -307,7 +322,14 @@ describe("createRunTimeline — skill_use", () => {
 
   it("a skill_use before any step opens one; a non-http source is dropped; a nameless event is ignored", () => {
     const t = createRunTimeline();
-    const changes = t.push({ type: "skill_use", skill: "tdd", description: "", agent: "coding", source: "javascript:alert(1)", bodyBytes: 10 });
+    const changes = t.push({
+      type: "skill_use",
+      skill: "tdd",
+      description: "",
+      agent: "coding",
+      source: "javascript:alert(1)",
+      bodyBytes: 10,
+    });
     expect(kinds(changes)).toEqual(["step", "skill"]);
     expect(changes[1].kind === "skill" && changes[1].skill.source).toBeUndefined();
     expect(t.push({ type: "skill_use", skill: "", agent: "coding", bodyBytes: 1 })).toEqual([]);
@@ -318,7 +340,17 @@ describe("createRunTimeline — review_artifact (features/reading-diff.md item 5
   it("folds a review_artifact to nothing — the panel renders it, the step story does not change shape", () => {
     const t = createRunTimeline();
     t.push(call("bash", "$ ls"));
-    expect(t.push({ type: "review_artifact", artifact: "reading_diff", poweredBy: "git", baseRef: "main", diff: "d", truncated: false, at: 1 })).toEqual([]);
+    expect(
+      t.push({
+        type: "review_artifact",
+        artifact: "reading_diff",
+        poweredBy: "git",
+        baseRef: "main",
+        diff: "d",
+        truncated: false,
+        at: 1,
+      }),
+    ).toEqual([]);
     expect(t.steps()[0].calls).toHaveLength(1); // untouched
   });
 });
@@ -326,18 +358,47 @@ describe("createRunTimeline — review_artifact (features/reading-diff.md item 5
 describe("createRunTimeline — run_meta (item 19)", () => {
   it("folds `run_meta` into a `meta` change carrying only the well-typed fields; a meta without agent/model is ignored", () => {
     const t = createRunTimeline();
-    expect(t.push({ type: "run_meta", agent: "review", model: "anthropic/claude-fable-5", repo: "acme/web", ref: "main", pr: 281, headSha: "c211fd0abc1234", at: 5 })).toEqual([
-      { kind: "meta", agent: "review", model: "anthropic/claude-fable-5", repo: "acme/web", ref: "main", pr: 281, headSha: "c211fd0abc1234", at: 5 },
+    expect(
+      t.push({
+        type: "run_meta",
+        agent: "review",
+        model: "anthropic/claude-fable-5",
+        repo: "acme/web",
+        ref: "main",
+        pr: 281,
+        headSha: "c211fd0abc1234",
+        at: 5,
+      }),
+    ).toEqual([
+      {
+        kind: "meta",
+        agent: "review",
+        model: "anthropic/claude-fable-5",
+        repo: "acme/web",
+        ref: "main",
+        pr: 281,
+        headSha: "c211fd0abc1234",
+        at: 5,
+      },
     ]);
     // no repo context → just agent · model; junk fields never make it through
-    expect(t.push({ type: "run_meta", agent: "general", model: "openai/gpt", pr: -1, headSha: "not a sha", ref: "" })).toEqual([{ kind: "meta", agent: "general", model: "openai/gpt", at: undefined }]);
+    expect(
+      t.push({ type: "run_meta", agent: "general", model: "openai/gpt", pr: -1, headSha: "not a sha", ref: "" }),
+    ).toEqual([{ kind: "meta", agent: "general", model: "openai/gpt", at: undefined }]);
     expect(t.push({ type: "run_meta", agent: "", model: "x" })).toEqual([]);
     expect(t.steps()).toEqual([]); // not a step
   });
 });
 
 describe("createRunTimeline — model turns (item 15)", () => {
-  const turn = (over: Record<string, unknown> = {}) => ({ type: "turn", startedAt: 1_000, durationMs: 304_000, stopReason: "tool_use", at: 305_000, ...over });
+  const turn = (over: Record<string, unknown> = {}) => ({
+    type: "turn",
+    startedAt: 1_000,
+    durationMs: 304_000,
+    stopReason: "tool_use",
+    at: 305_000,
+    ...over,
+  });
 
   it("a `turn` becomes its own change, labelled like the products people already know", () => {
     const t = createRunTimeline();
@@ -347,8 +408,14 @@ describe("createRunTimeline — model turns (item 15)", () => {
 
   it("token usage shows as compact facts: in, out, cached (cached only when present)", () => {
     const t = createRunTimeline();
-    const [c] = t.push(turn({ durationMs: 1_300, usage: { inputTokens: 12_345, outputTokens: 800, cacheReadTokens: 11_200 } }));
-    expect(c).toMatchObject({ kind: "turn", label: "Thought for 1.3s", facts: ["12.3k in", "800 out", "11.2k cached"] });
+    const [c] = t.push(
+      turn({ durationMs: 1_300, usage: { inputTokens: 12_345, outputTokens: 800, cacheReadTokens: 11_200 } }),
+    );
+    expect(c).toMatchObject({
+      kind: "turn",
+      label: "Thought for 1.3s",
+      facts: ["12.3k in", "800 out", "11.2k cached"],
+    });
     const [d] = t.push(turn({ usage: { inputTokens: 1_250_000, outputTokens: 0 } }));
     expect(d).toMatchObject({ facts: ["1.3M in", "0 out"] });
   });

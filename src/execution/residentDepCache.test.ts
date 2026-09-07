@@ -55,7 +55,13 @@ describe("mutableCachePaths (tool-managed paths inside a hardlinked node_modules
       `${ROOT}/react`,
       `${ROOT}/@types`,
     ];
-    expect(mutableCachePaths(ROOT, listing)).toEqual([`${ROOT}/.cache`, `${ROOT}/.vite`, `${ROOT}/.prisma`, `${ROOT}/.bin`, `${ROOT}/.package-lock.json`]);
+    expect(mutableCachePaths(ROOT, listing)).toEqual([
+      `${ROOT}/.cache`,
+      `${ROOT}/.vite`,
+      `${ROOT}/.prisma`,
+      `${ROOT}/.bin`,
+      `${ROOT}/.package-lock.json`,
+    ]);
   });
   // 2026-09-05: the nominal resident (a pnpm workspace) took ~190 s per fresh
   // attach and every thread tree cost 2.6 GB of real disk — `.pnpm`, pnpm's
@@ -78,20 +84,40 @@ describe("mutableCachePaths (tool-managed paths inside a hardlinked node_modules
     ]);
   });
   it("a .cache directory nested inside a package (recursive) is mutable too", () => {
-    expect(mutableCachePaths(ROOT, [`${ROOT}/some-loader/.cache`, `${ROOT}/some-loader/lib`])).toEqual([`${ROOT}/some-loader/.cache`]);
+    expect(mutableCachePaths(ROOT, [`${ROOT}/some-loader/.cache`, `${ROOT}/some-loader/lib`])).toEqual([
+      `${ROOT}/some-loader/.cache`,
+    ]);
   });
   it("a path under an already-mutable ancestor is dropped — the ancestor copy covers it", () => {
-    expect(mutableCachePaths(ROOT, [`${ROOT}/.cache/babel-loader/.cache`, `${ROOT}/.cache`])).toEqual([`${ROOT}/.cache`]);
+    expect(mutableCachePaths(ROOT, [`${ROOT}/.cache/babel-loader/.cache`, `${ROOT}/.cache`])).toEqual([
+      `${ROOT}/.cache`,
+    ]);
   });
   it("scoped packages are never mistaken for dot entries; paths outside the root and non-.cache nested dot dirs are ignored", () => {
-    expect(mutableCachePaths(ROOT, [`${ROOT}/@scope/pkg`, "/wt/dist/.cache", `${ROOT}/pkg/.bin`, `${ROOT}/pkg/.github`])).toEqual([]);
+    expect(
+      mutableCachePaths(ROOT, [`${ROOT}/@scope/pkg`, "/wt/dist/.cache", `${ROOT}/pkg/.bin`, `${ROOT}/pkg/.github`]),
+    ).toEqual([]);
   });
   it("blank lines from the find output are ignored", () => {
     expect(mutableCachePaths(ROOT, ["", `${ROOT}/.vite`, ""])).toEqual([`${ROOT}/.vite`]);
   });
   it("the find argv names exactly those shapes — top-level dot entries (with descendants, deduped later), .cache dirs at any depth — and never -maxdepth, which GNU find applies globally", () => {
     const argv = mutableCacheFindArgv(ROOT);
-    expect(argv).toEqual(["find", ROOT, "-mindepth", "1", "(", "-path", `${ROOT}/.*`, "-o", "-type", "d", "-name", ".cache", ")"]);
+    expect(argv).toEqual([
+      "find",
+      ROOT,
+      "-mindepth",
+      "1",
+      "(",
+      "-path",
+      `${ROOT}/.*`,
+      "-o",
+      "-type",
+      "d",
+      "-name",
+      ".cache",
+      ")",
+    ]);
     expect(argv).not.toContain("-maxdepth");
   });
 });
@@ -146,8 +172,12 @@ describe("parseDepCacheScriptOutput", () => {
     expect(parseDepCacheScriptOutput("").mech).toBe("none");
   });
   it("collects the mutable= listing lines for mutableCachePaths, dropping empties", () => {
-    const out = "mutable=/wt/node_modules/.cache\nmutable=/wt/node_modules/x/.cache\nmutable=\ndir:node_modules=hardlink\n";
-    expect(parseDepCacheScriptOutput(out).mutableListing).toEqual(["/wt/node_modules/.cache", "/wt/node_modules/x/.cache"]);
+    const out =
+      "mutable=/wt/node_modules/.cache\nmutable=/wt/node_modules/x/.cache\nmutable=\ndir:node_modules=hardlink\n";
+    expect(parseDepCacheScriptOutput(out).mutableListing).toEqual([
+      "/wt/node_modules/.cache",
+      "/wt/node_modules/x/.cache",
+    ]);
   });
   it("surfaces the first err= tag as the failed step", () => {
     expect(parseDepCacheScriptOutput("dir:node_modules=hardlink\nerr=deps-perms\n").failedStep).toBe("deps-perms");
@@ -167,6 +197,7 @@ describe("mutableCacheSwapScript (the per-path rm/cp/chown swaps in ONE fork)", 
     expect(s).toContain("cp -R '/workspace/checkout/node_modules/.cache' '/wt/node_modules/.cache'");
     expect(s).toContain("cp -R '/workspace/checkout/node_modules/loader/.cache' '/wt/node_modules/loader/.cache'");
     expect(s).toContain("chown -Rh 'worker4:worker4' '/wt/node_modules/.cache'");
-    for (const step of ["deps-mutable-rm", "deps-mutable-copy", "deps-mutable-chown"]) expect(s).toContain(`err=${step}`);
+    for (const step of ["deps-mutable-rm", "deps-mutable-copy", "deps-mutable-chown"])
+      expect(s).toContain(`err=${step}`);
   });
 });

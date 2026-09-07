@@ -138,10 +138,18 @@ export const RUNTIME_REPLACEMENT_WORDING =
  *  interruption whatever the disk holds (the kill ended the step); otherwise a
  *  probe below the floor names the disk, and no probe (`undefined`/`null`)
  *  leaves the step's own failure — unknown is never full. */
-export function classifyRefreshFailure(input: { step: string; message: string; freeKiB?: number | null }): RefreshFailure {
+export function classifyRefreshFailure(input: {
+  step: string;
+  message: string;
+  freeKiB?: number | null;
+}): RefreshFailure {
   const { step, message } = input;
   if (isDiskFullMessage(message)) {
-    return { interrupted: false, diskFull: true, reason: diskFullReason({ step, message, freeKiB: input.freeKiB ?? null }) };
+    return {
+      interrupted: false,
+      diskFull: true,
+      reason: diskFullReason({ step, message, freeKiB: input.freeKiB ?? null }),
+    };
   }
   const timedOut = /\(timed out\)/.test(message);
   if (!timedOut && (INTERRUPTION_SIGNATURE.test(message) || RUNTIME_REPLACEMENT_WORDING.test(message))) {
@@ -195,7 +203,9 @@ export function nextRefreshDelayS(input: {
     case "idle":
       return input.idleIntervalS;
     case "interrupted":
-      return (input.consecutiveInterrupted ?? 1) > INTERRUPTED_REARM_MAX_CONSECUTIVE ? input.intervalS : INTERRUPTED_REARM_S;
+      return (input.consecutiveInterrupted ?? 1) > INTERRUPTED_REARM_MAX_CONSECUTIVE
+        ? input.intervalS
+        : INTERRUPTED_REARM_S;
     case "image-stale-restart":
     case "disk-full-restart":
       return INTERRUPTED_REARM_S;

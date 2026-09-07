@@ -28,7 +28,13 @@ describe("resident deploy preflight — decide()", () => {
   });
 
   it("busy → refuse, naming every busy resident with its count", () => {
-    const d = decide(payload([resident("repo:jshttp/vary", 0), resident("repo:coreplanelabs/switchboard", 2), resident("repo:a/b", 1)]));
+    const d = decide(
+      payload([
+        resident("repo:jshttp/vary", 0),
+        resident("repo:coreplanelabs/switchboard", 2),
+        resident("repo:a/b", 1),
+      ]),
+    );
     expect(d.allow).toBe(false);
     expect(d.busy).toEqual([
       { resource: "repo:coreplanelabs/switchboard", inFlight: 2 },
@@ -46,7 +52,12 @@ describe("resident deploy preflight — decide()", () => {
   // repo:coreplanelabs/switchboard right after a deploy that passed preflight).
   it("a resident mid-cycle (refreshing / restoring / onboarding) → refuse, naming the state, even with 0 in flight", () => {
     for (const state of ["refreshing", "restoring", "onboarding"]) {
-      const d = decide(payload([resident("repo:jshttp/vary", 0), { resource: "repo:coreplanelabs/switchboard", live: { state, inFlight: 0 } }]));
+      const d = decide(
+        payload([
+          resident("repo:jshttp/vary", 0),
+          { resource: "repo:coreplanelabs/switchboard", live: { state, inFlight: 0 } },
+        ]),
+      );
       expect(d.allow, state).toBe(false);
       expect(d.midCycle).toEqual([{ resource: "repo:coreplanelabs/switchboard", state }]);
       expect(d.message).toContain(`repo:coreplanelabs/switchboard (${state})`);
@@ -82,7 +93,9 @@ describe("resident deploy preflight — decide()", () => {
     const d = decide(payload([{ resource: "repo:x/y", live: { state: "hibernating", inFlight: 0 } }]));
     expect(d.allow).toBe(false);
     expect(d.midCycle).toEqual([]);
-    expect(d.unknown).toEqual([{ resource: "repo:x/y", error: expect.stringContaining('unrecognized state "hibernating"') }]);
+    expect(d.unknown).toEqual([
+      { resource: "repo:x/y", error: expect.stringContaining('unrecognized state "hibernating"') },
+    ]);
   });
 
   it("force overrides mid-cycle — allowed, flagged, and the warning names the state", () => {
@@ -93,7 +106,9 @@ describe("resident deploy preflight — decide()", () => {
   });
 
   it("a resident whose live view failed is unknown → refuse (fail closed)", () => {
-    const d = decide(payload([resident("repo:jshttp/vary", 0), { resource: "repo:x/y", live: { error: "DO timed out" } }]));
+    const d = decide(
+      payload([resident("repo:jshttp/vary", 0), { resource: "repo:x/y", live: { error: "DO timed out" } }]),
+    );
     expect(d.allow).toBe(false);
     expect(d.unknown).toEqual([{ resource: "repo:x/y", error: "DO timed out" }]);
     expect(d.message).toContain("repo:x/y");

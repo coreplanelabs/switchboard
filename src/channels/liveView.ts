@@ -1,5 +1,13 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
-import { authorize, matchesPredicate, predicateFor, type Actor, type Decision, type Predicate, type Resource } from "../core/authz/index.js";
+import {
+  authorize,
+  matchesPredicate,
+  predicateFor,
+  type Actor,
+  type Decision,
+  type Predicate,
+  type Resource,
+} from "../core/authz/index.js";
 import type { StopMode } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { IndexSubscriber, RunRegistry, RunSummary, Unsubscribe } from "../core/runRegistry.js";
@@ -12,7 +20,15 @@ import type { ShellRenderer } from "./webShell.js";
 import { WEB_HTML_HEADERS } from "./webShell.js";
 import type { RunIndexRowSeed, RunsIndexSeed, ScheduledSeed } from "./webSeed.js";
 export { FAVICON_ICO_SVG, FAVICON_IDLE, FAVICON_LIVE, faviconSvg } from "./favicon.js";
-import { nodeSseSink, parseLastEventId, serveEvents, serveHistoryEvents, serveIndexEvents, startSseHeartbeat, withOmittedMarkers } from "./liveView/sse.js";
+import {
+  nodeSseSink,
+  parseLastEventId,
+  serveEvents,
+  serveHistoryEvents,
+  serveIndexEvents,
+  startSseHeartbeat,
+  withOmittedMarkers,
+} from "./liveView/sse.js";
 
 /** One index row, whatever its source: a live registry row (which carries the
  *  capability `token`) or a finished/persisted `RunView` (no token). The seed
@@ -62,7 +78,8 @@ export { retentionSentence } from "./webSeed.js";
 /** Which live-view route a path is, if any. The bare `/runs` index carries no
  *  id (it is Access-gated, not token-gated); the per-run routes do. `stop` is
  *  the one WRITE route (`POST /runs/:id/stop`, #101). */
-export type RunRoute = { kind: "index" } | { kind: "scheduled" } | { id: string; kind: "page" | "events" | "friction" | "stop" };
+export type RunRoute =
+  { kind: "index" } | { kind: "scheduled" } | { id: string; kind: "page" | "events" | "friction" | "stop" };
 
 /** Match the bare index (`/runs`, `/runs/`), the Scheduled tab
  *  (`/runs/scheduled`, item 18 — a reserved path word, never a run id: ids are
@@ -198,7 +215,10 @@ function readDecision(actor: Actor, view: RunView): Decision {
  * `create()`, so one decision per run holds for its whole life; `shown` is
  * bounded by the registry's live set (an id leaves it with its `removed`).
  */
-export function visibleIndexFeed(subscribeIndex: (onEvent: IndexSubscriber) => Unsubscribe, visibleTo: Predicate): (onEvent: IndexSubscriber) => Unsubscribe {
+export function visibleIndexFeed(
+  subscribeIndex: (onEvent: IndexSubscriber) => Unsubscribe,
+  visibleTo: Predicate,
+): (onEvent: IndexSubscriber) => Unsubscribe {
   return (onEvent) => {
     const shown = new Set<string>();
     return subscribeIndex((ev) => {
@@ -253,7 +273,9 @@ async function loadFirings(store: ScheduleStore): Promise<FiringsState> {
   }
 }
 
-export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, res: ServerResponse, ctx: LiveViewContext) => boolean {
+export function createLiveViewHandler(
+  deps: LiveViewDeps,
+): (req: HttpRequest, res: ServerResponse, ctx: LiveViewContext) => boolean {
   const { service, index } = deps;
   const audit = deps.audit ?? ((entry) => console.log(`[runs] history read ${JSON.stringify(entry)}`));
   /** True when the table lets `actor` read this finished run tokenless; a deny
@@ -268,7 +290,8 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
     res.writeHead(status, TEXT);
     res.end(body);
   };
-  const historyReadForbidden = (req: HttpRequest): boolean => !!deps.devBypass && deps.devBypass.active() && !deps.devBypass.isLoopback(req);
+  const historyReadForbidden = (req: HttpRequest): boolean =>
+    !!deps.devBypass && deps.devBypass.active() && !deps.devBypass.isLoopback(req);
   /** Runs the async history path; a throw is a 500, never an unhandled rejection. */
   const run = (res: ServerResponse, work: () => Promise<void>) => {
     work().catch((err: unknown) => {
@@ -291,11 +314,20 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
    *  the viewer may see (the service's cap, never its 50-row default), with the
    *  live rows' capability tokens re-attached for their hrefs (finished rows
    *  stay tokenless), plus the "Older runs" href when the page was full. */
-  const mergedRows = async (live: readonly RunSummary[], visibleTo: Predicate, cursor?: { before: number; beforeId: string }): Promise<IndexPage> => {
+  const mergedRows = async (
+    live: readonly RunSummary[],
+    visibleTo: Predicate,
+    cursor?: { before: number; beforeId: string },
+  ): Promise<IndexPage> => {
     const tokens = new Map(live.map((s) => [s.id, s.token]));
     // The viewer's predicate is the store's own filter (R6): the service hands
     // it down and nothing is loaded to be dropped afterwards.
-    const { runs, nextBefore, storeUnavailable } = await service.listRuns({ status: "all", visibleTo, limit: pageSize, ...(cursor ?? {}) });
+    const { runs, nextBefore, storeUnavailable } = await service.listRuns({
+      status: "all",
+      visibleTo,
+      limit: pageSize,
+      ...(cursor ?? {}),
+    });
     // A cursor page holds finished runs only — the service leaves the live rows
     // off it (they all sort ahead of any cursor), so the page is a full page.
     // Only an UNFINISHED row gets its capability token (R10): the seed is data
@@ -344,7 +376,11 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
       }
       const visibleTo = readableRuns(ctx.actor);
       if (url.searchParams.get("stream") === "1") {
-        serveIndexEvents(visibleIndexFeed((onEvent) => index.subscribeIndex(onEvent), visibleTo), nodeSseSink(req, res), () => startSseHeartbeat(req, res));
+        serveIndexEvents(
+          visibleIndexFeed((onEvent) => index.subscribeIndex(onEvent), visibleTo),
+          nodeSseSink(req, res),
+          () => startSseHeartbeat(req, res),
+        );
         return true;
       }
       const live = index.listActive().filter((s) => matchesPredicate(visibleTo, s));
@@ -510,7 +546,10 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
       run(res, async () => {
         // The summary row carries what the decision reads; the diagnosis is fetched only for an allowed viewer.
         const found = await service.getRun(route.id);
-        const friction = found.ok && found.value.finished && readable(actor, found.value, "friction") ? await service.getRunFriction(route.id) : null;
+        const friction =
+          found.ok && found.value.finished && readable(actor, found.value, "friction")
+            ? await service.getRunFriction(route.id)
+            : null;
         if (!friction?.ok || !friction.value.finished) {
           text(res, 404, NOT_FOUND);
           return;
@@ -537,7 +576,12 @@ export function createLiveViewHandler(deps: LiveViewDeps): (req: HttpRequest, re
           // A person landed here: the same 404 (existence never revealed), as a
           // page with the way back (item 19). Machine routes keep the text body.
           res.writeHead(404, WEB_HTML_HEADERS);
-          res.end(deps.shell("Run not found", { page: "runNotFound", retentionDays: deps.retention ? deps.retention.retentionDays : null }));
+          res.end(
+            deps.shell("Run not found", {
+              page: "runNotFound",
+              retentionDays: deps.retention ? deps.retention.retentionDays : null,
+            }),
+          );
         } else text(res, 404, NOT_FOUND);
         return;
       }

@@ -26,7 +26,9 @@ export interface HealthzBody {
 export function parseHealthz(text: string): HealthzBody | undefined {
   try {
     const parsed: unknown = JSON.parse(text);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as HealthzBody) : undefined;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as HealthzBody)
+      : undefined;
   } catch {
     return undefined;
   }
@@ -44,7 +46,8 @@ export const LIVE_GATE_POLL_MS = 15_000;
 /** One poll's verdict: `live` carrying the identity that proved it, or the
  *  reason an operator would want to read — `waiting` until the deadline,
  *  `timeout` after it (the CLI exits non-zero: never report success when not live). */
-export type ReadyDecision<Identity> = { kind: "live" } & Identity | { kind: "waiting"; reason: string } | { kind: "timeout"; reason: string };
+export type ReadyDecision<Identity> =
+  ({ kind: "live" } & Identity) | { kind: "waiting"; reason: string } | { kind: "timeout"; reason: string };
 
 export type LiveDecision = ReadyDecision<{ commit: string }>;
 export type RestartDecision = ReadyDecision<{ startedAt: string }>;
@@ -98,12 +101,26 @@ export function sameCommit(a: string, b: string): boolean {
  * the same reason becomes a `timeout` (the CLI exits non-zero: never report
  * success when not live).
  */
-export function decideLive(body: HealthzBody | undefined, expectedCommit: string, elapsedMs: number, deadlineMs: number = LIVE_GATE_DEADLINE_MS): LiveDecision {
+export function decideLive(
+  body: HealthzBody | undefined,
+  expectedCommit: string,
+  elapsedMs: number,
+  deadlineMs: number = LIVE_GATE_DEADLINE_MS,
+): LiveDecision {
   return decideReady(body, elapsedMs, deadlineMs, (b) => {
     const commit = servedCommit(b);
-    if (!commit) return { live: false, reason: "/healthz carries no build identity — a container that predates the live gate is answering" };
-    if (commit === "unknown") return { live: false, reason: "serving a build with commit \"unknown\" (image built without build.json)" };
-    if (!sameCommit(commit, expectedCommit)) return { live: false, reason: `serving commit ${commit.slice(0, 7)}, expected ${expectedCommit.slice(0, 7)} (old container still up)` };
+    if (!commit)
+      return {
+        live: false,
+        reason: "/healthz carries no build identity — a container that predates the live gate is answering",
+      };
+    if (commit === "unknown")
+      return { live: false, reason: 'serving a build with commit "unknown" (image built without build.json)' };
+    if (!sameCommit(commit, expectedCommit))
+      return {
+        live: false,
+        reason: `serving commit ${commit.slice(0, 7)}, expected ${expectedCommit.slice(0, 7)} (old container still up)`,
+      };
     return { live: true, identity: { commit } };
   });
 }
@@ -122,18 +139,34 @@ function servedStartedAt(body: HealthzBody): string | undefined {
  * non-draining container that reports one counts. Same waiting/timeout
  * vocabulary as `decideLive`.
  */
-export function decideRestarted(body: HealthzBody | undefined, previousStartedAt: string | undefined, elapsedMs: number, deadlineMs: number = LIVE_GATE_DEADLINE_MS): RestartDecision {
+export function decideRestarted(
+  body: HealthzBody | undefined,
+  previousStartedAt: string | undefined,
+  elapsedMs: number,
+  deadlineMs: number = LIVE_GATE_DEADLINE_MS,
+): RestartDecision {
   return decideReady(body, elapsedMs, deadlineMs, (b) => {
     const startedAt = servedStartedAt(b);
-    if (!startedAt) return { live: false, reason: "/healthz carries no startedAt — a container that predates `deploy restart` is answering" };
-    if (previousStartedAt !== undefined && Date.parse(startedAt) <= Date.parse(previousStartedAt)) return { live: false, reason: `old container still answering (started ${startedAt})` };
+    if (!startedAt)
+      return {
+        live: false,
+        reason: "/healthz carries no startedAt — a container that predates `deploy restart` is answering",
+      };
+    if (previousStartedAt !== undefined && Date.parse(startedAt) <= Date.parse(previousStartedAt))
+      return { live: false, reason: `old container still answering (started ${startedAt})` };
     return { live: true, identity: { startedAt } };
   });
 }
 
 /** The line printed on every preflight retry, so a long wait is never silent.
  *  `tag` names the command waiting (`deploy:all`, `deploy:restart`). */
-export function heartbeatLine(step: string, body: HealthzBody | undefined, elapsedMs: number, waitMaxMs: number, tag = "deploy:all"): string {
+export function heartbeatLine(
+  step: string,
+  body: HealthzBody | undefined,
+  elapsedMs: number,
+  waitMaxMs: number,
+  tag = "deploy:all",
+): string {
   const waited = `waited ${Math.floor(elapsedMs / 60_000)}m of ${Math.round(waitMaxMs / 60_000)}m`;
   if (!body) return `[${tag}] ${step}: still waiting — /healthz not answering, ${waited}`;
   const n = typeof body.inFlight === "number" ? body.inFlight : "?";

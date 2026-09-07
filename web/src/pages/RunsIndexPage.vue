@@ -44,7 +44,9 @@ const dividerIndex = computed(() => {
     return e !== undefined && e - now.value <= LEAVING_WINDOW_MS;
   });
 });
-const beforeDivider = computed(() => (dividerIndex.value === -1 ? ordered.value : ordered.value.slice(0, dividerIndex.value)));
+const beforeDivider = computed(() =>
+  dividerIndex.value === -1 ? ordered.value : ordered.value.slice(0, dividerIndex.value),
+);
 const afterDivider = computed(() => (dividerIndex.value === -1 ? [] : ordered.value.slice(dividerIndex.value)));
 
 // The tab bar carries the live count too (item 21): "(n) <title>" and the
@@ -129,8 +131,17 @@ onUnmounted(() => {
     <div class="toolbar mb-1.5 flex items-center gap-4 px-2 text-xs text-muted">
       <span class="count tabular-nums" id="livecount">{{ liveCount }} running</span>
       <span class="filter ml-auto inline-flex items-center gap-1.5">
-        <label class="toggle inline-flex cursor-pointer select-none items-center gap-1.5 text-toned hover:text-highlighted">
-          <input type="checkbox" id="showdone" class="accent-green-600" :checked="showAll" aria-describedby="retention" @change="onToggleCompleted" />
+        <label
+          class="toggle inline-flex cursor-pointer select-none items-center gap-1.5 text-toned hover:text-highlighted"
+        >
+          <input
+            type="checkbox"
+            id="showdone"
+            class="accent-green-600"
+            :checked="showAll"
+            aria-describedby="retention"
+            @change="onToggleCompleted"
+          />
           Show completed
         </label>
         <UTooltip :text="retention">
@@ -144,7 +155,11 @@ onUnmounted(() => {
       </span>
     </div>
 
-    <p v-if="seed?.storeUnavailable" class="banner mb-3 rounded-md border border-warn px-2.5 py-1.5 text-[0.8rem] text-warn" role="status">
+    <p
+      v-if="seed?.storeUnavailable"
+      class="banner mb-3 rounded-md border border-warn px-2.5 py-1.5 text-[0.8rem] text-warn"
+      role="status"
+    >
       {{ seed.storeUnavailable }}
     </p>
 
@@ -161,7 +176,9 @@ onUnmounted(() => {
         <span class="normal-case tracking-normal text-dimmed max-sm:hidden">— each row says when it is removed</span>
       </li>
       <RunRow v-for="run in afterDivider" :key="run.id" :run="run" :now="now" :retention-ms="retentionMs" />
-      <li v-if="ordered.length === 0" id="empty" class="empty px-2 py-2 text-muted">{{ showAll ? "No runs." : "No active runs." }}</li>
+      <li v-if="ordered.length === 0" id="empty" class="empty px-2 py-2 text-muted">
+        {{ showAll ? "No runs." : "No active runs." }}
+      </li>
     </ul>
 
     <nav
@@ -173,7 +190,9 @@ onUnmounted(() => {
         <a class="text-primary hover:underline" href="/runs?all=1">← Newest runs</a>
         <span class="range tabular-nums text-dimmed">· runs finished before {{ olderThanLabel }}</span>
       </template>
-      <a v-if="seed?.olderHref" class="older ml-auto text-primary hover:underline" :href="seed.olderHref">Older runs →</a>
+      <a v-if="seed?.olderHref" class="older ml-auto text-primary hover:underline" :href="seed.olderHref"
+        >Older runs →</a
+      >
     </nav>
   </AppShell>
 </template>

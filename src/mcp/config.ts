@@ -21,9 +21,14 @@ export function parseMcpSettings(raw: unknown): McpSettings | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "object" || Array.isArray(raw)) throw new Error("mcp: expected a mapping");
   const m = raw as Record<string, unknown>;
-  if (m.servers !== undefined) throw new Error("mcp.servers moved: declare servers as `defaults.mcpServers`, `channels.<id>.mcpServers`, or `users.<id>.mcpServers` (features/mcp-tools.md item 11)");
+  if (m.servers !== undefined)
+    throw new Error(
+      "mcp.servers moved: declare servers as `defaults.mcpServers`, `channels.<id>.mcpServers`, or `users.<id>.mcpServers` (features/mcp-tools.md item 11)",
+    );
   const credentialKeyEnv = m.credentialKeyEnv === undefined ? DEFAULT_MCP_KEY_ENV : m.credentialKeyEnv;
-  if (typeof credentialKeyEnv !== "string" || !credentialKeyEnv) throw new Error("mcp.credentialKeyEnv: expected an environment variable name");
-  if (m.secretsPath !== undefined && (typeof m.secretsPath !== "string" || !m.secretsPath)) throw new Error("mcp.secretsPath: expected a file path");
+  if (typeof credentialKeyEnv !== "string" || !credentialKeyEnv)
+    throw new Error("mcp.credentialKeyEnv: expected an environment variable name");
+  if (m.secretsPath !== undefined && (typeof m.secretsPath !== "string" || !m.secretsPath))
+    throw new Error("mcp.secretsPath: expected a file path");
   return { credentialKeyEnv, ...(typeof m.secretsPath === "string" ? { secretsPath: m.secretsPath } : {}) };
 }

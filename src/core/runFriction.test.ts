@@ -80,7 +80,10 @@ describe("analyzeRunFriction — empty / untimed input", () => {
   });
 
   it("is deterministic: the same stream yields a deep-equal diagnosis", () => {
-    const events = [...bash("npm install", T0, 95_000, false, "ERR! network"), ...bash("npm install", T0 + 96_000, 60_000)];
+    const events = [
+      ...bash("npm install", T0, 95_000, false, "ERR! network"),
+      ...bash("npm install", T0 + 96_000, 60_000),
+    ];
     expect(analyzeRunFriction(events)).toEqual(analyzeRunFriction(events));
   });
 
@@ -96,13 +99,21 @@ describe("analyzeRunFriction — per-category classification", () => {
   it("slow_tool: a tool call whose result arrives past the slow threshold", () => {
     const d = analyzeRunFriction([...bash("npm test", T0, 45_000)], { slowToolMs: 30_000 });
     expect(d.findings).toHaveLength(1);
-    expect(d.findings[0]).toMatchObject({ category: "slow_tool", tool: "bash", durationMs: 45_000, severity: "medium", eventIndex: 0 });
+    expect(d.findings[0]).toMatchObject({
+      category: "slow_tool",
+      tool: "bash",
+      durationMs: 45_000,
+      severity: "medium",
+      eventIndex: 0,
+    });
     expect(d.byCategory.slow_tool).toEqual({ count: 1, durationMs: 45_000 });
     expect(d.verdict).toMatch(/slow tool/i);
   });
 
   it("slow_tool: ≥2× the threshold is high severity; under the threshold is not flagged", () => {
-    const d = analyzeRunFriction([...bash("npm test", T0, 60_000), ...bash("ls", T0 + 70_000, 29_999)], { slowToolMs: 30_000 });
+    const d = analyzeRunFriction([...bash("npm test", T0, 60_000), ...bash("ls", T0 + 70_000, 29_999)], {
+      slowToolMs: 30_000,
+    });
     expect(d.findings).toHaveLength(1);
     expect(d.findings[0].severity).toBe("high");
   });
@@ -114,7 +125,11 @@ describe("analyzeRunFriction — per-category classification", () => {
       result("frobnicate", false, "Unknown tool: frobnicate", T0 + 3_001),
     ]);
     expect(categories(d)).toEqual(["failed_tool", "failed_tool"]);
-    expect(d.findings[0]).toMatchObject({ tool: "bash", summary: expect.stringContaining("3 failing"), durationMs: 2_000 });
+    expect(d.findings[0]).toMatchObject({
+      tool: "bash",
+      summary: expect.stringContaining("3 failing"),
+      durationMs: 2_000,
+    });
     expect(d.findings[1]).toMatchObject({ tool: "frobnicate", eventIndex: 2 });
   });
 
@@ -157,17 +172,43 @@ describe("analyzeRunFriction — per-category classification", () => {
 
   it("setup_install: recognizes the common package managers, not `npm test` / `npm run build`", () => {
     const yes = [
-      "npm install", "npm i", "npm ci", "yarn", "yarn install", "pnpm i", "bun install", "pip3 install x",
-      "poetry install", "uv sync", "apt-get install -y jq", "brew install jq", "bundle install", "cargo fetch",
-      "go mod download", "npx playwright install", "cd repo && npm install", "python -m pip install requests",
-      "python3 -m pip install -r requirements.txt", "corepack yarn install", "corepack pnpm i",
+      "npm install",
+      "npm i",
+      "npm ci",
+      "yarn",
+      "yarn install",
+      "pnpm i",
+      "bun install",
+      "pip3 install x",
+      "poetry install",
+      "uv sync",
+      "apt-get install -y jq",
+      "brew install jq",
+      "bundle install",
+      "cargo fetch",
+      "go mod download",
+      "npx playwright install",
+      "cd repo && npm install",
+      "python -m pip install requests",
+      "python3 -m pip install -r requirements.txt",
+      "corepack yarn install",
+      "corepack pnpm i",
     ];
     const no = [
-      "npm test", "npm run build", "pnpm test", "cat package.json", "yarn test", "git status", "pip freeze", "echo npm install",
+      "npm test",
+      "npm run build",
+      "pnpm test",
+      "cat package.json",
+      "yarn test",
+      "git status",
+      "pip freeze",
+      "echo npm install",
       // the subcommand word must END there — a hyphenated continuation is a different word
-      "npm ci-lockfile-report", "yarn add-hoc-thing foo",
+      "npm ci-lockfile-report",
+      "yarn add-hoc-thing foo",
       // quoted text is prose, not a command segment
-      'echo "run: cd repo && npm install"', "echo 'then; npm install'",
+      'echo "run: cd repo && npm install"',
+      "echo 'then; npm install'",
     ];
     for (const c of yes) expect(categories(analyzeRunFriction(bash(c, T0, 10))), c).toEqual(["setup_install"]);
     for (const c of no) expect(categories(analyzeRunFriction(bash(c, T0, 10))), c).toEqual([]);
@@ -185,7 +226,10 @@ describe("analyzeRunFriction — per-category classification", () => {
   });
 
   it("budget_hit: time- and turn-budget exhaustion notes are high-severity budget hits", () => {
-    const d = analyzeRunFriction([...bash("ls", T0, 100), note("time_budget_exhausted", "time budget exhausted — writing up findings so far", T0 + 5_000)]);
+    const d = analyzeRunFriction([
+      ...bash("ls", T0, 100),
+      note("time_budget_exhausted", "time budget exhausted — writing up findings so far", T0 + 5_000),
+    ]);
     expect(categories(d)).toEqual(["budget_hit"]);
     expect(d.findings[0]).toMatchObject({ severity: "high", summary: expect.stringContaining("time") });
     expect(d.verdict).toMatch(/budget/i);
@@ -207,7 +251,10 @@ describe("analyzeRunFriction — per-category classification", () => {
   });
 
   it("failed_tool severity scales with how long the failure took: high once it is also slow", () => {
-    const d = analyzeRunFriction([...bash("npm test", T0, 5, false, "fail"), ...bash("npm run e2e", T0 + 10, 600_000, false, "timeout")], { slowToolMs: 30_000 });
+    const d = analyzeRunFriction(
+      [...bash("npm test", T0, 5, false, "fail"), ...bash("npm run e2e", T0 + 10, 600_000, false, "timeout")],
+      { slowToolMs: 30_000 },
+    );
     expect(d.findings.map((f) => f.severity)).toEqual(["medium", "high"]);
   });
 
@@ -293,7 +340,12 @@ describe("analyzeRunFriction — slow_model_turn (the time between a result and 
   });
 
   it("untimed streams never produce slow_model_turn and carry no modelTimeMs", () => {
-    const d = analyzeRunFriction([call("bash", "$ ls"), result("bash", true, "ok"), call("bash", "$ pwd"), result("bash", true, "ok")]);
+    const d = analyzeRunFriction([
+      call("bash", "$ ls"),
+      result("bash", true, "ok"),
+      call("bash", "$ pwd"),
+      result("bash", true, "ok"),
+    ]);
     expect(categories(d)).toEqual([]);
     expect(d.modelTimeMs).toBeUndefined();
   });
@@ -312,7 +364,11 @@ describe("analyzeRunFriction — slow_model_turn (the time between a result and 
 
 describe("analyzeRunFriction — aggregation and verdict", () => {
   it("runMs spans first→last timestamp; toolTimeMs sums paired call→result durations", () => {
-    const d = analyzeRunFriction([...bash("a", T0, 1_000), ...bash("b", T0 + 5_000, 2_000), note("wrap_up", "w", T0 + 10_000)]);
+    const d = analyzeRunFriction([
+      ...bash("a", T0, 1_000),
+      ...bash("b", T0 + 5_000, 2_000),
+      note("wrap_up", "w", T0 + 10_000),
+    ]);
     expect(d.runMs).toBe(10_000);
     expect(d.toolTimeMs).toBe(3_000);
     expect(d.hasTimings).toBe(true);
@@ -326,7 +382,9 @@ describe("analyzeRunFriction — aggregation and verdict", () => {
   });
 
   it("an unpaired trailing tool_call in an UNFINISHED stream (finished:false) is not flagged — it is still running", () => {
-    const d = analyzeRunFriction([...bash("ls", T0, 100), call("bash", "$ npm install", T0 + 1_000)], { finished: false });
+    const d = analyzeRunFriction([...bash("ls", T0, 100), call("bash", "$ npm install", T0 + 1_000)], {
+      finished: false,
+    });
     expect(d.findings).toEqual([]);
     expect(d.toolCalls).toBe(2);
   });
@@ -343,18 +401,28 @@ describe("analyzeRunFriction — aggregation and verdict", () => {
 
   it("with no timings the verdict falls back to the category with the most findings", () => {
     const d = analyzeRunFriction([
-      call("bash", "$ x"), result("bash", false, "e"),
-      call("bash", "$ y"), result("bash", false, "e"),
-      call("bash", "$ x"), result("bash", true, "ok"),
+      call("bash", "$ x"),
+      result("bash", false, "e"),
+      call("bash", "$ y"),
+      result("bash", false, "e"),
+      call("bash", "$ x"),
+      result("bash", true, "ok"),
     ]);
     expect(d.verdict).toMatch(/failed tool/i);
   });
 
   it("byCategory always lists every category (zeroed when absent), so consumers need no undefined checks", () => {
     const d = analyzeRunFriction([]);
-    expect(Object.keys(d.byCategory).sort()).toEqual(
-      ["budget_hit", "failed_tool", "infra_failure", "retry", "setup_install", "slow_model_turn", "slow_tool", "wrap_up"],
-    );
+    expect(Object.keys(d.byCategory).sort()).toEqual([
+      "budget_hit",
+      "failed_tool",
+      "infra_failure",
+      "retry",
+      "setup_install",
+      "slow_model_turn",
+      "slow_tool",
+      "wrap_up",
+    ]);
     for (const v of Object.values(d.byCategory)) expect(v).toEqual({ count: 0, durationMs: 0 });
   });
 });
@@ -406,7 +474,8 @@ describe("analyzeRunFriction — narrative events are not steps; `context` is in
     expect(mixed.toolCalls).toBe(plain.toolCalls);
     // Counts match; durations may not — the `answer` legitimately extends the
     // stream's end (a wrap-up that took until the answer took that long).
-    const counts = (d: FrictionDiagnosis) => Object.fromEntries(Object.entries(d.byCategory).map(([c, t]) => [c, t.count]));
+    const counts = (d: FrictionDiagnosis) =>
+      Object.fromEntries(Object.entries(d.byCategory).map(([c, t]) => [c, t.count]));
     expect(counts(mixed)).toEqual(counts(plain));
     expect(mixed.findings.map((f) => f.category)).toEqual(plain.findings.map((f) => f.category));
   });
@@ -430,7 +499,14 @@ describe("analyzeRunFriction — narrative events are not steps; `context` is in
       { type: "input", text: "please run the tests", at: T0 },
       { type: "turn", startedAt: T0, durationMs: 900, stopReason: "tool_use", at: T0 + 900 },
       ...bash("npm test", T0 + 1000, 2000),
-      { type: "turn", startedAt: T0 + 3000, durationMs: 6000, stopReason: "end_turn", usage: { inputTokens: 10, outputTokens: 2 }, at: T0 + 9000 },
+      {
+        type: "turn",
+        startedAt: T0 + 3000,
+        durationMs: 6000,
+        stopReason: "end_turn",
+        usage: { inputTokens: 10, outputTokens: 2 },
+        at: T0 + 9000,
+      },
     ];
     const d = analyzeRunFriction(events);
     expect(d.eventCount).toBe(2);
@@ -439,7 +515,10 @@ describe("analyzeRunFriction — narrative events are not steps; `context` is in
   });
 
   it("a stream of only `context` events has no timings and zero events", () => {
-    const d = analyzeRunFriction([{ type: "context", text: "user: hi", at: T0 }, { type: "context", text: "assistant: hello", at: T0 + 100 }]);
+    const d = analyzeRunFriction([
+      { type: "context", text: "user: hi", at: T0 },
+      { type: "context", text: "assistant: hello", at: T0 + 100 },
+    ]);
     expect(d.eventCount).toBe(0);
     expect(d.hasTimings).toBe(false);
     expect(d.runMs).toBeUndefined();

@@ -57,7 +57,11 @@ export function scheduleActor(name: string, grants: Grants): RunAction["actor"] 
 
 /** What the weekly pass needs: read the fleet's runs (`friction report` is a
  *  run read across every channel — the #395 fix) and file proposals. No repos. */
-const SELF_IMPROVEMENT_GRANTS: Grants = Object.freeze({ actions: new Set(["friction:read", "friction:write"]), channels: "all", repos: new Set<string>() });
+const SELF_IMPROVEMENT_GRANTS: Grants = Object.freeze({
+  actions: new Set(["friction:read", "friction:write"]),
+  channels: "all",
+  repos: new Set<string>(),
+});
 
 export type ScheduleAction =
   | RunAction
@@ -89,15 +93,22 @@ export const SCHEDULES: readonly ScheduleDef[] = [
     cron: "* * * * *",
     worker: "bot",
     internal: true,
-    description: "Container keep-alive (GET /healthz) — also what restarts the container after a deploy or platform maintenance. Not a run.",
+    description:
+      "Container keep-alive (GET /healthz) — also what restarts the container after a deploy or platform maintenance. Not a run.",
     action: { type: "healthz" },
   },
   {
     name: "self-improvement",
     cron: "0 14 * * 1",
     worker: "bot",
-    description: "Weekly self-improvement pass (#84): cluster the friction ledger and file deduped `self-improvement` issues. Proposals only.",
-    action: { type: "run", command: "friction propose", identity: CRON_IDENTITY, actor: scheduleActor("self-improvement", SELF_IMPROVEMENT_GRANTS) },
+    description:
+      "Weekly self-improvement pass (#84): cluster the friction ledger and file deduped `self-improvement` issues. Proposals only.",
+    action: {
+      type: "run",
+      command: "friction propose",
+      identity: CRON_IDENTITY,
+      actor: scheduleActor("self-improvement", SELF_IMPROVEMENT_GRANTS),
+    },
   },
   {
     name: "resident-watchdog",
@@ -223,9 +234,18 @@ export function nextFire(expr: string, fromMs: number): number | undefined {
  *  `no-run` = ingress answered 200 without a run receipt; `ingress-error` =
  *  non-2xx (401 unknown identity, 503 disabled, 5xx bot down); `misconfigured`
  *  = the shim could not even plan the request (no `cron` token) and ran nothing. */
-export type FiringOutcome = "completed" | "failed" | "stopped_soft" | "stopped_hard" | "no-run" | "ingress-error" | "misconfigured";
+export type FiringOutcome =
+  "completed" | "failed" | "stopped_soft" | "stopped_hard" | "no-run" | "ingress-error" | "misconfigured";
 
-const OUTCOMES: ReadonlySet<string> = new Set<FiringOutcome>(["completed", "failed", "stopped_soft", "stopped_hard", "no-run", "ingress-error", "misconfigured"]);
+const OUTCOMES: ReadonlySet<string> = new Set<FiringOutcome>([
+  "completed",
+  "failed",
+  "stopped_soft",
+  "stopped_hard",
+  "no-run",
+  "ingress-error",
+  "misconfigured",
+]);
 
 export interface ScheduleFiring {
   /** `ScheduleDef.name`. */
@@ -258,20 +278,25 @@ export function isScheduleFiring(v: unknown): v is ScheduleFiring {
 // ---------------------------------------------------------------------------
 
 export type FiringPlan =
-  | { ok: true; token: string; body: { text: string; thread: string } }
-  | { ok: false; reason: string };
+  { ok: true; token: string; body: { text: string; thread: string } } | { ok: false; reason: string };
 
 /** Turn a run schedule into the /ingress request the shim sends. Fail-closed:
  *  without a usable `SWITCHBOARD_INGRESS_TOKENS` entry for the schedule's
  *  identity there is no request — the reason is for the log and the firing
  *  record, never guessed around. Each firing gets its own thread key so two
  *  firings never share a conversation. */
-export function planScheduledFiring(schedule: RunSchedule, ingressTokensJson: string | undefined, firedAt: number): FiringPlan {
-  if (!ingressTokensJson || ingressTokensJson.trim() === "") return { ok: false, reason: "SWITCHBOARD_INGRESS_TOKENS is not set" };
+export function planScheduledFiring(
+  schedule: RunSchedule,
+  ingressTokensJson: string | undefined,
+  firedAt: number,
+): FiringPlan {
+  if (!ingressTokensJson || ingressTokensJson.trim() === "")
+    return { ok: false, reason: "SWITCHBOARD_INGRESS_TOKENS is not set" };
   const parsed = parseIngressTokenMap(ingressTokensJson);
   if (parsed.ok === false) return { ok: false, reason: `SWITCHBOARD_INGRESS_TOKENS is ${parsed.reason}` };
   const token = tokenForSubject(parsed.tokens, schedule.action.identity);
-  if (!token) return { ok: false, reason: `SWITCHBOARD_INGRESS_TOKENS has no entry with subject "${schedule.action.identity}"` };
+  if (!token)
+    return { ok: false, reason: `SWITCHBOARD_INGRESS_TOKENS has no entry with subject "${schedule.action.identity}"` };
   return { ok: true, token, body: { text: schedule.action.command, thread: `${schedule.name}-${firedAt}` } };
 }
 
@@ -291,7 +316,12 @@ function cap(text: string): string {
  *  receipt yields the run's id + terminal status; a 2xx without one is
  *  `no-run`; anything else is `ingress-error` with the status and the error
  *  field (or the raw body) as detail. */
-export function interpretIngressResponse(schedule: RunSchedule, firedAt: number, status: number, bodyText: string): ScheduleFiring {
+export function interpretIngressResponse(
+  schedule: RunSchedule,
+  firedAt: number,
+  status: number,
+  bodyText: string,
+): ScheduleFiring {
   let body: Record<string, unknown> | undefined;
   try {
     const parsed: unknown = JSON.parse(bodyText);
@@ -315,7 +345,12 @@ export function interpretIngressResponse(schedule: RunSchedule, firedAt: number,
       ...(reply !== undefined ? { detail: cap(reply) } : {}),
     };
   }
-  return { schedule: schedule.name, firedAt, outcome: "no-run", ...(reply !== undefined ? { detail: cap(reply) } : {}) };
+  return {
+    schedule: schedule.name,
+    firedAt,
+    outcome: "no-run",
+    ...(reply !== undefined ? { detail: cap(reply) } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +365,14 @@ export interface WatchdogSummary {
   /** `error` is already a message (`runWatchdog` passes rejections through `errMsg`).
    *  `disk` is the resident's last disk sample gauge (`{usedKiB, totalKiB, …}`,
    *  features/resident-repos.md item 55) when it has one. */
-  results: ReadonlyArray<{ resource: string; state?: unknown; reason?: unknown; action?: unknown; error?: string; disk?: unknown }>;
+  results: ReadonlyArray<{
+    resource: string;
+    state?: unknown;
+    reason?: unknown;
+    action?: unknown;
+    error?: string;
+    disk?: unknown;
+  }>;
 }
 
 /** The fullest resident's disk, as `<pct>% (<owner/name>)`, from the per-resident
@@ -349,8 +391,13 @@ function fullestDisk(results: WatchdogSummary["results"]): string | undefined {
 /** Turn a watchdog pass (or the error it threw) into a firing record. A pass is
  *  `completed` when every resident was checked; any per-resident error — or a
  *  throw before the sweep — is `failed`, naming the first failing resident. */
-export function watchdogFiring(schedule: ScheduleDef, firedAt: number, result: WatchdogSummary | Error): ScheduleFiring {
-  if (result instanceof Error) return { schedule: schedule.name, firedAt, outcome: "failed", detail: cap(`watchdog threw: ${result.message}`) };
+export function watchdogFiring(
+  schedule: ScheduleDef,
+  firedAt: number,
+  result: WatchdogSummary | Error,
+): ScheduleFiring {
+  if (result instanceof Error)
+    return { schedule: schedule.name, firedAt, outcome: "failed", detail: cap(`watchdog threw: ${result.message}`) };
   const errors = result.results.filter((r) => r.error !== undefined);
   const reArmed = result.results.filter((r) => r.action === "re-armed").length;
   const timedOut = result.results.filter((r) => r.action === "provision-timed-out").length;
@@ -382,7 +429,11 @@ export type RecordResult = { ok: true } | { ok: false; reason: string };
  *  /runs Scheduled panel: a failure is returned for the caller's log line, never
  *  thrown — the firing's real work already happened and is its own record.
  *  Fail-closed on config: no URL or bearer → nothing sent. */
-export async function recordFiring(config: ScheduleRecorderConfig, firing: ScheduleFiring, fetchImpl: typeof fetch = fetch): Promise<RecordResult> {
+export async function recordFiring(
+  config: ScheduleRecorderConfig,
+  firing: ScheduleFiring,
+  fetchImpl: typeof fetch = fetch,
+): Promise<RecordResult> {
   if (!config.url) return { ok: false, reason: "STATE_WORKER_URL var is not set" };
   if (!config.token) return { ok: false, reason: "MEMORY_TOKEN secret is not set" };
   try {

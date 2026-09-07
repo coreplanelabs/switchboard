@@ -92,7 +92,10 @@ export interface GithubApi {
   readFile(repo: string, path: string, ref?: string): Promise<RepoFile>;
   listTree(repo: string, path?: string, ref?: string): Promise<TreeEntry[]>;
   searchCode(query: string, repo?: string, limit?: number): Promise<CodeSearchHit[]>;
-  listIssues(repo: string, opts?: { state?: "open" | "closed" | "all"; labels?: string[]; limit?: number }): Promise<IssueSummary[]>;
+  listIssues(
+    repo: string,
+    opts?: { state?: "open" | "closed" | "all"; labels?: string[]; limit?: number },
+  ): Promise<IssueSummary[]>;
   getIssue(repo: string, number: number): Promise<{ issue: IssueSummary; comments: IssueComment[] }>;
   createIssue(repo: string, input: NewIssueInput): Promise<IssueSummary>;
   updateIssue(repo: string, number: number, patch: IssuePatch): Promise<IssueSummary>;
@@ -122,7 +125,9 @@ export interface RestGithubApiOptions {
 }
 
 const clipBody = (body: string | undefined): string | undefined =>
-  body !== undefined && body.length > MAX_BODY_CHARS ? `${body.slice(0, MAX_BODY_CHARS)}\n\n_(clipped by Switchboard: body exceeded ${MAX_BODY_CHARS} chars)_` : body;
+  body !== undefined && body.length > MAX_BODY_CHARS
+    ? `${body.slice(0, MAX_BODY_CHARS)}\n\n_(clipped by Switchboard: body exceeded ${MAX_BODY_CHARS} chars)_`
+    : body;
 
 export class RestGithubApi implements GithubApi {
   private readonly fetchImpl: typeof fetch;
@@ -139,7 +144,12 @@ export class RestGithubApi implements GithubApi {
       const res = await this.request("read", "GET", `/installation/repositories?per_page=100&page=${page}`);
       const body = (await res.json()) as { repositories?: Array<Record<string, unknown>>; total_count?: number };
       for (const r of body.repositories ?? []) {
-        out.push({ fullName: String(r.full_name), private: Boolean(r.private), defaultBranch: String(r.default_branch ?? "main"), description: typeof r.description === "string" ? r.description : null });
+        out.push({
+          fullName: String(r.full_name),
+          private: Boolean(r.private),
+          defaultBranch: String(r.default_branch ?? "main"),
+          description: typeof r.description === "string" ? r.description : null,
+        });
       }
       if ((body.repositories ?? []).length < 100) break;
     }
@@ -155,16 +165,30 @@ export class RestGithubApi implements GithubApi {
     const size = Number(body.size ?? 0);
     const encoding = String(body.encoding ?? "");
     let content: string;
-    if (encoding === "base64") content = Buffer.from(String(body.content ?? "").replace(/\n/g, ""), "base64").toString("utf8");
+    if (encoding === "base64")
+      content = Buffer.from(String(body.content ?? "").replace(/\n/g, ""), "base64").toString("utf8");
     else if (encoding === "none") {
       // Over ~1 MB GitHub omits the content; read the blob via the raw media
       // type, streaming only as far as the clip — never the whole file.
-      const raw = await this.request("read", "GET", `/repos/${repo}/contents/${encodePath(path)}${q}`, undefined, "application/vnd.github.raw+json");
+      const raw = await this.request(
+        "read",
+        "GET",
+        `/repos/${repo}/contents/${encodePath(path)}${q}`,
+        undefined,
+        "application/vnd.github.raw+json",
+      );
       content = await readTextCapped(raw, MAX_FILE_CHARS + 1);
     } else content = String(body.content ?? "");
     if (content.includes("\u0000")) content = `(binary file, ${size} bytes — not shown)`;
     const truncated = content.length > MAX_FILE_CHARS;
-    return { path, content: truncated ? content.slice(0, MAX_FILE_CHARS) : content, size, truncated, sha: String(body.sha ?? ""), url: String(body.html_url ?? "") };
+    return {
+      path,
+      content: truncated ? content.slice(0, MAX_FILE_CHARS) : content,
+      size,
+      truncated,
+      sha: String(body.sha ?? ""),
+      url: String(body.html_url ?? ""),
+    };
   }
 
   async listTree(repo: string, path = "", ref?: string): Promise<TreeEntry[]> {
@@ -181,17 +205,28 @@ export class RestGithubApi implements GithubApi {
 
   async searchCode(query: string, repo?: string, limit = 10): Promise<CodeSearchHit[]> {
     const q = repo ? `${query} repo:${repo}` : query;
-    const res = await this.request("read", "GET", `/search/code?q=${encodeURIComponent(q)}&per_page=${Math.min(Math.max(limit, 1), 30)}`, undefined, "application/vnd.github.text-match+json");
+    const res = await this.request(
+      "read",
+      "GET",
+      `/search/code?q=${encodeURIComponent(q)}&per_page=${Math.min(Math.max(limit, 1), 30)}`,
+      undefined,
+      "application/vnd.github.text-match+json",
+    );
     const body = (await res.json()) as { items?: Array<Record<string, unknown>> };
     return (body.items ?? []).map((it) => ({
       repo: String((it.repository as Record<string, unknown> | undefined)?.full_name ?? ""),
       path: String(it.path),
       url: String(it.html_url ?? ""),
-      fragments: Array.isArray(it.text_matches) ? (it.text_matches as Array<Record<string, unknown>>).map((m) => String(m.fragment ?? "")).filter(Boolean) : [],
+      fragments: Array.isArray(it.text_matches)
+        ? (it.text_matches as Array<Record<string, unknown>>).map((m) => String(m.fragment ?? "")).filter(Boolean)
+        : [],
     }));
   }
 
-  async listIssues(repo: string, opts: { state?: "open" | "closed" | "all"; labels?: string[]; limit?: number } = {}): Promise<IssueSummary[]> {
+  async listIssues(
+    repo: string,
+    opts: { state?: "open" | "closed" | "all"; labels?: string[]; limit?: number } = {},
+  ): Promise<IssueSummary[]> {
     const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
     // GitHub's issues endpoint interleaves pull requests, which are dropped
     // here — so a page of `limit` rows can hold fewer than `limit` issues.
@@ -199,7 +234,13 @@ export class RestGithubApi implements GithubApi {
     // (bounded, so a PR-only repo cannot page forever).
     const out: IssueSummary[] = [];
     for (let page = 1; page <= MAX_ISSUE_PAGES && out.length < limit; page++) {
-      const params = new URLSearchParams({ state: opts.state ?? "open", per_page: "100", page: String(page), sort: "updated", direction: "desc" });
+      const params = new URLSearchParams({
+        state: opts.state ?? "open",
+        per_page: "100",
+        page: String(page),
+        sort: "updated",
+        direction: "desc",
+      });
       if (opts.labels?.length) params.set("labels", opts.labels.join(","));
       const res = await this.request("read", "GET", `/repos/${repo}/issues?${params.toString()}`);
       const rows = (await res.json()) as Array<Record<string, unknown>>;
@@ -237,12 +278,17 @@ export class RestGithubApi implements GithubApi {
   }
 
   async updateIssue(repo: string, number: number, patch: IssuePatch): Promise<IssueSummary> {
-    const res = await this.request("write", "PATCH", `/repos/${repo}/issues/${number}`, { ...patch, ...(patch.body !== undefined ? { body: clipBody(patch.body) } : {}) });
+    const res = await this.request("write", "PATCH", `/repos/${repo}/issues/${number}`, {
+      ...patch,
+      ...(patch.body !== undefined ? { body: clipBody(patch.body) } : {}),
+    });
     return toIssue((await res.json()) as Record<string, unknown>);
   }
 
   async commentIssue(repo: string, number: number, body: string): Promise<{ url: string }> {
-    const res = await this.request("write", "POST", `/repos/${repo}/issues/${number}/comments`, { body: clipBody(body) });
+    const res = await this.request("write", "POST", `/repos/${repo}/issues/${number}/comments`, {
+      body: clipBody(body),
+    });
     const row = (await res.json()) as Record<string, unknown>;
     return { url: String(row.html_url ?? "") };
   }
@@ -263,14 +309,22 @@ export class RestGithubApi implements GithubApi {
       // Live 2026-09-03: an App installation gets "Viewer not authorized to
       // delete" — GitHub lets only a repo admin's USER credential delete an
       // issue. The tool words that for the model (github.ts).
-      const forbidden = body.errors.some((e) => e.type === "FORBIDDEN" || /permission|not accessible|not authorized/i.test(e.message ?? ""));
+      const forbidden = body.errors.some(
+        (e) => e.type === "FORBIDDEN" || /permission|not accessible|not authorized/i.test(e.message ?? ""),
+      );
       throw new GithubApiError(forbidden ? 403 : 400, `GitHub refused to delete ${repo}#${number}: ${msg}`);
     }
   }
 
   /** One call. Non-2xx throws `GithubApiError` with the status and the start
    *  of GitHub's message. */
-  private async request(scope: GithubTokenScope, method: "GET" | "POST" | "PATCH", path: string, body?: unknown, accept = "application/vnd.github+json"): Promise<Response> {
+  private async request(
+    scope: GithubTokenScope,
+    method: "GET" | "POST" | "PATCH",
+    path: string,
+    body?: unknown,
+    accept = "application/vnd.github+json",
+  ): Promise<Response> {
     const token = await this.token(scope);
     if (!token) throw new GithubApiError(401, "no GitHub credential available (configure the GitHub App or GH_TOKEN)");
     const res = await this.fetchImpl(`https://api.github.com${path}`, {
@@ -336,8 +390,14 @@ function encodePath(path: string): string {
 }
 
 function toIssue(row: Record<string, unknown>): IssueSummary {
-  const labels = Array.isArray(row.labels) ? (row.labels as Array<Record<string, unknown> | string>).map((l) => (typeof l === "string" ? l : String(l.name ?? ""))).filter(Boolean) : [];
-  const assignees = Array.isArray(row.assignees) ? (row.assignees as Array<Record<string, unknown>>).map((a) => String(a.login ?? "")).filter(Boolean) : [];
+  const labels = Array.isArray(row.labels)
+    ? (row.labels as Array<Record<string, unknown> | string>)
+        .map((l) => (typeof l === "string" ? l : String(l.name ?? "")))
+        .filter(Boolean)
+    : [];
+  const assignees = Array.isArray(row.assignees)
+    ? (row.assignees as Array<Record<string, unknown>>).map((a) => String(a.login ?? "")).filter(Boolean)
+    : [];
   return {
     number: Number(row.number),
     title: String(row.title ?? ""),
@@ -400,7 +460,12 @@ export class InMemoryGithubApi implements GithubApi {
   }
 
   async listRepos(): Promise<InstallationRepo[]> {
-    return [...this.repos.entries()].map(([fullName, r]) => ({ fullName, private: r.private ?? true, defaultBranch: r.defaultBranch ?? "main", description: r.description ?? null }));
+    return [...this.repos.entries()].map(([fullName, r]) => ({
+      fullName,
+      private: r.private ?? true,
+      defaultBranch: r.defaultBranch ?? "main",
+      description: r.description ?? null,
+    }));
   }
 
   async readFile(repo: string, path: string, ref?: string): Promise<RepoFile> {
@@ -408,26 +473,37 @@ export class InMemoryGithubApi implements GithubApi {
     const clean = path.replace(/^\/+/, "");
     const content = r.files[clean];
     if (content === undefined) {
-      if (Object.keys(r.files).some((f) => f.startsWith(`${clean}/`))) throw new GithubApiError(400, `${path} is a directory — list it with github_tree`);
+      if (Object.keys(r.files).some((f) => f.startsWith(`${clean}/`)))
+        throw new GithubApiError(400, `${path} is a directory — list it with github_tree`);
       throw new GithubApiError(404, `GitHub GET /repos/${repo}/contents/${clean} failed: HTTP 404 Not Found`);
     }
     const truncated = content.length > MAX_FILE_CHARS;
-    return { path: clean, content: truncated ? content.slice(0, MAX_FILE_CHARS) : content, size: content.length, truncated, sha: "0".repeat(40), url: `https://github.com/${repo}/blob/${ref ?? r.defaultBranch ?? "main"}/${clean}` };
+    return {
+      path: clean,
+      content: truncated ? content.slice(0, MAX_FILE_CHARS) : content,
+      size: content.length,
+      truncated,
+      sha: "0".repeat(40),
+      url: `https://github.com/${repo}/blob/${ref ?? r.defaultBranch ?? "main"}/${clean}`,
+    };
   }
 
   async listTree(repo: string, path = ""): Promise<TreeEntry[]> {
     const r = this.repo(repo);
     const prefix = path.replace(/^\/+|\/+$/g, "");
-    if (prefix && r.files[prefix] !== undefined) throw new GithubApiError(400, `${path} is a file — read it with github_file`);
+    if (prefix && r.files[prefix] !== undefined)
+      throw new GithubApiError(400, `${path} is a file — read it with github_file`);
     const seen = new Map<string, TreeEntry>();
     for (const f of Object.keys(r.files)) {
       if (prefix && !f.startsWith(`${prefix}/`)) continue;
       const rest = prefix ? f.slice(prefix.length + 1) : f;
       const [head, ...more] = rest.split("/");
       const p = prefix ? `${prefix}/${head}` : head;
-      if (!seen.has(p)) seen.set(p, more.length ? { path: p, type: "dir" } : { path: p, type: "file", size: r.files[f].length });
+      if (!seen.has(p))
+        seen.set(p, more.length ? { path: p, type: "dir" } : { path: p, type: "file", size: r.files[f].length });
     }
-    if (prefix && seen.size === 0) throw new GithubApiError(404, `GitHub GET /repos/${repo}/contents/${prefix} failed: HTTP 404 Not Found`);
+    if (prefix && seen.size === 0)
+      throw new GithubApiError(404, `GitHub GET /repos/${repo}/contents/${prefix} failed: HTTP 404 Not Found`);
     return [...seen.values()].sort((a, b) => a.path.localeCompare(b.path));
   }
 
@@ -437,13 +513,22 @@ export class InMemoryGithubApi implements GithubApi {
       if (repo && name !== repo.toLowerCase()) continue;
       for (const [path, content] of Object.entries(r.files)) {
         const idx = content.indexOf(query);
-        if (idx >= 0) hits.push({ repo: name, path, url: `https://github.com/${name}/blob/main/${path}`, fragments: [content.slice(Math.max(0, idx - 40), idx + query.length + 40)] });
+        if (idx >= 0)
+          hits.push({
+            repo: name,
+            path,
+            url: `https://github.com/${name}/blob/main/${path}`,
+            fragments: [content.slice(Math.max(0, idx - 40), idx + query.length + 40)],
+          });
       }
     }
     return hits.slice(0, limit);
   }
 
-  async listIssues(repo: string, opts: { state?: "open" | "closed" | "all"; labels?: string[]; limit?: number } = {}): Promise<IssueSummary[]> {
+  async listIssues(
+    repo: string,
+    opts: { state?: "open" | "closed" | "all"; labels?: string[]; limit?: number } = {},
+  ): Promise<IssueSummary[]> {
     const state = opts.state ?? "open";
     return this.repo(repo)
       .issues.filter((i) => state === "all" || i.state === state)

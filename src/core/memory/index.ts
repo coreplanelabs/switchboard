@@ -7,14 +7,7 @@ import { listScopeKeys, requestScopeKeys } from "./scope.js";
 import { selectMemoryStore } from "./stores.js";
 import { reflect, reflectionActor, shouldReflect, trackReflection, type ReflectGateInput } from "./reflection.js";
 
-export type {
-  MemoryRecord,
-  MemoryCandidate,
-  MemoryQuery,
-  MemoryStore,
-  MemoryScope,
-  MemoryConfig,
-} from "./types.js";
+export type { MemoryRecord, MemoryCandidate, MemoryQuery, MemoryStore, MemoryScope, MemoryConfig } from "./types.js";
 export {
   DEFAULT_WEIGHTS,
   RECENCY_TAU_MS,
@@ -31,9 +24,24 @@ export {
   type ScoreWeights,
   type MemoryBudget,
 } from "./scorer.js";
-export { deriveScopeKey, requestScopeKeys, listScopeKeys, ORG_RESOURCE, type ScopeContext, type RequestScopeKeys } from "./scope.js";
+export {
+  deriveScopeKey,
+  requestScopeKeys,
+  listScopeKeys,
+  ORG_RESOURCE,
+  type ScopeContext,
+  type RequestScopeKeys,
+} from "./scope.js";
 export { NullMemoryStore, InMemoryMemoryStore, selectMemoryStore } from "./stores.js";
-export { normalizeText, rankRecords, planWrite, planEviction, mintRecord, DEFAULT_SCOPE_CAP, type WritePlan } from "./engine.js";
+export {
+  normalizeText,
+  rankRecords,
+  planWrite,
+  planEviction,
+  mintRecord,
+  DEFAULT_SCOPE_CAP,
+  type WritePlan,
+} from "./engine.js";
 export { WorkerMemoryStore, MEMORY_WORKER_TIMEOUT_MS, type WorkerMemoryStoreOptions } from "./workerStore.js";
 export { buildMemoryStore, DEFAULT_MEMORY_TOKEN_ENV } from "./buildStore.js";
 export {

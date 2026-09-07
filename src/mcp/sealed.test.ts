@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { generateCredentialKeyBase64, importCredentialKey, openCredential, randomNonce, sealCredential } from "./sealed.js";
+import {
+  generateCredentialKeyBase64,
+  importCredentialKey,
+  openCredential,
+  randomNonce,
+  sealCredential,
+} from "./sealed.js";
 
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; // 32 zero bytes, base64
 
@@ -19,7 +25,9 @@ describe("credential sealing (features/mcp-tools.md item 16)", () => {
     await expect(openCredential(k, { ...sealed, serverId: "org/notion" })).rejects.toThrow(/wrong key or tampered/);
     const bytes = Buffer.from(sealed.sealed, "base64");
     bytes[bytes.length - 1] ^= 0xff;
-    await expect(openCredential(k, { ...sealed, sealed: bytes.toString("base64") })).rejects.toThrow(/wrong key or tampered/);
+    await expect(openCredential(k, { ...sealed, sealed: bytes.toString("base64") })).rejects.toThrow(
+      /wrong key or tampered/,
+    );
     const other = importCredentialKey(generateCredentialKeyBase64());
     await expect(openCredential(other, sealed)).rejects.toThrow(/wrong key or tampered/);
     await expect(openCredential({ ...k, keyId: "k2" }, sealed)).rejects.toThrow(/sealed under key "k1"/);

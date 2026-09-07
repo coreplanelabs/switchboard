@@ -115,7 +115,16 @@ export function chartModelOf(report: CostReport, series: string[]): ChartModel {
       dayLabels.push({ x: Number((x + w / 2).toFixed(1)), label: d.date.slice(5) });
     }
   });
-  return { width: W, height: H, gridLines, segments, dayLabels, axisY: Number(y(0).toFixed(1)), marginLeft: m.l, marginRight: m.r };
+  return {
+    width: W,
+    height: H,
+    gridLines,
+    segments,
+    dayLabels,
+    axisY: Number(y(0).toFixed(1)),
+    marginLeft: m.l,
+    marginRight: m.r,
+  };
 }
 
 export interface ResourceSplitRow {

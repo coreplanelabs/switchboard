@@ -58,7 +58,9 @@ describe("AppShell", () => {
   it("puts the docs in the phone menu too, as its own group above the sections", () => {
     const wrapper = mountApp(AppShell, { props: { title: "Live runs", nav: "runs" } });
     // The header holds two dropdowns (theme, hamburger); this is the hamburger.
-    const menu = wrapper.findAllComponents({ name: "DropdownMenu" }).find((c) => c.find('button[aria-label="Menu"]').exists());
+    const menu = wrapper
+      .findAllComponents({ name: "DropdownMenu" })
+      .find((c) => c.find('button[aria-label="Menu"]').exists());
     const items = menu?.props("items") as { label: string; to?: string; target?: string }[][];
     expect(items[0]).toEqual([expect.objectContaining({ label: "Docs", to: "/docs", target: "_blank" })]);
     expect(items[1].map((i) => i.label)).toEqual(["Runs", "Residents", "Costs"]);

@@ -22,7 +22,9 @@ describe("imagePins (parser)", () => {
   });
 
   it("flags @latest, a range, and a bare name with no version", () => {
-    const pins = imagePins("RUN npm i -g pnpm@latest\nRUN npm install -g yarn@^1\nRUN corepack prepare pnpm --activate\n");
+    const pins = imagePins(
+      "RUN npm i -g pnpm@latest\nRUN npm install -g yarn@^1\nRUN corepack prepare pnpm --activate\n",
+    );
     expect(pins.map((p) => [p.tool, p.spec, p.floating])).toEqual([
       ["pnpm", "latest", true],
       ["yarn", "^1", true],

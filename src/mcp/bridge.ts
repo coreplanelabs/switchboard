@@ -49,7 +49,12 @@ export function newRunBudget(): { calls: number } {
 /** Bridge one server's discovered tools. A remote name listed twice is bridged
  *  once (the first listing wins): the digest cannot separate identical names,
  *  and a duplicate must degrade, never fail the run at `mergeTools`. */
-export function bridgeMcpTools(server: McpServerSpec, client: McpClient, tools: McpToolInfo[], opts: BridgeOptions): RunnableTool[] {
+export function bridgeMcpTools(
+  server: McpServerSpec,
+  client: McpClient,
+  tools: McpToolInfo[],
+  opts: BridgeOptions,
+): RunnableTool[] {
   const taken = new Set<string>();
   const seenRemote = new Set<string>();
   const now = opts.now ?? Date.now;
@@ -62,7 +67,8 @@ export function bridgeMcpTools(server: McpServerSpec, client: McpClient, tools: 
     const name = mcpToolName(server.name, t.name, taken);
     taken.add(name);
     const readOnly = t.annotations?.readOnlyHint === true && t.annotations?.destructiveHint !== true;
-    const description = `${untrustedDescriptionPrefix(server.name)} ${clip(t.description ?? "", MCP_MAX_DESCRIPTION_CHARS)}`.trimEnd();
+    const description =
+      `${untrustedDescriptionPrefix(server.name)} ${clip(t.description ?? "", MCP_MAX_DESCRIPTION_CHARS)}`.trimEnd();
     const inputSchema = isObjectSchema(t.inputSchema) ? t.inputSchema : { type: "object", properties: {} };
     const tool: RunnableTool = {
       name,
@@ -79,7 +85,14 @@ export function bridgeMcpTools(server: McpServerSpec, client: McpClient, tools: 
         try {
           result = await client.callTool(t.name, input ?? {}, { signal: ctx.signal });
         } catch (err) {
-          ctx.publish?.({ type: "mcp_tool_use", server: server.name, tool: t.name, ok: false, durationMs: now() - startedAt, bytes: 0 });
+          ctx.publish?.({
+            type: "mcp_tool_use",
+            server: server.name,
+            tool: t.name,
+            ok: false,
+            durationMs: now() - startedAt,
+            bytes: 0,
+          });
           const message = err instanceof McpError ? err.message : err instanceof Error ? err.message : String(err);
           throw new Error(`MCP ${server.name}/${t.name} failed: ${message}`);
         }
@@ -105,7 +118,11 @@ export function bridgeMcpTools(server: McpServerSpec, client: McpClient, tools: 
 /** Text parts joined; anything else named, never carried (an image from a
  *  remote server is not something we forward to the model in PR1). */
 export function renderContent(result: McpCallResult): string {
-  const parts = result.content.map((p) => (p.type === "text" && typeof (p as { text?: unknown }).text === "string" ? (p as { text: string }).text : `[${p.type} part]`));
+  const parts = result.content.map((p) =>
+    p.type === "text" && typeof (p as { text?: unknown }).text === "string"
+      ? (p as { text: string }).text
+      : `[${p.type} part]`,
+  );
   let text = parts.join("\n");
   if (text.trim() === "" && result.structuredContent !== undefined) {
     try {

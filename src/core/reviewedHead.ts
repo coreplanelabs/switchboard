@@ -66,7 +66,11 @@ export function checkReviewedHead(input: { expected?: string; observed?: string;
       : { ok: false, reason: `reviewed head ${observed.slice(0, 7)} is not the PR head ${expected.slice(0, 7)}` };
   }
   const reported = normalizeHead(input.reported);
-  if (!reported) return { ok: false, reason: "reviewed head unknown — the workspace HEAD could not be read and no head was reported with the verdict" };
+  if (!reported)
+    return {
+      ok: false,
+      reason: "reviewed head unknown — the workspace HEAD could not be read and no head was reported with the verdict",
+    };
   return sameCommit(reported, expected)
     ? { ok: true, head: reported, source: "reported" }
     : { ok: false, reason: `reviewed head ${reported.slice(0, 7)} is not the PR head ${expected.slice(0, 7)}` };

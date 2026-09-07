@@ -97,8 +97,12 @@ describe("configAwarenessBlock — effort", () => {
   };
 
   it("names the resolved effort on the header line, and the provider default when none resolved", () => {
-    expect(configAwarenessBlock({ ...base, effort: "medium" })).toMatch(/agent `coding` on model `anthropic\/m` at effort `medium`\./);
-    expect(configAwarenessBlock(base)).toMatch(/agent `coding` on model `anthropic\/m` at the model's default effort\./);
+    expect(configAwarenessBlock({ ...base, effort: "medium" })).toMatch(
+      /agent `coding` on model `anthropic\/m` at effort `medium`\./,
+    );
+    expect(configAwarenessBlock(base)).toMatch(
+      /agent `coding` on model `anthropic\/m` at the model's default effort\./,
+    );
   });
 
   it("reports effort overrides by scope and attributes an effort directive, and tells the model how effort is tuned", () => {
@@ -153,15 +157,22 @@ describe("configAwarenessBlock — MCP (#394, features/mcp-tools.md item 17)", (
   });
 
   it("lists the servers connected for this run and the ones that did not answer", () => {
-    const block = configAwarenessBlock({ ...base, mcp: { registryOn: true, served: ["linear", "vanta"], unavailable: ["notion"] } });
-    expect(block).toContain("External MCP servers connected for this run: linear, vanta — their tools are named `mcp__<server>__*` (details: `mcp list`, `mcp show <name>`).");
+    const block = configAwarenessBlock({
+      ...base,
+      mcp: { registryOn: true, served: ["linear", "vanta"], unavailable: ["notion"] },
+    });
+    expect(block).toContain(
+      "External MCP servers connected for this run: linear, vanta — their tools are named `mcp__<server>__*` (details: `mcp list`, `mcp show <name>`).",
+    );
     expect(block).toContain("MCP servers configured for this agent that did not answer this run: notion.");
     expect(block).not.toContain("none connected");
   });
 
   it("with the registry on and nothing connected, points the user at `mcp add`; with the registry off and nothing served, says nothing", () => {
     const on = configAwarenessBlock({ ...base, mcp: { registryOn: true, served: [], unavailable: [] } });
-    expect(on).toContain("External MCP servers: none connected for you or org-wide yet. Anyone can connect one for their own runs with `mcp add <name> --url <url>`");
+    expect(on).toContain(
+      "External MCP servers: none connected for you or org-wide yet. Anyone can connect one for their own runs with `mcp add <name> --url <url>`",
+    );
     expect(on).toContain("never paste tokens in chat");
     const off = configAwarenessBlock({ ...base, mcp: { registryOn: false, served: [], unavailable: [] } });
     expect(off).not.toContain("MCP");

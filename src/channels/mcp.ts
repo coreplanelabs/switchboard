@@ -1,7 +1,13 @@
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
 import { grantsFor } from "../core/authz/grants.js";
-import { CommandRegistry, type Caller, type CommandDef, type CommandInvoker, type InvokeErrorCode } from "../core/commandRegistry.js";
+import {
+  CommandRegistry,
+  type Caller,
+  type CommandDef,
+  type CommandInvoker,
+  type InvokeErrorCode,
+} from "../core/commandRegistry.js";
 import { jsonSchemaFor, mcpToolName, namedToInput } from "../core/commandSurface.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
@@ -93,7 +99,11 @@ export interface McpOptions {
 
 /** KTD2/KTD11: `runs.list` → tool `runs_list`; `inputSchema` = the command's
  *  arguments (by name) + options (camelCase keys), derived from the definition. */
-function toMcpTool(cmd: CommandDef<unknown>): { name: string; description: string; inputSchema: Record<string, unknown> } {
+function toMcpTool(cmd: CommandDef<unknown>): {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+} {
   return { name: mcpToolName(cmd.id), description: cmd.describe, inputSchema: jsonSchemaFor(cmd) };
 }
 
@@ -273,7 +283,9 @@ async function route(
       // registry-only token (`runs:read`, …) gets the same `unauthorized` code
       // the registry tools answer with.
       if (!hasDispatchScope(identity)) {
-        return err(id, RPC_CODE_FOR.unauthorized, `${PLATFORM}:${identity.subject} is not allowed to call dispatch`, { code: "unauthorized" });
+        return err(id, RPC_CODE_FOR.unauthorized, `${PLATFORM}:${identity.subject} is not allowed to call dispatch`, {
+          code: "unauthorized",
+        });
       }
       if (typeof args.text !== "string" || args.text.trim() === "") {
         return err(id, INVALID_PARAMS, "`text` is required and must be a non-empty string");
@@ -382,10 +394,7 @@ async function handleMcpMessage(
  * the handler, and writes the response. Wire this at POST /mcp in the server
  * (src/index.ts). Mirrors http.ts's createIngressHandler.
  */
-export function createMcpHandler(
-  deps: CoreDeps,
-  options: McpOptions,
-): (req: HttpRequest, res: ServerResponse) => void {
+export function createMcpHandler(deps: CoreDeps, options: McpOptions): (req: HttpRequest, res: ServerResponse) => void {
   const maxBytes = options.maxBodyBytes ?? MAX_BODY_BYTES;
   const write = (res: ServerResponse, status: number, body?: unknown) => {
     if (body === undefined) {

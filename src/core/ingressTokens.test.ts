@@ -6,8 +6,16 @@ import { parseIngressTokenMap, tokenForSubject } from "./ingressTokens.js";
 
 describe("parseIngressTokenMap", () => {
   it("parses a valid map, keeping `channel` only when present", () => {
-    const parsed = parseIngressTokenMap(JSON.stringify({ s3cr3t: { subject: "alice", channel: "ops" }, t2: { subject: "bob" } }));
-    expect(parsed).toEqual({ ok: true, tokens: { s3cr3t: { subject: "alice", channel: "ops", scopes: ["dispatch"] }, t2: { subject: "bob", scopes: ["dispatch"] } } });
+    const parsed = parseIngressTokenMap(
+      JSON.stringify({ s3cr3t: { subject: "alice", channel: "ops" }, t2: { subject: "bob" } }),
+    );
+    expect(parsed).toEqual({
+      ok: true,
+      tokens: {
+        s3cr3t: { subject: "alice", channel: "ops", scopes: ["dispatch"] },
+        t2: { subject: "bob", scopes: ["dispatch"] },
+      },
+    });
     expect("channel" in parsed.tokens.t2).toBe(false);
   });
 
@@ -45,12 +53,21 @@ describe("parseIngressTokenMap", () => {
         emptyScope: { subject: "d", scopes: [""] },
       }),
     );
-    expect(parsed).toEqual({ ok: true, tokens: { plain: { subject: "a", scopes: ["dispatch"] }, reader: { subject: "b", scopes: ["dispatch", "runs:read"] } } });
+    expect(parsed).toEqual({
+      ok: true,
+      tokens: {
+        plain: { subject: "a", scopes: ["dispatch"] },
+        reader: { subject: "b", scopes: ["dispatch", "runs:read"] },
+      },
+    });
   });
 });
 
 describe("tokenForSubject", () => {
-  const tokens = { a: { subject: "cron", channel: "cron", scopes: ["dispatch"] }, b: { subject: "justin-ingress", scopes: ["dispatch"] } };
+  const tokens = {
+    a: { subject: "cron", channel: "cron", scopes: ["dispatch"] },
+    b: { subject: "justin-ingress", scopes: ["dispatch"] },
+  };
 
   it("returns the one token mapped to the subject", () => {
     expect(tokenForSubject(tokens, "cron")).toBe("a");

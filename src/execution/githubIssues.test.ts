@@ -34,7 +34,12 @@ const tokenOk = async () => "tok-123";
 describe("GithubIssueTracker.listOpen", () => {
   it("lists open issues with the label (paginated) plus the newest unfiltered ones, deduped, dropping pull requests", async () => {
     const page = (n: number) =>
-      Array.from({ length: n }, (_, i) => ({ number: i, title: `t${i}`, body: `b${i}`, html_url: `https://gh/o/r/issues/${i}` }));
+      Array.from({ length: n }, (_, i) => ({
+        number: i,
+        title: `t${i}`,
+        body: `b${i}`,
+        html_url: `https://gh/o/r/issues/${i}`,
+      }));
     const { fetch, calls } = fakeFetch(({ url }) => {
       if (url.endsWith("&page=1")) return { status: 200, body: [...page(100)] };
       if (url.endsWith("&page=2")) {
@@ -51,7 +56,12 @@ describe("GithubIssueTracker.listOpen", () => {
         return {
           status: 200,
           body: [
-            { number: 902, title: "fresh", body: "<!-- switchboard-friction-pattern: x -->", html_url: "https://gh/o/r/issues/902" },
+            {
+              number: 902,
+              title: "fresh",
+              body: "<!-- switchboard-friction-pattern: x -->",
+              html_url: "https://gh/o/r/issues/902",
+            },
             { number: 901, title: "issue", body: null, html_url: "https://gh/o/r/issues/901" }, // overlap → once
           ],
         };
@@ -61,7 +71,12 @@ describe("GithubIssueTracker.listOpen", () => {
     const tracker = new GithubIssueTracker({ fetch, token: tokenOk });
     const issues = await tracker.listOpen("o/r", "self-improvement");
     expect(issues).toHaveLength(102);
-    expect(issues.find((i) => i.number === 901)).toEqual({ number: 901, title: "issue", body: "", url: "https://gh/o/r/issues/901" });
+    expect(issues.find((i) => i.number === 901)).toEqual({
+      number: 901,
+      title: "issue",
+      body: "",
+      url: "https://gh/o/r/issues/901",
+    });
     expect(issues.find((i) => i.number === 902)?.title).toBe("fresh");
     expect(calls.map((c) => c.url.replace("https://api.github.com/repos/o/r/issues?", ""))).toEqual([
       "state=open&labels=self-improvement&per_page=100&page=1",
@@ -89,7 +104,8 @@ describe("GithubIssueTracker.create", () => {
   it("ensures the label exists (creating it once when missing), then opens the issue", async () => {
     let labelExists = false;
     const { fetch, calls } = fakeFetch(({ url, method }) => {
-      if (url.endsWith("/labels/self-improvement") && method === "GET") return labelExists ? { status: 200, body: {} } : { status: 404 };
+      if (url.endsWith("/labels/self-improvement") && method === "GET")
+        return labelExists ? { status: 200, body: {} } : { status: 404 };
       if (url.endsWith("/labels") && method === "POST") {
         labelExists = true;
         return { status: 201, body: {} };
@@ -140,10 +156,15 @@ describe("GithubIssueTracker.create", () => {
   it("clips an oversized body so the issue still opens", async () => {
     const { fetch, calls } = fakeFetch(({ url, method }) => {
       if (url.includes("/labels/")) return { status: 200, body: {} };
-      if (url.endsWith("/issues") && method === "POST") return { status: 201, body: { number: 1, title: "T", body: "B", html_url: "u" } };
+      if (url.endsWith("/issues") && method === "POST")
+        return { status: 201, body: { number: 1, title: "T", body: "B", html_url: "u" } };
       return undefined;
     });
-    await new GithubIssueTracker({ fetch, token: tokenOk }).create("o/r", { title: "T", body: "x".repeat(70_000), labels: ["l"] });
+    await new GithubIssueTracker({ fetch, token: tokenOk }).create("o/r", {
+      title: "T",
+      body: "x".repeat(70_000),
+      labels: ["l"],
+    });
     const sent = calls.find((c) => c.url.endsWith("/issues"))!.body as { body: string };
     expect(sent.body.length).toBeLessThan(66_000);
     expect(sent.body).toMatch(/truncated/);

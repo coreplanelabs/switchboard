@@ -44,8 +44,12 @@ describe("planReadonlyAttach", () => {
   });
 
   it("a live tree built for the OTHER mode is a mode switch → recreate (both directions)", () => {
-    expect(planReadonlyAttach({ readonly: true, prior: { readonly: false }, slug: "a/b", mirrorDir: MIRROR }).modeSwitch).toBe(true);
-    expect(planReadonlyAttach({ readonly: false, prior: { readonly: true }, slug: "a/b", mirrorDir: MIRROR }).modeSwitch).toBe(true);
+    expect(
+      planReadonlyAttach({ readonly: true, prior: { readonly: false }, slug: "a/b", mirrorDir: MIRROR }).modeSwitch,
+    ).toBe(true);
+    expect(
+      planReadonlyAttach({ readonly: false, prior: { readonly: true }, slug: "a/b", mirrorDir: MIRROR }).modeSwitch,
+    ).toBe(true);
   });
 
   it("a binding predating the field counts as writable: a read-only attach on it switches, a writable one reuses", () => {
@@ -54,11 +58,19 @@ describe("planReadonlyAttach", () => {
   });
 
   it("same mode → reuse; an evicted prior is gone from disk, so its mode never forces a switch", () => {
-    expect(planReadonlyAttach({ readonly: true, prior: { readonly: true }, slug: "a/b", mirrorDir: MIRROR }).modeSwitch).toBe(false);
-    expect(planReadonlyAttach({ readonly: false, prior: { readonly: true, evicted: true }, slug: "a/b", mirrorDir: MIRROR }).modeSwitch).toBe(false);
+    expect(
+      planReadonlyAttach({ readonly: true, prior: { readonly: true }, slug: "a/b", mirrorDir: MIRROR }).modeSwitch,
+    ).toBe(false);
+    expect(
+      planReadonlyAttach({ readonly: false, prior: { readonly: true, evicted: true }, slug: "a/b", mirrorDir: MIRROR })
+        .modeSwitch,
+    ).toBe(false);
   });
 
   it("a reused read-only tree is still scrubbed — the credential file is written per attach today, so a stale one may exist", () => {
-    expect(planReadonlyAttach({ readonly: true, prior: { readonly: true }, slug: "a/b", mirrorDir: MIRROR }).scrubCredentials).toBe(true);
+    expect(
+      planReadonlyAttach({ readonly: true, prior: { readonly: true }, slug: "a/b", mirrorDir: MIRROR })
+        .scrubCredentials,
+    ).toBe(true);
   });
 });

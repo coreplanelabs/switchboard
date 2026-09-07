@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { GENERATED_FOOTER, anchorUrl, parsePrDescription, renderPrDescriptionMarkdown, type PrDescription } from "./prDescription.js";
+import {
+  GENERATED_FOOTER,
+  anchorUrl,
+  parsePrDescription,
+  renderPrDescriptionMarkdown,
+  type PrDescription,
+} from "./prDescription.js";
 
 // Feature: features/pr-description.md — the PR description is data; the GitHub
 // body is one rendering of it. The fixture is PR #329's own description and
@@ -42,7 +48,10 @@ describe("parsePrDescription (the schema)", () => {
     expect(badTitle).toThrow(/title/); // the zod error names the offending path
     expect(() => parsePrDescription({ ...desc(), title: "Fix\r\nthe gate" })).toThrow(/single line/);
     const badStep = () =>
-      parsePrDescription({ ...desc(), tour: [{ title: "The\nthing", description: "d", anchor: { path: "src/a.ts", from: 1, to: 2 } }] });
+      parsePrDescription({
+        ...desc(),
+        tour: [{ title: "The\nthing", description: "d", anchor: { path: "src/a.ts", from: 1, to: 2 } }],
+      });
     expect(badStep).toThrow(/single line/);
     expect(badStep).toThrow(/tour/); // …for tour-step titles too
   });
@@ -72,7 +81,14 @@ describe("renderPrDescriptionMarkdown", () => {
   it("renders every section as a ## heading in the contract order, TL;DR first", () => {
     const md = renderPrDescriptionMarkdown(desc(), CTX);
     const headings = md.split("\n").filter((l) => l.startsWith("## "));
-    expect(headings).toEqual(["## TL;DR", "## What & why", "## Tour", "## Decisions", "## Risks & implications", "## Validation"]);
+    expect(headings).toEqual([
+      "## TL;DR",
+      "## What & why",
+      "## Tour",
+      "## Decisions",
+      "## Risks & implications",
+      "## Validation",
+    ]);
     expect(md.startsWith("## TL;DR\n\nTwo sentences.\n")).toBe(true);
     expect(md.trimEnd().endsWith(GENERATED_FOOTER)).toBe(true);
   });
@@ -103,21 +119,31 @@ describe("renderPrDescriptionMarkdown", () => {
     const b = renderPrDescriptionMarkdown(d, { ...CTX, headSha: "a".repeat(40) });
     expect(a).not.toBe(b);
     expect(b).toContain(`/blob/${"a".repeat(40)}/src/a.ts#L3-L9`);
-    expect(anchorUrl(CTX, { path: "x/y.ts", from: 1, to: 2 })).toBe(`https://github.com/coreplanelabs/switchboard/blob/${CTX.headSha}/x/y.ts#L1-L2`);
+    expect(anchorUrl(CTX, { path: "x/y.ts", from: 1, to: 2 })).toBe(
+      `https://github.com/coreplanelabs/switchboard/blob/${CTX.headSha}/x/y.ts#L1-L2`,
+    );
   });
 
   it("percent-encodes path segments (a space or `#` in a filename would break the link), keeping `/` as the separator", () => {
-    expect(anchorUrl(CTX, { path: "docs/my file#1.md", from: 1, to: 2 })).toBe(`https://github.com/coreplanelabs/switchboard/blob/${CTX.headSha}/docs/my%20file%231.md#L1-L2`);
+    expect(anchorUrl(CTX, { path: "docs/my file#1.md", from: 1, to: 2 })).toBe(
+      `https://github.com/coreplanelabs/switchboard/blob/${CTX.headSha}/docs/my%20file%231.md#L1-L2`,
+    );
   });
 
   it("refuses a short sha or a non owner/name repo (a branch or short ref would not embed as code)", () => {
     expect(() => renderPrDescriptionMarkdown(desc(), { ...CTX, headSha: "5bf806a" })).toThrow(/full 40-char/);
-    expect(() => renderPrDescriptionMarkdown(desc(), { ...CTX, headSha: "coding/pr-tour-template" })).toThrow(/full 40-char/);
-    expect(() => renderPrDescriptionMarkdown(desc(), { ...CTX, repo: "https://github.com/a/b" })).toThrow(/owner\/name/);
+    expect(() => renderPrDescriptionMarkdown(desc(), { ...CTX, headSha: "coding/pr-tour-template" })).toThrow(
+      /full 40-char/,
+    );
+    expect(() => renderPrDescriptionMarkdown(desc(), { ...CTX, repo: "https://github.com/a/b" })).toThrow(
+      /owner\/name/,
+    );
   });
 
   it("Remaining changes lists each file with its note, or says none is left", () => {
-    expect(renderPrDescriptionMarkdown(desc(), CTX)).toContain("### 2. Remaining changes\n\n- none — every touched file is covered by a step above\n");
+    expect(renderPrDescriptionMarkdown(desc(), CTX)).toContain(
+      "### 2. Remaining changes\n\n- none — every touched file is covered by a step above\n",
+    );
     const md = renderPrDescriptionMarkdown(desc({ remaining: [{ path: "package.json", note: "new script" }] }), CTX);
     expect(md).toContain("### 2. Remaining changes\n\n- `package.json` — new script\n");
   });
@@ -153,7 +179,9 @@ describe("renderPrDescriptionMarkdown", () => {
 // the golden file, and this assertion are one artifact by construction.
 describe("golden: PR #329 rendered through the pipeline", () => {
   it("fixture → markdown equals the checked-in body byte for byte", () => {
-    const fixture = parsePrDescription(JSON.parse(readFileSync(new URL("./testing/pr329.description.json", import.meta.url), "utf8")));
+    const fixture = parsePrDescription(
+      JSON.parse(readFileSync(new URL("./testing/pr329.description.json", import.meta.url), "utf8")),
+    );
     const golden = readFileSync(new URL("./testing/pr329.body.md", import.meta.url), "utf8");
     expect(renderPrDescriptionMarkdown(fixture, CTX)).toBe(golden);
   });

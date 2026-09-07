@@ -77,14 +77,27 @@ export interface HostBootstrapOptions {
 /** Run the bootstrap against the real host: read the manifest, resolve the out
  *  path, shell out to `op` on apply, write the file. `log` receives the plan
  *  lines (names + refs, never values). */
-export async function bootstrapOnHost(opts: HostBootstrapOptions, log: (line: string) => void): Promise<BootstrapResult> {
+export async function bootstrapOnHost(
+  opts: HostBootstrapOptions,
+  log: (line: string) => void,
+): Promise<BootstrapResult> {
   const manifestFile = isAbsolute(opts.manifest) ? opts.manifest : resolve(REPO_ROOT, opts.manifest);
   const manifest = parseManifest(readFileSync(manifestFile, "utf8"));
   // Default out path keeps resolved values under a gitignored dir, keyed by
   // service+env so parallel services never clobber each other.
-  const outFile = opts.out ? (isAbsolute(opts.out) ? opts.out : resolve(REPO_ROOT, opts.out)) : resolve(REPO_ROOT, ".agent-env", `${opts.service}.${opts.env}.env`);
+  const outFile = opts.out
+    ? isAbsolute(opts.out)
+      ? opts.out
+      : resolve(REPO_ROOT, opts.out)
+    : resolve(REPO_ROOT, ".agent-env", `${opts.service}.${opts.env}.env`);
   return runBootstrap(
     { env: opts.env, service: opts.service, apply: opts.apply, outFile },
-    { manifest, env: { OP_SERVICE_ACCOUNT_TOKEN: process.env.OP_SERVICE_ACCOUNT_TOKEN }, opReader, sink: fileSink, log },
+    {
+      manifest,
+      env: { OP_SERVICE_ACCOUNT_TOKEN: process.env.OP_SERVICE_ACCOUNT_TOKEN },
+      opReader,
+      sink: fileSink,
+      log,
+    },
   );
 }

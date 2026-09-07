@@ -140,22 +140,37 @@ users:
   });
 
   it("unset everywhere → undefined (the agent definition / provider default decides)", async () => {
-    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: { agent: "review" } }).effort).toBeUndefined();
+    expect(
+      s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: { agent: "review" } }).effort,
+    ).toBeUndefined();
   });
 
   it("defaults.efforts.<agent> is the floor layer", async () => {
-    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: { agent: "coding" } }).effort).toBe("medium");
+    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: { agent: "coding" } }).effort).toBe(
+      "medium",
+    );
   });
 
   it("per-agent precedence: user efforts > channel efforts > defaults", async () => {
-    expect(s.resolve({ channelId: "slack:CPERAGENT", userId: "slack:UX", request: { agent: "coding" } }).effort).toBe("high");
-    expect(s.resolve({ channelId: "slack:CPERAGENT", userId: "slack:UPERAGENT", request: { agent: "coding" } }).effort).toBe("low");
+    expect(s.resolve({ channelId: "slack:CPERAGENT", userId: "slack:UX", request: { agent: "coding" } }).effort).toBe(
+      "high",
+    );
+    expect(
+      s.resolve({ channelId: "slack:CPERAGENT", userId: "slack:UPERAGENT", request: { agent: "coding" } }).effort,
+    ).toBe("low");
   });
 
   it("a forced effort (user > channel) beats per-agent efforts, and the request directive beats everything", async () => {
-    expect(s.resolve({ channelId: "slack:CLOW", userId: "slack:UPERAGENT", request: { agent: "coding" } }).effort).toBe("low");
-    expect(s.resolve({ channelId: "slack:CLOW", userId: "slack:UHIGH", request: { agent: "coding" } }).effort).toBe("high");
-    expect(s.resolve({ channelId: "slack:CLOW", userId: "slack:UHIGH", request: { agent: "coding", effort: "medium" } }).effort).toBe("medium");
+    expect(s.resolve({ channelId: "slack:CLOW", userId: "slack:UPERAGENT", request: { agent: "coding" } }).effort).toBe(
+      "low",
+    );
+    expect(s.resolve({ channelId: "slack:CLOW", userId: "slack:UHIGH", request: { agent: "coding" } }).effort).toBe(
+      "high",
+    );
+    expect(
+      s.resolve({ channelId: "slack:CLOW", userId: "slack:UHIGH", request: { agent: "coding", effort: "medium" } })
+        .effort,
+    ).toBe("medium");
   });
 
   it("runtime overrides set effort per scope and per agent, persist through the store, and clear", async () => {
@@ -168,8 +183,12 @@ users:
   });
 
   it("an invalid effort level in static config is rejected at load, naming the valid ones", async () => {
-    expect(() => store(EFFORT_YAML.replace("effort: low", "effort: turbo"))).toThrow(/channels\.slack:CLOW\.effort.*turbo.*low, medium, high, xhigh, max/);
-    expect(() => store(EFFORT_YAML.replace("    coding: medium", "    coding: turbo"))).toThrow(/defaults\.efforts\.coding.*turbo/);
+    expect(() => store(EFFORT_YAML.replace("effort: low", "effort: turbo"))).toThrow(
+      /channels\.slack:CLOW\.effort.*turbo.*low, medium, high, xhigh, max/,
+    );
+    expect(() => store(EFFORT_YAML.replace("    coding: medium", "    coding: turbo"))).toThrow(
+      /defaults\.efforts\.coding.*turbo/,
+    );
   });
 
   it("config show renders effort where it is set: effective, defaults, and scopes", async () => {
@@ -297,30 +316,62 @@ describe("grantsFor — the legacy keys as the grants the policy table decides o
 
   it("repoManagement → repo:write + friction:write for the listed (admins hold them through `all`), nothing for the rest", async () => {
     const s = store(YAML_FIXTURE + `  repoManagement: ["slack:UDEV"]\n`);
-    expect([holds(s, "slack:UADMIN", "repo:write"), holds(s, "slack:UDEV", "repo:write"), holds(s, "slack:URANDOM", "repo:write")]).toEqual([true, true, false]);
+    expect([
+      holds(s, "slack:UADMIN", "repo:write"),
+      holds(s, "slack:UDEV", "repo:write"),
+      holds(s, "slack:URANDOM", "repo:write"),
+    ]).toEqual([true, true, false]);
     expect(holds(s, "slack:UDEV", "friction:write")).toBe(true);
   });
 
   it("channelConfig → config:write: absent → every Slack user; present → admins and the listed; agents.coding → agent:run:coding for UDEV and admins, every agent when unrestricted", async () => {
     const open = store(YAML_FIXTURE.replace("  channelConfig: []\n", ""));
-    expect([holds(open, "slack:UADMIN", "config:write"), holds(open, "slack:URANDOM", "config:write")]).toEqual([true, true]);
+    expect([holds(open, "slack:UADMIN", "config:write"), holds(open, "slack:URANDOM", "config:write")]).toEqual([
+      true,
+      true,
+    ]);
     const closed = store(YAML_FIXTURE.replace("  channelConfig: []\n", `  channelConfig: ["slack:UDEV"]\n`));
-    expect([holds(closed, "slack:UADMIN", "config:write"), holds(closed, "slack:UDEV", "config:write"), holds(closed, "slack:URANDOM", "config:write")]).toEqual([true, true, false]);
+    expect([
+      holds(closed, "slack:UADMIN", "config:write"),
+      holds(closed, "slack:UDEV", "config:write"),
+      holds(closed, "slack:URANDOM", "config:write"),
+    ]).toEqual([true, true, false]);
     expect(holds(store(), "slack:URANDOM", "config:write")).toBe(false); // the fixture's `channelConfig: []`
     // the fixture restricts `coding` to UDEV (admins always pass)
-    expect([holds(open, "slack:UADMIN", "agent:run:coding"), holds(open, "slack:UDEV", "agent:run:coding"), holds(open, "slack:URANDOM", "agent:run:coding")]).toEqual([true, true, false]);
+    expect([
+      holds(open, "slack:UADMIN", "agent:run:coding"),
+      holds(open, "slack:UDEV", "agent:run:coding"),
+      holds(open, "slack:URANDOM", "agent:run:coding"),
+    ]).toEqual([true, true, false]);
     const unrestricted = store(YAML_FIXTURE.replace(`  agents:\n    coding: ["slack:UDEV"]\n`, ""));
     expect(holds(unrestricted, "slack:URANDOM", "agent:run:coding")).toBe(true); // no allowlist → the agent is open
   });
 
   it("permissions.operators → every registered group's read + write over every channel; an unlisted Access browser session holds the reads; a service token exactly its scopes", async () => {
-    const s = storeWith(YAML_FIXTURE + `  operators: ["access:alice@example.com"]\n  serviceTokens:\n    reader-bot: [runs:read]\n`, { commandGroups: ["runs", "friction"] });
-    expect(s.grantsFor("access:alice@example.com")).toEqual({ actions: new Set(["runs:read", "runs:write", "friction:read", "friction:write"]), channels: "all", repos: new Set() });
-    expect(s.grantsFor("access:stranger")).toEqual({ actions: new Set(["runs:read", "friction:read"]), channels: new Set(), repos: new Set() });
-    expect(s.grantsFor("access:svc:reader-bot")).toEqual({ actions: new Set(["runs:read"]), channels: "all", repos: new Set() });
+    const s = storeWith(
+      YAML_FIXTURE + `  operators: ["access:alice@example.com"]\n  serviceTokens:\n    reader-bot: [runs:read]\n`,
+      { commandGroups: ["runs", "friction"] },
+    );
+    expect(s.grantsFor("access:alice@example.com")).toEqual({
+      actions: new Set(["runs:read", "runs:write", "friction:read", "friction:write"]),
+      channels: "all",
+      repos: new Set(),
+    });
+    expect(s.grantsFor("access:stranger")).toEqual({
+      actions: new Set(["runs:read", "friction:read"]),
+      channels: new Set(),
+      repos: new Set(),
+    });
+    expect(s.grantsFor("access:svc:reader-bot")).toEqual({
+      actions: new Set(["runs:read"]),
+      channels: "all",
+      repos: new Set(),
+    });
     expect(s.grantsFor("access:svc:stranger")).toBe(NO_GRANTS);
     // Without the catalogue's groups the store cannot spell a group read: an operator holds channels only, a browser nothing.
-    expect(store(YAML_FIXTURE + `  operators: ["access:alice@example.com"]\n`).grantsFor("access:alice@example.com")).toEqual({ actions: new Set(), channels: "all", repos: new Set() });
+    expect(
+      store(YAML_FIXTURE + `  operators: ["access:alice@example.com"]\n`).grantsFor("access:alice@example.com"),
+    ).toEqual({ actions: new Set(), channels: "all", repos: new Set() });
     expect(store().grantsFor("access:stranger")).toBe(NO_GRANTS);
   });
 
@@ -378,7 +429,10 @@ describe("custom instructions (Scope.instructions)", () => {
     const cfg = join(dir, "config.yaml");
     writeFileSync(cfg, YAML_FIXTURE);
     const overrides = join(dir, "overrides.json");
-    writeFileSync(overrides, JSON.stringify({ users: { "slack:UX": { instructions: "x".repeat(MAX_INSTRUCTIONS_LENGTH + 1) } } }));
+    writeFileSync(
+      overrides,
+      JSON.stringify({ users: { "slack:UX": { instructions: "x".repeat(MAX_INSTRUCTIONS_LENGTH + 1) } } }),
+    );
     expect(() => new ConfigStore(cfg, overrides)).toThrow(/overrides.*users\.slack:UX\.instructions exceeds/);
   });
 
@@ -394,7 +448,11 @@ describe("custom instructions (Scope.instructions)", () => {
 
 // Feature: features/run-history.md — the `runHistory` section (KTD14).
 describe("grants config — the native shape beside the legacy keys (plan U2, R7/R8/KTD6)", () => {
-  const load = (yaml: string, warn: (m: string) => void = () => {}, options?: ConstructorParameters<typeof ConfigStore>[3]) => {
+  const load = (
+    yaml: string,
+    warn: (m: string) => void = () => {},
+    options?: ConstructorParameters<typeof ConfigStore>[3],
+  ) => {
     const dir = mkdtempSync(join(tmpdir(), "swb-config-grants-"));
     const cfg = join(dir, "config.yaml");
     writeFileSync(cfg, yaml);
@@ -403,23 +461,42 @@ describe("grants config — the native shape beside the legacy keys (plan U2, R7
   const set = (...names: string[]) => new Set(names);
 
   it("a well-formed block validates and grantsFor resolves it: absent axis = empty set, `all` explicit", () => {
-    const s = load(`${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch, runs:read]\n    channels: [http:ops]\n  "schedule:self-improvement":\n    actions: [friction:write]\n    channels: all\n`);
-    expect(s.grantsFor("http:ci")).toEqual({ actions: set("dispatch", "runs:read"), channels: set("http:ops"), repos: set() });
-    expect(s.grantsFor("schedule:self-improvement")).toEqual({ actions: set("friction:write"), channels: "all", repos: set() });
+    const s = load(
+      `${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch, runs:read]\n    channels: [http:ops]\n  "schedule:self-improvement":\n    actions: [friction:write]\n    channels: all\n`,
+    );
+    expect(s.grantsFor("http:ci")).toEqual({
+      actions: set("dispatch", "runs:read"),
+      channels: set("http:ops"),
+      repos: set(),
+    });
+    expect(s.grantsFor("schedule:self-improvement")).toEqual({
+      actions: set("friction:write"),
+      channels: "all",
+      repos: set(),
+    });
   });
 
   it("an unknown actor id prefix fails the load naming the id", () => {
-    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "discord:123":\n    actions: all\n`)).toThrow(/config\.yaml: grants\["discord:123"\].*slack:, http:, mcp:, access:, schedule:/);
+    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "discord:123":\n    actions: all\n`)).toThrow(
+      /config\.yaml: grants\["discord:123"\].*slack:, http:, mcp:, access:, schedule:/,
+    );
   });
 
   it("a misspelled `all`, an unknown axis, and a non-mapping block fail the load naming the id and field", () => {
-    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "slack:U1":\n    actions: ALL\n`)).toThrow(/grants\["slack:U1"\]\.actions: expected "all" or a list/);
-    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "slack:U1":\n    agents: [coding]\n`)).toThrow(/grants\["slack:U1"\]: unknown field agents/);
+    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "slack:U1":\n    actions: ALL\n`)).toThrow(
+      /grants\["slack:U1"\]\.actions: expected "all" or a list/,
+    );
+    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "slack:U1":\n    agents: [coding]\n`)).toThrow(
+      /grants\["slack:U1"\]: unknown field agents/,
+    );
     expect(() => load(`${YAML_FIXTURE}\ngrants: [a]\n`)).toThrow(/grants must be a mapping/);
   });
 
   it("the legacy keys translate through the same lookup: admins → everything; an agents-listed user → agent:run:<name> (+ every repo, repos absent); a plain user → the unrestricted agents; ingress tokens and command groups come from the store options", () => {
-    const s = load(YAML_FIXTURE, undefined, { ingressTokens: { tok: { subject: "ci", channel: "ops", scopes: ["dispatch", "runs:read"] } }, commandGroups: ["runs", "friction"] });
+    const s = load(YAML_FIXTURE, undefined, {
+      ingressTokens: { tok: { subject: "ci", channel: "ops", scopes: ["dispatch", "runs:read"] } },
+      commandGroups: ["runs", "friction"],
+    });
     expect(s.grantsFor("slack:UADMIN")).toEqual({ actions: "all", channels: "all", repos: "all" });
     const dev = s.grantsFor("slack:UDEV");
     expect(dev.repos).toBe("all");
@@ -429,10 +506,16 @@ describe("grants config — the native shape beside the legacy keys (plan U2, R7
     expect(plain.actions).not.toContain("agent:run:coding");
     expect(plain.actions).toContain("agent:run:general");
     // Credentials hold exactly what names them — no everyone baseline.
-    expect(s.grantsFor("http:ci")).toEqual({ actions: set("dispatch", "runs:read"), channels: set("http:ops"), repos: set() });
+    expect(s.grantsFor("http:ci")).toEqual({
+      actions: set("dispatch", "runs:read"),
+      channels: set("http:ops"),
+      repos: set(),
+    });
     expect(s.grantsFor("schedule:unlisted")).toEqual({ actions: set(), channels: set(), repos: set() });
     expect(s.grantsFor("mcp:ci").channels).toEqual(set("mcp:ops"));
-    const ops = load(`${YAML_FIXTURE}  operators: ["access:op-1"]\n`, undefined, { commandGroups: ["runs", "friction"] }).grantsFor("access:op-1");
+    const ops = load(`${YAML_FIXTURE}  operators: ["access:op-1"]\n`, undefined, {
+      commandGroups: ["runs", "friction"],
+    }).grantsFor("access:op-1");
     expect(ops.channels).toBe("all");
     for (const a of ["runs:read", "runs:write", "friction:read", "friction:write"]) expect(ops.actions).toContain(a);
   });
@@ -440,33 +523,52 @@ describe("grants config — the native shape beside the legacy keys (plan U2, R7
   it("an identity named by BOTH shapes takes the grants entry and is warned about by id", () => {
     const warnings: string[] = [];
     const s = load(`${YAML_FIXTURE}\ngrants:\n  "slack:UADMIN":\n    actions: [runs:read]\n`, (m) => warnings.push(m));
-    expect(warnings).toEqual([expect.stringMatching(/config\.yaml: grants and permissions both name "slack:UADMIN" — the grants entry wins/)]);
+    expect(warnings).toEqual([
+      expect.stringMatching(/config\.yaml: grants and permissions both name "slack:UADMIN" — the grants entry wins/),
+    ]);
     expect(s.grantsFor("slack:UADMIN")).toEqual({ actions: set("runs:read"), channels: set(), repos: set() });
     // No overlap → no warning.
     warnings.length = 0;
     load(`${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch]\n`, (m) => warnings.push(m));
     expect(warnings).toEqual([]);
     // An ingress token's id with a native entry beside it is the intended way to grant it channels (#453) — not a duplicate to warn about.
-    const s2 = load(`${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch, runs:read]\n    channels: all\n`, (m) => warnings.push(m), { ingressTokens: { tok: { subject: "ci", channel: "ops", scopes: ["dispatch"] } } });
+    const s2 = load(
+      `${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch, runs:read]\n    channels: all\n`,
+      (m) => warnings.push(m),
+      { ingressTokens: { tok: { subject: "ci", channel: "ops", scopes: ["dispatch"] } } },
+    );
     expect(warnings).toEqual([]);
     expect(s2.grantsFor("http:ci")).toEqual({ actions: set("dispatch", "runs:read"), channels: "all", repos: set() });
   });
 
   it("the permission helpers answer from the grants table, so a native-only config (no `permissions` block) keeps its admin: adminsHint names them, they manage repos and edit channel config, an unlisted user does neither", () => {
-    const NATIVE_ONLY = YAML_FIXTURE.replace(/permissions:[\s\S]*$/, "") + `grants:\n  "slack:UNATIVE":\n    actions: all\n    channels: all\n    repos: all\n  "slack:UMGR":\n    actions: [repo:write]\n`;
+    const NATIVE_ONLY =
+      YAML_FIXTURE.replace(/permissions:[\s\S]*$/, "") +
+      `grants:\n  "slack:UNATIVE":\n    actions: all\n    channels: all\n    repos: all\n  "slack:UMGR":\n    actions: [repo:write]\n`;
     const s = load(NATIVE_ONLY);
     expect(s.adminsHint()).toBe("<@slack:UNATIVE>");
-    expect([s.canManageRepos("slack:UNATIVE"), s.canManageRepos("slack:UMGR"), s.canManageRepos("slack:URANDOM")]).toEqual([true, true, false]);
+    expect([
+      s.canManageRepos("slack:UNATIVE"),
+      s.canManageRepos("slack:UMGR"),
+      s.canManageRepos("slack:URANDOM"),
+    ]).toEqual([true, true, false]);
     // No legacy block → no open-when-absent: `config:write` is the admin's alone.
     expect([s.canEditChannelConfig("slack:UNATIVE"), s.canEditChannelConfig("slack:URANDOM")]).toEqual([true, false]);
     expect(s.grantsFor("slack:URANDOM").actions).not.toContain("config:write");
     // A native admin bypasses the (still legacy) agent allowlist like a listed one.
     const restricted = load(NATIVE_ONLY + `permissions:\n  agents:\n    coding: ["slack:UDEV"]\n`);
-    expect([restricted.canRunAgent("slack:UNATIVE", "coding"), restricted.canRunAgent("slack:URANDOM", "coding")]).toEqual([true, false]);
+    expect([
+      restricted.canRunAgent("slack:UNATIVE", "coding"),
+      restricted.canRunAgent("slack:URANDOM", "coding"),
+    ]).toEqual([true, false]);
     // The same three answers under the legacy block, so neither shape changes them.
     const legacy = store();
     expect(legacy.adminsHint()).toBe("<@slack:UADMIN>");
-    expect([legacy.canManageRepos("slack:UADMIN"), legacy.canEditChannelConfig("slack:UADMIN"), legacy.canEditChannelConfig("slack:URANDOM")]).toEqual([true, true, false]);
+    expect([
+      legacy.canManageRepos("slack:UADMIN"),
+      legacy.canEditChannelConfig("slack:UADMIN"),
+      legacy.canEditChannelConfig("slack:URANDOM"),
+    ]).toEqual([true, true, false]);
   });
 });
 
@@ -480,23 +582,35 @@ describe("runHistory config", () => {
   };
 
   it("accepts a well-formed section and exposes it", async () => {
-    const s = load(withRunHistory("  retentionDays: 14\n  maxRuns: 100\n  worker:\n    baseUrl: https://state.example\n"));
-    expect(s.config.runHistory).toEqual({ retentionDays: 14, maxRuns: 100, worker: { baseUrl: "https://state.example" } });
+    const s = load(
+      withRunHistory("  retentionDays: 14\n  maxRuns: 100\n  worker:\n    baseUrl: https://state.example\n"),
+    );
+    expect(s.config.runHistory).toEqual({
+      retentionDays: 14,
+      maxRuns: 100,
+      worker: { baseUrl: "https://state.example" },
+    });
   });
 
   it("rejects retentionDays 0 and maxRuns 0", async () => {
-    expect(() => load(withRunHistory("  retentionDays: 0\n"))).toThrow(/runHistory\.retentionDays must be an integer >= 1/);
+    expect(() => load(withRunHistory("  retentionDays: 0\n"))).toThrow(
+      /runHistory\.retentionDays must be an integer >= 1/,
+    );
     expect(() => load(withRunHistory("  maxRuns: 0\n"))).toThrow(/runHistory\.maxRuns must be an integer >= 1/);
   });
 
   it("rejects an http:// worker baseUrl and an unknown store", async () => {
-    expect(() => load(withRunHistory("  worker:\n    baseUrl: http://state.example\n"))).toThrow(/runHistory\.worker\.baseUrl must be an https: URL/);
+    expect(() => load(withRunHistory("  worker:\n    baseUrl: http://state.example\n"))).toThrow(
+      /runHistory\.worker\.baseUrl must be an https: URL/,
+    );
     expect(() => load(withRunHistory("  store: disk\n"))).toThrow(/runHistory\.store must be "worker" or "file"/);
   });
 
   it("warns when selfImprovement.ledgerMax is set alongside runHistory (the ledger is served from the run store)", async () => {
     const warnings: string[] = [];
-    load(withRunHistory("  retentionDays: 30\n", "selfImprovement:\n  repo: o/r\n  ledgerMax: 500\n"), (m) => warnings.push(m));
+    load(withRunHistory("  retentionDays: 30\n", "selfImprovement:\n  repo: o/r\n  ledgerMax: 500\n"), (m) =>
+      warnings.push(m),
+    );
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatch(/selfImprovement\.ledgerMax.*runHistory/);
     warnings.length = 0;
@@ -517,12 +631,17 @@ describe("ship caps block (agent:ship pipeline)", () => {
 
   it("rejects non-integers and values < 1 at load, naming the key", async () => {
     expect(() => store(YAML_FIXTURE + "ship:\n  maxRounds: 0\n")).toThrow(/ship\.maxRounds must be an integer >= 1/);
-    expect(() => store(YAML_FIXTURE + "ship:\n  maxMinutes: 1.5\n")).toThrow(/ship\.maxMinutes must be an integer >= 1/);
+    expect(() => store(YAML_FIXTURE + "ship:\n  maxMinutes: 1.5\n")).toThrow(
+      /ship\.maxMinutes must be an integer >= 1/,
+    );
     expect(() => store(YAML_FIXTURE + 'ship: "nope"\n')).toThrow(/ship must be a mapping/);
   });
 
   it("resolveShipCaps: defaults 3 rounds / 120 minutes; configured values win", async () => {
-    expect(resolveShipCaps(undefined)).toEqual({ maxRounds: SHIP_DEFAULT_MAX_ROUNDS, maxMinutes: SHIP_DEFAULT_MAX_MINUTES });
+    expect(resolveShipCaps(undefined)).toEqual({
+      maxRounds: SHIP_DEFAULT_MAX_ROUNDS,
+      maxMinutes: SHIP_DEFAULT_MAX_MINUTES,
+    });
     expect(resolveShipCaps({})).toEqual({ maxRounds: 3, maxMinutes: 120 });
     expect(resolveShipCaps({ maxRounds: 1 })).toEqual({ maxRounds: 1, maxMinutes: 120 });
     expect(resolveShipCaps({ maxRounds: 5, maxMinutes: 45 })).toEqual({ maxRounds: 5, maxMinutes: 45 });
@@ -530,7 +649,9 @@ describe("ship caps block (agent:ship pipeline)", () => {
 
   it("the example config (config/config.example.yaml) still loads through ConfigStore", async () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-config-example-"));
-    expect(() => new ConfigStore(join(process.cwd(), "config/config.example.yaml"), join(dir, "overrides.json"))).not.toThrow();
+    expect(
+      () => new ConfigStore(join(process.cwd(), "config/config.example.yaml"), join(dir, "overrides.json")),
+    ).not.toThrow();
   });
 });
 
@@ -550,7 +671,10 @@ describe("overrides backing (item 12: durable runtime overrides)", () => {
     expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).agentName).toBe("review");
     await s.setUserOverride("slack:UX", { effort: "low" });
     expect(backing.saves).toBe(1);
-    expect(backing.document).toEqual({ channels: { "slack:CX": { agent: "review" } }, users: { "slack:UX": { effort: "low" } } });
+    expect(backing.document).toEqual({
+      channels: { "slack:CX": { agent: "review" } },
+      users: { "slack:UX": { effort: "low" } },
+    });
     await s.clearChannelOverride("slack:CX");
     expect(backing.saves).toBe(2);
     expect(backing.document).toEqual({ channels: {}, users: { "slack:UX": { effort: "low" } } });
@@ -577,7 +701,10 @@ describe("overrides backing (item 12: durable runtime overrides)", () => {
     backing.conflictNextSaveWith = { channels: {}, users: { "slack:UX": { effort: "low" } } };
     const effective = await s.setUserOverride("slack:UY", { agent: "review" });
     expect(effective.agent).toBe("review");
-    expect(backing.document).toEqual({ channels: {}, users: { "slack:UX": { effort: "low" }, "slack:UY": { agent: "review" } } });
+    expect(backing.document).toEqual({
+      channels: {},
+      users: { "slack:UX": { effort: "low" }, "slack:UY": { agent: "review" } },
+    });
     expect(s.scopes("slack:CX", "slack:UX").user).toEqual({ effort: "low" });
     expect(s.scopes("slack:CX", "slack:UY").user).toEqual({ agent: "review" });
     expect(backing.saves).toBe(1);
@@ -588,23 +715,36 @@ describe("overrides backing (item 12: durable runtime overrides)", () => {
     const backing = new InMemoryOverridesBacking({ channels: {}, users: {} });
     const s = new ConfigStore(cfg, { backing, initial: await backing.load() });
     backing.conflictNextSaveWith = { channels: {}, users: { "slack:UX": { effort: "low" } } };
-    backing.conflictAfterNextSaveWith = { channels: { "slack:CX": { agent: "coding" } }, users: { "slack:UX": { effort: "low" } } };
+    backing.conflictAfterNextSaveWith = {
+      channels: { "slack:CX": { agent: "coding" } },
+      users: { "slack:UX": { effort: "low" } },
+    };
     await expect(s.setUserOverride("slack:UY", { agent: "review" })).rejects.toThrow(OverridesConflictError);
     expect(backing.saves).toBe(0);
     expect(s.scopes("slack:CX", "slack:UX")).toMatchObject({ channel: { agent: "coding" }, user: { effort: "low" } });
     expect(s.scopes("slack:CX", "slack:UY").user).toEqual({});
     // The retry the error asks for now carries every writer's change.
     await s.setUserOverride("slack:UY", { agent: "review" });
-    expect(backing.document).toEqual({ channels: { "slack:CX": { agent: "coding" } }, users: { "slack:UX": { effort: "low" }, "slack:UY": { agent: "review" } } });
+    expect(backing.document).toEqual({
+      channels: { "slack:CX": { agent: "coding" } },
+      users: { "slack:UX": { effort: "low" }, "slack:UY": { agent: "review" } },
+    });
   });
 
   it("concurrent writes in one process are serialized: neither loses the other's change", async () => {
     const { cfg } = cfgFile();
     const backing = new InMemoryOverridesBacking();
     const s = new ConfigStore(cfg, { backing, initial: undefined });
-    await Promise.all([s.setUserOverride("slack:UX", { effort: "low" }), s.setChannelOverride("slack:CX", { agent: "review" }), s.setUserOverride("slack:UY", { agent: "coding" })]);
+    await Promise.all([
+      s.setUserOverride("slack:UX", { effort: "low" }),
+      s.setChannelOverride("slack:CX", { agent: "review" }),
+      s.setUserOverride("slack:UY", { agent: "coding" }),
+    ]);
     expect(backing.saves).toBe(3);
-    expect(backing.document).toEqual({ channels: { "slack:CX": { agent: "review" } }, users: { "slack:UX": { effort: "low" }, "slack:UY": { agent: "coding" } } });
+    expect(backing.document).toEqual({
+      channels: { "slack:CX": { agent: "review" } },
+      users: { "slack:UX": { effort: "low" }, "slack:UY": { agent: "coding" } },
+    });
     expect(s.scopes("slack:CX", "slack:UX")).toMatchObject({ channel: { agent: "review" }, user: { effort: "low" } });
   });
 
@@ -622,25 +762,46 @@ describe("overrides backing (item 12: durable runtime overrides)", () => {
 
   it("a preloaded document over the instructions cap is refused at construction, naming the backing", async () => {
     const { cfg } = cfgFile();
-    const backing = new InMemoryOverridesBacking({ channels: {}, users: { "slack:UX": { instructions: "x".repeat(MAX_INSTRUCTIONS_LENGTH + 1) } } });
-    expect(() => new ConfigStore(cfg, { backing, initial: backing.document })).toThrow(/overrides \(in-memory\).*instructions exceeds/);
+    const backing = new InMemoryOverridesBacking({
+      channels: {},
+      users: { "slack:UX": { instructions: "x".repeat(MAX_INSTRUCTIONS_LENGTH + 1) } },
+    });
+    expect(() => new ConfigStore(cfg, { backing, initial: backing.document })).toThrow(
+      /overrides \(in-memory\).*instructions exceeds/,
+    );
   });
 
   it("overridesBackingFor: no `runtimeOverrides` → the file; a worker → WorkerOverridesBacking; a worker without its bearer → a startup error naming the env var", () => {
     const base = { providers: {}, defaults: { agent: "general", models: {} } } as unknown as AppConfig;
     expect(overridesBackingFor(base, { overridesPath: "/tmp/o.json", env: {} })).toBeInstanceOf(FileOverridesBacking);
     const withWorker = { ...base, runtimeOverrides: { worker: { baseUrl: "https://state.example" } } } as AppConfig;
-    expect(overridesBackingFor(withWorker, { overridesPath: "/tmp/o.json", env: { MEMORY_TOKEN: "t" } })).toBeInstanceOf(WorkerOverridesBacking);
-    expect(() => overridesBackingFor(withWorker, { overridesPath: "/tmp/o.json", env: {} })).toThrow(/runtimeOverrides.worker is configured but MEMORY_TOKEN is not set/);
-    const customEnv = { ...base, runtimeOverrides: { worker: { baseUrl: "https://state.example", tokenEnv: "STATE_TOKEN" } } } as AppConfig;
-    expect(() => overridesBackingFor(customEnv, { overridesPath: "/tmp/o.json", env: {} })).toThrow(/STATE_TOKEN is not set/);
+    expect(
+      overridesBackingFor(withWorker, { overridesPath: "/tmp/o.json", env: { MEMORY_TOKEN: "t" } }),
+    ).toBeInstanceOf(WorkerOverridesBacking);
+    expect(() => overridesBackingFor(withWorker, { overridesPath: "/tmp/o.json", env: {} })).toThrow(
+      /runtimeOverrides.worker is configured but MEMORY_TOKEN is not set/,
+    );
+    const customEnv = {
+      ...base,
+      runtimeOverrides: { worker: { baseUrl: "https://state.example", tokenEnv: "STATE_TOKEN" } },
+    } as AppConfig;
+    expect(() => overridesBackingFor(customEnv, { overridesPath: "/tmp/o.json", env: {} })).toThrow(
+      /STATE_TOKEN is not set/,
+    );
   });
 
   it("config.yaml validation: runtimeOverrides.worker.baseUrl must be https; tokenEnv a name", () => {
-    expect(() => store(`${YAML_FIXTURE}\nruntimeOverrides:\n  worker:\n    baseUrl: http://state.example\n`)).toThrow(/runtimeOverrides\.worker\.baseUrl must be an https: URL/);
-    expect(() => store(`${YAML_FIXTURE}\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n    tokenEnv: ""\n`)).toThrow(/runtimeOverrides\.worker\.tokenEnv/);
+    expect(() => store(`${YAML_FIXTURE}\nruntimeOverrides:\n  worker:\n    baseUrl: http://state.example\n`)).toThrow(
+      /runtimeOverrides\.worker\.baseUrl must be an https: URL/,
+    );
+    expect(() =>
+      store(`${YAML_FIXTURE}\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n    tokenEnv: ""\n`),
+    ).toThrow(/runtimeOverrides\.worker\.tokenEnv/);
     expect(() => store(`${YAML_FIXTURE}\nruntimeOverrides: []\n`)).toThrow(/runtimeOverrides must be a mapping/);
-    expect(store(`${YAML_FIXTURE}\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n`).config.runtimeOverrides).toEqual({ worker: { baseUrl: "https://state.example" } });
+    expect(
+      store(`${YAML_FIXTURE}\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n`).config
+        .runtimeOverrides,
+    ).toEqual({ worker: { baseUrl: "https://state.example" } });
   });
 
   it("openConfigStore picks the backing from config.yaml and loads the document (file backing here)", async () => {
@@ -661,7 +822,10 @@ describe("overrides backing (item 12: durable runtime overrides)", () => {
 });
 
 describe("WorkerOverridesBacking (the ConfigDO client)", () => {
-  function fake(state: { document: Overrides | null; version: number }, opts: { failStatus?: number; down?: boolean } = {}) {
+  function fake(
+    state: { document: Overrides | null; version: number },
+    opts: { failStatus?: number; down?: boolean } = {},
+  ) {
     const calls: Array<{ path: string; body: Record<string, unknown>; auth: string | null }> = [];
     const fetchImpl: typeof fetch = async (input, init) => {
       if (opts.down) throw new Error("ECONNREFUSED");
@@ -671,18 +835,25 @@ describe("WorkerOverridesBacking (the ConfigDO client)", () => {
       if (opts.failStatus) return new Response("{}", { status: opts.failStatus });
       if (url.pathname === "/config/get") return Response.json({ document: state.document, version: state.version });
       if (url.pathname === "/config/put") {
-        if (body.expectedVersion !== state.version) return Response.json({ error: "version conflict", version: state.version }, { status: 409 });
+        if (body.expectedVersion !== state.version)
+          return Response.json({ error: "version conflict", version: state.version }, { status: 409 });
         state.version += 1;
         state.document = body.document as Overrides;
         return Response.json({ ok: true, version: state.version });
       }
       return new Response("{}", { status: 404 });
     };
-    return { calls, backing: new WorkerOverridesBacking({ baseUrl: "https://state.example/", token: "tok", fetch: fetchImpl }) };
+    return {
+      calls,
+      backing: new WorkerOverridesBacking({ baseUrl: "https://state.example/", token: "tok", fetch: fetchImpl }),
+    };
   }
 
   it("loads the document with its version, saves with expectedVersion, tracks the new version, sends the bearer", async () => {
-    const state = { document: { channels: {}, users: { "slack:UX": { agent: "review" } } } as Overrides | null, version: 3 };
+    const state = {
+      document: { channels: {}, users: { "slack:UX": { agent: "review" } } } as Overrides | null,
+      version: 3,
+    };
     const { calls, backing } = fake(state);
     expect(await backing.load()).toEqual(state.document);
     await backing.save({ channels: {}, users: {} });
@@ -716,8 +887,12 @@ describe("WorkerOverridesBacking (the ConfigDO client)", () => {
   });
 
   it("non-2xx and transport failures throw naming the config store", async () => {
-    await expect(fake({ document: null, version: 0 }, { failStatus: 500 }).backing.load()).rejects.toThrow(/config store answered HTTP 500/);
-    await expect(fake({ document: null, version: 0 }, { down: true }).backing.load()).rejects.toThrow(/config store unreachable: ECONNREFUSED/);
+    await expect(fake({ document: null, version: 0 }, { failStatus: 500 }).backing.load()).rejects.toThrow(
+      /config store answered HTTP 500/,
+    );
+    await expect(fake({ document: null, version: 0 }, { down: true }).backing.load()).rejects.toThrow(
+      /config store unreachable: ECONNREFUSED/,
+    );
   });
 });
 
@@ -768,8 +943,12 @@ users:
 
   it("a runtime `mcp add` into a channel or user that already has STATIC servers layers over them — the pinned entries keep serving", async () => {
     const s = store(withDefaults);
-    await s.setChannelOverride("slack:CMCP", { mcpServers: { hubspot: { url: "https://mcp.hubspot.com/mcp", auth: "none", addedBy: "slack:UX", addedAt: 1 } } });
-    await s.setUserOverride("slack:UX", { mcpServers: { asana: { url: "https://mcp.asana.com/mcp", auth: "none", addedBy: "slack:UX", addedAt: 2 } } });
+    await s.setChannelOverride("slack:CMCP", {
+      mcpServers: { hubspot: { url: "https://mcp.hubspot.com/mcp", auth: "none", addedBy: "slack:UX", addedAt: 1 } },
+    });
+    await s.setUserOverride("slack:UX", {
+      mcpServers: { asana: { url: "https://mcp.asana.com/mcp", auth: "none", addedBy: "slack:UX", addedAt: 2 } },
+    });
     const resolved = s.mcpServersFor("slack:CMCP", "slack:UX");
     expect(resolved.map((r) => [r.kind, r.name, r.source])).toEqual([
       ["org", "linear", "config"],
@@ -788,20 +967,33 @@ users:
     expect(shown).toMatch(/\*Your scope:\*.*mcp `vanta` `linear` `asana`/);
     // Removing the runtime entry again leaves the static ones exactly as before.
     await s.setChannelOverride("slack:CMCP", { mcpServers: undefined });
-    expect(s.mcpServersFor("slack:CMCP", "slack:UX").filter((r) => r.kind === "channel").map((r) => r.name)).toEqual(["notion"]);
+    expect(
+      s
+        .mcpServersFor("slack:CMCP", "slack:UX")
+        .filter((r) => r.kind === "channel")
+        .map((r) => r.name),
+    ).toEqual(["notion"]);
   });
 
   it("runtime entries layer over static ones per tier; `runtimeScope` is the runtime half only; the org tier is `defaults` + the `org` override", async () => {
     const s = store(withDefaults);
-    await s.setUserOverride("slack:UY", { mcpServers: { hubspot: { url: "https://mcp.hubspot.com/mcp", auth: "none", addedBy: "slack:UY", addedAt: 1 } } });
-    await s.setOrgOverride({ mcpServers: { github: { url: "https://api.githubcopilot.com/mcp/", auth: "bearer", addedBy: "slack:UADMIN", addedAt: 2 } } });
+    await s.setUserOverride("slack:UY", {
+      mcpServers: { hubspot: { url: "https://mcp.hubspot.com/mcp", auth: "none", addedBy: "slack:UY", addedAt: 1 } },
+    });
+    await s.setOrgOverride({
+      mcpServers: {
+        github: { url: "https://api.githubcopilot.com/mcp/", auth: "bearer", addedBy: "slack:UADMIN", addedAt: 2 },
+      },
+    });
     const resolved = s.mcpServersFor("slack:CX", "slack:UY");
     expect(resolved.map((r) => [r.kind, r.name, r.source])).toEqual([
       ["org", "linear", "config"],
       ["org", "github", "runtime"],
       ["user", "hubspot", "runtime"],
     ]);
-    expect(s.runtimeScope("org").mcpServers).toEqual({ github: expect.objectContaining({ url: "https://api.githubcopilot.com/mcp/" }) });
+    expect(s.runtimeScope("org").mcpServers).toEqual({
+      github: expect.objectContaining({ url: "https://api.githubcopilot.com/mcp/" }),
+    });
     expect(s.runtimeScope("user", "slack:UX").mcpServers).toBeUndefined(); // static only
     expect(s.isStaticMcpServer("org", undefined, "linear")).toBe(true);
     expect(s.isStaticMcpServer("org", undefined, "github")).toBe(false);
@@ -815,19 +1007,50 @@ users:
 
   it("validates every tier at load: slug names, http(s) + SSRF-safe URLs, known agents, auth kind, tokenEnv only with bearer, and self-serve agents only outside org", () => {
     const bad = (yaml: string) => () => store(yaml);
-    expect(bad(withDefaults.replace("notion:", "Bad Name:"))).toThrow(/channels\.slack:CMCP\.mcpServers\.Bad Name: server names are slugs/);
-    expect(bad(withDefaults.replace("https://mcp.notion.so/mcp", "http://169.254.169.254/"))).toThrow(/mcpServers\.notion\.url: .*169\.254/);
-    expect(bad(withDefaults.replace("https://mcp.notion.so/mcp", "ftp://x.example"))).toThrow(/mcpServers\.notion\.url:/);
-    expect(bad(withDefaults.replace('notion: { url: "https://mcp.notion.so/mcp", auth: none }', 'notion: { url: "https://mcp.notion.so/mcp", auth: none, agents: [wizard] }'))).toThrow(/unknown agent "wizard"/);
-    expect(bad(withDefaults.replace('vanta: { url: "https://mcp.vanta.com/mcp", auth: bearer }', 'vanta: { url: "https://mcp.vanta.com/mcp", auth: bearer, agents: [coding] }'))).toThrow(
-      /users\.slack:UX\.mcpServers\.vanta\.agents: a user-scoped server may name general\/research only/,
+    expect(bad(withDefaults.replace("notion:", "Bad Name:"))).toThrow(
+      /channels\.slack:CMCP\.mcpServers\.Bad Name: server names are slugs/,
     );
-    expect(bad(withDefaults.replace('notion: { url: "https://mcp.notion.so/mcp", auth: none }', 'notion: { url: "https://mcp.notion.so/mcp", auth: none, agents: [review] }'))).toThrow(/a channel-scoped server may name general\/research only/);
-    expect(bad(withDefaults.replace("auth: none }", "auth: magic }"))).toThrow(/must be \{ url, auth: none\|bearer\|oauth/);
+    expect(bad(withDefaults.replace("https://mcp.notion.so/mcp", "http://169.254.169.254/"))).toThrow(
+      /mcpServers\.notion\.url: .*169\.254/,
+    );
+    expect(bad(withDefaults.replace("https://mcp.notion.so/mcp", "ftp://x.example"))).toThrow(
+      /mcpServers\.notion\.url:/,
+    );
+    expect(
+      bad(
+        withDefaults.replace(
+          'notion: { url: "https://mcp.notion.so/mcp", auth: none }',
+          'notion: { url: "https://mcp.notion.so/mcp", auth: none, agents: [wizard] }',
+        ),
+      ),
+    ).toThrow(/unknown agent "wizard"/);
+    expect(
+      bad(
+        withDefaults.replace(
+          'vanta: { url: "https://mcp.vanta.com/mcp", auth: bearer }',
+          'vanta: { url: "https://mcp.vanta.com/mcp", auth: bearer, agents: [coding] }',
+        ),
+      ),
+    ).toThrow(/users\.slack:UX\.mcpServers\.vanta\.agents: a user-scoped server may name general\/research only/);
+    expect(
+      bad(
+        withDefaults.replace(
+          'notion: { url: "https://mcp.notion.so/mcp", auth: none }',
+          'notion: { url: "https://mcp.notion.so/mcp", auth: none, agents: [review] }',
+        ),
+      ),
+    ).toThrow(/a channel-scoped server may name general\/research only/);
+    expect(bad(withDefaults.replace("auth: none }", "auth: magic }"))).toThrow(
+      /must be \{ url, auth: none\|bearer\|oauth/,
+    );
     // oauth is a valid static kind (item 18): the credential is the connect page's, so no tokenEnv.
     expect(bad(withDefaults.replace("auth: none }", "auth: oauth }"))).not.toThrow();
-    expect(bad(withDefaults.replace("auth: none }", "auth: oauth, tokenEnv: X }"))).toThrow(/tokenEnv only applies to auth: bearer/);
-    expect(bad(withDefaults.replace("auth: none }", "auth: none, tokenEnv: X }"))).toThrow(/tokenEnv only applies to auth: bearer/);
+    expect(bad(withDefaults.replace("auth: none }", "auth: oauth, tokenEnv: X }"))).toThrow(
+      /tokenEnv only applies to auth: bearer/,
+    );
+    expect(bad(withDefaults.replace("auth: none }", "auth: none, tokenEnv: X }"))).toThrow(
+      /tokenEnv only applies to auth: bearer/,
+    );
     // The org tier may name any agent (coding above) — it loads.
     expect(store(withDefaults).config.defaults.mcpServers?.linear.agents).toEqual(["general", "coding"]);
   });
@@ -839,7 +1062,12 @@ users:
       writeFileSync(cfg, YAML_FIXTURE);
       return { cfg };
     })();
-    const backing = new InMemoryOverridesBacking({ channels: {}, users: { "slack:UX": { mcpServers: { vanta: { url: "http://localhost:1/mcp", auth: "none" } } } } });
-    expect(() => new ConfigStore(cfg, { backing, initial: backing.document })).toThrow(/overrides \(in-memory\): users\.slack:UX\.mcpServers\.vanta\.url/);
+    const backing = new InMemoryOverridesBacking({
+      channels: {},
+      users: { "slack:UX": { mcpServers: { vanta: { url: "http://localhost:1/mcp", auth: "none" } } } },
+    });
+    expect(() => new ConfigStore(cfg, { backing, initial: backing.document })).toThrow(
+      /overrides \(in-memory\): users\.slack:UX\.mcpServers\.vanta\.url/,
+    );
   });
 });

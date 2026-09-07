@@ -98,9 +98,21 @@ describe("RunRow", () => {
   });
 
   it("shows the stop badge while a stop is in flight, and as the outcome for a finished summary with no record status; the record's status wins", () => {
-    expect(mountRow(row({ stop: { mode: "soft", state: "stopping" } })).find(".stopbadge").text()).toBe("stopping (soft)");
-    expect(mountRow(row({ finished: true, stop: { mode: "hard", state: "stopped" } })).find(".stopbadge").text()).toBe("killed");
-    expect(mountRow(finished("stopped_hard", { stop: { mode: "hard", state: "stopped" } })).find(".stopbadge").exists()).toBe(false);
+    expect(
+      mountRow(row({ stop: { mode: "soft", state: "stopping" } }))
+        .find(".stopbadge")
+        .text(),
+    ).toBe("stopping (soft)");
+    expect(
+      mountRow(row({ finished: true, stop: { mode: "hard", state: "stopped" } }))
+        .find(".stopbadge")
+        .text(),
+    ).toBe("killed");
+    expect(
+      mountRow(finished("stopped_hard", { stop: { mode: "hard", state: "stopped" } }))
+        .find(".stopbadge")
+        .exists(),
+    ).toBe(false);
   });
 
   it("the source mark is the ↗ link for a run with a thread, the surface glyph otherwise; a javascript: url never links", () => {
@@ -144,7 +156,10 @@ describe("RunRow", () => {
     const w = mountRow(row({ token: "tok-1" }));
     const stop = w.findAll(".actions button")[0];
     await stop.trigger("click");
-    expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=soft", { method: "POST", credentials: "same-origin" });
+    expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=soft", {
+      method: "POST",
+      credentials: "same-origin",
+    });
     expect((stop.element as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -157,7 +172,10 @@ describe("RunRow", () => {
     confirmSpy.mockReturnValue(true);
     fetchMock.mockResolvedValueOnce({ ok: false, status: 500 });
     await kill.trigger("click");
-    expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", { method: "POST", credentials: "same-origin" });
+    expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+      method: "POST",
+      credentials: "same-origin",
+    });
     await vi.waitFor(() => expect((kill.element as HTMLButtonElement).disabled).toBe(false));
   });
 

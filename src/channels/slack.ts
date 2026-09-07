@@ -5,7 +5,14 @@ import { catchUpWindowWarning } from "../core/drain.js";
 import { mdToMrkdwn } from "./mrkdwn.js";
 import { escapeMrkdwn } from "./slackEscape.js";
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
-import { ACK_EMOJI, botRepliedAfter, catchUpMissedMentions, fetchReplies, type CatchUpClient, type SlackHistoryMessage } from "./slackCatchUp.js";
+import {
+  ACK_EMOJI,
+  botRepliedAfter,
+  catchUpMissedMentions,
+  fetchReplies,
+  type CatchUpClient,
+  type SlackHistoryMessage,
+} from "./slackCatchUp.js";
 import { missingBotScopes, recordCatchUpOutcome, recordMissingScopes } from "./slackCatchUpStatus.js";
 import { recordSocketConnected, recordSocketDisconnected } from "./slackSocketStatus.js";
 export { classifyMessage, threadIncludesBot, type MessageDecision } from "./slackTriggers.js";
@@ -63,13 +70,59 @@ const GENERIC_MIME_TYPES = new Set(["application/octet-stream", "binary/octet-st
 // the secret-file denylist — so a generic-typed config/JSON file is not "fair
 // game" for inlining just because of its extension.
 const TEXT_EXTENSIONS = new Set([
-  ".txt", ".md", ".markdown", ".log", ".csv", ".tsv", ".rst",
-  ".yaml", ".yml", ".toml",
-  ".xml", ".html", ".htm", ".css", ".scss", ".less",
-  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rb", ".go", ".rs",
-  ".java", ".kt", ".c", ".h", ".cpp", ".hpp", ".cc", ".cs", ".php", ".swift",
-  ".sh", ".bash", ".zsh", ".sql", ".r", ".pl", ".lua", ".dart", ".scala",
-  ".clj", ".ex", ".exs", ".vue", ".svelte", ".graphql", ".proto", ".dockerfile",
+  ".txt",
+  ".md",
+  ".markdown",
+  ".log",
+  ".csv",
+  ".tsv",
+  ".rst",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".xml",
+  ".html",
+  ".htm",
+  ".css",
+  ".scss",
+  ".less",
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".py",
+  ".rb",
+  ".go",
+  ".rs",
+  ".java",
+  ".kt",
+  ".c",
+  ".h",
+  ".cpp",
+  ".hpp",
+  ".cc",
+  ".cs",
+  ".php",
+  ".swift",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".sql",
+  ".r",
+  ".pl",
+  ".lua",
+  ".dart",
+  ".scala",
+  ".clj",
+  ".ex",
+  ".exs",
+  ".vue",
+  ".svelte",
+  ".graphql",
+  ".proto",
+  ".dockerfile",
 ]);
 // Secret-file denylist — filename shapes whose contents are likely credentials,
 // private keys, or secret config. Matching files are skipped-with-note and their
@@ -80,9 +133,7 @@ const TEXT_EXTENSIONS = new Set([
 // Matched on the filename, case-insensitive, and independent of
 // `node:path.extname` — which returns "" for dotfiles like `.env` and `.npmrc`,
 // so an extname-based check would miss exactly the files that matter most.
-const SECRET_FILE_EXTENSIONS = [
-  ".pem", ".key", ".p12", ".pfx", ".npmrc", ".netrc", ".ini", ".cfg", ".conf",
-];
+const SECRET_FILE_EXTENSIONS = [".pem", ".key", ".p12", ".pfx", ".npmrc", ".netrc", ".ini", ".cfg", ".conf"];
 const SECRET_FILE_PREFIXES = ["id_rsa"];
 
 /** Does this filename look like a secret/credential/key/config file? Case-
@@ -157,10 +208,12 @@ const LOADING_PHRASES = [
 interface NameLookupClient {
   conversations: { info(args: { channel: string }): Promise<{ channel?: { name?: string } }> };
   users: {
-    info(args: {
-      user: string;
-    }): Promise<{
-      user?: { name?: string; real_name?: string; profile?: { display_name?: string; real_name?: string; email?: string } };
+    info(args: { user: string }): Promise<{
+      user?: {
+        name?: string;
+        real_name?: string;
+        profile?: { display_name?: string; real_name?: string; email?: string };
+      };
     }>;
   };
 }
@@ -184,10 +237,7 @@ function cachePut(cache: Map<string, string>, key: string, value: string): void 
  *  error or when the channel has no name — the caller falls back to the raw id. A
  *  failed lookup is NOT cached, so a transient error can be retried next time.
  *  Exported for tests. */
-export async function resolveChannelName(
-  client: NameLookupClient,
-  channel: string,
-): Promise<string | undefined> {
+export async function resolveChannelName(client: NameLookupClient, channel: string): Promise<string | undefined> {
   const hit = channelNameCache.get(channel);
   if (hit !== undefined) return hit;
   try {
@@ -203,10 +253,7 @@ export async function resolveChannelName(
 /** Resolve a user's display name (cached, best-effort): profile.display_name,
  *  then real_name, then the handle. Same failure/caching contract as
  *  `resolveChannelName`. Exported for tests. */
-export async function resolveUserName(
-  client: NameLookupClient,
-  user: string,
-): Promise<string | undefined> {
+export async function resolveUserName(client: NameLookupClient, user: string): Promise<string | undefined> {
   const hit = userNameCache.get(user);
   if (hit !== undefined) return hit;
   try {
@@ -279,7 +326,9 @@ export function createSlackApp(deps: CoreDeps) {
             const missing = missingBotScopes(auth.response_metadata?.scopes);
             recordMissingScopes(missing);
             if (missing.length > 0) {
-              console.error(`[slack] bot token is MISSING required scopes: ${missing.join(", ")} — reinstall the app with them (README → Slack app setup); until then the features needing them silently do nothing`);
+              console.error(
+                `[slack] bot token is MISSING required scopes: ${missing.join(", ")} — reinstall the app with them (README → Slack app setup); until then the features needing them silently do nothing`,
+              );
             }
           }
         }
@@ -525,11 +574,9 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
   // was accepted, before any model/tool work starts. Fire-and-forget — a
   // missing reactions:write scope (or a re-run reacting twice) must never
   // block or fail the request itself.
-  client.reactions
-    .add({ channel: ev.channel, timestamp: ev.ts, name: ACK_EMOJI })
-    .catch((err: Error) => {
-      if (!err.message.includes("already_reacted")) console.error(`[ack] ${err.message}`);
-    });
+  client.reactions.add({ channel: ev.channel, timestamp: ev.ts, name: ACK_EMOJI }).catch((err: Error) => {
+    if (!err.message.includes("already_reacted")) console.error(`[ack] ${err.message}`);
+  });
   // A replayed message says how late the pickup was — best-effort, like the
   // ack, and overlapped with the file downloads (one Slack round-trip, not a
   // serial one). Awaited before dispatch so the note precedes the run card.
@@ -622,7 +669,9 @@ export async function fetchImages(
   }
   // An image is never text/html, so any HTML answer is Slack's login page.
   const downloads = await Promise.all(
-    candidates.map(({ url, label }) => downloadSlackFile(url, label, (contentType) => contentType.includes("text/html"))),
+    candidates.map(({ url, label }) =>
+      downloadSlackFile(url, label, (contentType) => contentType.includes("text/html")),
+    ),
   );
   candidates.forEach(({ f, label, mediaType }, i) => {
     const buf = downloads[i];
@@ -643,7 +692,11 @@ const fileLabel = (f: SlackFile) => `${f.name ?? f.id ?? "file"} (${f.mimetype ?
  *  Slack answers an unauthorized file fetch with an HTML login page and HTTP
  *  200 — content-type is the reliable failure signal, judged by the caller
  *  (`isLoginPage`) because a genuine .html attachment is itself text/html. */
-async function downloadSlackFile(url: string, label: string, isLoginPage: (contentType: string) => boolean): Promise<Buffer | undefined> {
+async function downloadSlackFile(
+  url: string,
+  label: string,
+  isLoginPage: (contentType: string) => boolean,
+): Promise<Buffer | undefined> {
   const token = process.env.SLACK_BOT_TOKEN;
   try {
     const res = await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} });
@@ -687,7 +740,9 @@ export async function fetchDocuments(
     candidates.push({ f, label, url, kind });
   }
   const downloads = await Promise.all(
-    candidates.map(({ url, label, f }) => downloadSlackFile(url, label, (contentType) => contentType.includes("text/html") && f.mimetype !== "text/html")),
+    candidates.map(({ url, label, f }) =>
+      downloadSlackFile(url, label, (contentType) => contentType.includes("text/html") && f.mimetype !== "text/html"),
+    ),
   );
   candidates.forEach(({ f, label, kind }, i) => {
     const buf = downloads[i];
@@ -775,9 +830,7 @@ export class SlackIO implements ChannelIO {
     const ts = posted.ts as string;
     liveCards.add(liveCardKey(this.ev.channel, ts));
     const edit = (frame: StatusUpdate) =>
-      this.client.chat
-        .update({ channel: this.ev.channel, ts, ...render(frame) })
-        .catch(() => {});
+      this.client.chat.update({ channel: this.ev.channel, ts, ...render(frame) }).catch(() => {});
     return {
       update: (frame) => void edit(frame),
       done: async (frame) => {
@@ -838,8 +891,12 @@ export class SlackIO implements ChannelIO {
         const files = kept[i].files;
         if (!files?.length) continue;
         const [imagePass, docPass] = await Promise.all([
-          imagesLeft > 0 && imageBytesLeft > 0 ? fetchImages(files, Math.min(MAX_IMAGES_PER_MESSAGE, imagesLeft), imageBytesLeft) : undefined,
-          docsLeft > 0 && docBytesLeft > 0 ? fetchDocuments(files, Math.min(MAX_DOCS_PER_MESSAGE, docsLeft), docBytesLeft) : undefined,
+          imagesLeft > 0 && imageBytesLeft > 0
+            ? fetchImages(files, Math.min(MAX_IMAGES_PER_MESSAGE, imagesLeft), imageBytesLeft)
+            : undefined,
+          docsLeft > 0 && docBytesLeft > 0
+            ? fetchDocuments(files, Math.min(MAX_DOCS_PER_MESSAGE, docsLeft), docBytesLeft)
+            : undefined,
         ]);
         if (imagePass) {
           imagesLeft -= imagePass.images.length;
@@ -900,9 +957,7 @@ export function ownsLiveCard(channel: string, ts: string): boolean {
  *  `*bold*`/`` `code` `` markup renders as before. Exported for tests. */
 export function render(frame: StatusUpdate): { text: string; blocks: object[] } {
   const title = escapeMrkdwn(frame.title);
-  const blocks: object[] = [
-    { type: "context", elements: [{ type: "mrkdwn", text: title }] },
-  ];
+  const blocks: object[] = [{ type: "context", elements: [{ type: "mrkdwn", text: title }] }];
   const elements: object[] = [];
   // The run link is a typed link element: one rendered line, and its 100+-char
   // capability URL lives in the `url` field where it has no width at all.
@@ -974,9 +1029,7 @@ const APP_FOOTER_RE = /(?:^|\s)(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[
 
 /** Exported for tests. */
 export function stripMention(text: string, botUserId?: string): string {
-  const stripped = botUserId
-    ? text.replaceAll(`<@${botUserId}>`, "")
-    : text.replace(/<@[A-Z0-9]+>/, "");
+  const stripped = botUserId ? text.replaceAll(`<@${botUserId}>`, "") : text.replace(/<@[A-Z0-9]+>/, "");
   // Exactly the two shapes Slack emits (bold or plain — never asymmetric), as
   // a whole trailing line; repeated because a forwarded app message can stack
   // two, and a message that is nothing but mention + footer strips to "".

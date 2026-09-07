@@ -50,7 +50,8 @@ export function residentStateTone(state: string): ResidentTone {
 }
 
 export const str = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
-export const rec = (v: unknown): Record<string, unknown> => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
+export const rec = (v: unknown): Record<string, unknown> =>
+  v && typeof v === "object" ? (v as Record<string, unknown>) : {};
 
 export function residentSlug(record: ResidentRecordView): string {
   return str(record.resource).replace(/^repo:/, "");
@@ -85,7 +86,14 @@ export function residentDisk(record: ResidentRecordView): ResidentDiskView | nul
     totalKiB: total,
     usedKiB: used,
     freeKiB: free,
-    parts: { mirror: kib(p.mirror), deps: kib(p.deps), checkout: kib(p.checkout), threads: kibMap(p.threads), homes: kibMap(p.homes), other: kib(p.other) ?? 0 },
+    parts: {
+      mirror: kib(p.mirror),
+      deps: kib(p.deps),
+      checkout: kib(p.checkout),
+      threads: kibMap(p.threads),
+      homes: kibMap(p.homes),
+      other: kib(p.other) ?? 0,
+    },
   };
 }
 

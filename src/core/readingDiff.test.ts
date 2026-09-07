@@ -27,16 +27,28 @@ describe("resolveReadingDiff (config + env)", () => {
       meatModel: "claude-opus-4-8",
       meatTimeoutS: 300,
     });
-    expect(resolveReadingDiff({ provider: "meat", meatTimeoutS: -5 }, {})).toEqual({ provider: "meat", meatTimeoutS: 240 });
+    expect(resolveReadingDiff({ provider: "meat", meatTimeoutS: -5 }, {})).toEqual({
+      provider: "meat",
+      meatTimeoutS: 240,
+    });
     expect(resolveReadingDiff({ provider: "off" }, {})).toBeNull();
   });
 
   it("SWITCHBOARD_READING_DIFF overrides config: git | meat | off", () => {
-    expect(resolveReadingDiff({ provider: "meat" }, { SWITCHBOARD_READING_DIFF: "git" })).toEqual({ provider: "git", meatTimeoutS: 240 });
-    expect(resolveReadingDiff({ provider: "off" }, { SWITCHBOARD_READING_DIFF: "meat" })).toEqual({ provider: "meat", meatTimeoutS: 240 });
+    expect(resolveReadingDiff({ provider: "meat" }, { SWITCHBOARD_READING_DIFF: "git" })).toEqual({
+      provider: "git",
+      meatTimeoutS: 240,
+    });
+    expect(resolveReadingDiff({ provider: "off" }, { SWITCHBOARD_READING_DIFF: "meat" })).toEqual({
+      provider: "meat",
+      meatTimeoutS: 240,
+    });
     expect(resolveReadingDiff({ provider: "git" }, { SWITCHBOARD_READING_DIFF: "off" })).toBeNull();
     // an unknown env value is ignored, never a crash
-    expect(resolveReadingDiff({ provider: "git" }, { SWITCHBOARD_READING_DIFF: "bogus" })).toEqual({ provider: "git", meatTimeoutS: 240 });
+    expect(resolveReadingDiff({ provider: "git" }, { SWITCHBOARD_READING_DIFF: "bogus" })).toEqual({
+      provider: "git",
+      meatTimeoutS: 240,
+    });
   });
 });
 
@@ -50,19 +62,34 @@ describe("readingDiffCommand", () => {
   });
 
   it("meat: bounded by its own `timeout` (the producer's clock — the pipeline never waits on meat), -json, the pinned model, the same quoted range", () => {
-    expect(readingDiffCommand("meat", "main", "claude-opus-4-8", 300)).toBe("timeout 300 meat -json -model 'claude-opus-4-8' 'origin/main...HEAD'");
+    expect(readingDiffCommand("meat", "main", "claude-opus-4-8", 300)).toBe(
+      "timeout 300 meat -json -model 'claude-opus-4-8' 'origin/main...HEAD'",
+    );
     expect(readingDiffCommand("meat", "main")).toBe("timeout 240 meat -json 'origin/main...HEAD'");
   });
 
   it("a hostile base ref is quoted into one inert token", () => {
-    expect(readingDiffCommand("git", "x; rm -rf /")).toBe("git diff --no-color --end-of-options 'origin/x; rm -rf /...HEAD'");
+    expect(readingDiffCommand("git", "x; rm -rf /")).toBe(
+      "git diff --no-color --end-of-options 'origin/x; rm -rf /...HEAD'",
+    );
   });
 });
 
 describe("parseMeatJson", () => {
   it("parses the -json wire shape (smart_diff + summary + token counts)", () => {
-    const raw = JSON.stringify({ smart_diff: "diff --git a/x b/x", summary: "one line", input_tokens: 100, output_tokens: 20, elision: "" });
-    expect(parseMeatJson(raw)).toEqual({ diff: "diff --git a/x b/x", summary: "one line", inputTokens: 100, outputTokens: 20 });
+    const raw = JSON.stringify({
+      smart_diff: "diff --git a/x b/x",
+      summary: "one line",
+      input_tokens: 100,
+      output_tokens: 20,
+      elision: "",
+    });
+    expect(parseMeatJson(raw)).toEqual({
+      diff: "diff --git a/x b/x",
+      summary: "one line",
+      inputTokens: 100,
+      outputTokens: 20,
+    });
   });
 
   it("throws on an exec error, non-JSON output, or JSON without smart_diff", () => {
@@ -87,26 +114,51 @@ describe("produceReadingDiff", () => {
   const exec = (impl: (cmd: string) => string | Promise<string>) => ({ exec: async (cmd: string) => impl(cmd) });
 
   it("git provider: one git command → a git-powered artifact", async () => {
-    const a = await produceReadingDiff(exec((cmd) => (cmd.startsWith("git diff") ? "diff --git a/f b/f\n+x" : "?")), { provider: "git", baseRef: "main" });
+    const a = await produceReadingDiff(
+      exec((cmd) => (cmd.startsWith("git diff") ? "diff --git a/f b/f\n+x" : "?")),
+      { provider: "git", baseRef: "main" },
+    );
     expect(a).toEqual({ poweredBy: "git", baseRef: "main", diff: "diff --git a/f b/f\n+x", truncated: false });
   });
 
   it("meat provider: meat's smart diff, summary, and token counts ride the artifact", async () => {
     const a = await produceReadingDiff(
-      exec((cmd) => (cmd.includes("meat") ? JSON.stringify({ smart_diff: "abridged", summary: "s", input_tokens: 9, output_tokens: 3 }) : "raw")),
+      exec((cmd) =>
+        cmd.includes("meat")
+          ? JSON.stringify({ smart_diff: "abridged", summary: "s", input_tokens: 9, output_tokens: 3 })
+          : "raw",
+      ),
       { provider: "meat", baseRef: "main", meatModel: "claude-opus-4-8" },
     );
     expect(a).toMatchObject({ poweredBy: "meat", diff: "abridged", summary: "s", meatTokens: { input: 9, output: 3 } });
   });
 
   it("meat failing (missing binary, timeout's exit 124, bad JSON) yields null — the git BASELINE artifact is the fallback, structurally", async () => {
-    expect(await produceReadingDiff(exec(() => "exit 127: zsh: command not found: meat"), { provider: "meat", baseRef: "main" })).toBeNull();
-    expect(await produceReadingDiff(exec(() => "exit 124: "), { provider: "meat", baseRef: "main" })).toBeNull();
-    expect(await produceReadingDiff(exec(() => "not json at all"), { provider: "meat", baseRef: "main" })).toBeNull();
+    expect(
+      await produceReadingDiff(
+        exec(() => "exit 127: zsh: command not found: meat"),
+        { provider: "meat", baseRef: "main" },
+      ),
+    ).toBeNull();
+    expect(
+      await produceReadingDiff(
+        exec(() => "exit 124: "),
+        { provider: "meat", baseRef: "main" },
+      ),
+    ).toBeNull();
+    expect(
+      await produceReadingDiff(
+        exec(() => "not json at all"),
+        { provider: "meat", baseRef: "main" },
+      ),
+    ).toBeNull();
   });
 
   it("a git failure yields null (no artifact, never a throw into the run)", async () => {
-    const a = await produceReadingDiff(exec(() => "fatal: ambiguous argument 'origin/gone...HEAD'"), { provider: "git", baseRef: "gone" });
+    const a = await produceReadingDiff(
+      exec(() => "fatal: ambiguous argument 'origin/gone...HEAD'"),
+      { provider: "git", baseRef: "gone" },
+    );
     expect(a).toBeNull();
     const b = await produceReadingDiff(
       exec(() => {
@@ -118,11 +170,19 @@ describe("produceReadingDiff", () => {
   });
 
   it("an empty diff yields null — nothing to review, no artifact", async () => {
-    expect(await produceReadingDiff(exec(() => ""), { provider: "git", baseRef: "main" })).toBeNull();
+    expect(
+      await produceReadingDiff(
+        exec(() => ""),
+        { provider: "git", baseRef: "main" },
+      ),
+    ).toBeNull();
   });
 
   it("caps the diff and marks truncation", async () => {
-    const a = await produceReadingDiff(exec(() => "diff --git\n" + "y".repeat(READING_DIFF_CAP + 100)), { provider: "git", baseRef: "main" });
+    const a = await produceReadingDiff(
+      exec(() => "diff --git\n" + "y".repeat(READING_DIFF_CAP + 100)),
+      { provider: "git", baseRef: "main" },
+    );
     expect(a?.truncated).toBe(true);
   });
 
@@ -131,7 +191,10 @@ describe("produceReadingDiff", () => {
   // hygiene: control-strip + redact FIRST, cap after, on every string.
   it("redacts secrets and strips ANSI from the diff before it can reach the stream — git and meat alike, meat's summary included", async () => {
     const secret = "ghp_" + "A".repeat(36);
-    const git = await produceReadingDiff(exec(() => `diff --git a/.env b/.env\n+[31mGITHUB_TOKEN=${secret}[m`), { provider: "git", baseRef: "main" });
+    const git = await produceReadingDiff(
+      exec(() => `diff --git a/.env b/.env\n+[31mGITHUB_TOKEN=${secret}[m`),
+      { provider: "git", baseRef: "main" },
+    );
     expect(git?.diff).not.toContain(secret);
     expect(git?.diff).toContain("«redacted");
     expect(git?.diff).not.toContain("[31m");
@@ -139,7 +202,12 @@ describe("produceReadingDiff", () => {
     const meat = await produceReadingDiff(
       exec((cmd) =>
         cmd.includes("meat")
-          ? JSON.stringify({ smart_diff: `+token=${secret}`, summary: `adds ${secret} to .env`, input_tokens: 1, output_tokens: 1 })
+          ? JSON.stringify({
+              smart_diff: `+token=${secret}`,
+              summary: `adds ${secret} to .env`,
+              input_tokens: 1,
+              output_tokens: 1,
+            })
           : "unused",
       ),
       { provider: "meat", baseRef: "main" },
@@ -151,7 +219,10 @@ describe("produceReadingDiff", () => {
   it("never splits a surrogate pair at the cap", async () => {
     const emoji = "😀"; // one astral char = two UTF-16 units
     const body = "d".repeat(READING_DIFF_CAP - 1) + emoji + "tail";
-    const a = await produceReadingDiff(exec(() => body), { provider: "git", baseRef: "main" });
+    const a = await produceReadingDiff(
+      exec(() => body),
+      { provider: "git", baseRef: "main" },
+    );
     expect(a?.truncated).toBe(true);
     const cut = a!.diff.slice(0, a!.diff.indexOf("…"));
     expect(cut.charCodeAt(cut.length - 1)).toBeLessThan(0xd800); // no lone high surrogate
@@ -173,14 +244,24 @@ describe("startReviewReadingDiff (baseline guaranteed, meat an unawaited upgrade
     expect(started.upgrade).toBeUndefined();
     expect(await started.baseline).toBe(true);
     expect(published).toEqual([
-      { type: "review_artifact", artifact: "reading_diff", poweredBy: "git", baseRef: "main", diff: "diff --git a/f b/f\n+x", truncated: false, at: expect.any(Number) },
+      {
+        type: "review_artifact",
+        artifact: "reading_diff",
+        poweredBy: "git",
+        baseRef: "main",
+        diff: "diff --git a/f b/f\n+x",
+        truncated: false,
+        at: expect.any(Number),
+      },
     ]);
   });
 
   it("meat provider: the git baseline AND the meat upgrade each publish; readers prefer meat", async () => {
     const published: RunEvent[] = [];
     const started = startReviewReadingDiff({
-      executor: exec((cmd) => (cmd.includes("meat") ? JSON.stringify({ smart_diff: "abridged", summary: "s" }) : "diff --git a/f b/f\n+x")),
+      executor: exec((cmd) =>
+        cmd.includes("meat") ? JSON.stringify({ smart_diff: "abridged", summary: "s" }) : "diff --git a/f b/f\n+x",
+      ),
       cfg: { provider: "meat" },
       env: {},
       baseRef: "main",
@@ -207,8 +288,20 @@ describe("startReviewReadingDiff (baseline guaranteed, meat an unawaited upgrade
 
   it("off (config or env) → baseline false, no upgrade, nothing published", async () => {
     const published: RunEvent[] = [];
-    const a = startReviewReadingDiff({ executor: exec(() => "d"), cfg: { provider: "off" }, env: {}, baseRef: "main", publish: (e) => published.push(e) });
-    const b = startReviewReadingDiff({ executor: exec(() => "d"), cfg: undefined, env: { SWITCHBOARD_READING_DIFF: "off" }, baseRef: "main", publish: (e) => published.push(e) });
+    const a = startReviewReadingDiff({
+      executor: exec(() => "d"),
+      cfg: { provider: "off" },
+      env: {},
+      baseRef: "main",
+      publish: (e) => published.push(e),
+    });
+    const b = startReviewReadingDiff({
+      executor: exec(() => "d"),
+      cfg: undefined,
+      env: { SWITCHBOARD_READING_DIFF: "off" },
+      baseRef: "main",
+      publish: (e) => published.push(e),
+    });
     expect(await a.baseline).toBe(false);
     expect(await b.baseline).toBe(false);
     expect(a.upgrade).toBeUndefined();
@@ -222,7 +315,13 @@ describe("startReviewReadingDiff (baseline guaranteed, meat an unawaited upgrade
         throw new Error("sandbox dead");
       },
     };
-    const started = startReviewReadingDiff({ executor: boom, cfg: { provider: "meat" }, env: {}, baseRef: "main", publish: (e) => published.push(e) });
+    const started = startReviewReadingDiff({
+      executor: boom,
+      cfg: { provider: "meat" },
+      env: {},
+      baseRef: "main",
+      publish: (e) => published.push(e),
+    });
     await expect(started.baseline).resolves.toBe(false);
     await expect(started.upgrade!).resolves.toBe(false);
     expect(published).toEqual([]);

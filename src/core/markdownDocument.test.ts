@@ -22,7 +22,9 @@ describe("toMarkdownDocument", () => {
   });
 
   it("consecutive lines stay on their own lines: each gets a hard break; blank lines and the last line of a run do not", () => {
-    expect(toMarkdownDocument("head\nTools (2):\n\nafter blank\nlast")).toBe("head  \nTools (2):\n\nafter blank  \nlast");
+    expect(toMarkdownDocument("head\nTools (2):\n\nafter blank\nlast")).toBe(
+      "head  \nTools (2):\n\nafter blank  \nlast",
+    );
     expect(toMarkdownDocument("only line")).toBe("only line");
     expect(toMarkdownDocument("trailing newline\n")).toBe("trailing newline\n");
   });
@@ -38,9 +40,23 @@ describe("toMarkdownDocument", () => {
   });
 
   it("renders a command reply end to end", () => {
-    const reply = ["🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 filed", "", "1. `slow_tool:npm test` — 82 runs · 89× · high", "", "*Filed:*", "• https://x.test/1 — npm test is slow"].join("\n");
+    const reply = [
+      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 filed",
+      "",
+      "1. `slow_tool:npm test` — 82 runs · 89× · high",
+      "",
+      "*Filed:*",
+      "• https://x.test/1 — npm test is slow",
+    ].join("\n");
     expect(toMarkdownDocument(reply)).toBe(
-      ["🔍 **Friction proposals** — 2 runs analyzed · 1 recurring pattern · 1 filed", "", "1. `slow_tool:npm test` — 82 runs · 89× · high", "", "**Filed:**  ", "- https://x.test/1 — npm test is slow"].join("\n"),
+      [
+        "🔍 **Friction proposals** — 2 runs analyzed · 1 recurring pattern · 1 filed",
+        "",
+        "1. `slow_tool:npm test` — 82 runs · 89× · high",
+        "",
+        "**Filed:**  ",
+        "- https://x.test/1 — npm test is slow",
+      ].join("\n"),
     );
   });
 });

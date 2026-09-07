@@ -35,10 +35,17 @@ function harness(script: Scripted, env: Record<string, string> = { SWITCHBOARD_D
     fetch: async (url, init) => {
       const method = init?.method ?? "GET";
       const headers = (init?.headers ?? {}) as Record<string, string>;
-      calls.push({ method, url, auth: headers.authorization, body: typeof init?.body === "string" ? init.body : undefined });
+      calls.push({
+        method,
+        url,
+        auth: headers.authorization,
+        body: typeof init?.body === "string" ? init.body : undefined,
+      });
       if (url.endsWith("/healthz")) {
         const body = next(script.health, healthIdx++);
-        return body === undefined ? new Response("<html>502</html>", { status: 502 }) : new Response(body, { status: 200 });
+        return body === undefined
+          ? new Response("<html>502</html>", { status: 502 })
+          : new Response(body, { status: 200 });
       }
       const r = next(script.restart, restartIdx++);
       return new Response(r.body, { status: r.status });
@@ -48,9 +55,16 @@ function harness(script: Scripted, env: Record<string, string> = { SWITCHBOARD_D
   return { deps, io, calls, lines };
 }
 
-const healthz = (inFlight: number, startedAt: string, draining = false) => JSON.stringify({ ok: true, inFlight, draining, startedAt, build: { commit: "abc1234" } });
-const stopping = (previousStartedAt: string) => ({ status: 202, body: JSON.stringify({ ok: true, stopping: true, forced: false, inFlight: 0, previousStartedAt }) });
-const refused = (n: number) => ({ status: 409, body: JSON.stringify({ ok: false, refused: true, problems: [`${n} run(s) in flight — a restart would kill them`] }) });
+const healthz = (inFlight: number, startedAt: string, draining = false) =>
+  JSON.stringify({ ok: true, inFlight, draining, startedAt, build: { commit: "abc1234" } });
+const stopping = (previousStartedAt: string) => ({
+  status: 202,
+  body: JSON.stringify({ ok: true, stopping: true, forced: false, inFlight: 0, previousStartedAt }),
+});
+const refused = (n: number) => ({
+  status: 409,
+  body: JSON.stringify({ ok: false, refused: true, problems: [`${n} run(s) in flight — a restart would kill them`] }),
+});
 
 describe("runBotRestart", () => {
   it("refuses without the bearer in the env — nothing is posted", async () => {
@@ -62,10 +76,18 @@ describe("runBotRestart", () => {
 
   it("happy path: POSTs with the bearer and {force:false}, then polls /healthz until a LATER startedAt answers; the old startedAt keeps it waiting", async () => {
     // Old container answers twice more after SIGTERM (draining, then still up), then restarts, then the new one.
-    const h = harness({ health: [healthz(0, BEFORE, true), healthz(0, BEFORE), undefined, healthz(0, AFTER)], restart: [stopping(BEFORE)] });
+    const h = harness({
+      health: [healthz(0, BEFORE, true), healthz(0, BEFORE), undefined, healthz(0, AFTER)],
+      restart: [stopping(BEFORE)],
+    });
     const r = await runBotRestart(plan(), h.io, h.deps);
     expect(r).toMatchObject({ kind: "ran", ok: true, previousStartedAt: BEFORE, startedAt: AFTER });
-    expect(h.calls[0]).toMatchObject({ method: "POST", url: "https://switchboard.coreplanelabs.dev/admin/restart", auth: "Bearer tok-deployer", body: '{"force":false}' });
+    expect(h.calls[0]).toMatchObject({
+      method: "POST",
+      url: "https://switchboard.coreplanelabs.dev/admin/restart",
+      auth: "Bearer tok-deployer",
+      body: '{"force":false}',
+    });
     expect(h.calls.filter((c) => c.url.endsWith("/healthz"))).toHaveLength(4);
     expect(h.lines.filter((l) => /not live yet/.test(l))).toEqual([
       expect.stringContaining("old container still draining"),
@@ -76,7 +98,10 @@ describe("runBotRestart", () => {
   });
 
   it("a 409 is waited out with a heartbeat and retried every poll; a later 202 proceeds", async () => {
-    const h = harness({ health: [healthz(2, BEFORE), healthz(1, BEFORE), healthz(0, AFTER)], restart: [refused(2), refused(1), stopping(BEFORE)] });
+    const h = harness({
+      health: [healthz(2, BEFORE), healthz(1, BEFORE), healthz(0, AFTER)],
+      restart: [refused(2), refused(1), stopping(BEFORE)],
+    });
     const r = await runBotRestart(plan(), h.io, h.deps);
     expect(r).toMatchObject({ kind: "ran", ok: true, startedAt: AFTER });
     expect(h.calls.filter((c) => c.method === "POST")).toHaveLength(3);
@@ -89,13 +114,25 @@ describe("runBotRestart", () => {
   it("a 409 past the wait budget fails without ever stopping anything (exit non-zero), naming --force", async () => {
     const h = harness({ health: [healthz(2, BEFORE)], restart: [refused(2)] });
     const r = await runBotRestart(plan(), h.io, h.deps);
-    expect(r).toMatchObject({ kind: "ran", ok: false, reason: expect.stringMatching(/still refusing after 2 min.*--force/) });
+    expect(r).toMatchObject({
+      kind: "ran",
+      ok: false,
+      reason: expect.stringMatching(/still refusing after 2 min.*--force/),
+    });
     // 2 min budget / 30 s poll → the first attempt plus four retries at most.
     expect(h.calls.filter((c) => c.method === "POST").length).toBeLessThanOrEqual(5);
   });
 
   it("--force posts {force:true} once and never retries", async () => {
-    const h = harness({ health: [healthz(2, BEFORE), healthz(0, AFTER)], restart: [{ status: 202, body: JSON.stringify({ ok: true, stopping: true, forced: true, inFlight: 2, previousStartedAt: BEFORE }) }] });
+    const h = harness({
+      health: [healthz(2, BEFORE), healthz(0, AFTER)],
+      restart: [
+        {
+          status: 202,
+          body: JSON.stringify({ ok: true, stopping: true, forced: true, inFlight: 2, previousStartedAt: BEFORE }),
+        },
+      ],
+    });
     const r = await runBotRestart(plan(true), h.io, h.deps);
     expect(r).toMatchObject({ kind: "ran", ok: true });
     expect(h.calls.filter((c) => c.method === "POST")).toEqual([expect.objectContaining({ body: '{"force":true}' })]);
@@ -103,20 +140,36 @@ describe("runBotRestart", () => {
 
   it("401/403 fails at once (no retry); any other error status fails with the status", async () => {
     const denied = harness({ health: [healthz(0, BEFORE)], restart: [{ status: 403, body: "forbidden" }] });
-    expect(await runBotRestart(plan(), denied.io, denied.deps)).toMatchObject({ kind: "ran", ok: false, reason: expect.stringContaining("HTTP 403") });
+    expect(await runBotRestart(plan(), denied.io, denied.deps)).toMatchObject({
+      kind: "ran",
+      ok: false,
+      reason: expect.stringContaining("HTTP 403"),
+    });
     expect(denied.calls.filter((c) => c.method === "POST")).toHaveLength(1);
     const broken = harness({ health: [healthz(0, BEFORE)], restart: [{ status: 502, body: "bad gateway" }] });
-    expect(await runBotRestart(plan(), broken.io, broken.deps)).toMatchObject({ kind: "ran", ok: false, reason: expect.stringContaining("HTTP 502") });
+    expect(await runBotRestart(plan(), broken.io, broken.deps)).toMatchObject({
+      kind: "ran",
+      ok: false,
+      reason: expect.stringContaining("HTTP 502"),
+    });
   });
 
   it("a container that was not running is reported as such — no gate to wait for, still ok", async () => {
-    const h = harness({ health: [healthz(0, AFTER)], restart: [{ status: 200, body: JSON.stringify({ ok: true, stopping: false, note: "container not running" }) }] });
+    const h = harness({
+      health: [healthz(0, AFTER)],
+      restart: [{ status: 200, body: JSON.stringify({ ok: true, stopping: false, note: "container not running" }) }],
+    });
     expect(await runBotRestart(plan(), h.io, h.deps)).toMatchObject({ kind: "ran", ok: true, startedAt: AFTER });
   });
 
   it("the gate times out past the live deadline with the last reason (never a false success)", async () => {
     const h = harness({ health: [healthz(0, BEFORE)], restart: [stopping(BEFORE)] });
     const r = await runBotRestart(plan(), h.io, h.deps);
-    expect(r).toMatchObject({ kind: "ran", ok: false, previousStartedAt: BEFORE, reason: expect.stringMatching(/old container still answering.*gave up after 20 min/) });
+    expect(r).toMatchObject({
+      kind: "ran",
+      ok: false,
+      previousStartedAt: BEFORE,
+      reason: expect.stringMatching(/old container still answering.*gave up after 20 min/),
+    });
   });
 });

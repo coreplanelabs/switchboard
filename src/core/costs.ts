@@ -51,17 +51,22 @@ export function parseCostsConfig(raw: unknown): CostsConfig | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "object") throw new Error("costs: must be a mapping");
   const r = raw as Record<string, unknown>;
-  if (typeof r.cloudflareAccountId !== "string" || !r.cloudflareAccountId) throw new Error("costs.cloudflareAccountId is required");
-  if (!r.groups || typeof r.groups !== "object") throw new Error("costs.groups must be a mapping of group → { workers, containerApps }");
+  if (typeof r.cloudflareAccountId !== "string" || !r.cloudflareAccountId)
+    throw new Error("costs.cloudflareAccountId is required");
+  if (!r.groups || typeof r.groups !== "object")
+    throw new Error("costs.groups must be a mapping of group → { workers, containerApps }");
   const groups: Record<string, CostGroupConfig> = {};
   for (const [name, g] of Object.entries(r.groups as Record<string, unknown>)) {
     if (!g || typeof g !== "object") throw new Error(`costs.groups.${name} must be a mapping`);
     const gg = g as Record<string, unknown>;
-    if (!Array.isArray(gg.workers) || !gg.workers.every((w) => typeof w === "string")) throw new Error(`costs.groups.${name}.workers must be a list of Worker script names`);
+    if (!Array.isArray(gg.workers) || !gg.workers.every((w) => typeof w === "string"))
+      throw new Error(`costs.groups.${name}.workers must be a list of Worker script names`);
     const apps = gg.containerApps ?? {};
-    if (typeof apps !== "object" || Object.values(apps as object).some((v) => typeof v !== "string")) throw new Error(`costs.groups.${name}.containerApps must map application id → label`);
+    if (typeof apps !== "object" || Object.values(apps as object).some((v) => typeof v !== "string"))
+      throw new Error(`costs.groups.${name}.containerApps must map application id → label`);
     const namespaces = gg.durableObjectNamespaces ?? {};
-    if (typeof namespaces !== "object" || Object.values(namespaces as object).some((v) => typeof v !== "string")) throw new Error(`costs.groups.${name}.durableObjectNamespaces must map namespace id → label`);
+    if (typeof namespaces !== "object" || Object.values(namespaces as object).some((v) => typeof v !== "string"))
+      throw new Error(`costs.groups.${name}.durableObjectNamespaces must map namespace id → label`);
     groups[name] = {
       label: typeof gg.label === "string" ? gg.label : undefined,
       workers: gg.workers as string[],
@@ -73,7 +78,8 @@ export function parseCostsConfig(raw: unknown): CostsConfig | undefined {
   return {
     cloudflareAccountId: r.cloudflareAccountId,
     cloudflareTokenEnv: typeof r.cloudflareTokenEnv === "string" ? r.cloudflareTokenEnv : DEFAULT_CF_TOKEN_ENV,
-    anthropicAdminKeyEnv: typeof r.anthropicAdminKeyEnv === "string" ? r.anthropicAdminKeyEnv : DEFAULT_ANTHROPIC_ADMIN_ENV,
+    anthropicAdminKeyEnv:
+      typeof r.anthropicAdminKeyEnv === "string" ? r.anthropicAdminKeyEnv : DEFAULT_ANTHROPIC_ADMIN_ENV,
     groups,
   };
 }
@@ -205,7 +211,13 @@ function eachDay(range: DateRange): string[] {
 /** Pure: prices the group's rows in the range. Rows for apps/workers/workspaces
  *  outside the group are dropped, days with no rows are zero-filled, `llm`
  *  null means no LLM source (reported as unavailable, not $0). */
-export function buildCostReport(group: string, cfg: CostGroupConfig, usage: CloudflareUsage, llm: LlmCostRow[] | null, range: DateRange): CostReport {
+export function buildCostReport(
+  group: string,
+  cfg: CostGroupConfig,
+  usage: CloudflareUsage,
+  llm: LlmCostRow[] | null,
+  range: DateRange,
+): CostReport {
   const workers = new Set(cfg.workers);
   const byResource = { cpu: 0, memory: 0, disk: 0, durableObjects: 0 };
   const days: DailyCost[] = eachDay(range).map((date) => {
@@ -216,7 +228,14 @@ export function buildCostReport(group: string, cfg: CostGroupConfig, usage: Clou
       if (!label) continue;
       const c = containerCostUsd(row);
       const prev = containers[label];
-      containers[label] = prev ? { cpu: prev.cpu + c.cpu, memory: prev.memory + c.memory, disk: prev.disk + c.disk, total: prev.total + c.total } : c;
+      containers[label] = prev
+        ? {
+            cpu: prev.cpu + c.cpu,
+            memory: prev.memory + c.memory,
+            disk: prev.disk + c.disk,
+            total: prev.total + c.total,
+          }
+        : c;
       byResource.cpu += c.cpu;
       byResource.memory += c.memory;
       byResource.disk += c.disk;
@@ -237,8 +256,15 @@ export function buildCostReport(group: string, cfg: CostGroupConfig, usage: Clou
     }
     byResource.durableObjects += doRequestsUsd;
     const llmUsd =
-      llm && cfg.anthropicWorkspaceId ? llm.filter((r) => r.date === date && r.workspaceId === cfg.anthropicWorkspaceId).reduce((s, r) => s + r.amountUsd, 0) : 0;
-    const cloudUsd = Object.values(containers).reduce((s, c) => s + c.total, 0) + Object.values(durableObjects).reduce((s, v) => s + v, 0) + doRequestsUsd;
+      llm && cfg.anthropicWorkspaceId
+        ? llm
+            .filter((r) => r.date === date && r.workspaceId === cfg.anthropicWorkspaceId)
+            .reduce((s, r) => s + r.amountUsd, 0)
+        : 0;
+    const cloudUsd =
+      Object.values(containers).reduce((s, c) => s + c.total, 0) +
+      Object.values(durableObjects).reduce((s, v) => s + v, 0) +
+      doRequestsUsd;
     return { date, containers, durableObjects, doRequestsUsd, cloudUsd, llmUsd, total: cloudUsd + llmUsd };
   });
   const cloudUsd = days.reduce((s, d) => s + d.cloudUsd, 0);
@@ -316,12 +342,17 @@ export class CloudflareGraphqlUsageSource implements CloudflareUsageSource {
       headers: { authorization: `Bearer ${this.token}`, "content-type": "application/json" },
       body: JSON.stringify({
         query: CF_USAGE_QUERY,
-        variables: { accountTag: this.accountId, from: `${range.from}T00:00:00Z`, to: `${addDays(range.to, 1)}T00:00:00Z` },
+        variables: {
+          accountTag: this.accountId,
+          from: `${range.from}T00:00:00Z`,
+          to: `${addDays(range.to, 1)}T00:00:00Z`,
+        },
       }),
     });
     if (res.status !== 200) throw new Error(`cloudflare graphql ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const body = (await res.json()) as { data?: unknown; errors?: { message?: string }[] | null };
-    if (Array.isArray(body.errors) && body.errors.length > 0) throw new Error(`cloudflare graphql: ${body.errors.map((e) => e.message ?? "?").join("; ")}`);
+    if (Array.isArray(body.errors) && body.errors.length > 0)
+      throw new Error(`cloudflare graphql: ${body.errors.map((e) => e.message ?? "?").join("; ")}`);
     const account = ((body.data as { viewer?: { accounts?: unknown[] } })?.viewer?.accounts?.[0] ?? {}) as {
       containers?: { dimensions?: Record<string, unknown>; sum?: Record<string, unknown> }[];
       durableObjectRequests?: { dimensions?: Record<string, unknown>; sum?: Record<string, unknown> }[];
@@ -370,7 +401,10 @@ export class AnthropicCostReportSource implements LlmCostSource {
     for (let i = 0; ; i++) {
       // Like the non-USD check: refuse rather than mis-sum. A ≤90-day range at
       // limit=31 is at most 3 pages, so hitting the cap means the API changed.
-      if (i >= MAX_COST_PAGES) throw new Error(`anthropic cost_report: more than ${MAX_COST_PAGES} pages; refusing to return a truncated total`);
+      if (i >= MAX_COST_PAGES)
+        throw new Error(
+          `anthropic cost_report: more than ${MAX_COST_PAGES} pages; refusing to return a truncated total`,
+        );
       const url = new URL(ANTHROPIC_COST_REPORT);
       url.searchParams.set("starting_at", `${range.from}T00:00:00Z`);
       url.searchParams.set("ending_at", `${addDays(range.to, 1)}T00:00:00Z`);
@@ -378,10 +412,16 @@ export class AnthropicCostReportSource implements LlmCostSource {
       url.searchParams.append("group_by[]", "workspace_id");
       url.searchParams.set("limit", "31");
       if (page) url.searchParams.set("page", page);
-      const res = await this.fetchImpl(url.toString(), { headers: { "x-api-key": this.adminKey, "anthropic-version": ANTHROPIC_VERSION } });
-      if (res.status !== 200) throw new Error(`anthropic cost_report ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      const res = await this.fetchImpl(url.toString(), {
+        headers: { "x-api-key": this.adminKey, "anthropic-version": ANTHROPIC_VERSION },
+      });
+      if (res.status !== 200)
+        throw new Error(`anthropic cost_report ${res.status}: ${(await res.text()).slice(0, 300)}`);
       const body = (await res.json()) as {
-        data?: { starting_at?: string; results?: { amount?: string; currency?: string; workspace_id?: string | null }[] }[];
+        data?: {
+          starting_at?: string;
+          results?: { amount?: string; currency?: string; workspace_id?: string | null }[];
+        }[];
         has_more?: boolean;
         next_page?: string | null;
       };
@@ -409,7 +449,12 @@ export interface CostsService {
   report(group: string, daysParam: string | null): Promise<CostReport>;
 }
 
-export function createCostsService(cfg: CostsConfig, cloudflare: CloudflareUsageSource, llm: LlmCostSource, now: () => Date = () => new Date()): CostsService {
+export function createCostsService(
+  cfg: CostsConfig,
+  cloudflare: CloudflareUsageSource,
+  llm: LlmCostSource,
+  now: () => Date = () => new Date(),
+): CostsService {
   return {
     groups: () => Object.keys(cfg.groups),
     async report(group, daysParam) {

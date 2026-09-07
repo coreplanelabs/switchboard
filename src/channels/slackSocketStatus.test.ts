@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { getSocketStatus, recordSocketConnected, recordSocketDisconnected, resetSocketStatus } from "./slackSocketStatus.js";
+import {
+  getSocketStatus,
+  recordSocketConnected,
+  recordSocketDisconnected,
+  resetSocketStatus,
+} from "./slackSocketStatus.js";
 
 // Feature: features/slack-channel.md item 8 — /healthz reports the Socket Mode
 // state, so "HTTP up, Slack not connected yet" (the cold-start window) and

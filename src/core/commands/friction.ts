@@ -1,12 +1,27 @@
 import { z } from "zod";
 import { GithubIssueTracker, type IssueTracker } from "../../execution/githubIssues.js";
 import { predicateFor } from "../authz/predicate.js";
-import { CommandError, commandDefiner, flag, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
+import {
+  CommandError,
+  commandDefiner,
+  flag,
+  type Caller,
+  type CommandDef,
+  type CommandRegistry,
+  type JsonObject,
+  type JsonValue,
+} from "../commandRegistry.js";
 import type { FrictionLedger } from "../frictionLedger.js";
 import { clusterFriction, type FrictionRunRecord } from "../frictionProposals.js";
 import { parseRunEventLines } from "../runEventLines.js";
 import { analyzeRunFriction, formatFrictionReport, type FrictionDiagnosis } from "../runFriction.js";
-import { countTruncatedInputs, formatSelfImprovementReport, runSelfImprovement, type SelfImprovementConfig, type SelfImprovementReport } from "../selfImprovement.js";
+import {
+  countTruncatedInputs,
+  formatSelfImprovementReport,
+  runSelfImprovement,
+  type SelfImprovementConfig,
+  type SelfImprovementReport,
+} from "../selfImprovement.js";
 
 // The `friction.*` registrations (#157 R13 — Area 7b's on-demand trigger, re-homed
 // on the registry): `friction.report` clusters the ledger's recent runs into
@@ -56,8 +71,10 @@ const defineCommand = commandDefiner<FrictionCommandDeps>();
 const positiveInt = z.coerce.number().int().positive();
 const repoSlug = z.string().refine((s) => /^[\w.-]+\/[\w.-]+$/.test(s), "expected an owner/name slug");
 
-export const NO_LEDGER_MESSAGE = "The friction ledger isn't wired in this process, so there are no recent runs to analyze.";
-export const NO_REPO_MESSAGE = "Set `selfImprovement.repo` (an `owner/name`) in config.yaml to tell `friction propose` where to file issues.";
+export const NO_LEDGER_MESSAGE =
+  "The friction ledger isn't wired in this process, so there are no recent runs to analyze.";
+export const NO_REPO_MESSAGE =
+  "Set `selfImprovement.repo` (an `owner/name`) in config.yaml to tell `friction propose` where to file issues.";
 
 /** The ledger, resolved ONCE per invocation. No ledger, or an accessor that
  *  throws (the run store's config could not be opened), is `unavailable` — the
@@ -76,7 +93,10 @@ async function ledgerOf(deps: FrictionCommandDeps): Promise<FrictionLedger> {
 /** The ledger's recent records. A ledger that cannot be read (the run store is
  *  down) is `unavailable` — the message names the cause, as the chat command
  *  has always shown it — never a masked `internal`. */
-async function recentRecords(ledger: FrictionLedger, query: Parameters<FrictionLedger["recent"]>[0]): Promise<FrictionRunRecord[]> {
+async function recentRecords(
+  ledger: FrictionLedger,
+  query: Parameters<FrictionLedger["recent"]>[0],
+): Promise<FrictionRunRecord[]> {
   try {
     return await ledger.recent(query);
   } catch (err) {
@@ -96,14 +116,20 @@ export const frictionReport = defineCommand({
   options: z.object({
     sinceMs: z.coerce.number().int().nonnegative().optional().describe("only runs finished at or after this epoch ms"),
     limit: positiveInt.optional().describe("newest n runs (default: the ledger's retained window)"),
-    minRuns: positiveInt.optional().describe("distinct runs a pattern must recur in (default selfImprovement.minRuns, else 2)"),
+    minRuns: positiveInt
+      .optional()
+      .describe("distinct runs a pattern must recur in (default selfImprovement.minRuns, else 2)"),
   }),
   action: "friction:read",
   effect: "read",
   describe: "Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.",
   render,
   handler: async ({ options, caller, deps }) => {
-    const records = await recentRecords(await ledgerOf(deps), { sinceMs: options.sinceMs, limit: options.limit, visibleTo: visibleRuns(caller) });
+    const records = await recentRecords(await ledgerOf(deps), {
+      sinceMs: options.sinceMs,
+      limit: options.limit,
+      visibleTo: visibleRuns(caller),
+    });
     return asJson({
       runsAnalyzed: records.length,
       patterns: clusterFriction(records, { minRuns: options.minRuns ?? (await deps.friction.config())?.minRuns }),
@@ -122,12 +148,15 @@ export const frictionPropose = defineCommand({
   options: z.object({
     dryRun: flag.optional().describe("compute and report everything, file nothing"),
     top: positiveInt.optional().describe("proposals filed per pass (default selfImprovement.top, else 3)"),
-    minRuns: positiveInt.optional().describe("distinct runs a pattern must recur in (default selfImprovement.minRuns, else 2)"),
+    minRuns: positiveInt
+      .optional()
+      .describe("distinct runs a pattern must recur in (default selfImprovement.minRuns, else 2)"),
     repo: repoSlug.optional().describe("owner/name to dedupe against and file into (default selfImprovement.repo)"),
   }),
   action: "friction:write",
   effect: "write",
-  describe: "Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.",
+  describe:
+    "Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.",
   render,
   handler: async ({ options, caller, deps }) => {
     const ledger = await ledgerOf(deps);
@@ -163,21 +192,39 @@ export const frictionPropose = defineCommand({
  *  not given; `undefined` otherwise. */
 export function inProgressHint(diagnosis: FrictionDiagnosis, finished: boolean): string | undefined {
   if (!finished) return undefined;
-  const midTool = diagnosis.findings.some((f) => f.category === "infra_failure" && f.summary.includes("run ended mid-tool"));
-  return midTool ? "(hint: the stream ends on a tool call with no result — if this capture was taken mid-run, pass --in-progress)" : undefined;
+  const midTool = diagnosis.findings.some(
+    (f) => f.category === "infra_failure" && f.summary.includes("run ended mid-tool"),
+  );
+  return midTool
+    ? "(hint: the stream ends on a tool call with no result — if this capture was taken mid-run, pass --in-progress)"
+    : undefined;
 }
 
 export const frictionAnalyze = defineCommand({
   id: "friction.analyze",
-  args: [{ name: "source", schema: z.string().optional(), describe: "a saved run stream: JSON lines of run events or a curl'ed /runs/:id/events SSE capture (default: stdin)" }],
+  args: [
+    {
+      name: "source",
+      schema: z.string().optional(),
+      describe:
+        "a saved run stream: JSON lines of run events or a curl'ed /runs/:id/events SSE capture (default: stdin)",
+    },
+  ],
   options: z.object({
-    slowMs: z.coerce.number().nonnegative().optional().describe("a tool call slower than this many ms is a slow-tool finding"),
-    inProgress: flag.optional().describe("the capture was taken mid-run: a trailing call without a result is still executing, not a dead run"),
+    slowMs: z.coerce
+      .number()
+      .nonnegative()
+      .optional()
+      .describe("a tool call slower than this many ms is a slow-tool finding"),
+    inProgress: flag
+      .optional()
+      .describe("the capture was taken mid-run: a trailing call without a result is still executing, not a dead run"),
   }),
   action: "friction:read",
   effect: "read",
   surfaces: { chat: false, mcp: false, http: false },
-  describe: "Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.",
+  describe:
+    "Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.",
   render: (output) => {
     const o = output as JsonObject;
     const lines = [formatFrictionReport(o.diagnosis as unknown as FrictionDiagnosis)];
@@ -192,18 +239,35 @@ export const frictionAnalyze = defineCommand({
     try {
       text = await deps.friction.readSource(source);
     } catch (err) {
-      throw new CommandError("not_found", `${source === "-" ? "stdin" : source}: ${err instanceof Error ? err.message : String(err)}`);
+      throw new CommandError(
+        "not_found",
+        `${source === "-" ? "stdin" : source}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
     const { events, skipped } = parseRunEventLines(text);
-    if (events.length === 0) throw new CommandError("invalid_input", `no run events found in ${source === "-" ? "stdin" : source}${skipped ? ` (${skipped} unparseable lines)` : ""}`);
+    if (events.length === 0)
+      throw new CommandError(
+        "invalid_input",
+        `no run events found in ${source === "-" ? "stdin" : source}${skipped ? ` (${skipped} unparseable lines)` : ""}`,
+      );
     const finished = !(options.inProgress ?? false);
     const diagnosis = analyzeRunFriction(events, { slowToolMs: options.slowMs, finished });
     const hint = inProgressHint(diagnosis, finished);
-    return { source, events: events.length, skipped, diagnosis: diagnosis as unknown as JsonValue, ...(hint !== undefined ? { hint } : {}) };
+    return {
+      source,
+      events: events.length,
+      skipped,
+      diagnosis: diagnosis as unknown as JsonValue,
+      ...(hint !== undefined ? { hint } : {}),
+    };
   },
 });
 
-export const frictionCommands: readonly CommandDef<FrictionCommandDeps>[] = [frictionReport, frictionPropose, frictionAnalyze] as unknown as CommandDef<FrictionCommandDeps>[];
+export const frictionCommands: readonly CommandDef<FrictionCommandDeps>[] = [
+  frictionReport,
+  frictionPropose,
+  frictionAnalyze,
+] as unknown as CommandDef<FrictionCommandDeps>[];
 
 export function registerFrictionCommands<D extends FrictionCommandDeps>(registry: CommandRegistry<D>): void {
   for (const cmd of frictionCommands) registry.register(cmd as unknown as CommandDef<D>);

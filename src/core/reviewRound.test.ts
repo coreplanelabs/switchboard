@@ -57,7 +57,9 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
         calls.push({ path, body });
         if (path === "/status") return new Response(JSON.stringify({ state: "warm", reason: "" }), { status: 200 });
         if (path === "/attach") {
-          return new Response(JSON.stringify({ ...attached, workspace: "/workspace/threads/t/x", user: "worker1" }), { status: 200 });
+          return new Response(JSON.stringify({ ...attached, workspace: "/workspace/threads/t/x", user: "worker1" }), {
+            status: 200,
+          });
         }
         if (path === "/detach") return new Response(JSON.stringify({ released: true }), { status: 200 });
         throw new Error(`unexpected fetch: ${String(url)}`);
@@ -117,7 +119,10 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
 
   it("release() is a no-op when the executor holds nothing releasable (a no-repo agent)", async () => {
     const round = await attachRoundWorkspace({
-      factory: { workspaceDir: mkdtempSync(join(tmpdir(), "swb-null-")), dataDir: mkdtempSync(join(tmpdir(), "swb-null-")) },
+      factory: {
+        workspaceDir: mkdtempSync(join(tmpdir(), "swb-null-")),
+        dataDir: mkdtempSync(join(tmpdir(), "swb-null-")),
+      },
       round: { threadKey: "t-none", agent: AGENTS.general },
       logKey: "t-none",
     });
@@ -154,9 +159,23 @@ describe("checkPrHeadPreflight (explicit AgentDef, before any model call)", () =
   });
 
   it("a resolved head, a slack-only opt-out, or a non-review AgentDef all pass", () => {
-    expect(checkPrHeadPreflight({ agent: AGENTS.review, requestText: "review it", repoCtx: { repo: "acme/api", pr: 42, headSha: HEAD } }).ok).toBe(true);
-    expect(checkPrHeadPreflight({ agent: AGENTS.review, requestText: "review it — slack only", repoCtx: { repo: "acme/api", pr: 42 } }).ok).toBe(true);
-    expect(checkPrHeadPreflight({ agent: AGENTS.coding, requestText: "fix it", repoCtx: { repo: "acme/api", pr: 42 } }).ok).toBe(true);
+    expect(
+      checkPrHeadPreflight({
+        agent: AGENTS.review,
+        requestText: "review it",
+        repoCtx: { repo: "acme/api", pr: 42, headSha: HEAD },
+      }).ok,
+    ).toBe(true);
+    expect(
+      checkPrHeadPreflight({
+        agent: AGENTS.review,
+        requestText: "review it — slack only",
+        repoCtx: { repo: "acme/api", pr: 42 },
+      }).ok,
+    ).toBe(true);
+    expect(
+      checkPrHeadPreflight({ agent: AGENTS.coding, requestText: "fix it", repoCtx: { repo: "acme/api", pr: 42 } }).ok,
+    ).toBe(true);
   });
 });
 
@@ -226,8 +245,12 @@ describe("guardAttachedHead (before any model call)", () => {
   it("a malformed or absent sha on either side proves nothing → unverified", async () => {
     const fetchPrHead = vi.fn(async () => HEAD);
     const base = { pr: { repo: "acme/api", number: 42 }, fallbackRef: undefined, fetchPrHead, logKey: "t" };
-    expect(await guardAttachedHead({ ...base, expectedHeadSha: undefined, attached: { sha: OTHER, ref: "b" } })).toEqual({ outcome: "unverified" });
-    expect(await guardAttachedHead({ ...base, expectedHeadSha: HEAD, attached: { sha: "not-a-sha", ref: "b" } })).toEqual({ outcome: "unverified" });
+    expect(
+      await guardAttachedHead({ ...base, expectedHeadSha: undefined, attached: { sha: OTHER, ref: "b" } }),
+    ).toEqual({ outcome: "unverified" });
+    expect(
+      await guardAttachedHead({ ...base, expectedHeadSha: HEAD, attached: { sha: "not-a-sha", ref: "b" } }),
+    ).toEqual({ outcome: "unverified" });
     expect(fetchPrHead).not.toHaveBeenCalled();
   });
 });
@@ -236,7 +259,14 @@ describe("makeSystemComposer (head-pinned composition with an explicit AgentDef)
   const blocks = { memory: undefined, config: undefined, instructions: undefined, skills: undefined };
 
   it("no blocks, no resident, no PR target → the agent's own prompt, byte-identical", () => {
-    const compose = makeSystemComposer({ agent: AGENTS.general, resident: false, repo: undefined, workspace: undefined, prTarget: undefined, blocks });
+    const compose = makeSystemComposer({
+      agent: AGENTS.general,
+      resident: false,
+      repo: undefined,
+      workspace: undefined,
+      prTarget: undefined,
+      blocks,
+    });
     expect(compose({ sha: undefined, verified: false })).toBe(AGENTS.general.system);
   });
 
@@ -393,4 +423,3 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     expect(out).toMatchObject({ posted: false });
   });
 });
-

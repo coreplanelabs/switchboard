@@ -63,7 +63,8 @@ function item(id: string, finishedAt: number, bytes?: number): RunListItem {
 
 function bigEvents(count: number, summaryChars: number): RunEvent[] {
   const out: RunEvent[] = [];
-  for (let i = 0; i < count; i++) out.push({ type: "tool_call", tool: "bash", summary: `#${i} ${"x".repeat(summaryChars)}`, at: i });
+  for (let i = 0; i < count; i++)
+    out.push({ type: "tool_call", tool: "bash", summary: `#${i} ${"x".repeat(summaryChars)}`, at: i });
   return out;
 }
 
@@ -179,7 +180,9 @@ describe("clampRetentionPolicy", () => {
   });
 
   it("falls back to the default for non-finite values and floors fractions", () => {
-    expect(clampRetentionPolicy({ retentionDays: Number.NaN, maxRuns: 2.7, maxBytes: Number.POSITIVE_INFINITY })).toEqual({
+    expect(
+      clampRetentionPolicy({ retentionDays: Number.NaN, maxRuns: 2.7, maxBytes: Number.POSITIVE_INFINITY }),
+    ).toEqual({
       retentionDays: 30,
       maxRuns: 2,
       maxBytes: DEFAULT_RETENTION_POLICY.maxBytes,
@@ -201,10 +204,34 @@ describe("isRunRecord", () => {
 
   it("round-trips the run-page fields on tool, input and turn events verbatim (callId, exitCode, output, source, startedAt/durationMs/stopReason/usage) — the validator only checks each event's `type`", () => {
     const events: RunEvent[] = [
-      { type: "input", text: "please review", source: { url: "https://x.slack.com/archives/C1/p1", channel: "general", user: "justin" }, seq: 1, at: 1 },
-      { type: "turn", startedAt: 1, durationMs: 1, stopReason: "tool_use", usage: { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 }, seq: 2, at: 2 },
+      {
+        type: "input",
+        text: "please review",
+        source: { url: "https://x.slack.com/archives/C1/p1", channel: "general", user: "justin" },
+        seq: 1,
+        at: 1,
+      },
+      {
+        type: "turn",
+        startedAt: 1,
+        durationMs: 1,
+        stopReason: "tool_use",
+        usage: { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 },
+        seq: 2,
+        at: 2,
+      },
       { type: "tool_call", tool: "bash", summary: "$ npm test", callId: "toolu_01", seq: 3, at: 2 },
-      { type: "tool_result", tool: "bash", ok: false, summary: "exit 1: 3 failed", callId: "toolu_01", exitCode: 1, output: "exit 1:\n--- stderr ---\n3 failed", seq: 4, at: 3 },
+      {
+        type: "tool_result",
+        tool: "bash",
+        ok: false,
+        summary: "exit 1: 3 failed",
+        callId: "toolu_01",
+        exitCode: 1,
+        output: "exit 1:\n--- stderr ---\n3 failed",
+        seq: 4,
+        at: 3,
+      },
     ];
     const rec = record({ events, eventCount: 3, storedEventCount: 4 });
     const stored: unknown = JSON.parse(JSON.stringify(rec));
@@ -215,7 +242,10 @@ describe("isRunRecord", () => {
   it("accepts a record whose diagnosis lacks a current category or carries an unknown one (structural check); normalizeDiagnosis zero-fills and drops", () => {
     const rec = record();
     const { slow_tool: _drop, ...rest } = rec.diagnosis.byCategory;
-    const stored = { ...rec, diagnosis: { ...rec.diagnosis, byCategory: { ...rest, retired_category: { count: 3, durationMs: 9 } } } };
+    const stored = {
+      ...rec,
+      diagnosis: { ...rec.diagnosis, byCategory: { ...rest, retired_category: { count: 3, durationMs: 9 } } },
+    };
     expect(isRunRecord(stored)).toBe(true);
     const normalized = normalizeDiagnosis(stored.diagnosis as unknown as RunRecord["diagnosis"]);
     expect(normalized.byCategory.slow_tool).toEqual({ count: 0, durationMs: 0 });
@@ -223,14 +253,21 @@ describe("isRunRecord", () => {
     expect(normalized.byCategory.failed_tool).toEqual(rec.diagnosis.byCategory.failed_tool);
     expect(stored.diagnosis.byCategory).not.toHaveProperty("slow_tool"); // pure: the input is untouched
     // Still rejects a byCategory whose totals are not { count, durationMs } numbers.
-    expect(isRunRecord({ ...rec, diagnosis: { ...rec.diagnosis, byCategory: { slow_tool: { count: "1", durationMs: 0 } } } })).toBe(false);
+    expect(
+      isRunRecord({
+        ...rec,
+        diagnosis: { ...rec.diagnosis, byCategory: { slow_tool: { count: "1", durationMs: 0 } } },
+      }),
+    ).toBe(false);
     expect(isRunRecord({ ...rec, diagnosis: { ...rec.diagnosis, byCategory: null } })).toBe(false);
   });
 
   it("a record written before `slow_model_turn` existed (#269) still loads; the category is zero-filled and `modelTimeMs` round-trips", () => {
     const rec = record();
     const { slow_model_turn: _pre269, ...byCategory } = rec.diagnosis.byCategory;
-    const stored: unknown = JSON.parse(JSON.stringify({ ...rec, diagnosis: { ...rec.diagnosis, byCategory, modelTimeMs: 4_200 } }));
+    const stored: unknown = JSON.parse(
+      JSON.stringify({ ...rec, diagnosis: { ...rec.diagnosis, byCategory, modelTimeMs: 4_200 } }),
+    );
     expect(isRunRecord(stored)).toBe(true);
     const normalized = normalizeDiagnosis((stored as RunRecord).diagnosis);
     expect(normalized.byCategory.slow_model_turn).toEqual({ count: 0, durationMs: 0 });
@@ -238,9 +275,15 @@ describe("isRunRecord", () => {
   });
 
   it("storedEventSeqs keeps the registry stamps when strictly increasing, else positions for every event", () => {
-    const stamped: RunEvent[] = [{ type: "tool_call", tool: "bash", summary: "a", seq: 2001 }, { type: "tool_call", tool: "bash", summary: "b", seq: 2005 }];
+    const stamped: RunEvent[] = [
+      { type: "tool_call", tool: "bash", summary: "a", seq: 2001 },
+      { type: "tool_call", tool: "bash", summary: "b", seq: 2005 },
+    ];
     expect(storedEventSeqs(stamped)).toEqual([2001, 2005]);
-    const bare: RunEvent[] = [{ type: "tool_call", tool: "bash", summary: "a" }, { type: "tool_call", tool: "bash", summary: "b" }];
+    const bare: RunEvent[] = [
+      { type: "tool_call", tool: "bash", summary: "a" },
+      { type: "tool_call", tool: "bash", summary: "b" },
+    ];
     expect(storedEventSeqs(bare)).toEqual([1, 2]);
     const colliding: RunEvent[] = [{ ...stamped[0], seq: 7 }, { ...stamped[1], seq: 7 }, bare[0]];
     expect(storedEventSeqs(colliding)).toEqual([1, 2, 3]);
@@ -292,7 +335,12 @@ describe("isRunRecord", () => {
 });
 
 describe("run visibility filter — the wire form of an authz Predicate (authorization.md item 6)", () => {
-  const row = (channelId: string, userId: string, channelVisibility: RunRecord["channelVisibility"], repo?: string) => ({ channelId, userId, channelVisibility, ...(repo ? { repo } : {}) });
+  const row = (
+    channelId: string,
+    userId: string,
+    channelVisibility: RunRecord["channelVisibility"],
+    repo?: string,
+  ) => ({ channelId, userId, channelVisibility, ...(repo ? { repo } : {}) });
   const pubRow = row("slack:C1", "slack:U1", "public");
   const privRow = row("slack:G1", "slack:U2", "private", "acme/api");
   const machineRow = row("http:ops", "http:ci", "machine");
@@ -303,7 +351,13 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
       of: [
         { kind: "channels-in", channelIds: new Set(["slack:G1", "http:ops"]) },
         { kind: "visibility-in", visibilities: new Set(["public"]) },
-        { kind: "and", of: [{ kind: "user-is", userId: "slack:U2" }, { kind: "repos-in", repos: new Set(["z/z", "acme/api"]) }] },
+        {
+          kind: "and",
+          of: [
+            { kind: "user-is", userId: "slack:U2" },
+            { kind: "repos-in", repos: new Set(["z/z", "acme/api"]) },
+          ],
+        },
       ],
     };
     expect(toVisibilityFilter(predicate)).toEqual({
@@ -311,7 +365,13 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
       of: [
         { kind: "channels-in", channelIds: ["http:ops", "slack:G1"] },
         { kind: "visibility-in", visibilities: ["public"] },
-        { kind: "and", of: [{ kind: "user-is", userId: "slack:U2" }, { kind: "repos-in", repos: ["acme/api", "z/z"] }] },
+        {
+          kind: "and",
+          of: [
+            { kind: "user-is", userId: "slack:U2" },
+            { kind: "repos-in", repos: ["acme/api", "z/z"] },
+          ],
+        },
       ],
     });
     expect(toVisibilityFilter({ kind: "all" })).toEqual({ kind: "all" });
@@ -331,12 +391,50 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
     expect(matchesVisibility({ kind: "visibility-in", visibilities: ["public"] }, pubRow)).toBe(true);
     expect(matchesVisibility({ kind: "visibility-in", visibilities: ["public"] }, privRow)).toBe(false);
     expect(matchesVisibility({ kind: "visibility-in", visibilities: ["public"] }, machineRow)).toBe(false);
-    expect(matchesVisibility({ kind: "visibility-in", visibilities: ["public"] }, { channelId: "slack:C1", userId: "slack:U1" })).toBe(false);
-    expect(matchesVisibility({ kind: "visibility-in", visibilities: ["unknown"] }, { channelId: "slack:C1", userId: "slack:U1" })).toBe(true);
-    const memberOfOps = { kind: "or" as const, of: [{ kind: "channels-in" as const, channelIds: ["http:ops"] }, { kind: "visibility-in" as const, visibilities: ["public" as const] }] };
+    expect(
+      matchesVisibility(
+        { kind: "visibility-in", visibilities: ["public"] },
+        { channelId: "slack:C1", userId: "slack:U1" },
+      ),
+    ).toBe(false);
+    expect(
+      matchesVisibility(
+        { kind: "visibility-in", visibilities: ["unknown"] },
+        { channelId: "slack:C1", userId: "slack:U1" },
+      ),
+    ).toBe(true);
+    const memberOfOps = {
+      kind: "or" as const,
+      of: [
+        { kind: "channels-in" as const, channelIds: ["http:ops"] },
+        { kind: "visibility-in" as const, visibilities: ["public" as const] },
+      ],
+    };
     expect([pubRow, privRow, machineRow].map((r) => matchesVisibility(memberOfOps, r))).toEqual([true, false, true]);
-    expect(matchesVisibility({ kind: "and", of: [{ kind: "user-is", userId: "slack:U2" }, { kind: "repos-in", repos: ["acme/api"] }] }, privRow)).toBe(true);
-    expect(matchesVisibility({ kind: "and", of: [{ kind: "user-is", userId: "slack:U1" }, { kind: "repos-in", repos: ["acme/api"] }] }, privRow)).toBe(false);
+    expect(
+      matchesVisibility(
+        {
+          kind: "and",
+          of: [
+            { kind: "user-is", userId: "slack:U2" },
+            { kind: "repos-in", repos: ["acme/api"] },
+          ],
+        },
+        privRow,
+      ),
+    ).toBe(true);
+    expect(
+      matchesVisibility(
+        {
+          kind: "and",
+          of: [
+            { kind: "user-is", userId: "slack:U1" },
+            { kind: "repos-in", repos: ["acme/api"] },
+          ],
+        },
+        privRow,
+      ),
+    ).toBe(false);
     expect(matchesVisibility({ kind: "and", of: [] }, pubRow)).toBe(false);
     expect(matchesVisibility({ kind: "or", of: [] }, pubRow)).toBe(false);
   });
@@ -349,7 +447,9 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
     expect(isRunVisibilityFilter({ kind: "user-is", userId: "slack:U1" })).toBe(true);
     expect(isRunVisibilityFilter({ kind: "repos-in", repos: ["a/b"] })).toBe(true);
     expect(isRunVisibilityFilter({ kind: "visibility-in", visibilities: ["public", "dm"] })).toBe(true);
-    expect(isRunVisibilityFilter({ kind: "or", of: [{ kind: "all" }, { kind: "and", of: [{ kind: "none" }] }] })).toBe(true);
+    expect(isRunVisibilityFilter({ kind: "or", of: [{ kind: "all" }, { kind: "and", of: [{ kind: "none" }] }] })).toBe(
+      true,
+    );
     expect(isRunVisibilityFilter({ kind: "everything" })).toBe(false);
     expect(isRunVisibilityFilter({ kind: "channels-in", channelIds: "slack:C1" })).toBe(false);
     expect(isRunVisibilityFilter({ kind: "channels-in", channelIds: [""] })).toBe(false);
@@ -361,6 +461,8 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
     let deep: unknown = { kind: "all" };
     for (let i = 0; i < 12; i++) deep = { kind: "or", of: [deep] };
     expect(isRunVisibilityFilter(deep)).toBe(false);
-    expect(isRunVisibilityFilter({ kind: "channels-in", channelIds: Array.from({ length: 1001 }, (_, i) => `c${i}`) })).toBe(false);
+    expect(
+      isRunVisibilityFilter({ kind: "channels-in", channelIds: Array.from({ length: 1001 }, (_, i) => `c${i}`) }),
+    ).toBe(false);
   });
 });

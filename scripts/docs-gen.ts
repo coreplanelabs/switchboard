@@ -48,7 +48,8 @@ function render(cmds: readonly DocCommand[]): FileOutcome[] {
     // A marker in the file that no renderer owns: a typo, or a renderer that was
     // deleted and left its block frozen in the page.
     for (const name of declaredRegions(current)) {
-      if (!(name in regions)) problems.push(`${file}: region '${name}' has a marker but no renderer in GENERATED_REGIONS`);
+      if (!(name in regions))
+        problems.push(`${file}: region '${name}' has a marker but no renderer in GENERATED_REGIONS`);
     }
     return { file, next, current, problems };
   });

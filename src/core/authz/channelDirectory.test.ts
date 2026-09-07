@@ -20,7 +20,8 @@ describe("visibilityOf — the static id mapping", () => {
   });
 
   it("anything else — the CLI, a foreign namespace, a bare id — is unknown", () => {
-    for (const id of ["cli:local", "discord:general", "C0123ABC", "", "slack:", "slack:X1"]) expect(visibilityOf(id), id).toBe("unknown");
+    for (const id of ["cli:local", "discord:general", "C0123ABC", "", "slack:", "slack:X1"])
+      expect(visibilityOf(id), id).toBe("unknown");
   });
 });
 

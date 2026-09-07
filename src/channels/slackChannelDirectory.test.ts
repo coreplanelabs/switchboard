@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { CHANNEL_INFO_CACHE_MAX, CHANNEL_INFO_TTL_MS, SlackChannelDirectory, type ConversationInfoClient } from "./slackChannelDirectory.js";
+import {
+  CHANNEL_INFO_CACHE_MAX,
+  CHANNEL_INFO_TTL_MS,
+  SlackChannelDirectory,
+  type ConversationInfoClient,
+} from "./slackChannelDirectory.js";
 
 // Feature: features/authorization.md item 7 (U5), features/slack-channel.md
 // item 6a — the Slack `ChannelDirectory`: `conversations.info` decides a
@@ -30,7 +35,12 @@ function clock(start = 1_000_000) {
 
 describe("SlackChannelDirectory.info — visibility from conversations.info", () => {
   it("maps a public channel to public, a private channel to private, a DM and a group DM to dm", async () => {
-    const { client } = fakeClient({ CPUB: { is_private: false }, CPRIV: { is_private: true }, GMPIM: { is_mpim: true, is_private: true }, CIM: { is_im: true } });
+    const { client } = fakeClient({
+      CPUB: { is_private: false },
+      CPRIV: { is_private: true },
+      GMPIM: { is_mpim: true, is_private: true },
+      CIM: { is_im: true },
+    });
     const dir = new SlackChannelDirectory(client, { now: clock().now });
     expect(await dir.info("slack:CPUB")).toEqual({ visibility: "public" });
     expect(await dir.info("slack:CPRIV")).toEqual({ visibility: "private" });

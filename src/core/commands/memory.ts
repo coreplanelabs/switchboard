@@ -1,6 +1,15 @@
 import { z } from "zod";
 import { authorize } from "../authz/authorize.js";
-import { CommandError, commandDefiner, wrapUntrusted, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
+import {
+  CommandError,
+  commandDefiner,
+  wrapUntrusted,
+  type Caller,
+  type CommandDef,
+  type CommandRegistry,
+  type JsonObject,
+  type JsonValue,
+} from "../commandRegistry.js";
 import { deriveScopeKey, requestScopeKeys, selectMemoryStore } from "../memory/index.js";
 import type { MemoryConfig, MemoryRecord, MemoryStore } from "../memory/types.js";
 
@@ -37,7 +46,8 @@ export const MEMORY_LIST_LIMIT = 20;
 /** Ceiling for `--limit` — the Memory Worker's per-request cap. */
 export const MEMORY_LIST_MAX_LIMIT = 50;
 
-export const MEMORY_OFF_MESSAGE = "Memory is off in this deployment (`memory.enabled` is not set), so there is nothing to list or forget.";
+export const MEMORY_OFF_MESSAGE =
+  "Memory is off in this deployment (`memory.enabled` is not set), so there is nothing to list or forget.";
 
 /** `mem:<scopeKey>:<seq>` → the scope key it belongs to (the id format minted
  *  by `mintRecord`); undefined when the id is not a memory id. */
@@ -46,7 +56,12 @@ export function scopeKeyOfMemoryId(id: string): string | undefined {
   return m ? m[1] : undefined;
 }
 
-const memoryId = z.string().refine((id) => scopeKeyOfMemoryId(id) !== undefined, "expected a memory id like mem:<scope>:<n> (see `memory list`)");
+const memoryId = z
+  .string()
+  .refine(
+    (id) => scopeKeyOfMemoryId(id) !== undefined,
+    "expected a memory id like mem:<scope>:<n> (see `memory list`)",
+  );
 
 async function storeOf(deps: MemoryCommandDeps): Promise<MemoryStore> {
   const cfg = await deps.memory.config();
@@ -73,7 +88,8 @@ function isOrgAdmin(caller: Caller): boolean {
 /** The shared scope keys (#253) — the same derivers the read/write paths use. */
 const repoScopeKey = (repo: string) => deriveScopeKey("repo", { repo });
 const channelScopeKey = (channelId: string) => deriveScopeKey("channel", { channelId });
-const isSharedScope = (key: string, keys: { org: string }) => key === keys.org || key.startsWith("repo:") || key.startsWith("channel:");
+const isSharedScope = (key: string, keys: { org: string }) =>
+  key === keys.org || key.startsWith("repo:") || key.startsWith("channel:");
 
 export const LIST_SCOPES = ["me", "org", "repo", "channel", "all"] as const;
 
@@ -99,8 +115,12 @@ function renderList(output: JsonValue): string {
   const filter = query !== undefined ? ` matching \`${query}\`` : "";
   const sections: string[] = [];
   const missing = Array.isArray(o.missing) ? o.missing : [];
-  if (missing.includes("me")) sections.push("*your records*: this request carries no user identity, so there is no personal scope to show.");
-  if (missing.includes("repo")) sections.push("*this repo's records*: no repo is bound here — name one (`--repo owner/name`, or ask in a repo thread).");
+  if (missing.includes("me"))
+    sections.push("*your records*: this request carries no user identity, so there is no personal scope to show.");
+  if (missing.includes("repo"))
+    sections.push(
+      "*this repo's records*: no repo is bound here — name one (`--repo owner/name`, or ask in a repo thread).",
+    );
   if (missing.includes("channel")) sections.push("*this channel's records*: this request carries no channel identity.");
   for (const s of (Array.isArray(o.scopes) ? o.scopes : []).map((v) => v as JsonObject)) {
     const records = Array.isArray(s.records) ? s.records.map((r) => r as JsonObject) : [];
@@ -109,7 +129,10 @@ function renderList(output: JsonValue): string {
       sections.push(`${head}: no active records.`);
       continue;
     }
-    const more = s.limitReached === true ? `\n_(limit ${limit} reached — there may be more; narrow with words or raise \`--limit\`, max ${MEMORY_LIST_MAX_LIMIT})_` : "";
+    const more =
+      s.limitReached === true
+        ? `\n_(limit ${limit} reached — there may be more; narrow with words or raise \`--limit\`, max ${MEMORY_LIST_MAX_LIMIT})_`
+        : "";
     sections.push([head, ...records.map(renderRecord)].join("\n") + more);
   }
   return sections.join("\n\n");
@@ -117,10 +140,26 @@ function renderList(output: JsonValue): string {
 
 export const memoryList = defineCommand({
   id: "memory.list",
-  args: [{ name: "query", schema: z.string().optional(), describe: "words a record must mention (whole-token match)", rest: true }],
+  args: [
+    {
+      name: "query",
+      schema: z.string().optional(),
+      describe: "words a record must mention (whole-token match)",
+      rest: true,
+    },
+  ],
   options: z.object({
-    scope: z.enum(LIST_SCOPES).optional().describe("which scopes to list (default all: yours, this repo's, this channel's, and the shared org scope)"),
-    limit: z.coerce.number().int().min(1).max(MEMORY_LIST_MAX_LIMIT).optional().describe(`records per scope (default ${MEMORY_LIST_LIMIT}, max ${MEMORY_LIST_MAX_LIMIT})`),
+    scope: z
+      .enum(LIST_SCOPES)
+      .optional()
+      .describe("which scopes to list (default all: yours, this repo's, this channel's, and the shared org scope)"),
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(MEMORY_LIST_MAX_LIMIT)
+      .optional()
+      .describe(`records per scope (default ${MEMORY_LIST_LIMIT}, max ${MEMORY_LIST_MAX_LIMIT})`),
     repo: z
       .string()
       .refine((s) => /^[\w.-]+\/[\w.-]+$/.test(s), "expected an owner/name slug")
@@ -129,7 +168,8 @@ export const memoryList = defineCommand({
   }),
   action: "memory:read",
   effect: "read",
-  describe: "Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.",
+  describe:
+    "Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.",
   render: renderList,
   handler: async ({ args, options, caller, deps }) => {
     const store = await storeOf(deps);
@@ -162,7 +202,8 @@ export const memoryList = defineCommand({
       else if (scope === "repo") missing.push("repo");
     }
     if (want("channel")) {
-      if (caller.origin) wanted.push({ key: channelScopeKey(caller.origin.channelId), label: "this channel's records" });
+      if (caller.origin)
+        wanted.push({ key: channelScopeKey(caller.origin.channelId), label: "this channel's records" });
       else if (scope === "channel") missing.push("channel");
     }
     if (want("org")) wanted.push({ key: keys.org, label: "shared org records" });
@@ -177,7 +218,10 @@ export const memoryList = defineCommand({
       ...(query !== undefined ? { query } : {}),
       limit,
       ...(missing.length > 0 ? { missing } : {}),
-      scopes: scopes.map((s) => ({ ...s, records: s.records.map((r) => ({ ...r, text: wrap(r.text) })) })) as unknown as JsonValue,
+      scopes: scopes.map((s) => ({
+        ...s,
+        records: s.records.map((r) => ({ ...r, text: wrap(r.text) })),
+      })) as unknown as JsonValue,
     };
   },
 });
@@ -187,7 +231,8 @@ export const memoryForget = defineCommand({
   args: [{ name: "id", schema: memoryId, describe: "the record id (`mem:<scope>:<n>`, from `memory list`)" }],
   action: "memory:write",
   effect: "write",
-  describe: "Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).",
+  describe:
+    "Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).",
   render: (output) => {
     const o = output as JsonObject;
     return `🧹 Forgot \`${String(o.id)}\` (\`${String(o.scope)}\`). It no longer influences any run; the row is kept for provenance.`;
@@ -199,17 +244,28 @@ export const memoryForget = defineCommand({
     if (target === keys.user) {
       // own scope: always allowed
     } else if (isSharedScope(target, keys)) {
-      if (!isOrgAdmin(caller)) throw new CommandError("unauthorized", "Forgetting shared memory (org, repo, channel) needs repo-management rights — you can always forget records in your own scope (`memory list --scope me`).");
+      if (!isOrgAdmin(caller))
+        throw new CommandError(
+          "unauthorized",
+          "Forgetting shared memory (org, repo, channel) needs repo-management rights — you can always forget records in your own scope (`memory list --scope me`).",
+        );
     } else {
-      throw new CommandError("unauthorized", `You can only forget records in your own scope${isOrgAdmin(caller) ? " or the org scope" : ""} — \`${args.id}\` belongs to another user's scope, which no one can reach from here.`);
+      throw new CommandError(
+        "unauthorized",
+        `You can only forget records in your own scope${isOrgAdmin(caller) ? " or the org scope" : ""} — \`${args.id}\` belongs to another user's scope, which no one can reach from here.`,
+      );
     }
     const forgotten = await viaStore(() => store.forget(target, args.id));
-    if (!forgotten) throw new CommandError("not_found", `Nothing to forget: no active record \`${args.id}\` in \`${target}\`.`);
+    if (!forgotten)
+      throw new CommandError("not_found", `Nothing to forget: no active record \`${args.id}\` in \`${target}\`.`);
     return { id: args.id, scope: target, forgotten: true };
   },
 });
 
-export const memoryCommands: readonly CommandDef<MemoryCommandDeps>[] = [memoryList, memoryForget] as unknown as CommandDef<MemoryCommandDeps>[];
+export const memoryCommands: readonly CommandDef<MemoryCommandDeps>[] = [
+  memoryList,
+  memoryForget,
+] as unknown as CommandDef<MemoryCommandDeps>[];
 
 export function registerMemoryCommands<D extends MemoryCommandDeps>(registry: CommandRegistry<D>): void {
   for (const cmd of memoryCommands) registry.register(cmd as unknown as CommandDef<D>);

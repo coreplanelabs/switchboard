@@ -18,7 +18,11 @@ const storeKey = () => `runs:test-${Date.now()}-${n++}`;
 
 async function post(path: string, body: unknown, headers: Record<string, string> = AUTH) {
   const raw = typeof body === "string" ? body : JSON.stringify(body);
-  const res = await SELF.fetch(`${BASE}${path}`, { method: "POST", headers: { ...headers, "content-length": String(new TextEncoder().encode(raw).byteLength) }, body: raw });
+  const res = await SELF.fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { ...headers, "content-length": String(new TextEncoder().encode(raw).byteLength) },
+    body: raw,
+  });
   const text = await res.text();
   let data: Record<string, unknown> = {};
   try {
@@ -43,7 +47,12 @@ const diagnosis = () => ({
 
 /** Events stamped 1..count like the registry stamps them (`seq` is what the store keys on). */
 function events(count: number, size = 10, firstSeq = 1): RunRecord["events"] {
-  return Array.from({ length: count }, (_, i) => ({ type: "tool_call" as const, tool: "bash", summary: `step ${i} ${"x".repeat(size)}`, seq: firstSeq + i }));
+  return Array.from({ length: count }, (_, i) => ({
+    type: "tool_call" as const,
+    tool: "bash",
+    summary: `step ${i} ${"x".repeat(size)}`,
+    seq: firstSeq + i,
+  }));
 }
 
 function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): RunRecord {
@@ -80,9 +89,16 @@ function spySql(inst: RunHistoryDO): string[] {
   return seen;
 }
 const rowCount = (key: string, table: string) =>
-  runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).one().n);
-const putDirect = (key: string, rec: RunRecord, proposal?: { policy: Record<string, number>; policyUpdatedAt: number }) =>
-  runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.put(rec, proposal));
+  runInDurableObject(
+    stubOf(key),
+    async (_inst: RunHistoryDO, state) =>
+      state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).one().n,
+  );
+const putDirect = (
+  key: string,
+  rec: RunRecord,
+  proposal?: { policy: Record<string, number>; policyUpdatedAt: number },
+) => runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.put(rec, proposal));
 
 describe("run history routes", () => {
   it("put → get round-trips the record with events in seq order; unknown id → {record: null} 200", async () => {
@@ -106,7 +122,9 @@ describe("run history routes", () => {
     expect(await rowCount(key, "run_events")).toBe(5000);
     expect(RUN_EVENT_INSERT_BATCH * 3).toBeLessThanOrEqual(100); // the DO bound-parameter limit
     const page = await post("/runs/events", { storeKey: key, id: "big", afterSeq: 10, limit: 5 });
-    expect((page.data.events as Array<{ seq: number; summary: string }>).map((e) => e.seq)).toEqual([11, 12, 13, 14, 15]);
+    expect((page.data.events as Array<{ seq: number; summary: string }>).map((e) => e.seq)).toEqual([
+      11, 12, 13, 14, 15,
+    ]);
     expect((page.data.events as Array<{ summary: string }>)[0].summary).toMatch(/^step 10 /);
     expect(page.data.nextAfterSeq).toBe(15);
     const tail = await post("/runs/events", { storeKey: key, id: "big", afterSeq: 4995, limit: 100 });
@@ -119,22 +137,51 @@ describe("run history routes", () => {
   it("stores each event's JSON verbatim: the run-page fields (callId, exitCode, output, input.source, the turn's timing + usage) come back unchanged from get and events", async () => {
     const key = storeKey();
     const evs: RunRecord["events"] = [
-      { type: "input", text: "please review", source: { url: "https://x.slack.com/archives/C1/p1", channel: "general", user: "justin" }, at: 1 },
-      { type: "turn", startedAt: 1, durationMs: 1, stopReason: "tool_use", usage: { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 }, at: 2 },
+      {
+        type: "input",
+        text: "please review",
+        source: { url: "https://x.slack.com/archives/C1/p1", channel: "general", user: "justin" },
+        at: 1,
+      },
+      {
+        type: "turn",
+        startedAt: 1,
+        durationMs: 1,
+        stopReason: "tool_use",
+        usage: { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 },
+        at: 2,
+      },
       { type: "tool_call", tool: "bash", summary: "$ npm test", callId: "toolu_01", at: 2 },
-      { type: "tool_result", tool: "bash", ok: false, summary: "exit 1: 3 failed", callId: "toolu_01", exitCode: 1, output: "exit 1:\n--- stderr ---\n3 failed", at: 3 },
+      {
+        type: "tool_result",
+        tool: "bash",
+        ok: false,
+        summary: "exit 1: 3 failed",
+        callId: "toolu_01",
+        exitCode: 1,
+        output: "exit 1:\n--- stderr ---\n3 failed",
+        at: 3,
+      },
     ];
     const rec = record("rich", Date.now(), { events: evs });
     expect((await post("/runs/put", { storeKey: key, record: rec })).status).toBe(200);
     // `seq` is the store's own key (position-stamped here); every other field is the JSON as written.
-    const withoutSeq = (list: unknown) => (list as Array<RunRecord["events"][number] & { seq?: number }>).map(({ seq: _seq, ...e }) => e);
-    expect(withoutSeq(((await post("/runs/get", { storeKey: key, id: "rich" })).data.record as RunRecord).events)).toEqual(evs);
+    const withoutSeq = (list: unknown) =>
+      (list as Array<RunRecord["events"][number] & { seq?: number }>).map(({ seq: _seq, ...e }) => e);
+    expect(
+      withoutSeq(((await post("/runs/get", { storeKey: key, id: "rich" })).data.record as RunRecord).events),
+    ).toEqual(evs);
     expect(withoutSeq((await post("/runs/events", { storeKey: key, id: "rich" })).data.events)).toEqual(evs);
   }, 60_000);
 
   it("events keep the registry seq: a record whose events carry seq 2001..7000 pages from afterSeq 6500 by that seq, and get returns them stamped", async () => {
     const key = storeKey();
-    const rec = record("trimmed", Date.now(), { events: events(5000, 10, 2001), eventCount: 7000, storedEventCount: 5000, truncated: true });
+    const rec = record("trimmed", Date.now(), {
+      events: events(5000, 10, 2001),
+      eventCount: 7000,
+      storedEventCount: 5000,
+      truncated: true,
+    });
     expect((await post("/runs/put", { storeKey: key, record: rec })).data).toMatchObject({ ok: true, stored: true });
     const page = await post("/runs/events", { storeKey: key, id: "trimmed", afterSeq: 6500, limit: 100 });
     const seqs = (page.data.events as Array<{ seq: number; summary: string }>).map((e) => e.seq);
@@ -158,7 +205,10 @@ describe("run history routes", () => {
     const key = storeKey();
     const rec = record("legacy", Date.now());
     const { slow_tool: _drop, ...rest } = rec.diagnosis.byCategory;
-    const put = await post("/runs/put", { storeKey: key, record: { ...rec, diagnosis: { ...rec.diagnosis, byCategory: { ...rest, retired: ZERO } } } });
+    const put = await post("/runs/put", {
+      storeKey: key,
+      record: { ...rec, diagnosis: { ...rec.diagnosis, byCategory: { ...rest, retired: ZERO } } },
+    });
     expect(put.status).toBe(200);
     const got = (await post("/runs/get", { storeKey: key, id: "legacy" })).data.record as RunRecord;
     expect(got.diagnosis.byCategory.slow_tool).toEqual(ZERO);
@@ -179,7 +229,12 @@ describe("run history routes", () => {
     const page2 = await post("/runs/list", { storeKey: key, limit: 2, before: cursor.finishedAt, beforeId: cursor.id });
     expect((page2.data.items as Array<{ id: string }>).map((r) => r.id)).toEqual(["tie-a", "older"]);
     expect(page2.data.nextBefore).toEqual({ finishedAt: now - 1000, id: "older" });
-    expect(((await post("/runs/list", { storeKey: key, before: cursor.finishedAt, beforeId: cursor.id })).data.items as unknown[]).length).toBe(2);
+    expect(
+      (
+        (await post("/runs/list", { storeKey: key, before: cursor.finishedAt, beforeId: cursor.id })).data
+          .items as unknown[]
+      ).length,
+    ).toBe(2);
     expect((await post("/runs/list", { storeKey: key, before: cursor.finishedAt, beforeId: "../x" })).status).toBe(400);
   });
 
@@ -188,10 +243,16 @@ describe("run history routes", () => {
     const now = Date.now();
     await post("/runs/put", { storeKey: key, record: record("a", now, { events: events(5) }) });
     const second = record("a", now, { events: events(3, 40) });
-    expect((await post("/runs/put", { storeKey: key, record: second })).data).toMatchObject({ rewritten: true, retained: 1 });
+    expect((await post("/runs/put", { storeKey: key, record: second })).data).toMatchObject({
+      rewritten: true,
+      retained: 1,
+    });
     expect((await post("/runs/get", { storeKey: key, id: "a" })).data.record).toEqual(second);
     expect(await rowCount(key, "run_events")).toBe(3);
-    expect((await post("/runs/put", { storeKey: key, record: second })).data).toMatchObject({ rewritten: false, retained: 1 });
+    expect((await post("/runs/put", { storeKey: key, record: second })).data).toMatchObject({
+      rewritten: false,
+      retained: 1,
+    });
     expect(await rowCount(key, "run_events")).toBe(3);
   });
 
@@ -201,10 +262,16 @@ describe("run history routes", () => {
     // The provisional tombstone written at run start: terminal, finishedAt = startedAt, few events.
     const tombstone = record("t1", now - 5000, { status: "interrupted", startedAt: now - 5000, events: events(2) });
     expect((await post("/runs/put", { storeKey: key, record: tombstone })).status).toBe(200);
-    expect((await post("/runs/get", { storeKey: key, id: "t1" })).data.record).toMatchObject({ status: "interrupted", finishedAt: now - 5000 });
+    expect((await post("/runs/get", { storeKey: key, id: "t1" })).data.record).toMatchObject({
+      status: "interrupted",
+      finishedAt: now - 5000,
+    });
     // The finish write: a different stored version (eventCount/finishedAt/bytes) → full rewrite.
     const final = record("t1", now, { status: "completed", startedAt: now - 5000, events: events(6) });
-    expect((await post("/runs/put", { storeKey: key, record: final })).data).toMatchObject({ rewritten: true, retained: 1 });
+    expect((await post("/runs/put", { storeKey: key, record: final })).data).toMatchObject({
+      rewritten: true,
+      retained: 1,
+    });
     expect((await post("/runs/get", { storeKey: key, id: "t1" })).data.record).toEqual(final);
     expect(await rowCount(key, "run_events")).toBe(6);
     const list = (await post("/runs/list", { storeKey: key })).data.items as Array<{ id: string; status: string }>;
@@ -232,45 +299,100 @@ describe("run history routes", () => {
     const key = storeKey();
     const now = Date.now();
     const policy = (retentionDays: number) => ({ retentionDays, maxRuns: 5000, maxBytes: 64 * MIB });
-    await post("/runs/put", { storeKey: key, record: record("old", now - 20 * DAY), policy: policy(30), policyUpdatedAt: now - 10_000 });
+    await post("/runs/put", {
+      storeKey: key,
+      record: record("old", now - 20 * DAY),
+      policy: policy(30),
+      policyUpdatedAt: now - 10_000,
+    });
     expect((await post("/runs/get", { storeKey: key, id: "old" })).data.record).not.toBeNull();
     // Older proposal with a tighter window: ignored, the run stays visible.
-    await post("/runs/put", { storeKey: key, record: record("x", now), policy: policy(5), policyUpdatedAt: now - 20_000 });
+    await post("/runs/put", {
+      storeKey: key,
+      record: record("x", now),
+      policy: policy(5),
+      policyUpdatedAt: now - 20_000,
+    });
     expect((await post("/runs/get", { storeKey: key, id: "old" })).data.record).not.toBeNull();
     // Newer proposal: accepted, the run is now hidden.
-    await post("/runs/put", { storeKey: key, record: record("y", now), policy: policy(5), policyUpdatedAt: now - 5_000 });
+    await post("/runs/put", {
+      storeKey: key,
+      record: record("y", now),
+      policy: policy(5),
+      policyUpdatedAt: now - 5_000,
+    });
     expect((await post("/runs/get", { storeKey: key, id: "old" })).data.record).toBeNull();
-    expect((await post("/runs/put", { storeKey: key, record: record("z", now), policy: policy(0), policyUpdatedAt: now })).status).toBe(400);
-    expect((await post("/runs/put", { storeKey: key, record: record("z", now), policy: { maxRuns: 0 }, policyUpdatedAt: now })).status).toBe(400);
+    expect(
+      (await post("/runs/put", { storeKey: key, record: record("z", now), policy: policy(0), policyUpdatedAt: now }))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await post("/runs/put", {
+          storeKey: key,
+          record: record("z", now),
+          policy: { maxRuns: 0 },
+          policyUpdatedAt: now,
+        })
+      ).status,
+    ).toBe(400);
 
     // A proposal dated a year ahead is stored with the DO clock, so a later,
     // correctly dated proposal still wins.
     const key2 = storeKey();
-    await post("/runs/put", { storeKey: key2, record: record("old", now - 20 * DAY), policy: policy(30), policyUpdatedAt: now + 365 * DAY });
+    await post("/runs/put", {
+      storeKey: key2,
+      record: record("old", now - 20 * DAY),
+      policy: policy(30),
+      policyUpdatedAt: now + 365 * DAY,
+    });
     const stored = await runInDurableObject(stubOf(key2), (inst: RunHistoryDO) => inst.policyState());
     expect(stored.policyUpdatedAt).toBeLessThanOrEqual(Date.now());
     await new Promise((r) => setTimeout(r, 10));
-    await post("/runs/put", { storeKey: key2, record: record("y", now), policy: policy(5), policyUpdatedAt: Date.now() });
-    expect((await runInDurableObject(stubOf(key2), (inst: RunHistoryDO) => inst.policyState())).policy.retentionDays).toBe(5);
+    await post("/runs/put", {
+      storeKey: key2,
+      record: record("y", now),
+      policy: policy(5),
+      policyUpdatedAt: Date.now(),
+    });
+    expect(
+      (await runInDurableObject(stubOf(key2), (inst: RunHistoryDO) => inst.policyState())).policy.retentionDays,
+    ).toBe(5);
     expect((await post("/runs/get", { storeKey: key2, id: "old" })).data.record).toBeNull();
   });
 
   it("get/list never accept a policy: a generous body policy cannot resurrect a hidden row", async () => {
     const key = storeKey();
     const now = Date.now();
-    await post("/runs/put", { storeKey: key, record: record("old", now - 20 * DAY), policy: { retentionDays: 5, maxRuns: 100, maxBytes: 64 * MIB }, policyUpdatedAt: now });
-    expect((await post("/runs/get", { storeKey: key, id: "old", policy: { retentionDays: 365 }, policyUpdatedAt: now + 1 })).data).toEqual({ record: null });
-    expect((await post("/runs/list", { storeKey: key, policy: { retentionDays: 365 }, policyUpdatedAt: now + 1 })).data).toEqual({ items: [] });
+    await post("/runs/put", {
+      storeKey: key,
+      record: record("old", now - 20 * DAY),
+      policy: { retentionDays: 5, maxRuns: 100, maxBytes: 64 * MIB },
+      policyUpdatedAt: now,
+    });
+    expect(
+      (await post("/runs/get", { storeKey: key, id: "old", policy: { retentionDays: 365 }, policyUpdatedAt: now + 1 }))
+        .data,
+    ).toEqual({ record: null });
+    expect(
+      (await post("/runs/list", { storeKey: key, policy: { retentionDays: 365 }, policyUpdatedAt: now + 1 })).data,
+    ).toEqual({ items: [] });
     // and the persisted policy is unchanged
-    expect((await runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.policyState())).policy.retentionDays).toBe(5);
+    expect(
+      (await runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.policyState())).policy.retentionDays,
+    ).toBe(5);
   });
 
   it("a shrink dropping >25% deletes at most 500 rows per put while list already hides them", async () => {
     const key = storeKey();
     const now = Date.now();
-    for (let i = 0; i < 620; i++) await putDirect(key, record(`r${String(i).padStart(4, "0")}`, now - i * 1000, { events: events(1) }));
+    for (let i = 0; i < 620; i++)
+      await putDirect(key, record(`r${String(i).padStart(4, "0")}`, now - i * 1000, { events: events(1) }));
     expect(await rowCount(key, "runs")).toBe(620);
-    const res = await putDirect(key, record("new", now + 1, { events: events(1) }), { policy: { retentionDays: 30, maxRuns: 50, maxBytes: 64 * MIB }, policyUpdatedAt: now });
+    const res = await putDirect(key, record("new", now + 1, { events: events(1) }), {
+      policy: { retentionDays: 30, maxRuns: 50, maxBytes: 64 * MIB },
+      policyUpdatedAt: now,
+    });
     expect(res.stored).toBe(true);
     expect(res.retained).toBe(50);
     // 621 - 50 = 571 outside policy; the fence deletes 500 of them this put.
@@ -280,7 +402,13 @@ describe("run history routes", () => {
     expect(list.data.items as unknown[]).toHaveLength(50);
     expect((list.data.items as Array<{ id: string }>)[0].id).toBe("new");
     // Rows still on disk behind the fence are hidden on every read path.
-    expect(await runInDurableObject(stubOf(key), async (_i: RunHistoryDO, state) => state.storage.sql.exec(`SELECT 1 FROM runs WHERE run_id = 'r0100'`).toArray().length)).toBe(1);
+    expect(
+      await runInDurableObject(
+        stubOf(key),
+        async (_i: RunHistoryDO, state) =>
+          state.storage.sql.exec(`SELECT 1 FROM runs WHERE run_id = 'r0100'`).toArray().length,
+      ),
+    ).toBe(1);
     expect((await post("/runs/get", { storeKey: key, id: "r0100" })).data).toEqual({ record: null });
     expect((await post("/runs/events", { storeKey: key, id: "r0100" })).data).toEqual({ events: null });
     // the next put finishes the job
@@ -294,24 +422,44 @@ describe("run history routes", () => {
     // (a put would trim them): every read path must then agree row by row.
     const setPolicy = (key: string, policy: Record<string, number>) =>
       runInDurableObject(stubOf(key), async (_i: RunHistoryDO, state) => {
-        state.storage.sql.exec(`INSERT INTO meta (key, value) VALUES ('policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, JSON.stringify({ ...policy, policyUpdatedAt: Date.now() }));
+        state.storage.sql.exec(
+          `INSERT INTO meta (key, value) VALUES ('policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+          JSON.stringify({ ...policy, policyUpdatedAt: Date.now() }),
+        );
       });
     const idsOnDisk = (key: string) =>
-      runInDurableObject(stubOf(key), async (_i: RunHistoryDO, state) => state.storage.sql.exec<{ run_id: string; bytes: number }>(`SELECT run_id, bytes FROM runs`).toArray());
+      runInDurableObject(stubOf(key), async (_i: RunHistoryDO, state) =>
+        state.storage.sql.exec<{ run_id: string; bytes: number }>(`SELECT run_id, bytes FROM runs`).toArray(),
+      );
     const agree = async (key: string, expected: string[]) => {
-      const listed = ((await post("/runs/list", { storeKey: key, limit: 200 })).data.items as Array<{ id: string }>).map((r) => r.id);
+      const listed = (
+        (await post("/runs/list", { storeKey: key, limit: 200 })).data.items as Array<{ id: string }>
+      ).map((r) => r.id);
       expect(listed).toEqual(expected);
       for (const { run_id } of await idsOnDisk(key)) {
         const visible = listed.includes(run_id);
-        expect((await post("/runs/get", { storeKey: key, id: run_id })).data.record !== null, `get ${run_id}`).toBe(visible);
-        expect((await post("/runs/events", { storeKey: key, id: run_id })).data.events !== null, `events ${run_id}`).toBe(visible);
+        expect((await post("/runs/get", { storeKey: key, id: run_id })).data.record !== null, `get ${run_id}`).toBe(
+          visible,
+        );
+        expect(
+          (await post("/runs/events", { storeKey: key, id: run_id })).data.events !== null,
+          `events ${run_id}`,
+        ).toBe(visible);
       }
     };
     const now = Date.now();
 
     // maxRuns with a finishedAt tie: t2 ranks ahead of t1 (run_id desc); age drops `old`.
     const k1 = storeKey();
-    for (const [id, at] of [["old", now - 20 * DAY], ["a", now - 1000], ["t1", now - 2500], ["t2", now - 2500], ["b", now - 2000], ["c", now - 3000], ["d", now - 4000]] as const) {
+    for (const [id, at] of [
+      ["old", now - 20 * DAY],
+      ["a", now - 1000],
+      ["t1", now - 2500],
+      ["t2", now - 2500],
+      ["b", now - 2000],
+      ["c", now - 3000],
+      ["d", now - 4000],
+    ] as const) {
       await putDirect(k1, record(id, at, { events: events(1) }));
     }
     expect(await rowCount(k1, "runs")).toBe(7);
@@ -323,7 +471,13 @@ describe("run history routes", () => {
     // and everything older fall off even though maxRuns would keep them.
     const k2 = storeKey();
     const big = () => events(72, 64 * 1024 - 100);
-    for (const [id, at] of [["a", now - 1000], ["b", now - 2000], ["t1", now - 2500], ["t2", now - 2500]] as const) await putDirect(k2, record(id, at, { events: big() }));
+    for (const [id, at] of [
+      ["a", now - 1000],
+      ["b", now - 2000],
+      ["t1", now - 2500],
+      ["t2", now - 2500],
+    ] as const)
+      await putDirect(k2, record(id, at, { events: big() }));
     await putDirect(k2, record("c", now - 3000, { events: events(1) }));
     await putDirect(k2, record("d", now - 4000, { events: events(1) }));
     const bytesOf = Object.fromEntries((await idsOnDisk(k2)).map((r) => [r.run_id, r.bytes]));
@@ -358,7 +512,11 @@ describe("run history routes", () => {
     const before = Date.now();
     await post("/runs/put", { storeKey: key, record: record("future", before + 365 * DAY) });
     const row = await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) =>
-      state.storage.sql.exec<{ finished_at: number; stored_at: number }>(`SELECT finished_at, stored_at FROM runs WHERE run_id = 'future'`).one(),
+      state.storage.sql
+        .exec<{ finished_at: number; stored_at: number }>(
+          `SELECT finished_at, stored_at FROM runs WHERE run_id = 'future'`,
+        )
+        .one(),
     );
     expect(row.finished_at).toBeLessThanOrEqual(Date.now() + DAY);
     expect(row.finished_at).toBeGreaterThanOrEqual(before + DAY - 1);
@@ -370,13 +528,21 @@ describe("run history routes", () => {
   it("the alarm deletes expired rows with no writes, and get is then not-found", async () => {
     const key = storeKey();
     const now = Date.now();
-    await post("/runs/put", { storeKey: key, record: record("old", now - 20 * DAY), policy: { retentionDays: 30, maxRuns: 100, maxBytes: 64 * MIB }, policyUpdatedAt: now });
+    await post("/runs/put", {
+      storeKey: key,
+      record: record("old", now - 20 * DAY),
+      policy: { retentionDays: 30, maxRuns: 100, maxBytes: 64 * MIB },
+      policyUpdatedAt: now,
+    });
     await post("/runs/put", { storeKey: key, record: record("fresh", now) });
     // Tighten the policy so `old` is outside it — via the meta table, exactly
     // what a shrink would persist — without a put that would trim it.
     await runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.policyState());
     await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
-      state.storage.sql.exec(`UPDATE meta SET value = ? WHERE key = 'policy'`, JSON.stringify({ retentionDays: 5, maxRuns: 100, maxBytes: 64 * MIB, policyUpdatedAt: now }));
+      state.storage.sql.exec(
+        `UPDATE meta SET value = ? WHERE key = 'policy'`,
+        JSON.stringify({ retentionDays: 5, maxRuns: 100, maxBytes: 64 * MIB, policyUpdatedAt: now }),
+      );
     });
     expect(await rowCount(key, "runs")).toBe(2);
     expect(await runDurableObjectAlarm(stubOf(key))).toBe(true); // an alarm was scheduled by the first put
@@ -384,7 +550,9 @@ describe("run history routes", () => {
     expect(await rowCount(key, "run_events")).toBe(3);
     expect((await post("/runs/get", { storeKey: key, id: "old" })).data).toEqual({ record: null });
     expect((await post("/runs/get", { storeKey: key, id: "fresh" })).data.record).not.toBeNull();
-    expect(await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => state.storage.getAlarm())).not.toBeNull(); // rescheduled
+    expect(
+      await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => state.storage.getAlarm()),
+    ).not.toBeNull(); // rescheduled
   });
 
   it("body fence: 2 MiB cap on /runs/put (at cap ok, +1 byte 413) measured in bytes; other routes keep 512 KB; missing Content-Length → 411", async () => {
@@ -405,7 +573,10 @@ describe("run history routes", () => {
     expect(multiBody.length).toBeLessThan(1_000_000);
     expect(new TextEncoder().encode(multiBody).byteLength).toBeGreaterThan(1_900_000);
     expect((await post("/runs/put", multiBody)).status).toBe(200);
-    expect(((await post("/runs/get", { storeKey: key, id: "multi" })).data.record as RunRecord).events[0]).toEqual({ ...multi.events[0], seq: 1 }); // no seq given → position
+    expect(((await post("/runs/get", { storeKey: key, id: "multi" })).data.record as RunRecord).events[0]).toEqual({
+      ...multi.events[0],
+      seq: 1,
+    }); // no seq given → position
     // other routes keep the 512 KB fence
     const bigList = JSON.stringify({ storeKey: key, agent: "x".repeat(600 * 1024) });
     expect((await post("/runs/list", bigList)).status).toBe(413);
@@ -428,12 +599,16 @@ describe("run history routes", () => {
   it("validates: bad store key, malformed record, bad id, bad limit → 400; unknown route → 404; no bearer → 401; GET → 405", async () => {
     const key = storeKey();
     expect((await post("/runs/put", { storeKey: "has space", record: record("a", 1) })).status).toBe(400);
-    expect((await post("/runs/put", { storeKey: key, record: { id: "a" } })).data).toEqual({ error: "record must be a RunRecord" });
+    expect((await post("/runs/put", { storeKey: key, record: { id: "a" } })).data).toEqual({
+      error: "record must be a RunRecord",
+    });
     expect((await post("/runs/get", { storeKey: key, id: "../x" })).status).toBe(400);
     expect((await post("/runs/events", { storeKey: key, id: "a", limit: 0 })).status).toBe(400);
     expect((await post("/runs/list", { storeKey: key, limit: "5" })).status).toBe(400);
     expect((await post("/runs/nope", { storeKey: key })).status).toBe(404);
-    expect((await post("/runs/get", { storeKey: key, id: "a" }, { "content-type": "application/json" })).status).toBe(401);
+    expect((await post("/runs/get", { storeKey: key, id: "a" }, { "content-type": "application/json" })).status).toBe(
+      401,
+    );
     expect((await SELF.fetch(`${BASE}/runs/list`, { headers: AUTH })).status).toBe(405);
   });
 
@@ -462,7 +637,14 @@ describe("run history routes", () => {
     const key = storeKey();
     const now = Date.now();
     for (let i = 0; i < 230; i++) {
-      await putDirect(key, record(`r${String(i).padStart(3, "0")}`, now - i * 1000, { events: events(1), agent: i % 2 ? "review" : "coding", channelId: i % 5 ? "slack:C1" : "slack:C2" }));
+      await putDirect(
+        key,
+        record(`r${String(i).padStart(3, "0")}`, now - i * 1000, {
+          events: events(1),
+          agent: i % 2 ? "review" : "coding",
+          channelId: i % 5 ? "slack:C1" : "slack:C2",
+        }),
+      );
     }
     const page = await post("/runs/list", { storeKey: key, limit: 1000 });
     const items = page.data.items as Array<Record<string, unknown>>;
@@ -472,15 +654,24 @@ describe("run history routes", () => {
     expect(items[0].bytes).toBeGreaterThan(100);
     expect(page.data.nextBefore).toEqual({ finishedAt: items[199].finishedAt, id: items[199].id });
     const cursor = page.data.nextBefore as { finishedAt: number; id: string };
-    const rest = await post("/runs/list", { storeKey: key, limit: 200, before: cursor.finishedAt, beforeId: cursor.id });
+    const rest = await post("/runs/list", {
+      storeKey: key,
+      limit: 200,
+      before: cursor.finishedAt,
+      beforeId: cursor.id,
+    });
     expect((rest.data.items as unknown[]).length).toBe(30);
     expect(rest.data.nextBefore).toBeUndefined();
     expect((await post("/runs/list", { storeKey: key })).data.items as unknown[]).toHaveLength(50);
     expect((await post("/runs/list", { storeKey: key, sinceMs: now - 2500 })).data.items as unknown[]).toHaveLength(3);
-    const coding = (await post("/runs/list", { storeKey: key, agent: "coding", limit: 5 })).data.items as Array<{ agent: string }>;
+    const coding = (await post("/runs/list", { storeKey: key, agent: "coding", limit: 5 })).data.items as Array<{
+      agent: string;
+    }>;
     expect(coding).toHaveLength(5);
     expect(coding.every((r) => r.agent === "coding")).toBe(true);
-    const c2 = (await post("/runs/list", { storeKey: key, channel: "slack:C2", limit: 5 })).data.items as Array<{ channelId: string }>;
+    const c2 = (await post("/runs/list", { storeKey: key, channel: "slack:C2", limit: 5 })).data.items as Array<{
+      channelId: string;
+    }>;
     expect(c2.every((r) => r.channelId === "slack:C2")).toBe(true);
   }, 60_000);
 
@@ -509,10 +700,19 @@ describe("run history routes", () => {
     const key = storeKey();
     const now = Date.now();
     for (let i = 0; i < 12; i++) {
-      await putDirect(key, record(`f${String(i).padStart(2, "0")}`, now - i * 1000, { events: events(1), agent: i % 2 ? "review" : "coding", channelId: i % 3 ? "slack:C1" : "slack:C2" }));
+      await putDirect(
+        key,
+        record(`f${String(i).padStart(2, "0")}`, now - i * 1000, {
+          events: events(1),
+          agent: i % 2 ? "review" : "coding",
+          channelId: i % 3 ? "slack:C1" : "slack:C2",
+        }),
+      );
     }
     const expectIds = async (q: Record<string, unknown>, ids: string[]) => {
-      expect(((await post("/runs/list", { storeKey: key, ...q })).data.items as Array<{ id: string }>).map((r) => r.id)).toEqual(ids);
+      expect(
+        ((await post("/runs/list", { storeKey: key, ...q })).data.items as Array<{ id: string }>).map((r) => r.id),
+      ).toEqual(ids);
     };
     const all = Array.from({ length: 12 }, (_, i) => `f${String(i).padStart(2, "0")}`);
     // Fast path: the plan is one SELECT … LIMIT, and the retention scan never runs.
@@ -535,7 +735,15 @@ describe("run history routes", () => {
 
     // Slow path: a policy the rows exceed (written straight into meta so they stay on disk).
     await runInDurableObject(stubOf(key), async (_i: RunHistoryDO, state) => {
-      state.storage.sql.exec(`INSERT INTO meta (key, value) VALUES ('policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, JSON.stringify({ retentionDays: 30, maxRuns: 7, maxBytes: 8 * 1024 * 1024 * 1024, policyUpdatedAt: Date.now() }));
+      state.storage.sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        JSON.stringify({
+          retentionDays: 30,
+          maxRuns: 7,
+          maxBytes: 8 * 1024 * 1024 * 1024,
+          policyUpdatedAt: Date.now(),
+        }),
+      );
     });
     const slow = await runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
       const seen = spySql(inst);
@@ -555,10 +763,42 @@ describe("run history routes", () => {
   it("list with `visibleTo` (authorization.md item 6): channels-in compiles to an indexed IN filter on the ONE LIMITed page query; visibility-in / user-is / or / and follow the same truth table as the in-memory store; none is an empty page; a bad filter is 400, never `all`", async () => {
     const key = storeKey();
     const now = Date.now();
-    await putDirect(key, record("pub", now - 1000, { events: events(1), channelId: "slack:C_PUB", userId: "slack:U1", channelVisibility: "public" }));
-    await putDirect(key, record("priv", now - 2000, { events: events(1), channelId: "slack:G1", userId: "slack:U2", channelVisibility: "private" }));
-    await putDirect(key, record("ops", now - 3000, { events: events(1), channelId: "http:ops", userId: "http:ci", channelVisibility: "machine" }));
-    await putDirect(key, record("dev", now - 4000, { events: events(1), channelId: "mcp:dev", userId: "mcp:ci", channelVisibility: "machine" }));
+    await putDirect(
+      key,
+      record("pub", now - 1000, {
+        events: events(1),
+        channelId: "slack:C_PUB",
+        userId: "slack:U1",
+        channelVisibility: "public",
+      }),
+    );
+    await putDirect(
+      key,
+      record("priv", now - 2000, {
+        events: events(1),
+        channelId: "slack:G1",
+        userId: "slack:U2",
+        channelVisibility: "private",
+      }),
+    );
+    await putDirect(
+      key,
+      record("ops", now - 3000, {
+        events: events(1),
+        channelId: "http:ops",
+        userId: "http:ci",
+        channelVisibility: "machine",
+      }),
+    );
+    await putDirect(
+      key,
+      record("dev", now - 4000, {
+        events: events(1),
+        channelId: "mcp:dev",
+        userId: "mcp:ci",
+        channelVisibility: "machine",
+      }),
+    );
     const ids = async (visibleTo: unknown, more: Record<string, unknown> = {}) => {
       const res = await post("/runs/list", { storeKey: key, visibleTo, ...more });
       expect(res.status).toBe(200);
@@ -571,16 +811,57 @@ describe("run history routes", () => {
     expect(await ids({ kind: "visibility-in", visibilities: ["public"] })).toEqual(["pub"]);
     expect(await ids({ kind: "user-is", userId: "slack:U2" })).toEqual(["priv"]);
     // member-of as the compiler emits it for a token granted http:ops, plus its own runs.
-    expect(await ids({ kind: "or", of: [{ kind: "channels-in", channelIds: ["http:ops"] }, { kind: "visibility-in", visibilities: ["public"] }, { kind: "user-is", userId: "http:ci" }] })).toEqual(["pub", "ops"]);
-    expect(await ids({ kind: "and", of: [{ kind: "channels-in", channelIds: ["slack:G1"] }, { kind: "user-is", userId: "slack:U2" }] })).toEqual(["priv"]);
-    expect(await ids({ kind: "and", of: [{ kind: "channels-in", channelIds: ["slack:G1"] }, { kind: "user-is", userId: "slack:U1" }] })).toEqual([]);
+    expect(
+      await ids({
+        kind: "or",
+        of: [
+          { kind: "channels-in", channelIds: ["http:ops"] },
+          { kind: "visibility-in", visibilities: ["public"] },
+          { kind: "user-is", userId: "http:ci" },
+        ],
+      }),
+    ).toEqual(["pub", "ops"]);
+    expect(
+      await ids({
+        kind: "and",
+        of: [
+          { kind: "channels-in", channelIds: ["slack:G1"] },
+          { kind: "user-is", userId: "slack:U2" },
+        ],
+      }),
+    ).toEqual(["priv"]);
+    expect(
+      await ids({
+        kind: "and",
+        of: [
+          { kind: "channels-in", channelIds: ["slack:G1"] },
+          { kind: "user-is", userId: "slack:U1" },
+        ],
+      }),
+    ).toEqual([]);
     // ANDed with the plain filters and the cursor.
-    expect(await ids({ kind: "channels-in", channelIds: ["http:ops", "mcp:dev", "slack:C_PUB"] }, { channel: "mcp:dev" })).toEqual(["dev"]);
-    expect(await ids({ kind: "channels-in", channelIds: ["http:ops", "mcp:dev", "slack:C_PUB"] }, { before: now - 1000, beforeId: "pub" })).toEqual(["ops", "dev"]);
+    expect(
+      await ids({ kind: "channels-in", channelIds: ["http:ops", "mcp:dev", "slack:C_PUB"] }, { channel: "mcp:dev" }),
+    ).toEqual(["dev"]);
+    expect(
+      await ids(
+        { kind: "channels-in", channelIds: ["http:ops", "mcp:dev", "slack:C_PUB"] },
+        { before: now - 1000, beforeId: "pub" },
+      ),
+    ).toEqual(["ops", "dev"]);
     // The plan: ONE indexed page query carrying the IN, no retention scan.
     const plan = await runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
       const seen = spySql(inst);
-      const res = await inst.list({ limit: 5, visibleTo: { kind: "or", of: [{ kind: "channels-in", channelIds: ["http:ops"] }, { kind: "visibility-in", visibilities: ["public"] }] } });
+      const res = await inst.list({
+        limit: 5,
+        visibleTo: {
+          kind: "or",
+          of: [
+            { kind: "channels-in", channelIds: ["http:ops"] },
+            { kind: "visibility-in", visibilities: ["public"] },
+          ],
+        },
+      });
       return { seen, ids: res.items.map((r) => r.id) };
     });
     expect(plan.ids).toEqual(["pub", "ops"]);
@@ -592,9 +873,26 @@ describe("run history routes", () => {
     expect(page[0]).toMatch(/LIMIT \?/);
     // Malformed or too wide → 400 with the field named; nothing widens to `all`.
     expect((await post("/runs/list", { storeKey: key, visibleTo: { kind: "everything" } })).status).toBe(400);
-    expect((await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["everyone"] } })).status).toBe(400);
-    expect((await post("/runs/list", { storeKey: key, visibleTo: { kind: "channels-in", channelIds: Array.from({ length: 95 }, (_, i) => `c${i}`) } })).status).toBe(400);
-    expect((await post("/runs/list", { storeKey: key, visibleTo: { kind: "channels-in", channelIds: Array.from({ length: 90 }, (_, i) => `c${i}`) } })).status).toBe(200);
+    expect(
+      (await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["everyone"] } }))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await post("/runs/list", {
+          storeKey: key,
+          visibleTo: { kind: "channels-in", channelIds: Array.from({ length: 95 }, (_, i) => `c${i}`) },
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await post("/runs/list", {
+          storeKey: key,
+          visibleTo: { kind: "channels-in", channelIds: Array.from({ length: 90 }, (_, i) => `c${i}`) },
+        })
+      ).status,
+    ).toBe(200);
   });
 
   it("a table created before the visibility stamp gains the column with `unknown` for every existing row (the one migration), and a record put without the stamp reads back as `unknown` — never public", async () => {
@@ -604,7 +902,10 @@ describe("run history routes", () => {
     await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
       state.storage.sql.exec(`DROP INDEX IF EXISTS runs_visibility_finished`);
       state.storage.sql.exec(`ALTER TABLE runs DROP COLUMN channel_visibility`);
-      const columns = state.storage.sql.exec<{ name: string }>(`PRAGMA table_info(runs)`).toArray().map((c) => c.name);
+      const columns = state.storage.sql
+        .exec<{ name: string }>(`PRAGMA table_info(runs)`)
+        .toArray()
+        .map((c) => c.name);
       expect(columns).not.toContain("channel_visibility");
     });
     // A row written straight into the old shape (as a pre-migration DO would have left it).
@@ -613,24 +914,82 @@ describe("run history routes", () => {
       state.storage.sql.exec(
         `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, repo, started_at, finished_at, stored_at, status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        summary.id, summary.label ?? null, summary.agent ?? null, summary.model ?? null, summary.channelId, summary.userId, summary.threadKey, null, summary.startedAt, summary.finishedAt, now, summary.status, 0, 0, 0, 100, JSON.stringify(summary.diagnosis), JSON.stringify(summary),
+        summary.id,
+        summary.label ?? null,
+        summary.agent ?? null,
+        summary.model ?? null,
+        summary.channelId,
+        summary.userId,
+        summary.threadKey,
+        null,
+        summary.startedAt,
+        summary.finishedAt,
+        now,
+        summary.status,
+        0,
+        0,
+        0,
+        100,
+        JSON.stringify(summary.diagnosis),
+        JSON.stringify(summary),
       );
       // Simulate the next constructor run: the migration the DO applies on load.
-      const cols = new Set(state.storage.sql.exec<{ name: string }>(`PRAGMA table_info(runs)`).toArray().map((c) => c.name));
-      if (!cols.has("channel_visibility")) state.storage.sql.exec(`ALTER TABLE runs ADD COLUMN channel_visibility TEXT NOT NULL DEFAULT 'unknown'`);
+      const cols = new Set(
+        state.storage.sql
+          .exec<{ name: string }>(`PRAGMA table_info(runs)`)
+          .toArray()
+          .map((c) => c.name),
+      );
+      if (!cols.has("channel_visibility"))
+        state.storage.sql.exec(`ALTER TABLE runs ADD COLUMN channel_visibility TEXT NOT NULL DEFAULT 'unknown'`);
     });
-    const listed = (await post("/runs/list", { storeKey: key })).data.items as Array<{ id: string; channelVisibility?: string }>;
+    const listed = (await post("/runs/list", { storeKey: key })).data.items as Array<{
+      id: string;
+      channelVisibility?: string;
+    }>;
     expect(listed.map((r) => r.id)).toEqual(["legacy"]);
-    expect(await runInDurableObject(stubOf(key), async (_i: RunHistoryDO, state) => state.storage.sql.exec<{ v: string }>(`SELECT channel_visibility AS v FROM runs WHERE run_id = 'legacy'`).one().v)).toBe("unknown");
-    expect((await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["public"] } })).data.items).toEqual([]);
-    expect(((await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["unknown"] } })).data.items as Array<{ id: string }>).map((r) => r.id)).toEqual(["legacy"]);
+    expect(
+      await runInDurableObject(
+        stubOf(key),
+        async (_i: RunHistoryDO, state) =>
+          state.storage.sql
+            .exec<{ v: string }>(`SELECT channel_visibility AS v FROM runs WHERE run_id = 'legacy'`)
+            .one().v,
+      ),
+    ).toBe("unknown");
+    expect(
+      (await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["public"] } })).data
+        .items,
+    ).toEqual([]);
+    expect(
+      (
+        (await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["unknown"] } }))
+          .data.items as Array<{ id: string }>
+      ).map((r) => r.id),
+    ).toEqual(["legacy"]);
     // A put without the stamp (an older bot) stores `unknown` too.
     const { channelVisibility: _cv, ...unstamped } = record("unstamped", now - 500, { events: events(1) });
     expect((await post("/runs/put", { storeKey: key, record: unstamped })).status).toBe(200);
-    expect(await runInDurableObject(stubOf(key), async (_i: RunHistoryDO, state) => state.storage.sql.exec<{ v: string }>(`SELECT channel_visibility AS v FROM runs WHERE run_id = 'unstamped'`).one().v)).toBe("unknown");
+    expect(
+      await runInDurableObject(
+        stubOf(key),
+        async (_i: RunHistoryDO, state) =>
+          state.storage.sql
+            .exec<{ v: string }>(`SELECT channel_visibility AS v FROM runs WHERE run_id = 'unstamped'`)
+            .one().v,
+      ),
+    ).toBe("unknown");
     // And a stamped put is stored as stamped and filterable.
-    await post("/runs/put", { storeKey: key, record: record("stamped", now - 200, { events: events(1), channelVisibility: "public" }) });
-    expect(((await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["public"] } })).data.items as Array<{ id: string }>).map((r) => r.id)).toEqual(["stamped"]);
+    await post("/runs/put", {
+      storeKey: key,
+      record: record("stamped", now - 200, { events: events(1), channelVisibility: "public" }),
+    });
+    expect(
+      (
+        (await post("/runs/list", { storeKey: key, visibleTo: { kind: "visibility-in", visibilities: ["public"] } }))
+          .data.items as Array<{ id: string }>
+      ).map((r) => r.id),
+    ).toEqual(["stamped"]);
   });
 
   it("delete removes the run and all its events; deleting an unknown id is fine", async () => {

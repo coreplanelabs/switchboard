@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OpenedPullRequest, PullRequestTarget, RepoShipInfo } from "../execution/githubPulls.js";
 import type { RunEvent } from "./runEvents.js";
-import { observeCodingWorkspace, pushedBranchOf, runCodingPrPostStep, trackPushedBranch, type WorkspaceObservation } from "./codingPrPostStep.js";
+import {
+  observeCodingWorkspace,
+  pushedBranchOf,
+  runCodingPrPostStep,
+  trackPushedBranch,
+  type WorkspaceObservation,
+} from "./codingPrPostStep.js";
 
 // A base is already known from `target` in most of the tests below — the
 // GitHub fetch must stay LAZY (never called) whenever one of the three
@@ -25,7 +31,9 @@ const DESCRIPTION = {
   title: "Fix the login redirect",
   tldr: "Restores the session cookie on login. Users can sign in again.",
   whatWhy: "The handler dropped the cookie after #12; this restores it.",
-  tour: [{ title: "The fix", description: "The cookie is set again.", anchor: { path: "src/login.ts", from: 10, to: 20 } }],
+  tour: [
+    { title: "The fix", description: "The cookie is set again.", anchor: { path: "src/login.ts", from: 10, to: 20 } },
+  ],
   remaining: [],
   decisions: [],
   risks: "none",
@@ -46,7 +54,11 @@ function openSpy(result: Partial<OpenedPullRequest> | Error = {}) {
   const fn = vi.fn(async (target: PullRequestTarget): Promise<OpenedPullRequest> => {
     calls.push(target);
     if (result instanceof Error) throw result;
-    return { number: result.number ?? 7, htmlUrl: result.htmlUrl ?? "https://github.com/acme/api/pull/7", created: result.created ?? true };
+    return {
+      number: result.number ?? 7,
+      htmlUrl: result.htmlUrl ?? "https://github.com/acme/api/pull/7",
+      created: result.created ?? true,
+    };
   });
   return { calls, fn };
 }
@@ -66,7 +78,12 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       logKey: "t",
     });
     expect(spy.calls).toHaveLength(1);
-    expect(spy.calls[0]).toMatchObject({ repo: "acme/api", headBranch: "feat/x", base: "main", title: DESCRIPTION.title });
+    expect(spy.calls[0]).toMatchObject({
+      repo: "acme/api",
+      headBranch: "feat/x",
+      base: "main",
+      title: DESCRIPTION.title,
+    });
     expect(events.some((e) => e.type === "pr_opened")).toBe(true);
     expect(note).toContain("https://github.com/acme/api/pull/7");
     // A binding ref already resolved the base — the GitHub last resort never fires.
@@ -197,7 +214,9 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       logKey: "t",
     });
     expect(spy.calls).toHaveLength(0);
-    expect(note).toBe("⚠️ A PR description was submitted but the branch `feat/x` was not found on the remote, so no PR was opened.");
+    expect(note).toBe(
+      "⚠️ A PR description was submitted but the branch `feat/x` was not found on the remote, so no PR was opened.",
+    );
   });
 
   it("no description and nothing pushed → nothing to report (undefined note), no GitHub fetch", async () => {
@@ -313,13 +332,17 @@ const STALE = "0123456789abcdef0123456789abcdef01234567";
 // What `git rev-parse @{u}` prints in a `--depth`/`--single-branch` clone after
 // a successful `git push -u`: the fetch refspec covers only the default
 // branch, so the remote-tracking ref for the pushed branch never exists (#438).
-const SINGLE_BRANCH_UPSTREAM = "exit 128:\nfatal: upstream branch 'refs/heads/feat/x' not stored as a remote-tracking branch\n";
+const SINGLE_BRANCH_UPSTREAM =
+  "exit 128:\nfatal: upstream branch 'refs/heads/feat/x' not stored as a remote-tracking branch\n";
 const NO_SUCH_REMOTE_BRANCH = "exit 2:\n";
-const REMOTE_UNREACHABLE = "exit 128:\nfatal: unable to access 'https://github.com/acme/api.git/': Could not resolve host: github.com\n";
+const REMOTE_UNREACHABLE =
+  "exit 128:\nfatal: unable to access 'https://github.com/acme/api.git/': Could not resolve host: github.com\n";
 
 /** A workspace whose probes answer from `answers` (a regexp per command). */
 function workspace(answers: Array<[RegExp, string]>) {
-  const exec = vi.fn(async (cmd: string) => answers.find(([re]) => re.test(cmd))?.[1] ?? "exit 128:\nfatal: not a git repository\n");
+  const exec = vi.fn(
+    async (cmd: string) => answers.find(([re]) => re.test(cmd))?.[1] ?? "exit 128:\nfatal: not a git repository\n",
+  );
   const commands = () => exec.mock.calls.map(([c]) => c);
   return { exec, commands };
 }
@@ -497,7 +520,10 @@ describe("observeCodingWorkspace", () => {
     const ws = workspace([
       [/abbrev-ref/, "chore/other\n"],
       [/rev-parse HEAD/, `${STALE}\n`],
-      [/rev-parse 'refs\/heads\/feat\/x'/, "exit 128:\nfatal: ambiguous argument 'refs/heads/feat/x': unknown revision or path not in the working tree.\n"],
+      [
+        /rev-parse 'refs\/heads\/feat\/x'/,
+        "exit 128:\nfatal: ambiguous argument 'refs/heads/feat/x': unknown revision or path not in the working tree.\n",
+      ],
       [/rev-parse 'feat\/x@\{u\}'/, "exit 128:\nfatal: no such branch: 'feat/x'\n"],
       [/ls-remote/, `${HEAD}\trefs/heads/feat/x\n`],
     ]);
@@ -567,35 +593,77 @@ describe("pushedBranchOf (the branch a run's own git push named)", () => {
   });
 
   it("a fast-forward update, a forced update and an up-to-date answer all name the branch", () => {
-    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n   a1b2c3d..e5f6a7b  feat/x -> feat/x"))).toBe("feat/x");
-    expect(pushedBranchOf(bash("To github.com:acme/api.git\n + a1b2c3d...e5f6a7b feat/x -> feat/x (forced update)"))).toBe("feat/x");
-    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n = [up to date]      feat/x -> feat/x"))).toBe("feat/x");
+    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n   a1b2c3d..e5f6a7b  feat/x -> feat/x"))).toBe(
+      "feat/x",
+    );
+    expect(
+      pushedBranchOf(bash("To github.com:acme/api.git\n + a1b2c3d...e5f6a7b feat/x -> feat/x (forced update)")),
+    ).toBe("feat/x");
+    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n = [up to date]      feat/x -> feat/x"))).toBe(
+      "feat/x",
+    );
   });
 
   it("`git push origin HEAD:feat/x` names the remote side, not HEAD", () => {
-    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n * [new branch]      HEAD -> feat/x"))).toBe("feat/x");
+    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n * [new branch]      HEAD -> feat/x"))).toBe(
+      "feat/x",
+    );
   });
 
   it("the credential in the remote URL is redacted by the time the event exists — the header still counts", () => {
-    expect(pushedBranchOf(bash("To https://x-access-token:«redacted»@github.com/acme/api.git\n * [new branch]      feat/x -> feat/x"))).toBe("feat/x");
+    expect(
+      pushedBranchOf(
+        bash("To https://x-access-token:«redacted»@github.com/acme/api.git\n * [new branch]      feat/x -> feat/x"),
+      ),
+    ).toBe("feat/x");
   });
 
   it("a rejected push, a deletion and a tag name no branch", () => {
-    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n ! [rejected]        feat/x -> feat/x (fetch first)\nerror: failed to push some refs to 'https://github.com/acme/api.git'", { ok: false, exitCode: 1 }))).toBeUndefined();
-    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n ! [remote rejected] feat/x -> feat/x (protected branch hook declined)", { ok: false, exitCode: 1 }))).toBeUndefined();
+    expect(
+      pushedBranchOf(
+        bash(
+          "To https://github.com/acme/api.git\n ! [rejected]        feat/x -> feat/x (fetch first)\nerror: failed to push some refs to 'https://github.com/acme/api.git'",
+          { ok: false, exitCode: 1 },
+        ),
+      ),
+    ).toBeUndefined();
+    expect(
+      pushedBranchOf(
+        bash(
+          "To https://github.com/acme/api.git\n ! [remote rejected] feat/x -> feat/x (protected branch hook declined)",
+          { ok: false, exitCode: 1 },
+        ),
+      ),
+    ).toBeUndefined();
     expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n - [deleted]         feat/x"))).toBeUndefined();
-    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n * [new tag]         v1.2.0 -> v1.2.0"))).toBeUndefined();
+    expect(
+      pushedBranchOf(bash("To https://github.com/acme/api.git\n * [new tag]         v1.2.0 -> v1.2.0")),
+    ).toBeUndefined();
   });
 
   // Review nit (PR #469, F1): a deletion's line has no `->`, so it must not
   // end the block — the update printed after it in the same push still counts.
   it("a mixed push (a deletion, then an update, in one block) → the deletion names nothing and the update still counts", () => {
-    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n - [deleted]         old\n * [new branch]      feat/x -> feat/x"))).toBe("feat/x");
-    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n * [new branch]      feat/x -> feat/x\n - [deleted]         old"))).toBe("feat/x");
+    expect(
+      pushedBranchOf(
+        bash("To https://github.com/acme/api.git\n - [deleted]         old\n * [new branch]      feat/x -> feat/x"),
+      ),
+    ).toBe("feat/x");
+    expect(
+      pushedBranchOf(
+        bash("To https://github.com/acme/api.git\n * [new branch]      feat/x -> feat/x\n - [deleted]         old"),
+      ),
+    ).toBe("feat/x");
   });
 
   it("`git fetch` output is the same shape under a `From` header — never a push", () => {
-    expect(pushedBranchOf(bash("From https://github.com/acme/api\n * [new branch]      main       -> origin/main\n   a1b2c3d..e5f6a7b  feat/x     -> origin/feat/x"))).toBeUndefined();
+    expect(
+      pushedBranchOf(
+        bash(
+          "From https://github.com/acme/api\n * [new branch]      main       -> origin/main\n   a1b2c3d..e5f6a7b  feat/x     -> origin/feat/x",
+        ),
+      ),
+    ).toBeUndefined();
   });
 
   it("a status-shaped line with no `To` header above it is not a push result", () => {
@@ -608,7 +676,13 @@ describe("pushedBranchOf (the branch a run's own git push named)", () => {
   });
 
   it("the LAST push in one result wins (two `To` blocks)", () => {
-    expect(pushedBranchOf(bash("To https://github.com/acme/api.git\n * [new branch]      feat/x -> feat/x\nTo https://github.com/acme/api.git\n * [new branch]      feat/y -> feat/y"))).toBe("feat/y");
+    expect(
+      pushedBranchOf(
+        bash(
+          "To https://github.com/acme/api.git\n * [new branch]      feat/x -> feat/x\nTo https://github.com/acme/api.git\n * [new branch]      feat/y -> feat/y",
+        ),
+      ),
+    ).toBe("feat/y");
   });
 
   it("a whitespace-free remote branch name only: anything else on the line is noise", () => {
@@ -626,7 +700,12 @@ describe("pushedBranchOf (the branch a run's own git push named)", () => {
   // `cat` of a transcript prints the same block. The tracker pairs each result
   // with its call by callId and reads a block only from a `git push` command.
   describe("trackPushedBranch (paired with the command that produced the output)", () => {
-    const call = (id: string, command: string): RunEvent => ({ type: "tool_call", tool: "bash", summary: `$ ${command}`, callId: id });
+    const call = (id: string, command: string): RunEvent => ({
+      type: "tool_call",
+      tool: "bash",
+      summary: `$ ${command}`,
+      callId: id,
+    });
     const track = (...events: RunEvent[]) => {
       const t = trackPushedBranch();
       for (const e of events) t.observe(e);

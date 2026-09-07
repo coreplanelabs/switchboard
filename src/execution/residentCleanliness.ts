@@ -71,7 +71,12 @@ export interface WorktreeCleanliness {
 /** Decide from the script's tagged output. Unknown (missing/failed tags,
  *  non-zero exit, timeout) counts as NOT clean — never destroy work on a
  *  guess — matching the pre-fold decision exactly. */
-export function parseWorktreeCleanliness(r: { stdout: string; stderr: string; exitCode: number; timedOut: boolean }): WorktreeCleanliness {
+export function parseWorktreeCleanliness(r: {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  timedOut: boolean;
+}): WorktreeCleanliness {
   const tags = new Map<string, string>();
   for (const line of r.stdout.split("\n")) {
     const m = /^(present|gitrc|giterr|changes|unpushed)=(.*)$/.exec(line.trim());
@@ -84,6 +89,7 @@ export function parseWorktreeCleanliness(r: { stdout: string; stderr: string; ex
   }
   const changes = Number(tags.get("changes")) || 0;
   const unpushed = Number(tags.get("unpushed")) || 0;
-  if (changes > 0 || unpushed > 0) return { clean: false, reason: `dirty: ${changes} uncommitted change(s), ${unpushed} unpushed commit(s)` };
+  if (changes > 0 || unpushed > 0)
+    return { clean: false, reason: `dirty: ${changes} uncommitted change(s), ${unpushed} unpushed commit(s)` };
   return { clean: true };
 }

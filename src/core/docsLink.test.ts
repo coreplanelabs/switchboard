@@ -13,7 +13,9 @@ describe("docsRedirectTarget", () => {
   });
 
   it("honours an overridden base (local development) without doubling the slash", () => {
-    expect(docsRedirectTarget("/docs/reference/cli", "http://localhost:5173")).toBe("http://localhost:5173/reference/cli");
+    expect(docsRedirectTarget("/docs/reference/cli", "http://localhost:5173")).toBe(
+      "http://localhost:5173/reference/cli",
+    );
     expect(docsRedirectTarget("/docs", "http://localhost:5173/")).toBe("http://localhost:5173/");
   });
 

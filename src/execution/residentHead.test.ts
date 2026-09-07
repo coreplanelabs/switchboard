@@ -12,7 +12,20 @@ describe("parseWantSha (/attach body field `sha`)", () => {
     expect(parseWantSha(TIP)).toEqual({ sha: TIP });
   });
   it("refuses anything but a full sha — abbreviations included — before it can become a git argument", () => {
-    for (const bad of ["", "47c4230", TIP.toUpperCase(), "HEAD", "main", "../evil", TIP + "0", TIP.slice(0, 39), 42, null, true, { sha: TIP }]) {
+    for (const bad of [
+      "",
+      "47c4230",
+      TIP.toUpperCase(),
+      "HEAD",
+      "main",
+      "../evil",
+      TIP + "0",
+      TIP.slice(0, 39),
+      42,
+      null,
+      true,
+      { sha: TIP },
+    ]) {
       expect(parseWantSha(bad)).toEqual({ error: expect.stringMatching(/sha must be a full 40/) });
     }
   });

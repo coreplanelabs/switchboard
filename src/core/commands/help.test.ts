@@ -17,7 +17,10 @@ describe("help.show", () => {
     registerHelpCommands(registry);
     const commands = bindCommands(registry, {
       help: {
-        agents: () => [{ name: "general", description: "answers questions" }, { name: "coding", description: "ships PRs" }],
+        agents: () => [
+          { name: "general", description: "answers questions" },
+          { name: "coding", description: "ships PRs" },
+        ],
         commands: () => [
           { id: "help.show", describe: "help" },
           { id: "runs.list", describe: "list runs" },
@@ -29,10 +32,20 @@ describe("help.show", () => {
     const res = await commands.invoke("help.show", {}, chat);
     expect(res.ok).toBe(true);
     if (!res.ok) throw new Error("unreachable");
-    expect(res.value).toMatchObject({ commands: [{ id: "help.show", form: "help show" }, { id: "runs.list", form: "runs list" }, { id: "config.set", form: "config set" }] });
+    expect(res.value).toMatchObject({
+      commands: [
+        { id: "help.show", form: "help show" },
+        { id: "runs.list", form: "runs list" },
+        { id: "config.set", form: "config set" },
+      ],
+    });
     const text = renderText(commands.get("help.show")!, res.value);
-    expect(text).toContain("*Switchboard* — send me a request. Agents:\n• `general` — answers questions\n• `coding` — ships PRs");
-    expect(text).toContain("*Per-request directives* (anywhere in the message):\n`agent:review model:anthropic/claude-opus-5 effort:low look at PR #42`");
+    expect(text).toContain(
+      "*Switchboard* — send me a request. Agents:\n• `general` — answers questions\n• `coding` — ships PRs",
+    );
+    expect(text).toContain(
+      "*Per-request directives* (anywhere in the message):\n`agent:review model:anthropic/claude-opus-5 effort:low look at PR #42`",
+    );
     expect(text).toContain("*Commands*");
     expect(text).toContain("  runs list   — list runs");
     expect(text).toContain("  config set  — set config");
@@ -51,7 +64,9 @@ describe("help.show", () => {
       { id: "config.set", describe: "set config" },
       { id: "repo.list", describe: "list repos" },
     ];
-    const commands = bindCommands(registry, { help: { agents: () => [{ name: "general", description: "answers questions" }], commands: () => catalogue } });
+    const commands = bindCommands(registry, {
+      help: { agents: () => [{ name: "general", description: "answers questions" }], commands: () => catalogue },
+    });
     const res = await commands.invoke("help.show", {}, chat);
     if (!res.ok) throw new Error("unreachable");
     const text = renderText(commands.get("help.show")!, res.value, { surface: "chat" });
@@ -65,7 +80,17 @@ describe("help.show", () => {
     expect(terminal).toMatch(/ {3,}/);
     const list = text.slice(text.indexOf("*Commands*")).split("\n").slice(1);
     // One header per group, in first-appearance order; the commands of a group under it, registry order.
-    expect(list).toEqual(["*help*", "• `help show` — help", "*config*", "• `config show` — show config", "• `config set` — set config", "*runs*", "• `runs list` — list runs", "*repo*", "• `repo list` — list repos"]);
+    expect(list).toEqual([
+      "*help*",
+      "• `help show` — help",
+      "*config*",
+      "• `config show` — show config",
+      "• `config set` — set config",
+      "*runs*",
+      "• `runs list` — list runs",
+      "*repo*",
+      "• `repo list` — list repos",
+    ]);
     // Every chat-exposed command exactly once, nothing hidden leaks — driven by the catalogue, not a hard-coded list.
     for (const c of catalogue) {
       const form = c.id.replace(".", " ");

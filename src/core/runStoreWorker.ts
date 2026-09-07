@@ -93,14 +93,20 @@ export class WorkerRunStore implements RunStore {
   }
 
   async put(record: RunRecord): Promise<PutResult> {
-    if (!RUN_ID_PATTERN.test(record.id)) throw new PermanentStoreError(`run store: refusing to put malformed id ${JSON.stringify(record.id)}`);
+    if (!RUN_ID_PATTERN.test(record.id))
+      throw new PermanentStoreError(`run store: refusing to put malformed id ${JSON.stringify(record.id)}`);
     const body: Record<string, unknown> = { storeKey: this.opts.storeKey, record };
     if (this.opts.policy) {
       body.policy = this.opts.policy;
       if (this.opts.policyUpdatedAt !== undefined) body.policyUpdatedAt = this.opts.policyUpdatedAt;
     }
     const data = await this.post("/runs/put", body);
-    if (data.ok !== true || typeof data.retained !== "number" || typeof data.stored !== "boolean" || typeof data.rewritten !== "boolean") {
+    if (
+      data.ok !== true ||
+      typeof data.retained !== "number" ||
+      typeof data.stored !== "boolean" ||
+      typeof data.rewritten !== "boolean"
+    ) {
       throw new PermanentStoreError("run store /runs/put returned a malformed result");
     }
     return { ok: true, retained: data.retained, stored: data.stored, rewritten: data.rewritten };
@@ -110,7 +116,8 @@ export class WorkerRunStore implements RunStore {
     if (!RUN_ID_PATTERN.test(id)) return null;
     const data = await this.post("/runs/get", { storeKey: this.opts.storeKey, id });
     if (data.record === null || data.record === undefined) return null;
-    if (!isRunRecord(data.record) || data.record.id !== id) throw new PermanentStoreError("run store /runs/get returned a malformed record");
+    if (!isRunRecord(data.record) || data.record.id !== id)
+      throw new PermanentStoreError("run store /runs/get returned a malformed record");
     return normalizeStored(data.record);
   }
 
@@ -118,7 +125,8 @@ export class WorkerRunStore implements RunStore {
     if (!RUN_ID_PATTERN.test(id)) return null;
     const data = await this.post("/runs/summary", { storeKey: this.opts.storeKey, id });
     if (data.summary === null || data.summary === undefined) return null;
-    if (!isRunListItem(data.summary) || data.summary.id !== id) throw new PermanentStoreError("run store /runs/summary returned a malformed summary");
+    if (!isRunListItem(data.summary) || data.summary.id !== id)
+      throw new PermanentStoreError("run store /runs/summary returned a malformed summary");
     return normalizeStored(data.summary);
   }
 
@@ -134,7 +142,11 @@ export class WorkerRunStore implements RunStore {
     if (data.events === null) return null; // the DO's not-found: no such run, or hidden by retention
     if (!Array.isArray(data.events)) throw new PermanentStoreError("run store /runs/events returned no events array");
     const events = data.events.filter(
-      (e): e is StoredRunEvent => typeof e === "object" && e !== null && typeof (e as StoredRunEvent).type === "string" && typeof (e as StoredRunEvent).seq === "number",
+      (e): e is StoredRunEvent =>
+        typeof e === "object" &&
+        e !== null &&
+        typeof (e as StoredRunEvent).type === "string" &&
+        typeof (e as StoredRunEvent).seq === "number",
     );
     const out: RunEventsPage = { events };
     if (typeof data.nextAfterSeq === "number") out.nextAfterSeq = data.nextAfterSeq;
@@ -171,7 +183,8 @@ export class WorkerRunStore implements RunStore {
       throw new PermanentStoreError(message);
     }
     const data = (await res.json().catch(() => null)) as unknown;
-    if (typeof data !== "object" || data === null) throw new PermanentStoreError(`run store ${path} returned a non-JSON body`);
+    if (typeof data !== "object" || data === null)
+      throw new PermanentStoreError(`run store ${path} returned a non-JSON body`);
     return data as Record<string, unknown>;
   }
 }

@@ -1,4 +1,10 @@
-import { commandDefiner, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
+import {
+  commandDefiner,
+  type CommandDef,
+  type CommandRegistry,
+  type JsonObject,
+  type JsonValue,
+} from "../commandRegistry.js";
 import type { ScheduleStore } from "../scheduleStore.js";
 import { nextFire, type ScheduleDef, type ScheduleFiring } from "../schedules.js";
 
@@ -36,8 +42,13 @@ export const scheduleList = defineCommand({
     const lines = rows.map((s) => {
       const last = s.last && typeof s.last === "object" && !Array.isArray(s.last) ? (s.last as JsonObject) : undefined;
       const next = typeof s.nextFireAt === "number" ? `next ${utc(s.nextFireAt)}` : "never fires";
-      const lastText = last ? `last ${utc(Number(last.firedAt))} → ${String(last.outcome)}${last.runId ? ` (run ${String(last.runId).slice(0, 8)})` : ""}` : "no firing recorded";
-      const what = s.action === "run" ? `\`${String(s.command)}\` as \`${String(s.identity)}\`` : `${ACTION_LABEL[String(s.action)] ?? String(s.action)} — not a run`;
+      const lastText = last
+        ? `last ${utc(Number(last.firedAt))} → ${String(last.outcome)}${last.runId ? ` (run ${String(last.runId).slice(0, 8)})` : ""}`
+        : "no firing recorded";
+      const what =
+        s.action === "run"
+          ? `\`${String(s.command)}\` as \`${String(s.identity)}\``
+          : `${ACTION_LABEL[String(s.action)] ?? String(s.action)} — not a run`;
       return `• \`${String(s.name)}\` — \`${String(s.cron)}\` · ${String(s.worker)} · ${what} · ${next} · ${lastText}`;
     });
     if (typeof o.firingsUnavailable === "string") lines.push(`⚠️ firing history unavailable: ${o.firingsUnavailable}`);
@@ -57,26 +68,30 @@ export const scheduleList = defineCommand({
     }
     const byName = new Map(firings.map((f) => [f.schedule, f]));
     return {
-      schedules: deps.schedule.schedules.filter((s) => !s.internal).map((s) => {
-        const last = byName.get(s.name);
-        const next = nextFire(s.cron, now);
-        return {
-          name: s.name,
-          worker: s.worker,
-          action: s.action.type,
-          cron: s.cron,
-          description: s.description,
-          ...(s.action.type === "run" ? { command: s.action.command, identity: s.action.identity } : {}),
-          ...(next !== undefined ? { nextFireAt: next } : {}),
-          ...(last ? { last: last as unknown as JsonValue } : {}),
-        };
-      }),
+      schedules: deps.schedule.schedules
+        .filter((s) => !s.internal)
+        .map((s) => {
+          const last = byName.get(s.name);
+          const next = nextFire(s.cron, now);
+          return {
+            name: s.name,
+            worker: s.worker,
+            action: s.action.type,
+            cron: s.cron,
+            description: s.description,
+            ...(s.action.type === "run" ? { command: s.action.command, identity: s.action.identity } : {}),
+            ...(next !== undefined ? { nextFireAt: next } : {}),
+            ...(last ? { last: last as unknown as JsonValue } : {}),
+          };
+        }),
       ...(firingsUnavailable !== undefined ? { firingsUnavailable } : {}),
     };
   },
 });
 
-export const scheduleCommands: readonly CommandDef<ScheduleCommandDeps>[] = [scheduleList] as unknown as CommandDef<ScheduleCommandDeps>[];
+export const scheduleCommands: readonly CommandDef<ScheduleCommandDeps>[] = [
+  scheduleList,
+] as unknown as CommandDef<ScheduleCommandDeps>[];
 
 export function registerScheduleCommands<D extends ScheduleCommandDeps>(registry: CommandRegistry<D>): void {
   for (const cmd of scheduleCommands) registry.register(cmd as unknown as CommandDef<D>);

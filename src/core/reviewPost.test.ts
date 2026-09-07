@@ -12,7 +12,10 @@ describe("reviewPostIntended", () => {
     expect(reviewPostIntended({ agentName: "coding", requestText: "review a/b#1" })).toBe(false);
   });
   it("decideReviewPost agrees with it: intended + resolved PR → target; not intended → null even with a PR", () => {
-    expect(decideReviewPost({ agentName: "review", repo: "a/b", pr: 1, requestText: "review" })).toEqual({ repo: "a/b", number: 1 });
+    expect(decideReviewPost({ agentName: "review", repo: "a/b", pr: 1, requestText: "review" })).toEqual({
+      repo: "a/b",
+      number: 1,
+    });
     expect(decideReviewPost({ agentName: "review", repo: "a/b", pr: 1, requestText: "review, don't post" })).toBeNull();
     expect(decideReviewPost({ agentName: "general", repo: "a/b", pr: 1, requestText: "review" })).toBeNull();
   });

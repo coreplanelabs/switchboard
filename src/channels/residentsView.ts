@@ -21,7 +21,13 @@ import { WEB_HTML_HEADERS } from "./webShell.js";
 // passed through as received — the view renders whatever the resident
 // reports, defensively, and every value lands as DOM text, never markup.
 
-export { residentLive, residentSlug, residentStateTone, type ResidentListing, type ResidentRecordView } from "./residentsModel.js";
+export {
+  residentLive,
+  residentSlug,
+  residentStateTone,
+  type ResidentListing,
+  type ResidentRecordView,
+} from "./residentsModel.js";
 
 export type ResidentsRoute = { kind: "index" } | { kind: "detail"; slug: string };
 
@@ -71,7 +77,11 @@ export function createResidentsViewHandler(
       return true;
     }
     if (!client) {
-      plain(res, 503, "Resident repo environments aren't configured — set execution.resident.baseUrl (and the RESIDENT_ADMIN_TOKEN bearer) to enable this view.");
+      plain(
+        res,
+        503,
+        "Resident repo environments aren't configured — set execution.resident.baseUrl (and the RESIDENT_ADMIN_TOKEN bearer) to enable this view.",
+      );
       return true;
     }
 
@@ -81,7 +91,10 @@ export function createResidentsViewHandler(
         if (r.status !== 200) {
           // Cap the echoed upstream body: an error page never relays a
           // pathological response wholesale.
-          const reason = (typeof r.data.error === "string" ? r.data.error : JSON.stringify(r.data)).slice(0, UPSTREAM_REASON_MAX);
+          const reason = (typeof r.data.error === "string" ? r.data.error : JSON.stringify(r.data)).slice(
+            0,
+            UPSTREAM_REASON_MAX,
+          );
           plain(res, 502, `resident Worker answered ${r.status} to /residents: ${reason}`);
           return;
         }
@@ -101,7 +114,11 @@ export function createResidentsViewHandler(
         res.end(shell(route.slug, { page: "resident", slug: route.slug, record }));
       })
       .catch((err: unknown) => {
-        plain(res, 502, `resident Worker unreachable: ${(err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX)}`);
+        plain(
+          res,
+          502,
+          `resident Worker unreachable: ${(err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX)}`,
+        );
       });
     return true;
   };

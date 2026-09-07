@@ -27,7 +27,7 @@ const GROUP: CostGroupConfig = {
   },
   durableObjectNamespaces: {
     "5fcc0392bd4240e4910a88ecf4040b43": "bot DO",
-    "d89e62295c1f47a9b25449739e62a164": "resident DOs",
+    d89e62295c1f47a9b25449739e62a164: "resident DOs",
   },
   anthropicWorkspaceId: "wrkspc_switchboard",
 };
@@ -47,10 +47,28 @@ const RESIDENT_0828 = {
 const USAGE: CloudflareUsage = {
   containers: [
     RESIDENT_0828,
-    { date: "2026-08-28", applicationId: "a0390da2-08e7-447f-aab9-f513815b9fce", cpuTimeSec: 2429, allocatedMemoryByteSec: 87450 * GiB, allocatedDiskByteSec: 349799 * GB },
+    {
+      date: "2026-08-28",
+      applicationId: "a0390da2-08e7-447f-aab9-f513815b9fce",
+      cpuTimeSec: 2429,
+      allocatedMemoryByteSec: 87450 * GiB,
+      allocatedDiskByteSec: 349799 * GB,
+    },
     // terrateam shares the account but is NOT in the group → must be ignored
-    { date: "2026-08-28", applicationId: "a03277f6-d087-448d-8c26-fbf5a316cb8c", cpuTimeSec: 2155, allocatedMemoryByteSec: 339642 * GiB, allocatedDiskByteSec: 679284 * GB },
-    { date: "2026-08-29", applicationId: "a0390da2-08e7-447f-aab9-f513815b9fce", cpuTimeSec: 1110, allocatedMemoryByteSec: 76855 * GiB, allocatedDiskByteSec: 307420 * GB },
+    {
+      date: "2026-08-28",
+      applicationId: "a03277f6-d087-448d-8c26-fbf5a316cb8c",
+      cpuTimeSec: 2155,
+      allocatedMemoryByteSec: 339642 * GiB,
+      allocatedDiskByteSec: 679284 * GB,
+    },
+    {
+      date: "2026-08-29",
+      applicationId: "a0390da2-08e7-447f-aab9-f513815b9fce",
+      cpuTimeSec: 1110,
+      allocatedMemoryByteSec: 76855 * GiB,
+      allocatedDiskByteSec: 307420 * GB,
+    },
   ],
   durableObjectRequests: [
     { date: "2026-08-28", scriptName: "switchboard", requests: 2160 },
@@ -86,7 +104,9 @@ describe("containerCostUsd", () => {
   });
 
   it("is zero for an idle (never-awake) row", () => {
-    expect(containerCostUsd({ ...RESIDENT_0828, cpuTimeSec: 0, allocatedMemoryByteSec: 0, allocatedDiskByteSec: 0 }).total).toBe(0);
+    expect(
+      containerCostUsd({ ...RESIDENT_0828, cpuTimeSec: 0, allocatedMemoryByteSec: 0, allocatedDiskByteSec: 0 }).total,
+    ).toBe(0);
   });
 });
 
@@ -126,7 +146,13 @@ describe("buildCostReport", () => {
   });
 
   it("emits one row per day in range, oldest first, with zero-filled gaps", () => {
-    const r = buildCostReport("switchboard", GROUP, { containers: [], durableObjectRequests: [], durableObjectDuration: [] }, [], { from: "2026-08-27", to: "2026-08-29", days: 3, partialLastDay: false });
+    const r = buildCostReport(
+      "switchboard",
+      GROUP,
+      { containers: [], durableObjectRequests: [], durableObjectDuration: [] },
+      [],
+      { from: "2026-08-27", to: "2026-08-29", days: 3, partialLastDay: false },
+    );
     expect(r.days.map((d) => d.date)).toEqual(["2026-08-27", "2026-08-28", "2026-08-29"]);
     expect(r.days.every((d) => d.total === 0)).toBe(true);
     expect(r.totals.total).toBe(0);
@@ -138,7 +164,10 @@ describe("buildCostReport", () => {
     const dos = d.durableObjects["bot DO"] + d.durableObjects["resident DOs"] + d.doRequestsUsd;
     expect(d.cloudUsd).toBeCloseTo(containers + dos, 9);
     expect(d.total).toBeCloseTo(containers + dos + 12.5, 9);
-    expect(report.totals.total).toBeCloseTo(report.days.reduce((s, x) => s + x.total, 0), 9);
+    expect(report.totals.total).toBeCloseTo(
+      report.days.reduce((s, x) => s + x.total, 0),
+      9,
+    );
     expect(report.totals.llmUsd).toBe(12.5);
   });
 
@@ -181,7 +210,16 @@ describe("resolveRange", () => {
 
 describe("parseCostsConfig", () => {
   it("accepts a well-formed block and applies env-name defaults", () => {
-    const c = parseCostsConfig({ cloudflareAccountId: "3c7b", groups: { switchboard: { workers: ["switchboard"], containerApps: { a: "bot" }, durableObjectNamespaces: { n1: "bot DO" } } } });
+    const c = parseCostsConfig({
+      cloudflareAccountId: "3c7b",
+      groups: {
+        switchboard: {
+          workers: ["switchboard"],
+          containerApps: { a: "bot" },
+          durableObjectNamespaces: { n1: "bot DO" },
+        },
+      },
+    });
     expect(c?.cloudflareTokenEnv).toBe("CF_ANALYTICS_TOKEN");
     expect(c?.groups.switchboard.durableObjectNamespaces).toEqual({ n1: "bot DO" });
     expect(c?.anthropicAdminKeyEnv).toBe("ANTHROPIC_ADMIN_KEY");
@@ -191,7 +229,9 @@ describe("parseCostsConfig", () => {
     expect(parseCostsConfig(undefined)).toBeUndefined();
     expect(() => parseCostsConfig({ groups: {} })).toThrow(/cloudflareAccountId/);
     expect(() => parseCostsConfig({ cloudflareAccountId: "x", groups: { g: { workers: "nope" } } })).toThrow(/workers/);
-    expect(() => parseCostsConfig({ cloudflareAccountId: "x", groups: { g: { workers: [], durableObjectNamespaces: { n: 1 } } } })).toThrow(/durableObjectNamespaces/);
+    expect(() =>
+      parseCostsConfig({ cloudflareAccountId: "x", groups: { g: { workers: [], durableObjectNamespaces: { n: 1 } } } }),
+    ).toThrow(/durableObjectNamespaces/);
   });
 });
 
@@ -214,8 +254,15 @@ describe("CloudflareGraphqlUsageSource", () => {
       viewer: {
         accounts: [
           {
-            containers: [{ dimensions: { date: "2026-08-28", applicationId: "app1" }, sum: { cpuTimeSec: 10, allocatedMemory: 20, allocatedDisk: 30 } }],
-            durableObjectRequests: [{ dimensions: { date: "2026-08-28", scriptName: "switchboard" }, sum: { requests: 5 } }],
+            containers: [
+              {
+                dimensions: { date: "2026-08-28", applicationId: "app1" },
+                sum: { cpuTimeSec: 10, allocatedMemory: 20, allocatedDisk: 30 },
+              },
+            ],
+            durableObjectRequests: [
+              { dimensions: { date: "2026-08-28", scriptName: "switchboard" }, sum: { requests: 5 } },
+            ],
             durableObjectDuration: [{ dimensions: { date: "2026-08-28", namespaceId: "ns1" }, sum: { duration: 7.5 } }],
           },
         ],
@@ -234,7 +281,15 @@ describe("CloudflareGraphqlUsageSource", () => {
     expect(body.variables.accountTag).toBe("acct");
     expect(body.variables.from).toBe("2026-08-01T00:00:00Z");
     expect(body.variables.to).toBe("2026-08-29T00:00:00Z"); // exclusive end: the whole last day
-    expect(usage.containers).toEqual([{ date: "2026-08-28", applicationId: "app1", cpuTimeSec: 10, allocatedMemoryByteSec: 20, allocatedDiskByteSec: 30 }]);
+    expect(usage.containers).toEqual([
+      {
+        date: "2026-08-28",
+        applicationId: "app1",
+        cpuTimeSec: 10,
+        allocatedMemoryByteSec: 20,
+        allocatedDiskByteSec: 30,
+      },
+    ]);
     expect(usage.durableObjectRequests).toEqual([{ date: "2026-08-28", scriptName: "switchboard", requests: 5 }]);
     expect(usage.durableObjectDuration).toEqual([{ date: "2026-08-28", namespaceId: "ns1", gbSeconds: 7.5 }]);
     expect(body.query).toContain("durableObjectsPeriodicGroups"); // the billable-duration dataset, not summed request wall time
@@ -242,9 +297,13 @@ describe("CloudflareGraphqlUsageSource", () => {
 
   it("throws on a non-200 and on GraphQL-level errors (the API returns 200 for those)", async () => {
     const bad = fakeFetch(() => ({ status: 403, body: { errors: [{ message: "denied" }] } }));
-    await expect(new CloudflareGraphqlUsageSource({ accountId: "a", token: "t", fetchImpl: bad.fetchImpl }).fetchUsage(RANGE)).rejects.toThrow(/403/);
+    await expect(
+      new CloudflareGraphqlUsageSource({ accountId: "a", token: "t", fetchImpl: bad.fetchImpl }).fetchUsage(RANGE),
+    ).rejects.toThrow(/403/);
     const gqlErr = fakeFetch(() => ({ status: 200, body: { data: null, errors: [{ message: "unknown field" }] } }));
-    await expect(new CloudflareGraphqlUsageSource({ accountId: "a", token: "t", fetchImpl: gqlErr.fetchImpl }).fetchUsage(RANGE)).rejects.toThrow(/unknown field/);
+    await expect(
+      new CloudflareGraphqlUsageSource({ accountId: "a", token: "t", fetchImpl: gqlErr.fetchImpl }).fetchUsage(RANGE),
+    ).rejects.toThrow(/unknown field/);
   });
 
   it("never puts the token in the URL or the error message", async () => {
@@ -262,11 +321,30 @@ describe("AnthropicCostReportSource", () => {
   it("walks every page of the Admin cost report grouped by workspace and converts cents to dollars", async () => {
     const pages: Record<string, unknown> = {
       first: {
-        data: [{ starting_at: "2026-08-28T00:00:00Z", ending_at: "2026-08-29T00:00:00Z", results: [{ amount: "1250.5", currency: "USD", workspace_id: "wrkspc_a" }, { amount: "300", currency: "USD", workspace_id: null }] }],
+        data: [
+          {
+            starting_at: "2026-08-28T00:00:00Z",
+            ending_at: "2026-08-29T00:00:00Z",
+            results: [
+              { amount: "1250.5", currency: "USD", workspace_id: "wrkspc_a" },
+              { amount: "300", currency: "USD", workspace_id: null },
+            ],
+          },
+        ],
         has_more: true,
         next_page: "p2",
       },
-      p2: { data: [{ starting_at: "2026-08-29T00:00:00Z", ending_at: "2026-08-30T00:00:00Z", results: [{ amount: "10", currency: "USD", workspace_id: "wrkspc_a" }] }], has_more: false, next_page: null },
+      p2: {
+        data: [
+          {
+            starting_at: "2026-08-29T00:00:00Z",
+            ending_at: "2026-08-30T00:00:00Z",
+            results: [{ amount: "10", currency: "USD", workspace_id: "wrkspc_a" }],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      },
     };
     const f = fakeFetch((url) => ({ status: 200, body: pages[new URL(url).searchParams.get("page") ?? "first"] }));
     const src = new AnthropicCostReportSource({ adminKey: "sk-ant-admin", fetchImpl: f.fetchImpl });
@@ -288,21 +366,40 @@ describe("AnthropicCostReportSource", () => {
 
   it("throws on a non-200 without leaking the key", async () => {
     const f = fakeFetch(() => ({ status: 401, body: { error: { message: "invalid x-api-key" } } }));
-    const err = await new AnthropicCostReportSource({ adminKey: "sk-ant-admin-SECRET", fetchImpl: f.fetchImpl }).fetchDailyCost(RANGE).catch((e: Error) => e);
+    const err = await new AnthropicCostReportSource({ adminKey: "sk-ant-admin-SECRET", fetchImpl: f.fetchImpl })
+      .fetchDailyCost(RANGE)
+      .catch((e: Error) => e);
     expect(String(err)).toMatch(/401/);
     expect(String(err)).not.toContain("SECRET");
   });
 
   it("refuses a non-USD amount rather than mis-summing currencies", async () => {
-    const f = fakeFetch(() => ({ status: 200, body: { data: [{ starting_at: "2026-08-28T00:00:00Z", ending_at: "x", results: [{ amount: "1", currency: "EUR", workspace_id: null }] }], has_more: false, next_page: null } }));
-    await expect(new AnthropicCostReportSource({ adminKey: "k", fetchImpl: f.fetchImpl }).fetchDailyCost(RANGE)).rejects.toThrow(/EUR/);
+    const f = fakeFetch(() => ({
+      status: 200,
+      body: {
+        data: [
+          {
+            starting_at: "2026-08-28T00:00:00Z",
+            ending_at: "x",
+            results: [{ amount: "1", currency: "EUR", workspace_id: null }],
+          },
+        ],
+        has_more: false,
+        next_page: null,
+      },
+    }));
+    await expect(
+      new AnthropicCostReportSource({ adminKey: "k", fetchImpl: f.fetchImpl }).fetchDailyCost(RANGE),
+    ).rejects.toThrow(/EUR/);
   });
 
   it("refuses a report that still has more pages past the page cap rather than returning a truncated total", async () => {
     // Every page claims another one follows: an endless report. Unreachable for a
     // ≤90-day range at limit=31, so this is the guard that makes it loud if it ever isn't.
     const f = fakeFetch(() => ({ status: 200, body: { data: [], has_more: true, next_page: "again" } }));
-    await expect(new AnthropicCostReportSource({ adminKey: "k", fetchImpl: f.fetchImpl }).fetchDailyCost(RANGE)).rejects.toThrow(/20 pages/);
+    await expect(
+      new AnthropicCostReportSource({ adminKey: "k", fetchImpl: f.fetchImpl }).fetchDailyCost(RANGE),
+    ).rejects.toThrow(/20 pages/);
     expect(f.calls.length).toBe(20);
   });
 });

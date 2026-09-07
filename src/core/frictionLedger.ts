@@ -2,7 +2,13 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname, resolve } from "node:path";
 import type { Predicate } from "./authz/types.js";
 import { isFrictionRunRecord, type FrictionRunRecord } from "./frictionProposals.js";
-import { clone, RUN_LIST_MAX_LIMIT, toVisibilityFilter, type RunListItem, type RunVisibilityFilter } from "./runRecord.js";
+import {
+  clone,
+  RUN_LIST_MAX_LIMIT,
+  toVisibilityFilter,
+  type RunListItem,
+  type RunVisibilityFilter,
+} from "./runRecord.js";
 import type { RunStore } from "./runStore.js";
 
 export { isFrictionRunRecord };
@@ -135,7 +141,9 @@ export class FileFrictionLedger implements FrictionLedger {
 
   private countLines(): number {
     if (!existsSync(this.path)) return 0;
-    return readFileSync(this.path, "utf8").split("\n").filter((l) => l.trim()).length;
+    return readFileSync(this.path, "utf8")
+      .split("\n")
+      .filter((l) => l.trim()).length;
   }
 
   private compact(): void {
@@ -201,22 +209,34 @@ export class RunStoreFrictionLedger implements FrictionLedger {
     ]);
     if (storeRes.status === "rejected" && legacyRes.status === "rejected") throw storeRes.reason;
     const describe = (reason: unknown) => (reason instanceof Error ? reason.message : String(reason));
-    if (legacyRes.status === "rejected") this.warn(`[friction] legacy ledger read failed; serving run-store rows only: ${describe(legacyRes.reason)}`);
-    if (storeRes.status === "rejected") this.warn(`[friction] run store read failed; serving legacy ledger rows only: ${describe(storeRes.reason)}`);
+    if (legacyRes.status === "rejected")
+      this.warn(`[friction] legacy ledger read failed; serving run-store rows only: ${describe(legacyRes.reason)}`);
+    if (storeRes.status === "rejected")
+      this.warn(`[friction] run store read failed; serving legacy ledger rows only: ${describe(storeRes.reason)}`);
     const byRun = new Map<string, FrictionRunRecord>();
     if (legacyRes.status === "fulfilled") for (const r of legacyRes.value) byRun.set(r.runId, r);
-    if (storeRes.status === "fulfilled") for (const item of storeRes.value) byRun.set(item.id, projectFrictionRecord(item));
+    if (storeRes.status === "fulfilled")
+      for (const item of storeRes.value) byRun.set(item.id, projectFrictionRecord(item));
     return sortAndTrim([...byRun.values()], max, trim);
   }
 
   /** The newest `max` runs, newest first, paging by the `{ before, beforeId }`
    *  cursor (the last row's `finishedAt` + `id`, so same-millisecond siblings
    *  are not skipped) since one `list` call returns at most RUN_LIST_MAX_LIMIT rows. */
-  private async newest(max: number, sinceMs: number | undefined, visibleTo: RunVisibilityFilter | undefined): Promise<RunListItem[]> {
+  private async newest(
+    max: number,
+    sinceMs: number | undefined,
+    visibleTo: RunVisibilityFilter | undefined,
+  ): Promise<RunListItem[]> {
     const out: RunListItem[] = [];
     let cursor: { before: number; beforeId: string } | undefined;
     while (out.length < max) {
-      const page = await this.store.list({ limit: max - out.length, ...cursor, sinceMs, ...(visibleTo !== undefined ? { visibleTo } : {}) });
+      const page = await this.store.list({
+        limit: max - out.length,
+        ...cursor,
+        sinceMs,
+        ...(visibleTo !== undefined ? { visibleTo } : {}),
+      });
       out.push(...page);
       if (page.length < Math.min(RUN_LIST_MAX_LIMIT, max - out.length + page.length)) break;
       const last = page[page.length - 1];
@@ -228,6 +248,10 @@ export class RunStoreFrictionLedger implements FrictionLedger {
 
 /** Startup wiring: with a run store the ledger is served from it (legacy rows
  *  unioned); without one the legacy ledger is used unchanged. */
-export function selectFrictionLedger(store: RunStore | null, legacy: FrictionLedger, warn?: (message: string) => void): FrictionLedger {
+export function selectFrictionLedger(
+  store: RunStore | null,
+  legacy: FrictionLedger,
+  warn?: (message: string) => void,
+): FrictionLedger {
   return store ? new RunStoreFrictionLedger(store, legacy, warn) : legacy;
 }

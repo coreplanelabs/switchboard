@@ -83,9 +83,19 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
 
   it("shows the empty sentinel per view, and the store-degraded banner when the seed carries one", () => {
     expect(mountIndex(seed([])).wrapper.find("#empty").text()).toBe("No active runs.");
-    expect(mountIndex(seed([], { all: true })).wrapper.find("#empty").text()).toBe("No runs.");
-    expect(mountIndex(seed([live("a")])).wrapper.find("#empty").exists()).toBe(false);
-    const banner = mountIndex(seed([], { all: true, storeUnavailable: "run history is unavailable right now — showing live runs only" }));
+    expect(
+      mountIndex(seed([], { all: true }))
+        .wrapper.find("#empty")
+        .text(),
+    ).toBe("No runs.");
+    expect(
+      mountIndex(seed([live("a")]))
+        .wrapper.find("#empty")
+        .exists(),
+    ).toBe(false);
+    const banner = mountIndex(
+      seed([], { all: true, storeUnavailable: "run history is unavailable right now — showing live runs only" }),
+    );
     expect(banner.wrapper.find(".banner").text()).toContain("live runs only");
     expect(mountIndex(seed([])).wrapper.find(".banner").exists()).toBe(false);
   });
@@ -98,7 +108,11 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     const later = mountIndex(seed([live("a")], { all: true, olderThan: at, now: at + 1000 })).wrapper;
     expect(later.find(".range").text()).toMatch(/runs finished before Aug 29, \d{1,2}:\d{2} [AP]M/);
     expect(later.find('a[href="/runs?all=1"]').text()).toBe("← Newest runs");
-    expect(mountIndex(seed([live("a")])).wrapper.find("nav.pager").exists()).toBe(false);
+    expect(
+      mountIndex(seed([live("a")]))
+        .wrapper.find("nav.pager")
+        .exists(),
+    ).toBe(false);
   });
 
   it("keeps the tab title and favicon on the live count (item 21)", async () => {
@@ -163,7 +177,10 @@ describe("RunsIndexPage — the live feed", () => {
     const { wrapper, es } = mountIndex(seed([done("a", { status: "failed", finishedAt: 1_063_000 })], { all: true }));
     es().emitOpen();
     // a registry summary carries no status/finishedAt
-    es().emitMessage({ type: "upsert", run: { ...done("a"), status: undefined, finishedAt: undefined, eventCount: 7 } });
+    es().emitMessage({
+      type: "upsert",
+      run: { ...done("a"), status: undefined, finishedAt: undefined, eventCount: 7 },
+    });
     await wrapper.vm.$nextTick();
     const rowEl = wrapper.find('[data-run-id="a"]');
     expect(rowEl.find(".count").text()).toBe("7 events");

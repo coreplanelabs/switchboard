@@ -23,7 +23,9 @@ if (parent) {
   if (diff !== null) {
     const files = diff.split("\n").filter(Boolean);
     changed = files.some((f) => DOCS_PATHS.test(f));
-    reason = changed ? `docs touched: ${files.filter((f) => DOCS_PATHS.test(f)).join(", ")}` : "docs untouched by this push";
+    reason = changed
+      ? `docs touched: ${files.filter((f) => DOCS_PATHS.test(f)).join(", ")}`
+      : "docs untouched by this push";
   }
 }
 console.log(`docs:changed — ${reason}`);

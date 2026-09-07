@@ -68,17 +68,29 @@ function kindFor(surface: ActorSurface): Actor["kind"] {
 export function resolveActor(input: ActorInput, grantsFor: GrantsLookup): Actor {
   if (input.surface === "cli") return CLI_ACTOR;
   const id = actorIdFor(input.surface, input.subjectId);
-  const origin = input.channelId !== undefined && input.threadKey !== undefined ? { channelId: input.channelId, threadKey: input.threadKey } : undefined;
+  const origin =
+    input.channelId !== undefined && input.threadKey !== undefined
+      ? { channelId: input.channelId, threadKey: input.threadKey }
+      : undefined;
   return { kind: kindFor(input.surface), id, grants: grantsFor(id), ...(origin ? { origin } : {}) };
 }
 
-const CHAT_SURFACES: Readonly<Record<string, ActorSurface>> = { slack: "slack", http: "http", mcp: "mcp", cli: "cli", schedule: "schedule" };
+const CHAT_SURFACES: Readonly<Record<string, ActorSurface>> = {
+  slack: "slack",
+  http: "http",
+  mcp: "mcp",
+  cli: "cli",
+  schedule: "schedule",
+};
 
 /** A chat message's `userId` is already namespaced by its adapter (`slack:U…`,
  *  `http:<subject>`, `mcp:<subject>`, `cli:local`, `schedule:<name>`): the prefix picks the surface.
  *  A namespace this module does not know stays a `user` with the id as given —
  *  its grants are whatever config names for that id, never a guess. */
-export function resolveChatActor(msg: { userId: string; channelId: string; threadKey: string }, grantsFor: GrantsLookup): Actor {
+export function resolveChatActor(
+  msg: { userId: string; channelId: string; threadKey: string },
+  grantsFor: GrantsLookup,
+): Actor {
   const colon = msg.userId.indexOf(":");
   const surface = colon > 0 ? CHAT_SURFACES[msg.userId.slice(0, colon)] : undefined;
   const origin = { channelId: msg.channelId, threadKey: msg.threadKey };

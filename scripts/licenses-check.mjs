@@ -59,7 +59,14 @@ export function evaluate(report, { allowed = ALLOWED_LICENSES, exceptions = EXCE
     if (name in exceptions) continue;
     const licenses = Array.isArray(info.licenses) ? info.licenses : [info.licenses ?? "UNKNOWN"];
     // A package may declare `(A OR B)`; accept it when any alternative is allowed.
-    const ok = licenses.every((l) => allowedSet.has(l) || String(l).replace(/^\(|\)$/g, "").split(" OR ").some((alt) => allowedSet.has(alt.trim())));
+    const ok = licenses.every(
+      (l) =>
+        allowedSet.has(l) ||
+        String(l)
+          .replace(/^\(|\)$/g, "")
+          .split(" OR ")
+          .some((alt) => allowedSet.has(alt.trim())),
+    );
     if (!ok) offending.push({ id, licenses: licenses.join(", "), path: info.path ?? "" });
   }
   return offending;
@@ -90,7 +97,7 @@ export function reportFromNpmLs(tree) {
 function normalizeLicense(license) {
   if (license == null || license === "") return "UNKNOWN";
   if (typeof license === "string") return license;
-  if (Array.isArray(license)) return license.map((l) => (typeof l === "string" ? l : l?.type ?? "UNKNOWN"));
+  if (Array.isArray(license)) return license.map((l) => (typeof l === "string" ? l : (l?.type ?? "UNKNOWN")));
   if (typeof license === "object" && typeof license.type === "string") return license.type;
   return "UNKNOWN";
 }
@@ -119,7 +126,8 @@ function listProduction(dir) {
   const scope = rel === "" ? ["--workspaces=false"] : ["-w", rel];
   const args = ["ls", "--omit=dev", "--all", "--json", "--long", ...scope];
   const result = spawnSync("npm", args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  if (!result.stdout) return { error: `\`npm ${args.join(" ")}\` produced no output${result.stderr ? `: ${result.stderr.trim()}` : ""}` };
+  if (!result.stdout)
+    return { error: `\`npm ${args.join(" ")}\` produced no output${result.stderr ? `: ${result.stderr.trim()}` : ""}` };
   try {
     const tree = JSON.parse(result.stdout);
     if (tree.error) return { error: `npm ls: ${tree.error.summary ?? JSON.stringify(tree.error)}` };
@@ -145,12 +153,18 @@ function main() {
   const total = Object.keys(report).length;
   const offending = evaluate(report);
   if (offending.length === 0) {
-    console.log(`licenses:check ok — ${total} production package(s) for ${dir}, all within the allowed set (${Object.keys(EXCEPTIONS).length} documented exception(s))`);
+    console.log(
+      `licenses:check ok — ${total} production package(s) for ${dir}, all within the allowed set (${Object.keys(EXCEPTIONS).length} documented exception(s))`,
+    );
     return;
   }
-  console.error(`licenses:check FAILED — ${offending.length} of ${total} production package(s) for ${dir} carry a license outside the allowed set:`);
+  console.error(
+    `licenses:check FAILED — ${offending.length} of ${total} production package(s) for ${dir} carry a license outside the allowed set:`,
+  );
   for (const o of offending) console.error(`  ${o.id}\t${o.licenses}\t${o.path}`);
-  console.error(`Allowed: ${ALLOWED_LICENSES.join("; ")}. To accept a misreported license, add a documented entry to EXCEPTIONS in scripts/licenses-check.mjs.`);
+  console.error(
+    `Allowed: ${ALLOWED_LICENSES.join("; ")}. To accept a misreported license, add a documented entry to EXCEPTIONS in scripts/licenses-check.mjs.`,
+  );
   process.exit(1);
 }
 

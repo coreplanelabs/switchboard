@@ -26,7 +26,10 @@ describe("build identity on /healthz", () => {
   });
 
   it("healthPayload carries `build` when given (builtAt omitted when absent) and no key when not", () => {
-    expect(healthPayload({ inFlight: 0, draining: false, build: { commit: "abc1234", builtAt: "2026-08-30T05:00:00.000Z" } }).build).toEqual({
+    expect(
+      healthPayload({ inFlight: 0, draining: false, build: { commit: "abc1234", builtAt: "2026-08-30T05:00:00.000Z" } })
+        .build,
+    ).toEqual({
       commit: "abc1234",
       builtAt: "2026-08-30T05:00:00.000Z",
     });
@@ -40,7 +43,9 @@ describe("build identity on /healthz", () => {
 // (process start, ISO) is how its live gate tells the new instance from the old.
 describe("startedAt on /healthz", () => {
   it("is the process start as ISO when given, and absent otherwise", () => {
-    expect(healthPayload({ inFlight: 0, draining: false, startedAt: Date.UTC(2026, 7, 30, 10, 0, 41) }).startedAt).toBe("2026-08-30T10:00:41.000Z");
+    expect(healthPayload({ inFlight: 0, draining: false, startedAt: Date.UTC(2026, 7, 30, 10, 0, 41) }).startedAt).toBe(
+      "2026-08-30T10:00:41.000Z",
+    );
     expect(healthPayload({ inFlight: 0, draining: false })).not.toHaveProperty("startedAt");
   });
 });
@@ -69,7 +74,9 @@ describe("healthPayload", () => {
       drainDeadlineMs: DRAIN_DEADLINE_MS,
       drainStartedAt: "2026-08-30T12:00:00.000Z",
     });
-    expect(healthPayload({ inFlight: 0, draining: false, drainStartedAt: startedAt })).not.toHaveProperty("drainStartedAt");
+    expect(healthPayload({ inFlight: 0, draining: false, drainStartedAt: startedAt })).not.toHaveProperty(
+      "drainStartedAt",
+    );
   });
 });
 
@@ -81,14 +88,25 @@ describe("healthPayload — catchUp", () => {
     const p = healthPayload({
       inFlight: 0,
       draining: false,
-      catchUp: { lastRunAt: "2026-08-29T22:00:00.000Z", channels: 3, missed: 0, skippedChannels: 0, error: undefined, missingScopes: undefined },
+      catchUp: {
+        lastRunAt: "2026-08-29T22:00:00.000Z",
+        channels: 3,
+        missed: 0,
+        skippedChannels: 0,
+        error: undefined,
+        missingScopes: undefined,
+      },
     });
     expect(p.catchUp).toEqual({ lastRunAt: "2026-08-29T22:00:00.000Z", channels: 3, missed: 0, skippedChannels: 0 });
     expect(Object.keys(p.catchUp ?? {})).toEqual(["lastRunAt", "channels", "missed", "skippedChannels"]);
   });
 
   it("carries error and missingScopes when set", () => {
-    const p = healthPayload({ inFlight: 0, draining: false, catchUp: { error: "missing_scope", missingScopes: ["channels:read"] } });
+    const p = healthPayload({
+      inFlight: 0,
+      draining: false,
+      catchUp: { error: "missing_scope", missingScopes: ["channels:read"] },
+    });
     expect(p.catchUp).toEqual({ error: "missing_scope", missingScopes: ["channels:read"] });
   });
 
@@ -103,7 +121,11 @@ describe("healthPayload — catchUp", () => {
 // validation poller (and any operator) reads deafness here, not in stdout.
 describe("healthPayload — slack socket state", () => {
   it("carries connected with since/connects when known, and drops the absent fields", () => {
-    const p = healthPayload({ inFlight: 0, draining: false, slack: { connected: true, since: "2026-08-30T20:48:09.000Z", connects: 1 } });
+    const p = healthPayload({
+      inFlight: 0,
+      draining: false,
+      slack: { connected: true, since: "2026-08-30T20:48:09.000Z", connects: 1 },
+    });
     expect(p.slack).toEqual({ connected: true, since: "2026-08-30T20:48:09.000Z", connects: 1 });
     const boot = healthPayload({ inFlight: 0, draining: false, slack: { connected: false } });
     expect(boot.slack).toEqual({ connected: false });

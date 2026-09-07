@@ -41,7 +41,7 @@ describe("LocalOperations", () => {
   });
 
   it("a failing test run is a RESULT with a named failure, not an error", async () => {
-    const dir = workspace({ name: "x", version: "0.0.0", scripts: { test: "node -e \"process.exit(1)\"" } });
+    const dir = workspace({ name: "x", version: "0.0.0", scripts: { test: 'node -e "process.exit(1)"' } });
     const res = await ops(dir).run("test", { repo: "acme/api" });
     expect(res).toMatchObject({ kind: "result", ok: false });
     if (res.kind === "result") expect(res.summary).toMatch(/failed/i);
@@ -54,7 +54,7 @@ describe("LocalOperations", () => {
   });
 
   it("a requested ref is honestly reported as ignored (local mode has no refs)", async () => {
-    const dir = workspace({ name: "x", version: "0.0.0", scripts: { test: "node -e \"0\"" } });
+    const dir = workspace({ name: "x", version: "0.0.0", scripts: { test: 'node -e "0"' } });
     const res = await ops(dir).run("test", { repo: "acme/api", ref: "main" });
     if (res.kind === "result") expect(res.summary).toMatch(/ref .*ignored/i);
   });
@@ -63,7 +63,7 @@ describe("LocalOperations", () => {
   // claim, not a verified checkout — the summary must disclose the workspace
   // was not verified to hold req.repo (mirrors the ref-not-verified note).
   it("a run against an existing workspace discloses it was not verified to hold the repo (local mode)", async () => {
-    const dir = workspace({ name: "x", version: "0.0.0", scripts: { test: "node -e \"0\"" } });
+    const dir = workspace({ name: "x", version: "0.0.0", scripts: { test: 'node -e "0"' } });
     const res = await ops(dir).run("test", { repo: "acme/api" });
     if (res.kind === "result") expect(res.summary).toMatch(/workspace not verified to hold acme\/api \(local mode\)/);
   });

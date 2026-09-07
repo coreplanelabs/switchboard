@@ -4,7 +4,11 @@
  * nothing new after it), like `Promise.all`. A `limit` at or above
  * `items.length` is plain full concurrency; a `limit` below 1 is treated as 1.
  */
-export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+export async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let next = 0;
   let failed = false;

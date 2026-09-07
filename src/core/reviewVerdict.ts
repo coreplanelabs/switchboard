@@ -120,7 +120,9 @@ function parseFindings(value: unknown): { findings?: Finding[]; dropped: string[
   return { findings, dropped, blocking };
 }
 
-function parseFinding(raw: unknown): { finding: Finding; id?: never; reason?: never } | { finding?: never; id?: string; reason: string } {
+function parseFinding(
+  raw: unknown,
+): { finding: Finding; id?: never; reason?: never } | { finding?: never; id?: string; reason: string } {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { reason: "not an object" };
   const r = raw as Record<string, unknown>;
   const id = typeof r.id === "string" ? oneLine(r.id) : "";
@@ -215,7 +217,9 @@ export function parseDispositionsInput(
     }
     const disposition = r.disposition;
     if (disposition !== "fixed" && disposition !== "declined") {
-      dropped.push(`dispositions[${i}] (${findingId}): dropped — invalid disposition ${JSON.stringify(r.disposition)} (expected fixed|declined)`);
+      dropped.push(
+        `dispositions[${i}] (${findingId}): dropped — invalid disposition ${JSON.stringify(r.disposition)} (expected fixed|declined)`,
+      );
       return;
     }
     const note = typeof r.note === "string" ? oneLine(r.note) : "";

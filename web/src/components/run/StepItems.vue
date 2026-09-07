@@ -37,9 +37,16 @@ function fmtBytes(n: number): string {
     >
       <span class="skillmark shrink-0 select-none text-xs">📚</span>
       <span class="skillname whitespace-nowrap font-semibold text-skill">skill {{ item.skill.name }}</span>
-      <span v-if="item.skill.description" class="skilldesc min-w-0 flex-1 truncate text-xs text-muted">{{ item.skill.description }}</span>
+      <span v-if="item.skill.description" class="skilldesc min-w-0 flex-1 truncate text-xs text-muted">{{
+        item.skill.description
+      }}</span>
       <span class="facts ml-auto flex shrink-0 gap-2.5 text-xs text-muted">
-        <a v-if="item.skill.source" class="fact text-primary hover:underline" :href="item.skill.source" target="_blank" rel="noopener noreferrer"
+        <a
+          v-if="item.skill.source"
+          class="fact text-primary hover:underline"
+          :href="item.skill.source"
+          target="_blank"
+          rel="noopener noreferrer"
           >source</a
         >
         <span class="fact">{{ fmtBytes(item.skill.bodyBytes) }} into context</span>

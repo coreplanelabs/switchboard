@@ -2,7 +2,15 @@ import { z } from "zod";
 import { authorize } from "../authz/authorize.js";
 import { predicateFor } from "../authz/predicate.js";
 import type { Action, Actor } from "../authz/types.js";
-import { CommandError, commandDefiner, wrapUntrusted, type Caller, type CommandDef, type CommandRegistry, type JsonValue } from "../commandRegistry.js";
+import {
+  CommandError,
+  commandDefiner,
+  wrapUntrusted,
+  type Caller,
+  type CommandDef,
+  type CommandRegistry,
+  type JsonValue,
+} from "../commandRegistry.js";
 import type { RunEvent } from "../runEvents.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../runRecord.js";
 import { MAX_EVENTS_PAGE, runResource, type Result, type RunRecordView, type RunsService } from "../runsService.js";
@@ -58,7 +66,15 @@ const logDenied = (entry: RunReadDenied): void => console.log(JSON.stringify({ a
  *  and the payload. `authorize(actor, action, run)` decides on the run's own
  *  attributes (R1); a deny is the same `not_found` an unknown id gives, so
  *  existence is never revealed (KTD8), and its reason reaches the audit line only. */
-async function getVisibleRun(runs: RunsService, id: string, caller: Caller, action: Action, deps: RunsCommandDeps, commandId: string, opts: { include?: "messages" } = {}): Promise<RunRecordView> {
+async function getVisibleRun(
+  runs: RunsService,
+  id: string,
+  caller: Caller,
+  action: Action,
+  deps: RunsCommandDeps,
+  commandId: string,
+  opts: { include?: "messages" } = {},
+): Promise<RunRecordView> {
   const view = unwrap(await runs.getRun(id, opts));
   const actor: Actor = caller.actor;
   const decision = authorize(actor, action, runResource(view));
@@ -91,12 +107,24 @@ const asJson = (v: unknown): JsonValue => v as JsonValue;
 export const runsList = defineCommand({
   id: "runs.list",
   options: z.object({
-    status: z.enum(["active", "finished", "all"]).default("active").describe("which runs: live (default), persisted, or both"),
+    status: z
+      .enum(["active", "finished", "all"])
+      .default("active")
+      .describe("which runs: live (default), persisted, or both"),
     agent: z.string().min(1).optional().describe("only runs of this agent"),
-    channel: z.string().min(1).optional().describe("only runs in this platform-namespaced channel (`slack:C0123`, `http:ops`)"),
+    channel: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("only runs in this platform-namespaced channel (`slack:C0123`, `http:ops`)"),
     sinceMs: z.coerce.number().int().nonnegative().optional().describe("only runs started at or after this epoch ms"),
     limit: positiveInt.max(RUN_LIST_MAX_LIMIT).optional().describe(`page size (max ${RUN_LIST_MAX_LIMIT})`),
-    before: z.coerce.number().int().nonnegative().optional().describe("page cursor: runs finished before this epoch ms"),
+    before: z.coerce
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe("page cursor: runs finished before this epoch ms"),
     beforeId: runId.optional().describe("page cursor tie-breaker: the last id of the previous page"),
   }),
   action: "runs:read",
@@ -113,13 +141,23 @@ export const runsList = defineCommand({
 export const runsGet = defineCommand({
   id: "runs.get",
   args: [idArg],
-  options: z.object({ include: z.enum(["messages"]).optional().describe("add the run's events, free text wrapped as untrusted content") }),
+  options: z.object({
+    include: z.enum(["messages"]).optional().describe("add the run's events, free text wrapped as untrusted content"),
+  }),
   action: "runs:read",
   effect: "read",
   surfaces: { chat: false },
   describe: "One run's record; `--include messages` adds its events with free text wrapped as untrusted content.",
   handler: async ({ args, options, caller, deps }) => {
-    const view = await getVisibleRun(await deps.runs(), args.id, caller, "runs:read", deps, "runs.get", options.include ? { include: options.include } : {});
+    const view = await getVisibleRun(
+      await deps.runs(),
+      args.id,
+      caller,
+      "runs:read",
+      deps,
+      "runs.get",
+      options.include ? { include: options.include } : {},
+    );
     if (view.events) view.events = view.events.map(wrapEvent);
     return asJson(view);
   },
@@ -164,7 +202,8 @@ export const runsStop = defineCommand({
   options: z.object({ mode: z.enum(["soft", "hard"]).describe("soft = finish the current step; hard = abort now") }),
   action: "runs:write",
   effect: "write",
-  describe: "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor.",
+  describe:
+    "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor.",
   handler: async ({ args, options, caller, deps }) => {
     const runs = await deps.runs();
     await getVisibleRun(runs, args.id, caller, "runs:write", deps, "runs.stop");
@@ -172,7 +211,13 @@ export const runsStop = defineCommand({
   },
 });
 
-export const runsCommands: readonly CommandDef<RunsCommandDeps>[] = [runsList, runsGet, runsEvents, runsFriction, runsStop] as unknown as CommandDef<RunsCommandDeps>[];
+export const runsCommands: readonly CommandDef<RunsCommandDeps>[] = [
+  runsList,
+  runsGet,
+  runsEvents,
+  runsFriction,
+  runsStop,
+] as unknown as CommandDef<RunsCommandDeps>[];
 
 export function registerRunsCommands<D extends RunsCommandDeps>(registry: CommandRegistry<D>): void {
   for (const cmd of runsCommands) registry.register(cmd as unknown as CommandDef<D>);

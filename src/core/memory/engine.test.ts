@@ -67,7 +67,9 @@ describe("planWrite", () => {
   });
 
   it("never dedups against a superseded record", () => {
-    expect(planWrite([rec({ status: "superseded" })], cand("the deploy command is npm run deploy"), mint).action).toBe("insert");
+    expect(planWrite([rec({ status: "superseded" })], cand("the deploy command is npm run deploy"), mint).action).toBe(
+      "insert",
+    );
   });
 
   it("resolves a supersede target only among active same-list records", () => {
@@ -87,13 +89,20 @@ describe("planWrite", () => {
     // Restating the target's own text is a dedup on the target.
     expect(planWrite([target], cand("stale", { supersedes: "t" }), mint)).toEqual({ action: "dedup", target });
     // Unresolvable id → no dedup at all, even against an identical unrelated record.
-    expect(planWrite([unrelated], cand("the deploy command is npm run ship", { supersedes: "zzz" }), mint).action).toBe("insert");
+    expect(planWrite([unrelated], cand("the deploy command is npm run ship", { supersedes: "zzz" }), mint).action).toBe(
+      "insert",
+    );
   });
 });
 
 describe("mintRecord", () => {
   it("carries every candidate field, stamps id/createdAt/useCount/status, and defaults keywords to tokens", () => {
-    const r = mintRecord(SCOPE, 3, NOW, cand("Deploy via npm", { confidence: 0.8, supersedes: "x", sourceRunId: "run" }));
+    const r = mintRecord(
+      SCOPE,
+      3,
+      NOW,
+      cand("Deploy via npm", { confidence: 0.8, supersedes: "x", sourceRunId: "run" }),
+    );
     expect(r).toEqual({
       id: `mem:${SCOPE}:3`,
       scopeKey: SCOPE,

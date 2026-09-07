@@ -30,7 +30,9 @@ describe("planForceDetach (#159: force-detach kills the thread's in-flight proce
       const plan = planForceDetach({ force: true, inFlight: 1, user, poolUsers });
       expect(plan.action).toBe("refuse");
       if (plan.action !== "refuse") throw new Error("unreachable");
-      expect(plan.reason).toBe(`busy: 1 operation(s) in flight on this thread — kept; refusing to kill: "${user}" is not a pool user`);
+      expect(plan.reason).toBe(
+        `busy: 1 operation(s) in flight on this thread — kept; refusing to kill: "${user}" is not a pool user`,
+      );
     },
   );
 

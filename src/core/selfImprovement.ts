@@ -111,7 +111,11 @@ export async function runSelfImprovement(opts: RunSelfImprovementOptions): Promi
 
   for (const proposal of fresh) {
     try {
-      const issue = await opts.tracker.create(opts.repo, { title: proposal.title, body: proposal.body, labels: proposal.labels });
+      const issue = await opts.tracker.create(opts.repo, {
+        title: proposal.title,
+        body: proposal.body,
+        labels: proposal.labels,
+      });
       report.filed.push({ proposal, issue });
     } catch (err) {
       report.failed.push({ proposal, error: err instanceof Error ? err.message : String(err) });
@@ -125,7 +129,10 @@ export async function runSelfImprovement(opts: RunSelfImprovementOptions): Promi
 export function formatSelfImprovementReport(r: SelfImprovementReport): string {
   const runs = `${r.runsAnalyzed} run${r.runsAnalyzed === 1 ? "" : "s"} analyzed`;
   const truncated = r.truncatedRuns ?? 0;
-  const truncatedNote = truncated > 0 ? ` (${truncated} run${truncated === 1 ? "" : "s"} diagnosed on a truncated event stream — patterns may be incomplete)` : "";
+  const truncatedNote =
+    truncated > 0
+      ? ` (${truncated} run${truncated === 1 ? "" : "s"} diagnosed on a truncated event stream — patterns may be incomplete)`
+      : "";
   if (r.patterns.length === 0) {
     return `🔍 ${runs}${truncatedNote} — no recurring friction pattern found (a pattern must recur across ≥2 distinct runs).`;
   }
@@ -152,7 +159,11 @@ export function formatSelfImprovementReport(r: SelfImprovementReport): string {
     lines.push("", "*Filed:*", ...r.filed.map((f) => `• ${f.issue.url} — ${f.proposal.title}`));
   }
   if (r.duplicates.length > 0) {
-    lines.push("", "*Already open (not refiled):*", ...r.duplicates.map((d) => `• ${d.issue.url} — \`${d.proposal.key}\``));
+    lines.push(
+      "",
+      "*Already open (not refiled):*",
+      ...r.duplicates.map((d) => `• ${d.issue.url} — \`${d.proposal.key}\``),
+    );
   }
   if (r.failed.length > 0) {
     lines.push("", "*Failed to file:*", ...r.failed.map((f) => `• ${f.proposal.title} — ${f.error}`));
@@ -161,7 +172,9 @@ export function formatSelfImprovementReport(r: SelfImprovementReport): string {
     const would = r.proposals.filter((p) => !dupKeys.has(p.key));
     if (would.length > 0) lines.push("", "*Would file (dry run):*", ...would.map((p) => `• ${p.title}`));
   } else {
-    const unproposed = r.proposals.filter((p) => !filedKeys.has(p.key) && !dupKeys.has(p.key) && !failedKeys.has(p.key));
+    const unproposed = r.proposals.filter(
+      (p) => !filedKeys.has(p.key) && !dupKeys.has(p.key) && !failedKeys.has(p.key),
+    );
     if (unproposed.length > 0) lines.push("", "*Not filed:*", ...unproposed.map((p) => `• ${p.title}`));
   }
   return lines.join("\n");

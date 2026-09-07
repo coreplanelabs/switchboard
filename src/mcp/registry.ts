@@ -75,7 +75,13 @@ export interface SealedCredential {
  *  `mcp connect`; single use; bound to the requester. */
 export type McpTicketState = "pending" | "opened" | "authorizing" | "completed" | "cancelled";
 /** Every state, for the Worker's route validation — one list, both ends. */
-export const MCP_TICKET_STATES: readonly McpTicketState[] = ["pending", "opened", "authorizing", "completed", "cancelled"];
+export const MCP_TICKET_STATES: readonly McpTicketState[] = [
+  "pending",
+  "opened",
+  "authorizing",
+  "completed",
+  "cancelled",
+];
 
 export interface McpTicket {
   nonce: string;
@@ -123,7 +129,10 @@ const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFin
 function isOutcome(v: unknown): v is NonNullable<McpTicket["outcome"]> {
   if (!v || typeof v !== "object" || Array.isArray(v)) return false;
   const o = v as Record<string, unknown>;
-  return (o.toolCount === undefined || (isNum(o.toolCount) && o.toolCount >= 0)) && (o.warning === undefined || isStr(o.warning, 1_024));
+  return (
+    (o.toolCount === undefined || (isNum(o.toolCount) && o.toolCount >= 0)) &&
+    (o.warning === undefined || isStr(o.warning, 1_024))
+  );
 }
 
 /** Shape only (the config layer adds the semantic checks: SSRF, known agents, tier rules). */
@@ -132,7 +141,11 @@ export function isMcpServerEntry(v: unknown): v is McpServerEntry {
   const e = v as Record<string, unknown>;
   return (
     isStr(e.url, MCP_URL_MAX) &&
-    (e.agents === undefined || (Array.isArray(e.agents) && e.agents.length > 0 && e.agents.length <= MCP_AGENTS_MAX && e.agents.every((a) => isStr(a, 32)))) &&
+    (e.agents === undefined ||
+      (Array.isArray(e.agents) &&
+        e.agents.length > 0 &&
+        e.agents.length <= MCP_AGENTS_MAX &&
+        e.agents.every((a) => isStr(a, 32)))) &&
     (e.auth === "none" || e.auth === "bearer" || e.auth === "oauth") &&
     (e.tokenEnv === undefined || isStr(e.tokenEnv, 128)) &&
     (e.addedBy === undefined || isStr(e.addedBy, 260)) &&
@@ -149,7 +162,9 @@ export function isSealedCredential(v: unknown): v is SealedCredential {
 export function isMcpTicket(v: unknown): v is McpTicket {
   if (!v || typeof v !== "object") return false;
   const t = v as Record<string, unknown>;
-  const actor = (a: unknown) => a === undefined || (!!a && typeof a === "object" && isStr((a as { sub?: unknown }).sub, 260) && isNum((a as { at?: unknown }).at));
+  const actor = (a: unknown) =>
+    a === undefined ||
+    (!!a && typeof a === "object" && isStr((a as { sub?: unknown }).sub, 260) && isNum((a as { at?: unknown }).at));
   return (
     isStr(t.nonce, 128) &&
     /^[A-Za-z0-9_-]{16,128}$/.test(t.nonce) &&
@@ -161,7 +176,11 @@ export function isMcpTicket(v: unknown): v is McpTicket {
     MCP_TICKET_STATES.includes(t.state as McpTicketState) &&
     actor(t.openedBy) &&
     actor(t.completedBy) &&
-    (t.oauth === undefined || (!!t.oauth && typeof t.oauth === "object" && isStr((t.oauth as { keyId?: unknown }).keyId, 64) && isStr((t.oauth as { sealed?: unknown }).sealed, 64 * 1024))) &&
+    (t.oauth === undefined ||
+      (!!t.oauth &&
+        typeof t.oauth === "object" &&
+        isStr((t.oauth as { keyId?: unknown }).keyId, 64) &&
+        isStr((t.oauth as { sealed?: unknown }).sealed, 64 * 1024))) &&
     (t.outcome === undefined || isOutcome(t.outcome))
   );
 }
@@ -184,9 +203,21 @@ export interface McpServerView {
   addedAt?: number;
 }
 
-export function serverView(scopeKey: string, name: string, entry: McpServerEntry, opts: { hasCredential: boolean; source: "config" | "runtime" }): McpServerView {
+export function serverView(
+  scopeKey: string,
+  name: string,
+  entry: McpServerEntry,
+  opts: { hasCredential: boolean; source: "config" | "runtime" },
+): McpServerView {
   const parsed = parseMcpScopeKey(scopeKey);
-  const state: McpServerView["state"] = entry.auth === "none" ? "connected" : entry.tokenEnv ? "static" : opts.hasCredential ? "connected" : "awaiting_credential";
+  const state: McpServerView["state"] =
+    entry.auth === "none"
+      ? "connected"
+      : entry.tokenEnv
+        ? "static"
+        : opts.hasCredential
+          ? "connected"
+          : "awaiting_credential";
   return {
     name,
     scope: parsed?.kind ?? "org",

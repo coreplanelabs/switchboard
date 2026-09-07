@@ -59,7 +59,9 @@ const count = computed(() => str(seed?.count) || String(rows.value.length));
 <template>
   <AppShell title="Resident repos" nav="residents">
     <template v-if="rows.length > 0">
-      <p class="mb-2 text-xs text-muted">{{ count }}/{{ cap }} resident slots in use · live registry read, not cached</p>
+      <p class="mb-2 text-xs text-muted">
+        {{ count }}/{{ cap }} resident slots in use · live registry read, not cached
+      </p>
       <ul class="m-0 list-none p-0">
         <li v-for="row in rows" :key="row.key" class="border-b border-muted first:border-t">
           <component
@@ -76,7 +78,9 @@ const count = computed(() => str(seed?.count) || String(rows.value.length));
             <span class="text-xs text-muted max-sm:basis-full max-sm:pl-5" :title="row.refreshed || undefined">
               ref {{ row.ref }}<template v-if="row.sha"> · sha {{ row.sha }}</template
               ><template v-if="row.refreshedLabel"> · refreshed {{ row.refreshedLabel }}</template
-              ><template v-if="row.disk"> · <span :title="row.diskAt ? `measured ${row.diskAt}` : undefined">disk {{ row.disk }}</span></template>
+              ><template v-if="row.disk">
+                · <span :title="row.diskAt ? `measured ${row.diskAt}` : undefined">disk {{ row.disk }}</span></template
+              >
             </span>
             <span v-if="row.reason" class="basis-full pl-5 text-xs text-warning">{{ row.reason }}</span>
           </component>

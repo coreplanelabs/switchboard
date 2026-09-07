@@ -32,7 +32,11 @@ export interface McpToolsForRun {
 }
 
 export interface McpToolSource {
-  toolsFor(agentName: string, caller: { userId: string; channelId?: string }, opts?: { signal?: AbortSignal }): Promise<McpToolsForRun>;
+  toolsFor(
+    agentName: string,
+    caller: { userId: string; channelId?: string },
+    opts?: { signal?: AbortSignal },
+  ): Promise<McpToolsForRun>;
 }
 
 /** A server the subclass resolved for this run — a usable spec, or a named
@@ -57,22 +61,39 @@ export abstract class DiscoveringMcpToolSource implements McpToolSource {
   }
 
   /** The servers this agent + caller may see, in priority order. */
-  protected abstract resolve(agentName: string, caller: { userId: string; channelId?: string }): Promise<ResolvedServer[]>;
+  protected abstract resolve(
+    agentName: string,
+    caller: { userId: string; channelId?: string },
+  ): Promise<ResolvedServer[]>;
 
-  async toolsFor(agentName: string, caller: { userId: string; channelId?: string }, opts?: { signal?: AbortSignal }): Promise<McpToolsForRun> {
+  async toolsFor(
+    agentName: string,
+    caller: { userId: string; channelId?: string },
+    opts?: { signal?: AbortSignal },
+  ): Promise<McpToolsForRun> {
     const resolved = await this.resolve(agentName, caller);
     if (resolved.length === 0) return { tools: [], servers: [] };
     const budget = newRunBudget();
     const results = await mapLimit(resolved, MCP_DISCOVERY_CONCURRENCY, async (entry) => {
-      if (!("spec" in entry)) return { outcome: { server: entry.name, unavailable: entry.unavailable } as McpServerOutcome, tools: [] as RunnableTool[] };
+      if (!("spec" in entry))
+        return {
+          outcome: { server: entry.name, unavailable: entry.unavailable } as McpServerOutcome,
+          tools: [] as RunnableTool[],
+        };
       const server = entry.spec;
       const client = this.clientFor(server);
       try {
         const tools = await this.discover(server, client, opts?.signal);
-        return { outcome: { server: server.name, toolCount: tools.length } as McpServerOutcome, tools: bridgeMcpTools(server, client, tools, { budget, now: this.now }) };
+        return {
+          outcome: { server: server.name, toolCount: tools.length } as McpServerOutcome,
+          tools: bridgeMcpTools(server, client, tools, { budget, now: this.now }),
+        };
       } catch (err) {
         const reason = redactAndCap(err instanceof Error ? err.message : String(err), 160);
-        return { outcome: { server: server.name, unavailable: reason } as McpServerOutcome, tools: [] as RunnableTool[] };
+        return {
+          outcome: { server: server.name, unavailable: reason } as McpServerOutcome,
+          tools: [] as RunnableTool[],
+        };
       }
     });
     return { tools: results.flatMap((r) => r.tools), servers: results.map((r) => r.outcome) };
@@ -138,7 +159,11 @@ export class StaticMcpToolSource extends DiscoveringMcpToolSource {
 export class CompositeMcpToolSource implements McpToolSource {
   constructor(private readonly sources: McpToolSource[]) {}
 
-  async toolsFor(agentName: string, caller: { userId: string; channelId?: string }, opts?: { signal?: AbortSignal }): Promise<McpToolsForRun> {
+  async toolsFor(
+    agentName: string,
+    caller: { userId: string; channelId?: string },
+    opts?: { signal?: AbortSignal },
+  ): Promise<McpToolsForRun> {
     const parts = await Promise.all(this.sources.map((s) => s.toolsFor(agentName, caller, opts)));
     const seen = new Set<string>();
     const tools: RunnableTool[] = [];
@@ -154,7 +179,15 @@ export class CompositeMcpToolSource implements McpToolSource {
         tools.push(t);
       }
       for (const s of part.servers) {
-        servers.push(shadowed.has(s.server) && s.unavailable === undefined ? { server: s.server, unavailable: "name shadowed by a server from an earlier source (config wins over registry, org over user)" } : s);
+        servers.push(
+          shadowed.has(s.server) && s.unavailable === undefined
+            ? {
+                server: s.server,
+                unavailable:
+                  "name shadowed by a server from an earlier source (config wins over registry, org over user)",
+              }
+            : s,
+        );
       }
     }
     return { tools, servers };

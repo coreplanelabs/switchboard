@@ -46,24 +46,19 @@ export async function postReviewComment(target: ReviewCommentTarget, body: strin
       : body;
   const payload: Record<string, string> = { event: "COMMENT", body: clipped };
   if (target.commitId) payload.commit_id = target.commitId;
-  const res = await fetch(
-    `https://api.github.com/repos/${target.repo}/pulls/${target.number}/reviews`,
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        accept: "application/vnd.github+json",
-        "content-type": "application/json",
-        "user-agent": "switchboard",
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000),
+  const res = await fetch(`https://api.github.com/repos/${target.repo}/pulls/${target.number}/reviews`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "content-type": "application/json",
+      "user-agent": "switchboard",
     },
-  );
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15000),
+  });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(
-      `PR comment post failed: HTTP ${res.status} ${text.slice(0, 300)}`,
-    );
+    throw new Error(`PR comment post failed: HTTP ${res.status} ${text.slice(0, 300)}`);
   }
 }

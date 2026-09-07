@@ -55,7 +55,13 @@ import { InMemoryRunStore } from "./runStore.js";
 import { createRunsService } from "./runsService.js";
 import { SCHEDULES } from "./schedules.js";
 import { InMemoryScheduleStore } from "./scheduleStore.js";
-import { importCredentialKey, InMemoryMcpClient, InMemoryMcpSecretStore, McpService, type McpServerEntry } from "../mcp/index.js";
+import {
+  importCredentialKey,
+  InMemoryMcpClient,
+  InMemoryMcpSecretStore,
+  McpService,
+  type McpServerEntry,
+} from "../mcp/index.js";
 import { InMemoryOverridesBacking, type Overrides } from "../config.js";
 import {
   admits,
@@ -138,7 +144,15 @@ vi.mock("node:child_process", () => {
   const armed = (name: string) => () => {
     throw new Error(`conformance suite: node:child_process.${name} must never run — a command reached a real executor`);
   };
-  return { spawn: armed("spawn"), spawnSync: armed("spawnSync"), exec: armed("exec"), execSync: armed("execSync"), execFile: armed("execFile"), execFileSync: armed("execFileSync"), fork: armed("fork") };
+  return {
+    spawn: armed("spawn"),
+    spawnSync: armed("spawnSync"),
+    exec: armed("exec"),
+    execSync: armed("execSync"),
+    execFile: armed("execFile"),
+    execFileSync: armed("execFileSync"),
+    fork: armed("fork"),
+  };
 });
 
 const realFetch = globalThis.fetch;
@@ -209,18 +223,44 @@ let configN = 0;
  *  matrix's ingress tokens, as the bot's does at startup. */
 function freshConfig(yaml: "config" | "authz" = "config"): { store: ConfigStore; overridesPath: string } {
   const overridesPath = join(CONFIG_DIR, `overrides-${++configN}.json`);
-  return { store: new ConfigStore(join(CONFIG_DIR, `${yaml}.yaml`), overridesPath, () => {}, { commandGroups: coreCommandGroups(), ingressTokens: AUTHZ_INGRESS_TOKENS }), overridesPath };
+  return {
+    store: new ConfigStore(join(CONFIG_DIR, `${yaml}.yaml`), overridesPath, () => {}, {
+      commandGroups: coreCommandGroups(),
+      ingressTokens: AUTHZ_INGRESS_TOKENS,
+    }),
+    overridesPath,
+  };
 }
 
 // ---- the generic fixture ----------------------------------------------------------------------------
 
 /** Every caller id the suite drives a command as — each gets its own memory scope. */
-const CALLER_IDS = [...new Set(["access:power", "access:svc:svc-none", "mcp:power", "mcp:nobody", CLI_CALLER.id, "cli:nobody", "cli:reference", POWER, NOBODY, ...AUTHZ_ROLES.map((r) => r.id)])];
+const CALLER_IDS = [
+  ...new Set([
+    "access:power",
+    "access:svc:svc-none",
+    "mcp:power",
+    "mcp:nobody",
+    CLI_CALLER.id,
+    "cli:nobody",
+    "cli:reference",
+    POWER,
+    NOBODY,
+    ...AUTHZ_ROLES.map((r) => r.id),
+  ]),
+];
 
 const RESIDENTS = {
   cap: 6,
   count: 1,
-  residents: [{ resource: `repo:${FIXTURE.repo}`, defaultRef: "master", commands: { install: "npm ci", build: "npm run build", test: "npm test" }, live: { state: "warm", reason: "", sha: "0123456789abcdef" } }],
+  residents: [
+    {
+      resource: `repo:${FIXTURE.repo}`,
+      defaultRef: "master",
+      commands: { install: "npm ci", build: "npm run build", test: "npm test" },
+      live: { state: "warm", reason: "", sha: "0123456789abcdef" },
+    },
+  ],
 };
 
 function record(id: string, finishedAt: number): RunRecord {
@@ -251,11 +291,26 @@ function record(id: string, finishedAt: number): RunRecord {
 }
 
 function memoryRecord(scopeKey: string): MemoryRecord {
-  return { id: `mem:${scopeKey}:1`, scopeKey, kind: "fact", text: `remembered ${PLANTED_TEXT}`, keywords: ["remembered"], sourceThreadKey: "slack:C1:t0", createdAt: NOW - 5000, useCount: 0, status: "active" };
+  return {
+    id: `mem:${scopeKey}:1`,
+    scopeKey,
+    kind: "fact",
+    text: `remembered ${PLANTED_TEXT}`,
+    keywords: ["remembered"],
+    sourceThreadKey: "slack:C1:t0",
+    createdAt: NOW - 5000,
+    useCount: 0,
+    status: "active",
+  };
 }
 
 /** Records in EVERY scope a command can reach: each caller's own, org, the fixture repo, the chat channel. */
-const MEMORY_SEED = [...CALLER_IDS.map((id) => `user:${id}`), "org:coreplanelabs", `repo:${FIXTURE.repo}`, `channel:${CHAT_CHANNEL}`].map(memoryRecord);
+const MEMORY_SEED = [
+  ...CALLER_IDS.map((id) => `user:${id}`),
+  "org:coreplanelabs",
+  `repo:${FIXTURE.repo}`,
+  `channel:${CHAT_CHANNEL}`,
+].map(memoryRecord);
 
 interface Recorded {
   id: string;
@@ -319,7 +374,13 @@ interface Stubs {
 function fakeMcpService(): McpService {
   // Bearer without a stored credential (`awaiting_credential`): `connect` mints a
   // link for it, `show` reports the missing credential, `remove` drops it.
-  const linear = (addedBy: string): McpServerEntry => ({ url: "https://mcp.linear.app/mcp", auth: "bearer", agents: ["general", "research"], addedBy, addedAt: NOW - 60_000 });
+  const linear = (addedBy: string): McpServerEntry => ({
+    url: "https://mcp.linear.app/mcp",
+    auth: "bearer",
+    agents: ["general", "research"],
+    addedBy,
+    addedAt: NOW - 60_000,
+  });
   const doc: Overrides = {
     org: { mcpServers: { linear: linear("slack:USEED") } },
     channels: { [FIXTURE.channel]: { mcpServers: { linear: linear("slack:USEED") } } },
@@ -331,7 +392,8 @@ function fakeMcpService(): McpService {
     config,
     secrets: new InMemoryMcpSecretStore(),
     key: importCredentialKey("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-    factory: () => new InMemoryMcpClient([{ name: "search_issues", inputSchema: {}, annotations: { readOnlyHint: true } }]),
+    factory: () =>
+      new InMemoryMcpClient([{ name: "search_issues", inputSchema: {}, annotations: { readOnlyHint: true } }]),
     publicBaseUrl: "https://switchboard.test",
     env: {},
     fetch: async () => new Response("", { status: 401 }), // auth detection → bearer (item 18)
@@ -351,23 +413,57 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
       exec(`admin.offboard ${resource} dryRun=${dryRun}`, {
         status: 200,
         data: dryRun
-          ? { wouldRemove: { schedules: 1, backupObjects: 2, snapshotBackupIds: ["b1", "b2"], r2Objects: 3, threadBindings: 0, container: "running" } }
-          : { registryRemoved: true, schedulesCancelled: 1, containerStopped: true, storageCleared: true, backupObjectsDeleted: 2, r2ObjectsDeleted: 3, errors: [] },
+          ? {
+              wouldRemove: {
+                schedules: 1,
+                backupObjects: 2,
+                snapshotBackupIds: ["b1", "b2"],
+                r2Objects: 3,
+                threadBindings: 0,
+                container: "running",
+              },
+            }
+          : {
+              registryRemoved: true,
+              schedulesCancelled: 1,
+              containerStopped: true,
+              storageCleared: true,
+              backupObjectsDeleted: 2,
+              r2ObjectsDeleted: 3,
+              errors: [],
+            },
       }),
     reconfigure: async (body) => exec(`admin.reconfigure ${String(body.resource)}`, { status: 200, data: {} }),
-    status: async (resource) => exec(`admin.status ${resource}`, { status: 200, data: { state: "warm", reason: "", inFlight: 0 } }),
+    status: async (resource) =>
+      exec(`admin.status ${resource}`, { status: 200, data: { state: "warm", reason: "", inFlight: 0 } }),
     rebuild: async (resource, dryRun) =>
       exec(`admin.rebuild ${resource} dryRun=${dryRun}`, {
         status: dryRun ? 200 : 202,
-        data: dryRun ? { from: { state: "warm" }, discards: { backupObjects: 0 }, reprovision: { defaultRef: "master", provisioningTimeoutMs: 600000 }, keeps: { threadBindings: 0 } } : { backupObjectsDeleted: 0, reprovision: { defaultRef: "master" } },
+        data: dryRun
+          ? {
+              from: { state: "warm" },
+              discards: { backupObjects: 0 },
+              reprovision: { defaultRef: "master", provisioningTimeoutMs: 600000 },
+              keeps: { threadBindings: 0 },
+            }
+          : { backupObjectsDeleted: 0, reprovision: { defaultRef: "master" } },
       }),
     residents: async () => ({ status: 200, data: RESIDENTS }),
   };
   const operations: Operations = {
-    run: async (op, req) => exec(`ops.${op} ${req.repo}${req.ref ? `@${req.ref}` : ""}`, { kind: "result", ok: true, summary: `${op} passed`, output: `> ${op}\n\nok` }),
+    run: async (op, req) =>
+      exec(`ops.${op} ${req.repo}${req.ref ? `@${req.ref}` : ""}`, {
+        kind: "result",
+        ok: true,
+        summary: `${op} passed`,
+        output: `> ${op}\n\nok`,
+      }),
   };
   return {
-    help: { agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })), commands: () => s.commands() },
+    help: {
+      agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })),
+      commands: () => s.commands(),
+    },
     config: {
       describeConfig: async (c, u) => s.config.describeConfig(c, u),
       scopes: async (c, u) => s.config.scopes(c, u),
@@ -383,7 +479,10 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
       tracker: s.tracker,
       config: async () => ({ repo: "acme/fixture" }),
       // A read of an input stream, not an executor: not recorded in `executed`.
-      readSource: async () => record("cap-1", NOW).events.map((e) => JSON.stringify(e)).join("\n"),
+      readSource: async () =>
+        record("cap-1", NOW)
+          .events.map((e) => JSON.stringify(e))
+          .join("\n"),
     },
     repo: { admin: async () => admin, operations: async () => operations, canUseRepo: async () => true },
     memory: { config: async () => ({ enabled: true }), store: s.memory },
@@ -391,15 +490,38 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
     schedule: { schedules: SCHEDULES, store: s.schedules, now: () => NOW },
     deploy: {
       run: async (plan: DeployPlan): Promise<DeployRunResult> =>
-        exec(`deploy.run ${plan.steps.map((st) => st.name).join(",")}`, { kind: "ran", ok: true, results: plan.steps.map((st) => ({ name: st.name, script: st.script, versionId: "v1", live: "n/a", status: "deployed" })), notAttempted: [] }),
+        exec(`deploy.run ${plan.steps.map((st) => st.name).join(",")}`, {
+          kind: "ran",
+          ok: true,
+          results: plan.steps.map((st) => ({
+            name: st.name,
+            script: st.script,
+            versionId: "v1",
+            live: "n/a",
+            status: "deployed",
+          })),
+          notAttempted: [],
+        }),
       restart: async (plan: RestartPlan): Promise<RestartRunResult> =>
-        exec(`deploy.restart ${plan.target} force=${plan.force}`, { kind: "ran", ok: true, target: plan.target, previousStartedAt: "2026-08-30T10:00:00.000Z", startedAt: "2026-08-30T10:00:41.000Z", waitedMs: 41_000 }),
+        exec(`deploy.restart ${plan.target} force=${plan.force}`, {
+          kind: "ran",
+          ok: true,
+          target: plan.target,
+          previousStartedAt: "2026-08-30T10:00:00.000Z",
+          startedAt: "2026-08-30T10:00:41.000Z",
+          waitedMs: 41_000,
+        }),
       // Probes of the checkout and the fleet, not executors: not recorded in `executed`.
       checkout: { hasNodeModules: () => true },
       affected: async (opts) => ({
         head: "f".repeat(40),
         workers: [
-          { name: "memory", decision: "deploy", base: opts.base ? { kind: "ref", ref: opts.base } : { kind: "live", commit: "a".repeat(40) }, reasons: ["deploy/cloudflare-memory/worker.ts"] },
+          {
+            name: "memory",
+            decision: "deploy",
+            base: opts.base ? { kind: "ref", ref: opts.base } : { kind: "live", commit: "a".repeat(40) },
+            reasons: ["deploy/cloudflare-memory/worker.ts"],
+          },
           { name: "bot", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
           { name: "resident", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
           { name: "sandbox", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
@@ -413,17 +535,40 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
     env: {
       bootstrap: async (opts, log): Promise<BootstrapResult> => {
         log(`plan: ${opts.service}.${opts.env}`);
-        return exec(`env.bootstrap ${opts.service}.${opts.env} apply=${opts.apply}`, { applied: opts.apply, entries: [{ env: opts.env, service: opts.service, name: "API_URL", ref: "op://vault/item/field", vault: "vault", item: "item", field: "field" }] });
+        return exec(`env.bootstrap ${opts.service}.${opts.env} apply=${opts.apply}`, {
+          applied: opts.apply,
+          entries: [
+            {
+              env: opts.env,
+              service: opts.service,
+              name: "API_URL",
+              ref: "op://vault/item/field",
+              vault: "vault",
+              item: "item",
+              field: "field",
+            },
+          ],
+        });
       },
     },
   };
 }
 
 /** `extra` registers commands beside the catalogue (the fence's self-test); `yaml` picks the deployment. */
-async function fixture(extra: (registry: CommandRegistry<CoreCommandDeps>) => void = () => {}, yaml: "config" | "authz" = "config"): Promise<Fixture> {
+async function fixture(
+  extra: (registry: CommandRegistry<CoreCommandDeps>) => void = () => {},
+  yaml: "config" | "authz" = "config",
+): Promise<Fixture> {
   let n = 0;
   const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
-  const live = reg.create("coding · acme/live", { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t", channelVisibility: "public" });
+  const live = reg.create("coding · acme/live", {
+    agent: "coding",
+    model: "anthropic/claude",
+    channelId: "slack:C1",
+    userId: "slack:U1",
+    threadKey: "slack:C1:t",
+    channelVisibility: "public",
+  });
   expect(live.id).toBe(FIXTURE.liveRun);
   reg.publish(live.id, { type: "input", text: `live request ${PLANTED_TEXT}` });
   reg.publish(live.id, { type: "tool_call", tool: "bash", summary: "$ pwd" });
@@ -432,14 +577,35 @@ async function fixture(extra: (registry: CommandRegistry<CoreCommandDeps>) => vo
   await store.put(record("fin-2", NOW - 2000));
   const tracker = new InMemoryIssueTracker();
   const { store: config, overridesPath } = freshConfig(yaml);
-  const memory = new InMemoryMemoryStore(MEMORY_SEED.map((r) => ({ ...r })), { now: () => NOW });
+  const memory = new InMemoryMemoryStore(
+    MEMORY_SEED.map((r) => ({ ...r })),
+    { now: () => NOW },
+  );
   const schedules = new InMemoryScheduleStore();
-  await schedules.record({ schedule: "self-improvement", firedAt: NOW - 60_000, runId: "run-sched-1", outcome: "completed", detail: "filed 0 issues" });
+  await schedules.record({
+    schedule: "self-improvement",
+    firedAt: NOW - 60_000,
+    runId: "run-sched-1",
+    outcome: "completed",
+    detail: "filed 0 issues",
+  });
   const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {}, logError: () => {} });
   registerCoreCommands(registry);
   extra(registry);
   const executed: string[] = [];
-  const raw = bindCommands(registry, fakeDeps({ reg, store, tracker, config, memory, schedules, executed, commands: () => registry.list() as CommandDef<unknown>[] }));
+  const raw = bindCommands(
+    registry,
+    fakeDeps({
+      reg,
+      store,
+      tracker,
+      config,
+      memory,
+      schedules,
+      executed,
+      commands: () => registry.list() as CommandDef<unknown>[],
+    }),
+  );
   const recorded: Recorded[] = [];
   return {
     commands: recording(raw, recorded),
@@ -515,17 +681,31 @@ function fakeReqRes(method: string, url: string, body?: string, headers: Incomin
       if (c) out.push(c);
     },
   };
-  return { req: req as unknown as IncomingMessage, res: res as unknown as ServerResponse, status: () => status, text: () => out.join("") };
+  return {
+    req: req as unknown as IncomingMessage,
+    res: res as unknown as ServerResponse,
+    status: () => status,
+    text: () => out.join(""),
+  };
 }
 
 function httpOutcome(status: number, text: string): Outcome {
   const json = text ? JSON.parse(text) : undefined;
   if (status === 200) return { ok: true, status, json, wire: text };
-  return { ok: false, status, code: (json as { code: Outcome["code"] }).code, text: (json as { error: string }).error, wire: text };
+  return {
+    ok: false,
+    status,
+    code: (json as { code: Outcome["code"] }).code,
+    text: (json as { error: string }).error,
+    wire: text,
+  };
 }
 
 const httpIdentity = (who: Who) => (who === "power" ? { sub: "power" } : { sub: "", commonName: "svc-none" });
-const httpCaller = (who: Who) => ({ kind: "access" as const, id: who === "power" ? "access:power" : "access:svc:svc-none" });
+const httpCaller = (who: Who) => ({
+  kind: "access" as const,
+  id: who === "power" ? "access:power" : "access:svc:svc-none",
+});
 const httpOptions = (f: Fixture) => ({ grantsFor: (id: string) => f.config.grantsFor(id), devBypassActive: false });
 const httpHandler = (f: Fixture) => createCommandHttpHandler(f.commands, httpOptions(f));
 
@@ -543,7 +723,9 @@ const httpPost: Surface = {
   meta: meta("httpPost"),
   caller: httpCaller,
   async run(f, cmd, named, who) {
-    const t = fakeReqRes("POST", toSurfaceNames(cmd.id).http, JSON.stringify(named), { "content-type": "application/json" });
+    const t = fakeReqRes("POST", toSurfaceNames(cmd.id).http, JSON.stringify(named), {
+      "content-type": "application/json",
+    });
     await httpHandler(f)(t.req, t.res, httpIdentity(who));
     return httpOutcome(t.status(), t.text());
   },
@@ -557,10 +739,23 @@ const mcp: Surface = {
       {
         method: "POST",
         headers: { authorization: `Bearer ${who}` },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toSurfaceNames(cmd.id).mcp, arguments: named } }),
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: toSurfaceNames(cmd.id).mcp, arguments: named },
+        }),
       },
       {} as CoreDeps,
-      { auth: { tokens: { power: { subject: "power", scopes: ALL_ACTIONS }, nobody: { subject: "nobody", scopes: ["dispatch"] } } }, commands: f.commands },
+      {
+        auth: {
+          tokens: {
+            power: { subject: "power", scopes: ALL_ACTIONS },
+            nobody: { subject: "nobody", scopes: ["dispatch"] },
+          },
+        },
+        commands: f.commands,
+      },
     );
     return mcpOutcome(res.body);
   },
@@ -568,7 +763,10 @@ const mcp: Surface = {
 
 function mcpOutcome(raw: unknown): Outcome {
   const wire = JSON.stringify(raw);
-  const body = raw as { result?: { content: { text: string }[] }; error?: { message: string; data?: { code: InvokeErrorCode } } };
+  const body = raw as {
+    result?: { content: { text: string }[] };
+    error?: { message: string; data?: { code: InvokeErrorCode } };
+  };
   if (body.error) return { ok: false, code: body.error.data?.code, text: body.error.message, wire };
   const text = body.result!.content[0].text;
   return { ok: true, json: JSON.parse(text.slice(text.indexOf("\n") + 1)), wire };
@@ -577,7 +775,10 @@ function mcpOutcome(raw: unknown): Outcome {
 /** The CLI has ONE real caller (`cli:local`, every grant); `cli:nobody` is a
  *  synthetic no-grants credential driven through this adapter so the
  *  registry's fail-closed path is exercised on this surface too. */
-const cliCaller = (who: Who): Caller => (who === "power" ? CLI_CALLER : { kind: "cli", id: "cli:nobody", actor: { kind: "service", id: "cli:nobody", grants: NO_GRANTS } });
+const cliCaller = (who: Who): Caller =>
+  who === "power"
+    ? CLI_CALLER
+    : { kind: "cli", id: "cli:nobody", actor: { kind: "service", id: "cli:nobody", grants: NO_GRANTS } };
 
 const cli: Surface = {
   meta: meta("cli"),
@@ -585,7 +786,8 @@ const cli: Surface = {
   async run(f, cmd, named, who) {
     const parsed = parseCliArgv([...toSurfaceNames(cmd.id).cli, ...toArgv(cmd, named), "--json"], f.commands);
     if (parsed.kind === "usage") return { ok: false, code: "usage", text: parsed.error, wire: parsed.error };
-    if (parsed.kind !== "command" && parsed.kind !== "invalid") throw new Error(`cli parsed ${parsed.kind} for ${cmd.id}`);
+    if (parsed.kind !== "command" && parsed.kind !== "invalid")
+      throw new Error(`cli parsed ${parsed.kind} for ${cmd.id}`);
     // Both a grammar rejection and a registry refusal leave through `runCli`'s one stderr shape.
     const out = await runCli(f.commands, parsed, cliCaller(who));
     const wire = out.stdout + out.stderr;
@@ -606,7 +808,13 @@ const chat: Surface = {
     if (!parsed) throw new Error(`chat did not recognize "${text}"`);
     if (parsed.kind === "reply") return { ok: false, code: parsed.error, text: parsed.text, wire: parsed.text };
     const before = f.recorded.length;
-    const res = await invokeChatCommand({ commands: f.commands, parsed, msg: { channelId: CHAT_CHANNEL, userId: who === "power" ? POWER : NOBODY, threadKey: `${CHAT_CHANNEL}:t1` }, config: f.config, now: NOW });
+    const res = await invokeChatCommand({
+      commands: f.commands,
+      parsed,
+      msg: { channelId: CHAT_CHANNEL, userId: who === "power" ? POWER : NOBODY, threadKey: `${CHAT_CHANNEL}:t1` },
+      config: f.config,
+      now: NOW,
+    });
     const last = f.recorded[f.recorded.length - 1];
     const code = f.recorded.length > before && !last.result.ok ? last.result.error : undefined;
     return { ok: res.ok, code, text: res.text, wire: res.text };
@@ -620,7 +828,9 @@ expect(SURFACES.map((s) => s.meta.key)).toEqual(SURFACE_METAS.map((m) => m.key))
 
 /** The Access identity an `access:` role authenticates as: a service token by common_name, else a browser sub. */
 function httpIdentityOf(role: AuthzRole): { sub: string; commonName?: string } {
-  return role.id.startsWith("access:svc:") ? { sub: "", commonName: role.id.slice("access:svc:".length) } : { sub: role.id.slice("access:".length) };
+  return role.id.startsWith("access:svc:")
+    ? { sub: "", commonName: role.id.slice("access:svc:".length) }
+    : { sub: role.id.slice("access:".length) };
 }
 
 /** Drive `cmd` with `named` as `role` on the surface its id is carried by. */
@@ -632,17 +842,37 @@ async function runAsRole(f: Fixture, cmd: CommandDef<unknown>, named: Named, rol
       const parsed = parseChatCommand(text, f.commands);
       if (!parsed) throw new Error(`chat did not recognize "${text}"`);
       if (parsed.kind === "reply") return { ok: false, code: parsed.error, text: parsed.text, wire: parsed.text };
-      const res = await invokeChatCommand({ commands: f.commands, parsed, msg: { channelId: CHAT_CHANNEL, userId: role.id, threadKey: `${CHAT_CHANNEL}:t1` }, config: f.config, now: NOW });
+      const res = await invokeChatCommand({
+        commands: f.commands,
+        parsed,
+        msg: { channelId: CHAT_CHANNEL, userId: role.id, threadKey: `${CHAT_CHANNEL}:t1` },
+        config: f.config,
+        now: NOW,
+      });
       return { ok: res.ok, code: res.error, text: res.text, wire: res.text };
     }
     case "access": {
-      const t = cmd.effect === "write" ? fakeReqRes("POST", toSurfaceNames(cmd.id).http, JSON.stringify(input), { "content-type": "application/json" }) : fakeReqRes("GET", `${toSurfaceNames(cmd.id).http}?${toKebabQuery(input).toString()}`);
+      const t =
+        cmd.effect === "write"
+          ? fakeReqRes("POST", toSurfaceNames(cmd.id).http, JSON.stringify(input), {
+              "content-type": "application/json",
+            })
+          : fakeReqRes("GET", `${toSurfaceNames(cmd.id).http}?${toKebabQuery(input).toString()}`);
       await httpHandler(f)(t.req, t.res, httpIdentityOf(role));
       return httpOutcome(t.status(), t.text());
     }
     case "mcp": {
       const res = await handleMcpRequest(
-        { method: "POST", headers: { authorization: `Bearer ${role.id.slice("mcp:".length)}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toSurfaceNames(cmd.id).mcp, arguments: input } }) },
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${role.id.slice("mcp:".length)}` },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: { name: toSurfaceNames(cmd.id).mcp, arguments: input },
+          }),
+        },
         {} as CoreDeps,
         { auth: { tokens: AUTHZ_INGRESS_TOKENS }, commands: f.commands, grantsFor: (id) => f.config.grantsFor(id) },
       );
@@ -650,11 +880,18 @@ async function runAsRole(f: Fixture, cmd: CommandDef<unknown>, named: Named, rol
     }
     case "cli": {
       const parsed = parseCliArgv([...toSurfaceNames(cmd.id).cli, ...toArgv(cmd, input), "--json"], f.commands);
-      if (parsed.kind !== "command" && parsed.kind !== "invalid") throw new Error(`cli parsed ${parsed.kind} for ${cmd.id}`);
+      if (parsed.kind !== "command" && parsed.kind !== "invalid")
+        throw new Error(`cli parsed ${parsed.kind} for ${cmd.id}`);
       const out = await runCli(f.commands, parsed, CLI_CALLER);
       if (out.exitCode !== 0) {
         const m = /^error \((\w+)\): (.*)$/s.exec(out.stderr);
-        return { ok: false, code: m?.[1] as InvokeErrorCode, status: out.exitCode, text: m?.[2], wire: out.stdout + out.stderr };
+        return {
+          ok: false,
+          code: m?.[1] as InvokeErrorCode,
+          status: out.exitCode,
+          text: m?.[2],
+          wire: out.stdout + out.stderr,
+        };
       }
       return { ok: true, json: JSON.parse(out.stdout), wire: out.stdout + out.stderr };
     }
@@ -704,11 +941,15 @@ function lastInvoke(f: Fixture, cmd: CommandDef<unknown>): { caller: Caller; par
  *  indentation is allowed; interior padding is not. */
 function assertChatShape(text: string, label: string): void {
   const padded = text.split("\n").filter((line) => /\S {2,}\S/.test(line));
-  expect(padded, `${label}: chat text pads columns (collapses in a proportional font) — give the command a chat shape: ${JSON.stringify(padded[0])}`).toEqual([]);
+  expect(
+    padded,
+    `${label}: chat text pads columns (collapses in a proportional font) — give the command a chat shape: ${JSON.stringify(padded[0])}`,
+  ).toEqual([]);
 }
 
 function assertNoSecrets(wire: string, f: Fixture, label: string): void {
-  for (const fragment of [...SECRET_FRAGMENTS, f.liveToken]) expect(wire, `${label}: leaks ${fragment}`).not.toContain(fragment);
+  for (const fragment of [...SECRET_FRAGMENTS, f.liveToken])
+    expect(wire, `${label}: leaks ${fragment}`).not.toContain(fragment);
 }
 
 /** Every string in `value` that carries stored free text is wrapped as untrusted. */
@@ -722,7 +963,8 @@ function assertUntrusted(value: unknown, label: string): void {
     return;
   }
   if (Array.isArray(value)) value.forEach((v, i) => assertUntrusted(v, `${label}[${i}]`));
-  else if (typeof value === "object" && value !== null) for (const [k, v] of Object.entries(value)) assertUntrusted(v, `${label}.${k}`);
+  else if (typeof value === "object" && value !== null)
+    for (const [k, v] of Object.entries(value)) assertUntrusted(v, `${label}.${k}`);
 }
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -754,7 +996,17 @@ describe("command conformance — catalogue fences", () => {
       tracker: new InMemoryIssueTracker(),
       audit: () => {},
     });
-    expect(real.list().map((c) => c.id).sort()).toEqual(f.commands.list().map((c) => c.id).sort());
+    expect(
+      real
+        .list()
+        .map((c) => c.id)
+        .sort(),
+    ).toEqual(
+      f.commands
+        .list()
+        .map((c) => c.id)
+        .sort(),
+    );
     expect(CATALOGUE.length).toBeGreaterThan(0);
   });
 
@@ -773,7 +1025,8 @@ describe("command conformance — catalogue fences", () => {
 
   it("every COMMAND_FIXTURES entry names a registered command (no stale escape hatches)", () => {
     const ids = new Set(CATALOGUE.map((c) => c.id));
-    for (const id of Object.keys(COMMAND_FIXTURES)) expect(ids.has(id), `COMMAND_FIXTURES["${id}"] names no registered command`).toBe(true);
+    for (const id of Object.keys(COMMAND_FIXTURES))
+      expect(ids.has(id), `COMMAND_FIXTURES["${id}"] names no registered command`).toBe(true);
   });
 
   it("authorization: every command's action has a policy row on the resource it authorizes (features/authorization.md item 4)", () => {
@@ -782,13 +1035,24 @@ describe("command conformance — catalogue fences", () => {
 
   it("authorization: a command whose action has no policy row fails loudly, by name", () => {
     const define = commandDefiner<CoreCommandDeps>();
-    const orphan = define({ id: "demo.norow", action: "demo:read", effect: "read", describe: "no row names demo:read", handler: async () => ({}) });
+    const orphan = define({
+      id: "demo.norow",
+      action: "demo:read",
+      effect: "read",
+      describe: "no row names demo:read",
+      handler: async () => ({}),
+    });
     const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
     registerCoreCommands(registry);
     registry.register(orphan);
-    expect(policyGaps(registry.list() as CommandDef<unknown>[])).toEqual([expect.stringMatching(/^demo\.norow: no policy row for demo:read on command/)]);
+    expect(policyGaps(registry.list() as CommandDef<unknown>[])).toEqual([
+      expect.stringMatching(/^demo\.norow: no policy row for demo:read on command/),
+    ]);
     // …and the registry refuses it for everyone, the local CLI included: no row → deny (R7).
-    expect(authorize(CLI_CALLER.actor, orphan.action, { type: "command", id: orphan.id })).toEqual({ allow: false, reason: "no-rule" });
+    expect(authorize(CLI_CALLER.actor, orphan.action, { type: "command", id: orphan.id })).toEqual({
+      allow: false,
+      reason: "no-rule",
+    });
   });
 
   it("authorization: the fixed actor set resolves through the real adapters to the actors the matrix decides for (grants from config, never from the adapter)", async () => {
@@ -798,16 +1062,26 @@ describe("command conformance — catalogue fences", () => {
       const resolved = (() => {
         switch (carriedBy(role.id)) {
           case "chat":
-            return resolveChatActor({ userId: role.id, channelId: CHAT_CHANNEL, threadKey: `${CHAT_CHANNEL}:t1` }, (id) => f.config.grantsFor(id));
+            return resolveChatActor(
+              { userId: role.id, channelId: CHAT_CHANNEL, threadKey: `${CHAT_CHANNEL}:t1` },
+              (id) => f.config.grantsFor(id),
+            );
           case "access":
             return callerFor(httpIdentityOf(role), httpOptions(f)).actor;
           case "mcp":
-            return toCaller(AUTHZ_INGRESS_TOKENS[role.id.slice("mcp:".length)]!, { auth: { tokens: AUTHZ_INGRESS_TOKENS }, grantsFor: (id) => f.config.grantsFor(id) }).actor;
+            return toCaller(AUTHZ_INGRESS_TOKENS[role.id.slice("mcp:".length)]!, {
+              auth: { tokens: AUTHZ_INGRESS_TOKENS },
+              grantsFor: (id) => f.config.grantsFor(id),
+            }).actor;
           case "cli":
             return CLI_CALLER.actor;
         }
       })();
-      expect({ kind: resolved.kind, id: resolved.id, grants: resolved.grants }, role.column).toEqual({ kind: expected.kind, id: expected.id, grants: expected.grants });
+      expect({ kind: resolved.kind, id: resolved.id, grants: resolved.grants }, role.column).toEqual({
+        kind: expected.kind,
+        id: expected.id,
+        grants: expected.grants,
+      });
     }
   });
 
@@ -837,7 +1111,10 @@ describe("command conformance — catalogue fences", () => {
         registry.register(unsampleable);
       }),
     );
-    expect(failures).toEqual([expect.stringMatching(/^demo\.needs: happy path .*unavailable/), expect.stringMatching(/^demo\.strict: no sample for ticket/)]);
+    expect(failures).toEqual([
+      expect.stringMatching(/^demo\.needs: happy path .*unavailable/),
+      expect.stringMatching(/^demo\.strict: no sample for ticket/),
+    ]);
   });
 
   it("scripts/command-conformance-matrix.ts prints this suite's matrix: one row per variant the suite runs, one exercised cell per surface it drives, one authorization row per command", () => {
@@ -852,12 +1129,25 @@ describe("command conformance — catalogue fences", () => {
       const vs = variantsOf(cmd).variants;
       variants += vs.length;
       for (const v of vs) cells += surfacesFor(cmd, v).length;
-      expect(matrix.commands.find((c) => c.id === cmd.id)?.rows.map((r) => r.variant), cmd.id).toEqual(vs.map((v) => v.name));
+      expect(
+        matrix.commands.find((c) => c.id === cmd.id)?.rows.map((r) => r.variant),
+        cmd.id,
+      ).toEqual(vs.map((v) => v.name));
     }
     expect(matrix.summary).toEqual({ commands: CATALOGUE.length, surfaces: SURFACES.length, variants, cells });
     expect(matrix.authorization.rows.map((r) => r.id)).toEqual(CATALOGUE.map((c) => c.id).sort());
     const md = renderConformanceMatrix(matrix);
-    expect(md.split("\n").filter((l) => /^\| [^-|]/.test(l) && !l.startsWith("| Variant") && !l.startsWith("| Assertion") && !l.startsWith("| Command")).length).toBe(variants + CATALOGUE.length + CROSS_CUTTING_ASSERTIONS.length);
+    expect(
+      md
+        .split("\n")
+        .filter(
+          (l) =>
+            /^\| [^-|]/.test(l) &&
+            !l.startsWith("| Variant") &&
+            !l.startsWith("| Assertion") &&
+            !l.startsWith("| Command"),
+        ).length,
+    ).toBe(variants + CATALOGUE.length + CROSS_CUTTING_ASSERTIONS.length);
     expect(md).toContain(renderAuthorizationMatrix(matrix.authorization).join("\n"));
   });
 
@@ -868,35 +1158,64 @@ describe("command conformance — catalogue fences", () => {
     for (const row of rows) {
       const exposed = Object.values(row.cells).filter((c) => c.kind !== "not-exposed");
       expect(exposed.length, `${row.id} [${row.variant}] runs nowhere`).toBeGreaterThan(0);
-      expect(new Set(exposed.map((c) => JSON.stringify(c))).size, `${row.id} [${row.variant}]: ${JSON.stringify(row.cells)}`).toBe(1);
-      expect(exposed[0].kind === "rejected" ? row.rejection : undefined, `${row.id} [${row.variant}]`).toBe(exposed[0].kind === "rejected" ? "invalid_input" : undefined);
+      expect(
+        new Set(exposed.map((c) => JSON.stringify(c))).size,
+        `${row.id} [${row.variant}]: ${JSON.stringify(row.cells)}`,
+      ).toBe(1);
+      expect(exposed[0].kind === "rejected" ? row.rejection : undefined, `${row.id} [${row.variant}]`).toBe(
+        exposed[0].kind === "rejected" ? "invalid_input" : undefined,
+      );
     }
     // The rendered rows say the same: every non-"—" cell of a row is the same glyph, and only a rejected row names a code.
     const rendered = renderConformanceMatrix(matrix)
       .split("\n")
       .map((l) => l.split(" | "))
-      .filter((cols) => cols.length === SURFACE_METAS.length + 2 && /^\| [^-|]/.test(cols[0]) && cols[0] !== "| Variant");
+      .filter(
+        (cols) => cols.length === SURFACE_METAS.length + 2 && /^\| [^-|]/.test(cols[0]) && cols[0] !== "| Variant",
+      );
     expect(rendered.length).toBe(rows.length);
     for (const cols of rendered) {
-      const cells = cols.slice(2).map((c) => c.replace(/\s*\|$/, "")).filter((c) => c !== "—");
+      const cells = cols
+        .slice(2)
+        .map((c) => c.replace(/\s*\|$/, ""))
+        .filter((c) => c !== "—");
       expect(new Set(cells).size, cols.join(" | ")).toBe(1);
       expect(cols[0].includes("→ `invalid_input`"), cols.join(" | ")).toBe(cells[0] === "⛔");
     }
-    expect(renderVariantCell({ variant: "unknown option", rejection: "invalid_input" })).toBe("unknown option → `invalid_input`");
+    expect(renderVariantCell({ variant: "unknown option", rejection: "invalid_input" })).toBe(
+      "unknown option → `invalid_input`",
+    );
     expect(renderVariantCell({ variant: "required-only" })).toBe("required-only");
   });
 
   it("toChatText quotes a token exactly as the tokenizer needs: whitespace, empty, an embedded \" or ' — and round-trips QUOTED_SAMPLE", () => {
-    for (const t of ["plain", "", "two words", 'say "hi"', "it's", `a"b'c`, QUOTED_SAMPLE, " lead", "trail ", `"`, "'"]) {
+    for (const t of [
+      "plain",
+      "",
+      "two words",
+      'say "hi"',
+      "it's",
+      `a"b'c`,
+      QUOTED_SAMPLE,
+      " lead",
+      "trail ",
+      `"`,
+      "'",
+    ]) {
       const quoted = quoteChatToken(t);
       expect(tokenize(quoted), JSON.stringify(t)).toEqual({ ok: true, tokens: [t] });
     }
     expect(quoteChatToken("plain")).toBe("plain");
     expect(quoteChatToken("two words")).toBe('"two words"');
     expect(quoteChatToken('say "hi"')).toBe(`'say "hi"'`);
-    expect(tokenize(toChatText(["config", "instructions"], ["me", ...QUOTED_SAMPLE.split(" ")]))).toEqual({ ok: true, tokens: ["config", "instructions", "me", ...QUOTED_SAMPLE.split(" ")] });
+    expect(tokenize(toChatText(["config", "instructions"], ["me", ...QUOTED_SAMPLE.split(" ")]))).toEqual({
+      ok: true,
+      tokens: ["config", "instructions", "me", ...QUOTED_SAMPLE.split(" ")],
+    });
     // The suite exercises this on every command with a free-text field.
-    expect(CATALOGUE.some((cmd) => variantsOf(cmd).variants.some((v) => v.name.endsWith(" with embedded quotes")))).toBe(true);
+    expect(
+      CATALOGUE.some((cmd) => variantsOf(cmd).variants.some((v) => v.name.endsWith(" with embedded quotes"))),
+    ).toBe(true);
   });
 });
 
@@ -911,12 +1230,17 @@ async function conformanceFailures(build: () => Promise<Fixture>): Promise<strin
     const f = await build();
     const { variants, missingSamples } = variantsOf(cmd);
     if (missingSamples.length > 0) {
-      failures.push(`${cmd.id}: no sample for ${missingSamples.join(", ")} — add a hint in FIELD_HINTS or a COMMAND_FIXTURES entry`);
+      failures.push(
+        `${cmd.id}: no sample for ${missingSamples.join(", ")} — add a hint in FIELD_HINTS or a COMMAND_FIXTURES entry`,
+      );
       continue;
     }
     const happy = variants.find((v) => v.name === "required-only")!;
     const res = await reference(f, cmd, happy.named, powerCaller);
-    if (!res.ok) failures.push(`${cmd.id}: happy path ${JSON.stringify(happy.named)} failed: ${res.error} — ${res.message}; add a COMMAND_FIXTURES entry (hints/baseline) or fake its dependency in fakeDeps`);
+    if (!res.ok)
+      failures.push(
+        `${cmd.id}: happy path ${JSON.stringify(happy.named)} failed: ${res.error} — ${res.message}; add a COMMAND_FIXTURES entry (hints/baseline) or fake its dependency in fakeDeps`,
+      );
   }
   return failures;
 }
@@ -929,9 +1253,18 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
   it("names derive mechanically: tools/list carries group_verb with the exact jsonSchemaFor; /api/<id>, argv words, and chat form all resolve to this command", async () => {
     const f = await fixture();
     const names = toSurfaceNames(cmd.id);
-    expect(names).toEqual({ http: `/api/${cmd.id}`, mcp: cmd.id.replace(".", "_"), cli: cmd.id.split("."), chat: cmd.id.replace(".", " ") });
+    expect(names).toEqual({
+      http: `/api/${cmd.id}`,
+      mcp: cmd.id.replace(".", "_"),
+      cli: cmd.id.split("."),
+      chat: cmd.id.replace(".", " "),
+    });
     const list = await handleMcpRequest(
-      { method: "POST", headers: { authorization: "Bearer power" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) },
+      {
+        method: "POST",
+        headers: { authorization: "Bearer power" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      },
       {} as CoreDeps,
       { auth: { tokens: { power: { subject: "power", scopes: ALL_ACTIONS } } }, commands: f.commands },
     );
@@ -939,12 +1272,18 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
     const tool = tools.find((t) => t.name === names.mcp);
     if (cmd.surfaces?.mcp === false) expect(tool).toBeUndefined();
     else expect(tool?.inputSchema).toEqual(jsonSchemaFor(cmd));
-    if (cmd.surfaces?.cli !== false) expect(parseCliArgv([...names.cli, "--help"], f.commands)).toEqual({ kind: "command-help", id: cmd.id });
+    if (cmd.surfaces?.cli !== false)
+      expect(parseCliArgv([...names.cli, "--help"], f.commands)).toEqual({ kind: "command-help", id: cmd.id });
     else expect(parseCliArgv([...names.cli, "--help"], f.commands).kind).toBe("usage");
     const chatParsed = parseChatCommand(`${names.chat} --help`, f.commands);
     if (cmd.surfaces?.chat !== false) expect(chatParsed?.kind).toBe("reply");
     else expect(chatParsed).toBeNull();
-    const t = fakeReqRes(cmd.effect === "write" ? "POST" : "GET", names.http, cmd.effect === "write" ? "{}" : undefined, { "content-type": "application/json" });
+    const t = fakeReqRes(
+      cmd.effect === "write" ? "POST" : "GET",
+      names.http,
+      cmd.effect === "write" ? "{}" : undefined,
+      { "content-type": "application/json" },
+    );
     await httpHandler(f)(t.req, t.res, { sub: "power" });
     if (cmd.surfaces?.http !== false) expect(t.status(), t.text()).not.toBe(404);
     else expect(t.status(), `${cmd.id}: opted out of http yet served`).toBe(404);
@@ -952,19 +1291,41 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
 
   it("MCP inputSchema lists exactly the arguments and options, required = the non-optional ones, additionalProperties false; enum values and defaults survive", () => {
     const fields = fieldsOf(cmd);
-    const schema = jsonSchemaFor(cmd) as { properties: Record<string, { enum?: unknown[]; default?: unknown; anyOf?: { enum?: unknown[] }[] }>; required?: string[]; additionalProperties: boolean };
+    const schema = jsonSchemaFor(cmd) as {
+      properties: Record<string, { enum?: unknown[]; default?: unknown; anyOf?: { enum?: unknown[] }[] }>;
+      required?: string[];
+      additionalProperties: boolean;
+    };
     expect(schemaPropertyNames(cmd)).toEqual(fields.map((f) => f.name).sort());
     expect(schema.additionalProperties).toBe(false);
-    expect([...(schema.required ?? [])].sort()).toEqual(fields.filter((f) => f.required).map((f) => f.name).sort());
+    expect([...(schema.required ?? [])].sort()).toEqual(
+      fields
+        .filter((f) => f.required)
+        .map((f) => f.name)
+        .sort(),
+    );
     for (const f of fields) {
       const declaredEnum = (() => {
-        const def = (f.schema as unknown as { _zod: { def: { type: string; innerType?: z.ZodType; entries?: Record<string, unknown> } } })._zod.def;
-        const inner = def.type === "optional" || def.type === "default" ? (def.innerType as unknown as { _zod: { def: { type: string; entries?: Record<string, unknown> } } })._zod.def : def;
+        const def = (
+          f.schema as unknown as {
+            _zod: { def: { type: string; innerType?: z.ZodType; entries?: Record<string, unknown> } };
+          }
+        )._zod.def;
+        const inner =
+          def.type === "optional" || def.type === "default"
+            ? (def.innerType as unknown as { _zod: { def: { type: string; entries?: Record<string, unknown> } } })._zod
+                .def
+            : def;
         return inner.type === "enum" && inner.entries ? Object.values(inner.entries) : undefined;
       })();
-      if (declaredEnum) expect(schema.properties[f.name].enum ?? schema.properties[f.name].anyOf?.flatMap((a) => a.enum ?? []), `${cmd.id}.${f.name} enum`).toEqual(declaredEnum);
+      if (declaredEnum)
+        expect(
+          schema.properties[f.name].enum ?? schema.properties[f.name].anyOf?.flatMap((a) => a.enum ?? []),
+          `${cmd.id}.${f.name} enum`,
+        ).toEqual(declaredEnum);
       const def = (f.schema as unknown as { _zod: { def: { type: string; defaultValue?: unknown } } })._zod.def;
-      if (def.type === "default") expect(schema.properties[f.name].default, `${cmd.id}.${f.name} default`).toEqual(def.defaultValue);
+      if (def.type === "default")
+        expect(schema.properties[f.name].default, `${cmd.id}.${f.name} default`).toEqual(def.defaultValue);
     }
   });
 
@@ -972,11 +1333,13 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
     const f = await fixture();
     const fields = fieldsOf(cmd);
     const check = (text: string, where: string) => {
-      for (const a of fields.filter((x) => x.kind === "arg")) expect(text, `${where} names <${a.name}>`).toContain(`<${a.name}>`);
+      for (const a of fields.filter((x) => x.kind === "arg"))
+        expect(text, `${where} names <${a.name}>`).toContain(`<${a.name}>`);
       for (const flag of expectedFlags(cmd)) expect(text, `${where} names ${flag}`).toContain(flag);
       expect(text).toContain(cmd.describe);
     };
-    if (cmd.surfaces?.cli !== false) check((await runCli(f.commands, { kind: "command-help", id: cmd.id }, CLI_CALLER)).stdout, "cli --help");
+    if (cmd.surfaces?.cli !== false)
+      check((await runCli(f.commands, { kind: "command-help", id: cmd.id }, CLI_CALLER)).stdout, "cli --help");
     if (cmd.surfaces?.chat !== false) {
       const parsed = parseChatCommand(`${toSurfaceNames(cmd.id).chat} --help`, f.commands);
       expect(parsed?.kind).toBe("reply");
@@ -1001,7 +1364,9 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         const out = await runOn(surface, f, cmd, variant.named, "power");
         expect(out.ok, `${where}: ${out.wire}`).toBe(true);
         const { caller, parsed } = lastInvoke(f, cmd);
-        expect({ kind: caller.kind, id: caller.id }, `${where}: the Caller the registry saw`).toEqual(surface.caller("power"));
+        expect({ kind: caller.kind, id: caller.id }, `${where}: the Caller the registry saw`).toEqual(
+          surface.caller("power"),
+        );
         if (surface === chat) expect(caller.origin?.channelId, `${where}: chat origin`).toBe(CHAT_CHANNEL);
         // The reference: a direct `invoke` as the very caller the adapter resolved, on an equivalent fixture.
         const refFixture = await fresh();
@@ -1017,14 +1382,18 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
           assertUntrusted(out.json, where);
           const normalized = withCallerToken(out.json, caller.id);
           firstJson ??= normalized;
-          expect(normalized, `${where}: invoke JSON differs from the first machine surface's (beyond the caller's own id)`).toEqual(firstJson);
+          expect(
+            normalized,
+            `${where}: invoke JSON differs from the first machine surface's (beyond the caller's own id)`,
+          ).toEqual(firstJson);
         } else {
           expect(out.text, `${where}: chat reply`).toBe(renderText(cmd, ref.value, { now: NOW, surface: "chat" }));
           assertChatShape(out.text ?? "", `${where}: chat reply`);
         }
         assertNoSecrets(out.wire, f, where);
       }
-      if (shared && before !== undefined) expect(await shared.fingerprint(), `${label}: a read command mutated the fixture`).toBe(before);
+      if (shared && before !== undefined)
+        expect(await shared.fingerprint(), `${label}: a read command mutated the fixture`).toBe(before);
     }
   });
 
@@ -1043,14 +1412,20 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         codes.set(surface.meta.column, out.code);
         if (surface.meta.key === "cli") expect(out.status, `${where}: exit code`).toBe(2);
         expect(namesField(out.text ?? "", field), `${where}: "${out.text}" does not name ${field}`).toBe(true);
-        if (variant.planted !== undefined) expect(out.wire, `${where}: echoes the submitted value`).not.toContain(typeof variant.planted === "string" ? variant.planted : JSON.stringify(variant.planted));
+        if (variant.planted !== undefined)
+          expect(out.wire, `${where}: echoes the submitted value`).not.toContain(
+            typeof variant.planted === "string" ? variant.planted : JSON.stringify(variant.planted),
+          );
         assertNoSecrets(out.wire, f, where);
         // Nothing ran: the fixture is untouched by a refused call.
         expect(f.recorded.filter((r) => r.result.ok)).toEqual([]);
         expect(f.executed, `${where}: an executor ran`).toEqual([]);
       }
       // The cells of this row agree: one code, whichever surface spelled the fault.
-      expect(new Set(codes.values()).size, `${cmd.id} [${variant.name}]: codes differ across surfaces ${JSON.stringify([...codes])}`).toBe(1);
+      expect(
+        new Set(codes.values()).size,
+        `${cmd.id} [${variant.name}]: codes differ across surfaces ${JSON.stringify([...codes])}`,
+      ).toBe(1);
     }
   });
 
@@ -1072,7 +1447,12 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
       const f = await fixture();
       // What the table says for the actor the chat adapter resolves for NOBODY (the plain Slack user's baseline grants).
       const msg = { userId: NOBODY, channelId: CHAT_CHANNEL, threadKey: `${CHAT_CHANNEL}:t1` };
-      const nobody: Caller = { kind: "chat", id: NOBODY, actor: resolveChatActor(msg, (id) => f.config.grantsFor(id)), origin: msg };
+      const nobody: Caller = {
+        kind: "chat",
+        id: NOBODY,
+        actor: resolveChatActor(msg, (id) => f.config.grantsFor(id)),
+        origin: msg,
+      };
       const input = namedToInput(cmd, forCaller(happy.named, NOBODY), "camel");
       if ("error" in input) throw new Error(input.error);
       const admitted = authorize(nobody.actor, cmd.action, resourceOf(cmd, input, nobody)).allow;
@@ -1086,11 +1466,18 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
     }
     // A credential holding no grant at all is refused whatever the surface (fail-closed, R7) — driven as a CLI
     // caller, the one surface every command is exposed on.
-    const bare = await reference(await fixture(), cmd, happy.named, { kind: "cli", id: "cli:nothing", actor: { kind: "service", id: "cli:nothing", grants: NO_GRANTS } });
+    const bare = await reference(await fixture(), cmd, happy.named, {
+      kind: "cli",
+      id: "cli:nothing",
+      actor: { kind: "service", id: "cli:nothing", grants: NO_GRANTS },
+    });
     expect(bare).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
     if (cmd.surfaces?.http !== false) {
       const f = await fixture();
-      const t = fakeReqRes("GET", `${toSurfaceNames(cmd.id).http}?${toKebabQuery(forCaller(happy.named, "access:power")).toString()}`);
+      const t = fakeReqRes(
+        "GET",
+        `${toSurfaceNames(cmd.id).http}?${toKebabQuery(forCaller(happy.named, "access:power")).toString()}`,
+      );
       await httpHandler(f)(t.req, t.res, { sub: "power" });
       if (cmd.effect === "write") expect(t.status(), `${cmd.id}: write over GET`).toBe(405);
       else expect(t.status(), `${cmd.id}: read over GET`).toBe(200);
@@ -1116,7 +1503,10 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         expect(registryRefused(f, out), `${where}: the table refuses, the surface admitted: ${out.wire}`).toBe(true);
         if (carriedBy(role.id) === "access") expect(out.status, where).toBe(403);
         if (carriedBy(role.id) === "chat") expect(out.text, where).toMatch(/^🚫 `.+` is restricted\. Ask /);
-        expect(f.recorded.filter((r) => r.result.ok), where).toEqual([]);
+        expect(
+          f.recorded.filter((r) => r.result.ok),
+          where,
+        ).toEqual([]);
         expect(f.executed, where).toEqual([]);
         assertNoSecrets(out.wire, f, where);
       }

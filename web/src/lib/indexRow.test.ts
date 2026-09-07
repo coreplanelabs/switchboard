@@ -116,7 +116,9 @@ describe("tooltips", () => {
     const s = Date.UTC(2026, 7, 30, 5, 0, 0);
     const f = Date.UTC(2026, 7, 30, 5, 2, 0);
     expect(whenTip(row({ startedAt: s }))).toBe(`started ${formatLocalIso(s)}`);
-    expect(whenTip(row({ finished: true, startedAt: s, finishedAt: f }))).toBe(`started ${formatLocalIso(s)}\nfinished ${formatLocalIso(f)}`);
+    expect(whenTip(row({ finished: true, startedAt: s, finishedAt: f }))).toBe(
+      `started ${formatLocalIso(s)}\nfinished ${formatLocalIso(f)}`,
+    );
   });
 
   it("the source tip: via <surface> · <resolved identity>, falling back to the id suffix", () => {
@@ -143,7 +145,9 @@ describe("surface + repo + sourceUrl", () => {
   });
 
   it("only http(s) sourceUrls survive — a hand-built record cannot plant a javascript: click target", () => {
-    expect(safeSourceUrl(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1" }))).toBe("https://acme.slack.com/archives/C1/p1");
+    expect(safeSourceUrl(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1" }))).toBe(
+      "https://acme.slack.com/archives/C1/p1",
+    );
     expect(safeSourceUrl(row({ sourceUrl: "javascript:alert(1)" }))).toBe("");
     expect(safeSourceUrl(row())).toBe("");
   });
@@ -151,13 +155,19 @@ describe("surface + repo + sourceUrl", () => {
 
 describe("feed reconciliation (R11)", () => {
   it("default view: drops a finished upsert (the row leaves as the run ends), honors every removed", () => {
-    expect(feedAction({ type: "upsert", run: finished("completed") }, false, false)).toEqual({ op: "remove", id: "run-1" });
+    expect(feedAction({ type: "upsert", run: finished("completed") }, false, false)).toEqual({
+      op: "remove",
+      id: "run-1",
+    });
     expect(feedAction({ type: "upsert", run: row() }, false, false)).toEqual({ op: "upsert", run: row() });
     expect(feedAction({ type: "removed", id: "x" }, false, true)).toEqual({ op: "remove", id: "x" });
   });
 
   it("?all=1: keeps finished rows, ignores removed only for a store-confirmed row", () => {
-    expect(feedAction({ type: "upsert", run: finished("completed") }, true, false)).toEqual({ op: "upsert", run: finished("completed") });
+    expect(feedAction({ type: "upsert", run: finished("completed") }, true, false)).toEqual({
+      op: "upsert",
+      run: finished("completed"),
+    });
     expect(feedAction({ type: "removed", id: "x" }, true, true)).toEqual({ op: "keep" });
     expect(feedAction({ type: "removed", id: "x" }, true, false)).toEqual({ op: "remove", id: "x" });
     expect(feedAction({ type: "bogus" }, true, false)).toEqual({ op: "keep" });

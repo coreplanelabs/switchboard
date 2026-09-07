@@ -57,8 +57,12 @@ describe("formatRelative", () => {
 });
 
 describe("splitRunLabel", () => {
-  it("splits the dispatcher's `agent · scope · \"snippet\"` label into its parts", () => {
-    expect(splitRunLabel('review · coreplanelabs/switchboard · "github.com/coreplanelabs/switchboard/pull/268 — re-review:…"')).toEqual({
+  it('splits the dispatcher\'s `agent · scope · "snippet"` label into its parts', () => {
+    expect(
+      splitRunLabel(
+        'review · coreplanelabs/switchboard · "github.com/coreplanelabs/switchboard/pull/268 — re-review:…"',
+      ),
+    ).toEqual({
       agent: "review",
       scope: "coreplanelabs/switchboard",
       snippet: "github.com/coreplanelabs/switchboard/pull/268 — re-review:…",

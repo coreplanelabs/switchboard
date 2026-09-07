@@ -194,8 +194,7 @@ function extractSignals(rawText: string): Signals {
   }
 
   // Explicit branch keyword: "on [the] branch X" or "branch:X" / "branch=X"
-  const kw =
-    /(?:^|\s)on\s+(?:the\s+)?branch\s+(\S+)/i.exec(text) ?? /(?:^|\s)branch[:=](\S+)/i.exec(text);
+  const kw = /(?:^|\s)on\s+(?:the\s+)?branch\s+(\S+)/i.exec(text) ?? /(?:^|\s)branch[:=](\S+)/i.exec(text);
   if (kw) out.ref = validRef(stripPunct(kw[1]));
 
   // Repo URL with an explicit /tree/<ref>
@@ -249,7 +248,8 @@ function extractSignals(rawText: string): Signals {
     if (prev === "in" && !inCode[i] && !out.addressed) {
       const slug = slugOf(t);
       if (slug) out.addressed = { slug };
-      else if (!t.includes("/") && NAME_RE.test(t) && tokens.slice(0, i - 1).every(isDirectiveOrMention)) out.addressed = { name: t.toLowerCase() };
+      else if (!t.includes("/") && NAME_RE.test(t) && tokens.slice(0, i - 1).every(isDirectiveOrMention))
+        out.addressed = { name: t.toLowerCase() };
     }
     if (prev === "on") {
       if (!out.ref && WELL_KNOWN_REFS.has(t)) out.ref = t;
@@ -323,7 +323,8 @@ function threadSignals(history: Array<{ role: string; text: string }>, isResiden
     // predicate confirms it — unvetted (no registry) it stays the weak token
     // it always was; a bare name cannot be resolved without the listing and
     // is ignored here.
-    if (!strong && s.addressed?.slug && isResident && safePredicate(isResident, s.addressed.slug)) strong = s.addressed.slug;
+    if (!strong && s.addressed?.slug && isResident && safePredicate(isResident, s.addressed.slug))
+      strong = s.addressed.slug;
     if (strong) {
       out.repo = strong;
       out.repoStrong = true;
@@ -440,7 +441,10 @@ export async function resolveRepoContext(
   // has no repo at all may this message's bare slug bind — vetted too. A bare
   // slug in this message that is not addressed (a file path, a phrase) is
   // NEVER a repo switch. No probe → unvetted.
-  const strongNow = s.pr?.repo ?? (s.repoStrong ? s.repo : undefined) ?? (s.addressed ? await resolveAddressed(s.addressed) : undefined);
+  const strongNow =
+    s.pr?.repo ??
+    (s.repoStrong ? s.repo : undefined) ??
+    (s.addressed ? await resolveAddressed(s.addressed) : undefined);
   // An explicitly addressed slug the registry could not be asked about is a
   // stop, not a fall-through: running on the thread's old repo instead would
   // be the wrong-repo run this strength exists to end. Refuse loudly.
@@ -530,9 +534,10 @@ export async function resolveRepoContext(
  *  is fetched now, is `open`, and the SHA is well-formed; otherwise the reason
  *  it is unusable — `closed` (closed/merged) or `unreachable` (failed fetch,
  *  malformed SHA, unknown state). Never throws. */
-async function openPrHeadSha(
-  pr: { repo: string; number: number },
-): Promise<{ sha: string; base?: string } | { reason: "closed" | "unreachable" }> {
+async function openPrHeadSha(pr: {
+  repo: string;
+  number: number;
+}): Promise<{ sha: string; base?: string } | { reason: "closed" | "unreachable" }> {
   const head = await prHead(pr).catch(() => undefined);
   if (head?.state === "closed") return { reason: "closed" };
   if (head?.state === "open" && head.sha) return head.base ? { sha: head.sha, base: head.base } : { sha: head.sha };
@@ -555,7 +560,11 @@ export async function currentPrHeadSha(pr: { repo: string; number: number }): Pr
  *  sha. Never throws; undefined on any failure or malformed answer (the
  *  classifier then has no verdict and the dispatcher falls back to the pinned
  *  post + note). */
-export async function prCommitsSince(input: { repo: string; base: string; sha: string }): Promise<PrCommitList | undefined> {
+export async function prCommitsSince(input: {
+  repo: string;
+  base: string;
+  sha: string;
+}): Promise<PrCommitList | undefined> {
   const sha = normalizeHead(input.sha);
   const base = validRef(input.base);
   if (!sha || !base) return undefined;
@@ -586,7 +595,9 @@ export async function prCommitsSince(input: { repo: string; base: string; sha: s
     if (!csha || typeof c.commit?.message !== "string") return undefined;
     commits.push({ sha: csha, message: c.commit.message });
   }
-  const files = Array.isArray(data.files) ? data.files.map((f) => f.filename).filter((f): f is string => typeof f === "string") : [];
+  const files = Array.isArray(data.files)
+    ? data.files.map((f) => f.filename).filter((f): f is string => typeof f === "string")
+    : [];
   return { commits, files, filesTruncated: files.length >= COMPARE_FILES_CAP };
 }
 
@@ -597,9 +608,10 @@ const COMPARE_FILES_CAP = 300;
  *  head REFS are NOT returned (they don't resolve in the resident's mirror);
  *  the SHA is, since it only pins the review post. Never throws to the
  *  caller's happy path — callers .catch() to degrade. */
-async function prHead(
-  pr: { repo: string; number: number },
-): Promise<{ ref?: string; sha?: string; base?: string; state?: "open" | "closed" } | undefined> {
+async function prHead(pr: {
+  repo: string;
+  number: number;
+}): Promise<{ ref?: string; sha?: string; base?: string; state?: "open" | "closed" } | undefined> {
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
     "user-agent": "switchboard",

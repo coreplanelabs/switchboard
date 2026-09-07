@@ -2,8 +2,25 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { computeAffected, formatAffectedText, type AffectedProbe, type AffectedReport } from "./affected.js";
-import { decideLive, decideRestarted, heartbeatLine, LIVE_GATE_DEADLINE_MS, LIVE_GATE_POLL_MS, parseHealthz, type HealthzBody } from "./liveGate.js";
-import { classifyDeployOutput, decideAccount, UNSET_ENV, WORKERS, type DeployPlan, type DeployStep, type TokenVerifyResult, type WorkerName } from "./plan.js";
+import {
+  decideLive,
+  decideRestarted,
+  heartbeatLine,
+  LIVE_GATE_DEADLINE_MS,
+  LIVE_GATE_POLL_MS,
+  parseHealthz,
+  type HealthzBody,
+} from "./liveGate.js";
+import {
+  classifyDeployOutput,
+  decideAccount,
+  UNSET_ENV,
+  WORKERS,
+  type DeployPlan,
+  type DeployStep,
+  type TokenVerifyResult,
+  type WorkerName,
+} from "./plan.js";
 import { classifyRestartResponse, type RestartPlan } from "./restart.js";
 
 // The production deploy RUNNER behind the registry's `deploy all` (CLI only):
@@ -53,7 +70,11 @@ export interface DeployRunnerIO {
 
 /** Spawn a command, stream its output, and collect it. `unset` removes env
  *  vars for the child (the `env -u` of the README commands). */
-function run(cmd: string, args: string[], opts: { cwd: string; unset?: readonly string[]; set?: Record<string, string>; stream?: (chunk: string) => void }): Promise<RunResult> {
+function run(
+  cmd: string,
+  args: string[],
+  opts: { cwd: string; unset?: readonly string[]; set?: Record<string, string>; stream?: (chunk: string) => void },
+): Promise<RunResult> {
   const env: NodeJS.ProcessEnv = { ...process.env, ...(opts.set ?? {}) };
   for (const k of opts.unset ?? []) delete env[k];
   return new Promise((resolve) => {
@@ -78,7 +99,10 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  *  for. Never throws: a network failure is "not verified", and refused. */
 async function verifyTokenAgainstAccount(account: string, token: string): Promise<TokenVerifyResult | undefined> {
   try {
-    const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/tokens/verify`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20_000) });
+    const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/tokens/verify`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(20_000),
+    });
     return { status: res.status, body: await res.text() };
   } catch {
     return undefined;
@@ -94,23 +118,35 @@ async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]
     whoamiOutput: who.output,
     whoamiExit: who.code,
     tokenSet: !!token,
-    ...(token && !who.output.includes(plan.checks.account) ? { tokenVerify: await verifyTokenAgainstAccount(plan.checks.account, token) } : {}),
+    ...(token && !who.output.includes(plan.checks.account)
+      ? { tokenVerify: await verifyTokenAgainstAccount(plan.checks.account, token) }
+      : {}),
   });
   if (account.ok) io.log(`[deploy:all] account: ${account.how}`);
   else problems.push(account.problem);
   const status = await run("git", ["status", "--porcelain"], { cwd: REPO_ROOT });
-  if (status.output.trim() !== "") problems.push("working tree is not clean — commit, stash, or deploy from a fresh checkout (wrangler builds the CURRENT tree)");
+  if (status.output.trim() !== "")
+    problems.push(
+      "working tree is not clean — commit, stash, or deploy from a fresh checkout (wrangler builds the CURRENT tree)",
+    );
   if (plan.checks.atOriginMain) {
     // A failed fetch would let the check pass against a stale origin/main — treat it as a problem, not a warning.
     const fetch = await run("git", ["fetch", "-q", "origin"], { cwd: REPO_ROOT });
-    if (fetch.code !== 0) problems.push(`git fetch origin failed (exit ${fetch.code}): ${fetch.output.trim().split("\n").pop() ?? ""} — cannot verify HEAD == origin/main`);
+    if (fetch.code !== 0)
+      problems.push(
+        `git fetch origin failed (exit ${fetch.code}): ${fetch.output.trim().split("\n").pop() ?? ""} — cannot verify HEAD == origin/main`,
+      );
     const head = (await run("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).output.trim();
     const main = (await run("git", ["rev-parse", "origin/main"], { cwd: REPO_ROOT })).output.trim();
-    if (head !== main) problems.push(`HEAD ${head.slice(0, 7)} != origin/main ${main.slice(0, 7)} — \`git checkout --detach origin/main\`, or pass --allow-branch deliberately`);
+    if (head !== main)
+      problems.push(
+        `HEAD ${head.slice(0, 7)} != origin/main ${main.slice(0, 7)} — \`git checkout --detach origin/main\`, or pass --allow-branch deliberately`,
+      );
   }
   for (const s of plan.steps) {
     for (const req of s.requiredEnv) {
-      if (!req.anyOf.some((v) => process.env[v])) problems.push(`${s.name}: none of ${req.anyOf.join(" / ")} is set in the environment`);
+      if (!req.anyOf.some((v) => process.env[v]))
+        problems.push(`${s.name}: none of ${req.anyOf.join(" / ")} is set in the environment`);
     }
   }
   return problems;
@@ -153,42 +189,81 @@ interface StepOutcome {
  * drain is visible. Returns the live commit, or the reason it never went live
  * within the drain deadline (+ cold-start margin).
  */
-async function waitUntilLive(step: DeployStep, healthUrl: string, expectedCommit: string, io: DeployRunnerIO): Promise<{ live: true; commit: string; waitedMs: number } | { live: false; reason: string }> {
+async function waitUntilLive(
+  step: DeployStep,
+  healthUrl: string,
+  expectedCommit: string,
+  io: DeployRunnerIO,
+): Promise<{ live: true; commit: string; waitedMs: number } | { live: false; reason: string }> {
   const started = Date.now();
   for (;;) {
     const elapsed = Date.now() - started;
     const body = await fetchHealthz(healthUrl);
     const d = decideLive(body, expectedCommit, elapsed);
     if (d.kind === "live") return { live: true, commit: d.commit, waitedMs: elapsed };
-    if (d.kind === "timeout") return { live: false, reason: `${d.reason} — gave up after ${Math.round(elapsed / 60_000)} min (drain deadline ${LIVE_GATE_DEADLINE_MS / 60_000} min)` };
-    io.log(`[deploy:all] ${step.name}: deployed, not live yet — ${d.reason} (${Math.floor(elapsed / 60_000)}m ${Math.floor((elapsed % 60_000) / 1000)}s)`);
+    if (d.kind === "timeout")
+      return {
+        live: false,
+        reason: `${d.reason} — gave up after ${Math.round(elapsed / 60_000)} min (drain deadline ${LIVE_GATE_DEADLINE_MS / 60_000} min)`,
+      };
+    io.log(
+      `[deploy:all] ${step.name}: deployed, not live yet — ${d.reason} (${Math.floor(elapsed / 60_000)}m ${Math.floor((elapsed % 60_000) / 1000)}s)`,
+    );
     await sleep(LIVE_GATE_POLL_MS);
   }
 }
 
-async function deployStep(step: DeployStep, plan: DeployPlan, expectedCommit: string, io: DeployRunnerIO): Promise<StepOutcome> {
+async function deployStep(
+  step: DeployStep,
+  plan: DeployPlan,
+  expectedCommit: string,
+  io: DeployRunnerIO,
+): Promise<StepOutcome> {
   const started = Date.now();
   const deadline = started + plan.waitMaxMs;
   for (;;) {
     io.log(`\n[deploy:all] ▶ ${step.name} (${step.script}) — ${step.dir}: ${step.command.join(" ")}`);
-    const r = await run(step.command[0], step.command.slice(1), { cwd: join(REPO_ROOT, step.dir), unset: step.unsetEnv, set: step.setEnv, stream: (c) => io.stream(c) });
+    const r = await run(step.command[0], step.command.slice(1), {
+      cwd: join(REPO_ROOT, step.dir),
+      unset: step.unsetEnv,
+      set: step.setEnv,
+      stream: (c) => io.stream(c),
+    });
     const outcome = classifyDeployOutput(r.code, r.output);
     if (outcome.kind === "deployed") {
       if (!step.liveGate) return { ok: true, versionId: outcome.versionId, live: "n/a" };
-      io.log(`[deploy:all] ${step.name}: version ${outcome.versionId ?? "?"} uploaded — waiting until the new container is live (commit ${expectedCommit.slice(0, 7)})`);
+      io.log(
+        `[deploy:all] ${step.name}: version ${outcome.versionId ?? "?"} uploaded — waiting until the new container is live (commit ${expectedCommit.slice(0, 7)})`,
+      );
       const gate = await waitUntilLive(step, step.liveGate.healthUrl, expectedCommit, io);
       if (gate.live) {
-        io.log(`[deploy:all] ${step.name}: live (commit ${gate.commit.slice(0, 7)}, drained after ${Math.round(gate.waitedMs / 1000)}s)`);
+        io.log(
+          `[deploy:all] ${step.name}: live (commit ${gate.commit.slice(0, 7)}, drained after ${Math.round(gate.waitedMs / 1000)}s)`,
+        );
         return { ok: true, versionId: outcome.versionId, live: "live" };
       }
-      return { ok: false, versionId: outcome.versionId, live: `deployed, not live: ${gate.reason}`, reason: `deployed but NOT live — ${gate.reason}` };
+      return {
+        ok: false,
+        versionId: outcome.versionId,
+        live: `deployed, not live: ${gate.reason}`,
+        reason: `deployed but NOT live — ${gate.reason}`,
+      };
     }
     if (outcome.kind === "preflight-refused" && step.retryOnPreflightRefusal) {
       const left = deadline - Date.now();
-      if (left <= 0) return { ok: false, live: "not deployed", reason: `preflight still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to kill what is in flight` };
+      if (left <= 0)
+        return {
+          ok: false,
+          live: "not deployed",
+          reason: `preflight still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to kill what is in flight`,
+        };
       // Never a silent wait: say what is in flight and how far into the budget we are.
       const body = step.healthUrl ? await fetchHealthz(step.healthUrl) : undefined;
-      io.log(step.healthUrl ? heartbeatLine(step.name, body, Date.now() - started, plan.waitMaxMs) : `[deploy:all] ${step.name}: still waiting — ${outcome.reason}`);
+      io.log(
+        step.healthUrl
+          ? heartbeatLine(step.name, body, Date.now() - started, plan.waitMaxMs)
+          : `[deploy:all] ${step.name}: still waiting — ${outcome.reason}`,
+      );
       io.log(`[deploy:all] ${step.name}: retrying in ${plan.pollMs / 1000}s (${Math.ceil(left / 60_000)} min left)`);
       await sleep(plan.pollMs);
       continue;
@@ -215,7 +290,12 @@ export async function runDeployPlan(plan: DeployPlan, io: DeployRunnerIO): Promi
   // closed (never a false "live") — and we say so up front rather than 18 min later.
   const expectedCommit = (await run("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).output.trim();
   if (!/^[0-9a-f]{40}$/.test(expectedCommit)) {
-    return { kind: "refused", problems: [`could not read HEAD (\`git rev-parse HEAD\` gave ${JSON.stringify(expectedCommit.slice(0, 40))}); the bot live gate needs the commit being deployed`] };
+    return {
+      kind: "refused",
+      problems: [
+        `could not read HEAD (\`git rev-parse HEAD\` gave ${JSON.stringify(expectedCommit.slice(0, 40))}); the bot live gate needs the commit being deployed`,
+      ],
+    };
   }
 
   const results: DeployStepResult[] = [];
@@ -239,14 +319,19 @@ export async function runDeployPlan(plan: DeployPlan, io: DeployRunnerIO): Promi
     }
   }
   const notAttempted = plan.steps.slice(results.length).map((s) => s.name);
-  const ok = results.every((r) => r.status.startsWith("deployed") && !r.live.startsWith("deployed, not live")) && notAttempted.length === 0;
+  const ok =
+    results.every((r) => r.status.startsWith("deployed") && !r.live.startsWith("deployed, not live")) &&
+    notAttempted.length === 0;
   return { kind: "ran", ok, results, notAttempted };
 }
 
 /** The Worker → version → live table both the success output and a failure message end with. */
 export function formatDeployResults(results: readonly DeployStepResult[], notAttempted: readonly string[]): string {
   const lines = [`  ${"worker".padEnd(9)} ${"script".padEnd(22)} ${"version".padEnd(38)} ${"live".padEnd(8)} status`];
-  for (const r of results) lines.push(`  ${r.name.padEnd(9)} ${r.script.padEnd(22)} ${(r.versionId ?? "-").padEnd(38)} ${r.live.padEnd(8)} ${r.status}`);
+  for (const r of results)
+    lines.push(
+      `  ${r.name.padEnd(9)} ${r.script.padEnd(22)} ${(r.versionId ?? "-").padEnd(38)} ${r.live.padEnd(8)} ${r.status}`,
+    );
   if (notAttempted.length > 0) lines.push(`  not attempted: ${notAttempted.join(", ")}`);
   return lines.join("\n");
 }
@@ -272,7 +357,13 @@ export function hostAffectedProbe(env: Record<string, string | undefined> = proc
   const trees = new Map<string, Promise<Set<string> | undefined>>();
   const listTree = (ref: string) => {
     let t = trees.get(ref);
-    if (!t) trees.set(ref, (t = git(["ls-tree", "-r", "--name-only", ref]).then((out) => (out === undefined ? undefined : new Set(out.split("\n").filter(Boolean))))));
+    if (!t)
+      trees.set(
+        ref,
+        (t = git(["ls-tree", "-r", "--name-only", ref]).then((out) =>
+          out === undefined ? undefined : new Set(out.split("\n").filter(Boolean)),
+        )),
+      );
     return t;
   };
   return {
@@ -280,19 +371,29 @@ export function hostAffectedProbe(env: Record<string, string | undefined> = proc
     liveCommit: async (worker: WorkerName) => {
       const w = WORKERS.find((x) => x.name === worker)!;
       const bearer = w.healthBearerEnv ? env[w.healthBearerEnv] : undefined;
-      if (w.healthBearerEnv && !bearer) return { error: `${w.healthBearerEnv} is not set — cannot read ${w.healthUrl}` };
+      if (w.healthBearerEnv && !bearer)
+        return { error: `${w.healthBearerEnv} is not set — cannot read ${w.healthUrl}` };
       try {
-        const res = await fetch(w.healthUrl, { headers: bearer ? { authorization: `Bearer ${bearer}` } : {}, signal: AbortSignal.timeout(20_000) });
+        const res = await fetch(w.healthUrl, {
+          headers: bearer ? { authorization: `Bearer ${bearer}` } : {},
+          signal: AbortSignal.timeout(20_000),
+        });
         const text = await res.text();
         if (!res.ok) return { error: `GET ${w.healthUrl} → HTTP ${res.status}` };
         const body = parseHealthz(text);
-        const commit = body && typeof body.build === "object" && body.build !== null ? (body.build as { commit?: unknown }).commit : undefined;
-        return typeof commit === "string" && commit !== "" ? { commit } : { error: `GET ${w.healthUrl} carries no build.commit` };
+        const commit =
+          body && typeof body.build === "object" && body.build !== null
+            ? (body.build as { commit?: unknown }).commit
+            : undefined;
+        return typeof commit === "string" && commit !== ""
+          ? { commit }
+          : { error: `GET ${w.healthUrl} carries no build.commit` };
       } catch (err) {
         return { error: `GET ${w.healthUrl} failed: ${err instanceof Error ? err.message : String(err)}` };
       }
     },
-    isAncestor: async (commit, head) => (await run("git", ["merge-base", "--is-ancestor", commit, head], { cwd: REPO_ROOT })).code === 0,
+    isAncestor: async (commit, head) =>
+      (await run("git", ["merge-base", "--is-ancestor", commit, head], { cwd: REPO_ROOT })).code === 0,
     lastRelease: async () => {
       const tag = (await git(["describe", "--tags", "--match", "v*", "--abbrev=0", "HEAD^"]))?.trim();
       if (!tag) return undefined;
@@ -300,7 +401,8 @@ export function hostAffectedProbe(env: Record<string, string | undefined> = proc
       return commit ? { tag, commit } : undefined;
     },
     // `undefined` on a git failure (an unknown base) — the pure half reads that as unsure, never as "nothing changed".
-    changedPaths: async (base, head) => (await git(["diff", "--name-only", "--no-renames", base, head, "--"]))?.split("\n").filter(Boolean),
+    changedPaths: async (base, head) =>
+      (await git(["diff", "--name-only", "--no-renames", base, head, "--"]))?.split("\n").filter(Boolean),
     fileAt: async (ref, path) => {
       const tree = await listTree(ref);
       if (tree && !tree.has(path)) return undefined;
@@ -320,7 +422,15 @@ export type RestartRunResult =
   /** Refused before anything was posted (no bearer in the env). */
   | { kind: "refused"; problems: string[] }
   /** The route was called. `ok` only when a non-draining container answered with a LATER `startedAt`. */
-  | { kind: "ran"; ok: boolean; target: string; previousStartedAt?: string; startedAt?: string; waitedMs: number; reason?: string };
+  | {
+      kind: "ran";
+      ok: boolean;
+      target: string;
+      previousStartedAt?: string;
+      startedAt?: string;
+      waitedMs: number;
+      reason?: string;
+    };
 
 /** The runner's I/O, injectable so the loop is unit-tested without a network or a clock. */
 export interface RestartRunnerDeps {
@@ -353,13 +463,26 @@ async function fetchHealthzWith(deps: RestartRunnerDeps, url: string): Promise<H
  * non-draining container reports a `startedAt` later than the old one's
  * (`decideRestarted`), logging every poll so the drain is visible.
  */
-export async function runBotRestart(plan: RestartPlan, io: Pick<DeployRunnerIO, "log" | "warn">, deps: RestartRunnerDeps = defaultRestartRunnerDeps): Promise<RestartRunResult> {
+export async function runBotRestart(
+  plan: RestartPlan,
+  io: Pick<DeployRunnerIO, "log" | "warn">,
+  deps: RestartRunnerDeps = defaultRestartRunnerDeps,
+): Promise<RestartRunResult> {
   const token = deps.env[plan.tokenEnv];
-  if (!token) return { kind: "refused", problems: [`${plan.tokenEnv} is not set in the environment — a SWITCHBOARD_INGRESS_TOKENS bearer whose identity carries deploy:write`] };
+  if (!token)
+    return {
+      kind: "refused",
+      problems: [
+        `${plan.tokenEnv} is not set in the environment — a SWITCHBOARD_INGRESS_TOKENS bearer whose identity carries deploy:write`,
+      ],
+    };
   const tag = "deploy:restart";
   const started = deps.now();
   const deadline = started + plan.waitMaxMs;
-  if (plan.force) io.warn(`[${tag}] WARNING --force: the preflight is bypassed — in-flight runs on ${plan.target} are SIGTERM-drained (finish if they can, else killed at the drain deadline)`);
+  if (plan.force)
+    io.warn(
+      `[${tag}] WARNING --force: the preflight is bypassed — in-flight runs on ${plan.target} are SIGTERM-drained (finish if they can, else killed at the drain deadline)`,
+    );
 
   let previousStartedAt: string | undefined;
   for (;;) {
@@ -367,25 +490,46 @@ export async function runBotRestart(plan: RestartPlan, io: Pick<DeployRunnerIO, 
     let status: number;
     let text: string;
     try {
-      const res = await deps.fetch(plan.adminUrl, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ force: plan.force }) });
+      const res = await deps.fetch(plan.adminUrl, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ force: plan.force }),
+      });
       status = res.status;
       text = await res.text();
     } catch (err) {
-      return { kind: "ran", ok: false, target: plan.target, waitedMs: deps.now() - started, reason: `POST ${plan.adminUrl} failed: ${err instanceof Error ? err.message : String(err)}` };
+      return {
+        kind: "ran",
+        ok: false,
+        target: plan.target,
+        waitedMs: deps.now() - started,
+        reason: `POST ${plan.adminUrl} failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
     const outcome = classifyRestartResponse(status, text);
     if (outcome.kind === "stopping") {
       previousStartedAt = outcome.previousStartedAt;
-      io.log(`[${tag}] ${plan.target}: SIGTERM sent (old container started ${previousStartedAt ?? "unknown"}) — waiting until a restarted container answers /healthz`);
+      io.log(
+        `[${tag}] ${plan.target}: SIGTERM sent (old container started ${previousStartedAt ?? "unknown"}) — waiting until a restarted container answers /healthz`,
+      );
       break;
     }
     if (outcome.kind === "not-running") {
-      io.log(`[${tag}] ${plan.target}: container was not running — the next request starts it with the current env; checking /healthz`);
+      io.log(
+        `[${tag}] ${plan.target}: container was not running — the next request starts it with the current env; checking /healthz`,
+      );
       break;
     }
     if (outcome.kind === "refused" && !plan.force) {
       const left = deadline - deps.now();
-      if (left <= 0) return { kind: "ran", ok: false, target: plan.target, waitedMs: deps.now() - started, reason: `still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to kill what is in flight` };
+      if (left <= 0)
+        return {
+          kind: "ran",
+          ok: false,
+          target: plan.target,
+          waitedMs: deps.now() - started,
+          reason: `still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to kill what is in flight`,
+        };
       const body = await fetchHealthzWith(deps, plan.healthUrl);
       io.log(heartbeatLine(plan.target, body, deps.now() - started, plan.waitMaxMs, tag));
       io.log(`[${tag}] ${plan.target}: retrying in ${plan.pollMs / 1000}s (${Math.ceil(left / 60_000)} min left)`);
@@ -398,15 +542,38 @@ export async function runBotRestart(plan: RestartPlan, io: Pick<DeployRunnerIO, 
   const gateStarted = deps.now();
   for (;;) {
     const elapsed = deps.now() - gateStarted;
-    const d = decideRestarted(await fetchHealthzWith(deps, plan.healthUrl), previousStartedAt, elapsed, plan.liveDeadlineMs);
+    const d = decideRestarted(
+      await fetchHealthzWith(deps, plan.healthUrl),
+      previousStartedAt,
+      elapsed,
+      plan.liveDeadlineMs,
+    );
     if (d.kind === "live") {
-      io.log(`[${tag}] ${plan.target}: restarted — startedAt ${d.startedAt} (was ${previousStartedAt ?? "unknown"}), live after ${Math.round(elapsed / 1000)}s`);
-      return { kind: "ran", ok: true, target: plan.target, previousStartedAt, startedAt: d.startedAt, waitedMs: deps.now() - started };
+      io.log(
+        `[${tag}] ${plan.target}: restarted — startedAt ${d.startedAt} (was ${previousStartedAt ?? "unknown"}), live after ${Math.round(elapsed / 1000)}s`,
+      );
+      return {
+        kind: "ran",
+        ok: true,
+        target: plan.target,
+        previousStartedAt,
+        startedAt: d.startedAt,
+        waitedMs: deps.now() - started,
+      };
     }
     if (d.kind === "timeout") {
-      return { kind: "ran", ok: false, target: plan.target, previousStartedAt, waitedMs: deps.now() - started, reason: `${d.reason} — gave up after ${Math.round(elapsed / 60_000)} min (drain deadline ${plan.liveDeadlineMs / 60_000} min)` };
+      return {
+        kind: "ran",
+        ok: false,
+        target: plan.target,
+        previousStartedAt,
+        waitedMs: deps.now() - started,
+        reason: `${d.reason} — gave up after ${Math.round(elapsed / 60_000)} min (drain deadline ${plan.liveDeadlineMs / 60_000} min)`,
+      };
     }
-    io.log(`[${tag}] ${plan.target}: not live yet — ${d.reason} (${Math.floor(elapsed / 60_000)}m ${Math.floor((elapsed % 60_000) / 1000)}s)`);
+    io.log(
+      `[${tag}] ${plan.target}: not live yet — ${d.reason} (${Math.floor(elapsed / 60_000)}m ${Math.floor((elapsed % 60_000) / 1000)}s)`,
+    );
     await deps.sleep(LIVE_GATE_POLL_MS);
   }
 }

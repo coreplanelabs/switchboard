@@ -60,17 +60,33 @@ export async function fetchHealth(baseUrl, { timeoutMs = 20_000 } = {}) {
  *  selects the account. Never throws: `{ok:true,payload}` or `{ok:false,error}`. */
 export function listContainerApps({ cwd = dirname(fileURLToPath(import.meta.url)), timeoutMs = 60_000 } = {}) {
   return new Promise((resolve) => {
-    execFile("npx", ["wrangler", "containers", "list", "--json"], { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) return resolve({ ok: false, error: `wrangler containers list failed: ${err.message} ${String(stderr).slice(0, 200)}`.trim() });
-      // wrangler prints its banner before the JSON; the payload starts at the first `[`.
-      const start = String(stdout).indexOf("[");
-      if (start < 0) return resolve({ ok: false, error: `wrangler containers list: no JSON array in output: ${String(stdout).slice(0, 200)}` });
-      try {
-        resolve({ ok: true, payload: JSON.parse(String(stdout).slice(start)) });
-      } catch (parseErr) {
-        resolve({ ok: false, error: `wrangler containers list: unparsable JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}` });
-      }
-    });
+    execFile(
+      "npx",
+      ["wrangler", "containers", "list", "--json"],
+      { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err)
+          return resolve({
+            ok: false,
+            error: `wrangler containers list failed: ${err.message} ${String(stderr).slice(0, 200)}`.trim(),
+          });
+        // wrangler prints its banner before the JSON; the payload starts at the first `[`.
+        const start = String(stdout).indexOf("[");
+        if (start < 0)
+          return resolve({
+            ok: false,
+            error: `wrangler containers list: no JSON array in output: ${String(stdout).slice(0, 200)}`,
+          });
+        try {
+          resolve({ ok: true, payload: JSON.parse(String(stdout).slice(start)) });
+        } catch (parseErr) {
+          resolve({
+            ok: false,
+            error: `wrangler containers list: unparsable JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+          });
+        }
+      },
+    );
   });
 }
 
@@ -86,10 +102,14 @@ export function catchUpWarnings(payload) {
   if (!c || typeof c !== "object") return [];
   const out = [];
   if (typeof c.error === "string" && c.error) {
-    out.push(`reconnect catch-up is NOT running (last attempt${c.lastRunAt ? ` ${c.lastRunAt}` : ""}): ${c.error} — mentions posted during a rollover are being dropped`);
+    out.push(
+      `reconnect catch-up is NOT running (last attempt${c.lastRunAt ? ` ${c.lastRunAt}` : ""}): ${c.error} — mentions posted during a rollover are being dropped`,
+    );
   }
   if (Array.isArray(c.missingScopes) && c.missingScopes.length > 0) {
-    out.push(`bot token is missing required Slack scopes: ${c.missingScopes.join(", ")} — reinstall the app with them (README → Slack app setup)`);
+    out.push(
+      `bot token is missing required Slack scopes: ${c.missingScopes.join(", ")} — reinstall the app with them (README → Slack app setup)`,
+    );
   }
   return out;
 }
@@ -102,14 +122,19 @@ export function catchUpWarnings(payload) {
 export function decide({ health, apps }, { force = false } = {}) {
   const problems = [];
   const warnings = health?.ok === true ? catchUpWarnings(health.payload) : [];
-  const warningText = warnings.length > 0 ? `\n  WARNING (not blocking — deploy may be the fix):\n${warnings.map((w) => `  - ${w}`).join("\n")}` : "";
+  const warningText =
+    warnings.length > 0
+      ? `\n  WARNING (not blocking — deploy may be the fix):\n${warnings.map((w) => `  - ${w}`).join("\n")}`
+      : "";
 
   if (!health || health.ok !== true) {
     problems.push(`bot not consulted: ${health?.error ?? "unknown error"}`);
   } else {
     const p = health.payload;
     if (!p || typeof p !== "object") {
-      problems.push(`bot answered /healthz without JSON (${JSON.stringify(p).slice(0, 40)}) — the running Worker predates the preflight; deploy once with SWITCHBOARD_DEPLOY_FORCE=1`);
+      problems.push(
+        `bot answered /healthz without JSON (${JSON.stringify(p).slice(0, 40)}) — the running Worker predates the preflight; deploy once with SWITCHBOARD_DEPLOY_FORCE=1`,
+      );
     } else {
       if (!Number.isInteger(p.inFlight) || p.inFlight < 0) {
         problems.push(`bot reports an impossible inFlight=${JSON.stringify(p.inFlight)} (counter bug or old Worker)`);
@@ -117,7 +142,9 @@ export function decide({ health, apps }, { force = false } = {}) {
         problems.push(`${p.inFlight} run(s) in flight — a rollout would kill them`);
       }
       if (p.draining === true) {
-        problems.push("bot is already draining from a previous deploy — a second rollout replaces the draining instance at once (the 2026-08-29 incident)");
+        problems.push(
+          "bot is already draining from a previous deploy — a second rollout replaces the draining instance at once (the 2026-08-29 incident)",
+        );
       }
     }
   }
@@ -127,14 +154,22 @@ export function decide({ health, apps }, { force = false } = {}) {
   } else {
     const app = Array.isArray(apps.payload) ? apps.payload.find((a) => a?.name === APP_NAME) : undefined;
     if (!app) {
-      problems.push(`container application ${APP_NAME} not in \`wrangler containers list\` (wrong account, or renamed class?)`);
+      problems.push(
+        `container application ${APP_NAME} not in \`wrangler containers list\` (wrong account, or renamed class?)`,
+      );
     } else if (!SETTLED_APP_STATES.has(app.state)) {
       problems.push(`container rollout in progress: state=${app.state} — wait until it is active`);
     }
   }
 
   if (problems.length === 0) {
-    return { allow: true, forced: false, problems, warnings, message: `preflight ok: no runs in flight, not draining, container application settled${warningText}` };
+    return {
+      allow: true,
+      forced: false,
+      problems,
+      warnings,
+      message: `preflight ok: no runs in flight, not draining, container application settled${warningText}`,
+    };
   }
   const detail = problems.map((p) => `  - ${p}`).join("\n");
   if (force) {

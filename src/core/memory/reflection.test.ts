@@ -238,7 +238,13 @@ describe("parseReflection", () => {
   it("redacts secrets in fact text, summary, and keywords", () => {
     const out = parseReflection(
       JSON.stringify({
-        facts: [{ text: "the token is ghp_abcdefghijklmnopqrstuvwxyz0123", keywords: ["sk-ant-abcdefghijklmnopqrst"], confidence: 1 }],
+        facts: [
+          {
+            text: "the token is ghp_abcdefghijklmnopqrstuvwxyz0123",
+            keywords: ["sk-ant-abcdefghijklmnopqrst"],
+            confidence: 1,
+          },
+        ],
         summary: "set ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz",
       }),
       PROVENANCE,
@@ -328,7 +334,9 @@ describe("reflect (one extractor call → store.write)", () => {
     expect(active.map((r) => r.text)).not.toContain("the deploy command is npm run deploy");
     const summary = await store.retrieve({ scopeKey: SCOPE, query: "deploy command changed ship", limit: 10 });
     expect(summary.some((r) => r.kind === "summary")).toBe(true);
-    expect(active.every((r) => r.sourceThreadKey === PROVENANCE.sourceThreadKey && r.sourceRunId === "run-1")).toBe(true);
+    expect(active.every((r) => r.sourceThreadKey === PROVENANCE.sourceThreadKey && r.sourceRunId === "run-1")).toBe(
+      true,
+    );
   });
 
   it("an unparseable reply writes nothing and resolves (never throws) — one call, no retry", async () => {
@@ -349,7 +357,9 @@ describe("reflect (one extractor call → store.write)", () => {
       },
     };
     const warnings: string[] = [];
-    await expect(reflect({ ...base, provider, store: new InMemoryMemoryStore(), onWarn: (m) => warnings.push(m) })).resolves.toBeUndefined();
+    await expect(
+      reflect({ ...base, provider, store: new InMemoryMemoryStore(), onWarn: (m) => warnings.push(m) }),
+    ).resolves.toBeUndefined();
     expect(warnings.join("\n")).toContain("rate limited");
   });
 
@@ -442,7 +452,10 @@ describe("reflect — repo / channel routing (#253)", () => {
     expect((await s1.list(USER, 10)).map((r) => r.text)).toContain("S1");
     expect((await s1.list(REPO, 10)).map((r) => r.text)).not.toContain("S1");
 
-    const channelOnly = JSON.stringify({ facts: [{ text: "this channel coordinates deploys", confidence: 0.9, audience: "channel" }], summary: "S2" });
+    const channelOnly = JSON.stringify({
+      facts: [{ text: "this channel coordinates deploys", confidence: 0.9, audience: "channel" }],
+      summary: "S2",
+    });
     const s2 = new InMemoryMemoryStore();
     await reflect({ ...base, provider: fakeProvider(channelOnly), store: s2 });
     expect((await s2.list(CHAN, 10)).map((r) => r.text)).toContain("S2");
@@ -464,7 +477,14 @@ describe("reflect — repo / channel routing (#253)", () => {
     const stale = existing({ id: "mem:repo:acme/api:0", scopeKey: REPO, text: "acme/api deploys with make ship" });
     const provider = fakeProvider(
       JSON.stringify({
-        facts: [{ text: "acme/api deploys with make release", confidence: 0.9, audience: "org", supersedes: "mem:repo:acme/api:0" }],
+        facts: [
+          {
+            text: "acme/api deploys with make release",
+            confidence: 0.9,
+            audience: "org",
+            supersedes: "mem:repo:acme/api:0",
+          },
+        ],
         summary: "",
       }),
     );
@@ -525,9 +545,14 @@ describe("reflect — user scope routing (#107 PR B)", () => {
     expect(provider.requests).toHaveLength(1); // still ONE extractor call
     const org = await store.retrieve({ scopeKey: SCOPE, query: "deploy preview vitest ran", limit: 10 });
     const user = await store.retrieve({ scopeKey: USER, query: "deploy preview vitest ran", limit: 10 });
-    expect(org.map((r) => r.text).sort()).toEqual(["CI runs vitest on deploy", "the deploy command is npm run deploy"].sort());
+    expect(org.map((r) => r.text).sort()).toEqual(
+      ["CI runs vitest on deploy", "the deploy command is npm run deploy"].sort(),
+    );
     expect(user.map((r) => r.text).sort()).toEqual(
-      ["User asked for a deploy; it ran with a preview link.", "this user wants a deploy preview link before prod"].sort(),
+      [
+        "User asked for a deploy; it ran with a preview link.",
+        "this user wants a deploy preview link before prod",
+      ].sort(),
     );
     expect(user.every((r) => r.id.startsWith("mem:user:slack:U1:"))).toBe(true);
     expect(user.every((r) => r.sourceThreadKey === PROVENANCE.sourceThreadKey)).toBe(true);
@@ -561,7 +586,11 @@ describe("reflect — user scope routing (#107 PR B)", () => {
   });
 
   it("shows the extractor the user's existing records too, and a supersede lands in the superseded record's scope", async () => {
-    const stale = existing({ id: "mem:user:slack:U1:0", scopeKey: USER, text: "this user wants deploys announced in #ops" });
+    const stale = existing({
+      id: "mem:user:slack:U1:0",
+      scopeKey: USER,
+      text: "this user wants deploys announced in #ops",
+    });
     const provider = fakeProvider(
       JSON.stringify({
         facts: [
@@ -615,12 +644,21 @@ describe("reflect — write gate (authorization R11, deliberate change c)", () =
     actor: runActor,
     ...PROVENANCE,
   };
-  const texts = async (store: InMemoryMemoryStore, scope: string) => (await store.list(scope, 10)).map((r) => r.text).sort();
+  const texts = async (store: InMemoryMemoryStore, scope: string) =>
+    (await store.list(scope, 10)).map((r) => r.text).sort();
 
   it("a dm-origin org fact is written to the user scope, never org — and its summary follows it", async () => {
     const store = new InMemoryMemoryStore();
     const warnings: string[] = [];
-    await reflect({ ...base, scopeKeys: { org: SCOPE, user: USER, channel: "channel:slack:D1" }, actor: reflectionActor(PRINCIPAL, { channelId: "slack:D1" }), originChannelVisibility: "dm", provider: fakeProvider(reply), store, onWarn: (m) => warnings.push(m) });
+    await reflect({
+      ...base,
+      scopeKeys: { org: SCOPE, user: USER, channel: "channel:slack:D1" },
+      actor: reflectionActor(PRINCIPAL, { channelId: "slack:D1" }),
+      originChannelVisibility: "dm",
+      provider: fakeProvider(reply),
+      store,
+      onWarn: (m) => warnings.push(m),
+    });
     expect(await texts(store, SCOPE)).toEqual([]);
     expect(await texts(store, USER)).toEqual(["Standup time was confirmed.", "the org standup is at 10am"]);
     expect(await texts(store, "channel:slack:D1")).toEqual([]);
@@ -639,7 +677,13 @@ describe("reflect — write gate (authorization R11, deliberate change c)", () =
     expect(await texts(withChannel, USER)).toEqual([]);
 
     const noChannel = new InMemoryMemoryStore();
-    await reflect({ ...base, scopeKeys: { org: SCOPE, user: USER, repo: REPO }, originChannelVisibility: "private", provider: fakeProvider(reply), store: noChannel });
+    await reflect({
+      ...base,
+      scopeKeys: { org: SCOPE, user: USER, repo: REPO },
+      originChannelVisibility: "private",
+      provider: fakeProvider(reply),
+      store: noChannel,
+    });
     expect(await texts(noChannel, SCOPE)).toEqual([]);
     expect(await texts(noChannel, USER)).toEqual(["Standup time was confirmed.", "the org standup is at 10am"]);
   });
@@ -655,7 +699,13 @@ describe("reflect — write gate (authorization R11, deliberate change c)", () =
     for (const origin of ["public", "machine"] as const) {
       const store = new InMemoryMemoryStore();
       const warnings: string[] = [];
-      await reflect({ ...base, originChannelVisibility: origin, provider: fakeProvider(reply), store, onWarn: (m) => warnings.push(m) });
+      await reflect({
+        ...base,
+        originChannelVisibility: origin,
+        provider: fakeProvider(reply),
+        store,
+        onWarn: (m) => warnings.push(m),
+      });
       expect(await texts(store, SCOPE), origin).toEqual(["Standup time was confirmed.", "the org standup is at 10am"]);
       expect(warnings, origin).toEqual([]);
     }
@@ -691,10 +741,20 @@ describe("reflect — write gate (authorization R11, deliberate change c)", () =
 
   it("a write the table denies for any other reason is dropped with the reason — never rerouted wider, never logged with the fact text", async () => {
     // The run's own channel scope, but an actor that is NOT a member of it (the dispatcher's `reflectionActor` makes this impossible; the gate still holds).
-    const channelFact = JSON.stringify({ facts: [{ text: "this channel coordinates deploys", confidence: 0.9, audience: "channel" }], summary: "" });
+    const channelFact = JSON.stringify({
+      facts: [{ text: "this channel coordinates deploys", confidence: 0.9, audience: "channel" }],
+      summary: "",
+    });
     const store = new InMemoryMemoryStore();
     const warnings: string[] = [];
-    await reflect({ ...base, actor: PRINCIPAL, originChannelVisibility: "public", provider: fakeProvider(channelFact), store, onWarn: (m) => warnings.push(m) });
+    await reflect({
+      ...base,
+      actor: PRINCIPAL,
+      originChannelVisibility: "public",
+      provider: fakeProvider(channelFact),
+      store,
+      onWarn: (m) => warnings.push(m),
+    });
     expect(await texts(store, CHAN)).toEqual([]);
     expect(await texts(store, SCOPE)).toEqual([]);
     expect(await texts(store, USER)).toEqual([]);
@@ -705,14 +765,26 @@ describe("reflect — write gate (authorization R11, deliberate change c)", () =
   it("with no narrower scope allowed, the fact is dropped and said so — never written to org", async () => {
     const store = new InMemoryMemoryStore();
     const warnings: string[] = [];
-    await reflect({ ...base, scopeKeys: { org: SCOPE }, originChannelVisibility: "private", provider: fakeProvider(reply), store, onWarn: (m) => warnings.push(m) });
+    await reflect({
+      ...base,
+      scopeKeys: { org: SCOPE },
+      originChannelVisibility: "private",
+      provider: fakeProvider(reply),
+      store,
+      onWarn: (m) => warnings.push(m),
+    });
     expect(await texts(store, SCOPE)).toEqual([]);
     expect(warnings).toEqual([expect.stringContaining("org (origin-visibility)")]);
     expect(warnings[0]).toContain("2 candidate(s) dropped");
   });
 
   it("reflectionActor: the run's principal holding the run's own channel and repo as memberships — no action added, `all` left alone, nothing else changed", () => {
-    const plain = actor("user", "slack:U1", { actions: new Set(["memory:write"]), channels: new Set(["slack:C9"]) }, { origin: { channelId: "slack:C1", threadKey: "slack:C1:1" } });
+    const plain = actor(
+      "user",
+      "slack:U1",
+      { actions: new Set(["memory:write"]), channels: new Set(["slack:C9"]) },
+      { origin: { channelId: "slack:C1", threadKey: "slack:C1:1" } },
+    );
     const scoped = reflectionActor(plain, { channelId: "slack:C1", repo: "acme/api" });
     expect(scoped.grants.actions).toEqual(new Set(["memory:write"]));
     expect(scoped.grants.channels).toEqual(new Set(["slack:C9", "slack:C1"]));

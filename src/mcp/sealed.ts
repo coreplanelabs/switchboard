@@ -23,7 +23,9 @@ const IV_BYTES = 12;
 export function importCredentialKey(raw: string, keyId = "k1"): CredentialKey {
   const bytes = fromBase64(raw.trim());
   if (!bytes || bytes.byteLength !== MCP_KEY_BYTES) {
-    throw new Error(`MCP credential key must be exactly ${MCP_KEY_BYTES} bytes, base64-encoded (openssl rand -base64 32)`);
+    throw new Error(
+      `MCP credential key must be exactly ${MCP_KEY_BYTES} bytes, base64-encoded (openssl rand -base64 32)`,
+    );
   }
   const key = crypto.subtle.importKey("raw", buf(bytes), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
   return { keyId, key };
@@ -35,10 +37,19 @@ function buf(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer as ArrayBuffer;
 }
 
-export async function sealCredential(k: CredentialKey, serverId: string, plaintext: string, now: number): Promise<SealedCredential> {
+export async function sealCredential(
+  k: CredentialKey,
+  serverId: string,
+  plaintext: string,
+  now: number,
+): Promise<SealedCredential> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: buf(iv), additionalData: buf(new TextEncoder().encode(serverId)) }, await k.key, buf(new TextEncoder().encode(plaintext))),
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: buf(iv), additionalData: buf(new TextEncoder().encode(serverId)) },
+      await k.key,
+      buf(new TextEncoder().encode(plaintext)),
+    ),
   );
   const out = new Uint8Array(iv.byteLength + ct.byteLength);
   out.set(iv, 0);
@@ -48,14 +59,19 @@ export async function sealCredential(k: CredentialKey, serverId: string, plainte
 
 /** Throws on a wrong key, a tampered blob, or a blob sealed for another server. */
 export async function openCredential(k: CredentialKey, sealed: SealedCredential): Promise<string> {
-  if (sealed.keyId !== k.keyId) throw new Error(`credential sealed under key "${sealed.keyId}", this process holds "${k.keyId}"`);
+  if (sealed.keyId !== k.keyId)
+    throw new Error(`credential sealed under key "${sealed.keyId}", this process holds "${k.keyId}"`);
   const bytes = fromBase64(sealed.sealed);
   if (!bytes || bytes.byteLength <= IV_BYTES) throw new Error("credential blob is malformed");
   const iv = bytes.slice(0, IV_BYTES);
   const ct = bytes.slice(IV_BYTES);
   let pt: ArrayBuffer;
   try {
-    pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: buf(iv), additionalData: buf(new TextEncoder().encode(sealed.serverId)) }, await k.key, buf(ct));
+    pt = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: buf(iv), additionalData: buf(new TextEncoder().encode(sealed.serverId)) },
+      await k.key,
+      buf(ct),
+    );
   } catch {
     throw new Error("credential could not be opened (wrong key or tampered blob)");
   }

@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { closeMarker, declaredRegions, openMarker, replaceRegion } from "./regions.js";
 
-const page = ["# Reference", "", "prose above", "", openMarker("things"), "", "| old |", "", closeMarker("things"), "", "prose below", ""].join("\n");
+const page = [
+  "# Reference",
+  "",
+  "prose above",
+  "",
+  openMarker("things"),
+  "",
+  "| old |",
+  "",
+  closeMarker("things"),
+  "",
+  "prose below",
+  "",
+].join("\n");
 
 describe("replaceRegion", () => {
   it("replaces only the region body and leaves every byte outside the markers alone", () => {

@@ -52,7 +52,9 @@ export function planSecretPuts(manifest, worker, hasFile, only) {
         return def;
       })
     : mine;
-  const puts = [], skippedOptional = [], missing = [];
+  const puts = [],
+    skippedOptional = [],
+    missing = [];
   for (const s of wanted) {
     if (hasFile(s.name)) puts.push(s.name);
     else if (s.optional) skippedOptional.push(s.name);
@@ -85,14 +87,21 @@ function main(argv) {
   }
   for (const n of plan.skippedOptional) console.log(`skip  ${n} (optional; no ${fileFor(n)})`);
   if (plan.missing.length) {
-    console.error(`refusing: no local value for required ${worker} secret(s) ${plan.missing.join(", ")} — expected ${SECRETS_DIR}/<NAME> (1Password item "Switchboard: <NAME>"). Nothing uploaded.`);
+    console.error(
+      `refusing: no local value for required ${worker} secret(s) ${plan.missing.join(", ")} — expected ${SECRETS_DIR}/<NAME> (1Password item "Switchboard: <NAME>"). Nothing uploaded.`,
+    );
     return 1;
   }
   for (const n of plan.puts) {
     console.log(`put   ${n} → ${WORKERS[worker]}`);
-    const r = spawnSync(wranglerBin(), ["secret", "put", n], { input: readFileSync(fileFor(n)), stdio: ["pipe", "inherit", "inherit"] });
+    const r = spawnSync(wranglerBin(), ["secret", "put", n], {
+      input: readFileSync(fileFor(n)),
+      stdio: ["pipe", "inherit", "inherit"],
+    });
     if (r.status !== 0) {
-      console.error(`wrangler secret put ${n} failed (exit ${r.status}); stopping — ${plan.puts.slice(plan.puts.indexOf(n) + 1).join(", ") || "nothing"} not attempted`);
+      console.error(
+        `wrangler secret put ${n} failed (exit ${r.status}); stopping — ${plan.puts.slice(plan.puts.indexOf(n) + 1).join(", ") || "nothing"} not attempted`,
+      );
       return r.status ?? 1;
     }
   }
@@ -100,4 +109,5 @@ function main(argv) {
   return 0;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exit(main(process.argv.slice(2)));
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
+  process.exit(main(process.argv.slice(2)));

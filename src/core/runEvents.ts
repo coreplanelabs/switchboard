@@ -86,14 +86,7 @@ export function sanitizeActor(actor: RunActor): RunActor {
  *  settles a round: caps end the pipeline BETWEEN rounds, visible as the
  *  absence of a next `started` boundary plus the answer's cap report. */
 export type ShipRoundOutcome =
-  | "started"
-  | "pr_opened"
-  | "completed"
-  | "approve"
-  | "request_changes"
-  | "no_verdict"
-  | "aborted"
-  | "stopped";
+  "started" | "pr_opened" | "completed" | "approve" | "request_changes" | "no_verdict" | "aborted" | "stopped";
 
 /**
  * One event in a run's stream. `seq` is stamped by `RunRegistry.publish` — a
@@ -132,7 +125,15 @@ export type RunEvent =
     }
   /** `mode` rides only on the stop notes (`stop_requested` / `stopped`); `actor`
    *  only on a `stop_requested` published through `RunsService.stopRun`. */
-  | { type: "run_note"; kind: RunNoteKind; summary: string; mode?: StopMode; actor?: RunActor; seq?: number; at?: number }
+  | {
+      type: "run_note";
+      kind: RunNoteKind;
+      summary: string;
+      mode?: StopMode;
+      actor?: RunActor;
+      seq?: number;
+      at?: number;
+    }
   /** The run's final answer — the same text the channel reply/PR post is
    *  projected from, redacted like every event (NOT capped: the run record is
    *  the source of truth, the summaries are). Published by the dispatcher once
@@ -175,14 +176,33 @@ export type RunEvent =
    *  `at - startedAt === durationMs`. `usage` rides only when the provider
    *  reported token counts. Shape follows the OTel GenAI `chat` span (duration,
    *  stop reason, input/output tokens) so it exports without translation. */
-    | { type: "turn"; startedAt: number; durationMs: number; stopReason: CompletionResult["stopReason"]; usage?: TokenUsage; seq?: number; at?: number }
+  | {
+      type: "turn";
+      startedAt: number;
+      durationMs: number;
+      stopReason: CompletionResult["stopReason"];
+      usage?: TokenUsage;
+      seq?: number;
+      at?: number;
+    }
   /** What the run is about (live-view item 19): the resolved agent and model,
    *  and — for a repo run — the repo, ref, PR number and PR head as resolved
    *  BEFORE the first model turn (`RepoContext`). Published by the dispatcher
    *  right after `input`, once per run, so the run page can head its Request
    *  block with linked `owner/repo · ref · #PR · sha`. Additive: every
    *  consumer that only knows the other types keeps working. */
-  | { type: "run_meta"; agent: string; model: string; effort?: string; repo?: string; ref?: string; pr?: number; headSha?: string; seq?: number; at?: number }
+  | {
+      type: "run_meta";
+      agent: string;
+      model: string;
+      effort?: string;
+      repo?: string;
+      ref?: string;
+      pr?: number;
+      headSha?: string;
+      seq?: number;
+      at?: number;
+    }
   /** A skill was loaded into the model's context (features/skills.md). Emitted
    *  by the `use_skill` tool on a successful load — alongside, not instead of,
    *  its `tool_call`/`tool_result` pair — so skill use is a first-class fact in
@@ -210,7 +230,16 @@ export type RunEvent =
    *  error and not `isError`), how long, and how many result bytes. Never the
    *  arguments or the body — those ride the redacted `tool_result.output`
    *  like every tool's. Additive: unknown → ignored. */
-  | { type: "mcp_tool_use"; server: string; tool: string; ok: boolean; durationMs: number; bytes: number; seq?: number; at?: number }
+  | {
+      type: "mcp_tool_use";
+      server: string;
+      tool: string;
+      ok: boolean;
+      durationMs: number;
+      bytes: number;
+      seq?: number;
+      at?: number;
+    }
   /** A review run's reading diff (features/reading-diff.md): the change as a
    *  reviewer reads it. The baseline artifact is the full `git diff`
    *  (`poweredBy: "git"`, guaranteed on every PR review); with the meat
@@ -266,7 +295,10 @@ export type RunEvent =
 // legitimate output (SHAs, UUIDs, digests, version numbers all pass through).
 const REDACT: Array<{ re: RegExp; replace: string }> = [
   // PEM private keys — full block (incl. \n-escaped inside JSON) and a bare header.
-  { re: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g, replace: "«redacted-private-key»" },
+  {
+    re: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g,
+    replace: "«redacted-private-key»",
+  },
   { re: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g, replace: "«redacted-private-key»" },
   // URL / connection-string basic-auth: scheme://user:password@host
   // Anchored to the start of a scheme-character run (not `\b`): one attempt per
@@ -295,7 +327,8 @@ const REDACT: Array<{ re: RegExp; replace: string }> = [
 // secret. Matched case-insensitively against each component, so `AWS_SECRET_
 // ACCESS_KEY` (…SECRET, …KEY) and `STRIPE_WEBHOOK_SECRET` are caught while
 // `PORT`, `REACT_VERSION`, `DATABASE_URL`, `MONKEY_BARS` are not.
-const SECRET_COMPONENT = /^(secret|token|password|passwd|pwd|credential|credentials|key|apikey|auth|session|sessionid|cookie)$/i;
+const SECRET_COMPONENT =
+  /^(secret|token|password|passwd|pwd|credential|credentials|key|apikey|auth|session|sessionid|cookie)$/i;
 
 /** Redact the VALUE of any `<name> = value` / `<name>: value` where the name has
  *  a secret-marking component. Handles quoted values (with spaces) and unquoted,
@@ -367,10 +400,15 @@ export function summarizeToolResult(output: string): string {
 function summarizeClean(clean: string): string {
   const trimmed = clean.trim();
   if (trimmed === "") return "(no output)";
-  const firstLine = trimmed.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
+  const firstLine =
+    trimmed
+      .split("\n")
+      .find((l) => l.trim().length > 0)
+      ?.trim() ?? "";
   const head = firstLine.length > SUMMARY_CAP ? `${firstLine.slice(0, SUMMARY_CAP)}…` : firstLine;
   const lineCount = trimmed.split("\n").length;
-  const more = trimmed.length > head.length ? ` (${trimmed.length} chars${lineCount > 1 ? `, ${lineCount} lines` : ""})` : "";
+  const more =
+    trimmed.length > head.length ? ` (${trimmed.length} chars${lineCount > 1 ? `, ${lineCount} lines` : ""})` : "";
   return head + more;
 }
 

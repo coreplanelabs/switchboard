@@ -12,7 +12,11 @@ describe("buildMemoryStore", () => {
   it("memory disabled/absent → undefined (the dispatcher then uses NullMemoryStore)", () => {
     const warnings: string[] = [];
     expect(buildMemoryStore(undefined, {}, (m) => warnings.push(m))).toBeUndefined();
-    expect(buildMemoryStore({ enabled: false, worker: { baseUrl: "https://m" } }, { MEMORY_TOKEN: "t" }, (m) => warnings.push(m))).toBeUndefined();
+    expect(
+      buildMemoryStore({ enabled: false, worker: { baseUrl: "https://m" } }, { MEMORY_TOKEN: "t" }, (m) =>
+        warnings.push(m),
+      ),
+    ).toBeUndefined();
     expect(warnings).toEqual([]);
   });
 

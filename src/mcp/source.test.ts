@@ -4,11 +4,18 @@ import { CompositeMcpToolSource, StaticMcpToolSource, mcpGuidanceBlock } from ".
 import type { McpServerSpec } from "./types.js";
 
 const linear: McpServerSpec = { name: "linear", url: "https://mcp.linear.app/mcp", agents: ["general", "research"] };
-const github: McpServerSpec = { name: "github", url: "https://api.githubcopilot.com/mcp/", agents: ["general", "coding", "review"] };
+const github: McpServerSpec = {
+  name: "github",
+  url: "https://api.githubcopilot.com/mcp/",
+  agents: ["general", "coding", "review"],
+};
 
 function clients() {
   const byName: Record<string, InMemoryMcpClient> = {
-    linear: new InMemoryMcpClient([{ name: "search_issues", inputSchema: {} }, { name: "create_issue", inputSchema: {} }]),
+    linear: new InMemoryMcpClient([
+      { name: "search_issues", inputSchema: {} },
+      { name: "create_issue", inputSchema: {} },
+    ]),
     github: new InMemoryMcpClient([{ name: "get_pr", inputSchema: {}, annotations: { readOnlyHint: true } }]),
   };
   return { byName, factory: (s: McpServerSpec) => byName[s.name] };
@@ -19,7 +26,11 @@ describe("StaticMcpToolSource", () => {
     const { factory } = clients();
     const src = new StaticMcpToolSource([linear, github], { factory });
     const general = await src.toolsFor("general", { userId: "slack:U1" });
-    expect(general.tools.map((t) => t.name).sort()).toEqual(["mcp__github__get_pr", "mcp__linear__create_issue", "mcp__linear__search_issues"]);
+    expect(general.tools.map((t) => t.name).sort()).toEqual([
+      "mcp__github__get_pr",
+      "mcp__linear__create_issue",
+      "mcp__linear__search_issues",
+    ]);
     expect(general.servers).toEqual([
       { server: "linear", toolCount: 2 },
       { server: "github", toolCount: 1 },
@@ -111,19 +122,31 @@ describe("CompositeMcpToolSource (config wins over registry, item 1)", () => {
     const a = new StaticMcpToolSource([{ name: "linear", url: "https://a.example/mcp", agents: ["general"] }], {
       factory: () => new InMemoryMcpClient([{ name: "search_issues", inputSchema: {} }]),
     });
-    const b = new StaticMcpToolSource([{ id: "user:slack:U1/linear", name: "linear", url: "https://b.example/mcp", agents: ["general"] }, { name: "vanta", url: "https://v.example/mcp", agents: ["general"] }], {
-      factory: () => new InMemoryMcpClient([{ name: "search_issues", inputSchema: {} }]),
-    });
+    const b = new StaticMcpToolSource(
+      [
+        { id: "user:slack:U1/linear", name: "linear", url: "https://b.example/mcp", agents: ["general"] },
+        { name: "vanta", url: "https://v.example/mcp", agents: ["general"] },
+      ],
+      {
+        factory: () => new InMemoryMcpClient([{ name: "search_issues", inputSchema: {} }]),
+      },
+    );
     const out = await new CompositeMcpToolSource([a, b]).toolsFor("general", { userId: "slack:U1" });
     expect(out.tools.map((t) => t.name)).toEqual(["mcp__linear__search_issues", "mcp__vanta__search_issues"]);
     expect(out.servers).toEqual([
       { server: "linear", toolCount: 1 },
-      { server: "linear", unavailable: "name shadowed by a server from an earlier source (config wins over registry, org over user)" },
+      {
+        server: "linear",
+        unavailable: "name shadowed by a server from an earlier source (config wins over registry, org over user)",
+      },
       { server: "vanta", toolCount: 1 },
     ]);
   });
 
   it("an empty source list is an empty run", async () => {
-    expect(await new CompositeMcpToolSource([]).toolsFor("general", { userId: "u" })).toEqual({ tools: [], servers: [] });
+    expect(await new CompositeMcpToolSource([]).toolsFor("general", { userId: "u" })).toEqual({
+      tools: [],
+      servers: [],
+    });
   });
 });

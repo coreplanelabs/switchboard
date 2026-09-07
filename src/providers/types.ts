@@ -113,9 +113,7 @@ export interface ProviderConfig {
 export function parseModelRef(ref: string): { provider: string; model: string } {
   const i = ref.indexOf("/");
   if (i === -1) {
-    throw new Error(
-      `Model "${ref}" must be qualified as "<provider>/<model>", e.g. "anthropic/claude-opus-5"`,
-    );
+    throw new Error(`Model "${ref}" must be qualified as "<provider>/<model>", e.g. "anthropic/claude-opus-5"`);
   }
   return { provider: ref.slice(0, i), model: ref.slice(i + 1) };
 }
