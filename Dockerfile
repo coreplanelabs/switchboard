@@ -1,7 +1,7 @@
 # Switchboard — single-process Slack bot (Socket Mode, no inbound port needed).
 # git + gh are installed because the coding/review agents shell out to them.
 
-FROM node:22-slim AS build
+FROM node:26-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -15,7 +15,7 @@ COPY web ./web
 RUN cd web && npm run build
 RUN npm run build && npm prune --omit=dev
 
-FROM node:22-slim
+FROM node:26-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git curl ca-certificates \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
