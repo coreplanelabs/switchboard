@@ -2,7 +2,7 @@
 # coding/review agents work out of the box.
 # The tag MUST match the @cloudflare/sandbox version in package.json exactly
 # (no 'latest' tag exists) — bump both together.
-FROM docker.io/cloudflare/sandbox:0.3.7
+FROM docker.io/cloudflare/sandbox:0.12.9
 USER root
 # The SDK's container server kills any command after COMMAND_TIMEOUT_MS
 # (default 30s) — far too short for clones, installs, and test runs. exec()
