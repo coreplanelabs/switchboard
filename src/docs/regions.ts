@@ -17,8 +17,8 @@
  *  markdown knows what wrote the block and how to change it. */
 export const REGION_NOTE = "npm run docs:gen — generated from the code, do not edit by hand";
 
-export function openMarker(name: string): string {
-  return `<!-- generated:${name} · ${REGION_NOTE} -->`;
+export function openMarker(name: string, note: string = REGION_NOTE): string {
+  return `<!-- generated:${name} · ${note} -->`;
 }
 
 export function closeMarker(name: string): string {
@@ -38,17 +38,22 @@ function escapeRegExp(s: string): string {
 export type RegionOutcome = { ok: true; text: string; changed: boolean } | { ok: false; problem: string };
 
 /** Replace one region's body. The markers themselves are rewritten too, so the
- *  note text stays current. A missing or unclosed marker is a problem, never a
- *  silent no-op — a region that quietly stopped being generated is the exact
- *  drift this mechanism exists to prevent. */
-export function replaceRegion(text: string, name: string, body: string): RegionOutcome {
+ *  note text stays current (`note` names the generator that owns the region —
+ *  the docs tables and the AGENTS.md command table have different ones). A
+ *  missing or unclosed marker is a problem, never a silent no-op — a region
+ *  that quietly stopped being generated is the exact drift this mechanism
+ *  exists to prevent. */
+export function replaceRegion(text: string, name: string, body: string, note: string = REGION_NOTE): RegionOutcome {
   const open = openPattern(name).exec(text);
   if (!open)
-    return { ok: false, problem: `no opening marker for region '${name}' (expected a line ${openMarker(name)})` };
+    return {
+      ok: false,
+      problem: `no opening marker for region '${name}' (expected a line ${openMarker(name, note)})`,
+    };
   const close = closeMarker(name);
   const closeAt = text.indexOf(close, open.index + open[0].length);
   if (closeAt === -1) return { ok: false, problem: `region '${name}' is never closed (expected a line ${close})` };
-  const rendered = `${openMarker(name)}\n\n${body.trim()}\n\n${close}`;
+  const rendered = `${openMarker(name, note)}\n\n${body.trim()}\n\n${close}`;
   const next = text.slice(0, open.index) + rendered + text.slice(closeAt + close.length);
   return { ok: true, text: next, changed: next !== text };
 }

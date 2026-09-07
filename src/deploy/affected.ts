@@ -40,7 +40,7 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
   },
   {
     rule: "repo metadata",
-    test: /^(\.gitignore|\.nvmrc|\.env\.example|LICENSE|NOTICE|docker-compose\.yml|fly\.toml|tsconfig\.scripts\.json|release-please-config\.json|\.release-please-manifest\.json|switchboard\.png)$/,
+    test: /^(\.gitignore|\.nvmrc|\.env\.example|LICENSE|NOTICE|docker-compose\.yml|fly\.toml|tsconfig\.scripts\.json|release-please-config\.json|\.release-please-manifest\.json|project\.json|switchboard\.png)$/,
   },
   { rule: "lint and format config", test: /^(\.prettierignore|\.prettierrc(\.json)?|eslint\.config\.[cm]?js)$/ },
   // One npm workspace, one lockfile (#496): a per-workspace lockfile in a diff

@@ -1,0 +1,132 @@
+{
+  "$comment": "The one place the project says who it is. Everything that names the project, its home, its docs, or its contact reads this file or is checked against it (npm run check:project-facts). Change a value here and the check names every copy that has to follow.",
+  "name": "switchboard",
+  "displayName": "Switchboard",
+  "organization": "coreplanelabs",
+  "repository": "https://github.com/coreplanelabs/switchboard",
+  "docs": "https://docs.switchboard.coreplanelabs.dev",
+  "contact": "dev@coreplane.ai",
+  "steward": { "name": "Coreplane Labs", "url": "https://coreplane.ai" },
+  "commands": {
+    "$comment": "What each root npm script does and when to run it — the source of the Commands table in AGENTS.md (npm run agents:gen). A script without an entry fails agents:check, so a new script cannot ship undocumented.",
+    "verify": {
+      "does": "The whole gate: every root check, every workspace's verify, the site check — exactly what CI runs.",
+      "when": "Before requesting review. ~4 min."
+    },
+    "verify:root": {
+      "does": "The bot package's gate: consistency checks, typecheck, lint, format, tests, dist.",
+      "when": "When only the bot changed."
+    },
+    "check:consistency": {
+      "does": "The sub-second checks that keep generated and declared things equal to the code (lockfile, sandbox pairs, skills, licenses, docs tables, spec bindings, project facts, this table).",
+      "when": "After touching a generated or declared artifact; one CI leg."
+    },
+    "test": {
+      "does": "The whole vitest suite (bot, web, the plain-Node Worker tests) from one entry.",
+      "when": "Before pushing. Use `npx vitest run --changed origin/main` while working."
+    },
+    "typecheck": {
+      "does": "TypeScript over the bot and its scripts, no emit.",
+      "when": "After type-level changes; `verify:root` runs it."
+    },
+    "lint": { "does": "ESLint over the whole tree.", "when": "`npm run fix` repairs what it can." },
+    "lint:fix": { "does": "ESLint with autofix.", "when": "Part of `fix`." },
+    "format": { "does": "Prettier over the whole tree (not Markdown).", "when": "Part of `fix`." },
+    "format:check": { "does": "Prettier in check mode.", "when": "Part of `verify:root`." },
+    "fix": {
+      "does": "Regenerates every generated artifact (docs tables, this table, vendored skills) and repairs lint and formatting.",
+      "when": "Before committing; whenever `check:consistency` reports drift."
+    },
+    "build": {
+      "does": "Compiles the bot to `dist/`.",
+      "when": "`check:dist` and the Docker image run it; rarely by hand."
+    },
+    "start": { "does": "Runs the compiled bot from `dist/`.", "when": "Production entry (the container's CMD)." },
+    "dev": { "does": "Runs the bot from source with tsx.", "when": "Local development against a real Slack app." },
+    "cli": {
+      "does": "The operator CLI over the command registry (`-- <group> <verb> …`), plus `ask` to drive the full pipeline without Slack.",
+      "when": "Smoke tests, deploys, config, run history."
+    },
+    "ci:gate": {
+      "does": "Reads the `needs` context of a CI fan-out and passes only when every leg succeeded.",
+      "when": "CI only — the `bot` and `workers` gate jobs."
+    },
+    "check:lockfile": {
+      "does": "Every native package in the lockfile carries its Linux x64 and macOS arm64 variants.",
+      "when": "After any `npm install`; the fix is `rm -rf node_modules && npm install`."
+    },
+    "check:sandbox-pair": {
+      "does": "Each Worker on the `cloudflare/sandbox` image pins `@cloudflare/sandbox` to exactly its Dockerfile tag.",
+      "when": "After bumping either half of a pair."
+    },
+    "check:pr-title": {
+      "does": "Judges one PR title against Conventional Commits with the types release-please knows.",
+      "when": "`-- \"feat(scope): …\"` before opening a PR; CI's `title` check runs it."
+    },
+    "check:dist": {
+      "does": "Builds, then proves the compiled entry points and the web bundle the image needs exist.",
+      "when": "Part of `verify:root`."
+    },
+    "check:site": {
+      "does": "The docs site builds with no dead links and the pages the dashboard links to exist.",
+      "when": "After a docs change; part of `verify`."
+    },
+    "check:image": {
+      "does": "Builds the Docker image.",
+      "when": "After touching the Dockerfile or what it copies; needs Docker. Its own CI job."
+    },
+    "check:project-facts": {
+      "does": "Every copy of the project's name, repository, docs URL and contact address equals `project.json`.",
+      "when": "After editing `project.json` or a community file; part of `check:consistency`."
+    },
+    "skills:sync": {
+      "does": "Vendors the skills listed in `skills/manifest.yaml`.",
+      "when": "After changing the manifest; part of `fix`."
+    },
+    "skills:check": {
+      "does": "The vendored skills match the manifest byte for byte.",
+      "when": "Part of `check:consistency`."
+    },
+    "licenses:check": {
+      "does": "Every production dependency's license is on the allowlist.",
+      "when": "After adding a dependency."
+    },
+    "docs:gen": {
+      "does": "Writes the generated regions of the reference docs from the command registry.",
+      "when": "After changing a command, flag, route, or config key; part of `fix`."
+    },
+    "docs:check": {
+      "does": "The generated doc regions equal what the code would generate.",
+      "when": "Part of `check:consistency`."
+    },
+    "specs:check": {
+      "does": "Every `file::describe::it` proof in `features/*.md` names a real test; header paths exist; every `[gap]` links an issue.",
+      "when": "After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit."
+    },
+    "agents:gen": {
+      "does": "Writes the Commands table in AGENTS.md from `package.json` and this file.",
+      "when": "After adding or changing a script; part of `fix`."
+    },
+    "agents:check": {
+      "does": "AGENTS.md is under its size budget, its Commands table is current, and every root script is described here.",
+      "when": "Part of `check:consistency`."
+    },
+    "docs:changed": {
+      "does": "Says whether the last push touched the docs or their build (a CI job output).",
+      "when": "CI only — gates the docs deploy."
+    },
+    "deploy:targets": {
+      "does": "Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment.",
+      "when": "CI only — the `deploy targets` job."
+    },
+    "docs:dev": { "does": "Serves the docs site locally with live reload.", "when": "Writing docs." },
+    "docs:build": {
+      "does": "Builds the docs site to `docs/.vitepress/dist`.",
+      "when": "Rarely by hand; `verify -w docs` and the docs Worker's deploy run it."
+    },
+    "web:preview": {
+      "does": "Serves the dashboard bundle over fixtures for a visual check.",
+      "when": "After a `web/` change."
+    }
+  }
+}
