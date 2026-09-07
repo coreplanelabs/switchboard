@@ -111,20 +111,26 @@ jobs:
           ARGS: ${{ steps.selection.outputs.args }}
           TARGETS: ${{ inputs.targets }}
         run: |
+          # The plan files live OUTSIDE the checkout: `deploy all` refuses a
+          # working tree that is not clean (wrangler builds the current tree), and
+          # an untracked plan.json in the repo root is exactly that (the first
+          # release deploy, run 34161067561, refused itself this way).
           # shellcheck disable=SC2086 — $ARGS is a flag list built above, split on purpose
-          npm run --silent cli -- deploy plan $ARGS --allow-branch --json > plan.json
-          npm run --silent cli -- deploy plan $ARGS --allow-branch | tee plan.txt
+          npm run --silent cli -- deploy plan $ARGS --allow-branch --json > "$RUNNER_TEMP/plan.json"
+          npm run --silent cli -- deploy plan $ARGS --allow-branch | tee "$RUNNER_TEMP/plan.txt"
           {
             echo "## Production deploy — \`${GITHUB_SHA:0:7}\` (${TARGETS:-affected})"
             echo
-            if jq -e '.affected' plan.json > /dev/null; then jq -r '.affected.markdown' plan.json; echo; fi
+            if jq -e '.affected' "$RUNNER_TEMP/plan.json" > /dev/null; then jq -r '.affected.markdown' "$RUNNER_TEMP/plan.json"; echo; fi
             echo '<details><summary>plan</summary>'
             echo
             echo '```'
-            cat plan.txt
+            cat "$RUNNER_TEMP/plan.txt"
             echo '```'
             echo '</details>'
           } >> "$GITHUB_STEP_SUMMARY"
+          # Prove it: the tree `deploy all` is about to build is the commit, nothing else.
+          git status --porcelain
       - name: deploy
         env:
           ARGS: ${{ steps.selection.outputs.args }}
