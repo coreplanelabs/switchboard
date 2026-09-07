@@ -268,7 +268,16 @@ export class ResidentExecutor implements Executor {
     if (this.opts.refHint) body.refHint = this.opts.refHint;
     if (this.opts.readonly) body.readonly = true;
     if (this.opts.sha) body.sha = this.opts.sha;
-    const { status, data } = await this.call("/attach", body);
+    const answered = await this.call("/attach", body);
+    const data = answered.data;
+    // Post-validation answers stream like /exec (heartbeat whitespace then one
+    // JSON document over HTTP 200, item 59) so an attach that waits on a deps
+    // install cannot lose the connection; a streamed refusal carries its
+    // status IN the body. Pre-validation refusals (400/404) keep real statuses.
+    const status =
+      answered.status === 200 && typeof data.error === "string" && typeof data.status === "number"
+        ? data.status
+        : answered.status;
     if (status === 200) {
       if (typeof data.ref !== "string" || typeof data.sha !== "string") {
         throw new Error(`resident attach: malformed answer for ${this.opts.resource} (missing ref/sha)`);

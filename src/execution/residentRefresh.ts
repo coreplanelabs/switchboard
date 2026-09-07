@@ -142,21 +142,26 @@ export interface RefreshFailure {
  *  as long as main kept moving. A Worker-only deploy is the other way to
  *  orphan a step: the DO isolate resets, the container keeps running.
  *
- *  Steps are strictly sequential, and the build user (worker1) owns nothing
- *  else — thread work runs as worker2+ — so a live worker1 process at step
- *  start is by definition a leftover. Survivors are NAMED on stdout (the
- *  Worker log shows what was still running) before SIGKILL: SIGTERM would let
- *  npm keep writing while the clean runs. `pgrep`'s no-match exit 1 is the
- *  happy path (the `if` swallows it); a process that survives SIGKILL for 5 s
- *  fails the step — nothing may start beside it. */
-export function killStaleBuildProcessesCommand(user: string): string[] {
+ *  Scoped to the TREE the step is about to touch (`dir`): a process counts as
+ *  stale when its cwd is `dir` or below it. Steps on one tree are strictly
+ *  sequential, so a live build-user process inside that tree at step start
+ *  is by definition a leftover — while the same user's installs into OTHER
+ *  trees (the deps store runs distinct keys in parallel, item 59) are live
+ *  work this sweep must not touch. Survivors are NAMED on stdout (the Worker
+ *  log shows what was still running) before SIGKILL: SIGTERM would let npm
+ *  keep writing while the clean runs. Nothing matching is the happy path; a
+ *  process that survives SIGKILL for 5 s fails the step — nothing may start
+ *  beside it. */
+export function killStaleBuildProcessesCommand(user: string, dir: string): string[] {
+  const inTree = `case "$(readlink /proc/$p/cwd 2>/dev/null)" in ${dir}|${dir}/*) `;
   const script =
-    `stale=$(pgrep -a -u ${user}); ` +
+    `stale=""; for p in $(pgrep -u ${user}); do ${inTree}stale="$stale$p ";; esac; done; ` +
     `if [ -n "$stale" ]; then ` +
-    `echo "killing stale ${user} processes:"; echo "$stale"; ` +
-    `pkill -KILL -u ${user}; ` +
-    `i=0; while pgrep -u ${user} >/dev/null; do i=$((i+1)); ` +
-    `if [ $i -ge 50 ]; then echo "stale ${user} processes survived SIGKILL for 5s" >&2; exit 1; fi; ` +
+    `echo "killing stale ${user} processes under ${dir}:"; ps -o pid=,args= -p $(echo $stale | tr ' ' ',') 2>/dev/null; ` +
+    `kill -KILL $stale 2>/dev/null; ` +
+    `i=0; while :; do alive=""; for p in $stale; do kill -0 $p 2>/dev/null && alive="$alive$p "; done; ` +
+    `[ -z "$alive" ] && break; i=$((i+1)); ` +
+    `if [ $i -ge 50 ]; then echo "stale ${user} processes survived SIGKILL for 5s: $alive" >&2; exit 1; fi; ` +
     `sleep 0.1; done; ` +
     `fi`;
   return ["sh", "-c", script];

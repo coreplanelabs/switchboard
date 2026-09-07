@@ -50,6 +50,43 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("ResidentExecutor.attach over a heartbeat stream (#555 item 59: an attach that waits on an install must not lose the connection)", () => {
+  it("parses heartbeat whitespace then the binding, exactly like /exec", async () => {
+    stubFetch({ raw: "\n\n\n" + JSON.stringify(ATTACH_OK) });
+    const ex = new ResidentExecutor(OPTS);
+    await expect(ex.attach()).resolves.toEqual({
+      ref: "master",
+      sha: "1220b9c4",
+      workspace: ATTACH_OK.workspace,
+    });
+  });
+
+  it("a refusal streamed over HTTP 200 carries its status IN THE BODY and is handled like the same real status", async () => {
+    stubFetch({
+      status: 200,
+      raw:
+        "\n" +
+        JSON.stringify({ error: "mirror-busy: mutex not acquired within 60000ms", status: 503, reason: "mirror-busy" }),
+    });
+    const ex = new ResidentExecutor(OPTS);
+    await expect(ex.attach()).rejects.toThrow(/resident attach failed for repo:jshttp\/vary: mirror-busy/);
+  });
+
+  it('needs:"ref" streamed with status 409 is still ResidentNeedsRefError with the default branch', async () => {
+    stubFetch({ status: 200, body: { error: "needs ref", status: 409, needs: "ref", defaultRef: "master" } });
+    const ex = new ResidentExecutor(OPTS);
+    const err = await ex.attach().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ResidentNeedsRefError);
+    expect((err as ResidentNeedsRefError).defaultRef).toBe("master");
+  });
+
+  it("pre-validation refusals keep using the real HTTP status (a 404 body without `status` is still not-onboarded)", async () => {
+    stubFetch({ status: 404, body: { error: "repo:jshttp/vary is not onboarded" } });
+    const ex = new ResidentExecutor(OPTS);
+    await expect(ex.attach()).rejects.toThrow(/is not onboarded/);
+  });
+});
+
 describe("ResidentExecutor.exec", () => {
   it("parses the streamed body: leading heartbeat whitespace then one JSON document", async () => {
     const { calls } = stubFetch({

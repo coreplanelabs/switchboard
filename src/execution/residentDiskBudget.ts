@@ -27,7 +27,7 @@ import { DF_FREE_ARGV, parseDfKiB } from "./residentDisk.js";
 export interface DiskParts {
   /** `/workspace/mirror` — the bare mirror (history once). */
   mirror: number | null;
-  /** `/workspace/checkout/node_modules` — the warm dependency cache; the
+  /** `/workspace/deps` — the deps store (item 59), every installed key; the
    *  bytes a hardlinked thread tree shares are charged HERE, never to the thread. */
   deps: number | null;
   /** `/workspace/checkout` minus its node_modules: history + tree + build
@@ -62,6 +62,10 @@ export const DF_SAMPLE_ARGV = DF_FREE_ARGV;
 export interface DiskLayout {
   mirrorDir: string;
   checkoutDir: string;
+  /** The deps store (item 59): every installed lockfile key's node_modules,
+   *  the source every view hardlinks from. Measured BEFORE the checkout and
+   *  the threads so the shared inodes land on the `deps` term. */
+  depsStoreDir: string;
   /** Live bindings: the thread's top-level dir under /workspace/threads (the
    *  700 per-thread dir the eviction removes), keyed for the sample. */
   threads: ReadonlyArray<{ threadKey: string; dir: string }>;
@@ -71,17 +75,17 @@ export interface DiskLayout {
 }
 
 /** `du -xsk` over every component in the ONE order the accounting needs:
- *  mirror first, then the checkout's node_modules BEFORE the checkout itself
- *  (so `checkout` reads as history + tree, the hardlink-eligible thread cost),
- *  then each thread tree (charged only what it does not share with the
- *  checkout), then the homes. `-x` stays on the workspace filesystem; `-s`
- *  one total per argument; `-k` KiB. */
+ *  mirror first, then the deps store BEFORE the checkout (so the shared
+ *  node_modules inodes land on `deps` and `checkout` reads as history + tree +
+ *  build output, the hardlink-eligible thread cost), then each thread tree
+ *  (charged only what it does not share with the store), then the homes. `-x`
+ *  stays on the workspace filesystem; `-s` one total per argument; `-k` KiB. */
 export function duArgv(layout: DiskLayout): string[] {
   return [
     "du",
     "-xsk",
     layout.mirrorDir,
-    `${layout.checkoutDir}/node_modules`,
+    layout.depsStoreDir,
     layout.checkoutDir,
     ...layout.threads.map((t) => t.dir),
     ...layout.homes.map((h) => h.dir),
@@ -111,7 +115,7 @@ export function assembleDiskSample(input: {
 }): DiskSample {
   const { du, layout } = input;
   const get = (path: string): number | null => du.get(path) ?? null;
-  const deps = get(`${layout.checkoutDir}/node_modules`);
+  const deps = get(layout.depsStoreDir);
   const parts: DiskParts = {
     mirror: get(layout.mirrorDir),
     deps,

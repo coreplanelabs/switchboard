@@ -124,6 +124,23 @@ describe("mutableCachePaths (tool-managed paths inside a hardlinked node_modules
   });
 });
 
+describe("depCacheScript with a store-backed node_modules source (#555 item 59)", () => {
+  const script = depCacheScript("/workspace/checkout", "/wt", "worker4", {
+    nodeModulesSrc: "/workspace/deps/" + "a".repeat(64) + "/node_modules",
+  });
+  it("node_modules comes from the store entry, the build dirs still from the checkout", () => {
+    expect(script).toContain(`cp -al '/workspace/deps/${"a".repeat(64)}/node_modules' '/wt/node_modules'`);
+    expect(script).toContain(`test -d '/workspace/deps/${"a".repeat(64)}/node_modules'`);
+    expect(script).not.toContain("cp -al '/workspace/checkout/node_modules'");
+    expect(script).toContain("test -d '/workspace/checkout/dist'");
+  });
+  it("without the option the checkout stays the node_modules source (the pre-store behavior, byte for byte)", () => {
+    expect(depCacheScript("/workspace/checkout", "/wt", "worker4")).toBe(
+      depCacheScript("/workspace/checkout", "/wt", "worker4", {}),
+    );
+  });
+});
+
 describe("depCacheScript (#356 item 4: all five dirs in ONE fork, tagged output)", () => {
   const script = depCacheScript("/workspace/checkout", "/wt", "worker4");
   it("handles every cached dir, each gated on src-exists and dst-absent exactly like the old per-dir spawns", () => {
@@ -199,8 +216,20 @@ describe("mutableCacheSwapScript (the per-path rm/cp/chown swaps in ONE fork)", 
     expect(s).toContain("cp -R '/workspace/checkout/node_modules/.cache' '/wt/node_modules/.cache'");
     expect(s).toContain("cp -R '/workspace/checkout/node_modules/loader/.cache' '/wt/node_modules/loader/.cache'");
     expect(s).toContain("chown -Rh 'worker4:worker4' '/wt/node_modules/.cache'");
-    for (const step of ["deps-mutable-rm", "deps-mutable-copy", "deps-mutable-chown"])
+    for (const step of ["deps-mutable-rm", "deps-mutable-copy", "deps-mutable-chmod", "deps-mutable-chown"])
       expect(s).toContain(`err=${step}`);
+  });
+
+  it("the copy is made writable again (item 57: store entries are owner-read-only, a tool cache must be rewritable in place)", () => {
+    const s = mutableCacheSwapScript("/workspace/deps/k/node_modules", "/wt/node_modules", "worker4", [
+      "/wt/node_modules/.vite",
+    ]);
+    const copy = s.indexOf("cp -R '/workspace/deps/k/node_modules/.vite'");
+    const chmod = s.indexOf("chmod -R u+w '/wt/node_modules/.vite'");
+    const chown = s.indexOf("chown -Rh 'worker4:worker4' '/wt/node_modules/.vite'");
+    expect(copy).toBeGreaterThan(-1);
+    expect(chmod).toBeGreaterThan(copy);
+    expect(chown).toBeGreaterThan(chmod);
   });
 });
 
