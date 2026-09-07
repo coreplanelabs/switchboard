@@ -65,8 +65,9 @@ afterEach(() => {
 
 describe("RunPage — history mode", () => {
   // features/thread-admission.md item 2: a steered follow-up is a second `input`
-  // on the same run — listed under the request, never in its place.
-  it("keeps the first input as the Request and lists later inputs as follow-ups under it (one run, several inputs)", () => {
+  // on the same run — its own block in the timeline where the run read it,
+  // never in the request's place.
+  it("keeps the first input as the Request and renders later inputs as follow-up blocks in the timeline (one run, several inputs)", () => {
     const { factory } = fakeEventSourceFactory();
     const w = mountApp(RunPage, {
       seed: historySeed(
@@ -88,12 +89,18 @@ describe("RunPage — history mode", () => {
       eventSource: factory,
     });
     expect(w.find("#request").text()).toContain("fix the"); // the original stays the request
+    expect(w.find("#request").text()).not.toContain("numbers"); // and carries no copy of the follow-up
     expect(w.find("#request .source").text()).toContain("justin");
-    const followUps = w.findAll("#followups .followup");
+    const followUps = w.findAll("#log .followup");
     expect(followUps).toHaveLength(1);
-    expect(followUps[0].text()).toContain("follow-up");
-    expect(followUps[0].text()).toContain("bob");
+    expect(followUps[0].find("h2").text()).toContain("Follow-up");
+    expect(followUps[0].find(".source a").attributes("href")).toBe("https://acme.slack.com/archives/C1/p2");
+    expect(followUps[0].find(".source").text()).toContain("bob");
     expect(followUps[0].find("strong").text()).toBe("numbers"); // markdown, same renderer
+    // where the run read it: after the step that was in flight, not under the request
+    const rows = Array.from(w.find("#log").element.children).filter((el) => el.matches("li:not([aria-hidden])"));
+    expect(rows.map((el) => el.className.split(" ")[0])).toEqual(["step", "followup"]);
+    expect(w.findAll("#log .note")).toHaveLength(0); // the snippet note is not a row
     expect(w.findAll("#request").length).toBe(1); // never a second request block
   });
 

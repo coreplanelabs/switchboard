@@ -48,20 +48,35 @@ describe("request / context / answer / placeholder", () => {
     expect(m.state.request?.source?.channel).toBe("dev");
   });
 
-  it("a later input is a steered follow-up listed under the request — it never replaces it (one run, several inputs)", () => {
+  it("a later input is a steered follow-up: its own timeline block where the run read it — it never replaces the request (one run, several inputs)", () => {
     const m = model();
     m.handle(input);
+    m.handle({ type: "tool_call", callId: "c1", tool: "bash", summary: "$ npm test", at: 1500 });
     m.handle({
       type: "input",
       text: "also the numbers",
       at: 2000,
       source: { user: "bob", url: "https://acme.slack.com/y" },
     });
+    m.handle({ type: "run_note", kind: "follow_up", summary: "follow-up folded in: also the numbers", at: 2000 });
     m.handle({ type: "input", text: "and a chart", at: 3000 });
+    m.handle({ type: "run_note", kind: "follow_up", summary: "follow-up folded in: and a chart", at: 3000 });
     expect(m.state.request?.text).toBe("fix the build");
-    expect(m.state.followUps.map((f) => f.text)).toEqual(["also the numbers", "and a chart"]);
-    expect(m.state.followUps[0].source?.user).toBe("bob");
-    expect(m.state.followUps[1].source).toBeUndefined();
+    // the step first, then the two follow-ups in arrival order; the snippet
+    // notes are not rows — the block IS the marker
+    expect(m.state.log.map((i) => i.kind)).toEqual(["step", "followup", "followup"]);
+    const followUps = m.state.log.filter((i) => i.kind === "followup");
+    expect(followUps.map((f) => f.input.text)).toEqual(["also the numbers", "and a chart"]);
+    expect(followUps[0].input.source?.user).toBe("bob");
+    expect(followUps[0].input.at).toBe(2000);
+    expect(followUps[1].input.source).toBeUndefined();
+  });
+
+  it("every other run note is still a row (only the follow-up snippet is folded into its block)", () => {
+    const m = model();
+    m.handle(input);
+    m.handle({ type: "run_note", kind: "stop_requested", mode: "soft", summary: "stop requested (soft)", at: 2000 });
+    expect(m.state.log.map((i) => i.kind)).toEqual(["note"]);
   });
 
   it("collects context turns outside the log", () => {

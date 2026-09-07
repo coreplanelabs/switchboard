@@ -246,10 +246,11 @@ onUnmounted(() => {
 });
 
 // ---- request source / meta -------------------------------------------------------
-const sourceUrl = computed(() => {
-  const url = state.request?.source?.url;
+/** Only an http(s) source URL becomes a link — anything else stays text. */
+function httpsUrl(url: string | undefined): string {
   return url && /^https?:\/\//.test(url) ? url : "";
-});
+}
+const sourceUrl = computed(() => httpsUrl(state.request?.source?.url));
 const metaRepoOk = computed(() => !!state.meta?.repo && /^[\w.-]+\/[\w.-]+$/.test(state.meta.repo));
 
 /** Block headers (Request/Context/Answer) read a human moment — `Aug 30,
@@ -349,19 +350,6 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           </span>
         </h2>
         <MarkdownText :text="state.request.text" />
-        <!-- Follow-ups steered into this run (features/thread-admission.md
-             item 2): the same run, more input — listed under the request in
-             arrival order, each with who sent it and when. -->
-        <ol v-if="state.followUps.length" id="followups" class="mt-3 space-y-2 border-t border-default pt-2.5">
-          <li v-for="(f, i) in state.followUps" :key="i" class="followup">
-            <div class="mb-1 flex items-baseline gap-2 text-xs text-muted">
-              <span class="font-semibold uppercase tracking-wider">↪ follow-up</span>
-              <span class="ts select-none text-dimmed" :title="fmtTimeTitle(f.at)">{{ fmtTime(f.at) }}</span>
-              <span v-if="f.source?.user" class="source ml-auto">{{ f.source.user }}</span>
-            </div>
-            <MarkdownText :text="f.text" />
-          </li>
-        </ol>
         <!-- What the run is about (item 19/21): agent · model · effort · linked
              repo · branch tag · GitHub-marked #PR. The branch is a fact, not a
              destination; the sha is gone for the same reason. -->
@@ -491,6 +479,38 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
                 >{{ formatClock(item.turn.at) }}</span
               >
             </div>
+          </li>
+          <!-- A follow-up steered into this run (features/thread-admission.md
+               item 2): the same run, more input — the Request's treatment,
+               at the moment the run read it, with who sent it and when. -->
+          <li
+            v-else-if="item.kind === 'followup'"
+            class="followup block mt-5 rounded-lg border border-default bg-(--ui-bg-muted) px-3.5 py-3"
+          >
+            <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
+              <span>↪ Follow-up</span>
+              <span
+                class="ts select-none text-xs normal-case tracking-normal text-dimmed"
+                :title="fmtTimeTitle(item.input.at)"
+                >{{ fmtTime(item.input.at) }}</span
+              >
+              <span
+                v-if="item.input.source?.user"
+                class="source ml-auto flex items-center gap-2 font-normal normal-case tracking-normal text-muted"
+              >
+                <a
+                  v-if="httpsUrl(item.input.source.url)"
+                  class="text-toned no-underline hover:text-primary hover:underline"
+                  :href="item.input.source.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="open the message"
+                  >{{ item.input.source.user }}</a
+                >
+                <span v-else>{{ item.input.source.user }}</span>
+              </span>
+            </h2>
+            <MarkdownText :text="item.input.text" />
           </li>
           <li
             v-else
