@@ -110,6 +110,7 @@ const HIST_EVENTS = [
   },
   {
     type: "turn",
+    model: "anthropic/claude-fable-5",
     durationMs: 74_000,
     at: NOW - 2_390_000,
     seq: 4,
@@ -231,13 +232,20 @@ const HIST_EVENTS = [
     at: NOW - 760_000,
     seq: 23,
   },
+  // The answer's own turn, on a DIFFERENT model than the run started on — not
+  // something a run does today (it is pinned to one model), but the switch
+  // treatment (`⇄ claude-opus-5` on the turn's head) has to be seen somewhere.
+  { type: "turn", model: "anthropic/claude-opus-5", durationMs: 9_000, at: NOW - 751_000, seq: 24 },
   {
     type: "answer",
     text: "Done — `sendWebhook` now retries with exponential backoff (5 attempts, 4xx gives up immediately). PR updated.",
     at: NOW - 750_000,
-    seq: 24,
+    seq: 25,
   },
 ];
+
+/** The script's last command — the one the live stream holds out for a while. */
+const LAST_CALL_INDEX = HIST_EVENTS.map((e) => e.type).lastIndexOf("tool_call");
 
 /** The live stream: replays the history script slowly, then keeps the run open. */
 function serveLiveStream(res: import("node:http").ServerResponse): void {
@@ -256,7 +264,7 @@ function serveLiveStream(res: import("node:http").ServerResponse): void {
     i++;
     // The last command stays out for half a minute so a ticking running card
     // can be seen; then the model "thinks" forever (the pending-turn row).
-    nextAt = Date.now() + (i === HIST_EVENTS.length - 2 ? 30_000 : 1500);
+    nextAt = Date.now() + (i === LAST_CALL_INDEX + 1 ? 30_000 : 1500);
   }, 500);
   res.on("close", () => clearInterval(timer));
 }

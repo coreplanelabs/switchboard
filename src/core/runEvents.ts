@@ -182,6 +182,10 @@ export type RunEvent =
    *  stop reason, input/output tokens) so it exports without translation. */
   | {
       type: "turn";
+      /** The `<provider>/<model>` that took this turn — the run's model today
+       *  (a run is pinned to one at start), stamped per turn so the page can
+       *  name a silent model and make a switch stand out if one ever happens. */
+      model?: string;
       startedAt: number;
       durationMs: number;
       stopReason: CompletionResult["stopReason"];

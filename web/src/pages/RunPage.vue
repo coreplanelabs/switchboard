@@ -8,7 +8,7 @@ import StepBlock from "../components/run/StepBlock.vue";
 import { useSeed } from "../lib/seed";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
-import { createRunPageModel, liveWait, runnerNow, RunnerClockKey, runningHeader } from "../lib/runPageModel";
+import { createRunPageModel, liveWait, modelName, runnerNow, RunnerClockKey, runningHeader } from "../lib/runPageModel";
 import { createPrReviewCollector } from "../lib/prReviewCollector";
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
 import { durationTone, heatStyle } from "../lib/durationTone";
@@ -155,6 +155,8 @@ provide(RunnerClockKey, runnerClock);
 const waiting = computed(() => (live.value ? liveWait(state, model.pendingCall(), nowWall.value) : null));
 // The silent model's verbs: a fixed list, a new word every 6 s in order —
 // predictable, not twitchy — so the row is visibly alive without a spinner.
+// The word is DERIVED from how long this silence has lasted, so every silence
+// starts at "Thinking" and nothing rotates while no one is waiting.
 const THINKING = [
   "Thinking",
   "Pondering",
@@ -169,8 +171,9 @@ const THINKING = [
   "Ruminating",
   "Reticulating splines",
 ];
-const verbIndex = ref(0);
-let verbSince = Date.now();
+const verb = computed(() =>
+  waiting.value?.kind === "thinking" ? THINKING[Math.floor(waiting.value.elapsedMs / 6000) % THINKING.length] : "",
+);
 
 // ---- fold toggle ---------------------------------------------------------------
 function toggleAll(): void {
@@ -212,10 +215,6 @@ if (seed?.mode === "history") {
 onMounted(() => {
   tick = setInterval(() => {
     nowWall.value = Date.now();
-    if (nowWall.value - verbSince > 6000) {
-      verbIndex.value = (verbIndex.value + 1) % THINKING.length;
-      verbSince = nowWall.value;
-    }
   }, 1000);
 
   if (seed?.mode !== "live") return;
@@ -496,6 +495,12 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
               <span class="thought" :class="item.turn.quick ? '' : 'text-warn'" :title="item.turn.label"
                 >thought {{ item.turn.chip }}</span
               >
+              <span
+                v-if="item.turn.switched"
+                class="model-switch rounded border border-warn/40 bg-warn/10 px-1.5 font-semibold text-warn"
+                :title="`model changed: this turn ran on ${item.turn.model}`"
+                >⇄ {{ modelName(item.turn.model) }}</span
+              >
               <span v-for="(f, i) in item.turn.facts" :key="i" class="fact">{{ f }}</span>
               <span v-if="item.note" class="nonar font-sans italic">{{ item.note }}</span>
               <span
@@ -567,10 +572,11 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         >
           <span class="pulse text-[1.1em] leading-none text-info motion-safe:animate-pulse">∿</span>
           <span
-            class="badge shrink-0 rounded bg-accented px-1.5 text-[0.68rem] font-semibold uppercase leading-normal tracking-wider text-muted"
-            >model</span
+            class="badge shrink-0 rounded bg-accented px-1.5 text-[0.68rem] font-semibold leading-normal tracking-wider text-muted"
+            :title="state.model ?? undefined"
+            >{{ modelName(state.model) }}</span
           >
-          <span class="verb min-w-0 truncate text-toned">{{ THINKING[verbIndex] }}…</span>
+          <span class="verb min-w-0 truncate text-toned">{{ verb }}…</span>
           <span
             class="since ml-auto shrink-0 text-xs tabular-nums"
             :class="waiting.slow ? 'text-warn' : 'text-dimmed'"

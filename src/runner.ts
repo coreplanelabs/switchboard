@@ -196,6 +196,7 @@ async function runLoop(
     const at = now();
     emit({
       type: "turn",
+      model: opts.model,
       startedAt,
       durationMs: at - startedAt,
       stopReason: result.stopReason,

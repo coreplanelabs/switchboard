@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createRunPageModel, liveWait, runnerNow, runningHeader, runSpan, type StepVm } from "./runPageModel";
+import {
+  createRunPageModel,
+  liveWait,
+  modelName,
+  runnerNow,
+  runningHeader,
+  runSpan,
+  type StepVm,
+} from "./runPageModel";
 
 // The run page's fold, driven by real event streams (the same shapes the SSE
 // stream and the history seed carry). One fold for both — `handle` is the
@@ -312,6 +320,52 @@ describe("notes and stops", () => {
       expect(note.replay).toBe(true);
       expect(note.text).toBe("3 events omitted");
     }
+  });
+});
+
+describe("the run's model — badged on the pending-turn row, flagged when it switches", () => {
+  const meta = { type: "run_meta", agent: "coding", model: "anthropic/claude-fable-5", at: 5 };
+
+  it("run_meta declares the model; a stamped turn confirms it (no switch); a turn on a different model switches and becomes the current one", () => {
+    const m = model();
+    expect(m.state.model).toBeNull();
+    m.handle(meta);
+    expect(m.state.model).toBe("anthropic/claude-fable-5");
+    m.handle({ type: "turn", durationMs: 5_000, model: "anthropic/claude-fable-5", at: 10 });
+    m.handle(assistant("one", 11));
+    expect(step(m, 0).turn).toMatchObject({ model: "anthropic/claude-fable-5", switched: false });
+    m.handle({ type: "turn", durationMs: 5_000, model: "anthropic/claude-opus-5", at: 20 });
+    m.handle(assistant("two", 21));
+    expect(step(m, 1).turn).toMatchObject({ model: "anthropic/claude-opus-5", switched: true });
+    expect(m.state.model).toBe("anthropic/claude-opus-5");
+    // back again: also a switch, relative to the model the run was on
+    m.handle({ type: "turn", durationMs: 5_000, model: "anthropic/claude-fable-5", at: 30 });
+    m.handle(assistant("three", 31));
+    expect(step(m, 2).turn?.switched).toBe(true);
+  });
+
+  it("an unstamped turn (a stream from before model stamps) keeps the declared model and never reads as a switch; the first stamped turn of a meta-less run is not a switch either", () => {
+    const m = model();
+    m.handle(meta);
+    m.handle({ type: "turn", durationMs: 5_000, at: 10 });
+    m.handle(assistant("one", 11));
+    expect(step(m, 0).turn).toMatchObject({ switched: false });
+    expect(step(m, 0).turn?.model).toBeUndefined();
+    expect(m.state.model).toBe("anthropic/claude-fable-5");
+
+    const bare = model();
+    bare.handle({ type: "turn", durationMs: 5_000, model: "openai/gpt-5", at: 10 });
+    bare.handle(assistant("one", 11));
+    expect(step(bare, 0).turn).toMatchObject({ model: "openai/gpt-5", switched: false });
+    expect(bare.state.model).toBe("openai/gpt-5");
+  });
+
+  it("modelName is the part after the provider slash; a bare name is itself; nothing known reads `model`", () => {
+    expect(modelName("anthropic/claude-fable-5")).toBe("claude-fable-5");
+    expect(modelName("gpt-5")).toBe("gpt-5");
+    expect(modelName("acme/")).toBe("acme/");
+    expect(modelName(null)).toBe("model");
+    expect(modelName(undefined)).toBe("model");
   });
 });
 

@@ -464,6 +464,7 @@ describe("RunPage — live mode", () => {
       expect(wrapper.find("#thinking").exists()).toBe(false);
       es().emitOpen();
       es().emitMessage(input, "1"); // at 1000
+      es().emitMessage({ type: "run_meta", agent: "coding", model: "anthropic/claude-fable-5", at: 1000 }, "1b");
       es().emitMessage(call("c1", "$ pnpm run typegen 2>&1 | tail -5", 3000), "2");
       es().emitMessage(call("c2", "$ echo later", 4000), "3");
       vi.advanceTimersByTime(65_000);
@@ -490,9 +491,10 @@ describe("RunPage — live mode", () => {
       const thinking = wrapper.find("#thinking");
       expect(thinking.exists()).toBe(true);
       expect(thinking.find(".pulse").text()).toBe("∿");
-      expect(thinking.find(".badge").text()).toBe("model"); // whose silence this is
+      expect(thinking.find(".badge").text()).toBe("claude-fable-5"); // whose silence this is: the run's model, by name
+      expect(thinking.find(".badge").attributes("title")).toBe("anthropic/claude-fable-5");
       const firstVerb = thinking.find(".verb").text();
-      expect(firstVerb).toMatch(/…$/);
+      expect(firstVerb).toBe("Thinking…"); // every silence starts at the top of the list
       expect(thinking.find(".since").text()).toBe("3s"); // since the last stamped event (70_500)
       expect(thinking.find(".since").classes()).not.toContain("text-warn");
       vi.advanceTimersByTime(60_000);
@@ -500,13 +502,24 @@ describe("RunPage — live mode", () => {
       expect(wrapper.find("#thinking .since").text()).toBe("1m 03s");
       expect(wrapper.find("#thinking .since").classes()).toContain("text-warn"); // amber past a minute, like the head it becomes
       expect(wrapper.find("#thinking .verb").text()).not.toBe(firstVerb); // the verb rotates (every 6 s)
-      // The turn lands: the real step takes its place, and the model is silent again.
-      es().emitMessage({ type: "turn", durationMs: 63_000, at: 133_500 }, "6");
+      // The turn lands — on a DIFFERENT model: the real step takes the row's place with the
+      // switch flagged in its head, the badge names the new model, and the silence restarts.
+      es().emitMessage({ type: "turn", durationMs: 63_000, model: "anthropic/claude-opus-5", at: 133_500 }, "6");
       es().emitMessage(assistant("all green now", 133_600), "7");
       await wrapper.vm.$nextTick();
       const heads = wrapper.findAll("#log .step .thought");
       expect(heads[heads.length - 1].text()).toBe("thought 1m 03s");
+      const lastStep = wrapper.findAll("#log .step").at(-1)!;
+      expect(lastStep.find(".model-switch").text()).toBe("⇄ claude-opus-5");
+      expect(lastStep.find(".model-switch").attributes("title")).toContain("anthropic/claude-opus-5");
+      expect(wrapper.find("#thinking .badge").text()).toBe("claude-opus-5");
       expect(wrapper.find("#thinking .since").text()).toBe("0s");
+      expect(wrapper.find("#thinking .verb").text()).toBe("Thinking…"); // a new silence, back at the top of the list
+      // A turn on the SAME model is not a switch.
+      es().emitMessage({ type: "turn", durationMs: 2_000, model: "anthropic/claude-opus-5", at: 140_000 }, "8");
+      es().emitMessage(assistant("still green", 140_100), "9");
+      await wrapper.vm.$nextTick();
+      expect(wrapper.findAll("#log .step").at(-1)!.find(".model-switch").exists()).toBe(false);
       es().emitNamed("end");
       await wrapper.vm.$nextTick();
       expect(wrapper.find("#thinking").exists()).toBe(false);

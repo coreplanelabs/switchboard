@@ -80,7 +80,7 @@ export type TimelineChange =
   | { kind: "note"; text: string; noteKind: string; mode?: string; at?: number }
   /** One model call: `label` is "Thought for 5m 04s"; `facts` the token counts
    *  ("12.3k in", "800 out", "11.2k cached") when the event carries usage. */
-  | { kind: "turn"; label: string; facts: string[]; durationMs: number; at?: number }
+  | { kind: "turn"; label: string; facts: string[]; durationMs: number; model?: string; at?: number }
   /** What the run is about (item 19): agent, model and the resolved repo context, for the Request head. */
   | {
       kind: "meta";
@@ -339,7 +339,17 @@ export function createRunTimeline(): RunTimeline {
         if (inTok !== undefined) facts.push(fmtTokens(inTok) + " in");
         if (outTok !== undefined) facts.push(fmtTokens(outTok) + " out");
         if (cached !== undefined) facts.push(fmtTokens(cached) + " cached");
-        return [{ kind: "turn", label: "Thought for " + fmtDuration(durationMs), facts, durationMs, at: num(e.at) }];
+        const model = str(e.model);
+        return [
+          {
+            kind: "turn",
+            label: "Thought for " + fmtDuration(durationMs),
+            facts,
+            durationMs,
+            ...(model ? { model } : {}),
+            at: num(e.at),
+          },
+        ];
       }
       case "review_artifact":
         // The reading diff is the review panel's material (features/reading-diff.md

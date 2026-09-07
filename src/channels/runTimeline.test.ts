@@ -406,6 +406,16 @@ describe("createRunTimeline — model turns (item 15)", () => {
     expect(c).toEqual({ kind: "turn", label: "Thought for 5m 04s", facts: [], durationMs: 304_000, at: 305_000 });
   });
 
+  it("a turn carries the model that took it when the event names one; an unstamped turn has no model key", () => {
+    const t = createRunTimeline();
+    const [c] = t.push(turn({ model: "anthropic/claude-fable-5" }));
+    expect(c).toMatchObject({ kind: "turn", model: "anthropic/claude-fable-5" });
+    const [d] = t.push(turn());
+    expect(d).not.toHaveProperty("model");
+    const [e] = t.push(turn({ model: 42 }));
+    expect(e).not.toHaveProperty("model"); // a non-string model is not a model
+  });
+
   it("token usage shows as compact facts: in, out, cached (cached only when present)", () => {
     const t = createRunTimeline();
     const [c] = t.push(
