@@ -7,3 +7,7 @@ export function sdkPin(manifest: {
 export function pairMismatches(
   pairs: { label: string; imageTag: string | null; sdkPin: string | null }[],
 ): { label: string; reason: string }[];
+export function installMismatches(
+  pairs: { label: string; sdkPin: string | null; installed: string | null }[],
+): { label: string; reason: string }[];
+export function installedSdkVersion(manifestPath: string): string | null;

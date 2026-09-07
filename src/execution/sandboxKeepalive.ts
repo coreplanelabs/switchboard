@@ -1,26 +1,31 @@
 // Sandbox activity keepalive (features/execution.md item 2): one in-flight
 // exec never outlives the container's activity timeout.
 //
-// The @cloudflare/containers base class keeps an activity clock: every
-// proxied fetch renews it ONCE, before the fetch, and an alarm loop stops the
-// container (SIGTERM) the moment the clock reads expired — with no notion of
-// a request still in flight. So a single command running longer than
-// `sleepAfter` had its container killed under it, deterministically, at
-// exactly `sleepAfter` (2026-09-07, the #521 review's first command: 20:00 of
-// a 20-minute budget, `Command execution failed`, a fresh container with an
-// empty /workspace). The fix is to renew the clock on a timer WHILE a command
-// runs, which turns `sleepAfter` into what its name says: idle time.
+// On @cloudflare/containers 0.0.28 (production until 2026-09-07) the base
+// class kept an activity clock that every proxied fetch renewed ONCE, before
+// the fetch, and an alarm loop stopped the container (SIGTERM) the moment the
+// clock read expired — with no notion of a request still in flight. So a
+// single command running longer than `sleepAfter` had its container killed
+// under it, deterministically, at exactly `sleepAfter` (2026-09-07, the #521
+// review's first command: 20:00 of a 20-minute budget, `Command execution
+// failed`, a fresh container with an empty /workspace). Renewing the clock on
+// a timer WHILE a command runs turned `sleepAfter` into what its name says:
+// idle time. The 0.3.x containers class that ships with sandbox 0.12.x counts
+// in-flight requests itself and refuses to expire while one is open, so the
+// keepalive is now belt-and-braces; it stays until the live long-command
+// receipt on the tracker (#228) proves the SDK's own tracking on our path.
 //
 // Deliberately free of node: imports so wrangler can bundle it into the
 // sandbox Worker.
 
 /** How long an IDLE container stays warm before the Durable Object stops it,
- *  in the Container class's own `<n>[smh]` grammar. With the keepalive below,
- *  this is pure idle time — a running command can never reach it. 5 minutes
- *  frees a finished thread's slot (`max_instances`) four times sooner than
- *  the SDK's 20-minute default, while a follow-up inside 5 minutes still
- *  lands on the same warm workspace; a later one re-clones, which is the
- *  documented per-thread degradation (item 1). */
+ *  in the Container class's own `<n>[smh]` grammar. With the keepalive below
+ *  (and the SDK's own in-flight tracking) this is pure idle time — a running
+ *  command can never reach it. 5 minutes frees a finished thread's slot
+ *  (`max_instances`) sooner than the SDK default (20 min on 0.3.x, 10 min on
+ *  0.12.x), while a follow-up inside 5 minutes still lands on the same warm
+ *  workspace; a later one re-clones, which is the documented per-thread
+ *  degradation (item 1). */
 export const SANDBOX_SLEEP_AFTER = "5m";
 
 /** How often a running command renews the activity clock. Well inside
@@ -61,31 +66,49 @@ export async function withActivityKeepalive<T>(
 }
 
 /** The texts the SDK produces when the container is torn down under a
- *  command: the exec handler's generic wrapper (its real cause, "Session
- *  terminated", sits in a field the client discards), the cause itself when a
- *  client does surface it, and the stale-session answer the same attempt gets
- *  once the sessions are cleared. Anything else — a transport error, a file-op
- *  failure — is never recycle-shaped, whenever it arrives. */
+ *  command, across generations. 0.3.x: the exec handler's generic wrapper (its
+ *  real cause, "Session terminated", sat in a field the client discarded), the
+ *  cause itself, and the stale-session answer the same attempt got once the
+ *  sessions were cleared. 0.12.x: the typed `SessionTerminatedError` text
+ *  (`Session '<id>' shell exited (exit code: <n>)`) and the
+ *  `OperationInterruptedError` text for a container that stopped under a
+ *  pending call. Anything else — a transport error, a file-op failure — is
+ *  never recycle-shaped, whenever it arrives. */
 const RECYCLE_SHAPED: readonly RegExp[] = [
   /^Command execution failed$/,
   /^Session terminated$/i,
   /^Session '[^']*' not found$/i,
+  /^Session '[^']*' shell exited \(exit code: /i,
+  /^The sandbox container stopped while the operation was pending\.?$/i,
 ];
 
-/** Grace inside which a recycle-shaped failure is taken at face value: a
- *  session that fails to start does so in seconds, not minutes. */
+/** The 0.12.x typed errors that MEAN the container went away under the call.
+ *  Matched by name, not `instanceof`: the Worker sees them after the Durable
+ *  Object RPC boundary, which keeps `name`/`message` and drops the prototype. */
+export const RECYCLE_ERROR_NAMES: readonly string[] = ["SessionTerminatedError", "OperationInterruptedError"];
+
+/** Type first, text second: a typed recycle error, or a recycle-shaped text. */
+export function isRecycleError(err: { name?: string; message?: string }): boolean {
+  if (err.name && RECYCLE_ERROR_NAMES.includes(err.name)) return true;
+  return !!err.message && RECYCLE_SHAPED.some((re) => re.test(err.message!.trim()));
+}
+
+/** Grace inside which a recycle-shaped TEXT is taken at face value: a session
+ *  that fails to start does so in seconds, not minutes. A typed recycle error
+ *  needs no grace — the SDK is stating the container stopped. */
 const RECYCLE_SUSPECT_AFTER_MS = 60_000;
 
 /** The message `/exec` puts in-body when a command's failure looks like the
- *  container was recycled under it: a recycle-shaped failure that arrived more
- *  than a minute into THIS attempt (a startup failure shows in seconds). Any
- *  other text, however late, is returned unchanged — timing alone never
- *  rewords an unrelated error. The exit code stays 127: it IS an infra failure
- *  — the workspace really is gone — and a faked exit 124 would tell the model
- *  to shorten a command that was never the problem. */
-export function recycledMidCommandMessage(elapsedMs: number, msg: string): string {
+ *  container was recycled under it: a typed recycle error (`certain`), or a
+ *  recycle-shaped text that arrived more than a minute into THIS attempt (a
+ *  startup failure shows in seconds). Any other text, however late, is
+ *  returned unchanged — timing alone never rewords an unrelated error. The exit
+ *  code stays 127: it IS an infra failure — the workspace really is gone — and
+ *  a faked exit 124 would tell the model to shorten a command that was never
+ *  the problem. */
+export function recycledMidCommandMessage(elapsedMs: number, msg: string, certain = false): string {
   const shaped = RECYCLE_SHAPED.some((re) => re.test(msg.trim()));
-  if (!shaped || elapsedMs <= RECYCLE_SUSPECT_AFTER_MS) return msg;
+  if (!certain && (!shaped || elapsedMs <= RECYCLE_SUSPECT_AFTER_MS)) return msg;
   const secs = Math.round(elapsedMs / 1_000);
   return (
     `sandbox recycled mid-command after ${secs}s — the container was replaced and /workspace is empty; ` +

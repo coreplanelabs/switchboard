@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   EXEC_KEEPALIVE_INTERVAL_MS,
   SANDBOX_SLEEP_AFTER,
+  isRecycleError,
   parseSleepAfterMs,
   recycledMidCommandMessage,
   withActivityKeepalive,
@@ -126,6 +127,44 @@ describe("recycledMidCommandMessage", () => {
     expect(recycledMidCommandMessage(1_200_000, "fetch failed")).toBe("fetch failed");
     expect(recycledMidCommandMessage(1_200_000, "Failed to create session: 503")).toBe("Failed to create session: 503");
   });
+
+  it("recognizes the 0.12.x recycle texts — a terminated session shell and a container stopped under a pending call", () => {
+    expect(recycledMidCommandMessage(90_000, "Session 'sandbox-slack:C1:1.0' shell exited (exit code: 143)")).toMatch(
+      RECYCLED,
+    );
+    expect(recycledMidCommandMessage(90_000, "The sandbox container stopped while the operation was pending.")).toMatch(
+      RECYCLED,
+    );
+  });
+
+  it("a typed recycle error (certain) is named at any elapsed time — the SDK is stating the container stopped", () => {
+    const msg = recycledMidCommandMessage(3_000, "Session 'x' shell exited (exit code: 143)", true);
+    expect(msg).toMatch(RECYCLED);
+    expect(msg).toContain("after 3s");
+    // `certain` is the caller's typed evidence, so it rewords whatever text the
+    // typed error carried; without it the shape-plus-time gate still holds
+    expect(recycledMidCommandMessage(3_000, "fetch failed", false)).toBe("fetch failed");
+    expect(recycledMidCommandMessage(3_000, "fetch failed", true)).toMatch(RECYCLED);
+  });
+});
+
+describe("isRecycleError", () => {
+  it("takes the 0.12.x typed errors by NAME (the RPC boundary drops the prototype)", () => {
+    expect(isRecycleError({ name: "SessionTerminatedError", message: "whatever the text" })).toBe(true);
+    expect(isRecycleError({ name: "OperationInterruptedError", message: "…" })).toBe(true);
+  });
+
+  it("falls back to the recycle-shaped texts, and rejects everything else", () => {
+    expect(isRecycleError({ name: "Error", message: "Command execution failed" })).toBe(true);
+    expect(
+      isRecycleError({ name: "Error", message: "The sandbox container stopped while the operation was pending." }),
+    ).toBe(true);
+    expect(isRecycleError({ name: "ContainerUnavailableError", message: "no Container instance available" })).toBe(
+      false,
+    );
+    expect(isRecycleError({ name: "Error", message: "fetch failed" })).toBe(false);
+    expect(isRecycleError({})).toBe(false);
+  });
 });
 
 describe("sandbox Worker wiring (static)", () => {
@@ -142,7 +181,18 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).toContain("EXEC_KEEPALIVE_INTERVAL_MS");
   });
 
-  it("the /exec failure path names a mid-command recycle", () => {
+  it("the /exec failure path names a mid-command recycle, typed errors first", () => {
     expect(worker).toContain("recycledMidCommandMessage(");
+    expect(worker).toContain("isRecycleError(");
+    expect(worker).toContain("isFleetBusyError(");
+  });
+
+  // #447: the credential rides in the SDK's per-exec `env` option, so it never
+  // appears in the command text the SDK logs. The 0.3.x base64 export prefix
+  // put the live GH_TOKEN into every "Command executed" log line.
+  it("the credential goes through the exec env option, never through the command text", () => {
+    expect(worker).toMatch(/env:\s*envVars/);
+    expect(worker).not.toContain("base64 -d");
+    expect(worker).not.toContain("btoa(");
   });
 });

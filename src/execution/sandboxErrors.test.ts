@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  isContainerStarting,
+  isFleetBusyError,
+  thrownShape,
   FLEET_BUSY_BACKOFF_MS,
   FLEET_BUSY_REASON,
   FLEET_BUSY_WAIT_MAX_MS,
@@ -78,5 +81,55 @@ describe("the executor's bounded wait", () => {
       "sandbox fleet busy — no free per-thread sandbox after waiting 300s (the fleet's max_instances is reached); try again in a few minutes",
     );
     expect(fleetBusyExhaustedMessage(60_000)).toContain("after waiting 60s");
+  });
+});
+
+// Feature: features/execution.md item 14 — on 0.12.x the SDK throws a typed
+// `ContainerUnavailableError`; after the Durable Object RPC boundary only its
+// name/message survive, so classification takes the name (or code) first and
+// the text second. `thrownShape` is the one place that reads a thrown value.
+describe("isFleetBusyError / thrownShape", () => {
+  it("takes the 0.12.x typed error by name, whatever its text", () => {
+    const err = Object.assign(new Error("There is no Container instance available at this time."), {
+      name: "ContainerUnavailableError",
+    });
+    expect(isFleetBusyError(err)).toBe(true);
+    expect(isFleetBusyError({ name: "ContainerUnavailableError", message: "anything" })).toBe(true);
+  });
+
+  it("takes the error code when a client surfaces it, and falls back to the recognized texts", () => {
+    expect(isFleetBusyError({ name: "Error", code: "CONTAINER_UNAVAILABLE", message: "…" })).toBe(true);
+    expect(isFleetBusyError(new Error("Failed to create session: 503"))).toBe(true);
+    expect(isFleetBusyError("no container instance that can be provided to this durable object")).toBe(true);
+  });
+
+  it("is NOT a recycle, a stale session, or an unrelated failure", () => {
+    expect(
+      isFleetBusyError({ name: "SessionTerminatedError", message: "Session 'x' shell exited (exit code: 143)" }),
+    ).toBe(false);
+    expect(isFleetBusyError(new Error("Session 'x' not found"))).toBe(false);
+    expect(isFleetBusyError(new Error("fetch failed"))).toBe(false);
+    expect(isFleetBusyError(undefined)).toBe(false);
+  });
+
+  it("thrownShape reads an Error, a plain object, and a string the same way", () => {
+    expect(thrownShape(Object.assign(new Error("m"), { name: "N", code: "C" }))).toEqual({
+      name: "N",
+      code: "C",
+      message: "m",
+    });
+    expect(thrownShape({ name: "N", message: "m" })).toEqual({ name: "N", code: undefined, message: "m" });
+    expect(thrownShape("plain")).toEqual({ message: "plain" });
+  });
+});
+
+// Feature: features/execution.md item 4 — a booting container is the one
+// failure the Worker still retries itself: nothing ran.
+describe("isContainerStarting", () => {
+  it("recognizes the 0.12.x boot-time answer and nothing else", () => {
+    expect(isContainerStarting(new Error("Container is starting. Please retry in a moment."))).toBe(true);
+    expect(isContainerStarting({ message: "Container is starting. Please retry in a moment" })).toBe(true);
+    expect(isContainerStarting(new Error("Container is starting the wrong way"))).toBe(false);
+    expect(isContainerStarting(new Error("no Container instance available"))).toBe(false);
   });
 });
