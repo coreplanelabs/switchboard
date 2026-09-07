@@ -110,6 +110,39 @@ export interface RefreshFailure {
   diskFull: boolean;
 }
 
+/** Root argv that kills every process the build user still owns and waits
+ *  (bounded, 5 s) until none is left. Runs before EVERY build-user step.
+ *
+ *  Why (2026-09-07, switchboard resident): `npm install` outlived its budget
+ *  and the SDK's output grace; the cycle recorded the timeout and moved on
+ *  while npm kept extracting into CHECKOUT_DIR/node_modules. The next cycle's
+ *  `git clean -fdx` raced it — `warning: failed to remove node_modules/dayjs:
+ *  Directory not empty` on exactly the packages being written — and the
+ *  resident spiralled between `checkout-update-failed` and install timeouts
+ *  (each cycle's install now sharing 1 vCPU with the last one's orphan) for
+ *  as long as main kept moving. A Worker-only deploy is the other way to
+ *  orphan a step: the DO isolate resets, the container keeps running.
+ *
+ *  Steps are strictly sequential, and the build user (worker1) owns nothing
+ *  else — thread work runs as worker2+ — so a live worker1 process at step
+ *  start is by definition a leftover. Survivors are NAMED on stdout (the
+ *  Worker log shows what was still running) before SIGKILL: SIGTERM would let
+ *  npm keep writing while the clean runs. `pgrep`'s no-match exit 1 is the
+ *  happy path (the `if` swallows it); a process that survives SIGKILL for 5 s
+ *  fails the step — nothing may start beside it. */
+export function killStaleBuildProcessesCommand(user: string): string[] {
+  const script =
+    `stale=$(pgrep -a -u ${user}); ` +
+    `if [ -n "$stale" ]; then ` +
+    `echo "killing stale ${user} processes:"; echo "$stale"; ` +
+    `pkill -KILL -u ${user}; ` +
+    `i=0; while pgrep -u ${user} >/dev/null; do i=$((i+1)); ` +
+    `if [ $i -ge 50 ]; then echo "stale ${user} processes survived SIGKILL for 5s" >&2; exit 1; fi; ` +
+    `sleep 0.1; done; ` +
+    `fi`;
+  return ["sh", "-c", script];
+}
+
 /** Signature of a step killed from OUTSIDE its own budget: the exit status of
  *  SIGTERM (128 + 15), bash's "Session terminated" on a killed login shell, or
  *  a tool naming the signal. A bare "killed" is NOT enough — compilers and

@@ -46,6 +46,24 @@ function exitPhrase(r: StepResult): string {
   return `exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}`;
 }
 
+/** The StepResult for a wait the SDK gave up on while the process was still
+ *  alive (`ProcessWaitTimeoutError`: "Process output did not complete within
+ *  <ms>ms") — after the caller killed it. It is the step's OWN timeout, shaped
+ *  exactly like one the supervisor enforced (`timedOut: true` → "(timed out)"
+ *  in the report), so `classifyRefreshFailure` files it as `<step>-failed`,
+ *  never as an interruption. `exitCode` is the status observed after the
+ *  kill, or -1 when the process still had not reported one: the report says
+ *  which, and never invents a status. */
+export function abandonedWaitStepResult(input: { detail: string; exitCode: number | null }): StepResult {
+  const exit = input.exitCode === null ? "killed, no exit status observed" : `killed, exit ${input.exitCode}`;
+  return {
+    stdout: "",
+    stderr: `${input.detail} — process was still running: ${exit}`,
+    exitCode: input.exitCode ?? -1,
+    timedOut: true,
+  };
+}
+
 /** The stored `provision-failed at <step>: <this>` / refresh-error detail.
  *
  *  Throws when handed a success: the only correct caller is a failure branch,

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { describeStepFailure, stepFailureLog, STEP_REPORT_PER_STREAM } from "./residentStepReport.js";
+import { classifyRefreshFailure } from "./residentRefresh.js";
+import {
+  abandonedWaitStepResult,
+  describeStepFailure,
+  stepFailureLog,
+  STEP_REPORT_PER_STREAM,
+} from "./residentStepReport.js";
 
 // Feature: features/resident-repos.md item 53 — a failed resident step names
 // the failure. The fixtures below are REAL captures, not invented strings:
@@ -90,5 +96,40 @@ describe("stepFailureLog", () => {
   it("stays bounded so one runaway step cannot flood the log", () => {
     const line = stepFailureLog("test", { stdout: "o".repeat(200_000), stderr: "e".repeat(200_000), ...failed });
     expect(line.length).toBeLessThan(20_000);
+  });
+});
+
+// 2026-09-07: the switchboard resident's `npm install` outlived its 5-min
+// budget AND the SDK's 30 s output grace; `output()` rejected with
+// `Process output did not complete within 330000ms`, the cycle recorded
+// `refresh-failed: …` and moved on — leaving npm running in the checkout. The
+// next cycle's `git clean -fdx` raced it (`Directory not empty` on exactly the
+// packages being extracted) and the resident spiralled: every cycle a timeout
+// or a torn clean, `degraded` for as long as main kept moving.
+describe("abandonedWaitStepResult (a wait that gives up on a live process is the step's own timeout)", () => {
+  const sdkMessage = "Process output did not complete within 330000ms";
+
+  it("is a timed-out failure of the STEP — described with `(timed out)`, so the classifier never calls it an interruption", () => {
+    const r = abandonedWaitStepResult({ detail: sdkMessage, exitCode: 137 });
+    expect(r.timedOut).toBe(true);
+    expect(r.exitCode).toBe(137);
+    const described = describeStepFailure(r);
+    expect(described).toMatch(/^exit 137 \(timed out\): /);
+    expect(described).toContain(sdkMessage);
+    const f = classifyRefreshFailure({ step: "install", message: described });
+    expect(f).toMatchObject({ interrupted: false, diskFull: false });
+    expect(f.reason).toMatch(/^install-failed: exit 137 \(timed out\)/);
+  });
+
+  it("says the process was killed — the operator must know nothing is left running in the checkout", () => {
+    const r = abandonedWaitStepResult({ detail: sdkMessage, exitCode: 137 });
+    expect(r.stderr).toMatch(/killed/);
+  });
+
+  it("no exit observed even after the kill → exit -1 and the report says so, never a made-up status", () => {
+    const r = abandonedWaitStepResult({ detail: sdkMessage, exitCode: null });
+    expect(r.exitCode).toBe(-1);
+    expect(describeStepFailure(r)).toMatch(/^exit -1 \(timed out\): /);
+    expect(r.stderr).toMatch(/no exit status/);
   });
 });
