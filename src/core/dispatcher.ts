@@ -914,6 +914,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     });
+    io.runStarted?.({ id: run.id });
     // The narrative events the dispatcher itself publishes — the request, the
     // thread context, the final answer — go straight to the registry: redacted
     // like every event, uncapped (the run record is the source of truth; the
@@ -1654,6 +1655,7 @@ async function runShipBranch(
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     },
   );
+  io.runStarted?.({ id: run.id });
   const publishText = (
     type: "input" | "context" | "answer",
     text: string,
@@ -2066,6 +2068,7 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean }>(
       channelVisibility,
     },
   );
+  io.runStarted?.({ id: run.id });
   registry.publish(run.id, { type: "input", text: redactSecrets(msg.text), at: Date.now() });
   let result: T | undefined;
   try {

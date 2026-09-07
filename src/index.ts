@@ -273,7 +273,7 @@ async function main() {
   // streamable-HTTP (JSON-RPC 2.0). With no tokens configured BOTH are
   // fail-closed disabled.
   if (process.env.PORT) {
-    const ingress = createIngressHandler(deps, { auth });
+    const ingress = createIngressHandler(deps, { auth, publicBaseUrl: process.env.PUBLIC_BASE_URL });
     const mcp = createMcpHandler(deps, { auth, commands, grantsFor: (id) => config.grantsFor(id) });
     // Scheduled jobs (#244) arrive through /ingress like any other caller: the
     // Worker shim (deploy/cloudflare/worker.ts) POSTs each `run` schedule's

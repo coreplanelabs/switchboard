@@ -46,6 +46,9 @@ export interface IngressOptions {
   dispatch?: DispatchFn;
   /** Max body size in bytes (node wrapper enforces at read time). */
   maxBodyBytes?: number;
+  /** Base URL for the run's live page in async acknowledgements (from
+   *  PUBLIC_BASE_URL). Absent => `runUrl` is a path-only `/runs/<id>`. */
+  publicBaseUrl?: string;
 }
 
 /** Equal-length constant-time string compare. Guards length first (differing
@@ -87,6 +90,8 @@ interface IngressBody {
   channel?: string;
   thread?: string;
   history: HistoryItem[];
+  /** `"async": true` => acknowledge with 202 + run id; run continues in background. */
+  async: boolean;
 }
 
 /** Build the namespaced IncomingMessage from an authed identity + the body.
@@ -111,7 +116,18 @@ function toIncomingMessage(identity: IngressIdentity, body: IngressBody): Incomi
 export class HttpIO implements ChannelIO {
   private replies: string[] = [];
   private receipt: RunReceipt | undefined;
+  private resolveStarted!: (started: { id: string }) => void;
+  /** Resolves when the core has created a run in the registry (runStarted).
+   *  The async ingress path races this against dispatch completion to answer
+   *  202 with the run id; never resolves for a run-less request (config reply). */
+  readonly started: Promise<{ id: string }> = new Promise((resolve) => {
+    this.resolveStarted = resolve;
+  });
   constructor(private readonly priorTurns: HistoryItem[] = []) {}
+
+  runStarted(started: { id: string }): void {
+    this.resolveStarted(started);
+  }
 
   async reply(text: string): Promise<void> {
     this.replies.push(text);
@@ -167,6 +183,9 @@ function parseBody(raw: string): { body: IngressBody } | { error: string } {
   if (obj.thread !== undefined && typeof obj.thread !== "string") {
     return { error: "`thread` must be a string" };
   }
+  if (obj.async !== undefined && typeof obj.async !== "boolean") {
+    return { error: "`async` must be a boolean" };
+  }
   const history: HistoryItem[] = [];
   if (obj.history !== undefined) {
     if (!Array.isArray(obj.history)) return { error: "`history` must be an array" };
@@ -186,6 +205,7 @@ function parseBody(raw: string): { body: IngressBody } | { error: string } {
       channel: obj.channel as string | undefined,
       thread: obj.thread as string | undefined,
       history,
+      async: obj.async === true,
     },
   };
 }
@@ -270,6 +290,35 @@ async function handleAuthorized(
   const msg = toIncomingMessage(identity, parsed.body);
   const io = new HttpIO(parsed.body.history);
   const dispatchFn = options.dispatch ?? realDispatch;
+  if (parsed.body.async) {
+    // Async mode (`"async": true`): same validation and authorization as the
+    // sync path (both already happened above), but the caller gets a 202 the
+    // moment the core has CREATED the run — the run continues to completion in
+    // the background and its record lands in run history as usual (the reply
+    // text goes to the run record, not to any HTTP response). The dispatch
+    // promise is started (not awaited), which increments the dispatcher's
+    // activeRuns counter on its first line — so the shutdown drain awaits
+    // async runs exactly like synchronous ones. Errors are the dispatcher's
+    // own (it catches and records); the catch here is a belt against a
+    // transport-level throw escaping as an unhandled rejection.
+    const done = dispatchFn(deps, msg, io).catch((err) => {
+      console.error(`[ingress] async dispatch: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    // Race run creation against completion: a request the core answers WITHOUT
+    // a run (a config reply, a refused command) finishes dispatch with no
+    // runStarted — fall back to the synchronous response shape so the caller
+    // still gets the reply text rather than hanging.
+    const started = await Promise.race([io.started, done.then(() => undefined)]);
+    if (!started) {
+      const run = io.run();
+      return { status: 200, body: { reply: io.collected(), ...(run ? { run } : {}) } };
+    }
+    const base = options.publicBaseUrl?.replace(/\/+$/, "") ?? "";
+    return {
+      status: 202,
+      body: { runId: started.id, runUrl: `${base}/runs/${started.id}`, threadKey: msg.threadKey },
+    };
+  }
   await dispatchFn(deps, msg, io);
   // `run` is present only when the core created a run for this request (agent
   // runs, inline command runs); a config reply has none. Id + status only —
