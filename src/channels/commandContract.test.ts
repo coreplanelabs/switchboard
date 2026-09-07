@@ -420,7 +420,7 @@ describe("derived naming across surfaces (KTD2/KTD21)", () => {
     expect(byId["repo.build"]).toBe("repo build <slug> [ref]");
     expect(byId["schedule.list"]).toBe("schedule list");
     expect(byId["friction.analyze"]).toBe("friction analyze [source] [--slow-ms <number>] [--in-progress]");
-    expect(byId["deploy.plan"]).toBe("deploy plan [--only <string>] [--skip <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]");
+    expect(byId["deploy.plan"]).toBe("deploy plan [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]");
     expect(byId["deploy.all"]).toBe(byId["deploy.plan"].replace("deploy plan", "deploy all"));
     expect(byId["env.bootstrap"]).toBe("env bootstrap --env <string> --service <string> [--apply] [--out <string>] [--manifest <string>]");
     // CLI-only commands never reach chat, MCP, or HTTP.

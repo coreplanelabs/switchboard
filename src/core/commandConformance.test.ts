@@ -394,8 +394,21 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
         exec(`deploy.run ${plan.steps.map((st) => st.name).join(",")}`, { kind: "ran", ok: true, results: plan.steps.map((st) => ({ name: st.name, script: st.script, versionId: "v1", live: "n/a", status: "deployed" })), notAttempted: [] }),
       restart: async (plan: RestartPlan): Promise<RestartRunResult> =>
         exec(`deploy.restart ${plan.target} force=${plan.force}`, { kind: "ran", ok: true, target: plan.target, previousStartedAt: "2026-08-30T10:00:00.000Z", startedAt: "2026-08-30T10:00:41.000Z", waitedMs: 41_000 }),
-      // A probe of the checkout, not an executor: not recorded in `executed`.
+      // Probes of the checkout and the fleet, not executors: not recorded in `executed`.
       checkout: { hasNodeModules: () => true },
+      affected: async (opts) => ({
+        head: "f".repeat(40),
+        workers: [
+          { name: "memory", decision: "deploy", base: opts.base ? { kind: "ref", ref: opts.base } : { kind: "live", commit: "a".repeat(40) }, reasons: ["deploy/cloudflare-memory/worker.ts"] },
+          { name: "bot", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
+          { name: "resident", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
+          { name: "sandbox", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
+        ],
+        selected: ["memory"],
+        unclassified: [],
+        deployAll: false,
+        markdown: "(md)",
+      }),
     },
     env: {
       bootstrap: async (opts, log): Promise<BootstrapResult> => {

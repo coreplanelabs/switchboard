@@ -100,9 +100,11 @@ retell an incident. The changelog and the decision records carry provenance.
 
 Maintainers cut releases from `main` with release-please: merged conventional
 commits accumulate into a release PR, and merging it tags the version, writes
-the changelog, and publishes the release. Until 1.0, a minor version may change
-configuration keys or command syntax; the changelog calls out every such change
-with a migration note.
+the changelog, publishes the release, and deploys production from CI — only the
+Workers the release actually changed, which the release PR lists in a comment
+before anyone merges it (every PR's `deploy targets` check shows the same for
+its own diff). Until 1.0, a minor version may change configuration keys or
+command syntax; the changelog calls out every such change with a migration note.
 
 ## Where things live
 

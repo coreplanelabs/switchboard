@@ -50,7 +50,9 @@ flowchart LR
     M["memory<br/>(state Worker)"] --> B["bot"] --> R["resident"] --> S["sandbox"]
 ```
 
-The state Worker goes first because its Durable Object migrations have to exist before the bot writes to them — deploying the bot against a state Worker that hasn't migrated yet is a live 500, not a graceful degrade. Resident and sandbox come after the bot because they're consumers of bearer tokens the bot's config names; there's no correctness reason they *can't* go first, it's just that a Worker deploy briefly swaps out the isolate underneath any resident/sandbox work in flight, so doing it right after the bot (rather than mid-run) minimizes what gets interrupted. See [how-to: deploy and rotate a secret](../how-to/deploy-and-rotate-a-secret.md) for the actual command.
+The state Worker goes first because its Durable Object migrations have to exist before the bot writes to them — deploying the bot against a state Worker that hasn't migrated yet is a live 500, not a graceful degrade. Resident and sandbox come after the bot because they're consumers of bearer tokens the bot's config names; there's no correctness reason they *can't* go first, it's just that a Worker deploy briefly swaps out the isolate underneath any resident/sandbox work in flight, so doing it right after the bot (rather than mid-run) minimizes what gets interrupted.
+
+The order is also why a release does not redeploy everything. Each Worker is a separate artifact with separate inputs — the state Worker's bundle, the bot's image, the resident's bundle plus image — so a release that only touched the resident's engine rolls only the resident, and the bot's container (with its 15-minute drain and its Slack blackout) is left alone. CI derives that per Worker from the diff between the commit each one is serving and the release commit, keeping the order for whatever it does select. See [how-to: deploy and rotate a secret](../how-to/deploy-and-rotate-a-secret.md) for what you actually do.
 
 ## What this buys you operationally
 

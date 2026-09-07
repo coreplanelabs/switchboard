@@ -6,8 +6,9 @@
   "account_id": "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
   // ASSETS ONLY: no `main`, so there is no Worker script, no Durable Object,
   // and no container. Nothing here can be mid-rollout or draining, which is
-  // exactly why CI may deploy it on every docs change while the bot's own
-  // deploy stays hand-driven and preflighted (AGENTS.md, features/docs-site.md).
+  // exactly why CI may deploy it on every docs change, while the four runtime
+  // Workers deploy on the release, preflighted and in order (AGENTS.md,
+  // features/docs-site.md, features/release-and-deploy.md).
   "assets": {
     "directory": "../../docs/.vitepress/dist",
     // VitePress emits clean URLs (`/reference/cli.html`), so /reference/cli must
