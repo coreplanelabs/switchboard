@@ -23,7 +23,12 @@ export const SERVICEABLE_STATES: ReadonlySet<ResidentLifecycleState> = new Set<R
 // `checkout-update-failed`, `install-failed`, `build-failed`,
 // `snapshot-failed`, `refresh-failed` — leaves the checkout at a new sha with
 // absent/partial deps, and a fresh thread would hardlink that broken cache.
-// Everything not on the allow-list, including unknown reasons, stays cold.
+// `disk-full: …` (#457, `residentDisk.ts`) is not on the list on purpose: the
+// checkout may be intact, but a full disk cannot take a worktree, a credential
+// file, or even `/etc/gitconfig.lock`, so the attach would fail every time
+// (2026-09-04: recorded as `github-unreachable`, every run attached and died
+// at git-setup). Everything not on the allow-list, including unknown reasons,
+// stays cold.
 const SERVICEABLE_DEGRADED_REASON = /^(?:github-unreachable|alarm-missed)(?::|$)/;
 
 export function degradedIsServiceable(reason: string | undefined): boolean {

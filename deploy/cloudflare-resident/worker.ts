@@ -108,8 +108,10 @@ import {
   RUNTIME_REPLACEMENT_WORDING,
   withTimeout,
   type RefreshDisk,
+  type RefreshFailure,
   type RefreshOutcome,
 } from "../../src/execution/residentRefresh.js";
+import { DF_FREE_ARGV, DISK_FULL_FREE_KIB, isDiskFullReason, parseDfFreeKiB, planDiskFullRecovery } from "../../src/execution/residentDisk.js";
 import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
 import { describeStepFailure, stepFailureLog, type StepResult } from "../../src/execution/residentStepReport.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
@@ -316,6 +318,13 @@ const NON_EVIDENCE_REASON = /^(?:alarm-missed|stale-mid-flight|refresh-interrupt
 /** Consecutive cycles that ended `refresh-interrupted` (#216): feeds the
  *  short-re-arm cap in `nextRefreshDelayS`; cleared by any other outcome. */
 const INTERRUPTED_STREAK_KEY = "resident:interruptedStreak";
+/** When the disk-full recovery last stopped the container (#457, item 54):
+ *  feeds `planDiskFullRecovery`'s cooldown so a working set that refills the
+ *  disk is named, not recycled in a loop. */
+const DISK_FULL_RECYCLE_KEY = "resident:diskFullRecycleAt";
+/** A disk-full attach pulls the refresh cycle this close (seconds) so the
+ *  recovery decision runs now, not at the next 600 s alarm. */
+const DISK_FULL_REARM_S = 1;
 function isNonEvidenceReason(reason: string): boolean {
   return NON_EVIDENCE_REASON.test(reason);
 }
@@ -1621,6 +1630,19 @@ export class ResidentDO extends Sandbox<Env> {
       // (hydration, registry, facts, reconcile) — same re-read discipline as
       // every other state decision in this file.
       const entry = await this.getStatus();
+      if (entry.state === "degraded" && isDiskFullReason(entry.reason)) {
+        // The cycle owns the disk-full verdict (#457, item 54): re-probe before
+        // fetching. Still full → nothing a fetch can do; decide whether the
+        // container may be recycled and stop here (a fetch that happened to fit
+        // would flip the resident `warm`, the bot would attach, git-setup would
+        // fail and flip it back — a flap loop). Space back (a detach or the
+        // sweep freed trees) → run the cycle as usual and earn `warm`.
+        const free = await this.freeKiB();
+        if (free !== null && free < DISK_FULL_FREE_KIB) {
+          await this.recoverFromDiskFull(entry.reason, 0);
+          return; // finally re-arms: short after a recycle, the cadence otherwise
+        }
+      }
       let settled = entry.state === "warm";
       if (entry.state === "degraded" && !isNonEvidenceReason(entry.reason)) {
         // Count consecutive cycles that found the same REFRESH-PRODUCED degraded
@@ -1697,7 +1719,19 @@ export class ResidentDO extends Sandbox<Env> {
         // A private repo whose mint failed lands here (the anonymous fetch is
         // refused): say so, rather than blaming GitHub reachability alone.
         const cause = mintError ? `${mintError}; then ` : "";
-        await this.setResidentState("degraded", `github-unreachable: ${cause}${errMsg(err)}`);
+        const message = `${cause}${errMsg(err)}`;
+        // A full disk fails this step too — the credential file is written
+        // here (live 2026-09-04: `ENOSPC` on /workspace/.resident/git-credentials,
+        // recorded as github-unreachable, a SERVICEABLE reason, so every run
+        // attached and died at git-setup, #457). Name the disk instead: not
+        // serviceable, and the recovery below can free it.
+        const failure = await this.classifyFailure("fetch", message);
+        if (failure.diskFull) {
+          await this.setResidentState("degraded", failure.reason);
+          await this.recoverFromDiskFull(failure.reason, refreshCounted ? 1 : 0);
+          return;
+        }
+        await this.setResidentState("degraded", `github-unreachable: ${message}`);
         return;
       }
 
@@ -1808,9 +1842,9 @@ export class ResidentDO extends Sandbox<Env> {
       // replacement error can surface between steps — with the generic
       // "refresh" step, whose failure reason is the pre-existing
       // `refresh-failed: …` shape.
-      const failure = classifyRefreshFailure(
-        err instanceof StepError ? { step: err.step, message: err.message } : { step: "refresh", message: errMsg(err) },
-      );
+      // A full disk (#457) is a third class: `disk-full: …`, never serviceable,
+      // and the one failure the resident can act on itself (recoverFromDiskFull).
+      const failure = err instanceof StepError ? await this.classifyFailure(err.step, err.message) : await this.classifyFailure("refresh", errMsg(err));
       // Set BEFORE the writes on purpose: if either throws, the finally still
       // re-arms short — the safe direction for an interruption.
       if (failure.interrupted) this.rearmOutcome = "interrupted";
@@ -1822,6 +1856,7 @@ export class ResidentDO extends Sandbox<Env> {
       // clears it, same as a mint error.
       await this.recordRefreshError(failure.reason);
       await this.setResidentState("degraded", failure.reason); // last snapshot keeps serving
+      if (failure.diskFull) await this.recoverFromDiskFull(failure.reason, refreshCounted ? 1 : 0);
     } finally {
       if (refreshCounted) this.refreshesInFlight--;
       const state = await this.ctx.storage.get<ResidentState>(STATE_KEY);
@@ -1847,26 +1882,89 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** Set during one alarm by the idle gate (`idle`), an image-stale container
-   *  stop (`image-stale-restart`) or an interrupted step (`interrupted`) so
-   *  `finally` picks the matching re-arm delay (`nextRefreshDelayS`); reset to
-   *  `normal` after every arm. */
+   *  stop (`image-stale-restart`), a disk-full recycle (`disk-full-restart`)
+   *  or an interrupted step (`interrupted`) so `finally` picks the matching
+   *  re-arm delay (`nextRefreshDelayS`); reset to `normal` after every arm. */
   private rearmOutcome: RefreshOutcome = "normal";
 
   /** Idle = no live binding attached within IDLE_AFTER_S AND (when the
    *  runtime is up) no live tree is dirty. Bindings are storage; dirtiness
    *  needs the container — if it is already asleep there is nothing to lose. */
   private async isIdle(): Promise<boolean> {
-    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-    const live = [...all.values()].filter((b) => !b.evicted && b.user);
+    const live = await this.liveBindings();
     const recent = Date.now() - IDLE_AFTER_S * 1000;
     if (live.some((b) => Date.parse(b.lastAttachAt) >= recent)) return false;
     if (this.inFlightCount() > 0) return false;
+    return this.liveTreesClean(live);
+  }
+
+  /** Bindings that hold a pool user and a tree on disk (not evicted). */
+  private async liveBindings(): Promise<ThreadBinding[]> {
+    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    return [...all.values()].filter((b) => !b.evicted && b.user);
+  }
+
+  /** True when no live tree holds work a lost disk would destroy: every one
+   *  is clean (as its thread user), or the runtime is already down — a sleep
+   *  has destroyed the disk, so there is nothing left to lose. */
+  private async liveTreesClean(live: ThreadBinding[]): Promise<boolean> {
     if (!(await this.isRuntimeActive().catch(() => false))) return true;
     // Concurrent: each check touches only its own (disjoint) tree, and one
     // spawn each (#356 item 6) — the idle gate no longer pays a serial
     // 3-probe round-trip per live binding.
     const checks = await Promise.all(live.map((b) => this.worktreeCleanliness(b)));
-    return checks.every((c) => c.clean); // any dirty or unknown → stay awake
+    return checks.every((c) => c.clean); // any dirty or unknown → not clean
+  }
+
+  // -- disk-full (#457, item 54) ------------------------------------------------
+
+  /** Free space on the workspace mount in KiB; `null` when df cannot answer.
+   *  One fork, run only after a step has already failed — never on the hot path. */
+  private async freeKiB(): Promise<number | null> {
+    try {
+      const r = await this.run([...DF_FREE_ARGV]);
+      return r.exitCode === 0 ? parseDfFreeKiB(r.stdout) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** `classifyRefreshFailure` with the disk probe folded in: the probe runs
+   *  only when the message alone does not decide (no ENOSPC wording, no kill
+   *  signature) — git's `git config` reports its write failure without an
+   *  errno, which is how the 2026-09-04 attaches read like a lock bug. */
+  private async classifyFailure(step: string, message: string): Promise<RefreshFailure> {
+    const direct = classifyRefreshFailure({ step, message });
+    if (direct.diskFull || direct.interrupted) return direct;
+    return classifyRefreshFailure({ step, message, freeKiB: await this.freeKiB() });
+  }
+
+  /** The disk is a cache (KTD3): stop the container so the next alarm restores
+   *  mirror + checkout from R2 onto an empty disk — the same wake path as a
+   *  platform sleep. Only when the pure plan allows it: nothing in flight
+   *  (`selfInFlight` excludes the calling refresh cycle from the count), every
+   *  live tree clean, and no recycle within the cooldown. A refused recycle is
+   *  written to `lastRefreshError` with its why, so `/residents` says what an
+   *  operator must do; the `degraded` reason stays the clean `disk-full: …`. */
+  private async recoverFromDiskFull(reason: string, selfInFlight: number): Promise<void> {
+    const lastRecycleAt = await this.ctx.storage.get<number>(DISK_FULL_RECYCLE_KEY);
+    const plan = planDiskFullRecovery({
+      now: Date.now(),
+      lastRecycleAt,
+      inFlight: this.inFlightCount() - selfInFlight,
+      treesClean: await this.liveTreesClean(await this.liveBindings()),
+    });
+    if (plan.action === "wait") {
+      console.log(`disk-full: container kept — ${plan.why}`);
+      await this.recordRefreshError(`${reason} — container kept: ${plan.why}`);
+      return;
+    }
+    console.log(`disk-full: recycling the container — the next alarm restores mirror + checkout from R2 onto an empty disk (${reason})`);
+    await this.ctx.storage.put(DISK_FULL_RECYCLE_KEY, Date.now());
+    await this.recordRefreshError(`${reason} — container recycled; restoring from R2 on the next alarm`);
+    this.clearIncarnationMemos(); // deliberate incarnation swap
+    await this.stop().catch((err) => console.log(`disk-full: stop failed: ${errMsg(err)}`));
+    this.rearmOutcome = "disk-full-restart";
   }
 
   /** Refresh-on-attach, BOUNDED: if the resident was idle (or the last
@@ -2193,6 +2291,23 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
+  /** A failed attach step after its rollback: the 500 the caller falls back
+   *  on, named by step. A step that died of a full disk (#457, item 54) also
+   *  flips the resident `degraded(disk-full: …)` — not serviceable, so the
+   *  next dispatch goes cold without attaching (the card names the disk, not
+   *  `/etc/gitconfig.lock`) — and pulls the refresh cycle to now, where the
+   *  recovery decision lives (an attach never stops the container itself: it
+   *  is in flight). */
+  private async attachFailed(err: unknown, resource: string): Promise<ThreadErr> {
+    if (!(err instanceof StepError)) return { error: `attach-failed: ${errMsg(err)}`, status: 500 };
+    const failure = await this.classifyFailure(err.step, err.message);
+    if (!failure.diskFull) return { error: `attach-failed at ${err.step}: ${err.message}`, status: 500 };
+    console.log(`attach: ${failure.reason}`);
+    await this.setResidentState("degraded", failure.reason);
+    await this.armRefresh(resource, DISK_FULL_REARM_S);
+    return { error: `attach-failed: ${failure.reason}`, status: 500 };
+  }
+
   private async attachThreadBody(
     threadKey: string,
     refHint: string | null,
@@ -2301,8 +2416,7 @@ export class ResidentDO extends Sandbox<Env> {
       if (err instanceof StepError && err.step === "unknown-ref") {
         return { error: `unknown-ref: ${err.message}`, status: 400 };
       }
-      const step = err instanceof StepError ? ` at ${err.step}` : "";
-      return { error: `attach-failed${step}: ${errMsg(err)}`, status: 500 };
+      return this.attachFailed(err, resource);
     }
 
     let deps: { deps: ThreadDepsMechanism; reconciled: boolean };
@@ -2327,8 +2441,7 @@ export class ResidentDO extends Sandbox<Env> {
         const s = await this.getStatus();
         return { error: errMsg(err), status: 503, state: s.state, reason: "mirror-busy" };
       }
-      const step = err instanceof StepError ? ` at ${err.step}` : "";
-      return { error: `attach-failed${step}: ${errMsg(err)}`, status: 500 };
+      return this.attachFailed(err, resource);
     }
 
     // The prior write time never survives an attach: a read-only attach
