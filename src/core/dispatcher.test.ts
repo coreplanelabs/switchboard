@@ -7010,17 +7010,28 @@ workspaceDir: __WORKDIR__
     expect(reviewSystem).not.toContain("BASE main");
   });
 
-  it("a human-authored open thread PR WITH new task text refuses on authorship — never advising a resume the author check would reject", async () => {
-    const provider = shipProvider();
+  it("new task text citing a human-authored open PR does NOT bind it — round 0 starts from the default branch, no refusal (#512)", async () => {
+    const TASK = "investigate the review-agent bug seen on acme/api#508";
+    const provider = shipProvider({ coding: [say("Which review run did you mean?")] });
     const { deps } = shipDeps(provider);
-    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
+    // resolveRepoContext resolves the cited PR's head and binds it as `ref`
+    // (repoContext.ts: `if (head?.ref) ref = head.ref`) — the head branch of
+    // the human PR (SHIP_BRANCH here, matching openBotPr's headRef). The mock
+    // MUST carry that ref, or it hides the fall-through re-basing round 0 on
+    // the stranger's head branch (F1).
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 508, ref: SHIP_BRANCH, headSha: HEAD_A, baseRef: "main" });
     deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "justin", id: 42 } }));
+    const branch = shipBranchName(shipTaskText(TASK, "acme/api"), "slack:CX:1.0");
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch, remoteHead: null }));
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("agent:ship also add rate limiting", "slack:UADMIN"), io);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("not ship's to drive");
-    expect(replies[0]).not.toContain("resume its review loop"); // the misleading advice the ordering fix removes
-    expect(makeExecutor).not.toHaveBeenCalled();
+    await dispatch(deps, msg(`agent:ship ${TASK}`, "slack:UADMIN"), io);
+    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].agent.name).toBe("coding"); // round 0, not a refusal
+    // Round 0 creates the pipeline branch from the repo default branch — NEVER
+    // the cited PR's head branch (SHIP_BRANCH), which would carry the
+    // stranger's commits and dangle when #508 merges (F1).
+    expect(deps.createBranchRef).toHaveBeenCalledWith("acme/api", branch, "main");
+    for (const r of replies) expect(r).not.toContain("not ship's to drive");
   });
 
   it("thread PR authored by a human → refusal (not ship's to drive), no child run", async () => {
