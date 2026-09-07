@@ -1,0 +1,19 @@
+{
+  // Scoped config so `npm run typecheck` checks worker.ts on its own terms.
+  // Without it tsc falls back to the repo-root tsconfig, which excludes this
+  // directory — and TypeScript 7 refuses `tsc <file>` outright when any
+  // tsconfig.json is discoverable (TS5112), so the options live here instead
+  // of on the command line. Types resolve through node resolution, so they
+  // are found wherever npm installed them.
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2022"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["worker.ts"]
+}
