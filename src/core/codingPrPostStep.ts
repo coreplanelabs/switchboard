@@ -5,16 +5,28 @@
 // explicit seam between them, because the dispatcher publishes the accepted
 // `pr_description` event in between and a hard stop can land mid-observation:
 //
-//   1. `observeCodingWorkspace` — read the workspace's HEAD, branch, the
-//      remote's head for that branch (and, when asked, origin remote) BEFORE
-//      the workspace can be released.
+//   1. `observeCodingWorkspace` — read the workspace's head branch, its tip,
+//      the remote's head for that branch (and, when asked, origin remote)
+//      BEFORE the workspace can be released.
 //   2. `runCodingPrPostStep` — given that observation and the run's submitted
 //      `PrDescription`, render the body at the observed head and open or edit
 //      the PR (open-or-edit idempotency lives in githubPulls), publishing the
 //      typed `pr_opened` event and returning the honest reply note.
 //
+// The head branch is the branch the run's own `git push` named — read off the
+// run's bash calls + results as they stream by (`trackPushedBranch`: only a `git
+// push` command's own result is read, `pushedBranchOf` parses git's `To <url>` +
+// per-ref status block) — and the checked-out branch only when no push was
+// observed. The checkout is NOT the record of what was pushed: anything that
+// moves HEAD between the push and the post (#458: a second run's `git
+// checkout -b` in a shared sandbox; equally the agent itself checking out
+// another branch after pushing) would make the post ask the remote for a
+// branch nobody pushed and orphan the pushed work. When the two differ, the
+// pushed branch's LOCAL tip (`refs/heads/<branch>`) is the head the body
+// renders at — never HEAD, which is another branch's commit.
+//
 // "Pushed" is OBSERVED, never inferred: the branch counts as pushed only when
-// the remote's own `refs/heads/<branch>` (git ls-remote) is the observed HEAD.
+// the remote's own `refs/heads/<branch>` (git ls-remote) is that observed tip.
 // The clone's tracking state (`@{u}`) is NOT the proof — a `--depth` /
 // `--single-branch` clone, the cold sandbox's usual shape, never creates the
 // remote-tracking ref for a pushed branch, so `@{u}` fails after a successful
@@ -46,48 +58,65 @@ import { parseExitPrefix, type RunEvent } from "./runEvents.js";
 /** What the PR post-step observed in the run's workspace, all read BEFORE the
  *  workspace is released. Every field is undefined when its probe failed. */
 export interface WorkspaceObservation {
+  /** The tip of `branch`: HEAD when it is the checked-out branch, else the
+   *  local `refs/heads/<branch>` — the commit the body renders at. */
   head: string | undefined;
+  /** The PR's head branch: the branch the run's own `git push` named
+   *  (`pushedBranch`), else the checked-out branch. Undefined when neither
+   *  is known (a failed probe, a detached checkout with no push observed). */
   branch: string | undefined;
-  /** The commit the remote holds for the checked-out branch — the proof of a
-   *  push, read from the remote itself (`git ls-remote --exit-code origin
+  /** The branch checked out when the workspace was observed. Equals `branch`
+   *  unless HEAD moved to another branch after the push (#458) — then the
+   *  post-step's notes name both. */
+  checkedOut: string | undefined;
+  /** The commit the remote holds for `branch` — the proof of a push, read
+   *  from the remote itself (`git ls-remote --exit-code origin
    *  refs/heads/<branch>`), so it does not depend on the clone's shape. A
    *  remote that answers "no such branch" is final (undefined). Only when
    *  that probe itself fails (network, auth, an unreadable origin) does the
-   *  local record of the last push, `@{u}`, stand in. */
+   *  local record of the last push, `<branch>@{u}`, stand in. */
   remoteHead: string | undefined;
   /** `owner/name` parsed from the origin remote, probed only when asked. */
   remoteRepo: string | undefined;
 }
 
 /**
- * Probe a coding run's workspace — HEAD, branch, `@{u}`, and (when the
- * dispatch resolved no repo) the origin remote — concurrently, then the
- * remote's head for the observed branch, at the workspace root first. Cold
- * coding agents clone the repo into a SUBDIRECTORY of the sandbox root (the
- * coding prompt mandates at most ONE clone), so a failed root HEAD probe
- * discovers the single cloned repo and re-probes with `git -C` — the
- * directory shell-quoted AND vetted against a conservative name pattern,
- * never interpolated raw. The remote probe runs through the same executor as
- * the agent's own push did, so it authenticates the same way (the sandbox's
- * forwarded token via `gh auth git-credential`, the resident tree's
- * credential store). Best-effort throughout: a failed probe leaves its field
- * undefined and the post-step reports honestly.
+ * Probe a coding run's workspace — HEAD, the checked-out branch, the head
+ * branch's upstream (and, when a push named a branch, that branch's local
+ * tip; when the dispatch resolved no repo, the origin remote) — concurrently,
+ * then the remote's head for the head branch, at the workspace root first.
+ * `pushedBranch` is the branch the run's own `git push` named
+ * (`trackPushedBranch` over the run's events); absent, the checked-out branch is
+ * the head branch. Cold coding agents clone the repo into a SUBDIRECTORY of
+ * the sandbox root (the coding prompt mandates at most ONE clone), so a
+ * failed root HEAD probe discovers the single cloned repo and re-probes with
+ * `git -C` — the directory shell-quoted AND vetted against a conservative
+ * name pattern, never interpolated raw. The remote probe runs through the
+ * same executor as the agent's own push did, so it authenticates the same
+ * way (the sandbox's forwarded token via `gh auth git-credential`, the
+ * resident tree's credential store). Best-effort throughout: a failed probe
+ * leaves its field undefined and the post-step reports honestly.
  */
 export async function observeCodingWorkspace(
   executor: { exec: (cmd: string) => Promise<string> },
-  opts: { probeRemote: boolean },
+  opts: { probeRemote: boolean; pushedBranch?: string },
 ): Promise<WorkspaceObservation> {
   const probe = (cmd: string) => executor.exec(cmd).catch(() => "");
-  const probesAt = async (git: string): Promise<WorkspaceObservation> => {
-    const [headOut, branchOut, upstreamOut, remoteOut] = await Promise.all([
+  const pushed = opts.pushedBranch;
+  const probesAt = async (git: string): Promise<{ observation: WorkspaceObservation; isRepo: boolean }> => {
+    const [headOut, branchOut, upstreamOut, remoteOut, tipOut] = await Promise.all([
       probe(`${git} rev-parse HEAD`),
       probe(`${git} rev-parse --abbrev-ref HEAD`),
-      probe(`${git} rev-parse @{u}`),
+      // The head branch's own upstream: `@{u}` reads the checkout's, which is
+      // the wrong branch once HEAD moved after the push.
+      probe(pushed === undefined ? `${git} rev-parse @{u}` : `${git} rev-parse ${shellQuote(`${pushed}@{u}`)}`),
       opts.probeRemote ? probe(`${git} remote get-url origin`) : Promise.resolve(""),
+      pushed === undefined ? Promise.resolve("") : probe(`${git} rev-parse ${shellQuote(`refs/heads/${pushed}`)}`),
     ]);
-    const branch = parseBranchOutput(branchOut);
-    const upstream = parseRevParseOutput(upstreamOut);
-    let remoteHead: string | undefined = upstream;
+    const headSha = parseRevParseOutput(headOut);
+    const checkedOut = parseBranchOutput(branchOut);
+    const branch = pushed ?? checkedOut;
+    let remoteHead: string | undefined = parseRevParseOutput(upstreamOut);
     if (branch !== undefined) {
       const remote = parseLsRemoteOutput(await probe(`${git} ls-remote --exit-code origin ${shellQuote(`refs/heads/${branch}`)}`), branch);
       // The remote's answer is the truth when it gave one; only a probe that
@@ -95,17 +124,112 @@ export async function observeCodingWorkspace(
       if (remote.kind !== "failed") remoteHead = remote.kind === "found" ? remote.sha : undefined;
     }
     return {
-      head: parseRevParseOutput(headOut),
-      branch,
-      remoteHead,
-      remoteRepo: parseOriginRemoteOutput(remoteOut),
+      observation: {
+        head: pushed === undefined ? headSha : parseRevParseOutput(tipOut),
+        branch,
+        checkedOut,
+        remoteHead,
+        remoteRepo: parseOriginRemoteOutput(remoteOut),
+      },
+      isRepo: headSha !== undefined,
     };
   };
   const atRoot = await probesAt("git");
-  if (atRoot.head !== undefined) return atRoot;
+  if (atRoot.isRepo) return atRoot.observation;
   const dir = parseCloneDirOutput(await probe("ls -d */.git 2>/dev/null | head -1"));
-  if (dir === undefined) return atRoot; // no clone anywhere → the post-step reports honestly
-  return probesAt(`git -C ${shellQuote(dir)}`);
+  if (dir === undefined) return atRoot.observation; // no clone anywhere → the post-step reports honestly
+  return (await probesAt(`git -C ${shellQuote(dir)}`)).observation;
+}
+
+// git's per-ref push status line — `" %c %-*s %-*s -> %s"` in git's own format:
+// a flag (` ` fast-forward, `+` forced, `-` deleted, `*` new ref, `!`
+// rejected, `=` up to date), the summary (`[new branch]`, `[up to date]`,
+// `old..new`, `old...new`, `[rejected]`, …), then `<from> -> <to>` and an
+// optional `(reason)`. The flag is optional here: the fast-forward flag is a
+// space, and the output cap trims the first line's leading whitespace.
+const PUSH_STATUS_LINE_RE = /^\s*(?:[+*=!-]\s+)?(\[[a-z ]+\]|[0-9a-f]{4,40}\.{2,3}[0-9a-f]{4,40})\s+(\S+)\s+->\s+(\S+)(?:\s+\(.*\))?\s*$/i;
+/** A deletion's status line has no `->` side: ` - [deleted]         old`. It
+ *  names no branch, but it IS part of the block — a mixed push (`git push
+ *  origin :old new`) prints it beside the update line, which must still count. */
+const PUSH_DELETION_LINE_RE = /^\s*-\s+\[deleted\]\s+\S+\s*$/i;
+/** The summaries that mean the remote branch now exists at the pushed commit. */
+const PUSHED_SUMMARY_RE = /^(?:\[new branch\]|\[up to date\]|[0-9a-f]+\.{2,3}[0-9a-f]+)$/i;
+/** The `To <url>` header git prints above a push's status block (`From` heads a
+ *  fetch's identical-looking block, whose `->` side is a remote-tracking ref). */
+const PUSH_HEADER_RE = /^To\s+\S+$/;
+
+/**
+ * The remote branch a run's own `git push` landed on, or undefined when the
+ * event is not a bash result carrying one — the `To <url>` header followed by
+ * per-ref status lines; the block ends at the first line that is not one, so
+ * a chained command's later output cannot add a branch. Rejections
+ * (`[rejected]`, `[remote rejected]`), deletions and tags name no branch, and
+ * `git fetch`'s look-alike block sits under `From`, never `To`. The last
+ * status line of the last block wins: a run that pushed twice opens its PR
+ * from the branch it pushed last. This reads one result's OUTPUT only —
+ * `trackPushedBranch` is what pairs it with the command that produced it and
+ * keeps the latest answer across a run's events.
+ */
+export function pushedBranchOf(event: RunEvent): string | undefined {
+  if (event.type !== "tool_result" || event.tool !== "bash" || event.output === undefined) return undefined;
+  let branch: string | undefined;
+  let inBlock = false;
+  for (const raw of event.output.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    if (PUSH_HEADER_RE.test(line.trim())) {
+      inBlock = true;
+      continue;
+    }
+    if (!inBlock) continue;
+    if (PUSH_DELETION_LINE_RE.test(line)) continue; // part of the block, names nothing
+    const m = PUSH_STATUS_LINE_RE.exec(line);
+    if (!m) {
+      inBlock = false;
+      continue;
+    }
+    if (PUSHED_SUMMARY_RE.test(m[1])) branch = m[3];
+  }
+  return branch;
+}
+
+/** A bash `tool_call` summary (`$ <command>`, redacted and capped) whose command
+ *  invokes `git … push`: `git` in command position — the start of the command
+ *  or of a shell segment (`;`, `&&`, `|`, `(`, a new line) — with `push` in
+ *  the same segment and no quote between them. `git push -u origin x`,
+ *  `cd api && git push`, `git -C api push` count; `grep 'git push'`,
+ *  `echo "git push"` do not (a `VAR=1 git push` prefix is missed: a false
+ *  negative only falls back to the checkout). */
+const PUSH_COMMAND_RE = /(?:^\$?|[\n;&|(])\s*git\b[^\n;&|'"]*\bpush\b/;
+
+/**
+ * The branch a run's own `git push` named, tracked across the run's events:
+ * feed every event to `observe`, read `branch()` when the run is done. A
+ * push block counts only when it is the OUTPUT of a bash call whose COMMAND
+ * invoked `git push` — the `tool_call`/`tool_result` pair is matched by
+ * `callId` — so a command that merely reproduces a push block (an `echo`, a
+ * `cat` of a transcript, a test that prints one) names nothing. The latest
+ * push wins; a later non-push result never erases it. Even a candidate that
+ * slipped through is never a fact: the post-step still requires the remote's
+ * own `refs/heads/<branch>` to equal that branch's observed local tip, so a
+ * phantom degrades to the honest "not found on the remote" note.
+ */
+export function trackPushedBranch(): { observe(event: RunEvent): void; branch(): string | undefined } {
+  // callIds of in-flight bash calls whose command invokes git push; entries
+  // leave on their result, so the set never outgrows one turn's tool calls.
+  const pushCalls = new Set<string>();
+  let branch: string | undefined;
+  return {
+    observe(event) {
+      if (event.type === "tool_call") {
+        if (event.tool === "bash" && event.callId !== undefined && PUSH_COMMAND_RE.test(event.summary)) pushCalls.add(event.callId);
+        return;
+      }
+      if (event.type !== "tool_result" || event.tool !== "bash" || event.callId === undefined) return;
+      const fromPush = pushCalls.delete(event.callId);
+      if (fromPush) branch = pushedBranchOf(event) ?? branch;
+    },
+    branch: () => branch,
+  };
 }
 
 /** Where the post-step's PR would open: the dispatch's resolved slug and refs.
@@ -163,12 +287,18 @@ export async function runCodingPrPostStep(input: {
   const remoteHead = normalizeHead(observed.remoteHead);
   const pushed = headSha !== undefined && remoteHead !== undefined && sameCommit(remoteHead, headSha);
   const compareUrl = repo && branch && pushed ? `https://github.com/${repo}/compare/${encodeGithubPathSegments(branch)}` : undefined;
+  // HEAD moved after the push (#458): the head branch is the one the run's
+  // push named, the checkout another. Every note and log line about the
+  // branch names both, so a reader can tell which branch was asked about.
+  const moved = branch !== undefined && observed.checkedOut !== undefined && observed.checkedOut !== branch;
+  const branchNote = moved ? ` (the branch the run's push named; the workspace was checked out on \`${observed.checkedOut}\`)` : "";
+  const branchLog = moved ? `${branch} (pushed; checkout on ${observed.checkedOut})` : (branch ?? "unknown");
   if (repo === undefined) {
     // Neither the dispatch nor the workspace names a repository — nowhere a
     // PR could be opened. Said plainly when a description was submitted;
     // otherwise there is nothing to report on.
     if (prDescription) {
-      console.log(`[pr-post] ${logKey} skipped: no repo resolvable (none at dispatch, no GitHub origin remote observed; branch ${branch ?? "unknown"})`);
+      console.log(`[pr-post] ${logKey} skipped: no repo resolvable (none at dispatch, no GitHub origin remote observed; branch ${branchLog})`);
       return `⚠️ A PR description was submitted but no repository is known for this thread (none resolved at dispatch, and no GitHub origin remote was observed in the workspace), so no PR was opened.`;
     }
     return undefined;
@@ -197,14 +327,14 @@ export async function runCodingPrPostStep(input: {
       remoteHead === undefined
         ? "was not found on the remote"
         : `has unpushed commits (the remote branch is at ${remoteHead.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`;
-    console.log(`[pr-post] ${logKey} skipped: push not observed (repo ${repo}, branch ${branch}, head ${headSha.slice(0, 7)}, remote ${remoteHead?.slice(0, 7) ?? "none"})`);
-    return `⚠️ A PR description was submitted but the branch \`${branch}\` ${why}, so no PR was opened.`;
+    console.log(`[pr-post] ${logKey} skipped: push not observed (repo ${repo}, branch ${branchLog}, head ${headSha.slice(0, 7)}, remote ${remoteHead?.slice(0, 7) ?? "none"})`);
+    return `⚠️ A PR description was submitted but the branch \`${branch}\`${branchNote} ${why}, so no PR was opened.`;
   }
   if (prDescription && pushedBranch && headSha?.length === 40 && base) {
     try {
       const body = renderPrDescriptionMarkdown(prDescription, { repo, headSha });
       const opened = await input.openPullRequest({ repo, headBranch: branch, base, title: prDescription.title, body });
-      console.log(`[pr-post] ${logKey} ${opened.created ? "opened" : "updated"} ${repo}#${opened.number} (${branch} → ${base} @ ${headSha.slice(0, 7)})`);
+      console.log(`[pr-post] ${logKey} ${opened.created ? "opened" : "updated"} ${repo}#${opened.number} (${branchLog} → ${base} @ ${headSha.slice(0, 7)})`);
       input.publish({ type: "pr_opened", url: opened.htmlUrl, number: opened.number, created: opened.created, at: Date.now() });
       return opened.created
         ? `🔀 PR opened: ${opened.htmlUrl} (\`${branch}\` → \`${base}\`)`
@@ -220,16 +350,19 @@ export async function runCodingPrPostStep(input: {
     // empty (githubPulls.ts' fetchRepoShipInfo — no App credential, the repo
     // lookup failed, or it answered with no default_branch). Genuinely rare:
     // this is the last resort's own failure mode, not the common case.
-    console.log(`[pr-post] ${logKey} skipped: no base branch resolvable, even after a GitHub default-branch lookup (repo ${repo}, branch ${branch})`);
+    console.log(`[pr-post] ${logKey} skipped: no base branch resolvable, even after a GitHub default-branch lookup (repo ${repo}, branch ${branchLog})`);
     return `⚠️ A PR description was submitted but no base branch is known for this thread, so no PR was opened — compare & open manually: ${compareUrl}`;
   }
   if (prDescription) {
     // A description was submitted but the pushed head — or the branch itself
-    // (a failed probe, a detached checkout) — could not be observed. Never
-    // render anchors at a guessed commit, and never leave the submission
-    // dangling silently: say plainly that no PR was opened.
-    console.log(`[pr-post] ${logKey} skipped: push unobservable (repo ${repo}, branch ${branch ?? "unknown"}, head ${headSha ?? "unknown"})`);
-    return `⚠️ A PR description was submitted but the pushed ${branch === undefined ? "branch" : "head"} could not be observed in the workspace, so no PR was opened${compareUrl ? ` — compare & open manually: ${compareUrl}` : "."}`;
+    // (a failed probe, a detached checkout) — could not be observed: the
+    // checkout is not a repo, or HEAD moved off the pushed branch and its
+    // local ref is gone too. Never render anchors at a guessed commit, and
+    // never leave the submission dangling silently: say plainly that no PR
+    // was opened.
+    console.log(`[pr-post] ${logKey} skipped: push unobservable (repo ${repo}, branch ${branchLog}, head ${headSha ?? "unknown"})`);
+    const what = branch === undefined ? "pushed branch" : `pushed head of \`${branch}\`${branchNote}`;
+    return `⚠️ A PR description was submitted but the ${what} could not be observed in the workspace, so no PR was opened${compareUrl ? ` — compare & open manually: ${compareUrl}` : "."}`;
   }
   if (pushedBranch && compareUrl) {
     console.log(`[pr-post] ${logKey} skipped: no description submitted (repo ${repo}, branch ${branch})`);
