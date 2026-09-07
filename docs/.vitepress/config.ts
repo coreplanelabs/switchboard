@@ -72,6 +72,8 @@ export default withMermaid(
             { text: "Restrict who can do what", link: "/how-to/restrict-who-can-do-what" },
             { text: "Add a provider or an agent", link: "/how-to/add-a-provider-or-agent" },
             { text: "Deploy and rotate a secret", link: "/how-to/deploy-and-rotate-a-secret" },
+            { text: "Operate production", link: "/how-to/operate-production" },
+            { text: "Configure the repository", link: "/how-to/configure-the-repository" },
           ],
         },
         {
@@ -83,6 +85,7 @@ export default withMermaid(
             { text: "Configuration", link: "/reference/configuration" },
             { text: "Permissions", link: "/reference/permissions" },
             { text: "Dashboard routes", link: "/reference/dashboard-routes" },
+            { text: "Code map", link: "/reference/code-map" },
           ],
         },
         {
@@ -96,6 +99,9 @@ export default withMermaid(
             { text: "One definition, every surface", link: "/explanation/one-command-many-surfaces" },
             { text: "Runs: live, then remembered", link: "/explanation/runs-live-and-history" },
             { text: "How Switchboard improves itself", link: "/self-improvement-architecture" },
+            { text: "How we work", link: "/explanation/how-we-work" },
+            { text: "Capacity and sizing", link: "/explanation/capacity-and-sizing" },
+            { text: "Known limits", link: "/explanation/known-limits" },
           ],
         },
       ],
