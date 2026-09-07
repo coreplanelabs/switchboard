@@ -44,6 +44,7 @@ Drawn from [opensource.guide](https://opensource.guide/starting-a-project/), the
 3. **Every comment serves the reader who has only the repo.** No company names, people, incidents, private trackers, plan ids. A comment explains *why the code is this way*; provenance lives in `CHANGELOG.md` and `docs/decisions/`.
 4. **Design decisions are written down** as ADRs a newcomer can read in an hour, and the code points at them.
 5. **Features compose.** Every optional subsystem has an off-state, and help text, dashboards, prompts, deploy tooling, and docs all reflect it.
+5a. **Off-the-shelf patterns, named.** The code is built from the vocabulary a newcomer already has: Ports & Adapters at the boundaries, GoF Strategy/Registry/Composite/Null Object where they fit, Fowler's feature toggles and refactoring catalog, Beck's Simple Design and Tidy First, SOLID (open-closed and interface segregation above all), YAGNI as the reason things are deleted. Each ADR names the pattern it instantiates so the map from code to concept is one lookup, and no bespoke abstraction survives where a named one does the job.
 6. **Contribution is safe and predictable.** CONTRIBUTING, CODE_OF_CONDUCT, SECURITY with private reporting, CODEOWNERS, templates, labels, Discussions; CI is the gate; conventional commits + release-please; pinned actions; Dependabot; CodeQL; Scorecard badge.
 7. **Deployment config lives outside the repo.** The repo ships examples and templates; our production values live in `coreplanelabs/infrastructure`.
 8. **Docs are a product surface**: public, pretty, searchable, with a landing page, architecture diagrams, screenshots, a demo video, and the four Diataxis kinds pruned to what a stranger needs.
@@ -56,13 +57,13 @@ Taken 2026-09-07 (Justin). The recommendations below are kept for the record; th
 
 | # | Taken | Consequence for the phases |
 |---|---|---|
-| D1 | **MIT** | Matches the org's other public repos. No NOTICE file; `THIRD_PARTY_NOTICES.md` carries the vendored skills' MIT notice. |
+| D1 | **Apache-2.0** (first answered MIT, changed the same day) | Explicit patent grant; contributions covered by the license's own §5, so no DCO/CLA is needed for inbound = outbound. `NOTICE` carries the copyright line; `THIRD_PARTY_NOTICES.md` carries the vendored skills' MIT notice. |
 | D2 | **Fresh public repo, curated history.** The private repo was written assuming privacy: commit messages and PR bodies are as internal as the comments, and 464 issues/PRs would need triage. Decisions are codified in ADRs, so the history's explanatory value is captured elsewhere; a v0.1.0 does not need 489 commits of provenance. | Phases 1–9 still run as reviewed PRs in the private repo. Phase 10 becomes an **export**: the scrubbed tree lands in a new `coreplanelabs/switchboard` (the private repo is renamed to `switchboard-private` first, or the public one takes a new name) with a small number of coherent commits, then settings, then v0.1.0. Open issues that belong to the public roadmap are re-filed cleanly. |
 | D3 | **Dissolve `features/` into the Diataxis tree.** Not kept as a parallel `specs/` folder. | Behavioral contracts become **reference specs** (`docs/reference/specs/<feature>.md`: precise behavior + criteria + the proving test, scrubbed and tightened); the *why* moves to `docs/explanation/` and ADRs; operator steps embedded in `[agent]` criteria become `docs/how-to/` pages or are dropped. AGENTS.md's same-PR discipline points at the reference specs. `features/` is deleted at the end of Phase 6. |
 | D4 | Product domain, **Justin to choose**. | Phase 8 hosts on it; until then the site builds locally. |
 | D5 | Pluggable `dashboard.auth` (`access` \| `token`), `none` on loopback only. | Phase 4. |
 | D6 | **1Password env bootstrap stays** as a generic optional integration (a secrets-manager → agent-environment bridge is useful to any self-hoster); scrubbed of our service names and documented as a how-to. **Auto-approve-LGTM** becomes a documented *template* (a how-to page + an example workflow parameterized on the bot identity), not a live workflow in the public repo. **`docs/plans/`** dissolves into ADRs + explanation, then is deleted. **`config.production.yaml`** becomes `config/examples/*.yaml` with placeholders (`minimal`, `docker-local`, `cloudflare-full`); our real values move to the infra repo. | Phases 2, 3, 6, 7. |
-| D7 | **No DCO/CLA for now**: inbound = outbound under MIT, stated in CONTRIBUTING. Revisit if outside contribution grows; DCO would add sign-off friction to agent-authored commits. | Phase 1. |
+| D7 | **No DCO/CLA**: Apache-2.0 §5 already places intentional submissions under the license; CONTRIBUTING says so. DCO would add sign-off friction to agent-authored commits for no added coverage. | Phase 1. |
 | D8 | Company-stewarded, `GOVERNANCE.md`. | Phase 1. |
 | D9 | release-please + conventional commits; GHCR image with provenance + SBOM; `0.x`. | Phases 1, 10. |
 | D10 | Keep the name. | — |
@@ -119,6 +120,14 @@ Things already scheduled for removal, or internal-only, that are cheaper to dele
 
 ### Phase 4 — Composability: the product adapts to what is on (2–3 PRs, medium-large)
 
+Design vocabulary for this phase (the patterns are the spec, not decoration):
+
+- **Feature toggles resolved once** (Fowler, *Feature Toggles*): one `Capabilities` value is computed from config at startup and passed down. No surface reads `config.memory?.enabled` itself; scattered `if (config.x)` checks are the smell this phase removes.
+- **Null Object / Special Case** (GoF; Fowler, *Introduce Special Case*) for every off-state: the pattern `NullMemoryStore` already follows becomes the rule (`NullResidentAdmin`, `NullLlmCostSource` exists, `NullScheduleStore`, a no-op MCP source), so callers never branch on presence.
+- **Open-closed** (SOLID): adding a capability never edits help, the dashboard nav, the self-description, or the deploy plan. Each iterates the capability set and the registry's `enabledWhen`; the change lands in one place.
+- **Strategy** for dashboard auth (`access` | `token`), the same shape as providers and executors, behind one small interface (interface segregation: the verifier, not the whole Access module).
+- **Dependency inversion** through `CoreDeps` stays the wiring seam; `index.ts` composes, the core never constructs.
+
 Introduce one **capabilities** value computed once at startup from config (`residents`, `sandbox`, `memory`, `runHistory`, `mcp`, `costs`, `schedules`, `github`, `dashboardAuth`) and thread it to every surface:
 
 - `help` / `<group> help` / MCP tool list / HTTP catalogue hide commands whose capability is off, instead of answering `unavailable` (registry gets an `enabledWhen`).
@@ -132,11 +141,13 @@ Introduce one **capabilities** value computed once at startup from config (`resi
 
 ### Phase 5 — Simplify to off-the-shelf shapes (3–5 PRs, medium, behavior-preserving)
 
-- Split `src/core/dispatcher.ts` (2,463 lines, 44 top-level symbols) into the pipeline it already is: `admission` → `resolve` → `authorize` → `provision` → `run` → `reply` → `record`, each a file with one exported function and its tests moved alongside. No behavior change; the existing 3,554 tests are the harness.
+Method: Beck's **Tidy First** — every PR in this phase is a tidying, never a behavior change, so the diff is reviewable by structure alone; a behavior change that turns out to be needed gets its own PR before or after. Each move is named with its entry in Fowler's refactoring catalog in the commit message (*Extract Function*, *Move Function*, *Rename*, *Replace Conditional with Polymorphism*, *Introduce Special Case*, *Remove Dead Code*), and the acceptance test is Beck's four rules of Simple Design: passes the tests, reveals intention, no duplication, fewest elements.
+
+- Split `src/core/dispatcher.ts` (2,463 lines, 44 top-level symbols) into the pipeline it already is (a **Pipeline / Chain of Responsibility** of stages): `admission` → `resolve` → `authorize` → `provision` → `run` → `reply` → `record`, each a file with one exported function and its tests moved alongside. No behavior change; the existing 3,554 tests are the harness. `CoreDeps` is split per stage (**interface segregation**): a stage declares the two or three dependencies it uses, not the whole bag.
 - Same treatment for `config.ts` (1,028) and `slack.ts` (990) where a seam is obvious.
 - Naming pass against the git-hygiene rule ("names tell the truth"): rename things named after their history (`legacy*`, `*Worker` when it is a store, `frictionLedger` vs run history).
-- Replace bespoke helpers with the standard library or an existing dependency where one is already present (e.g. `mapLimit` stays — it is 30 lines and tested; a hand-rolled JWT verifier would not).
-- **Acceptance**: `npm test` and the conformance snapshot unchanged except for file moves; no file over ~800 lines in `src/core/`.
+- **YAGNI** audit: anything with one implementation and no second caller in sight loses its abstraction (the reverse of invariant 2, which asks for ≥2 implementations before a seam exists). Replace bespoke helpers with the standard library or an existing dependency where one is already present (e.g. `mapLimit` stays — it is 30 lines and tested; a hand-rolled JWT verifier would not).
+- **Acceptance**: `npm test` and the conformance snapshot unchanged except for file moves; no file over ~800 lines in `src/core/`; every commit message names its refactoring.
 
 ### Phase 6 — De-imprint, and make it impossible to regress (parallel by directory, large)
 
@@ -154,7 +165,7 @@ Mechanics: one worktree per directory (`src/core`, `src/channels+execution+mcp`,
 ### Phase 7 — Design decisions as ADRs (1 PR, medium)
 
 - `docs/decisions/` with ~20 ADRs distilled from the four plans, AGENTS.md, and the KTD/KD ids that comments lean on today: seams with ≥2 implementations; dispatcher as the only orchestrator; outbound-only Slack (Socket Mode) and what it costs; platform-namespaced ids; layered config and effort as a first-class dimension; runs have two lives (live registry, then history); one command definition → every surface; authorization as a policy table over a closed condition vocabulary; residents as a second credential domain; typed LLM output; thread admission; reconnect catch-up as recovery; capability tokens for live run pages; why the dashboard is CSP `script-src 'self'`; deploy order and "deployed ≠ live"; why not serverless-native; why memory is off by default.
-- Each ADR: context, decision, consequences, alternatives rejected, status; an index page in the docs site under **Explanation → Design decisions**.
+- Each ADR: context, decision, consequences, alternatives rejected, status, and **the named pattern it instantiates** (Ports & Adapters for the seams; Strategy for providers/executors/auth; Registry for agents, commands, schedules; Composite for tool sources; Null Object for off-states; Fowler's feature toggles for capabilities; capability-based security for live-run tokens; a rules table for authorization) so a newcomer maps code to a concept they already know in one lookup. An index page in the docs site under **Explanation → Design decisions**.
 - Comments that need provenance say `see docs/decisions/0007-authorization-policy-table.md`.
 - `AGENTS.md` shrinks to invariants + map + how to verify (target ≤ 12 KB); the ops runbook content moves to `docs/operations/` (generic) and the infra repo (ours).
 

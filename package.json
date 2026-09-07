@@ -2,7 +2,16 @@
   "name": "switchboard",
   "version": "0.1.0",
   "private": true,
-  "description": "Configurable Slack bot that routes requests to agents (coding, review, general) across pluggable inference providers",
+  "description": "Agent gateway: messages from Slack, the CLI, HTTP, or MCP are routed to agents that answer, review, and ship code on any model provider, executing in sandboxes you control",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/coreplanelabs/switchboard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coreplanelabs/switchboard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/coreplanelabs/switchboard/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -17,6 +26,7 @@
     "cli": "tsx src/cli.ts",
     "skills:sync": "tsx scripts/skills-sync.ts",
     "skills:check": "tsx scripts/skills-sync.ts --check",
+    "licenses:check": "license-checker-rseidelsohn --production --excludePrivatePackages --onlyAllow \"MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;BlueOak-1.0.0;CC0-1.0;Unlicense;MPL-2.0;Python-2.0;CC-BY-4.0;(Apache-2.0 AND BSD-3-Clause)\"",
     "docs:gen": "tsx scripts/docs-gen.ts",
     "docs:check": "tsx scripts/docs-gen.ts --check",
     "docs:dev": "npm --prefix docs run dev",
@@ -34,6 +44,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "license-checker-rseidelsohn": "^5.0.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.11"

@@ -1,0 +1,21 @@
+name: Feature request
+description: Something Switchboard should do that it does not.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do and what gets in the way today. Describe the situation, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: If you have a shape in mind, describe it. Which surface (Slack, CLI, HTTP, dashboard) and which seam (channel, provider, executor, agent) it touches.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: Workarounds, configuration you attempted, other tools.
