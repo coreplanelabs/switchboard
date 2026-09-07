@@ -540,6 +540,36 @@ describe("RunPage — live mode", () => {
     expect(card.text()).not.toMatch(/running/);
   });
 
+  it("every thought head wears the model badge — a record from before per-turn stamps names its run_meta model; a switched turn wears the ⇄ chip instead; nothing known → no badge", () => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([
+        input,
+        { type: "run_meta", agent: "review", model: "anthropic/claude-fable-5", at: 1000 },
+        { type: "turn", durationMs: 3_400, at: 2000 }, // unstamped (pre-#559 runner)
+        assistant("looking", 2100),
+        { type: "turn", durationMs: 16_300, model: "anthropic/claude-fable-5", at: 5000 }, // stamped, same model
+        assistant("still looking", 5100),
+        { type: "turn", durationMs: 2_000, model: "anthropic/claude-opus-5", at: 8000 }, // stamped, switched
+        { type: "answer", text: "done", at: 8100 },
+      ] as LiveFrame[]),
+    });
+    const heads = w.findAll("#log .step .meta");
+    expect(heads).toHaveLength(2);
+    for (const head of heads) {
+      expect(head.find(".model-badge").text()).toBe("claude-fable-5");
+      expect(head.find(".model-badge").attributes("title")).toBe("anthropic/claude-fable-5");
+      expect(head.find(".model-switch").exists()).toBe(false);
+    }
+    const turnRow = w.find("#log .turn .meta"); // the answer's own turn, flushed as its own row
+    expect(turnRow.find(".model-switch").text()).toBe("⇄ claude-opus-5");
+    expect(turnRow.find(".model-badge").exists()).toBe(false);
+
+    const bare = mountApp(RunPage, {
+      seed: historySeed([{ type: "turn", durationMs: 3_400, at: 2000 }, assistant("x", 2100)] as LiveFrame[]),
+    });
+    expect(bare.find("#log .step .model-badge").exists()).toBe(false);
+  });
+
   it("a history page never ticks: a record's un-resulted call shows no elapsed", () => {
     const w = mountApp(RunPage, { seed: historySeed([input, call("c1", "$ npm test", 3000)] as LiveFrame[]) });
     expect(w.find("details.call").attributes("data-status")).toBe("running");

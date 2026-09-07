@@ -497,9 +497,15 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
               >
               <span
                 v-if="item.turn.switched"
-                class="model-switch rounded border border-warn/40 bg-warn/10 px-1.5 font-semibold text-warn"
+                class="model-switch order-first rounded border border-warn/40 bg-warn/10 px-1.5 font-semibold text-warn"
                 :title="`model changed: this turn ran on ${item.turn.model}`"
                 >⇄ {{ modelName(item.turn.model) }}</span
+              >
+              <span
+                v-else-if="item.turn.model"
+                class="model-badge order-first rounded bg-accented px-1.5 text-[0.68rem] font-semibold leading-normal tracking-wider text-muted"
+                :title="item.turn.model"
+                >{{ modelName(item.turn.model) }}</span
               >
               <span v-for="(f, i) in item.turn.facts" :key="i" class="fact">{{ f }}</span>
               <span v-if="item.note" class="nonar font-sans italic">{{ item.note }}</span>
