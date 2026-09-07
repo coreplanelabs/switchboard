@@ -1,0 +1,1 @@
+receipt for #469: the PR head is the branch the run named
