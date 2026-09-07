@@ -138,7 +138,12 @@ describe("RunRegistry.finish", () => {
     const { id, token } = reg.create();
     const seen: RunEvent[] = [];
     let finished = false;
-    reg.subscribe(id, token, (e) => seen.push(e), () => (finished = true));
+    reg.subscribe(
+      id,
+      token,
+      (e) => seen.push(e),
+      () => (finished = true),
+    );
     reg.publish(id, call("during"));
     reg.finish(id);
     expect(finished).toBe(true);
@@ -153,7 +158,12 @@ describe("RunRegistry.finish", () => {
     reg.finish(id);
     const seen: RunEvent[] = [];
     let finished = false;
-    const unsub = reg.subscribe(id, token, (e) => seen.push(e), () => (finished = true));
+    const unsub = reg.subscribe(
+      id,
+      token,
+      (e) => seen.push(e),
+      () => (finished = true),
+    );
     expect(unsub).not.toBeNull();
     expect(seen).toEqual([seq(1, call("happened"))]);
     expect(finished).toBe(true);
@@ -163,7 +173,6 @@ describe("RunRegistry.finish", () => {
     const { reg } = testRegistry();
     expect(() => reg.publish("ghost", call("x"))).not.toThrow();
   });
-
 });
 
 describe("RunRegistry.listActive", () => {
@@ -218,7 +227,17 @@ describe("RunRegistry.listActive", () => {
     });
     expect(handle.label).toBe('coding · acme/x · "token «redacted-github-token»"');
     const [row] = reg.listActive();
-    expect(row).toMatchObject({ label: handle.label, agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1", repo: "acme/x", sourceUrl: "https://acme.slack.com/archives/C1/p1", userName: "justin" }); // sourceUrl + userName: live-view item 21, the index's thread link and its hover identity
+    expect(row).toMatchObject({
+      label: handle.label,
+      agent: "coding",
+      model: "anthropic/claude",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:1",
+      repo: "acme/x",
+      sourceUrl: "https://acme.slack.com/archives/C1/p1",
+      userName: "justin",
+    }); // sourceUrl + userName: live-view item 21, the index's thread link and its hover identity
     expect(reg.getById(handle.id)).toMatchObject({ agent: "coding", repo: "acme/x" });
     const bare = reg.create();
     const bareRow = reg.listActive().find((r) => r.id === bare.id)!;
@@ -293,11 +312,25 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     expect(events).toEqual([
       {
         type: "upsert",
-        run: { id: "id-2", token: "tok-2", label: "review · thread-42", finished: false, startedAt: 1010, eventCount: 0 },
+        run: {
+          id: "id-2",
+          token: "tok-2",
+          label: "review · thread-42",
+          finished: false,
+          startedAt: 1010,
+          eventCount: 0,
+        },
       },
       {
         type: "upsert",
-        run: { id: "id-1", token: "tok-1", label: "coding · owner/repo", finished: false, startedAt: 1000, eventCount: 0 },
+        run: {
+          id: "id-1",
+          token: "tok-1",
+          label: "coding · owner/repo",
+          finished: false,
+          startedAt: 1000,
+          eventCount: 0,
+        },
       },
     ]);
   });
@@ -315,7 +348,10 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     reg.subscribeIndex((ev) => events.push(ev));
     reg.create("x");
     expect(events).toEqual([
-      { type: "upsert", run: { id: "id-1", token: "tok-1", label: "x", finished: false, startedAt: 1000, eventCount: 0 } },
+      {
+        type: "upsert",
+        run: { id: "id-1", token: "tok-1", label: "x", finished: false, startedAt: 1000, eventCount: 0 },
+      },
     ]);
   });
 
@@ -327,7 +363,10 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     events.length = 0; // drop the create-replay upsert
     reg.publish(id, call("x"));
     expect(events).toEqual([
-      { type: "upsert", run: { id: "id-1", token: "tok-1", finished: false, startedAt: 1000, eventCount: 1, activity: "x" } },
+      {
+        type: "upsert",
+        run: { id: "id-1", token: "tok-1", finished: false, startedAt: 1000, eventCount: 1, activity: "x" },
+      },
     ]);
   });
 
@@ -339,7 +378,18 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     events.length = 0;
     reg.finish(id);
     expect(events).toEqual([
-      { type: "upsert", run: { id: "id-1", token: "tok-1", label: "done-run", finished: true, startedAt: 1000, finishedAt: 1000, eventCount: 0 } },
+      {
+        type: "upsert",
+        run: {
+          id: "id-1",
+          token: "tok-1",
+          label: "done-run",
+          finished: true,
+          startedAt: 1000,
+          finishedAt: 1000,
+          eventCount: 0,
+        },
+      },
     ]);
   });
 
@@ -393,14 +443,27 @@ describe("snapshot — token-gated read of a run's backlog (#84)", () => {
     const ev = { type: "tool_call", tool: "bash", summary: "$ ls", at: 5 } as const;
     reg.publish(id, ev);
     const live = reg.snapshot(id, token);
-    expect(live).toEqual({ events: [seq(1, ev)], finished: false, startedAt: expect.any(Number), eventCount: 1, truncated: false });
+    expect(live).toEqual({
+      events: [seq(1, ev)],
+      finished: false,
+      startedAt: expect.any(Number),
+      eventCount: 1,
+      truncated: false,
+    });
     expect("finishedAt" in live!).toBe(false);
     // A copy: mutating it does not touch the registry's backlog.
     live!.events.push({ type: "tool_call", tool: "bash", summary: "$ rm -rf", at: 6 });
     expect(reg.snapshot(id, token)!.events).toHaveLength(1);
 
     reg.finish(id);
-    expect(reg.snapshot(id, token)).toEqual({ events: [seq(1, ev)], finished: true, startedAt: expect.any(Number), finishedAt: expect.any(Number), eventCount: 1, truncated: false });
+    expect(reg.snapshot(id, token)).toEqual({
+      events: [seq(1, ev)],
+      finished: true,
+      startedAt: expect.any(Number),
+      finishedAt: expect.any(Number),
+      eventCount: 1,
+      truncated: false,
+    });
     expect(reg.snapshot(id, "wrong")).toBeNull();
     expect(reg.snapshot("nope", token)).toBeNull();
   });
@@ -419,7 +482,19 @@ describe("RunRegistry.markPersisted", () => {
     events.length = 0; // drop the replay upsert
     reg.markPersisted(id);
     expect(events).toEqual([
-      { type: "upsert", run: { id: "id-1", token: "tok-1", label: "x", finished: true, startedAt: 1000, finishedAt: 1000, eventCount: 0, persisted: true } },
+      {
+        type: "upsert",
+        run: {
+          id: "id-1",
+          token: "tok-1",
+          label: "x",
+          finished: true,
+          startedAt: 1000,
+          finishedAt: 1000,
+          eventCount: 0,
+          persisted: true,
+        },
+      },
     ]);
     expect(reg.listActive()[0].persisted).toBe(true);
   });
@@ -537,7 +612,10 @@ describe("RunRegistry.requestStop — run control (#101)", () => {
     reg.requestStop(id, token, "hard");
     expect(reg.listActive()[0].stop).toEqual({ mode: "hard", state: "stopping" });
     // The request itself is an index upsert so open index pages repaint the row.
-    expect(seen.at(-1)).toEqual({ type: "upsert", run: expect.objectContaining({ stop: { mode: "hard", state: "stopping" } }) });
+    expect(seen.at(-1)).toEqual({
+      type: "upsert",
+      run: expect.objectContaining({ stop: { mode: "hard", state: "stopping" } }),
+    });
     reg.finish(id);
     expect(reg.listActive()[0].stop).toEqual({ mode: "hard", state: "stopped" });
   });
@@ -676,14 +754,25 @@ describe("RunRegistry — token-free operator reads (#157 U5, KTD7)", () => {
     reg.subscribe(id, token, (e) => seen.push(e));
     expect(reg.requestStopById(id, "soft", { kind: "mcp", id: "mcp:agent one!" })).toEqual({ ok: true, mode: "soft" });
     expect(control.requested).toBe("soft");
-    expect(seen.at(-1)).toMatchObject({ type: "run_note", kind: "stop_requested", mode: "soft", actor: { kind: "mcp", id: "mcp:agentone" } });
+    expect(seen.at(-1)).toMatchObject({
+      type: "run_note",
+      kind: "stop_requested",
+      mode: "soft",
+      actor: { kind: "mcp", id: "mcp:agentone" },
+    });
     // The token-gated path publishes no actor: the capability, not a person, asked.
     reg.requestStop(id, token, "hard");
     expect(seen.at(-1)).toMatchObject({ kind: "stop_requested", mode: "hard" });
     expect(seen.at(-1)).not.toHaveProperty("actor");
     reg.finish(id);
-    expect(reg.requestStopById(id, "soft", { kind: "cli", id: "cli:local" })).toEqual({ ok: false, reason: "finished" });
-    expect(reg.requestStopById("nope", "soft", { kind: "cli", id: "cli:local" })).toEqual({ ok: false, reason: "not-found" });
+    expect(reg.requestStopById(id, "soft", { kind: "cli", id: "cli:local" })).toEqual({
+      ok: false,
+      reason: "finished",
+    });
+    expect(reg.requestStopById("nope", "soft", { kind: "cli", id: "cli:local" })).toEqual({
+      ok: false,
+      reason: "not-found",
+    });
   });
 
   it("an actor id with nothing allowed in it becomes `unknown`", () => {

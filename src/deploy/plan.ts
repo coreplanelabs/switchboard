@@ -96,7 +96,19 @@ export const WORKERS: readonly WorkerDef[] = [
     // and the two files that decide what it copies. The root lockfile is a
     // WHOLE-file input: tsc and vite are devDependencies that build the artifact.
     inputs: {
-      paths: ["deploy/cloudflare/", "Dockerfile", ".dockerignore", "package.json", "package-lock.json", "tsconfig.json", "tsconfig.build.json", "src/", "web/", "config/", "skills/"],
+      paths: [
+        "deploy/cloudflare/",
+        "Dockerfile",
+        ".dockerignore",
+        "package.json",
+        "package-lock.json",
+        "tsconfig.json",
+        "tsconfig.build.json",
+        "src/",
+        "web/",
+        "config/",
+        "skills/",
+      ],
       prodDepsLockfiles: ["deploy/cloudflare/package-lock.json"],
     },
     preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: BOT_HEALTH_URL },
@@ -109,7 +121,10 @@ export const WORKERS: readonly WorkerDef[] = [
     dir: "deploy/cloudflare-resident",
     entry: "deploy/cloudflare-resident/worker.ts",
     healthUrl: "https://switchboard-resident.coreplanelabs.dev/healthz",
-    inputs: { paths: ["deploy/cloudflare-resident/"], prodDepsLockfiles: ["deploy/cloudflare-resident/package-lock.json"] },
+    inputs: {
+      paths: ["deploy/cloudflare-resident/"],
+      prodDepsLockfiles: ["deploy/cloudflare-resident/package-lock.json"],
+    },
     preflight: { forceEnv: "RESIDENT_DEPLOY_FORCE" },
     requiredEnv: [{ anyOf: RESIDENT_BEARER_ENVS }],
     why: "per-repo DOs — preflight refuses while a resident has work in flight",
@@ -121,7 +136,10 @@ export const WORKERS: readonly WorkerDef[] = [
     entry: "deploy/cloudflare-sandbox/worker.ts",
     healthUrl: "https://switchboard-sandbox.coreplanelabs.dev/healthz",
     healthBearerEnv: "SANDBOX_TOKEN",
-    inputs: { paths: ["deploy/cloudflare-sandbox/"], prodDepsLockfiles: ["deploy/cloudflare-sandbox/package-lock.json"] },
+    inputs: {
+      paths: ["deploy/cloudflare-sandbox/"],
+      prodDepsLockfiles: ["deploy/cloudflare-sandbox/package-lock.json"],
+    },
     why: "per-thread exec proxy — stateless per run",
   },
 ];
@@ -186,8 +204,12 @@ export interface CheckoutProbe {
 
 export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe): DeployPlan {
   // `--affected` selects; `--only` (and `--skip`) can only narrow what it selected.
-  const selected = opts.affected ? opts.affected.selected.filter((n) => !opts.only || opts.only.includes(n)) : opts.only;
-  const steps = WORKERS.filter((w) => (selected ? selected.includes(w.name) : true) && !(opts.skip ?? []).includes(w.name)).map<DeployStep>((w) => ({
+  const selected = opts.affected
+    ? opts.affected.selected.filter((n) => !opts.only || opts.only.includes(n))
+    : opts.only;
+  const steps = WORKERS.filter(
+    (w) => (selected ? selected.includes(w.name) : true) && !(opts.skip ?? []).includes(w.name),
+  ).map<DeployStep>((w) => ({
     name: w.name,
     script: w.script,
     dir: w.dir,
@@ -214,14 +236,22 @@ export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe): Deploy
       atOriginMain: !opts.allowBranch,
       nodeModulesMissing: steps.filter((s) => !checkout.hasNodeModules(s.dir)).map((s) => s.dir),
     },
-    warnings: forcedNames.length > 0 ? [`--force: preflights are bypassed — in-flight runs on ${forcedNames.join(" and ")} are SIGTERM-drained (finish if they can, else killed at the drain deadline)`] : [],
+    warnings:
+      forcedNames.length > 0
+        ? [
+            `--force: preflights are bypassed — in-flight runs on ${forcedNames.join(" and ")} are SIGTERM-drained (finish if they can, else killed at the drain deadline)`,
+          ]
+        : [],
   };
 }
 
 /** Human rendering of a plan (what `--dry-run` prints). */
 export function formatPlan(plan: DeployPlan): string {
   const missing = plan.checks.nodeModulesMissing;
-  const nodeModules = missing.length === 0 ? "node_modules present in every dir" : `node_modules missing in ${missing.join(", ")} — the runner will \`npm ci\` there first`;
+  const nodeModules =
+    missing.length === 0
+      ? "node_modules present in every dir"
+      : `node_modules missing in ${missing.join(", ")} — the runner will \`npm ci\` there first`;
   const lines = [
     ...(plan.affected ? [formatAffectedText(plan.affected)] : []),
     `Checks: wrangler account = ${plan.checks.account}; clean tree; ${plan.checks.atOriginMain ? "HEAD == origin/main" : "any branch (--allow-branch)"}; ${nodeModules}`,
@@ -234,9 +264,16 @@ export function formatPlan(plan: DeployPlan): string {
       : Object.keys(s.setEnv).length > 0
         ? ` — preflight FORCED (${Object.keys(s.setEnv).join(",")}=1)`
         : "";
-    const env = s.requiredEnv.length > 0 ? ` — needs ${s.requiredEnv.map((r) => (r.anyOf.length === 1 ? r.anyOf[0] : `one of ${r.anyOf.join(" / ")}`)).join(", ")}` : "";
-    const live = s.liveGate ? ` — then wait until live (${s.liveGate.healthUrl} not draining + build.commit == HEAD)` : "";
-    lines.push(`  ${i + 1}. ${s.name} (${s.script}) — ${s.dir}: ${s.command.join(" ")}${pf}${env}${live}\n     ${s.why}`);
+    const env =
+      s.requiredEnv.length > 0
+        ? ` — needs ${s.requiredEnv.map((r) => (r.anyOf.length === 1 ? r.anyOf[0] : `one of ${r.anyOf.join(" / ")}`)).join(", ")}`
+        : "";
+    const live = s.liveGate
+      ? ` — then wait until live (${s.liveGate.healthUrl} not draining + build.commit == HEAD)`
+      : "";
+    lines.push(
+      `  ${i + 1}. ${s.name} (${s.script}) — ${s.dir}: ${s.command.join(" ")}${pf}${env}${live}\n     ${s.why}`,
+    );
   });
   if (plan.dryRun) lines.push("(dry run — nothing executed)");
   return lines.join("\n");
@@ -256,8 +293,15 @@ export interface TokenVerifyResult {
  * `active` passes and says so. Neither → refuse with wrangler's words and
  * both ways out — never a silent switch to whatever credential is around.
  */
-export function decideAccount(input: { account: string; whoamiOutput: string; whoamiExit: number; tokenSet: boolean; tokenVerify?: TokenVerifyResult }): { ok: true; how: string } | { ok: false; problem: string } {
-  if (input.whoamiOutput.includes(input.account)) return { ok: true, how: `wrangler whoami lists account ${input.account}` };
+export function decideAccount(input: {
+  account: string;
+  whoamiOutput: string;
+  whoamiExit: number;
+  tokenSet: boolean;
+  tokenVerify?: TokenVerifyResult;
+}): { ok: true; how: string } | { ok: false; problem: string } {
+  if (input.whoamiOutput.includes(input.account))
+    return { ok: true, how: `wrangler whoami lists account ${input.account}` };
   if (input.tokenSet && input.tokenVerify) {
     let status: unknown;
     try {
@@ -265,19 +309,33 @@ export function decideAccount(input: { account: string; whoamiOutput: string; wh
     } catch {
       status = undefined;
     }
-    if (input.tokenVerify.status === 200 && status === "active") return { ok: true, how: `CLOUDFLARE_API_TOKEN verifies active against account ${input.account} (account-owned token; wrangler whoami lists no memberships)` };
+    if (input.tokenVerify.status === 200 && status === "active")
+      return {
+        ok: true,
+        how: `CLOUDFLARE_API_TOKEN verifies active against account ${input.account} (account-owned token; wrangler whoami lists no memberships)`,
+      };
   }
-  const said = input.whoamiOutput.trim().split("\n").filter(Boolean).slice(-3).join(" | ") || `exit ${input.whoamiExit}, no output`;
+  const said =
+    input.whoamiOutput.trim().split("\n").filter(Boolean).slice(-3).join(" | ") ||
+    `exit ${input.whoamiExit}, no output`;
   const verify = input.tokenSet
     ? input.tokenVerify
       ? ` and the token does not verify against it (HTTP ${input.tokenVerify.status})`
       : " and the token could not be verified against it"
     : "";
-  const wayOut = input.tokenSet ? "unset a CLOUDFLARE_API_TOKEN that belongs to another account, or use one for this account" : "run `npx wrangler login` in deploy/cloudflare";
-  return { ok: false, problem: `wrangler whoami does not list account ${input.account} (coreplane-infra)${verify} — ${wayOut}. wrangler said: ${said}` };
+  const wayOut = input.tokenSet
+    ? "unset a CLOUDFLARE_API_TOKEN that belongs to another account, or use one for this account"
+    : "run `npx wrangler login` in deploy/cloudflare";
+  return {
+    ok: false,
+    problem: `wrangler whoami does not list account ${input.account} (coreplane-infra)${verify} — ${wayOut}. wrangler said: ${said}`,
+  };
 }
 
-export type DeployOutcome = { kind: "deployed"; versionId: string | undefined } | { kind: "preflight-refused"; reason: string } | { kind: "failed"; reason: string };
+export type DeployOutcome =
+  | { kind: "deployed"; versionId: string | undefined }
+  | { kind: "preflight-refused"; reason: string }
+  | { kind: "failed"; reason: string };
 
 /** Read a step's exit + combined output: a preflight refusal (retryable), a
  *  deploy with its `Current Version ID`, or a hard failure (first error-ish line). */

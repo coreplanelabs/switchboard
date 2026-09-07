@@ -50,7 +50,13 @@
 // base".
 
 import { shellQuote } from "../execution/shellQuote.js";
-import { resolveBaseRef, resolveBaseRefLazy, type OpenedPullRequest, type PullRequestTarget, type RepoShipInfo } from "../execution/githubPulls.js";
+import {
+  resolveBaseRef,
+  resolveBaseRefLazy,
+  type OpenedPullRequest,
+  type PullRequestTarget,
+  type RepoShipInfo,
+} from "../execution/githubPulls.js";
 import { encodeGithubPathSegments, renderPrDescriptionMarkdown, type PrDescription } from "./prDescription.js";
 import { normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { parseExitPrefix, type RunEvent } from "./runEvents.js";
@@ -118,7 +124,10 @@ export async function observeCodingWorkspace(
     const branch = pushed ?? checkedOut;
     let remoteHead: string | undefined = parseRevParseOutput(upstreamOut);
     if (branch !== undefined) {
-      const remote = parseLsRemoteOutput(await probe(`${git} ls-remote --exit-code origin ${shellQuote(`refs/heads/${branch}`)}`), branch);
+      const remote = parseLsRemoteOutput(
+        await probe(`${git} ls-remote --exit-code origin ${shellQuote(`refs/heads/${branch}`)}`),
+        branch,
+      );
       // The remote's answer is the truth when it gave one; only a probe that
       // failed outright leaves the local record standing.
       if (remote.kind !== "failed") remoteHead = remote.kind === "found" ? remote.sha : undefined;
@@ -147,7 +156,8 @@ export async function observeCodingWorkspace(
 // `old..new`, `old...new`, `[rejected]`, …), then `<from> -> <to>` and an
 // optional `(reason)`. The flag is optional here: the fast-forward flag is a
 // space, and the output cap trims the first line's leading whitespace.
-const PUSH_STATUS_LINE_RE = /^\s*(?:[+*=!-]\s+)?(\[[a-z ]+\]|[0-9a-f]{4,40}\.{2,3}[0-9a-f]{4,40})\s+(\S+)\s+->\s+(\S+)(?:\s+\(.*\))?\s*$/i;
+const PUSH_STATUS_LINE_RE =
+  /^\s*(?:[+*=!-]\s+)?(\[[a-z ]+\]|[0-9a-f]{4,40}\.{2,3}[0-9a-f]{4,40})\s+(\S+)\s+->\s+(\S+)(?:\s+\(.*\))?\s*$/i;
 /** A deletion's status line has no `->` side: ` - [deleted]         old`. It
  *  names no branch, but it IS part of the block — a mixed push (`git push
  *  origin :old new`) prints it beside the update line, which must still count. */
@@ -224,7 +234,8 @@ export function trackPushedBranch(): { observe(event: RunEvent): void; branch():
         // The full command when the event carries it (runner ≥ this fix); the
         // 200-char summary otherwise (older records) — where a chained command's
         // push past the cap is a known false negative (falls back to the checkout).
-        if (event.tool === "bash" && event.callId !== undefined && PUSH_COMMAND_RE.test(event.command ?? event.summary)) pushCalls.add(event.callId);
+        if (event.tool === "bash" && event.callId !== undefined && PUSH_COMMAND_RE.test(event.command ?? event.summary))
+          pushCalls.add(event.callId);
         return;
       }
       if (event.type !== "tool_result" || event.tool !== "bash" || event.callId === undefined) return;
@@ -289,19 +300,24 @@ export async function runCodingPrPostStep(input: {
   const branch = observed.branch;
   const remoteHead = normalizeHead(observed.remoteHead);
   const pushed = headSha !== undefined && remoteHead !== undefined && sameCommit(remoteHead, headSha);
-  const compareUrl = repo && branch && pushed ? `https://github.com/${repo}/compare/${encodeGithubPathSegments(branch)}` : undefined;
+  const compareUrl =
+    repo && branch && pushed ? `https://github.com/${repo}/compare/${encodeGithubPathSegments(branch)}` : undefined;
   // HEAD moved after the push (#458): the head branch is the one the run's
   // push named, the checkout another. Every note and log line about the
   // branch names both, so a reader can tell which branch was asked about.
   const moved = branch !== undefined && observed.checkedOut !== undefined && observed.checkedOut !== branch;
-  const branchNote = moved ? ` (the branch the run's push named; the workspace was checked out on \`${observed.checkedOut}\`)` : "";
+  const branchNote = moved
+    ? ` (the branch the run's push named; the workspace was checked out on \`${observed.checkedOut}\`)`
+    : "";
   const branchLog = moved ? `${branch} (pushed; checkout on ${observed.checkedOut})` : (branch ?? "unknown");
   if (repo === undefined) {
     // Neither the dispatch nor the workspace names a repository — nowhere a
     // PR could be opened. Said plainly when a description was submitted;
     // otherwise there is nothing to report on.
     if (prDescription) {
-      console.log(`[pr-post] ${logKey} skipped: no repo resolvable (none at dispatch, no GitHub origin remote observed; branch ${branchLog})`);
+      console.log(
+        `[pr-post] ${logKey} skipped: no repo resolvable (none at dispatch, no GitHub origin remote observed; branch ${branchLog})`,
+      );
       return `⚠️ A PR description was submitted but no repository is known for this thread (none resolved at dispatch, and no GitHub origin remote was observed in the workspace), so no PR was opened.`;
     }
     return undefined;
@@ -312,7 +328,9 @@ export async function runCodingPrPostStep(input: {
   // needed a base in the first place, so a repo with no PR/resident/explicit
   // ref never pays for a network call it won't use.
   const candidates = [target.baseRef, target.bindingRef, target.resolvedRef];
-  const base = prDescription ? await resolveBaseRefLazy(candidates, repo, input.fetchRepoInfo) : resolveBaseRef(candidates, undefined);
+  const base = prDescription
+    ? await resolveBaseRefLazy(candidates, repo, input.fetchRepoInfo)
+    : resolveBaseRef(candidates, undefined);
   const pushedBranch = branch !== undefined && branch !== base && pushed;
   if (prDescription && branch !== undefined && branch === base) {
     // The workspace sat on the base branch: nothing was pushed to open a PR
@@ -330,15 +348,25 @@ export async function runCodingPrPostStep(input: {
       remoteHead === undefined
         ? "was not found on the remote"
         : `has unpushed commits (the remote branch is at ${remoteHead.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`;
-    console.log(`[pr-post] ${logKey} skipped: push not observed (repo ${repo}, branch ${branchLog}, head ${headSha.slice(0, 7)}, remote ${remoteHead?.slice(0, 7) ?? "none"})`);
+    console.log(
+      `[pr-post] ${logKey} skipped: push not observed (repo ${repo}, branch ${branchLog}, head ${headSha.slice(0, 7)}, remote ${remoteHead?.slice(0, 7) ?? "none"})`,
+    );
     return `⚠️ A PR description was submitted but the branch \`${branch}\`${branchNote} ${why}, so no PR was opened.`;
   }
   if (prDescription && pushedBranch && headSha?.length === 40 && base) {
     try {
       const body = renderPrDescriptionMarkdown(prDescription, { repo, headSha });
       const opened = await input.openPullRequest({ repo, headBranch: branch, base, title: prDescription.title, body });
-      console.log(`[pr-post] ${logKey} ${opened.created ? "opened" : "updated"} ${repo}#${opened.number} (${branchLog} → ${base} @ ${headSha.slice(0, 7)})`);
-      input.publish({ type: "pr_opened", url: opened.htmlUrl, number: opened.number, created: opened.created, at: Date.now() });
+      console.log(
+        `[pr-post] ${logKey} ${opened.created ? "opened" : "updated"} ${repo}#${opened.number} (${branchLog} → ${base} @ ${headSha.slice(0, 7)})`,
+      );
+      input.publish({
+        type: "pr_opened",
+        url: opened.htmlUrl,
+        number: opened.number,
+        created: opened.created,
+        at: Date.now(),
+      });
       return opened.created
         ? `🔀 PR opened: ${opened.htmlUrl} (\`${branch}\` → \`${base}\`)`
         : `🔀 PR updated: ${opened.htmlUrl} — body re-rendered at \`${headSha.slice(0, 7)}\``;
@@ -353,7 +381,9 @@ export async function runCodingPrPostStep(input: {
     // empty (githubPulls.ts' fetchRepoShipInfo — no App credential, the repo
     // lookup failed, or it answered with no default_branch). Genuinely rare:
     // this is the last resort's own failure mode, not the common case.
-    console.log(`[pr-post] ${logKey} skipped: no base branch resolvable, even after a GitHub default-branch lookup (repo ${repo}, branch ${branchLog})`);
+    console.log(
+      `[pr-post] ${logKey} skipped: no base branch resolvable, even after a GitHub default-branch lookup (repo ${repo}, branch ${branchLog})`,
+    );
     return `⚠️ A PR description was submitted but no base branch is known for this thread, so no PR was opened — compare & open manually: ${compareUrl}`;
   }
   if (prDescription) {
@@ -363,7 +393,9 @@ export async function runCodingPrPostStep(input: {
     // local ref is gone too. Never render anchors at a guessed commit, and
     // never leave the submission dangling silently: say plainly that no PR
     // was opened.
-    console.log(`[pr-post] ${logKey} skipped: push unobservable (repo ${repo}, branch ${branchLog}, head ${headSha ?? "unknown"})`);
+    console.log(
+      `[pr-post] ${logKey} skipped: push unobservable (repo ${repo}, branch ${branchLog}, head ${headSha ?? "unknown"})`,
+    );
     const what = branch === undefined ? "pushed branch" : `pushed head of \`${branch}\`${branchNote}`;
     return `⚠️ A PR description was submitted but the ${what} could not be observed in the workspace, so no PR was opened${compareUrl ? ` — compare & open manually: ${compareUrl}` : "."}`;
   }
@@ -404,7 +436,10 @@ const LS_REMOTE_LINE_RE = /^([0-9a-f]{40})\s+(\S+)$/i;
  *  the thread user cannot read) or output with no ref line at all — which the
  *  caller treats as "the remote could not be asked". `found`/`absent` are
  *  final; only `failed` lets the local `@{u}` stand in. */
-export function parseLsRemoteOutput(output: string, branch: string): { kind: "found"; sha: string } | { kind: "absent" } | { kind: "failed" } {
+export function parseLsRemoteOutput(
+  output: string,
+  branch: string,
+): { kind: "found"; sha: string } | { kind: "absent" } | { kind: "failed" } {
   const exit = parseExitPrefix(output);
   if (exit.failed) return exit.exitCode === 2 ? { kind: "absent" } : { kind: "failed" };
   const want = `refs/heads/${branch}`;

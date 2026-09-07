@@ -30,7 +30,10 @@ const define = commandDefiner<Deps>();
 
 const echo = define({
   id: "demo.echo",
-  options: z.object({ status: z.enum(["active", "finished", "all"]), limit: z.coerce.number().int().positive().optional() }),
+  options: z.object({
+    status: z.enum(["active", "finished", "all"]),
+    limit: z.coerce.number().int().positive().optional(),
+  }),
   action: "runs:read",
   effect: "read",
   describe: "echoes its parsed options",
@@ -134,42 +137,95 @@ describe("defineCommand — definition-time checks", () => {
   const base = { action: "x:read" as const, effect: "read" as const, describe: "d", handler: async () => ({}) };
 
   it("rejects an id that is not <group>.<verb>", () => {
-    for (const id of ["runs", "Runs.list", "runs.list.all", "runs_list"]) expect(() => defineCommand({ ...base, id })).toThrow(/<group>\.<verb>/);
+    for (const id of ["runs", "Runs.list", "runs.list.all", "runs_list"])
+      expect(() => defineCommand({ ...base, id })).toThrow(/<group>\.<verb>/);
   });
 
   it("rejects the retired `scope` and `chatGate` fields (the policy table decides now) and a malformed action", () => {
-    expect(() => defineCommand({ ...base, id: "a.b", chatGate: "open" } as never)).toThrow(/a\.b: `chatGate` is gone — declare `action`/);
+    expect(() => defineCommand({ ...base, id: "a.b", chatGate: "open" } as never)).toThrow(
+      /a\.b: `chatGate` is gone — declare `action`/,
+    );
     expect(() => defineCommand({ ...base, id: "a.b", scope: "x:read" } as never)).toThrow(/a\.b: `scope` is gone/);
-    for (const action of ["x:delete", "read", "X:read", "x:read:more", ""]) expect(() => defineCommand({ ...base, id: "a.b", action } as never), action).toThrow(/action must be <group>:read\|write\|exec/);
+    for (const action of ["x:delete", "read", "X:read", "x:read:more", ""])
+      expect(() => defineCommand({ ...base, id: "a.b", action } as never), action).toThrow(
+        /action must be <group>:read\|write\|exec/,
+      );
     expect(() => defineCommand({ ...base, id: "a.b", action: "x:exec" })).not.toThrow();
   });
 
   it("rejects a required argument after an optional one, a rest argument that is not last, and a name shared by an argument and an option", () => {
-    expect(() => defineCommand({ ...base, id: "a.b", args: [{ name: "x", schema: z.string().optional(), describe: "" }, { name: "y", schema: z.string(), describe: "" }] })).toThrow(/required argument y follows an optional one/);
-    expect(() => defineCommand({ ...base, id: "a.b", args: [{ name: "x", schema: z.string(), describe: "", rest: true }, { name: "y", schema: z.string(), describe: "" }] })).toThrow(/only the last argument may be free text/);
-    expect(() => defineCommand({ ...base, id: "a.b", args: [{ name: "id", schema: z.string(), describe: "" }], options: z.object({ id: z.string() }) })).toThrow(/id is both an argument and an option/);
+    expect(() =>
+      defineCommand({
+        ...base,
+        id: "a.b",
+        args: [
+          { name: "x", schema: z.string().optional(), describe: "" },
+          { name: "y", schema: z.string(), describe: "" },
+        ],
+      }),
+    ).toThrow(/required argument y follows an optional one/);
+    expect(() =>
+      defineCommand({
+        ...base,
+        id: "a.b",
+        args: [
+          { name: "x", schema: z.string(), describe: "", rest: true },
+          { name: "y", schema: z.string(), describe: "" },
+        ],
+      }),
+    ).toThrow(/only the last argument may be free text/);
+    expect(() =>
+      defineCommand({
+        ...base,
+        id: "a.b",
+        args: [{ name: "id", schema: z.string(), describe: "" }],
+        options: z.object({ id: z.string() }),
+      }),
+    ).toThrow(/id is both an argument and an option/);
   });
 
   it("rejects non-camelCase names (kebab-case belongs to the CLI surface only)", () => {
-    expect(() => defineCommand({ ...base, id: "a.b", options: z.object({ "since-ms": z.string() }) })).toThrow(/camelCase/);
-    expect(() => defineCommand({ ...base, id: "a.b", args: [{ name: "Run-Id", schema: z.string(), describe: "" }] })).toThrow(/camelCase/);
+    expect(() => defineCommand({ ...base, id: "a.b", options: z.object({ "since-ms": z.string() }) })).toThrow(
+      /camelCase/,
+    );
+    expect(() =>
+      defineCommand({ ...base, id: "a.b", args: [{ name: "Run-Id", schema: z.string(), describe: "" }] }),
+    ).toThrow(/camelCase/);
   });
 });
 
 describe("parseInput — the untyped { args, options } against the definition", () => {
   it("binds positionals in order (by name for the handler) and coerces options", () => {
-    expect(parseInput(typed, { args: ["abc", "hello world"], options: { mode: "soft", dryRun: "false", models: { coding: "m" } } })).toEqual({
+    expect(
+      parseInput(typed, {
+        args: ["abc", "hello world"],
+        options: { mode: "soft", dryRun: "false", models: { coding: "m" } },
+      }),
+    ).toEqual({
       ok: true,
       args: { id: "abc", text: "hello world" },
       options: { mode: "soft", dryRun: false, models: { coding: "m" } },
     });
-    expect(parseInput(typed, { args: ["abc"], options: { mode: "hard", dryRun: true } })).toMatchObject({ ok: true, args: { id: "abc" }, options: { dryRun: true } });
+    expect(parseInput(typed, { args: ["abc"], options: { mode: "hard", dryRun: true } })).toMatchObject({
+      ok: true,
+      args: { id: "abc" },
+      options: { dryRun: true },
+    });
   });
 
   it("a missing required argument, a surplus argument, and an unknown option are named — the values never are", () => {
-    expect(parseInput(typed, { args: [], options: { mode: "soft" } })).toEqual({ ok: false, message: "missing argument id" });
-    expect(parseInput(echo, { args: ["s3cret"], options: { status: "all" } })).toEqual({ ok: false, message: "unexpected argument: takes none, 1 given" });
-    expect(parseInput(typed, { args: ["abc", "t", "x"], options: { mode: "soft" } })).toMatchObject({ ok: false, message: expect.stringContaining("takes at most 2") });
+    expect(parseInput(typed, { args: [], options: { mode: "soft" } })).toEqual({
+      ok: false,
+      message: "missing argument id",
+    });
+    expect(parseInput(echo, { args: ["s3cret"], options: { status: "all" } })).toEqual({
+      ok: false,
+      message: "unexpected argument: takes none, 1 given",
+    });
+    expect(parseInput(typed, { args: ["abc", "t", "x"], options: { mode: "soft" } })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("takes at most 2"),
+    });
     const unknown = parseInput(typed, { args: ["abc"], options: { mode: "soft", sinceMs: "s3cret-value" } });
     expect(unknown).toEqual({ ok: false, message: "unexpected option: sinceMs" });
   });
@@ -180,9 +236,18 @@ describe("parseInput — the untyped { args, options } against the definition", 
   });
 
   it("argument validation names the argument; options is the default field for a shapeless failure", () => {
-    expect(parseInput(typed, { args: ["NOT-lower"], options: { mode: "soft" } })).toMatchObject({ ok: false, message: expect.stringMatching(/^id: expected a string matching/) });
-    expect(parseInput(typed, { args: ["abc"], options: [] as unknown as Record<string, unknown> })).toEqual({ ok: false, message: "options: expected an object" });
-    expect(parseInput(typed, { args: "abc" as unknown as unknown[] })).toEqual({ ok: false, message: "args: expected an array" });
+    expect(parseInput(typed, { args: ["NOT-lower"], options: { mode: "soft" } })).toMatchObject({
+      ok: false,
+      message: expect.stringMatching(/^id: expected a string matching/),
+    });
+    expect(parseInput(typed, { args: ["abc"], options: [] as unknown as Record<string, unknown> })).toEqual({
+      ok: false,
+      message: "options: expected an object",
+    });
+    expect(parseInput(typed, { args: "abc" as unknown as unknown[] })).toEqual({
+      ok: false,
+      message: "args: expected an array",
+    });
   });
 });
 
@@ -195,7 +260,13 @@ describe("CommandRegistry registration", () => {
 
   it("lists and gets registered commands", () => {
     const { registry } = setup();
-    expect(registry.list().map((c) => c.id)).toEqual(["demo.echo", "demo.fail", "demo.machine", "friction.propose", "demo.typed"]);
+    expect(registry.list().map((c) => c.id)).toEqual([
+      "demo.echo",
+      "demo.fail",
+      "demo.machine",
+      "friction.propose",
+      "demo.typed",
+    ]);
     expect(registry.get("demo.echo")?.describe).toBe("echoes its parsed options");
     expect(registry.get("nope")).toBeUndefined();
   });
@@ -241,14 +312,26 @@ describe("CommandRegistry.invoke — auth before parse", () => {
   it("a chat caller holding no grant for the action is refused (fail-closed); the same decision for the same actor on any surface", async () => {
     const { registry, deps } = setup();
     const nobody = callerWith("chat", "slack:U1", []);
-    expect(await registry.invoke("demo.echo", opts({ status: "all" }), nobody, deps)).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
-    expect(await registry.invoke("demo.echo", opts({ status: "all" }), { ...nobody, kind: "access" }, deps)).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("demo.echo", opts({ status: "all" }), nobody, deps)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+      decidedBy: "registry",
+    });
+    expect(
+      await registry.invoke("demo.echo", opts({ status: "all" }), { ...nobody, kind: "access" }, deps),
+    ).toMatchObject({ ok: false, error: "unauthorized" });
   });
 
   it("dispatch-only MCP caller is refused on a read and a write command", async () => {
     const { registry, deps } = setup();
-    expect(await registry.invoke("demo.echo", opts({ status: "all" }), mcpDispatchOnly, deps)).toMatchObject({ ok: false, error: "unauthorized" });
-    expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), mcpDispatchOnly, deps)).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("demo.echo", opts({ status: "all" }), mcpDispatchOnly, deps)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
+    expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), mcpDispatchOnly, deps)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
     expect(deps.hits).toEqual([]);
   });
 
@@ -256,28 +339,49 @@ describe("CommandRegistry.invoke — auth before parse", () => {
     const { registry, deps } = setup();
     expect(await registry.invoke("demo.echo", opts({ status: "all" }), mcpRunsRead, deps)).toMatchObject({ ok: true });
     const other: Caller = callerWith("mcp", "mcp:x", ["friction:read"]);
-    expect(await registry.invoke("demo.echo", opts({ status: "all" }), other, deps)).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("demo.echo", opts({ status: "all" }), other, deps)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
   });
 
   it("a runs:write caller is refused on a friction:write command", async () => {
     const { registry, deps } = setup();
     const runsWriter: Caller = callerWith("mcp", "mcp:x", ["runs:write"]);
-    expect(await registry.invoke("friction.propose", {}, runsWriter, deps)).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("friction.propose", {}, runsWriter, deps)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
     const frictionWriter: Caller = callerWith("mcp", "mcp:x", ["friction:write"]);
-    expect(await registry.invoke("friction.propose", {}, frictionWriter, deps)).toEqual({ ok: true, value: { proposed: 0 } });
+    expect(await registry.invoke("friction.propose", {}, frictionWriter, deps)).toEqual({
+      ok: true,
+      value: { proposed: 0 },
+    });
   });
 
   it("browser Access identity: the reads its translation gives, a write only when granted (permissions.operators)", async () => {
     const { registry, deps } = setup();
     expect(await registry.invoke("demo.echo", opts({ status: "all" }), browser, deps)).toMatchObject({ ok: true });
-    expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), browser, deps)).toMatchObject({ ok: false, error: "unauthorized" });
-    expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), browserOperator, deps)).toMatchObject({ ok: false, error: "conflict" });
+    expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), browser, deps)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
+    expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), browserOperator, deps)).toMatchObject({
+      ok: false,
+      error: "conflict",
+    });
   });
 
   it("an Access service token is a machine caller: no implicit reads", async () => {
     const { registry, deps } = setup();
-    expect(await registry.invoke("demo.echo", opts({ status: "all" }), svcToken, deps)).toMatchObject({ ok: false, error: "unauthorized" });
-    expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), svcToken, deps)).toMatchObject({ ok: false, error: "conflict" });
+    expect(await registry.invoke("demo.echo", opts({ status: "all" }), svcToken, deps)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
+    expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), svcToken, deps)).toMatchObject({
+      ok: false,
+      error: "conflict",
+    });
   });
 
   it("every grant (cli:local) passes every command", async () => {
@@ -288,7 +392,10 @@ describe("CommandRegistry.invoke — auth before parse", () => {
 
   it("a command that opted out of chat is not_found for a chat caller, present for others", async () => {
     const { registry, deps } = setup();
-    expect(await registry.invoke("demo.machine", {}, chatOperator, deps)).toMatchObject({ ok: false, error: "not_found" });
+    expect(await registry.invoke("demo.machine", {}, chatOperator, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
     expect(await registry.invoke("demo.machine", {}, cli, deps)).toEqual({ ok: true, value: { ok: true } });
   });
 });
@@ -317,7 +424,9 @@ describe("CommandRegistry.invoke — parse and error mapping", () => {
 
   it("a non-object input is invalid_input", async () => {
     const { registry, deps } = setup();
-    expect(await registry.invoke("demo.echo", "status=all" as unknown as { options: Record<string, unknown> }, cli, deps)).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(
+      await registry.invoke("demo.echo", "status=all" as unknown as { options: Record<string, unknown> }, cli, deps),
+    ).toMatchObject({ ok: false, error: "invalid_input" });
   });
 
   it("limit:'10' and limit:10 parse to the same input (coercion)", async () => {
@@ -330,17 +439,42 @@ describe("CommandRegistry.invoke — parse and error mapping", () => {
 
   it("the handler receives typed args (by name) and options: positional id + free text + boolean + nested option", async () => {
     const { registry, deps } = setup();
-    const res = await registry.invoke("demo.typed", { args: ["abc", "the rest of it"], options: { mode: "soft", dryRun: "true", models: { coding: "m" }, repo: "acme/api" } }, cli, deps);
-    expect(res).toEqual({ ok: true, value: { id: "abc", text: "the rest of it", mode: "soft", dryRun: true, coding: "m", repo: "acme/api" } });
+    const res = await registry.invoke(
+      "demo.typed",
+      {
+        args: ["abc", "the rest of it"],
+        options: { mode: "soft", dryRun: "true", models: { coding: "m" }, repo: "acme/api" },
+      },
+      cli,
+      deps,
+    );
+    expect(res).toEqual({
+      ok: true,
+      value: { id: "abc", text: "the rest of it", mode: "soft", dryRun: true, coding: "m", repo: "acme/api" },
+    });
   });
 
   it("maps CommandError codes to not_found/conflict/unavailable and swallows unexpected throws as internal", async () => {
     const { registry, deps } = setup();
     const errors: unknown[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((...a) => void errors.push(a));
-    expect(await registry.invoke("demo.fail", opts({ code: "not_found" }), cli, deps)).toMatchObject({ ok: false, error: "not_found", status: 404, message: "demo says no" });
-    expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), cli, deps)).toMatchObject({ ok: false, error: "conflict", status: 409 });
-    expect(await registry.invoke("demo.fail", opts({ code: "unavailable" }), cli, deps)).toMatchObject({ ok: false, error: "unavailable", status: 503, message: "demo says no" });
+    expect(await registry.invoke("demo.fail", opts({ code: "not_found" }), cli, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+      status: 404,
+      message: "demo says no",
+    });
+    expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), cli, deps)).toMatchObject({
+      ok: false,
+      error: "conflict",
+      status: 409,
+    });
+    expect(await registry.invoke("demo.fail", opts({ code: "unavailable" }), cli, deps)).toMatchObject({
+      ok: false,
+      error: "unavailable",
+      status: 503,
+      message: "demo says no",
+    });
     const internal = await registry.invoke("demo.fail", opts({ code: "boom" }), cli, deps);
     expect(internal).toMatchObject({ ok: false, error: "internal", status: 500 });
     if (internal.ok) throw new Error("unreachable");
@@ -360,7 +494,14 @@ describe("CommandRegistry audit line", () => {
     expect(audit).toHaveBeenCalledTimes(3);
     expect(audit.mock.calls.map(([e]) => e)).toEqual([
       { commandId: "demo.echo", callerKind: "cli", callerId: "cli:local", effect: "read", outcome: "ok" },
-      { commandId: "demo.echo", callerKind: "chat", callerId: "slack:URANDOM", effect: "read", outcome: "unauthorized", reason: "missing-grant" },
+      {
+        commandId: "demo.echo",
+        callerKind: "chat",
+        callerId: "slack:URANDOM",
+        effect: "read",
+        outcome: "unauthorized",
+        reason: "missing-grant",
+      },
       { commandId: "demo.fail", callerKind: "cli", callerId: "cli:local", effect: "write", outcome: "conflict" },
     ]);
     expect(JSON.stringify(audit.mock.calls)).not.toMatch(/limit|"7"|status/);
@@ -369,7 +510,11 @@ describe("CommandRegistry audit line", () => {
   it("the deny reason is the audit line's, never the reply's (KTD8)", async () => {
     const { registry, audit, deps } = setup();
     const res = await registry.invoke("demo.echo", opts({ status: "all" }), chatRandom, deps);
-    expect(res).toMatchObject({ ok: false, error: "unauthorized", message: "slack:URANDOM is not allowed to run demo.echo" });
+    expect(res).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+      message: "slack:URANDOM is not allowed to run demo.echo",
+    });
     expect(JSON.stringify(res)).not.toContain("missing-grant");
     expect(audit.mock.calls[0]?.[0].reason).toBe("missing-grant");
   });
@@ -401,8 +546,27 @@ describe("untrusted wrapping and rendering", () => {
       "runs.list",
       {
         runs: [
-          { id: "abcdefghijklmnop", agent: "coding", status: "completed", startedAt: now - 95_000, finishedAt: now - 5_000, finished: true, channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1", label: "coding · acme/x", eventCount: 3 },
-          { id: "zyxwvutsrqponmlk", agent: "review", startedAt: now - 30_000, finished: false, stop: { mode: "soft", state: "stopping" }, eventCount: 1 },
+          {
+            id: "abcdefghijklmnop",
+            agent: "coding",
+            status: "completed",
+            startedAt: now - 95_000,
+            finishedAt: now - 5_000,
+            finished: true,
+            channelId: "slack:C1",
+            userId: "slack:U1",
+            threadKey: "slack:C1:1",
+            label: "coding · acme/x",
+            eventCount: 3,
+          },
+          {
+            id: "zyxwvutsrqponmlk",
+            agent: "review",
+            startedAt: now - 30_000,
+            finished: false,
+            stop: { mode: "soft", state: "stopping" },
+            eventCount: 1,
+          },
         ],
       },
       { now },
@@ -417,7 +581,11 @@ describe("untrusted wrapping and rendering", () => {
   it("renderCompact appends the store-unavailable banner to runs.list when the service degraded to live rows", () => {
     const banner = "⚠ history store unavailable — showing live runs only";
     expect(renderCompact("runs.list", { runs: [], storeUnavailable: true })).toBe(`(no runs)\n${banner}`);
-    const one = renderCompact("runs.list", { runs: [{ id: "abcdefgh1234", agent: "coding", finished: false, startedAt: 0 }], storeUnavailable: true }, { now: 5000 });
+    const one = renderCompact(
+      "runs.list",
+      { runs: [{ id: "abcdefgh1234", agent: "coding", finished: false, startedAt: 0 }], storeUnavailable: true },
+      { now: 5000 },
+    );
     expect(one.split("\n")).toEqual(["abcdefgh  coding    active        5s", banner]);
     expect(renderCompact("runs.list", { runs: [] })).not.toContain(banner);
   });
@@ -426,20 +594,41 @@ describe("untrusted wrapping and rendering", () => {
     const banner = "⚠ history store unavailable — showing live runs only";
     const now = 1_000_000;
     const runs = [
-      { id: "abcdefgh1234", agent: "coding", startedAt: now - 90_000, finishedAt: now, finished: true, status: "completed" },
-      { id: "zyxwvutsrqponmlk", agent: "review", startedAt: now - 30_000, finished: false, stop: { mode: "soft", state: "stopping" } },
+      {
+        id: "abcdefgh1234",
+        agent: "coding",
+        startedAt: now - 90_000,
+        finishedAt: now,
+        finished: true,
+        status: "completed",
+      },
+      {
+        id: "zyxwvutsrqponmlk",
+        agent: "review",
+        startedAt: now - 30_000,
+        finished: false,
+        stop: { mode: "soft", state: "stopping" },
+      },
     ];
     const chat = renderCompact("runs.list", { runs, storeUnavailable: true }, { now, surface: "chat" });
-    expect(chat.split("\n")).toEqual(["• `abcdefgh` — coding · completed · 1m 30s", "• `zyxwvuts` — review · stopping · 30s", banner]);
+    expect(chat.split("\n")).toEqual([
+      "• `abcdefgh` — coding · completed · 1m 30s",
+      "• `zyxwvuts` — review · stopping · 30s",
+      banner,
+    ]);
     expect(chat).not.toMatch(/\S {2,}\S/);
     expect(renderCompact("runs.list", { runs: [] }, { surface: "chat" })).toBe("(no runs)");
     // The same rows on the text surface keep their aligned columns.
-    expect(renderCompact("runs.list", { runs }, { now, surface: "text" }).split("\n")[0]).toMatch(/^abcdefgh\s{2,}coding\s{2,}completed\s{2,}1m 30s$/);
+    expect(renderCompact("runs.list", { runs }, { now, surface: "text" }).split("\n")[0]).toMatch(
+      /^abcdefgh\s{2,}coding\s{2,}completed\s{2,}1m 30s$/,
+    );
   });
 
   it("renderCompact renders an empty list and generic objects as key: value lines", () => {
     expect(renderCompact("runs.list", { runs: [] })).toBe("(no runs)");
-    expect(renderCompact("runs.stop", { id: "r1", mode: "soft", state: "stopping" })).toBe("id: r1\nmode: soft\nstate: stopping");
+    expect(renderCompact("runs.stop", { id: "r1", mode: "soft", state: "stopping" })).toBe(
+      "id: r1\nmode: soft\nstate: stopping",
+    );
     expect(renderCompact("x.y", { nested: { a: 1 }, list: [1, 2] })).toBe('nested: {"a":1}\nlist: [1,2]');
   });
 
@@ -466,7 +655,14 @@ describe("who decided a failure (phase 4b): registry vs handler; the wider Comma
     },
   });
   /** A deterministic op: the table decides on `agent { coding }`, as `repo.test|build` declare. */
-  const op = define({ id: "demo.exec", action: "repo:exec", resource: () => ({ type: "agent", name: "coding" }), effect: "write", describe: "an op", handler: async () => ({ ran: true }) });
+  const op = define({
+    id: "demo.exec",
+    action: "repo:exec",
+    resource: () => ({ type: "agent", name: "coding" }),
+    effect: "write",
+    describe: "an op",
+    handler: async () => ({ ran: true }),
+  });
   const registry = new CommandRegistry<D>({ audit: () => {} });
   registry.register(dataGated);
   registry.register(op);
@@ -474,21 +670,56 @@ describe("who decided a failure (phase 4b): registry vs handler; the wider Comma
   const chatOpen: Caller = callerWith("chat", "slack:U1", ["config:read"]);
 
   it("a table refusal or a schema failure is `decidedBy: registry`; a CommandError the handler threw is `decidedBy: handler` with its own message", async () => {
-    expect(await registry.invoke("demo.exec", {}, chatOpen, {})).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
-    expect(await registry.invoke("demo.gated", { args: ["nope"] }, chatOpen, {})).toMatchObject({ ok: false, error: "invalid_input", decidedBy: "registry" });
-    expect(await registry.invoke("demo.gated", { args: ["channel"] }, chatOpen, {})).toMatchObject({ ok: false, error: "unauthorized", status: 403, decidedBy: "handler", message: "Channel config changes are restricted." });
-    expect(await registry.invoke("demo.gated", { args: ["me"] }, chatOpen, {})).toMatchObject({ ok: false, error: "invalid_input", status: 400, decidedBy: "handler", message: "nothing to set" });
-    expect(await registry.invoke("demo.nope", {}, chatOpen, {})).toMatchObject({ ok: false, error: "not_found", decidedBy: "registry" });
+    expect(await registry.invoke("demo.exec", {}, chatOpen, {})).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+      decidedBy: "registry",
+    });
+    expect(await registry.invoke("demo.gated", { args: ["nope"] }, chatOpen, {})).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      decidedBy: "registry",
+    });
+    expect(await registry.invoke("demo.gated", { args: ["channel"] }, chatOpen, {})).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+      status: 403,
+      decidedBy: "handler",
+      message: "Channel config changes are restricted.",
+    });
+    expect(await registry.invoke("demo.gated", { args: ["me"] }, chatOpen, {})).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      status: 400,
+      decidedBy: "handler",
+      message: "nothing to set",
+    });
+    expect(await registry.invoke("demo.nope", {}, chatOpen, {})).toMatchObject({
+      ok: false,
+      error: "not_found",
+      decidedBy: "registry",
+    });
   });
 
   it("`<group>:exec` is a third class decided on the resolved `agent`: a credential needs the exec grant exactly (write does not imply exec); a person passes by the right to run the agent", async () => {
     const mcp = (...actions: string[]): Caller => callerWith("mcp", "mcp:a", actions);
-    expect(await registry.invoke("demo.exec", {}, mcp("repo:write"), {})).toMatchObject({ ok: false, error: "unauthorized" });
-    expect(await registry.invoke("demo.exec", {}, mcp("repo:read"), {})).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("demo.exec", {}, mcp("repo:write"), {})).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
+    expect(await registry.invoke("demo.exec", {}, mcp("repo:read"), {})).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
     expect((await registry.invoke("demo.exec", {}, mcp("repo:exec"), {})).ok).toBe(true);
-    expect((await registry.invoke("demo.exec", {}, callerWith("chat", "slack:U1", ["agent:run:coding"]), {})).ok).toBe(true);
+    expect((await registry.invoke("demo.exec", {}, callerWith("chat", "slack:U1", ["agent:run:coding"]), {})).ok).toBe(
+      true,
+    );
     // A browser Access session holds reads, never exec.
-    expect(await registry.invoke("demo.exec", {}, callerWith("access", "access:u", ["repo:read"]), {})).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("demo.exec", {}, callerWith("access", "access:u", ["repo:read"]), {})).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
   });
 
   it("`refuses` decides early only for a command whose resource is the command itself; a resolver command waits for the input", () => {
@@ -499,7 +730,10 @@ describe("who decided a failure (phase 4b): registry vs handler; the wider Comma
 
   it("`resourceOf`: the resolver sees a normalized raw input (a malformed half is empty), the default is the command itself", () => {
     const seen: unknown[] = [];
-    const probe = { id: "x.y", resource: (input: unknown) => (seen.push(input), { type: "command" as const, id: "x.y" }) };
+    const probe = {
+      id: "x.y",
+      resource: (input: unknown) => (seen.push(input), { type: "command" as const, id: "x.y" }),
+    };
     resourceOf(probe, { args: "nope" as never, options: [] as never }, cli);
     resourceOf(probe, { args: ["a"], options: { k: 1 } }, cli);
     expect(seen).toEqual([
@@ -549,7 +783,10 @@ describe("settle — the deferred outcome of an accepted command (resident-repos
 
   it("a throwing settle is logged and yields undefined — a follow-up that cannot be produced is not an error the caller can act on", async () => {
     const logged: unknown[] = [];
-    const reg = new CommandRegistry<Deps>({ audit: () => {}, logError: (id, err) => logged.push([id, (err as Error).message]) });
+    const reg = new CommandRegistry<Deps>({
+      audit: () => {},
+      logError: (id, err) => logged.push([id, (err as Error).message]),
+    });
     reg.register(throwing);
     expect(await reg.settle("demo.unsettled", {}, caller, { hits: [] })).toBeUndefined();
     expect(logged).toEqual([["demo.unsettled", "poll exploded"]]);

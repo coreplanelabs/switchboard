@@ -47,13 +47,18 @@ describe("schedule firing routes", () => {
     const a = name();
     const b = name();
     expect((await post("/schedules/record", { firing: firing(a, 100) })).data).toEqual({ ok: true, retained: 1 });
-    expect((await post("/schedules/record", { firing: firing(a, 300, { outcome: "failed", detail: "🚫 restricted" }) })).data).toEqual({ ok: true, retained: 2 });
+    expect(
+      (await post("/schedules/record", { firing: firing(a, 300, { outcome: "failed", detail: "🚫 restricted" }) }))
+        .data,
+    ).toEqual({ ok: true, retained: 2 });
     expect((await post("/schedules/record", { firing: firing(b, 200) })).data).toEqual({ ok: true, retained: 1 });
     // A late-arriving OLDER firing is kept but never becomes the latest.
     await post("/schedules/record", { firing: firing(a, 250) });
     const latest = await latestOf([a, b]);
     expect(latest).toHaveLength(2);
-    expect(latest.find((f) => f.schedule === a)).toEqual(firing(a, 300, { outcome: "failed", detail: "🚫 restricted" }));
+    expect(latest.find((f) => f.schedule === a)).toEqual(
+      firing(a, 300, { outcome: "failed", detail: "🚫 restricted" }),
+    );
     expect(latest.find((f) => f.schedule === b)).toEqual(firing(b, 200));
   });
 
@@ -100,7 +105,15 @@ describe("schedule firing routes", () => {
 
   it("401 without the bearer, 405 on GET", async () => {
     expect((await post("/schedules/latest", {}, { "content-type": "application/json" })).status).toBe(401);
-    expect((await post("/schedules/record", { firing: firing("s", 1) }, { authorization: "Bearer nope", "content-type": "application/json" })).status).toBe(401);
+    expect(
+      (
+        await post(
+          "/schedules/record",
+          { firing: firing("s", 1) },
+          { authorization: "Bearer nope", "content-type": "application/json" },
+        )
+      ).status,
+    ).toBe(401);
     const res = await SELF.fetch(`${BASE}/schedules/latest`, { method: "GET", headers: AUTH });
     expect(res.status).toBe(405);
   });

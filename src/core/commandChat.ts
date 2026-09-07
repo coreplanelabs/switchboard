@@ -1,7 +1,24 @@
 import type { ConfigStore } from "../config.js";
 import { resolveChatActor } from "./authz/actor.js";
-import { renderText, type Caller, type CommandInput, type CommandInvoker, type CommandSurfaces, type InvokeErrorCode, type SettledOutcome } from "./commandRegistry.js";
-import { chatCatalogueText, chatForm, chatHelpText, commandsInGroup, parseInvocation, tokenize, type CommandShape, type GrammarRejection } from "./commandSurface.js";
+import {
+  renderText,
+  type Caller,
+  type CommandInput,
+  type CommandInvoker,
+  type CommandSurfaces,
+  type InvokeErrorCode,
+  type SettledOutcome,
+} from "./commandRegistry.js";
+import {
+  chatCatalogueText,
+  chatForm,
+  chatHelpText,
+  commandsInGroup,
+  parseInvocation,
+  tokenize,
+  type CommandShape,
+  type GrammarRejection,
+} from "./commandSurface.js";
 import type { IncomingMessage } from "./types.js";
 
 // The chat adapter for the command registry (#157 U13 — R7, KTD18, KTD19,
@@ -64,7 +81,9 @@ function chatExposed(cmd: { surfaces?: CommandSurfaces }): boolean {
  *  before the grammar sees the text. Only http(s) links: mentions, channels and
  *  `<!here>` stay as they are (they are prose to the grammar, never a value). */
 export function unwrapChatLinks(text: string): string {
-  return text.replace(/<(https?:\/\/[^<>|\s]+)(?:\|[^<>]*)?>/g, (_m, url: string) => url.replace(/&(amp|lt|gt);/g, (_e, name: string) => SLACK_ENTITIES[name as keyof typeof SLACK_ENTITIES]));
+  return text.replace(/<(https?:\/\/[^<>|\s]+)(?:\|[^<>]*)?>/g, (_m, url: string) =>
+    url.replace(/&(amp|lt|gt);/g, (_e, name: string) => SLACK_ENTITIES[name as keyof typeof SLACK_ENTITIES]),
+  );
 }
 
 const SLACK_ENTITIES = { amp: "&", lt: "<", gt: ">" } as const;
@@ -79,7 +98,10 @@ export function parseChatCommand(rawText: string, catalog: ChatCommandCatalog): 
   const text = unwrapChatLinks(rawText);
   const trimmed = text.trim();
   const exposed = catalog.list().filter(chatExposed);
-  if (/^help$/i.test(trimmed)) return exposed.some((c) => c.id === HELP_COMMAND_ID) ? { kind: "invoke", id: HELP_COMMAND_ID, input: { args: [], options: {} } } : null;
+  if (/^help$/i.test(trimmed))
+    return exposed.some((c) => c.id === HELP_COMMAND_ID)
+      ? { kind: "invoke", id: HELP_COMMAND_ID, input: { args: [], options: {} } }
+      : null;
   const head = trimmed.split(/\s+/, 2);
   if (head.length < 2 || !WORD.test(head[0]) || !WORD.test(head[1])) return null;
   const [group, verb] = head;
@@ -93,7 +115,11 @@ export function parseChatCommand(rawText: string, catalog: ChatCommandCatalog): 
   if (!cmd) return null;
   // A malformed tail (or an unterminated quote) is worded exactly like a
   // registry `invalid_input` (`chatErrorLine`'s default) and carries that code.
-  const rejected = (message: string): ParsedChatCommand => ({ kind: "reply", error: "invalid_input", text: `⚠️ \`${chatForm(id)}\`: ${message}` });
+  const rejected = (message: string): ParsedChatCommand => ({
+    kind: "reply",
+    error: "invalid_input",
+    text: `⚠️ \`${chatForm(id)}\`: ${message}`,
+  });
   const tokens = tokenize(text);
   if (!tokens.ok) return rejected(tokens.error);
   const bound = parseInvocation(cmd, tokens.tokens.slice(2));
@@ -131,7 +157,11 @@ export interface HandleChatCommandArgs {
  *  is admitted by its grants like its tool call and sees the runs its grants
  *  name — not the channel it speaks in (authorization.md item 7), so one token
  *  gets one answer on every surface. */
-export function chatCallerFor(msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">, config: Pick<ConfigStore, "grantsFor">, resolveRepo?: () => Promise<string | undefined>): Caller {
+export function chatCallerFor(
+  msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey">,
+  config: Pick<ConfigStore, "grantsFor">,
+  resolveRepo?: () => Promise<string | undefined>,
+): Caller {
   return {
     kind: "chat",
     id: msg.userId,
@@ -162,11 +192,19 @@ export interface ChatCommandResult {
  *  decided about the request (the channel scope, another user's memory, a repo
  *  allowlist) carries its reason. The deny reason itself never reaches a reply
  *  (KTD8): it is on the audit line. */
-export function chatErrorLine(id: string, error: InvokeErrorCode, message: string, config: Pick<ConfigStore, "adminsHint">, decidedBy: "registry" | "handler" = "registry"): string {
+export function chatErrorLine(
+  id: string,
+  error: InvokeErrorCode,
+  message: string,
+  config: Pick<ConfigStore, "adminsHint">,
+  decidedBy: "registry" | "handler" = "registry",
+): string {
   const name = chatForm(id);
   switch (error) {
     case "unauthorized":
-      return decidedBy === "handler" ? `🚫 \`${name}\`: ${message} Ask ${config.adminsHint()}.` : `🚫 \`${name}\` is restricted. Ask ${config.adminsHint()}.`;
+      return decidedBy === "handler"
+        ? `🚫 \`${name}\`: ${message} Ask ${config.adminsHint()}.`
+        : `🚫 \`${name}\` is restricted. Ask ${config.adminsHint()}.`;
     case "internal":
       return `⚠️ \`${name}\` failed: ${message}`;
     default:
@@ -175,14 +213,29 @@ export function chatErrorLine(id: string, error: InvokeErrorCode, message: strin
 }
 
 /** Invoke a parsed chat command as the message's user (a help or rejected parse is replied as-is, `ok: false`, with its code). */
-export async function invokeChatCommand({ commands, parsed, msg, config, resolveRepo, now }: HandleChatCommandArgs): Promise<ChatCommandResult> {
-  if (parsed.kind === "reply") return { ok: false, text: parsed.text, ...(parsed.error ? { error: parsed.error } : {}) };
+export async function invokeChatCommand({
+  commands,
+  parsed,
+  msg,
+  config,
+  resolveRepo,
+  now,
+}: HandleChatCommandArgs): Promise<ChatCommandResult> {
+  if (parsed.kind === "reply")
+    return { ok: false, text: parsed.text, ...(parsed.error ? { error: parsed.error } : {}) };
   const caller = chatCallerFor(msg, config, resolveRepo);
   const res = await commands.invoke(parsed.id, parsed.input, caller);
   if (res.ok) {
-    const text = renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, { surface: "chat", ...(now === undefined ? {} : { now }) });
+    const text = renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, {
+      surface: "chat",
+      ...(now === undefined ? {} : { now }),
+    });
     const { id } = parsed;
-    return { ok: true, text, ...(commands.settles(id) ? { followUp: () => commands.settle(id, res.value, caller) } : {}) };
+    return {
+      ok: true,
+      text,
+      ...(commands.settles(id) ? { followUp: () => commands.settle(id, res.value, caller) } : {}),
+    };
   }
   return { ok: false, error: res.error, text: chatErrorLine(parsed.id, res.error, res.message, config, res.decidedBy) };
 }

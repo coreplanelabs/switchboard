@@ -28,7 +28,9 @@ const PROD_CONFIG = fileURLToPath(new URL("../config/config.production.yaml", im
  *  CRON_IDENTITY). The real map is a Worker secret no test can read, so its
  *  `channel` / `scopes` are assumed here; neither matters for `http:cron`,
  *  whose native `grants` entry REPLACES the token's translation whole. */
-const INGRESS_TOKENS: IngressTokenMap = { "not-a-real-token": { subject: "cron", channel: "cron", scopes: ["dispatch"] } };
+const INGRESS_TOKENS: IngressTokenMap = {
+  "not-a-real-token": { subject: "cron", channel: "cron", scopes: ["dispatch"] },
+};
 
 const set = (...names: string[]) => new Set(names);
 const grants = (g: Partial<Grants>): Grants => ({ actions: set(), channels: set(), repos: set(), ...g });
@@ -41,11 +43,53 @@ const GOLDEN: Record<string, Grants> = {
   [ADMIN]: ALL_GRANTS,
   "http:cron": SCHEDULED_RUN,
   "schedule:self-improvement": SCHEDULED_RUN,
-  [OPS_TOKEN]: grants({ actions: set("runs:read", "friction:read", "repo:read", "memory:read", "schedule:read", "config:read", "help:read", "deploy:read"), channels: "all" }),
+  [OPS_TOKEN]: grants({
+    actions: set(
+      "runs:read",
+      "friction:read",
+      "repo:read",
+      "memory:read",
+      "schedule:read",
+      "config:read",
+      "help:read",
+      "deploy:read",
+    ),
+    channels: "all",
+  }),
   // An unlisted Slack user: the open chat commands and every registered agent — never `config:write` (channel config is admins only), never a run read.
-  "slack:U_OTHER": grants({ actions: set("help:read", "config:read", "repo:read", "friction:read", "memory:read", "mcp:read", "schedule:read", "memory:write", "mcp:write", "agent:run:general", "agent:run:coding", "agent:run:review", "agent:run:ship", "agent:run:research") }),
+  "slack:U_OTHER": grants({
+    actions: set(
+      "help:read",
+      "config:read",
+      "repo:read",
+      "friction:read",
+      "memory:read",
+      "mcp:read",
+      "schedule:read",
+      "memory:write",
+      "mcp:write",
+      "agent:run:general",
+      "agent:run:coding",
+      "agent:run:review",
+      "agent:run:ship",
+      "agent:run:research",
+    ),
+  }),
   // An unlisted Access browser session: every registered group's read, no channel (a private-channel run is `not_found`).
-  "access:someone@coreplane.ai": grants({ actions: set("config:read", "deploy:read", "env:read", "friction:read", "help:read", "mcp:read", "memory:read", "repo:read", "runs:read", "schedule:read") }),
+  "access:someone@coreplane.ai": grants({
+    actions: set(
+      "config:read",
+      "deploy:read",
+      "env:read",
+      "friction:read",
+      "help:read",
+      "mcp:read",
+      "memory:read",
+      "repo:read",
+      "runs:read",
+      "schedule:read",
+    ),
+  }),
   // The same token over MCP is the token map's translation, untouched by the file.
   "mcp:cron": grants({ actions: set("dispatch"), channels: set("mcp:cron") }),
 };
@@ -53,7 +97,10 @@ const GOLDEN: Record<string, Grants> = {
 function openProd(): { store: ConfigStore; warnings: string[] } {
   const warnings: string[] = [];
   const dir = mkdtempSync(join(tmpdir(), "swb-prod-config-"));
-  const store = new ConfigStore(PROD_CONFIG, join(dir, "overrides.json"), (m) => warnings.push(m), { ingressTokens: INGRESS_TOKENS, commandGroups: coreCommandGroups() });
+  const store = new ConfigStore(PROD_CONFIG, join(dir, "overrides.json"), (m) => warnings.push(m), {
+    ingressTokens: INGRESS_TOKENS,
+    commandGroups: coreCommandGroups(),
+  });
   return { store, warnings };
 }
 
@@ -62,7 +109,9 @@ describe("config/config.production.yaml — native grants, one shape (authorizat
     const { store, warnings } = openProd();
     expect(warnings).toEqual([]);
     expect(store.config.permissions).toBeUndefined();
-    expect(Object.keys(store.config.grants ?? {}).sort()).toEqual([ADMIN, OPS_TOKEN, "http:cron", "schedule:self-improvement"].sort());
+    expect(Object.keys(store.config.grants ?? {}).sort()).toEqual(
+      [ADMIN, OPS_TOKEN, "http:cron", "schedule:self-improvement"].sort(),
+    );
   });
 
   it("every production actor resolves to exactly the grants it held under the legacy block", () => {
@@ -85,13 +134,25 @@ describe("config/config.production.yaml — native grants, one shape (authorizat
   it("`config set channel` stays admins only end to end: the chat adapter's actor for an unlisted user is refused, the admin's is served", async () => {
     const { store } = openProd();
     const commands = bindConfigCommands(store);
-    const other = chatCallerFor({ userId: "slack:U_OTHER", channelId: "slack:C_ANY", threadKey: "slack:C_ANY:1.0" }, store);
-    expect(await commands.invoke("config.set", { args: ["channel"], options: { agent: "review" } }, other)).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "handler", message: "Channel config changes are restricted." });
+    const other = chatCallerFor(
+      { userId: "slack:U_OTHER", channelId: "slack:C_ANY", threadKey: "slack:C_ANY:1.0" },
+      store,
+    );
+    expect(
+      await commands.invoke("config.set", { args: ["channel"], options: { agent: "review" } }, other),
+    ).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+      decidedBy: "handler",
+      message: "Channel config changes are restricted.",
+    });
     expect(store.scopes("slack:C_ANY", "slack:U_OTHER").channel).toEqual({});
     // A person always has their own scope.
     expect((await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, other)).ok).toBe(true);
     const admin = chatCallerFor({ userId: ADMIN, channelId: "slack:C_ANY", threadKey: "slack:C_ANY:1.0" }, store);
-    expect((await commands.invoke("config.set", { args: ["channel"], options: { agent: "review" } }, admin)).ok).toBe(true);
+    expect((await commands.invoke("config.set", { args: ["channel"], options: { agent: "review" } }, admin)).ok).toBe(
+      true,
+    );
     expect(store.scopes("slack:C_ANY", ADMIN).channel).toEqual({ agent: "review" });
   });
 });

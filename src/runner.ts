@@ -1,7 +1,16 @@
 import type { AgentDef } from "./agents/registry.js";
 import type { Effort } from "./effort.js";
 import { toolResultText, type ChatMessage, type ContentPart, type Provider } from "./providers/types.js";
-import { COMMAND_CAP, parseExitPrefix, prepareToolResult, redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
+import {
+  COMMAND_CAP,
+  parseExitPrefix,
+  prepareToolResult,
+  redactAndCap,
+  redactSecrets,
+  type RunEvent,
+  type RunNoteKind,
+  type StopMode,
+} from "./core/runEvents.js";
 import type { RunControl } from "./core/runRegistry.js";
 import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
 import { ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
@@ -231,7 +240,13 @@ async function runLoop(
     const parts: ContentPart[] = [{ type: "text", text: followUpPrompt(inputs, { superseded }) }];
     for (const input of inputs) {
       for (const img of input.images ?? []) parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
-      for (const doc of input.documents ?? []) parts.push({ type: "document", mediaType: doc.mediaType, data: doc.data, ...(doc.name ? { name: doc.name } : {}) });
+      for (const doc of input.documents ?? [])
+        parts.push({
+          type: "document",
+          mediaType: doc.mediaType,
+          data: doc.data,
+          ...(doc.name ? { name: doc.name } : {}),
+        });
     }
     return parts;
   };
@@ -299,7 +314,13 @@ async function runLoop(
     const runOne = async (tu: ToolUsePart): Promise<ContentPart> => {
       const tool = toolsByName.get(tu.name);
       if (!tool) {
-        emit({ type: "tool_result", tool: tu.name, ok: false, summary: redactAndCap(`Unknown tool: ${tu.name}`), callId: tu.id });
+        emit({
+          type: "tool_result",
+          tool: tu.name,
+          ok: false,
+          summary: redactAndCap(`Unknown tool: ${tu.name}`),
+          callId: tu.id,
+        });
         return { type: "tool_result", toolUseId: tu.id, content: `Unknown tool: ${tu.name}`, isError: true };
       }
       try {
@@ -324,7 +345,9 @@ async function runLoop(
         // so it is not silently swallowed behind the abort message.
         if (err instanceof HardStopError) throw err;
         if (control?.requested === "hard") {
-          console.warn(`[runner] tool ${tu.name} failed while hard-stopping: ${err instanceof Error ? err.message : String(err)}`);
+          console.warn(
+            `[runner] tool ${tu.name} failed while hard-stopping: ${err instanceof Error ? err.message : String(err)}`,
+          );
           throw err;
         }
         const message = err instanceof Error ? err.message : String(err);
@@ -348,8 +371,17 @@ async function runLoop(
     // command pushed past the 200-char summary (runEvents `tool_call.command`).
     const announce = (tu: ToolUsePart) => {
       const input = tu.input as Record<string, unknown> | undefined;
-      const command = tu.name === "bash" && typeof input?.command === "string" ? { command: redactAndCap(input.command, COMMAND_CAP) } : {};
-      emit({ type: "tool_call", tool: tu.name, summary: redactAndCap(describeToolCall(tu)), callId: tu.id, ...command });
+      const command =
+        tu.name === "bash" && typeof input?.command === "string"
+          ? { command: redactAndCap(input.command, COMMAND_CAP) }
+          : {};
+      emit({
+        type: "tool_call",
+        tool: tu.name,
+        summary: redactAndCap(describeToolCall(tu)),
+        callId: tu.id,
+        ...command,
+      });
     };
     // Execution order: a mutating tool runs alone, in the model's order; a run
     // of consecutive side-effect-free tools (several read_file/web_fetch in one

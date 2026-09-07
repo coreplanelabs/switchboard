@@ -12,7 +12,11 @@ const OTHER = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
 
 describe("checkReviewedHead", () => {
   it("passes when the observed HEAD equals the PR head", () => {
-    expect(checkReviewedHead({ expected: PR_HEAD, observed: PR_HEAD })).toEqual({ ok: true, head: PR_HEAD, source: "observed" });
+    expect(checkReviewedHead({ expected: PR_HEAD, observed: PR_HEAD })).toEqual({
+      ok: true,
+      head: PR_HEAD,
+      source: "observed",
+    });
   });
 
   it("fails when the observed HEAD is another commit — the #182 incident shape", () => {
@@ -26,7 +30,11 @@ describe("checkReviewedHead", () => {
   });
 
   it("falls back to the agent-reported head when nothing was observed (cold sandbox: cwd is not the clone)", () => {
-    expect(checkReviewedHead({ expected: PR_HEAD, reported: PR_HEAD })).toEqual({ ok: true, head: PR_HEAD, source: "reported" });
+    expect(checkReviewedHead({ expected: PR_HEAD, reported: PR_HEAD })).toEqual({
+      ok: true,
+      head: PR_HEAD,
+      source: "reported",
+    });
     expect(checkReviewedHead({ expected: PR_HEAD, reported: PR_HEAD.slice(0, 7) })).toEqual({
       ok: true,
       head: PR_HEAD.slice(0, 7),
@@ -67,7 +75,9 @@ describe("parseRevParseOutput", () => {
   });
 
   it("returns undefined for errors, empty output, or non-git cwd", () => {
-    expect(parseRevParseOutput("fatal: not a git repository (or any of the parent directories): .git\nexit 128")).toBeUndefined();
+    expect(
+      parseRevParseOutput("fatal: not a git repository (or any of the parent directories): .git\nexit 128"),
+    ).toBeUndefined();
     expect(parseRevParseOutput("")).toBeUndefined();
     expect(parseRevParseOutput("exit 127: git: command not found")).toBeUndefined();
   });

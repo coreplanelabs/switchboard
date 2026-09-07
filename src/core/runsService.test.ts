@@ -101,7 +101,14 @@ describe("RunsService.getRun", () => {
     const res = await svc.getRun("r1");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.value).toMatchObject({ id: "r1", finished: true, persisted: true, status: "completed", eventCount: 4, agent: "coding" });
+    expect(res.value).toMatchObject({
+      id: "r1",
+      finished: true,
+      persisted: true,
+      status: "completed",
+      eventCount: 4,
+      agent: "coding",
+    });
     expect(res.value).not.toHaveProperty("token");
     expect(res.value).not.toHaveProperty("events");
 
@@ -137,7 +144,12 @@ describe("RunsService.listRuns — read merge", () => {
 
     const before = await svc.listRuns({ visibleTo: ALL, status: "all" });
     expect(before.runs.map((r) => r.id)).toEqual([id]);
-    expect(before.runs[0]).toMatchObject({ finished: true, eventCount: 4, stop: { mode: "soft", state: "stopped" }, persisted: true });
+    expect(before.runs[0]).toMatchObject({
+      finished: true,
+      eventCount: 4,
+      stop: { mode: "soft", state: "stopped" },
+      persisted: true,
+    });
     expect(before.storeUnavailable).toBeUndefined();
     expectNoToken(before);
 
@@ -151,10 +163,23 @@ describe("RunsService.listRuns — read merge", () => {
 
   it("a live run's provisional interrupted tombstone (#375) never surfaces: the run lists as live under `all`, is absent from `finished`, and getRun serves the live row", async () => {
     const { reg, svc, store } = setup();
-    const { id } = reg.create("coding · acme/x", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:x" });
+    const { id } = reg.create("coding · acme/x", {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:x",
+    });
     reg.publish(id, { type: "input", text: "go" });
     // The start-of-run tombstone: terminal in the store while the run is live.
-    await store!.put(record(id, NOW, { status: "interrupted", startedAt: NOW, events: [{ type: "input", text: "go", seq: 1 }], eventCount: 1, storedEventCount: 1 }));
+    await store!.put(
+      record(id, NOW, {
+        status: "interrupted",
+        startedAt: NOW,
+        events: [{ type: "input", text: "go", seq: 1 }],
+        eventCount: 1,
+        storedEventCount: 1,
+      }),
+    );
 
     const all = await svc.listRuns({ visibleTo: ALL, status: "all" });
     expect(all.runs.map((r) => r.id)).toEqual([id]);
@@ -226,10 +251,21 @@ describe("RunsService.listRuns — read merge", () => {
     const page1 = await svc.listRuns({ visibleTo: ALL, status: "all", limit: 2 });
     expect(page1.runs.map((r) => r.id)).toEqual([live.id, "p3"]);
     expect(page1.nextBefore).toEqual({ finishedAt: NOW, id: "p3" });
-    const page2 = await svc.listRuns({ visibleTo: ALL, status: "all", limit: 2, before: page1.nextBefore!.finishedAt, beforeId: page1.nextBefore!.id });
+    const page2 = await svc.listRuns({
+      visibleTo: ALL,
+      status: "all",
+      limit: 2,
+      before: page1.nextBefore!.finishedAt,
+      beforeId: page1.nextBefore!.id,
+    });
     expect(page2.runs.map((r) => r.id)).toEqual(["p2", "p1"]);
     expect(page2.nextBefore).toEqual({ finishedAt: NOW, id: "p1" });
-    const page3 = await svc.listRuns({ visibleTo: ALL, status: "all", limit: 2, ...{ before: page2.nextBefore!.finishedAt, beforeId: page2.nextBefore!.id } });
+    const page3 = await svc.listRuns({
+      visibleTo: ALL,
+      status: "all",
+      limit: 2,
+      ...{ before: page2.nextBefore!.finishedAt, beforeId: page2.nextBefore!.id },
+    });
     expect(page3.runs.map((r) => r.id)).toEqual(["p0"]);
     expect(page3.nextBefore).toBeUndefined();
     // A full page of live rows only has no store cursor.
@@ -244,12 +280,24 @@ describe("RunsService.listRuns — read merge", () => {
     await store!.put(record("c1", NOW - DAY, { agent: "coding", channelId: "slack:C1" }));
     await store!.put(record("r1", NOW - 2 * DAY, { agent: "review", channelId: "slack:C2" }));
     await store!.put(record("old", NOW - 10 * DAY, { agent: "coding", channelId: "slack:C1" }));
-    const live = reg.create("live", { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U9", threadKey: "slack:C1:9" });
+    const live = reg.create("live", {
+      agent: "coding",
+      model: "anthropic/claude",
+      channelId: "slack:C1",
+      userId: "slack:U9",
+      threadKey: "slack:C1:9",
+    });
     const bare = reg.create("bare"); // no meta: excluded by an agent/channel filter, kept otherwise
 
     const coding = await svc.listRuns({ visibleTo: ALL, status: "all", agent: "coding" });
     expect(coding.runs.map((r) => r.id)).toEqual([live.id, "c1", "old"]);
-    expect(coding.runs[0]).toMatchObject({ agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U9", threadKey: "slack:C1:9" });
+    expect(coding.runs[0]).toMatchObject({
+      agent: "coding",
+      model: "anthropic/claude",
+      channelId: "slack:C1",
+      userId: "slack:U9",
+      threadKey: "slack:C1:9",
+    });
 
     const c2 = await svc.listRuns({ visibleTo: ALL, status: "all", channel: "slack:C2" });
     expect(c2.runs.map((r) => r.id)).toEqual(["r1"]);
@@ -260,20 +308,44 @@ describe("RunsService.listRuns — read merge", () => {
 
   it("a run in both sources projects identically from the live row and the persisted row, except for the finish-only fields", async () => {
     const { reg, tick, svc, store } = setup();
-    const meta = { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:x", channelVisibility: "unknown" as const, repo: "acme/x" };
+    const meta = {
+      agent: "coding",
+      model: "anthropic/claude",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:x",
+      channelVisibility: "unknown" as const,
+      repo: "acme/x",
+    };
     const { id } = reg.create("coding · acme/x", meta);
     reg.publish(id, { type: "input", text: "go" });
     reg.finish(id);
-    await store!.put(record(id, NOW + 1, { ...meta, label: "coding · acme/x", startedAt: NOW, events: [{ type: "input", text: "go", seq: 1 }] }));
+    await store!.put(
+      record(id, NOW + 1, {
+        ...meta,
+        label: "coding · acme/x",
+        startedAt: NOW,
+        events: [{ type: "input", text: "go", seq: 1 }],
+      }),
+    );
     reg.markPersisted(id);
     const liveRow = (await svc.getRun(id)).ok && (await svc.getRun(id));
     tick(61_000);
     const persistedRow = await svc.getRun(id);
     if (!liveRow || !liveRow.ok || !persistedRow.ok) throw new Error("both reads must succeed");
     const finishOnly = ["finishedAt", "status", "storedEventCount", "truncated", "diagnosis", "bytes"];
-    const strip = (v: Record<string, unknown>) => Object.fromEntries(Object.entries(v).filter(([k]) => !finishOnly.includes(k)));
-    expect(strip(liveRow.value as unknown as Record<string, unknown>)).toEqual(strip(persistedRow.value as unknown as Record<string, unknown>));
-    expect(liveRow.value).toMatchObject({ label: "coding · acme/x", ...meta, finished: true, persisted: true, eventCount: 1 });
+    const strip = (v: Record<string, unknown>) =>
+      Object.fromEntries(Object.entries(v).filter(([k]) => !finishOnly.includes(k)));
+    expect(strip(liveRow.value as unknown as Record<string, unknown>)).toEqual(
+      strip(persistedRow.value as unknown as Record<string, unknown>),
+    );
+    expect(liveRow.value).toMatchObject({
+      label: "coding · acme/x",
+      ...meta,
+      finished: true,
+      persisted: true,
+      eventCount: 1,
+    });
     expect(persistedRow.value).toMatchObject({ status: "completed", finishedAt: NOW + 1 });
   });
 
@@ -293,7 +365,11 @@ describe("RunsService.listRuns — read merge", () => {
     t2(61_000); // evicted: the same read now comes from the store
     const persisted = await svc2.getRunEvents(id, { afterSeq: 17 });
     expect(persisted.ok && persisted.value.events.map((e) => e.seq)).toEqual([18, 19, 20]);
-    expect(persisted.ok && persisted.value.events.map((e) => (e as { summary: string }).summary)).toEqual(["$ step 18", "$ step 19", "$ step 20"]);
+    expect(persisted.ok && persisted.value.events.map((e) => (e as { summary: string }).summary)).toEqual([
+      "$ step 18",
+      "$ step 19",
+      "$ step 20",
+    ]);
     const first = await svc2.getRunEvents(id, { afterSeq: 0, limit: 2 });
     expect(first.ok && first.value.events.map((e) => e.seq)).toEqual([16, 17]);
     expect(first.ok && first.value.nextAfterSeq).toBe(17);
@@ -387,7 +463,12 @@ describe("RunsService.listRuns — read merge", () => {
 
   it("a run in both sources: the RECORD's finishedAt/status win over the registry row's (the record is the source of truth; a reply that threw after the loop is `failed` there only)", async () => {
     const { reg, tick, svc, store } = setup();
-    const run = reg.create("r", { agent: "review", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1" });
+    const run = reg.create("r", {
+      agent: "review",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:1",
+    });
     tick(5_000);
     reg.finish(run.id, "completed");
     await store!.put(record(run.id, NOW + 5_000, { status: "failed" }));
@@ -398,11 +479,22 @@ describe("RunsService.listRuns — read merge", () => {
 
   it("a finished registry row carries the status and finishedAt the dispatcher handed to finish() — nothing re-derived", async () => {
     const { reg, tick, svc } = setup();
-    const run = reg.create("r", { agent: "review", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1" });
+    const run = reg.create("r", {
+      agent: "review",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:1",
+    });
     tick(7_000);
     reg.finish(run.id, "failed");
     const [row] = (await svc.listRuns({ visibleTo: ALL, status: "all" })).runs;
-    expect(row).toMatchObject({ id: run.id, finished: true, status: "failed", finishedAt: NOW + 7_000, startedAt: NOW });
+    expect(row).toMatchObject({
+      id: run.id,
+      finished: true,
+      status: "failed",
+      finishedAt: NOW + 7_000,
+      startedAt: NOW,
+    });
     const got = await svc.getRun(run.id);
     expect(got.ok && got.value).toMatchObject({ status: "failed", finishedAt: NOW + 7_000 });
   });
@@ -410,25 +502,74 @@ describe("RunsService.listRuns — read merge", () => {
   it("with history off (store null) lists live rows and never reports storeUnavailable", async () => {
     const { reg, svc } = setup(null);
     const live = reg.create();
-    expect(await svc.listRuns({ visibleTo: ALL, status: "all" })).toEqual({ runs: [expect.objectContaining({ id: live.id })] });
+    expect(await svc.listRuns({ visibleTo: ALL, status: "all" })).toEqual({
+      runs: [expect.objectContaining({ id: live.id })],
+    });
   });
 
   it("`visibleTo` is pushed down (authorization R6): live rows are filtered by the predicate, the store is asked with its wire form, `all` sends no filter, and `none` touches neither", async () => {
     const { reg, svc, store } = setup();
-    await store!.put(record("pub", NOW - DAY, { channelId: "slack:C_PUB", userId: "slack:U1", channelVisibility: "public" }));
-    await store!.put(record("priv", NOW - 2 * DAY, { channelId: "slack:G1", userId: "slack:U2", channelVisibility: "private" }));
-    const liveOps = reg.create("ops", { agent: "coding", channelId: "http:ops", userId: "http:ci", threadKey: "http:ops:1", channelVisibility: "machine" });
-    const livePriv = reg.create("priv-live", { agent: "coding", channelId: "slack:G1", userId: "slack:U2", threadKey: "slack:G1:1", channelVisibility: "private" });
-    const unstamped = reg.create("bare", { agent: "coding", channelId: "slack:C_PUB", userId: "slack:U3", threadKey: "slack:C_PUB:2" }); // no stamp = unknown
+    await store!.put(
+      record("pub", NOW - DAY, { channelId: "slack:C_PUB", userId: "slack:U1", channelVisibility: "public" }),
+    );
+    await store!.put(
+      record("priv", NOW - 2 * DAY, { channelId: "slack:G1", userId: "slack:U2", channelVisibility: "private" }),
+    );
+    const liveOps = reg.create("ops", {
+      agent: "coding",
+      channelId: "http:ops",
+      userId: "http:ci",
+      threadKey: "http:ops:1",
+      channelVisibility: "machine",
+    });
+    const livePriv = reg.create("priv-live", {
+      agent: "coding",
+      channelId: "slack:G1",
+      userId: "slack:U2",
+      threadKey: "slack:G1:1",
+      channelVisibility: "private",
+    });
+    const unstamped = reg.create("bare", {
+      agent: "coding",
+      channelId: "slack:C_PUB",
+      userId: "slack:U3",
+      threadKey: "slack:C_PUB:2",
+    }); // no stamp = unknown
     const list = vi.spyOn(store!, "list");
 
     // A token granted http:ops: its channel, the public runs, its own.
-    const token = await svc.listRuns({ status: "all", visibleTo: { kind: "or", of: [{ kind: "channels-in", channelIds: new Set(["http:ops"]) }, { kind: "visibility-in", visibilities: new Set(["public"]) }, { kind: "user-is", userId: "http:ci" }] } });
+    const token = await svc.listRuns({
+      status: "all",
+      visibleTo: {
+        kind: "or",
+        of: [
+          { kind: "channels-in", channelIds: new Set(["http:ops"]) },
+          { kind: "visibility-in", visibilities: new Set(["public"]) },
+          { kind: "user-is", userId: "http:ci" },
+        ],
+      },
+    });
     expect(token.runs.map((r) => r.id)).toEqual([liveOps.id, "pub"]);
-    expect(list.mock.calls[0][0].visibleTo).toEqual({ kind: "or", of: [{ kind: "channels-in", channelIds: ["http:ops"] }, { kind: "visibility-in", visibilities: ["public"] }, { kind: "user-is", userId: "http:ci" }] });
+    expect(list.mock.calls[0][0].visibleTo).toEqual({
+      kind: "or",
+      of: [
+        { kind: "channels-in", channelIds: ["http:ops"] },
+        { kind: "visibility-in", visibilities: ["public"] },
+        { kind: "user-is", userId: "http:ci" },
+      ],
+    });
 
     // The private run's own user: the live and persisted private rows, plus public; never the unstamped one.
-    const owner = await svc.listRuns({ status: "all", visibleTo: { kind: "or", of: [{ kind: "visibility-in", visibilities: new Set(["public"]) }, { kind: "user-is", userId: "slack:U2" }] } });
+    const owner = await svc.listRuns({
+      status: "all",
+      visibleTo: {
+        kind: "or",
+        of: [
+          { kind: "visibility-in", visibilities: new Set(["public"]) },
+          { kind: "user-is", userId: "slack:U2" },
+        ],
+      },
+    });
     expect(owner.runs.map((r) => r.id)).toEqual([livePriv.id, "pub", "priv"]);
 
     list.mockClear();
@@ -447,7 +588,14 @@ describe("RunsService.listRuns — read merge", () => {
 describe("RunsService — summary-only persisted reads", () => {
   it("getRun without include, getRunFriction and stopRun read the persisted summary (store.getSummary), never the full record", async () => {
     const inner = new InMemoryRunStore({ now: () => NOW });
-    await inner.put(record("p1", NOW - DAY, { events: [{ type: "input", text: "x", seq: 1 }, ...Array.from({ length: 50 }, (_, i) => ({ ...call(`$ ${i}`), seq: i + 2 }))] }));
+    await inner.put(
+      record("p1", NOW - DAY, {
+        events: [
+          { type: "input", text: "x", seq: 1 },
+          ...Array.from({ length: 50 }, (_, i) => ({ ...call(`$ ${i}`), seq: i + 2 })),
+        ],
+      }),
+    );
     const store: RunStore = {
       put: (r) => inner.put(r),
       get: vi.fn((id: string) => inner.get(id)),
@@ -460,7 +608,13 @@ describe("RunsService — summary-only persisted reads", () => {
     const svc = createRunsService({ registry: reg, store });
 
     const view = await svc.getRun("p1");
-    expect(view.ok && view.value).toMatchObject({ id: "p1", finished: true, persisted: true, status: "completed", eventCount: 51 });
+    expect(view.ok && view.value).toMatchObject({
+      id: "p1",
+      finished: true,
+      persisted: true,
+      status: "completed",
+      eventCount: 51,
+    });
     expect(view.ok && (view.value as { events?: unknown }).events).toBeUndefined();
     const friction = await svc.getRunFriction("p1");
     expect(friction.ok && friction.value.diagnosis.eventCount).toBeGreaterThan(0);
@@ -583,7 +737,12 @@ describe("RunsService.stopRun", () => {
     const res = await svc.stopRun(id, "soft", { kind: "chat", id: "slack:U123" });
     expect(res).toEqual({ ok: true, value: { id, mode: "soft", state: "stopping" } });
     expect(control.requested).toBe("soft");
-    expect(seen.at(-1)).toMatchObject({ type: "run_note", kind: "stop_requested", mode: "soft", actor: { kind: "chat", id: "slack:U123" } });
+    expect(seen.at(-1)).toMatchObject({
+      type: "run_note",
+      kind: "stop_requested",
+      mode: "soft",
+      actor: { kind: "chat", id: "slack:U123" },
+    });
     expect(reg.getById(id)?.stop).toEqual({ mode: "soft", state: "stopping" });
     expectNoToken(res);
   });
@@ -623,7 +782,10 @@ describe("RunsService.authorizeLive", () => {
     expect(live).not.toBeNull();
     const seen: RunEvent[] = [];
     let finished = false;
-    const unsub = live!.subscribe((e) => seen.push(e), () => (finished = true));
+    const unsub = live!.subscribe(
+      (e) => seen.push(e),
+      () => (finished = true),
+    );
     expect(unsub).not.toBeNull();
     reg.publish(id, call("$ pwd"));
     expect(seen.map((e) => e.seq)).toEqual([1, 2]);

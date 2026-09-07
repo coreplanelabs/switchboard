@@ -55,7 +55,10 @@ describe("deploy/secrets.manifest.json", () => {
     const forwarded = new Set([...list[1].matchAll(/"([A-Z][A-Z0-9_]*)"/g)].map((m) => m[1]));
     for (const m of fn[0].matchAll(/^\s*([A-Z][A-Z0-9_]*): env\.\1,/gm)) forwarded.add(m[1]);
     for (const s of manifest.secrets) {
-      if (s.workers.includes("bot")) expect(forwarded, `${s.name} is put on the bot Worker but never forwarded into the container`).toContain(s.name);
+      if (s.workers.includes("bot"))
+        expect(forwarded, `${s.name} is put on the bot Worker but never forwarded into the container`).toContain(
+          s.name,
+        );
     }
   });
 
@@ -94,7 +97,11 @@ describe("planSecretPuts", () => {
   });
 
   it("an explicit name list narrows the put, and an unknown name is refused", () => {
-    expect(planSecretPuts(m, "bot", files(["A", "B"]), ["B"])).toEqual({ puts: ["B"], skippedOptional: [], missing: [] });
+    expect(planSecretPuts(m, "bot", files(["A", "B"]), ["B"])).toEqual({
+      puts: ["B"],
+      skippedOptional: [],
+      missing: [],
+    });
     expect(() => planSecretPuts(m, "bot", files(["A"]), ["C"])).toThrow(/C is not a bot secret/);
     expect(() => planSecretPuts(m, "bot", files(["A"]), ["NOPE"])).toThrow(/NOPE is not a bot secret/);
   });

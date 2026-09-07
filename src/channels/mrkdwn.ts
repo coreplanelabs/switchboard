@@ -57,9 +57,8 @@ function convertOutsideInlineCode(text: string): string {
     return `${CODE_OPEN}${spans.length - 1}${CODE_CLOSE}`;
   });
   const converted = convert(protectedText);
-  return converted.replace(
-    new RegExp(`${CODE_OPEN}(\\d+)${CODE_CLOSE}`, "g"),
-    (_, i) => escapeMrkdwn(spans[Number(i)]),
+  return converted.replace(new RegExp(`${CODE_OPEN}(\\d+)${CODE_CLOSE}`, "g"), (_, i) =>
+    escapeMrkdwn(spans[Number(i)]),
   );
 }
 
@@ -86,9 +85,8 @@ function convert(text: string): string {
   // The url keeps its literal `&` — query params must survive; HTML-escaping it
   // would corrupt the address. Stash the whole produced link so the prose escape
   // below leaves its real `<`/`>`/`|` and already-escaped label alone.
-  out = out.replace(
-    /\[([^\]]+)\]\(([^)\s]+)\)/g,
-    (_, label: string, url: string) => stash(`<${encodeMrkdwnUrl(url)}|${escapeMrkdwn(label)}>`),
+  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label: string, url: string) =>
+    stash(`<${encodeMrkdwnUrl(url)}|${escapeMrkdwn(label)}>`),
   );
 
   // Blockquotes use the same leading `>` in Markdown and Slack. Stash the leading
@@ -119,8 +117,5 @@ function convert(text: string): string {
   out = out.replace(/^(\s*)- /gm, "$1• ");
 
   // Restore stashed structural syntax verbatim.
-  return out.replace(
-    new RegExp(`${STRUCT_OPEN}(\\d+)${STRUCT_CLOSE}`, "g"),
-    (_, i) => structural[Number(i)],
-  );
+  return out.replace(new RegExp(`${STRUCT_OPEN}(\\d+)${STRUCT_CLOSE}`, "g"), (_, i) => structural[Number(i)]);
 }

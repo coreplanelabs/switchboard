@@ -11,7 +11,13 @@ import { loadWebAssets } from "./channels/webAssets.js";
 import { makeShellRenderer } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
-import { AnthropicCostReportSource, CloudflareGraphqlUsageSource, NullLlmCostSource, createCostsService, parseCostsConfig } from "./core/costs.js";
+import {
+  AnthropicCostReportSource,
+  CloudflareGraphqlUsageSource,
+  NullLlmCostSource,
+  createCostsService,
+  parseCostsConfig,
+} from "./core/costs.js";
 import { makeResidentAdminClient } from "./core/residentAdmin.js";
 import {
   httpJwksFetcher,
@@ -37,12 +43,25 @@ import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { DOCS_BASE_URL, docsRedirectTarget } from "./core/docsLink.js";
-import { activeRunCount, DEPLOY_RESTART_NOTICE, setShutdownNotice, writeAbandonedRunRecords, type CoreDeps } from "./core/dispatcher.js";
+import {
+  activeRunCount,
+  DEPLOY_RESTART_NOTICE,
+  setShutdownNotice,
+  writeAbandonedRunRecords,
+  type CoreDeps,
+} from "./core/dispatcher.js";
 import { buildScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters (#157 U7) ---
 import { buildCoreCommands } from "./core/commandCatalogue.js";
-import { accessActor, createCommandHttpHandler, isCommandPath, isLocalhostBase, isLoopbackAddress, serviceTokenAllowed } from "./channels/commandHttp.js";
+import {
+  accessActor,
+  createCommandHttpHandler,
+  isCommandPath,
+  isLocalhostBase,
+  isLoopbackAddress,
+  serviceTokenAllowed,
+} from "./channels/commandHttp.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 // --- end command registry adapters ---
 
@@ -78,7 +97,12 @@ async function main() {
   // Runtime overrides (`config set …`) live where `runtimeOverrides.worker`
   // says — the state Worker's ConfigDO in prod, so a container restart keeps
   // them (features/routing-and-config.md item 12); the JSON file otherwise.
-  const config = await openConfigStore(CONFIG_PATH, { overridesPath: OVERRIDES_PATH, env: process.env, ingressTokens: auth.tokens, commandGroups: coreCommandGroups() });
+  const config = await openConfigStore(CONFIG_PATH, {
+    overridesPath: OVERRIDES_PATH,
+    env: process.env,
+    ingressTokens: auth.tokens,
+    commandGroups: coreCommandGroups(),
+  });
   console.log(`[config] runtime overrides: ${config.overridesLocation()}`);
   const providers = new ProviderRegistry(config.config.providers);
   // Bundled skills (#100): loaded once from the seeded `skills/` dir and shared
@@ -101,7 +125,9 @@ async function main() {
     warn: (m) => console.warn(`[mcp] ${m}`),
   });
   const mcp = mcpWiring.source;
-  console.log(`[mcp] ${mcpWiring.service ? `on (secrets: ${mcpWiring.service.secrets.describe()})` : `off — ${mcpWiring.unavailable}`}`);
+  console.log(
+    `[mcp] ${mcpWiring.service ? `on (secrets: ${mcpWiring.service.secrets.describe()})` : `off — ${mcpWiring.unavailable}`}`,
+  );
   // Cross-session memory (#85): ONE store instance shared by every channel so
   // what the reflection pass writes after a run is what the next run reads.
   // Durable WorkerMemoryStore when memory.worker (+ its bearer) is configured;
@@ -124,9 +150,16 @@ async function main() {
   // ledger is READ from it (legacy FrictionDO rows unioned for the rollout
   // window) while `record()` keeps writing the legacy ledger (KD3 call-out).
   const runHistoryCfg = config.config.runHistory;
-  const runStore = buildRunStore(runHistoryCfg, process.env, { dataDir: "./data", warn: (m) => console.warn(`[run-history] ${m}`) });
+  const runStore = buildRunStore(runHistoryCfg, process.env, {
+    dataDir: "./data",
+    warn: (m) => console.warn(`[run-history] ${m}`),
+  });
   const runHistoryWriter = runStore
-    ? createRunHistoryWriter({ store: runStore, warn: (m) => console.warn(m), onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
+    ? createRunHistoryWriter({
+        store: runStore,
+        warn: (m) => console.warn(m),
+        onPersisted: (id) => defaultRunRegistry.markPersisted(id),
+      })
     : undefined;
   console.log(
     runStore
@@ -136,7 +169,9 @@ async function main() {
   const frictionLedger = selectFrictionLedger(runStore, legacyFrictionLedger);
   console.log(
     `[friction] ledger: ${runStore ? "run store (legacy rows unioned); legacy write: " : ""}${legacyFrictionLedger instanceof WorkerFrictionLedger ? `durable (${selfImprovement?.worker?.baseUrl})` : "host-disk file"}; ` +
-      (selfImprovement?.repo ? `\`friction propose\` files to ${selfImprovement.repo}` : "`friction propose` disabled until selfImprovement.repo is set"),
+      (selfImprovement?.repo
+        ? `\`friction propose\` files to ${selfImprovement.repo}`
+        : "`friction propose` disabled until selfImprovement.repo is set"),
   );
   // Deploy-ordering probe (best-effort, never blocks startup): the state Worker
   // must carry the `v3` run-history routes before this bot version writes to
@@ -149,14 +184,29 @@ async function main() {
         const body = (await res.json().catch(() => null)) as { features?: unknown } | null;
         const features = Array.isArray(body?.features) ? (body!.features as unknown[]) : [];
         if (!features.includes("runs")) {
-          console.error(`[run-history] ORDERING ERROR: ${base}/healthz lists features ${JSON.stringify(features)} without "runs" — deploy the state Worker with run-history routes before this bot version; every run write will fail until then`);
+          console.error(
+            `[run-history] ORDERING ERROR: ${base}/healthz lists features ${JSON.stringify(features)} without "runs" — deploy the state Worker with run-history routes before this bot version; every run write will fail until then`,
+          );
         } else {
           console.log(`[run-history] state Worker ${base} reports runs support`);
         }
       })
-      .catch((err: unknown) => console.warn(`[run-history] /healthz probe of ${base} failed: ${err instanceof Error ? err.message : String(err)}`));
+      .catch((err: unknown) =>
+        console.warn(
+          `[run-history] /healthz probe of ${base} failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
   }
-  const deps: CoreDeps = { config, providers, skills, mcp, mcpRegistryOn: mcpWiring.service !== undefined, memory, frictionLedger, runHistoryWriter };
+  const deps: CoreDeps = {
+    config,
+    providers,
+    skills,
+    mcp,
+    mcpRegistryOn: mcpWiring.service !== undefined,
+    memory,
+    frictionLedger,
+    runHistoryWriter,
+  };
   // --- command registry (#157 U6/U7/U9): the ONE core catalogue (`buildCoreCommands`,
   // shared with src/cli.ts), bound ONCE; every adapter
   // (HTTP /api/*, MCP tools, chat) exposes the same registrations over the same
@@ -167,7 +217,9 @@ async function main() {
   const runsService = createRunsService({ registry: defaultRunRegistry, store: runStore });
   // Scheduled firings (#244) are recorded on the state Worker's ScheduleDO;
   // `schedule list` and the /runs "Scheduled" panel read the same store.
-  const scheduleStore = buildScheduleStore(config.config.schedules, process.env, (m) => console.warn(`[schedules] ${m}`));
+  const scheduleStore = buildScheduleStore(config.config.schedules, process.env, (m) =>
+    console.warn(`[schedules] ${m}`),
+  );
   const commands = buildCoreCommands(config, runStore, {
     registry: defaultRunRegistry,
     env: process.env,
@@ -194,7 +246,10 @@ async function main() {
   // Connect tickets bind to the requester's email when Slack can tell us
   // (`users:read.email`); without the scope the lookup yields undefined and the
   // ticket binds to the first Access identity that opens it instead.
-  slackEmailLookup = (userId) => (userId.startsWith("slack:") ? resolveUserEmail(app.client, userId.slice("slack:".length)) : Promise.resolve(undefined));
+  slackEmailLookup = (userId) =>
+    userId.startsWith("slack:")
+      ? resolveUserEmail(app.client, userId.slice("slack:".length))
+      : Promise.resolve(undefined);
 
   // Work in flight = agent runs + the background memory reflections they spawn
   // + run-history writes still retrying (#157 KTD4: a record lost at SIGTERM is
@@ -245,14 +300,19 @@ async function main() {
     // Access-gated below alongside /runs — it lists every onboarded repo and
     // its build commands, so it must never be exposed without SSO.
     const residentCfg = config.config.execution?.resident;
-    const residentAdminToken = residentCfg?.baseUrl ? process.env[residentCfg.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN"] : undefined;
+    const residentAdminToken = residentCfg?.baseUrl
+      ? process.env[residentCfg.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN"]
+      : undefined;
     const residentsView = createResidentsViewHandler(
-      residentCfg?.baseUrl && residentAdminToken ? makeResidentAdminClient(residentCfg.baseUrl, residentAdminToken) : undefined,
+      residentCfg?.baseUrl && residentAdminToken
+        ? makeResidentAdminClient(residentCfg.baseUrl, residentAdminToken)
+        : undefined,
       shell,
     );
-    const residentsState = residentCfg?.baseUrl && residentAdminToken
-      ? `GET /residents (dash → ${residentCfg.baseUrl})`
-      : "GET /residents (503 — resident admin not configured)";
+    const residentsState =
+      residentCfg?.baseUrl && residentAdminToken
+        ? `GET /residents (dash → ${residentCfg.baseUrl})`
+        : "GET /residents (503 — resident admin not configured)";
     // Costs dash: GET /costs (first group) + /costs/<group> (+ .json twin).
     // Reads Cloudflare's billing datasets (and, when an Admin key is present,
     // Anthropic's cost report) live per request. Fully off without the
@@ -266,7 +326,9 @@ async function main() {
         ? createCostsService(
             costsCfg,
             new CloudflareGraphqlUsageSource({ accountId: costsCfg.cloudflareAccountId, token: cfAnalyticsToken }),
-            anthropicAdminKey ? new AnthropicCostReportSource({ adminKey: anthropicAdminKey }) : new NullLlmCostSource(),
+            anthropicAdminKey
+              ? new AnthropicCostReportSource({ adminKey: anthropicAdminKey })
+              : new NullLlmCostSource(),
           )
         : undefined;
     const costsView = createCostsViewHandler(costsService, shell);
@@ -343,7 +405,10 @@ async function main() {
       publicBaseUrl,
     });
     const commandHttpState = `GET|POST /api/<group>.<verb> (${commands.list().length} commands)`;
-    const mcpConnectView = createMcpConnectViewHandler({ registry: () => mcpWiring.service, publicOrigin: publicBaseUrl ? new URL(publicBaseUrl).origin : undefined });
+    const mcpConnectView = createMcpConnectViewHandler({
+      registry: () => mcpWiring.service,
+      publicOrigin: publicBaseUrl ? new URL(publicBaseUrl).origin : undefined,
+    });
     // --- end command registry over HTTP ---
     // A service token is a command-surface credential only (`serviceTokenAllowed`):
     // it can never load /runs* (live capability tokens), /residents* or /costs*.
@@ -375,7 +440,17 @@ async function main() {
       // /runs/:id, and /runs/:id/events, and still applies its own per-run
       // capability-token check — defense in depth). Non-/runs paths below are
       // unchanged and not gated.
-      if (isCommandPath(path) || isConnectPath(path) || path === "/runs" || path.startsWith("/runs/") || path === "/residents" || path.startsWith("/residents/") || path === "/costs" || path === "/costs.json" || path.startsWith("/costs/")) {
+      if (
+        isCommandPath(path) ||
+        isConnectPath(path) ||
+        path === "/runs" ||
+        path.startsWith("/runs/") ||
+        path === "/residents" ||
+        path.startsWith("/residents/") ||
+        path === "/costs" ||
+        path === "/costs.json" ||
+        path.startsWith("/costs/")
+      ) {
         requireAccessForRuns(req.headers, { config: accessConfig, verify: accessVerify, devBypass: accessDevBypass })
           .then((gate) => {
             if (!gate.ok) {
@@ -445,7 +520,20 @@ async function main() {
       // preflight refuses on (features/slack-channel.md item 8).
       if (path === "/healthz") {
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(healthPayload({ inFlight: inFlight(), draining, drainStartedAt, catchUp: getCatchUpStatus(), slack: getSocketStatus(), build, startedAt: PROCESS_STARTED_AT, httpListeningAt })));
+        res.end(
+          JSON.stringify(
+            healthPayload({
+              inFlight: inFlight(),
+              draining,
+              drainStartedAt,
+              catchUp: getCatchUpStatus(),
+              slack: getSocketStatus(),
+              build,
+              startedAt: PROCESS_STARTED_AT,
+              httpListeningAt,
+            }),
+          ),
+        );
         return;
       }
       // Unknown paths. The live-view handler only ever owns /runs*, which the
@@ -522,7 +610,10 @@ async function main() {
     if (runHistoryWriter && inFlight() > 0) {
       const written = writeAbandonedRunRecords(defaultRunRegistry, runHistoryWriter, Date.now());
       if (written > 0) {
-        await Promise.race([runHistoryWriter.settled(), new Promise((r) => setTimeout(r, INTERRUPTED_WRITE_BUDGET_MS))]);
+        await Promise.race([
+          runHistoryWriter.settled(),
+          new Promise((r) => setTimeout(r, INTERRUPTED_WRITE_BUDGET_MS)),
+        ]);
       }
     }
     console.log(

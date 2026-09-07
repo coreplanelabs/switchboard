@@ -19,8 +19,19 @@ const model = computed(() => chartModelOf(props.report, props.series));
       aria-label="Daily cost, stacked by component"
     >
       <template v-for="(g, i) in model.gridLines" :key="`g${i}`">
-        <line class="stroke-(--ui-border-muted)" :x1="model.marginLeft" :x2="model.width - model.marginRight" :y1="g.y" :y2="g.y" />
-        <text class="fill-(--ui-text-dimmed) text-[11px] tabular-nums" :x="model.marginLeft - 8" :y="g.y + 4" text-anchor="end">
+        <line
+          class="stroke-(--ui-border-muted)"
+          :x1="model.marginLeft"
+          :x2="model.width - model.marginRight"
+          :y1="g.y"
+          :y2="g.y"
+        />
+        <text
+          class="fill-(--ui-text-dimmed) text-[11px] tabular-nums"
+          :x="model.marginLeft - 8"
+          :y="g.y + 4"
+          text-anchor="end"
+        >
           {{ g.label }}
         </text>
       </template>
@@ -46,7 +57,13 @@ const model = computed(() => chartModelOf(props.report, props.series));
       >
         {{ d.label }}
       </text>
-      <line class="stroke-(--ui-border)" :x1="model.marginLeft" :x2="model.width - model.marginRight" :y1="model.axisY" :y2="model.axisY" />
+      <line
+        class="stroke-(--ui-border)"
+        :x1="model.marginLeft"
+        :x2="model.width - model.marginRight"
+        :y1="model.axisY"
+        :y2="model.axisY"
+      />
     </svg>
   </div>
 </template>

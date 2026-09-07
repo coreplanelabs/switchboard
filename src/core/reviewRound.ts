@@ -125,7 +125,8 @@ export function checkPrHeadPreflight(input: {
   repoCtx: Pick<RepoContext, "repo" | "pr" | "headSha" | "prUnpostable">;
 }): PrHeadPreflight {
   const { repoCtx } = input;
-  if (!repoCtx.repo || !reviewPostIntended({ agentName: input.agent.name, requestText: input.requestText })) return { ok: true };
+  if (!repoCtx.repo || !reviewPostIntended({ agentName: input.agent.name, requestText: input.requestText }))
+    return { ok: true };
   const unknownHead =
     repoCtx.pr !== undefined && !repoCtx.headSha
       ? repoCtx.pr
@@ -185,7 +186,9 @@ export async function guardAttachedHead(input: {
       );
       return { outcome: "adopted", headSha: current };
     }
-    console.log(`[review] ${input.logKey} not started: worktree attached at ${attached.slice(0, 7)}, PR head ${expected.slice(0, 7)} (${where})`);
+    console.log(
+      `[review] ${input.logKey} not started: worktree attached at ${attached.slice(0, 7)}, PR head ${expected.slice(0, 7)} (${where})`,
+    );
     return {
       outcome: "refused",
       reply:
@@ -230,7 +233,14 @@ export function makeSystemComposer(input: {
   /** Pre-built advisory/context blocks; absent blocks leave the prompt untouched.
    *  `about` is the self-description (routing-and-config behavior 11), right
    *  after the config block — the same category of fact-about-yourself. */
-  blocks: { memory: string | undefined; config: string | undefined; about?: string | undefined; instructions: string | undefined; skills: string | undefined; mcp?: string | undefined };
+  blocks: {
+    memory: string | undefined;
+    config: string | undefined;
+    about?: string | undefined;
+    instructions: string | undefined;
+    skills: string | undefined;
+    mcp?: string | undefined;
+  };
 }): (head: HeadPin) => string {
   const { agent, resident, workspace, prTarget, blocks } = input;
   const residentSystem =
@@ -365,7 +375,12 @@ export async function settleReviewedHead(input: {
       );
       reviewHead = current;
     } else if (current && !sameCommit(current, expected) && sameCommit(reviewed, expected)) {
-      const classified = await classifyMove(input.fetchPrCommits, { repo: pr.repo, base: input.baseRef, from: expected, to: current });
+      const classified = await classifyMove(input.fetchPrCommits, {
+        repo: pr.repo,
+        base: input.baseRef,
+        from: expected,
+        to: current,
+      });
       const move = classified?.move;
       if (move?.kind === "rebase") {
         console.log(
@@ -386,9 +401,13 @@ export async function settleReviewedHead(input: {
           try {
             const at = normalizeHead((await executor.moveTo(current)).sha);
             worktreeMoved = at !== undefined && sameCommit(at, current);
-            console.log(`[review] ${logKey} worktree moved to ${at?.slice(0, 7) ?? "?"}${worktreeMoved ? "" : " (not the expected head)"}`);
+            console.log(
+              `[review] ${logKey} worktree moved to ${at?.slice(0, 7) ?? "?"}${worktreeMoved ? "" : " (not the expected head)"}`,
+            );
           } catch (err) {
-            console.warn(`[review] ${logKey} worktree move failed: ${err instanceof Error ? err.message : String(err)}`);
+            console.warn(
+              `[review] ${logKey} worktree move failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
           }
         }
         verdict = undefined; // the earlier verdict is void; the re-review must submit its own
@@ -401,7 +420,15 @@ export async function settleReviewedHead(input: {
             content: [
               {
                 type: "text",
-                text: rereviewFollowUp({ where, reviewed: expected, current, move, before: classified.before, after: classified.after, worktreeMoved }),
+                text: rereviewFollowUp({
+                  where,
+                  reviewed: expected,
+                  current,
+                  move,
+                  before: classified.before,
+                  after: classified.after,
+                  worktreeMoved,
+                }),
               },
             ],
           },
@@ -518,8 +545,13 @@ export async function runReviewPostStep(input: {
         skipReason = why;
         console.log(`[review-post] ${logKey} skipped: ${why} (repo ${repoCtx.repo ?? "none"})`);
         if (unpostable && repoCtx.repo) {
-          const detail = unpostable.reason === "closed" ? "the PR is closed" : "the PR's head could not be verified on GitHub";
-          await input.reply(`ℹ️ Review not posted to ${repoCtx.repo}#${unpostable.number}: ${detail} — this verdict is Slack-only.`).catch(() => {});
+          const detail =
+            unpostable.reason === "closed" ? "the PR is closed" : "the PR's head could not be verified on GitHub";
+          await input
+            .reply(
+              `ℹ️ Review not posted to ${repoCtx.repo}#${unpostable.number}: ${detail} — this verdict is Slack-only.`,
+            )
+            .catch(() => {});
         }
       }
     }
@@ -535,7 +567,9 @@ export async function runReviewPostStep(input: {
     const head = checkReviewedHead({ expected: reviewHead, observed: observedHead, reported: verdict?.head });
     if (!head.ok) {
       console.log(`[review-post] ${logKey} skipped: ${head.reason} (${where})`);
-      await input.reply(`ℹ️ Review not posted to ${where}: ${head.reason} — this verdict is Slack-only.`).catch(() => {});
+      await input
+        .reply(`ℹ️ Review not posted to ${where}: ${head.reason} — this verdict is Slack-only.`)
+        .catch(() => {});
       skipReason = head.reason;
       postTarget = null;
     }
@@ -550,7 +584,9 @@ export async function runReviewPostStep(input: {
     const target: ReviewCommentTarget = { ...postTarget, commitId: pinned };
     // The verdict line is built here, by code — the model's prose never
     // decides whether the body starts with "LGTM:" (auto-approve contract).
-    const body = carried ? `${buildReviewPostBody(input.answer, verdict)}\n\n${carriedFooter(carried)}` : buildReviewPostBody(input.answer, verdict);
+    const body = carried
+      ? `${buildReviewPostBody(input.answer, verdict)}\n\n${carriedFooter(carried)}`
+      : buildReviewPostBody(input.answer, verdict);
     const where = `${postTarget.repo}#${postTarget.number}`;
     try {
       await input.post(target, body);
@@ -572,10 +608,14 @@ export async function runReviewPostStep(input: {
     // `.catch` guards an injected `fetchPrHead` (the seam's contract is
     // "undefined or a throw both mean unknown"). The post already landed, so
     // these notes never demote the outcome.
-    const current = await input.fetchPrHead({ repo: postTarget.repo, number: postTarget.number }).catch(() => undefined);
+    const current = await input
+      .fetchPrHead({ repo: postTarget.repo, number: postTarget.number })
+      .catch(() => undefined);
     const moved = headMovedNote({ where, reviewed: pinned, current });
     if (moved) {
-      console.log(`[review-post] ${logKey} head moved after review: ${pinned.slice(0, 7)} → ${current?.slice(0, 7)} (${where})`);
+      console.log(
+        `[review-post] ${logKey} head moved after review: ${pinned.slice(0, 7)} → ${current?.slice(0, 7)} (${where})`,
+      );
       await input.reply(moved).catch(() => {});
     }
     return { posted: true };

@@ -31,20 +31,33 @@ export function githubRepoInspector(opts: GithubRepoInspectorOptions = {}): Repo
     try {
       bearer = await token();
     } catch (err) {
-      return { ok: false, reason: `GitHub credential unavailable (${err instanceof Error ? err.message : String(err)})` };
+      return {
+        ok: false,
+        reason: `GitHub credential unavailable (${err instanceof Error ? err.message : String(err)})`,
+      };
     }
     if (!bearer) return { ok: false, reason: "no GitHub credential configured (GitHub App or GH_TOKEN)" };
     const headers = (accept: string) => ({ authorization: `Bearer ${bearer}`, accept, "user-agent": "switchboard" });
     const base = `https://api.github.com/repos/${slug}`;
     try {
-      const tree = await fetchImpl(`${base}/git/trees/${encodeURIComponent(ref)}`, { headers: headers("application/vnd.github+json"), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-      if (tree.status === 404) return { ok: false, reason: `GitHub answered 404 for ${slug}@${ref} — the repo is outside the App installation, or the ref does not exist` };
+      const tree = await fetchImpl(`${base}/git/trees/${encodeURIComponent(ref)}`, {
+        headers: headers("application/vnd.github+json"),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      if (tree.status === 404)
+        return {
+          ok: false,
+          reason: `GitHub answered 404 for ${slug}@${ref} — the repo is outside the App installation, or the ref does not exist`,
+        };
       if (!tree.ok) return { ok: false, reason: `GitHub tree lookup failed: HTTP ${tree.status}` };
       const body = (await tree.json()) as { tree?: Array<{ path?: unknown }> };
       const entries = (body.tree ?? []).map((e) => e.path).filter((p): p is string => typeof p === "string");
       if (!entries.includes("package.json")) return { ok: true, facts: { entries } };
 
-      const pkg = await fetchImpl(`${base}/contents/package.json?ref=${encodeURIComponent(ref)}`, { headers: headers("application/vnd.github.raw+json"), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      const pkg = await fetchImpl(`${base}/contents/package.json?ref=${encodeURIComponent(ref)}`, {
+        headers: headers("application/vnd.github.raw+json"),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
       if (!pkg.ok) return { ok: false, reason: `GitHub package.json read failed: HTTP ${pkg.status}` };
       const text = await pkg.text();
       if (text.length > PACKAGE_JSON_CAP_BYTES) return { ok: true, facts: { entries, packageJson: null } };
@@ -60,7 +73,9 @@ export function githubRepoInspector(opts: GithubRepoInspectorOptions = {}): Repo
         facts: {
           entries,
           packageJson: {
-            ...(typeof obj.scripts === "object" && obj.scripts !== null ? { scripts: obj.scripts as Record<string, unknown> } : {}),
+            ...(typeof obj.scripts === "object" && obj.scripts !== null
+              ? { scripts: obj.scripts as Record<string, unknown> }
+              : {}),
             ...(obj.packageManager !== undefined ? { packageManager: obj.packageManager } : {}),
           },
         },

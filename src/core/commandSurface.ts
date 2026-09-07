@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { acceptsUndefined, type ArgDef, type CommandDef, type CommandInput, type InvokeErrorCode } from "./commandRegistry.js";
+import { acceptsUndefined, type CommandDef, type CommandInput, type InvokeErrorCode } from "./commandRegistry.js";
 
 // Everything a surface shows for a command, DERIVED from its definition (#157
 // KTD20/KTD21). This is the only place a surface name or a grammar exists:
@@ -123,7 +123,15 @@ function unwrap(schema: z.ZodType): z.ZodType {
   let s = schema;
   for (;;) {
     const def = defOf(s);
-    if ((def.type === "optional" || def.type === "nullable" || def.type === "default" || def.type === "nonoptional" || def.type === "readonly") && def.innerType) s = def.innerType;
+    if (
+      (def.type === "optional" ||
+        def.type === "nullable" ||
+        def.type === "default" ||
+        def.type === "nonoptional" ||
+        def.type === "readonly") &&
+      def.innerType
+    )
+      s = def.innerType;
     else return s;
   }
 }
@@ -158,7 +166,10 @@ export function jsonSchemaFor(cmd: CommandShape): Record<string, unknown> {
     if (!acceptsUndefined(arg.schema)) required.push(arg.name);
   }
   if (cmd.options) {
-    const opts = z.toJSONSchema(cmd.options, { io: "input" }) as { properties?: Record<string, unknown>; required?: string[] };
+    const opts = z.toJSONSchema(cmd.options, { io: "input" }) as {
+      properties?: Record<string, unknown>;
+      required?: string[];
+    };
     Object.assign(properties, opts.properties ?? {});
     required.push(...(opts.required ?? []));
   }
@@ -208,7 +219,11 @@ export function setDotted(target: Record<string, unknown>, path: string[], value
  * and ends with the usage line.
  */
 export function parseInvocation(cmd: CommandShape, tokens: readonly string[]): GrammarResult {
-  const invalid = (error: string): GrammarRejection => ({ kind: "invalid", code: "invalid_input", error: `${error}\nusage: ${usageLine(cmd)}` });
+  const invalid = (error: string): GrammarRejection => ({
+    kind: "invalid",
+    code: "invalid_input",
+    error: `${error}\nusage: ${usageLine(cmd)}`,
+  });
   const shape = cmd.options?.shape ?? {};
   const positional: string[] = [];
   const options: Record<string, unknown> = {};
@@ -262,7 +277,11 @@ export function parseInvocation(cmd: CommandShape, tokens: readonly string[]): G
   if (rest) {
     if (positional.length > fixed.length) args.push(positional.slice(fixed.length).join(" "));
   } else if (positional.length > declared.length) {
-    return invalid(declared.length === 0 ? `${chatForm(cmd.id)} takes no arguments` : `unexpected argument: ${chatForm(cmd.id)} takes at most ${declared.length}`);
+    return invalid(
+      declared.length === 0
+        ? `${chatForm(cmd.id)} takes no arguments`
+        : `unexpected argument: ${chatForm(cmd.id)} takes at most ${declared.length}`,
+    );
   }
   const missing = declared.find((a, i) => args[i] === undefined && !acceptsUndefined(a.schema));
   if (missing) return invalid(`missing argument <${missing.name}>`);
@@ -276,7 +295,11 @@ export function parseInvocation(cmd: CommandShape, tokens: readonly string[]): G
  * string spellings (`since-ms`, `models.coding`) onto the camelCase, nested
  * option keys; `"camel"` (JSON) takes keys as they are, dotted keys still nest.
  */
-export function namedToInput(cmd: CommandShape, named: Record<string, unknown>, keys: "kebab" | "camel"): CommandInput | { error: string } {
+export function namedToInput(
+  cmd: CommandShape,
+  named: Record<string, unknown>,
+  keys: "kebab" | "camel",
+): CommandInput | { error: string } {
   const argNames = new Set((cmd.args ?? []).map((a) => a.name));
   const options: Record<string, unknown> = {};
   const byName: Record<string, unknown> = {};
@@ -332,7 +355,10 @@ export interface HelpRow {
  *  Arguments are optional by exception (`(optional)` when the schema accepts
  *  undefined); options are optional by default (`(required)` when it does not). */
 export function helpRows(cmd: CommandShape): { arguments: HelpRow[]; options: HelpRow[] } {
-  const args = (cmd.args ?? []).map((a) => ({ form: `<${a.name}>`, describe: `${a.describe}${acceptsUndefined(a.schema) ? " (optional)" : ""}` }));
+  const args = (cmd.args ?? []).map((a) => ({
+    form: `<${a.name}>`,
+    describe: `${a.describe}${acceptsUndefined(a.schema) ? " (optional)" : ""}`,
+  }));
   const options = (Object.entries(cmd.options?.shape ?? {}) as [string, z.ZodType][]).map(([key, schema]) => ({
     form: isBooleanSchema(schema) ? cliFlag(key) : `${cliFlag(key)} <${typeHint(schema)}>`,
     describe: [schema.description, acceptsUndefined(schema) ? undefined : "(required)"].filter(Boolean).join(" "),
@@ -346,7 +372,10 @@ export function helpText(cmd: CommandShape): string {
   const rows = helpRows(cmd);
   const width = Math.max(0, ...[...rows.arguments, ...rows.options].map((r) => r.form.length));
   const lines = [cmd.describe, `usage: ${usageLine(cmd)}`];
-  for (const [header, section] of [["arguments:", rows.arguments], ["options:", rows.options]] as const) {
+  for (const [header, section] of [
+    ["arguments:", rows.arguments],
+    ["options:", rows.options],
+  ] as const) {
     if (section.length === 0) continue;
     lines.push(header);
     for (const r of section) lines.push(`  ${r.form.padEnd(width)}  ${r.describe}`.trimEnd());
@@ -375,7 +404,10 @@ export function chatCatalogueText(cmds: readonly CommandShape[]): string {
 export function chatHelpText(cmd: CommandShape): string {
   const rows = helpRows(cmd);
   const lines = [cmd.describe, `usage: \`${usageLine(cmd)}\``];
-  for (const [header, section] of [["*arguments*", rows.arguments], ["*options*", rows.options]] as const) {
+  for (const [header, section] of [
+    ["*arguments*", rows.arguments],
+    ["*options*", rows.options],
+  ] as const) {
     if (section.length === 0) continue;
     lines.push(header);
     for (const r of section) lines.push(r.describe ? `• \`${r.form}\` — ${r.describe}` : `• \`${r.form}\``);

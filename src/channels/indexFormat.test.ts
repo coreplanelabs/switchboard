@@ -57,8 +57,12 @@ describe("formatRelative", () => {
 });
 
 describe("splitRunLabel", () => {
-  it("splits the dispatcher's `agent · scope · \"snippet\"` label into its parts", () => {
-    expect(splitRunLabel('review · coreplanelabs/switchboard · "github.com/coreplanelabs/switchboard/pull/268 — re-review:…"')).toEqual({
+  it('splits the dispatcher\'s `agent · scope · "snippet"` label into its parts', () => {
+    expect(
+      splitRunLabel(
+        'review · coreplanelabs/switchboard · "github.com/coreplanelabs/switchboard/pull/268 — re-review:…"',
+      ),
+    ).toEqual({
       agent: "review",
       scope: "coreplanelabs/switchboard",
       snippet: "github.com/coreplanelabs/switchboard/pull/268 — re-review:…",
@@ -81,7 +85,7 @@ describe("splitRunLabel", () => {
     for (const fn of [formatElapsed, splitRunLabel]) {
       const src = String(fn);
       expect(src).not.toMatch(/\brequire\(|\bimport\b/);
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+
       expect(typeof new Function(`var __name = function (f) { return f; }; return (${src});`)()).toBe("function");
     }
   });

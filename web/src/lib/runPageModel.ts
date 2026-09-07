@@ -1,5 +1,12 @@
 import { reactive } from "vue";
-import { createRunTimeline, type TimelineCall, type TimelineChange, type TimelineSkill, type TimelineSource, type TimelineStep } from "@core/channels/runTimeline.js";
+import {
+  createRunTimeline,
+  type TimelineCall,
+  type TimelineChange,
+  type TimelineSkill,
+  type TimelineSource,
+  type TimelineStep,
+} from "@core/channels/runTimeline.js";
 import { formatElapsed } from "./format";
 
 // The run page's view model: the ONE fold for seeded history and live frames
@@ -352,7 +359,10 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         return;
       case "note":
         state.log.push({ kind: "note", key: key("note"), at: change.at, replay: false, text: change.text });
-        if ((change.noteKind === "stop_requested" || change.noteKind === "stopped") && (change.mode === "soft" || change.mode === "hard")) {
+        if (
+          (change.noteKind === "stop_requested" || change.noteKind === "stopped") &&
+          (change.mode === "soft" || change.mode === "hard")
+        ) {
           markStopping(change.mode);
         }
         return;
@@ -416,5 +426,7 @@ export function runningHeader(state: RunPageModel["state"], nowWall: number): st
 
 /** The finished duration on the runner clock (first → last event). */
 export function runSpan(state: RunPageModel["state"]): string {
-  return state.firstAt !== null && state.lastAt !== null && state.lastAt > state.firstAt ? formatElapsed(state.lastAt - state.firstAt) : "";
+  return state.firstAt !== null && state.lastAt !== null && state.lastAt > state.firstAt
+    ? formatElapsed(state.lastAt - state.firstAt)
+    : "";
 }

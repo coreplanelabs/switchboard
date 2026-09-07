@@ -16,7 +16,13 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
-import { checkVendoredSkills, parseManifest, renderVendoredSkill, upstreamRawUrl, type ManifestSource } from "../src/skills/manifest.js";
+import {
+  checkVendoredSkills,
+  parseManifest,
+  renderVendoredSkill,
+  upstreamRawUrl,
+  type ManifestSource,
+} from "../src/skills/manifest.js";
 
 const SKILLS_DIR = process.env.SWITCHBOARD_SKILLS_DIR ?? fileURLToPath(new URL("../skills", import.meta.url));
 const MANIFEST_PATH = join(SKILLS_DIR, "manifest.yaml");
@@ -43,13 +49,19 @@ function ghAuthToken(): string | undefined {
 async function resolveCommit(src: ManifestSource): Promise<string> {
   const m = src.repo.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)$/);
   if (!m) throw new Error(`not a GitHub repo URL: ${src.repo}`);
-  const headers: Record<string, string> = { accept: "application/vnd.github.sha", "user-agent": "switchboard-skills-sync" };
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github.sha",
+    "user-agent": "switchboard-skills-sync",
+  };
   const token = process.env.GITHUB_TOKEN ?? ghAuthToken();
   if (token) headers.authorization = `Bearer ${token}`;
-  const res = await fetch(`https://api.github.com/repos/${m[1]}/${m[2]}/commits/${encodeURIComponent(src.ref)}`, { headers });
+  const res = await fetch(`https://api.github.com/repos/${m[1]}/${m[2]}/commits/${encodeURIComponent(src.ref)}`, {
+    headers,
+  });
   if (!res.ok) throw new Error(`resolving ${src.repo}@${src.ref}: HTTP ${res.status}`);
   const sha = (await res.text()).trim();
-  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`resolving ${src.repo}@${src.ref}: unexpected response ${sha.slice(0, 80)}`);
+  if (!/^[0-9a-f]{40}$/.test(sha))
+    throw new Error(`resolving ${src.repo}@${src.ref}: unexpected response ${sha.slice(0, 80)}`);
   return sha;
 }
 
@@ -61,7 +73,9 @@ async function sync(): Promise<number> {
   for (const [key, src] of Object.entries(manifest.sources)) {
     const commit = await resolveCommit(src);
     const moved = src.commit && src.commit !== commit;
-    console.log(`${key}: ${src.ref} → ${commit.slice(0, 12)}${moved ? ` (was ${src.commit!.slice(0, 12)})` : src.commit ? " (unchanged)" : " (first pin)"}`);
+    console.log(
+      `${key}: ${src.ref} → ${commit.slice(0, 12)}${moved ? ` (was ${src.commit!.slice(0, 12)})` : src.commit ? " (unchanged)" : " (first pin)"}`,
+    );
     src.commit = commit;
     doc.setIn(["sources", key, "commit"], commit);
   }

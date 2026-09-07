@@ -13,7 +13,13 @@ import {
   str,
   type ResidentRecordView,
 } from "@core/channels/residentsModel.js";
-import { diskReserveKiB, effectiveFreeKiB, formatDiskGauge, formatGiB, projectThreadCostKiB } from "@core/execution/residentDiskBudget.js";
+import {
+  diskReserveKiB,
+  effectiveFreeKiB,
+  formatDiskGauge,
+  formatGiB,
+  projectThreadCostKiB,
+} from "@core/execution/residentDiskBudget.js";
 
 // One resident's detail page: lifecycle, pinned facts, snapshot stamp, thread
 // worktrees, pending schedules, command table, registry settings — the browser
@@ -87,7 +93,9 @@ const lastRestore = computed(() => {
 // pure functions the resident's attach admission runs, so the page shows the
 // numbers the next admission will decide on.
 const disk = computed(() => residentDisk(record.value));
-const diskBudgetMb = computed(() => (typeof record.value.diskBudgetMb === "number" ? record.value.diskBudgetMb : undefined));
+const diskBudgetMb = computed(() =>
+  typeof record.value.diskBudgetMb === "number" ? record.value.diskBudgetMb : undefined,
+);
 const diskFacts = computed(() => {
   const d = disk.value;
   if (!d) return [];
@@ -103,8 +111,14 @@ const diskFacts = computed(() => {
   return [
     ["used / total", formatDiskGauge(d)],
     ["free", `${formatGiB(freeKiB)}${capped ? ` under the ${formatGiB(capacityKiB)} diskBudgetMb cap` : ""}`],
-    ["reserve", `${formatGiB(reserve.totalKiB)} (snapshot staging ${formatGiB(reserve.stagingKiB)} + floor ${formatGiB(reserve.floorKiB)})`],
-    ["headroom", `${formatGiB(Math.max(0, headroom))} — room for ${room("hardlink")} hardlinked trees, ${room("install")} deps-installing`],
+    [
+      "reserve",
+      `${formatGiB(reserve.totalKiB)} (snapshot staging ${formatGiB(reserve.stagingKiB)} + floor ${formatGiB(reserve.floorKiB)})`,
+    ],
+    [
+      "headroom",
+      `${formatGiB(Math.max(0, headroom))} — room for ${room("hardlink")} hardlinked trees, ${room("install")} deps-installing`,
+    ],
     ["measured", d.at || "—"],
   ];
 });
@@ -116,10 +130,12 @@ const diskParts = computed(() => {
     ["checkout deps (node_modules)", formatGiB(d.parts.deps)],
     ["checkout (history + tree + build)", formatGiB(d.parts.checkout)],
   ];
-  for (const [key, kib] of Object.entries(d.parts.threads).sort((a, b) => b[1] - a[1])) rows.push([`thread ${key}`, formatGiB(kib)]);
+  for (const [key, kib] of Object.entries(d.parts.threads).sort((a, b) => b[1] - a[1]))
+    rows.push([`thread ${key}`, formatGiB(kib)]);
   // Homes hold an install thread's pnpm store / npm cache; a bare home (a few
   // KiB of dotfiles) is noise, so only ones above 1 MiB are listed.
-  for (const [user, kib] of Object.entries(d.parts.homes).sort((a, b) => b[1] - a[1])) if (kib >= 1024) rows.push([`home ${user}`, formatGiB(kib)]);
+  for (const [user, kib] of Object.entries(d.parts.homes).sort((a, b) => b[1] - a[1]))
+    if (kib >= 1024) rows.push([`home ${user}`, formatGiB(kib)]);
   rows.push(["other (image, /tmp, …)", formatGiB(d.parts.other)]);
   return rows;
 });
@@ -145,7 +161,8 @@ const diskParts = computed(() => {
           <tr class="border-t border-muted">
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">reason</td>
             <td class="break-all px-2 py-1 align-top">
-              <span v-if="live.reason">{{ live.reason }}</span><span v-else class="text-dimmed">—</span>
+              <span v-if="live.reason">{{ live.reason }}</span
+              ><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
@@ -158,13 +175,15 @@ const diskParts = computed(() => {
           <tr class="border-t border-muted">
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">last restore</td>
             <td class="break-all px-2 py-1 align-top">
-              <span v-if="lastRestore">{{ lastRestore }}</span><span v-else class="text-dimmed">—</span>
+              <span v-if="lastRestore">{{ lastRestore }}</span
+              ><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">state updated</td>
             <td class="break-all px-2 py-1 align-top">
-              <span v-if="str(live.updatedAt)">{{ str(live.updatedAt) }}</span><span v-else class="text-dimmed">—</span>
+              <span v-if="str(live.updatedAt)">{{ str(live.updatedAt) }}</span
+              ><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
@@ -206,19 +225,22 @@ const diskParts = computed(() => {
           <tr class="border-t border-muted">
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">lockfile hash</td>
             <td class="break-all px-2 py-1 align-top">
-              <span v-if="str(live.lockfileHash)">{{ str(live.lockfileHash) }}</span><span v-else class="text-dimmed">—</span>
+              <span v-if="str(live.lockfileHash)">{{ str(live.lockfileHash) }}</span
+              ><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">provisioned</td>
             <td class="break-all px-2 py-1 align-top">
-              <span v-if="str(live.provisionedAt)">{{ str(live.provisionedAt) }}</span><span v-else class="text-dimmed">—</span>
+              <span v-if="str(live.provisionedAt)">{{ str(live.provisionedAt) }}</span
+              ><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">last refresh</td>
             <td class="break-all px-2 py-1 align-top">
-              <span v-if="str(live.lastRefreshAt)">{{ str(live.lastRefreshAt) }}</span><span v-else class="text-dimmed">—</span>
+              <span v-if="str(live.lastRefreshAt)">{{ str(live.lastRefreshAt) }}</span
+              ><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
         </tbody>
@@ -236,7 +258,10 @@ const diskParts = computed(() => {
             </tr>
           </tbody>
         </table>
-        <p class="mb-1 mt-2 text-xs text-muted">components (one du, hardlinks counted once — a thread tree shows only what it does not share with the checkout)</p>
+        <p class="mb-1 mt-2 text-xs text-muted">
+          components (one du, hardlinks counted once — a thread tree shows only what it does not share with the
+          checkout)
+        </p>
         <table class="w-full border-collapse text-[0.8125rem]">
           <tbody>
             <tr v-for="[label, value] in diskParts" :key="label" class="border-t border-muted">
@@ -246,17 +271,24 @@ const diskParts = computed(() => {
           </tbody>
         </table>
       </template>
-      <p v-else class="text-xs text-muted">not measured yet — the first refresh cycle or attach of this container measures it</p>
+      <p v-else class="text-xs text-muted">
+        not measured yet — the first refresh cycle or attach of this container measures it
+      </p>
     </section>
 
     <section class="mt-4">
       <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Snapshot stamp</h2>
       <table v-if="snapshot" class="w-full border-collapse text-[0.8125rem]">
         <tbody>
-          <tr v-for="k in ['ref', 'sha', 'lockfileHash', 'createdAt', 'mirrorBackupId', 'checkoutBackupId']" :key="k" class="border-t border-muted">
+          <tr
+            v-for="k in ['ref', 'sha', 'lockfileHash', 'createdAt', 'mirrorBackupId', 'checkoutBackupId']"
+            :key="k"
+            class="border-t border-muted"
+          >
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">{{ k }}</td>
             <td class="break-all px-2 py-1 align-top">
-              <span v-if="str(snapshot[k])">{{ str(snapshot[k]) }}</span><span v-else class="text-dimmed">—</span>
+              <span v-if="str(snapshot[k])">{{ str(snapshot[k]) }}</span
+              ><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
         </tbody>
@@ -269,39 +301,44 @@ const diskParts = computed(() => {
       <template v-if="threads.length > 0">
         <p class="mb-1 text-xs text-muted">{{ liveThreads }} live · {{ threads.length - liveThreads }} evicted</p>
         <div class="overflow-x-auto">
-        <table class="w-full border-collapse text-[0.8125rem]">
-          <tbody>
-            <tr class="text-xs text-muted">
-              <td class="px-2 py-1">thread</td>
-              <td class="px-2 py-1">ref · sha</td>
-              <td class="px-2 py-1">user · deps</td>
-              <td class="px-2 py-1">bound · last attach</td>
-            </tr>
-            <tr v-for="t in threads" :key="t.threadKey" class="border-t border-muted">
-              <td class="break-all px-2 py-1 align-top">
-                <template v-if="t.evicted">
-                  <span class="text-xs text-muted">evicted {{ t.evictedAt || "—" }}<template v-if="t.evictedWhy"> · {{ t.evictedWhy }}</template></span>
-                </template>
-                <StatusDot v-else tone="green" label="live" tip="live" />
-                {{ t.threadKey }}
-              </td>
-              <td class="break-all px-2 py-1 align-top">
-                {{ t.ref }} ·
-                <a v-if="t.commitHref" class="text-primary" :href="t.commitHref">{{ t.sha }}</a>
-                <span v-else-if="t.sha">{{ t.sha }}</span>
-                <span v-else class="text-dimmed">—</span>
-              </td>
-              <td class="break-all px-2 py-1 align-top">
-                <span v-if="t.user">{{ t.user }}</span><span v-else class="text-dimmed">—</span> ·
-                <span v-if="t.deps">{{ t.deps }}</span><span v-else class="text-dimmed">—</span>
-              </td>
-              <td class="break-all px-2 py-1 align-top">
-                <span v-if="t.boundAt">{{ t.boundAt }}</span><span v-else class="text-dimmed">—</span> ·
-                <span v-if="t.lastAttachAt">{{ t.lastAttachAt }}</span><span v-else class="text-dimmed">—</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+          <table class="w-full border-collapse text-[0.8125rem]">
+            <tbody>
+              <tr class="text-xs text-muted">
+                <td class="px-2 py-1">thread</td>
+                <td class="px-2 py-1">ref · sha</td>
+                <td class="px-2 py-1">user · deps</td>
+                <td class="px-2 py-1">bound · last attach</td>
+              </tr>
+              <tr v-for="t in threads" :key="t.threadKey" class="border-t border-muted">
+                <td class="break-all px-2 py-1 align-top">
+                  <template v-if="t.evicted">
+                    <span class="text-xs text-muted"
+                      >evicted {{ t.evictedAt || "—"
+                      }}<template v-if="t.evictedWhy"> · {{ t.evictedWhy }}</template></span
+                    >
+                  </template>
+                  <StatusDot v-else tone="green" label="live" tip="live" />
+                  {{ t.threadKey }}
+                </td>
+                <td class="break-all px-2 py-1 align-top">
+                  {{ t.ref }} ·
+                  <a v-if="t.commitHref" class="text-primary" :href="t.commitHref">{{ t.sha }}</a>
+                  <span v-else-if="t.sha">{{ t.sha }}</span>
+                  <span v-else class="text-dimmed">—</span>
+                </td>
+                <td class="break-all px-2 py-1 align-top">
+                  <span v-if="t.user">{{ t.user }}</span
+                  ><span v-else class="text-dimmed">—</span> · <span v-if="t.deps">{{ t.deps }}</span
+                  ><span v-else class="text-dimmed">—</span>
+                </td>
+                <td class="break-all px-2 py-1 align-top">
+                  <span v-if="t.boundAt">{{ t.boundAt }}</span
+                  ><span v-else class="text-dimmed">—</span> · <span v-if="t.lastAttachAt">{{ t.lastAttachAt }}</span
+                  ><span v-else class="text-dimmed">—</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </template>
       <p v-else class="text-xs text-muted">no thread worktrees</p>
@@ -311,7 +348,15 @@ const diskParts = computed(() => {
       <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Pending schedules</h2>
       <table class="w-full border-collapse text-[0.8125rem]">
         <tbody>
-          <tr v-for="[label, key] in [['refresh', 'refresh'], ['provision run', 'provisionRun'], ['provision deadline', 'provisionDeadline']]" :key="key" class="border-t border-muted">
+          <tr
+            v-for="[label, key] in [
+              ['refresh', 'refresh'],
+              ['provision run', 'provisionRun'],
+              ['provision deadline', 'provisionDeadline'],
+            ]"
+            :key="key"
+            class="border-t border-muted"
+          >
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">{{ label }}</td>
             <td class="px-2 py-1 align-top">{{ str(schedules[key] ?? 0) || "0" }}</td>
           </tr>
@@ -351,7 +396,8 @@ const diskParts = computed(() => {
           >
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">{{ label }}</td>
             <td class="break-all px-2 py-1 align-top">
-              <span v-if="value">{{ value }}</span><span v-else class="text-dimmed">—</span>
+              <span v-if="value">{{ value }}</span
+              ><span v-else class="text-dimmed">—</span>
             </td>
           </tr>
         </tbody>

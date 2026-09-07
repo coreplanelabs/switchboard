@@ -46,7 +46,9 @@ function main() {
   try {
     lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
   } catch (err) {
-    console.error(`check:lockfile — cannot read package-lock.json: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(
+      `check:lockfile — cannot read package-lock.json: ${err instanceof Error ? err.message : String(err)}`,
+    );
     process.exit(2);
   }
   const missing = missingVariants(Object.keys(lock.packages ?? {}));

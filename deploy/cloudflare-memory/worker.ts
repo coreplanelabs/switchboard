@@ -1,6 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
 import type { MemoryCandidate, MemoryRecord } from "../../src/core/memory/types.ts";
-import { DEFAULT_SCOPE_CAP, mintRecord, normalizeText, planEviction, planWrite, rankRecords } from "../../src/core/memory/engine.ts";
+import {
+  DEFAULT_SCOPE_CAP,
+  mintRecord,
+  normalizeText,
+  planEviction,
+  planWrite,
+  rankRecords,
+} from "../../src/core/memory/engine.ts";
 import { tokenize } from "../../src/core/memory/scorer.ts";
 import { isFrictionRunRecord, type FrictionRunRecord } from "../../src/core/frictionProposals.ts";
 import { FIRING_DETAIL_MAX, isScheduleFiring, type ScheduleFiring } from "../../src/core/schedules.ts";
@@ -26,7 +33,14 @@ import {
   type StoredRunEvent,
 } from "../../src/core/runRecord.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
-import { isMcpTicket, isSealedCredential, MCP_TICKET_STATES, type McpTicket, type McpTicketState, type SealedCredential } from "../../src/mcp/registry.ts";
+import {
+  isMcpTicket,
+  isSealedCredential,
+  MCP_TICKET_STATES,
+  type McpTicket,
+  type McpTicketState,
+  type SealedCredential,
+} from "../../src/mcp/registry.ts";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.ts";
 
 /** The commit this bundle was built from, injected by the deploy
@@ -328,7 +342,9 @@ export class MemoryDO extends DurableObject<Env> {
       // FTS entries do not, #356). The full active set is fetched only when
       // the indexed COUNT says the scope is over the cap — the common
       // under-cap batch does no full scan (#356 item 10).
-      const activeCount = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM records WHERE status = 'active'`).one().n;
+      const activeCount = this.sql
+        .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM records WHERE status = 'active'`)
+        .one().n;
       if (activeCount > cap) {
         const active = this.sql.exec<Row>(`SELECT * FROM records WHERE status = 'active'`).toArray().map(toRecord);
         for (const victim of planEviction(active, cap)) {
@@ -373,7 +389,8 @@ export class MemoryDO extends DurableObject<Env> {
    *  IS the scope, so an id from another scope simply matches nothing here. */
   async forget(_scopeKey: string, id: string): Promise<boolean> {
     return this.ctx.storage.transactionSync(() => {
-      const flipped = this.sql.exec(`UPDATE records SET status = 'forgotten' WHERE id = ? AND status = 'active'`, id).rowsWritten > 0;
+      const flipped =
+        this.sql.exec(`UPDATE records SET status = 'forgotten' WHERE id = ? AND status = 'active'`, id).rowsWritten > 0;
       // Soft delete for the record row, hard delete for its FTS entry (#356):
       // one sync transaction, so no crash can strand a dead FTS row (and the
       // start-time reconciliation would heal it anyway).
@@ -510,7 +527,7 @@ const SCHEDULE_MAX_FIRINGS = 100;
 
 type FiringRow = {
   record: string;
-}
+};
 
 /**
  * ScheduleDO: one SQLite Durable Object holding every schedule's firings. The
@@ -542,7 +559,12 @@ export class ScheduleDO extends DurableObject<Env> {
   async record(firing: ScheduleFiring): Promise<number> {
     let retained = 0;
     this.ctx.storage.transactionSync(() => {
-      this.sql.exec(`INSERT INTO firings (schedule, fired_at, record) VALUES (?, ?, ?)`, firing.schedule, firing.firedAt, JSON.stringify(firing));
+      this.sql.exec(
+        `INSERT INTO firings (schedule, fired_at, record) VALUES (?, ?, ?)`,
+        firing.schedule,
+        firing.firedAt,
+        JSON.stringify(firing),
+      );
       this.sql.exec(
         `DELETE FROM firings WHERE schedule = ? AND id NOT IN (
            SELECT id FROM firings WHERE schedule = ? ORDER BY fired_at DESC, id DESC LIMIT ?)`,
@@ -550,7 +572,9 @@ export class ScheduleDO extends DurableObject<Env> {
         firing.schedule,
         SCHEDULE_MAX_FIRINGS,
       );
-      retained = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM firings WHERE schedule = ?`, firing.schedule).one().n;
+      retained = this.sql
+        .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM firings WHERE schedule = ?`, firing.schedule)
+        .one().n;
     });
     return retained;
   }
@@ -615,11 +639,17 @@ export class ConfigDO extends DurableObject<Env> {
   // things a config document must never carry, kept beside it on this object.
 
   async putSecret(sealed: SealedCredential): Promise<void> {
-    this.sql.exec(`INSERT OR REPLACE INTO secrets (server_id, sealed) VALUES (?, ?)`, sealed.serverId, JSON.stringify(sealed));
+    this.sql.exec(
+      `INSERT OR REPLACE INTO secrets (server_id, sealed) VALUES (?, ?)`,
+      sealed.serverId,
+      JSON.stringify(sealed),
+    );
   }
 
   async getSecret(serverId: string): Promise<SealedCredential | null> {
-    const row = this.sql.exec<{ sealed: string }>(`SELECT sealed FROM secrets WHERE server_id = ?`, serverId).toArray()[0];
+    const row = this.sql
+      .exec<{ sealed: string }>(`SELECT sealed FROM secrets WHERE server_id = ?`, serverId)
+      .toArray()[0];
     return row ? parseStored(row.sealed, isSealedCredential) : null;
   }
 
@@ -632,7 +662,13 @@ export class ConfigDO extends DurableObject<Env> {
   /** Insert or replace; tickets expired more than a day ago are swept on every write. */
   async putTicket(ticket: McpTicket, now: number): Promise<void> {
     this.ctx.storage.transactionSync(() => {
-      this.sql.exec(`INSERT OR REPLACE INTO tickets (nonce, server_id, expires_at, ticket) VALUES (?, ?, ?, ?)`, ticket.nonce, ticket.serverId, ticket.expiresAt, JSON.stringify(ticket));
+      this.sql.exec(
+        `INSERT OR REPLACE INTO tickets (nonce, server_id, expires_at, ticket) VALUES (?, ?, ?, ?)`,
+        ticket.nonce,
+        ticket.serverId,
+        ticket.expiresAt,
+        JSON.stringify(ticket),
+      );
       this.sql.exec(`DELETE FROM tickets WHERE expires_at < ?`, now - 24 * 3600_000);
     });
   }
@@ -648,16 +684,26 @@ export class ConfigDO extends DurableObject<Env> {
    *  property of the store, not of request timing. */
   async transitionTicket(ticket: McpTicket, fromState: McpTicketState): Promise<boolean> {
     return this.ctx.storage.transactionSync(() => {
-      const row = this.sql.exec<{ ticket: string }>(`SELECT ticket FROM tickets WHERE nonce = ?`, ticket.nonce).toArray()[0];
+      const row = this.sql
+        .exec<{ ticket: string }>(`SELECT ticket FROM tickets WHERE nonce = ?`, ticket.nonce)
+        .toArray()[0];
       const stored = row ? parseStored(row.ticket, isMcpTicket) : null;
       if (!stored || stored.state !== fromState) return false;
-      this.sql.exec(`UPDATE tickets SET server_id = ?, expires_at = ?, ticket = ? WHERE nonce = ?`, ticket.serverId, ticket.expiresAt, JSON.stringify(ticket), ticket.nonce);
+      this.sql.exec(
+        `UPDATE tickets SET server_id = ?, expires_at = ?, ticket = ? WHERE nonce = ?`,
+        ticket.serverId,
+        ticket.expiresAt,
+        JSON.stringify(ticket),
+        ticket.nonce,
+      );
       return true;
     });
   }
 
   async get(key: string): Promise<{ document: unknown; version: number }> {
-    const row = this.sql.exec<{ version: number; body: string }>(`SELECT version, body FROM documents WHERE key = ?`, key).toArray()[0];
+    const row = this.sql
+      .exec<{ version: number; body: string }>(`SELECT version, body FROM documents WHERE key = ?`, key)
+      .toArray()[0];
     if (!row) return { document: null, version: 0 };
     try {
       return { document: JSON.parse(row.body) as unknown, version: row.version };
@@ -668,7 +714,12 @@ export class ConfigDO extends DurableObject<Env> {
 
   /** Replace the document iff its stored version equals `expectedVersion`
    *  (0 = not yet stored). Returns the new version, or the current one on conflict. */
-  async put(key: string, document: unknown, expectedVersion: number, now: number): Promise<{ ok: true; version: number } | { ok: false; version: number }> {
+  async put(
+    key: string,
+    document: unknown,
+    expectedVersion: number,
+    now: number,
+  ): Promise<{ ok: true; version: number } | { ok: false; version: number }> {
     let outcome: { ok: true; version: number } | { ok: false; version: number } = { ok: false, version: 0 };
     this.ctx.storage.transactionSync(() => {
       const row = this.sql.exec<{ version: number }>(`SELECT version FROM documents WHERE key = ?`, key).toArray()[0];
@@ -678,7 +729,13 @@ export class ConfigDO extends DurableObject<Env> {
         return;
       }
       const next = current + 1;
-      this.sql.exec(`INSERT OR REPLACE INTO documents (key, version, body, updated_at) VALUES (?, ?, ?, ?)`, key, next, JSON.stringify(document), now);
+      this.sql.exec(
+        `INSERT OR REPLACE INTO documents (key, version, body, updated_at) VALUES (?, ?, ?, ?)`,
+        key,
+        next,
+        JSON.stringify(document),
+        now,
+      );
       outcome = { ok: true, version: next };
     });
     return outcome;
@@ -697,7 +754,16 @@ function parseStored<T>(text: string, guard: (v: unknown) => v is T): T | null {
 /** Documents are small; a body over this is refused before storage. */
 const MAX_CONFIG_DOCUMENT_BYTES = 256 * 1024;
 
-const CONFIG_ROUTES = new Set(["/config/get", "/config/put", "/config/secrets/put", "/config/secrets/get", "/config/secrets/delete", "/config/tickets/put", "/config/tickets/get", "/config/tickets/transition"]);
+const CONFIG_ROUTES = new Set([
+  "/config/get",
+  "/config/put",
+  "/config/secrets/put",
+  "/config/secrets/get",
+  "/config/secrets/delete",
+  "/config/tickets/put",
+  "/config/tickets/get",
+  "/config/tickets/transition",
+]);
 const TICKET_STATES: ReadonlySet<string> = new Set<McpTicketState>(MCP_TICKET_STATES);
 
 async function handleConfig(pathname: string, body: unknown, env: Env): Promise<Response> {
@@ -726,27 +792,35 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
       return json({ ok: true });
     }
     case "/config/tickets/get": {
-      if (typeof b.nonce !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(b.nonce)) return json({ error: "nonce malformed" }, 400);
+      if (typeof b.nonce !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(b.nonce))
+        return json({ error: "nonce malformed" }, 400);
       return json({ ticket: await dO.getTicket(b.nonce) });
     }
     case "/config/tickets/transition": {
       if (!isMcpTicket(b.ticket)) return json({ error: "ticket must be an McpTicket" }, 400);
-      if (typeof b.fromState !== "string" || !TICKET_STATES.has(b.fromState)) return json({ error: "fromState must be a ticket state" }, 400);
+      if (typeof b.fromState !== "string" || !TICKET_STATES.has(b.fromState))
+        return json({ error: "fromState must be a ticket state" }, 400);
       const applied = await dO.transitionTicket(b.ticket, b.fromState as McpTicketState);
-      console.log(`[config/tickets/transition] ${b.ticket.serverId} ${b.fromState}→${b.ticket.state} applied=${applied}`);
+      console.log(
+        `[config/tickets/transition] ${b.ticket.serverId} ${b.fromState}→${b.ticket.state} applied=${applied}`,
+      );
       return json({ ok: true, applied });
     }
     default:
       break;
   }
-  if (typeof b.key !== "string" || !CONFIG_KEY_RE.test(b.key)) return json({ error: "key must be a short lowercase slug" }, 400);
+  if (typeof b.key !== "string" || !CONFIG_KEY_RE.test(b.key))
+    return json({ error: "key must be a short lowercase slug" }, 400);
   if (pathname === "/config/get") {
     return json(await dO.get(b.key));
   }
   if (pathname === "/config/put") {
-    if (typeof b.document !== "object" || b.document === null || Array.isArray(b.document)) return json({ error: "document must be a JSON object" }, 400);
-    if (typeof b.expectedVersion !== "number" || !Number.isInteger(b.expectedVersion) || b.expectedVersion < 0) return json({ error: "expectedVersion must be a non-negative integer" }, 400);
-    if (new TextEncoder().encode(JSON.stringify(b.document)).byteLength > MAX_CONFIG_DOCUMENT_BYTES) return json({ error: `document must be at most ${MAX_CONFIG_DOCUMENT_BYTES} bytes` }, 413);
+    if (typeof b.document !== "object" || b.document === null || Array.isArray(b.document))
+      return json({ error: "document must be a JSON object" }, 400);
+    if (typeof b.expectedVersion !== "number" || !Number.isInteger(b.expectedVersion) || b.expectedVersion < 0)
+      return json({ error: "expectedVersion must be a non-negative integer" }, 400);
+    if (new TextEncoder().encode(JSON.stringify(b.document)).byteLength > MAX_CONFIG_DOCUMENT_BYTES)
+      return json({ error: `document must be at most ${MAX_CONFIG_DOCUMENT_BYTES} bytes` }, 413);
     const out = await dO.put(b.key, b.document, b.expectedVersion, Date.now());
     if (!out.ok) return json({ error: "version conflict", version: out.version }, 409);
     console.log(`[config/put] ${b.key} v${out.version}`);
@@ -758,10 +832,13 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
 function parseScheduleFiring(body: unknown): Validated<ScheduleFiring> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const f = (body as Record<string, unknown>).firing;
-  if (!isScheduleFiring(f)) return invalid("firing must be a ScheduleFiring (schedule, firedAt, outcome[, runId, detail])");
+  if (!isScheduleFiring(f))
+    return invalid("firing must be a ScheduleFiring (schedule, firedAt, outcome[, runId, detail])");
   if (f.schedule.length > MAX_KEY_CHARS) return invalid(`firing.schedule must be at most ${MAX_KEY_CHARS} characters`);
-  if (f.runId !== undefined && f.runId.length > MAX_KEY_CHARS) return invalid(`firing.runId must be at most ${MAX_KEY_CHARS} characters`);
-  if (f.detail !== undefined && f.detail.length > FIRING_DETAIL_MAX) return invalid(`firing.detail must be at most ${FIRING_DETAIL_MAX} characters`);
+  if (f.runId !== undefined && f.runId.length > MAX_KEY_CHARS)
+    return invalid(`firing.runId must be at most ${MAX_KEY_CHARS} characters`);
+  if (f.detail !== undefined && f.detail.length > FIRING_DETAIL_MAX)
+    return invalid(`firing.detail must be at most ${FIRING_DETAIL_MAX} characters`);
   return { ok: true, value: f };
 }
 
@@ -770,7 +847,8 @@ function parseFrictionRecord(body: unknown): Validated<{ ledgerKey: string; reco
   const b = body as Record<string, unknown>;
   const key = parseScopeKey(b.ledgerKey, "ledgerKey");
   if (!key.ok) return key;
-  if (!isFrictionRunRecord(b.record)) return invalid("record must be a FrictionRunRecord (runId, finishedAt, diagnosis)");
+  if (!isFrictionRunRecord(b.record))
+    return invalid("record must be a FrictionRunRecord (runId, finishedAt, diagnosis)");
   if (b.record.runId.length > MAX_KEY_CHARS) return invalid(`record.runId must be at most ${MAX_KEY_CHARS} characters`);
   if (JSON.stringify(b.record).length > MAX_FRICTION_RECORD_CHARS) {
     return invalid(`record must serialize to at most ${MAX_FRICTION_RECORD_CHARS} characters`);
@@ -791,7 +869,8 @@ function parseFrictionRecent(body: unknown): Validated<{ ledgerKey: string; limi
     out.limit = b.limit;
   }
   if (b.sinceMs !== undefined) {
-    if (typeof b.sinceMs !== "number" || !Number.isFinite(b.sinceMs) || b.sinceMs < 0) return invalid("sinceMs must be a non-negative number");
+    if (typeof b.sinceMs !== "number" || !Number.isFinite(b.sinceMs) || b.sinceMs < 0)
+      return invalid("sinceMs must be a non-negative number");
     out.sinceMs = b.sinceMs;
   }
   return { ok: true, value: out };
@@ -898,8 +977,14 @@ export class RunHistoryDO extends DurableObject<Env> {
     // every existing row — so a run written before the stamp is never public.
     // Then the indexes the visibility predicate's leaves walk (`channel_id IN`,
     // `channel_visibility IN`, `user_id =`), each ordered like the page.
-    const columns = new Set(this.sql.exec<{ name: string }>(`PRAGMA table_info(runs)`).toArray().map((c) => c.name));
-    if (!columns.has("channel_visibility")) this.sql.exec(`ALTER TABLE runs ADD COLUMN channel_visibility TEXT NOT NULL DEFAULT 'unknown'`);
+    const columns = new Set(
+      this.sql
+        .exec<{ name: string }>(`PRAGMA table_info(runs)`)
+        .toArray()
+        .map((c) => c.name),
+    );
+    if (!columns.has("channel_visibility"))
+      this.sql.exec(`ALTER TABLE runs ADD COLUMN channel_visibility TEXT NOT NULL DEFAULT 'unknown'`);
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS runs_channel_finished ON runs(channel_id, finished_at DESC, run_id DESC);
       CREATE INDEX IF NOT EXISTS runs_visibility_finished ON runs(channel_visibility, finished_at DESC, run_id DESC);
@@ -915,7 +1000,10 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!row) return { policy: clampRetentionPolicy({}), policyUpdatedAt: 0 };
     try {
       const parsed = JSON.parse(row.value) as Partial<RetentionPolicy> & { policyUpdatedAt?: number };
-      const at = typeof parsed.policyUpdatedAt === "number" && Number.isFinite(parsed.policyUpdatedAt) ? parsed.policyUpdatedAt : 0;
+      const at =
+        typeof parsed.policyUpdatedAt === "number" && Number.isFinite(parsed.policyUpdatedAt)
+          ? parsed.policyUpdatedAt
+          : 0;
       return { policy: clampRetentionPolicy(parsed), policyUpdatedAt: at };
     } catch {
       return { policy: clampRetentionPolicy({}), policyUpdatedAt: 0 };
@@ -952,7 +1040,9 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** Every row, oldest first (`finished_at ASC, run_id ASC`) — the deletion order. */
   private retentionRows(): RetentionRow[] {
-    return this.sql.exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs ORDER BY finished_at ASC, run_id ASC`).toArray();
+    return this.sql
+      .exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs ORDER BY finished_at ASC, run_id ASC`)
+      .toArray();
   }
 
   /**
@@ -999,7 +1089,12 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  exactly the rows retained after the delete: the kept set is the newest
    *  prefix of the age-filtered order, and only rows outside it were removed,
    *  so re-running retention on what remains selects the same rows. */
-  private trim(policy: RetentionPolicy, now: number, fence: number | undefined, first?: string): { deleted: number; kept: Set<string> } {
+  private trim(
+    policy: RetentionPolicy,
+    now: number,
+    fence: number | undefined,
+    first?: string,
+  ): { deleted: number; kept: Set<string> } {
     const rows = this.retentionRows();
     const kept = RunHistoryDO.keptIds(rows, policy, now);
     const outside = rows.map((r) => r.run_id).filter((id) => !kept.has(id) && id !== first);
@@ -1007,7 +1102,10 @@ export class RunHistoryDO extends DurableObject<Env> {
     const doomed = firstDoomed ? [first, ...outside] : outside;
     const victims = fence === undefined ? doomed : doomed.slice(0, Math.max(fence, firstDoomed ? 1 : 0));
     this.deleteRuns(victims);
-    if (victims.length < doomed.length) console.log(`[runs/trim] deletion fence: ${victims.length} of ${doomed.length} rows outside policy deleted this put`);
+    if (victims.length < doomed.length)
+      console.log(
+        `[runs/trim] deletion fence: ${victims.length} of ${doomed.length} rows outside policy deleted this put`,
+      );
     return { deleted: victims.length, kept };
   }
 
@@ -1019,7 +1117,10 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  an identical retry is a no-op on `run_events`. `stored: false` when the
    *  record itself fell outside the (possibly just-updated) policy: it was
    *  written and deleted in the same transaction, so nothing of it remains. */
-  async put(record: RunRecord, proposal?: RunPolicyProposal): Promise<{ ok: true; retained: number; stored: boolean; rewritten: boolean }> {
+  async put(
+    record: RunRecord,
+    proposal?: RunPolicyProposal,
+  ): Promise<{ ok: true; retained: number; stored: boolean; rewritten: boolean }> {
     let result = { ok: true as const, retained: 0, stored: false, rewritten: false };
     this.ctx.storage.transactionSync(() => {
       const now = Date.now();
@@ -1029,11 +1130,17 @@ export class RunHistoryDO extends DurableObject<Env> {
       const { events, ...summary } = stored;
       const bytes = utf8ByteLength(JSON.stringify(stored));
       const existing = this.sql
-        .exec<{ event_count: number; finished_at: number; bytes: number }>(`SELECT event_count, finished_at, bytes FROM runs WHERE run_id = ?`, record.id)
+        .exec<{ event_count: number; finished_at: number; bytes: number }>(
+          `SELECT event_count, finished_at, bytes FROM runs WHERE run_id = ?`,
+          record.id,
+        )
         .toArray()[0];
       const unchanged =
         existing !== undefined &&
-        sameStoredVersion({ eventCount: existing.event_count, finishedAt: existing.finished_at, bytes: existing.bytes }, { eventCount: stored.eventCount, finishedAt, bytes });
+        sameStoredVersion(
+          { eventCount: existing.event_count, finishedAt: existing.finished_at, bytes: existing.bytes },
+          { eventCount: stored.eventCount, finishedAt, bytes },
+        );
       this.sql.exec(
         `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, channel_visibility, repo, started_at, finished_at, stored_at, status,
                            event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json)
@@ -1072,15 +1179,24 @@ export class RunHistoryDO extends DurableObject<Env> {
           const batch = events.slice(i, i + RUN_EVENT_INSERT_BATCH);
           const params: (string | number)[] = [];
           batch.forEach((e, j) => params.push(record.id, seqs[i + j], JSON.stringify(e)));
-          this.sql.exec(`INSERT INTO run_events (run_id, seq, json) VALUES ${batch.map(() => "(?, ?, ?)").join(",")}`, ...params);
+          this.sql.exec(
+            `INSERT INTO run_events (run_id, seq, json) VALUES ${batch.map(() => "(?, ?, ?)").join(",")}`,
+            ...params,
+          );
         }
       }
       // The just-written row is either kept or was deleted by the trim (it is
       // always `first`), so kept membership IS whether it is still stored.
       const { kept } = this.trim(policy, now, RUN_TRIM_FENCE, record.id);
-      result = { ok: true, retained: kept.size, stored: kept.has(record.id), rewritten: existing !== undefined && !unchanged };
+      result = {
+        ok: true,
+        retained: kept.size,
+        stored: kept.has(record.id),
+        rewritten: existing !== undefined && !unchanged,
+      };
     });
-    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + RUN_SWEEP_INTERVAL_MS);
+    if ((await this.ctx.storage.getAlarm()) === null)
+      await this.ctx.storage.setAlarm(Date.now() + RUN_SWEEP_INTERVAL_MS);
     return result;
   }
 
@@ -1117,7 +1233,12 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  unknown or outside policy — one not-found shape. A corrupt event row is skipped. */
   async get(id: string): Promise<RunRecord | null> {
     const now = Date.now();
-    const row = this.sql.exec<RunRow>(`SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE run_id = ?`, id).toArray()[0];
+    const row = this.sql
+      .exec<RunRow>(
+        `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE run_id = ?`,
+        id,
+      )
+      .toArray()[0];
     if (!row || !this.isKept(row, this.policyState().policy, now)) return null;
     const summary = parseSummary(row);
     if (!summary) return null;
@@ -1126,7 +1247,14 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   private eventRows(id: string, afterSeq: number, limit: number): EventRow[] {
-    return this.sql.exec<EventRow>(`SELECT seq, json FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`, id, afterSeq, limit).toArray();
+    return this.sql
+      .exec<EventRow>(
+        `SELECT seq, json FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
+        id,
+        afterSeq,
+        limit,
+      )
+      .toArray();
   }
 
   /** A page of events with seq > afterSeq. `nextAfterSeq` is set when more
@@ -1135,8 +1263,14 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  as `get`); a run with nothing past `afterSeq` → an empty page. One query
    *  reads `limit + 1` rows: the page is the first `limit`, the extra row only
    *  says that more follow. */
-  async events(id: string, afterSeq: number, limit: number): Promise<{ events: StoredRunEvent[]; nextAfterSeq?: number } | null> {
-    const row = this.sql.exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs WHERE run_id = ?`, id).toArray()[0];
+  async events(
+    id: string,
+    afterSeq: number,
+    limit: number,
+  ): Promise<{ events: StoredRunEvent[]; nextAfterSeq?: number } | null> {
+    const row = this.sql
+      .exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs WHERE run_id = ?`, id)
+      .toArray()[0];
     if (!row || !this.isKept(row, this.policyState().policy, Date.now())) return null;
     const rows = this.eventRows(id, afterSeq, limit + 1);
     const page = rows.slice(0, limit);
@@ -1150,7 +1284,12 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  is touched: the read for callers that need identity, status, or the
    *  diagnosis but not the event set. */
   async summary(id: string): Promise<RunListItem | null> {
-    const row = this.sql.exec<RunRow>(`SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE run_id = ?`, id).toArray()[0];
+    const row = this.sql
+      .exec<RunRow>(
+        `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE run_id = ?`,
+        id,
+      )
+      .toArray()[0];
     if (!row || !this.isKept(row, this.policyState().policy, Date.now())) return null;
     const summary = parseSummary(row);
     return summary ? { ...summary, bytes: row.bytes } : null;
@@ -1187,7 +1326,12 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (q.visibleTo?.kind === "none") return { items: [] };
     const { policy } = this.policyState();
     const cutoff = now - policy.retentionDays * 86_400_000;
-    const inPolicy = this.sql.exec<{ n: number; b: number }>(`SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b FROM runs WHERE finished_at >= ?`, cutoff).one();
+    const inPolicy = this.sql
+      .exec<{ n: number; b: number }>(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b FROM runs WHERE finished_at >= ?`,
+        cutoff,
+      )
+      .one();
     const boundExceeded = inPolicy.n > policy.maxRuns || inPolicy.b > policy.maxBytes;
     const kept = boundExceeded ? RunHistoryDO.keptIds(this.retentionRows(), policy, now) : null;
     const before = q.before ?? Number.MAX_SAFE_INTEGER;
@@ -1278,7 +1422,9 @@ function parseEventRows(rows: readonly EventRow[]): StoredRunEvent[] {
 function parseSummary(row: RunRow): Omit<RunRecord, "events"> | null {
   try {
     const parsed: unknown = JSON.parse(row.summary_json);
-    return isRunRecord({ ...(parsed as object), events: [] }) ? normalizeStored(parsed as Omit<RunRecord, "events">) : null;
+    return isRunRecord({ ...(parsed as object), events: [] })
+      ? normalizeStored(parsed as Omit<RunRecord, "events">)
+      : null;
   } catch {
     return null;
   }
@@ -1294,7 +1440,8 @@ function parseStoreKey(b: Record<string, unknown>): Validated<string> {
 }
 
 function parsePositiveInt(v: unknown, name: string, max: number): Validated<number> {
-  if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > max) return invalid(`${name} must be an integer between 1 and ${max}`);
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > max)
+    return invalid(`${name} must be an integer between 1 and ${max}`);
   return { ok: true, value: v };
 }
 
@@ -1304,7 +1451,10 @@ function parseRunPut(body: unknown): Validated<{ storeKey: string; record: RunRe
   const key = parseStoreKey(b);
   if (!key.ok) return key;
   if (!isRunRecord(b.record)) return invalid("record must be a RunRecord");
-  const out: { storeKey: string; record: RunRecord; proposal?: RunPolicyProposal } = { storeKey: key.value, record: b.record };
+  const out: { storeKey: string; record: RunRecord; proposal?: RunPolicyProposal } = {
+    storeKey: key.value,
+    record: b.record,
+  };
   if (b.policy !== undefined) {
     if (typeof b.policy !== "object" || b.policy === null) return invalid("policy must be an object");
     const p = b.policy as Record<string, unknown>;
@@ -1312,7 +1462,8 @@ function parseRunPut(body: unknown): Validated<{ storeKey: string; record: RunRe
     for (const field of ["retentionDays", "maxRuns", "maxBytes"] as const) {
       const v = p[field];
       if (v === undefined) continue;
-      if (typeof v !== "number" || !Number.isInteger(v) || v < 1) return invalid(`policy.${field} must be an integer >= 1`);
+      if (typeof v !== "number" || !Number.isInteger(v) || v < 1)
+        return invalid(`policy.${field} must be an integer >= 1`);
       policy[field] = v;
     }
     if (typeof b.policyUpdatedAt !== "number" || !Number.isFinite(b.policyUpdatedAt) || b.policyUpdatedAt < 0) {
@@ -1340,7 +1491,8 @@ function parseRunEvents(body: unknown): Validated<{ storeKey: string; id: string
   const b = body as Record<string, unknown>;
   let afterSeq = 0;
   if (b.afterSeq !== undefined) {
-    if (typeof b.afterSeq !== "number" || !Number.isInteger(b.afterSeq) || b.afterSeq < 0) return invalid("afterSeq must be a non-negative integer");
+    if (typeof b.afterSeq !== "number" || !Number.isInteger(b.afterSeq) || b.afterSeq < 0)
+      return invalid("afterSeq must be a non-negative integer");
     afterSeq = b.afterSeq;
   }
   let limit = RUN_EVENTS_DEFAULT_PAGE;
@@ -1360,7 +1512,8 @@ function parseRunList(body: unknown): Validated<{ storeKey: string; query: RunLi
   const query: RunListOptions = {};
   if (b.limit !== undefined) {
     // Over-asking is not an error: the cap is the contract (`limit: 1000` → 200 rows).
-    if (typeof b.limit !== "number" || !Number.isInteger(b.limit) || b.limit < 1) return invalid("limit must be a positive integer");
+    if (typeof b.limit !== "number" || !Number.isInteger(b.limit) || b.limit < 1)
+      return invalid("limit must be a positive integer");
     query.limit = Math.min(b.limit, RUN_LIST_MAX_LIMIT);
   }
   for (const field of ["before", "sinceMs"] as const) {
@@ -1377,14 +1530,16 @@ function parseRunList(body: unknown): Validated<{ storeKey: string; query: RunLi
   for (const field of ["agent", "channel"] as const) {
     const v = b[field];
     if (v === undefined) continue;
-    if (typeof v !== "string" || v.length > MAX_KEY_CHARS) return invalid(`${field} must be a string of at most ${MAX_KEY_CHARS} characters`);
+    if (typeof v !== "string" || v.length > MAX_KEY_CHARS)
+      return invalid(`${field} must be a string of at most ${MAX_KEY_CHARS} characters`);
     query[field] = v;
   }
   if (b.visibleTo !== undefined) {
     // A malformed filter is a 400, never "all": the bot degrades to live rows
     // rather than the DO widening what an actor may see.
     if (!isRunVisibilityFilter(b.visibleTo)) return invalid("visibleTo must be a run visibility filter");
-    if (boundParameters(b.visibleTo) > DO_MAX_BOUND_PARAMETERS - RUN_LIST_BASE_PARAMETERS) return invalid(`visibleTo names more than ${DO_MAX_BOUND_PARAMETERS - RUN_LIST_BASE_PARAMETERS} ids`);
+    if (boundParameters(b.visibleTo) > DO_MAX_BOUND_PARAMETERS - RUN_LIST_BASE_PARAMETERS)
+      return invalid(`visibleTo names more than ${DO_MAX_BOUND_PARAMETERS - RUN_LIST_BASE_PARAMETERS} ids`);
     query.visibleTo = b.visibleTo;
   }
   return { ok: true, value: { storeKey: key.value, query } };
@@ -1519,7 +1674,11 @@ function parseCandidate(v: unknown, i: number): Validated<MemoryCandidate> {
   if (c.kind !== "fact" && c.kind !== "summary") return invalid(`${at}.kind must be "fact" or "summary"`);
   if (typeof c.text !== "string" || c.text.trim().length === 0) return invalid(`${at}.text must be a non-empty string`);
   if (c.text.length > MAX_TEXT_CHARS) return invalid(`${at}.text must be at most ${MAX_TEXT_CHARS} characters`);
-  if (typeof c.sourceThreadKey !== "string" || c.sourceThreadKey.length === 0 || c.sourceThreadKey.length > MAX_KEY_CHARS) {
+  if (
+    typeof c.sourceThreadKey !== "string" ||
+    c.sourceThreadKey.length === 0 ||
+    c.sourceThreadKey.length > MAX_KEY_CHARS
+  ) {
     return invalid(`${at}.sourceThreadKey must be a non-empty string`);
   }
   const out: MemoryCandidate = { kind: c.kind, text: c.text, sourceThreadKey: c.sourceThreadKey };
@@ -1534,7 +1693,8 @@ function parseCandidate(v: unknown, i: number): Validated<MemoryCandidate> {
     out.keywords = c.keywords as string[];
   }
   if (c.sourceRunId !== undefined) {
-    if (typeof c.sourceRunId !== "string" || c.sourceRunId.length > MAX_KEY_CHARS) return invalid(`${at}.sourceRunId must be a string`);
+    if (typeof c.sourceRunId !== "string" || c.sourceRunId.length > MAX_KEY_CHARS)
+      return invalid(`${at}.sourceRunId must be a string`);
     out.sourceRunId = c.sourceRunId;
   }
   if (c.confidence !== undefined) {
@@ -1544,7 +1704,8 @@ function parseCandidate(v: unknown, i: number): Validated<MemoryCandidate> {
     out.confidence = c.confidence;
   }
   if (c.supersedes !== undefined) {
-    if (typeof c.supersedes !== "string" || c.supersedes.length > MAX_KEY_CHARS) return invalid(`${at}.supersedes must be a string`);
+    if (typeof c.supersedes !== "string" || c.supersedes.length > MAX_KEY_CHARS)
+      return invalid(`${at}.supersedes must be a string`);
     out.supersedes = c.supersedes;
   }
   return { ok: true, value: out };
@@ -1593,14 +1754,18 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
     if (!parsed.ok) return json({ error: parsed.error }, 400);
     const { storeKey, record, proposal } = parsed.value;
     const result = await stub(storeKey).put(record, proposal);
-    console.log(`[runs/put] ${storeKey} <- ${record.id} (${record.storedEventCount} events, stored=${result.stored}, ${result.retained} retained)`);
+    console.log(
+      `[runs/put] ${storeKey} <- ${record.id} (${record.storedEventCount} events, stored=${result.stored}, ${result.retained} retained)`,
+    );
     return json(result);
   }
   if (pathname === "/runs/get") {
     const parsed = parseRunTarget(body);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
     const record = await stub(parsed.value.storeKey).get(parsed.value.id);
-    console.log(`[runs/get] ${parsed.value.storeKey} ${parsed.value.id} -> ${record ? `${record.events.length} events` : "not found"}`);
+    console.log(
+      `[runs/get] ${parsed.value.storeKey} ${parsed.value.id} -> ${record ? `${record.events.length} events` : "not found"}`,
+    );
     return json({ record });
   }
   if (pathname === "/runs/summary") {
@@ -1622,7 +1787,9 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
     if (!parsed.ok) return json({ error: parsed.error }, 400);
     const { storeKey, id, afterSeq, limit } = parsed.value;
     const result = await stub(storeKey).events(id, afterSeq, limit);
-    console.log(`[runs/events] ${storeKey} ${id} after ${afterSeq} -> ${result ? `${result.events.length} events` : "not found"}`);
+    console.log(
+      `[runs/events] ${storeKey} ${id} after ${afterSeq} -> ${result ? `${result.events.length} events` : "not found"}`,
+    );
     return json(result ?? { events: null });
   }
   // /runs/delete
@@ -1636,7 +1803,8 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, build: BUILD, features: ["memory", "friction", "schedules", "runs", "config"] });
+    if (url.pathname === "/healthz" && request.method === "GET")
+      return json({ ok: true, build: BUILD, features: ["memory", "friction", "schedules", "runs", "config"] });
     const ROUTES = new Set([
       ...CONFIG_ROUTES,
       "/retrieve",
@@ -1689,7 +1857,9 @@ export default {
       if (!parsed.ok) return json({ error: parsed.error }, 400);
       const firing = parsed.value;
       const retained = await env.SCHEDULES.get(env.SCHEDULES.idFromName(SCHEDULES_OBJECT)).record(firing);
-      console.log(`[schedules/record] ${firing.schedule} ${firing.outcome}${firing.runId ? ` run ${firing.runId}` : ""} (${retained} retained)`);
+      console.log(
+        `[schedules/record] ${firing.schedule} ${firing.outcome}${firing.runId ? ` run ${firing.runId}` : ""} (${retained} retained)`,
+      );
       return json({ ok: true, retained });
     }
     if (url.pathname === "/schedules/latest") {
@@ -1756,7 +1926,9 @@ export default {
     // Observability (counts + scopeKey only, never record content/PII): confirms
     // the reflection write fired, how many candidates it carried, and whether
     // the per-scope cap evicted anything.
-    console.log(`[write] ${scopeKey} <- ${records.length} candidates${counts.evicted > 0 ? ` (evicted ${counts.evicted})` : ""}`);
+    console.log(
+      `[write] ${scopeKey} <- ${records.length} candidates${counts.evicted > 0 ? ` (evicted ${counts.evicted})` : ""}`,
+    );
     return json({ ok: true, ...counts });
   },
 } satisfies ExportedHandler<Env>;

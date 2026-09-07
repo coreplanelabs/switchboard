@@ -196,7 +196,7 @@ export function parseManifest(text: string): AgentEnvManifest {
   try {
     raw = JSON.parse(stripJsonc(text));
   } catch (e) {
-    throw new Error(`agent-env manifest is not valid JSONC: ${(e as Error).message}`);
+    throw new Error(`agent-env manifest is not valid JSONC: ${(e as Error).message}`, { cause: e });
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error('agent-env manifest must be a JSON object of { <env>: { <service>: { <NAME>: "op://…" } } }');
@@ -211,7 +211,9 @@ export function parseManifest(text: string): AgentEnvManifest {
       }
       for (const [name, ref] of Object.entries(vars as Record<string, unknown>)) {
         if (!ENV_NAME_RE.test(name)) {
-          throw new Error(`agent-env manifest: ${env}.${service}.${name} is not a valid env var name (must match ${ENV_NAME_RE})`);
+          throw new Error(
+            `agent-env manifest: ${env}.${service}.${name} is not a valid env var name (must match ${ENV_NAME_RE})`,
+          );
         }
         if (typeof ref !== "string") {
           throw new Error(`agent-env manifest: ${env}.${service}.${name} must be a string op:// ref`);
@@ -389,4 +391,3 @@ export async function buildAgentEnv(input: {
 
 /** Where the manifest lives unless `env bootstrap --manifest` names another file. */
 export const DEFAULT_MANIFEST_PATH = "deploy/agent-env.jsonc";
-

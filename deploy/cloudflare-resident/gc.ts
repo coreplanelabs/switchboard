@@ -90,7 +90,15 @@ export function decisivePull(pulls: readonly PullSummary[]): PullSummary | null 
   return pulls.find((p) => p.state === "open") ?? pulls.find((p) => p.merged) ?? pulls[0] ?? null;
 }
 
-export type ReclaimWhy = "default-ref" | "pr-open" | "no-pr" | "fate-unknown" | "busy" | "re-attached" | "dirty" | Extract<RefFate, "gone" | "merged" | "closed">;
+export type ReclaimWhy =
+  | "default-ref"
+  | "pr-open"
+  | "no-pr"
+  | "fate-unknown"
+  | "busy"
+  | "re-attached"
+  | "dirty"
+  | Extract<RefFate, "gone" | "merged" | "closed">;
 
 /** Evict this binding now? A finished ref (gone/merged/closed) is reclaimed
  *  only when nothing runs on it and its tree is provably clean — a merged PR
@@ -153,7 +161,8 @@ export interface StoredTestOverrides {
   build: string;
 }
 
-export type ParsedTestOverrides = { overrides: { cap?: number; floorS?: number } } | { clear: true } | { error: string };
+export type ParsedTestOverrides =
+  { overrides: { cap?: number; floorS?: number } } | { clear: true } | { error: string };
 
 /** Parse the `/debug {"op":"set-test-overrides", cap?, floorS?}` body.
  *  Neither field → clear. Each present field must be an integer within
@@ -162,13 +171,22 @@ export function parseTestOverrides(body: Record<string, unknown>, defaults: Limi
   const out: { cap?: number; floorS?: number } = {};
   if (body.cap !== undefined) {
     if (typeof body.cap !== "number" || !Number.isInteger(body.cap) || body.cap < 1 || body.cap > defaults.cap) {
-      return { error: `cap must be an integer between 1 and ${defaults.cap} (the compiled RESIDENT_CAP); overrides only lower it` };
+      return {
+        error: `cap must be an integer between 1 and ${defaults.cap} (the compiled RESIDENT_CAP); overrides only lower it`,
+      };
     }
     out.cap = body.cap;
   }
   if (body.floorS !== undefined) {
-    if (typeof body.floorS !== "number" || !Number.isInteger(body.floorS) || body.floorS < 0 || body.floorS > defaults.floorS) {
-      return { error: `floorS must be an integer between 0 and ${defaults.floorS} (the compiled LRU_FLOOR_S); overrides only lower it` };
+    if (
+      typeof body.floorS !== "number" ||
+      !Number.isInteger(body.floorS) ||
+      body.floorS < 0 ||
+      body.floorS > defaults.floorS
+    ) {
+      return {
+        error: `floorS must be an integer between 0 and ${defaults.floorS} (the compiled LRU_FLOOR_S); overrides only lower it`,
+      };
     }
     out.floorS = body.floorS;
   }
@@ -186,7 +204,11 @@ export interface EffectiveLimits extends LimitDefaults {
 /** The limits the registry enforces right now: the compiled defaults, lowered
  *  by an override written under THIS build. Values are clamped to the
  *  defaults even when stored (a later deploy may have lowered the constant). */
-export function effectiveLimits(stored: StoredTestOverrides | undefined, build: string, defaults: LimitDefaults): EffectiveLimits {
+export function effectiveLimits(
+  stored: StoredTestOverrides | undefined,
+  build: string,
+  defaults: LimitDefaults,
+): EffectiveLimits {
   if (!stored) return { ...defaults, override: null };
   if (stored.build !== build) return { ...defaults, override: null, ignored: `stale-build ${stored.build}` };
   return {
@@ -252,7 +274,10 @@ export function pickEvictionCandidate(views: readonly ResidentView[], nowMs: num
     const last = lastActivityAt(v);
     const idleMs = nowMs - Date.parse(last);
     if (!(idleMs >= floorMs)) {
-      rejected.push({ resource: v.resource, why: `active ${Math.round(idleMs / 60_000)}m ago (floor ${Math.round(floorMs / 60_000)}m)` });
+      rejected.push({
+        resource: v.resource,
+        why: `active ${Math.round(idleMs / 60_000)}m ago (floor ${Math.round(floorMs / 60_000)}m)`,
+      });
       continue;
     }
     eligible.push({ resource: v.resource, lastActivityAt: last });

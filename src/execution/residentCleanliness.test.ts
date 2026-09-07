@@ -30,7 +30,10 @@ describe("worktreeCleanlinessScript (#356 item 6: three probes in one spawn)", (
 
 describe("parseWorktreeCleanliness (tag-keyed, PAM-banner safe)", () => {
   it("a missing worktree is releasable: nothing to preserve", () => {
-    expect(parseWorktreeCleanliness(r("present=no\n"))).toEqual({ clean: true, reason: "worktree missing (disk recycled)" });
+    expect(parseWorktreeCleanliness(r("present=no\n"))).toEqual({
+      clean: true,
+      reason: "worktree missing (disk recycled)",
+    });
   });
   it("a clean tree with nothing unpushed is clean", () => {
     expect(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=0\nunpushed=0\n"))).toEqual({ clean: true });
@@ -57,15 +60,21 @@ describe("parseWorktreeCleanliness (tag-keyed, PAM-banner safe)", () => {
     });
   });
   it("a script that died before emitting gitrc (su refused, timeout) fails closed with the stderr's first line", () => {
-    expect(parseWorktreeCleanliness(r("present=yes\n", { exitCode: 1, stderr: "su: user worker3 does not exist\nmore" }))).toEqual({
+    expect(
+      parseWorktreeCleanliness(r("present=yes\n", { exitCode: 1, stderr: "su: user worker3 does not exist\nmore" })),
+    ).toEqual({
       clean: false,
       reason: "clean-check failed: su: user worker3 does not exist",
     });
-    expect(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=0\nunpushed=0\n", { timedOut: true })).clean).toBe(false);
+    expect(parseWorktreeCleanliness(r("present=yes\ngitrc=0\nchanges=0\nunpushed=0\n", { timedOut: true })).clean).toBe(
+      false,
+    );
   });
   it("a PAM/su banner cannot shift a field: tags are keyed, not positional, and the first occurrence wins", () => {
     expect(
-      parseWorktreeCleanliness(r("Warning: your password will expire\npresent=yes\ngitrc=0\nchanges=0\nunpushed=0\npresent=no\n")),
+      parseWorktreeCleanliness(
+        r("Warning: your password will expire\npresent=yes\ngitrc=0\nchanges=0\nunpushed=0\npresent=no\n"),
+      ),
     ).toEqual({ clean: true });
   });
   it("a non-numeric unpushed value reads as 0, exactly like the old Number(...) || 0", () => {

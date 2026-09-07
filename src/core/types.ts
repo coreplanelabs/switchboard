@@ -4,7 +4,6 @@
 // talk back through. Everything else — config resolution, permissions, agent
 // selection, execution — is channel-agnostic and lives in the dispatcher.
 
-
 /** An image the user attached, already downloaded and base64-encoded. */
 export interface ImageAttachment {
   /** e.g. "image/png" — adapters only pass types every provider accepts */

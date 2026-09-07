@@ -190,7 +190,10 @@ describe("buildPlan", () => {
 
 describe("renderEnvFile", () => {
   it("emits `export NAME='value'` lines that survive sourcing", () => {
-    const text = renderEnvFile({ DATABASE_URL: "postgres://u:p@h/db", API: "a b'c" }, { env: "uat", service: "billing" });
+    const text = renderEnvFile(
+      { DATABASE_URL: "postgres://u:p@h/db", API: "a b'c" },
+      { env: "uat", service: "billing" },
+    );
     expect(text).toContain("export DATABASE_URL='postgres://u:p@h/db'");
     // single quotes inside a value are escaped so `source` keeps them intact
     expect(text).toContain(`export API='a b'\\''c'`);
@@ -211,10 +214,7 @@ describe("renderEnvFile", () => {
 describe("runBootstrap — dry-run", () => {
   it("prints NAMES + refs, and calls neither the resolver nor the sink", async () => {
     const deps = mockDeps();
-    const res = await runBootstrap(
-      { env: "uat", service: "billing", apply: false, outFile: "/tmp/x.env" },
-      deps,
-    );
+    const res = await runBootstrap({ env: "uat", service: "billing", apply: false, outFile: "/tmp/x.env" }, deps);
 
     expect(res.applied).toBe(false);
     expect(deps.reader.read).not.toHaveBeenCalled();

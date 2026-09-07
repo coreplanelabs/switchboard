@@ -120,7 +120,10 @@ export const SEED_ELEMENT_ID = "sb-seed";
  * `JSON.parse` returns the original value byte-for-byte.
  */
 export function serializeSeed(seed: WebSeed): string {
-  return JSON.stringify(seed).replace(/[<>&\u2028\u2029]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return JSON.stringify(seed).replace(
+    /[<>&\u2028\u2029]/g,
+    (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
 }
 
 /** The retention sentence shared by the index toggle tooltip and the 404 page —

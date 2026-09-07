@@ -112,13 +112,16 @@ export function memoryBlockPrefix(resource: string): string {
  *  tag \u2014 inline within a bullet. This is the anti-poisoning containment for the
  *  memory block (see features/memory.md). */
 export function sanitizeMemoryField(s: string): string {
-  return s
-    .replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  return (
+    s
+      // eslint-disable-next-line no-control-regex -- control characters are exactly what this strips
+      .replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+  );
 }
 
 /** The exact rendered bullet for one record — the single source of truth shared

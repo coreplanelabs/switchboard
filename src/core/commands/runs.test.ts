@@ -62,8 +62,12 @@ async function setup() {
   const store = new InMemoryRunStore({ now: () => NOW });
   await store.put(record("fin-x", NOW - 1000, { channelId: "mcp:X", channelVisibility: "machine" }));
   await store.put(record("fin-y", NOW - 2000, { channelId: "mcp:Y", channelVisibility: "machine" }));
-  await store.put(record("fin-priv", NOW - 3000, { channelId: "slack:G_PRIV", userId: "slack:U9", channelVisibility: "private" }));
-  await store.put(record("fin-pub", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:U9", channelVisibility: "public" }));
+  await store.put(
+    record("fin-priv", NOW - 3000, { channelId: "slack:G_PRIV", userId: "slack:U9", channelVisibility: "private" }),
+  );
+  await store.put(
+    record("fin-pub", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:U9", channelVisibility: "public" }),
+  );
   const runs = createRunsService({ registry: reg, store });
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
   registerRunsCommands(registry);
@@ -73,7 +77,12 @@ async function setup() {
 }
 
 const set = (...names: string[]) => new Set(names);
-const actor = (kind: Actor["kind"], id: string, actions: Set<string> | "all", channels: Set<string> | "all"): Actor => ({ kind, id, grants: { actions, channels, repos: set() } });
+const actor = (
+  kind: Actor["kind"],
+  id: string,
+  actions: Set<string> | "all",
+  channels: Set<string> | "all",
+): Actor => ({ kind, id, grants: { actions, channels, repos: set() } });
 
 /** The ingress token map every machine caller below is translated from (`grantsFor`, KTD6). */
 const TOKENS: IngressTokenMap = {
@@ -83,22 +92,47 @@ const TOKENS: IngressTokenMap = {
 
 const cli: Caller = { kind: "cli", id: "cli:local", actor: CLI_ACTOR };
 /** A machine reader granted every channel natively (an ops token). */
-const reader: Caller = { kind: "mcp", id: "mcp:reader", actor: actor("service", "mcp:reader", set("runs:read", "runs:write"), "all") };
+const reader: Caller = {
+  kind: "mcp",
+  id: "mcp:reader",
+  actor: actor("service", "mcp:reader", set("runs:read", "runs:write"), "all"),
+};
 /** A token pinned to channel X by its `channel` key: its one channel grant is `mcp:X`. */
-const pinnedX: Caller = { kind: "mcp", id: "mcp:x-bot", actor: resolveActor({ surface: "mcp", subjectId: "x-bot" }, (id) => grantsFor(id, { ingressTokens: TOKENS })) };
+const pinnedX: Caller = {
+  kind: "mcp",
+  id: "mcp:x-bot",
+  actor: resolveActor({ surface: "mcp", subjectId: "x-bot" }, (id) => grantsFor(id, { ingressTokens: TOKENS })),
+};
 /** A token WITHOUT a `channel` key: no channel grant at all (OQ4, option a). */
-const unpinned: Caller = { kind: "mcp", id: "mcp:ci", actor: resolveActor({ surface: "mcp", subjectId: "ci" }, (id) => grantsFor(id, { ingressTokens: TOKENS })) };
-const dispatchOnly: Caller = { kind: "mcp", id: "mcp:agent", actor: actor("service", "mcp:agent", set("dispatch"), set()) };
+const unpinned: Caller = {
+  kind: "mcp",
+  id: "mcp:ci",
+  actor: resolveActor({ surface: "mcp", subjectId: "ci" }, (id) => grantsFor(id, { ingressTokens: TOKENS })),
+};
+const dispatchOnly: Caller = {
+  kind: "mcp",
+  id: "mcp:agent",
+  actor: actor("service", "mcp:agent", set("dispatch"), set()),
+};
 /** A Slack admin: every grant. */
-const chatOperator: Caller = { kind: "chat", id: "slack:UADMIN", actor: { kind: "user", id: "slack:UADMIN", grants: ALL_GRANTS } };
+const chatOperator: Caller = {
+  kind: "chat",
+  id: "slack:UADMIN",
+  actor: { kind: "user", id: "slack:UADMIN", grants: ALL_GRANTS },
+};
 /** An Access operator configured NATIVELY without `channels: all` (OQ1): every runs action, no channel membership. */
-const accessOperator: Caller = { kind: "access", id: "access:op-2", actor: actor("user", "access:op-2", set("runs:read", "runs:write"), set()) };
+const accessOperator: Caller = {
+  kind: "access",
+  id: "access:op-2",
+  actor: actor("user", "access:op-2", set("runs:read", "runs:write"), set()),
+};
 
 function value<T>(res: { ok: true; value: unknown } | { ok: false }): T {
   if (!res.ok) throw new Error(`expected ok, got ${JSON.stringify(res)}`);
   return res.value as T;
 }
-const ids = (res: { ok: true; value: unknown } | { ok: false }) => value<{ runs: { id: string }[] }>(res).runs.map((r) => r.id);
+const ids = (res: { ok: true; value: unknown } | { ok: false }) =>
+  value<{ runs: { id: string }[] }>(res).runs.map((r) => r.id);
 
 describe("runs.* registrations", () => {
   it("registers the five commands with the declared actions and chat opt-outs", () => {
@@ -114,31 +148,56 @@ describe("runs.* registrations", () => {
   });
 
   it("jsonSchemaFor(runs.list) has a three-value status enum", () => {
-    const schema = jsonSchemaFor(runsCommands.find((c) => c.id === "runs.list")!) as { properties: Record<string, { enum?: string[] }> };
+    const schema = jsonSchemaFor(runsCommands.find((c) => c.id === "runs.list")!) as {
+      properties: Record<string, { enum?: string[] }>;
+    };
     expect(schema.properties.status.enum).toEqual(["active", "finished", "all"]);
   });
 
   it("a dispatch-only MCP caller is refused on runs.list and runs.stop", async () => {
     const { registry, deps } = await setup();
-    expect(await registry.invoke("runs.list", { options: { status: "all" } }, dispatchOnly, deps)).toMatchObject({ ok: false, error: "unauthorized" });
-    expect(await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, dispatchOnly, deps)).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("runs.list", { options: { status: "all" } }, dispatchOnly, deps)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
+    expect(
+      await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, dispatchOnly, deps),
+    ).toMatchObject({ ok: false, error: "unauthorized" });
   });
 
   it("chat callers can list but not get/events/friction (surface opt-out)", async () => {
     const { registry, deps } = await setup();
-    expect(await registry.invoke("runs.list", { options: { status: "all" } }, chatOperator, deps)).toMatchObject({ ok: true });
-    expect(await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, chatOperator, deps)).toMatchObject({ ok: false, error: "not_found" });
-    expect(await registry.invoke("runs.events", { args: ["fin-x"], options: {} }, chatOperator, deps)).toMatchObject({ ok: false, error: "not_found" });
-    expect(await registry.invoke("runs.friction", { args: ["fin-x"], options: {} }, chatOperator, deps)).toMatchObject({ ok: false, error: "not_found" });
+    expect(await registry.invoke("runs.list", { options: { status: "all" } }, chatOperator, deps)).toMatchObject({
+      ok: true,
+    });
+    expect(await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, chatOperator, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+    expect(await registry.invoke("runs.events", { args: ["fin-x"], options: {} }, chatOperator, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+    expect(await registry.invoke("runs.friction", { args: ["fin-x"], options: {} }, chatOperator, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
   });
 });
 
 describe("runs.list", () => {
   it("returns metadata only: no message text, no token", async () => {
     const { reg, registry, deps } = await setup();
-    const { id } = reg.create("coding · acme/live", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t" });
+    const { id } = reg.create("coding · acme/live", {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:t",
+    });
     reg.publish(id, { type: "input", text: "live secret request" });
-    const out = value<{ runs: { id: string }[] }>(await registry.invoke("runs.list", { options: { status: "all" } }, reader, deps));
+    const out = value<{ runs: { id: string }[] }>(
+      await registry.invoke("runs.list", { options: { status: "all" } }, reader, deps),
+    );
     expect(out.runs.map((r) => r.id)).toEqual([id, "fin-x", "fin-y", "fin-priv", "fin-pub"]);
     const json = JSON.stringify(out);
     expect(json).not.toMatch(/please do the thing|all done|live secret request/);
@@ -148,17 +207,36 @@ describe("runs.list", () => {
 
   it("status defaults to active (features/run-history.md: active by default, `all` opt-in) — a bare `runs list` equals `--status active`", async () => {
     const { reg, registry, deps } = await setup();
-    const { id } = reg.create("coding · acme/live", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t" });
+    const { id } = reg.create("coding · acme/live", {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:t",
+    });
     const bare = await registry.invoke("runs.list", {}, reader, deps);
     expect(bare).toEqual(await registry.invoke("runs.list", { options: { status: "active" } }, reader, deps));
     expect(ids(bare)).toEqual([id]);
-    expect(value<{ runs: { id: string }[] }>(await registry.invoke("runs.list", { options: { status: "all" } }, reader, deps)).runs).toHaveLength(5);
+    expect(
+      value<{ runs: { id: string }[] }>(
+        await registry.invoke("runs.list", { options: { status: "all" } }, reader, deps),
+      ).runs,
+    ).toHaveLength(5);
   });
 
   it("limit:'10' (string) and limit:10 yield the same result", async () => {
     const { registry, deps } = await setup();
-    const a = await registry.invoke("runs.list", { options: { status: "finished", limit: "10", sinceMs: String(NOW - 2500) } }, reader, deps);
-    const b = await registry.invoke("runs.list", { options: { status: "finished", limit: 10, sinceMs: NOW - 2500 } }, reader, deps);
+    const a = await registry.invoke(
+      "runs.list",
+      { options: { status: "finished", limit: "10", sinceMs: String(NOW - 2500) } },
+      reader,
+      deps,
+    );
+    const b = await registry.invoke(
+      "runs.list",
+      { options: { status: "finished", limit: 10, sinceMs: NOW - 2500 } },
+      reader,
+      deps,
+    );
     expect(a).toEqual(b);
     expect(value<{ runs: unknown[] }>(a).runs).toHaveLength(2);
   });
@@ -175,14 +253,31 @@ describe("runs.list", () => {
   it("passes the actor's predicate to the store and never filters after: the store is asked with `visibleTo`, and `none` never touches it", async () => {
     const { store, registry, deps } = await setup();
     const list = vi.spyOn(store, "list");
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, pinnedX, deps))).toEqual(["fin-x", "fin-pub"]);
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, pinnedX, deps))).toEqual([
+      "fin-x",
+      "fin-pub",
+    ]);
     expect(list).toHaveBeenCalledTimes(1);
-    expect(list.mock.calls[0][0].visibleTo).toEqual({ kind: "or", of: [{ kind: "channels-in", channelIds: ["mcp:X"] }, { kind: "visibility-in", visibilities: ["public"] }, { kind: "user-is", userId: "mcp:x-bot" }] });
+    expect(list.mock.calls[0][0].visibleTo).toEqual({
+      kind: "or",
+      of: [
+        { kind: "channels-in", channelIds: ["mcp:X"] },
+        { kind: "visibility-in", visibilities: ["public"] },
+        { kind: "user-is", userId: "mcp:x-bot" },
+      ],
+    });
     list.mockClear();
     // An actor the table cannot place (unknown kind) is refused at the door — the registry's own `authorize` says
     // `unknown-actor-kind` before any handler runs — so the store is never asked (its predicate would be `none` anyway).
-    const bogus: Caller = { ...reader, actor: { kind: "bogus" as Actor["kind"], id: "mcp:reader", grants: ALL_GRANTS } };
-    expect(await registry.invoke("runs.list", { options: { status: "all" } }, bogus, deps)).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
+    const bogus: Caller = {
+      ...reader,
+      actor: { kind: "bogus" as Actor["kind"], id: "mcp:reader", grants: ALL_GRANTS },
+    };
+    expect(await registry.invoke("runs.list", { options: { status: "all" } }, bogus, deps)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+      decidedBy: "registry",
+    });
     expect(list).not.toHaveBeenCalled();
     // `all` is no constraint: the store's own query is unchanged for an all-channels actor.
     await registry.invoke("runs.list", { options: { status: "all" } }, reader, deps);
@@ -193,38 +288,79 @@ describe("runs.list", () => {
 describe("channel visibility (authorization.md items 5–7)", () => {
   it("a pinned token sees its channel and the public runs — never another machine channel or a private run — on list (even when asking for another channel) and on get/events/friction/stop (KTD10 preserved, R12 d)", async () => {
     const { reg, registry, deps } = await setup();
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, pinnedX, deps))).toEqual(["fin-x", "fin-pub"]);
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all", channel: "mcp:Y" } }, pinnedX, deps))).toEqual([]);
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all", channel: "mcp:Y" } }, reader, deps))).toEqual(["fin-y"]);
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, pinnedX, deps))).toEqual([
+      "fin-x",
+      "fin-pub",
+    ]);
+    expect(
+      ids(await registry.invoke("runs.list", { options: { status: "all", channel: "mcp:Y" } }, pinnedX, deps)),
+    ).toEqual([]);
+    expect(
+      ids(await registry.invoke("runs.list", { options: { status: "all", channel: "mcp:Y" } }, reader, deps)),
+    ).toEqual(["fin-y"]);
     for (const cmd of ["runs.get", "runs.events", "runs.friction"]) {
-      expect(await registry.invoke(cmd, { args: ["fin-y"], options: {} }, pinnedX, deps)).toMatchObject({ ok: false, error: "not_found" });
-      expect(await registry.invoke(cmd, { args: ["fin-priv"], options: {} }, pinnedX, deps)).toMatchObject({ ok: false, error: "not_found" });
+      expect(await registry.invoke(cmd, { args: ["fin-y"], options: {} }, pinnedX, deps)).toMatchObject({
+        ok: false,
+        error: "not_found",
+      });
+      expect(await registry.invoke(cmd, { args: ["fin-priv"], options: {} }, pinnedX, deps)).toMatchObject({
+        ok: false,
+        error: "not_found",
+      });
       expect(await registry.invoke(cmd, { args: ["fin-x"], options: {} }, pinnedX, deps)).toMatchObject({ ok: true });
     }
-    const { id } = reg.create("x", { channelId: "mcp:Y", userId: "mcp:u", threadKey: "mcp:Y:t", channelVisibility: "machine" });
-    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, pinnedX, deps)).toMatchObject({ ok: false, error: "not_found" });
+    const { id } = reg.create("x", {
+      channelId: "mcp:Y",
+      userId: "mcp:u",
+      threadKey: "mcp:Y:t",
+      channelVisibility: "machine",
+    });
+    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, pinnedX, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
   });
 
   it("an unpinned token (no `channel` key) holds no channel: it lists NOTHING and gets not_found on every run — R12's fourth deliberate change (OQ4 a)", async () => {
     const { registry, deps } = await setup();
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, unpinned, deps))).toEqual(["fin-pub"]); // the public run only (member-of's public half)
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, unpinned, deps))).toEqual([
+      "fin-pub",
+    ]); // the public run only (member-of's public half)
     for (const cmd of ["runs.get", "runs.events", "runs.friction"]) {
-      for (const run of ["fin-x", "fin-y", "fin-priv"]) expect(await registry.invoke(cmd, { args: [run], options: {} }, unpinned, deps), `${cmd} ${run}`).toMatchObject({ ok: false, error: "not_found" });
+      for (const run of ["fin-x", "fin-y", "fin-priv"])
+        expect(await registry.invoke(cmd, { args: [run], options: {} }, unpinned, deps), `${cmd} ${run}`).toMatchObject(
+          { ok: false, error: "not_found" },
+        );
     }
-    expect(await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, unpinned, deps)).toMatchObject({ ok: false, error: "not_found" });
+    expect(
+      await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, unpinned, deps),
+    ).toMatchObject({ ok: false, error: "not_found" });
     // The one thing everyone may read: a run stamped `public` (member-of's public half).
-    expect(await registry.invoke("runs.get", { args: ["fin-pub"], options: {} }, unpinned, deps)).toMatchObject({ ok: true });
+    expect(await registry.invoke("runs.get", { args: ["fin-pub"], options: {} }, unpinned, deps)).toMatchObject({
+      ok: true,
+    });
   });
 
   it("an unpinned token speaking as TEXT is no longer pinned to the channel it speaks in: `runs list` from channel mcp:X lists nothing (today's per-request pin is gone)", async () => {
     const { registry, deps } = await setup();
     const dir = mkdtempSync(join(tmpdir(), "swb-runs-authz-"));
-    writeFileSync(join(dir, "config.yaml"), "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\npermissions:\n  admins: [\"slack:UADMIN\"]\n");
-    const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"), () => {}, { ingressTokens: TOKENS, commandGroups: ["runs"] });
+    writeFileSync(
+      join(dir, "config.yaml"),
+      'providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\npermissions:\n  admins: ["slack:UADMIN"]\n',
+    );
+    const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"), () => {}, {
+      ingressTokens: TOKENS,
+      commandGroups: ["runs"],
+    });
     const spokenInX = chatCallerFor({ userId: "mcp:ci", channelId: "mcp:X", threadKey: "mcp:X:t" }, config);
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, spokenInX, deps))).toEqual(["fin-pub"]); // not fin-x: the channel it speaks in grants nothing
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, spokenInX, deps))).toEqual([
+      "fin-pub",
+    ]); // not fin-x: the channel it speaks in grants nothing
     const pinnedSpokenInY = chatCallerFor({ userId: "mcp:x-bot", channelId: "mcp:Y", threadKey: "mcp:Y:t" }, config);
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, pinnedSpokenInY, deps))).toEqual(["fin-x", "fin-pub"]); // its grant, not the channel it speaks in
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, pinnedSpokenInY, deps))).toEqual([
+      "fin-x",
+      "fin-pub",
+    ]); // its grant, not the channel it speaks in
   });
 
   it("an Access operator without all-channels gets not_found outside their channels — a private Slack run is invisible on get/events/friction; the public run and their own are not (R12 b)", async () => {
@@ -235,7 +371,9 @@ describe("channel visibility (authorization.md items 5–7)", () => {
       // Byte-identical to a run that does not exist.
       expect(res).toEqual(await registry.invoke(cmd, { args: ["nope"], options: {} }, accessOperator, deps));
     }
-    expect(await registry.invoke("runs.get", { args: ["fin-pub"], options: {} }, accessOperator, deps)).toMatchObject({ ok: true });
+    expect(await registry.invoke("runs.get", { args: ["fin-pub"], options: {} }, accessOperator, deps)).toMatchObject({
+      ok: true,
+    });
     // The deny reason reaches the audit sink only — never the reply.
     expect(denied).toEqual([
       { commandId: "runs.get", actorId: "access:op-2", action: "runs:read", reason: "not-member" },
@@ -246,26 +384,56 @@ describe("channel visibility (authorization.md items 5–7)", () => {
 
   it("an Access operator without all-channels lists only public and granted runs; an admin lists the fleet", async () => {
     const { registry, deps } = await setup();
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, accessOperator, deps))).toEqual(["fin-pub"]);
-    const granted: Caller = { ...accessOperator, actor: actor("user", "access:op-2", set("runs:read", "runs:write"), set("slack:G_PRIV")) };
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, granted, deps))).toEqual(["fin-priv", "fin-pub"]);
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, chatOperator, deps))).toEqual(["fin-x", "fin-y", "fin-priv", "fin-pub"]);
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, accessOperator, deps))).toEqual([
+      "fin-pub",
+    ]);
+    const granted: Caller = {
+      ...accessOperator,
+      actor: actor("user", "access:op-2", set("runs:read", "runs:write"), set("slack:G_PRIV")),
+    };
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, granted, deps))).toEqual([
+      "fin-priv",
+      "fin-pub",
+    ]);
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, chatOperator, deps))).toEqual([
+      "fin-x",
+      "fin-y",
+      "fin-priv",
+      "fin-pub",
+    ]);
   });
 
   it("a run is its user's own: the DM/private run's user reads it without a channel grant (is-self); a reader with no channel grant sees the public run only", async () => {
     const { registry, deps } = await setup();
-    const owner: Caller = { kind: "access", id: "access:u9", actor: actor("user", "slack:U9", set("runs:read"), set()) };
-    expect(await registry.invoke("runs.get", { args: ["fin-priv"], options: {} }, owner, deps)).toMatchObject({ ok: true });
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, owner, deps))).toEqual(["fin-priv", "fin-pub"]);
+    const owner: Caller = {
+      kind: "access",
+      id: "access:u9",
+      actor: actor("user", "slack:U9", set("runs:read"), set()),
+    };
+    expect(await registry.invoke("runs.get", { args: ["fin-priv"], options: {} }, owner, deps)).toMatchObject({
+      ok: true,
+    });
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, owner, deps))).toEqual([
+      "fin-priv",
+      "fin-pub",
+    ]);
     const noChannels: Caller = callerWith("mcp", "mcp:ghost", { actions: set("runs:read") });
-    expect(await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, noChannels, deps)).toMatchObject({ ok: false, error: "not_found" });
-    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, noChannels, deps))).toEqual(["fin-pub"]);
+    expect(await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, noChannels, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+    expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, noChannels, deps))).toEqual([
+      "fin-pub",
+    ]);
   });
 
   it("a live run without a stamp is `unknown` — never public: only a channel grant, all-channels, or its own user reads it", async () => {
     const { reg, registry, deps } = await setup();
     const { id } = reg.create("x", { channelId: "slack:C_PUB", userId: "slack:U1", threadKey: "slack:C_PUB:t" });
-    expect(await registry.invoke("runs.get", { args: [id], options: {} }, accessOperator, deps)).toMatchObject({ ok: false, error: "not_found" });
+    expect(await registry.invoke("runs.get", { args: [id], options: {} }, accessOperator, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
     expect(await registry.invoke("runs.get", { args: [id], options: {} }, reader, deps)).toMatchObject({ ok: true });
   });
 });
@@ -273,7 +441,11 @@ describe("channel visibility (authorization.md items 5–7)", () => {
 describe("runs.get / runs.events / runs.friction", () => {
   it("unknown id → not_found; malformed id → invalid_input naming id", async () => {
     const { registry, deps } = await setup();
-    expect(await registry.invoke("runs.get", { args: ["nope"], options: {} }, reader, deps)).toMatchObject({ ok: false, error: "not_found", status: 404 });
+    expect(await registry.invoke("runs.get", { args: ["nope"], options: {} }, reader, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+      status: 404,
+    });
     const bad = await registry.invoke("runs.get", { args: ["has spaces!"], options: {} }, reader, deps);
     expect(bad).toMatchObject({ ok: false, error: "invalid_input" });
     if (bad.ok) throw new Error("unreachable");
@@ -283,12 +455,17 @@ describe("runs.get / runs.events / runs.friction", () => {
 
   it("runs.get without include returns no events; include=messages wraps every text field as untrusted", async () => {
     const { registry, deps } = await setup();
-    const bare = value<{ events?: unknown }>(await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, reader, deps));
+    const bare = value<{ events?: unknown }>(
+      await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, reader, deps),
+    );
     expect(bare.events).toBeUndefined();
-    const full = value<{ events: RunEvent[] }>(await registry.invoke("runs.get", { args: ["fin-x"], options: { include: "messages" } }, reader, deps));
+    const full = value<{ events: RunEvent[] }>(
+      await registry.invoke("runs.get", { args: ["fin-x"], options: { include: "messages" } }, reader, deps),
+    );
     expect(full.events).toHaveLength(4);
     for (const e of full.events) {
-      if (e.type === "input" || e.type === "context" || e.type === "answer" || e.type === "assistant") expect(e.text).toContain(UNTRUSTED_OPEN);
+      if (e.type === "input" || e.type === "context" || e.type === "answer" || e.type === "assistant")
+        expect(e.text).toContain(UNTRUSTED_OPEN);
       if (e.type === "tool_call" || e.type === "tool_result") expect(e.summary).toContain(UNTRUSTED_OPEN);
     }
     expect(JSON.stringify(full)).toContain("please do the thing");
@@ -297,7 +474,9 @@ describe("runs.get / runs.events / runs.friction", () => {
 
   it("runs.events pages with afterSeq/limit (coerced) and wraps text", async () => {
     const { registry, deps } = await setup();
-    const page = value<{ events: RunEvent[]; nextAfterSeq?: number }>(await registry.invoke("runs.events", { args: ["fin-x"], options: { afterSeq: "1", limit: "2" } }, reader, deps));
+    const page = value<{ events: RunEvent[]; nextAfterSeq?: number }>(
+      await registry.invoke("runs.events", { args: ["fin-x"], options: { afterSeq: "1", limit: "2" } }, reader, deps),
+    );
     expect(page.events.map((e) => e.seq)).toEqual([2, 3]);
     expect(page.nextAfterSeq).toBe(3);
     expect((page.events[0] as { summary: string }).summary).toContain(UNTRUSTED_OPEN);
@@ -305,7 +484,9 @@ describe("runs.get / runs.events / runs.friction", () => {
 
   it("runs.friction returns the stored diagnosis", async () => {
     const { registry, deps } = await setup();
-    const out = value<{ id: string; finished: boolean; diagnosis: { verdict: string } }>(await registry.invoke("runs.friction", { args: ["fin-x"], options: {} }, reader, deps));
+    const out = value<{ id: string; finished: boolean; diagnosis: { verdict: string } }>(
+      await registry.invoke("runs.friction", { args: ["fin-x"], options: {} }, reader, deps),
+    );
     expect(out).toMatchObject({ id: "fin-x", finished: true });
     expect(typeof out.diagnosis.verdict).toBe("string");
   });
@@ -313,7 +494,9 @@ describe("runs.get / runs.events / runs.friction", () => {
   it("runs.get fetches the run once — the authorization check reuses the payload's view", async () => {
     const { registry, deps } = await setup();
     const getRun = vi.spyOn(await deps.runs(), "getRun");
-    const out = value<{ id: string; events?: unknown[] }>(await registry.invoke("runs.get", { args: ["fin-x"], options: { include: "messages" } }, pinnedX, deps));
+    const out = value<{ id: string; events?: unknown[] }>(
+      await registry.invoke("runs.get", { args: ["fin-x"], options: { include: "messages" } }, pinnedX, deps),
+    );
     expect(out.id).toBe("fin-x");
     expect(out.events).toHaveLength(4);
     expect(getRun).toHaveBeenCalledTimes(1);
@@ -322,7 +505,13 @@ describe("runs.get / runs.events / runs.friction", () => {
 
   it("every handler resolves the `runs` accessor exactly once per invocation (#409, F1)", async () => {
     const { registry, deps, reg } = await setup();
-    const live = reg.create("coding · acme/live", { agent: "coding", channelId: "mcp:X", userId: "mcp:u", threadKey: "mcp:X:t", channelVisibility: "machine" });
+    const live = reg.create("coding · acme/live", {
+      agent: "coding",
+      channelId: "mcp:X",
+      userId: "mcp:u",
+      threadKey: "mcp:X:t",
+      channelVisibility: "machine",
+    });
     let resolved = 0;
     const counted: RunsCommandDeps = {
       runs: () => {
@@ -348,26 +537,54 @@ describe("runs.get / runs.events / runs.friction", () => {
 describe("runs.stop", () => {
   it("finished run → conflict; unknown → not_found", async () => {
     const { registry, deps } = await setup();
-    expect(await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, cli, deps)).toMatchObject({ ok: false, error: "conflict", status: 409 });
-    expect(await registry.invoke("runs.stop", { args: ["nope"], options: { mode: "soft" } }, cli, deps)).toMatchObject({ ok: false, error: "not_found", status: 404 });
+    expect(await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, cli, deps)).toMatchObject(
+      { ok: false, error: "conflict", status: 409 },
+    );
+    expect(await registry.invoke("runs.stop", { args: ["nope"], options: { mode: "soft" } }, cli, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+      status: 404,
+    });
   });
 
   it("stops a live run and records the caller as the structured actor", async () => {
     const { reg, registry, deps } = await setup();
-    const { id, token } = reg.create("coding · acme/live", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t" });
+    const { id, token } = reg.create("coding · acme/live", {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:t",
+    });
     const res = await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps);
     expect(res).toEqual({ ok: true, value: { id, mode: "hard", state: "stopping" } });
     const snap = reg.snapshot(id, token)!;
-    const note = snap.events.find((e) => e.type === "run_note" && e.kind === "stop_requested") as Extract<RunEvent, { type: "run_note" }>;
+    const note = snap.events.find((e) => e.type === "run_note" && e.kind === "stop_requested") as Extract<
+      RunEvent,
+      { type: "run_note" }
+    >;
     expect(note.actor).toEqual({ kind: "mcp", id: "mcp:reader" });
   });
 
   it("stopping needs runs:write AND visibility: a reader without the write grant is refused by the registry, a writer outside the channel gets not_found", async () => {
     const { reg, registry, deps } = await setup();
-    const { id } = reg.create("x", { channelId: "mcp:Y", userId: "mcp:u", threadKey: "mcp:Y:t", channelVisibility: "machine" });
-    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, pinnedX, deps)).toMatchObject({ ok: false, error: "not_found" });
-    const writerY: Caller = { kind: "mcp", id: "mcp:y-bot", actor: actor("service", "mcp:y-bot", set("runs:read", "runs:write"), set("mcp:Y")) };
-    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, writerY, deps)).toMatchObject({ ok: true });
+    const { id } = reg.create("x", {
+      channelId: "mcp:Y",
+      userId: "mcp:u",
+      threadKey: "mcp:Y:t",
+      channelVisibility: "machine",
+    });
+    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, pinnedX, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+    const writerY: Caller = {
+      kind: "mcp",
+      id: "mcp:y-bot",
+      actor: actor("service", "mcp:y-bot", set("runs:read", "runs:write"), set("mcp:Y")),
+    };
+    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, writerY, deps)).toMatchObject({
+      ok: true,
+    });
   });
 
   it("mode is required and must be soft|hard", async () => {

@@ -167,13 +167,22 @@ describe("RunStoreFrictionLedger", () => {
     const file = new FileFrictionLedger(tmpPath());
     for (const [id, at] of fixture) {
       await store.put(runRecord(id, at));
-      await file.record({ runId: id, label: `coding · o/r · "${id}"`, agent: "coding", finishedAt: at, diagnosis: (await store.get(id))!.diagnosis });
+      await file.record({
+        runId: id,
+        label: `coding · o/r · "${id}"`,
+        agent: "coding",
+        finishedAt: at,
+        diagnosis: (await store.get(id))!.diagnosis,
+      });
     }
     const viaStore = await new RunStoreFrictionLedger(store).recent();
     expect(viaStore).toEqual(await file.recent());
     expect(viaStore.map((r) => r.runId)).toEqual(["a", "b", "c", "d"]);
     expect((await new RunStoreFrictionLedger(store).recent({ limit: 2 })).map((r) => r.runId)).toEqual(["c", "d"]);
-    expect((await new RunStoreFrictionLedger(store).recent({ sinceMs: NOW - 100 })).map((r) => r.runId)).toEqual(["c", "d"]);
+    expect((await new RunStoreFrictionLedger(store).recent({ sinceMs: NOW - 100 })).map((r) => r.runId)).toEqual([
+      "c",
+      "d",
+    ]);
   });
 
   it("recent() takes the actor's predicate (authorization.md item 6): the run store is asked with it as `visibleTo`; legacy rows carry nothing a predicate could check and are excluded under any narrower one; a bare-record ledger yields nothing", async () => {
@@ -190,7 +199,9 @@ describe("RunStoreFrictionLedger", () => {
     expect((await ledger.recent({ visibleTo: inX })).map((r) => r.runId)).toEqual(["x1", "x2"]);
     expect(list.mock.calls[0][0].visibleTo).toEqual({ kind: "channels-in", channelIds: ["http:x"] });
     expect((await ledger.recent({ visibleTo: inX, limit: 1 })).map((r) => r.runId)).toEqual(["x2"]);
-    expect(await ledger.recent({ visibleTo: { kind: "channels-in", channelIds: new Set(["http:nowhere"]) } })).toEqual([]);
+    expect(await ledger.recent({ visibleTo: { kind: "channels-in", channelIds: new Set(["http:nowhere"]) } })).toEqual(
+      [],
+    );
     // member-of as the compiler emits it: the granted channel OR the public runs.
     const memberOf: Predicate = { kind: "or", of: [inX, { kind: "visibility-in", visibilities: new Set(["public"]) }] };
     expect((await ledger.recent({ visibleTo: memberOf })).map((r) => r.runId)).toEqual(["x1", "p1", "x2"]);
@@ -198,7 +209,13 @@ describe("RunStoreFrictionLedger", () => {
     list.mockClear();
     expect(await ledger.recent({ visibleTo: { kind: "none" } })).toEqual([]);
     expect(list).not.toHaveBeenCalled();
-    expect((await ledger.recent({ visibleTo: { kind: "all" } })).map((r) => r.runId)).toEqual(["x1", "p1", "y1", "legacy-1", "x2"]);
+    expect((await ledger.recent({ visibleTo: { kind: "all" } })).map((r) => r.runId)).toEqual([
+      "x1",
+      "p1",
+      "y1",
+      "legacy-1",
+      "x2",
+    ]);
     expect(list.mock.calls[0][0]).not.toHaveProperty("visibleTo");
     expect((await ledger.recent()).map((r) => r.runId)).toEqual(["x1", "p1", "y1", "legacy-1", "x2"]);
     expect(await legacy.recent({ visibleTo: inX })).toEqual([]);
@@ -222,7 +239,12 @@ describe("RunStoreFrictionLedger", () => {
     const store = new InMemoryRunStore({ now: () => NOW });
     const legacy = new InMemoryFrictionLedger();
     await store.put(runRecord("shared", NOW - 10, { label: "from store" }));
-    await legacy.record({ runId: "shared", label: "from legacy", finishedAt: NOW - 10, diagnosis: analyzeRunFriction([]) });
+    await legacy.record({
+      runId: "shared",
+      label: "from legacy",
+      finishedAt: NOW - 10,
+      diagnosis: analyzeRunFriction([]),
+    });
     await legacy.record({ runId: "legacy-only", finishedAt: NOW - 20, diagnosis: analyzeRunFriction([]) });
     const out = await new RunStoreFrictionLedger(store, legacy).recent();
     expect(out.map((r) => r.runId)).toEqual(["legacy-only", "shared"]);
@@ -291,9 +313,15 @@ describe("RunStoreFrictionLedger", () => {
   it("record() forwards to the legacy ledger (FrictionDO keeps its writes until decommission) and is a no-op without one", async () => {
     const store = new InMemoryRunStore({ now: () => NOW });
     const legacy = new InMemoryFrictionLedger();
-    await new RunStoreFrictionLedger(store, legacy).record({ runId: "x", finishedAt: 1, diagnosis: analyzeRunFriction([]) });
+    await new RunStoreFrictionLedger(store, legacy).record({
+      runId: "x",
+      finishedAt: 1,
+      diagnosis: analyzeRunFriction([]),
+    });
     expect((await legacy.recent()).map((r) => r.runId)).toEqual(["x"]);
-    await expect(new RunStoreFrictionLedger(store).record({ runId: "y", finishedAt: 1, diagnosis: analyzeRunFriction([]) })).resolves.toBeUndefined();
+    await expect(
+      new RunStoreFrictionLedger(store).record({ runId: "y", finishedAt: 1, diagnosis: analyzeRunFriction([]) }),
+    ).resolves.toBeUndefined();
     expect(await store.list({})).toEqual([]); // never writes the run store
   });
 

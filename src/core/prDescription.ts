@@ -121,8 +121,10 @@ function cell(s: string): string {
  * generated-with footer.
  */
 export function renderPrDescriptionMarkdown(desc: PrDescription, ctx: RenderContext): string {
-  if (!REPO_RE.test(ctx.repo)) throw new Error(`renderPrDescriptionMarkdown: repo must be owner/name, got "${ctx.repo}"`);
-  if (!SHA_RE.test(ctx.headSha)) throw new Error(`renderPrDescriptionMarkdown: headSha must be a full 40-char lowercase sha, got "${ctx.headSha}"`);
+  if (!REPO_RE.test(ctx.repo))
+    throw new Error(`renderPrDescriptionMarkdown: repo must be owner/name, got "${ctx.repo}"`);
+  if (!SHA_RE.test(ctx.headSha))
+    throw new Error(`renderPrDescriptionMarkdown: headSha must be a full 40-char lowercase sha, got "${ctx.headSha}"`);
 
   const out: string[] = [];
   out.push("## TL;DR", "", desc.tldr, "");

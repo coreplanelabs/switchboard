@@ -59,7 +59,10 @@ export function reviewTargetBlock(t: ReviewTarget): string {
         ? `Your shell starts in the worktree \`${t.workspace}\` on every bash call — work there with relative paths. Never \`cd\` out of it and never search the filesystem for the repository: any other checkout on this host (the resident's own default-branch checkout included) is NOT the PR, and comparing against it produces a false mismatch.`
         : "Your shell starts in the worktree on every bash call — work there with relative paths. Never `cd` out of it and never search the filesystem for the repository: any other checkout on this host is NOT the PR.",
     );
-    const verified = t.verifiedAtAttach && t.headSha ? "Switchboard attached this worktree at that commit and verified it before this run. " : "";
+    const verified =
+      t.verifiedAtAttach && t.headSha
+        ? "Switchboard attached this worktree at that commit and verified it before this run. "
+        : "";
     lines.push(
       `${verified}The worktree is already at that head. ` +
         (t.headSha

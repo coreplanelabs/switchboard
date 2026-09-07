@@ -82,7 +82,12 @@ export type DiskFullRecovery = { action: "recycle" } | { action: "wait"; why: st
  *  the container; so does the cooldown. `treesClean` must be computed as the
  *  thread users (never root git in a thread tree) and treated as false when a
  *  check could not run — an unreadable tree is kept, never guessed clean. */
-export function planDiskFullRecovery(input: { now: number; lastRecycleAt?: number; inFlight: number; treesClean: boolean }): DiskFullRecovery {
+export function planDiskFullRecovery(input: {
+  now: number;
+  lastRecycleAt?: number;
+  inFlight: number;
+  treesClean: boolean;
+}): DiskFullRecovery {
   if (input.lastRecycleAt !== undefined && input.now - input.lastRecycleAt < DISK_FULL_RECYCLE_COOLDOWN_MS) {
     const min = Math.round((input.now - input.lastRecycleAt) / 60_000);
     return {
@@ -90,9 +95,13 @@ export function planDiskFullRecovery(input: { now: number; lastRecycleAt?: numbe
       why: `recycled ${min} min ago and the disk filled again — the working set does not fit the instance disk (resize the instance, or offboard a repo)`,
     };
   }
-  if (input.inFlight > 0) return { action: "wait", why: `${input.inFlight} operation(s) in flight — a recycle would kill them` };
+  if (input.inFlight > 0)
+    return { action: "wait", why: `${input.inFlight} operation(s) in flight — a recycle would kill them` };
   if (!input.treesClean) {
-    return { action: "wait", why: "a live worktree has (or could not prove it has no) uncommitted or unpushed work — a recycle would destroy it" };
+    return {
+      action: "wait",
+      why: "a live worktree has (or could not prove it has no) uncommitted or unpushed work — a recycle would destroy it",
+    };
   }
   return { action: "recycle" };
 }

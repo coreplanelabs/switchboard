@@ -43,7 +43,8 @@ export type RegionOutcome = { ok: true; text: string; changed: boolean } | { ok:
  *  drift this mechanism exists to prevent. */
 export function replaceRegion(text: string, name: string, body: string): RegionOutcome {
   const open = openPattern(name).exec(text);
-  if (!open) return { ok: false, problem: `no opening marker for region '${name}' (expected a line ${openMarker(name)})` };
+  if (!open)
+    return { ok: false, problem: `no opening marker for region '${name}' (expected a line ${openMarker(name)})` };
   const close = closeMarker(name);
   const closeAt = text.indexOf(close, open.index + open[0].length);
   if (closeAt === -1) return { ok: false, problem: `region '${name}' is never closed (expected a line ${close})` };

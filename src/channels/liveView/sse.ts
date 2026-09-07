@@ -214,7 +214,10 @@ export function serveIndexEvents(
 export function withOmittedMarkers(events: readonly RunEvent[], eventCount: number): LiveFrame[] {
   const omitted = eventCount - events.length;
   if (omitted <= 0) return [...events];
-  const marker = (n: number): LiveFrame => ({ type: "replay_note", summary: `${n} event${n === 1 ? "" : "s"} omitted` });
+  const marker = (n: number): LiveFrame => ({
+    type: "replay_note",
+    summary: `${n} event${n === 1 ? "" : "s"} omitted`,
+  });
   const out: LiveFrame[] = [];
   let expected = 1;
   let accounted = 0;

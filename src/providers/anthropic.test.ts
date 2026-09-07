@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { AnthropicProvider, buildAnthropicParams, effortFor, toAnthropicMessage, usageFromAnthropic } from "./anthropic.js";
+import {
+  AnthropicProvider,
+  buildAnthropicParams,
+  effortFor,
+  toAnthropicMessage,
+  usageFromAnthropic,
+} from "./anthropic.js";
 import type { ChatMessage, CompletionRequest } from "./types.js";
 
 // Feature: features/run-loop.md — prompt caching: the static prefix (tools +
@@ -56,7 +62,11 @@ describe("buildAnthropicParams (prompt-cache layout)", () => {
         {
           role: "user",
           content: [
-            { type: "tool_result", toolUseId: "t1", content: [{ type: "document", mediaType: "application/pdf", data: "JVBERi0=", name: "spec.pdf" }] },
+            {
+              type: "tool_result",
+              toolUseId: "t1",
+              content: [{ type: "document", mediaType: "application/pdf", data: "JVBERi0=", name: "spec.pdf" }],
+            },
           ],
         },
       ],
@@ -165,7 +175,10 @@ describe("toAnthropicMessage (content-part mapping)", () => {
   });
 
   it("string tool_result content is unchanged (no regression)", () => {
-    const msg: ChatMessage = { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "ok", isError: true }] };
+    const msg: ChatMessage = {
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t1", content: "ok", isError: true }],
+    };
     const blocks = toAnthropicMessage(msg).content as unknown as Array<Record<string, unknown>>;
     expect(blocks[0]).toEqual({ type: "tool_result", tool_use_id: "t1", content: "ok", is_error: true });
   });
@@ -173,7 +186,14 @@ describe("toAnthropicMessage (content-part mapping)", () => {
 
 describe("usageFromAnthropic (token usage → TokenUsage)", () => {
   it("maps input/output and both cache counters", () => {
-    expect(usageFromAnthropic({ input_tokens: 12, output_tokens: 3, cache_read_input_tokens: 1000, cache_creation_input_tokens: 40 })).toEqual({
+    expect(
+      usageFromAnthropic({
+        input_tokens: 12,
+        output_tokens: 3,
+        cache_read_input_tokens: 1000,
+        cache_creation_input_tokens: 40,
+      }),
+    ).toEqual({
       inputTokens: 12,
       outputTokens: 3,
       cacheReadTokens: 1000,
@@ -181,7 +201,14 @@ describe("usageFromAnthropic (token usage → TokenUsage)", () => {
     });
   });
   it("omits absent/null cache counters and returns undefined when there is no usage or the core counts are missing", () => {
-    expect(usageFromAnthropic({ input_tokens: 5, output_tokens: 1, cache_read_input_tokens: null, cache_creation_input_tokens: null })).toEqual({ inputTokens: 5, outputTokens: 1 });
+    expect(
+      usageFromAnthropic({
+        input_tokens: 5,
+        output_tokens: 1,
+        cache_read_input_tokens: null,
+        cache_creation_input_tokens: null,
+      }),
+    ).toEqual({ inputTokens: 5, outputTokens: 1 });
     expect(usageFromAnthropic(undefined)).toBeUndefined();
     expect(usageFromAnthropic({ input_tokens: "x", output_tokens: 1 })).toBeUndefined();
   });
@@ -200,7 +227,11 @@ function fakeClient(msg: Record<string, unknown>, captured: Captured[]) {
     },
   } as unknown as ConstructorParameters<typeof AnthropicProvider>[2];
 }
-const TEXT_MSG = { content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } };
+const TEXT_MSG = {
+  content: [{ type: "text", text: "hi" }],
+  stop_reason: "end_turn",
+  usage: { input_tokens: 1, output_tokens: 1 },
+};
 const ttlReq = (over: Partial<CompletionRequest> = {}): CompletionRequest => ({
   model: "claude-fable-5",
   system: "SYSTEM PROMPT",
@@ -224,10 +255,20 @@ describe("buildAnthropicParams — cache TTL and breakpoint placement (item 11)"
   });
 
   it("a rolling breakpoint skips a trailing thinking block (cache_control is rejected there) and lands on the last cacheable block", () => {
-    const p = buildAnthropicParams(ttlReq({ messages: [
-      { role: "user", content: [{ type: "text", text: "go" }] },
-      { role: "assistant", content: [{ type: "text", text: "hm" }, { type: "thinking", thinking: "", signature: "s" }] },
-    ] })) as unknown as Record<string, any>;
+    const p = buildAnthropicParams(
+      ttlReq({
+        messages: [
+          { role: "user", content: [{ type: "text", text: "go" }] },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "hm" },
+              { type: "thinking", thinking: "", signature: "s" },
+            ],
+          },
+        ],
+      }),
+    ) as unknown as Record<string, any>;
     const [text, thinking] = p.messages[1].content;
     expect(text).toHaveProperty("cache_control");
     expect(thinking).not.toHaveProperty("cache_control");
@@ -235,10 +276,14 @@ describe("buildAnthropicParams — cache TTL and breakpoint placement (item 11)"
   });
 
   it("a turn made only of thinking blocks gets no breakpoint rather than an invalid one", () => {
-    const p = buildAnthropicParams(ttlReq({ messages: [
-      { role: "user", content: [{ type: "text", text: "go" }] },
-      { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "s" }] },
-    ] })) as unknown as Record<string, any>;
+    const p = buildAnthropicParams(
+      ttlReq({
+        messages: [
+          { role: "user", content: [{ type: "text", text: "go" }] },
+          { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "s" }] },
+        ],
+      }),
+    ) as unknown as Record<string, any>;
     expect(JSON.stringify(p.messages[1])).not.toContain("cache_control");
     expect(marks(p)).toBe(3);
   });
@@ -267,11 +312,14 @@ describe("AnthropicProvider — thinking blocks are replayed unchanged (item 11)
   });
 
   it("maps thinking parts back to the wire shape byte-for-byte (a modified block is a 400)", () => {
-    const out = toAnthropicMessage({ role: "assistant", content: [
-      { type: "thinking", thinking: "", signature: "sig1" },
-      { type: "redacted_thinking", data: "opaque" },
-      { type: "text", text: "ok" },
-    ] });
+    const out = toAnthropicMessage({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "", signature: "sig1" },
+        { type: "redacted_thinking", data: "opaque" },
+        { type: "text", text: "ok" },
+      ],
+    });
     expect(out.content).toEqual([
       { type: "thinking", thinking: "", signature: "sig1" },
       { type: "redacted_thinking", data: "opaque" },
@@ -282,13 +330,29 @@ describe("AnthropicProvider — thinking blocks are replayed unchanged (item 11)
 
 describe("effortFor — effort is sent only where the model accepts it (item 11)", () => {
   it("passes every level through on Fable 5 / Opus 5 / Sonnet 5 / Opus 4.7+", () => {
-    for (const m of ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-7-20261101"]) {
+    for (const m of [
+      "claude-fable-5",
+      "claude-opus-5",
+      "claude-sonnet-5",
+      "claude-opus-4-7",
+      "claude-opus-4-8",
+      "claude-sonnet-4-7-20261101",
+    ]) {
       expect(effortFor(m, "xhigh")).toBe("xhigh");
       expect(effortFor(m, "max")).toBe("max");
     }
   });
   it("clamps xhigh/max to high on 4.6 and earlier Opus/Sonnet, dated ids included; low..high pass through", () => {
-    for (const m of ["claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5", "claude-sonnet-4-5-20250929", "claude-opus-4-1", "claude-sonnet-4", "claude-sonnet-4-20250514", "claude-opus-4-20250514"]) {
+    for (const m of [
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+      "claude-opus-4-5",
+      "claude-sonnet-4-5-20250929",
+      "claude-opus-4-1",
+      "claude-sonnet-4",
+      "claude-sonnet-4-20250514",
+      "claude-opus-4-20250514",
+    ]) {
       expect(effortFor(m, "xhigh")).toBe("high");
       expect(effortFor(m, "max")).toBe("high");
       expect(effortFor(m, "medium")).toBe("medium");

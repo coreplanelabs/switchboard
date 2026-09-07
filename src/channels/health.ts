@@ -130,7 +130,11 @@ export function healthPayload(state: HealthState): HealthPayload {
       ...(state.slack.connects !== undefined ? { connects: state.slack.connects } : {}),
     };
   }
-  if (state.build) payload.build = { commit: state.build.commit, ...(state.build.builtAt !== undefined ? { builtAt: state.build.builtAt } : {}) };
+  if (state.build)
+    payload.build = {
+      commit: state.build.commit,
+      ...(state.build.builtAt !== undefined ? { builtAt: state.build.builtAt } : {}),
+    };
   if (state.startedAt !== undefined) payload.startedAt = new Date(state.startedAt).toISOString();
   if (state.httpListeningAt !== undefined) payload.httpListeningAt = new Date(state.httpListeningAt).toISOString();
   return payload;

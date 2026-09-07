@@ -166,7 +166,7 @@ export function renderVendoredSkill(upstreamRaw: string, entry: ManifestSkill, s
  *  bundled parser cannot read them; this reads the two fields we need and the
  *  body, and fails on anything that is not a SKILL.md at all. */
 function parseUpstreamSkill(raw: string): { name: string; description: string; body: string } {
-  const m = raw.match(/^﻿?---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  const m = raw.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   if (!m) throw new Error("upstream skill has no YAML frontmatter");
   const rec = asRecord(YAML.parse(m[1]), "upstream frontmatter");
   return {

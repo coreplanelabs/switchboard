@@ -28,12 +28,16 @@ describe("isDiskFullMessage — the errno wording tools print when the disk is f
 
   it("git config's write_error carries NO errno — the message alone cannot decide (that is what the df probe is for)", () => {
     // The incident's exact stderr (reproduced on a full Linux tmpfs: exit 4).
-    expect(isDiskFullMessage("exit 4: stderr: error: failed to write new configuration file /etc/gitconfig.lock")).toBe(false);
+    expect(isDiskFullMessage("exit 4: stderr: error: failed to write new configuration file /etc/gitconfig.lock")).toBe(
+      false,
+    );
   });
 
   it("a stale lock is a different failure with a different message — never disk-full", () => {
     // Reproduced: `git config` against a config whose `.lock` already exists.
-    expect(isDiskFullMessage("exit 255: stderr: error: could not lock config file /etc/gitconfig: File exists")).toBe(false);
+    expect(isDiskFullMessage("exit 255: stderr: error: could not lock config file /etc/gitconfig: File exists")).toBe(
+      false,
+    );
   });
 
   it("ordinary failures and near-miss words stay false", () => {
@@ -45,11 +49,15 @@ describe("isDiskFullMessage — the errno wording tools print when the disk is f
 
 describe("parseDfFreeKiB — the free column of POSIX `df -Pk <path>`", () => {
   it("reads the 4th column of the one data row", () => {
-    const out = "Filesystem     1024-blocks     Used Available Capacity Mounted on\n" + "overlay           15999888 15999888         0     100% /\n";
+    const out =
+      "Filesystem     1024-blocks     Used Available Capacity Mounted on\n" +
+      "overlay           15999888 15999888         0     100% /\n";
     expect(parseDfFreeKiB(out)).toBe(0);
-    expect(parseDfFreeKiB("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 16000000 4000000 12000000 25% /workspace\n")).toBe(
-      12_000_000,
-    );
+    expect(
+      parseDfFreeKiB(
+        "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 16000000 4000000 12000000 25% /workspace\n",
+      ),
+    ).toBe(12_000_000);
   });
 
   it("the probe argv is POSIX df in KiB on the workspace mount (one line to parse, no locale surprises)", () => {
@@ -59,17 +67,27 @@ describe("parseDfFreeKiB — the free column of POSIX `df -Pk <path>`", () => {
   it("no data row, a non-numeric column, or a header-only dump → null (unknown, never 0)", () => {
     expect(parseDfFreeKiB("")).toBeNull();
     expect(parseDfFreeKiB("Filesystem 1024-blocks Used Available Capacity Mounted on\n")).toBeNull();
-    expect(parseDfFreeKiB("Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 1 2 lots 3% /\n")).toBeNull();
+    expect(
+      parseDfFreeKiB("Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 1 2 lots 3% /\n"),
+    ).toBeNull();
     expect(parseDfFreeKiB("df: /workspace: No such file or directory\n")).toBeNull();
   });
 });
 
 describe("diskFullReason / isDiskFullReason — the degraded reason and its prefix", () => {
   it("names the step, keeps the step's own message verbatim, and appends the probe when it answered", () => {
-    expect(diskFullReason({ step: "git-setup", message: "exit 4: stderr: error: failed to write new configuration file /etc/gitconfig.lock", freeKiB: 0 })).toBe(
+    expect(
+      diskFullReason({
+        step: "git-setup",
+        message: "exit 4: stderr: error: failed to write new configuration file /etc/gitconfig.lock",
+        freeKiB: 0,
+      }),
+    ).toBe(
       "disk-full: git-setup exit 4: stderr: error: failed to write new configuration file /etc/gitconfig.lock (/workspace: 0 KiB free)",
     );
-    expect(diskFullReason({ step: "fetch", message: "ENOSPC: no space left on device", freeKiB: null })).toBe("disk-full: fetch ENOSPC: no space left on device");
+    expect(diskFullReason({ step: "fetch", message: "ENOSPC: no space left on device", freeKiB: null })).toBe(
+      "disk-full: fetch ENOSPC: no space left on device",
+    );
   });
 
   it("the prefix test is exact — `disk-full:` and nothing that merely starts with it", () => {
@@ -90,7 +108,9 @@ describe("planDiskFullRecovery — recycle the cache disk only when nothing live
 
   it("nothing in flight, every live tree clean, never recycled → recycle", () => {
     expect(planDiskFullRecovery(clear)).toEqual({ action: "recycle" });
-    expect(planDiskFullRecovery({ ...clear, lastRecycleAt: now - DISK_FULL_RECYCLE_COOLDOWN_MS - 1 })).toEqual({ action: "recycle" });
+    expect(planDiskFullRecovery({ ...clear, lastRecycleAt: now - DISK_FULL_RECYCLE_COOLDOWN_MS - 1 })).toEqual({
+      action: "recycle",
+    });
   });
 
   it("a recycle inside the cooldown is refused and says the working set does not fit", () => {

@@ -29,29 +29,46 @@ describe("parseTestOverrides — the /debug set-test-overrides body", () => {
     expect(parseTestOverrides({ op: "set-test-overrides", resource: "x" }, DEFAULTS)).toEqual({ clear: true });
   });
   it("an override can never RAISE a limit above the constant (no back door past max_instances)", () => {
-    expect(parseTestOverrides({ cap: 7 }, DEFAULTS)).toEqual({ error: "cap must be an integer between 1 and 6 (the compiled RESIDENT_CAP); overrides only lower it" });
-    expect(parseTestOverrides({ floorS: 3601 }, DEFAULTS)).toEqual({ error: "floorS must be an integer between 0 and 3600 (the compiled LRU_FLOOR_S); overrides only lower it" });
+    expect(parseTestOverrides({ cap: 7 }, DEFAULTS)).toEqual({
+      error: "cap must be an integer between 1 and 6 (the compiled RESIDENT_CAP); overrides only lower it",
+    });
+    expect(parseTestOverrides({ floorS: 3601 }, DEFAULTS)).toEqual({
+      error: "floorS must be an integer between 0 and 3600 (the compiled LRU_FLOOR_S); overrides only lower it",
+    });
   });
   it("non-integers, zero cap, negatives, strings → named errors", () => {
     expect(parseTestOverrides({ cap: 0 }, DEFAULTS)).toMatchObject({ error: expect.stringContaining("cap must be") });
     expect(parseTestOverrides({ cap: 2.5 }, DEFAULTS)).toMatchObject({ error: expect.stringContaining("cap must be") });
     expect(parseTestOverrides({ cap: "2" }, DEFAULTS)).toMatchObject({ error: expect.stringContaining("cap must be") });
-    expect(parseTestOverrides({ floorS: -1 }, DEFAULTS)).toMatchObject({ error: expect.stringContaining("floorS must be") });
+    expect(parseTestOverrides({ floorS: -1 }, DEFAULTS)).toMatchObject({
+      error: expect.stringContaining("floorS must be"),
+    });
   });
 });
 
 describe("effectiveLimits — what the registry actually enforces", () => {
-  const stored = (o: { cap?: number; floorS?: number }, build = "gc51") => ({ ...o, setAt: "2026-08-29T23:00:00Z", build });
+  const stored = (o: { cap?: number; floorS?: number }, build = "gc51") => ({
+    ...o,
+    setAt: "2026-08-29T23:00:00Z",
+    build,
+  });
   it("no override → the compiled defaults, override null", () => {
     expect(effectiveLimits(undefined, "gc51", DEFAULTS)).toEqual({ cap: 6, floorS: 3600, override: null });
   });
   it("an active override lowers exactly the fields it names", () => {
     expect(effectiveLimits(stored({ cap: 2 }), "gc51", DEFAULTS)).toMatchObject({ cap: 2, floorS: 3600 });
     expect(effectiveLimits(stored({ floorS: 600 }), "gc51", DEFAULTS)).toMatchObject({ cap: 6, floorS: 600 });
-    expect(effectiveLimits(stored({ cap: 2, floorS: 600 }), "gc51", DEFAULTS).override).toEqual(stored({ cap: 2, floorS: 600 }));
+    expect(effectiveLimits(stored({ cap: 2, floorS: 600 }), "gc51", DEFAULTS).override).toEqual(
+      stored({ cap: 2, floorS: 600 }),
+    );
   });
   it("an override written by a PREVIOUS deploy is ignored (deploy-scoped: a forgotten test cap cannot outlive the build)", () => {
-    expect(effectiveLimits(stored({ cap: 2 }, "gc50"), "gc51", DEFAULTS)).toEqual({ cap: 6, floorS: 3600, override: null, ignored: "stale-build gc50" });
+    expect(effectiveLimits(stored({ cap: 2 }, "gc50"), "gc51", DEFAULTS)).toEqual({
+      cap: 6,
+      floorS: 3600,
+      override: null,
+      ignored: "stale-build gc50",
+    });
   });
   it("a stored value above the compiled constant (constant lowered by a later deploy) is clamped, never honored", () => {
     expect(effectiveLimits(stored({ cap: 9, floorS: 9999 }), "gc51", DEFAULTS)).toMatchObject({ cap: 6, floorS: 3600 });
@@ -67,10 +84,20 @@ describe("pullsFate — the GitHub pulls list for one head ref", () => {
     expect(pullsFate([])).toBe("no-pr");
   });
   it("any open PR wins — the branch is still being worked", () => {
-    expect(pullsFate([{ number: 2, state: "closed", merged: true }, { number: 3, state: "open", merged: false }])).toBe("open");
+    expect(
+      pullsFate([
+        { number: 2, state: "closed", merged: true },
+        { number: 3, state: "open", merged: false },
+      ]),
+    ).toBe("open");
   });
   it("a merged PR (no open one) → merged, even alongside an older closed one", () => {
-    expect(pullsFate([{ number: 3, state: "closed", merged: false }, { number: 2, state: "closed", merged: true }])).toBe("merged");
+    expect(
+      pullsFate([
+        { number: 3, state: "closed", merged: false },
+        { number: 2, state: "closed", merged: true },
+      ]),
+    ).toBe("merged");
   });
   it("closed-unmerged only → closed", () => {
     expect(pullsFate([{ number: 4, state: "closed", merged: false }])).toBe("closed");
@@ -91,7 +118,12 @@ describe("decisivePull — which PR the fate is attributed to", () => {
 
 describe("parsePullsBody — defensive parse of the REST answer", () => {
   it("keeps number/state/merged_at from each element", () => {
-    expect(parsePullsBody([{ number: 7, state: "closed", merged_at: "2026-08-29T10:00:00Z" }, { number: 8, state: "open", merged_at: null }])).toEqual([
+    expect(
+      parsePullsBody([
+        { number: 7, state: "closed", merged_at: "2026-08-29T10:00:00Z" },
+        { number: 8, state: "open", merged_at: null },
+      ]),
+    ).toEqual([
       { number: 7, state: "closed", merged: true },
       { number: 8, state: "open", merged: false },
     ]);
@@ -102,9 +134,14 @@ describe("parsePullsBody — defensive parse of the REST answer", () => {
     expect(parsePullsBody("<html>")).toBeNull();
   });
   it("malformed elements are dropped, not guessed at", () => {
-    expect(parsePullsBody([{ number: "x" }, 42, { number: 9, state: "weird", merged_at: null }, { number: 10, state: "open", merged_at: null }])).toEqual([
-      { number: 10, state: "open", merged: false },
-    ]);
+    expect(
+      parsePullsBody([
+        { number: "x" },
+        42,
+        { number: 9, state: "weird", merged_at: null },
+        { number: 10, state: "open", merged_at: null },
+      ]),
+    ).toEqual([{ number: 10, state: "open", merged: false }]);
   });
 });
 
@@ -123,7 +160,10 @@ describe("reclaimDecision — evict this binding now?", () => {
     expect(reclaimDecision({ ...base, fate: "unknown" })).toEqual({ reclaim: false, why: "fate-unknown" });
   });
   it("the default branch is never reclaimed, whatever the PR list says", () => {
-    expect(reclaimDecision({ ...base, fate: "gone", isDefaultRef: true })).toEqual({ reclaim: false, why: "default-ref" });
+    expect(reclaimDecision({ ...base, fate: "gone", isDefaultRef: true })).toEqual({
+      reclaim: false,
+      why: "default-ref",
+    });
   });
   it("an op in flight on the thread → keep (busy)", () => {
     expect(reclaimDecision({ ...base, busy: 2 })).toEqual({ reclaim: false, why: "busy" });
@@ -222,7 +262,11 @@ describe("pickEvictionCandidate — coldest eligible warm resident", () => {
 
   it("ties break on resource name so the choice is deterministic", () => {
     const t = ago(30 * HOUR);
-    const pick = pickEvictionCandidate([view("repo:b/y", { provisionedAt: t }), view("repo:a/x", { provisionedAt: t })], NOW, HOUR);
+    const pick = pickEvictionCandidate(
+      [view("repo:b/y", { provisionedAt: t }), view("repo:a/x", { provisionedAt: t })],
+      NOW,
+      HOUR,
+    );
     expect(pick.candidate?.resource).toBe("repo:a/x");
   });
 

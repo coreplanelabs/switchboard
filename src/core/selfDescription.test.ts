@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { AGENTS } from "../agents/registry.js";
 import { buildCoreCommands } from "./commandCatalogue.js";
 import { RunRegistry } from "./runRegistry.js";
-import { RESIDENT_CAP_NOTE, SELF_DESCRIPTION_HEADER, SWITCHBOARD_REPO, selfDescriptionBlock } from "./selfDescription.js";
+import {
+  RESIDENT_CAP_NOTE,
+  SELF_DESCRIPTION_HEADER,
+  SWITCHBOARD_REPO,
+  selfDescriptionBlock,
+} from "./selfDescription.js";
 
 // Feature: features/routing-and-config.md behavior 11 — the self-description
 // block every agent carries. Pinned against the live registries so the block
@@ -26,7 +31,12 @@ describe("selfDescriptionBlock", () => {
       null,
       { registry: new RunRegistry(), env: {}, dataDir: ".", warn: () => {} },
     );
-    const ids = new Set(commands.list().filter((c) => c.surfaces?.chat !== false).map((c) => c.id));
+    const ids = new Set(
+      commands
+        .list()
+        .filter((c) => c.surfaces?.chat !== false)
+        .map((c) => c.id),
+    );
     const named = [...block.matchAll(/`(repo|memory|config|runs) ([a-z]+)/g)].map((m) => `${m[1]}.${m[2]}`);
     expect(named.length).toBeGreaterThan(4);
     for (const id of named) expect(ids.has(id), id).toBe(true);

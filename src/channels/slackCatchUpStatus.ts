@@ -99,6 +99,8 @@ export function missingBotScopes(
   required: readonly string[] = REQUIRED_BOT_SCOPES,
 ): string[] {
   if (granted === undefined) return [];
-  const have = new Set((typeof granted === "string" ? granted.split(",") : granted).map((s) => s.trim()).filter(Boolean));
+  const have = new Set(
+    (typeof granted === "string" ? granted.split(",") : granted).map((s) => s.trim()).filter(Boolean),
+  );
   return required.filter((s) => !have.has(s));
 }

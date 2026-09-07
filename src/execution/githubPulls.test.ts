@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createBranchRef, fetchPullRequestFacts, fetchRepoShipInfo, findOpenPrByHead, openPullRequest, updatePullRequest } from "./githubPulls.js";
+import {
+  createBranchRef,
+  fetchPullRequestFacts,
+  fetchRepoShipInfo,
+  findOpenPrByHead,
+  openPullRequest,
+  updatePullRequest,
+} from "./githubPulls.js";
 
 // Feature: features/pr-description.md — the bot process opens and edits PRs
 // itself over the GitHub REST API with the App token (never the model, never
@@ -30,7 +37,10 @@ describe("githubPulls", () => {
   }
 
   /** Lookup finds nothing; create succeeds. */
-  function stubCreatePath(createStatus = 201, createBody = '{"number":7,"html_url":"https://github.com/acme/api/pull/7"}') {
+  function stubCreatePath(
+    createStatus = 201,
+    createBody = '{"number":7,"html_url":"https://github.com/acme/api/pull/7"}',
+  ) {
     return stubFetch((url, init) =>
       (init.method ?? "GET") === "GET"
         ? new Response("[]", { status: 200 })
@@ -71,27 +81,44 @@ describe("githubPulls", () => {
     stubToken();
     const calls = stubFetch((url, init) =>
       (init.method ?? "GET") === "GET"
-        ? new Response(JSON.stringify([{ number: 5, html_url: "https://github.com/acme/api/pull/5", head: { sha: "a".repeat(40) } }]), { status: 200 })
+        ? new Response(
+            JSON.stringify([
+              { number: 5, html_url: "https://github.com/acme/api/pull/5", head: { sha: "a".repeat(40) } },
+            ]),
+            { status: 200 },
+          )
         : new Response("{}", { status: 200 }),
     );
     const result = await openPullRequest(target);
     expect(calls).toHaveLength(2);
     expect(calls[1].init.method).toBe("PATCH");
     expect(calls[1].url).toBe("https://api.github.com/repos/acme/api/pulls/5");
-    expect(JSON.parse(String(calls[1].init.body))).toEqual({ title: "Add the widget", body: "## TL;DR\n\nAdds the widget." });
+    expect(JSON.parse(String(calls[1].init.body))).toEqual({
+      title: "Add the widget",
+      body: "## TL;DR\n\nAdds the widget.",
+    });
     expect(result).toEqual({ number: 5, htmlUrl: "https://github.com/acme/api/pull/5", created: false });
   });
 
   it("findOpenPrByHead returns the first open PR with its head sha, or null when none", async () => {
     stubToken();
-    const calls = stubFetch(() =>
-      new Response(JSON.stringify([{ number: 12, html_url: "https://github.com/acme/api/pull/12", head: { sha: "b".repeat(40) } }]), { status: 200 }),
+    const calls = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify([
+            { number: 12, html_url: "https://github.com/acme/api/pull/12", head: { sha: "b".repeat(40) } },
+          ]),
+          { status: 200 },
+        ),
     );
     const found = await findOpenPrByHead("acme/api", "feat/x");
     expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls?state=open&head=acme%3Afeat%2Fx");
     expect(found).toEqual({ number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "b".repeat(40) });
 
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("[]", { status: 200 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("[]", { status: 200 })),
+    );
     expect(await findOpenPrByHead("acme/api", "feat/x")).toBeNull();
   });
 
@@ -121,7 +148,13 @@ describe("githubPulls", () => {
     stubToken();
     const calls = stubCreatePath(201, '{"number":9,"html_url":"https://github.com/acme/api/pull/9"}');
     const hostile = "base: main\nhead: attacker:evil\ntitle: pwned\n\n## TL;DR\n\nlooks normal";
-    await openPullRequest({ repo: "acme/api", headBranch: "feat/x", base: "release-1", title: "Real title", body: hostile });
+    await openPullRequest({
+      repo: "acme/api",
+      headBranch: "feat/x",
+      base: "release-1",
+      title: "Real title",
+      body: hostile,
+    });
     const payload = JSON.parse(String(calls[1].init.body));
     expect(payload.base).toBe("release-1");
     expect(payload.head).toBe("feat/x");
@@ -138,8 +171,13 @@ describe("githubPulls", () => {
     expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/31");
     expect(JSON.parse(String(calls[0].init.body))).toEqual({ title: "T2", body: "B2" });
 
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 403 })));
-    await expect(updatePullRequest("acme/api", 31, { title: "T2", body: "B2" })).rejects.toThrow(/PR update failed: HTTP 403/);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("nope", { status: 403 })),
+    );
+    await expect(updatePullRequest("acme/api", 31, { title: "T2", body: "B2" })).rejects.toThrow(
+      /PR update failed: HTTP 403/,
+    );
   });
 
   it("clips an oversized body with a visible note so a huge description still lands", async () => {
@@ -179,7 +217,9 @@ describe("githubPulls", () => {
     function stubRefPath(createStatus = 201, createBody = "{}") {
       return stubFetch((url, init) =>
         (init.method ?? "GET") === "GET"
-          ? new Response(JSON.stringify({ ref: "refs/heads/main", object: { sha: BASE_SHA, type: "commit" } }), { status: 200 })
+          ? new Response(JSON.stringify({ ref: "refs/heads/main", object: { sha: BASE_SHA, type: "commit" } }), {
+              status: 200,
+            })
           : new Response(createBody, { status: createStatus }),
       );
     }
@@ -193,7 +233,10 @@ describe("githubPulls", () => {
       expect(calls[0].init.method ?? "GET").toBe("GET");
       expect(calls[1].url).toBe("https://api.github.com/repos/acme/api/git/refs");
       expect(calls[1].init.method).toBe("POST");
-      expect(JSON.parse(String(calls[1].init.body))).toEqual({ ref: "refs/heads/ship/fix-login-abc123", sha: BASE_SHA });
+      expect(JSON.parse(String(calls[1].init.body))).toEqual({
+        ref: "refs/heads/ship/fix-login-abc123",
+        sha: BASE_SHA,
+      });
       expect((calls[1].init.headers as Record<string, string>).authorization).toBe("Bearer ghtok");
     });
 
@@ -234,11 +277,19 @@ describe("githubPulls", () => {
   describe("fetchRepoShipInfo (ship auto-merge gate)", () => {
     it("parses allow_auto_merge and default_branch", async () => {
       stubToken();
-      const calls = stubFetch(() => new Response(JSON.stringify({ allow_auto_merge: true, default_branch: "main" }), { status: 200 }));
+      const calls = stubFetch(
+        () => new Response(JSON.stringify({ allow_auto_merge: true, default_branch: "main" }), { status: 200 }),
+      );
       expect(await fetchRepoShipInfo("acme/api")).toEqual({ allowAutoMerge: true, defaultBranch: "main" });
       expect(calls[0].url).toBe("https://api.github.com/repos/acme/api");
 
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ allow_auto_merge: false, default_branch: "develop" }), { status: 200 })));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(JSON.stringify({ allow_auto_merge: false, default_branch: "develop" }), { status: 200 }),
+        ),
+      );
       expect(await fetchRepoShipInfo("acme/api")).toEqual({ allowAutoMerge: false, defaultBranch: "develop" });
     });
 
@@ -253,7 +304,10 @@ describe("githubPulls", () => {
       stubFetch(() => new Response("nope", { status: 404 }));
       expect(await fetchRepoShipInfo("acme/api")).toBeUndefined();
 
-      vi.stubGlobal("fetch", vi.fn(async () => new Response("not json", { status: 200 })));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response("not json", { status: 200 })),
+      );
       expect(await fetchRepoShipInfo("acme/api")).toBeUndefined();
 
       vi.stubEnv("GH_TOKEN", "");
@@ -295,23 +349,36 @@ describe("githubPulls", () => {
 
     it("a deleted-fork null head repo is sameRepoHead: false — never assumed same-repo", async () => {
       stubToken();
-      stubFetch(() => new Response(JSON.stringify({ ...openPr, head: { ...openPr.head, repo: null } }), { status: 200 }));
+      stubFetch(
+        () => new Response(JSON.stringify({ ...openPr, head: { ...openPr.head, repo: null } }), { status: 200 }),
+      );
       const facts = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
       expect(facts?.sameRepoHead).toBe(false);
     });
 
     it("a malformed sha is dropped; an unrecognizable state, non-2xx, or fetch throw → undefined", async () => {
       stubToken();
-      stubFetch(() => new Response(JSON.stringify({ ...openPr, head: { ...openPr.head, sha: "HEAD" } }), { status: 200 }));
+      stubFetch(
+        () => new Response(JSON.stringify({ ...openPr, head: { ...openPr.head, sha: "HEAD" } }), { status: 200 }),
+      );
       expect((await fetchPullRequestFacts({ repo: "acme/api", number: 7 }))?.headSha).toBeUndefined();
 
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ state: "weird" }), { status: 200 })));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ state: "weird" }), { status: 200 })),
+      );
       expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toBeUndefined();
 
-      vi.stubGlobal("fetch", vi.fn(async () => new Response("x", { status: 500 })));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response("x", { status: 500 })),
+      );
       expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toBeUndefined();
 
-      vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("boom"))));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => Promise.reject(new Error("boom"))),
+      );
       expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toBeUndefined();
     });
 

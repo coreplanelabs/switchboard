@@ -19,9 +19,8 @@ describe("formatLocalIso", () => {
     expect(formatLocalIso(T)).toBe(formatLocalIso(T, d.getTimezoneOffset()));
   });
 
-  it("is plain ES5 source so it can be inlined into the page with String(fn)", () => {
+  it("is a self-contained leaf the dashboard bundle can import with no second copy of anything", () => {
     const src = String(formatLocalIso);
     expect(src).not.toMatch(/\b(import|require|export)\b/);
-    expect(src).not.toMatch(/=>|\bconst\b|\blet\b/);
   });
 });

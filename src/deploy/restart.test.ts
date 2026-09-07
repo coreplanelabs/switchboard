@@ -36,7 +36,11 @@ describe("decideRestart", () => {
     expect(refused.problems).toEqual(["2 run(s) in flight — a restart would kill them"]);
     expect(refused.message).toMatch(/REFUSED/);
     const forced = decideRestart({ ...idle, inFlight: 2 }, { force: true });
-    expect(forced).toMatchObject({ allow: true, forced: true, problems: ["2 run(s) in flight — a restart would kill them"] });
+    expect(forced).toMatchObject({
+      allow: true,
+      forced: true,
+      problems: ["2 run(s) in flight — a restart would kill them"],
+    });
     expect(forced.message).toMatch(/SIGTERM'd into the drain/);
     expect(forced.message).not.toMatch(/WILL be killed/); // stop() drains; nothing is killed before the deadline
   });
@@ -48,8 +52,14 @@ describe("decideRestart", () => {
   });
 
   it("fails closed: no JSON body or an impossible inFlight refuses (force still bypasses)", () => {
-    expect(decideRestart(undefined, { force: false })).toMatchObject({ allow: false, problems: [expect.stringMatching(/not answering with JSON/)] });
-    expect(decideRestart({ ok: true, inFlight: -1, draining: false }, { force: false })).toMatchObject({ allow: false, problems: [expect.stringMatching(/impossible inFlight/)] });
+    expect(decideRestart(undefined, { force: false })).toMatchObject({
+      allow: false,
+      problems: [expect.stringMatching(/not answering with JSON/)],
+    });
+    expect(decideRestart({ ok: true, inFlight: -1, draining: false }, { force: false })).toMatchObject({
+      allow: false,
+      problems: [expect.stringMatching(/impossible inFlight/)],
+    });
     expect(decideRestart(undefined, { force: true }).allow).toBe(true);
   });
 });
@@ -70,7 +80,11 @@ describe("authorizeRestart", () => {
     expect(authorizeRestart(undefined, tokens)).toMatchObject({ ok: false, status: 401 });
     expect(authorizeRestart("Basic abc", tokens)).toMatchObject({ ok: false, status: 401 });
     expect(authorizeRestart("Bearer nope", tokens)).toMatchObject({ ok: false, status: 401 });
-    expect(authorizeRestart("Bearer tok-reader", tokens)).toMatchObject({ ok: false, status: 403, reason: expect.stringContaining("deploy:write") });
+    expect(authorizeRestart("Bearer tok-reader", tokens)).toMatchObject({
+      ok: false,
+      status: 403,
+      reason: expect.stringContaining("deploy:write"),
+    });
     expect(authorizeRestart("Bearer tok-cron", tokens)).toMatchObject({ ok: false, status: 403 });
   });
 
@@ -103,7 +117,9 @@ describe("restart request/response wire shapes", () => {
   });
 
   it("restartResponse maps the DO outcome onto HTTP: 202 stopping, 409 refused (problems listed), 200 not-running", () => {
-    expect(restartResponse({ kind: "stopping", forced: false, inFlight: 0, previousStartedAt: idle.startedAt })).toEqual({
+    expect(
+      restartResponse({ kind: "stopping", forced: false, inFlight: 0, previousStartedAt: idle.startedAt }),
+    ).toEqual({
       status: 202,
       body: { ok: true, stopping: true, forced: false, inFlight: 0, previousStartedAt: idle.startedAt },
     });
@@ -111,20 +127,41 @@ describe("restart request/response wire shapes", () => {
       status: 409,
       body: { ok: false, refused: true, problems: ["2 run(s) in flight — a restart would kill them"] },
     });
-    expect(restartResponse({ kind: "not-running" })).toEqual({ status: 200, body: { ok: true, stopping: false, note: expect.stringContaining("not running") } });
+    expect(restartResponse({ kind: "not-running" })).toEqual({
+      status: 200,
+      body: { ok: true, stopping: false, note: expect.stringContaining("not running") },
+    });
   });
 
   it("classifyRestartResponse (CLI side): 202 → stopping with the previous startedAt; 409 → refused (retryable) with the first problem; 401/403 → unauthorized; else failed", () => {
-    expect(classifyRestartResponse(202, JSON.stringify({ ok: true, stopping: true, previousStartedAt: idle.startedAt }))).toEqual({ kind: "stopping", previousStartedAt: idle.startedAt });
+    expect(
+      classifyRestartResponse(202, JSON.stringify({ ok: true, stopping: true, previousStartedAt: idle.startedAt })),
+    ).toEqual({ kind: "stopping", previousStartedAt: idle.startedAt });
     expect(classifyRestartResponse(202, "{}")).toEqual({ kind: "stopping", previousStartedAt: undefined });
-    expect(classifyRestartResponse(200, JSON.stringify({ ok: true, stopping: false, note: "container not running" }))).toEqual({ kind: "not-running" });
-    expect(classifyRestartResponse(409, JSON.stringify({ ok: false, refused: true, problems: ["2 run(s) in flight — a restart would kill them", "x"] }))).toEqual({
+    expect(
+      classifyRestartResponse(200, JSON.stringify({ ok: true, stopping: false, note: "container not running" })),
+    ).toEqual({ kind: "not-running" });
+    expect(
+      classifyRestartResponse(
+        409,
+        JSON.stringify({ ok: false, refused: true, problems: ["2 run(s) in flight — a restart would kill them", "x"] }),
+      ),
+    ).toEqual({
       kind: "refused",
       reason: "2 run(s) in flight — a restart would kill them",
     });
-    expect(classifyRestartResponse(401, "unauthorized")).toEqual({ kind: "unauthorized", reason: expect.stringContaining("401") });
-    expect(classifyRestartResponse(403, "forbidden")).toEqual({ kind: "unauthorized", reason: expect.stringContaining("403") });
-    expect(classifyRestartResponse(502, "<html>bad gateway</html>")).toEqual({ kind: "failed", reason: expect.stringContaining("502") });
+    expect(classifyRestartResponse(401, "unauthorized")).toEqual({
+      kind: "unauthorized",
+      reason: expect.stringContaining("401"),
+    });
+    expect(classifyRestartResponse(403, "forbidden")).toEqual({
+      kind: "unauthorized",
+      reason: expect.stringContaining("403"),
+    });
+    expect(classifyRestartResponse(502, "<html>bad gateway</html>")).toEqual({
+      kind: "failed",
+      reason: expect.stringContaining("502"),
+    });
   });
 });
 
@@ -146,6 +183,8 @@ describe("planRestart / formatRestartPlan", () => {
     expect(text).toContain("POST https://switchboard.coreplanelabs.dev/admin/restart");
     expect(text).toContain(RESTART_TOKEN_ENV);
     expect(text).toContain("startedAt");
-    expect(formatRestartPlan(planRestart({ only: "bot", force: true, waitMaxMinutes: 5, pollSeconds: 10 }))).toContain("FORCED");
+    expect(formatRestartPlan(planRestart({ only: "bot", force: true, waitMaxMinutes: 5, pollSeconds: 10 }))).toContain(
+      "FORCED",
+    );
   });
 });

@@ -29,7 +29,11 @@ export interface ResidentAdminClient {
 }
 
 export function makeResidentAdminClient(baseUrl: string, token: string): ResidentAdminClient {
-  const call = async (route: string, method: "GET" | "POST", body?: Record<string, unknown>): Promise<ResidentAdminResponse> => {
+  const call = async (
+    route: string,
+    method: "GET" | "POST",
+    body?: Record<string, unknown>,
+  ): Promise<ResidentAdminResponse> => {
     let res: Response;
     try {
       res = await fetch(`${baseUrl.replace(/\/$/, "")}${route}`, {
@@ -44,6 +48,7 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
       throw new Error(
         `resident admin ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
           "The operation may still have run in the resident; check `repo list` before re-running it.",
+        { cause: err },
       );
     }
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -61,10 +66,15 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
 
 /** The admin client the config names, or the operator-facing reason there is
  *  none: no `execution.resident.baseUrl`, or its bearer env var unset. */
-export function residentAdminFromConfig(config: ConfigStore, env: Record<string, string | undefined> = process.env): ResidentAdminClient | { unavailable: string } {
+export function residentAdminFromConfig(
+  config: ConfigStore,
+  env: Record<string, string | undefined> = process.env,
+): ResidentAdminClient | { unavailable: string } {
   const resident = config.config.execution?.resident;
   if (!resident?.baseUrl) {
-    return { unavailable: "Resident repo environments aren't configured — set `execution.resident.baseUrl` in config.yaml." };
+    return {
+      unavailable: "Resident repo environments aren't configured — set `execution.resident.baseUrl` in config.yaml.",
+    };
   }
   const tokenEnv = resident.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN";
   const token = env[tokenEnv];

@@ -82,7 +82,17 @@ export type TimelineChange =
    *  ("12.3k in", "800 out", "11.2k cached") when the event carries usage. */
   | { kind: "turn"; label: string; facts: string[]; durationMs: number; at?: number }
   /** What the run is about (item 19): agent, model and the resolved repo context, for the Request head. */
-  | { kind: "meta"; agent: string; model: string; effort?: string; repo?: string; ref?: string; pr?: number; headSha?: string; at?: number }
+  | {
+      kind: "meta";
+      agent: string;
+      model: string;
+      effort?: string;
+      repo?: string;
+      ref?: string;
+      pr?: number;
+      headSha?: string;
+      at?: number;
+    }
   /** One thread turn the model was given (a `context` event) — the page's
    *  collapsed Context block, never a step. */
   | { kind: "context"; text: string; at?: number }
@@ -200,8 +210,14 @@ export function createRunTimeline(): RunTimeline {
   // and `git diff | head` is `git`. One tag per call, most specific first.
   const SHELL_KINDS: Array<[string, RegExp]> = [
     ["tests", /\b(npm|pnpm|yarn|bun)\s+(run\s+)?test\b|\b(vitest|jest|pytest|mocha|go test|cargo test)\b/],
-    ["build", /\b(npm|pnpm|yarn|bun)\s+run\s+(build|typecheck|lint)\b|\b(tsc|make|cargo build|go build|eslint|prettier)\b/],
-    ["install", /\b(npm|pnpm|yarn|bun)\s+(i|install|ci|add)\b|\bpip3?\s+install\b|\bapt(-get)?\s+install\b|\bbrew\s+install\b/],
+    [
+      "build",
+      /\b(npm|pnpm|yarn|bun)\s+run\s+(build|typecheck|lint)\b|\b(tsc|make|cargo build|go build|eslint|prettier)\b/,
+    ],
+    [
+      "install",
+      /\b(npm|pnpm|yarn|bun)\s+(i|install|ci|add)\b|\bpip3?\s+install\b|\bapt(-get)?\s+install\b|\bbrew\s+install\b/,
+    ],
     ["git", /(^|[\s;&|(])(git|gh)\s/],
     ["network", /(^|[\s;&|(])(curl|wget)\s/],
     ["read", /(^|[\s;&|(])(cat|sed|head|tail|less|ls|find|grep|rg|wc|tree|pwd|echo|env|which|stat|file|diff)\b/],
@@ -230,7 +246,12 @@ export function createRunTimeline(): RunTimeline {
     const raw = summary || tool;
     // Shell: the command without its `$ ` marker. Other tools: the target
     // without the tool-name prefix (the card shows the tool as a chip).
-    const title = shell && raw.startsWith("$ ") ? raw.slice(2) : !shell && raw.startsWith(tool + " ") ? raw.slice(tool.length + 1) : raw;
+    const title =
+      shell && raw.startsWith("$ ")
+        ? raw.slice(2)
+        : !shell && raw.startsWith(tool + " ")
+          ? raw.slice(tool.length + 1)
+          : raw;
     const call: TimelineCall = {
       id: str(e.callId) || "c" + ++seq,
       tool,
@@ -298,7 +319,9 @@ export function createRunTimeline(): RunTimeline {
       case "replay_note":
         return [{ kind: "replay_note", text: str(e.summary) }];
       case "run_note":
-        return [{ kind: "note", text: str(e.summary), noteKind: str(e.kind), mode: str(e.mode) || undefined, at: num(e.at) }];
+        return [
+          { kind: "note", text: str(e.summary), noteKind: str(e.kind), mode: str(e.mode) || undefined, at: num(e.at) },
+        ];
       case "assistant":
         return [{ kind: "step", step: openStep({ text: str(e.text), at: num(e.at) }) }];
       case "turn": {

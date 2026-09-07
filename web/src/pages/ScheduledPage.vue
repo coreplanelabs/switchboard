@@ -4,7 +4,13 @@ import AppShell from "../components/AppShell.vue";
 import RunsTabs from "../components/runs/RunsTabs.vue";
 import { useSeed } from "../lib/seed";
 import { formatDateTime, formatLocalIso } from "../lib/format";
-import { ACTION_LABEL, firingDetailSummary, formatRelative, OUTCOME_CLASS, OUTCOME_LABEL } from "@core/channels/scheduledPanel.js";
+import {
+  ACTION_LABEL,
+  firingDetailSummary,
+  formatRelative,
+  OUTCOME_CLASS,
+  OUTCOME_LABEL,
+} from "@core/channels/scheduledPanel.js";
 
 // The Scheduled tab (#244): the registry's schedules with each one's last
 // firing — a snapshot per load, no feed. The rows arrive prebuilt from the
@@ -59,7 +65,10 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
               <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.cron }}</code>
               <span class="text-dimmed">UTC</span>
               <span class="hidden text-accented sm:inline" aria-hidden="true">·</span>
-              <span class="next tabular-nums max-sm:ml-auto" :title="r.nextFireAt !== undefined ? formatLocalIso(r.nextFireAt) : undefined">
+              <span
+                class="next tabular-nums max-sm:ml-auto"
+                :title="r.nextFireAt !== undefined ? formatLocalIso(r.nextFireAt) : undefined"
+              >
                 <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">next</span>
                 <template v-if="r.nextFireAt !== undefined">
                   <!-- The absolute stamp is a wide-screen luxury; the phone reads the relative form (exact local time on the title). -->
@@ -78,20 +87,28 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
           >
             <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">last</span>
             <template v-if="r.last">
-              <span class="outcome" :class="OUTCOME_TONE[OUTCOME_CLASS[r.last.outcome]]">{{ OUTCOME_LABEL[r.last.outcome] }}</span>
+              <span class="outcome" :class="OUTCOME_TONE[OUTCOME_CLASS[r.last.outcome]]">{{
+                OUTCOME_LABEL[r.last.outcome]
+              }}</span>
               <span class="mx-1.5 text-accented max-sm:mx-0" aria-hidden="true">·</span>
-              <span class="when text-toned" :title="formatLocalIso(r.last.firedAt)">{{ formatRelative(r.last.firedAt, now) }}</span>
+              <span class="when text-toned" :title="formatLocalIso(r.last.firedAt)">{{
+                formatRelative(r.last.firedAt, now)
+              }}</span>
               <template v-if="r.last.runId">
                 <span class="mx-1.5 text-accented max-sm:mx-0" aria-hidden="true">·</span>
-                <a v-if="r.last.runHref" class="text-primary hover:underline" :href="r.last.runHref">run {{ r.last.runId.slice(0, 8) }}</a>
+                <a v-if="r.last.runHref" class="text-primary hover:underline" :href="r.last.runHref"
+                  >run {{ r.last.runId.slice(0, 8) }}</a
+                >
                 <template v-else>run {{ r.last.runId.slice(0, 8) }}</template>
               </template>
               <template v-if="r.last.detail && firingDetailSummary(r.last.detail)">
                 <span class="mx-1.5 text-accented max-sm:hidden" aria-hidden="true">·</span>
                 <!-- The reply's facts: one ellipsized line on desktop, a clamped block of its own on phones. -->
-                <span class="detail max-sm:line-clamp-2 max-sm:basis-full max-sm:whitespace-normal" :title="r.last.detail">{{
-                  firingDetailSummary(r.last.detail)
-                }}</span>
+                <span
+                  class="detail max-sm:line-clamp-2 max-sm:basis-full max-sm:whitespace-normal"
+                  :title="r.last.detail"
+                  >{{ firingDetailSummary(r.last.detail) }}</span
+                >
               </template>
             </template>
             <span v-else class="text-dimmed">{{ seed?.firingsUnavailable ? "unknown" : "never fired" }}</span>

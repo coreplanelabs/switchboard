@@ -64,7 +64,9 @@ function toolchainFromPackageManager(value: unknown): Toolchain | undefined {
 
 function hasScript(pkg: RepoRootFacts["packageJson"], name: string): boolean {
   const scripts = pkg?.scripts;
-  return typeof scripts === "object" && scripts !== null && typeof (scripts as Record<string, unknown>)[name] === "string";
+  return (
+    typeof scripts === "object" && scripts !== null && typeof (scripts as Record<string, unknown>)[name] === "string"
+  );
 }
 
 /** Decide the command table from the root facts. Precedence for the package

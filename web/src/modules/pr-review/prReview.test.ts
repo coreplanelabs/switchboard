@@ -35,7 +35,9 @@ describe("prLinks", () => {
       files: "https://github.com/acme/api/pull/42/files",
       commit: `https://github.com/acme/api/pull/42/commits/${"e".repeat(40)}`,
     });
-    expect(prLinks({ repo: "acme/api", headSha: "e".repeat(40) })).toEqual({ commit: `https://github.com/acme/api/commit/${"e".repeat(40)}` });
+    expect(prLinks({ repo: "acme/api", headSha: "e".repeat(40) })).toEqual({
+      commit: `https://github.com/acme/api/commit/${"e".repeat(40)}`,
+    });
     // hostile shapes never become URLs
     expect(prLinks({ repo: "https://evil.example/x", number: 42 })).toEqual({});
     expect(prLinks({ repo: "acme/api", number: 42, headSha: "not a sha" })).not.toHaveProperty("commit");

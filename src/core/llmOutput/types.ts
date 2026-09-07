@@ -21,8 +21,7 @@ export interface OutputFailure {
  *  form every consumer stores/projects; `changed` says whether normalization
  *  altered the raw text (false = canonical is byte-identical to the input). */
 export type ParseOutcome<T> =
-  | { ok: true; value: T; canonical: string; changed: boolean }
-  | { ok: false; failure: OutputFailure };
+  { ok: true; value: T; canonical: string; changed: boolean } | { ok: false; failure: OutputFailure };
 
 /** The per-datatype half of the contract. Modules are pure: `parse` never
  *  throws and touches no I/O — classification, normalization, and schema

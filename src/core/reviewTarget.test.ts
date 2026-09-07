@@ -60,7 +60,11 @@ describe("reviewTargetBlock", () => {
   // read `main`'s HEAD there and reported a mismatch. The block now names the
   // worktree and forbids leaving it.
   it("resident path with the worktree path: names it, pins every command to it, forbids cd/find", () => {
-    const b = reviewTargetBlock({ ...full, resident: true, workspace: "/workspace/threads/slack-C1-9.0-ab12cd34/patch-1" });
+    const b = reviewTargetBlock({
+      ...full,
+      resident: true,
+      workspace: "/workspace/threads/slack-C1-9.0-ab12cd34/patch-1",
+    });
     expect(b).toContain("`/workspace/threads/slack-C1-9.0-ab12cd34/patch-1`");
     expect(b).toMatch(/never `cd` out of it/i);
     expect(b).toMatch(/search the filesystem/i);
@@ -80,7 +84,9 @@ describe("reviewTargetBlock", () => {
     expect(verified).toMatch(/STOP/); // the model-side check stays as the backstop for drift after attach
     expect(reviewTargetBlock({ ...full, resident: true })).not.toMatch(/verified it before this run/);
     // Never claimed on the sandbox path — nothing was attached there.
-    expect(reviewTargetBlock({ ...full, resident: false, verifiedAtAttach: true })).not.toMatch(/verified it before this run/);
+    expect(reviewTargetBlock({ ...full, resident: false, verifiedAtAttach: true })).not.toMatch(
+      /verified it before this run/,
+    );
   });
 
   it("is deterministic (same input, same text)", () => {

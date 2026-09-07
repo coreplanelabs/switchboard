@@ -75,25 +75,23 @@ export class E2BExecutor implements Executor {
    *  honored — it maps onto the SDK's own command timeout. */
   async exec(command: string, opts?: ExecOptions): Promise<string> {
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
-    const result = await this.sbx.commands
-      .run(command, { cwd: WORKDIR, timeoutMs })
-      .catch((err: unknown) => {
-        const e = err as { name?: string; exitCode?: number; stdout?: string; stderr?: string; message?: string };
-        // The SDK's deadline kill throws TimeoutError with no exit code —
-        // render it as exit 124 naming the limit that fired, so the model can
-        // self-correct instead of reading a generic failure.
-        // Exactly the SDK's TimeoutError — a message-regex fallback would also
-        // catch CONNECTION timeouts and mislabel them as the command deadline.
-        if (e.exitCode === undefined && e.name === "TimeoutError") {
-          return { exitCode: 124, stdout: e.stdout ?? "", stderr: bashTimeoutNote(timeoutMs) };
-        }
-        // e2b throws on non-zero exit; surface it as output like LocalExecutor
-        return {
-          exitCode: e.exitCode ?? 1,
-          stdout: e.stdout ?? "",
-          stderr: e.stderr ?? e.message ?? String(err),
-        };
-      });
+    const result = await this.sbx.commands.run(command, { cwd: WORKDIR, timeoutMs }).catch((err: unknown) => {
+      const e = err as { name?: string; exitCode?: number; stdout?: string; stderr?: string; message?: string };
+      // The SDK's deadline kill throws TimeoutError with no exit code —
+      // render it as exit 124 naming the limit that fired, so the model can
+      // self-correct instead of reading a generic failure.
+      // Exactly the SDK's TimeoutError — a message-regex fallback would also
+      // catch CONNECTION timeouts and mislabel them as the command deadline.
+      if (e.exitCode === undefined && e.name === "TimeoutError") {
+        return { exitCode: 124, stdout: e.stdout ?? "", stderr: bashTimeoutNote(timeoutMs) };
+      }
+      // e2b throws on non-zero exit; surface it as output like LocalExecutor
+      return {
+        exitCode: e.exitCode ?? 1,
+        stdout: e.stdout ?? "",
+        stderr: e.stderr ?? e.message ?? String(err),
+      };
+    });
     const parts = [result.stdout, result.stderr].filter(Boolean).join("\n--- stderr ---\n");
     if (result.exitCode !== 0) {
       return truncate(`exit ${result.exitCode}:\n${parts}`);

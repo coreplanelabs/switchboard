@@ -296,9 +296,7 @@ describe("JWKS unknown-kid hardening", () => {
     const token = mint(privateKey, rs256Header({ kid: "unknown" }), claims());
 
     // All five verifies are kicked off before the shared fetch settles.
-    const results = await Promise.all(
-      Array.from({ length: 5 }, () => verifyAccessJwt(token, config, shared)),
-    );
+    const results = await Promise.all(Array.from({ length: 5 }, () => verifyAccessJwt(token, config, shared)));
 
     expect(fetchJwks).toHaveBeenCalledTimes(1); // single-flight: one fetch for all five
     expect(results).toEqual([null, null, null, null, null]); // unknown kid ⇒ all fail closed
@@ -421,7 +419,11 @@ describe("requireAccessForRuns", () => {
 
 describe("verifyAccessJwt — Cloudflare Access service tokens", () => {
   it("accepts an empty sub + non-empty common_name as a service-token identity", async () => {
-    const token = mint(privateKey, rs256Header(), claims({ sub: "", email: undefined, common_name: "reader-bot.access" }));
+    const token = mint(
+      privateKey,
+      rs256Header(),
+      claims({ sub: "", email: undefined, common_name: "reader-bot.access" }),
+    );
     const identity = await verifyAccessJwt(token, config, deps());
     expect(identity).toEqual({ sub: "", commonName: "reader-bot.access" });
     expect(identity && isServiceToken(identity)).toBe(true);
@@ -430,10 +432,17 @@ describe("verifyAccessJwt — Cloudflare Access service tokens", () => {
   it("accepts an absent sub with a common_name; rejects empty sub without one, and an empty or non-string common_name", async () => {
     const absent = claims({ common_name: "svc-1" }) as Record<string, unknown>;
     delete absent.sub;
-    expect(await verifyAccessJwt(mint(privateKey, rs256Header(), absent), config, deps())).toEqual({ sub: "", commonName: "svc-1" });
+    expect(await verifyAccessJwt(mint(privateKey, rs256Header(), absent), config, deps())).toEqual({
+      sub: "",
+      commonName: "svc-1",
+    });
     expect(await verifyAccessJwt(mint(privateKey, rs256Header(), claims({ sub: "" })), config, deps())).toBeNull();
-    expect(await verifyAccessJwt(mint(privateKey, rs256Header(), claims({ sub: "", common_name: "" })), config, deps())).toBeNull();
-    expect(await verifyAccessJwt(mint(privateKey, rs256Header(), claims({ sub: "", common_name: 42 })), config, deps())).toBeNull();
+    expect(
+      await verifyAccessJwt(mint(privateKey, rs256Header(), claims({ sub: "", common_name: "" })), config, deps()),
+    ).toBeNull();
+    expect(
+      await verifyAccessJwt(mint(privateKey, rs256Header(), claims({ sub: "", common_name: 42 })), config, deps()),
+    ).toBeNull();
   });
 
   it("a browser token stays a browser identity even when it also carries common_name", async () => {
@@ -450,7 +459,10 @@ describe("verifyAccessJwt — Cloudflare Access service tokens", () => {
 
   it("the gate admits a service token in Cf-Access-Jwt-Assertion", async () => {
     const token = mint(privateKey, rs256Header(), claims({ sub: "", common_name: "svc-1" }));
-    const res = await requireAccessForRuns({ "cf-access-jwt-assertion": token }, { config, verify: deps(), devBypass: false });
+    const res = await requireAccessForRuns(
+      { "cf-access-jwt-assertion": token },
+      { config, verify: deps(), devBypass: false },
+    );
     expect(res).toEqual({ ok: true, identity: { sub: "", commonName: "svc-1" } });
   });
 });

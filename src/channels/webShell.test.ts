@@ -83,9 +83,17 @@ describe("renderShell", () => {
   });
 
   it("run-state pages wear the idle dot (the app repaints it live by id); every other page wears the neutral mark", () => {
-    const runs = renderShell("Runs", { page: "runs", now: 0, rows: [], all: false, retentionDays: 30 } as unknown as WebSeed, assets);
+    const runs = renderShell(
+      "Runs",
+      { page: "runs", now: 0, rows: [], all: false, retentionDays: 30 } as unknown as WebSeed,
+      assets,
+    );
     expect(runs).toContain(`<link rel="icon" id="favicon" href="${FAVICON_IDLE}" />`);
-    const run = renderShell("Run", { page: "run", mode: "history", id: "r", events: [], eventCount: 0 } as unknown as WebSeed, assets);
+    const run = renderShell(
+      "Run",
+      { page: "run", mode: "history", id: "r", events: [], eventCount: 0 } as unknown as WebSeed,
+      assets,
+    );
     expect(run).toContain(`<link rel="icon" id="favicon" href="${FAVICON_IDLE}" />`);
     for (const other of [seed, { page: "costs", now: 0 } as unknown as WebSeed]) {
       expect(renderShell("x", other, assets)).toContain(`<link rel="icon" id="favicon" href="${FAVICON_DEFAULT}" />`);

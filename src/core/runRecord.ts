@@ -1,6 +1,11 @@
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { RunEvent } from "./runEvents.js";
-import { FRICTION_CATEGORIES, type CategoryTotals, type FrictionCategory, type FrictionDiagnosis } from "./runFriction.js";
+import {
+  FRICTION_CATEGORIES,
+  type CategoryTotals,
+  type FrictionCategory,
+  type FrictionDiagnosis,
+} from "./runFriction.js";
 
 // Run history (#157, U12): the cross-deployable contract for a persisted run.
 // Both the bot (`src/core/runStore.ts`) and the state Worker's `RunHistoryDO`
@@ -201,10 +206,15 @@ export function isRunVisibilityFilter(v: unknown, depth = 0): v is RunVisibility
     case "repos-in":
       return isStringList(f.repos, MAX_FILTER_IDS);
     case "visibility-in":
-      return isStringList(f.visibilities, CHANNEL_VISIBILITIES.length) && f.visibilities.every((s) => (CHANNEL_VISIBILITIES as readonly string[]).includes(s));
+      return (
+        isStringList(f.visibilities, CHANNEL_VISIBILITIES.length) &&
+        f.visibilities.every((s) => (CHANNEL_VISIBILITIES as readonly string[]).includes(s))
+      );
     case "or":
     case "and":
-      return Array.isArray(f.of) && f.of.length <= MAX_FILTER_IDS && f.of.every((p) => isRunVisibilityFilter(p, depth + 1));
+      return (
+        Array.isArray(f.of) && f.of.length <= MAX_FILTER_IDS && f.of.every((p) => isRunVisibilityFilter(p, depth + 1))
+      );
     default:
       return false;
   }
@@ -212,7 +222,10 @@ export function isRunVisibilityFilter(v: unknown, depth = 0): v is RunVisibility
 
 /** The one truth table every store implements: does `row` satisfy the filter?
  *  A row without `channelVisibility` is `unknown` — never public. */
-export function matchesVisibility(filter: RunVisibilityFilter, row: Pick<RunListItem, "channelId" | "userId"> & { repo?: string; channelVisibility?: ChannelVisibility }): boolean {
+export function matchesVisibility(
+  filter: RunVisibilityFilter,
+  row: Pick<RunListItem, "channelId" | "userId"> & { repo?: string; channelVisibility?: ChannelVisibility },
+): boolean {
   switch (filter.kind) {
     case "none":
       return false;
@@ -236,7 +249,11 @@ export function matchesVisibility(filter: RunVisibilityFilter, row: Pick<RunList
 /** The list order (`finishedAt` desc, `id` desc) as a cursor predicate: true
  *  when `row` comes strictly after the cursor. Shared by `selectListItems`;
  *  the Worker applies the same predicate in SQL. */
-export function isAfterCursor(row: { finishedAt: number; id: string }, before: number, beforeId: string | undefined): boolean {
+export function isAfterCursor(
+  row: { finishedAt: number; id: string },
+  before: number,
+  beforeId: string | undefined,
+): boolean {
   return row.finishedAt < before || (beforeId !== undefined && row.finishedAt === before && row.id < beforeId);
 }
 
@@ -264,7 +281,11 @@ const KIB = 1024;
 const MIB = 1024 * KIB;
 const GIB = 1024 * MIB;
 
-export const DEFAULT_RETENTION_POLICY: Readonly<RetentionPolicy> = { retentionDays: 30, maxRuns: 5000, maxBytes: 2 * GIB };
+export const DEFAULT_RETENTION_POLICY: Readonly<RetentionPolicy> = {
+  retentionDays: 30,
+  maxRuns: 5000,
+  maxBytes: 2 * GIB,
+};
 
 /** Inclusive `[min, max]` per policy field (KTD5). */
 export const RETENTION_BOUNDS: Readonly<Record<keyof RetentionPolicy, readonly [number, number]>> = {
@@ -332,7 +353,9 @@ export function normalizeDiagnosis(d: FrictionDiagnosis): FrictionDiagnosis {
  *  a listing row — on its way out of a store, and the `channelVisibility` stamp
  *  filled with `unknown` for a row written before it existed (fail-closed:
  *  `unknown` is never public). */
-export function normalizeStored<T extends { diagnosis: FrictionDiagnosis; channelVisibility?: ChannelVisibility }>(v: T): T & { channelVisibility: ChannelVisibility } {
+export function normalizeStored<T extends { diagnosis: FrictionDiagnosis; channelVisibility?: ChannelVisibility }>(
+  v: T,
+): T & { channelVisibility: ChannelVisibility } {
   return { ...v, diagnosis: normalizeDiagnosis(v.diagnosis), channelVisibility: v.channelVisibility ?? "unknown" };
 }
 
@@ -345,17 +368,29 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (typeof v !== "object" || v === null) return false;
   const r = v as Record<string, unknown>;
   if (typeof r.id !== "string" || !RUN_ID_PATTERN.test(r.id)) return false;
-  if (!isOptionalString(r.label) || !isOptionalString(r.agent) || !isOptionalString(r.model) || !isOptionalString(r.repo)) return false;
+  if (
+    !isOptionalString(r.label) ||
+    !isOptionalString(r.agent) ||
+    !isOptionalString(r.model) ||
+    !isOptionalString(r.repo)
+  )
+    return false;
   if (!isOptionalString(r.activity) || !isOptionalString(r.sourceUrl) || !isOptionalString(r.userName)) return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   // Absent on records written before the stamp existed (read as `unknown`); present → a known value.
-  if (r.channelVisibility !== undefined && !CHANNEL_VISIBILITIES.includes(r.channelVisibility as ChannelVisibility)) return false;
+  if (r.channelVisibility !== undefined && !CHANNEL_VISIBILITIES.includes(r.channelVisibility as ChannelVisibility))
+    return false;
   if (!isFiniteNumber(r.startedAt) || !isFiniteNumber(r.finishedAt)) return false;
   if (!RUN_STATUSES.includes(r.status as RunStatus)) return false;
   if (!isFiniteNumber(r.eventCount) || !isFiniteNumber(r.storedEventCount)) return false;
   if (typeof r.truncated !== "boolean") return false;
   if (!Array.isArray(r.events)) return false;
-  if (!r.events.every((e) => typeof e === "object" && e !== null && typeof (e as Record<string, unknown>).type === "string")) return false;
+  if (
+    !r.events.every(
+      (e) => typeof e === "object" && e !== null && typeof (e as Record<string, unknown>).type === "string",
+    )
+  )
+    return false;
   return isStoredDiagnosis(r.diagnosis);
 }
 
@@ -388,9 +423,16 @@ export type RetentionKey = Pick<RunListItem, "id" | "finishedAt" | "bytes">;
  * kept exceeds `maxBytes` (missing `bytes` counts as 0). Returns the kept items
  * newest-first; never mutates `items`.
  */
-export function applyRetention<T extends RetentionKey>(items: readonly T[], policy: RetentionPolicy, nowMs: number): T[] {
+export function applyRetention<T extends RetentionKey>(
+  items: readonly T[],
+  policy: RetentionPolicy,
+  nowMs: number,
+): T[] {
   const cutoff = nowMs - policy.retentionDays * 86_400_000;
-  const kept = items.filter((r) => r.finishedAt >= cutoff).sort(newestFirst).slice(0, Math.max(0, policy.maxRuns));
+  const kept = items
+    .filter((r) => r.finishedAt >= cutoff)
+    .sort(newestFirst)
+    .slice(0, Math.max(0, policy.maxRuns));
   let total = 0;
   let end = kept.length;
   for (let i = 0; i < kept.length; i++) {
@@ -459,7 +501,8 @@ function capEvent(event: RunEvent, maxBytes: number): { event: RunEvent; bytes: 
 export function fitRecordToBudget(record: RunRecord, maxBytes: number = MAX_RECORD_BYTES): RunRecord {
   const capped = record.events.map((e) => capEvent(e, MAX_EVENT_BYTES));
   const events = capped.map((c) => c.event);
-  const measure = (evs: RunEvent[]): number => utf8ByteLength(JSON.stringify({ ...record, events: evs, storedEventCount: evs.length, truncated: true }));
+  const measure = (evs: RunEvent[]): number =>
+    utf8ByteLength(JSON.stringify({ ...record, events: evs, storedEventCount: evs.length, truncated: true }));
   const whole: RunRecord = { ...record, events, storedEventCount: events.length };
   if (utf8ByteLength(JSON.stringify(whole)) <= maxBytes) return whole;
 
@@ -477,7 +520,7 @@ export function fitRecordToBudget(record: RunRecord, maxBytes: number = MAX_RECO
     if (takeHead) head++;
     else tail++;
   }
-  let kept = [...events.slice(0, head), ...events.slice(events.length - tail)];
+  const kept = [...events.slice(0, head), ...events.slice(events.length - tail)];
   while (kept.length > 0 && measure(kept) > maxBytes) {
     // Estimate was optimistic (should not happen; defensive): drop from the center.
     kept.splice(Math.floor(kept.length / 2), 1);

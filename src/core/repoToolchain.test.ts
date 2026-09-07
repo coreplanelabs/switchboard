@@ -7,7 +7,10 @@ import { NO_OP_COMMAND, NPM_FALLBACK_COMMANDS, detectCommands } from "./repoTool
 
 describe("detectCommands", () => {
   it("a pnpm workspace (pnpm-lock.yaml, no root build script) installs with pnpm and skips the build", () => {
-    const d = detectCommands({ entries: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "turbo.json"], packageJson: { scripts: { test: "turbo test -- run" } } });
+    const d = detectCommands({
+      entries: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "turbo.json"],
+      packageJson: { scripts: { test: "turbo test -- run" } },
+    });
     expect(d.toolchain).toBe("pnpm");
     expect(d.commands).toEqual({ install: "pnpm install --frozen-lockfile", build: NO_OP_COMMAND, test: "pnpm test" });
     expect(d.notes).toEqual(["package manager from pnpm-lock.yaml", "no build script — build is a no-op"]);
@@ -28,31 +31,55 @@ describe("detectCommands", () => {
   });
 
   it("the packageManager field wins over the lockfile", () => {
-    const d = detectCommands({ entries: ["package.json", "package-lock.json"], packageJson: { packageManager: "pnpm@10.10.0", scripts: { build: "tsc", test: "vitest run" } } });
+    const d = detectCommands({
+      entries: ["package.json", "package-lock.json"],
+      packageJson: { packageManager: "pnpm@10.10.0", scripts: { build: "tsc", test: "vitest run" } },
+    });
     expect(d.toolchain).toBe("pnpm");
-    expect(d.commands).toEqual({ install: "pnpm install --frozen-lockfile", build: "pnpm run build", test: "pnpm test" });
+    expect(d.commands).toEqual({
+      install: "pnpm install --frozen-lockfile",
+      build: "pnpm run build",
+      test: "pnpm test",
+    });
     expect(d.notes[0]).toBe("package manager from package.json packageManager (pnpm@10.10.0)");
   });
 
   it("an unknown packageManager falls through to the lockfile", () => {
-    expect(detectCommands({ entries: ["package.json", "yarn.lock"], packageJson: { packageManager: "volta@1" } }).toolchain).toBe("yarn");
+    expect(
+      detectCommands({ entries: ["package.json", "yarn.lock"], packageJson: { packageManager: "volta@1" } }).toolchain,
+    ).toBe("yarn");
   });
 
   it("npm with a lockfile keeps the proven npm install; scripts decide build/test", () => {
-    const d = detectCommands({ entries: ["package.json", "package-lock.json"], packageJson: { scripts: { build: "tsc", test: "vitest run" } } });
-    expect(d).toEqual({ toolchain: "npm", commands: { install: NPM_FALLBACK_COMMANDS.install, build: "npm run build", test: "npm test" }, notes: ["package manager from package-lock.json"] });
+    const d = detectCommands({
+      entries: ["package.json", "package-lock.json"],
+      packageJson: { scripts: { build: "tsc", test: "vitest run" } },
+    });
+    expect(d).toEqual({
+      toolchain: "npm",
+      commands: { install: NPM_FALLBACK_COMMANDS.install, build: "npm run build", test: "npm test" },
+      notes: ["package manager from package-lock.json"],
+    });
   });
 
   it("package.json with no lockfile assumes npm and says so", () => {
     const d = detectCommands({ entries: ["package.json"], packageJson: { scripts: {} } });
     expect(d.toolchain).toBe("npm");
-    expect(d.notes).toEqual(["no lockfile at the repo root — assuming npm", "no build script — build is a no-op", "no test script — test is a no-op; pass --test to set one"]);
+    expect(d.notes).toEqual([
+      "no lockfile at the repo root — assuming npm",
+      "no build script — build is a no-op",
+      "no test script — test is a no-op; pass --test to set one",
+    ]);
     expect(d.commands).toEqual({ install: NPM_FALLBACK_COMMANDS.install, build: NO_OP_COMMAND, test: NO_OP_COMMAND });
   });
 
   it("yarn classic vs berry: .yarnrc.yml selects --immutable", () => {
-    expect(detectCommands({ entries: ["package.json", "yarn.lock"], packageJson: {} }).commands.install).toBe("yarn install --frozen-lockfile");
-    expect(detectCommands({ entries: ["package.json", "yarn.lock", ".yarnrc.yml"], packageJson: {} }).commands.install).toBe("yarn install --immutable");
+    expect(detectCommands({ entries: ["package.json", "yarn.lock"], packageJson: {} }).commands.install).toBe(
+      "yarn install --frozen-lockfile",
+    );
+    expect(
+      detectCommands({ entries: ["package.json", "yarn.lock", ".yarnrc.yml"], packageJson: {} }).commands.install,
+    ).toBe("yarn install --immutable");
   });
 
   it("bun: either lockfile name", () => {
@@ -64,6 +91,10 @@ describe("detectCommands", () => {
 
   it("an unparseable package.json (null) is treated as one with no scripts", () => {
     const d = detectCommands({ entries: ["package.json", "pnpm-lock.yaml"], packageJson: null });
-    expect(d.commands).toEqual({ install: "pnpm install --frozen-lockfile", build: NO_OP_COMMAND, test: NO_OP_COMMAND });
+    expect(d.commands).toEqual({
+      install: "pnpm install --frozen-lockfile",
+      build: NO_OP_COMMAND,
+      test: NO_OP_COMMAND,
+    });
   });
 });

@@ -208,7 +208,10 @@ export interface RepoShipInfo {
  *  unconditionally for the auto-merge gate, spec item 9). `resolveBaseRefLazy`
  *  below is for a caller with no other reason to fetch one. Shared so "ask
  *  GitHub for the default branch" stays one mechanism, not one per caller. */
-export function resolveBaseRef(candidates: Array<string | undefined>, defaultBranch: string | undefined): string | undefined {
+export function resolveBaseRef(
+  candidates: Array<string | undefined>,
+  defaultBranch: string | undefined,
+): string | undefined {
   return candidates.find((c): c is string => c !== undefined) ?? defaultBranch;
 }
 
@@ -275,7 +278,10 @@ export interface PullRequestFacts {
 
 /** GET /repos/{repo}/pulls/{n} → the entry-check facts, or undefined when the
  *  fetch fails or the state is unrecognizable. Never throws. */
-export async function fetchPullRequestFacts(pr: { repo: string; number: number }): Promise<PullRequestFacts | undefined> {
+export async function fetchPullRequestFacts(pr: {
+  repo: string;
+  number: number;
+}): Promise<PullRequestFacts | undefined> {
   const token = await resolveGithubToken().catch(() => null);
   const headers = apiHeaders(token); // no credential → unauthenticated (public repos answer)
   let res: Response;

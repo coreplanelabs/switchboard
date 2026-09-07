@@ -1,5 +1,12 @@
 import type { RunSummary } from "../core/runRegistry.js";
-import { nextFire, type FiringOutcome, type ScheduleAction, type ScheduleDef, type ScheduleFiring, type ScheduleWorker } from "../core/schedules.js";
+import {
+  nextFire,
+  type FiringOutcome,
+  type ScheduleAction,
+  type ScheduleDef,
+  type ScheduleFiring,
+  type ScheduleWorker,
+} from "../core/schedules.js";
 
 // The "Scheduled" tab of the Access-gated /runs page (#244, `/runs/scheduled`): what is armed
 // (from the schedule registry — the same list the Worker shim fires from), when
@@ -36,29 +43,46 @@ export interface ScheduledRow {
 
 /** One row per schedule an operator can act on: `internal` plumbing (the
  *  container keep-alive) is never listed. */
-export function buildScheduledRows(schedules: readonly ScheduleDef[], firings: FiringsState, liveRuns: RunSummary[], now: number): ScheduledRow[] {
+export function buildScheduledRows(
+  schedules: readonly ScheduleDef[],
+  firings: FiringsState,
+  liveRuns: RunSummary[],
+  now: number,
+): ScheduledRow[] {
   const byName = new Map<string, ScheduleFiring>();
   if (firings.ok) for (const f of firings.firings) byName.set(f.schedule, f);
   const live = new Map(liveRuns.map((r) => [r.id, r]));
-  return schedules.filter((s) => !s.internal).map((s) => {
-    const f = byName.get(s.name);
-    const row: ScheduledRow = { name: s.name, worker: s.worker, action: s.action, cron: s.cron, description: s.description };
-    const next = nextFire(s.cron, now);
-    if (next !== undefined) row.nextFireAt = next;
-    if (f) {
-      const liveRun = f.runId ? live.get(f.runId) : undefined;
-      row.last = {
-        firedAt: f.firedAt,
-        outcome: f.outcome,
-        ...(f.runId !== undefined ? { runId: f.runId } : {}),
-        ...(f.runId !== undefined
-          ? { runHref: liveRun ? `/runs/${encodeURIComponent(f.runId)}?t=${encodeURIComponent(liveRun.token)}` : `/runs/${encodeURIComponent(f.runId)}` }
-          : {}),
-        ...(f.detail !== undefined ? { detail: f.detail } : {}),
+  return schedules
+    .filter((s) => !s.internal)
+    .map((s) => {
+      const f = byName.get(s.name);
+      const row: ScheduledRow = {
+        name: s.name,
+        worker: s.worker,
+        action: s.action,
+        cron: s.cron,
+        description: s.description,
       };
-    }
-    return row;
-  });
+      const next = nextFire(s.cron, now);
+      if (next !== undefined) row.nextFireAt = next;
+      if (f) {
+        const liveRun = f.runId ? live.get(f.runId) : undefined;
+        row.last = {
+          firedAt: f.firedAt,
+          outcome: f.outcome,
+          ...(f.runId !== undefined ? { runId: f.runId } : {}),
+          ...(f.runId !== undefined
+            ? {
+                runHref: liveRun
+                  ? `/runs/${encodeURIComponent(f.runId)}?t=${encodeURIComponent(liveRun.token)}`
+                  : `/runs/${encodeURIComponent(f.runId)}`,
+              }
+            : {}),
+          ...(f.detail !== undefined ? { detail: f.detail } : {}),
+        };
+      }
+      return row;
+    });
 }
 
 /** `in 2d 3h` / `in 45m` / `in <1m` / `3h ago` — coarse, for a glance. */

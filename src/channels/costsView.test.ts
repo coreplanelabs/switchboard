@@ -45,7 +45,10 @@ function seedOf(html: string): CostsSeed {
   return JSON.parse(m[1]) as CostsSeed;
 }
 
-function fakeService(impl: (group: string, days: string | null) => Promise<CostReport>, groups = ["switchboard"]): CostsService {
+function fakeService(
+  impl: (group: string, days: string | null) => Promise<CostReport>,
+  groups = ["switchboard"],
+): CostsService {
   return { groups: () => groups, report: impl };
 }
 
@@ -101,7 +104,10 @@ describe("parseCostsRoute", () => {
 
 describe("createCostsViewHandler", () => {
   it("ignores paths it does not own", () => {
-    const h = createCostsViewHandler(fakeService(() => Promise.resolve(report())), shell);
+    const h = createCostsViewHandler(
+      fakeService(() => Promise.resolve(report())),
+      shell,
+    );
     const io = fakeReqRes("GET", "/runs");
     expect(h(io.req, io.res)).toBe(false);
     expect(io.status).toBe(0);
@@ -117,7 +123,10 @@ describe("createCostsViewHandler", () => {
   });
 
   it("405s non-GET", () => {
-    const h = createCostsViewHandler(fakeService(() => Promise.resolve(report())), shell);
+    const h = createCostsViewHandler(
+      fakeService(() => Promise.resolve(report())),
+      shell,
+    );
     const io = fakeReqRes("POST", "/costs");
     expect(h(io.req, io.res)).toBe(true);
     expect(io.status).toBe(405);
@@ -127,12 +136,15 @@ describe("createCostsViewHandler", () => {
   it("serves the first group on the bare index, LIVE per request, with the hardened page headers and the report + groups as the seed", async () => {
     let calls = 0;
     const h = createCostsViewHandler(
-      fakeService((group, days) => {
-        calls++;
-        expect(group).toBe("switchboard");
-        expect(days).toBeNull();
-        return Promise.resolve(report());
-      }, ["switchboard", "other"]),
+      fakeService(
+        (group, days) => {
+          calls++;
+          expect(group).toBe("switchboard");
+          expect(days).toBeNull();
+          return Promise.resolve(report());
+        },
+        ["switchboard", "other"],
+      ),
       shell,
     );
     for (let i = 0; i < 2; i++) {
@@ -157,7 +169,9 @@ describe("createCostsViewHandler", () => {
 
   it("passes ?days through and 404s an unknown group", async () => {
     const h = createCostsViewHandler(
-      fakeService((_g, days) => Promise.resolve(report({ range: { from: "x", to: "y", days: Number(days), partialLastDay: false } }))),
+      fakeService((_g, days) =>
+        Promise.resolve(report({ range: { from: "x", to: "y", days: Number(days), partialLastDay: false } })),
+      ),
       shell,
     );
     const ok = fakeReqRes("GET", "/costs/switchboard?days=7");
@@ -172,7 +186,10 @@ describe("createCostsViewHandler", () => {
   });
 
   it("serves the JSON twin for agents with no-store", async () => {
-    const h = createCostsViewHandler(fakeService(() => Promise.resolve(report())), shell);
+    const h = createCostsViewHandler(
+      fakeService(() => Promise.resolve(report())),
+      shell,
+    );
     const io = fakeReqRes("GET", "/costs/switchboard.json");
     h(io.req, io.res);
     await tick();
@@ -185,7 +202,10 @@ describe("createCostsViewHandler", () => {
   });
 
   it("502s (never 500s, never leaks) when an upstream source fails", async () => {
-    const h = createCostsViewHandler(fakeService(() => Promise.reject(new Error("cloudflare graphql 403: denied " + "x".repeat(2000)))), shell);
+    const h = createCostsViewHandler(
+      fakeService(() => Promise.reject(new Error("cloudflare graphql 403: denied " + "x".repeat(2000)))),
+      shell,
+    );
     const io = fakeReqRes("GET", "/costs");
     h(io.req, io.res);
     await tick();

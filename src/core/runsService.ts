@@ -2,8 +2,25 @@ import { matchesPredicate } from "./authz/predicate.js";
 import type { ChannelVisibility, Predicate, Resource } from "./authz/types.js";
 import type { RunActor, RunEvent, StopMode } from "./runEvents.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
-import { clampListLimit, RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, toVisibilityFilter, utf8ByteLength, type RunListItem, type RunRecord } from "./runRecord.js";
-import type { RunRegistry, RunSnapshot, RunStopStatus, RunSubscriber, RunFinishListener, RunSummary, StopRequestResult, Unsubscribe } from "./runRegistry.js";
+import {
+  clampListLimit,
+  RUN_ID_PATTERN,
+  RUN_LIST_MAX_LIMIT,
+  toVisibilityFilter,
+  utf8ByteLength,
+  type RunListItem,
+  type RunRecord,
+} from "./runRecord.js";
+import type {
+  RunRegistry,
+  RunSnapshot,
+  RunStopStatus,
+  RunSubscriber,
+  RunFinishListener,
+  RunSummary,
+  StopRequestResult,
+  Unsubscribe,
+} from "./runRegistry.js";
 import type { RunStore } from "./runStore.js";
 
 // Run history (#157, U5): the ONE service behind every `runs.*` command — list,
@@ -318,7 +335,9 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
           // in the log: the message only (a store error names a route or an
           // HTTP status, never a token), once per failing call.
           storeUnavailable = true;
-          warn(`[runs] history store list failed — showing live runs only: ${err instanceof Error ? err.message : String(err)}`);
+          warn(
+            `[runs] history store list failed — showing live runs only: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
       // A FINISHED live row wins on every field it carries (the final stop
@@ -349,7 +368,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // A full page ending on a persisted row has a next page to ask for; a
       // page of live rows only, or a short page, is the end of the list.
       const last = runs.at(-1);
-      if (runs.length === limit && last?.finishedAt !== undefined) out.nextBefore = { finishedAt: last.finishedAt, id: last.id };
+      if (runs.length === limit && last?.finishedAt !== undefined)
+        out.nextBefore = { finishedAt: last.finishedAt, id: last.id };
       if (storeUnavailable) out.storeUnavailable = true;
       return out;
     },
@@ -382,7 +402,14 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       const limit = opts.limit ?? MAX_EVENTS_PAGE;
       const snap = registry.snapshotById(id);
       if (snap) {
-        return { ok: true, value: pageBounded(snap.events.filter((e) => (e.seq ?? 0) > afterSeq), limit, false) };
+        return {
+          ok: true,
+          value: pageBounded(
+            snap.events.filter((e) => (e.seq ?? 0) > afterSeq),
+            limit,
+            false,
+          ),
+        };
       }
       if (!store || !RUN_ID_PATTERN.test(id)) return notFound;
       const cap = Math.min(MAX_EVENTS_PAGE, Math.max(1, Math.floor(limit)));
@@ -396,7 +423,15 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
 
     async getRunFriction(id) {
       const snap = registry.snapshotById(id);
-      if (snap) return { ok: true, value: { id, finished: snap.finished, diagnosis: analyze(snap.events, { finished: snap.finished, truncated: snap.truncated }) } };
+      if (snap)
+        return {
+          ok: true,
+          value: {
+            id,
+            finished: snap.finished,
+            diagnosis: analyze(snap.events, { finished: snap.finished, truncated: snap.truncated }),
+          },
+        };
       // The stored diagnosis rides on the summary row — the events are not needed.
       const summary = await storeSummary(id);
       if (!summary) return notFound;

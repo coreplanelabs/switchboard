@@ -55,7 +55,15 @@ export const TARGET_ATTRIBUTES: Readonly<Record<Target, readonly AttributeName[]
   command: [],
 };
 
-export const RESOURCE_TYPES: readonly ResourceType[] = ["run", "channel", "memory-scope", "repo", "config-scope", "agent", "command"];
+export const RESOURCE_TYPES: readonly ResourceType[] = [
+  "run",
+  "channel",
+  "memory-scope",
+  "repo",
+  "config-scope",
+  "agent",
+  "command",
+];
 
 export const CHANNEL_VISIBILITIES: readonly ChannelVisibility[] = ["public", "private", "dm", "machine", "unknown"];
 

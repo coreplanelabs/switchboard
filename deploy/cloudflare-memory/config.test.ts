@@ -34,15 +34,37 @@ describe("ConfigDO routes", () => {
   it("get of an unknown key is null at version 0; put creates v1, replaces to v2, and a stale expectedVersion is a 409 carrying the current version", async () => {
     const k = key();
     expect((await post("/config/get", { key: k })).data).toEqual({ document: null, version: 0 });
-    expect((await post("/config/put", { key: k, document: { channels: { a: { agent: "coding" } }, users: {} }, expectedVersion: 0 })).data).toEqual({ ok: true, version: 1 });
-    expect((await post("/config/get", { key: k })).data).toEqual({ document: { channels: { a: { agent: "coding" } }, users: {} }, version: 1 });
+    expect(
+      (
+        await post("/config/put", {
+          key: k,
+          document: { channels: { a: { agent: "coding" } }, users: {} },
+          expectedVersion: 0,
+        })
+      ).data,
+    ).toEqual({ ok: true, version: 1 });
+    expect((await post("/config/get", { key: k })).data).toEqual({
+      document: { channels: { a: { agent: "coding" } }, users: {} },
+      version: 1,
+    });
     // A writer that loaded v1 replaces it.
-    expect((await post("/config/put", { key: k, document: { channels: {}, users: { u: { effort: "low" } } }, expectedVersion: 1 })).data).toEqual({ ok: true, version: 2 });
+    expect(
+      (
+        await post("/config/put", {
+          key: k,
+          document: { channels: {}, users: { u: { effort: "low" } } },
+          expectedVersion: 1,
+        })
+      ).data,
+    ).toEqual({ ok: true, version: 2 });
     // A writer still holding v1 (or v0) is refused and told the current version — nothing is clobbered.
     const stale = await post("/config/put", { key: k, document: { channels: {}, users: {} }, expectedVersion: 1 });
     expect(stale.status).toBe(409);
     expect(stale.data).toEqual({ error: "version conflict", version: 2 });
-    expect((await post("/config/get", { key: k })).data).toEqual({ document: { channels: {}, users: { u: { effort: "low" } } }, version: 2 });
+    expect((await post("/config/get", { key: k })).data).toEqual({
+      document: { channels: {}, users: { u: { effort: "low" } } },
+      version: 2,
+    });
   });
 
   it("validates: bad key, non-object document, bad expectedVersion, oversize document; unknown route 404", async () => {
@@ -50,10 +72,16 @@ describe("ConfigDO routes", () => {
     expect((await post("/config/put", { key: key(), document: [1], expectedVersion: 0 })).status).toBe(400);
     expect((await post("/config/put", { key: key(), document: {}, expectedVersion: -1 })).status).toBe(400);
     expect((await post("/config/put", { key: key(), document: {}, expectedVersion: 1.5 })).status).toBe(400);
-    expect((await post("/config/put", { key: key(), document: { big: "x".repeat(300 * 1024) }, expectedVersion: 0 })).status).toBe(413);
+    expect(
+      (await post("/config/put", { key: key(), document: { big: "x".repeat(300 * 1024) }, expectedVersion: 0 })).status,
+    ).toBe(413);
     // The cap is BYTES: 100 K three-byte characters are 100 K UTF-16 code units but 300 KB.
-    expect((await post("/config/put", { key: key(), document: { big: "€".repeat(100 * 1024) }, expectedVersion: 0 })).status).toBe(413);
-    expect((await post("/config/put", { key: key(), document: { big: "€".repeat(80 * 1024) }, expectedVersion: 0 })).status).toBe(200);
+    expect(
+      (await post("/config/put", { key: key(), document: { big: "€".repeat(100 * 1024) }, expectedVersion: 0 })).status,
+    ).toBe(413);
+    expect(
+      (await post("/config/put", { key: key(), document: { big: "€".repeat(80 * 1024) }, expectedVersion: 0 })).status,
+    ).toBe(200);
     expect((await post("/config/nope", { key: key() })).status).toBe(404);
   });
 });
@@ -76,7 +104,14 @@ describe("ConfigDO secrets + tickets (features/mcp-tools.md items 15–16)", () 
   it("tickets: put (insert or replace) → get; a bad nonce is 400; writes sweep tickets expired more than a day ago", async () => {
     const serverId = `org/${key()}`;
     const nonce = `${"t".repeat(20)}${key()}`;
-    const ticket = { nonce, serverId, requesterId: "slack:U1", createdAt: 1, expiresAt: Date.now() + 600_000, state: "pending" };
+    const ticket = {
+      nonce,
+      serverId,
+      requesterId: "slack:U1",
+      createdAt: 1,
+      expiresAt: Date.now() + 600_000,
+      state: "pending",
+    };
     expect((await post("/config/tickets/get", { nonce })).data).toEqual({ ticket: null });
     expect((await post("/config/tickets/put", { ticket })).data).toEqual({ ok: true });
     expect((await post("/config/tickets/get", { nonce })).data).toEqual({ ticket });
@@ -93,23 +128,58 @@ describe("ConfigDO secrets + tickets (features/mcp-tools.md items 15–16)", () 
   it("tickets/transition is a compare-and-swap on the stored state: applied once; the race loser sees applied=false and the row is untouched", async () => {
     const serverId = `org/${key()}`;
     const nonce = `${"c".repeat(20)}${key()}`;
-    const ticket = { nonce, serverId, requesterId: "slack:U1", createdAt: 1, expiresAt: Date.now() + 600_000, state: "pending" };
+    const ticket = {
+      nonce,
+      serverId,
+      requesterId: "slack:U1",
+      createdAt: 1,
+      expiresAt: Date.now() + 600_000,
+      state: "pending",
+    };
     const first = { ...ticket, state: "opened", openedBy: { sub: "cf-a", at: 2 } };
     const second = { ...ticket, state: "opened", openedBy: { sub: "cf-b", at: 3 } };
-    expect((await post("/config/tickets/transition", { ticket: first, fromState: "pending" })).data).toEqual({ ok: true, applied: false }); // unknown nonce
+    expect((await post("/config/tickets/transition", { ticket: first, fromState: "pending" })).data).toEqual({
+      ok: true,
+      applied: false,
+    }); // unknown nonce
     await post("/config/tickets/put", { ticket });
-    expect((await post("/config/tickets/transition", { ticket: first, fromState: "pending" })).data).toEqual({ ok: true, applied: true });
-    expect((await post("/config/tickets/transition", { ticket: second, fromState: "pending" })).data).toEqual({ ok: true, applied: false });
-    expect(((await post("/config/tickets/get", { nonce })).data.ticket as { openedBy: { sub: string } }).openedBy.sub).toBe("cf-a");
+    expect((await post("/config/tickets/transition", { ticket: first, fromState: "pending" })).data).toEqual({
+      ok: true,
+      applied: true,
+    });
+    expect((await post("/config/tickets/transition", { ticket: second, fromState: "pending" })).data).toEqual({
+      ok: true,
+      applied: false,
+    });
+    expect(
+      ((await post("/config/tickets/get", { nonce })).data.ticket as { openedBy: { sub: string } }).openedBy.sub,
+    ).toBe("cf-a");
     // OAuth (item 18): opened → authorizing carries the sealed pending record, opaque here; the callback then claims it.
     const authorizing = { ...first, state: "authorizing", oauth: { keyId: "k1", sealed: "c2VhbGVk" } };
-    expect((await post("/config/tickets/transition", { ticket: authorizing, fromState: "opened" })).data).toEqual({ ok: true, applied: true });
-    expect(((await post("/config/tickets/get", { nonce })).data.ticket as { state: string; oauth: { sealed: string } }).oauth.sealed).toBe("c2VhbGVk");
+    expect((await post("/config/tickets/transition", { ticket: authorizing, fromState: "opened" })).data).toEqual({
+      ok: true,
+      applied: true,
+    });
+    expect(
+      ((await post("/config/tickets/get", { nonce })).data.ticket as { state: string; oauth: { sealed: string } }).oauth
+        .sealed,
+    ).toBe("c2VhbGVk");
     const done = { ...authorizing, state: "completed", completedBy: { sub: "cf-a", at: 4 } };
-    expect((await post("/config/tickets/transition", { ticket: done, fromState: "opened" })).data).toEqual({ ok: true, applied: false }); // it is authorizing now
-    expect((await post("/config/tickets/transition", { ticket: done, fromState: "authorizing" })).data).toEqual({ ok: true, applied: true });
-    expect((await post("/config/tickets/transition", { ticket: done, fromState: "authorizing" })).data).toEqual({ ok: true, applied: false });
+    expect((await post("/config/tickets/transition", { ticket: done, fromState: "opened" })).data).toEqual({
+      ok: true,
+      applied: false,
+    }); // it is authorizing now
+    expect((await post("/config/tickets/transition", { ticket: done, fromState: "authorizing" })).data).toEqual({
+      ok: true,
+      applied: true,
+    });
+    expect((await post("/config/tickets/transition", { ticket: done, fromState: "authorizing" })).data).toEqual({
+      ok: true,
+      applied: false,
+    });
     expect((await post("/config/tickets/transition", { ticket: done, fromState: "done" })).status).toBe(400);
-    expect((await post("/config/tickets/transition", { ticket: { nonce: "short" }, fromState: "pending" })).status).toBe(400);
+    expect(
+      (await post("/config/tickets/transition", { ticket: { nonce: "short" }, fromState: "pending" })).status,
+    ).toBe(400);
   });
 });

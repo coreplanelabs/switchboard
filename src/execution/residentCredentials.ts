@@ -40,6 +40,7 @@ export function shouldRefreshThreadCredentials(input: {
   if (readonly) return { refresh: false, reason: null };
   if (fileBytes === null) return { refresh: true, reason: "missing" };
   if (fileBytes === 0) return { refresh: true, reason: "empty" };
-  if (writtenAtMs === null || nowMs - writtenAtMs > CREDENTIAL_REFRESH_AFTER_MS) return { refresh: true, reason: "stale" };
+  if (writtenAtMs === null || nowMs - writtenAtMs > CREDENTIAL_REFRESH_AFTER_MS)
+    return { refresh: true, reason: "stale" };
   return { refresh: false, reason: null };
 }

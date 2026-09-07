@@ -31,10 +31,7 @@ export default defineConfig({
   },
   server: {
     fs: {
-      allow: [
-        fileURLToPath(new URL(".", import.meta.url)),
-        fileURLToPath(new URL("../src", import.meta.url)),
-      ],
+      allow: [fileURLToPath(new URL(".", import.meta.url)), fileURLToPath(new URL("../src", import.meta.url))],
     },
   },
   build: {

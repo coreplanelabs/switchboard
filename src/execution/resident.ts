@@ -158,8 +158,7 @@ export class ResidentOperations implements Operations {
  *  marker. `transport: true` means the failure was network-level (fetch threw
  *  or timed out) — the only kind the factory's negative cache may store. */
 export type ResidentStatusProbe =
-  | { kind: "status"; state: string; reason: string }
-  | { kind: "unreachable"; error: string; transport: boolean };
+  { kind: "status"; state: string; reason: string } | { kind: "unreachable"; error: string; transport: boolean };
 
 export class ResidentExecutor implements Executor {
   /** Consecutive `runtime-replaced` outcomes with no successful op between

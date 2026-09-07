@@ -1,7 +1,15 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
 import type { Actor } from "../core/authz/types.js";
-import { COMMAND_ID, CommandRegistry, ERROR_STATUS, type Caller, type CommandDef, type CommandInvoker, type InvokeErrorCode } from "../core/commandRegistry.js";
+import {
+  COMMAND_ID,
+  CommandRegistry,
+  ERROR_STATUS,
+  type Caller,
+  type CommandDef,
+  type CommandInvoker,
+  type InvokeErrorCode,
+} from "../core/commandRegistry.js";
 import { namedToInput } from "../core/commandSurface.js";
 import { isServiceToken, type AccessIdentity } from "./accessAuth.js";
 import { MAX_BODY_BYTES, readBody } from "./http.js";
@@ -202,7 +210,13 @@ function isJsonContentType(req: IncomingMessage): boolean {
 }
 
 /** Transport-level refusals that have no registry code. */
-type TransportCode = "not_found" | "method_not_allowed" | "unsupported_media_type" | "forbidden_origin" | "forbidden" | "payload_too_large";
+type TransportCode =
+  | "not_found"
+  | "method_not_allowed"
+  | "unsupported_media_type"
+  | "forbidden_origin"
+  | "forbidden"
+  | "payload_too_large";
 
 export function createCommandHttpHandler(commands: CommandInvoker, opts: CommandHttpOptions): CommandHttpHandler {
   const maxBytes = opts.maxBodyBytes ?? MAX_BODY_BYTES;
@@ -211,8 +225,13 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
     res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extra });
     res.end(JSON.stringify(body));
   };
-  const refuse = (res: ServerResponse, status: number, code: TransportCode | InvokeErrorCode, error: string, extra: Record<string, string> = {}) =>
-    send(res, status, { error, code }, extra);
+  const refuse = (
+    res: ServerResponse,
+    status: number,
+    code: TransportCode | InvokeErrorCode,
+    error: string,
+    extra: Record<string, string> = {},
+  ) => send(res, status, { error, code }, extra);
 
   return async (req, res, identity) => {
     // KTD13 dev-bypass rule: a bypassed gate serves /api/* only on loopback, on a

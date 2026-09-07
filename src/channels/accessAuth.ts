@@ -348,9 +348,7 @@ export interface RunsGateOptions {
 }
 
 /** The gate result: allow (with identity) or deny (with a status + body). */
-export type RunsGateResult =
-  | { ok: true; identity: AccessIdentity }
-  | { ok: false; status: number; body: string };
+export type RunsGateResult = { ok: true; identity: AccessIdentity } | { ok: false; status: number; body: string };
 
 /**
  * The /runs* SSO gate, fail-closed:

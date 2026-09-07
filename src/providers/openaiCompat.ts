@@ -19,9 +19,7 @@ interface OAIToolCall {
   function: { name: string; arguments: string };
 }
 
-type OAIContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
+type OAIContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
 
 interface OAIMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -87,7 +85,7 @@ export class OpenAICompatProvider implements Provider {
       content.push({ type: "text", text: choice.message.content });
     }
     for (const tc of choice.message.tool_calls ?? []) {
-      let input: unknown = {};
+      let input: unknown;
       try {
         input = JSON.parse(tc.function.arguments || "{}");
       } catch {

@@ -51,19 +51,36 @@ export interface RestartVerdict {
 export function decideRestart(body: HealthzBody | undefined, opts: { force: boolean }): RestartVerdict {
   const problems: string[] = [];
   if (!body) {
-    problems.push("bot not answering with JSON on /healthz (container restarting, unreachable, or a Worker that predates the preflight)");
+    problems.push(
+      "bot not answering with JSON on /healthz (container restarting, unreachable, or a Worker that predates the preflight)",
+    );
   } else {
     if (!Number.isInteger(body.inFlight) || (body.inFlight as number) < 0) {
       problems.push(`bot reports an impossible inFlight=${JSON.stringify(body.inFlight)} (counter bug or old Worker)`);
     } else if ((body.inFlight as number) > 0) {
       problems.push(`${body.inFlight} run(s) in flight — a restart would kill them`);
     }
-    if (body.draining === true) problems.push("bot is already draining (a deploy or an earlier restart is in progress) — it restarts on its own when the drain ends");
+    if (body.draining === true)
+      problems.push(
+        "bot is already draining (a deploy or an earlier restart is in progress) — it restarts on its own when the drain ends",
+      );
   }
-  if (problems.length === 0) return { allow: true, forced: false, problems, message: "restart ok: no runs in flight, not draining" };
+  if (problems.length === 0)
+    return { allow: true, forced: false, problems, message: "restart ok: no runs in flight, not draining" };
   const detail = problems.map((p) => `  - ${p}`).join("\n");
-  if (opts.force) return { allow: true, forced: true, problems, message: `restart WARNING: stopping by force despite —\n${detail}\n  in-flight runs get SIGTERM'd into the drain: they finish if they can, else are killed at the drain deadline and their status cards left for the next connect's sweep to close` };
-  return { allow: false, forced: false, problems, message: `restart REFUSED —\n${detail}\n  wait and retry, or pass --force to drain (and at the deadline kill) what is in flight` };
+  if (opts.force)
+    return {
+      allow: true,
+      forced: true,
+      problems,
+      message: `restart WARNING: stopping by force despite —\n${detail}\n  in-flight runs get SIGTERM'd into the drain: they finish if they can, else are killed at the drain deadline and their status cards left for the next connect's sweep to close`,
+    };
+  return {
+    allow: false,
+    forced: false,
+    problems,
+    message: `restart REFUSED —\n${detail}\n  wait and retry, or pass --force to drain (and at the deadline kill) what is in flight`,
+  };
 }
 
 // ---- authorization (Worker side) ---------------------------------------------------------------
@@ -97,12 +114,26 @@ export type RestartAuth = { ok: true; subject: string } | { ok: false; status: 4
 export function authorizeRestart(authorization: string | undefined, tokensRaw: string | undefined): RestartAuth {
   const parsed = parseIngressTokenMap(tokensRaw);
   if (!parsed.ok || Object.keys(parsed.tokens).length === 0) {
-    return { ok: false, status: 503, reason: `restart disabled: SWITCHBOARD_INGRESS_TOKENS is ${parsed.ok ? "not set" : parsed.reason}` };
+    return {
+      ok: false,
+      status: 503,
+      reason: `restart disabled: SWITCHBOARD_INGRESS_TOKENS is ${parsed.ok ? "not set" : parsed.reason}`,
+    };
   }
   const m = /^Bearer\s+(\S+)$/i.exec(authorization ?? "");
   const identity = m ? lookupConstantTime(parsed.tokens, m[1]) : undefined;
-  if (!identity) return { ok: false, status: 401, reason: "unauthorized: a Bearer token from SWITCHBOARD_INGRESS_TOKENS is required" };
-  if (!identity.scopes.includes(RESTART_SCOPE)) return { ok: false, status: 403, reason: `forbidden: identity "${identity.subject}" lacks the ${RESTART_SCOPE} scope` };
+  if (!identity)
+    return {
+      ok: false,
+      status: 401,
+      reason: "unauthorized: a Bearer token from SWITCHBOARD_INGRESS_TOKENS is required",
+    };
+  if (!identity.scopes.includes(RESTART_SCOPE))
+    return {
+      ok: false,
+      status: 403,
+      reason: `forbidden: identity "${identity.subject}" lacks the ${RESTART_SCOPE} scope`,
+    };
   return { ok: true, subject: identity.subject };
 }
 
@@ -119,7 +150,8 @@ export function parseRestartRequest(text: string): ParsedRestartRequest {
   } catch {
     return { ok: false, reason: "body is not valid JSON" };
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { ok: false, reason: "body must be a JSON object" };
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    return { ok: false, reason: "body must be a JSON object" };
   const force = (parsed as { force?: unknown }).force;
   if (force !== undefined && typeof force !== "boolean") return { ok: false, reason: "`force` must be a boolean" };
   return { ok: true, force: force === true };
@@ -141,11 +173,27 @@ export interface RestartHttpResponse {
 export function restartResponse(outcome: RestartOutcome): RestartHttpResponse {
   switch (outcome.kind) {
     case "stopping":
-      return { status: 202, body: { ok: true, stopping: true, forced: outcome.forced, inFlight: outcome.inFlight, previousStartedAt: outcome.previousStartedAt } };
+      return {
+        status: 202,
+        body: {
+          ok: true,
+          stopping: true,
+          forced: outcome.forced,
+          inFlight: outcome.inFlight,
+          previousStartedAt: outcome.previousStartedAt,
+        },
+      };
     case "refused":
       return { status: 409, body: { ok: false, refused: true, problems: outcome.problems } };
     case "not-running":
-      return { status: 200, body: { ok: true, stopping: false, note: "container not running — nothing to stop; the next request starts it with the current env" } };
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          stopping: false,
+          note: "container not running — nothing to stop; the next request starts it with the current env",
+        },
+      };
   }
 }
 
@@ -160,13 +208,20 @@ export type RestartResponseClass =
 
 export function classifyRestartResponse(status: number, text: string): RestartResponseClass {
   const body = parseHealthz(text) as Record<string, unknown> | undefined;
-  if (status === 202) return { kind: "stopping", previousStartedAt: typeof body?.previousStartedAt === "string" ? body.previousStartedAt : undefined };
+  if (status === 202)
+    return {
+      kind: "stopping",
+      previousStartedAt: typeof body?.previousStartedAt === "string" ? body.previousStartedAt : undefined,
+    };
   if (status === 200 && body?.stopping === false) return { kind: "not-running" };
   if (status === 409) {
-    const problems = Array.isArray(body?.problems) ? body.problems.filter((p): p is string => typeof p === "string") : [];
+    const problems = Array.isArray(body?.problems)
+      ? body.problems.filter((p): p is string => typeof p === "string")
+      : [];
     return { kind: "refused", reason: problems[0] ?? "restart refused" };
   }
-  if (status === 401 || status === 403) return { kind: "unauthorized", reason: `HTTP ${status}: ${text.slice(0, 200)}` };
+  if (status === 401 || status === 403)
+    return { kind: "unauthorized", reason: `HTTP ${status}: ${text.slice(0, 200)}` };
   return { kind: "failed", reason: `HTTP ${status}: ${text.slice(0, 200)}` };
 }
 

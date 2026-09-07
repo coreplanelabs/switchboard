@@ -92,7 +92,9 @@ describe("ci.yml runs only the repository's own scripts", () => {
         expect(step.with?.["node-version-file"], "setup-node must read the version from .nvmrc").toBe(".nvmrc");
         if (step.with?.cache === "npm") {
           cachingJobs++;
-          expect(step.with?.["cache-dependency-path"], "an npm cache must key on package-lock.json alone").toBe("package-lock.json");
+          expect(step.with?.["cache-dependency-path"], "an npm cache must key on package-lock.json alone").toBe(
+            "package-lock.json",
+          );
         }
       }
     }

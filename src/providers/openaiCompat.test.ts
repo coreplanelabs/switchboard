@@ -75,7 +75,9 @@ describe("toOAIMessages (content-part mapping)", () => {
 
 describe("usageFromOpenAI (token usage → TokenUsage)", () => {
   it("maps prompt/completion tokens and the cached-prompt detail when present", () => {
-    expect(usageFromOpenAI({ prompt_tokens: 20, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 16 } })).toEqual({
+    expect(
+      usageFromOpenAI({ prompt_tokens: 20, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 16 } }),
+    ).toEqual({
       inputTokens: 20,
       outputTokens: 4,
       cacheReadTokens: 16,
@@ -90,11 +92,14 @@ describe("usageFromOpenAI (token usage → TokenUsage)", () => {
 
 describe("toOAIMessages — thinking parts", () => {
   it("drops Anthropic thinking blocks from an assistant turn (no OpenAI equivalent; text and tool calls survive)", () => {
-    const [m] = toOAIMessages({ role: "assistant", content: [
-      { type: "thinking", thinking: "", signature: "s" },
-      { type: "text", text: "hello" },
-      { type: "tool_use", id: "t", name: "bash", input: { command: "ls" } },
-    ] });
+    const [m] = toOAIMessages({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "", signature: "s" },
+        { type: "text", text: "hello" },
+        { type: "tool_use", id: "t", name: "bash", input: { command: "ls" } },
+      ],
+    });
     expect(m.content).toBe("hello");
     expect((m as { tool_calls?: unknown[] }).tool_calls).toHaveLength(1);
   });

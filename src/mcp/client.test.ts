@@ -4,11 +4,23 @@ import { fakeMcpServerFetch } from "./fake.js";
 import { McpError } from "./types.js";
 
 const TOOLS = [
-  { name: "search_issues", description: "Search issues", inputSchema: { type: "object", properties: { q: { type: "string" } } } },
-  { name: "create_issue", description: "Create", inputSchema: { type: "object" }, annotations: { readOnlyHint: false } },
+  {
+    name: "search_issues",
+    description: "Search issues",
+    inputSchema: { type: "object", properties: { q: { type: "string" } } },
+  },
+  {
+    name: "create_issue",
+    description: "Create",
+    inputSchema: { type: "object" },
+    annotations: { readOnlyHint: false },
+  },
 ];
 
-function client(server: ReturnType<typeof fakeMcpServerFetch>, extra: Partial<ConstructorParameters<typeof StreamableHttpMcpClient>[0]> = {}) {
+function client(
+  server: ReturnType<typeof fakeMcpServerFetch>,
+  extra: Partial<ConstructorParameters<typeof StreamableHttpMcpClient>[0]> = {},
+) {
   return new StreamableHttpMcpClient({ url: "https://mcp.example.com/mcp", fetch: server.fetch, ...extra });
 }
 
@@ -37,7 +49,11 @@ describe("StreamableHttpMcpClient", () => {
   });
 
   it("reads an SSE response and picks the frame with the request id", async () => {
-    const server = fakeMcpServerFetch({ tools: TOOLS, sse: true, onCall: () => ({ content: [{ type: "text", text: "from sse" }] }) });
+    const server = fakeMcpServerFetch({
+      tools: TOOLS,
+      sse: true,
+      onCall: () => ({ content: [{ type: "text", text: "from sse" }] }),
+    });
     const c = client(server);
     expect((await c.listTools()).length).toBe(2);
     const res = await c.callTool("search_issues", {});
@@ -132,7 +148,9 @@ describe("StreamableHttpMcpClient", () => {
   });
 
   it("drops malformed tool entries instead of failing the list", async () => {
-    const server = fakeMcpServerFetch({ tools: [{ name: "ok", inputSchema: { type: "object" } }, { nope: true } as never, { name: "", inputSchema: {} }] });
+    const server = fakeMcpServerFetch({
+      tools: [{ name: "ok", inputSchema: { type: "object" } }, { nope: true } as never, { name: "", inputSchema: {} }],
+    });
     const tools = await client(server).listTools();
     expect(tools.map((t) => t.name)).toEqual(["ok"]);
   });
@@ -140,7 +158,7 @@ describe("StreamableHttpMcpClient", () => {
 
 describe("sseDataFrames", () => {
   it("joins multi-line data, skips comments and other fields, tolerates CRLF", () => {
-    const text = ": comment\r\nevent: message\r\nid: 1\r\ndata: {\"a\":\r\ndata: 1}\r\n\r\ndata:solo\n\n";
+    const text = ': comment\r\nevent: message\r\nid: 1\r\ndata: {"a":\r\ndata: 1}\r\n\r\ndata:solo\n\n';
     expect(sseDataFrames(text)).toEqual(['{"a":\n1}', "solo"]);
   });
 });

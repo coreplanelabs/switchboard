@@ -20,7 +20,12 @@ function ctx(agentName?: string): ToolContext {
       agents: ["review"],
       body: "REVIEW BODY",
       source: "https://example.com/cr",
-      upstream: { repo: "https://github.com/addyosmani/agent-skills", commit: "d".repeat(40), path: "skills/code-review-and-quality/SKILL.md", bodySha256: "0".repeat(64) },
+      upstream: {
+        repo: "https://github.com/addyosmani/agent-skills",
+        commit: "d".repeat(40),
+        path: "skills/code-review-and-quality/SKILL.md",
+        bodySha256: "0".repeat(64),
+      },
     }),
     skill({ name: "test-driven-development", description: "test it", agents: ["coding"], body: "CODING BODY" }),
   ]);

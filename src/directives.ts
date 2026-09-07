@@ -55,9 +55,7 @@ export function parseDirectives(input: string): RequestDirectives {
   for (const f of found) {
     if (f.key === "agent") {
       if (!AGENTS[f.value]) {
-        throw new Error(
-          `Unknown agent "${f.value}". Available: ${Object.keys(AGENTS).join(", ")}`,
-        );
+        throw new Error(`Unknown agent "${f.value}". Available: ${Object.keys(AGENTS).join(", ")}`);
       }
       out.agent = f.value;
     } else if (f.key === "model") {

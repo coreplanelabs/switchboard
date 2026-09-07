@@ -28,7 +28,12 @@ const title = isHistory ? "Run" : "Live run";
 
 const openParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("open") : null;
 const model = createRunPageModel({
-  openTags: openParam ? openParam.split(",").map((t) => t.trim()).filter(Boolean) : undefined,
+  openTags: openParam
+    ? openParam
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+    : undefined,
 });
 const state = model.state;
 
@@ -45,7 +50,12 @@ const nowWall = ref(Date.now());
 const endChip = computed(() => {
   if (isHistory && seed?.mode === "history") {
     if (seed.status === "completed") return { ok: true, cls: "", word: "succeeded" };
-    const cls = seed.status === "failed" || seed.status === "stopped_hard" || seed.status === "interrupted" ? "red" : seed.status === "stopped_soft" ? "amber" : "grey";
+    const cls =
+      seed.status === "failed" || seed.status === "stopped_hard" || seed.status === "interrupted"
+        ? "red"
+        : seed.status === "stopped_soft"
+          ? "amber"
+          : "grey";
     return { ok: false, cls, word: seed.status ? statusLabel(seed.status) : "ended" };
   }
   const mode = state.stopMode;
@@ -56,7 +66,11 @@ const endChip = computed(() => {
   };
 });
 const endDuration = computed(() =>
-  isHistory && seed?.mode === "history" ? (seed.durationMs !== undefined ? formatElapsed(seed.durationMs) : "") : runSpan(state),
+  isHistory && seed?.mode === "history"
+    ? seed.durationMs !== undefined
+      ? formatElapsed(seed.durationMs)
+      : ""
+    : runSpan(state),
 );
 const CHIP_CLS: Record<string, string> = {
   red: "border-bad/30 text-bad",
@@ -72,7 +86,11 @@ const headerText = computed(() => {
   return runningHeader(state, nowWall.value) ?? "running";
 });
 const pulseCls = computed(() =>
-  stopError.value || phase.value === "disconnected" ? "text-bad" : phase.value === "running" ? "text-ok motion-safe:animate-pulse" : "text-warn motion-safe:animate-pulse",
+  stopError.value || phase.value === "disconnected"
+    ? "text-bad"
+    : phase.value === "running"
+      ? "text-ok motion-safe:animate-pulse"
+      : "text-warn motion-safe:animate-pulse",
 );
 
 // ---- stop control (#101) -----------------------------------------------------
@@ -112,15 +130,26 @@ watch(
 // gray once it ended or the stream dropped. A history page is idle by
 // definition — the shell's gray dot already says so.
 if (!isHistory) {
-  watch(
-    phase,
-    (p) => browser.setFavicon(p === "ended" || p === "disconnected" ? FAVICON_IDLE : FAVICON_LIVE),
-    { immediate: true },
-  );
+  watch(phase, (p) => browser.setFavicon(p === "ended" || p === "disconnected" ? FAVICON_IDLE : FAVICON_LIVE), {
+    immediate: true,
+  });
 }
 
 // ---- the live tail -----------------------------------------------------------
-const THINKING = ["Thinking", "Pondering", "Mulling it over", "Reasoning", "Cogitating", "Weighing options", "Puzzling", "Deliberating", "Noodling", "Chewing on it", "Ruminating", "Reticulating splines"];
+const THINKING = [
+  "Thinking",
+  "Pondering",
+  "Mulling it over",
+  "Reasoning",
+  "Cogitating",
+  "Weighing options",
+  "Puzzling",
+  "Deliberating",
+  "Noodling",
+  "Chewing on it",
+  "Ruminating",
+  "Reticulating splines",
+];
 const verbIndex = ref(0);
 let verbSince = Date.now();
 const tailVisible = computed(() => !isHistory && phase.value !== "ended" && phase.value !== "disconnected");
@@ -243,22 +272,40 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       <span class="conn flex items-center gap-2">
         <template v-if="phase === 'ended'">
           <span v-if="endChip.ok" class="ok text-ok" role="img" aria-label="succeeded">✓</span>
-          <span v-else class="chip rounded border px-1.5 text-[0.7rem]" :class="CHIP_CLS[endChip.cls]">{{ endChip.word }}</span>
+          <span v-else class="chip rounded border px-1.5 text-[0.7rem]" :class="CHIP_CLS[endChip.cls]">{{
+            endChip.word
+          }}</span>
           <span id="state" class="dur text-xs tabular-nums text-muted">{{ endDuration }}</span>
         </template>
         <template v-else>
-          <span class="pulse text-[1.1em] leading-none" :class="pulseCls" id="statedot">∿</span>
-          <span id="state" class="text-xs tabular-nums" :class="stopError ? 'text-bad' : 'text-muted'">{{ headerText }}</span>
+          <span id="statedot" class="pulse text-[1.1em] leading-none" :class="pulseCls">∿</span>
+          <span id="state" class="text-xs tabular-nums" :class="stopError ? 'text-bad' : 'text-muted'">{{
+            headerText
+          }}</span>
         </template>
       </span>
     </template>
     <template #actions>
-      <span v-if="!actionsHidden" class="actions flex gap-1.5" id="actions">
+      <span v-if="!actionsHidden" id="actions" class="actions flex gap-1.5">
         <UTooltip text="Soft stop: no new steps, the agent writes up what it has">
-          <UButton size="xs" color="neutral" variant="outline" label="Stop" :disabled="stopDisabled" @click="requestStop('soft')" />
+          <UButton
+            size="xs"
+            color="neutral"
+            variant="outline"
+            label="Stop"
+            :disabled="stopDisabled"
+            @click="requestStop('soft')"
+          />
         </UTooltip>
         <UTooltip text="Hard stop: abort now, no summary, free the sandbox">
-          <UButton size="xs" color="error" variant="outline" label="Kill" :disabled="stopDisabled" @click="requestStop('hard')" />
+          <UButton
+            size="xs"
+            color="error"
+            variant="outline"
+            label="Kill"
+            :disabled="stopDisabled"
+            @click="requestStop('hard')"
+          />
         </UTooltip>
       </span>
     </template>
@@ -269,11 +316,22 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
            and the framed prose breathe by the same rhythm — the meta row is
            small type, so it gets MORE air, not less (gap-y for the phone
            where it wraps to two lines). -->
-      <section v-if="state.request" id="request" class="block mb-5 rounded-lg border border-default bg-(--ui-bg-muted) px-3.5 py-3">
+      <section
+        v-if="state.request"
+        id="request"
+        class="block mb-5 rounded-lg border border-default bg-(--ui-bg-muted) px-3.5 py-3"
+      >
         <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
           <span>Request</span>
-          <span class="ts select-none text-xs normal-case tracking-normal text-dimmed" :title="fmtTimeTitle(state.request.at)">{{ fmtTime(state.request.at) }}</span>
-          <span v-if="state.request.source" class="source ml-auto flex items-center gap-2 font-normal normal-case tracking-normal text-muted">
+          <span
+            class="ts select-none text-xs normal-case tracking-normal text-dimmed"
+            :title="fmtTimeTitle(state.request.at)"
+            >{{ fmtTime(state.request.at) }}</span
+          >
+          <span
+            v-if="state.request.source"
+            class="source ml-auto flex items-center gap-2 font-normal normal-case tracking-normal text-muted"
+          >
             <template v-if="state.request.source.channel">
               <SlackMark />
               <a
@@ -307,15 +365,29 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         <!-- What the run is about (item 19/21): agent · model · effort · linked
              repo · branch tag · GitHub-marked #PR. The branch is a fact, not a
              destination; the sha is gone for the same reason. -->
-        <div v-if="state.meta" class="runmeta mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 border-t border-default pt-2.5 text-xs text-muted" id="runmeta">
-          <span class="agent text-[0.68rem] font-semibold uppercase tracking-wider text-toned">{{ state.meta.agent }}</span>
+        <div
+          v-if="state.meta"
+          id="runmeta"
+          class="runmeta mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 border-t border-default pt-2.5 text-xs text-muted"
+        >
+          <span class="agent text-[0.68rem] font-semibold uppercase tracking-wider text-toned">{{
+            state.meta.agent
+          }}</span>
           <span class="model">{{ state.meta.model }}</span>
           <span v-if="state.meta.effort" class="effort text-toned">{{ state.meta.effort }} effort</span>
           <template v-if="metaRepoOk">
-            <a class="text-primary no-underline hover:underline" :href="`https://github.com/${state.meta.repo}`" target="_blank" rel="noopener noreferrer">{{
-              state.meta.repo
-            }}</a>
-            <span v-if="state.meta.ref" class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned">{{ state.meta.ref }}</span>
+            <a
+              class="text-primary no-underline hover:underline"
+              :href="`https://github.com/${state.meta.repo}`"
+              target="_blank"
+              rel="noopener noreferrer"
+              >{{ state.meta.repo }}</a
+            >
+            <span
+              v-if="state.meta.ref"
+              class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned"
+              >{{ state.meta.ref }}</span
+            >
             <a
               v-if="state.meta.pr"
               class="prlink whitespace-nowrap text-primary no-underline hover:underline"
@@ -352,13 +424,24 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           <summary
             class="flex min-h-6 cursor-pointer list-none items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted hover:text-toned [&::-webkit-details-marker]:hidden"
           >
-            <span class="chev select-none text-xs text-dimmed transition-transform group-open:rotate-90 motion-reduce:transition-none">❯</span>
+            <span
+              class="chev select-none text-xs text-dimmed transition-transform group-open:rotate-90 motion-reduce:transition-none"
+              >❯</span
+            >
             <span>Context</span>
-            <span class="count font-normal normal-case tracking-normal">({{ state.context.length }} turn{{ state.context.length === 1 ? "" : "s" }})</span>
+            <span class="count font-normal normal-case tracking-normal"
+              >({{ state.context.length }} turn{{ state.context.length === 1 ? "" : "s" }})</span
+            >
           </summary>
           <div id="contextturns" class="pb-3">
-            <div v-for="turn in state.context" :key="turn.key" class="turn flex items-baseline gap-3 border-t border-default py-1.5 opacity-85 first-of-type:border-t-0">
-              <span class="ts select-none text-xs text-dimmed" :title="fmtTimeTitle(turn.at)">{{ fmtTime(turn.at) }}</span>
+            <div
+              v-for="turn in state.context"
+              :key="turn.key"
+              class="turn flex items-baseline gap-3 border-t border-default py-1.5 opacity-85 first-of-type:border-t-0"
+            >
+              <span class="ts select-none text-xs text-dimmed" :title="fmtTimeTitle(turn.at)">{{
+                fmtTime(turn.at)
+              }}</span>
               <MarkdownText :text="turn.text" />
             </div>
           </div>
@@ -380,43 +463,80 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
 
       <!-- The timeline -->
       <ol id="log" class="m-0 list-none p-0">
-        <li v-if="state.placeholder && !tailVisible" id="placeholder" class="empty text-muted">Waiting for activity…</li>
+        <li v-if="state.placeholder && !tailVisible" id="placeholder" class="empty text-muted">
+          Waiting for activity…
+        </li>
         <template v-for="item in state.log" :key="item.key">
-          <StepBlock v-if="item.kind === 'step'" :step="item" class="mt-5 first:mt-0" @toggle-group="model.toggleGroup(item)" />
-          <li v-else-if="item.kind === 'turn'" class="turn mt-5 border-l-2 border-(--ui-border-accented)/50 pb-3 pl-3 pt-2">
+          <StepBlock
+            v-if="item.kind === 'step'"
+            :step="item"
+            class="mt-5 first:mt-0"
+            @toggle-group="model.toggleGroup(item)"
+          />
+          <li
+            v-else-if="item.kind === 'turn'"
+            class="turn mt-5 border-l-2 border-(--ui-border-accented)/50 pb-3 pl-3 pt-2"
+          >
             <!-- A turn that produced no step: the same ONE meta row a step heads with. -->
             <div class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 pr-3 text-xs tabular-nums text-dimmed">
-              <span class="thought" :class="item.turn.quick ? '' : 'text-warn'" :title="item.turn.label">thought {{ item.turn.chip }}</span>
+              <span class="thought" :class="item.turn.quick ? '' : 'text-warn'" :title="item.turn.label"
+                >thought {{ item.turn.chip }}</span
+              >
               <span v-for="(f, i) in item.turn.facts" :key="i" class="fact">{{ f }}</span>
               <span v-if="item.note" class="nonar font-sans italic">{{ item.note }}</span>
-              <span v-if="item.turn.at !== undefined" class="ts ml-auto select-none" :title="formatLocalIso(item.turn.at)">{{ formatClock(item.turn.at) }}</span>
+              <span
+                v-if="item.turn.at !== undefined"
+                class="ts ml-auto select-none"
+                :title="formatLocalIso(item.turn.at)"
+                >{{ formatClock(item.turn.at) }}</span
+              >
             </div>
           </li>
-          <li v-else class="note mt-4 flex items-baseline gap-3 rounded-md px-3 py-1.5" :class="item.replay ? 'text-dimmed' : 'bg-warn/10 text-warn'">
+          <li
+            v-else
+            class="note mt-4 flex items-baseline gap-3 rounded-md px-3 py-1.5"
+            :class="item.replay ? 'text-dimmed' : 'bg-warn/10 text-warn'"
+          >
             <span>{{ (item.replay ? "… " : "⏱ ") + item.text }}</span>
-            <span v-if="item.at !== undefined" class="ts ml-auto select-none text-xs text-dimmed" :title="formatLocalIso(item.at)">{{ formatClock(item.at) }}</span>
+            <span
+              v-if="item.at !== undefined"
+              class="ts ml-auto select-none text-xs text-dimmed"
+              :title="formatLocalIso(item.at)"
+              >{{ formatClock(item.at) }}</span
+            >
           </li>
         </template>
         <!-- The live tail: what is happening right now, always last while connected. -->
         <li
           v-if="tailVisible"
-          class="tail mt-10 flex items-center gap-3 border-t border-dashed border-accented py-3 pl-6 pr-8 text-[0.8rem] text-muted"
           id="tail"
+          class="tail mt-10 flex items-center gap-3 border-t border-dashed border-accented py-3 pl-6 pr-8 text-[0.8rem] text-muted"
         >
           <span class="pulse text-[1.1em] leading-none text-info motion-safe:animate-pulse">∿</span>
           <span class="verb text-toned">{{ THINKING[verbIndex] }}…</span>
-          <span class="since ml-auto shrink-0 tabular-nums" :class="tailSince >= SLOW_MS ? 'text-warn' : 'text-dimmed'" title="since the last event arrived">{{
-            formatElapsed(tailSince)
-          }}</span>
+          <span
+            class="since ml-auto shrink-0 tabular-nums"
+            :class="tailSince >= SLOW_MS ? 'text-warn' : 'text-dimmed'"
+            title="since the last event arrived"
+            >{{ formatElapsed(tailSince) }}</span
+          >
         </li>
         <li ref="logEnd" aria-hidden="true" />
       </ol>
 
       <!-- Answer -->
-      <section v-if="state.answer" id="answer" class="block mt-6 rounded-lg border border-ok/40 bg-(--ui-bg-muted) px-3.5 py-3">
+      <section
+        v-if="state.answer"
+        id="answer"
+        class="block mt-6 rounded-lg border border-ok/40 bg-(--ui-bg-muted) px-3.5 py-3"
+      >
         <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-ok">
           <span>Answer</span>
-          <span class="ts select-none text-xs normal-case tracking-normal text-dimmed" :title="fmtTimeTitle(state.answer.at)">{{ fmtTime(state.answer.at) }}</span>
+          <span
+            class="ts select-none text-xs normal-case tracking-normal text-dimmed"
+            :title="fmtTimeTitle(state.answer.at)"
+            >{{ fmtTime(state.answer.at) }}</span
+          >
         </h2>
         <MarkdownText :text="state.answer.text" />
       </section>

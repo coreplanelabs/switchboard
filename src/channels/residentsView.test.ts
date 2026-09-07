@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ResidentAdminClient, ResidentAdminResponse } from "../core/residentAdmin.js";
-import { createResidentsViewHandler, parseResidentsRoute, residentStateTone, type ResidentListing } from "./residentsView.js";
+import {
+  createResidentsViewHandler,
+  parseResidentsRoute,
+  residentStateTone,
+  type ResidentListing,
+} from "./residentsView.js";
 import { makeShellRenderer } from "./webShell.js";
 import { SEED_ELEMENT_ID, type ResidentDetailSeed, type ResidentsIndexSeed } from "./webSeed.js";
 
@@ -126,7 +131,10 @@ describe("residentStateTone", () => {
 
 describe("createResidentsViewHandler", () => {
   it("ignores non-/residents paths (returns false, writes nothing)", () => {
-    const h = createResidentsViewHandler(fakeClient(() => Promise.resolve(ok(LISTING as never))), shell);
+    const h = createResidentsViewHandler(
+      fakeClient(() => Promise.resolve(ok(LISTING as never))),
+      shell,
+    );
     const io = fakeReqRes("GET", "/runs");
     expect(h(io.req, io.res)).toBe(false);
     expect(io.status).toBe(0);
@@ -162,7 +170,10 @@ describe("createResidentsViewHandler", () => {
 
   it("a hostile record is inert in the page (the seed island escapes every angle bracket) and survives as data", async () => {
     const hostile = { ...DOWN, live: { ...DOWN.live, reason: '"><script>alert(1)</script>' } };
-    const h = createResidentsViewHandler(fakeClient(() => Promise.resolve(ok({ cap: 5, count: 1, residents: [hostile] }))), shell);
+    const h = createResidentsViewHandler(
+      fakeClient(() => Promise.resolve(ok({ cap: 5, count: 1, residents: [hostile] }))),
+      shell,
+    );
     const io = fakeReqRes("GET", "/residents");
     h(io.req, io.res);
     await new Promise((r) => setTimeout(r, 0));
@@ -173,7 +184,10 @@ describe("createResidentsViewHandler", () => {
   });
 
   it("serves a detail page for an onboarded slug (the record as the seed) and 404s an unknown one", async () => {
-    const h = createResidentsViewHandler(fakeClient(() => Promise.resolve(ok(LISTING as never))), shell);
+    const h = createResidentsViewHandler(
+      fakeClient(() => Promise.resolve(ok(LISTING as never))),
+      shell,
+    );
     const hit = fakeReqRes("GET", "/residents/jshttp/vary");
     h(hit.req, hit.res);
     await new Promise((r) => setTimeout(r, 0));
@@ -191,7 +205,10 @@ describe("createResidentsViewHandler", () => {
   });
 
   it("405s non-GET methods", () => {
-    const h = createResidentsViewHandler(fakeClient(() => Promise.resolve(ok(LISTING as never))), shell);
+    const h = createResidentsViewHandler(
+      fakeClient(() => Promise.resolve(ok(LISTING as never))),
+      shell,
+    );
     const io = fakeReqRes("POST", "/residents");
     expect(h(io.req, io.res)).toBe(true);
     expect(io.status).toBe(405);
@@ -207,7 +224,10 @@ describe("createResidentsViewHandler", () => {
   });
 
   it("502s (never a 500 with a stack) when the resident Worker answers non-200 or the request throws", async () => {
-    const bad = createResidentsViewHandler(fakeClient(() => Promise.resolve({ status: 401, data: { error: "unauthorized" } })), shell);
+    const bad = createResidentsViewHandler(
+      fakeClient(() => Promise.resolve({ status: 401, data: { error: "unauthorized" } })),
+      shell,
+    );
     const a = fakeReqRes("GET", "/residents");
     bad(a.req, a.res);
     await new Promise((r) => setTimeout(r, 0));
@@ -215,21 +235,30 @@ describe("createResidentsViewHandler", () => {
     expect(a.body()).toContain("401");
     expect(a.body()).toContain("unauthorized");
 
-    const huge = createResidentsViewHandler(fakeClient(() => Promise.resolve({ status: 500, data: { blob: "x".repeat(10_000) } })), shell);
+    const huge = createResidentsViewHandler(
+      fakeClient(() => Promise.resolve({ status: 500, data: { blob: "x".repeat(10_000) } })),
+      shell,
+    );
     const c = fakeReqRes("GET", "/residents");
     huge(c.req, c.res);
     await new Promise((r) => setTimeout(r, 0));
     expect(c.status).toBe(502);
     expect(c.body().length).toBeLessThan(700);
 
-    const hugeErr = createResidentsViewHandler(fakeClient(() => Promise.reject(new Error("x".repeat(10_000)))), shell);
+    const hugeErr = createResidentsViewHandler(
+      fakeClient(() => Promise.reject(new Error("x".repeat(10_000)))),
+      shell,
+    );
     const e = fakeReqRes("GET", "/residents");
     hugeErr(e.req, e.res);
     await new Promise((r) => setTimeout(r, 0));
     expect(e.status).toBe(502);
     expect(e.body().length).toBeLessThan(700);
 
-    const throwing = createResidentsViewHandler(fakeClient(() => Promise.reject(new Error("resident admin /residents request failed (ECONNREFUSED)"))), shell);
+    const throwing = createResidentsViewHandler(
+      fakeClient(() => Promise.reject(new Error("resident admin /residents request failed (ECONNREFUSED)"))),
+      shell,
+    );
     const b = fakeReqRes("GET", "/residents/jshttp/vary");
     throwing(b.req, b.res);
     await new Promise((r) => setTimeout(r, 0));

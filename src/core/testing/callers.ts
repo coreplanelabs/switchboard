@@ -23,7 +23,12 @@ export function actorKindOf(id: string): Actor["kind"] {
 /** A `Caller` whose actor holds exactly `grants`. A list of actions means "over
  *  every channel" (an ops token granted `channels: all`); `Partial<Grants>` is
  *  taken as given (an absent axis is the empty set, R7). `extra` adds a chat `origin`. */
-export function callerWith(kind: Caller["kind"], id: string, grants: CallerGrants = [], extra: Partial<Pick<Caller, "origin">> = {}): Caller {
+export function callerWith(
+  kind: Caller["kind"],
+  id: string,
+  grants: CallerGrants = [],
+  extra: Partial<Pick<Caller, "origin">> = {},
+): Caller {
   const origin = extra.origin ? { channelId: extra.origin.channelId, threadKey: extra.origin.threadKey } : undefined;
   const actor: Actor = { kind: actorKindOf(id), id, grants: toGrants(grants), ...(origin ? { origin } : {}) };
   return { kind, id, actor, ...extra };

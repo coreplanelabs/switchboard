@@ -63,12 +63,19 @@ describe("classifyMessage (trigger gating)", () => {
 // elements are also literal, so untrusted detail cannot smuggle a <!channel>.
 describe("render (status card rich_text body)", () => {
   type ContextBlock = { type: string; elements: { text: string }[] };
-  type RichText = { type: string; elements: { type: string; elements: { type: string; text?: string; url?: string }[] }[] };
+  type RichText = {
+    type: string;
+    elements: { type: string; elements: { type: string; text?: string; url?: string }[] }[];
+  };
   const body = (out: { blocks: object[] }) => out.blocks[1] as RichText;
   const bodyElements = (out: { blocks: object[] }) => body(out).elements[0].elements;
 
   it("renders the body as a rich_text block, never a foldable section", () => {
-    const out = render({ title: "run", link: { url: "https://b.example/r", label: "Live run" }, detail: "✓ a\n✓ b\n✓ c\n✓ d\n✓ e\n✓ f" });
+    const out = render({
+      title: "run",
+      link: { url: "https://b.example/r", label: "Live run" },
+      detail: "✓ a\n✓ b\n✓ c\n✓ d\n✓ e\n✓ f",
+    });
     expect(body(out).type).toBe("rich_text");
     expect(out.blocks.map((b) => (b as { type: string }).type)).not.toContain("section");
   });
@@ -136,7 +143,15 @@ describe("render (status card rich_text body)", () => {
 
 describe("threadIncludesBot (participation, re-derived from history)", () => {
   it("true when the bot posted in the thread", () => {
-    expect(threadIncludesBot([{ user: "U1", text: "q" }, { user: BOT, text: "a" }], BOT)).toBe(true);
+    expect(
+      threadIncludesBot(
+        [
+          { user: "U1", text: "q" },
+          { user: BOT, text: "a" },
+        ],
+        BOT,
+      ),
+    ).toBe(true);
   });
 
   it("true when the bot was mentioned anywhere in the thread", () => {
@@ -171,9 +186,9 @@ describe("stripMention — Slack app 'Sent using' footer", () => {
   // this for months because it ignores trailing text.
   it("drops a same-line trailing footer (the shape Slack actually delivers)", () => {
     expect(stripMention(`<@${BOT}> friction report *Sent using* <@U0BJJMDUCKY>`, BOT)).toBe("friction report");
-    expect(stripMention(`<@${BOT}> repo onboard acme/api test="npm test" *Sent using* <@U0BJJMDUCKY|Claude>`, BOT)).toBe(
-      'repo onboard acme/api test="npm test"',
-    );
+    expect(
+      stripMention(`<@${BOT}> repo onboard acme/api test="npm test" *Sent using* <@U0BJJMDUCKY|Claude>`, BOT),
+    ).toBe('repo onboard acme/api test="npm test"');
     // Still anchored to the END: the phrase mid-text is the user's own words.
     expect(stripMention(`<@${BOT}> why does *Sent using* <@U0BJJMDUCKY> appear in my messages?`, BOT)).toBe(
       "why does *Sent using* <@U0BJJMDUCKY> appear in my messages?",
@@ -181,18 +196,20 @@ describe("stripMention — Slack app 'Sent using' footer", () => {
   });
 
   it("drops the footer when a bracketed sender attribution follows the mention", () => {
-    expect(stripMention(`<@${BOT}> friction report\n*Sent using* <@U0BJJMDUCKY|Claude> [justin <justin@coreplane.ai>]`, BOT)).toBe(
-      "friction report",
-    );
+    expect(
+      stripMention(`<@${BOT}> friction report\n*Sent using* <@U0BJJMDUCKY|Claude> [justin <justin@coreplane.ai>]`, BOT),
+    ).toBe("friction report");
     expect(stripMention(`<@${BOT}> repo list\nSent using <@U0BJJMDUCKY> [Justin Helmer]`, BOT)).toBe("repo list");
     // Attribution text is never treated as the footer on its own.
-    expect(stripMention(`<@${BOT}> hello [justin <justin@coreplane.ai>]`, BOT)).toBe("hello [justin <justin@coreplane.ai>]");
+    expect(stripMention(`<@${BOT}> hello [justin <justin@coreplane.ai>]`, BOT)).toBe(
+      "hello [justin <justin@coreplane.ai>]",
+    );
   });
 
   it("drops a trailing '*Sent using* <@APP|Name>' footer line", () => {
-    expect(stripMention(`<@${BOT}> repo onboard coreplanelabs/switchboard\n*Sent using* <@U0BJJMDUCKY|Claude>`, BOT)).toBe(
-      "repo onboard coreplanelabs/switchboard",
-    );
+    expect(
+      stripMention(`<@${BOT}> repo onboard coreplanelabs/switchboard\n*Sent using* <@U0BJJMDUCKY|Claude>`, BOT),
+    ).toBe("repo onboard coreplanelabs/switchboard");
   });
 
   it("accepts the unbolded and label-less forms and surrounding whitespace", () => {
@@ -200,11 +217,15 @@ describe("stripMention — Slack app 'Sent using' footer", () => {
   });
 
   it("strips only the two real shapes: asymmetric bold is not a footer", () => {
-    expect(stripMention(`<@${BOT}> repo list\n*Sent using <@U0BJJMDUCKY|Claude>`, BOT)).toBe("repo list\n*Sent using <@U0BJJMDUCKY|Claude>");
+    expect(stripMention(`<@${BOT}> repo list\n*Sent using <@U0BJJMDUCKY|Claude>`, BOT)).toBe(
+      "repo list\n*Sent using <@U0BJJMDUCKY|Claude>",
+    );
   });
 
   it("strips stacked footers (a forwarded app message can carry two)", () => {
-    expect(stripMention(`<@${BOT}> repo list\n*Sent using* <@U0BJJMDUCKY|Claude>\n*Sent using* <@U0BJJMDUCKY|Claude>`, BOT)).toBe("repo list");
+    expect(
+      stripMention(`<@${BOT}> repo list\n*Sent using* <@U0BJJMDUCKY|Claude>\n*Sent using* <@U0BJJMDUCKY|Claude>`, BOT),
+    ).toBe("repo list");
   });
 
   it("a message that is only a mention plus the footer strips to empty", () => {
@@ -240,7 +261,11 @@ describe("resolveChannelName / resolveUserName (best-effort, cached)", () => {
         info: vi.fn(
           over.userInfo ??
             (async () => ({
-              user: { name: "juser", real_name: "Justin Helmer", profile: { display_name: "justin", real_name: "Justin Helmer" } },
+              user: {
+                name: "juser",
+                real_name: "Justin Helmer",
+                profile: { display_name: "justin", real_name: "Justin Helmer" },
+              },
             })),
         ),
       },
@@ -347,7 +372,13 @@ describe("SlackIO.history — thread reuse and concurrent attachment downloads",
         return new Response(new Uint8Array(4).fill(7), { status: 200, headers: { "content-type": "image/png" } });
       }),
     );
-    const png = (name: string) => ({ id: name, name, mimetype: "image/png", size: 4, url_private_download: `https://files.slack.test/${name}` });
+    const png = (name: string) => ({
+      id: name,
+      name,
+      mimetype: "image/png",
+      size: 4,
+      url_private_download: `https://files.slack.test/${name}`,
+    });
     const p = fetchImages([png("a.png"), png("b.png"), png("c.png")], 10);
     await new Promise((r) => setTimeout(r, 0));
     expect(inFlight).toBe(3);
@@ -440,7 +471,7 @@ describe("fetchImages (attachment ingestion within budgets)", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
-        throw "string failure"; // eslint-disable-line no-throw-literal
+        throw "string failure";
       }),
     );
     const { images, skipped } = await fetchImages([png("a.png")], 10);
@@ -497,10 +528,7 @@ describe("fetchDocuments (PDF + text/code ingestion within budgets)", () => {
 
   it("accepts code files by extension when the mimetype is generic", async () => {
     stubFetch("export const x = 1;\n", "application/octet-stream");
-    const { documents, skipped } = await fetchDocuments(
-      [textFile("main.ts", "application/octet-stream")],
-      10,
-    );
+    const { documents, skipped } = await fetchDocuments([textFile("main.ts", "application/octet-stream")], 10);
     expect(skipped).toEqual([]);
     expect(documents).toHaveLength(1);
     expect(documents[0].data).toBe("export const x = 1;\n");
@@ -510,7 +538,13 @@ describe("fetchDocuments (PDF + text/code ingestion within budgets)", () => {
     const fetchMock = stubFetch();
     const files = [
       { id: "img", name: "shot.png", mimetype: "image/png", size: 10, url_private_download: "https://x/i" },
-      { id: "bin", name: "app.bin", mimetype: "application/octet-stream", size: 10, url_private_download: "https://x/b" },
+      {
+        id: "bin",
+        name: "app.bin",
+        mimetype: "application/octet-stream",
+        size: 10,
+        url_private_download: "https://x/b",
+      },
       pdf("ok.pdf"),
     ];
     const { documents, skipped } = await fetchDocuments(files, 10);
@@ -522,11 +556,7 @@ describe("fetchDocuments (PDF + text/code ingestion within budgets)", () => {
 
   it("skips oversize files and over-count files without fetching them", async () => {
     const fetchMock = stubFetch();
-    const files = [
-      { ...pdf("huge.pdf"), size: 11 * 1024 * 1024 },
-      pdf("one.pdf"),
-      pdf("two.pdf"),
-    ];
+    const files = [{ ...pdf("huge.pdf"), size: 11 * 1024 * 1024 }, pdf("one.pdf"), pdf("two.pdf")];
     const { documents, skipped } = await fetchDocuments(files, 1);
     expect(documents).toHaveLength(1);
     expect(skipped).toEqual([
@@ -578,10 +608,25 @@ describe("fetchDocuments (PDF + text/code ingestion within budgets)", () => {
 describe("classifyDocument (secret-file denylist overrides text classification)", () => {
   it("denies every secret-shaped filename even with a text-ish mimetype", () => {
     for (const name of [
-      ".env", ".env.local", ".env.production", "config.env", "prod.env",
-      "credentials.json", "gcp-service-account.json", "app-key.json",
-      "id_rsa", "id_rsa.pub", "foo.pem", "server.key", "cert.p12", "cert.pfx",
-      ".npmrc", ".netrc", "db.cfg", "app.conf", "settings.ini",
+      ".env",
+      ".env.local",
+      ".env.production",
+      "config.env",
+      "prod.env",
+      "credentials.json",
+      "gcp-service-account.json",
+      "app-key.json",
+      "id_rsa",
+      "id_rsa.pub",
+      "foo.pem",
+      "server.key",
+      "cert.p12",
+      "cert.pfx",
+      ".npmrc",
+      ".netrc",
+      "db.cfg",
+      "app.conf",
+      "settings.ini",
     ]) {
       expect(classifyDocument("text/plain", name), name).toBeNull();
     }
@@ -760,7 +805,9 @@ describe("dedupeDelivery (redelivery guard, #346)", () => {
       { ts: "1788121716.609039", bot_id: "B1" }, // the answer
     ]);
     const drop = await dedupeDelivery(client, ev, REDELIVERY_MS, state);
-    expect(drop).toMatch(/^already answered in its thread \(delivered 36\ds after it was posted — a Slack redelivery\)$/);
+    expect(drop).toMatch(
+      /^already answered in its thread \(delivered 36\ds after it was posted — a Slack redelivery\)$/,
+    );
     expect(client.calls).toEqual([{ channel: "C0BQS7KPJHK", ts: TS }]);
     // The pair is claimed either way — a third delivery is dropped by check 1.
     expect(state.was("C0BQS7KPJHK", TS)).toBe(true);
@@ -797,7 +844,9 @@ describe("dedupeDelivery (redelivery guard, #346)", () => {
     const state = memState();
     const client = repliesClient(new Error("must not be called"));
     await expect(dedupeDelivery(client, { ...ev, botUserId: undefined }, REDELIVERY_MS, state)).resolves.toBeNull();
-    await expect(dedupeDelivery(client, { ...ev, ts: "not-a-ts", threadTs: "not-a-ts" }, REDELIVERY_MS, state)).resolves.toBeNull();
+    await expect(
+      dedupeDelivery(client, { ...ev, ts: "not-a-ts", threadTs: "not-a-ts" }, REDELIVERY_MS, state),
+    ).resolves.toBeNull();
     expect(client.calls).toHaveLength(0);
   });
 
@@ -812,15 +861,27 @@ describe("dedupeDelivery (redelivery guard, #346)", () => {
 
 describe("SlackIO.attach (features/slack-channel.md item 10)", () => {
   const ev = { channel: "C1", user: "U1", text: "hi", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
-  const file = { name: "mcp-show.txt", text: "Tools (100):\n" + "  - `tool` — long\n".repeat(400), lead: "• `vanta` (user) ✅ connected\n_(full output attached — 8,000 chars)_" };
+  const file = {
+    name: "mcp-show.txt",
+    text: "Tools (100):\n" + "  - `tool` — long\n".repeat(400),
+    lead: "• `vanta` (user) ✅ connected\n_(full output attached — 8,000 chars)_",
+  };
 
   it("uploads the text as a snippet in the thread with the lead (in mrkdwn) as the comment — one call, no chunked messages", async () => {
     const uploadV2 = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
     const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
-    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
+      typeof SlackIO
+    >[0];
     await new SlackIO(client, ev).attach(file);
     expect(uploadV2).toHaveBeenCalledTimes(1);
-    expect(uploadV2.mock.calls[0][0]).toMatchObject({ channel_id: "C1", thread_ts: "1.0", filename: "mcp-show.txt", title: "mcp-show.txt", content: file.text });
+    expect(uploadV2.mock.calls[0][0]).toMatchObject({
+      channel_id: "C1",
+      thread_ts: "1.0",
+      filename: "mcp-show.txt",
+      title: "mcp-show.txt",
+      content: file.text,
+    });
     expect(String(uploadV2.mock.calls[0][0].initial_comment)).toContain("_(full output attached — 8,000 chars)_");
     expect(postMessage).not.toHaveBeenCalled();
   });
@@ -830,7 +891,9 @@ describe("SlackIO.attach (features/slack-channel.md item 10)", () => {
       throw new Error("An API error occurred: missing_scope");
     });
     const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
-    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
+      typeof SlackIO
+    >[0];
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       await new SlackIO(client, ev).attach(file);

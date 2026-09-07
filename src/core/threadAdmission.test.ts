@@ -16,7 +16,12 @@ import {
 // while a run is in flight is steered into it or refused with a pointer, never
 // started as a rival run.
 
-const input = (text: string, over: Partial<FollowUpInput> = {}): FollowUpInput => ({ text, userId: "slack:U1", at: 1_000, ...over });
+const input = (text: string, over: Partial<FollowUpInput> = {}): FollowUpInput => ({
+  text,
+  userId: "slack:U1",
+  at: 1_000,
+  ...over,
+});
 
 describe("ThreadAdmission — claim and release", () => {
   it("the first claim on a thread starts; a second claim while it is held sees the live run", () => {
@@ -79,7 +84,12 @@ describe("FollowUpInbox", () => {
 });
 
 describe("decideFollowUp", () => {
-  const live = (agent: string, policy: "steer" | "refuse"): LiveThread => ({ agent, policy, inbox: new FollowUpInbox(), startedAt: 0 });
+  const live = (agent: string, policy: "steer" | "refuse"): LiveThread => ({
+    agent,
+    policy,
+    inbox: new FollowUpInbox(),
+    startedAt: 0,
+  });
 
   it("a bare follow-up into a steerable run steers", () => {
     expect(decideFollowUp(live("coding", "steer"), {})).toEqual({ kind: "steer" });
@@ -90,18 +100,33 @@ describe("decideFollowUp", () => {
   });
 
   it("a follow-up naming a DIFFERENT agent is refused (agent_mismatch), whatever the policy", () => {
-    expect(decideFollowUp(live("coding", "steer"), { agent: "review" })).toEqual({ kind: "refuse", reason: "agent_mismatch" });
-    expect(decideFollowUp(live("review", "refuse"), { agent: "coding" })).toEqual({ kind: "refuse", reason: "agent_mismatch" });
+    expect(decideFollowUp(live("coding", "steer"), { agent: "review" })).toEqual({
+      kind: "refuse",
+      reason: "agent_mismatch",
+    });
+    expect(decideFollowUp(live("review", "refuse"), { agent: "coding" })).toEqual({
+      kind: "refuse",
+      reason: "agent_mismatch",
+    });
   });
 
   it("a bare follow-up into a non-steerable run is refused (not_steerable)", () => {
     expect(decideFollowUp(live("review", "refuse"), {})).toEqual({ kind: "refuse", reason: "not_steerable" });
-    expect(decideFollowUp(live("review", "refuse"), { agent: "review" })).toEqual({ kind: "refuse", reason: "not_steerable" });
+    expect(decideFollowUp(live("review", "refuse"), { agent: "review" })).toEqual({
+      kind: "refuse",
+      reason: "not_steerable",
+    });
   });
 });
 
 describe("replies", () => {
-  const live: LiveThread = { agent: "coding", policy: "steer", inbox: new FollowUpInbox(), startedAt: 10_000, runLink: "https://sb/runs/r1?t=x" };
+  const live: LiveThread = {
+    agent: "coding",
+    policy: "steer",
+    inbox: new FollowUpInbox(),
+    startedAt: 10_000,
+    runLink: "https://sb/runs/r1?t=x",
+  };
 
   it("the steer ack names the agent, the elapsed time and carries the live run's URL bare (the reply path escapes mrkdwn `<url|label>`)", () => {
     const ack = steerAck(live, 73_000);
@@ -133,7 +158,12 @@ describe("replies", () => {
   });
 
   it("the not-steerable refusal says the live agent takes no mid-flight follow-ups", () => {
-    const text = refusalReply({ ...live, agent: "review", policy: "refuse" }, { reason: "not_steerable" }, undefined, 20_000);
+    const text = refusalReply(
+      { ...live, agent: "review", policy: "refuse" },
+      { reason: "not_steerable" },
+      undefined,
+      20_000,
+    );
     expect(text).toContain("*review*");
     expect(text).toContain("does not take follow-ups mid-flight");
   });
@@ -186,7 +216,14 @@ describe("mergeFollowUps — unconsumed inputs become ONE fresh request", () => 
       input("first", { userId: "slack:U1", userName: "ann", sourceUrl: "https://s/1", images: [img] }),
       input("second", { userId: "slack:U2", userName: "bob", sourceUrl: "https://s/2", documents: [doc] }),
     ]);
-    expect(merged).toEqual({ text: "first\n\nsecond", userId: "slack:U2", userName: "bob", sourceUrl: "https://s/2", images: [img], documents: [doc] });
+    expect(merged).toEqual({
+      text: "first\n\nsecond",
+      userId: "slack:U2",
+      userName: "bob",
+      sourceUrl: "https://s/2",
+      images: [img],
+      documents: [doc],
+    });
   });
 
   it("no attachments and no names → those keys are absent, not undefined", () => {

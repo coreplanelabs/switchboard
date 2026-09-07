@@ -32,7 +32,9 @@ export const CHANNEL_INFO_CACHE_MAX = 1000;
 /** The one Web API method the directory needs; `app.client` satisfies it. */
 export interface ConversationInfoClient {
   conversations: {
-    info(args: { channel: string }): Promise<{ channel?: { is_im?: boolean; is_mpim?: boolean; is_private?: boolean } }>;
+    info(args: {
+      channel: string;
+    }): Promise<{ channel?: { is_im?: boolean; is_mpim?: boolean; is_private?: boolean } }>;
   };
 }
 
@@ -78,7 +80,8 @@ export class SlackChannelDirectory implements ChannelDirectory {
   async info(channelId: string): Promise<{ visibility: ChannelVisibility }> {
     // Only a Slack channel or group needs the API: a DM's id already says `dm`,
     // and a non-Slack id is not this adapter's to describe.
-    if (!channelId.startsWith(SLACK_PREFIX) || channelId.startsWith(`${SLACK_PREFIX}D`)) return this.fallback.info(channelId);
+    if (!channelId.startsWith(SLACK_PREFIX) || channelId.startsWith(`${SLACK_PREFIX}D`))
+      return this.fallback.info(channelId);
     const hit = this.cache.get(channelId);
     if (hit && hit.expiresAt > this.now()) return { visibility: hit.visibility };
     const pending = this.inFlight.get(channelId);
@@ -98,9 +101,14 @@ export class SlackChannelDirectory implements ChannelDirectory {
     try {
       const res = await this.client.conversations.info({ channel: channelId.slice(SLACK_PREFIX.length) });
       if (res.channel) visibility = visibilityOfInfo(res.channel);
-      else this.warn(`[authz] conversations.info returned no channel for ${channelId} — treating it as unknown (grants-only) for ${this.ttlMs} ms`);
+      else
+        this.warn(
+          `[authz] conversations.info returned no channel for ${channelId} — treating it as unknown (grants-only) for ${this.ttlMs} ms`,
+        );
     } catch (err) {
-      this.warn(`[authz] conversations.info failed for ${channelId} — treating it as unknown (grants-only) for ${this.ttlMs} ms: ${err instanceof Error ? err.message : String(err)}`);
+      this.warn(
+        `[authz] conversations.info failed for ${channelId} — treating it as unknown (grants-only) for ${this.ttlMs} ms: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
     this.remember(channelId, visibility);
     return { visibility };

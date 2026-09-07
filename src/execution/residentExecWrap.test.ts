@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { capBytesFor, capWrappedCommand, execCapFiles, recoverCapturedOutput } from "./residentExecWrap.js";
+import { capBytesFor, capWrappedCommand, recoverCapturedOutput } from "./residentExecWrap.js";
 
 const run = promisify(execFile);
 

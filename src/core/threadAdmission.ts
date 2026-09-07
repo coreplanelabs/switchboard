@@ -93,7 +93,12 @@ export class ThreadAdmission<T extends FollowUpInput = FollowUpInput> {
   claim(threadKey: string, run: { agent: string; policy: FollowUpPolicy; now?: number }): ClaimOutcome<T> {
     const existing = this.live.get(threadKey);
     if (existing) return { kind: "live", live: existing };
-    const live: LiveThread<T> = { agent: run.agent, policy: run.policy, inbox: new FollowUpInbox<T>(), startedAt: run.now ?? Date.now() };
+    const live: LiveThread<T> = {
+      agent: run.agent,
+      policy: run.policy,
+      inbox: new FollowUpInbox<T>(),
+      startedAt: run.now ?? Date.now(),
+    };
     this.live.set(threadKey, live);
     return { kind: "start", live };
   }
@@ -116,9 +121,7 @@ export class ThreadAdmission<T extends FollowUpInput = FollowUpInput> {
   }
 }
 
-export type FollowUpDecision =
-  | { kind: "steer" }
-  | { kind: "refuse"; reason: "agent_mismatch" | "not_steerable" };
+export type FollowUpDecision = { kind: "steer" } | { kind: "refuse"; reason: "agent_mismatch" | "not_steerable" };
 
 /**
  * Steer unless the follow-up explicitly asks for a different agent than the
@@ -126,7 +129,8 @@ export type FollowUpDecision =
  * nudge) or the live agent does not take mid-run input at all.
  */
 export function decideFollowUp(live: LiveThread, requested: { agent?: string }): FollowUpDecision {
-  if (requested.agent !== undefined && requested.agent !== live.agent) return { kind: "refuse", reason: "agent_mismatch" };
+  if (requested.agent !== undefined && requested.agent !== live.agent)
+    return { kind: "refuse", reason: "agent_mismatch" };
   if (live.policy === "refuse") return { kind: "refuse", reason: "not_steerable" };
   return { kind: "steer" };
 }
@@ -144,7 +148,12 @@ export function steerAck(live: LiveThread, now: number): string {
 }
 
 /** The reply a refused follow-up gets: what is live, why it was not run, what to do. */
-export function refusalReply(live: LiveThread, decision: { reason: "agent_mismatch" | "not_steerable" }, requestedAgent: string | undefined, now: number): string {
+export function refusalReply(
+  live: LiveThread,
+  decision: { reason: "agent_mismatch" | "not_steerable" },
+  requestedAgent: string | undefined,
+  now: number,
+): string {
   const head = `⏳ A *${live.agent}* run is already in flight in this thread (${elapsed(live, now)} in).${linkSuffix(live)}`;
   if (decision.reason === "agent_mismatch") {
     return `${head}\nAn \`agent:${requestedAgent}\` request cannot start beside it — one run per thread. Wait for it to finish and re-send, or start a new thread.`;
@@ -185,7 +194,16 @@ export function followUpSnippet(input: FollowUpInput, max = 80): string {
  * joined in arrival order, attachments concatenated, identity from the last
  * (most recent) input. Empty input → undefined (nothing to run).
  */
-export function mergeFollowUps(inputs: FollowUpInput[]): { text: string; userId: string; userName?: string; sourceUrl?: string; images?: ImageAttachment[]; documents?: DocumentAttachment[] } | undefined {
+export function mergeFollowUps(inputs: FollowUpInput[]):
+  | {
+      text: string;
+      userId: string;
+      userName?: string;
+      sourceUrl?: string;
+      images?: ImageAttachment[];
+      documents?: DocumentAttachment[];
+    }
+  | undefined {
   if (inputs.length === 0) return undefined;
   const last = inputs[inputs.length - 1];
   const images = inputs.flatMap((i) => i.images ?? []);

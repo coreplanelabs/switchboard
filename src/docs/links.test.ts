@@ -21,7 +21,9 @@ const ABSOLUTE_URL = /\bhttps?:\/+[^\s)"'<>\]]*/g;
 const WELL_FORMED_SCHEME = /^https?:\/\/[^/]/;
 
 function docsPages(): string[] {
-  return globSync("**/*.md", { cwd: DOCS }).filter((rel) => !rel.startsWith("node_modules/") && !rel.startsWith(".vitepress/"));
+  return globSync("**/*.md", { cwd: DOCS }).filter(
+    (rel) => !rel.startsWith("node_modules/") && !rel.startsWith(".vitepress/"),
+  );
 }
 
 describe("absolute URLs in docs/", () => {

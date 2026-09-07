@@ -11,6 +11,8 @@ export function formatClock(at: number): string {
   const d = new Date(at);
   const h = d.getHours();
   const p = (n: number): string => String(n).padStart(2, "0");
-  const zone = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(d).find((part) => part.type === "timeZoneName")?.value;
+  const zone = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" })
+    .formatToParts(d)
+    .find((part) => part.type === "timeZoneName")?.value;
   return `${h % 12 === 0 ? 12 : h % 12}:${p(d.getMinutes())}:${p(d.getSeconds())} ${h < 12 ? "AM" : "PM"}${zone ? ` ${zone}` : ""}`;
 }

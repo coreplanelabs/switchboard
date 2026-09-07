@@ -50,7 +50,8 @@ export function residentStateTone(state: string): ResidentTone {
 }
 
 export const str = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
-export const rec = (v: unknown): Record<string, unknown> => (v && typeof v === "object" ? (v as Record<string, unknown>) : {});
+export const rec = (v: unknown): Record<string, unknown> =>
+  v && typeof v === "object" ? (v as Record<string, unknown>) : {};
 
 export function residentSlug(record: ResidentRecordView): string {
   return str(record.resource).replace(/^repo:/, "");
@@ -61,7 +62,7 @@ export function residentSlug(record: ResidentRecordView): string {
  *  container before its first cycle) or the field is malformed. The shape is
  *  the resident's `DiskSample` (KiB; a `parts` value may be null = unmeasured,
  *  rendered "?"), validated field by field — the view displays, never trusts. */
-export interface ResidentDiskView extends DiskSample {}
+export type ResidentDiskView = DiskSample;
 
 const kib = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
 const kibMap = (v: unknown): Record<string, number> => {
@@ -85,7 +86,14 @@ export function residentDisk(record: ResidentRecordView): ResidentDiskView | nul
     totalKiB: total,
     usedKiB: used,
     freeKiB: free,
-    parts: { mirror: kib(p.mirror), deps: kib(p.deps), checkout: kib(p.checkout), threads: kibMap(p.threads), homes: kibMap(p.homes), other: kib(p.other) ?? 0 },
+    parts: {
+      mirror: kib(p.mirror),
+      deps: kib(p.deps),
+      checkout: kib(p.checkout),
+      threads: kibMap(p.threads),
+      homes: kibMap(p.homes),
+      other: kib(p.other) ?? 0,
+    },
   };
 }
 

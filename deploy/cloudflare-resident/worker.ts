@@ -78,12 +78,28 @@ import { DurableObject } from "cloudflare:workers";
 import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
-import { depCacheScript, mutableCachePaths, mutableCacheSwapScript, parseDepCacheScriptOutput } from "../../src/execution/residentDepCache.js";
+import {
+  depCacheScript,
+  mutableCachePaths,
+  mutableCacheSwapScript,
+  parseDepCacheScriptOutput,
+} from "../../src/execution/residentDepCache.js";
 import { parseWorktreeCleanliness, worktreeCleanlinessScript } from "../../src/execution/residentCleanliness.js";
-import { capBytesFor, capWrappedCommand, execCapFiles, recoverCapturedOutput } from "../../src/execution/residentExecWrap.js";
+import {
+  capBytesFor,
+  capWrappedCommand,
+  execCapFiles,
+  recoverCapturedOutput,
+} from "../../src/execution/residentExecWrap.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
 import { shouldRefreshThreadCredentials } from "../../src/execution/residentCredentials.js";
-import { recordFiring, scheduleForCron, watchdogFiring, type ScheduleFiring, type WatchdogSummary } from "../../src/core/schedules.js";
+import {
+  recordFiring,
+  scheduleForCron,
+  watchdogFiring,
+  type ScheduleFiring,
+  type WatchdogSummary,
+} from "../../src/core/schedules.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 import {
   decisivePull,
@@ -111,7 +127,13 @@ import {
   type RefreshFailure,
   type RefreshOutcome,
 } from "../../src/execution/residentRefresh.js";
-import { DF_FREE_ARGV, DISK_FULL_FREE_KIB, isDiskFullReason, parseDfFreeKiB, planDiskFullRecovery } from "../../src/execution/residentDisk.js";
+import {
+  DF_FREE_ARGV,
+  DISK_FULL_FREE_KIB,
+  isDiskFullReason,
+  parseDfFreeKiB,
+  planDiskFullRecovery,
+} from "../../src/execution/residentDisk.js";
 import {
   assembleDiskSample,
   checkDiskAdmission,
@@ -589,7 +611,10 @@ export async function mintRepoScopedToken(env: Env, slug: string): Promise<strin
     // AbortSignal.timeout aborts with a "TimeoutError" DOMException; any other
     // fetch throw (network/DNS) lands here too. Both are command-level per KTD12.
     const aborted = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-    throw new Error(`github-token-mint-failed: ${aborted ? "timed out after 10s contacting api.github.com" : errMsg(err)}`);
+    throw new Error(
+      `github-token-mint-failed: ${aborted ? "timed out after 10s contacting api.github.com" : errMsg(err)}`,
+      { cause: err },
+    );
   }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -906,7 +931,11 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     const { cap } = await this.limits();
     const existing = await this.ctx.storage.list({ prefix: REGISTRY_KEY_PREFIX });
     if (existing.size - 1 >= cap) {
-      return { ok: false, status: 429, error: `resident cap reached (${existing.size}/${cap}) even after evicting ${evict}` };
+      return {
+        ok: false,
+        status: 429,
+        error: `resident cap reached (${existing.size}/${cap}) even after evicting ${evict}`,
+      };
     }
     await this.ctx.storage.delete(registryKey(evict));
     await this.ctx.storage.put(registryKey(record.resource), record);
@@ -926,7 +955,12 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  `commands`, when present, REPLACES the whole command table. */
   async updateConfig(
     resource: string,
-    patch: Partial<Pick<ResidentRecord, "commands" | "effects" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs" | "worktreeTtlDays">>,
+    patch: Partial<
+      Pick<
+        ResidentRecord,
+        "commands" | "effects" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs" | "worktreeTtlDays"
+      >
+    >,
   ): Promise<ResidentRecord | null> {
     const key = registryKey(resource);
     const record = await this.ctx.storage.get<ResidentRecord>(key);
@@ -1144,7 +1178,9 @@ export class ResidentDO extends Sandbox<Env> {
         this.clearIncarnationMemos(); // the container this incarnation's memos described is gone
         throw new RuntimeReplacedError("spawn", err);
       }
-      console.log(`exec: runtime replaced before the process started (SDK says retryable) — retrying once: ${errMsg(err)}`);
+      console.log(
+        `exec: runtime replaced before the process started (SDK says retryable) — retrying once: ${errMsg(err)}`,
+      );
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     }
     try {
@@ -1194,7 +1230,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  process-wide env, never argv (which every user could read from the
    *  shared process list), per KTD12. The leading `credential.helper=`
    *  clears inherited helpers (the image configures gh's). */
-  private async gitWithCred(token: string | null, gitArgs: readonly string[], step: string, timeoutMs: number): Promise<string> {
+  private async gitWithCred(
+    token: string | null,
+    gitArgs: readonly string[],
+    step: string,
+    timeoutMs: number,
+  ): Promise<string> {
     const injected = { GIT_TERMINAL_PROMPT: "0" }; // fail fast instead of prompting
     validateEnvNames(injected);
     if (!token) {
@@ -1254,7 +1295,9 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   private async readMirrorSha(ref: string): Promise<string> {
-    return (await this.runOk(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", `refs/heads/${ref}`], "rev-parse")).trim();
+    return (
+      await this.runOk(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", `refs/heads/${ref}`], "rev-parse")
+    ).trim();
   }
 
   /** Attach's fetch decision (item 51) over the mirror's actual state: the ref
@@ -1325,7 +1368,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  bounded by R2_TRANSFER_TIMEOUT_MS (#356 item 7a): a hang becomes this
    *  StepError, which the cycle's existing failure handling degrades with
    *  the step named. */
-  private async takeSnapshot(resource: string, ref: string, sha: string, lockfileHash: string): Promise<SnapshotRecord> {
+  private async takeSnapshot(
+    resource: string,
+    ref: string,
+    sha: string,
+    lockfileHash: string,
+  ): Promise<SnapshotRecord> {
     try {
       const [mirror, checkout] = await Promise.all([
         withTimeout(
@@ -1334,7 +1382,12 @@ export class ResidentDO extends Sandbox<Env> {
           "mirror backup",
         ),
         withTimeout(
-          this.createBackup({ dir: CHECKOUT_DIR, localBucket: true, ttl: SNAPSHOT_TTL_S, name: `${resource} checkout` }),
+          this.createBackup({
+            dir: CHECKOUT_DIR,
+            localBucket: true,
+            ttl: SNAPSHOT_TTL_S,
+            name: `${resource} checkout`,
+          }),
           R2_TRANSFER_TIMEOUT_MS,
           "checkout backup",
         ),
@@ -1425,14 +1478,21 @@ export class ResidentDO extends Sandbox<Env> {
         try {
           token = await mintRepoScopedToken(this.env, slug);
         } catch (err) {
-          console.log(`provisioning ${resource}: token mint failed (command-level), trying anonymous clone: ${errMsg(err)}`);
+          console.log(
+            `provisioning ${resource}: token mint failed (command-level), trying anonymous clone: ${errMsg(err)}`,
+          );
         }
       }
 
       await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-workspace");
       await this.ensureGitSetup();
       await this.withMirrorLock(() =>
-        this.gitWithCred(token, ["clone", "--mirror", `https://github.com/${slug}.git`, MIRROR_DIR], "clone", stepBudget),
+        this.gitWithCred(
+          token,
+          ["clone", "--mirror", `https://github.com/${slug}.git`, MIRROR_DIR],
+          "clone",
+          stepBudget,
+        ),
       );
       await this.ensureGitSetup(); // the clone just created MIRROR_DIR — lock its perms down
 
@@ -1440,15 +1500,22 @@ export class ResidentDO extends Sandbox<Env> {
       // the mirror's HEAD (what GitHub reports as the default branch).
       let ref = record.defaultRef;
       if (!(await this.refExists(ref))) {
-        ref = (await this.runOk(["git", "-C", MIRROR_DIR, "symbolic-ref", "--short", "HEAD"], "detect-default-branch")).trim();
+        ref = (
+          await this.runOk(["git", "-C", MIRROR_DIR, "symbolic-ref", "--short", "HEAD"], "detect-default-branch")
+        ).trim();
         if (!(await this.refExists(ref))) {
-          throw new StepError("detect-default-branch", `neither configured ref "${record.defaultRef}" nor detected HEAD "${ref}" exists in the mirror`);
+          throw new StepError(
+            "detect-default-branch",
+            `neither configured ref "${record.defaultRef}" nor detected HEAD "${ref}" exists in the mirror`,
+          );
         }
       }
       const sha = await this.readMirrorSha(ref);
       const lockfileHash = await this.lockfileKey(sha);
 
-      await this.runOk(["git", "clone", "--branch", ref, MIRROR_DIR, CHECKOUT_DIR], "checkout-clone", { timeoutMs: stepBudget });
+      await this.runOk(["git", "clone", "--branch", ref, MIRROR_DIR, CHECKOUT_DIR], "checkout-clone", {
+        timeoutMs: stepBudget,
+      });
       await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, CHECKOUT_DIR], "chown");
 
       // Full install + build, unprivileged and token-free (KTD5/KTD7).
@@ -1474,7 +1541,9 @@ export class ResidentDO extends Sandbox<Env> {
       if ((await this.ctx.storage.get<ResidentState>(STATE_KEY)) !== "onboarding") return;
       this.deleteSchedules(PROVISIONING_CALLBACK);
       const reason =
-        err instanceof StepError ? `provision-failed at ${err.step}: ${err.message}` : `provision-failed: ${errMsg(err)}`;
+        err instanceof StepError
+          ? `provision-failed at ${err.step}: ${err.message}`
+          : `provision-failed: ${errMsg(err)}`;
       await this.setResidentState("down", reason);
     }
   }
@@ -1518,11 +1587,13 @@ export class ResidentDO extends Sandbox<Env> {
     // 10-min cadence always outlives the TTL, so a cycle re-probes for real.
     if (this.hydratedVerdictAt !== 0 && Date.now() - this.hydratedVerdictAt < this.hydrationMemoTtlMs) return;
     if (this.hydration) return this.hydration;
-    const p = this.doHydrate().then(() => {
-      this.hydratedVerdictAt = Date.now();
-    }).finally(() => {
-      if (this.hydration === p) this.hydration = null;
-    });
+    const p = this.doHydrate()
+      .then(() => {
+        this.hydratedVerdictAt = Date.now();
+      })
+      .finally(() => {
+        if (this.hydration === p) this.hydration = null;
+      });
     this.hydration = p;
     this.hydrationStartedAt = Date.now();
     return p;
@@ -1536,7 +1607,11 @@ export class ResidentDO extends Sandbox<Env> {
 
   private async doHydrate(): Promise<void> {
     // One storage round trip for the three facts, not three.
-    const stored = await this.ctx.storage.get<ResidentState | SnapshotRecord | RepoFacts>([STATE_KEY, SNAPSHOT_KEY, FACTS_KEY]);
+    const stored = await this.ctx.storage.get<ResidentState | SnapshotRecord | RepoFacts>([
+      STATE_KEY,
+      SNAPSHOT_KEY,
+      FACTS_KEY,
+    ]);
     const state = stored.get(STATE_KEY) as ResidentState | undefined;
     if (!state || state === "onboarding") throw new Error("resident is not provisioned yet — nothing to hydrate");
     const snap = stored.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
@@ -1678,7 +1753,10 @@ export class ResidentDO extends Sandbox<Env> {
         // retrying is not going to help and parking is the right cost behavior.
         // Any other state resets the streak (below).
         const prev = await this.ctx.storage.get<{ reason: string; count: number }>(DEGRADED_STREAK_KEY);
-        const streak = prev && prev.reason === entry.reason ? { reason: entry.reason, count: prev.count + 1 } : { reason: entry.reason, count: 1 };
+        const streak =
+          prev && prev.reason === entry.reason
+            ? { reason: entry.reason, count: prev.count + 1 }
+            : { reason: entry.reason, count: 1 };
         await this.ctx.storage.put(DEGRADED_STREAK_KEY, streak);
         settled = streak.count >= DEGRADED_PARK_AFTER_CYCLES;
       } else {
@@ -1696,7 +1774,8 @@ export class ResidentDO extends Sandbox<Env> {
       if (settled && (await this.isIdle())) {
         // isIdle awaited (git status per live tree) — re-read before writing.
         const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
-        if (!now.idleSince) await this.ctx.storage.put(FACTS_KEY, { ...now, idleSince: new Date().toISOString() } satisfies RepoFacts);
+        if (!now.idleSince)
+          await this.ctx.storage.put(FACTS_KEY, { ...now, idleSince: new Date().toISOString() } satisfies RepoFacts);
         this.rearmOutcome = "idle";
         return; // finally re-arms at IDLE_REFRESH_INTERVAL_S
       }
@@ -1767,7 +1846,12 @@ export class ResidentDO extends Sandbox<Env> {
       // Pure function of the commit (KTD7) — computed from the mirror before
       // any checkout work so the planner can compare it to the deps marker.
       const lockfileHash = sha === facts.sha ? facts.lockfileHash : await this.lockfileKey(sha);
-      const plan = planRefresh({ sha, factsSha: facts.sha, lockfileKey: lockfileHash, disk: await this.readRefreshDisk() });
+      const plan = planRefresh({
+        sha,
+        factsSha: facts.sha,
+        lockfileKey: lockfileHash,
+        disk: await this.readRefreshDisk(),
+      });
       let snap: SnapshotRecord | null = null;
       let previous: SnapshotRecord | undefined;
       if (plan.action !== "unchanged") {
@@ -1875,7 +1959,10 @@ export class ResidentDO extends Sandbox<Env> {
       // `refresh-failed: …` shape.
       // A full disk (#457) is a third class: `disk-full: …`, never serviceable,
       // and the one failure the resident can act on itself (recoverFromDiskFull).
-      const failure = err instanceof StepError ? await this.classifyFailure(err.step, err.message) : await this.classifyFailure("refresh", errMsg(err));
+      const failure =
+        err instanceof StepError
+          ? await this.classifyFailure(err.step, err.message)
+          : await this.classifyFailure("refresh", errMsg(err));
       // Set BEFORE the writes on purpose: if either throws, the finally still
       // re-arms short — the safe direction for an interruption.
       if (failure.interrupted) this.rearmOutcome = "interrupted";
@@ -1990,7 +2077,9 @@ export class ResidentDO extends Sandbox<Env> {
       await this.recordRefreshError(`${reason} — container kept: ${plan.why}`);
       return;
     }
-    console.log(`disk-full: recycling the container — the next alarm restores mirror + checkout from R2 onto an empty disk (${reason})`);
+    console.log(
+      `disk-full: recycling the container — the next alarm restores mirror + checkout from R2 onto an empty disk (${reason})`,
+    );
     await this.ctx.storage.put(DISK_FULL_RECYCLE_KEY, Date.now());
     await this.recordRefreshError(`${reason} — container recycled; restoring from R2 on the next alarm`);
     this.clearIncarnationMemos(); // deliberate incarnation swap
@@ -2089,7 +2178,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  lifecycle flip: the checkout is intact and every existing tree keeps
    *  serving. Runs BEFORE the mirror lock — evictions take the lock themselves.
    *  No `df` answer → admitted (unknown is never refused, #472's rule). */
-  private async admitThreadDisk(input: { threadKey: string; binding: ThreadBinding; facts: RepoFacts; record: ResidentRecord }): Promise<{ admitted: true; committedKiB: number } | ThreadErr> {
+  private async admitThreadDisk(input: {
+    threadKey: string;
+    binding: ThreadBinding;
+    facts: RepoFacts;
+    record: ResidentRecord;
+  }): Promise<{ admitted: true; committedKiB: number } | ThreadErr> {
     const wt = input.binding.worktreePath;
     if ((await this.run(["test", "-d", `${wt}/.git`])).exitCode === 0) return { admitted: true, committedKiB: 0 };
     let kind: ThreadCostKind = "hardlink";
@@ -2105,11 +2199,22 @@ export class ResidentDO extends Sandbox<Env> {
     }
     // The parts come from the last full sample; total/used/free from this df.
     const stored = await this.ctx.storage.get<DiskSample>(DISK_KEY);
-    const sample: DiskSample = { at: stored?.at ?? "", ...df, parts: stored?.parts ?? { mirror: null, deps: null, checkout: null, threads: {}, homes: {}, other: 0 } };
+    const sample: DiskSample = {
+      at: stored?.at ?? "",
+      ...df,
+      parts: stored?.parts ?? { mirror: null, deps: null, checkout: null, threads: {}, homes: {}, other: 0 },
+    };
     // `rawFree` is always the last RAW df reading: `checkDiskAdmission`
     // deducts the in-flight commitments itself, exactly once, so a re-check
     // after an eviction never deducts them twice (review F1).
-    const decide = (rawFreeKiB: number) => checkDiskAdmission({ sample, freeKiB: rawFreeKiB, committedKiB: this.diskCommittedKiB, diskBudgetMb: input.record.diskBudgetMb, kind });
+    const decide = (rawFreeKiB: number) =>
+      checkDiskAdmission({
+        sample,
+        freeKiB: rawFreeKiB,
+        committedKiB: this.diskCommittedKiB,
+        diskBudgetMb: input.record.diskBudgetMb,
+        kind,
+      });
     let rawFree = df.freeKiB;
     let verdict = decide(rawFree);
     const evicted: Array<{ threadKey: string; freedKiB: number | null }> = [];
@@ -2137,7 +2242,12 @@ export class ResidentDO extends Sandbox<Env> {
         }
         // Same re-read guards as the sweep: the clean check awaited.
         const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(c.threadKey));
-        if (!current || current.evicted || current.lastAttachAt !== binding.lastAttachAt || (this.threadOpsInFlight.get(c.threadKey) ?? 0) > 0) {
+        if (
+          !current ||
+          current.evicted ||
+          current.lastAttachAt !== binding.lastAttachAt ||
+          (this.threadOpsInFlight.get(c.threadKey) ?? 0) > 0
+        ) {
           kept.push({ threadKey: c.threadKey, detail: "re-attached or busy during the clean check" });
           continue;
         }
@@ -2146,7 +2256,9 @@ export class ResidentDO extends Sandbox<Env> {
           continue;
         }
         evicted.push({ threadKey: c.threadKey, freedKiB: c.sizeKiB });
-        console.log(`disk-pressure: evicted ${c.threadKey} (${c.ref}, ${formatGiB(c.sizeKiB)} back) to make room for ${input.threadKey}`);
+        console.log(
+          `disk-pressure: evicted ${c.threadKey} (${c.ref}, ${formatGiB(c.sizeKiB)} back) to make room for ${input.threadKey}`,
+        );
         rawFree = rawFreeAfterEviction(rawFree, await this.dfSample(), c.sizeKiB);
         verdict = decide(rawFree);
       }
@@ -2191,11 +2303,19 @@ export class ResidentDO extends Sandbox<Env> {
       // expiry (MirrorBusyError) proceed on the last mirror, same as a failed
       // fetch. The background full cycle armed below repays the staleness.
       await this.withMirrorLock(
-        () => this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "wake-fetch", GIT_NETWORK_TIMEOUT_MS),
+        () =>
+          this.gitWithCred(
+            token,
+            ["-C", MIRROR_DIR, "fetch", "--prune", "origin"],
+            "wake-fetch",
+            GIT_NETWORK_TIMEOUT_MS,
+          ),
         ATTACH_MUTEX_WAIT_MS,
       );
     } catch (err) {
-      console.log(`wake-fetch ${err instanceof MirrorBusyError ? "skipped (mirror busy)" : "failed"} — attach proceeds on the last mirror: ${errMsg(err)}`);
+      console.log(
+        `wake-fetch ${err instanceof MirrorBusyError ? "skipped (mirror busy)" : "failed"} — attach proceeds on the last mirror: ${errMsg(err)}`,
+      );
     }
     // Re-read before writing: the awaits above yielded, and a concurrent
     // refresh cycle may have advanced facts (sha/lastRefreshAt) meanwhile —
@@ -2221,10 +2341,14 @@ export class ResidentDO extends Sandbox<Env> {
     if (probe.exitCode === 0) return false;
     const busy = this.inFlightCount();
     if (busy > 0) {
-      console.log(`image-stale (${where}): ${last} missing but ${busy} operation(s)/attach(es) in flight — deferring restart`);
+      console.log(
+        `image-stale (${where}): ${last} missing but ${busy} operation(s)/attach(es) in flight — deferring restart`,
+      );
       return false;
     }
-    console.log(`image-stale (${where}): ${last} missing in the running container — stopping so it restarts on the current image`);
+    console.log(
+      `image-stale (${where}): ${last} missing in the running container — stopping so it restarts on the current image`,
+    );
     this.clearIncarnationMemos(); // deliberate incarnation swap
     await this.stop().catch((err) => console.log(`image-stale: stop failed: ${errMsg(err)}`));
     return true;
@@ -2251,7 +2375,12 @@ export class ResidentDO extends Sandbox<Env> {
     return { ...check, disk };
   }
 
-  private async watchdogCheckLifecycle(): Promise<{ resource: string; state: ResidentState; reason: string; action: "none" | "rearmed" | "provision-timed-out" | "auto-rebuilt" }> {
+  private async watchdogCheckLifecycle(): Promise<{
+    resource: string;
+    state: ResidentState;
+    reason: string;
+    action: "none" | "rearmed" | "provision-timed-out" | "auto-rebuilt";
+  }> {
     const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
     const status = await this.getStatus();
     if (status.state === "onboarding") {
@@ -2315,7 +2444,9 @@ export class ResidentDO extends Sandbox<Env> {
         this.deleteSchedules(SWEEP_CALLBACK);
         await this.schedule(5, SWEEP_CALLBACK, resource);
         // Disjoint by construction: inside this branch, a non-empty list implies `drifted`.
-        console.log(`watchdog ${resource}: sweep ${pendingSweeps.length === 0 ? "chain was dead" : "row was due beyond the current interval (config drift)"} with live bindings — re-armed`);
+        console.log(
+          `watchdog ${resource}: sweep ${pendingSweeps.length === 0 ? "chain was dead" : "row was due beyond the current interval (config drift)"} with live bindings — re-armed`,
+        );
       }
     }
 
@@ -2393,7 +2524,9 @@ export class ResidentDO extends Sandbox<Env> {
   ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
     const injected = { GIT_TERMINAL_PROMPT: "0" };
     validateEnvNames(injected);
-    const body = capBytes ? capWrappedCommand(worktreePath, command, capBytes, capFiles) : `cd ${worktreePath} && ${command}`;
+    const body = capBytes
+      ? capWrappedCommand(worktreePath, command, capBytes, capFiles)
+      : `cd ${worktreePath} && ${command}`;
     return this.run(["su", "-s", "/bin/bash", user, "-c", body], {
       timeoutMs,
       env: injected,
@@ -2417,7 +2550,12 @@ export class ResidentDO extends Sandbox<Env> {
     const r = await this.threadRun(user, worktreePath, command, timeoutMs, capBytes, files);
     if (!r.timedOut) return r;
     try {
-      const rec = await this.threadRun(user, worktreePath, recoverCapturedOutput(files, capBytes), DEFAULT_EXEC_TIMEOUT_MS);
+      const rec = await this.threadRun(
+        user,
+        worktreePath,
+        recoverCapturedOutput(files, capBytes),
+        DEFAULT_EXEC_TIMEOUT_MS,
+      );
       return { ...r, stdout: rec.stdout, stderr: rec.stderr };
     } catch (err) {
       console.log(`exec: timeout-output recovery failed (${errMsg(err)}) — returning the bare timeout result`);
@@ -2425,7 +2563,13 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  private async threadRunOk(user: string, worktreePath: string, command: string, step: string, timeoutMs: number): Promise<string> {
+  private async threadRunOk(
+    user: string,
+    worktreePath: string,
+    command: string,
+    step: string,
+    timeoutMs: number,
+  ): Promise<string> {
     return this.assertOk(await this.threadRun(user, worktreePath, command, timeoutMs), step);
   }
 
@@ -2484,13 +2628,24 @@ export class ResidentDO extends Sandbox<Env> {
    *  clone → materialize deps (KTD7) → per-attach credential file (KTD12).
    *  `wantSha` (item 51): the commit the caller expects the ref to be at — a
    *  mirror whose ref tip is not that commit is fetched before the clone. */
-  async attachThread(threadKey: string, refHint: string | null, readonly = false, wantSha: string | null = null, record?: ResidentRecord): Promise<AttachOk | ThreadErr> {
+  async attachThread(
+    threadKey: string,
+    refHint: string | null,
+    readonly = false,
+    wantSha: string | null = null,
+    record?: ResidentRecord,
+  ): Promise<AttachOk | ThreadErr> {
     const t0 = Date.now();
     try {
       await this.ensureHydrated();
       const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
       if (await this.reconcileImage("attach")) {
-        return { error: "image-stale: the container predates the current pool and is restarting; retry shortly", status: 503, state: "restoring", reason: "image-stale" };
+        return {
+          error: "image-stale: the container predates the current pool and is restarting; retry shortly",
+          status: 503,
+          state: "restoring",
+          reason: "image-stale",
+        };
       }
       // From here the attach may hold the mirror lock through clone/install:
       // count it so a concurrent refresh-cycle reconcileImage never stops the
@@ -2556,7 +2711,12 @@ export class ResidentDO extends Sandbox<Env> {
       // Name the default branch so the bot can bind to it (loudly) instead of
       // asking the user when the message named no branch; the binding is still
       // made by the caller's next attach, never here (KTD6: explicit, no guess).
-      return { error: "needs-ref: this thread has no ref binding yet — supply refHint", status: 409, needs: "ref", defaultRef: facts.defaultRef };
+      return {
+        error: "needs-ref: this thread has no ref binding yet — supply refHint",
+        status: 409,
+        needs: "ref",
+        defaultRef: facts.defaultRef,
+      };
     }
     const worktreePath = prior?.worktreePath ?? (await threadWorktreePath(threadKey, ref));
     // Read-only vs writable (item 50): decided here, once, from the request
@@ -2582,7 +2742,19 @@ export class ResidentDO extends Sandbox<Env> {
       return admission;
     }
     try {
-      return await this.attachThreadCreate({ threadKey, refHint, wantSha, resource, slug, t0, facts, record, binding, mode, rollback });
+      return await this.attachThreadCreate({
+        threadKey,
+        refHint,
+        wantSha,
+        resource,
+        slug,
+        t0,
+        facts,
+        record,
+        binding,
+        mode,
+        rollback,
+      });
     } finally {
       this.diskCommittedKiB -= admission.committedKiB;
     }
@@ -2644,9 +2816,17 @@ export class ResidentDO extends Sandbox<Env> {
       locked = await this.withMirrorLock(async () => {
         await this.ensureGitSetup();
         if (await this.mirrorNeedsFetchFor(binding.ref, want)) {
-          await this.gitWithCred(fetchToken, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "fetch", GIT_NETWORK_TIMEOUT_MS);
+          await this.gitWithCred(
+            fetchToken,
+            ["-C", MIRROR_DIR, "fetch", "--prune", "origin"],
+            "fetch",
+            GIT_NETWORK_TIMEOUT_MS,
+          );
           if (!(await this.refExists(binding.ref))) {
-            throw new StepError("unknown-ref", `ref ${JSON.stringify(binding.ref)} does not resolve in the mirror (even after a fetch)`);
+            throw new StepError(
+              "unknown-ref",
+              `ref ${JSON.stringify(binding.ref)} does not resolve in the mirror (even after a fetch)`,
+            );
           }
         }
         const sha = await this.readMirrorSha(binding.ref);
@@ -2670,7 +2850,12 @@ export class ResidentDO extends Sandbox<Env> {
     let credentials: AttachOk["credentials"] = mode.readonly ? "none" : "unavailable";
     let credentialsWrittenAt: number | undefined;
     try {
-      deps = await this.materializeThreadDeps(binding, locked.value.threadLockKey, facts.lockfileHash, record.commands.install);
+      deps = await this.materializeThreadDeps(
+        binding,
+        locked.value.threadLockKey,
+        facts.lockfileHash,
+        record.commands.install,
+      );
       if (mode.scrubCredentials) {
         // Every read-only attach, reused tree included: a tree built before
         // this rule (or by a writable attach on this thread) may carry a file.
@@ -2745,7 +2930,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  gives the thread user a fully-owned repo whose writes stay in its own
    *  .git; `origin` is repointed at GitHub so fetch/push use the per-attach
    *  credential file rather than the (deliberately unreadable) mirror. */
-  private async ensureThreadWorktree(binding: ThreadBinding, sha: string, originUrl: string, modeSwitch: boolean): Promise<boolean> {
+  private async ensureThreadWorktree(
+    binding: ThreadBinding,
+    sha: string,
+    originUrl: string,
+    modeSwitch: boolean,
+  ): Promise<boolean> {
     const wt = binding.worktreePath;
     const threadDir = parentDir(wt);
     await this.runOk(["install", "-d", "-m", "755", "-o", "root", "-g", "root", THREADS_DIR], "threads-dir");
@@ -2767,7 +2957,12 @@ export class ResidentDO extends Sandbox<Env> {
       } else {
         const headSha = head.stdout.trim();
         if (headSha !== sha) {
-          const anc = await this.threadRun(binding.user, wt, `git merge-base --is-ancestor ${sha} HEAD`, DEFAULT_EXEC_TIMEOUT_MS);
+          const anc = await this.threadRun(
+            binding.user,
+            wt,
+            `git merge-base --is-ancestor ${sha} HEAD`,
+            DEFAULT_EXEC_TIMEOUT_MS,
+          );
           if (anc.exitCode !== 0) recreate = true; // stale: behind/diverged from the mirror tip
         }
       }
@@ -2775,17 +2970,21 @@ export class ResidentDO extends Sandbox<Env> {
     }
 
     await this.runOk(["rm", "-rf", wt], "worktree-clean");
-    await this.runOk(
-      ["git", "clone", "--no-hardlinks", "--branch", binding.ref, MIRROR_DIR, wt],
-      "worktree-clone",
-      { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
-    );
+    await this.runOk(["git", "clone", "--no-hardlinks", "--branch", binding.ref, MIRROR_DIR, wt], "worktree-clone", {
+      timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+    });
     await this.runOk(["chown", "-R", `${binding.user}:${binding.user}`, wt], "worktree-chown");
     // Writable: origin → GitHub (fetch/push via the per-attach credential file).
     // Read-only: origin stays the local mirror, which thread users cannot
     // traverse (root:worker1 750) — fetch/push fail legibly, while the
     // clone-time remote-tracking refs still serve `git diff origin/<base>...HEAD`.
-    await this.threadRunOk(binding.user, wt, `git remote set-url origin ${shellQuote(originUrl)}`, "worktree-remote", DEFAULT_EXEC_TIMEOUT_MS);
+    await this.threadRunOk(
+      binding.user,
+      wt,
+      `git remote set-url origin ${shellQuote(originUrl)}`,
+      "worktree-remote",
+      DEFAULT_EXEC_TIMEOUT_MS,
+    );
     return true;
   }
 
@@ -2917,7 +3116,10 @@ export class ResidentDO extends Sandbox<Env> {
     const stage = `${stageDir}/cred`;
     await this.ensureStageDir(binding.user, stageDir);
     await this.writeFile(stage, `https://x-access-token:${token}@github.com\n`);
-    await this.runOk(["sh", "-c", `chown ${binding.user}:${binding.user} ${stage} && chmod 600 ${stage}`], "stage-perms");
+    await this.runOk(
+      ["sh", "-c", `chown ${binding.user}:${binding.user} ${stage} && chmod 600 ${stage}`],
+      "stage-perms",
+    );
     const cred = `${binding.worktreePath}/.git/github-credentials`;
     await this.threadRunOk(
       binding.user,
@@ -2957,7 +3159,9 @@ export class ResidentDO extends Sandbox<Env> {
       console.log(`credentials: refreshed for ${binding.threadKey} (${decision.reason})`);
       return writtenAt;
     } catch (err) {
-      console.log(`credentials: refresh failed (${decision.reason}: ${errMsg(err)}) — command runs without a fresh token`);
+      console.log(
+        `credentials: refresh failed (${decision.reason}: ${errMsg(err)}) — command runs without a fresh token`,
+      );
       return undefined;
     }
   }
@@ -2974,13 +3178,25 @@ export class ResidentDO extends Sandbox<Env> {
     }
     const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
     if (!binding) {
-      return { error: "not-attached: no binding for this threadKey — POST /attach first", status: 409, needs: "attach" };
+      return {
+        error: "not-attached: no binding for this threadKey — POST /attach first",
+        status: 409,
+        needs: "attach",
+      };
     }
     if (binding.evicted || !binding.user) {
-      return { error: "evicted: this thread's worktree was evicted after inactivity — POST /attach to recreate", status: 409, needs: "attach" };
+      return {
+        error: "evicted: this thread's worktree was evicted after inactivity — POST /attach to recreate",
+        status: 409,
+        needs: "attach",
+      };
     }
     if ((await this.run(["test", "-d", `${binding.worktreePath}/.git`])).exitCode !== 0) {
-      return { error: "worktree-missing: the container disk was recycled since the last attach — POST /attach to recreate", status: 409, needs: "attach" };
+      return {
+        error: "worktree-missing: the container disk was recycled since the last attach — POST /attach to recreate",
+        status: 409,
+        needs: "attach",
+      };
     }
     return { binding };
   }
@@ -3059,14 +3275,24 @@ export class ResidentDO extends Sandbox<Env> {
     return this.withThreadBusy(threadKey, () => this.readThreadFileImpl(threadKey, path));
   }
 
-  private async readThreadFileImpl(threadKey: string, path: string): Promise<{ content: string; truncated: boolean } | ThreadErr> {
+  private async readThreadFileImpl(
+    threadKey: string,
+    path: string,
+  ): Promise<{ content: string; truncated: boolean } | ThreadErr> {
     const pre = await this.threadPreflight(threadKey);
     if ("error" in pre) return pre;
     const resolved = confineThreadPath(pre.binding.worktreePath, path);
-    if (!resolved) return { error: `path-escape: ${JSON.stringify(path)} does not stay inside the thread worktree`, status: 400 };
+    if (!resolved)
+      return { error: `path-escape: ${JSON.stringify(path)} does not stay inside the thread worktree`, status: 400 };
     let r: Awaited<ReturnType<ResidentDO["threadRun"]>>;
     try {
-      r = await this.threadRun(pre.binding.user, pre.binding.worktreePath, `cat -- ${resolved}`, DEFAULT_EXEC_TIMEOUT_MS, capBytesFor(READ_CONTENT_CAP));
+      r = await this.threadRun(
+        pre.binding.user,
+        pre.binding.worktreePath,
+        `cat -- ${resolved}`,
+        DEFAULT_EXEC_TIMEOUT_MS,
+        capBytesFor(READ_CONTENT_CAP),
+      );
     } catch (err) {
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       throw err;
@@ -3081,22 +3307,34 @@ export class ResidentDO extends Sandbox<Env> {
    *  then a privilege-dropped `cat` moves it into the worktree. Writing as
    *  the user (not root) means a planted symlink cannot escalate the write
    *  beyond what the user could touch anyway. */
-  async writeThreadFile(threadKey: string, path: string, content: string): Promise<{ ok: true; bytes: number } | ThreadErr> {
+  async writeThreadFile(
+    threadKey: string,
+    path: string,
+    content: string,
+  ): Promise<{ ok: true; bytes: number } | ThreadErr> {
     return this.withThreadBusy(threadKey, () => this.writeThreadFileImpl(threadKey, path, content));
   }
 
-  private async writeThreadFileImpl(threadKey: string, path: string, content: string): Promise<{ ok: true; bytes: number } | ThreadErr> {
+  private async writeThreadFileImpl(
+    threadKey: string,
+    path: string,
+    content: string,
+  ): Promise<{ ok: true; bytes: number } | ThreadErr> {
     const pre = await this.threadPreflight(threadKey);
     if ("error" in pre) return pre;
     const { binding } = pre;
     const resolved = confineThreadPath(binding.worktreePath, path);
-    if (!resolved) return { error: `path-escape: ${JSON.stringify(path)} does not stay inside the thread worktree`, status: 400 };
+    if (!resolved)
+      return { error: `path-escape: ${JSON.stringify(path)} does not stay inside the thread worktree`, status: 400 };
     const stageDir = `/workspace/.stage-${binding.user}`;
     const stage = `${stageDir}/put`;
     try {
       await this.ensureStageDir(binding.user, stageDir);
       await this.writeFile(stage, content);
-      await this.runOk(["sh", "-c", `chown ${binding.user}:${binding.user} ${stage} && chmod 600 ${stage}`], "stage-perms");
+      await this.runOk(
+        ["sh", "-c", `chown ${binding.user}:${binding.user} ${stage} && chmod 600 ${stage}`],
+        "stage-perms",
+      );
       await this.threadRunOk(
         binding.user,
         binding.worktreePath,
@@ -3116,7 +3354,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  already lost it) and release its pool user; the binding is KEPT, marked
    *  evicted, so the ref stays sticky and the next attach recreates the tree
    *  (KTD6). Shared by the inactivity sweep and /detach. */
-  private async evictBinding(binding: ThreadBinding, runtimeActive: boolean, logCtx: string, why: string): Promise<boolean> {
+  private async evictBinding(
+    binding: ThreadBinding,
+    runtimeActive: boolean,
+    logCtx: string,
+    why: string,
+  ): Promise<boolean> {
     const threadDir = parentDir(binding.worktreePath);
     if (runtimeActive && threadDir.startsWith(`${THREADS_DIR}/`)) {
       try {
@@ -3130,7 +3373,9 @@ export class ResidentDO extends Sandbox<Env> {
       // the tree lived, all of them now), npm/yarn/bun caches — goes with it.
       // Pool users only, never the build user (its store backs the warm checkout).
       if ((THREAD_USERS as readonly string[]).includes(binding.user)) {
-        await this.run(threadUserCacheCleanArgv(`/home/${binding.user}`)).catch((err) => console.log(`${logCtx}: home cache rm failed for ${binding.user}: ${errMsg(err)}`));
+        await this.run(threadUserCacheCleanArgv(`/home/${binding.user}`)).catch((err) =>
+          console.log(`${logCtx}: home cache rm failed for ${binding.user}: ${errMsg(err)}`),
+        );
       }
     }
     // The rm above awaited the mirror lock; a re-attach that STARTED in that
@@ -3162,7 +3407,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  uncommitted or unpushed work, is KEPT and the caller learns why. No
    *  binding → 404-shaped error; already evicted → a no-op success. Never
    *  flips lifecycle state. */
-  async detachThread(threadKey: string, force: boolean): Promise<{ released: boolean; reason?: string; user?: string } | ThreadErr> {
+  async detachThread(
+    threadKey: string,
+    force: boolean,
+  ): Promise<{ released: boolean; reason?: string; user?: string } | ThreadErr> {
     const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
     if (!binding) return { error: `no-binding: ${threadKey} has never attached to this resident`, status: 404 };
     if (binding.evicted || !binding.user) return { released: false, reason: "already-evicted" };
@@ -3175,7 +3423,9 @@ export class ResidentDO extends Sandbox<Env> {
     if (plan.action === "refuse") return { released: false, reason: plan.reason, user: binding.user };
     if (plan.action === "kill") {
       await this.killThreadUserProcesses(plan.user);
-      console.log(`detach: force — killed ${plan.user}'s processes for ${threadKey} (${plan.inFlight} op(s) were in flight)`);
+      console.log(
+        `detach: force — killed ${plan.user}'s processes for ${threadKey} (${plan.inFlight} op(s) were in flight)`,
+      );
       const left = await this.waitForThreadDrain(threadKey);
       if (left > 0) return { released: false, reason: busyAfterKillReason(left), user: binding.user };
     }
@@ -3188,12 +3438,18 @@ export class ResidentDO extends Sandbox<Env> {
     // yields at each await), so an exec that arrived mid-detach would otherwise
     // have its tree removed under it.
     const busyNow = this.threadOpsInFlight.get(threadKey) ?? 0;
-    if (busyNow > 0) return { released: false, reason: `busy: ${busyNow} operation(s) started during detach — kept`, user: binding.user };
+    if (busyNow > 0)
+      return {
+        released: false,
+        reason: `busy: ${busyNow} operation(s) started during detach — kept`,
+        user: binding.user,
+      };
     // Same re-read as the sweep: a re-attach during the clean check means a
     // fresh tree we must not remove from a stale snapshot.
     const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
     if (!current || current.evicted) return { released: false, reason: "already-evicted" };
-    if (current.lastAttachAt !== binding.lastAttachAt) return { released: false, reason: "re-attached during the clean check — kept", user: current.user };
+    if (current.lastAttachAt !== binding.lastAttachAt)
+      return { released: false, reason: "re-attached during the clean check — kept", user: current.user };
     const user = current.user;
     // Same as the sweep: `active` was read before the clean check's awaits; a
     // container that woke meanwhile must get the rm, not an orphaned tree.
@@ -3340,7 +3596,15 @@ export class ResidentDO extends Sandbox<Env> {
         // attach), and an eviction decided on a stale "inactive" would skip the
         // rm and orphan a real tree.
         const activeNow = await this.isRuntimeActive().catch(() => false);
-        if (await this.evictBinding(current, activeNow, `worktree-sweep ${resource}`, last >= cutoff ? "clean-idle" : "ttl")) evicted.push(binding.threadKey);
+        if (
+          await this.evictBinding(
+            current,
+            activeNow,
+            `worktree-sweep ${resource}`,
+            last >= cutoff ? "clean-idle" : "ttl",
+          )
+        )
+          evicted.push(binding.threadKey);
         else kept++;
       }
     } finally {
@@ -3420,9 +3684,17 @@ export class ResidentDO extends Sandbox<Env> {
         await this.ensureGitSetup();
         const ref = refArg ?? facts.defaultRef;
         if (!(await this.refExists(ref))) {
-          await this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "fetch", GIT_NETWORK_TIMEOUT_MS);
+          await this.gitWithCred(
+            token,
+            ["-C", MIRROR_DIR, "fetch", "--prune", "origin"],
+            "fetch",
+            GIT_NETWORK_TIMEOUT_MS,
+          );
           if (!(await this.refExists(ref))) {
-            throw new StepError("unknown-ref", `ref ${JSON.stringify(ref)} does not resolve in the mirror (even after a fetch)`);
+            throw new StepError(
+              "unknown-ref",
+              `ref ${JSON.stringify(ref)} does not resolve in the mirror (even after a fetch)`,
+            );
           }
         }
         const sha = await this.readMirrorSha(ref);
@@ -3517,7 +3789,11 @@ export class ResidentDO extends Sandbox<Env> {
   /** Ask GitHub what happened to a head branch that still exists in the
    *  mirror. One REST call, bounded; any failure is `unknown` (keep), never a
    *  guess. Anonymous when the App is unconfigured (public repos). */
-  private async lookupPullFate(slug: string, ref: string, token: string | null): Promise<{ fate: RefFate; pr: number | null }> {
+  private async lookupPullFate(
+    slug: string,
+    ref: string,
+    token: string | null,
+  ): Promise<{ fate: RefFate; pr: number | null }> {
     const owner = slug.split("/")[0];
     const url = `https://api.github.com/repos/${slug}/pulls?state=all&head=${encodeURIComponent(`${owner}:${ref}`)}&sort=updated&direction=desc&per_page=10`;
     try {
@@ -3549,7 +3825,10 @@ export class ResidentDO extends Sandbox<Env> {
     resource: string,
     defaultRef: string,
     token: string | null,
-  ): Promise<{ reclaimed: Array<{ threadKey: string; ref: string; why: string }>; kept: Array<{ threadKey: string; ref: string; why: ReclaimWhy }> }> {
+  ): Promise<{
+    reclaimed: Array<{ threadKey: string; ref: string; why: string }>;
+    kept: Array<{ threadKey: string; ref: string; why: ReclaimWhy }>;
+  }> {
     const reclaimed: Array<{ threadKey: string; ref: string; why: string }> = [];
     const kept: Array<{ threadKey: string; ref: string; why: ReclaimWhy }> = [];
     const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
@@ -3572,7 +3851,14 @@ export class ResidentDO extends Sandbox<Env> {
     // unknown (null) and the PR lookup decides — keep on a guess, never evict.
     let mirrorRefs: Set<string> | null = null;
     if (active && distinctRefs.length > 0) {
-      const listing = await this.run(["git", "-C", MIRROR_DIR, "for-each-ref", "--format=%(refname:short)", "refs/heads/"]);
+      const listing = await this.run([
+        "git",
+        "-C",
+        MIRROR_DIR,
+        "for-each-ref",
+        "--format=%(refname:short)",
+        "refs/heads/",
+      ]);
       mirrorRefs = listing.exitCode === 0 ? parseRefListing(listing.stdout) : null;
     }
     const fates = new Map<string, { fate: RefFate; detail: string }>();
@@ -3583,7 +3869,8 @@ export class ResidentDO extends Sandbox<Env> {
           return;
         }
         const looked = await this.lookupPullFate(slug, ref, token);
-        const detail = looked.pr !== null && (looked.fate === "merged" || looked.fate === "closed") ? ` #${looked.pr}` : "";
+        const detail =
+          looked.pr !== null && (looked.fate === "merged" || looked.fate === "closed") ? ` #${looked.pr}` : "";
         fates.set(ref, { fate: looked.fate, detail });
       }),
     );
@@ -3597,7 +3884,11 @@ export class ResidentDO extends Sandbox<Env> {
       // anything: a finished ref, nothing running, runtime up (down → the tree
       // is already gone with the disk → null).
       const finished = fate === "gone" || fate === "merged" || fate === "closed";
-      const clean = !active ? null : finished && !isDefaultRef && busy === 0 ? (await this.worktreeCleanliness(binding)).clean : null;
+      const clean = !active
+        ? null
+        : finished && !isDefaultRef && busy === 0
+          ? (await this.worktreeCleanliness(binding)).clean
+          : null;
       const decision = reclaimDecision({ fate, isDefaultRef, busy, clean });
       if (!decision.reclaim) {
         kept.push({ threadKey: binding.threadKey, ref: binding.ref, why: decision.why });
@@ -3638,12 +3929,19 @@ export class ResidentDO extends Sandbox<Env> {
     const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
     if (!facts) return { reclaimed: [], kept: [], fetch: "skipped" };
     let token: string | null = null;
-    if (githubAppConfigured(this.env)) token = await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null);
+    if (githubAppConfigured(this.env))
+      token = await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null);
     let fetchResult = "skipped";
     if (await this.isRuntimeActive().catch(() => false)) {
       try {
         await this.withMirrorLock(
-          () => this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "reclaim-fetch", GIT_NETWORK_TIMEOUT_MS),
+          () =>
+            this.gitWithCred(
+              token,
+              ["-C", MIRROR_DIR, "fetch", "--prune", "origin"],
+              "reclaim-fetch",
+              GIT_NETWORK_TIMEOUT_MS,
+            ),
           ATTACH_MUTEX_WAIT_MS,
         );
         fetchResult = "ok";
@@ -3686,7 +3984,15 @@ export class ResidentDO extends Sandbox<Env> {
    *  lifecycle + recorded sha/cache keys/snapshot stamp/refresh telemetry.
    *  Backup handles are reduced to ids — never the raw handle internals. */
   async getResidentInfo(): Promise<Record<string, unknown>> {
-    const map = await this.ctx.storage.get<unknown>([RESOURCE_KEY, STATE_KEY, REASON_KEY, UPDATED_KEY, FACTS_KEY, SNAPSHOT_KEY, DISK_KEY]);
+    const map = await this.ctx.storage.get<unknown>([
+      RESOURCE_KEY,
+      STATE_KEY,
+      REASON_KEY,
+      UPDATED_KEY,
+      FACTS_KEY,
+      SNAPSHOT_KEY,
+      DISK_KEY,
+    ]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const snap = map.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
     const disk = (map.get(DISK_KEY) as DiskSample | undefined) ?? null;
@@ -3702,7 +4008,16 @@ export class ResidentDO extends Sandbox<Env> {
     const threads = [...bindings.values()]
       .sort((a, b) => b.lastAttachAt.localeCompare(a.lastAttachAt))
       .map(({ threadKey, ref, sha, user, deps, boundAt, lastAttachAt, evicted, evictedAt, evictedWhy }) => ({
-        threadKey, ref, sha: sha ?? null, user, deps: deps ?? null, boundAt, lastAttachAt, evicted: evicted ?? false, evictedAt: evictedAt ?? null, evictedWhy: evictedWhy ?? null,
+        threadKey,
+        ref,
+        sha: sha ?? null,
+        user,
+        deps: deps ?? null,
+        boundAt,
+        lastAttachAt,
+        evicted: evicted ?? false,
+        evictedAt: evictedAt ?? null,
+        evictedWhy: evictedWhy ?? null,
       }));
     return {
       resource: map.get(RESOURCE_KEY) ?? null,
@@ -3727,7 +4042,11 @@ export class ResidentDO extends Sandbox<Env> {
             checkoutBackupId: snap.checkout.id,
           }
         : null,
-      schedules: { refresh: refresh.length, provisionRun: provisionRun.length, provisionDeadline: provisionDeadline.length },
+      schedules: {
+        refresh: refresh.length,
+        provisionRun: provisionRun.length,
+        provisionDeadline: provisionDeadline.length,
+      },
       inFlight: this.inFlightCount(),
       threads,
       // Item 55: the last disk sample (`residentDiskBudget.ts` DiskSample), or
@@ -4016,10 +4335,15 @@ function parseResource(value: unknown): { resource: string } | { error: string }
   const match = RESOURCE_RE.exec(value);
   if (!match) return { error: `resource must match ${String(RESOURCE_RE)}` };
   if (!SUPPORTED_RESOURCE_TYPES.has(match[1])) {
-    return { error: `unsupported resource type "${match[1]}" (supported: ${[...SUPPORTED_RESOURCE_TYPES].join(", ")})` };
+    return {
+      error: `unsupported resource type "${match[1]}" (supported: ${[...SUPPORTED_RESOURCE_TYPES].join(", ")})`,
+    };
   }
   if (match[1] === "repo" && !REPO_ID_RE.test(match[2])) {
-    return { error: 'repo resource id must be a lowercase GitHub "<owner>/<name>" slug (e.g. "repo:coreplanelabs/switchboard")' };
+    return {
+      error:
+        'repo resource id must be a lowercase GitHub "<owner>/<name>" slug (e.g. "repo:coreplanelabs/switchboard")',
+    };
   }
   return { resource: value };
 }
@@ -4035,7 +4359,9 @@ function parseCommands(value: unknown): { commands: Record<string, string> } | {
   for (const [name, command] of Object.entries(value)) {
     if (!COMMAND_NAME_RE.test(name)) return { error: `invalid command name ${JSON.stringify(name)}` };
     if (typeof command !== "string" || command.length === 0 || command.length > MAX_COMMAND_LENGTH) {
-      return { error: `command ${JSON.stringify(name)} must be a non-empty string of at most ${MAX_COMMAND_LENGTH} chars` };
+      return {
+        error: `command ${JSON.stringify(name)} must be a non-empty string of at most ${MAX_COMMAND_LENGTH} chars`,
+      };
     }
     commands[name] = command;
   }
@@ -4070,7 +4396,13 @@ const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
  *  and whitespace, and `..` / `@{` are refused before the value ever derives
  *  a path or a git argument. */
 function parseRef(value: unknown, field: string): { ref: string } | { error: string } {
-  if (typeof value !== "string" || !REF_RE.test(value) || value.includes("..") || value.includes("@{") || value.endsWith(".lock")) {
+  if (
+    typeof value !== "string" ||
+    !REF_RE.test(value) ||
+    value.includes("..") ||
+    value.includes("@{") ||
+    value.endsWith(".lock")
+  ) {
     return { error: `${field} must be a plausible git branch ref (e.g. "main")` };
   }
   return { ref: value };
@@ -4090,12 +4422,19 @@ const THREAD_KEY_RE = /^[a-z]{1,32}:[A-Za-z0-9._:-]{1,128}$/;
 
 function parseThreadKey(value: unknown): { threadKey: string } | { error: string } {
   if (typeof value !== "string" || !THREAD_KEY_RE.test(value)) {
-    return { error: `threadKey must be a platform-namespaced id matching ${String(THREAD_KEY_RE)} (e.g. "slack:C0123ABC:1712345.6789")` };
+    return {
+      error: `threadKey must be a platform-namespaced id matching ${String(THREAD_KEY_RE)} (e.g. "slack:C0123ABC:1712345.6789")`,
+    };
   }
   return { threadKey: value };
 }
 
-function parsePositiveInt(value: unknown, field: string, min: number, max: number): { value: number } | { error: string } {
+function parsePositiveInt(
+  value: unknown,
+  field: string,
+  min: number,
+  max: number,
+): { value: number } | { error: string } {
   if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
     return { error: `${field} must be an integer between ${min} and ${max}` };
   }
@@ -4236,7 +4575,8 @@ export default {
           // auth so an unauthenticated caller still learns nothing extra.
           const op = typeof body.op === "string" ? body.op : "";
           // Authenticated but under-scoped → 403 (401 is reserved for "no valid bearer").
-          if (!isAdmin && !READ_DEBUG_OPS.has(op)) return json({ error: "forbidden: admin scope required for this op" }, 403);
+          if (!isAdmin && !READ_DEBUG_OPS.has(op))
+            return json({ error: "forbidden: admin scope required for this op" }, 403);
           return await handleDebug(env, body);
         }
         case "/status":
@@ -4274,11 +4614,15 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const schedule = scheduleForCron(controller.cron, "resident");
     if (!schedule) {
-      console.error(`[schedule] cron "${controller.cron}" is not a resident schedule in the registry — nothing fired (wrangler.jsonc and src/core/schedules.ts have drifted)`);
+      console.error(
+        `[schedule] cron "${controller.cron}" is not a resident schedule in the registry — nothing fired (wrangler.jsonc and src/core/schedules.ts have drifted)`,
+      );
       return;
     }
     if (schedule.action.type !== "watchdog") {
-      console.error(`[schedule] ${schedule.name}: action "${schedule.action.type}" is not something the resident Worker fires — nothing fired`);
+      console.error(
+        `[schedule] ${schedule.name}: action "${schedule.action.type}" is not something the resident Worker fires — nothing fired`,
+      );
       return;
     }
     const firedAt = controller.scheduledTime || Date.now();
@@ -4388,7 +4732,9 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
     if ("error" in result) return json({ error: result.error, wouldHaveEvicted: pick.candidate }, result.status);
     const teardown = await teardownResident(env, pick.candidate.resource);
     evicted = { ...pick.candidate, registryRemoved: true, ...teardown };
-    console.log(`lru-evict: offboarded ${pick.candidate.resource} (last activity ${pick.candidate.lastActivityAt}) to make room for ${resource.resource}`);
+    console.log(
+      `lru-evict: offboarded ${pick.candidate.resource} (last activity ${pick.candidate.lastActivityAt}) to make room for ${resource.resource}`,
+    );
   }
   if ("error" in result) return json({ error: result.error, ...(evicted ? { evicted } : {}) }, result.status);
 
@@ -4416,7 +4762,9 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
  *  — never as a cold candidate. */
 async function collectResidentViews(env: Env): Promise<ResidentView[]> {
   const residents = await registryStub(env).list();
-  const settled = await Promise.allSettled(residents.map((record) => residentStub(env, record.resource).getResidentInfo()));
+  const settled = await Promise.allSettled(
+    residents.map((record) => residentStub(env, record.resource).getResidentInfo()),
+  );
   return residents.map((record, i) => {
     const s = settled[i];
     const live = s.status === "fulfilled" ? s.value : {};
@@ -4510,15 +4858,13 @@ async function teardownResident(
   const [teardown, r2Sweep] = await Promise.all([
     residentStub(env, resource)
       .teardown()
-      .catch(
-        (err: unknown): Awaited<ReturnType<ResidentDO["teardown"]>> => ({
-          schedulesCancelled: false,
-          containerStopped: false,
-          storageCleared: false,
-          backupObjectsDeleted: 0,
-          errors: [`teardown failed: ${errMsg(err)}`],
-        }),
-      ),
+      .catch((err: unknown): Awaited<ReturnType<ResidentDO["teardown"]>> => ({
+        schedulesCancelled: false,
+        containerStopped: false,
+        storageCleared: false,
+        backupObjectsDeleted: 0,
+        errors: [`teardown failed: ${errMsg(err)}`],
+      })),
     // The registry is already gone, so the offboard cannot be retried; a
     // transient R2 failure must degrade to a reported partial success (naming
     // the prefix left behind) rather than throw an unretryable 500.
@@ -4547,7 +4893,12 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
 
-  const patch: Partial<Pick<ResidentRecord, "commands" | "effects" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs" | "worktreeTtlDays">> = {};
+  const patch: Partial<
+    Pick<
+      ResidentRecord,
+      "commands" | "effects" | "defaultRef" | "diskBudgetMb" | "provisioningTimeoutMs" | "worktreeTtlDays"
+    >
+  > = {};
   if (body.commands !== undefined) {
     const commands = parseCommands(body.commands);
     if ("error" in commands) return json({ error: commands.error }, 400);
@@ -4573,7 +4924,10 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
   if (limits.worktreeTtlDays !== undefined) patch.worktreeTtlDays = limits.worktreeTtlDays;
   if (Object.keys(patch).length === 0) {
     return json(
-      { error: "nothing to reconfigure (accepted: commands, effects, defaultRef, diskBudgetMb, provisioningTimeoutMs, worktreeTtlDays)" },
+      {
+        error:
+          "nothing to reconfigure (accepted: commands, effects, defaultRef, diskBudgetMb, provisioningTimeoutMs, worktreeTtlDays)",
+      },
       400,
     );
   }
@@ -4643,7 +4997,9 @@ async function handleResidents(env: Env): Promise<Response> {
   return json({
     cap: limits.cap,
     capDefault: RESIDENT_CAP,
-    ...(limits.override ? { testOverrides: { ...limits.override, floorS: limits.floorS, floorDefaultS: LRU_FLOOR_S } } : {}),
+    ...(limits.override
+      ? { testOverrides: { ...limits.override, floorS: limits.floorS, floorDefaultS: LRU_FLOOR_S } }
+      : {}),
     count: residents.length,
     inFlight,
     inFlightUnknown,
@@ -4690,7 +5046,9 @@ async function resolveThreadRoute(
   env: Env,
   body: Record<string, unknown>,
   requireOnboarded = false,
-): Promise<{ stub: ReturnType<typeof residentStub>; resource: string; threadKey: string; record?: ResidentRecord } | Response> {
+): Promise<
+  { stub: ReturnType<typeof residentStub>; resource: string; threadKey: string; record?: ResidentRecord } | Response
+> {
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
   const threadKey = parseThreadKey(body.threadKey);
@@ -4700,7 +5058,12 @@ async function resolveThreadRoute(
   }
   const record = await registryStub(env).getRecord(resource.resource);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
-  return { stub: residentStub(env, resource.resource), resource: resource.resource, threadKey: threadKey.threadKey, record };
+  return {
+    stub: residentStub(env, resource.resource),
+    resource: resource.resource,
+    threadKey: threadKey.threadKey,
+    record,
+  };
 }
 
 /** Map a ThreadErr union member to its HTTP response (status leaves the body). */
@@ -4818,7 +5181,8 @@ function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execTh
 async function handleRead(env: Env, body: Record<string, unknown>): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
-  if (typeof body.path !== "string") return json({ error: "path must be a string relative to the thread worktree" }, 400);
+  if (typeof body.path !== "string")
+    return json({ error: "path must be a string relative to the thread worktree" }, 400);
   const result = await ctx.stub.readThreadFile(ctx.threadKey, body.path);
   if ("error" in result) return threadErrResponse(result);
   return json(result);
@@ -4827,7 +5191,8 @@ async function handleRead(env: Env, body: Record<string, unknown>): Promise<Resp
 async function handleWrite(env: Env, body: Record<string, unknown>): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
-  if (typeof body.path !== "string") return json({ error: "path must be a string relative to the thread worktree" }, 400);
+  if (typeof body.path !== "string")
+    return json({ error: "path must be a string relative to the thread worktree" }, 400);
   if (typeof body.content !== "string" || body.content.length > MAX_WRITE_CONTENT) {
     return json({ error: `content must be a string of at most ${MAX_WRITE_CONTENT} chars` }, 400);
   }
@@ -4936,8 +5301,17 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     const parsed = parseTestOverrides(body, { cap: RESIDENT_CAP, floorS: LRU_FLOOR_S });
     if ("error" in parsed) return json({ error: parsed.error }, 400);
     const limits = await registryStub(env).setTestOverrides("clear" in parsed ? null : parsed.overrides);
-    console.log(`test-overrides: ${"clear" in parsed ? "cleared" : JSON.stringify(parsed.overrides)} → effective cap ${limits.cap}, floorS ${limits.floorS}`);
-    return json({ op, cap: limits.cap, capDefault: RESIDENT_CAP, floorS: limits.floorS, floorDefaultS: LRU_FLOOR_S, override: limits.override });
+    console.log(
+      `test-overrides: ${"clear" in parsed ? "cleared" : JSON.stringify(parsed.overrides)} → effective cap ${limits.cap}, floorS ${limits.floorS}`,
+    );
+    return json({
+      op,
+      cap: limits.cap,
+      capDefault: RESIDENT_CAP,
+      floorS: limits.floorS,
+      floorDefaultS: LRU_FLOOR_S,
+      override: limits.override,
+    });
   }
   if (op === "mint-token") {
     const resource = parseResource(body.resource);
@@ -4994,7 +5368,9 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     }
     default:
       return json(
-        { error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, measure-disk, backdate-thread)` },
+        {
+          error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, measure-disk, backdate-thread)`,
+        },
         400,
       );
   }
@@ -5020,7 +5396,13 @@ async function runWatchdog(env: Env): Promise<WatchdogSummary> {
   const results: WatchdogSummary["results"][number][] = residents.map((record, i) => {
     const s = settled[i];
     return s.status === "fulfilled"
-      ? { resource: record.resource, state: s.value.state, reason: s.value.reason, action: s.value.action, disk: s.value.disk }
+      ? {
+          resource: record.resource,
+          state: s.value.state,
+          reason: s.value.reason,
+          action: s.value.action,
+          disk: s.value.disk,
+        }
       : { resource: record.resource, error: errMsg(s.reason) };
   });
   return { cap: (await registry.limits()).cap, count: residents.length, results };

@@ -30,14 +30,35 @@ const shortSha = computed(() => props.data.pr.headSha?.slice(0, 7));
 <template>
   <div class="pr-review-panel flex min-w-0 flex-col gap-3" data-testid="pr-review-panel">
     <div class="flex flex-wrap items-center gap-2 text-sm">
-      <a v-if="links.pr" :href="links.pr" target="_blank" rel="noopener noreferrer" class="font-medium text-primary hover:underline" data-testid="pr-link">
+      <a
+        v-if="links.pr"
+        :href="links.pr"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="font-medium text-primary hover:underline"
+        data-testid="pr-link"
+      >
         {{ data.pr.repo }}#{{ data.pr.number }}
       </a>
       <span v-else-if="data.pr.repo" class="font-medium">{{ data.pr.repo }}</span>
-      <a v-if="links.commit" :href="links.commit" target="_blank" rel="noopener noreferrer" class="font-mono text-xs text-muted hover:underline" data-testid="commit-link">
+      <a
+        v-if="links.commit"
+        :href="links.commit"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="font-mono text-xs text-muted hover:underline"
+        data-testid="commit-link"
+      >
         {{ shortSha }}
       </a>
-      <a v-if="links.files" :href="links.files" target="_blank" rel="noopener noreferrer" class="text-xs text-muted hover:underline" data-testid="files-link">
+      <a
+        v-if="links.files"
+        :href="links.files"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="text-xs text-muted hover:underline"
+        data-testid="files-link"
+      >
         all files on GitHub ↗
       </a>
     </div>

@@ -72,7 +72,13 @@ describe("classifyHeadMove (item 12)", () => {
   it("a dropped or squashed commit → substantive, naming what went away", () => {
     const before = list(["feat: catalog", "wip", "fix typo"], ["src/a.ts"]);
     const after = list(["feat: catalog"], ["src/a.ts"]);
-    expect(classifyHeadMove(before, after)).toEqual({ kind: "substantive", before: 3, after: 1, added: [], removed: ["wip", "fix typo"] });
+    expect(classifyHeadMove(before, after)).toEqual({
+      kind: "substantive",
+      before: 3,
+      after: 1,
+      added: [],
+      removed: ["wip", "fix typo"],
+    });
   });
 
   it("same commits but a different set of touched files → substantive (an amend that keeps the message)", () => {
@@ -101,7 +107,9 @@ describe("item 12 thread notes and posted-body footer", () => {
       "ℹ️ acme/api#42 moved during the run: reviewed e8e43f4, head is now d75b5a5 — a rebase of the same 3 commits " +
         "(same messages, same files). The review applies unchanged and was posted pinned to d75b5a5.",
     );
-    expect(headCarriedNote({ where: "acme/api#42", reviewed: A, current: B, commits: 1 })).toContain("the same 1 commit (");
+    expect(headCarriedNote({ where: "acme/api#42", reviewed: A, current: B, commits: 1 })).toContain(
+      "the same 1 commit (",
+    );
   });
 
   it("carried footer for the posted body (italic, one line)", () => {
@@ -117,9 +125,13 @@ describe("item 12 thread notes and posted-body footer", () => {
         "Re-reviewing at d75b5a5 before posting.",
     );
     const removed: Sub = { kind: "substantive", before: 2, after: 1, added: [], removed: ["wip"] };
-    expect(headRereviewNote({ where: "acme/api#42", reviewed: A, current: B, move: removed })).toContain("2 → 1 commits (− “wip”)");
+    expect(headRereviewNote({ where: "acme/api#42", reviewed: A, current: B, move: removed })).toContain(
+      "2 → 1 commits (− “wip”)",
+    );
     const amend: Sub = { kind: "substantive", before: 1, after: 1, added: [], removed: [] };
-    expect(headRereviewNote({ where: "acme/api#42", reviewed: A, current: B, move: amend })).toContain("1 → 1 commits (same messages, different files)");
+    expect(headRereviewNote({ where: "acme/api#42", reviewed: A, current: B, move: amend })).toContain(
+      "1 → 1 commits (same messages, different files)",
+    );
   });
 
   it("re-review note caps the listed subjects", () => {
@@ -132,7 +144,11 @@ describe("item 12 thread notes and posted-body footer", () => {
 
 describe("rereviewFollowUp (the second model turn's instruction)", () => {
   const move: Sub = { kind: "substantive", before: 1, after: 2, added: ["fix: nits"], removed: [] };
-  const before: PrCommitList = { commits: [{ sha: A, message: "feat: catalog\n\nbody" }], files: ["src/a.ts"], filesTruncated: false };
+  const before: PrCommitList = {
+    commits: [{ sha: A, message: "feat: catalog\n\nbody" }],
+    files: ["src/a.ts"],
+    filesTruncated: false,
+  };
   const after: PrCommitList = {
     commits: [
       { sha: "1".repeat(40), message: "feat: catalog\n\nbody" },
@@ -143,7 +159,15 @@ describe("rereviewFollowUp (the second model turn's instruction)", () => {
   };
 
   it("worktree moved by Switchboard: names both heads, lists both commit sets, forbids fetching, demands a fresh verdict with the new head", () => {
-    const text = rereviewFollowUp({ where: "acme/api#42", reviewed: A, current: B, move, before, after, worktreeMoved: true });
+    const text = rereviewFollowUp({
+      where: "acme/api#42",
+      reviewed: A,
+      current: B,
+      move,
+      before,
+      after,
+      worktreeMoved: true,
+    });
     expect(text).toContain("moved from e8e43f4 to d75b5a5 while you were reviewing");
     expect(text).toContain("Switchboard has already moved your worktree to d75b5a5");
     expect(text).toContain("`git rev-parse HEAD`");
@@ -157,7 +181,15 @@ describe("rereviewFollowUp (the second model turn's instruction)", () => {
   });
 
   it("worktree not moved (sandbox clone): tells the model to fetch and check out the new head itself", () => {
-    const text = rereviewFollowUp({ where: "acme/api#42", reviewed: A, current: B, move, before, after, worktreeMoved: false });
+    const text = rereviewFollowUp({
+      where: "acme/api#42",
+      reviewed: A,
+      current: B,
+      move,
+      before,
+      after,
+      worktreeMoved: false,
+    });
     expect(text).toContain(`git fetch origin ${B} && git checkout ${B}`);
     expect(text).not.toContain("already moved your worktree");
   });

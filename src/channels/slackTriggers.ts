@@ -25,10 +25,7 @@ export function classifyMessage(
 
 /** Is the bot part of this thread — has it posted, or been mentioned anywhere
  *  in it? Pure over already-fetched messages. Exported for tests. */
-export function threadIncludesBot(
-  messages: Array<{ user?: string; text?: string }>,
-  botUserId?: string,
-): boolean {
+export function threadIncludesBot(messages: Array<{ user?: string; text?: string }>, botUserId?: string): boolean {
   if (!botUserId) return false;
   return messages.some((m) => m.user === botUserId || (m.text ?? "").includes(`<@${botUserId}>`));
 }

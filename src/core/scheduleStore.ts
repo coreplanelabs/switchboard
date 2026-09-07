@@ -120,13 +120,17 @@ export function buildScheduleStore(
 ): ScheduleStore | undefined {
   const worker = cfg?.worker;
   if (!worker?.baseUrl) {
-    warn("no schedule firing store — the /runs Scheduled panel will show schedules without their firing history. Configure schedules.worker.baseUrl (+ its bearer).");
+    warn(
+      "no schedule firing store — the /runs Scheduled panel will show schedules without their firing history. Configure schedules.worker.baseUrl (+ its bearer).",
+    );
     return undefined;
   }
   const tokenEnv = worker.tokenEnv ?? DEFAULT_SCHEDULE_TOKEN_ENV;
   const token = env[tokenEnv]?.trim();
   if (!token) {
-    warn(`schedules.worker is configured but ${tokenEnv} is unset — firing history unavailable. Set ${tokenEnv} to the state Worker's bearer.`);
+    warn(
+      `schedules.worker is configured but ${tokenEnv} is unset — firing history unavailable. Set ${tokenEnv} to the state Worker's bearer.`,
+    );
     return undefined;
   }
   return new WorkerScheduleStore({ baseUrl: worker.baseUrl, token });

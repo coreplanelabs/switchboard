@@ -49,7 +49,15 @@ import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memo
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource } from "../mcp/source.js";
 import { formatTurnDuration, redactSecrets, type RunEvent, type StopMode } from "./runEvents.js";
-import { decideFollowUp, mergeFollowUps, refusalReply, steerAck, ThreadAdmission, type FollowUpInput, type LiveThread } from "./threadAdmission.js";
+import {
+  decideFollowUp,
+  mergeFollowUps,
+  refusalReply,
+  steerAck,
+  ThreadAdmission,
+  type FollowUpInput,
+  type LiveThread,
+} from "./threadAdmission.js";
 import { resolveChatActor } from "./authz/actor.js";
 import { STATIC_CHANNEL_DIRECTORY } from "./authz/channelDirectory.js";
 import type { ChannelDirectory, ChannelVisibility } from "./authz/types.js";
@@ -62,12 +70,25 @@ import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { RestGithubApi, type GithubApi } from "../execution/githubApi.js";
 import type { GithubCapability } from "../tools/github.js";
-import { invokeChatCommand, parseChatCommand, type ChatCommandResult, type ChatCommands, type ParsedChatCommand } from "./commandChat.js";
+import {
+  invokeChatCommand,
+  parseChatCommand,
+  type ChatCommandResult,
+  type ChatCommands,
+  type ParsedChatCommand,
+} from "./commandChat.js";
 import { toMarkdownDocument } from "./markdownDocument.js";
 import { cliWords } from "./commandSurface.js";
-import { activityOfEvents, defaultRunRegistry, type RunControl, type RunHandle, type RunRegistry, type RunSnapshot, type RunSummary } from "./runRegistry.js";
+import {
+  activityOfEvents,
+  defaultRunRegistry,
+  type RunControl,
+  type RunHandle,
+  type RunRegistry,
+  type RunSnapshot,
+  type RunSummary,
+} from "./runRegistry.js";
 import { coalesceStatus } from "./statusCoalescer.js";
-import type { Provider } from "../providers/types.js";
 import type {
   ChannelIO,
   DocumentAttachment,
@@ -93,10 +114,7 @@ export interface CoreDeps {
    * history); injectable for tests. No repo signal → {} → the per-thread
    * executor path with no resident probe (total input contract).
    */
-  resolveRepoContext?: (
-    msg: IncomingMessage,
-    history: HistoryItem[],
-  ) => Promise<RepoContext> | RepoContext;
+  resolveRepoContext?: (msg: IncomingMessage, history: HistoryItem[]) => Promise<RepoContext> | RepoContext;
   /**
    * Live run-view registry (Area 2 / #43): every run is registered here and its
    * events published so the external /runs page can stream them. Optional;
@@ -273,7 +291,12 @@ export interface CoreDeps {
  *  reconfigure`), a deterministic op executed (`repo.test|build`). Config
  *  replies, `help`, listings, and usage/help replies are not runs. */
 export function isInlineRunCommand(id: string): boolean {
-  return id.startsWith("friction.") || id === "memory.forget" || /^repo\.(onboard|offboard|rebuild|reconfigure|test|build)$/.test(id) || /^mcp\.(add|connect|remove)$/.test(id);
+  return (
+    id.startsWith("friction.") ||
+    id === "memory.forget" ||
+    /^repo\.(onboard|offboard|rebuild|reconfigure|test|build)$/.test(id) ||
+    /^mcp\.(add|connect|remove)$/.test(id)
+  );
 }
 
 /** Floor between two edits of a run's status card (see `coalesceStatus`). Below
@@ -320,7 +343,8 @@ const defaultAdmission = new ThreadAdmission<DispatchFollowUp>();
 
 /** The note a follow-up's sender gets when the run it was folded into was
  *  stopped by an operator before its next step read it. */
-const FOLLOW_UP_DROPPED_BY_STOP = "⛔ The run this was folded into was stopped before it read this follow-up, so it was not run. Re-send it to run it fresh.";
+const FOLLOW_UP_DROPPED_BY_STOP =
+  "⛔ The run this was folded into was stopped before it read this follow-up, so it was not run. Re-send it to run it fresh.";
 export function activeRunCount(): number {
   return activeRuns;
 }
@@ -409,9 +433,15 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // backend or a backend failure) the agent still gets the ask, while a
     // refusal or a result is the reply. An explicit agent:/model: directive
     // disables recognition — the user picked a model path.
-    const opAsk = deps.commands ? recognizeOperation(msg.text, history, { allowNatural: !directives.agent && !directives.model }) : null;
+    const opAsk = deps.commands
+      ? recognizeOperation(msg.text, history, { allowNatural: !directives.agent && !directives.model })
+      : null;
     if (opAsk) {
-      const translated: ParsedChatCommand = { kind: "invoke", id: `repo.${opAsk.op}`, input: { args: [opAsk.repo, opAsk.ref], options: {} } };
+      const translated: ParsedChatCommand = {
+        kind: "invoke",
+        id: `repo.${opAsk.op}`,
+        input: { args: [opAsk.repo, opAsk.ref], options: {} },
+      };
       const res = await runChatCommand(deps, msg, io, translated);
       if (!(res.error === "not_found" || res.error === "unavailable")) {
         await io.reply(res.text);
@@ -464,12 +494,16 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // run that one too (invariant 3 — no path runs an agent for a user the
       // allowlist excludes, and "run" includes "is heard by").
       if (!deps.config.canRunAgent(msg.userId, claim.live.agent)) {
-        await io.reply(`🚫 You're not on the allowlist for the \`${claim.live.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`);
+        await io.reply(
+          `🚫 You're not on the allowlist for the \`${claim.live.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
+        );
         return;
       }
       const decision = decideFollowUp(claim.live, { agent: directives.agent });
       if (decision.kind === "refuse") {
-        console.log(`[dispatch] ${msg.threadKey} follow-up refused (${decision.reason}): ${claim.live.agent} run in flight`);
+        console.log(
+          `[dispatch] ${msg.threadKey} follow-up refused (${decision.reason}): ${claim.live.agent} run in flight`,
+        );
         await io.reply(refusalReply(claim.live, decision, directives.agent, Date.now()));
         return;
       }
@@ -484,7 +518,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         msg,
         io,
       });
-      console.log(`[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending)`);
+      console.log(
+        `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending)`,
+      );
       await io.reply(steerAck(claim.live, Date.now()));
       return;
     }
@@ -598,7 +634,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // the repo by URL.
     if (needsRepo && !repoCtx.repo && repoCtx.unverifiedRepo) {
       const slug = repoCtx.unverifiedRepo;
-      console.log(`[dispatch] ${msg.threadKey} not started: repo could not be verified (${slug}: resident registry unreachable)`);
+      console.log(
+        `[dispatch] ${msg.threadKey} not started: repo could not be verified (${slug}: resident registry unreachable)`,
+      );
       await card.done({ title: `📦 ${label} · not started (repo could not be verified)` });
       await io.reply(
         `⚠️ I couldn't verify that \`${slug}\` is an onboarded repo — the resident registry didn't answer — so I did not start a *${agent.name}* run rather than guess which repo you meant. ` +
@@ -752,7 +790,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // that does not answer contributes no tools and is named in the MCP block
     // (and, once the run is registered, in an `mcp_unavailable` note). No
     // source, or nothing scoped → no tools, no block, request unchanged.
-    const mcpForRun = deps.mcp ? await deps.mcp.toolsFor(agent.name, { userId: msg.userId, channelId: msg.channelId }) : undefined;
+    const mcpForRun = deps.mcp
+      ? await deps.mcp.toolsFor(agent.name, { userId: msg.userId, channelId: msg.channelId })
+      : undefined;
     const mcpBlock = mcpForRun ? mcpGuidanceBlock(mcpForRun.servers) : undefined;
 
     // Config awareness (routing-and-config behavior 8): tell the model the
@@ -818,7 +858,14 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         isPrReview && repoCtx.repo && repoCtx.pr !== undefined
           ? { repo: repoCtx.repo, pr: repoCtx.pr, ref: repoCtx.ref, baseRef: repoCtx.baseRef }
           : undefined,
-      blocks: { memory: memoryBlock, config: configBlock, about: aboutBlock, instructions: instructionsBlock, skills: skillsBlock, mcp: mcpBlock },
+      blocks: {
+        memory: memoryBlock,
+        config: configBlock,
+        about: aboutBlock,
+        instructions: instructionsBlock,
+        skills: skillsBlock,
+        mcp: mcpBlock,
+      },
     });
     // The PR head this run reviews — the resolved head, or the one adopted at
     // attach; the head settle (item 12) advances it after the model turn. The
@@ -874,7 +921,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // persistence), never through onEvent (no card refresh, no friction input),
     // and logged as ONE line of type + byte-length — never the text, which may
     // span lines or carry what redaction missed.
-    const publishText = (type: "input" | "context" | "answer", text: string, source?: { url?: string; channel?: string; user?: string }, raw?: string) => {
+    const publishText = (
+      type: "input" | "context" | "answer",
+      text: string,
+      source?: { url?: string; channel?: string; user?: string },
+      raw?: string,
+    ) => {
       const redacted = redactSecrets(text);
       const event = { type, text: redacted, ...(source ? { source } : {}), at: Date.now() };
       // The model's raw answer rides on the event only when normalization
@@ -901,7 +953,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       ...(msg.userName ? { user: msg.userName } : {}),
     };
     const request = humanize ? humanizeMessageText(directives.text) : directives.text;
-    publishText("input", attachments ? `${request} ${attachments}` : request, Object.keys(source).length > 0 ? source : undefined);
+    publishText(
+      "input",
+      attachments ? `${request} ${attachments}` : request,
+      Object.keys(source).length > 0 ? source : undefined,
+    );
     // What the run is about (live-view item 19): agent, model, and the repo
     // context resolved above — so the page can head the record with linked
     // owner/repo · ref · #PR · sha. Once per run, straight after the request.
@@ -975,7 +1031,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       const detail = [checklist, lastActivity].filter(Boolean).join("\n");
       // The shutdown notice rides on the LIVE frame only: the closed card is
       // built from title()/finalDetail() and never mentions the restart.
-      return { title: title() + thinking + (shutdownNotice ? ` · ${shutdownNotice}` : ""), detail: detail || undefined, link: liveLink };
+      return {
+        title: title() + thinking + (shutdownNotice ? ` · ${shutdownNotice}` : ""),
+        detail: detail || undefined,
+        link: liveLink,
+      };
     };
     // The closed card keeps the run link (the run page outlives the run and
     // shows the final answer) and the agent's checklist; only the transient
@@ -1014,7 +1074,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // run (features/mcp-tools.md item 8): one note per server, before the
     // first tool event, so the run page explains a missing tool.
     for (const s of mcpForRun?.servers ?? []) {
-      if (s.unavailable !== undefined) onEvent({ type: "run_note", kind: "mcp_unavailable", summary: `MCP server ${s.server} unavailable: ${s.unavailable}` });
+      if (s.unavailable !== undefined)
+        onEvent({
+          type: "run_note",
+          kind: "mcp_unavailable",
+          summary: `MCP server ${s.server} unavailable: ${s.unavailable}`,
+        });
     }
     const reportProgress = (list: string) => {
       const trimmed = list.trim();
@@ -1053,7 +1118,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         console.log(`[reading-diff] ${msg.threadKey} baseline ${published ? "published" : "none"}`);
         return published;
       });
-      void started.upgrade?.then((published) => console.log(`[reading-diff] ${msg.threadKey} meat ${published ? "published" : "did not land"}`));
+      void started.upgrade?.then((published) =>
+        console.log(`[reading-diff] ${msg.threadKey} meat ${published ? "published" : "did not land"}`),
+      );
     }
 
     let answer: string;
@@ -1121,7 +1188,16 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // One tool context for the whole run: the first turn and any re-review
     // turn (settleReviewedHead) share it, so submit_pr_description and the
     // progress checklist keep flowing to the same hooks.
-    const toolContext = { executor, reportProgress, web: webCapability(), skills: deps.skills, github: githubCapabilityFor(deps, msg.userId), agentName: agent.name, onVerdict, onPrDescription };
+    const toolContext = {
+      executor,
+      reportProgress,
+      web: webCapability(),
+      skills: deps.skills,
+      github: githubCapabilityFor(deps, msg.userId),
+      agentName: agent.name,
+      onVerdict,
+      onPrDescription,
+    };
     try {
       answer = await runAgent({
         provider,
@@ -1156,7 +1232,17 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
           messages,
           composeSystem,
           executor,
-          turn: { provider, model, agent, effort: resolved.effort, toolContext, extraTools: mcpForRun?.tools, onProgress, onEvent, control: run.control },
+          turn: {
+            provider,
+            model,
+            agent,
+            effort: resolved.effort,
+            toolContext,
+            extraTools: mcpForRun?.tools,
+            onProgress,
+            onEvent,
+            control: run.control,
+          },
           fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
           fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
           notify: {
@@ -1189,7 +1275,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // posted.
       if (isCodingPrRun && run.control.requested !== "hard") {
         const pushedBranch = pushes.branch();
-        const observed = await observeCodingWorkspace(executor, { probeRemote: repoCtx.repo === undefined, ...(pushedBranch !== undefined ? { pushedBranch } : {}) });
+        const observed = await observeCodingWorkspace(executor, {
+          probeRemote: repoCtx.repo === undefined,
+          ...(pushedBranch !== undefined ? { pushedBranch } : {}),
+        });
         observedHead = observed.head;
         observedBranch = observed.branch;
         observedCheckedOut = observed.checkedOut;
@@ -1201,7 +1290,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // redacted like every payload, so the run page's review panel renders
       // the same object the GitHub body is rendered from.
       if (prDescription) {
-        registry.publish(run.id, { type: "pr_description", description: redactPrDescription(prDescription), at: Date.now() });
+        registry.publish(run.id, {
+          type: "pr_description",
+          description: redactPrDescription(prDescription),
+          at: Date.now(),
+        });
       }
       // Deterministic coding PR post-step (features/pr-description.md item 5,
       // agent-coding.md item 2, runCodingPrPostStep in codingPrPostStep.ts):
@@ -1219,7 +1312,13 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // hard stop observed nothing above and posts nothing.
       if (isCodingPrRun && run.control.requested !== "hard") {
         prNote = await runCodingPrPostStep({
-          observed: { head: observedHead, branch: observedBranch, checkedOut: observedCheckedOut, remoteHead: observedRemoteHead, remoteRepo: observedRemoteRepo },
+          observed: {
+            head: observedHead,
+            branch: observedBranch,
+            checkedOut: observedCheckedOut,
+            remoteHead: observedRemoteHead,
+            remoteRepo: observedRemoteRepo,
+          },
           description: prDescription,
           target: { repo: repoCtx.repo, baseRef: repoCtx.baseRef, bindingRef: binding?.ref, resolvedRef: repoCtx.ref },
           openPullRequest: deps.openPullRequest ?? openPullRequest,
@@ -1256,7 +1355,13 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     } finally {
       clearInterval(heartbeat);
       const stopped = run.control.requested;
-      const status: RunStatus = runFailed ? "failed" : stopped === "hard" ? "stopped_hard" : stopped === "soft" ? "stopped_soft" : "completed";
+      const status: RunStatus = runFailed
+        ? "failed"
+        : stopped === "hard"
+          ? "stopped_hard"
+          : stopped === "soft"
+            ? "stopped_soft"
+            : "completed";
       // Close the live-view stream and start the TTL, handing the registry the
       // terminal status so every summary projects it (the index, `runs list`)
       // instead of re-deriving it. The one status the registry cannot know is
@@ -1305,9 +1410,17 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       if (deps.frictionLedger) {
         const ledger = deps.frictionLedger;
         void ledger
-          .record({ runId: run.id, ...(run.label !== undefined ? { label: run.label } : {}), agent: agent.name, finishedAt, diagnosis })
+          .record({
+            runId: run.id,
+            ...(run.label !== undefined ? { label: run.label } : {}),
+            agent: agent.name,
+            finishedAt,
+            diagnosis,
+          })
           .catch((err: unknown) =>
-            console.warn(`[friction] ${msg.threadKey} ledger write failed: ${err instanceof Error ? err.message : String(err)}`),
+            console.warn(
+              `[friction] ${msg.threadKey} ledger write failed: ${err instanceof Error ? err.message : String(err)}`,
+            ),
           );
       }
     }
@@ -1324,7 +1437,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // unchunkable line) must still give the pool user back, or it is held
     // until the hourly sweep — the toil 16a exists to avoid.
     try {
-      await card.done({ title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"), detail: stopped ? finalDetail() : checkedOffDetail(), link: liveLink });
+      await card.done({
+        title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"),
+        detail: stopped ? finalDetail() : checkedOffDetail(),
+        link: liveLink,
+      });
       // A review verdict carries its run link (as standard Markdown — each
       // adapter renders its own dialect): the verdict message is what gets
       // scanned in the review loop, and the card above scrolls away. Projection
@@ -1355,26 +1472,27 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // point and never reflect. A HARD-stopped run has no summary to distill
     // (its answer is the abort line), so it is skipped too; a soft stop wrote
     // a real finale and reflects normally.
-    if (stopped !== "hard") scheduleReflection({
-      cfg: deps.config.config.memory,
-      store: deps.memory,
-      providers: deps.providers,
-      runModelRef: resolved.modelRef,
-      gate: { toolCalls, historyTurns: history.length, agentName: resolved.agentName },
-      threadKey: msg.threadKey,
-      runId: run.id,
-      // The writes are the policy's decision for the run's principal under the
-      // run's stamped origin (authorization.md item 8): the same actor the chat
-      // commands resolve, the same stamp the record carries.
-      actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)),
-      originChannelVisibility: channelVisibility,
-      userId: msg.userId,
-      channelId: msg.channelId,
-      repo: repoCtx.repo,
-      history,
-      request: directives.text,
-      answer,
-    });
+    if (stopped !== "hard")
+      scheduleReflection({
+        cfg: deps.config.config.memory,
+        store: deps.memory,
+        providers: deps.providers,
+        runModelRef: resolved.modelRef,
+        gate: { toolCalls, historyTurns: history.length, agentName: resolved.agentName },
+        threadKey: msg.threadKey,
+        runId: run.id,
+        // The writes are the policy's decision for the run's principal under the
+        // run's stamped origin (authorization.md item 8): the same actor the chat
+        // commands resolve, the same stamp the record carries.
+        actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)),
+        originChannelVisibility: channelVisibility,
+        userId: msg.userId,
+        channelId: msg.channelId,
+        repo: repoCtx.repo,
+        history,
+        request: directives.text,
+        answer,
+      });
 
     // Deterministic review post-step (issue #69, runReviewPostStep in
     // reviewRound.ts): a `review` run against a resolved PR posts its findings
@@ -1437,8 +1555,14 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
           // admitted as input FOR this run's agent (a different one would have
           // been refused), so the fresh turn must not fall back to whatever the
           // thread's history or the channel default resolves to.
-          await dispatch(deps, { ...last.msg, ...merged, text: `agent:${admitted.agent} ${merged.text}` }, last.io).catch((err: unknown) =>
-            console.error(`[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`),
+          await dispatch(
+            deps,
+            { ...last.msg, ...merged, text: `agent:${admitted.agent} ${merged.text}` },
+            last.io,
+          ).catch((err: unknown) =>
+            console.error(
+              `[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`,
+            ),
           );
         }
       }
@@ -1479,7 +1603,12 @@ interface ShipBranchContext {
  * card, persists the `failed` record, and propagates to dispatch()'s outer
  * catch for the error reply.
  */
-async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO, ctx: ShipBranchContext): Promise<void> {
+async function runShipBranch(
+  deps: CoreDeps,
+  msg: IncomingMessage,
+  io: ChannelIO,
+  ctx: ShipBranchContext,
+): Promise<void> {
   const { agent, card, directives, history, repoCtx, label } = ctx;
   const pre = await shipPreflight({
     channelId: msg.channelId,
@@ -1525,7 +1654,11 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     },
   );
-  const publishText = (type: "input" | "context" | "answer", text: string, source?: { url?: string; channel?: string; user?: string }) => {
+  const publishText = (
+    type: "input" | "context" | "answer",
+    text: string,
+    source?: { url?: string; channel?: string; user?: string },
+  ) => {
     const redacted = redactSecrets(text);
     registry.publish(run.id, { type, text: redacted, ...(source ? { source } : {}), at: Date.now() });
     console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
@@ -1538,7 +1671,11 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
     ...(msg.userName ? { user: msg.userName } : {}),
   };
   const request = humanize ? humanizeMessageText(directives.text) : directives.text;
-  publishText("input", attachments ? `${request} ${attachments}` : request, Object.keys(source).length > 0 ? source : undefined);
+  publishText(
+    "input",
+    attachments ? `${request} ${attachments}` : request,
+    Object.keys(source).length > 0 ? source : undefined,
+  );
   registry.publish(run.id, {
     type: "run_meta",
     agent: agent.name,
@@ -1591,7 +1728,11 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
   let roundHeader: string | undefined;
   const currentFrame = () => {
     const detail = [roundHeader, checklist, lastActivity].filter(Boolean).join("\n");
-    return { title: title() + (shutdownNotice ? ` · ${shutdownNotice}` : ""), detail: detail || undefined, link: liveLink };
+    return {
+      title: title() + (shutdownNotice ? ` · ${shutdownNotice}` : ""),
+      detail: detail || undefined,
+      link: liveLink,
+    };
   };
   const finalDetail = () => checklist;
   const checkedOffDetail = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
@@ -1616,7 +1757,11 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
     const r = deps.config.resolve({
       channelId: msg.channelId,
       userId: msg.userId,
-      request: { agent: name, model: directives.model ?? ctx.sticky.model, effort: directives.effort ?? ctx.sticky.effort },
+      request: {
+        agent: name,
+        model: directives.model ?? ctx.sticky.model,
+        effort: directives.effort ?? ctx.sticky.effort,
+      },
     });
     const { provider: providerName, model } = parseModelRef(r.modelRef);
     return {
@@ -1726,9 +1871,17 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
     if (deps.frictionLedger) {
       const ledger = deps.frictionLedger;
       void ledger
-        .record({ runId: run.id, ...(run.label !== undefined ? { label: run.label } : {}), agent: agent.name, finishedAt, diagnosis })
+        .record({
+          runId: run.id,
+          ...(run.label !== undefined ? { label: run.label } : {}),
+          agent: agent.name,
+          finishedAt,
+          diagnosis,
+        })
         .catch((err: unknown) =>
-          console.warn(`[friction] ${msg.threadKey} ledger write failed: ${err instanceof Error ? err.message : String(err)}`),
+          console.warn(
+            `[friction] ${msg.threadKey} ledger write failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
         );
     }
     if (deps.runHistoryWriter) {
@@ -1764,9 +1917,19 @@ async function runShipBranch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO
   // un-rewritten checklist (✓s over an abort would claim work that never
   // finished); stops keep their ⏹/⛔.
   const icon =
-    outcome.status === "stopped_hard" ? "⛔" : outcome.status === "stopped_soft" ? "⏹" : outcome.status === "completed" ? "✅" : "⚠️";
+    outcome.status === "stopped_hard"
+      ? "⛔"
+      : outcome.status === "stopped_soft"
+        ? "⏹"
+        : outcome.status === "completed"
+          ? "✅"
+          : "⚠️";
   try {
-    await card.done({ title: title(icon), detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(), link: liveLink });
+    await card.done({
+      title: title(icon),
+      detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(),
+      link: liveLink,
+    });
     await io.reply(outcome.reply);
   } catch (err) {
     // The report never reached the thread: the record must say `failed`,
@@ -1811,12 +1974,19 @@ export const COMMAND_RUN_AGENT = "command";
  * only when asked. Commands that do work (`isInlineRunCommand`) are recorded as
  * inline runs; help/usage replies and read-only answers are not.
  */
-async function runChatCommand(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO, parsed: ParsedChatCommand): Promise<ChatCommandResult> {
+async function runChatCommand(
+  deps: CoreDeps,
+  msg: IncomingMessage,
+  io: ChannelIO,
+  parsed: ParsedChatCommand,
+): Promise<ChatCommandResult> {
   const commands = deps.commands;
   if (!commands) return { ok: false, text: "" };
-  const resolveRepo = async (): Promise<string | undefined> => (await resolveRepoForCommand(deps, msg, await io.history())).repo;
+  const resolveRepo = async (): Promise<string | undefined> =>
+    (await resolveRepoForCommand(deps, msg, await io.history())).repo;
   const invoke = () => invokeChatCommand({ commands, parsed, msg, config: deps.config, resolveRepo });
-  if (parsed.kind === "invoke" && isInlineRunCommand(parsed.id)) return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke);
+  if (parsed.kind === "invoke" && isInlineRunCommand(parsed.id))
+    return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke);
   return invoke();
 }
 
@@ -1842,7 +2012,11 @@ export async function replyCommandOutput(io: ChannelIO, parsed: ParsedChatComman
   const nl = text.indexOf("\n");
   const lead = nl === -1 ? text : text.slice(0, nl);
   const name = parsed.kind === "invoke" ? cliWords(parsed.id).join("-") : "command";
-  await io.attach({ name: `${name}.md`, text: toMarkdownDocument(text), lead: `${lead}\n_(full output attached — ${text.length.toLocaleString("en-US")} chars)_` });
+  await io.attach({
+    name: `${name}.md`,
+    text: toMarkdownDocument(text),
+    lead: `${lead}\n_(full output attached — ${text.length.toLocaleString("en-US")} chars)_`,
+  });
 }
 
 function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined>, io: ChannelIO): void {
@@ -1865,12 +2039,31 @@ function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined
  * reply as its `answer`) and the error propagates to the dispatcher's outer
  * handler.
  */
-async function runInlineCommandRun<T extends { text: string; ok: boolean }>(deps: CoreDeps, msg: IncomingMessage, command: string, io: ChannelIO, execute: () => Promise<T>): Promise<T> {
+async function runInlineCommandRun<T extends { text: string; ok: boolean }>(
+  deps: CoreDeps,
+  msg: IncomingMessage,
+  command: string,
+  io: ChannelIO,
+  execute: () => Promise<T>,
+): Promise<T> {
   const registry = deps.runRegistry ?? defaultRunRegistry;
   const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
   const run = registry.create(
-    composeRunLabel({ agent: command, channelId: msg.channelId, userId: msg.userId, channelName: msg.channelName, userName: msg.userName, text: msg.text }),
-    { agent: COMMAND_RUN_AGENT, channelId: msg.channelId, userId: msg.userId, threadKey: msg.threadKey, channelVisibility },
+    composeRunLabel({
+      agent: command,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      channelName: msg.channelName,
+      userName: msg.userName,
+      text: msg.text,
+    }),
+    {
+      agent: COMMAND_RUN_AGENT,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      threadKey: msg.threadKey,
+      channelVisibility,
+    },
   );
   registry.publish(run.id, { type: "input", text: redactSecrets(msg.text), at: Date.now() });
   let result: T | undefined;
@@ -1894,7 +2087,18 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean }>(deps
       const snap = registry.snapshot(run.id, run.token);
       const finishedAt = snap?.finishedAt ?? Date.now();
       const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
-      deps.runHistoryWriter.write(assembleRunRecord({ run, snap, agent: COMMAND_RUN_AGENT, msg, channelVisibility, finishedAt, status, diagnosis }));
+      deps.runHistoryWriter.write(
+        assembleRunRecord({
+          run,
+          snap,
+          agent: COMMAND_RUN_AGENT,
+          msg,
+          channelVisibility,
+          finishedAt,
+          status,
+          diagnosis,
+        }),
+      );
     }
   }
 }
@@ -1914,7 +2118,9 @@ const DIRECTORY_TIMED_OUT = Symbol("channel directory timed out");
 async function channelVisibilityOf(deps: CoreDeps, channelId: string): Promise<ChannelVisibility> {
   const timeoutMs = deps.channelDirectoryTimeoutMs ?? CHANNEL_DIRECTORY_TIMEOUT_MS;
   const failed = (err: unknown): ChannelVisibility => {
-    console.warn(`[authz] channel directory failed for ${channelId} — stamping unknown: ${err instanceof Error ? err.message : String(err)}`);
+    console.warn(
+      `[authz] channel directory failed for ${channelId} — stamping unknown: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return "unknown";
   };
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1922,7 +2128,9 @@ async function channelVisibilityOf(deps: CoreDeps, channelId: string): Promise<C
     // Caught BEFORE the race, so a rejection is `unknown` by the same path
     // whether it lands before the timeout (stamped at once) or after it (the
     // run is already stamped; the late failure is logged, never left unhandled).
-    const lookup = (deps.channelDirectory ?? STATIC_CHANNEL_DIRECTORY).info(channelId).then((info) => info.visibility, failed);
+    const lookup = (deps.channelDirectory ?? STATIC_CHANNEL_DIRECTORY)
+      .info(channelId)
+      .then((info) => info.visibility, failed);
     const answer = await Promise.race([
       lookup,
       new Promise<typeof DIRECTORY_TIMED_OUT>((resolve) => {
@@ -2163,7 +2371,12 @@ function humanizeLinks(text: string, compact = true): string {
 /** Slack auto-links a pasted URL as `<url|label>` where the label is the url
  *  itself, often without its scheme, `www.` or trailing slash. */
 function isAutoLinkLabel(url: string, label: string): boolean {
-  const strip = (s: string) => s.trim().replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/+$/, "");
+  const strip = (s: string) =>
+    s
+      .trim()
+      .replace(/^https?:\/\//i, "")
+      .replace(/^www\./i, "")
+      .replace(/\/+$/, "");
   return strip(url) === strip(label);
 }
 
@@ -2195,7 +2408,7 @@ export function humanizeMessageText(text: string): string {
 function markdownEmphasis(text: string): string {
   const parts = text.split(/(```[\s\S]*?```|`[^`\n]*`)/);
   for (let i = 0; i < parts.length; i += 2) {
-    parts[i] = parts[i].replace(/(^|[\s(\[{"'>])\*(\S(?:[^*\n]*?\S)?)\*(?=$|[\s)\]}.,!?:;"'<])/gm, "$1**$2**");
+    parts[i] = parts[i].replace(/(^|[\s([{"'>])\*(\S(?:[^*\n]*?\S)?)\*(?=$|[\s)\]}.,!?:;"'<])/gm, "$1**$2**");
   }
   return parts.join("");
 }
@@ -2286,7 +2499,10 @@ function activityLine(e: RunEvent): string {
  * (features/live-view.md item 12): `[+2 images, 1 document]`. Counts only — the
  * payloads never enter the run stream. Empty when nothing was attached.
  */
-export function attachmentSuffix(images: ImageAttachment[] | undefined, documents: DocumentAttachment[] | undefined): string {
+export function attachmentSuffix(
+  images: ImageAttachment[] | undefined,
+  documents: DocumentAttachment[] | undefined,
+): string {
   const parts: string[] = [];
   if (images && images.length > 0) parts.push(`${images.length} image${images.length === 1 ? "" : "s"}`);
   if (documents && documents.length > 0) parts.push(`${documents.length} document${documents.length === 1 ? "" : "s"}`);
@@ -2369,11 +2585,7 @@ function buildMessages(
  * files are inlined as a fenced text part naming the file (provider-agnostic).
  * Exported for tests.
  */
-export function turnContent(
-  text: string,
-  images?: ImageAttachment[],
-  documents?: DocumentAttachment[],
-): ContentPart[] {
+export function turnContent(text: string, images?: ImageAttachment[], documents?: DocumentAttachment[]): ContentPart[] {
   const parts: ContentPart[] = (images ?? []).map((img) => ({
     type: "image" as const,
     mediaType: img.mediaType,
@@ -2400,9 +2612,15 @@ export function turnContent(
  * unwrapped, entities unescaped) — every caller feeds channel-authored turns.
  * Redaction happens at publish, not here.
  */
-function messageText(text: string, humanize: boolean, images?: ImageAttachment[], documents?: DocumentAttachment[]): string {
+function messageText(
+  text: string,
+  humanize: boolean,
+  images?: ImageAttachment[],
+  documents?: DocumentAttachment[],
+): string {
   const lines = [(humanize ? humanizeMessageText(text) : text).trim()];
-  for (const img of images ?? []) lines.push(attachmentLine(img.name, img.mediaType, Buffer.byteLength(img.data, "base64")));
+  for (const img of images ?? [])
+    lines.push(attachmentLine(img.name, img.mediaType, Buffer.byteLength(img.data, "base64")));
   for (const doc of documents ?? []) {
     const bytes = Buffer.byteLength(doc.data, doc.mediaType === "application/pdf" ? "base64" : "utf8");
     lines.push(attachmentLine(doc.name, doc.mediaType, bytes));
@@ -2459,7 +2677,11 @@ function normalizeAlternation(messages: ChatMessage[]): ChatMessage[] {
  *  (`Caller.origin.repo`, e.g. `memory list` with the repo scope, #253): the
  *  injected resolver in tests, the production resolver (registry-vetted slugs,
  *  PR → repo) otherwise; a failure means "no repo bound", never an error reply. */
-async function resolveRepoForCommand(deps: CoreDeps, msg: IncomingMessage, history: HistoryItem[]): Promise<RepoContext> {
+async function resolveRepoForCommand(
+  deps: CoreDeps,
+  msg: IncomingMessage,
+  history: HistoryItem[],
+): Promise<RepoContext> {
   try {
     return (
       (await (deps.resolveRepoContext
@@ -2475,4 +2697,3 @@ async function resolveRepoForCommand(deps: CoreDeps, msg: IncomingMessage, histo
     return {};
   }
 }
-

@@ -228,7 +228,8 @@ You cannot run commands, clone repositories, edit code, or review pull requests,
 export const AGENTS: Record<string, AgentDef> = {
   general: {
     name: "general",
-    description: "Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.",
+    description:
+      "Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.",
     system: GENERAL_SYSTEM,
     toolset: "assistant",
     maxTurns: 8, // a repo read is 2-3 calls (repos → tree → file); an issue action 1-2; still fast
@@ -270,11 +271,13 @@ export const AGENTS: Record<string, AgentDef> = {
   ship: {
     name: "ship",
     followUps: "refuse", // a deterministic round pipeline; nothing mid-flight can take a nudge
-    description: "Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.",
+    description:
+      "Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.",
     // Never sent to a model: `agent:ship` forks inside dispatch() into the
     // pipeline orchestrator (src/core/shipPipeline.ts), whose child rounds run
     // on the coding/review defs above — runAgent is never called with THIS def.
-    system: "You are Switchboard's ship pipeline. This prompt is never sent to a model — the pipeline orchestrates coding and review child runs on their own definitions.",
+    system:
+      "You are Switchboard's ship pipeline. This prompt is never sent to a model — the pipeline orchestrates coding and review child runs on their own definitions.",
     // Full toolset so a ship thread provisions a writable workspace class like
     // coding; nominal budgets — the pipeline is bounded by the `ship` config
     // caps and by each child's own budgets clipped to the remaining wall clock,
@@ -287,7 +290,8 @@ export const AGENTS: Record<string, AgentDef> = {
   },
   research: {
     name: "research",
-    description: "Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.",
+    description:
+      "Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.",
     system: RESEARCH_SYSTEM,
     toolset: "web",
     resources: { repo: "none" }, // web I/O only; no workspace is provisioned

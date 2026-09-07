@@ -5,19 +5,35 @@
  * `offsetMinutes` follows `Date#getTimezoneOffset` (minutes *west* of UTC, so
  * PDT is 420) and defaults to the runtime's zone — in the browser, the viewer's.
  *
- * Written as plain ES5 with no imports: the run page inlines it with
- * `String(formatLocalIso)` (see liveView.ts), the same build step as the
- * markdown renderer and the timeline.
+ * A pure leaf with no imports: the dashboard bundle imports it straight from
+ * here (web/src/lib/format.ts), the same way as the markdown renderer and the
+ * timeline, so server and browser format an instant identically.
  */
 export function formatLocalIso(at: number, offsetMinutes?: number): string {
-  var off = typeof offsetMinutes === "number" ? offsetMinutes : new Date(at).getTimezoneOffset();
+  const off = typeof offsetMinutes === "number" ? offsetMinutes : new Date(at).getTimezoneOffset();
   // Shift the instant by the offset, then read the fields as UTC: the zone's
   // wall-clock without depending on the runtime zone for any field but `off`.
-  var d = new Date(at - off * 60000);
-  function p(n: number): string { return (n < 10 ? "0" : "") + n; }
-  var sign = off <= 0 ? "+" : "-";
-  var abs = Math.abs(off);
-  return d.getUTCFullYear() + "-" + p(d.getUTCMonth() + 1) + "-" + p(d.getUTCDate()) +
-    "T" + p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) + ":" + p(d.getUTCSeconds()) +
-    sign + p(Math.floor(abs / 60)) + ":" + p(abs % 60);
+  const d = new Date(at - off * 60000);
+  function p(n: number): string {
+    return (n < 10 ? "0" : "") + n;
+  }
+  const sign = off <= 0 ? "+" : "-";
+  const abs = Math.abs(off);
+  return (
+    d.getUTCFullYear() +
+    "-" +
+    p(d.getUTCMonth() + 1) +
+    "-" +
+    p(d.getUTCDate()) +
+    "T" +
+    p(d.getUTCHours()) +
+    ":" +
+    p(d.getUTCMinutes()) +
+    ":" +
+    p(d.getUTCSeconds()) +
+    sign +
+    p(Math.floor(abs / 60)) +
+    ":" +
+    p(abs % 60)
+  );
 }

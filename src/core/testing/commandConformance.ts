@@ -27,14 +27,22 @@ export interface Field {
 }
 
 export function fieldsOf(cmd: Pick<CommandDef<unknown>, "args" | "options">): Field[] {
-  const args: Field[] = (cmd.args ?? []).map((a) => ({ name: a.name, kind: "arg", schema: a.schema, required: !acceptsUndefined(a.schema), rest: a.rest === true }));
-  const options: Field[] = (Object.entries(cmd.options?.shape ?? {}) as [string, z.ZodType][]).map(([name, schema]) => ({
-    name,
-    kind: "option",
-    schema,
-    required: !acceptsUndefined(schema),
-    rest: false,
+  const args: Field[] = (cmd.args ?? []).map((a) => ({
+    name: a.name,
+    kind: "arg",
+    schema: a.schema,
+    required: !acceptsUndefined(a.schema),
+    rest: a.rest === true,
   }));
+  const options: Field[] = (Object.entries(cmd.options?.shape ?? {}) as [string, z.ZodType][]).map(
+    ([name, schema]) => ({
+      name,
+      kind: "option",
+      schema,
+      required: !acceptsUndefined(schema),
+      rest: false,
+    }),
+  );
   return [...args, ...options];
 }
 
@@ -59,7 +67,15 @@ export function unwrapSchema(schema: z.ZodType): z.ZodType {
   let s = schema;
   for (;;) {
     const def = defOf(s);
-    if ((def.type === "optional" || def.type === "nullable" || def.type === "default" || def.type === "nonoptional" || def.type === "readonly") && def.innerType) s = def.innerType;
+    if (
+      (def.type === "optional" ||
+        def.type === "nullable" ||
+        def.type === "default" ||
+        def.type === "nonoptional" ||
+        def.type === "readonly") &&
+      def.innerType
+    )
+      s = def.innerType;
     else return s;
   }
 }
@@ -122,7 +138,12 @@ export function sampleFor(schema: z.ZodType, hint?: unknown): unknown {
     return schema.safeParse(out).success ? out : undefined;
   }
   const kind = kindOf(schema);
-  const candidates: unknown[] = kind === "integer" || kind === "number" ? NUMBER_CANDIDATES : kind === "array" ? [[]] : [...STRING_CANDIDATES, ...NUMBER_CANDIDATES];
+  const candidates: unknown[] =
+    kind === "integer" || kind === "number"
+      ? NUMBER_CANDIDATES
+      : kind === "array"
+        ? [[]]
+        : [...STRING_CANDIDATES, ...NUMBER_CANDIDATES];
   return candidates.find((c) => schema.safeParse(c).success);
 }
 
@@ -199,35 +220,71 @@ export function exhaustiveVariants(
     if (v === undefined) missingSamples.push(f.name);
     else samples.set(f.name, v);
   }
-  const requiredOnly: Named = { ...baseline, ...Object.fromEntries(fields.filter((f) => f.required).map((f) => [f.name, samples.get(f.name)])) };
+  const requiredOnly: Named = {
+    ...baseline,
+    ...Object.fromEntries(fields.filter((f) => f.required).map((f) => [f.name, samples.get(f.name)])),
+  };
   const allSet: Named = { ...baseline, ...Object.fromEntries(fields.map((f) => [f.name, samples.get(f.name)])) };
   const variants: Variant[] = [
     { name: "required-only", named: requiredOnly, expect: { ok: true } },
     { name: "all-options-set", named: allSet, expect: { ok: true } },
   ];
   for (const f of fields) {
-    for (const value of enumValuesOf(f.schema)) variants.push({ name: `${f.name}=${String(value)}`, named: { ...requiredOnly, [f.name]: value }, expect: { ok: true } });
+    for (const value of enumValuesOf(f.schema))
+      variants.push({
+        name: `${f.name}=${String(value)}`,
+        named: { ...requiredOnly, [f.name]: value },
+        expect: { ok: true },
+      });
     if (isBooleanSchema(f.schema)) {
       variants.push({ name: `${f.name}=true`, named: { ...requiredOnly, [f.name]: true }, expect: { ok: true } });
       variants.push({ name: `${f.name}=false`, named: { ...requiredOnly, [f.name]: false }, expect: { ok: true } });
     }
     const textBad = mismatchFor(f.schema, { text: true });
-    if (textBad !== undefined) variants.push({ name: `${f.name} type-mismatch`, named: { ...requiredOnly, [f.name]: textBad }, expect: { ok: false, error: "invalid_input", field: f.name }, planted: textBad });
+    if (textBad !== undefined)
+      variants.push({
+        name: `${f.name} type-mismatch`,
+        named: { ...requiredOnly, [f.name]: textBad },
+        expect: { ok: false, error: "invalid_input", field: f.name },
+        planted: textBad,
+      });
     const jsonBad = mismatchFor(f.schema, { text: false });
     if (jsonBad !== undefined && jsonBad !== textBad) {
-      variants.push({ name: `${f.name} type-mismatch (json)`, named: { ...requiredOnly, [f.name]: jsonBad }, expect: { ok: false, error: "invalid_input", field: f.name }, planted: jsonBad, jsonOnly: true });
+      variants.push({
+        name: `${f.name} type-mismatch (json)`,
+        named: { ...requiredOnly, [f.name]: jsonBad },
+        expect: { ok: false, error: "invalid_input", field: f.name },
+        planted: jsonBad,
+        jsonOnly: true,
+      });
     }
   }
   // Free text = a field the schema alone constrains: a hinted or baseline field
   // is one the FIXTURE constrains (an agent name, a repo slug the tracker
   // accepts), so the quoted sample would be refused for the wrong reason.
-  const freeText = fields.find((f) => hints[f.name] === undefined && !(f.name in baseline) && f.schema.safeParse(QUOTED_SAMPLE).success);
-  if (freeText) variants.push({ name: `${freeText.name} with embedded quotes`, named: { ...requiredOnly, [freeText.name]: QUOTED_SAMPLE }, expect: { ok: true } });
-  variants.push({ name: "unknown option", named: { ...requiredOnly, [UNKNOWN_OPTION]: MISMATCH_MARKER }, expect: { ok: false, error: "invalid_input", field: UNKNOWN_OPTION }, planted: MISMATCH_MARKER });
+  const freeText = fields.find(
+    (f) => hints[f.name] === undefined && !(f.name in baseline) && f.schema.safeParse(QUOTED_SAMPLE).success,
+  );
+  if (freeText)
+    variants.push({
+      name: `${freeText.name} with embedded quotes`,
+      named: { ...requiredOnly, [freeText.name]: QUOTED_SAMPLE },
+      expect: { ok: true },
+    });
+  variants.push({
+    name: "unknown option",
+    named: { ...requiredOnly, [UNKNOWN_OPTION]: MISMATCH_MARKER },
+    expect: { ok: false, error: "invalid_input", field: UNKNOWN_OPTION },
+    planted: MISMATCH_MARKER,
+  });
   const firstRequiredArg = fields.find((f) => f.kind === "arg" && f.required);
   if (firstRequiredArg) {
     const { [firstRequiredArg.name]: _omitted, ...rest } = requiredOnly;
-    variants.push({ name: `missing argument ${firstRequiredArg.name}`, named: rest, expect: { ok: false, error: "invalid_input", field: firstRequiredArg.name } });
+    variants.push({
+      name: `missing argument ${firstRequiredArg.name}`,
+      named: rest,
+      expect: { ok: false, error: "invalid_input", field: firstRequiredArg.name },
+    });
   }
   return { variants, missingSamples };
 }
@@ -267,17 +324,19 @@ export function toArgv(cmd: Pick<CommandDef<unknown>, "args" | "options">, named
     return a.rest ? asText(v).split(" ") : [asText(v)];
   });
   const shape = (cmd.options?.shape ?? {}) as Record<string, z.ZodType>;
-  const flags = flatten(Object.fromEntries(Object.entries(named).filter(([k]) => !argNames.has(k)))).flatMap(([k, v]) => {
-    const flag = `--${k.split(".").map(camelToKebab).join(".")}`;
-    const top = shape[k.split(".")[0]];
-    if (top && !k.includes(".") && isBooleanSchema(top)) {
-      // A boolean flag never consumes the next token, so a non-boolean value
-      // (the type-mismatch case) rides inline: `--dry-run=<value>`.
-      if (typeof v === "boolean") return v ? [flag] : [`--no-${k.split(".").map(camelToKebab).join(".")}`];
-      return [`${flag}=${asText(v)}`];
-    }
-    return [flag, asText(v)];
-  });
+  const flags = flatten(Object.fromEntries(Object.entries(named).filter(([k]) => !argNames.has(k)))).flatMap(
+    ([k, v]) => {
+      const flag = `--${k.split(".").map(camelToKebab).join(".")}`;
+      const top = shape[k.split(".")[0]];
+      if (top && !k.includes(".") && isBooleanSchema(top)) {
+        // A boolean flag never consumes the next token, so a non-boolean value
+        // (the type-mismatch case) rides inline: `--dry-run=<value>`.
+        if (typeof v === "boolean") return v ? [flag] : [`--no-${k.split(".").map(camelToKebab).join(".")}`];
+        return [`${flag}=${asText(v)}`];
+      }
+      return [flag, asText(v)];
+    },
+  );
   return [...positional, ...flags];
 }
 
@@ -320,7 +379,11 @@ export interface CommandSnapshot {
 
 /** The policy target a command's `resource` resolver names for the given input
  *  (`command` when it has none). */
-export function resourceTargetOf(cmd: Pick<CommandDef<unknown>, "id" | "resource">, named: Named, caller: Caller): string {
+export function resourceTargetOf(
+  cmd: Pick<CommandDef<unknown>, "id" | "resource">,
+  named: Named,
+  caller: Caller,
+): string {
   const input = namedToInput(cmd as CommandDef<unknown>, named, "camel");
   return targetOfResource(resourceOf(cmd, "error" in input ? {} : input, caller));
 }
@@ -334,7 +397,12 @@ export function catalogueSnapshot(cmds: readonly CommandDef<unknown>[]): Command
     .sort((a, b) => a.id.localeCompare(b.id))
     .map((cmd) => ({
       id: cmd.id,
-      args: (cmd.args ?? []).map((a) => ({ name: a.name, type: kindOf(a.schema), required: !acceptsUndefined(a.schema), ...(a.rest ? { rest: true as const } : {}) })),
+      args: (cmd.args ?? []).map((a) => ({
+        name: a.name,
+        type: kindOf(a.schema),
+        required: !acceptsUndefined(a.schema),
+        ...(a.rest ? { rest: true as const } : {}),
+      })),
       options: (Object.entries(cmd.options?.shape ?? {}) as [string, z.ZodType][]).map(([name, s]) => {
         const values = enumValuesOf(s);
         return { name, type: kindOf(s), required: !acceptsUndefined(s), ...(values.length > 0 ? { values } : {}) };
@@ -401,7 +469,8 @@ export const CALLER_ID = "{caller.id}";
 function mapStrings<T>(value: T, fn: (s: string) => string): T {
   if (typeof value === "string") return fn(value) as unknown as T;
   if (Array.isArray(value)) return value.map((v) => mapStrings(v, fn)) as unknown as T;
-  if (typeof value === "object" && value !== null) return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, mapStrings(v, fn)])) as unknown as T;
+  if (typeof value === "object" && value !== null)
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, mapStrings(v, fn)])) as unknown as T;
   return value;
 }
 
@@ -453,15 +522,37 @@ export const FIELD_HINTS: SampleHints = {
  *  field-name hint for this command; `baseline` options are present in EVERY
  *  variant. Each entry says why the generic sample is not enough. */
 export const COMMAND_FIXTURES: Readonly<Record<string, { hints?: SampleHints; baseline?: Named; why: string }>> = {
-  "config.show": { baseline: { channel: FIXTURE.channel }, why: "a machine caller has no origin channel — `--channel` is required there" },
-  "config.set": { baseline: { channel: FIXTURE.channel, agent: "general" }, why: "as config.show, plus at least one setting (a bare `config set` is `nothing to set`)" },
+  "config.show": {
+    baseline: { channel: FIXTURE.channel },
+    why: "a machine caller has no origin channel — `--channel` is required there",
+  },
+  "config.set": {
+    baseline: { channel: FIXTURE.channel, agent: "general" },
+    why: "as config.show, plus at least one setting (a bare `config set` is `nothing to set`)",
+  },
   "config.clear": { baseline: { channel: FIXTURE.channel }, why: "as config.show" },
   "config.instructions": { baseline: { channel: FIXTURE.channel }, why: "as config.show" },
-  "repo.reconfigure": { baseline: { ref: "main" }, why: "at least one change is required (a bare `repo reconfigure <slug>` is `nothing to reconfigure`)" },
-  "memory.forget": { hints: { id: FIXTURE.ownMemoryRecord }, why: "the record must exist in the CALLER's own scope — the generic `id` hint is a run id" },
-  "deploy.restart": { hints: { only: "bot" }, why: "`--only` is an enum of the one restartable Worker (`bot`) — the generic `only` hint (`memory`) is a deploy target" },
-  "mcp.add": { hints: { name: "notion" }, baseline: { channel: FIXTURE.channel }, why: "the generic `name` hint is the seeded server (a duplicate); `--scope channel` needs a channel on machine surfaces" },
-  "mcp.connect": { baseline: { channel: FIXTURE.channel }, why: "`--scope channel` needs a channel on machine surfaces" },
+  "repo.reconfigure": {
+    baseline: { ref: "main" },
+    why: "at least one change is required (a bare `repo reconfigure <slug>` is `nothing to reconfigure`)",
+  },
+  "memory.forget": {
+    hints: { id: FIXTURE.ownMemoryRecord },
+    why: "the record must exist in the CALLER's own scope — the generic `id` hint is a run id",
+  },
+  "deploy.restart": {
+    hints: { only: "bot" },
+    why: "`--only` is an enum of the one restartable Worker (`bot`) — the generic `only` hint (`memory`) is a deploy target",
+  },
+  "mcp.add": {
+    hints: { name: "notion" },
+    baseline: { channel: FIXTURE.channel },
+    why: "the generic `name` hint is the seeded server (a duplicate); `--scope channel` needs a channel on machine surfaces",
+  },
+  "mcp.connect": {
+    baseline: { channel: FIXTURE.channel },
+    why: "`--scope channel` needs a channel on machine surfaces",
+  },
   "mcp.show": { baseline: { channel: FIXTURE.channel }, why: "as mcp.connect" },
   "mcp.remove": { baseline: { channel: FIXTURE.channel }, why: "as mcp.connect" },
   "mcp.list": { baseline: { channel: FIXTURE.channel }, why: "a machine caller has no origin channel" },
@@ -470,7 +561,10 @@ export const COMMAND_FIXTURES: Readonly<Record<string, { hints?: SampleHints; ba
 /** The suite's variants for one command: `exhaustiveVariants` over the shared
  *  hints, minus any case no exposed surface can carry (a JSON-only mismatch
  *  for a CLI-only command) — a variant that runs nowhere asserts nothing. */
-export function variantsOf(cmd: Pick<CommandDef<unknown>, "id" | "args" | "options" | "surfaces" | "effect">): { variants: Variant[]; missingSamples: string[] } {
+export function variantsOf(cmd: Pick<CommandDef<unknown>, "id" | "args" | "options" | "surfaces" | "effect">): {
+  variants: Variant[];
+  missingSamples: string[];
+} {
   const entry = COMMAND_FIXTURES[cmd.id];
   const { variants, missingSamples } = exhaustiveVariants(cmd, { ...FIELD_HINTS, ...entry?.hints }, entry?.baseline);
   return { variants: variants.filter((v) => SURFACE_METAS.some((s) => exposedOn(cmd, s, v))), missingSamples };
@@ -501,7 +595,11 @@ export const SURFACE_METAS: readonly SurfaceMeta[] = [
 
 /** Whether a variant of this command runs on this surface: the command exposes
  *  the surface, a write never rides GET, a JSON-only mismatch has no text spelling. */
-export function exposedOn(cmd: Pick<CommandDef<unknown>, "surfaces" | "effect">, surface: SurfaceMeta, variant?: Variant): boolean {
+export function exposedOn(
+  cmd: Pick<CommandDef<unknown>, "surfaces" | "effect">,
+  surface: SurfaceMeta,
+  variant?: Variant,
+): boolean {
   if (cmd.surfaces?.[surface.exposure] === false) return false;
   if (surface.key === "httpGet" && cmd.effect === "write") return false;
   if (variant?.jsonOnly && !surface.json) return false;
@@ -611,14 +709,20 @@ export function carriedBy(id: string): Caller["kind"] {
 
 /** The `Actor` a role resolves to under `AUTHZ_SOURCE` — the CLI's one caller holds everything. */
 export function roleActor(role: AuthzRole): Actor {
-  return callerWith(carriedBy(role.id), role.id, role.id === "cli:local" ? "all" : grantsFor(role.id, AUTHZ_SOURCE)).actor;
+  return callerWith(carriedBy(role.id), role.id, role.id === "cli:local" ? "all" : grantsFor(role.id, AUTHZ_SOURCE))
+    .actor;
 }
 
 /** The `Caller` a role drives a command as: its actor, plus a chat origin for Slack roles. */
 export function roleCaller(role: AuthzRole, origin: { channelId: string; threadKey: string }): Caller {
   const actor = roleActor(role);
   const kind = carriedBy(role.id);
-  return { kind, id: role.id, actor: kind === "chat" ? { ...actor, origin } : actor, ...(kind === "chat" ? { origin } : {}) };
+  return {
+    kind,
+    id: role.id,
+    actor: kind === "chat" ? { ...actor, origin } : actor,
+    ...(kind === "chat" ? { origin } : {}),
+  };
 }
 
 export interface AuthorizationRow {
@@ -650,7 +754,12 @@ export function buildAuthorizationMatrix(catalogue: readonly CommandDef<unknown>
     .sort((a, b) => a.id.localeCompare(b.id))
     .map<AuthorizationRow>((cmd) => {
       const happy = variantsOf(cmd).variants.find((v) => v.name === "required-only")!;
-      return { id: cmd.id, action: cmd.action, resource: resourceTargetOf(cmd, happy.named, roleCaller(AUTHZ_ROLES[0]!, MATRIX_ORIGIN)), cells: Object.fromEntries(AUTHZ_ROLES.map((role) => [role.id, admits(cmd, role)])) };
+      return {
+        id: cmd.id,
+        action: cmd.action,
+        resource: resourceTargetOf(cmd, happy.named, roleCaller(AUTHZ_ROLES[0]!, MATRIX_ORIGIN)),
+        cells: Object.fromEntries(AUTHZ_ROLES.map((role) => [role.id, admits(cmd, role)])),
+      };
     });
   return { roles: AUTHZ_ROLES, rows };
 }
@@ -661,10 +770,17 @@ export function policyGaps(catalogue: readonly CommandDef<unknown>[]): string[] 
   const probe = callerWith("cli", "cli:probe");
   return catalogue
     .filter((cmd) => {
-      const target = resourceTargetOf(cmd, variantsOf(cmd).variants.find((v) => v.name === "required-only")?.named ?? {}, probe);
+      const target = resourceTargetOf(
+        cmd,
+        variantsOf(cmd).variants.find((v) => v.name === "required-only")?.named ?? {},
+        probe,
+      );
       return !POLICY.some((rule) => rule.action === cmd.action && ruleTarget(rule) === target);
     })
-    .map((cmd) => `${cmd.id}: no policy row for ${cmd.action} on ${resourceTargetOf(cmd, {}, probe)} — add one to src/core/authz/policy.ts (with its allow + deny cases in policy.test.ts)`);
+    .map(
+      (cmd) =>
+        `${cmd.id}: no policy row for ${cmd.action} on ${resourceTargetOf(cmd, {}, probe)} — add one to src/core/authz/policy.ts (with its allow + deny cases in policy.test.ts)`,
+    );
 }
 
 export function renderAuthorizationMatrix(matrix: AuthorizationMatrix): string[] {
@@ -676,7 +792,10 @@ export function renderAuthorizationMatrix(matrix: AuthorizationMatrix): string[]
     `| Command | Action | Resource | ${matrix.roles.map((r) => r.column).join(" | ")} |`,
     `|---|---|---|${matrix.roles.map(() => ":-:").join("|")}|`,
   ];
-  for (const row of matrix.rows) out.push(`| \`${row.id}\` | \`${row.action}\` | \`${row.resource}\` | ${matrix.roles.map((r) => (row.cells[r.id] ? "✅" : "⛔")).join(" | ")} |`);
+  for (const row of matrix.rows)
+    out.push(
+      `| \`${row.id}\` | \`${row.action}\` | \`${row.resource}\` | ${matrix.roles.map((r) => (row.cells[r.id] ? "✅" : "⛔")).join(" | ")} |`,
+    );
   out.push("");
   return out;
 }
@@ -688,7 +807,9 @@ export function buildConformanceMatrix(catalogue: readonly CommandDef<unknown>[]
       const { variants, missingSamples } = variantsOf(cmd);
       if (missingSamples.length > 0) throw new Error(`${cmd.id}: no sample for ${missingSamples.join(", ")}`);
       const rows = variants.map<MatrixRow>((variant) => {
-        const input = variant.jsonOnly ? `POST ${JSON.stringify(variant.named)}` : toChatText(cmd.id.split("."), toArgv(cmd, variant.named));
+        const input = variant.jsonOnly
+          ? `POST ${JSON.stringify(variant.named)}`
+          : toChatText(cmd.id.split("."), toArgv(cmd, variant.named));
         const rejection = expectedRejection(variant);
         const cells = Object.fromEntries(
           SURFACE_METAS.map((s): [SurfaceKey, MatrixCell] => {
@@ -701,25 +822,80 @@ export function buildConformanceMatrix(catalogue: readonly CommandDef<unknown>[]
       return { id: cmd.id, describe: cmd.describe, rows };
     });
   const variants = commands.reduce((n, c) => n + c.rows.length, 0);
-  const cells = commands.reduce((n, c) => n + c.rows.reduce((m, r) => m + Object.values(r.cells).filter((x) => x.kind !== "not-exposed").length, 0), 0);
-  return { commands, authorization: buildAuthorizationMatrix(catalogue), summary: { commands: commands.length, surfaces: SURFACE_METAS.length, variants, cells } };
+  const cells = commands.reduce(
+    (n, c) => n + c.rows.reduce((m, r) => m + Object.values(r.cells).filter((x) => x.kind !== "not-exposed").length, 0),
+    0,
+  );
+  return {
+    commands,
+    authorization: buildAuthorizationMatrix(catalogue),
+    summary: { commands: commands.length, surfaces: SURFACE_METAS.length, variants, cells },
+  };
 }
 
 /** The assertions applied to every exercised cell, for the matrix's closing table. */
 export const CROSS_CUTTING_ASSERTIONS: ReadonlyArray<{ name: string; assertion: string }> = [
-  { name: "Name mapping", assertion: "`/api/<group>.<verb>`, the MCP tool `group_verb`, the CLI words `group verb`, and the chat form all resolve to this one command; an opted-out surface does not expose it (404 / no tool / usage / not a chat command)." },
-  { name: "Schema exactness", assertion: "The MCP `inputSchema` is exactly `jsonSchemaFor(cmd)`: properties = the declared arguments + options, `required` = the non-optional ones, `additionalProperties: false`, enum values and defaults intact." },
-  { name: "Help completeness", assertion: "CLI `--help` and chat `--help` name every `<argument>`, every `--option` flag, and the description." },
-  { name: "Chat shape", assertion: "No chat reply — a command's rendered output or its `--help` — pads columns (two or more spaces between words): padded columns collapse in Slack's proportional font, so a command shaped for a terminal must declare a chat shape (`renderChat`, or a chat branch in `renderCompact`)." },
-  { name: "Auth before parse", assertion: "Admission on every surface equals `authorize(caller.actor, cmd.action, resource)` over the policy table (the Authorization table below): a refused caller gets `unauthorized` (HTTP 403) even for a malformed input — the value is never parsed; a credential with no grants is refused on every command (fail-closed)." },
-  { name: "Caller is what the adapter resolved", assertion: "The `Caller` the registry saw has the surface's kind and id (`access:<sub>`, `mcp:<subject>`, `cli:local`, the Slack user) and, in chat, the message's channel as its origin." },
-  { name: "POST-only writes", assertion: "A write command over HTTP GET is 405 and never invoked; a read leaves the fixture fingerprint (runs, memory, config overrides, tracker, executors) byte-identical." },
-  { name: "Same parsed input", assertion: "Every surface binds to the identical parsed `{ args, options }` (modulo the caller's own id)." },
-  { name: "Identical invoke JSON", assertion: "HTTP GET, HTTP POST, MCP, and CLI `--json` return the same JSON as a direct `invoke` with that caller, identical across surfaces modulo the caller's own id; chat returns `renderText` of it." },
-  { name: "Field named, value never echoed", assertion: "A refusal names the offending field (camelCase, `--kebab`, or `<name>`) and never repeats the submitted value; nothing ran." },
-  { name: "No token, no secret", assertion: "No output carries a run capability token, the planted env secret, or a planted mismatch value." },
-  { name: "Untrusted wrapping", assertion: "Stored free text reaches a machine surface only inside `wrapUntrusted` (preamble + fences)." },
-  { name: "No real executor", assertion: "Every executing dependency (resident admin, deterministic ops, deploy runner, env bootstrap, run-stream source) is a recording stub; `fetch` and `node:child_process` are disarmed for the whole suite." },
+  {
+    name: "Name mapping",
+    assertion:
+      "`/api/<group>.<verb>`, the MCP tool `group_verb`, the CLI words `group verb`, and the chat form all resolve to this one command; an opted-out surface does not expose it (404 / no tool / usage / not a chat command).",
+  },
+  {
+    name: "Schema exactness",
+    assertion:
+      "The MCP `inputSchema` is exactly `jsonSchemaFor(cmd)`: properties = the declared arguments + options, `required` = the non-optional ones, `additionalProperties: false`, enum values and defaults intact.",
+  },
+  {
+    name: "Help completeness",
+    assertion: "CLI `--help` and chat `--help` name every `<argument>`, every `--option` flag, and the description.",
+  },
+  {
+    name: "Chat shape",
+    assertion:
+      "No chat reply — a command's rendered output or its `--help` — pads columns (two or more spaces between words): padded columns collapse in Slack's proportional font, so a command shaped for a terminal must declare a chat shape (`renderChat`, or a chat branch in `renderCompact`).",
+  },
+  {
+    name: "Auth before parse",
+    assertion:
+      "Admission on every surface equals `authorize(caller.actor, cmd.action, resource)` over the policy table (the Authorization table below): a refused caller gets `unauthorized` (HTTP 403) even for a malformed input — the value is never parsed; a credential with no grants is refused on every command (fail-closed).",
+  },
+  {
+    name: "Caller is what the adapter resolved",
+    assertion:
+      "The `Caller` the registry saw has the surface's kind and id (`access:<sub>`, `mcp:<subject>`, `cli:local`, the Slack user) and, in chat, the message's channel as its origin.",
+  },
+  {
+    name: "POST-only writes",
+    assertion:
+      "A write command over HTTP GET is 405 and never invoked; a read leaves the fixture fingerprint (runs, memory, config overrides, tracker, executors) byte-identical.",
+  },
+  {
+    name: "Same parsed input",
+    assertion: "Every surface binds to the identical parsed `{ args, options }` (modulo the caller's own id).",
+  },
+  {
+    name: "Identical invoke JSON",
+    assertion:
+      "HTTP GET, HTTP POST, MCP, and CLI `--json` return the same JSON as a direct `invoke` with that caller, identical across surfaces modulo the caller's own id; chat returns `renderText` of it.",
+  },
+  {
+    name: "Field named, value never echoed",
+    assertion:
+      "A refusal names the offending field (camelCase, `--kebab`, or `<name>`) and never repeats the submitted value; nothing ran.",
+  },
+  {
+    name: "No token, no secret",
+    assertion: "No output carries a run capability token, the planted env secret, or a planted mismatch value.",
+  },
+  {
+    name: "Untrusted wrapping",
+    assertion: "Stored free text reaches a machine surface only inside `wrapUntrusted` (preamble + fences).",
+  },
+  {
+    name: "No real executor",
+    assertion:
+      "Every executing dependency (resident admin, deterministic ops, deploy runner, env bootstrap, run-stream source) is a recording stub; `fetch` and `node:child_process` are disarmed for the whole suite.",
+  },
 ];
 
 const CELL_TEXT: Record<MatrixCell["kind"], string> = { ok: "✅", rejected: "⛔", "not-exposed": "—" };
@@ -738,8 +914,18 @@ export function renderConformanceMatrix(matrix: ConformanceMatrix): string {
     "",
   ];
   for (const cmd of matrix.commands) {
-    out.push(`### \`${cmd.id}\``, "", cmd.describe, "", `| Variant | Input (as the CLI spells it) | ${SURFACE_METAS.map((s) => s.column).join(" | ")} |`, `|---|---|${SURFACE_METAS.map(() => ":-:").join("|")}|`);
-    for (const row of cmd.rows) out.push(`| ${renderVariantCell(row)} | \`${mdCell(row.input)}\` | ${SURFACE_METAS.map((s) => CELL_TEXT[row.cells[s.key].kind]).join(" | ")} |`);
+    out.push(
+      `### \`${cmd.id}\``,
+      "",
+      cmd.describe,
+      "",
+      `| Variant | Input (as the CLI spells it) | ${SURFACE_METAS.map((s) => s.column).join(" | ")} |`,
+      `|---|---|${SURFACE_METAS.map(() => ":-:").join("|")}|`,
+    );
+    for (const row of cmd.rows)
+      out.push(
+        `| ${renderVariantCell(row)} | \`${mdCell(row.input)}\` | ${SURFACE_METAS.map((s) => CELL_TEXT[row.cells[s.key].kind]).join(" | ")} |`,
+      );
     out.push("");
   }
   out.push(...renderAuthorizationMatrix(matrix.authorization));

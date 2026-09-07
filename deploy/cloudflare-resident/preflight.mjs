@@ -24,7 +24,8 @@ const HOW_TO_SET_TOKEN =
   `set one of ${TOKEN_ENV_VARS.join(" / ")} in the environment (the same bearer ` +
   "`npm run secrets` put on the Worker; any scope may read /residents), e.g. " +
   "`RESIDENT_ADMIN_TOKEN=… npm run deploy`";
-const HOW_TO_FORCE = "to deploy anyway (this WILL kill in-flight runs): `RESIDENT_DEPLOY_FORCE=1 npm run deploy` (`node preflight.mjs --force` checks alone)";
+const HOW_TO_FORCE =
+  "to deploy anyway (this WILL kill in-flight runs): `RESIDENT_DEPLOY_FORCE=1 npm run deploy` (`node preflight.mjs --force` checks alone)";
 /** Lifecycle states in which NOTHING is executing on the resident — the only
  *  states a deploy may land on. Every other state is either known mid-cycle
  *  (the engine is running a refresh's fetch/rebuild, a restore, or
@@ -88,7 +89,11 @@ export function decide(fetched, { force = false } = {}) {
         if (!live || typeof live !== "object" || typeof live.error === "string") {
           unknown.push({ resource, error: live?.error ?? "no live view" });
         } else if (typeof live.inFlight !== "number") {
-          unknown.push({ resource, error: "live view carries no inFlight count (Worker predates the preflight — deploy once with RESIDENT_DEPLOY_FORCE=1)" });
+          unknown.push({
+            resource,
+            error:
+              "live view carries no inFlight count (Worker predates the preflight — deploy once with RESIDENT_DEPLOY_FORCE=1)",
+          });
         } else if (!Number.isInteger(live.inFlight) || live.inFlight < 0) {
           // A count that is not a non-negative integer can only come from a
           // counter bug (double release, unmatched decrement). We cannot tell
@@ -106,19 +111,34 @@ export function decide(fetched, { force = false } = {}) {
             midCycle.push({ resource, state: live.state });
           } else if (!SETTLED_STATES.has(live.state)) {
             // A state this script does not know: fail closed rather than assume settled.
-            unknown.push({ resource, error: `live view carries an unrecognized state ${JSON.stringify(live.state)} (vocabulary drift — update preflight.mjs)` });
+            unknown.push({
+              resource,
+              error: `live view carries an unrecognized state ${JSON.stringify(live.state)} (vocabulary drift — update preflight.mjs)`,
+            });
           }
         }
       }
-      if (busy.length) problems.push(`in flight: ${busy.map((b) => `${b.resource} (${b.inFlight} in flight)`).join(", ")}`);
-      if (midCycle.length) problems.push(`mid-cycle: ${midCycle.map((m) => `${m.resource} (${m.state})`).join(", ")} — the refresh/restore would be killed`);
-      if (unknown.length) problems.push(`unknown state: ${unknown.map((u) => `${u.resource} (${u.error})`).join(", ")}`);
+      if (busy.length)
+        problems.push(`in flight: ${busy.map((b) => `${b.resource} (${b.inFlight} in flight)`).join(", ")}`);
+      if (midCycle.length)
+        problems.push(
+          `mid-cycle: ${midCycle.map((m) => `${m.resource} (${m.state})`).join(", ")} — the refresh/restore would be killed`,
+        );
+      if (unknown.length)
+        problems.push(`unknown state: ${unknown.map((u) => `${u.resource} (${u.error})`).join(", ")}`);
     }
   }
 
   if (problems.length === 0) {
     const count = fetched.payload.residents.length;
-    return { allow: true, forced: false, busy, midCycle, unknown, message: `preflight ok: ${count} residents, no resident has work in flight or a cycle running` };
+    return {
+      allow: true,
+      forced: false,
+      busy,
+      midCycle,
+      unknown,
+      message: `preflight ok: ${count} residents, no resident has work in flight or a cycle running`,
+    };
   }
   const detail = problems.map((p) => `  - ${p}`).join("\n");
   if (force) {

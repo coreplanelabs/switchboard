@@ -70,7 +70,14 @@ function main() {
     .split("\n")
     .find((line) => line.trim().length > 0);
   if (existing) {
-    run("gh", ["api", "--method", "PATCH", `repos/${repo}/issues/comments/${existing.trim()}`, "-F", "body=@comment.md"]);
+    run("gh", [
+      "api",
+      "--method",
+      "PATCH",
+      `repos/${repo}/issues/comments/${existing.trim()}`,
+      "-F",
+      "body=@comment.md",
+    ]);
     console.log(`updated comment ${existing.trim()}`);
   } else {
     run("gh", ["pr", "comment", pr, "--body-file", "comment.md"]);

@@ -65,7 +65,7 @@ function ser(n: FakeNode): string {
 }
 
 function render(text: string): { html: string; root: FakeNode } {
-  const { doc, node } = makeDoc();
+  const { node } = makeDoc();
   const root = node("div");
   renderMarkdownInto(root as unknown as HTMLElement, text);
   return { html: ser(root).replace(/^<div>|<\/div>$/g, ""), root };
@@ -136,7 +136,9 @@ describe("renderMarkdownInto — blocks", () => {
   });
 
   it("nests an indented list one level inside the previous item", () => {
-    expect(render("- a\n  - a1\n  - a2\n- b").html).toBe("<ul><li>a<ul><li>a1</li><li>a2</li></ul></li><li>b</li></ul>");
+    expect(render("- a\n  - a1\n  - a2\n- b").html).toBe(
+      "<ul><li>a<ul><li>a1</li><li>a2</li></ul></li><li>b</li></ul>",
+    );
   });
 
   it("renders > quotes, with block syntax parsed inside them", () => {
@@ -242,7 +244,9 @@ describe("renderMarkdownInto — safety contract", () => {
   });
 
   it("markup in table cells stays text: <img>/<script>/javascript: never become nodes (#209)", () => {
-    const t = render('| <img src=x onerror="alert(1)"> | </td><script>x</script> |\n|---|---|\n| <svg onload=alert(1)> | [x](javascript:alert(1)) |');
+    const t = render(
+      '| <img src=x onerror="alert(1)"> | </td><script>x</script> |\n|---|---|\n| <svg onload=alert(1)> | [x](javascript:alert(1)) |',
+    );
     expect(tags(t.root)).not.toContain("img");
     expect(tags(t.root)).not.toContain("script");
     expect(tags(t.root)).not.toContain("svg");

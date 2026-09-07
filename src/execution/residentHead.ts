@@ -33,7 +33,11 @@ export function parseWantSha(value: unknown): ParsedWantSha {
  *  branch's tip at the PR head, so the sha is dropped rather than forcing a
  *  fetch on every attach of a permanently mismatched thread. No refHint (a
  *  follow-up that named no branch) → the caller means the bound ref. */
-export function wantShaForBinding(input: { boundRef: string; refHint: string | null; wantSha: string | null }): string | null {
+export function wantShaForBinding(input: {
+  boundRef: string;
+  refHint: string | null;
+  wantSha: string | null;
+}): string | null {
   if (input.refHint !== null && input.refHint !== input.boundRef) return null;
   return input.wantSha;
 }

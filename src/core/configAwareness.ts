@@ -42,24 +42,28 @@ type DirectiveSet = { agent?: string; model?: string; effort?: Effort };
 export const CONFIG_AWARENESS_HEADER = "Switchboard runtime config for this run:";
 
 export function configAwarenessBlock(i: ConfigAwarenessInput): string {
-  const overrides = [
-    fmtScopeOverride("channel", i.channel),
-    fmtScopeOverride("user", i.user),
-  ].filter((s): s is string => s !== undefined);
+  const overrides = [fmtScopeOverride("channel", i.channel), fmtScopeOverride("user", i.user)].filter(
+    (s): s is string => s !== undefined,
+  );
   const scopeLine =
     overrides.length > 0
       ? `Scope: ${overrides.join("; ")}.`
       : "Scope: using defaults — no channel or user overrides are set.";
 
   const effort = i.effort ? `at effort \`${i.effort}\`` : "at the model's default effort";
-  const lines = [`${CONFIG_AWARENESS_HEADER} agent \`${i.agentName}\` on model \`${i.modelRef}\` ${effort}.`, scopeLine];
+  const lines = [
+    `${CONFIG_AWARENESS_HEADER} agent \`${i.agentName}\` on model \`${i.modelRef}\` ${effort}.`,
+    scopeLine,
+  ];
 
   const fromMessage = fmtDirective(i.messageDirective);
   const fromThread = fmtDirective(i.threadDirective);
   if (fromMessage) {
     lines.push(`This message's \`${fromMessage}\` directive set the agent/model/effort for this run.`);
   } else if (fromThread) {
-    lines.push(`A \`${fromThread}\` directive earlier in this thread set the agent/model/effort for this run (thread stickiness).`);
+    lines.push(
+      `A \`${fromThread}\` directive earlier in this thread set the agent/model/effort for this run (thread stickiness).`,
+    );
   }
 
   // Custom instructions (#107 phase 2): name WHICH scopes carry them, never
@@ -74,8 +78,12 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
 
   if (i.mcp) {
     const { registryOn, served, unavailable } = i.mcp;
-    if (served.length > 0) lines.push(`External MCP servers connected for this run: ${served.join(", ")} — their tools are named \`mcp__<server>__*\` (details: \`mcp list\`, \`mcp show <name>\`).`);
-    if (unavailable.length > 0) lines.push(`MCP servers configured for this agent that did not answer this run: ${unavailable.join(", ")}.`);
+    if (served.length > 0)
+      lines.push(
+        `External MCP servers connected for this run: ${served.join(", ")} — their tools are named \`mcp__<server>__*\` (details: \`mcp list\`, \`mcp show <name>\`).`,
+      );
+    if (unavailable.length > 0)
+      lines.push(`MCP servers configured for this agent that did not answer this run: ${unavailable.join(", ")}.`);
     if (registryOn && served.length === 0 && unavailable.length === 0) {
       lines.push(
         "External MCP servers: none connected for you or org-wide yet. Anyone can connect one for their own runs with `mcp add <name> --url <url>` (a one-time link takes the token; never paste tokens in chat); admins add org-wide ones with `--scope org`. `mcp list` shows what exists.",
@@ -83,9 +91,7 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
     }
   }
 
-  const channelGate = i.canEditChannelConfig
-    ? "per-channel"
-    : "per-channel; restricted for this user — ask an admin";
+  const channelGate = i.canEditChannelConfig ? "per-channel" : "per-channel; restricted for this user — ask an admin";
   lines.push(
     "Users inspect and tune settings: `config show`, " +
       "`config set me --agent <name> --model <provider>/<model> --effort <low|medium|high>` (per-user; `--models.<agent>` / `--efforts.<agent>` per agent), " +

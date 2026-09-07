@@ -9,7 +9,11 @@ export type ResidentLifecycleState = "onboarding" | "warm" | "refreshing" | "res
 /** States in which the resident serves the last snapshot and its /attach route
  *  refuses nothing: the bot attaches. `degraded` is serviceable only for the
  *  reason classes that leave the checkout intact — see `degradedIsServiceable`. */
-export const SERVICEABLE_STATES: ReadonlySet<ResidentLifecycleState> = new Set<ResidentLifecycleState>(["warm", "refreshing", "degraded"]);
+export const SERVICEABLE_STATES: ReadonlySet<ResidentLifecycleState> = new Set<ResidentLifecycleState>([
+  "warm",
+  "refreshing",
+  "degraded",
+]);
 
 // A `degraded` reason names its cause (features/resident-repos.md item 7).
 // Only reasons that PROVE the previous checkout + dep cache are intact attach:

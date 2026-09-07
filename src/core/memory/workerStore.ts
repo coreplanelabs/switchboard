@@ -60,12 +60,16 @@ export class WorkerMemoryStore implements MemoryStore {
     try {
       res = await this.post("/retrieve", { ...q, query });
     } catch (err) {
-      this.warn(`worker /retrieve failed (${err instanceof Error ? err.message : String(err)}); continuing without memory`);
+      this.warn(
+        `worker /retrieve failed (${err instanceof Error ? err.message : String(err)}); continuing without memory`,
+      );
       return [];
     }
     const data = await parseBody(res);
     if (!res.ok) {
-      this.warn(`worker /retrieve HTTP ${res.status}${data.error ? ` (${String(data.error)})` : ""}; continuing without memory`);
+      this.warn(
+        `worker /retrieve HTTP ${res.status}${data.error ? ` (${String(data.error)})` : ""}; continuing without memory`,
+      );
       return [];
     }
     if (!Array.isArray(data.records)) {
@@ -95,7 +99,8 @@ export class WorkerMemoryStore implements MemoryStore {
   async list(scopeKey: string, limit: number, query?: string): Promise<MemoryRecord[]> {
     const res = await this.post("/list", { scopeKey, limit, ...(query !== undefined ? { query } : {}) });
     const data = await parseBody(res);
-    if (!res.ok) throw new Error(`memory worker /list HTTP ${res.status}${data.error ? `: ${String(data.error)}` : ""}`);
+    if (!res.ok)
+      throw new Error(`memory worker /list HTTP ${res.status}${data.error ? `: ${String(data.error)}` : ""}`);
     return Array.isArray(data.records) ? data.records.filter(isMemoryRecord) : [];
   }
 
@@ -103,7 +108,8 @@ export class WorkerMemoryStore implements MemoryStore {
   async forget(scopeKey: string, id: string): Promise<boolean> {
     const res = await this.post("/forget", { scopeKey, id });
     const data = await parseBody(res);
-    if (!res.ok) throw new Error(`memory worker /forget HTTP ${res.status}${data.error ? `: ${String(data.error)}` : ""}`);
+    if (!res.ok)
+      throw new Error(`memory worker /forget HTTP ${res.status}${data.error ? `: ${String(data.error)}` : ""}`);
     return data.forgotten === true;
   }
 

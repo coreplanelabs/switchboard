@@ -5,7 +5,6 @@ import { ALL_GRANTS } from "../core/authz/grants.js";
 import type { DispatchFn, IngressConfig, IngressIdentity } from "./http.js";
 import type { CoreDeps } from "../core/dispatcher.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
-import { z } from "zod";
 import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
 import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
 import type { RunEvent } from "../core/runEvents.js";
@@ -142,11 +141,10 @@ describe("handleMcpRequest — tools/call", () => {
 
   it("rejects an unknown tool name with -32602, dispatch never called", async () => {
     const d = fakeDispatch();
-    const res = await handleMcpRequest(
-      rpc("tools/call", { name: "nope", arguments: { text: "hi" } }),
-      deps,
-      { auth: good, dispatch: d.fn },
-    );
+    const res = await handleMcpRequest(rpc("tools/call", { name: "nope", arguments: { text: "hi" } }), deps, {
+      auth: good,
+      dispatch: d.fn,
+    });
     expect(res.status).toBe(200);
     expect((res.body as RpcError).error.code).toBe(-32602);
     expect(d.calls).toHaveLength(0);
@@ -155,11 +153,10 @@ describe("handleMcpRequest — tools/call", () => {
   it("rejects missing/blank/non-string text with -32602, dispatch never called", async () => {
     const d = fakeDispatch();
     for (const args of [{}, { text: "  " }, { text: 5 }, { name: "dispatch" }]) {
-      const res = await handleMcpRequest(
-        rpc("tools/call", { name: "dispatch", arguments: args }),
-        deps,
-        { auth: good, dispatch: d.fn },
-      );
+      const res = await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: args }), deps, {
+        auth: good,
+        dispatch: d.fn,
+      });
       expect((res.body as RpcError).error.code).toBe(-32602);
     }
     expect(d.calls).toHaveLength(0);
@@ -218,7 +215,7 @@ describe("handleMcpRequest — JSON-RPC framing errors", () => {
     }
   });
 
-  it("a missing or non-\"2.0\" jsonrpc field → -32600", async () => {
+  it('a missing or non-"2.0" jsonrpc field → -32600', async () => {
     for (const raw of [
       JSON.stringify({ method: "tools/list", id: 1 }), // jsonrpc missing
       JSON.stringify({ jsonrpc: "1.0", method: "tools/list", id: 1 }), // wrong version
@@ -231,7 +228,11 @@ describe("handleMcpRequest — JSON-RPC framing errors", () => {
   it("a malformed id (object/boolean) → -32600, not silently coerced to null", async () => {
     for (const badId of [{}, true]) {
       const res = await handleMcpRequest(
-        { method: "POST", headers: bearer("tok"), body: JSON.stringify({ jsonrpc: "2.0", id: badId, method: "tools/list" }) },
+        {
+          method: "POST",
+          headers: bearer("tok"),
+          body: JSON.stringify({ jsonrpc: "2.0", id: badId, method: "tools/list" }),
+        },
         deps,
         { auth: good },
       );
@@ -252,7 +253,11 @@ describe("handleMcpRequest — JSON-RPC framing errors", () => {
   it("a notification (no id) is accepted with 202 and no response body, dispatch never called", async () => {
     const d = fakeDispatch();
     const res = await handleMcpRequest(
-      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) },
+      {
+        method: "POST",
+        headers: bearer("tok"),
+        body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+      },
       deps,
       { auth: good, dispatch: d.fn },
     );
@@ -304,12 +309,16 @@ describe("createMcpHandler (node:http wrapper)", () => {
   it("reads the body, routes tools/call, and writes a 200 JSON-RPC reply", async () => {
     const d = fakeDispatch("wrapped");
     const handler = createMcpHandler(deps, { auth: good, dispatch: d.fn });
-    const t = fakeReqRes("POST", bearer("tok"), JSON.stringify({
-      jsonrpc: "2.0",
-      id: 9,
-      method: "tools/call",
-      params: { name: "dispatch", arguments: { text: "hi" } },
-    }));
+    const t = fakeReqRes(
+      "POST",
+      bearer("tok"),
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 9,
+        method: "tools/call",
+        params: { name: "dispatch", arguments: { text: "hi" } },
+      }),
+    );
     handler(t.req, t.res);
     await vi.waitFor(() => expect(t.status()).toBe(200));
     expect(t.json().result).toEqual({ content: [{ type: "text", text: "wrapped" }] });
@@ -328,7 +337,12 @@ describe("createMcpHandler (node:http wrapper)", () => {
     const destroy = vi.fn();
     const req = Object.assign(iter(), { method: "POST", headers: bearer("wrong"), destroy });
     let statusCode = 0;
-    const res = { writeHead: (c: number) => { statusCode = c; }, end: () => {} };
+    const res = {
+      writeHead: (c: number) => {
+        statusCode = c;
+      },
+      end: () => {},
+    };
     const handler = createMcpHandler(deps, { auth: good, dispatch: d.fn });
     handler(
       req as unknown as Parameters<ReturnType<typeof createMcpHandler>>[0],
@@ -342,7 +356,11 @@ describe("createMcpHandler (node:http wrapper)", () => {
 
   it("writes an empty 202 body for a notification", async () => {
     const handler = createMcpHandler(deps, { auth: good });
-    const t = fakeReqRes("POST", bearer("tok"), JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }));
+    const t = fakeReqRes(
+      "POST",
+      bearer("tok"),
+      JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    );
     handler(t.req, t.res);
     await vi.waitFor(() => expect(t.status()).toBe(202));
     expect(t.raw()).toBe("");
@@ -370,14 +388,25 @@ const NOW = 1_700_000_000_000;
 async function commandFixture() {
   let n = 0;
   const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
-  const live = reg.create("coding · acme/live", { agent: "coding", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t", channelVisibility: "public" });
+  const live = reg.create("coding · acme/live", {
+    agent: "coding",
+    channelId: "slack:C1",
+    userId: "slack:U1",
+    threadKey: "slack:C1:t",
+    channelVisibility: "public",
+  });
   reg.publish(live.id, { type: "input", text: "live request" });
   const store = new InMemoryRunStore({ now: () => NOW });
   const events: RunEvent[] = [
     { type: "input", text: "please do the thing", seq: 1 },
     { type: "answer", text: "all done", seq: 2 },
   ];
-  const persisted = (id: string, channelId: string, channelVisibility: RunRecord["channelVisibility"], finishedAt: number): RunRecord => ({
+  const persisted = (
+    id: string,
+    channelId: string,
+    channelVisibility: RunRecord["channelVisibility"],
+    finishedAt: number,
+  ): RunRecord => ({
     id,
     label: `coding · acme/${id}`,
     agent: "coding",
@@ -403,7 +432,9 @@ async function commandFixture() {
   return { reg, live, commands };
 }
 
-const scoped = (scopes: string[], channel?: string): IngressConfig => ({ tokens: { tok: { subject: "alice", scopes, ...(channel ? { channel } : {}) } } });
+const scoped = (scopes: string[], channel?: string): IngressConfig => ({
+  tokens: { tok: { subject: "alice", scopes, ...(channel ? { channel } : {}) } },
+});
 
 /** The tool result text is `<one-line header>\n<JSON>`; return the parsed JSON. */
 function toolJson(res: { body?: unknown }): unknown {
@@ -420,12 +451,20 @@ describe("toCaller — the Caller a tool call runs as carries the mcp: Actor (pl
     expect(c).toEqual({ kind: "mcp", id: "mcp:alice", actor: c.actor });
     expect(c).not.toHaveProperty("channel");
     expect(c).not.toHaveProperty("scopes");
-    expect(c.actor).toEqual({ kind: "service", id: "mcp:alice", grants: { actions: new Set(["runs:read"]), channels: new Set(["mcp:ops"]), repos: new Set() } });
+    expect(c.actor).toEqual({
+      kind: "service",
+      id: "mcp:alice",
+      grants: { actions: new Set(["runs:read"]), channels: new Set(["mcp:ops"]), repos: new Set() },
+    });
   });
 
   it("an unpinned token's actor holds NO channel (OQ4, option a — fail-closed); a wired `grantsFor` (ConfigStore) is consulted by the mcp: id", () => {
     const auth = scoped(["dispatch"]);
-    expect(toCaller(auth.tokens.tok, { auth }).actor).toEqual({ kind: "service", id: "mcp:alice", grants: { actions: new Set(["dispatch"]), channels: new Set(), repos: new Set() } });
+    expect(toCaller(auth.tokens.tok, { auth }).actor).toEqual({
+      kind: "service",
+      id: "mcp:alice",
+      grants: { actions: new Set(["dispatch"]), channels: new Set(), repos: new Set() },
+    });
     const asked: string[] = [];
     const c = toCaller(auth.tokens.tok, { auth, grantsFor: (id) => (asked.push(id), ALL_GRANTS) });
     expect(asked).toEqual(["mcp:alice"]);
@@ -437,12 +476,27 @@ describe("handleMcpRequest — registry commands as tools", () => {
   it("tools/list = dispatch + every registered command with a derived inputSchema (runs_list has the status enum)", async () => {
     const { commands } = await commandFixture();
     const res = await handleMcpRequest(rpc("tools/list", {}), deps, { auth: good, commands });
-    const tools = (res.body as RpcResult).result.tools as Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
+    const tools = (res.body as RpcResult).result.tools as Array<{
+      name: string;
+      description: string;
+      inputSchema: Record<string, unknown>;
+    }>;
     expect(tools[0].name).toBe("dispatch");
-    expect(tools.map((t) => t.name)).toEqual(["dispatch", "runs_list", "runs_get", "runs_events", "runs_friction", "runs_stop"]);
+    expect(tools.map((t) => t.name)).toEqual([
+      "dispatch",
+      "runs_list",
+      "runs_get",
+      "runs_events",
+      "runs_friction",
+      "runs_stop",
+    ]);
     const list = tools.find((t) => t.name === "runs_list")!;
     expect(list.description).toBeTruthy();
-    expect((list.inputSchema.properties as Record<string, { enum?: string[] }>).status.enum).toEqual(["active", "finished", "all"]);
+    expect((list.inputSchema.properties as Record<string, { enum?: string[] }>).status.enum).toEqual([
+      "active",
+      "finished",
+      "all",
+    ]);
     expect(list.inputSchema.type).toBe("object");
   });
 
@@ -456,24 +510,37 @@ describe("handleMcpRequest — registry commands as tools", () => {
       describe: "not for MCP",
       handler: async () => ({}),
     });
-    const res = await handleMcpRequest(rpc("tools/list", {}), deps, { auth: good, commands: bindCommands(registry, undefined) });
+    const res = await handleMcpRequest(rpc("tools/list", {}), deps, {
+      auth: good,
+      commands: bindCommands(registry, undefined),
+    });
     expect(((res.body as RpcResult).result.tools as { name: string }[]).map((t) => t.name)).toEqual(["dispatch"]);
   });
 
   it("tools/call runs_list returns a header line plus the invoke JSON, with no token", async () => {
     const { commands } = await commandFixture();
-    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, { auth: scoped(["runs:read"]), commands });
+    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, {
+      auth: scoped(["runs:read"]),
+      commands,
+    });
     expect(res.status).toBe(200);
     const body = toolJson(res) as { runs: { id: string }[] };
     expect(body.runs.map((r) => r.id).sort()).toEqual(["fin-1", "live-1"]);
     expect(JSON.stringify(res.body)).not.toContain("tok-");
-    const direct = await commands.invoke("runs.list", { options: { status: "all" } }, toCaller(scoped(["runs:read"]).tokens.tok, { auth: scoped(["runs:read"]) }));
+    const direct = await commands.invoke(
+      "runs.list",
+      { options: { status: "all" } },
+      toCaller(scoped(["runs:read"]).tokens.tok, { auth: scoped(["runs:read"]) }),
+    );
     expect(body).toEqual(direct.ok ? direct.value : null);
   });
 
   it("runs_get on an unknown run → JSON-RPC error with data.code 'not_found'", async () => {
     const { commands } = await commandFixture();
-    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_get", arguments: { id: "nope" } }), deps, { auth: scoped(["runs:read"]), commands });
+    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_get", arguments: { id: "nope" } }), deps, {
+      auth: scoped(["runs:read"]),
+      commands,
+    });
     expect(res.status).toBe(200);
     const body = res.body as RpcError & { error: { data?: { code: string } } };
     expect(body.error.data?.code).toBe("not_found");
@@ -482,7 +549,11 @@ describe("handleMcpRequest — registry commands as tools", () => {
 
   it("bad input → JSON-RPC -32602 with data.code 'invalid_input', never echoing the value", async () => {
     const { commands } = await commandFixture();
-    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "s3cret" } }), deps, { auth: scoped(["runs:read"]), commands });
+    const res = await handleMcpRequest(
+      rpc("tools/call", { name: "runs_list", arguments: { status: "s3cret" } }),
+      deps,
+      { auth: scoped(["runs:read"]), commands },
+    );
     const body = res.body as RpcError & { error: { data?: { code: string } } };
     expect(body.error.code).toBe(-32602);
     expect(body.error.data?.code).toBe("invalid_input");
@@ -505,44 +576,79 @@ describe("handleMcpRequest — registry commands as tools", () => {
   it("a runs:write token stops a live run as actor mcp:<subject>; a finished run → data.code 'conflict'", async () => {
     const { commands, live, reg } = await commandFixture();
     const auth = scoped(["runs:write"]);
-    const res = await handleMcpRequest(rpc("tools/call", { name: "runs_stop", arguments: { id: live.id, mode: "soft" } }), deps, { auth, commands });
+    const res = await handleMcpRequest(
+      rpc("tools/call", { name: "runs_stop", arguments: { id: live.id, mode: "soft" } }),
+      deps,
+      { auth, commands },
+    );
     expect((res.body as RpcResult).result).toBeTruthy();
-    const note = reg.snapshotById(live.id)!.events.find((e) => e.type === "run_note" && e.kind === "stop_requested") as { actor?: unknown };
+    const note = reg
+      .snapshotById(live.id)!
+      .events.find((e) => e.type === "run_note" && e.kind === "stop_requested") as { actor?: unknown };
     expect(note.actor).toEqual({ kind: "mcp", id: "mcp:alice" });
-    const fin = await handleMcpRequest(rpc("tools/call", { name: "runs_stop", arguments: { id: "fin-1", mode: "soft" } }), deps, { auth, commands });
+    const fin = await handleMcpRequest(
+      rpc("tools/call", { name: "runs_stop", arguments: { id: "fin-1", mode: "soft" } }),
+      deps,
+      { auth, commands },
+    );
     expect((fin.body as RpcError & { error: { data?: { code: string } } }).error.data?.code).toBe("conflict");
   });
 
   it("a token's `channel` is its one channel grant (`mcp:<channel>`): it lists that channel's runs plus the public ones, never another machine channel's; a token with no `channel` lists the public runs only", async () => {
     const { commands, live } = await commandFixture();
-    const list = async (auth: IngressConfig) => ((toolJson(await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, { auth, commands })) as { runs: { id: string }[] }).runs.map((r) => r.id));
+    const list = async (auth: IngressConfig) =>
+      (
+        toolJson(
+          await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, {
+            auth,
+            commands,
+          }),
+        ) as { runs: { id: string }[] }
+      ).runs.map((r) => r.id);
     expect(await list(scoped(["runs:read"], "ops"))).toEqual([live.id, "fin-1"]);
     expect(await list(scoped(["runs:read"], "dev"))).toEqual([live.id, "fin-1", "fin-2"]);
     expect(await list(scoped(["runs:read"]))).toEqual([live.id, "fin-1"]);
-    const get = await handleMcpRequest(rpc("tools/call", { name: "runs_get", arguments: { id: "fin-2" } }), deps, { auth: scoped(["runs:read"], "ops"), commands });
+    const get = await handleMcpRequest(rpc("tools/call", { name: "runs_get", arguments: { id: "fin-2" } }), deps, {
+      auth: scoped(["runs:read"], "ops"),
+      commands,
+    });
     expect((get.body as RpcError & { error: { data?: { code: string } } }).error.data?.code).toBe("not_found");
   });
 
   it("a token without the dispatch scope (runs:read only) cannot call `dispatch`: -32001 data.code 'unauthorized', dispatch never called", async () => {
     const { commands } = await commandFixture();
     const d = fakeDispatch("hi");
-    const res = await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: { text: "start a run" } }), deps, { auth: scoped(["runs:read"]), commands, dispatch: d.fn });
+    const res = await handleMcpRequest(
+      rpc("tools/call", { name: "dispatch", arguments: { text: "start a run" } }),
+      deps,
+      { auth: scoped(["runs:read"]), commands, dispatch: d.fn },
+    );
     const body = res.body as RpcError & { error: { data?: { code: string } } };
     expect(body.error.code).toBe(-32001);
     expect(body.error.data?.code).toBe("unauthorized");
     expect(d.calls).toHaveLength(0);
     // the same token still reads through the registry tool it IS scoped for
-    const list = await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, { auth: scoped(["runs:read"]), commands });
+    const list = await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, {
+      auth: scoped(["runs:read"]),
+      commands,
+    });
     expect((list.body as RpcResult).result).toBeTruthy();
   });
 
   it("dispatch is unchanged alongside the registry tools; an unknown tool is still -32602", async () => {
     const { commands } = await commandFixture();
     const d = fakeDispatch("hi");
-    const res = await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: { text: "hello" } }), deps, { auth: good, commands, dispatch: d.fn });
+    const res = await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: { text: "hello" } }), deps, {
+      auth: good,
+      commands,
+      dispatch: d.fn,
+    });
     expect((res.body as RpcResult).result).toEqual({ content: [{ type: "text", text: "hi" }] });
     expect(d.calls).toHaveLength(1);
-    const unknown = await handleMcpRequest(rpc("tools/call", { name: "runs_frobnicate", arguments: {} }), deps, { auth: good, commands });
+    const unknown = await handleMcpRequest(rpc("tools/call", { name: "runs_frobnicate", arguments: {} }), deps, {
+      auth: good,
+      commands,
+    });
     expect((unknown.body as RpcError).error.code).toBe(-32602);
   });
 });

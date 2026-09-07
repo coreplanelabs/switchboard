@@ -28,7 +28,9 @@ export const MAX_SCOPE_CAP = 10_000;
 export function resolveScopeCap(configured: number | undefined, warn: (message: string) => void): number {
   if (configured === undefined) return DEFAULT_SCOPE_CAP;
   if (Number.isInteger(configured) && configured >= 1 && configured <= MAX_SCOPE_CAP) return configured;
-  warn(`memory.maxRecordsPerScope must be an integer between 1 and ${MAX_SCOPE_CAP} (got ${String(configured)}) — using the default ${DEFAULT_SCOPE_CAP}.`);
+  warn(
+    `memory.maxRecordsPerScope must be an integer between 1 and ${MAX_SCOPE_CAP} (got ${String(configured)}) — using the default ${DEFAULT_SCOPE_CAP}.`,
+  );
   return DEFAULT_SCOPE_CAP;
 }
 

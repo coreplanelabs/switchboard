@@ -76,7 +76,9 @@ export function fakeMcpServerFetch(opts: FakeServerOptions = {}): FakeServer {
     let body: string;
     if (opts.sse) {
       headers.set("content-type", "text/event-stream");
-      body = `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: 999, result: { noise: true } })}\n\n` + `data: ${JSON.stringify(payload)}\n\n`;
+      body =
+        `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: 999, result: { noise: true } })}\n\n` +
+        `data: ${JSON.stringify(payload)}\n\n`;
     } else {
       headers.set("content-type", "application/json");
       body = JSON.stringify(payload);
@@ -124,7 +126,15 @@ export function fakeMcpServerFetch(opts: FakeServerOptions = {}): FakeServer {
       sessionValid = true;
       served = 0;
       return respond(
-        { jsonrpc: "2.0", id, result: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: { name: "fake", version: "0" } } },
+        {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            protocolVersion: MCP_PROTOCOL_VERSION,
+            capabilities: { tools: {} },
+            serverInfo: { name: "fake", version: "0" },
+          },
+        },
         { headers: opts.sessionId ? { "mcp-session-id": opts.sessionId } : {} },
       );
     }
@@ -148,7 +158,9 @@ export function fakeMcpServerFetch(opts: FakeServerOptions = {}): FakeServer {
     if (method === "tools/call") {
       if (opts.rpcError) return respond({ jsonrpc: "2.0", id, error: opts.rpcError });
       const params = body.params as { name: string; arguments?: Record<string, unknown> };
-      const result = opts.onCall?.(params.name, params.arguments ?? {}) ?? { content: [{ type: "text", text: `${params.name} ok` }] };
+      const result = opts.onCall?.(params.name, params.arguments ?? {}) ?? {
+        content: [{ type: "text", text: `${params.name} ok` }],
+      };
       return respond({ jsonrpc: "2.0", id, result });
     }
     return respond({ jsonrpc: "2.0", id, error: { code: -32601, message: `unknown method ${method}` } });
@@ -229,7 +241,8 @@ export function fakeAuthorizationServer(opts: FakeAuthorizationServerOptions) {
   let tokens = 0;
   let refreshes = 1;
 
-  const json = (status: number, body: unknown, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+  const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
   const s256 = async (verifier: string) => {
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
     let s = "";
@@ -262,14 +275,30 @@ export function fakeAuthorizationServer(opts: FakeAuthorizationServerOptions) {
     // The MCP server itself.
     if (path === `${server.origin}${serverPath}`) {
       const status = opts.initializeStatus ?? 401;
-      if (status >= 200 && status < 300) return json(status, { jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "fake", version: "0" } } });
-      const hint = opts.metadata === false || opts.selfIssued ? "" : `, resource_metadata="${server.origin}/.well-known/oauth-protected-resource"`;
-      return json(status, { error: "invalid_token" }, status === 401 || status === 403 ? { "www-authenticate": `Bearer error="invalid_token"${hint}` } : {});
+      if (status >= 200 && status < 300)
+        return json(status, {
+          jsonrpc: "2.0",
+          id: 1,
+          result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "fake", version: "0" } },
+        });
+      const hint =
+        opts.metadata === false || opts.selfIssued
+          ? ""
+          : `, resource_metadata="${server.origin}/.well-known/oauth-protected-resource"`;
+      return json(
+        status,
+        { error: "invalid_token" },
+        status === 401 || status === 403 ? { "www-authenticate": `Bearer error="invalid_token"${hint}` } : {},
+      );
     }
     if (opts.metadata === false) return json(404, { error: "not_found" });
     // RFC 9728 — root form only (the path-inserted form is not served, like Vanta).
     if (!opts.selfIssued && path === `${server.origin}/.well-known/oauth-protected-resource`) {
-      return json(200, { resource: server.origin, authorization_servers: opts.authorizationServers ?? [`${asOrigin}${asPath}`], scopes_supported: ["mcp-api.all:write"] });
+      return json(200, {
+        resource: server.origin,
+        authorization_servers: opts.authorizationServers ?? [`${asOrigin}${asPath}`],
+        scopes_supported: ["mcp-api.all:write"],
+      });
     }
     // RFC 8414 — path inserted after the host.
     if (path === `${asOrigin}/.well-known/oauth-authorization-server${asPath}`) {
@@ -288,7 +317,8 @@ export function fakeAuthorizationServer(opts: FakeAuthorizationServerOptions) {
     if (path === `${asOrigin}/oauth/register`) {
       const req = JSON.parse(body ?? "{}") as Record<string, unknown>;
       registrations.push(req);
-      if (opts.registrationStatus && opts.registrationStatus >= 400) return json(opts.registrationStatus, { error: "invalid_client_metadata" });
+      if (opts.registrationStatus && opts.registrationStatus >= 400)
+        return json(opts.registrationStatus, { error: "invalid_client_metadata" });
       return json(201, { client_id: "client-1", redirect_uris: req.redirect_uris });
     }
     if (path === tokenEndpoint.replace(/\?.*$/, "")) {
@@ -296,17 +326,25 @@ export function fakeAuthorizationServer(opts: FakeAuthorizationServerOptions) {
       tokenRequests.push(form);
       const issue = (refresh: string) => {
         tokens += 1;
-        return json(200, { access_token: `at-${tokens}`, token_type: opts.tokenType ?? "Bearer", expires_in: opts.expiresIn ?? 3600, refresh_token: refresh, scope: "mcp-api.all:write" });
+        return json(200, {
+          access_token: `at-${tokens}`,
+          token_type: opts.tokenType ?? "Bearer",
+          expires_in: opts.expiresIn ?? 3600,
+          refresh_token: refresh,
+          scope: "mcp-api.all:write",
+        });
       };
       if (form.grant_type === "authorization_code") {
         const challenge = form.code ? codes.get(form.code) : undefined;
-        if (!challenge || !form.code_verifier || (await s256(form.code_verifier)) !== challenge) return json(400, { error: "invalid_grant", error_description: "bad code or verifier" });
+        if (!challenge || !form.code_verifier || (await s256(form.code_verifier)) !== challenge)
+          return json(400, { error: "invalid_grant", error_description: "bad code or verifier" });
         if (form.client_id !== "client-1" || !form.redirect_uri) return json(400, { error: "invalid_client" });
         codes.delete(form.code); // single use
         return issue("rt-1");
       }
       if (form.grant_type === "refresh_token") {
-        if (!form.refresh_token || !refreshTokens.has(form.refresh_token)) return json(400, { error: "invalid_grant", error_description: "unknown refresh token" });
+        if (!form.refresh_token || !refreshTokens.has(form.refresh_token))
+          return json(400, { error: "invalid_grant", error_description: "unknown refresh token" });
         if (opts.rotateRefresh) {
           refreshTokens.delete(form.refresh_token);
           refreshes += 1;

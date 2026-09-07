@@ -42,9 +42,7 @@ describe("findMissed (pure selection over fetched history)", () => {
   it("picks an un-acked top-level mention inside the window, threaded to itself", () => {
     const m = mention();
     const out = findMissed({ ...base, channel: "C1", parents: [m], threads: new Map() });
-    expect(out).toEqual([
-      { channel: "C1", user: "U0USER", text: m.text, ts: m.ts, threadTs: m.ts, files: undefined },
-    ]);
+    expect(out).toEqual([{ channel: "C1", user: "U0USER", text: m.text, ts: m.ts, threadTs: m.ts, files: undefined }]);
   });
 
   it("skips a 👀-acked mention younger than ACK_GRACE_MS — its card is on the way", () => {
@@ -57,24 +55,42 @@ describe("findMissed (pure selection over fetched history)", () => {
   // process's scan skipped the reply as "acked". 👀 alone is not "handled".
   it("re-runs a 👀-acked message older than ACK_GRACE_MS when the bot never replied after it (#317)", () => {
     const parent = mention({ ts: ts(ACK_GRACE_MS / 1000 + 1), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
-    expect(findMissed({ ...base, channel: "C1", parents: [parent], threads: new Map() }).map((x) => x.ts)).toEqual([parent.ts]);
+    expect(findMissed({ ...base, channel: "C1", parents: [parent], threads: new Map() }).map((x) => x.ts)).toEqual([
+      parent.ts,
+    ]);
 
     const root = mention({ ts: ts(800), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
-    const rootCard = { type: "message", user: BOT, bot_id: "B1", text: "✅ coding · 4s", ts: ts(799), thread_ts: root.ts };
-    const follow = mention({ ts: ts(31), thread_ts: root.ts, text: `<@${BOT}> run git remote -v`, reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+    const rootCard = {
+      type: "message",
+      user: BOT,
+      bot_id: "B1",
+      text: "✅ coding · 4s",
+      ts: ts(799),
+      thread_ts: root.ts,
+    };
+    const follow = mention({
+      ts: ts(31),
+      thread_ts: root.ts,
+      text: `<@${BOT}> run git remote -v`,
+      reactions: [{ name: "eyes", users: [BOT], count: 1 }],
+    });
     const threads = new Map([[root.ts, [root, rootCard, follow]]]);
     expect(findMissed({ ...base, channel: "C1", parents: [root], threads }).map((x) => x.ts)).toEqual([follow.ts]);
   });
 
   it("skips a 👀-acked message of any age once the bot replied after it", () => {
     const m = mention({ ts: ts(800), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
-    const threads = new Map([[m.ts, [m, { type: "message", user: BOT, bot_id: "B1", text: "✅ done", ts: ts(790), thread_ts: m.ts }]]]);
+    const threads = new Map([
+      [m.ts, [m, { type: "message", user: BOT, bot_id: "B1", text: "✅ done", ts: ts(790), thread_ts: m.ts }]],
+    ]);
     expect(findMissed({ ...base, channel: "C1", parents: [m], threads })).toEqual([]);
   });
 
   it("skips a mention the bot already replied to in-thread (ack lost, but a status card/reply exists)", () => {
     const m = mention({ reply_count: 1, latest_reply: ts(30) });
-    const threads = new Map([[m.ts, [m, { type: "message", user: BOT, bot_id: "B1", text: "⏳ working", ts: ts(30), thread_ts: m.ts }]]]);
+    const threads = new Map([
+      [m.ts, [m, { type: "message", user: BOT, bot_id: "B1", text: "⏳ working", ts: ts(30), thread_ts: m.ts }]],
+    ]);
     expect(findMissed({ ...base, channel: "C1", parents: [m], threads })).toEqual([]);
   });
 
@@ -117,22 +133,49 @@ describe("findMissed (pure selection over fetched history)", () => {
   it("picks an un-acked in-thread mention (a rereview follow-up) even when the parent is old", () => {
     const parent = mention({ ts: ts(3 * 86_400), reply_count: 3, latest_reply: ts(45) });
     const follow = mention({ ts: ts(45), thread_ts: parent.ts, text: `<@${BOT}> please re-review` });
-    const threads = new Map([[parent.ts, [parent, { ...mention({ ts: ts(3000), thread_ts: parent.ts, user: BOT, bot_id: "B1", text: "done" }) }, follow]]]);
+    const threads = new Map([
+      [
+        parent.ts,
+        [parent, { ...mention({ ts: ts(3000), thread_ts: parent.ts, user: BOT, bot_id: "B1", text: "done" }) }, follow],
+      ],
+    ]);
     const out = findMissed({ ...base, channel: "C1", parents: [parent], threads });
-    expect(out).toEqual([{ channel: "C1", user: "U0USER", text: follow.text, ts: follow.ts, threadTs: parent.ts, files: undefined }]);
+    expect(out).toEqual([
+      { channel: "C1", user: "U0USER", text: follow.text, ts: follow.ts, threadTs: parent.ts, files: undefined },
+    ]);
   });
 
   it("picks an un-acked, un-mentioned follow-up in a thread the bot participates in (live trigger 1c)", () => {
     const parent = mention({ ts: ts(3000), reply_count: 2, latest_reply: ts(40) });
-    const botReply = { type: "message", user: BOT, bot_id: "B1", text: "here you go", ts: ts(2000), thread_ts: parent.ts };
-    const follow = { type: "message", user: "U0USER", text: "and now do the other thing", ts: ts(40), thread_ts: parent.ts };
+    const botReply = {
+      type: "message",
+      user: BOT,
+      bot_id: "B1",
+      text: "here you go",
+      ts: ts(2000),
+      thread_ts: parent.ts,
+    };
+    const follow = {
+      type: "message",
+      user: "U0USER",
+      text: "and now do the other thing",
+      ts: ts(40),
+      thread_ts: parent.ts,
+    };
     const threads = new Map([[parent.ts, [parent, botReply, follow]]]);
     const out = findMissed({ ...base, channel: "C1", parents: [parent], threads });
     expect(out.map((m) => m.ts)).toEqual([follow.ts]);
   });
 
   it("ignores an un-mentioned follow-up in a thread the bot is NOT part of", () => {
-    const parent = { type: "message", user: "U0A", text: "chatting", ts: ts(3000), reply_count: 1, latest_reply: ts(40) };
+    const parent = {
+      type: "message",
+      user: "U0A",
+      text: "chatting",
+      ts: ts(3000),
+      reply_count: 1,
+      latest_reply: ts(40),
+    };
     const follow = { type: "message", user: "U0B", text: "yep", ts: ts(40), thread_ts: parent.ts };
     const threads = new Map([[parent.ts, [parent, follow]]]);
     expect(findMissed({ ...base, channel: "C1", parents: [parent], threads })).toEqual([]);
@@ -156,12 +199,14 @@ describe("findMissed (pure selection over fetched history)", () => {
   });
 });
 
-function mockClient(over: {
-  channels?: Array<{ id: string }>;
-  history?: Record<string, SlackHistoryMessage[]>;
-  replies?: Record<string, SlackHistoryMessage[]>;
-  historyError?: string;
-} = {}) {
+function mockClient(
+  over: {
+    channels?: Array<{ id: string }>;
+    history?: Record<string, SlackHistoryMessage[]>;
+    replies?: Record<string, SlackHistoryMessage[]>;
+    historyError?: string;
+  } = {},
+) {
   const history = over.history ?? {};
   const replies = over.replies ?? {};
   const client = {
@@ -190,9 +235,19 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     const client = mockClient({ channels: [{ id: "C1" }, { id: "C2" }], history: { C1: [b, a], C2: [c] } });
     const onMissed = vi.fn();
     const log = vi.fn();
-    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, log });
+    const out = await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: NOW,
+      alreadyHandled: () => false,
+      onMissed,
+      log,
+    });
     expect(out).toEqual({ channels: 2, missed: 2, orphans: 0, skippedChannels: 0 });
-    expect(onMissed.mock.calls.map(([m]) => [m.channel, m.ts])).toEqual([[ "C1", a.ts ], [ "C2", c.ts ]]);
+    expect(onMissed.mock.calls.map(([m]) => [m.channel, m.ts])).toEqual([
+      ["C1", a.ts],
+      ["C2", c.ts],
+    ]);
     expect(client.users.conversations).toHaveBeenCalledWith(
       expect.objectContaining({ types: "public_channel,private_channel", exclude_archived: true }),
     );
@@ -218,7 +273,10 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(inFlight).toBe(3); // all three channel scans in flight before any history page came back
     // Resolve out of order: C3 first, then C1, then C2 — dispatch order must not follow it.
-    gates.splice(0).reverse().forEach((r) => r());
+    gates
+      .splice(0)
+      .reverse()
+      .forEach((r) => r());
     const out = await p;
     expect(peak).toBe(3);
     expect(out).toMatchObject({ channels: 3, missed: 3 });
@@ -236,14 +294,24 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     const onMissed = vi.fn();
     await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed });
     expect(client.conversations.replies).toHaveBeenCalledTimes(1);
-    expect(client.conversations.replies).toHaveBeenCalledWith(expect.objectContaining({ channel: "C1", ts: active.ts }));
+    expect(client.conversations.replies).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: "C1", ts: active.ts }),
+    );
     expect(onMissed.mock.calls.map(([m]) => m.ts)).toEqual([follow.ts]);
   });
 
   it("does nothing when everything was handled (the common reconnect)", async () => {
-    const client = mockClient({ history: { C1: [mention({ ts: ts(10), reactions: [{ name: "eyes", users: [BOT], count: 1 }] })] } });
+    const client = mockClient({
+      history: { C1: [mention({ ts: ts(10), reactions: [{ name: "eyes", users: [BOT], count: 1 }] })] },
+    });
     const onMissed = vi.fn();
-    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed });
+    const out = await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: NOW,
+      alreadyHandled: () => false,
+      onMissed,
+    });
     expect(out).toEqual({ channels: 1, missed: 0, orphans: 0, skippedChannels: 0 });
     expect(onMissed).not.toHaveBeenCalled();
   });
@@ -251,7 +319,14 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
   it("never throws: a channel whose history fails is logged and skipped", async () => {
     const client = mockClient({ historyError: "missing_scope" });
     const log = vi.fn();
-    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), log });
+    const out = await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: NOW,
+      alreadyHandled: () => false,
+      onMissed: vi.fn(),
+      log,
+    });
     expect(out).toEqual({ channels: 1, missed: 0, orphans: 0, skippedChannels: 1 });
     expect(log).toHaveBeenCalledWith(expect.stringContaining("missing_scope"));
   });
@@ -264,7 +339,14 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
       if (t === a.ts) throw new Error("boom");
     });
     const log = vi.fn();
-    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, log });
+    const out = await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: NOW,
+      alreadyHandled: () => false,
+      onMissed,
+      log,
+    });
     expect(out.missed).toBe(2);
     expect(onMissed).toHaveBeenCalledTimes(2);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("boom"));
@@ -281,7 +363,9 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     const onMissed = vi.fn();
     await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed });
     expect(client.conversations.replies).toHaveBeenCalledTimes(2);
-    expect(client.conversations.replies.mock.calls[1][0]).toEqual(expect.objectContaining({ ts: parent.ts, cursor: "r2" }));
+    expect(client.conversations.replies.mock.calls[1][0]).toEqual(
+      expect.objectContaining({ ts: parent.ts, cursor: "r2" }),
+    );
     // the bot's reply on page 1 makes it a participating thread; the follow-up on page 2 is the missed message
     expect(onMissed.mock.calls.map(([m]) => m.ts)).toEqual([follow.ts]);
   });
@@ -290,9 +374,19 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
     const client = mockClient();
     client.conversations.history
       .mockResolvedValueOnce({ messages: [mention({ ts: ts(100) })], response_metadata: { next_cursor: "c2" } })
-      .mockResolvedValueOnce({ messages: [mention({ ts: ts(5), reactions: [{ name: "eyes", users: [BOT], count: 1 }] })], response_metadata: { next_cursor: "" } });
+      .mockResolvedValueOnce({
+        messages: [mention({ ts: ts(5), reactions: [{ name: "eyes", users: [BOT], count: 1 }] })],
+        response_metadata: { next_cursor: "" },
+      });
     const onMissed = vi.fn();
-    await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, parentLookbackMs: 86_400_000 });
+    await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: NOW,
+      alreadyHandled: () => false,
+      onMissed,
+      parentLookbackMs: 86_400_000,
+    });
     expect(client.conversations.history).toHaveBeenCalledTimes(2);
     const first = client.conversations.history.mock.calls[0][0] as unknown as { oldest: string; cursor?: string };
     expect(Number(first.oldest)).toBeCloseTo((NOW - 86_400_000) / 1000, 0);
@@ -324,12 +418,16 @@ describe("findOrphanedCards (pure selection of the bot's own frozen live cards)"
   it("picks a bot card whose text starts with a live glyph (spinner or 👀 setup), inside the window", () => {
     for (const glyph of ["◐", "◓", "◑", "◒", "👀"]) {
       const c = card(`${glyph} *review* on \`anthropic/claude-fable-5\` · 153s — thinking (88s since last tool)`);
-      expect(findOrphanedCards({ ...base, threads: threads(c) }), glyph).toEqual([{ channel: "C1", ts: c.ts, text: c.text }]);
+      expect(findOrphanedCards({ ...base, threads: threads(c) }), glyph).toEqual([
+        { channel: "C1", ts: c.ts, text: c.text },
+      ]);
     }
   });
 
   it("skips closed cards (✅ / ❌ / ⏹), human messages, bot replies without a glyph, and cards older than the window", () => {
-    const closed = ["✅ *review* · 203s", "❌ *review* · failed", "⏹ *review* · stopped", "Here is my answer"].map((t) => card(t));
+    const closed = ["✅ *review* · 203s", "❌ *review* · failed", "⏹ *review* · stopped", "Here is my answer"].map(
+      (t) => card(t),
+    );
     const human = card("◓ pretending", { user: "U0USER", bot_id: undefined });
     const old = card("◓ *review* · 9000s", { ts: ts(3 * 3600) });
     expect(findOrphanedCards({ ...base, threads: threads(...closed, human, old) })).toEqual([]);
@@ -337,14 +435,20 @@ describe("findOrphanedCards (pure selection of the bot's own frozen live cards)"
 
   it("skips a live card THIS process owns (a reconnect without a restart must not close a running run's card)", () => {
     const mine = card("◓ *review* · 12s");
-    const out = findOrphanedCards({ ...base, threads: threads(mine), ownedHere: (ch, t) => ch === "C1" && t === mine.ts });
+    const out = findOrphanedCards({
+      ...base,
+      threads: threads(mine),
+      ownedHere: (ch, t) => ch === "C1" && t === mine.ts,
+    });
     expect(out).toEqual([]);
   });
 });
 
 describe("interruptedCardFrame", () => {
   it("keeps the run label and elapsed time, drops the spinner and the thinking suffix, explains and tells the reader what to do", () => {
-    const f = interruptedCardFrame("◓ *review* on `anthropic/claude-fable-5` · resident refreshing · 153s — thinking (88s since last tool)");
+    const f = interruptedCardFrame(
+      "◓ *review* on `anthropic/claude-fable-5` · resident refreshing · 153s — thinking (88s since last tool)",
+    );
     expect(f.title).toBe("❌ interrupted · *review* on `anthropic/claude-fable-5` · resident refreshing · 153s");
     expect(f.detail).toMatch(/restarted .* while this run was in flight/);
     expect(f.detail).toMatch(/re-send/i);
@@ -385,12 +489,14 @@ describe("interruptedCardFrame", () => {
   });
 
   it("drops the drain notice even when the glyph token is missing entirely", () => {
-    const f = interruptedCardFrame("◐ *coding* on `m` · 323s · deploy in progress — finishing this run before the bot restarts");
+    const f = interruptedCardFrame(
+      "◐ *coding* on `m` · 323s · deploy in progress — finishing this run before the bot restarts",
+    );
     expect(f.title).toBe("❌ interrupted · *coding* on `m` · 323s");
   });
 
   it("leaves a label alone that merely mentions a deploy mid-text", () => {
-    const f = interruptedCardFrame("◓ *coding* · \"fix the deploy in progress banner\" · 42s");
+    const f = interruptedCardFrame('◓ *coding* · "fix the deploy in progress banner" · 42s');
     expect(f.title).toBe('❌ interrupted · *coding* · "fix the deploy in progress banner" · 42s');
   });
 });
@@ -398,7 +504,12 @@ describe("interruptedCardFrame", () => {
 describe("catchUpMissedMentions — orphaned-card sweep", () => {
   // The requester's mention was 👀-acked (handled) and its thread was last
   // active 41 min ago: outside the 20 min mention window, inside the orphan one.
-  const parent = mention({ ts: ts(3000), reply_count: 1, latest_reply: ts(2500), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+  const parent = mention({
+    ts: ts(3000),
+    reply_count: 1,
+    latest_reply: ts(2500),
+    reactions: [{ name: "eyes", users: [BOT], count: 1 }],
+  });
   const frozen: SlackHistoryMessage = {
     type: "message",
     user: BOT,
@@ -413,7 +524,16 @@ describe("catchUpMissedMentions — orphaned-card sweep", () => {
     const onMissed = vi.fn();
     const onOrphanedCard = vi.fn(async () => {});
     const log = vi.fn();
-    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed, ownedHere: () => false, onOrphanedCard, log });
+    const out = await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: NOW,
+      alreadyHandled: () => false,
+      onMissed,
+      ownedHere: () => false,
+      onOrphanedCard,
+      log,
+    });
     expect(out).toEqual({ channels: 1, missed: 0, orphans: 1, skippedChannels: 0 });
     expect(client.conversations.replies).toHaveBeenCalledTimes(1);
     expect(onMissed).not.toHaveBeenCalled();
@@ -426,21 +546,44 @@ describe("catchUpMissedMentions — orphaned-card sweep", () => {
 
   it("without an onOrphanedCard hook the sweep is off: no wider fetch, no closes", async () => {
     const client = mockClient({ history: { C1: [parent] }, replies: { [`C1:${parent.ts}`]: [parent, frozen] } });
-    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn() });
+    const out = await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: NOW,
+      alreadyHandled: () => false,
+      onMissed: vi.fn(),
+    });
     expect(out).toEqual({ channels: 1, missed: 0, orphans: 0, skippedChannels: 0 });
     expect(client.conversations.replies).not.toHaveBeenCalled();
   });
 
   it("a failing close is logged, does not stop the rest, and is not counted as closed", async () => {
-    const other = mention({ ts: ts(3000, "000002"), reply_count: 1, latest_reply: ts(2400), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
+    const other = mention({
+      ts: ts(3000, "000002"),
+      reply_count: 1,
+      latest_reply: ts(2400),
+      reactions: [{ name: "eyes", users: [BOT], count: 1 }],
+    });
     const frozen2 = { ...frozen, ts: ts(2400), thread_ts: other.ts };
     const client = mockClient({
       history: { C1: [parent, other] },
       replies: { [`C1:${parent.ts}`]: [parent, frozen], [`C1:${other.ts}`]: [other, frozen2] },
     });
-    const onOrphanedCard = vi.fn().mockRejectedValueOnce(new Error("message_not_found")).mockResolvedValueOnce(undefined);
+    const onOrphanedCard = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("message_not_found"))
+      .mockResolvedValueOnce(undefined);
     const log = vi.fn();
-    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), ownedHere: () => false, onOrphanedCard, log });
+    const out = await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: NOW,
+      alreadyHandled: () => false,
+      onMissed: vi.fn(),
+      ownedHere: () => false,
+      onOrphanedCard,
+      log,
+    });
     expect(onOrphanedCard).toHaveBeenCalledTimes(2);
     expect(out.orphans).toBe(1);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("message_not_found"));
@@ -453,7 +596,14 @@ describe("catchUpMissedMentions — outcome record", () => {
   it("records channels/missed and zero skipped after a clean scan", async () => {
     const client = mockClient({ channels: [{ id: "C1" }, { id: "C2" }], history: { C1: [mention()], C2: [] } });
     const record = vi.fn();
-    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), record });
+    const out = await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: NOW,
+      alreadyHandled: () => false,
+      onMissed: vi.fn(),
+      record,
+    });
     expect(out).toEqual({ channels: 2, missed: 1, orphans: 0, skippedChannels: 0 });
     expect(record).toHaveBeenCalledWith({ at: NOW, channels: 2, missed: 1, skippedChannels: 0 });
   });
@@ -462,15 +612,35 @@ describe("catchUpMissedMentions — outcome record", () => {
     const client = mockClient();
     client.users.conversations.mockRejectedValue(new Error("An API error occurred: missing_scope"));
     const record = vi.fn();
-    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), record });
+    const out = await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: NOW,
+      alreadyHandled: () => false,
+      onMissed: vi.fn(),
+      record,
+    });
     expect(out).toEqual({ channels: 0, missed: 0, orphans: 0, skippedChannels: 0 });
-    expect(record).toHaveBeenCalledWith({ at: NOW, channels: 0, missed: 0, skippedChannels: 0, error: "An API error occurred: missing_scope" });
+    expect(record).toHaveBeenCalledWith({
+      at: NOW,
+      channels: 0,
+      missed: 0,
+      skippedChannels: 0,
+      error: "An API error occurred: missing_scope",
+    });
   });
 
   it("counts per-channel scan failures as skippedChannels, without an error", async () => {
     const client = mockClient({ channels: [{ id: "C1" }, { id: "C2" }], historyError: "not_in_channel" });
     const record = vi.fn();
-    const out = await catchUpMissedMentions({ client, botUserId: BOT, now: NOW, alreadyHandled: () => false, onMissed: vi.fn(), record });
+    const out = await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: NOW,
+      alreadyHandled: () => false,
+      onMissed: vi.fn(),
+      record,
+    });
     expect(out.skippedChannels).toBe(2);
     expect(record).toHaveBeenCalledWith({ at: NOW, channels: 2, missed: 0, skippedChannels: 2 });
   });

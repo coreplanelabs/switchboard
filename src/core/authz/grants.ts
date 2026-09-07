@@ -33,7 +33,17 @@ export function agentRunAction(agent: string): string {
  *  that key (open-when-absent). A deployment with no `permissions` block has
  *  nothing to be absent from: it holds `config:write` where its `grants` say so
  *  and nowhere else (R7 — production since authz U7 step 1). */
-export const CHAT_OPEN_ACTIONS: readonly string[] = ["help:read", "config:read", "repo:read", "friction:read", "memory:read", "mcp:read", "schedule:read", "memory:write", "mcp:write"];
+export const CHAT_OPEN_ACTIONS: readonly string[] = [
+  "help:read",
+  "config:read",
+  "repo:read",
+  "friction:read",
+  "memory:read",
+  "mcp:read",
+  "schedule:read",
+  "memory:write",
+  "mcp:write",
+];
 
 /** What an Access browser session holds implicitly (KTD6/KTD10): every registered
  *  group's read — never a write, never an exec. */
@@ -57,7 +67,9 @@ export interface GrantsEntryConfig {
 export type GrantsConfig = Record<string, GrantsEntryConfig>;
 
 const grantList = z.union([z.literal("all"), z.array(z.string().min(1))]);
-const grantsEntrySchema = z.object({ actions: grantList.optional(), channels: grantList.optional(), repos: grantList.optional() }).strict();
+const grantsEntrySchema = z
+  .object({ actions: grantList.optional(), channels: grantList.optional(), repos: grantList.optional() })
+  .strict();
 
 export type ParsedGrantsConfig = { ok: true; grants: Map<string, Grants> } | { ok: false; errors: string[] };
 
@@ -75,24 +87,35 @@ function hasKnownPrefix(actorId: string): boolean {
 /** Validate a raw `grants` block and build its table. Every problem names the
  *  actor id (and the axis) it is about; nothing is silently dropped or widened. */
 export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: false, errors: ["grants must be a mapping of actor id → { actions, channels, repos }"] };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    return { ok: false, errors: ["grants must be a mapping of actor id → { actions, channels, repos }"] };
   const errors: string[] = [];
   const grants = new Map<string, Grants>();
   for (const [actorId, entry] of Object.entries(raw as Record<string, unknown>)) {
     const where = `grants["${actorId}"]`;
     if (!hasKnownPrefix(actorId)) {
-      errors.push(`${where}: actor ids are platform-namespaced — one of ${GRANT_ACTOR_PREFIXES.map((p) => `${p}:`).join(", ")} followed by the subject`);
+      errors.push(
+        `${where}: actor ids are platform-namespaced — one of ${GRANT_ACTOR_PREFIXES.map((p) => `${p}:`).join(", ")} followed by the subject`,
+      );
       continue;
     }
     const parsed = grantsEntrySchema.safeParse(entry);
     if (!parsed.success) {
       for (const issue of parsed.error.issues) {
         const axis = issue.path.length > 0 ? `.${issue.path.map(String).join(".")}` : "";
-        errors.push(issue.code === "unrecognized_keys" ? `${where}: unknown field ${issue.keys.join(", ")} (expected actions, channels, repos)` : `${where}${axis}: expected "all" or a list of non-empty names`);
+        errors.push(
+          issue.code === "unrecognized_keys"
+            ? `${where}: unknown field ${issue.keys.join(", ")} (expected actions, channels, repos)`
+            : `${where}${axis}: expected "all" or a list of non-empty names`,
+        );
       }
       continue;
     }
-    grants.set(actorId, { actions: toSet(parsed.data.actions), channels: toSet(parsed.data.channels), repos: toSet(parsed.data.repos) });
+    grants.set(actorId, {
+      actions: toSet(parsed.data.actions),
+      channels: toSet(parsed.data.channels),
+      repos: toSet(parsed.data.repos),
+    });
   }
   return errors.length > 0 ? { ok: false, errors } : { ok: true, grants };
 }
@@ -153,10 +176,16 @@ export interface LegacyTranslation {
  *   serviceTokens[cn]         → `access:svc:<cn>` actions = scopes; channels all
  * An actor named by several keys holds the union; `all` absorbs a list.
  */
-export function translateLegacyConfig(permissions: LegacyPermissions | undefined, ingressTokens: IngressTokenMap | undefined, accessServiceTokens: Record<string, string[]> | undefined, vocabulary: LegacyVocabulary): LegacyTranslation {
+export function translateLegacyConfig(
+  permissions: LegacyPermissions | undefined,
+  ingressTokens: IngressTokenMap | undefined,
+  accessServiceTokens: Record<string, string[]> | undefined,
+  vocabulary: LegacyVocabulary,
+): LegacyTranslation {
   const table = new Map<string, Grants>();
   const fromPermissions = new Set<string>();
-  const union = (actorId: string, g: Partial<Grants>) => table.set(actorId, unionGrants(table.get(actorId) ?? NO_GRANTS, { ...NO_GRANTS, ...g }));
+  const union = (actorId: string, g: Partial<Grants>) =>
+    table.set(actorId, unionGrants(table.get(actorId) ?? NO_GRANTS, { ...NO_GRANTS, ...g }));
   /** A `permissions.*` key naming `actorId`: unioned in AND recorded as deletable. */
   const add = (actorId: string, g: Partial<Grants>) => {
     fromPermissions.add(actorId);
@@ -179,7 +208,11 @@ export function translateLegacyConfig(permissions: LegacyPermissions | undefined
   const channelConfigOpen = permissions !== undefined && p.channelConfig === undefined;
   const everyone: Grants = {
     ...NO_GRANTS,
-    actions: new Set([...CHAT_OPEN_ACTIONS, ...(channelConfigOpen ? ["config:write"] : []), ...vocabulary.agentNames.filter((a) => restricted[a] === undefined).map(agentRunAction)]),
+    actions: new Set([
+      ...CHAT_OPEN_ACTIONS,
+      ...(channelConfigOpen ? ["config:write"] : []),
+      ...vocabulary.agentNames.filter((a) => restricted[a] === undefined).map(agentRunAction),
+    ]),
   };
 
   const reposOpen = p.repos === undefined;
@@ -193,7 +226,10 @@ export function translateLegacyConfig(permissions: LegacyPermissions | undefined
 
   for (const entry of Object.values(ingressTokens ?? {})) {
     for (const ns of ["http", "mcp"] as const) {
-      union(`${ns}:${entry.subject}`, { actions: new Set(entry.scopes), channels: new Set(entry.channel === undefined ? [] : [`${ns}:${entry.channel}`]) });
+      union(`${ns}:${entry.subject}`, {
+        actions: new Set(entry.scopes),
+        channels: new Set(entry.channel === undefined ? [] : [`${ns}:${entry.channel}`]),
+      });
     }
   }
 
@@ -201,7 +237,10 @@ export function translateLegacyConfig(permissions: LegacyPermissions | undefined
     // A malformed list is no scopes, never a widened one (the same tolerance
     // `validateConfig` shows the key).
     if (!Array.isArray(scopes)) continue;
-    add(`access:svc:${commonName}`, { actions: new Set(scopes.filter((s): s is string => typeof s === "string")), channels: "all" });
+    add(`access:svc:${commonName}`, {
+      actions: new Set(scopes.filter((s): s is string => typeof s === "string")),
+      channels: "all",
+    });
   }
 
   return { grants: table, everyone, reposOpen, fromPermissions };
@@ -213,11 +252,22 @@ function unionSet(a: GrantSet, b: GrantSet): GrantSet {
 }
 
 function unionGrants(a: Grants, b: Grants): Grants {
-  return { actions: unionSet(a.actions, b.actions), channels: unionSet(a.channels, b.channels), repos: unionSet(a.repos, b.repos) };
+  return {
+    actions: unionSet(a.actions, b.actions),
+    channels: unionSet(a.channels, b.channels),
+    repos: unionSet(a.repos, b.repos),
+  };
 }
 
 function isEmpty(g: Grants): boolean {
-  return g.actions !== "all" && g.actions.size === 0 && g.channels !== "all" && g.channels.size === 0 && g.repos !== "all" && g.repos.size === 0;
+  return (
+    g.actions !== "all" &&
+    g.actions.size === 0 &&
+    g.channels !== "all" &&
+    g.channels.size === 0 &&
+    g.repos !== "all" &&
+    g.repos.size === 0
+  );
 }
 
 // ---- merging + lookup -------------------------------------------------------------
@@ -291,15 +341,30 @@ export function legacyBaseline(actorId: string, table: Pick<GrantsTable, "everyo
  *  registry is a default, not a second config shape). */
 export function grantsTable(source: GrantsSource): GrantsTable {
   const { serviceTokens, ...permissions } = source.permissions ?? {};
-  const legacy = translateLegacyConfig(source.permissions ? permissions : undefined, source.ingressTokens, serviceTokens, { agentNames: source.agentNames ?? [], commandGroups: source.commandGroups ?? [] });
-  const baselines = { everyone: legacy.everyone, browserReads: { ...NO_GRANTS, actions: browserReadActions(source.commandGroups ?? []) } };
-  const withBaseline = new Map([...legacy.grants].map(([id, g]) => [id, unionGrants(g, legacyBaseline(id, baselines))] as const));
+  const legacy = translateLegacyConfig(
+    source.permissions ? permissions : undefined,
+    source.ingressTokens,
+    serviceTokens,
+    { agentNames: source.agentNames ?? [], commandGroups: source.commandGroups ?? [] },
+  );
+  const baselines = {
+    everyone: legacy.everyone,
+    browserReads: { ...NO_GRANTS, actions: browserReadActions(source.commandGroups ?? []) },
+  };
+  const withBaseline = new Map(
+    [...legacy.grants].map(([id, g]) => [id, unionGrants(g, legacyBaseline(id, baselines))] as const),
+  );
   const merged = mergeGrants(source.grants ?? new Map(), withBaseline);
   for (const schedule of source.schedules ?? []) {
     if (source.grants?.has(schedule.id)) continue;
     merged.grants.set(schedule.id, unionGrants(merged.grants.get(schedule.id) ?? NO_GRANTS, schedule.grants));
   }
-  return { grants: merged.grants, overlapping: merged.overlapping.filter((id) => legacy.fromPermissions.has(id)), ...baselines, reposOpen: legacy.reposOpen };
+  return {
+    grants: merged.grants,
+    overlapping: merged.overlapping.filter((id) => legacy.fromPermissions.has(id)),
+    ...baselines,
+    reposOpen: legacy.reposOpen,
+  };
 }
 
 /** One actor's grants from a built table: its entry; else the legacy baseline

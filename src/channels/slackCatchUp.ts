@@ -134,13 +134,16 @@ export function isAckedByBot(m: SlackHistoryMessage, botUserId: string): boolean
   return (m.reactions ?? []).some((r) => r.name === ACK_EMOJI && (r.users ?? []).includes(botUserId));
 }
 
-const isFromBot = (m: SlackHistoryMessage, botUserId: string): boolean =>
-  Boolean(m.bot_id) || m.user === botUserId;
+const isFromBot = (m: SlackHistoryMessage, botUserId: string): boolean => Boolean(m.bot_id) || m.user === botUserId;
 
 /** Has the bot posted in this thread after `m` — a status card or a reply?
  *  Exported for the adapter's redelivery guard (#346), which asks the same
  *  question about a stale delivered event before starting a run. */
-export function botRepliedAfter(thread: SlackHistoryMessage[], m: Pick<SlackHistoryMessage, "ts">, botUserId: string): boolean {
+export function botRepliedAfter(
+  thread: SlackHistoryMessage[],
+  m: Pick<SlackHistoryMessage, "ts">,
+  botUserId: string,
+): boolean {
   return thread.some((r) => isFromBot(r, botUserId) && tsNum(r.ts) > tsNum(m.ts));
 }
 
@@ -273,7 +276,8 @@ export function interruptedCardFrame(cardText: string): StatusUpdate {
     .trim();
   return {
     title: `❌ interrupted · ${label}`,
-    detail: "The bot restarted (a deploy) while this run was in flight, so the run was lost and this card stopped updating. Re-send your request to run it again.",
+    detail:
+      "The bot restarted (a deploy) while this run was in flight, so the run was lost and this card stopped updating. Re-send your request to run it again.",
   };
 }
 
@@ -319,14 +323,15 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<Catch
   const lookbackMs = opts.parentLookbackMs ?? DEFAULT_PARENT_LOOKBACK_MS;
   const log = opts.log ?? ((line) => console.log(line));
   const cutoffMs = now - windowMs;
-  const sweep = opts.ownedHere && opts.onOrphanedCard ? { ownedHere: opts.ownedHere, close: opts.onOrphanedCard } : undefined;
+  const sweep =
+    opts.ownedHere && opts.onOrphanedCard ? { ownedHere: opts.ownedHere, close: opts.onOrphanedCard } : undefined;
   const orphanCutoffMs = now - (opts.orphanWindowMs ?? ORPHAN_CARD_WINDOW_MS);
   // Threads are fetched once for both jobs: active since the EARLIER cutoff.
   const threadCutoffMs = sweep ? Math.min(cutoffMs, orphanCutoffMs) : cutoffMs;
   const { client, botUserId } = opts;
   const record = opts.record ?? recordCatchUpOutcome;
 
-  let channels: string[] = [];
+  let channels: string[];
   try {
     channels = await listChannels(client);
   } catch (err) {
@@ -352,8 +357,18 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<Catch
       );
       const replies = await mapLimit(active, CATCH_UP_THREAD_CONCURRENCY, (p) => fetchReplies(client, channel, p.ts!));
       const threads = new Map<string, SlackHistoryMessage[]>(active.map((p, i) => [p.ts!, replies[i]]));
-      const found = findMissed({ channel, botUserId, cutoffMs, nowMs: now, parents, threads, alreadyHandled: opts.alreadyHandled });
-      const orphaned = sweep ? findOrphanedCards({ channel, botUserId, cutoffMs: orphanCutoffMs, threads, ownedHere: sweep.ownedHere }) : [];
+      const found = findMissed({
+        channel,
+        botUserId,
+        cutoffMs,
+        nowMs: now,
+        parents,
+        threads,
+        alreadyHandled: opts.alreadyHandled,
+      });
+      const orphaned = sweep
+        ? findOrphanedCards({ channel, botUserId, cutoffMs: orphanCutoffMs, threads, ownedHere: sweep.ownedHere })
+        : [];
       return { found, orphaned };
     } catch (err) {
       return { failed: errMsg(err) };
@@ -385,11 +400,15 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<Catch
         }
       }
       orphans += closed;
-      log(`[catch-up] ${channel}: ${closed} of ${orphaned.length} orphaned status card(s) closed as interrupted (ts ${orphaned.map((c) => c.ts).join(", ")})`);
+      log(
+        `[catch-up] ${channel}: ${closed} of ${orphaned.length} orphaned status card(s) closed as interrupted (ts ${orphaned.map((c) => c.ts).join(", ")})`,
+      );
     }
     if (found.length === 0) continue;
     missed += found.length;
-    log(`[catch-up] ${channel}: ${found.length} missed message(s) re-dispatched (ts ${found.map((m) => m.ts).join(", ")})`);
+    log(
+      `[catch-up] ${channel}: ${found.length} missed message(s) re-dispatched (ts ${found.map((m) => m.ts).join(", ")})`,
+    );
     for (const m of found) {
       try {
         await opts.onMissed(m);
@@ -398,7 +417,9 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<Catch
       }
     }
   }
-  log(`[catch-up] scanned ${channels.length} channel(s): ${missed} missed message(s), ${orphans} orphaned card(s), ${skippedChannels} skipped`);
+  log(
+    `[catch-up] scanned ${channels.length} channel(s): ${missed} missed message(s), ${orphans} orphaned card(s), ${skippedChannels} skipped`,
+  );
   record({ at: now, channels: channels.length, missed, skippedChannels });
   return { channels: channels.length, missed, orphans, skippedChannels };
 }
@@ -423,7 +444,12 @@ async function fetchParents(client: CatchUpClient, channel: string, oldestSec: n
   const out: SlackHistoryMessage[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < MAX_HISTORY_PAGES; page++) {
-    const res = await client.conversations.history({ channel, oldest: oldestSec.toFixed(6), limit: HISTORY_PAGE, cursor });
+    const res = await client.conversations.history({
+      channel,
+      oldest: oldestSec.toFixed(6),
+      limit: HISTORY_PAGE,
+      cursor,
+    });
     out.push(...(res.messages ?? []));
     cursor = res.response_metadata?.next_cursor || undefined;
     if (!cursor) break;
@@ -436,7 +462,11 @@ async function fetchParents(client: CatchUpClient, channel: string, oldestSec: n
  *  messages; the full thread is also what `threadIncludesBot` / `botRepliedAfter`
  *  need to judge participation. Exported for the adapter's redelivery guard
  *  (#346), which reads one thread the same way. */
-export async function fetchReplies(client: Pick<CatchUpClient, "conversations">, channel: string, ts: string): Promise<SlackHistoryMessage[]> {
+export async function fetchReplies(
+  client: Pick<CatchUpClient, "conversations">,
+  channel: string,
+  ts: string,
+): Promise<SlackHistoryMessage[]> {
   const out: SlackHistoryMessage[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < MAX_REPLIES_PAGES; page++) {

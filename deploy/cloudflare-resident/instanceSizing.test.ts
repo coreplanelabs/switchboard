@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { DISK_FLOOR_FRACTION, DISK_FLOOR_MIN_KIB, SNAPSHOT_STAGING_RATIO } from "../../src/execution/residentDiskBudget.js";
+import {
+  DISK_FLOOR_FRACTION,
+  DISK_FLOOR_MIN_KIB,
+  SNAPSHOT_STAGING_RATIO,
+} from "../../src/execution/residentDiskBudget.js";
 
 // The resident container's instance type is sized by arithmetic over MEASURED
 // parts, and this test is where the arithmetic lives — wrangler.jsonc carries
@@ -50,9 +54,12 @@ interface InstanceType {
 }
 
 function configuredInstanceType(): InstanceType {
-  const cfg = readJsonc(fileURLToPath(new URL("./wrangler.jsonc", import.meta.url))) as { containers?: Array<{ instance_type?: unknown }> };
+  const cfg = readJsonc(fileURLToPath(new URL("./wrangler.jsonc", import.meta.url))) as {
+    containers?: Array<{ instance_type?: unknown }>;
+  };
   const it = cfg.containers?.[0]?.instance_type;
-  if (!it || typeof it !== "object") throw new Error("wrangler.jsonc: containers[0].instance_type must be a custom {vcpu, memory_mib, disk_mb} object");
+  if (!it || typeof it !== "object")
+    throw new Error("wrangler.jsonc: containers[0].instance_type must be a custom {vcpu, memory_mib, disk_mb} object");
   return it as InstanceType;
 }
 
@@ -108,7 +115,16 @@ function requiredDiskMb(repo: typeof NOMINAL, hardlinked: number, installing: nu
   const installingThread = repo.hardlinkedThreadMb + repo.nodeModulesMb;
   const staging = Math.round((mirror + checkout) * SNAPSHOT_STAGING_RATIO);
   const floor = Math.max(mb(DISK_FLOOR_MIN_KIB), Math.round(usableDiskMb * DISK_FLOOR_FRACTION));
-  return IMAGE_MB + mirror + checkout + PNPM_STORE_MB + hardlinked * repo.hardlinkedThreadMb + installing * installingThread + staging + floor;
+  return (
+    IMAGE_MB +
+    mirror +
+    checkout +
+    PNPM_STORE_MB +
+    hardlinked * repo.hardlinkedThreadMb +
+    installing * installingThread +
+    staging +
+    floor
+  );
 }
 
 describe("resident instance type (deploy/cloudflare-resident/wrangler.jsonc)", () => {

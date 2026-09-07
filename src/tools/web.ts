@@ -1,6 +1,6 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { Agent, fetch as undiciFetch } from "undici";
-import type { RunnableTool, ToolContext } from "./workspace.js";
+import type { RunnableTool } from "./workspace.js";
 
 // Provider-agnostic web tools (Area 5 / R16): URL reading (web_fetch) and web
 // search (web_search). These do network I/O in the bot process directly — NOT
@@ -111,7 +111,11 @@ export function makeSsrfLookup(resolve: DnsResolve) {
           cb(new BlockedUrlError(`host ${hostname} did not resolve`));
           return;
         }
-        if (all) cb(null, ips.map((ip) => ({ address: ip, family: family(ip) })));
+        if (all)
+          cb(
+            null,
+            ips.map((ip) => ({ address: ip, family: family(ip) })),
+          );
         else cb(null, ips[0], family(ips[0]));
       },
       (e) => cb(e instanceof Error ? e : new Error(String(e))),
@@ -131,7 +135,8 @@ export function makeWebCapability(
   const agent = new Agent({ connect: { lookup: makeSsrfLookup(resolve) } as never });
   const boundFetch: FetchLike =
     fetchImpl ??
-    ((url, init) => undiciFetch(url, { ...(init as Record<string, unknown>), dispatcher: agent }) as unknown as Promise<Response>);
+    ((url, init) =>
+      undiciFetch(url, { ...(init as Record<string, unknown>), dispatcher: agent }) as unknown as Promise<Response>);
   const key = env.BRAVE_SEARCH_API_KEY;
   const search: WebSearch = key ? new BraveWebSearch(key, boundFetch) : new NullWebSearch();
   return { fetch: boundFetch, search };
@@ -297,7 +302,9 @@ async function readCapped(res: Response, maxBytes: number): Promise<{ bytes: Buf
   const reader = res.body?.getReader?.();
   if (!reader) {
     const whole =
-      typeof res.arrayBuffer === "function" ? Buffer.from(await res.arrayBuffer()) : Buffer.from(await res.text(), "utf8");
+      typeof res.arrayBuffer === "function"
+        ? Buffer.from(await res.arrayBuffer())
+        : Buffer.from(await res.text(), "utf8");
     return { bytes: whole.subarray(0, maxBytes), truncated: whole.length > maxBytes };
   }
   const chunks: Uint8Array[] = [];
@@ -442,9 +449,7 @@ export const webSearchTool: RunnableTool = {
     try {
       const results = await ctx.web.search.search(query, count != null ? { count } : undefined);
       if (results.length === 0) return `No results for "${query}".`;
-      const body = results
-        .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`)
-        .join("\n\n");
+      const body = results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join("\n\n");
       return `Results for "${query}":\n\n${body}`;
     } catch (e) {
       if (e instanceof WebSearchUnavailableError) {

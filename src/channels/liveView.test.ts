@@ -15,7 +15,15 @@ import {
   type SseSink,
 } from "./liveView.js";
 import { makeShellRenderer, type ShellRenderer } from "./webShell.js";
-import { SEED_ELEMENT_ID, type RunHistorySeed, type RunLiveSeed, type RunNotFoundSeed, type RunsIndexSeed, type ScheduledSeed, type WebSeed } from "./webSeed.js";
+import {
+  SEED_ELEMENT_ID,
+  type RunHistorySeed,
+  type RunLiveSeed,
+  type RunNotFoundSeed,
+  type RunsIndexSeed,
+  type ScheduledSeed,
+  type WebSeed,
+} from "./webSeed.js";
 import { accessActor, isLoopbackAddress } from "./commandHttp.js";
 import { grantsFor, type GrantsSource } from "../core/authz/grants.js";
 import { NO_GRANTS, predicateFor } from "../core/authz/index.js";
@@ -69,18 +77,29 @@ function fixedRegistry() {
  *  `grantsFor`, the path index.ts takes) — every channel, so the index and the
  *  history routes show what they always showed. The authz block passes its own
  *  viewers. */
-const ADMIN: LiveViewContext = { actor: accessActor({ sub: "admin" }, (id) => grantsFor(id, { permissions: { admins: ["access:admin"] } })) };
+const ADMIN: LiveViewContext = {
+  actor: accessActor({ sub: "admin" }, (id) => grantsFor(id, { permissions: { admins: ["access:admin"] } })),
+};
 
 type Handler = ReturnType<typeof createLiveViewHandler>;
 /** `createLiveViewHandler` with `ctx` defaulting to the admin viewer. */
-function adminByDefault(handler: Handler): (req: Parameters<Handler>[0], res: Parameters<Handler>[1], ctx?: LiveViewContext) => boolean {
+function adminByDefault(
+  handler: Handler,
+): (req: Parameters<Handler>[0], res: Parameters<Handler>[1], ctx?: LiveViewContext) => boolean {
   return (req, res, ctx = ADMIN) => handler(req, res, ctx);
 }
 
 /** The handler over a registry alone — run history off (store: null), the
  *  live-only shape every token-path test below exercises. */
 function liveOnlyHandler(registry: RunRegistry) {
-  return adminByDefault(createLiveViewHandler({ shell, service: createRunsService({ registry, store: null }), index: registry, retention: null }));
+  return adminByDefault(
+    createLiveViewHandler({
+      shell,
+      service: createRunsService({ registry, store: null }),
+      index: registry,
+      retention: null,
+    }),
+  );
 }
 
 /** An SseSink that records everything written, for socket-free assertions. */
@@ -172,7 +191,11 @@ describe("serveEvents (SSE, transport-free)", () => {
     reg.publish(id, result(true, "hi"));
     // Each frame carries its stream position twice on purpose: as the SSE `id:`
     // (the resume cursor) and as `seq` on the event itself (the record's order).
-    expect(rec.body()).toBe(PRELUDE + `id: 1\ndata: ${JSON.stringify({ ...call("$ echo hi"), seq: 1 })}\n\n` + `id: 2\ndata: ${JSON.stringify({ ...result(true, "hi"), seq: 2 })}\n\n`);
+    expect(rec.body()).toBe(
+      PRELUDE +
+        `id: 1\ndata: ${JSON.stringify({ ...call("$ echo hi"), seq: 1 })}\n\n` +
+        `id: 2\ndata: ${JSON.stringify({ ...result(true, "hi"), seq: 2 })}\n\n`,
+    );
   });
 
   it("a reconnect with Last-Event-ID replays only the events after that position — never the whole backlog again", () => {
@@ -209,7 +232,9 @@ describe("serveEvents (SSE, transport-free)", () => {
     serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), b.sink);
     const spy = vi.spyOn(JSON, "stringify");
     reg.publish(id, result(true, "x".repeat(5000)));
-    const calls = spy.mock.calls.filter((c) => typeof c[0] === "object" && c[0] !== null && (c[0] as { type?: string }).type === "tool_result");
+    const calls = spy.mock.calls.filter(
+      (c) => typeof c[0] === "object" && c[0] !== null && (c[0] as { type?: string }).type === "tool_result",
+    );
     spy.mockRestore();
     expect(calls).toHaveLength(1);
     expect(a.body()).toBe(b.body());
@@ -316,7 +341,16 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
 describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
   const NOW = Date.UTC(2026, 7, 29, 12, 0);
   function panelHandler(registry: RunRegistry, options: Pick<LiveViewDeps, "scheduled">) {
-    return adminByDefault(createLiveViewHandler({ shell, service: createRunsService({ registry, store: null }), index: registry, retention: null, now: () => NOW, ...options }));
+    return adminByDefault(
+      createLiveViewHandler({
+        shell,
+        service: createRunsService({ registry, store: null }),
+        index: registry,
+        retention: null,
+        now: () => NOW,
+        ...options,
+      }),
+    );
   }
   function pageFor(options: Pick<LiveViewDeps, "scheduled">, url = "/runs/scheduled", method = "GET") {
     const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
@@ -331,7 +365,19 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
     };
     const req = { method, url, headers: {}, on: () => {} };
     const owned = handler(req as never, res as never);
-    return { registry, owned, get body() { return body; }, get status() { return status; }, get headers() { return headers; } };
+    return {
+      registry,
+      owned,
+      get body() {
+        return body;
+      },
+      get status() {
+        return status;
+      },
+      get headers() {
+        return headers;
+      },
+    };
   }
   const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -363,18 +409,31 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
     const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
     registry.create("friction · #cron · cron");
     const store = new InMemoryScheduleStore();
-    await store.record({ schedule: "self-improvement", firedAt: NOW - 60_000, outcome: "completed", runId: "run-live", detail: "🔍 8 runs analyzed" });
+    await store.record({
+      schedule: "self-improvement",
+      firedAt: NOW - 60_000,
+      outcome: "completed",
+      runId: "run-live",
+      detail: "🔍 8 runs analyzed",
+    });
     const handler = panelHandler(registry, { scheduled: { schedules: FIXTURE_SCHEDULES, store } });
     let body = "";
     const res = { writeHead: () => {}, write: () => {}, end: (c?: string) => void (body += c ?? "") };
-    expect(handler({ method: "GET", url: "/runs/scheduled", headers: {}, on: () => {} } as never, res as never)).toBe(true);
+    expect(handler({ method: "GET", url: "/runs/scheduled", headers: {}, on: () => {} } as never, res as never)).toBe(
+      true,
+    );
     await tick();
     const seed = scheduledSeedOf(body);
     expect(seed.now).toBe(NOW);
     expect(seed.firingsUnavailable).toBeUndefined();
     const rows = seed.rows ?? [];
     const si = rows.find((r) => r.name === "self-improvement");
-    expect(si?.last).toMatchObject({ outcome: "completed", runId: "run-live", runHref: "/runs/run-live?t=tok-live", detail: "🔍 8 runs analyzed" });
+    expect(si?.last).toMatchObject({
+      outcome: "completed",
+      runId: "run-live",
+      runHref: "/runs/run-live?t=tok-live",
+      detail: "🔍 8 runs analyzed",
+    });
     expect(si?.nextFireAt).toBe(Date.UTC(2026, 7, 31, 14, 0)); // next fire, Monday
     expect(rows.some((r) => r.name === "resident-watchdog")).toBe(true);
     expect(rows.some((r) => r.name === "keep-alive")).toBe(false); // internal plumbing stays off the dashboard
@@ -382,11 +441,24 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
 
   it("links a live firing with its token only for a viewer who may read that run — an unlisted browser session gets the bare tokenless href (authorization.md items 5–7, #428)", async () => {
     const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
-    registry.create("friction · #cron · cron", { channelId: "http:cron", userId: "http:cron", threadKey: "http:cron:1", channelVisibility: "machine" });
+    registry.create("friction · #cron · cron", {
+      channelId: "http:cron",
+      userId: "http:cron",
+      threadKey: "http:cron:1",
+      channelVisibility: "machine",
+    });
     const store = new InMemoryScheduleStore();
-    await store.record({ schedule: "self-improvement", firedAt: NOW - 60_000, outcome: "completed", runId: "run-live", detail: "🔍 8 runs analyzed" });
+    await store.record({
+      schedule: "self-improvement",
+      firedAt: NOW - 60_000,
+      outcome: "completed",
+      runId: "run-live",
+      detail: "🔍 8 runs analyzed",
+    });
     const handler = panelHandler(registry, { scheduled: { schedules: FIXTURE_SCHEDULES, store } });
-    const alice: LiveViewContext = { actor: accessActor({ sub: "alice" }, (id) => grantsFor(id, { commandGroups: ["runs"] })) };
+    const alice: LiveViewContext = {
+      actor: accessActor({ sub: "alice" }, (id) => grantsFor(id, { commandGroups: ["runs"] })),
+    };
     const hrefFor = async (ctx?: LiveViewContext) => {
       let body = "";
       const res = { writeHead: () => {}, write: () => {}, end: (c?: string) => void (body += c ?? "") };
@@ -485,7 +557,13 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.headers["x-frame-options"]).toBe("DENY");
     expect(t.headers["cache-control"]).toBe("no-store");
     const seed = runSeedOf(t.body());
-    expect(seed).toEqual({ page: "run", mode: "live", id, eventsUrl: `/runs/${id}/events?t=${token}`, stopUrl: `/runs/${id}/stop?t=${token}` });
+    expect(seed).toEqual({
+      page: "run",
+      mode: "live",
+      id,
+      eventsUrl: `/runs/${id}/events?t=${token}`,
+      stopUrl: `/runs/${id}/stop?t=${token}`,
+    });
   });
 
   it("percent-encodes id/token into the seeded URLs so special chars can't break them", () => {
@@ -839,7 +917,11 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
     const reg = fixedRegistry();
     const { id, control } = reg.create();
     const handler = liveOnlyHandler(reg);
-    for (const url of [`/runs/${id}/stop?t=wrong&mode=hard`, `/runs/${id}/stop?mode=hard`, `/runs/nope/stop?t=tok-1&mode=hard`]) {
+    for (const url of [
+      `/runs/${id}/stop?t=wrong&mode=hard`,
+      `/runs/${id}/stop?mode=hard`,
+      `/runs/nope/stop?t=tok-1&mode=hard`,
+    ]) {
       const t = fakeReqRes("POST", url);
       handler(t.req, t.res);
       await vi.waitFor(() => expect(t.status).toBe(404));
@@ -885,7 +967,9 @@ describe("serveEvents — live replay budget (#157 U11)", () => {
     for (let i = 1; i <= 3000; i++) reg.publish(id, call(`$ step ${i}`));
     const rec = recordingSink();
     serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
-    const frames = rec.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: ")).map((w) => JSON.parse(w.slice(w.indexOf("data: ") + 6)));
+    const frames = rec.writes
+      .filter((w) => w.startsWith("data: ") || w.startsWith("id: "))
+      .map((w) => JSON.parse(w.slice(w.indexOf("data: ") + 6)));
     expect(frames).toHaveLength(1001);
     expect(frames[0]).toEqual({ type: "replay_note", summary: "replaying last 1000 of 3000 events" });
     expect(frames[1]).toMatchObject({ summary: "$ step 2001", seq: 2001 });
@@ -928,11 +1012,16 @@ describe("serveEvents — live replay budget (#157 U11)", () => {
     serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, parseLastEventId("500")), rec.sink);
     const frames = rec.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: "));
     expect(frames).toHaveLength(1001);
-    expect(frames[0]).toBe(`data: ${JSON.stringify({ type: "replay_note", summary: "replaying last 1000 of 2500 events" })}\n\n`);
+    expect(frames[0]).toBe(
+      `data: ${JSON.stringify({ type: "replay_note", summary: "replaying last 1000 of 2500 events" })}\n\n`,
+    );
     expect(frames[1]).toMatch(/^id: 2001\n/);
     expect(frames[1000]).toMatch(/^id: 3000\n/);
     const rec2 = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, parseLastEventId("2500")), rec2.sink);
+    serveEvents(
+      (onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, parseLastEventId("2500")),
+      rec2.sink,
+    );
     const frames2 = rec2.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: "));
     expect(frames2).toHaveLength(500);
     expect(rec2.body()).not.toContain("replay_note");
@@ -947,7 +1036,8 @@ describe("serveEvents — live replay budget (#157 U11)", () => {
 // in the seed, finished rows never carry one.
 describe("live view on RunsService: history pages + index toggle (#157 U8)", () => {
   const NOW = 1_700_000_000_000;
-  const text = (type: "input" | "context" | "assistant" | "answer", t: string, seq: number): RunEvent => ({ type, text: t, seq }) as RunEvent;
+  const text = (type: "input" | "context" | "assistant" | "answer", t: string, seq: number): RunEvent =>
+    ({ type, text: t, seq }) as RunEvent;
 
   function record(id: string, over: Partial<RunRecord> = {}): RunRecord {
     const events: RunEvent[] = over.events ?? [
@@ -980,7 +1070,13 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
 
   function fakeReqRes(method: string, url: string, remoteAddress = "203.0.113.9") {
     const listeners: Record<string, Array<() => void>> = {};
-    const req = { method, url, headers: {}, socket: { remoteAddress }, on: (ev: string, cb: () => void) => void (listeners[ev] ??= []).push(cb) };
+    const req = {
+      method,
+      url,
+      headers: {},
+      socket: { remoteAddress },
+      on: (ev: string, cb: () => void) => void (listeners[ev] ??= []).push(cb),
+    };
     let status = 0;
     let outHeaders: Record<string, string> = {};
     const chunks: string[] = [];
@@ -1116,14 +1212,22 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const events = fakeReqRes("GET", "/runs/r1/events");
       h.handler(events.req, events.res);
       await done(events);
-      expect(audit.mock.calls).toEqual([[{ route: "page", runId: "r1", identity: "access:admin" }], [{ route: "events", runId: "r1", identity: "access:admin" }]]);
+      expect(audit.mock.calls).toEqual([
+        [{ route: "page", runId: "r1", identity: "access:admin" }],
+        [{ route: "events", runId: "r1", identity: "access:admin" }],
+      ]);
       for (const [entry] of audit.mock.calls) expect(JSON.stringify(entry)).not.toContain("please run it");
     });
   });
 
   describe("AE11: truncated records", () => {
     it("withOmittedMarkers marks every seq gap with its own count; the unaccounted remainder is a tail marker", () => {
-      const events: RunEvent[] = [text("input", "a", 1), { ...call("b"), seq: 4 }, { ...call("c"), seq: 5 }, { ...call("d"), seq: 9 }];
+      const events: RunEvent[] = [
+        text("input", "a", 1),
+        { ...call("b"), seq: 4 },
+        { ...call("c"), seq: 5 },
+        { ...call("d"), seq: 9 },
+      ];
       expect(withOmittedMarkers(events, 12)).toEqual([
         events[0],
         { type: "replay_note", summary: "2 events omitted" },
@@ -1133,26 +1237,51 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
         events[3],
         { type: "replay_note", summary: "3 events omitted" },
       ]);
-      const odd: RunEvent[] = [{ ...call("x"), seq: 1 }, { ...call("y"), seq: 50 }];
+      const odd: RunEvent[] = [
+        { ...call("x"), seq: 1 },
+        { ...call("y"), seq: 50 },
+      ];
       expect(withOmittedMarkers(odd, 3)).toEqual([odd[0], { type: "replay_note", summary: "1 event omitted" }, odd[1]]);
     });
 
     it("withOmittedMarkers puts one 'N events omitted' note at a single seq gap, N = eventCount − stored", () => {
-      const events: RunEvent[] = [text("input", "a", 1), { ...call("b"), seq: 2 }, { ...call("c"), seq: 8 }, text("answer", "d", 9)];
-      expect(withOmittedMarkers(events, 9)).toEqual([events[0], events[1], { type: "replay_note", summary: "5 events omitted" }, events[2], events[3]]);
+      const events: RunEvent[] = [
+        text("input", "a", 1),
+        { ...call("b"), seq: 2 },
+        { ...call("c"), seq: 8 },
+        text("answer", "d", 9),
+      ];
+      expect(withOmittedMarkers(events, 9)).toEqual([
+        events[0],
+        events[1],
+        { type: "replay_note", summary: "5 events omitted" },
+        events[2],
+        events[3],
+      ]);
     });
 
     it("a gap at the start puts the marker first; a record with nothing missing gets no marker; a gap only at the tail puts it last", () => {
-      const tail: RunEvent[] = [{ ...call("x"), seq: 4 }, { ...call("y"), seq: 5 }];
+      const tail: RunEvent[] = [
+        { ...call("x"), seq: 4 },
+        { ...call("y"), seq: 5 },
+      ];
       expect(withOmittedMarkers(tail, 5)[0]).toEqual({ type: "replay_note", summary: "3 events omitted" });
-      const full: RunEvent[] = [{ ...call("x"), seq: 1 }, { ...call("y"), seq: 2 }];
+      const full: RunEvent[] = [
+        { ...call("x"), seq: 1 },
+        { ...call("y"), seq: 2 },
+      ];
       expect(withOmittedMarkers(full, 2)).toEqual(full);
       expect(withOmittedMarkers(full, 3).at(-1)).toEqual({ type: "replay_note", summary: "1 event omitted" });
     });
 
     it("the persisted page seeds the marker in place and the events replay carries it too", async () => {
       const h = harness();
-      const events: RunEvent[] = [text("input", "a", 1), { ...call("b"), seq: 2 }, { ...call("c"), seq: 8 }, text("answer", "d", 9)];
+      const events: RunEvent[] = [
+        text("input", "a", 1),
+        { ...call("b"), seq: 2 },
+        { ...call("c"), seq: 8 },
+        text("answer", "d", 9),
+      ];
       await h.store!.put(record("r1", { events, eventCount: 9, storedEventCount: 4, truncated: true }));
       const page = fakeReqRes("GET", "/runs/r1");
       h.handler(page.req, page.res);
@@ -1300,7 +1429,9 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     it("?all=1 seeds live rows with tokens and finished/persisted rows tokenless, with status and finished-at", async () => {
       const h = harness();
       await h.store!.put(record("p1"));
-      await h.store!.put(record("p2", { status: "failed", finishedAt: NOW - 30_000, startedAt: NOW - 30_000 - 3_725_000 }));
+      await h.store!.put(
+        record("p2", { status: "failed", finishedAt: NOW - 30_000, startedAt: NOW - 30_000 - 3_725_000 }),
+      );
       const active = h.registry.create("active one");
       const fin = h.registry.create("finished one");
       h.registry.finish(fin.id);
@@ -1354,7 +1485,11 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       await done(t);
       expect(list).toHaveBeenCalledTimes(1);
       const seed = indexSeedOf(t.body());
-      expect(seed.rows.find((r) => r.id === run.id)).toMatchObject({ persisted: true, finishedAt: NOW - 60_000, status: "completed" });
+      expect(seed.rows.find((r) => r.id === run.id)).toMatchObject({
+        persisted: true,
+        finishedAt: NOW - 60_000,
+        status: "completed",
+      });
     });
 
     it("?all=1 seeds a visible banner when the history store is unavailable (live rows still listed); the default view never does", async () => {
@@ -1501,7 +1636,12 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     // granted the private channel natively, the admin holds everything.
     const SOURCE: GrantsSource = {
       permissions: { admins: ["access:admin"] },
-      grants: new Map([["access:bob", { actions: new Set(["runs:read"]), channels: new Set(["slack:G_PRIV"]), repos: new Set<string>() }]]),
+      grants: new Map([
+        [
+          "access:bob",
+          { actions: new Set(["runs:read"]), channels: new Set(["slack:G_PRIV"]), repos: new Set<string>() },
+        ],
+      ]),
       commandGroups: ["runs"],
     };
     const viewer = (sub: string): LiveViewContext => ({ actor: accessActor({ sub }, (id) => grantsFor(id, SOURCE)) });
@@ -1512,14 +1652,23 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     const nobody: LiveViewContext = { actor: accessActor({ sub: "nobody" }, () => NO_GRANTS) };
     const PUBLIC = { channelId: "slack:C_PUB", channelVisibility: "public" } as const;
     const PRIVATE = { channelId: "slack:G_PRIV", channelVisibility: "private" } as const;
-    const meta = (channel: typeof PUBLIC | typeof PRIVATE, threadKey: string) => ({ ...channel, userId: "slack:U1", threadKey });
+    const meta = (channel: typeof PUBLIC | typeof PRIVATE, threadKey: string) => ({
+      ...channel,
+      userId: "slack:U1",
+      threadKey,
+    });
 
     async function index(h: ReturnType<typeof harness>, url: string, ctx: LiveViewContext) {
       const t = fakeReqRes("GET", url);
       h.handler(t.req, t.res, ctx);
       await done(t);
       expect(t.status).toBe(200);
-      return { ids: indexSeedOf(t.body()).rows.map((r) => r.id).sort(), body: t.body() };
+      return {
+        ids: indexSeedOf(t.body())
+          .rows.map((r) => r.id)
+          .sort(),
+        body: t.body(),
+      };
     }
     async function request(h: ReturnType<typeof harness>, url: string, ctx: LiveViewContext, method = "GET") {
       const t = fakeReqRes(method, url);
@@ -1537,7 +1686,9 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect((await index(h, "/runs?all=1", alice)).ids).toEqual(["pub"]);
       expect((await index(h, "/runs?all=1", bob)).ids).toEqual(["priv", "pub"]);
       expect((await index(h, "/runs?all=1", admin)).ids).toEqual(["priv", "pub", "unk"]);
-      expect(list.mock.calls.map(([opts]) => opts.visibleTo)).toEqual([alice, bob, admin].map((v) => predicateFor(v.actor, "runs:read", "run")));
+      expect(list.mock.calls.map(([opts]) => opts.visibleTo)).toEqual(
+        [alice, bob, admin].map((v) => predicateFor(v.actor, "runs:read", "run")),
+      );
     });
 
     it("the default `/runs` and its `?stream=1` feed carry only the live runs the viewer may read: a hidden run's row, token, upserts and eviction never reach the page", async () => {
@@ -1586,7 +1737,13 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const stop = await request(h, "/runs/priv/stop?mode=soft", alice, "POST");
       expect([stop.status, stop.body()]).toEqual([404, "run not found"]);
       // Who, which route, why — never the run id, never in the reply.
-      expect(audit.mock.calls.map(([e]) => e)).toEqual(["page", "events", "friction", "stop"].map((route) => ({ route, identity: "access:alice", denied: "not-member" })));
+      expect(audit.mock.calls.map(([e]) => e)).toEqual(
+        ["page", "events", "friction", "stop"].map((route) => ({
+          route,
+          identity: "access:alice",
+          denied: "not-member",
+        })),
+      );
       expect(denied.body()).not.toContain("not-member");
       // A native member and the admin read it; the admin's tokenless stop is the 409 a finished run gives.
       expect((await request(h, "/runs/priv", bob)).status).toBe(200);
@@ -1608,12 +1765,17 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect((await index(h, "/runs?all=1", nobody)).ids).toEqual([]);
       expect((await request(h, "/runs/pub", nobody)).status).toBe(404);
       expect((await request(h, "/runs/pub/events", nobody)).status).toBe(404);
-      expect(audit.mock.calls.map(([e]) => e)).toEqual(["page", "events"].map((route) => ({ route, identity: "access:nobody", denied: "missing-grant" })));
+      expect(audit.mock.calls.map(([e]) => e)).toEqual(
+        ["page", "events"].map((route) => ({ route, identity: "access:nobody", denied: "missing-grant" })),
+      );
 
       const page = await request(h, `/runs/${live.id}?t=${live.token}`, nobody);
       expect(page.status).toBe(200);
       expect(page.body()).toBe((await request(h, `/runs/${live.id}?t=${live.token}`, admin)).body());
-      expect(runSeedOf(page.body())).toMatchObject({ mode: "live", eventsUrl: `/runs/${live.id}/events?t=${live.token}` });
+      expect(runSeedOf(page.body())).toMatchObject({
+        mode: "live",
+        eventsUrl: `/runs/${live.id}/events?t=${live.token}`,
+      });
       expect((await request(h, `/runs/${live.id}/friction?t=${live.token}`, nobody)).status).toBe(200);
       const stream = fakeReqRes("GET", `/runs/${live.id}/events?t=${live.token}`);
       h.handler(stream.req, stream.res, nobody);
@@ -1629,8 +1791,21 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
 // the handler, the seed, and the web app's row model.
 describe("IndexRow seed shape", () => {
   it("accepts a live registry summary (with token) and a store view (without)", () => {
-    const live: IndexRow = { id: "a", token: "t", finished: false, startedAt: 1, eventCount: 0 } satisfies Partial<RunSummary> as IndexRow;
-    const stored: IndexRow = { id: "b", finished: true, startedAt: 1, finishedAt: 2, status: "completed", eventCount: 3 };
+    const live: IndexRow = {
+      id: "a",
+      token: "t",
+      finished: false,
+      startedAt: 1,
+      eventCount: 0,
+    } satisfies Partial<RunSummary> as IndexRow;
+    const stored: IndexRow = {
+      id: "b",
+      finished: true,
+      startedAt: 1,
+      finishedAt: 2,
+      status: "completed",
+      eventCount: 3,
+    };
     expect(live.token).toBe("t");
     expect(stored.token).toBeUndefined();
   });

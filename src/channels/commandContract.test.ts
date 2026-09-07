@@ -39,7 +39,13 @@ const NOW = 1_700_000_000_000;
 const RESIDENTS = {
   cap: 6,
   count: 1,
-  residents: [{ resource: "repo:jshttp/vary", defaultRef: "master", live: { state: "warm", reason: "", sha: "0123456789abcdef" } }],
+  residents: [
+    {
+      resource: "repo:jshttp/vary",
+      defaultRef: "master",
+      live: { state: "warm", reason: "", sha: "0123456789abcdef" },
+    },
+  ],
 };
 
 const residentAdmin: ResidentAdminClient = {
@@ -94,7 +100,14 @@ function record(id: string, finishedAt: number): RunRecord {
 async function fixture() {
   let n = 0;
   const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
-  const live = reg.create("coding · acme/live", { agent: "coding", model: "anthropic/claude", channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:t", channelVisibility: "public" });
+  const live = reg.create("coding · acme/live", {
+    agent: "coding",
+    model: "anthropic/claude",
+    channelId: "slack:C1",
+    userId: "slack:U1",
+    threadKey: "slack:C1:t",
+    channelVisibility: "public",
+  });
   reg.publish(live.id, { type: "input", text: "live request" });
   reg.publish(live.id, { type: "tool_call", tool: "bash", summary: "$ pwd" });
   const store = new InMemoryRunStore({ now: () => NOW });
@@ -178,7 +191,12 @@ function fakeReqRes(method: string, url: string, headers: IncomingHttpHeaders = 
       if (c) out.push(c);
     },
   };
-  return { req: req as unknown as IncomingMessage, res: res as unknown as ServerResponse, status: () => status, text: () => out.join("") };
+  return {
+    req: req as unknown as IncomingMessage,
+    res: res as unknown as ServerResponse,
+    status: () => status,
+    text: () => out.join(""),
+  };
 }
 
 /** An unlisted Access browser session holds every group's read (the legacy translation). */
@@ -188,7 +206,10 @@ const httpRow: AdapterRow = {
   name: "http",
   caller: callerWith("access", "access:user-1", grantsFor("access:user-1", BROWSER_GRANTS)),
   async call(f, id, named) {
-    const handler = createCommandHttpHandler(f.commands, { grantsFor: (actorId) => grantsFor(actorId, BROWSER_GRANTS), devBypassActive: false });
+    const handler = createCommandHttpHandler(f.commands, {
+      grantsFor: (actorId) => grantsFor(actorId, BROWSER_GRANTS),
+      devBypassActive: false,
+    });
     // A query string spells option keys in kebab-case (`?since-ms=…`); argument names are what they are.
     const query = new URLSearchParams(Object.entries(named).map(([k, v]) => [camelToKebab(k), v]));
     const t = fakeReqRes("GET", `${httpPath(id)}?${query.toString()}`);
@@ -208,7 +229,12 @@ const mcpRow: AdapterRow = {
       {
         method: "POST",
         headers: { authorization: "Bearer tok" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: mcpToolName(id), arguments: named } }),
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: mcpToolName(id), arguments: named },
+        }),
       },
       {} as CoreDeps,
       { auth: { tokens: { tok: { subject: "alice", scopes: MCP_SCOPES } } }, commands: f.commands },
@@ -240,7 +266,11 @@ const rows: AdapterRow[] = [httpRow, mcpRow, cliRow];
 describe.each(rows)("adapter contract — $name", (row) => {
   it("runs.list {status:'all'} hands back the exact invoke JSON: both runs once, no token", async () => {
     const f = await fixture();
-    const reference = await f.commands.invoke("runs.list", inputFor(f.commands.get("runs.list")!, { status: "all" }), row.caller);
+    const reference = await f.commands.invoke(
+      "runs.list",
+      inputFor(f.commands.get("runs.list")!, { status: "all" }),
+      row.caller,
+    );
     expect(reference.ok).toBe(true);
     const got = await row.call(f, "runs.list", { status: "all" });
     expect(got.json).toEqual(reference.ok ? reference.value : null);
@@ -252,7 +282,11 @@ describe.each(rows)("adapter contract — $name", (row) => {
 
   it("a bare runs.list (no options) defaults to the active runs — the same JSON as {status:'active'}: the live run only", async () => {
     const f = await fixture();
-    const reference = await f.commands.invoke("runs.list", inputFor(f.commands.get("runs.list")!, { status: "active" }), row.caller);
+    const reference = await f.commands.invoke(
+      "runs.list",
+      inputFor(f.commands.get("runs.list")!, { status: "active" }),
+      row.caller,
+    );
     expect(reference.ok).toBe(true);
     const got = await row.call(f, "runs.list", {});
     expect(got.json).toEqual(reference.ok ? reference.value : null);
@@ -274,7 +308,11 @@ describe.each(rows)("adapter contract — $name", (row) => {
   it("runs.events <id> --after-seq 1 --limit 2: a positional argument plus two kebab↔camel options bind identically on every surface", async () => {
     const f = await fixture();
     const named = { id: f.persistedIds[0], afterSeq: "1", limit: "2" };
-    const reference = await f.commands.invoke("runs.events", inputFor(f.commands.get("runs.events")!, named), row.caller);
+    const reference = await f.commands.invoke(
+      "runs.events",
+      inputFor(f.commands.get("runs.events")!, named),
+      row.caller,
+    );
     expect(reference.ok, JSON.stringify(reference)).toBe(true);
     const got = await row.call(f, "runs.events", named);
     expect(got.json).toEqual(reference.ok ? reference.value : null);
@@ -318,16 +356,27 @@ describe.each(rows)("adapter contract for migrated commands — $name", (row) =>
 // ---- the chat row ------------------------------------------------------------
 
 describe("adapter contract — chat", () => {
-  const caller = (config: ConfigStore, userId: string): Caller => chatCallerFor({ userId, channelId: "slack:CX", threadKey: "slack:CX:t" }, config);
+  const caller = (config: ConfigStore, userId: string): Caller =>
+    chatCallerFor({ userId, channelId: "slack:CX", threadKey: "slack:CX:t" }, config);
 
   it("`runs list --status all` renders renderText(invoke JSON) for the same caller; no token anywhere", async () => {
     const f = await fixture();
     const parsed = parseChatCommand("runs list --status all", f.commands);
     expect(parsed).toEqual({ kind: "invoke", id: "runs.list", input: { args: [], options: { status: "all" } } });
-    const direct = await f.commands.invoke("runs.list", { options: { status: "all" } }, caller(f.config, "slack:UADMIN"));
+    const direct = await f.commands.invoke(
+      "runs.list",
+      { options: { status: "all" } },
+      caller(f.config, "slack:UADMIN"),
+    );
     expect(direct.ok).toBe(true);
     if (!direct.ok) throw new Error("unreachable");
-    const reply = await handleChatCommand({ commands: f.commands, parsed: parsed!, msg: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:t" }, config: f.config, now: NOW });
+    const reply = await handleChatCommand({
+      commands: f.commands,
+      parsed: parsed!,
+      msg: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:t" },
+      config: f.config,
+      now: NOW,
+    });
     expect(reply).toBe(renderText(f.commands.get("runs.list")!, direct.value, { now: NOW, surface: "chat" }));
     expect(reply.split("\n")).toHaveLength(3);
     expect(reply).not.toContain("tok-");
@@ -338,9 +387,19 @@ describe("adapter contract — chat", () => {
     const f = await fixture();
     const parsed = parseChatCommand("runs list", f.commands);
     expect(parsed).toEqual({ kind: "invoke", id: "runs.list", input: { args: [], options: {} } });
-    const direct = await f.commands.invoke("runs.list", { options: { status: "active" } }, caller(f.config, "slack:UADMIN"));
+    const direct = await f.commands.invoke(
+      "runs.list",
+      { options: { status: "active" } },
+      caller(f.config, "slack:UADMIN"),
+    );
     if (!direct.ok) throw new Error("unreachable");
-    const reply = await handleChatCommand({ commands: f.commands, parsed: parsed!, msg: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:t" }, config: f.config, now: NOW });
+    const reply = await handleChatCommand({
+      commands: f.commands,
+      parsed: parsed!,
+      msg: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:t" },
+      config: f.config,
+      now: NOW,
+    });
     expect(reply).toBe(renderText(f.commands.get("runs.list")!, direct.value, { now: NOW, surface: "chat" }));
     expect(reply.split("\n")).toHaveLength(1);
     expect(reply).toContain(f.liveId.slice(0, 8));
@@ -357,7 +416,12 @@ describe("adapter contract — chat", () => {
       expect(parsed.kind).toBe("invoke");
       const direct = await f.commands.invoke(id, inputFor(f.commands.get(id)!, named), caller(f.config, "slack:UX"));
       expect(direct.ok, id).toBe(true);
-      const reply = await handleChatCommand({ commands: f.commands, parsed, msg: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:t" }, config: f.config });
+      const reply = await handleChatCommand({
+        commands: f.commands,
+        parsed,
+        msg: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:t" },
+        config: f.config,
+      });
       expect(reply).toBe(renderText(f.commands.get(id)!, direct.ok ? direct.value : null));
       expect(reply).not.toContain("tok-");
     }
@@ -366,8 +430,20 @@ describe("adapter contract — chat", () => {
   it("error mapping mirrors invoke: unauthorized → restricted line; invalid input → option line without the value", async () => {
     const f = await fixture();
     const parsed = parseChatCommand("runs list --status bogus", f.commands)!;
-    expect(await handleChatCommand({ commands: f.commands, parsed, msg: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:t" }, config: f.config })).toBe("🚫 `runs list` is restricted. Ask <@slack:UADMIN>.");
-    const admin = await handleChatCommand({ commands: f.commands, parsed, msg: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:t" }, config: f.config });
+    expect(
+      await handleChatCommand({
+        commands: f.commands,
+        parsed,
+        msg: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:t" },
+        config: f.config,
+      }),
+    ).toBe("🚫 `runs list` is restricted. Ask <@slack:UADMIN>.");
+    const admin = await handleChatCommand({
+      commands: f.commands,
+      parsed,
+      msg: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:t" },
+      config: f.config,
+    });
     expect(admin).toBe('⚠️ `runs list`: status: expected one of "active", "finished", "all"');
     expect(admin).not.toContain("bogus");
   });
@@ -388,9 +464,18 @@ describe("derived naming across surfaces (KTD2/KTD21)", () => {
         expect(schema.properties, `${cmd.id} MCP schema has ${key}`).toHaveProperty(key);
         seen[key] = cliFlag(key);
       }
-      for (const arg of cmd.args ?? []) expect(schema.properties, `${cmd.id} MCP schema has argument ${arg.name}`).toHaveProperty(arg.name);
+      for (const arg of cmd.args ?? [])
+        expect(schema.properties, `${cmd.id} MCP schema has argument ${arg.name}`).toHaveProperty(arg.name);
     }
-    expect(seen).toMatchObject({ sinceMs: "--since-ms", beforeId: "--before-id", afterSeq: "--after-seq", minRuns: "--min-runs", dryRun: "--dry-run", limit: "--limit", mode: "--mode" });
+    expect(seen).toMatchObject({
+      sinceMs: "--since-ms",
+      beforeId: "--before-id",
+      afterSeq: "--after-seq",
+      minRuns: "--min-runs",
+      dryRun: "--dry-run",
+      limit: "--limit",
+      mode: "--mode",
+    });
   });
 
   it("the migrated forms read as specified: runs get <id> [--include], runs events <id> [--after-seq] [--limit], runs stop <id> --mode, friction propose [--dry-run] …", async () => {
@@ -401,31 +486,52 @@ describe("derived naming across surfaces (KTD2/KTD21)", () => {
     expect(byId["runs.events"]).toBe("runs events <id> [--after-seq <integer>] [--limit <integer>]");
     expect(byId["runs.friction"]).toBe("runs friction <id>");
     expect(byId["runs.stop"]).toBe("runs stop <id> --mode <soft|hard>");
-    expect(byId["runs.list"]).toBe("runs list [--status <active|finished|all>] [--agent <string>] [--channel <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]");
-    expect(byId["friction.report"]).toBe("friction report [--since-ms <integer>] [--limit <integer>] [--min-runs <integer>]");
-    expect(byId["friction.propose"]).toBe("friction propose [--dry-run] [--top <integer>] [--min-runs <integer>] [--repo <string>]");
+    expect(byId["runs.list"]).toBe(
+      "runs list [--status <active|finished|all>] [--agent <string>] [--channel <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]",
+    );
+    expect(byId["friction.report"]).toBe(
+      "friction report [--since-ms <integer>] [--limit <integer>] [--min-runs <integer>]",
+    );
+    expect(byId["friction.propose"]).toBe(
+      "friction propose [--dry-run] [--top <integer>] [--min-runs <integer>] [--repo <string>]",
+    );
     // Phase 4b: every remaining command, derived from its typed definition.
     expect(byId["help.show"]).toBe("help show");
     expect(byId["config.show"]).toBe("config show [--channel <string>]");
-    expect(byId["config.set"]).toBe("config set <scope> [--agent <string>] [--model <string>] [--models <object>] [--effort <low|medium|high|xhigh|max>] [--efforts <object>] [--channel <string>]");
+    expect(byId["config.set"]).toBe(
+      "config set <scope> [--agent <string>] [--model <string>] [--models <object>] [--effort <low|medium|high|xhigh|max>] [--efforts <object>] [--channel <string>]",
+    );
     expect(byId["config.clear"]).toBe("config clear <scope> [--channel <string>]");
     expect(byId["config.instructions"]).toBe("config instructions <scope> [text…] [--channel <string>]");
-    expect(byId["memory.list"]).toBe("memory list [query…] [--scope <me|org|repo|channel|all>] [--limit <integer>] [--repo <string>]");
+    expect(byId["memory.list"]).toBe(
+      "memory list [query…] [--scope <me|org|repo|channel|all>] [--limit <integer>] [--repo <string>]",
+    );
     expect(byId["memory.forget"]).toBe("memory forget <id>");
-    expect(byId["repo.onboard"]).toBe("repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--evict-coldest]");
+    expect(byId["repo.onboard"]).toBe(
+      "repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--evict-coldest]",
+    );
     expect(byId["repo.offboard"]).toBe("repo offboard <slug> [--dry-run]");
-    expect(byId["repo.reconfigure"]).toBe("repo reconfigure <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>]");
+    expect(byId["repo.reconfigure"]).toBe(
+      "repo reconfigure <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>]",
+    );
     expect(byId["repo.rebuild"]).toBe("repo rebuild <slug> [--dry-run]");
     expect(byId["repo.test"]).toBe("repo test <slug> [ref]");
     expect(byId["repo.build"]).toBe("repo build <slug> [ref]");
     expect(byId["schedule.list"]).toBe("schedule list");
     expect(byId["friction.analyze"]).toBe("friction analyze [source] [--slow-ms <number>] [--in-progress]");
-    expect(byId["deploy.plan"]).toBe("deploy plan [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]");
+    expect(byId["deploy.plan"]).toBe(
+      "deploy plan [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]",
+    );
     expect(byId["deploy.all"]).toBe(byId["deploy.plan"].replace("deploy plan", "deploy all"));
-    expect(byId["env.bootstrap"]).toBe("env bootstrap --env <string> --service <string> [--apply] [--out <string>] [--manifest <string>]");
+    expect(byId["env.bootstrap"]).toBe(
+      "env bootstrap --env <string> --service <string> [--apply] [--out <string>] [--manifest <string>]",
+    );
     // CLI-only commands never reach chat, MCP, or HTTP.
-    expect(byId["deploy.restart"]).toBe("deploy restart [--only <bot>] [--force] [--wait-max <integer>] [--poll <integer>]");
-    for (const id of ["deploy.all", "deploy.restart", "env.bootstrap", "friction.analyze"]) expect(f.commands.get(id)!.surfaces, id).toEqual({ chat: false, mcp: false, http: false });
+    expect(byId["deploy.restart"]).toBe(
+      "deploy restart [--only <bot>] [--force] [--wait-max <integer>] [--poll <integer>]",
+    );
+    for (const id of ["deploy.all", "deploy.restart", "env.bootstrap", "friction.analyze"])
+      expect(f.commands.get(id)!.surfaces, id).toEqual({ chat: false, mcp: false, http: false });
     expect(byId["repo.list"]).toBe("repo list");
   });
 });
@@ -453,6 +559,8 @@ describe("migrated commands over MCP — scopes (AE12)", () => {
     expect((await callAs(f.commands, ["runs:write"], "friction_propose")).error?.data?.code).toBe("unauthorized");
     // friction:write passes the gate; with no `selfImprovement.repo` and no `repo` arg the step is `unavailable`, not unauthorized
     expect((await callAs(f.commands, ["friction:write"], "friction_propose")).error?.data?.code).toBe("unavailable");
-    expect((await callAs(f.commands, ["friction:write"], "friction_propose", { dryRun: "true", repo: "acme/api" })).result).toBeTruthy();
+    expect(
+      (await callAs(f.commands, ["friction:write"], "friction_propose", { dryRun: "true", repo: "acme/api" })).result,
+    ).toBeTruthy();
   });
 });

@@ -82,10 +82,23 @@ describe("schedule registry", () => {
   });
 
   it("catalog: keep-alive is internal (healthz, hidden); self-improvement runs `friction propose` as cron; the resident watchdog is a visible non-run", () => {
-    expect(scheduleForCron("* * * * *", "bot")).toMatchObject({ name: "keep-alive", worker: "bot", internal: true, action: { type: "healthz" } });
-    expect(selfImprovement).toMatchObject({ worker: "bot", cron: "0 14 * * 1", action: { type: "run", command: "friction propose", identity: CRON_IDENTITY } });
+    expect(scheduleForCron("* * * * *", "bot")).toMatchObject({
+      name: "keep-alive",
+      worker: "bot",
+      internal: true,
+      action: { type: "healthz" },
+    });
+    expect(selfImprovement).toMatchObject({
+      worker: "bot",
+      cron: "0 14 * * 1",
+      action: { type: "run", command: "friction propose", identity: CRON_IDENTITY },
+    });
     expect(selfImprovement.internal).toBeUndefined();
-    expect(scheduleForCron("*/10 * * * *", "resident")).toMatchObject({ name: "resident-watchdog", worker: "resident", action: { type: "watchdog" } });
+    expect(scheduleForCron("*/10 * * * *", "resident")).toMatchObject({
+      name: "resident-watchdog",
+      worker: "resident",
+      action: { type: "watchdog" },
+    });
     expect(scheduleForCron("*/10 * * * *", "resident")?.internal).toBeUndefined();
   });
 
@@ -117,7 +130,13 @@ describe("watchdogFiring (the resident's firing record)", () => {
   const watchdog = scheduleForCron("*/10 * * * *", "resident")!;
 
   it("summarizes a quiet pass as completed with the counts", () => {
-    expect(watchdogFiring(watchdog, T0, { cap: 10, count: 3, results: [{ resource: "a", state: "ready", action: "none" }, { resource: "b" }, { resource: "c" }] })).toEqual({
+    expect(
+      watchdogFiring(watchdog, T0, {
+        cap: 10,
+        count: 3,
+        results: [{ resource: "a", state: "ready", action: "none" }, { resource: "b" }, { resource: "c" }],
+      }),
+    ).toEqual({
       schedule: "resident-watchdog",
       firedAt: T0,
       outcome: "completed",
@@ -129,9 +148,17 @@ describe("watchdogFiring (the resident's firing record)", () => {
     const summary = {
       cap: 10,
       count: 4,
-      results: [{ resource: "a", action: "re-armed" }, { resource: "b", action: "provision-timed-out" }, { resource: "c", error: "boom" }, { resource: "d" }],
+      results: [
+        { resource: "a", action: "re-armed" },
+        { resource: "b", action: "provision-timed-out" },
+        { resource: "c", error: "boom" },
+        { resource: "d" },
+      ],
     };
-    expect(watchdogFiring(watchdog, T0, summary)).toMatchObject({ outcome: "failed", detail: "4/10 residents · 1 re-armed · 1 timed out · 1 errors — c: boom" });
+    expect(watchdogFiring(watchdog, T0, summary)).toMatchObject({
+      outcome: "failed",
+      detail: "4/10 residents · 1 re-armed · 1 timed out · 1 errors — c: boom",
+    });
   });
 
   it("item 55: the fullest resident's disk gauge rides on the line when any resident has measured; malformed or absent gauges are skipped", () => {
@@ -145,13 +172,24 @@ describe("watchdogFiring (the resident's firing record)", () => {
         { resource: "repo:d/four", action: "none", disk: { usedKiB: "x", totalKiB: 0 } },
       ],
     };
-    expect(watchdogFiring(watchdog, T0, summary).detail).toBe("3/6 residents · 0 re-armed · 0 timed out · 0 errors · disk max 80% (b/two)");
-    expect(watchdogFiring(watchdog, T0, { cap: 6, count: 1, results: [{ resource: "repo:a/one", action: "none" }] }).detail).toBe("1/6 residents · 0 re-armed · 0 timed out · 0 errors");
+    expect(watchdogFiring(watchdog, T0, summary).detail).toBe(
+      "3/6 residents · 0 re-armed · 0 timed out · 0 errors · disk max 80% (b/two)",
+    );
+    expect(
+      watchdogFiring(watchdog, T0, { cap: 6, count: 1, results: [{ resource: "repo:a/one", action: "none" }] }).detail,
+    ).toBe("1/6 residents · 0 re-armed · 0 timed out · 0 errors");
   });
 
   it("a thrown watchdog is `failed` with the message; detail stays capped", () => {
-    expect(watchdogFiring(watchdog, T0, new Error("registry unreachable"))).toMatchObject({ outcome: "failed", detail: "watchdog threw: registry unreachable" });
-    const many = { cap: 1, count: 1, results: Array.from({ length: 200 }, (_, i) => ({ resource: `r${i}`, error: "x".repeat(50) })) };
+    expect(watchdogFiring(watchdog, T0, new Error("registry unreachable"))).toMatchObject({
+      outcome: "failed",
+      detail: "watchdog threw: registry unreachable",
+    });
+    const many = {
+      cap: 1,
+      count: 1,
+      results: Array.from({ length: 200 }, (_, i) => ({ resource: `r${i}`, error: "x".repeat(50) })),
+    };
     expect(watchdogFiring(watchdog, T0, many).detail!.length).toBeLessThanOrEqual(300);
   });
 });
@@ -161,14 +199,22 @@ describe("recordFiring (shared by both shims)", () => {
 
   it("fail-closed on config: no URL or bearer → nothing sent, the reason returned", async () => {
     const fetchSpy = vi.fn();
-    expect(await recordFiring({ url: undefined, token: "t" }, firing, fetchSpy as never)).toEqual({ ok: false, reason: "STATE_WORKER_URL var is not set" });
-    expect(await recordFiring({ url: "https://state", token: undefined }, firing, fetchSpy as never)).toEqual({ ok: false, reason: "MEMORY_TOKEN secret is not set" });
+    expect(await recordFiring({ url: undefined, token: "t" }, firing, fetchSpy as never)).toEqual({
+      ok: false,
+      reason: "STATE_WORKER_URL var is not set",
+    });
+    expect(await recordFiring({ url: "https://state", token: undefined }, firing, fetchSpy as never)).toEqual({
+      ok: false,
+      reason: "MEMORY_TOKEN secret is not set",
+    });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("POSTs {firing} to <url>/schedules/record with the bearer; trailing slashes on the URL are tolerated", async () => {
     const fetchSpy = vi.fn(async () => new Response("{}", { status: 200 }));
-    expect(await recordFiring({ url: "https://state//", token: "tok" }, firing, fetchSpy as never)).toEqual({ ok: true });
+    expect(await recordFiring({ url: "https://state//", token: "tok" }, firing, fetchSpy as never)).toEqual({
+      ok: true,
+    });
     const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://state/schedules/record");
     expect(init.method).toBe("POST");
@@ -177,15 +223,17 @@ describe("recordFiring (shared by both shims)", () => {
   });
 
   it("a non-2xx or a thrown fetch is reported, never thrown (best-effort telemetry)", async () => {
-    expect(await recordFiring({ url: "https://state", token: "tok" }, firing, (async () => new Response("", { status: 503 })) as never)).toEqual({ ok: false, reason: "state Worker HTTP 503" });
     expect(
       await recordFiring(
         { url: "https://state", token: "tok" },
         firing,
-        (async () => {
-          throw new Error("ECONNRESET");
-        }) as never,
+        (async () => new Response("", { status: 503 })) as never,
       ),
+    ).toEqual({ ok: false, reason: "state Worker HTTP 503" });
+    expect(
+      await recordFiring({ url: "https://state", token: "tok" }, firing, (async () => {
+        throw new Error("ECONNRESET");
+      }) as never),
     ).toEqual({ ok: false, reason: "ECONNRESET" });
   });
 });
@@ -203,7 +251,20 @@ describe("cron evaluation (nextFire, UTC)", () => {
 
   it("rejects malformed expressions instead of guessing", () => {
     // `5/2` (a step on a single value) is malformed in Vixie cron — rejected, never expanded to 5-59/2.
-    for (const bad of ["", "* * * *", "* * * * * *", "60 * * * *", "* 24 * * *", "* * 0 * *", "* * * 13 *", "* * * * 8", "a * * * *", "*/0 * * * *", "5-1 * * * *", "5/2 * * * *"]) {
+    for (const bad of [
+      "",
+      "* * * *",
+      "* * * * * *",
+      "60 * * * *",
+      "* 24 * * *",
+      "* * 0 * *",
+      "* * * 13 *",
+      "* * * * 8",
+      "a * * * *",
+      "*/0 * * * *",
+      "5-1 * * * *",
+      "5/2 * * * *",
+    ]) {
       expect(parseCron(bad), bad).toBeUndefined();
     }
     expect(nextFire("nope", T0)).toBeUndefined();
@@ -247,8 +308,14 @@ describe("planScheduledFiring (the shim's request plan)", () => {
   });
 
   it("fail-closed: no token map, an unparseable map, or no `cron` identity → nothing to run, with the reason", () => {
-    expect(planScheduledFiring(selfImprovement, undefined, T0)).toEqual({ ok: false, reason: "SWITCHBOARD_INGRESS_TOKENS is not set" });
-    expect(planScheduledFiring(selfImprovement, "{oops", T0)).toEqual({ ok: false, reason: "SWITCHBOARD_INGRESS_TOKENS is not valid JSON" });
+    expect(planScheduledFiring(selfImprovement, undefined, T0)).toEqual({
+      ok: false,
+      reason: "SWITCHBOARD_INGRESS_TOKENS is not set",
+    });
+    expect(planScheduledFiring(selfImprovement, "{oops", T0)).toEqual({
+      ok: false,
+      reason: "SWITCHBOARD_INGRESS_TOKENS is not valid JSON",
+    });
     expect(planScheduledFiring(selfImprovement, JSON.stringify({ aaaa: { subject: "justin-ingress" } }), T0)).toEqual({
       ok: false,
       reason: 'SWITCHBOARD_INGRESS_TOKENS has no entry with subject "cron"',
@@ -257,7 +324,10 @@ describe("planScheduledFiring (the shim's request plan)", () => {
 
   it("an ambiguous identity (two tokens for `cron`) is refused, never guessed", () => {
     const dup = JSON.stringify({ a: { subject: "cron" }, b: { subject: "cron" } });
-    expect(planScheduledFiring(selfImprovement, dup, T0)).toEqual({ ok: false, reason: 'SWITCHBOARD_INGRESS_TOKENS has no entry with subject "cron"' });
+    expect(planScheduledFiring(selfImprovement, dup, T0)).toEqual({
+      ok: false,
+      reason: 'SWITCHBOARD_INGRESS_TOKENS has no entry with subject "cron"',
+    });
   });
 });
 
@@ -273,10 +343,19 @@ describe("interpretIngressResponse (the firing record)", () => {
     });
     // Only the reply's FIRST line is the detail: the ranked list under the
     // friction head used to flatten into one 300-char run-on on the panel.
-    const multi = JSON.stringify({ reply: "🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns\n\n1. `slow_tool` — 22 runs", run: { id: "run-3", status: "completed" } });
-    expect(interpretIngressResponse(selfImprovement, T0, 200, multi)).toMatchObject({ detail: "🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns" });
+    const multi = JSON.stringify({
+      reply: "🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns\n\n1. `slow_tool` — 22 runs",
+      run: { id: "run-3", status: "completed" },
+    });
+    expect(interpretIngressResponse(selfImprovement, T0, 200, multi)).toMatchObject({
+      detail: "🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns",
+    });
     const failed = JSON.stringify({ reply: "🚫 restricted", run: { id: "run-2", status: "failed" } });
-    expect(interpretIngressResponse(selfImprovement, T0, 200, failed)).toMatchObject({ runId: "run-2", outcome: "failed", detail: "🚫 restricted" });
+    expect(interpretIngressResponse(selfImprovement, T0, 200, failed)).toMatchObject({
+      runId: "run-2",
+      outcome: "failed",
+      detail: "🚫 restricted",
+    });
   });
 
   it("200 without a run receipt → `no-run` (an older bot answered; nothing to link)", () => {
@@ -287,12 +366,25 @@ describe("interpretIngressResponse (the firing record)", () => {
   });
 
   it("non-2xx (401 unknown identity, 503 disabled, 5xx) → `ingress-error` naming the status", () => {
-    expect(interpretIngressResponse(selfImprovement, T0, 401, '{"error":"unauthorized"}')).toMatchObject({ outcome: "ingress-error", detail: "HTTP 401 unauthorized" });
-    expect(interpretIngressResponse(selfImprovement, T0, 503, '{"error":"disabled","detail":"no ingress tokens configured"}')).toMatchObject({
+    expect(interpretIngressResponse(selfImprovement, T0, 401, '{"error":"unauthorized"}')).toMatchObject({
+      outcome: "ingress-error",
+      detail: "HTTP 401 unauthorized",
+    });
+    expect(
+      interpretIngressResponse(
+        selfImprovement,
+        T0,
+        503,
+        '{"error":"disabled","detail":"no ingress tokens configured"}',
+      ),
+    ).toMatchObject({
       outcome: "ingress-error",
       detail: "HTTP 503 disabled",
     });
-    expect(interpretIngressResponse(selfImprovement, T0, 502, "<html>bad gateway</html>")).toMatchObject({ outcome: "ingress-error", detail: "HTTP 502 <html>bad gateway</html>" });
+    expect(interpretIngressResponse(selfImprovement, T0, 502, "<html>bad gateway</html>")).toMatchObject({
+      outcome: "ingress-error",
+      detail: "HTTP 502 <html>bad gateway</html>",
+    });
   });
 
   it("detail is capped so a firing record never carries a whole report", () => {
@@ -306,7 +398,15 @@ describe("isScheduleFiring", () => {
   it("accepts the record shape and rejects anything else", () => {
     expect(isScheduleFiring({ schedule: "s", firedAt: 1, outcome: "completed" })).toBe(true);
     expect(isScheduleFiring({ schedule: "s", firedAt: 1, outcome: "completed", runId: "r", detail: "d" })).toBe(true);
-    for (const bad of [null, "x", {}, { schedule: "", firedAt: 1, outcome: "completed" }, { schedule: "s", firedAt: "1", outcome: "completed" }, { schedule: "s", firedAt: 1, outcome: "meh" }, { schedule: "s", firedAt: 1, outcome: "completed", runId: 5 }]) {
+    for (const bad of [
+      null,
+      "x",
+      {},
+      { schedule: "", firedAt: 1, outcome: "completed" },
+      { schedule: "s", firedAt: "1", outcome: "completed" },
+      { schedule: "s", firedAt: 1, outcome: "meh" },
+      { schedule: "s", firedAt: 1, outcome: "completed", runId: 5 },
+    ]) {
       expect(isScheduleFiring(bad)).toBe(false);
     }
   });

@@ -88,7 +88,10 @@ export class StreamableHttpMcpClient implements McpClient {
       structuredContent?: unknown;
     };
     const content = Array.isArray(result?.content)
-      ? result.content.filter((p): p is McpCallResult["content"][number] => typeof p === "object" && p !== null && typeof (p as { type?: unknown }).type === "string")
+      ? result.content.filter(
+          (p): p is McpCallResult["content"][number] =>
+            typeof p === "object" && p !== null && typeof (p as { type?: unknown }).type === "string",
+        )
       : [];
     return {
       content,
@@ -140,7 +143,12 @@ export class StreamableHttpMcpClient implements McpClient {
     await this.post({ jsonrpc: "2.0", method: "notifications/initialized" }, signal).catch(() => undefined);
   }
 
-  private async rpc(method: string, params: Record<string, unknown>, signal?: AbortSignal, o?: { initializing?: boolean }): Promise<unknown> {
+  private async rpc(
+    method: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+    o?: { initializing?: boolean },
+  ): Promise<unknown> {
     const id = this.nextId++;
     const res = await this.post({ jsonrpc: "2.0", id, method, params }, signal, o);
     const session = res.headers.get("mcp-session-id");
@@ -153,7 +161,11 @@ export class StreamableHttpMcpClient implements McpClient {
     return message.result;
   }
 
-  private async post(body: Record<string, unknown>, signal?: AbortSignal, o?: { initializing?: boolean }): Promise<Response> {
+  private async post(
+    body: Record<string, unknown>,
+    signal?: AbortSignal,
+    o?: { initializing?: boolean },
+  ): Promise<Response> {
     const headers: Record<string, string> = {
       ...this.headers,
       "content-type": "application/json",
@@ -223,8 +235,12 @@ function toToolInfo(raw: unknown): McpToolInfo | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const r = raw as Record<string, unknown>;
   if (typeof r.name !== "string" || !r.name) return undefined;
-  const schema = r.inputSchema && typeof r.inputSchema === "object" && !Array.isArray(r.inputSchema) ? (r.inputSchema as Record<string, unknown>) : {};
-  const ann = r.annotations && typeof r.annotations === "object" ? (r.annotations as McpToolInfo["annotations"]) : undefined;
+  const schema =
+    r.inputSchema && typeof r.inputSchema === "object" && !Array.isArray(r.inputSchema)
+      ? (r.inputSchema as Record<string, unknown>)
+      : {};
+  const ann =
+    r.annotations && typeof r.annotations === "object" ? (r.annotations as McpToolInfo["annotations"]) : undefined;
   return {
     name: r.name,
     ...(typeof r.description === "string" ? { description: r.description } : {}),

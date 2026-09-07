@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { ExecOptions, Executor } from "../execution/executor.js";
 import type { PrDescription } from "../core/prDescription.js";
-import { bashTool, diffDigestTool, submitPrDescriptionTool, submitVerdictTool, TOOLSETS, type ToolContext } from "./workspace.js";
+import {
+  bashTool,
+  diffDigestTool,
+  submitPrDescriptionTool,
+  submitVerdictTool,
+  TOOLSETS,
+  type ToolContext,
+} from "./workspace.js";
 
 // Feature: features/validated-review.md (R14). The diff_digest tool is a thin
 // wrapper: it runs `git diff <base>...HEAD` through the Executor seam and
@@ -28,7 +35,10 @@ index aaa..bbb 100644
 
 describe("diff_digest tool", () => {
   it("distills the diff the executor returns", async () => {
-    const out = await diffDigestTool.run({}, ctxWith(async () => SAMPLE_DIFF));
+    const out = await diffDigestTool.run(
+      {},
+      ctxWith(async () => SAMPLE_DIFF),
+    );
     expect(out).toContain("1 file changed, +1 -0");
     expect(out).toContain("src/a.ts  +1 -0");
   });
@@ -138,29 +148,38 @@ describe("submit_verdict tool", () => {
 
   it("forwards a valid verdict to the context and acknowledges it", async () => {
     const got: unknown[] = [];
-    const out = await submitVerdictTool.run({ verdict: "approve", summary: "clean" }, ctxWith((v) => got.push(v)));
+    const out = await submitVerdictTool.run(
+      { verdict: "approve", summary: "clean" },
+      ctxWith((v) => got.push(v)),
+    );
     expect(got).toEqual([{ verdict: "approve", summary: "clean" }]);
     expect(out).toBe("verdict recorded: approve");
   });
 
   it("forwards the reported head (the commit the agent reviewed) alongside the verdict", async () => {
     const got: unknown[] = [];
-    await submitVerdictTool.run({ verdict: "approve", summary: "clean", head: "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3" }, ctxWith((v) => got.push(v)));
+    await submitVerdictTool.run(
+      { verdict: "approve", summary: "clean", head: "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3" },
+      ctxWith((v) => got.push(v)),
+    );
     expect(got).toEqual([{ verdict: "approve", summary: "clean", head: "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3" }]);
     expect(submitVerdictTool.inputSchema.required).toContain("head");
   });
 
   it("rejects anything but the two verdict values without touching the context", async () => {
     const got: unknown[] = [];
-    const out = await submitVerdictTool.run({ verdict: "LGTM", summary: "x" }, ctxWith((v) => got.push(v)));
+    const out = await submitVerdictTool.run(
+      { verdict: "LGTM", summary: "x" },
+      ctxWith((v) => got.push(v)),
+    );
     expect(got).toEqual([]);
     expect(String(out)).toMatch(/^error:/);
   });
 
   it("tolerates a context with no verdict sink", async () => {
-    await expect(submitVerdictTool.run({ verdict: "request_changes", summary: "bug" }, ctxWith(undefined))).resolves.toBe(
-      "verdict recorded: request_changes",
-    );
+    await expect(
+      submitVerdictTool.run({ verdict: "request_changes", summary: "bug" }, ctxWith(undefined)),
+    ).resolves.toBe("verdict recorded: request_changes");
   });
 
   // Feature: features/agent-ship.md item 6 — the verdict enumerates findings
@@ -253,7 +272,10 @@ describe("submit_dispositions tool", () => {
 
   it("forwards a valid set to the context and acknowledges the count", async () => {
     const got: unknown[] = [];
-    const out = await tool().run(valid(), ctxWith((d) => got.push(d)));
+    const out = await tool().run(
+      valid(),
+      ctxWith((d) => got.push(d)),
+    );
     expect(got).toEqual([
       [
         { findingId: "F1", disposition: "fixed", note: "guarded the null path" },
@@ -268,7 +290,12 @@ describe("submit_dispositions tool", () => {
   it("an unknown findingId (with knownFindingIds provided) is a string error naming it — context untouched", async () => {
     const got: unknown[] = [];
     const out = await tool().run(
-      { dispositions: [{ findingId: "F1", disposition: "fixed", note: "n" }, { findingId: "F9", disposition: "declined", note: "n" }] },
+      {
+        dispositions: [
+          { findingId: "F1", disposition: "fixed", note: "n" },
+          { findingId: "F9", disposition: "declined", note: "n" },
+        ],
+      },
       ctxWith((d) => got.push(d), ["F1", "F2"]),
     );
     expect(got).toEqual([]);
@@ -278,7 +305,10 @@ describe("submit_dispositions tool", () => {
 
   it("without knownFindingIds the id-existence check is skipped (the orchestrator supplies it in U7)", async () => {
     const got: unknown[] = [];
-    const out = await tool().run({ dispositions: [{ findingId: "F9", disposition: "fixed", note: "n" }] }, ctxWith((d) => got.push(d)));
+    const out = await tool().run(
+      { dispositions: [{ findingId: "F9", disposition: "fixed", note: "n" }] },
+      ctxWith((d) => got.push(d)),
+    );
     expect(got).toHaveLength(1);
     expect(String(out)).not.toMatch(/^error:/);
   });
@@ -293,7 +323,10 @@ describe("submit_dispositions tool", () => {
 
   it("a non-array input is a string error — context untouched", async () => {
     const got: unknown[] = [];
-    const out = await tool().run({ dispositions: "all fixed" }, ctxWith((d) => got.push(d)));
+    const out = await tool().run(
+      { dispositions: "all fixed" },
+      ctxWith((d) => got.push(d)),
+    );
     expect(got).toEqual([]);
     expect(String(out)).toMatch(/^error:/);
   });
@@ -301,7 +334,12 @@ describe("submit_dispositions tool", () => {
   it("a malformed entry is dropped with the drop surfaced in the ack; the rest are recorded", async () => {
     const got: unknown[][] = [];
     const out = await tool().run(
-      { dispositions: [{ findingId: "F1", disposition: "fixed", note: "done" }, { findingId: "F2", disposition: "wontfix", note: "nope" }] },
+      {
+        dispositions: [
+          { findingId: "F1", disposition: "fixed", note: "done" },
+          { findingId: "F2", disposition: "wontfix", note: "nope" },
+        ],
+      },
       ctxWith((d) => got.push(d as unknown[])),
     );
     expect(got).toEqual([[{ findingId: "F1", disposition: "fixed", note: "done" }]]);
@@ -354,7 +392,10 @@ describe("submit_pr_description tool", () => {
 
   it("forwards a valid description to the context, parsed and normalized, and acknowledges it", async () => {
     const got: PrDescription[] = [];
-    const out = await submitPrDescriptionTool.run({ ...validInput(), title: "  Fix the widget gate  " }, ctxWith((d) => got.push(d)));
+    const out = await submitPrDescriptionTool.run(
+      { ...validInput(), title: "  Fix the widget gate  " },
+      ctxWith((d) => got.push(d)),
+    );
     expect(got).toHaveLength(1);
     expect(got[0].title).toBe("Fix the widget gate"); // trimmed by the schema, not passed through raw
     expect(got[0].tour[0].anchor).toEqual({ path: "src/a.ts", from: 3, to: 9 });
@@ -364,7 +405,10 @@ describe("submit_pr_description tool", () => {
   it("a missing section is a string error naming the zod path — no throw, context untouched", async () => {
     const got: PrDescription[] = [];
     const { risks: _r, ...noRisks } = validInput();
-    const out = await submitPrDescriptionTool.run(noRisks, ctxWith((d) => got.push(d)));
+    const out = await submitPrDescriptionTool.run(
+      noRisks,
+      ctxWith((d) => got.push(d)),
+    );
     expect(got).toEqual([]);
     expect(String(out)).toMatch(/^error:/);
     expect(String(out)).toContain("risks");
@@ -372,7 +416,10 @@ describe("submit_pr_description tool", () => {
 
   it("a blank title is a string error naming `title`", async () => {
     const got: PrDescription[] = [];
-    const out = await submitPrDescriptionTool.run({ ...validInput(), title: "   " }, ctxWith((d) => got.push(d)));
+    const out = await submitPrDescriptionTool.run(
+      { ...validInput(), title: "   " },
+      ctxWith((d) => got.push(d)),
+    );
     expect(got).toEqual([]);
     expect(String(out)).toMatch(/^error:/);
     expect(String(out)).toContain("title");
@@ -381,7 +428,10 @@ describe("submit_pr_description tool", () => {
   it("a bad anchor is a string error naming the full path into the tour", async () => {
     const input = validInput();
     input.tour = [{ title: "t", description: "d", anchor: { path: "/etc/passwd", from: 1, to: 2 } }];
-    const out = await submitPrDescriptionTool.run(input, ctxWith(() => {}));
+    const out = await submitPrDescriptionTool.run(
+      input,
+      ctxWith(() => {}),
+    );
     expect(String(out)).toMatch(/^error:/);
     expect(String(out)).toContain("tour.0.anchor.path");
   });
@@ -403,7 +453,9 @@ describe("submit_pr_description tool", () => {
   });
 
   it("tolerates a context with no description sink", async () => {
-    await expect(submitPrDescriptionTool.run(validInput(), ctxWith(undefined))).resolves.toMatch(/PR description recorded/);
+    await expect(submitPrDescriptionTool.run(validInput(), ctxWith(undefined))).resolves.toMatch(
+      /PR description recorded/,
+    );
   });
 
   it("declares every schema section in the tool input schema (the model's contract)", () => {

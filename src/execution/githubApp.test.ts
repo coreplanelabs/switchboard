@@ -32,10 +32,9 @@ function mockMint(token: string, expiresInMs: number) {
   return vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     void url;
     void init;
-    return new Response(
-      JSON.stringify({ token, expires_at: new Date(Date.now() + expiresInMs).toISOString() }),
-      { status: 201 },
-    );
+    return new Response(JSON.stringify({ token, expires_at: new Date(Date.now() + expiresInMs).toISOString() }), {
+      status: 201,
+    });
   });
 }
 

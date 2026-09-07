@@ -123,7 +123,11 @@ describe("createRunHistoryWriter", () => {
   });
 
   it("three transient failures: the write is lost, counted once, warned once with the run id and attempt count", async () => {
-    const h = harness([new TransientStoreError("HTTP 503"), new TransientStoreError("HTTP 502"), new TransientStoreError("fetch failed")]);
+    const h = harness([
+      new TransientStoreError("HTTP 503"),
+      new TransientStoreError("HTTP 502"),
+      new TransientStoreError("fetch failed"),
+    ]);
     h.writer.write(record("run-lost"));
     await h.writer.settled();
     expect(h.puts).toHaveLength(3);
@@ -161,7 +165,9 @@ describe("createRunHistoryWriter", () => {
     expect(h.writer.failures()).toBe(2);
     const ordering = h.warnings.filter((w) => w.includes("state Worker has no /runs/put"));
     expect(ordering).toHaveLength(1);
-    expect(ordering[0]).toBe("[run-history] state Worker has no /runs/put — deploy the state Worker with run-history routes before this bot version");
+    expect(ordering[0]).toBe(
+      "[run-history] state Worker has no /runs/put — deploy the state Worker with run-history routes before this bot version",
+    );
     expect(h.persisted).toEqual([]);
   });
 
@@ -196,7 +202,12 @@ describe("createRunHistoryWriter", () => {
     const gate = new Promise<void>((r) => (release = r));
     const { store, puts } = scriptedStore([new TransientStoreError("HTTP 503"), OK, OK]);
     const persisted: string[] = [];
-    const writer = createRunHistoryWriter({ store, warn: () => {}, onPersisted: (id) => persisted.push(id), sleep: () => gate });
+    const writer = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => persisted.push(id),
+      sleep: () => gate,
+    });
     writer.write({ ...record("run-x"), status: "interrupted" }, { provisional: true });
     await new Promise((r) => setTimeout(r, 0)); // the tombstone's first put failed; it is now in backoff
     writer.write(record("run-x")); // the run finished: its FINAL record is enqueued

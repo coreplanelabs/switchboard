@@ -63,8 +63,7 @@ export function planEviction(active: MemoryRecord[], cap: number): MemoryRecord[
  *  insert nothing. `insert`: append `record` (already minted) and, when
  *  `supersede` is set, flip that record to `superseded`. */
 export type WritePlan =
-  | { action: "dedup"; target: MemoryRecord }
-  | { action: "insert"; record: MemoryRecord; supersede?: MemoryRecord };
+  { action: "dedup"; target: MemoryRecord } | { action: "insert"; record: MemoryRecord; supersede?: MemoryRecord };
 
 /**
  * Decide how one candidate lands among a scope's ACTIVE records (features/
@@ -88,9 +87,7 @@ export function planWrite(
   mint: (cand: MemoryCandidate) => MemoryRecord,
 ): WritePlan {
   const norm = normalizeText(cand.text);
-  const target = cand.supersedes
-    ? active.find((r) => r.status === "active" && r.id === cand.supersedes)
-    : undefined;
+  const target = cand.supersedes ? active.find((r) => r.status === "active" && r.id === cand.supersedes) : undefined;
   const dedupPool = cand.supersedes ? (target ? [target] : []) : active.filter((r) => r.status === "active");
   const existing = dedupPool.find((r) => normalizeText(r.text) === norm);
   if (existing) return { action: "dedup", target: existing };

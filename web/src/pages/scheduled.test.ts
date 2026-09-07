@@ -10,7 +10,16 @@ const NOW = Date.UTC(2026, 7, 30, 12, 0, 0);
 const RUN_ROW: ScheduledRow = {
   name: "self-improvement",
   worker: "bot",
-  action: { type: "run", command: "friction propose", identity: "cron", actor: { kind: "schedule", id: "schedule:self-improvement", grants: { actions: new Set<string>(), channels: "all", repos: new Set<string>() } } },
+  action: {
+    type: "run",
+    command: "friction propose",
+    identity: "cron",
+    actor: {
+      kind: "schedule",
+      id: "schedule:self-improvement",
+      grants: { actions: new Set<string>(), channels: "all", repos: new Set<string>() },
+    },
+  },
   cron: "0 14 * * 1",
   description: "Weekly friction proposals",
   nextFireAt: Date.UTC(2026, 7, 31, 14, 0, 0),

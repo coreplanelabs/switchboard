@@ -16,13 +16,23 @@ const KEY_B = "b".repeat(64);
 const OLD = "1111111111111111111111111111111111111111";
 const NEW = "2222222222222222222222222222222222222222";
 
-const disk = (over: Partial<RefreshDisk> = {}): RefreshDisk => ({ head: OLD, installedKey: KEY_A, builtSha: OLD, ...over });
+const disk = (over: Partial<RefreshDisk> = {}): RefreshDisk => ({
+  head: OLD,
+  installedKey: KEY_A,
+  builtSha: OLD,
+  ...over,
+});
 
 describe("planRefresh (#163: lockfile-hash install gate + on-disk checkpoints)", () => {
   it("default branch did not move → unchanged, whatever the disk says", () => {
     expect(planRefresh({ sha: OLD, factsSha: OLD, lockfileKey: KEY_A, disk: disk() })).toEqual({ action: "unchanged" });
     expect(
-      planRefresh({ sha: OLD, factsSha: OLD, lockfileKey: KEY_B, disk: disk({ head: null, installedKey: null, builtSha: null }) }),
+      planRefresh({
+        sha: OLD,
+        factsSha: OLD,
+        lockfileKey: KEY_B,
+        disk: disk({ head: null, installedKey: null, builtSha: null }),
+      }),
     ).toEqual({ action: "unchanged" });
   });
 
@@ -51,31 +61,41 @@ describe("planRefresh (#163: lockfile-hash install gate + on-disk checkpoints)",
   });
 
   it("built marker matches but the checkout HEAD does not → never reuse; rebuild on the kept deps", () => {
-    expect(planRefresh({ sha: NEW, factsSha: OLD, lockfileKey: KEY_A, disk: disk({ head: OLD, builtSha: NEW }) })).toMatchObject({
+    expect(
+      planRefresh({ sha: NEW, factsSha: OLD, lockfileKey: KEY_A, disk: disk({ head: OLD, builtSha: NEW }) }),
+    ).toMatchObject({
       action: "rebuild",
       install: false,
       clean: "keep-deps",
     });
-    expect(planRefresh({ sha: NEW, factsSha: OLD, lockfileKey: KEY_A, disk: disk({ head: null, builtSha: NEW }) })).toMatchObject({
+    expect(
+      planRefresh({ sha: NEW, factsSha: OLD, lockfileKey: KEY_A, disk: disk({ head: null, builtSha: NEW }) }),
+    ).toMatchObject({
       action: "rebuild",
       install: false,
     });
   });
 
   it("checkout at the new sha but the build never finished → keep deps, rebuild only", () => {
-    expect(planRefresh({ sha: NEW, factsSha: OLD, lockfileKey: KEY_A, disk: disk({ head: NEW, builtSha: OLD }) })).toMatchObject({
+    expect(
+      planRefresh({ sha: NEW, factsSha: OLD, lockfileKey: KEY_A, disk: disk({ head: NEW, builtSha: OLD }) }),
+    ).toMatchObject({
       action: "rebuild",
       install: false,
       clean: "keep-deps",
     });
-    expect(planRefresh({ sha: NEW, factsSha: OLD, lockfileKey: KEY_A, disk: disk({ head: NEW, builtSha: null }) })).toMatchObject({
+    expect(
+      planRefresh({ sha: NEW, factsSha: OLD, lockfileKey: KEY_A, disk: disk({ head: NEW, builtSha: null }) }),
+    ).toMatchObject({
       action: "rebuild",
       install: false,
     });
   });
 
   it("checkout and build markers match the sha but the deps key does not → full install, never reuse", () => {
-    expect(planRefresh({ sha: NEW, factsSha: OLD, lockfileKey: KEY_B, disk: disk({ head: NEW, builtSha: NEW }) })).toMatchObject({
+    expect(
+      planRefresh({ sha: NEW, factsSha: OLD, lockfileKey: KEY_B, disk: disk({ head: NEW, builtSha: NEW }) }),
+    ).toMatchObject({
       action: "rebuild",
       install: true,
       clean: "all",
@@ -92,7 +112,9 @@ describe("checkoutUpdateCommand", () => {
 
   it("keep-deps: sweeps the build-written caches inside node_modules at any depth (they open+truncate hardlinked inodes)", () => {
     const cmd = checkoutUpdateCommand(NEW, "keep-deps");
-    expect(cmd).toContain("find . -path '*/node_modules/*' -type d \\( -name .cache -o -name .vite \\) -prune -exec rm -rf {} +");
+    expect(cmd).toContain(
+      "find . -path '*/node_modules/*' -type d \\( -name .cache -o -name .vite \\) -prune -exec rm -rf {} +",
+    );
     // The sweep runs after the clean, so it never races git over the same paths.
     expect(cmd.indexOf("git clean")).toBeLessThan(cmd.indexOf("find ."));
   });
@@ -122,13 +144,21 @@ describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an inte
   });
 
   it("SIGTERM / 'Session terminated' wording without the exit code still counts", () => {
-    expect(classifyRefreshFailure({ step: "build", message: "exit 1: Session terminated, killing shell" }).interrupted).toBe(true);
-    expect(classifyRefreshFailure({ step: "build", message: "exit 1: npm ERR! signal SIGTERM" }).interrupted).toBe(true);
+    expect(
+      classifyRefreshFailure({ step: "build", message: "exit 1: Session terminated, killing shell" }).interrupted,
+    ).toBe(true);
+    expect(classifyRefreshFailure({ step: "build", message: "exit 1: npm ERR! signal SIGTERM" }).interrupted).toBe(
+      true,
+    );
   });
 
   it("an ordinary build failure stays <step>-failed with the message verbatim", () => {
     const f = classifyRefreshFailure({ step: "build", message: "exit 1: src/x.ts(3,1): error TS2304" });
-    expect(f).toEqual({ interrupted: false, diskFull: false, reason: "build-failed: exit 1: src/x.ts(3,1): error TS2304" });
+    expect(f).toEqual({
+      interrupted: false,
+      diskFull: false,
+      reason: "build-failed: exit 1: src/x.ts(3,1): error TS2304",
+    });
   });
 
   it("our own timeout kill is NOT an interruption — the build really did not finish in budget", () => {
@@ -175,14 +205,17 @@ describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an inte
   });
 
   it("'killed' inside ordinary compiler output does not count without the signal signature", () => {
-    expect(classifyRefreshFailure({ step: "build", message: "exit 1: error: process killed by OOM killer" }).interrupted).toBe(false);
+    expect(
+      classifyRefreshFailure({ step: "build", message: "exit 1: error: process killed by OOM killer" }).interrupted,
+    ).toBe(false);
   });
 });
 
 describe("classifyRefreshFailure (#457: a full container disk is `disk-full`, not GitHub's fault and not the repo's)", () => {
   // The refresh reason the nominal resident actually carried on 2026-09-04
   // while every attach failed at git-setup — recorded as github-unreachable.
-  const credWrite = "Failed to write file '/workspace/.resident/git-credentials': ENOSPC: no space left on device, write '/workspace/.resident/git-credentials'";
+  const credWrite =
+    "Failed to write file '/workspace/.resident/git-credentials': ENOSPC: no space left on device, write '/workspace/.resident/git-credentials'";
 
   it("ENOSPC wording in the message decides on its own — no probe needed", () => {
     const f = classifyRefreshFailure({ step: "fetch", message: credWrite });
@@ -197,7 +230,9 @@ describe("classifyRefreshFailure (#457: a full container disk is `disk-full`, no
     const f = classifyRefreshFailure({ step: "git-setup", message: msg, freeKiB: 0 });
     expect(f.diskFull).toBe(true);
     expect(f.reason).toBe(`disk-full: git-setup ${msg} (/workspace: 0 KiB free)`);
-    expect(classifyRefreshFailure({ step: "git-setup", message: msg, freeKiB: DISK_FULL_FREE_KIB - 1 }).diskFull).toBe(true);
+    expect(classifyRefreshFailure({ step: "git-setup", message: msg, freeKiB: DISK_FULL_FREE_KIB - 1 }).diskFull).toBe(
+      true,
+    );
   });
 
   it("the same message with room on the disk, or with no probe answer, stays the step's own failure", () => {
@@ -212,14 +247,21 @@ describe("classifyRefreshFailure (#457: a full container disk is `disk-full`, no
   });
 
   it("a step killed from outside is an interruption even on a low disk — the kill, not the disk, ended it", () => {
-    const f = classifyRefreshFailure({ step: "build", message: "exit 143: Session terminated, killing shell...", freeKiB: 0 });
+    const f = classifyRefreshFailure({
+      step: "build",
+      message: "exit 143: Session terminated, killing shell...",
+      freeKiB: 0,
+    });
     expect(f.interrupted).toBe(true);
     expect(f.diskFull).toBe(false);
     expect(f.reason).toMatch(/^refresh-interrupted: build /);
   });
 
   it("ENOSPC in the message wins over a kill signature in the same message (the disk is the actionable fact)", () => {
-    const f = classifyRefreshFailure({ step: "install", message: "exit 143: ENOSPC: no space left on device; Session terminated" });
+    const f = classifyRefreshFailure({
+      step: "install",
+      message: "exit 143: ENOSPC: no space left on device; Session terminated",
+    });
     expect(f.diskFull).toBe(true);
     expect(f.interrupted).toBe(false);
   });
@@ -234,7 +276,9 @@ describe("nextRefreshDelayS (#216: re-arm short after an interruption or an imag
 
   it("disk-full restart → the same short re-arm as an image-stale restart (the container is coming back on an empty disk), uncapped", () => {
     expect(nextRefreshDelayS({ outcome: "disk-full-restart", ...cadence })).toBe(INTERRUPTED_REARM_S);
-    expect(nextRefreshDelayS({ outcome: "disk-full-restart", consecutiveInterrupted: 50, ...cadence })).toBe(INTERRUPTED_REARM_S);
+    expect(nextRefreshDelayS({ outcome: "disk-full-restart", consecutiveInterrupted: 50, ...cadence })).toBe(
+      INTERRUPTED_REARM_S,
+    );
   });
 
   it("interrupted → the short re-arm, well under the regular interval", () => {
@@ -253,14 +297,24 @@ describe("nextRefreshDelayS (#216: re-arm short after an interruption or an imag
 
   it("a run of consecutive interruptions is capped: past the cap the regular interval returns (no 45 s hot loop on a chronic false positive)", () => {
     for (let n = 1; n <= INTERRUPTED_REARM_MAX_CONSECUTIVE; n++) {
-      expect(nextRefreshDelayS({ outcome: "interrupted", consecutiveInterrupted: n, ...cadence })).toBe(INTERRUPTED_REARM_S);
+      expect(nextRefreshDelayS({ outcome: "interrupted", consecutiveInterrupted: n, ...cadence })).toBe(
+        INTERRUPTED_REARM_S,
+      );
     }
-    expect(nextRefreshDelayS({ outcome: "interrupted", consecutiveInterrupted: INTERRUPTED_REARM_MAX_CONSECUTIVE + 1, ...cadence })).toBe(600);
+    expect(
+      nextRefreshDelayS({
+        outcome: "interrupted",
+        consecutiveInterrupted: INTERRUPTED_REARM_MAX_CONSECUTIVE + 1,
+        ...cadence,
+      }),
+    ).toBe(600);
     expect(nextRefreshDelayS({ outcome: "interrupted", consecutiveInterrupted: 50, ...cadence })).toBe(600);
   });
 
   it("the cap applies to interruptions only — an image-stale restart is never repeated by the same cause", () => {
-    expect(nextRefreshDelayS({ outcome: "image-stale-restart", consecutiveInterrupted: 50, ...cadence })).toBe(INTERRUPTED_REARM_S);
+    expect(nextRefreshDelayS({ outcome: "image-stale-restart", consecutiveInterrupted: 50, ...cadence })).toBe(
+      INTERRUPTED_REARM_S,
+    );
   });
 
   it("omitting the count means 'first interruption' (short)", () => {

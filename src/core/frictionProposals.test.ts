@@ -46,7 +46,13 @@ function lockfileRun(runId: string, finishedAt: number, extra: RunEvent[] = []):
     result(true, "done", 60_000),
     ...extra,
   ];
-  return { runId, label: `coding · o/r · "fix ${runId}"`, agent: "coding", finishedAt, diagnosis: analyzeRunFriction(events) };
+  return {
+    runId,
+    label: `coding · o/r · "fix ${runId}"`,
+    agent: "coding",
+    finishedAt,
+    diagnosis: analyzeRunFriction(events),
+  };
 }
 
 /** A clean run: nothing to cluster. */
@@ -89,21 +95,33 @@ describe("normalizeCommand", () => {
 
 describe("commandSignature", () => {
   it("reduces a chained shell command to its meaningful program+subcommand tokens, dropping cd/echo/pipes/redirections", () => {
-    expect(commandSignature("$ cd /tmp/ws/repo && git checkout -q main && npm test 2>&1 | grep -E \"Test Files\"")).toBe("git checkout, npm test");
-    expect(commandSignature("$ cd ~/switchboard && node --version && npx vitest run src/a.test.ts 2>&1 | tail -8")).toBe("node, npx vitest");
-    expect(commandSignature("$ echo hi; (npm test 2>&1 | tail -15); echo \"=== done ===\"")).toBe("npm test");
+    expect(commandSignature('$ cd /tmp/ws/repo && git checkout -q main && npm test 2>&1 | grep -E "Test Files"')).toBe(
+      "git checkout, npm test",
+    );
+    expect(
+      commandSignature("$ cd ~/switchboard && node --version && npx vitest run src/a.test.ts 2>&1 | tail -8"),
+    ).toBe("node, npx vitest");
+    expect(commandSignature('$ echo hi; (npm test 2>&1 | tail -15); echo "=== done ==="')).toBe("npm test");
     expect(commandSignature("$ FOO=1 sudo apt-get install -y jq >/dev/null")).toBe("apt-get install");
   });
 
   it("is the SAME for the two ways real runs chained the same install (the cross-run case)", () => {
-    const a = commandSignature("$ cd /tmp/ws/repo && npm ci --silent 2>&1 | tail -2 && npm run typecheck 2>&1 | tail -3 && npm test 2>&1 | tail -8");
-    const b = commandSignature("$ cd ~/switchboard && npm ci --silent >/dev/null 2>&1; (npm test 2>&1 | tail -15); npm run typecheck 2>&1 | tail -5");
+    const a = commandSignature(
+      "$ cd /tmp/ws/repo && npm ci --silent 2>&1 | tail -2 && npm run typecheck 2>&1 | tail -3 && npm test 2>&1 | tail -8",
+    );
+    const b = commandSignature(
+      "$ cd ~/switchboard && npm ci --silent >/dev/null 2>&1; (npm test 2>&1 | tail -15); npm run typecheck 2>&1 | tail -5",
+    );
     expect(a).toBe("npm ci, npm run typecheck, npm test");
     expect(b).toBe("npm ci, npm test, npm run typecheck");
     // Order differs, so the tool-level signature differs — but the INSTALL
     // signature (what setup_install keys on) is identical:
-    expect(installSignature(a === b ? "" : "$ cd /tmp/ws/repo && npm ci --silent 2>&1 | tail -2 && npm test")).toBe("npm ci");
-    expect(installSignature("$ cd ~/switchboard && npm ci --silent >/dev/null 2>&1; (npm test 2>&1 | tail -15)")).toBe("npm ci");
+    expect(installSignature(a === b ? "" : "$ cd /tmp/ws/repo && npm ci --silent 2>&1 | tail -2 && npm test")).toBe(
+      "npm ci",
+    );
+    expect(installSignature("$ cd ~/switchboard && npm ci --silent >/dev/null 2>&1; (npm test 2>&1 | tail -15)")).toBe(
+      "npm ci",
+    );
   });
 
   it("treats a lone `&` (backgrounding) as a separator too, without breaking `&&`", () => {
@@ -113,7 +131,9 @@ describe("commandSignature", () => {
   it("caps the number of segments and normalizes volatile tokens", () => {
     expect(commandSignature("$ a && b && c && d && e && f")).toBe("a, b, c, d");
     expect(commandSignature("$ git checkout 9bcdb44e1f2a && sleep 12 && make build")).toBe("git checkout, make build");
-    expect(commandSignature("$ git checkout 9bcdb44e1f2a && make build")).toBe(commandSignature("$ git checkout 33dc4d4cafe && make build"));
+    expect(commandSignature("$ git checkout 9bcdb44e1f2a && make build")).toBe(
+      commandSignature("$ git checkout 33dc4d4cafe && make build"),
+    );
   });
 });
 
@@ -137,22 +157,26 @@ describe("patternSignature", () => {
   });
 
   it("keys tool findings by category + normalized command, dropping the analyzer's label prefixes", () => {
-    expect(patternSignature(f({ category: "setup_install", summary: "install failed: $ pnpm install --frozen-lockfile → ERR" }))).toBe(
-      "setup_install:pnpm install --frozen-lockfile",
-    );
-    expect(patternSignature(f({ category: "setup_install", summary: "slow install: $ pnpm install --frozen-lockfile" }))).toBe(
-      "setup_install:pnpm install --frozen-lockfile",
-    );
+    expect(
+      patternSignature(
+        f({ category: "setup_install", summary: "install failed: $ pnpm install --frozen-lockfile → ERR" }),
+      ),
+    ).toBe("setup_install:pnpm install --frozen-lockfile");
+    expect(
+      patternSignature(f({ category: "setup_install", summary: "slow install: $ pnpm install --frozen-lockfile" })),
+    ).toBe("setup_install:pnpm install --frozen-lockfile");
     expect(patternSignature(f({ category: "slow_tool", summary: "took 46s: $ npm test" }))).toBe("slow_tool:npm test");
     // A slow think is a property of the agent/model, not of the command it
     // eventually issued — one key, so the pattern clusters across runs.
-    expect(patternSignature(f({ category: "slow_model_turn", summary: "model turn took 3m 42s before: $ grep -n foo src" }))).toBe(
-      "slow_model_turn:model_turn",
+    expect(
+      patternSignature(f({ category: "slow_model_turn", summary: "model turn took 3m 42s before: $ grep -n foo src" })),
+    ).toBe("slow_model_turn:model_turn");
+    expect(patternSignature(f({ category: "retry", summary: "retried after failure: $ npm test" }))).toBe(
+      "retry:npm test",
     );
-    expect(patternSignature(f({ category: "retry", summary: "retried after failure: $ npm test" }))).toBe("retry:npm test");
-    expect(patternSignature(f({ category: "failed_tool", summary: "$ npm test → sh: vitest: command not found" }))).toBe(
-      "failed_tool:npm test",
-    );
+    expect(
+      patternSignature(f({ category: "failed_tool", summary: "$ npm test → sh: vitest: command not found" })),
+    ).toBe("failed_tool:npm test");
   });
 
   it("keys an unknown-tool failure (tool misuse) by the tool name", () => {
@@ -162,26 +186,48 @@ describe("patternSignature", () => {
   });
 
   it("keys note findings by their kind, not their free text", () => {
-    expect(patternSignature(f({ category: "budget_hit", summary: "budget hit (time): ~0s left, wrapping up" }))).toBe("budget_hit:time");
-    expect(patternSignature(f({ category: "budget_hit", summary: "budget hit (turns): 40 turns used" }))).toBe("budget_hit:turns");
-    expect(patternSignature(f({ category: "wrap_up", summary: "~3 min left — signaling wrap-up" }))).toBe("wrap_up:wrap_up");
+    expect(patternSignature(f({ category: "budget_hit", summary: "budget hit (time): ~0s left, wrapping up" }))).toBe(
+      "budget_hit:time",
+    );
+    expect(patternSignature(f({ category: "budget_hit", summary: "budget hit (turns): 40 turns used" }))).toBe(
+      "budget_hit:turns",
+    );
+    expect(patternSignature(f({ category: "wrap_up", summary: "~3 min left — signaling wrap-up" }))).toBe(
+      "wrap_up:wrap_up",
+    );
     expect(patternSignature(f({ category: "infra_failure", summary: "sandbox dead: exec transport closed" }))).toBe(
       "infra_failure:sandbox_dead",
     );
     expect(
-      patternSignature(f({ category: "infra_failure", summary: "no result for tool call (run ended mid-tool): $ npm test" })),
+      patternSignature(
+        f({ category: "infra_failure", summary: "no result for tool call (run ended mid-tool): $ npm test" }),
+      ),
     ).toBe("infra_failure:mid-tool npm test");
     expect(
-      patternSignature(f({ category: "infra_failure", summary: "exec infrastructure failed during $ npm ci → ECONNRESET" })),
+      patternSignature(
+        f({ category: "infra_failure", summary: "exec infrastructure failed during $ npm ci → ECONNRESET" }),
+      ),
     ).toBe("infra_failure:npm ci");
   });
 
   it("clusters the SAME install chained differently across real runs (the case the first real capture exposed)", () => {
-    const a = f({ category: "setup_install", summary: "slow install: $ cd /tmp/ws/repo && npm ci --silent 2>&1 | tail -2 && npm run typecheck 2>&1 | tail -3 && npm test 2>&1 | tail -8" });
-    const b = f({ category: "setup_install", summary: "slow install: $ cd ~/switchboard && npm ci --silent >/dev/null 2>&1; (npm test 2>&1 | tail -15); echo \"=== bot typecheck ===\"" });
+    const a = f({
+      category: "setup_install",
+      summary:
+        "slow install: $ cd /tmp/ws/repo && npm ci --silent 2>&1 | tail -2 && npm run typecheck 2>&1 | tail -3 && npm test 2>&1 | tail -8",
+    });
+    const b = f({
+      category: "setup_install",
+      summary:
+        'slow install: $ cd ~/switchboard && npm ci --silent >/dev/null 2>&1; (npm test 2>&1 | tail -15); echo "=== bot typecheck ==="',
+    });
     expect(patternSignature(a)).toBe("setup_install:npm ci");
     expect(patternSignature(b)).toBe("setup_install:npm ci");
-    const c = f({ category: "slow_tool", summary: "took 37s: $ cd /tmp/ws/repo && git checkout -q main && npm test 2>&1 | grep -E \"Test Files\" ; git checkout -q feat/x && npm test 2>&1 | grep -E \"Test Files\"" });
+    const c = f({
+      category: "slow_tool",
+      summary:
+        'took 37s: $ cd /tmp/ws/repo && git checkout -q main && npm test 2>&1 | grep -E "Test Files" ; git checkout -q feat/x && npm test 2>&1 | grep -E "Test Files"',
+    });
     expect(patternSignature(c)).toBe("slow_tool:git checkout, npm test");
   });
 });
@@ -230,9 +276,19 @@ describe("clusterFriction", () => {
     // 3 runs share a cheap failure; 2 runs share the lockfile run's three patterns.
     const cheap = (id: string, ms: number): FrictionRunRecord => {
       t = 0;
-      return { runId: id, finishedAt: T0 + ms, diagnosis: analyzeRunFriction([call("$ false"), result(false, "exit 1", 50)]) };
+      return {
+        runId: id,
+        finishedAt: T0 + ms,
+        diagnosis: analyzeRunFriction([call("$ false"), result(false, "exit 1", 50)]),
+      };
     };
-    const patterns = clusterFriction([lockfileRun("a", T0), lockfileRun("b", T0 + 1), cheap("c", 2), cheap("d", 3), cheap("e", 4)]);
+    const patterns = clusterFriction([
+      lockfileRun("a", T0),
+      lockfileRun("b", T0 + 1),
+      cheap("c", 2),
+      cheap("d", 3),
+      cheap("e", 4),
+    ]);
     expect(patterns.map((p) => p.key)).toEqual([
       "failed_tool:false", // 3 runs beats 2, however cheap
       "setup_install:pnpm install --frozen-lockfile", // high (a FAILED install) beats a slower medium
@@ -244,7 +300,9 @@ describe("clusterFriction", () => {
   it("honors minRuns", () => {
     const records = [lockfileRun("r1", T0), lockfileRun("r3", T0 + 2)];
     expect(clusterFriction(records, { minRuns: 3 })).toEqual([]);
-    expect(clusterFriction(records, { minRuns: 1 }).some((p) => p.key.startsWith("setup_install:git clone"))).toBe(true);
+    expect(clusterFriction(records, { minRuns: 1 }).some((p) => p.key.startsWith("setup_install:git clone"))).toBe(
+      true,
+    );
   });
 
   it("keeps the most recent examples first, capped, each anchored to its run", () => {
@@ -290,8 +348,12 @@ describe("clusterFriction", () => {
       return rec;
     };
     const minute = 60_000;
-    expect(clusterFriction([withRun("a", 40 * minute), withRun("b", 42 * minute), withRun("c", 41 * minute)])).toEqual([]);
-    expect(clusterFriction([withRun("a", 2 * minute), withRun("b", 2 * minute), withRun("c", 60 * minute)])).toEqual([]);
+    expect(clusterFriction([withRun("a", 40 * minute), withRun("b", 42 * minute), withRun("c", 41 * minute)])).toEqual(
+      [],
+    );
+    expect(clusterFriction([withRun("a", 2 * minute), withRun("b", 2 * minute), withRun("c", 60 * minute)])).toEqual(
+      [],
+    );
   });
 
   it("is deterministic and does not mutate its input", () => {
@@ -335,7 +397,17 @@ describe("proposeImprovements", () => {
   });
 
   it("has a fix template for every pattern kind", () => {
-    const kinds = ["slow_tool", "slow_model_turn", "failed_tool", "retry", "setup_install", "wrap_up", "budget_hit", "infra_failure", "long_run"] as const;
+    const kinds = [
+      "slow_tool",
+      "slow_model_turn",
+      "failed_tool",
+      "retry",
+      "setup_install",
+      "wrap_up",
+      "budget_hit",
+      "infra_failure",
+      "long_run",
+    ] as const;
     for (const kind of kinds) {
       const [p] = proposeImprovements(
         [
@@ -369,7 +441,12 @@ describe("dedupeProposals", () => {
 
   it("matches an open issue by its marker, not its title, and keeps the rest fresh", () => {
     const open = [
-      { number: 7, url: "https://github.com/o/r/issues/7", title: "totally different title", body: `hello\n${proposalMarker(proposals[0].key)}\n` },
+      {
+        number: 7,
+        url: "https://github.com/o/r/issues/7",
+        title: "totally different title",
+        body: `hello\n${proposalMarker(proposals[0].key)}\n`,
+      },
       { number: 8, url: "https://github.com/o/r/issues/8", title: proposals[1].title, body: "no marker here" },
     ];
     const { fresh, duplicates } = dedupeProposals(proposals, open);

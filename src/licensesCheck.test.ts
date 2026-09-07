@@ -16,14 +16,36 @@ describe("licenses-check reportFromNpmLs", () => {
     path: `${root}/web`,
     license: "Apache-2.0",
     dependencies: {
-      vue: { name: "vue", version: "3.5.42", path: `${root}/node_modules/vue`, license: "MIT", dependencies: {
-        "@vue/shared": { name: "@vue/shared", version: "3.5.42", path: `${root}/node_modules/@vue/shared`, license: "MIT" },
-      } },
+      vue: {
+        name: "vue",
+        version: "3.5.42",
+        path: `${root}/node_modules/vue`,
+        license: "MIT",
+        dependencies: {
+          "@vue/shared": {
+            name: "@vue/shared",
+            version: "3.5.42",
+            path: `${root}/node_modules/@vue/shared`,
+            license: "MIT",
+          },
+        },
+      },
       // A nested copy npm could not hoist: its own path, so it counts separately.
-      diff2html: { name: "diff2html", version: "3.4.56", path: `${root}/web/node_modules/diff2html`, license: "MIT", dependencies: {
-        // The same @vue/shared reached again through another edge: deduplicated by path.
-        "@vue/shared": { name: "@vue/shared", version: "3.5.42", path: `${root}/node_modules/@vue/shared`, license: "MIT" },
-      } },
+      diff2html: {
+        name: "diff2html",
+        version: "3.4.56",
+        path: `${root}/web/node_modules/diff2html`,
+        license: "MIT",
+        dependencies: {
+          // The same @vue/shared reached again through another edge: deduplicated by path.
+          "@vue/shared": {
+            name: "@vue/shared",
+            version: "3.5.42",
+            path: `${root}/node_modules/@vue/shared`,
+            license: "MIT",
+          },
+        },
+      },
       old: { name: "old", version: "1.0.0", path: `${root}/node_modules/old`, license: { type: "BSD-3-Clause" } },
       bare: { name: "bare", version: "2.0.0", path: `${root}/node_modules/bare` },
       stray: { name: "stray", version: "9.9.9", path: `${root}/node_modules/stray`, license: "MIT", extraneous: true },
@@ -33,7 +55,13 @@ describe("licenses-check reportFromNpmLs", () => {
 
   it("counts each installed package once by path, wherever npm hoisted it, and never the project itself", () => {
     const report = reportFromNpmLs(tree);
-    expect(Object.keys(report).sort()).toEqual(["@vue/shared@3.5.42", "bare@2.0.0", "diff2html@3.4.56", "old@1.0.0", "vue@3.5.42"]);
+    expect(Object.keys(report).sort()).toEqual([
+      "@vue/shared@3.5.42",
+      "bare@2.0.0",
+      "diff2html@3.4.56",
+      "old@1.0.0",
+      "vue@3.5.42",
+    ]);
     expect(report["diff2html@3.4.56"].path).toBe(`${root}/web/node_modules/diff2html`);
   });
 
@@ -96,7 +124,18 @@ describe("licenses-check evaluate", () => {
   });
 
   it("the allowed set is the permissive family THIRD_PARTY_NOTICES.md documents, MPL-2.0 included", () => {
-    for (const l of ["MIT", "ISC", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "BlueOak-1.0.0", "CC0-1.0", "Unlicense", "MPL-2.0"]) {
+    for (const l of [
+      "MIT",
+      "ISC",
+      "Apache-2.0",
+      "BSD-2-Clause",
+      "BSD-3-Clause",
+      "0BSD",
+      "BlueOak-1.0.0",
+      "CC0-1.0",
+      "Unlicense",
+      "MPL-2.0",
+    ]) {
       expect(ALLOWED_LICENSES).toContain(l);
     }
     expect(ALLOWED_LICENSES).not.toContain("GPL-3.0");

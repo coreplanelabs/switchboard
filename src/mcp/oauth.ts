@@ -104,7 +104,16 @@ export function isOAuthCredential(v: unknown): v is OAuthCredential {
 export function isOAuthPending(v: unknown): v is OAuthPending {
   if (!v || typeof v !== "object") return false;
   const p = v as Record<string, unknown>;
-  return str(p.state) && str(p.codeVerifier) && str(p.clientId) && (p.clientSecret === undefined || str(p.clientSecret)) && str(p.tokenEndpoint) && str(p.redirectUri) && str(p.resource) && (p.scope === undefined || typeof p.scope === "string");
+  return (
+    str(p.state) &&
+    str(p.codeVerifier) &&
+    str(p.clientId) &&
+    (p.clientSecret === undefined || str(p.clientSecret)) &&
+    str(p.tokenEndpoint) &&
+    str(p.redirectUri) &&
+    str(p.resource) &&
+    (p.scope === undefined || typeof p.scope === "string")
+  );
 }
 
 const str = (v: unknown, max = 8_192): v is string => typeof v === "string" && v.length > 0 && v.length <= max;
@@ -133,8 +142,21 @@ export async function detectAuth(fetchImpl: FetchLike, serverUrl: string): Promi
   try {
     res = await fetchImpl(serverUrl, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": MCP_PROTOCOL_VERSION },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "switchboard", version: "0" } } }),
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: MCP_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "switchboard", version: "0" },
+        },
+      }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (err) {
@@ -142,7 +164,10 @@ export async function detectAuth(fetchImpl: FetchLike, serverUrl: string): Promi
   }
   await res.body?.cancel().catch(() => undefined);
   if (res.ok || res.status === 202) return { auth: "none" };
-  if (res.status !== 401 && res.status !== 403) throw new OAuthError(`the server answered HTTP ${res.status} to an unauthenticated initialize; pass --auth explicitly`);
+  if (res.status !== 401 && res.status !== 403)
+    throw new OAuthError(
+      `the server answered HTTP ${res.status} to an unauthenticated initialize; pass --auth explicitly`,
+    );
   const hinted = resourceMetadataHint(res.headers.get("www-authenticate"));
   try {
     return { auth: "oauth", discovery: await discover(fetchImpl, serverUrl, hinted) };
@@ -176,7 +201,11 @@ function wellKnownCandidates(base: URL, suffix: string): string[] {
   return out;
 }
 
-export async function discover(fetchImpl: FetchLike, serverUrl: string, hintedMetadataUrl?: string): Promise<OAuthDiscovery> {
+export async function discover(
+  fetchImpl: FetchLike,
+  serverUrl: string,
+  hintedMetadataUrl?: string,
+): Promise<OAuthDiscovery> {
   const server = assertUrlAllowed(serverUrl);
   const resource = `${server.origin}${server.pathname.replace(/\/+$/, "")}`;
   const candidates = [...(hintedMetadataUrl ? [hintedMetadataUrl] : []), ...wellKnownCandidates(server, PRM_SUFFIX)];
@@ -186,7 +215,10 @@ export async function discover(fetchImpl: FetchLike, serverUrl: string, hintedMe
     if (prm) break;
   }
   // The MCP spec lets a server skip RFC 9728 and BE its own authorization server.
-  const authServers = prm && Array.isArray(prm.authorization_servers) ? prm.authorization_servers.filter((s): s is string => typeof s === "string") : [];
+  const authServers =
+    prm && Array.isArray(prm.authorization_servers)
+      ? prm.authorization_servers.filter((s): s is string => typeof s === "string")
+      : [];
   const asBase = assertHttpsUrl(authServers[0] ?? `${server.origin}`, "authorization server");
   let meta: Record<string, unknown> | undefined;
   for (const url of [...wellKnownCandidates(asBase, AS_SUFFIX), ...wellKnownCandidates(asBase, OIDC_SUFFIX)]) {
@@ -196,11 +228,17 @@ export async function discover(fetchImpl: FetchLike, serverUrl: string, hintedMe
   if (!meta) throw new NoOAuthMetadata(`no OAuth metadata at ${asBase.origin} (RFC 8414 / OpenID discovery)`);
   const authorizationEndpoint = endpoint(meta.authorization_endpoint, "authorization_endpoint");
   const tokenEndpoint = endpoint(meta.token_endpoint, "token_endpoint");
-  const registrationEndpoint = meta.registration_endpoint === undefined ? undefined : endpoint(meta.registration_endpoint, "registration_endpoint");
-  const methods = Array.isArray(meta.code_challenge_methods_supported) ? meta.code_challenge_methods_supported : undefined;
+  const registrationEndpoint =
+    meta.registration_endpoint === undefined
+      ? undefined
+      : endpoint(meta.registration_endpoint, "registration_endpoint");
+  const methods = Array.isArray(meta.code_challenge_methods_supported)
+    ? meta.code_challenge_methods_supported
+    : undefined;
   if (methods && !methods.includes("S256")) throw new OAuthError("the authorization server does not support PKCE S256");
   const grants = Array.isArray(meta.grant_types_supported) ? meta.grant_types_supported : undefined;
-  if (grants && !grants.includes("authorization_code")) throw new OAuthError("the authorization server does not offer the authorization_code grant");
+  if (grants && !grants.includes("authorization_code"))
+    throw new OAuthError("the authorization server does not offer the authorization_code grant");
   const scopes = strList(prm?.scopes_supported) ?? strList(meta.scopes_supported);
   return {
     resource,
@@ -213,7 +251,9 @@ export async function discover(fetchImpl: FetchLike, serverUrl: string, hintedMe
 }
 
 function strList(v: unknown): string[] | undefined {
-  return Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s.length > 0 && s.length <= 256) : undefined;
+  return Array.isArray(v)
+    ? v.filter((s): s is string => typeof s === "string" && s.length > 0 && s.length <= 256)
+    : undefined;
 }
 
 function endpoint(v: unknown, name: string): string {
@@ -242,7 +282,11 @@ async function getJson(fetchImpl: FetchLike, url: string, what: string): Promise
   }
   let res: Response;
   try {
-    res = await fetchImpl(url, { method: "GET", headers: { accept: "application/json" }, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    res = await fetchImpl(url, {
+      method: "GET",
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
   } catch (err) {
     throw new OAuthError(`${what} at ${url} could not be fetched: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -251,7 +295,9 @@ async function getJson(fetchImpl: FetchLike, url: string, what: string): Promise
     return undefined;
   }
   const parsed = await readJson(res);
-  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : undefined;
 }
 
 async function readJson(res: Response): Promise<unknown> {
@@ -293,8 +339,16 @@ export const OAUTH_CLIENT_NAME = "Switchboard";
 
 /** RFC 7591: a public client with our callback as its only redirect URI. A
  *  server without a registration endpoint cannot be connected self-serve. */
-export async function registerClient(fetchImpl: FetchLike, discovery: OAuthDiscovery, redirectUri: string, clientUri?: string): Promise<{ clientId: string; clientSecret?: string }> {
-  if (!discovery.registrationEndpoint) throw new OAuthError("the authorization server does not offer dynamic client registration; Switchboard cannot register itself");
+export async function registerClient(
+  fetchImpl: FetchLike,
+  discovery: OAuthDiscovery,
+  redirectUri: string,
+  clientUri?: string,
+): Promise<{ clientId: string; clientSecret?: string }> {
+  if (!discovery.registrationEndpoint)
+    throw new OAuthError(
+      "the authorization server does not offer dynamic client registration; Switchboard cannot register itself",
+    );
   let res: Response;
   try {
     res = await fetchImpl(discovery.registrationEndpoint, {
@@ -316,7 +370,9 @@ export async function registerClient(fetchImpl: FetchLike, discovery: OAuthDisco
   }
   const body = (await readJson(res)) as Record<string, unknown> | undefined;
   if (!res.ok || !body || !str(body.client_id, 1024)) {
-    throw new OAuthError(`client registration was refused (HTTP ${res.status}${body && typeof body.error === "string" ? `, ${body.error}` : ""})`);
+    throw new OAuthError(
+      `client registration was refused (HTTP ${res.status}${body && typeof body.error === "string" ? `, ${body.error}` : ""})`,
+    );
   }
   return { clientId: body.client_id, ...(str(body.client_secret, 4096) ? { clientSecret: body.client_secret } : {}) };
 }
@@ -324,7 +380,9 @@ export async function registerClient(fetchImpl: FetchLike, discovery: OAuthDisco
 // ---- PKCE + the authorization request ------------------------------------------------
 
 /** RFC 7636: a 43-char base64url verifier and its S256 challenge. */
-export async function pkce(random: (bytes: number) => Uint8Array = randomBytes): Promise<{ verifier: string; challenge: string }> {
+export async function pkce(
+  random: (bytes: number) => Uint8Array = randomBytes,
+): Promise<{ verifier: string; challenge: string }> {
   const verifier = b64url(random(32));
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
   return { verifier, challenge: b64url(digest) };
@@ -356,7 +414,12 @@ export function authorizationUrl(discovery: OAuthDiscovery, pending: OAuthPendin
 
 // ---- the token endpoint ---------------------------------------------------------------
 
-export async function exchangeCode(fetchImpl: FetchLike, pending: OAuthPending, code: string, now: number): Promise<OAuthCredential> {
+export async function exchangeCode(
+  fetchImpl: FetchLike,
+  pending: OAuthPending,
+  code: string,
+  now: number,
+): Promise<OAuthCredential> {
   const tokens = await tokenRequest(fetchImpl, pending.tokenEndpoint, {
     grant_type: "authorization_code",
     code,
@@ -366,7 +429,17 @@ export async function exchangeCode(fetchImpl: FetchLike, pending: OAuthPending, 
     code_verifier: pending.codeVerifier,
     resource: pending.resource,
   });
-  return credentialFrom(tokens, { clientId: pending.clientId, clientSecret: pending.clientSecret, tokenEndpoint: pending.tokenEndpoint, resource: pending.resource, scope: pending.scope }, now);
+  return credentialFrom(
+    tokens,
+    {
+      clientId: pending.clientId,
+      clientSecret: pending.clientSecret,
+      tokenEndpoint: pending.tokenEndpoint,
+      resource: pending.resource,
+      scope: pending.scope,
+    },
+    now,
+  );
 }
 
 /** Whether `specFor` must refresh before handing the token to a run. */
@@ -374,8 +447,15 @@ export function needsRefresh(cred: OAuthCredential, now: number): boolean {
   return cred.expiresAt !== undefined && now >= cred.expiresAt - OAUTH_REFRESH_SKEW_MS;
 }
 
-export async function refreshCredential(fetchImpl: FetchLike, cred: OAuthCredential, now: number): Promise<OAuthCredential> {
-  if (!cred.refreshToken) throw new OAuthError("the access token expired and the server issued no refresh token — run `mcp connect` to sign in again");
+export async function refreshCredential(
+  fetchImpl: FetchLike,
+  cred: OAuthCredential,
+  now: number,
+): Promise<OAuthCredential> {
+  if (!cred.refreshToken)
+    throw new OAuthError(
+      "the access token expired and the server issued no refresh token — run `mcp connect` to sign in again",
+    );
   const tokens = await tokenRequest(fetchImpl, cred.tokenEndpoint, {
     grant_type: "refresh_token",
     refresh_token: cred.refreshToken,
@@ -385,10 +465,17 @@ export async function refreshCredential(fetchImpl: FetchLike, cred: OAuthCredent
   });
   // A server that rotates refresh tokens sends a new one; one that does not
   // keeps the old one valid.
-  return { ...credentialFrom(tokens, cred, now), refreshToken: typeof tokens.refresh_token === "string" ? tokens.refresh_token : cred.refreshToken };
+  return {
+    ...credentialFrom(tokens, cred, now),
+    refreshToken: typeof tokens.refresh_token === "string" ? tokens.refresh_token : cred.refreshToken,
+  };
 }
 
-async function tokenRequest(fetchImpl: FetchLike, tokenEndpoint: string, form: Record<string, string>): Promise<Record<string, unknown>> {
+async function tokenRequest(
+  fetchImpl: FetchLike,
+  tokenEndpoint: string,
+  form: Record<string, string>,
+): Promise<Record<string, unknown>> {
   assertHttpsUrl(tokenEndpoint, "token endpoint");
   let res: Response;
   try {
@@ -399,20 +486,32 @@ async function tokenRequest(fetchImpl: FetchLike, tokenEndpoint: string, form: R
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (err) {
-    throw new OAuthError(`the token endpoint could not be reached: ${err instanceof Error ? err.message : String(err)}`);
+    throw new OAuthError(
+      `the token endpoint could not be reached: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
   const body = (await readJson(res)) as Record<string, unknown> | undefined;
   if (!res.ok || !body) {
-    const why = body && typeof body.error === "string" ? `${body.error}${typeof body.error_description === "string" ? `: ${body.error_description}` : ""}` : `HTTP ${res.status}`;
+    const why =
+      body && typeof body.error === "string"
+        ? `${body.error}${typeof body.error_description === "string" ? `: ${body.error_description}` : ""}`
+        : `HTTP ${res.status}`;
     throw new OAuthError(`the token endpoint refused the request (${why})`);
   }
   return body;
 }
 
-function credentialFrom(tokens: Record<string, unknown>, base: { clientId: string; clientSecret?: string; tokenEndpoint: string; resource: string; scope?: string }, now: number): OAuthCredential {
+function credentialFrom(
+  tokens: Record<string, unknown>,
+  base: { clientId: string; clientSecret?: string; tokenEndpoint: string; resource: string; scope?: string },
+  now: number,
+): OAuthCredential {
   if (!str(tokens.access_token)) throw new OAuthError("the token endpoint returned no access token");
   const type = typeof tokens.token_type === "string" ? tokens.token_type.toLowerCase() : "bearer";
-  if (type !== "bearer") throw new OAuthError(`the token endpoint issued a "${type}" token; only bearer tokens can be sent to an MCP server`);
+  if (type !== "bearer")
+    throw new OAuthError(
+      `the token endpoint issued a "${type}" token; only bearer tokens can be sent to an MCP server`,
+    );
   const expiresInMs = expiresInOf(tokens.expires_in);
   return {
     kind: "oauth",
@@ -431,7 +530,12 @@ function credentialFrom(tokens: Record<string, unknown>, base: { clientId: strin
  *  checked: absent or unparseable → `undefined` (no expiry known); zero or
  *  negative → the server issued a dead token, refused; past the cap → clamped. */
 function expiresInOf(v: unknown): number | undefined {
-  const seconds = typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && /^-?\d+$/.test(v) ? Number(v) : undefined;
+  const seconds =
+    typeof v === "number" && Number.isFinite(v)
+      ? v
+      : typeof v === "string" && /^-?\d+$/.test(v)
+        ? Number(v)
+        : undefined;
   if (seconds === undefined) return undefined;
   if (seconds <= 0) throw new OAuthError(`the token endpoint issued an already expired token (expires_in ${seconds})`);
   return Math.min(seconds * 1000, OAUTH_MAX_EXPIRES_IN_MS);

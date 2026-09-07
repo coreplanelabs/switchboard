@@ -5,10 +5,29 @@ import { createRunPageModel, runningHeader, runSpan, type StepVm } from "./runPa
 // stream and the history seed carry). One fold for both — `handle` is the
 // single entry point, exactly like the old inline script's.
 
-const input = { type: "input", text: "fix the build", at: 1000, source: { channel: "dev", user: "justin", url: "https://acme.slack.com/x" } };
+const input = {
+  type: "input",
+  text: "fix the build",
+  at: 1000,
+  source: { channel: "dev", user: "justin", url: "https://acme.slack.com/x" },
+};
 const assistant = (text: string, at: number) => ({ type: "assistant", text, at });
-const call = (id: string, summary: string, at: number, tool = "bash") => ({ type: "tool_call", callId: id, tool, summary, at });
-const result = (id: string, over: Record<string, unknown> = {}) => ({ type: "tool_result", callId: id, tool: "bash", ok: true, summary: "", output: "out", ...over });
+const call = (id: string, summary: string, at: number, tool = "bash") => ({
+  type: "tool_call",
+  callId: id,
+  tool,
+  summary,
+  at,
+});
+const result = (id: string, over: Record<string, unknown> = {}) => ({
+  type: "tool_result",
+  callId: id,
+  tool: "bash",
+  ok: true,
+  summary: "",
+  output: "out",
+  ...over,
+});
 
 function model(openTags?: string[]) {
   return createRunPageModel({ openTags });
@@ -32,7 +51,12 @@ describe("request / context / answer / placeholder", () => {
   it("a later input is a steered follow-up listed under the request — it never replaces it (one run, several inputs)", () => {
     const m = model();
     m.handle(input);
-    m.handle({ type: "input", text: "also the numbers", at: 2000, source: { user: "bob", url: "https://acme.slack.com/y" } });
+    m.handle({
+      type: "input",
+      text: "also the numbers",
+      at: 2000,
+      source: { user: "bob", url: "https://acme.slack.com/y" },
+    });
     m.handle({ type: "input", text: "and a chart", at: 3000 });
     expect(m.state.request?.text).toBe("fix the build");
     expect(m.state.followUps.map((f) => f.text)).toEqual(["also the numbers", "and a chart"]);
@@ -211,7 +235,15 @@ describe("calls, groups, folding", () => {
   it("a skill lands as its own row inside the step, never a call card", () => {
     const m = model();
     m.handle(call("c1", "use_skill pdf", 2, "use_skill"));
-    m.handle({ type: "skill_use", skill: "pdf", description: "Fill PDFs", agent: "coding", bodyBytes: 2048, source: "https://example.com/x", at: 3 });
+    m.handle({
+      type: "skill_use",
+      skill: "pdf",
+      description: "Fill PDFs",
+      agent: "coding",
+      bodyBytes: 2048,
+      source: "https://example.com/x",
+      at: 3,
+    });
     const items = step(m).items;
     expect(items[1].kind).toBe("skill");
     if (items[1].kind === "skill") {
@@ -224,7 +256,13 @@ describe("calls, groups, folding", () => {
 describe("notes and stops", () => {
   it("run notes land in the log; a stop note marks the run stopping", () => {
     const m = model();
-    m.handle({ type: "run_note", summary: "stop requested (soft): finishing up", kind: "stop_requested", mode: "soft", at: 5 });
+    m.handle({
+      type: "run_note",
+      summary: "stop requested (soft): finishing up",
+      kind: "stop_requested",
+      mode: "soft",
+      at: 5,
+    });
     const note = m.state.log[0];
     expect(note.kind).toBe("note");
     expect(m.state.stopMode).toBe("soft");

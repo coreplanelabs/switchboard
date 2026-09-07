@@ -14,7 +14,13 @@ import { countTruncatedInputs, formatSelfImprovementReport, runSelfImprovement }
 let t = 0;
 const at = (ms: number) => (t += ms);
 const call = (summary: string): RunEvent => ({ type: "tool_call", tool: "bash", summary, at: at(10) });
-const result = (ok: boolean, summary: string, ms: number): RunEvent => ({ type: "tool_result", tool: "bash", ok, summary, at: at(ms) });
+const result = (ok: boolean, summary: string, ms: number): RunEvent => ({
+  type: "tool_result",
+  tool: "bash",
+  ok,
+  summary,
+  at: at(ms),
+});
 
 function lockfileRun(runId: string, finishedAt: number): FrictionRunRecord {
   t = 0;
@@ -33,7 +39,12 @@ function lockfileRun(runId: string, finishedAt: number): FrictionRunRecord {
 }
 function cleanRun(runId: string, finishedAt: number): FrictionRunRecord {
   t = 0;
-  return { runId, agent: "review", finishedAt, diagnosis: analyzeRunFriction([call("$ ls"), result(true, "src", 100)]) };
+  return {
+    runId,
+    agent: "review",
+    finishedAt,
+    diagnosis: analyzeRunFriction([call("$ ls"), result(true, "src", 100)]),
+  };
 }
 
 const REPO = "coreplanelabs/switchboard";
@@ -73,8 +84,22 @@ describe("runSelfImprovement", () => {
   it("is idempotent: a second pass over the same runs files nothing and reports the open duplicate", async () => {
     const tracker = new InMemoryIssueTracker();
     const records = await (await seeded()).recent();
-    const first = await runSelfImprovement({ records, tracker, repo: REPO, label: "self-improvement", top: 1, dryRun: false });
-    const second = await runSelfImprovement({ records, tracker, repo: REPO, label: "self-improvement", top: 1, dryRun: false });
+    const first = await runSelfImprovement({
+      records,
+      tracker,
+      repo: REPO,
+      label: "self-improvement",
+      top: 1,
+      dryRun: false,
+    });
+    const second = await runSelfImprovement({
+      records,
+      tracker,
+      repo: REPO,
+      label: "self-improvement",
+      top: 1,
+      dryRun: false,
+    });
     expect(second.filed).toEqual([]);
     expect(second.duplicates).toHaveLength(1);
     expect(second.duplicates[0].issue.number).toBe(first.filed[0].issue.number);
@@ -84,9 +109,23 @@ describe("runSelfImprovement", () => {
   it("dedupes only against OPEN issues carrying the label — a closed proposal can be re-proposed", async () => {
     const tracker = new InMemoryIssueTracker();
     const records = await (await seeded()).recent();
-    const first = await runSelfImprovement({ records, tracker, repo: REPO, label: "self-improvement", top: 1, dryRun: false });
+    const first = await runSelfImprovement({
+      records,
+      tracker,
+      repo: REPO,
+      label: "self-improvement",
+      top: 1,
+      dryRun: false,
+    });
     tracker.close(REPO, first.filed[0].issue.number);
-    const second = await runSelfImprovement({ records, tracker, repo: REPO, label: "self-improvement", top: 1, dryRun: false });
+    const second = await runSelfImprovement({
+      records,
+      tracker,
+      repo: REPO,
+      label: "self-improvement",
+      top: 1,
+      dryRun: false,
+    });
     expect(second.filed).toHaveLength(1);
     expect(tracker.issues(REPO)).toHaveLength(2);
   });
@@ -110,7 +149,12 @@ describe("runSelfImprovement", () => {
 
   it("without a repo it is a pure dry run: patterns and proposals are computed, GitHub is never consulted", async () => {
     const tracker = new InMemoryIssueTracker();
-    const report = await runSelfImprovement({ records: await (await seeded()).recent(), tracker, top: 3, dryRun: false });
+    const report = await runSelfImprovement({
+      records: await (await seeded()).recent(),
+      tracker,
+      top: 3,
+      dryRun: false,
+    });
     expect(report.dryRun).toBe(true);
     expect(report.proposals.length).toBeGreaterThan(0);
     expect(report.filed).toEqual([]);
@@ -167,11 +211,20 @@ describe("formatSelfImprovementReport", () => {
     const tracker = new InMemoryIssueTracker();
     const records = await (await seeded()).recent();
     await runSelfImprovement({ records, tracker, repo: REPO, label: "self-improvement", top: 1, dryRun: false });
-    const report = await runSelfImprovement({ records, tracker, repo: REPO, label: "self-improvement", top: 2, dryRun: false });
+    const report = await runSelfImprovement({
+      records,
+      tracker,
+      repo: REPO,
+      label: "self-improvement",
+      top: 2,
+      dryRun: false,
+    });
     const text = formatSelfImprovementReport(report);
     expect(text).toContain("3 runs analyzed");
     // The head line is the whole story in one glance (the /runs panel shows only it).
-    expect(text.split("\n")[0]).toMatch(/^🔍 \*Friction proposals\* — 3 runs analyzed · \d+ recurring patterns? · 1 filed · 1 already open$/);
+    expect(text.split("\n")[0]).toMatch(
+      /^🔍 \*Friction proposals\* — 3 runs analyzed · \d+ recurring patterns? · 1 filed · 1 already open$/,
+    );
     expect(text).toContain("setup_install:pnpm install --frozen-lockfile");
     expect(text).toMatch(/already open/i);
     expect(text).toMatch(/filed/);
@@ -185,7 +238,11 @@ describe("formatSelfImprovementReport", () => {
     expect(report.truncatedRuns).toBe(1);
     expect(countTruncatedInputs(records)).toBe(1);
     expect(formatSelfImprovementReport(report)).toMatch(/1 run diagnosed on a truncated event stream/);
-    const clean = await runSelfImprovement({ records: await (await seeded()).recent(), tracker: new InMemoryIssueTracker(), dryRun: true });
+    const clean = await runSelfImprovement({
+      records: await (await seeded()).recent(),
+      tracker: new InMemoryIssueTracker(),
+      dryRun: true,
+    });
     expect(clean.truncatedRuns).toBe(0);
     expect(formatSelfImprovementReport(clean)).not.toMatch(/truncated/);
   });

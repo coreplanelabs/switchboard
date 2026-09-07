@@ -5,4 +5,9 @@ export type Plan = { puts: string[]; skippedOptional: string[]; missing: string[
 export const WORKERS: Readonly<Record<"bot" | "resident" | "memory" | "sandbox", string>>;
 export const SECRETS_DIR: string;
 export function loadManifest(path: string): Manifest;
-export function planSecretPuts(manifest: Manifest, worker: string, hasFile: (name: string) => boolean, only?: string[]): Plan;
+export function planSecretPuts(
+  manifest: Manifest,
+  worker: string,
+  hasFile: (name: string) => boolean,
+  only?: string[],
+): Plan;

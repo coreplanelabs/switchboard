@@ -18,12 +18,25 @@
 import { effectiveGrants, hasAction, holds, isKnownActorKind, principalOf } from "./authorize.js";
 import { POLICY, resolveGrant, ruleTarget } from "./policy.js";
 import { RESOURCE_KINDS, targetOf, type ResourceAttributes } from "./resource.js";
-import type { Action, Actor, ChannelVisibility, Condition, Grants, Predicate, ResourceKind, ResourceType, Rule } from "./types.js";
+import type {
+  Action,
+  Actor,
+  ChannelVisibility,
+  Condition,
+  Grants,
+  Predicate,
+  ResourceKind,
+  ResourceType,
+  Rule,
+} from "./types.js";
 
 const NONE: Predicate = Object.freeze({ kind: "none" });
 const ALL: Predicate = Object.freeze({ kind: "all" });
 /** `member-of`'s public half: every actor is a member of a public channel. */
-const PUBLIC: Predicate = Object.freeze({ kind: "visibility-in", visibilities: new Set<ChannelVisibility>(["public"]) });
+const PUBLIC: Predicate = Object.freeze({
+  kind: "visibility-in",
+  visibilities: new Set<ChannelVisibility>(["public"]),
+});
 
 /** OR alternatives with nested `or`s flattened; `none`s dropped, one `all` wins. */
 function anyOf(alternatives: readonly Predicate[]): Predicate {
@@ -75,7 +88,13 @@ function compileRule(rule: Rule, grants: Grants, selfId: string): Predicate {
 }
 
 /** `predicateFor` over an explicit (validated) table; production code calls `predicateFor`. */
-export function predicateWith(rules: readonly Rule[], actor: Actor, action: Action, resourceType: ResourceType, kind?: ResourceKind): Predicate {
+export function predicateWith(
+  rules: readonly Rule[],
+  actor: Actor,
+  action: Action,
+  resourceType: ResourceType,
+  kind?: ResourceKind,
+): Predicate {
   if (RESOURCE_KINDS[resourceType] && kind === undefined) {
     throw new TypeError(`authz predicate: ${resourceType} is kinded — pass the kind`);
   }

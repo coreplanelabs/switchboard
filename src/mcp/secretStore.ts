@@ -1,6 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { isMcpTicket, isSealedCredential, type McpTicket, type McpTicketState, type SealedCredential } from "./registry.js";
+import {
+  isMcpTicket,
+  isSealedCredential,
+  type McpTicket,
+  type McpTicketState,
+  type SealedCredential,
+} from "./registry.js";
 
 // Where sealed MCP credentials and connect tickets live (features/mcp-tools.md
 // items 15–16). The server ENTRIES are config (`Scope.mcpServers`, persisted
@@ -75,7 +81,10 @@ export class FileMcpSecretStore implements McpSecretStore {
   }
   private read(): { credentials: Record<string, SealedCredential>; tickets: Record<string, McpTicket> } {
     if (!existsSync(this.path)) return { credentials: {}, tickets: {} };
-    const raw = JSON.parse(readFileSync(this.path, "utf8")) as { credentials?: Record<string, unknown>; tickets?: Record<string, unknown> };
+    const raw = JSON.parse(readFileSync(this.path, "utf8")) as {
+      credentials?: Record<string, unknown>;
+      tickets?: Record<string, unknown>;
+    };
     const credentials: Record<string, SealedCredential> = {};
     for (const [k, v] of Object.entries(raw.credentials ?? {})) if (isSealedCredential(v)) credentials[k] = v;
     const tickets: Record<string, McpTicket> = {};
@@ -170,7 +179,9 @@ export class WorkerMcpSecretStore implements McpSecretStore {
         signal: AbortSignal.timeout(MCP_SECRET_WORKER_TIMEOUT_MS),
       });
     } catch (err) {
-      throw new Error(`MCP secret store unreachable: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(`MCP secret store unreachable: ${err instanceof Error ? err.message : String(err)}`, {
+        cause: err,
+      });
     }
     if (!res.ok) throw new Error(`MCP secret store answered HTTP ${res.status} on ${path}`);
     const body: unknown = await res.json().catch(() => undefined);

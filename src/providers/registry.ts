@@ -23,9 +23,7 @@ export class ProviderRegistry {
   get(name: string): Provider {
     const p = this.providers.get(name);
     if (!p) {
-      throw new Error(
-        `Unknown provider "${name}". Configured providers: ${[...this.providers.keys()].join(", ")}`,
-      );
+      throw new Error(`Unknown provider "${name}". Configured providers: ${[...this.providers.keys()].join(", ")}`);
     }
     return p;
   }

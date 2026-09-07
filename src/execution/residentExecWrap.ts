@@ -55,8 +55,14 @@ export function execCapFiles(): { out: string; err: string } {
  * timeout-recoverable mode) the pair comes from `execCapFiles`; without, two
  * `mktemp` files that die with the EXIT trap.
  */
-export function capWrappedCommand(cwd: string, command: string, capBytes: number, files?: { out: string; err: string }): string {
-  if (!Number.isInteger(capBytes) || capBytes <= 0) throw new Error(`capBytes must be a positive integer, got ${capBytes}`);
+export function capWrappedCommand(
+  cwd: string,
+  command: string,
+  capBytes: number,
+  files?: { out: string; err: string },
+): string {
+  if (!Number.isInteger(capBytes) || capBytes <= 0)
+    throw new Error(`capBytes must be a positive integer, got ${capBytes}`);
   return [
     files ? `o=${files.out}` : `o=$(mktemp) || exit 125`,
     files ? `e=${files.err}` : `e=$(mktemp) || exit 125`,

@@ -10,12 +10,26 @@ describe("analyzeRunFriction — skill_use is invisible to friction", () => {
   const base: RunEvent[] = [
     { type: "input", text: "review it", at: T0 },
     { type: "tool_call", tool: "use_skill", summary: "use_skill code-review-and-quality", callId: "c1", at: T0 + 1000 },
-    { type: "tool_result", tool: "use_skill", ok: true, summary: "# Skill: code-review-and-quality", callId: "c1", at: T0 + 1100 },
+    {
+      type: "tool_result",
+      tool: "use_skill",
+      ok: true,
+      summary: "# Skill: code-review-and-quality",
+      callId: "c1",
+      at: T0 + 1100,
+    },
     { type: "answer", text: "LGTM", at: T0 + 5000 },
   ];
   const withSkill: RunEvent[] = [
     ...base.slice(0, 2),
-    { type: "skill_use", skill: "code-review-and-quality", description: "d", agent: "review", bodyBytes: 4321, at: T0 + 1050 },
+    {
+      type: "skill_use",
+      skill: "code-review-and-quality",
+      description: "d",
+      agent: "review",
+      bodyBytes: 4321,
+      at: T0 + 1050,
+    },
     ...base.slice(2),
   ];
 

@@ -60,7 +60,8 @@ const DU_OUT = [
   "",
 ].join("\n");
 
-const DF_OUT = "Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/vdc          15086920 8100000   6986920      54% /\n";
+const DF_OUT =
+  "Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/vdc          15086920 8100000   6986920      54% /\n";
 
 function sample(overrides: Partial<DiskSample> = {}, parts: Partial<DiskSample["parts"]> = {}): DiskSample {
   return {
@@ -96,7 +97,9 @@ describe("measurement — one df, one du, hardlinks counted once", () => {
   });
 
   it("parseDu reads `<KiB>\\t<path>` lines and ignores everything else (errors, blanks)", () => {
-    const m = parseDu("du: cannot read directory '/x': Permission denied\n4\t/x\n123\t/workspace/checkout\n\nnot a line\n");
+    const m = parseDu(
+      "du: cannot read directory '/x': Permission denied\n4\t/x\n123\t/workspace/checkout\n\nnot a line\n",
+    );
     expect([...m]).toEqual([
       ["/x", 4],
       ["/workspace/checkout", 123],
@@ -104,7 +107,12 @@ describe("measurement — one df, one du, hardlinks counted once", () => {
   });
 
   it("assembleDiskSample itemizes every measured part by key and puts the remainder (image, /tmp, …) in `other`", () => {
-    const s = assembleDiskSample({ at: "2026-09-07T15:00:00.000Z", df: parseDfKiB(DF_OUT)!, du: parseDu(DU_OUT), layout: LAYOUT });
+    const s = assembleDiskSample({
+      at: "2026-09-07T15:00:00.000Z",
+      df: parseDfKiB(DF_OUT)!,
+      du: parseDu(DU_OUT),
+      layout: LAYOUT,
+    });
     expect(s).toEqual({
       at: "2026-09-07T15:00:00.000Z",
       totalKiB: 15_086_920,
@@ -220,7 +228,10 @@ describe("checkDiskAdmission — free − reserve ≥ projected", () => {
     const ok = checkDiskAdmission({ sample: fresh, kind: "install" });
     expect(ok.fits).toBe(true);
     expect(ok.math.projectedKiB).toBeNull();
-    const tight = checkDiskAdmission({ sample: { ...fresh, usedKiB: 14.5 * GIB, freeKiB: 0.5 * GIB }, kind: "hardlink" });
+    const tight = checkDiskAdmission({
+      sample: { ...fresh, usedKiB: 14.5 * GIB, freeKiB: 0.5 * GIB },
+      kind: "hardlink",
+    });
     expect(tight.fits).toBe(false);
   });
 
@@ -230,7 +241,9 @@ describe("checkDiskAdmission — free − reserve ≥ projected", () => {
     const viaNet = checkDiskAdmission({ sample: s, freeKiB: 4 * GIB, kind: "hardlink" });
     expect(viaCommitted).toEqual(viaNet);
     expect(viaCommitted.math.freeKiB).toBe(4 * GIB);
-    expect(checkDiskAdmission({ sample: s, freeKiB: GIB, committedKiB: 3 * GIB, kind: "hardlink" }).math.freeKiB).toBe(0);
+    expect(checkDiskAdmission({ sample: s, freeKiB: GIB, committedKiB: 3 * GIB, kind: "hardlink" }).math.freeKiB).toBe(
+      0,
+    );
   });
 
   it("rawFreeAfterEviction: a re-probe that answered wins; one that did not → the previous RAW reading plus the evicted bytes (unknown size adds nothing)", () => {
@@ -239,7 +252,12 @@ describe("checkDiskAdmission — free − reserve ≥ projected", () => {
     expect(rawFreeAfterEviction(5 * GIB, null, null)).toBe(5 * GIB);
     // The fallback feeds checkDiskAdmission a RAW number, so the commitment is deducted exactly once there.
     const s = sample({ usedKiB: 10 * GIB, freeKiB: 5 * GIB });
-    const after = checkDiskAdmission({ sample: s, freeKiB: rawFreeAfterEviction(5 * GIB, null, GIB), committedKiB: GIB, kind: "hardlink" });
+    const after = checkDiskAdmission({
+      sample: s,
+      freeKiB: rawFreeAfterEviction(5 * GIB, null, GIB),
+      committedKiB: GIB,
+      kind: "hardlink",
+    });
     expect(after.math.freeKiB).toBe(5 * GIB);
   });
 
@@ -252,7 +270,11 @@ describe("checkDiskAdmission — free − reserve ≥ projected", () => {
 
 describe("orderEvictionCandidates — coldest clean idle trees first, every keep named", () => {
   const now = Date.parse("2026-09-07T15:00:00.000Z");
-  const c = (threadKey: string, minsAgo: number, extra: Partial<Parameters<typeof orderEvictionCandidates>[0]["candidates"][number]> = {}) => ({
+  const c = (
+    threadKey: string,
+    minsAgo: number,
+    extra: Partial<Parameters<typeof orderEvictionCandidates>[0]["candidates"][number]> = {},
+  ) => ({
     threadKey,
     ref: "feat/x",
     lastAttachAt: new Date(now - minsAgo * 60_000).toISOString(),
@@ -292,7 +314,11 @@ describe("orderEvictionCandidates — coldest clean idle trees first, every keep
   });
 
   it("an unparsable lastAttachAt is kept as recent (unknown is never idle)", () => {
-    const r = orderEvictionCandidates({ now, requestingThreadKey: "me", candidates: [c("x", 0, { lastAttachAt: "garbage" })] });
+    const r = orderEvictionCandidates({
+      now,
+      requestingThreadKey: "me",
+      candidates: [c("x", 0, { lastAttachAt: "garbage" })],
+    });
     expect(r.order).toHaveLength(0);
     expect(r.kept[0].why).toBe("recent");
   });
@@ -317,13 +343,19 @@ describe("diskPressureReason — the refusal names free, reserve, projected, wha
     );
     expect(text).not.toContain("cap"); // no diskBudgetMb → no cap named
     expect(text).toContain("evicted 1 idle tree(s) (0.43 GiB back): slack:C1:old");
-    expect(text).toContain("kept 2: slack:C1:busy (1 operation(s) in flight), slack:C1:dirty (dirty: uncommitted changes)");
+    expect(text).toContain(
+      "kept 2: slack:C1:busy (1 operation(s) in flight), slack:C1:dirty (dirty: uncommitted changes)",
+    );
     expect(isDiskPressureReason(text)).toBe(true);
     expect(isDiskPressureReason("disk-full: x")).toBe(false);
   });
 
   it("names a budget cap and an unmeasured projection when those decided", () => {
-    const v = checkDiskAdmission({ sample: sample({}, { checkout: null, deps: null }), kind: "hardlink", diskBudgetMb: 4 * 1024 });
+    const v = checkDiskAdmission({
+      sample: sample({}, { checkout: null, deps: null }),
+      kind: "hardlink",
+      diskBudgetMb: 4 * 1024,
+    });
     if (v.fits) throw new Error("fixture must not fit");
     const text = diskPressureReason({ verdict: v, evicted: [], kept: [] });
     expect(text).toContain("need a new tree (hardlink) of UNMEASURED cost (no du sample yet)");
@@ -345,6 +377,14 @@ describe("formatting — one unit everywhere", () => {
 describe("threadUserCacheCleanArgv — an eviction removes the pool user's package-manager leftovers too", () => {
   it("pnpm store, tool caches, npm/yarn/bun caches under the home, in one rm", () => {
     expect([...THREAD_USER_CACHE_DIRS]).toEqual([".local/share/pnpm", ".cache", ".npm", ".yarn", ".bun"]);
-    expect(threadUserCacheCleanArgv("/home/worker7")).toEqual(["rm", "-rf", "/home/worker7/.local/share/pnpm", "/home/worker7/.cache", "/home/worker7/.npm", "/home/worker7/.yarn", "/home/worker7/.bun"]);
+    expect(threadUserCacheCleanArgv("/home/worker7")).toEqual([
+      "rm",
+      "-rf",
+      "/home/worker7/.local/share/pnpm",
+      "/home/worker7/.cache",
+      "/home/worker7/.npm",
+      "/home/worker7/.yarn",
+      "/home/worker7/.bun",
+    ]);
   });
 });

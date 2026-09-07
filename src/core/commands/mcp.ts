@@ -2,7 +2,15 @@ import { z } from "zod";
 import { MCP_SERVER_NAME_PATTERN } from "../../mcp/config.js";
 import { MCP_OFF_MESSAGE, McpServiceError, type McpActor, type McpService } from "../../mcp/service.js";
 import { authorize } from "../authz/authorize.js";
-import { CommandError, commandDefiner, type Caller, type CommandDef, type CommandRegistry, type JsonObject, type JsonValue } from "../commandRegistry.js";
+import {
+  CommandError,
+  commandDefiner,
+  type Caller,
+  type CommandDef,
+  type CommandRegistry,
+  type JsonObject,
+  type JsonValue,
+} from "../commandRegistry.js";
 
 export { MCP_OFF_MESSAGE };
 
@@ -36,10 +44,20 @@ export interface McpCommandDeps {
 
 const defineCommand = commandDefiner<McpCommandDeps>();
 
-const serverName = z.string().refine((s) => MCP_SERVER_NAME_PATTERN.test(s), "expected a slug: lowercase letters, digits, dashes (≤ 32 chars)");
+const serverName = z
+  .string()
+  .refine((s) => MCP_SERVER_NAME_PATTERN.test(s), "expected a slug: lowercase letters, digits, dashes (≤ 32 chars)");
 const serverUrl = z.string().refine((s) => /^https?:\/\/\S+$/.test(s), "expected an http(s) URL");
-const scopeOption = z.enum(["me", "channel", "org"]).optional().describe("whose server: yours (`me`, default), this channel's (`channel`, channel-config rights), or org-wide (`org`, admins)");
-const channelOption = z.string().optional().describe("target channel for `--scope channel` and for `list` (default: the channel you are speaking in)");
+const scopeOption = z
+  .enum(["me", "channel", "org"])
+  .optional()
+  .describe(
+    "whose server: yours (`me`, default), this channel's (`channel`, channel-config rights), or org-wide (`org`, admins)",
+  );
+const channelOption = z
+  .string()
+  .optional()
+  .describe("target channel for `--scope channel` and for `list` (default: the channel you are speaking in)");
 const nameArg = { name: "name", schema: serverName, describe: "the server's name (see `mcp list`)" } as const;
 
 async function serviceOf(deps: McpCommandDeps): Promise<McpService> {
@@ -58,7 +76,8 @@ function actorOf(caller: Caller, channel: string | undefined): McpActor {
   return {
     id: caller.id,
     orgAdmin: authorize(caller.actor, "mcp:write", { type: "config-scope", kind: "org" }).allow,
-    channelAdmin: authorize(caller.actor, "mcp:write", { type: "config-scope", kind: "channel", id: channel ?? "" }).allow,
+    channelAdmin: authorize(caller.actor, "mcp:write", { type: "config-scope", kind: "channel", id: channel ?? "" })
+      .allow,
   };
 }
 
@@ -82,7 +101,10 @@ async function via<T>(fn: () => Promise<T> | T): Promise<T> {
  *  or expired unused with the way to a new link. A link superseded by a newer
  *  one that did connect says nothing. Nothing is probed here: the completion
  *  recorded the outcome on the ticket. */
-async function settleConnect(deps: McpCommandDeps, output: JsonValue): Promise<{ ok: boolean; text: string } | undefined> {
+async function settleConnect(
+  deps: McpCommandDeps,
+  output: JsonValue,
+): Promise<{ ok: boolean; text: string } | undefined> {
   const o = output as JsonObject;
   if (typeof o.connectUrl !== "string") return undefined; // nothing deferred: auth none, or no link
   const nonce = o.connectUrl.slice(o.connectUrl.lastIndexOf("/") + 1);
@@ -92,12 +114,18 @@ async function settleConnect(deps: McpCommandDeps, output: JsonValue): Promise<{
   const r = await svc.awaitTicket(nonce, deps.mcp.sleep ? { sleep: deps.mcp.sleep } : {});
   switch (r.kind) {
     case "completed": {
-      const count = typeof r.outcome.toolCount === "number" ? ` — ${r.outcome.toolCount} tool${r.outcome.toolCount === 1 ? "" : "s"}` : "";
+      const count =
+        typeof r.outcome.toolCount === "number"
+          ? ` — ${r.outcome.toolCount} tool${r.outcome.toolCount === 1 ? "" : "s"}`
+          : "";
       const warn = r.outcome.warning ? `\n⚠️ ${r.outcome.warning}` : "";
       return { ok: true, text: `✅ \`${name}\` is connected${count}. Your runs can use it now.${warn}` };
     }
     case "expired":
-      return { ok: false, text: `⌛ The connect link for \`${name}\` expired unused. \`mcp connect ${name}\` mints a new one.` };
+      return {
+        ok: false,
+        text: `⌛ The connect link for \`${name}\` expired unused. \`mcp connect ${name}\` mints a new one.`,
+      };
     case "cancelled":
       return { ok: false, text: `The connect link for \`${name}\` was cancelled.` };
     default:
@@ -106,7 +134,8 @@ async function settleConnect(deps: McpCommandDeps, output: JsonValue): Promise<{
 }
 
 function renderServerLine(r: JsonObject): string {
-  const state = r.state === "connected" ? "✅ connected" : r.state === "static" ? "✅ static (tokenEnv)" : "⏳ awaiting credential";
+  const state =
+    r.state === "connected" ? "✅ connected" : r.state === "static" ? "✅ static (tokenEnv)" : "⏳ awaiting credential";
   const agents = Array.isArray(r.agents) ? r.agents.join(", ") : "";
   const pinned = r.source === "config" ? " · pinned in config.yaml" : "";
   return `• \`${String(r.name)}\` (${String(r.scope)}) ${state} — ${String(r.url)} · agents: ${agents} · auth: ${String(r.auth)}${pinned}`;
@@ -115,7 +144,8 @@ function renderServerLine(r: JsonObject): string {
 function renderList(output: JsonValue): string {
   const o = output as JsonObject;
   const servers = Array.isArray(o.servers) ? o.servers.map((s) => s as JsonObject) : [];
-  if (servers.length === 0) return "No MCP servers reach your runs here. Add one for yourself with `mcp add <name> --url <url>`; channel-config holders add channel ones with `--scope channel`, admins org-wide ones with `--scope org`.";
+  if (servers.length === 0)
+    return "No MCP servers reach your runs here. Add one for yourself with `mcp add <name> --url <url>`; channel-config holders add channel ones with `--scope channel`, admins org-wide ones with `--scope org`.";
   return servers.map(renderServerLine).join("\n");
 }
 
@@ -136,7 +166,10 @@ function renderShow(output: JsonValue): string {
   const probe = o.probe as JsonObject | undefined;
   if (probe?.ok === true && Array.isArray(probe.tools)) {
     lines.push(`Tools (${probe.tools.length}):`);
-    for (const t of probe.tools.map((x) => x as JsonObject)) lines.push(`  - \`${String(t.name)}\`${t.readOnly === true ? " (read-only)" : ""}${t.description ? ` — ${String(t.description)}` : ""}`);
+    for (const t of probe.tools.map((x) => x as JsonObject))
+      lines.push(
+        `  - \`${String(t.name)}\`${t.readOnly === true ? " (read-only)" : ""}${t.description ? ` — ${String(t.description)}` : ""}`,
+      );
   } else if (probe) {
     lines.push(`Probe failed: ${String(probe.error)}`);
   }
@@ -148,7 +181,8 @@ export const mcpList = defineCommand({
   options: z.object({ channel: channelOption }),
   action: "mcp:read",
   effect: "read",
-  describe: "External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.",
+  describe:
+    "External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.",
   render: renderList,
   handler: async ({ options, caller, deps }) => {
     const svc = await serviceOf(deps);
@@ -160,21 +194,40 @@ export const mcpList = defineCommand({
 
 export const mcpAdd = defineCommand({
   id: "mcp.add",
-  args: [{ name: "name", schema: serverName, describe: "a short slug for the server (becomes the tool prefix mcp__<name>__)" }],
+  args: [
+    {
+      name: "name",
+      schema: serverName,
+      describe: "a short slug for the server (becomes the tool prefix mcp__<name>__)",
+    },
+  ],
   options: z.object({
     url: serverUrl.describe("the server's Streamable-HTTP endpoint (https://…/mcp)"),
     scope: scopeOption,
     agents: z
       .string()
-      .transform((s) => s.split(",").map((a) => a.trim()).filter(Boolean))
+      .transform((s) =>
+        s
+          .split(",")
+          .map((a) => a.trim())
+          .filter(Boolean),
+      )
       .optional()
-      .describe("comma-separated agents that may use it (default general,research; only org servers may name coding/review/ship)"),
-    auth: z.enum(["oauth", "bearer", "none"]).optional().describe("how the server authenticates: `oauth` (you sign in on a one-time link), `bearer` (you paste a token on a one-time link), or `none`; omit to detect it from the server"),
+      .describe(
+        "comma-separated agents that may use it (default general,research; only org servers may name coding/review/ship)",
+      ),
+    auth: z
+      .enum(["oauth", "bearer", "none"])
+      .optional()
+      .describe(
+        "how the server authenticates: `oauth` (you sign in on a one-time link), `bearer` (you paste a token on a one-time link), or `none`; omit to detect it from the server",
+      ),
     channel: channelOption,
   }),
   action: "mcp:write",
   effect: "write",
-  describe: "Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.",
+  describe:
+    "Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.",
   render: renderAdd,
   settle: (output, { deps }) => settleConnect(deps, output),
   handler: async ({ args, options, caller, deps }) => {
@@ -182,7 +235,14 @@ export const mcpAdd = defineCommand({
     const channel = channelOf(caller, options.channel);
     const actor = actorOf(caller, channel);
     const target = await via(() => svc.target(actor, options.scope ?? "me", channel));
-    return (await via(() => svc.add(actor, target, { name: args.name, url: options.url, agents: options.agents, ...(options.auth ? { auth: options.auth } : {}) }))) as unknown as JsonObject;
+    return (await via(() =>
+      svc.add(actor, target, {
+        name: args.name,
+        url: options.url,
+        agents: options.agents,
+        ...(options.auth ? { auth: options.auth } : {}),
+      }),
+    )) as unknown as JsonObject;
   },
 });
 
@@ -192,7 +252,8 @@ export const mcpConnect = defineCommand({
   options: z.object({ scope: scopeOption, channel: channelOption }),
   action: "mcp:write",
   effect: "write",
-  describe: "A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.",
+  describe:
+    "A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.",
   render: renderAdd,
   settle: (output, { deps }) => settleConnect(deps, output),
   handler: async ({ args, options, caller, deps }) => {
@@ -210,7 +271,8 @@ export const mcpShow = defineCommand({
   options: z.object({ scope: scopeOption, channel: channelOption }),
   action: "mcp:read",
   effect: "read",
-  describe: "One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.",
+  describe:
+    "One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.",
   render: renderShow,
   handler: async ({ args, options, caller, deps }) => {
     const svc = await serviceOf(deps);
@@ -219,8 +281,14 @@ export const mcpShow = defineCommand({
     // Seeing is open: org and channel entries are visible to everyone who can
     // run there, so `show` resolves the tier without the management gates.
     const word = options.scope ?? "me";
-    const target = word === "org" ? { kind: "org" as const } : word === "channel" ? { kind: "channel" as const, id: channelId } : { kind: "user" as const, id: actor.id };
-    if (target.kind === "channel" && !target.id) throw new CommandError("invalid_input", "channel: required on this surface — pass --channel <id>");
+    const target =
+      word === "org"
+        ? { kind: "org" as const }
+        : word === "channel"
+          ? { kind: "channel" as const, id: channelId }
+          : { kind: "user" as const, id: actor.id };
+    if (target.kind === "channel" && !target.id)
+      throw new CommandError("invalid_input", "channel: required on this surface — pass --channel <id>");
     return (await via(() => svc.show(actor, target, args.name))) as unknown as JsonObject;
   },
 });
@@ -231,7 +299,8 @@ export const mcpRemove = defineCommand({
   options: z.object({ scope: scopeOption, channel: channelOption }),
   action: "mcp:write",
   effect: "write",
-  describe: "Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).",
+  describe:
+    "Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).",
   handler: async ({ args, options, caller, deps }) => {
     const svc = await serviceOf(deps);
     const channel = channelOf(caller, options.channel);

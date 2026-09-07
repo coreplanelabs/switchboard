@@ -2,14 +2,24 @@ import { describe, expect, it } from "vitest";
 import { analyzeRunFriction } from "./runFriction.js";
 import type { RunEvent } from "./runEvents.js";
 import { DEFAULT_RETENTION_POLICY, type RunRecord } from "./runRecord.js";
-import { describeError, PermanentStoreError, RouteMissingError, TransientStoreError, WorkerRunStore } from "./runStoreWorker.js";
+import {
+  describeError,
+  PermanentStoreError,
+  RouteMissingError,
+  TransientStoreError,
+  WorkerRunStore,
+} from "./runStoreWorker.js";
 
 // Feature: features/run-history.md — the HTTPS RunStore client to the state
 // Worker's RunHistoryDO (POST /runs/put|get|list|events|delete).
 
 const NOW = 1_800_000_000_000;
 function events(n: number, size = 20): RunEvent[] {
-  return Array.from({ length: n }, (_, i) => ({ type: "tool_call", tool: "bash", summary: `step ${i} ${"x".repeat(size)}` }));
+  return Array.from({ length: n }, (_, i) => ({
+    type: "tool_call",
+    tool: "bash",
+    summary: `step ${i} ${"x".repeat(size)}`,
+  }));
 }
 function record(id: string, evs: RunEvent[] = events(3)): RunRecord {
   return {
@@ -48,16 +58,28 @@ function fakeFetch(handler: (call: Call) => { status: number; body?: unknown } |
     calls.push(call);
     const r = handler(call);
     if (r instanceof Error) throw r;
-    return new Response(r.body === undefined ? "" : JSON.stringify(r.body), { status: r.status, headers: { "content-type": "application/json" } });
+    return new Response(r.body === undefined ? "" : JSON.stringify(r.body), {
+      status: r.status,
+      headers: { "content-type": "application/json" },
+    });
   }) as typeof fetch;
   return { fetch: impl, calls };
 }
 
-const OPTS = { baseUrl: "https://state.example/", token: "tok", storeKey: "runs:default", policy: DEFAULT_RETENTION_POLICY, policyUpdatedAt: NOW };
+const OPTS = {
+  baseUrl: "https://state.example/",
+  token: "tok",
+  storeKey: "runs:default",
+  policy: DEFAULT_RETENTION_POLICY,
+  policyUpdatedAt: NOW,
+};
 
 describe("WorkerRunStore", () => {
   it("put sends a 1.9 MB record as a string body (Content-Length left to the runtime), the bearer, and the policy", async () => {
-    const { fetch, calls } = fakeFetch(() => ({ status: 200, body: { ok: true, retained: 1, stored: true, rewritten: false } }));
+    const { fetch, calls } = fakeFetch(() => ({
+      status: 200,
+      body: { ok: true, retained: 1, stored: true, rewritten: false },
+    }));
     const rec = record("a", events(38, 50_000));
     const res = await new WorkerRunStore({ ...OPTS, fetch }).put(rec);
     expect(res).toEqual({ ok: true, retained: 1, stored: true, rewritten: false });
@@ -79,14 +101,19 @@ describe("WorkerRunStore", () => {
     const rec = record("a");
     const { fetch, calls } = fakeFetch((c) => {
       if (c.url.endsWith("/runs/get")) return { status: 200, body: { record: rec } };
-      if (c.url.endsWith("/runs/list")) return { status: 200, body: { items: [{ ...rec, events: undefined, bytes: 10 }, { junk: true }] } };
-      if (c.url.endsWith("/runs/events")) return { status: 200, body: { events: [{ ...rec.events[1], seq: 2 }], nextAfterSeq: 2 } };
+      if (c.url.endsWith("/runs/list"))
+        return { status: 200, body: { items: [{ ...rec, events: undefined, bytes: 10 }, { junk: true }] } };
+      if (c.url.endsWith("/runs/events"))
+        return { status: 200, body: { events: [{ ...rec.events[1], seq: 2 }], nextAfterSeq: 2 } };
       return { status: 200, body: { ok: true } };
     });
     const store = new WorkerRunStore({ ...OPTS, fetch });
     expect(await store.get("a")).toEqual(rec);
     expect(await store.list({ limit: 5, agent: "review" })).toEqual([{ ...rec, events: undefined, bytes: 10 }]);
-    expect(await store.events("a", { afterSeq: 1, limit: 1 })).toEqual({ events: [{ ...rec.events[1], seq: 2 }], nextAfterSeq: 2 });
+    expect(await store.events("a", { afterSeq: 1, limit: 1 })).toEqual({
+      events: [{ ...rec.events[1], seq: 2 }],
+      nextAfterSeq: 2,
+    });
     await store.delete("a");
     expect(calls).toHaveLength(4);
     for (const c of calls) {
@@ -118,7 +145,9 @@ describe("WorkerRunStore", () => {
   });
 
   it("get returns null for {record: null}; events returns null for {events: null}; a malformed record is a PermanentStoreError", async () => {
-    const nul = fakeFetch((c) => (c.url.endsWith("/runs/get") ? { status: 200, body: { record: null } } : { status: 200, body: { events: null } }));
+    const nul = fakeFetch((c) =>
+      c.url.endsWith("/runs/get") ? { status: 200, body: { record: null } } : { status: 200, body: { events: null } },
+    );
     expect(await new WorkerRunStore({ ...OPTS, fetch: nul.fetch }).get("a")).toBeNull();
     expect(await new WorkerRunStore({ ...OPTS, fetch: nul.fetch }).events("a", {})).toBeNull();
     const bad = fakeFetch(() => ({ status: 200, body: { record: { id: "a" } } }));
@@ -126,11 +155,16 @@ describe("WorkerRunStore", () => {
   });
 
   it("get and list normalize a stored diagnosis missing a current category (zero-filled) and keep the events' stored seq", async () => {
-    const rec = record("a", events(2).map((e, i) => ({ ...e, seq: 100 + i })));
+    const rec = record(
+      "a",
+      events(2).map((e, i) => ({ ...e, seq: 100 + i })),
+    );
     const { slow_tool: _drop, ...rest } = rec.diagnosis.byCategory;
     const legacy = { ...rec, diagnosis: { ...rec.diagnosis, byCategory: rest } };
     const { fetch } = fakeFetch((c) =>
-      c.url.endsWith("/runs/get") ? { status: 200, body: { record: legacy } } : { status: 200, body: { items: [{ ...legacy, events: undefined, bytes: 1 }] } },
+      c.url.endsWith("/runs/get")
+        ? { status: 200, body: { record: legacy } }
+        : { status: 200, body: { items: [{ ...legacy, events: undefined, bytes: 1 }] } },
     );
     const store = new WorkerRunStore({ ...OPTS, fetch });
     const got = await store.get("a");
@@ -150,14 +184,19 @@ describe("WorkerRunStore", () => {
   });
 
   it("classifies failures: 404 → RouteMissingError; 503/408/429/network → TransientStoreError; 400 → PermanentStoreError", async () => {
-    const mk = (r: { status: number; body?: unknown } | Error) => new WorkerRunStore({ ...OPTS, fetch: fakeFetch(() => r).fetch });
+    const mk = (r: { status: number; body?: unknown } | Error) =>
+      new WorkerRunStore({ ...OPTS, fetch: fakeFetch(() => r).fetch });
     await expect(mk({ status: 404, body: { error: "not found" } }).put(record("a"))).rejects.toThrow(RouteMissingError);
     await expect(mk({ status: 503 }).put(record("a"))).rejects.toThrow(TransientStoreError);
     await expect(mk({ status: 408 }).get("a")).rejects.toThrow(TransientStoreError);
     await expect(mk({ status: 429 }).list({})).rejects.toThrow(TransientStoreError);
     await expect(mk(new Error("ECONNRESET")).get("a")).rejects.toThrow(TransientStoreError);
-    await expect(mk({ status: 400, body: { error: "record must be a RunRecord" } }).put(record("a"))).rejects.toThrow(PermanentStoreError);
-    await expect(mk({ status: 400, body: { error: "record must be a RunRecord" } }).put(record("a"))).rejects.toThrow(/HTTP 400: record must be a RunRecord/);
+    await expect(mk({ status: 400, body: { error: "record must be a RunRecord" } }).put(record("a"))).rejects.toThrow(
+      PermanentStoreError,
+    );
+    await expect(mk({ status: 400, body: { error: "record must be a RunRecord" } }).put(record("a"))).rejects.toThrow(
+      /HTTP 400: record must be a RunRecord/,
+    );
   });
 });
 
@@ -166,13 +205,20 @@ describe("describeError — the cause chain survives into the warn line (#313)",
     const socket = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
     const undici = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET", cause: socket });
     const fetchFailed = new TypeError("fetch failed", { cause: undici });
-    expect(describeError(fetchFailed)).toBe("fetch failed (cause: other side closed [UND_ERR_SOCKET] (cause: read ECONNRESET))");
+    expect(describeError(fetchFailed)).toBe(
+      "fetch failed (cause: other side closed [UND_ERR_SOCKET] (cause: read ECONNRESET))",
+    );
     expect(describeError("plain")).toBe("plain");
     expect(describeError(new Error("no cause"))).toBe("no cause");
   });
 
   it("a network failure surfaces as a TransientStoreError whose message carries the cause", async () => {
-    const { fetch } = fakeFetch(() => new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }) }));
+    const { fetch } = fakeFetch(
+      () =>
+        new TypeError("fetch failed", {
+          cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }),
+        }),
+    );
     const store = new WorkerRunStore({ ...OPTS, fetch });
     await expect(store.list({ limit: 1 })).rejects.toMatchObject({
       name: "TransientStoreError",

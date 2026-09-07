@@ -17,7 +17,8 @@ import { createMcpConnectViewHandler, isConnectPath, parseConnectRoute } from ".
 // local http server with a fixed identity per request (header-selected so one
 // server can play several people).
 
-const YAML = "providers:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n";
+const YAML =
+  "providers:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n";
 const alice: McpActor = { id: "slack:U1", orgAdmin: false, channelAdmin: true };
 const ME = { kind: "user" as const, id: alice.id };
 const KEY_ID = "user:slack:U1/vanta";
@@ -42,20 +43,27 @@ function harness(opts: { rejectTokens?: string[]; email?: string; oauth?: FakeAu
     nonce: () => `nonce-${String(++n).padStart(20, "0")}`,
     factory: (spec) => {
       const c = new InMemoryMcpClient([{ name: "search", inputSchema: {} }]);
-      if (spec.auth?.type === "bearer" && opts.rejectTokens?.includes(spec.auth.token)) c.failListWith = "MCP server returned HTTP 401";
+      if (spec.auth?.type === "bearer" && opts.rejectTokens?.includes(spec.auth.token))
+        c.failListWith = "MCP server returned HTTP 401";
       return c;
     },
   });
   const handler = createMcpConnectViewHandler({ registry: () => service, publicOrigin: "https://switchboard.test" });
-  const addVanta = (url = "https://mcp.vanta.com/mcp") => service.add(alice, ME, { name: "vanta", url, auth: "bearer" });
+  const addVanta = (url = "https://mcp.vanta.com/mcp") =>
+    service.add(alice, ME, { name: "vanta", url, auth: "bearer" });
   const addOAuth = (url = "https://mcp.vanta.com/mcp") => service.add(alice, ME, { name: "vanta", url, auth: "oauth" });
   return { secrets, service, handler, addVanta, addOAuth, as };
 }
 
-async function serve(handler: ReturnType<typeof createMcpConnectViewHandler>): Promise<{ server: Server; base: string }> {
+async function serve(
+  handler: ReturnType<typeof createMcpConnectViewHandler>,
+): Promise<{ server: Server; base: string }> {
   const server = createServer((req, res) => {
     // The identity index.ts would have verified: chosen by a test header.
-    const identity: AccessIdentity = { sub: String(req.headers["x-test-sub"] ?? "cf-justin"), email: String(req.headers["x-test-email"] ?? "justin@coreplane.ai") };
+    const identity: AccessIdentity = {
+      sub: String(req.headers["x-test-sub"] ?? "cf-justin"),
+      email: String(req.headers["x-test-email"] ?? "justin@coreplane.ai"),
+    };
     if (!handler(req, res, identity)) {
       res.writeHead(404);
       res.end("fallthrough");
@@ -67,7 +75,12 @@ async function serve(handler: ReturnType<typeof createMcpConnectViewHandler>): P
 }
 
 const post = (base: string, path: string, body: string, headers: Record<string, string> = {}) =>
-  fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "sec-fetch-site": "same-origin", ...headers }, body, redirect: "manual" });
+  fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", "sec-fetch-site": "same-origin", ...headers },
+    body,
+    redirect: "manual",
+  });
 
 const NONCE1 = "/mcp/connect/nonce-00000000000000000001";
 
@@ -103,12 +116,18 @@ describe("GET /mcp/connect/<nonce>", () => {
       expect(html).toContain("https://mcp.vanta.com/mcp");
       expect(html).not.toContain("SECRET");
       expect(html).not.toContain("<script");
-      const stranger = await fetch(`${base}${NONCE1}`, { headers: { "x-test-sub": "cf-x", "x-test-email": "x@else.example" } });
+      const stranger = await fetch(`${base}${NONCE1}`, {
+        headers: { "x-test-sub": "cf-x", "x-test-email": "x@else.example" },
+      });
       expect(stranger.status).toBe(403);
       expect(await stranger.text()).toContain("belongs to another user");
       expect((await fetch(`${base}/mcp/connect/${"z".repeat(24)}`)).status).toBe(404);
       expect((await fetch(`${base}/mcp/connect/tiny`)).status).toBe(404);
-      await h.service.completeTicket("nonce-00000000000000000001", { sub: "cf-justin", email: "justin@coreplane.ai" }, "tok");
+      await h.service.completeTicket(
+        "nonce-00000000000000000001",
+        { sub: "cf-justin", email: "justin@coreplane.ai" },
+        "tok",
+      );
       expect((await fetch(`${base}${NONCE1}`)).status).toBe(410);
     } finally {
       server.close();
@@ -163,7 +182,9 @@ describe("POST /mcp/connect/<nonce>", () => {
       expect(empty.status).toBe(400);
       expect(await empty.text()).toContain("the token is empty");
       expect((await post(base, NONCE1, "token=x", { "sec-fetch-site": "cross-site" })).status).toBe(403);
-      expect((await post(base, NONCE1, "token=x", { "sec-fetch-site": "", origin: "https://evil.example" })).status).toBe(403);
+      expect(
+        (await post(base, NONCE1, "token=x", { "sec-fetch-site": "", origin: "https://evil.example" })).status,
+      ).toBe(403);
       expect((await post(base, NONCE1, "token=good")).status).toBe(200); // the real token still works on the same ticket
     } finally {
       server.close();
@@ -250,7 +271,10 @@ describe("OAuth on the connect page (item 18)", () => {
       // Cross-site posts cannot start a sign-in either.
       expect((await post(base, NONCE1, "action=start", { "sec-fetch-site": "cross-site" })).status).toBe(403);
       // A stranger cannot start it.
-      expect((await post(base, NONCE1, "action=start", { "x-test-sub": "cf-other", "x-test-email": "other@else.example" })).status).toBe(403);
+      expect(
+        (await post(base, NONCE1, "action=start", { "x-test-sub": "cf-other", "x-test-email": "other@else.example" }))
+          .status,
+      ).toBe(403);
     } finally {
       server.close();
     }
@@ -287,11 +311,19 @@ describe("OAuth on the connect page (item 18)", () => {
       const auth = authUrlOf(await started.text());
       const state = new URL(auth).searchParams.get("state") as string;
       const nonce = "nonce-00000000000000000001";
-      expect((await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(state)}&code=c`, { headers: { "x-test-sub": "cf-other", "x-test-email": "other@else.example" } })).status).toBe(403);
+      expect(
+        (
+          await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(state)}&code=c`, {
+            headers: { "x-test-sub": "cf-other", "x-test-email": "other@else.example" },
+          })
+        ).status,
+      ).toBe(403);
       const wrong = await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(`${nonce}.nope`)}&code=c`);
       expect(wrong.status).toBe(502);
       expect(await wrong.text()).toContain("state does not match");
-      const denied = await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(state)}&error=access_denied&error_description=nope`);
+      const denied = await fetch(
+        `${base}${CALLBACK}?state=${encodeURIComponent(state)}&error=access_denied&error_description=nope`,
+      );
       expect(denied.status).toBe(502);
       expect(await denied.text()).toContain("access_denied");
       const badCode = await fetch(`${base}${CALLBACK}?state=${encodeURIComponent(state)}&code=never`);

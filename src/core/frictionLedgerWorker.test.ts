@@ -114,7 +114,11 @@ describe("buildFrictionLedger", () => {
 
   it("with a worker but no bearer → the file ledger and a warning naming the env var", () => {
     warnings.length = 0;
-    const l = buildFrictionLedger({ repo: "o/r", worker: { baseUrl: "https://state.example" } }, {}, { dataDir: "/tmp/x", warn });
+    const l = buildFrictionLedger(
+      { repo: "o/r", worker: { baseUrl: "https://state.example" } },
+      {},
+      { dataDir: "/tmp/x", warn },
+    );
     expect(l).toBeInstanceOf(FileFrictionLedger);
     expect(warnings[0]).toContain("MEMORY_TOKEN");
   });

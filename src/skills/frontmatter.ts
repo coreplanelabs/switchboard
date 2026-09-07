@@ -6,7 +6,7 @@ import type { Skill } from "./types.js";
 // use; we reuse the repo's existing `yaml` dependency (as config.ts does) so an
 // `agents: [review]` array parses cleanly.
 
-const FRONTMATTER_RE = /^﻿?---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+const FRONTMATTER_RE = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
 /** Parse a raw SKILL.md string into a Skill. Throws with a precise message when
  *  the frontmatter is missing or a required field is absent/mistyped — a
@@ -21,7 +21,9 @@ export function parseSkillMarkdown(raw: string): Skill {
   try {
     fm = YAML.parse(m[1]);
   } catch (err) {
-    throw new Error(`skill frontmatter is not valid YAML: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`skill frontmatter is not valid YAML: ${err instanceof Error ? err.message : String(err)}`, {
+      cause: err,
+    });
   }
   if (!fm || typeof fm !== "object" || Array.isArray(fm)) {
     throw new Error("skill frontmatter is not a YAML mapping");

@@ -44,7 +44,9 @@ export function loadBundledSkills(dir: string): Skill[] {
     try {
       skills.push(parseSkillMarkdown(readFileSync(file, "utf8")));
     } catch (err) {
-      throw new Error(`failed to load skill from ${file}: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(`failed to load skill from ${file}: ${err instanceof Error ? err.message : String(err)}`, {
+        cause: err,
+      });
     }
   }
   return skills;

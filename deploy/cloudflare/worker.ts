@@ -11,7 +11,13 @@
 // `cron` identity, so it becomes an ordinary run (#244).
 import { Container, getContainer } from "@cloudflare/containers";
 import { parseHealthz } from "../../src/deploy/liveGate.ts";
-import { authorizeRestart, decideRestart, parseRestartRequest, restartResponse, type RestartOutcome } from "../../src/deploy/restart.ts";
+import {
+  authorizeRestart,
+  decideRestart,
+  parseRestartRequest,
+  restartResponse,
+  type RestartOutcome,
+} from "../../src/deploy/restart.ts";
 import {
   interpretIngressResponse,
   isRunSchedule,
@@ -107,7 +113,11 @@ export class SwitchboardServer extends Container<Env> {
    *  pull + Slack connect) can exceed it. Already running → a no-op (the
    *  start options are not applied to a live container). */
   private startBot(): Promise<void> {
-    return this.startAndWaitForPorts(this.defaultPort, { portReadyTimeoutMS: 120_000 }, { envVars: containerEnv(this.env) });
+    return this.startAndWaitForPorts(
+      this.defaultPort,
+      { portReadyTimeoutMS: 120_000 },
+      { envVars: containerEnv(this.env) },
+    );
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -133,14 +143,18 @@ export class SwitchboardServer extends Container<Env> {
     if (!verdict.allow) return { kind: "refused", problems: verdict.problems };
     const inFlight = typeof body?.inFlight === "number" ? body.inFlight : 0;
     const previousStartedAt = typeof body?.startedAt === "string" ? body.startedAt : undefined;
-    console.log(`[restart] SIGTERM → container (started ${previousStartedAt ?? "unknown"}, ${inFlight} in flight${verdict.forced ? ", FORCED" : ""})`);
+    console.log(
+      `[restart] SIGTERM → container (started ${previousStartedAt ?? "unknown"}, ${inFlight} in flight${verdict.forced ? ", FORCED" : ""})`,
+    );
     await this.stop();
     return { kind: "stopping", forced: verdict.forced, inFlight, previousStartedAt };
   }
 
   override onStop(params: { exitCode: number; reason: string }): void {
     // The next fetch (cron keep-alive within a minute, or the CLI's poll) starts it again with the current env.
-    console.log(`[restart] container stopped (exit ${params.exitCode}, ${params.reason}) — restarts with the current env on the next request`);
+    console.log(
+      `[restart] container stopped (exit ${params.exitCode}, ${params.reason}) — restarts with the current env on the next request`,
+    );
   }
 }
 
@@ -149,7 +163,8 @@ export class SwitchboardServer extends Container<Env> {
  *  SWITCHBOARD_INGRESS_TOKENS bearer whose identity carries `deploy:write`).
  *  Body `{ "force": true }` bypasses the in-flight/draining refusal. */
 async function handleAdminRestart(request: Request, env: Env): Promise<Response> {
-  const json = (status: number, body: Record<string, unknown>) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const json = (status: number, body: Record<string, unknown>) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   if (request.method !== "POST") return json(405, { ok: false, error: "method not allowed: POST /admin/restart" });
   const auth = authorizeRestart(request.headers.get("authorization") ?? undefined, env.SWITCHBOARD_INGRESS_TOKENS);
   if (!auth.ok) {
@@ -169,7 +184,9 @@ async function handleAdminRestart(request: Request, env: Env): Promise<Response>
     console.error(`[restart] ${auth.subject} → error before stop: ${reason}`);
     return json(500, { ok: false, error: `restart failed before stopping anything: ${reason}` });
   }
-  console.log(`[restart] ${auth.subject} → ${outcome.kind}${outcome.kind === "refused" ? `: ${outcome.problems.join("; ")}` : ""}`);
+  console.log(
+    `[restart] ${auth.subject} → ${outcome.kind}${outcome.kind === "refused" ? `: ${outcome.problems.join("; ")}` : ""}`,
+  );
   const res = restartResponse(outcome);
   return json(res.status, res.body);
 }
@@ -204,7 +221,9 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const schedule = scheduleForCron(controller.cron, "bot");
     if (!schedule) {
-      console.error(`[schedule] cron "${controller.cron}" is not a bot schedule in the registry — nothing fired (wrangler.jsonc and src/core/schedules.ts have drifted)`);
+      console.error(
+        `[schedule] cron "${controller.cron}" is not a bot schedule in the registry — nothing fired (wrangler.jsonc and src/core/schedules.ts have drifted)`,
+      );
       return;
     }
     if (schedule.action.type === "healthz") {
@@ -213,7 +232,9 @@ export default {
       return;
     }
     if (!isRunSchedule(schedule)) {
-      console.error(`[schedule] ${schedule.name}: action "${schedule.action.type}" is not something the bot shim fires — nothing fired (the registry entry names the wrong worker)`);
+      console.error(
+        `[schedule] ${schedule.name}: action "${schedule.action.type}" is not something the bot shim fires — nothing fired (the registry entry names the wrong worker)`,
+      );
       return;
     }
 
@@ -221,7 +242,9 @@ export default {
     const plan = planScheduledFiring(schedule, env.SWITCHBOARD_INGRESS_TOKENS, firedAt);
     if (!plan.ok) {
       console.error(`[schedule] ${schedule.name}: not armed — ${plan.reason}; nothing ran`);
-      ctx.waitUntil(recordFiring(env, { schedule: schedule.name, firedAt, outcome: "misconfigured", detail: plan.reason }));
+      ctx.waitUntil(
+        recordFiring(env, { schedule: schedule.name, firedAt, outcome: "misconfigured", detail: plan.reason }),
+      );
       return;
     }
     let firing: ScheduleFiring;
@@ -235,10 +258,17 @@ export default {
       );
       firing = interpretIngressResponse(schedule, firedAt, res.status, await res.text().catch(() => ""));
     } catch (err) {
-      firing = { schedule: schedule.name, firedAt, outcome: "ingress-error", detail: `fetch failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300) };
+      firing = {
+        schedule: schedule.name,
+        firedAt,
+        outcome: "ingress-error",
+        detail: `fetch failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300),
+      };
     }
     // Ids, outcome, and the reply's first line only — never a token.
-    console.log(`[schedule] ${schedule.name} → ${firing.outcome}${firing.runId ? ` run ${firing.runId}` : ""}${firing.detail ? ` — ${firing.detail}` : ""}`);
+    console.log(
+      `[schedule] ${schedule.name} → ${firing.outcome}${firing.runId ? ` run ${firing.runId}` : ""}${firing.detail ? ` — ${firing.detail}` : ""}`,
+    );
     // Telemetry for the /runs Scheduled panel — best-effort and off the
     // invocation's critical path: the cron completes when the ingress answered,
     // not when the state Worker has acknowledged the record.

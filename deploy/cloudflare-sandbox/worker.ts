@@ -160,18 +160,16 @@ export default {
               ? Math.ceil(clampBashTimeout(requested) / 1000)
               : EXEC_TIMEOUT_SECS;
           const full = `${envPrefix}mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${String(body.command ?? "")}`;
-          return streamExec(
-            sandbox,
-            `timeout -k 10 ${execTimeoutSecs} bash -c ${shellQuote(full)}`,
-            execTimeoutSecs,
-          );
+          return streamExec(sandbox, `timeout -k 10 ${execTimeoutSecs} bash -c ${shellQuote(full)}`, execTimeoutSecs);
         }
         case "/read": {
           const file = await withSessionRecovery(sandbox, () => sandbox.readFile(abs(String(body.path ?? ""))));
           return json({ content: typeof file === "string" ? file : (file?.content ?? "") });
         }
         case "/write": {
-          await withSessionRecovery(sandbox, () => sandbox.writeFile(abs(String(body.path ?? "")), String(body.content ?? "")));
+          await withSessionRecovery(sandbox, () =>
+            sandbox.writeFile(abs(String(body.path ?? "")), String(body.content ?? "")),
+          );
           return json({ ok: true });
         }
         default:
@@ -189,7 +187,10 @@ export default {
  *  the result is known): a completed command as {stdout, stderr, exitCode},
  *  a sandbox-enforced timeout as exit 124, and any other failure as {error}. */
 function streamExec(
-  sandbox: { resetDefaultSession(): void | Promise<void>; exec(command: string): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> },
+  sandbox: {
+    resetDefaultSession(): void | Promise<void>;
+    exec(command: string): Promise<{ stdout?: string; stderr?: string; exitCode?: number }>;
+  },
   command: string,
   execTimeoutSecs: number,
 ): Response {

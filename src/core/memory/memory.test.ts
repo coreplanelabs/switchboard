@@ -49,9 +49,12 @@ describe("memoryContextBlock", () => {
   });
 
   it("renders the advisory block when enabled with matching records", async () => {
-    const seeded = new InMemoryMemoryStore([rec({ text: "prefers squashed history", keywords: ["squash", "history"] })], {
-      now: () => NOW,
-    });
+    const seeded = new InMemoryMemoryStore(
+      [rec({ text: "prefers squashed history", keywords: ["squash", "history"] })],
+      {
+        now: () => NOW,
+      },
+    );
     const block = await memoryContextBlock({ enabled: true }, seeded, "squash history please");
     expect(block).toBeDefined();
     expect(block!.split("\n")[0]).toBe(
@@ -84,21 +87,50 @@ describe("memoryContextBlock — reads are not policy-gated (authorization R11)"
     const store = new InMemoryMemoryStore(
       [
         rec({ id: "mem:org:coreplanelabs:1", text: "deploy is npm run deploy", keywords: ["deploy"] }),
-        rec({ id: "mem:channel:slack:C1:0", scopeKey: "channel:slack:C1", text: "this channel is for deploy coordination", keywords: ["deploy"] }),
-        rec({ id: "mem:user:slack:U1:0", scopeKey: "user:slack:U1", text: "prefers deploy previews", keywords: ["deploy"] }),
-        rec({ id: "mem:repo:acme/api:0", scopeKey: "repo:acme/api", text: "acme/api deploys via make release", keywords: ["deploy"] }),
+        rec({
+          id: "mem:channel:slack:C1:0",
+          scopeKey: "channel:slack:C1",
+          text: "this channel is for deploy coordination",
+          keywords: ["deploy"],
+        }),
+        rec({
+          id: "mem:user:slack:U1:0",
+          scopeKey: "user:slack:U1",
+          text: "prefers deploy previews",
+          keywords: ["deploy"],
+        }),
+        rec({
+          id: "mem:repo:acme/api:0",
+          scopeKey: "repo:acme/api",
+          text: "acme/api deploys via make release",
+          keywords: ["deploy"],
+        }),
       ],
       { now: () => NOW },
     );
     vi.mocked(authorize).mockClear();
-    const block = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", { channelId: "slack:C1", repo: "acme/api" });
+    const block = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", {
+      channelId: "slack:C1",
+      repo: "acme/api",
+    });
     expect(block).toContain("org:coreplanelabs + repo:acme/api + channel:slack:C1 + user:slack:U1");
     expect(vi.mocked(authorize)).not.toHaveBeenCalled();
 
     const provider: Provider = {
       name: "fake",
       async complete() {
-        return { content: [{ type: "text", text: JSON.stringify({ facts: [{ text: "the deploy command is npm run deploy", confidence: 0.9 }], summary: "" }) }], stopReason: "end_turn" };
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                facts: [{ text: "the deploy command is npm run deploy", confidence: 0.9 }],
+                summary: "",
+              }),
+            },
+          ],
+          stopReason: "end_turn",
+        };
       },
     };
     await reflect({
@@ -113,24 +145,52 @@ describe("memoryContextBlock — reads are not policy-gated (authorization R11)"
       answer: "npm run deploy",
       sourceThreadKey: "slack:C1:1.0",
     });
-    expect(vi.mocked(authorize)).toHaveBeenCalledWith(expect.objectContaining({ id: "slack:U1" }), "memory:write", expect.objectContaining({ type: "memory-scope", kind: "org", originChannelVisibility: "public" }));
+    expect(vi.mocked(authorize)).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "slack:U1" }),
+      "memory:write",
+      expect.objectContaining({ type: "memory-scope", kind: "org", originChannelVisibility: "public" }),
+    );
   });
 });
 
 describe("memoryContextBlock — repo + channel scopes (#253)", () => {
   const orgRec = rec({ id: "mem:org:coreplanelabs:1", text: "deploy is npm run deploy", keywords: ["deploy"] });
-  const repoRec = rec({ id: "mem:repo:acme/api:0", scopeKey: "repo:acme/api", text: "acme/api deploys via make release", keywords: ["deploy", "release"] });
-  const chanRec = rec({ id: "mem:channel:slack:C1:0", scopeKey: "channel:slack:C1", text: "this channel is for deploy coordination", keywords: ["deploy", "channel"] });
-  const otherChan = rec({ id: "mem:channel:slack:C2:0", scopeKey: "channel:slack:C2", text: "deploy chatter for team two", keywords: ["deploy"] });
-  const u1Rec = rec({ id: "mem:user:slack:U1:0", scopeKey: "user:slack:U1", text: "prefers deploy previews", keywords: ["deploy", "preview"] });
+  const repoRec = rec({
+    id: "mem:repo:acme/api:0",
+    scopeKey: "repo:acme/api",
+    text: "acme/api deploys via make release",
+    keywords: ["deploy", "release"],
+  });
+  const chanRec = rec({
+    id: "mem:channel:slack:C1:0",
+    scopeKey: "channel:slack:C1",
+    text: "this channel is for deploy coordination",
+    keywords: ["deploy", "channel"],
+  });
+  const otherChan = rec({
+    id: "mem:channel:slack:C2:0",
+    scopeKey: "channel:slack:C2",
+    text: "deploy chatter for team two",
+    keywords: ["deploy"],
+  });
+  const u1Rec = rec({
+    id: "mem:user:slack:U1:0",
+    scopeKey: "user:slack:U1",
+    text: "prefers deploy previews",
+    keywords: ["deploy", "preview"],
+  });
 
   it("reads org + repo + channel + user and names all four in the prefix, in that order", async () => {
     const store = new InMemoryMemoryStore([orgRec, repoRec, chanRec, otherChan, u1Rec], { now: () => NOW });
-    const block = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", { channelId: "slack:C1", repo: "acme/api" });
+    const block = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", {
+      channelId: "slack:C1",
+      repo: "acme/api",
+    });
     expect(block!.split("\n")[0]).toBe(
       "Background memory for org:coreplanelabs + repo:acme/api + channel:slack:C1 + user:slack:U1 (may be outdated — verify before acting):",
     );
-    for (const t of ["deploy is npm run deploy", "make release", "deploy coordination", "prefers deploy previews"]) expect(block).toContain(t);
+    for (const t of ["deploy is npm run deploy", "make release", "deploy coordination", "prefers deploy previews"])
+      expect(block).toContain(t);
     expect(block).not.toContain("team two"); // another channel's scope is never read
   });
 
@@ -144,9 +204,13 @@ describe("memoryContextBlock — repo + channel scopes (#253)", () => {
 
   it("a repo promise that resolves to nothing (no repo bound) or rejects leaves the repo scope out, without failing the read", async () => {
     const store = new InMemoryMemoryStore([orgRec, repoRec], { now: () => NOW });
-    const none = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", { repo: Promise.resolve(undefined) });
+    const none = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", {
+      repo: Promise.resolve(undefined),
+    });
     expect(none).not.toContain("make release");
-    const failed = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", { repo: Promise.reject(new Error("github down")) });
+    const failed = await memoryContextBlock({ enabled: true }, store, "deploy", "slack:U1", {
+      repo: Promise.reject(new Error("github down")),
+    });
     expect(failed).toContain("deploy is npm run deploy");
     expect(failed).not.toContain("make release");
   });
@@ -193,7 +257,9 @@ describe("memoryContextBlock — user scope (#107 PR B)", () => {
   it("without a user id reads org only (no user bucket is touched)", async () => {
     const store = new InMemoryMemoryStore([orgRec, u1Rec], { now: () => NOW });
     const block = await memoryContextBlock({ enabled: true }, store, "deploy");
-    expect(block!.split("\n")[0]).toBe("Background memory for org:coreplanelabs (may be outdated — verify before acting):");
+    expect(block!.split("\n")[0]).toBe(
+      "Background memory for org:coreplanelabs (may be outdated — verify before acting):",
+    );
     expect(block).not.toContain("prefers deploy previews");
   });
 
@@ -201,7 +267,12 @@ describe("memoryContextBlock — user scope (#107 PR B)", () => {
     const seed = [
       ...Array.from({ length: 5 }, (_, i) => rec({ id: `o${i}`, text: `deploy org note ${i}`, keywords: ["deploy"] })),
       ...Array.from({ length: 5 }, (_, i) =>
-        rec({ id: `u${i}`, scopeKey: "user:slack:U1", text: `deploy preview user note ${i}`, keywords: ["deploy", "preview"] }),
+        rec({
+          id: `u${i}`,
+          scopeKey: "user:slack:U1",
+          text: `deploy preview user note ${i}`,
+          keywords: ["deploy", "preview"],
+        }),
       ),
     ];
     const store = new InMemoryMemoryStore(seed, { now: () => NOW });

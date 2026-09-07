@@ -196,7 +196,12 @@ describe("ResidentDetailPage", () => {
     expect(w.text()).toContain("provision-failed at clone: fatal: could not read Username");
     expect(w.text()).toContain("clone failed");
     expect(w.find('[data-tone="red"]').exists()).toBe(true);
-    expect(w.findAll("a").map((a) => a.attributes("href")).join(" ")).not.toContain("/commit/");
+    expect(
+      w
+        .findAll("a")
+        .map((a) => a.attributes("href"))
+        .join(" "),
+    ).not.toContain("/commit/");
     expect(w.text()).toContain("no snapshot");
   });
 
@@ -224,16 +229,28 @@ describe("ResidentDetailPage", () => {
   });
 
   it("says so when a resident has no thread worktrees, and never links a non-hex sha", () => {
-    expect(mountApp(ResidentDetailPage, { seed: detailSeed(DOWN, "coreplanelabs/switchboard") }).text()).toContain("no thread worktrees");
-    const hostile = { ...WARM, live: { ...WARM.live, threads: [{ threadKey: "<b>x</b>", ref: "<i>r</i>", sha: "zz", lastAttachAt: "t" }] } };
+    expect(mountApp(ResidentDetailPage, { seed: detailSeed(DOWN, "coreplanelabs/switchboard") }).text()).toContain(
+      "no thread worktrees",
+    );
+    const hostile = {
+      ...WARM,
+      live: { ...WARM.live, threads: [{ threadKey: "<b>x</b>", ref: "<i>r</i>", sha: "zz", lastAttachAt: "t" }] },
+    };
     const w = mountApp(ResidentDetailPage, { seed: detailSeed(hostile) });
     expect(w.find("table b").exists()).toBe(false);
     expect(w.text()).toContain("<b>x</b>");
-    expect(w.findAll("a").map((x) => x.attributes("href")).join(" ")).not.toContain("/commit/zz");
+    expect(
+      w
+        .findAll("a")
+        .map((x) => x.attributes("href"))
+        .join(" "),
+    ).not.toContain("/commit/zz");
   });
 
   it("shows the resident's live-view error when the registry record has no reachable engine", () => {
-    const w = mountApp(ResidentDetailPage, { seed: detailSeed({ ...DOWN, live: { error: "DO unreachable" } }, "coreplanelabs/switchboard") });
+    const w = mountApp(ResidentDetailPage, {
+      seed: detailSeed({ ...DOWN, live: { error: "DO unreachable" } }, "coreplanelabs/switchboard"),
+    });
     expect(w.text()).toContain("DO unreachable");
     expect(w.find('[data-tone="grey"]').exists()).toBe(true);
     expect(w.text()).toContain("unreachable");
@@ -247,7 +264,9 @@ describe("ResidentDetailPage", () => {
     // reserve = 0.6 × (mirror + deps + checkout) + max(1 GiB, 5 %) = 0.6 × 2.94 GiB + 1 GiB
     expect(t).toMatch(/reserve\s*2\.76 GiB \(snapshot staging 1\.76 GiB \+ floor 1\.00 GiB\)/);
     // headroom = 10.3 − 2.76 = 7.5 GiB → 17 hardlinked (0.44 GiB each) or 2 deps-installing (2.58 GiB each)
-    expect(t).toMatch(/headroom\s*7\.5\d GiB — room for 17 more \(0\.44 GiB each\) hardlinked trees, 2 more \(2\.58 GiB each\) deps-installing/);
+    expect(t).toMatch(
+      /headroom\s*7\.5\d GiB — room for 17 more \(0\.44 GiB each\) hardlinked trees, 2 more \(2\.58 GiB each\) deps-installing/,
+    );
     expect(t).toContain("2026-09-07T15:30:00.000Z");
     expect(t).toMatch(/mirror\s*0\.35 GiB/);
     expect(t).toMatch(/checkout deps \(node_modules\)\s*2\.14 GiB/);
@@ -263,7 +282,10 @@ describe("ResidentDetailPage", () => {
     // cap 8 GiB − used 4.06 GiB = 3.94 GiB free under the cap
     expect(capped).toContain("3.94 GiB under the 8.00 GiB diskBudgetMb cap");
     expect(mountApp(ResidentDetailPage, { seed: detailSeed(WARM) }).text()).toContain("not measured yet");
-    const broken = { ...WARM, live: { ...WARM.live, disk: { totalKiB: "lots", usedKiB: -1, freeKiB: null, parts: "<b>x</b>" } } };
+    const broken = {
+      ...WARM,
+      live: { ...WARM.live, disk: { totalKiB: "lots", usedKiB: -1, freeKiB: null, parts: "<b>x</b>" } },
+    };
     const bw = mountApp(ResidentDetailPage, { seed: detailSeed(broken) });
     expect(bw.text()).toContain("not measured yet");
     expect(bw.text()).not.toContain("NaN");

@@ -23,14 +23,24 @@ describe("catch-up status record (in-process, live-only)", () => {
 
   it("records the last outcome — a successful scan has no error", () => {
     recordCatchUpOutcome({ at: 1_788_040_800_000, channels: 3, missed: 1, skippedChannels: 0 });
-    expect(getCatchUpStatus()).toEqual({ lastRunAt: "2026-08-29T22:00:00.000Z", channels: 3, missed: 1, skippedChannels: 0 });
+    expect(getCatchUpStatus()).toEqual({
+      lastRunAt: "2026-08-29T22:00:00.000Z",
+      channels: 3,
+      missed: 1,
+      skippedChannels: 0,
+    });
   });
 
   it("records a whole-scan failure as `error` and clears it on the next clean run", () => {
     recordCatchUpOutcome({ at: 1_788_040_800_000, channels: 0, missed: 0, skippedChannels: 0, error: "missing_scope" });
     expect(getCatchUpStatus().error).toBe("missing_scope");
     recordCatchUpOutcome({ at: 1_788_040_860_000, channels: 2, missed: 0, skippedChannels: 1 });
-    expect(getCatchUpStatus()).toEqual({ lastRunAt: "2026-08-29T22:01:00.000Z", channels: 2, missed: 0, skippedChannels: 1 });
+    expect(getCatchUpStatus()).toEqual({
+      lastRunAt: "2026-08-29T22:01:00.000Z",
+      channels: 2,
+      missed: 0,
+      skippedChannels: 1,
+    });
   });
 
   it("keeps missingScopes across outcomes (the scope check runs once, at startup)", () => {
