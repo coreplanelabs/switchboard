@@ -13,6 +13,6 @@
     "tail": "wrangler tail switchboard-docs"
   },
   "devDependencies": {
-    "wrangler": "^4.120.1"
+    "wrangler": "^4.129.0"
   }
 }
