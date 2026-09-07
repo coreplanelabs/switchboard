@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AffectedReport } from "./affected.js";
 import {
   BOT_HEALTH_URL,
+  capabilityProblem,
   classifyDeployOutput,
   decideAccount,
   DEPLOY_ORDER,
@@ -250,6 +251,51 @@ describe("planDeploy", () => {
     );
     expect(formatPlan(nothing)).toContain("Steps: none — nothing to deploy");
     expect(plan().affected).toBeUndefined();
+  });
+});
+
+describe("capabilityProblem", () => {
+  it("every Worker with an image needs the Containers scope (containers list) — bot, sandbox AND resident, which also needs R2 (r2 bucket list); the memory Worker nothing; the plan carries each step's checks", () => {
+    const byName = Object.fromEntries(WORKERS.map((w) => [w.name, w]));
+    const containers = { command: ["wrangler", "containers", "list", "--json"], needs: "Containers: Edit" };
+    expect(byName.memory.capabilities).toBeUndefined();
+    expect(byName.bot.capabilities).toEqual([containers]);
+    expect(byName.sandbox.capabilities).toEqual([containers]);
+    // The resident carries its own Containers check: an --affected release can select it without the bot.
+    expect(byName.resident.capabilities).toEqual([
+      containers,
+      { command: ["wrangler", "r2", "bucket", "list"], needs: "Workers R2 Storage: Edit" },
+    ]);
+    const p = plan();
+    expect(p.steps.find((s) => s.name === "resident")!.capabilities).toEqual(byName.resident.capabilities);
+    expect(p.steps.find((s) => s.name === "memory")!.capabilities).toEqual([]);
+    expect(formatPlan(p)).toContain(
+      "credential must pass `wrangler containers list --json` (Containers: Edit) and `wrangler r2 bucket list` (Workers R2 Storage: Edit)",
+    );
+  });
+
+  it("a failing check is a problem naming the Worker, the scope and wrangler's own [ERROR] lines — ANSI stripped, npm noise dropped; a passing check or a step without one is silent", () => {
+    const bot = WORKERS.find((w) => w.name === "bot")!;
+    const wranglerOut = [
+      "",
+      " ⛅️ wrangler 4.120.1",
+      "───────────────────",
+      "\x1b[31m✘ [ERROR] A request to the Cloudflare API (/accounts/3c7b28f2/containers/applications) failed.\x1b[0m",
+      "",
+      "  Authentication error [code: 10000]",
+      "npm ERR! code 1",
+    ].join("\n");
+    const containers = bot.capabilities![0];
+    const problem = capabilityProblem("bot", containers, 1, wranglerOut);
+    expect(problem).toBe(
+      "bot: the credential cannot `wrangler containers list --json` — its deploy needs Containers: Edit; grant it on the token, or deploy with a login that has it. wrangler said: ✘ [ERROR] A request to the Cloudflare API (/accounts/3c7b28f2/containers/applications) failed. | Authentication error [code: 10000]",
+    );
+    expect(problem).not.toContain("\x1b");
+    expect(problem).not.toContain("npm ERR");
+    expect(capabilityProblem("bot", containers, 0, wranglerOut)).toBeUndefined();
+    // No error-shaped line: the last lines are kept; no output at all: the exit code is the message.
+    expect(capabilityProblem("bot", containers, 2, "a\nb\nc\nd")).toContain("wrangler said: b | c | d");
+    expect(capabilityProblem("bot", containers, 2, "")).toContain("wrangler said: exit 2, no output");
   });
 });
 

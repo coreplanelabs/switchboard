@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { APP_NAME, catchUpWarnings, decide } from "./preflight.mjs";
+import { APP_NAME, catchUpWarnings, decide, wranglerFailureText } from "./preflight.mjs";
+
+describe("bot deploy preflight — wranglerFailureText()", () => {
+  it("keeps wrangler's own [ERROR] lines from STDOUT (where wrangler prints them), ANSI stripped, npm noise dropped, with the exit code", () => {
+    const stdout = [
+      " ⛅️ wrangler 4.120.1",
+      "\x1b[31m✘ [ERROR] A request to the Cloudflare API (/accounts/3c7b28f2/containers/applications) failed.\x1b[0m",
+      "",
+      "  Authentication error [code: 10000]",
+    ].join("\n");
+    expect(wranglerFailureText({ code: 1 }, stdout, "npm ERR! code 1\n")).toBe(
+      "exit 1: ✘ [ERROR] A request to the Cloudflare API (/accounts/3c7b28f2/containers/applications) failed. | Authentication error [code: 10000]",
+    );
+  });
+
+  it("falls back to the last lines of either stream, then to the exit alone; a timeout kill says so", () => {
+    expect(wranglerFailureText({ code: 2 }, "one\ntwo\nthree\nfour", "")).toBe("exit 2: two | three | four");
+    expect(wranglerFailureText({ code: 2 }, "", "   ")).toBe("exit 2, no output");
+    expect(wranglerFailureText({ killed: true }, "", "")).toBe("killed (timeout?), no output");
+  });
+});
 
 // Feature: features/slack-channel.md item 8 — the bot deploy preflight. Live
 // 2026-08-29: two `wrangler deploy`s 90 s apart (23:49:45Z, 23:51:15Z) landed on

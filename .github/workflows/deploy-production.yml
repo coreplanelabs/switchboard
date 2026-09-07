@@ -6,9 +6,18 @@
 # release changed roll (judged per Worker against the commit it is serving).
 #
 # Secrets (repository secrets, set once by a maintainer — never by code):
-#   CLOUDFLARE_API_TOKEN  wrangler's credential on the coreplane-infra account
-#                         (Workers Scripts, Containers, Durable Objects, R2,
-#                         and the zone's Workers Routes for the custom domains)
+#   CLOUDFLARE_DEPLOY_TOKEN  wrangler's credential for the four runtime Workers on
+#                         the coreplane-infra account. Its own token, distinct
+#                         from the docs job's: Account → Workers Scripts: Edit,
+#                         Containers: Edit, Workers R2 Storage: Edit, Account
+#                         Settings: Read; Zone coreplanelabs.dev → Workers
+#                         Routes: Edit, DNS: Edit (the custom domains). The
+#                         v0.2.1 deploy (run 34162851123) proved a token without
+#                         the Containers scope deploys the memory Worker and then
+#                         can never pass the bot's preflight; `deploy all` now
+#                         checks these capabilities before any Worker deploys.
+#   CLOUDFLARE_API_TOKEN  fallback while CLOUDFLARE_DEPLOY_TOKEN is unset (the
+#                         docs Worker's narrower token)
 #   RESIDENT_READ_TOKEN   the resident preflight reads GET /residents with it;
 #                         read scope is enough (any of the three bearers works)
 #   SANDBOX_TOKEN         optional: lets --affected read the sandbox's live
@@ -59,7 +68,9 @@ jobs:
     # (15 min) plus cold start, with room for the image builds.
     timeout-minutes: 120
     env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # wrangler reads CLOUDFLARE_API_TOKEN; it is the deploy token when one exists.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+      DEPLOY_TOKEN_SOURCE: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN && 'CLOUDFLARE_DEPLOY_TOKEN' || 'CLOUDFLARE_API_TOKEN (the docs token — fallback)' }}
       RESIDENT_READ_TOKEN: ${{ secrets.RESIDENT_READ_TOKEN }}
       SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
       WRANGLER_SEND_METRICS: "false"
@@ -84,7 +95,9 @@ jobs:
       - run: npm ci
       - name: the credentials this run has
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "::error::CLOUDFLARE_API_TOKEN is not set — add it as a repository secret (see the header of this workflow)"; exit 1; fi
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "::error::no Cloudflare token — add CLOUDFLARE_DEPLOY_TOKEN as a repository secret (see the header of this workflow)"; exit 1; fi
+          echo "Cloudflare credential: $DEPLOY_TOKEN_SOURCE"
+          if [ "${DEPLOY_TOKEN_SOURCE#CLOUDFLARE_API_TOKEN}" != "$DEPLOY_TOKEN_SOURCE" ]; then echo "::warning::deploying with the docs Worker's token — it may lack the Containers/R2 scopes; deploy all checks before touching a Worker"; fi
           if [ -z "$RESIDENT_READ_TOKEN" ]; then echo "::warning::RESIDENT_READ_TOKEN is not set — a resident step would be refused before anything deploys"; fi
           if [ -z "$SANDBOX_TOKEN" ]; then echo "::notice::SANDBOX_TOKEN is not set — the sandbox is judged against the last release tag, not what it serves"; fi
       - name: the selection

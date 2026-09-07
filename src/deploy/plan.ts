@@ -54,6 +54,19 @@ export interface EnvRequirement {
   anyOf: readonly string[];
 }
 
+/** A read-only wrangler command that succeeds only when the credential has the
+ *  scope this Worker's deploy needs — run BEFORE any Worker deploys, so a token
+ *  that can deploy the memory Worker but not push the bot's image is refused at
+ *  the top with wrangler's own words, not after step one (v0.2.1, run
+ *  34162851123: the docs Worker's token lacked the Containers scope and the bot
+ *  preflight refused for 22 minutes with the cause truncated away). */
+export interface CapabilityCheck {
+  /** argv after `npx`, run in the Worker's dir so wrangler.jsonc picks the account. */
+  command: readonly string[];
+  /** The scope, named the way the Cloudflare dashboard names it. */
+  needs: string;
+}
+
 export interface WorkerDef {
   name: WorkerName;
   /** The Cloudflare Worker script name (what `wrangler deployments list` shows). */
@@ -77,11 +90,20 @@ export interface WorkerDef {
   liveGate?: { healthUrl: string };
   /** Env the step needs present (the runner fails fast when a requirement has none of its alternatives). */
   requiredEnv?: readonly EnvRequirement[];
+  /** The credential capabilities this Worker's deploy needs beyond Workers Scripts: Edit — each one checked before any Worker deploys. */
+  capabilities?: readonly CapabilityCheck[];
   why: string;
 }
 
 /** The three bearer scopes the resident preflight accepts (deploy/cloudflare-resident/preflight.mjs `TOKEN_ENV_VARS`); read is enough. */
 export const RESIDENT_BEARER_ENVS = ["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"] as const;
+
+/** Every Worker with a container image needs this: the bot's preflight reads the
+ *  application with it, and `wrangler deploy` pushes the image with it. */
+export const CONTAINERS_CAPABILITY: CapabilityCheck = {
+  command: ["wrangler", "containers", "list", "--json"],
+  needs: "Containers: Edit",
+};
 
 /** Canonical order. Never reorder without updating README + AGENTS.md. */
 export const WORKERS: readonly WorkerDef[] = [
@@ -131,6 +153,8 @@ export const WORKERS: readonly WorkerDef[] = [
     },
     preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: BOT_HEALTH_URL },
     liveGate: { healthUrl: BOT_HEALTH_URL },
+    // The preflight reads the container application and the deploy pushes the image: both need Containers.
+    capabilities: [CONTAINERS_CAPABILITY],
     why: "container shim — preflight refuses while runs are in flight; done only when the new container is live. A rotated bot secret needs no build: `wrangler secret put` alone leaves the running container on its old env — `deploy restart` restarts it on the current env",
   },
   {
@@ -145,6 +169,13 @@ export const WORKERS: readonly WorkerDef[] = [
     },
     preflight: { forceEnv: "RESIDENT_DEPLOY_FORCE" },
     requiredEnv: [{ anyOf: RESIDENT_BEARER_ENVS }],
+    // A container image like the bot's — checked here too, since an --affected
+    // release can select the resident without the bot — plus the BACKUP_BUCKET
+    // R2 binding wrangler validates on deploy.
+    capabilities: [
+      CONTAINERS_CAPABILITY,
+      { command: ["wrangler", "r2", "bucket", "list"], needs: "Workers R2 Storage: Edit" },
+    ],
     why: "per-repo DOs — preflight refuses while a resident has work in flight",
   },
   {
@@ -158,6 +189,8 @@ export const WORKERS: readonly WorkerDef[] = [
       paths: ["deploy/cloudflare-sandbox/"],
       lockfile: [{ workspace: "deploy/cloudflare-sandbox", includeDev: false }],
     },
+    // Its image needs Containers too.
+    capabilities: [CONTAINERS_CAPABILITY],
     why: "per-thread exec proxy — stateless per run",
   },
 ];
@@ -185,6 +218,8 @@ export interface DeployStep {
   /** Force env for a preflighted step when --force; empty otherwise. */
   setEnv: Record<string, string>;
   requiredEnv: readonly EnvRequirement[];
+  /** The read-only wrangler commands the pre-checks run to prove the credential can deploy this step. */
+  capabilities: readonly CapabilityCheck[];
   /** A "preflight REFUSED" exit is waited out and retried (never for forced or unpreflighted steps). */
   retryOnPreflightRefusal: boolean;
   /** `/healthz` to read for the wait heartbeat (preflighted steps with a health URL). */
@@ -235,6 +270,7 @@ export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe): Deploy
     unsetEnv: UNSET_ENV,
     setEnv: opts.force && w.preflight ? { [w.preflight.forceEnv]: "1" } : {},
     requiredEnv: w.requiredEnv ?? [],
+    capabilities: w.capabilities ?? [],
     retryOnPreflightRefusal: !!w.preflight && !opts.force,
     ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
     ...(w.liveGate ? { liveGate: w.liveGate } : {}),
@@ -289,12 +325,52 @@ export function formatPlan(plan: DeployPlan): string {
     const live = s.liveGate
       ? ` — then wait until live (${s.liveGate.healthUrl} not draining + build.commit == HEAD)`
       : "";
+    const cap =
+      s.capabilities.length > 0
+        ? ` — credential must pass ${s.capabilities.map((c) => `\`${c.command.join(" ")}\` (${c.needs})`).join(" and ")}`
+        : "";
     lines.push(
-      `  ${i + 1}. ${s.name} (${s.script}) — ${s.dir}: ${s.command.join(" ")}${pf}${env}${live}\n     ${s.why}`,
+      `  ${i + 1}. ${s.name} (${s.script}) — ${s.dir}: ${s.command.join(" ")}${pf}${env}${cap}${live}\n     ${s.why}`,
     );
   });
   if (plan.dryRun) lines.push("(dry run — nothing executed)");
   return lines.join("\n");
+}
+
+/** ANSI colour sequences (ESC `[` … `m`), built from the code point so the regex literal carries no control character. */
+const ANSI_SEQUENCE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+
+/** The last non-empty lines of a command's output, ANSI-stripped, wrangler's own
+ *  `✘ [ERROR]` lines preferred — the words an operator needs to fix a credential.
+ *  (deploy/cloudflare/preflight.mjs `wranglerFailureText` is the same idea on the
+ *  plain-Node side of the boundary; the two are pinned by their own tests.) */
+export function lastErrorLines(output: string, maxLines = 3): string {
+  const lines = output
+    .split("\n")
+    .map((l) => l.replace(ANSI_SEQUENCE, "").trim())
+    .filter((l) => l.length > 0 && !/^npm (ERR|WARN|warn)/i.test(l));
+  const errorish = lines.filter((l) =>
+    /\[ERROR\]|✘|error|Authentication|Unauthorized|not authorized|permission/i.test(l),
+  );
+  return (errorish.length > 0 ? errorish : lines).slice(-maxLines).join(" | ");
+}
+
+/**
+ * The capability pre-check's verdict for one planned step, pure: a non-zero
+ * exit of the step's read-only wrangler command means the credential cannot
+ * do what this Worker's deploy will need, and the problem names the scope and
+ * keeps wrangler's words. `undefined` when the step needs no capability or the
+ * command succeeded.
+ */
+export function capabilityProblem(
+  stepName: WorkerName,
+  check: CapabilityCheck,
+  exitCode: number,
+  output: string,
+): string | undefined {
+  if (exitCode === 0) return undefined;
+  const said = lastErrorLines(output) || `exit ${exitCode}, no output`;
+  return `${stepName}: the credential cannot \`${check.command.join(" ")}\` — its deploy needs ${check.needs}; grant it on the token, or deploy with a login that has it. wrangler said: ${said}`;
 }
 
 /** Cloudflare's per-account token check: `GET /accounts/<id>/tokens/verify` → `{ result: { status } }`. */
