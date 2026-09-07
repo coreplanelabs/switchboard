@@ -24,6 +24,7 @@ import { WEB_HTML_HEADERS } from "./webShell.js";
 export {
   residentLive,
   residentSlug,
+  residentsFleetTone,
   residentStateTone,
   type ResidentListing,
   type ResidentRecordView,

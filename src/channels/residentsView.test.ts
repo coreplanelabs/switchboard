@@ -3,6 +3,7 @@ import type { ResidentAdminClient, ResidentAdminResponse } from "../core/residen
 import {
   createResidentsViewHandler,
   parseResidentsRoute,
+  residentsFleetTone,
   residentStateTone,
   type ResidentListing,
 } from "./residentsView.js";
@@ -124,6 +125,26 @@ describe("residentStateTone", () => {
     expect(residentStateTone("degraded")).toBe("red");
     expect(residentStateTone("down")).toBe("red");
     expect(residentStateTone("whatever")).toBe("grey");
+  });
+});
+
+describe("residentsFleetTone", () => {
+  const at = (state: string) => ({ resource: `repo:o/${state}`, live: { state } });
+  it("is the worst resident's tone: red beats amber beats everything else", () => {
+    expect(residentsFleetTone([at("warm"), at("refreshing"), at("down")])).toBe("red");
+    expect(residentsFleetTone([at("degraded"), at("whatever")])).toBe("red");
+    expect(residentsFleetTone([at("warm"), at("onboarding"), at("warm")])).toBe("amber");
+    expect(residentsFleetTone([at("restoring"), at("whatever")])).toBe("amber");
+  });
+  it("is green only when every resident is warm", () => {
+    expect(residentsFleetTone([at("warm"), at("warm"), at("warm")])).toBe("green");
+    expect(residentsFleetTone([at("warm")])).toBe("green");
+  });
+  it("is grey with no residents, and when a resident is unknown or unreachable with nothing worse to show", () => {
+    expect(residentsFleetTone([])).toBe("grey");
+    expect(residentsFleetTone([at("warm"), at("whatever")])).toBe("grey");
+    expect(residentsFleetTone([at("warm"), { resource: "repo:o/x", live: { error: "DO unreachable" } }])).toBe("grey");
+    expect(residentsFleetTone([at("warm"), "not a record" as never])).toBe("grey");
   });
 });
 

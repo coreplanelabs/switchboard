@@ -49,6 +49,19 @@ export function residentStateTone(state: string): ResidentTone {
   }
 }
 
+/** The fleet's one-word health — what the residents index tab's favicon dot
+ *  says. Worst-of, in severity order: any red resident → red; else any amber →
+ *  amber; else green only when every resident is warm; anything else — no
+ *  residents, or an unknown/unreachable one with nothing worse to show — is
+ *  grey ("no claim"), never green: a fleet is only "all up" when all of it is. */
+export function residentsFleetTone(records: readonly ResidentRecordView[]): ResidentTone {
+  if (records.length === 0) return "grey";
+  const tones = new Set(records.map((record) => residentStateTone(residentLive(rec(record)).state)));
+  if (tones.has("red")) return "red";
+  if (tones.has("amber")) return "amber";
+  return tones.size === 1 && tones.has("green") ? "green" : "grey";
+}
+
 export const str = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
 export const rec = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" ? (v as Record<string, unknown>) : {};

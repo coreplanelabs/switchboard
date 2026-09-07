@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { FORM_PAGE_CSP, PAGE_CSP, renderShell, WEB_HTML_HEADERS, type ShellAssets } from "./webShell.js";
 import { serializeSeed, SEED_ELEMENT_ID, type WebSeed } from "./webSeed.js";
-import { FAVICON_DEFAULT, FAVICON_IDLE } from "./favicon.js";
+import { FAVICON_BAD, FAVICON_DEFAULT, FAVICON_IDLE, FAVICON_LIVE, FAVICON_WARN } from "./favicon.js";
 
 const assets: ShellAssets = { js: "/assets/main-AbC123.js", css: ["/assets/main-DeF456.css"] };
 const seed: WebSeed = { page: "runNotFound", retentionDays: 14 };
@@ -99,5 +99,18 @@ describe("renderShell", () => {
       expect(renderShell("x", other, assets)).toContain(`<link rel="icon" id="favicon" href="${FAVICON_DEFAULT}" />`);
     }
     expect(FAVICON_DEFAULT).not.toBe(FAVICON_IDLE);
+  });
+
+  it("the residents index wears the fleet's worst dot from the seed: red over amber over green, grey when empty or unknown", () => {
+    const at = (state: string) => ({ resource: `repo:o/${state}`, live: { state } });
+    const shell = (residents: unknown[]) =>
+      renderShell("Residents", { page: "residents", cap: 5, count: residents.length, residents } as WebSeed, assets);
+    const icon = (href: string) => `<link rel="icon" id="favicon" href="${href}" />`;
+    expect(shell([at("warm"), at("warm")])).toContain(icon(FAVICON_LIVE));
+    expect(shell([at("warm"), at("refreshing")])).toContain(icon(FAVICON_WARN));
+    expect(shell([at("warm"), at("refreshing"), at("down")])).toContain(icon(FAVICON_BAD));
+    expect(shell([])).toContain(icon(FAVICON_IDLE));
+    expect(shell([at("warm"), { resource: "repo:o/x", live: { error: "unreachable" } }])).toContain(icon(FAVICON_IDLE));
+    expect(new Set([FAVICON_LIVE, FAVICON_WARN, FAVICON_BAD, FAVICON_IDLE, FAVICON_DEFAULT]).size).toBe(5);
   });
 });
