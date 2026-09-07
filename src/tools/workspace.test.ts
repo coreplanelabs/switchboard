@@ -10,7 +10,7 @@ import {
   type ToolContext,
 } from "./workspace.js";
 
-// Feature: features/validated-review.md (R14). The diff_digest tool is a thin
+// Feature: features/distilled-diffs.md (R14). The diff_digest tool is a thin
 // wrapper: it runs `git diff <base>...HEAD` through the Executor seam and
 // distills the raw output. These tests use a fake Executor so no repo/process
 // is needed.

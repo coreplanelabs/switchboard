@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { distillDiff } from "./diffDigest.js";
 
-// Feature: features/validated-review.md (R14). distillDiff is the pure,
+// Feature: features/distilled-diffs.md (R14). distillDiff is the pure,
 // I/O-free core the diff_digest tool renders: unified diff -> compact digest
 // (per-file +adds/-dels, totals, risky-file flags). These tests pin the
 // parse counts and the risky-flag heuristics.
