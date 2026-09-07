@@ -77,13 +77,20 @@ const firstCallAt = computed(() => {
             :title="step.turn.label"
             >thought {{ step.turn.chip }}</span
           >
-          <!-- A turn that ran on a different model than the run was on: the
-               switch is the thing to notice, so it is a loud chip, not a fact. -->
+          <!-- Every head names the model that took the turn — the same badge
+               the pending-turn row wears. A turn on a DIFFERENT model than the
+               run was on is the thing to notice: a loud ⇄ chip instead. -->
           <span
             v-if="step.turn.switched"
-            class="model-switch rounded border border-warn/40 bg-warn/10 px-1.5 font-semibold text-warn"
+            class="model-switch order-first rounded border border-warn/40 bg-warn/10 px-1.5 font-semibold text-warn"
             :title="`model changed: this turn ran on ${step.turn.model}`"
             >⇄ {{ modelName(step.turn.model) }}</span
+          >
+          <span
+            v-else-if="step.turn.model"
+            class="model-badge order-first rounded bg-accented px-1.5 text-[0.68rem] font-semibold leading-normal tracking-wider text-muted"
+            :title="step.turn.model"
+            >{{ modelName(step.turn.model) }}</span
           >
           <span v-for="(f, i) in step.turn.facts" :key="i" class="fact">{{ f }}</span>
         </div>

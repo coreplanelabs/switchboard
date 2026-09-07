@@ -349,8 +349,8 @@ describe("the run's model — badged on the pending-turn row, flagged when it sw
     m.handle(meta);
     m.handle({ type: "turn", durationMs: 5_000, at: 10 });
     m.handle(assistant("one", 11));
-    expect(step(m, 0).turn).toMatchObject({ switched: false });
-    expect(step(m, 0).turn?.model).toBeUndefined();
+    // the head still names the run's declared model — every head carries its badge
+    expect(step(m, 0).turn).toMatchObject({ model: "anthropic/claude-fable-5", switched: false });
     expect(m.state.model).toBe("anthropic/claude-fable-5");
 
     const bare = model();
@@ -358,6 +358,12 @@ describe("the run's model — badged on the pending-turn row, flagged when it sw
     bare.handle(assistant("one", 11));
     expect(step(bare, 0).turn).toMatchObject({ model: "openai/gpt-5", switched: false });
     expect(bare.state.model).toBe("openai/gpt-5");
+
+    const nothing = model();
+    nothing.handle({ type: "turn", durationMs: 5_000, at: 10 });
+    nothing.handle(assistant("one", 11));
+    expect(step(nothing, 0).turn?.model).toBeUndefined(); // nothing known → no badge, no guess
+    expect(step(nothing, 0).turn?.switched).toBe(false);
   });
 
   it("modelName is the part after the provider slash; a bare name is itself; nothing known reads `model`", () => {

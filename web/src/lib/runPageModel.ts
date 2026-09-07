@@ -187,13 +187,17 @@ export interface RunPageModel {
 }
 
 function turnVm(change: Extract<TimelineChange, { kind: "turn" }>, modelBefore: string | null): TurnVm {
+  // The model that took the turn: the stamp when the event carries one, else
+  // the model the run was on — a stream from before per-turn stamps still
+  // names its `run_meta` model on every head.
+  const model = change.model ?? modelBefore ?? undefined;
   return {
     label: change.label,
     chip: change.label.replace(/^Thought for /, ""),
     quick: change.durationMs < 60_000,
     durationMs: change.durationMs,
     facts: change.facts,
-    ...(change.model ? { model: change.model } : {}),
+    ...(model ? { model } : {}),
     // A switch is a change from a KNOWN model; the first stamped turn of a
     // run whose meta never named one is not a switch.
     switched: !!change.model && modelBefore !== null && change.model !== modelBefore,
