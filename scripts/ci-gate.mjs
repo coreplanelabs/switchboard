@@ -9,6 +9,8 @@
 // cancelled leg fails the gate too — a check the ruleset requires must never
 // go green because a job did not run.
 
+import { pathToFileURL } from "node:url";
+
 /** Pure: the upstream jobs that did not succeed, from the `needs` context. */
 export function failedJobs(needs) {
   return Object.entries(needs)
@@ -26,7 +28,7 @@ export function parseNeeds(raw) {
   return needs;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const needs = parseNeeds(process.env.NEEDS);
     const failed = failedJobs(needs);

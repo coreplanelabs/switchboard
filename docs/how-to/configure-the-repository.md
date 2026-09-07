@@ -119,7 +119,7 @@ The default token permission stays `read`; each workflow raises its own `permiss
 
 ## Repository secrets
 
-The deploy workflows need `CLOUDFLARE_API_TOKEN` and `RESIDENT_READ_TOKEN`, and optionally `SANDBOX_TOKEN` for the release PR's deploy plan. What each one is and how to rotate it: [Deploy and rotate a secret](deploy-and-rotate-a-secret.md). A fork that never deploys from CI needs none of them; the docs deploy step skips loudly when its token is absent.
+The deploy workflows need `CLOUDFLARE_DEPLOY_TOKEN` (Workers Scripts, Containers, R2 and Account Settings at the account; Workers Routes and DNS at the zone) and `RESIDENT_READ_TOKEN`, and optionally `SANDBOX_TOKEN` for the release PR's deploy plan; the docs deploy uses `CLOUDFLARE_API_TOKEN`, which is also the fallback while no deploy token is set. What each one is and how to rotate it: [Deploy and rotate a secret](deploy-and-rotate-a-secret.md). A fork that never deploys from CI needs none of them; the docs deploy step skips loudly when its token is absent.
 
 ## Dependabot
 

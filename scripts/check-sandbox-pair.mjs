@@ -12,6 +12,7 @@
 // together, then deploy and validate (#498). Dependabot ignores both sides.
 
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 /** The Workers whose image and SDK must agree. */
 export const PAIRS = [
@@ -82,4 +83,4 @@ function main() {
   process.exit(1);
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

@@ -20,6 +20,7 @@
 
 import { spawnSync } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 export const MARKER = "<!-- switchboard:deploy-targets -->";
 export const FOOTER =
@@ -88,7 +89,7 @@ function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     main();
   } catch (err) {
