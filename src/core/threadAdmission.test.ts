@@ -26,9 +26,9 @@ const input = (text: string, over: Partial<FollowUpInput> = {}): FollowUpInput =
 describe("ThreadAdmission — claim and release", () => {
   it("the first claim on a thread starts; a second claim while it is held sees the live run", () => {
     const adm = new ThreadAdmission();
-    const first = adm.claim("slack:C:1", { agent: "coding", policy: "steer", now: 500 });
+    const first = adm.claim("slack:C:1", { agent: "coding", now: 500 });
     expect(first.kind).toBe("start");
-    const second = adm.claim("slack:C:1", { agent: "coding", policy: "steer" });
+    const second = adm.claim("slack:C:1", { agent: "coding" });
     expect(second.kind).toBe("live");
     expect(second.live).toBe(first.live); // the SAME slot object — its inbox is the live run's
     expect(first.live.startedAt).toBe(500);
@@ -37,26 +37,26 @@ describe("ThreadAdmission — claim and release", () => {
 
   it("threads are independent: a claim on another thread starts", () => {
     const adm = new ThreadAdmission();
-    adm.claim("slack:C:1", { agent: "coding", policy: "steer" });
-    expect(adm.claim("slack:C:2", { agent: "coding", policy: "steer" }).kind).toBe("start");
+    adm.claim("slack:C:1", { agent: "coding" });
+    expect(adm.claim("slack:C:2", { agent: "coding" }).kind).toBe("start");
     expect(adm.size).toBe(2);
   });
 
   it("release frees the slot and hands back what the run never consumed", () => {
     const adm = new ThreadAdmission();
-    const { live } = adm.claim("slack:C:1", { agent: "coding", policy: "steer" });
+    const { live } = adm.claim("slack:C:1", { agent: "coding" });
     live.inbox.push(input("also do X"));
     live.inbox.push(input("and Y"));
     expect(adm.release("slack:C:1", live).map((i) => i.text)).toEqual(["also do X", "and Y"]);
     expect(adm.get("slack:C:1")).toBeUndefined();
-    expect(adm.claim("slack:C:1", { agent: "coding", policy: "steer" }).kind).toBe("start");
+    expect(adm.claim("slack:C:1", { agent: "coding" }).kind).toBe("start");
   });
 
   it("a stale release (the slot was re-claimed by a later run) is a no-op and returns nothing", () => {
     const adm = new ThreadAdmission();
-    const { live: first } = adm.claim("slack:C:1", { agent: "coding", policy: "steer" });
+    const { live: first } = adm.claim("slack:C:1", { agent: "coding" });
     adm.release("slack:C:1", first);
-    const { live: second } = adm.claim("slack:C:1", { agent: "coding", policy: "steer" });
+    const { live: second } = adm.claim("slack:C:1", { agent: "coding" });
     second.inbox.push(input("for the second run"));
     expect(adm.release("slack:C:1", first)).toEqual([]);
     expect(adm.get("slack:C:1")).toBe(second);
@@ -65,7 +65,7 @@ describe("ThreadAdmission — claim and release", () => {
 
   it("releasing a thread that was never claimed returns nothing", () => {
     const adm = new ThreadAdmission();
-    const orphan: LiveThread = { agent: "coding", policy: "steer", inbox: new FollowUpInbox(), startedAt: 0 };
+    const orphan: LiveThread = { agent: "coding", inbox: new FollowUpInbox(), startedAt: 0 };
     expect(adm.release("slack:C:none", orphan)).toEqual([]);
   });
 });
@@ -84,37 +84,29 @@ describe("FollowUpInbox", () => {
 });
 
 describe("decideFollowUp", () => {
-  const live = (agent: string, policy: "steer" | "refuse"): LiveThread => ({
-    agent,
-    policy,
-    inbox: new FollowUpInbox(),
-    startedAt: 0,
+  const live = (agent: string): LiveThread => ({ agent, inbox: new FollowUpInbox(), startedAt: 0 });
+
+  it("a bare follow-up steers into the live run, whatever agent is running — review and ship included", () => {
+    for (const agent of ["coding", "general", "research", "review", "ship"]) {
+      expect(decideFollowUp(live(agent), {})).toEqual({ kind: "steer" });
+    }
   });
 
-  it("a bare follow-up into a steerable run steers", () => {
-    expect(decideFollowUp(live("coding", "steer"), {})).toEqual({ kind: "steer" });
+  it("a follow-up naming the SAME agent as the live run steers (a re-review sent into a live review is a nudge, not a rival run)", () => {
+    expect(decideFollowUp(live("coding"), { agent: "coding" })).toEqual({ kind: "steer" });
+    expect(decideFollowUp(live("review"), { agent: "review" })).toEqual({ kind: "steer" });
   });
 
-  it("a follow-up naming the SAME agent as the live run steers", () => {
-    expect(decideFollowUp(live("coding", "steer"), { agent: "coding" })).toEqual({ kind: "steer" });
-  });
-
-  it("a follow-up naming a DIFFERENT agent is refused (agent_mismatch), whatever the policy", () => {
-    expect(decideFollowUp(live("coding", "steer"), { agent: "review" })).toEqual({
+  it("a follow-up naming a DIFFERENT agent is refused (agent_mismatch) — the only refusal", () => {
+    expect(decideFollowUp(live("coding"), { agent: "review" })).toEqual({
       kind: "refuse",
       reason: "agent_mismatch",
+      requestedAgent: expect.any(String),
     });
-    expect(decideFollowUp(live("review", "refuse"), { agent: "coding" })).toEqual({
+    expect(decideFollowUp(live("review"), { agent: "coding" })).toEqual({
       kind: "refuse",
       reason: "agent_mismatch",
-    });
-  });
-
-  it("a bare follow-up into a non-steerable run is refused (not_steerable)", () => {
-    expect(decideFollowUp(live("review", "refuse"), {})).toEqual({ kind: "refuse", reason: "not_steerable" });
-    expect(decideFollowUp(live("review", "refuse"), { agent: "review" })).toEqual({
-      kind: "refuse",
-      reason: "not_steerable",
+      requestedAgent: expect.any(String),
     });
   });
 });
@@ -122,7 +114,6 @@ describe("decideFollowUp", () => {
 describe("replies", () => {
   const live: LiveThread = {
     agent: "coding",
-    policy: "steer",
     inbox: new FollowUpInbox(),
     startedAt: 10_000,
     runLink: "https://sb/runs/r1?t=x",
@@ -138,7 +129,7 @@ describe("replies", () => {
   });
 
   it("the refusal carries the same bare URL", () => {
-    const text = refusalReply(live, { reason: "agent_mismatch" }, "review", 20_000);
+    const text = refusalReply(live, { requestedAgent: "review" }, 20_000);
     expect(text).toContain(" · https://sb/runs/r1?t=x");
     expect(text).not.toMatch(/[<>]/);
   });
@@ -151,21 +142,10 @@ describe("replies", () => {
   });
 
   it("the agent-mismatch refusal names the requested agent and says one run per thread", () => {
-    const text = refusalReply(live, { reason: "agent_mismatch" }, "review", 20_000);
+    const text = refusalReply(live, { requestedAgent: "review" }, 20_000);
     expect(text).toContain("`agent:review`");
     expect(text).toContain("one run per thread");
     expect(text).toContain("*coding*");
-  });
-
-  it("the not-steerable refusal says the live agent takes no mid-flight follow-ups", () => {
-    const text = refusalReply(
-      { ...live, agent: "review", policy: "refuse" },
-      { reason: "not_steerable" },
-      undefined,
-      20_000,
-    );
-    expect(text).toContain("*review*");
-    expect(text).toContain("does not take follow-ups mid-flight");
   });
 });
 

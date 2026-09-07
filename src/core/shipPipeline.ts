@@ -20,6 +20,11 @@
 //     (githubPulls.createBranchRef), the PR open/edit (githubPulls), and the
 //     pinned review post (runReviewPostStep) — no merge endpoint is reachable
 //     from any code path here.
+//   - Thread follow-ups steer the pipeline like every agent (thread-admission
+//     item 2): the dispatcher's one per-thread inbox is handed to EVERY child
+//     round's runner, so a reply lands on whichever child is in flight at its
+//     next step, and a reply between rounds is read by the next child. The
+//     orchestrator itself never reads the inbox — it has no model turn.
 
 import { createHash } from "node:crypto";
 import type { AgentDef } from "../agents/registry.js";
@@ -44,6 +49,7 @@ import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdic
 import type { RepoContext } from "./repoContext.js";
 import type { RunEvent, ShipRoundOutcome } from "./runEvents.js";
 import type { RunControl } from "./runRegistry.js";
+import type { FollowUpInbox } from "./threadAdmission.js";
 import { normalizeHead, sameCommit } from "./reviewedHead.js";
 import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "./codingPrPostStep.js";
 import {
@@ -452,6 +458,11 @@ export interface ShipPipelineInput {
   threadKey: string;
   caps: ShipCaps;
   control: RunControl;
+  /** The thread's follow-up inbox (features/thread-admission.md): handed to
+   *  every child round's runner so a reply during the pipeline is read by the
+   *  child in flight at its next step. Absent (tests) → children run as
+   *  without follow-ups. */
+  inbox?: FollowUpInbox;
   /** Run-visibility event sink (registry + card refresh). */
   onEvent: (event: RunEvent) => void;
   onProgress: (note: string) => void;
@@ -744,6 +755,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
           input.onEvent(e);
         },
         control,
+        inbox: input.inbox,
       });
       // A hard stop tore the work down mid-flight — observe nothing, post nothing.
       const pushedBranch = pushes.branch();
@@ -896,6 +908,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         onProgress: input.onProgress,
         onEvent: input.onEvent,
         control,
+        inbox: input.inbox,
       });
       if (control.requested === "hard") return { answer };
       settled = await settleReviewedHead({
