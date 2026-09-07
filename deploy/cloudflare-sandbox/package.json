@@ -15,7 +15,7 @@
     "secrets": "node ../bin/put-secrets.mjs sandbox"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "^0.12.9"
+    "@cloudflare/sandbox": "^0.13.0-next.751.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260904.1",

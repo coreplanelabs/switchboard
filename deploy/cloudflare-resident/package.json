@@ -18,7 +18,7 @@
     "wake": "curl -s -o /dev/null -w 'resident worker awake: HTTP %{http_code}\\n' --max-time 180 https://switchboard-resident.coreplanelabs.dev/healthz"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "0.13.0-next.751.1"
+    "@cloudflare/sandbox": "^0.13.0-next.751.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260904.1",
