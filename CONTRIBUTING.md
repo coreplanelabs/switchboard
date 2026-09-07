@@ -21,8 +21,8 @@ project happens.
 
 ## Setting up
 
-You need Node 22 or newer (`.nvmrc` pins it) and an API key for at least one
-model provider.
+You need Node 24 (`.nvmrc` pins it; 22 or newer runs) and an API key for at
+least one model provider.
 
 ```bash
 git clone https://github.com/coreplanelabs/switchboard.git
