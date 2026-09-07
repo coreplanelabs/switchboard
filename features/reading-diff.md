@@ -32,7 +32,7 @@ Not part of this feature's code, and `git` is the default until they land: the *
 
 | Criterion | Proof |
 |---|---|
-| Resolve: default git + default meat budget; config selects provider/model/budget (floored, positive); `off` → null; env overrides config; unknown env ignored | `[unit]` `src/core/readingDiff.test.ts::resolveReadingDiff` (3) |
+| Resolve: default git + default meat budget; config selects provider/model/budget (floored, positive); `off` → null; env overrides config; unknown env ignored | `[unit]` `src/core/readingDiff.test.ts::resolveReadingDiff…` (3) |
 | Commands: exact git/meat strings, meat under its own `timeout`, `origin/HEAD` fallback, hostile ref quoted inert | `[unit]` `::readingDiffCommand` (4) |
 | meat JSON parsed strictly; error line / non-JSON / no smart_diff throw | `[unit]` `::parseMeatJson` (2) |
 | Cap with note + truncated flag; never splits a surrogate pair | `[unit]` `::capDiff`, `::produceReadingDiff::caps the diff…`, `::never splits a surrogate pair at the cap` |
