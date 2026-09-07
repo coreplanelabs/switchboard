@@ -10,6 +10,7 @@
     "build": "vite build",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
+    "verify": "npm run typecheck && npm test && npm run licenses:check && npm run build",
     "licenses:check": "node ../scripts/licenses-check.mjs"
   },
   "dependencies": {
@@ -26,7 +27,6 @@
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/test-utils": "^2.5.0",
     "happy-dom": "^20.14.0",
-    "license-checker-rseidelsohn": "^5.0.1",
     "typescript": "^5.7.0",
     "vite": "^8.2.2",
     "vitest": "^5.0.0",

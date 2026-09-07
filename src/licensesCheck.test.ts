@@ -1,10 +1,58 @@
 import { describe, expect, it } from "vitest";
-import { ALLOWED_LICENSES, EXCEPTIONS, evaluate } from "../scripts/licenses-check.mjs";
+import { ALLOWED_LICENSES, EXCEPTIONS, evaluate, reportFromNpmLs } from "../scripts/licenses-check.mjs";
 
-// The license gate's decision, over the shape license-checker emits. The CLI
-// wrapper around it (`npm run licenses:check` in each package root) is proven
-// by CI running it; what matters here is that the decision names exactly the
-// packages outside the allowed set and honors the documented exceptions.
+// The license gate's two pure halves: flattening `npm ls --json --long` into a
+// report, and the decision over that report. The CLI wrapper around them
+// (`npm run licenses:check` in each package root) is proven by CI running it;
+// what matters here is that the report counts every installed production
+// package exactly once wherever npm hoisted it, and that the decision names
+// exactly the packages outside the allowed set and honors the exceptions.
+
+describe("licenses-check reportFromNpmLs", () => {
+  const root = "/repo";
+  const tree = {
+    name: "switchboard-web",
+    version: "0.0.0",
+    path: `${root}/web`,
+    license: "Apache-2.0",
+    dependencies: {
+      vue: { name: "vue", version: "3.5.42", path: `${root}/node_modules/vue`, license: "MIT", dependencies: {
+        "@vue/shared": { name: "@vue/shared", version: "3.5.42", path: `${root}/node_modules/@vue/shared`, license: "MIT" },
+      } },
+      // A nested copy npm could not hoist: its own path, so it counts separately.
+      diff2html: { name: "diff2html", version: "3.4.56", path: `${root}/web/node_modules/diff2html`, license: "MIT", dependencies: {
+        // The same @vue/shared reached again through another edge: deduplicated by path.
+        "@vue/shared": { name: "@vue/shared", version: "3.5.42", path: `${root}/node_modules/@vue/shared`, license: "MIT" },
+      } },
+      old: { name: "old", version: "1.0.0", path: `${root}/node_modules/old`, license: { type: "BSD-3-Clause" } },
+      bare: { name: "bare", version: "2.0.0", path: `${root}/node_modules/bare` },
+      stray: { name: "stray", version: "9.9.9", path: `${root}/node_modules/stray`, license: "MIT", extraneous: true },
+      deduped: { name: "vue", version: "3.5.42", deduped: true },
+    },
+  };
+
+  it("counts each installed package once by path, wherever npm hoisted it, and never the project itself", () => {
+    const report = reportFromNpmLs(tree);
+    expect(Object.keys(report).sort()).toEqual(["@vue/shared@3.5.42", "bare@2.0.0", "diff2html@3.4.56", "old@1.0.0", "vue@3.5.42"]);
+    expect(report["diff2html@3.4.56"].path).toBe(`${root}/web/node_modules/diff2html`);
+  });
+
+  it("normalizes the manifest's license: object form to its type, absent to UNKNOWN", () => {
+    const report = reportFromNpmLs(tree);
+    expect(report["old@1.0.0"].licenses).toBe("BSD-3-Clause");
+    expect(report["bare@2.0.0"].licenses).toBe("UNKNOWN");
+  });
+
+  it("skips extraneous packages and deduped placeholders", () => {
+    const report = reportFromNpmLs(tree);
+    expect(report).not.toHaveProperty("stray@9.9.9");
+    expect(Object.values(report).filter((e) => e.path?.endsWith("/vue"))).toHaveLength(1);
+  });
+
+  it("an unknown license from the manifest is then refused by evaluate", () => {
+    expect(evaluate(reportFromNpmLs(tree)).map((o) => o.id)).toEqual(["bare@2.0.0"]);
+  });
+});
 
 describe("licenses-check evaluate", () => {
   const report = {

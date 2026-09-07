@@ -1,11 +1,14 @@
-# CI: the automated half of the feature-spec discipline (features/README.md).
-# Every [unit] criterion in features/*.md must be green here before merge;
-# [agent] criteria are validated against the live deployment and receipted in
-# the feature files instead.
+# CI is a thin caller of the repository's own scripts: every step below is
+# `npm ci` or `npm run <script>`, so a contributor or an agent runs the exact
+# same checks locally with `npm run verify` (or one area's `verify`). Nothing
+# lives only in this file; src/ciWorkflow.test.ts fails the suite if a step
+# ever does. One lockfile at the root covers every workspace (bot, web, docs,
+# the five Workers), so there is one install and one cache key.
 name: ci
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
@@ -19,99 +22,112 @@ concurrency:
 
 jobs:
   bot:
-    name: typecheck + tests
+    name: bot — typecheck, tests, skills, licenses, docs tables, dist
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
+          cache-dependency-path: package-lock.json
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      # Vendored skills must match skills/manifest.yaml (features/skills.md item 10).
-      - run: npm run skills:check
-      # Every production dependency carries a license from the allowed set
-      # (THIRD_PARTY_NOTICES.md); a new copyleft or unlicensed package is a red PR.
-      - run: npm run licenses:check
-      # dist/ must never ship test files (see PR #35's review finding).
-      - name: build excludes tests
-        run: |
-          npm run build
-          count=$(find dist -name '*.test.js' | wc -l)
-          echo "test files in dist: $count"
-          test "$count" -eq 0
+      - run: npm run verify:root
 
   web:
-    name: web app typecheck + tests + build
+    name: web — typecheck, tests, licenses, build
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: package-lock.json
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run licenses:check
-      # The server refuses to boot without the built manifest — prove it builds.
-      - run: npm run build
+      - run: npm run verify -w web
 
   docs:
-    name: docs check + site build + deploy dry-run
+    name: docs — site build, completeness, deploy dry-run
+    runs-on: ubuntu-latest
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      # A dead internal link fails the build; the site check proves the pages
+      # the dashboard links to exist; the dry-run proves wrangler would accept
+      # the deploy without touching an account.
+      - run: npm run verify -w docs
+      - run: npm run check:site
+      - run: npm run verify -w deploy/cloudflare-docs
+
+  workers:
+    name: workers — typecheck and tests (memory runs inside workerd)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            docs/package-lock.json
-            deploy/cloudflare-docs/package-lock.json
+          cache-dependency-path: package-lock.json
       - run: npm ci
-      # The generated regions of docs/reference/* must match the command
-      # registry — a stale table is a red build, not a docs bug found later
-      # (features/docs-site.md items 6-8).
-      - run: npm run docs:check
-      - name: build the docs site
-        working-directory: docs
-        # A dead internal link fails this build (ignoreDeadLinks: false), so a
-        # renamed or deleted page cannot merge with links still pointing at it.
-        run: |
-          npm ci
-          npm run build
-      # The build proves the ARTIFACT; these two steps prove the DEPLOY would be
-      # accepted. Without them the first thing to look at wrangler.jsonc or at
-      # the assets directory is the push to main, after review is over.
-      - name: the built site is complete
-        run: |
-          set -e
-          for page in index.html 404.html tutorials/index.html how-to/index.html \
-                      reference/index.html explanation/index.html reference/cli.html; do
-            test -f "docs/.vitepress/dist/$page" || { echo "missing: $page"; exit 1; }
-          done
-          # Working documents, deliberately unpublished (srcExclude).
-          test ! -d docs/.vitepress/dist/plans || { echo "plans/ must not be published"; exit 1; }
-          echo "pages present: $(find docs/.vitepress/dist -name '*.html' | wc -l)"
-      - name: the docs Worker config would deploy
-        working-directory: deploy/cloudflare-docs
-        # --dry-run needs no credentials: it validates wrangler.jsonc, resolves
-        # `assets.directory` against the tree just built, and reads every file
-        # it would upload — so a wrong path or a broken config is a red PR, not
-        # a red main. It uploads nothing and touches no account.
-        env:
-          WRANGLER_SEND_METRICS: "false"
-        run: |
-          npm ci
-          npx wrangler deploy --dry-run
+      - run: npm run verify -w deploy/cloudflare -w deploy/cloudflare-memory -w deploy/cloudflare-resident -w deploy/cloudflare-sandbox
+
+  image:
+    name: image — the Dockerfile builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The same image docker-compose and the Cloudflare deploy build. Until
+      # this job existed, a broken Dockerfile was found at deploy time. The
+      # runner's own npm is enough to invoke the script; Node inside the image
+      # comes from the Dockerfile.
+      - run: npm run check:image
+
+  # Which Workers this PR's diff would deploy (features/release-and-deploy.md
+  # item 8): `deploy plan --affected --base HEAD^` — HEAD is the merge commit,
+  # so HEAD^ is the PR's base — into the job summary, on every PR. On the
+  # RELEASE PR the same command runs against production instead (each Worker's
+  # live commit), and the result is one sticky comment on the PR: what merging
+  # it will deploy, re-rendered on every push to the release branch. An
+  # unclassified path shows here as "every Worker deploys" long before it
+  # reaches a release. The logic is scripts/deploy-targets.mjs, like every
+  # other step here: `npm run deploy:targets` runs it locally too.
+  deploy-targets:
+    name: deploy targets
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      RELEASE_PR: ${{ startsWith(github.head_ref, 'release-please--') }}
+      # Optional: lets the release-PR plan read the sandbox's live commit. Empty
+      # on a fork PR (secrets are withheld there) — the plan then says so.
+      SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history + tags: the diff against the PR base, or against what
+          # each Worker serves, and the last `v*` tag as the fallback base.
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run deploy:targets
 
   docs-deploy:
     name: deploy the docs site
@@ -132,182 +148,21 @@ jobs:
           fetch-depth: 2
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: |
-            docs/package-lock.json
-            deploy/cloudflare-docs/package-lock.json
-      # Deploy only when this push actually touched the docs or their build.
-      # Fails OPEN (deploys) when the diff cannot be computed, so the published
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      # Deploy only when this push touched the docs or their build; the script
+      # fails OPEN (deploys) when the diff cannot be computed, so the published
       # site is never silently older than main.
       - id: touched
-        run: |
-          if ! range=$(git rev-parse HEAD^ 2>/dev/null); then
-            echo "no parent commit — deploying"
-            echo "docs=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed=$(git diff --name-only "$range" HEAD)
-          echo "$changed"
-          if echo "$changed" | grep -qE '^(docs/|deploy/cloudflare-docs/)'; then
-            echo "docs=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "docs=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: no docs changes in this push
-        if: steps.touched.outputs.docs != 'true'
-        run: echo "::notice::docs untouched by this push — nothing to deploy"
-      - name: missing CLOUDFLARE_API_TOKEN
-        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN == ''
-        # A red main on every docs edit would be worse than a loud skip: the
-        # token is a one-time repository-secret setup (features/docs-site.md).
-        run: echo "::warning::docs changed but CLOUDFLARE_API_TOKEN is not set — skipping the deploy"
+        run: npm run docs:changed
       - name: build + deploy
         if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != ''
-        working-directory: deploy/cloudflare-docs
-        # `npm run deploy` builds docs/ first, so the upload can never be a
-        # stale dist. CLOUDFLARE_ACCOUNT_ID is deliberately NOT set — the
-        # account is pinned in wrangler.jsonc and the env var would override it.
-        run: |
-          npm ci
-          npm --prefix ../../docs ci
-          npm run deploy
-
-  # Which Workers this PR's diff would deploy (features/release-and-deploy.md
-  # item 8): `deploy plan --affected --base HEAD^` — HEAD is the merge commit,
-  # so HEAD^ is the PR's base — into the job summary, on every PR. On the
-  # RELEASE PR the same command runs against production instead (each Worker's
-  # live commit), and the result is one sticky comment on the PR: what merging
-  # it will deploy, re-rendered on every push to the release branch. An
-  # unclassified path shows here as "every Worker deploys" long before it
-  # reaches a release.
-  deploy-targets:
-    name: deploy targets
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-    env:
-      RELEASE_PR: ${{ startsWith(github.head_ref, 'release-please--') }}
-      # Optional: lets the release-PR plan read the sandbox's live commit. Empty
-      # on a fork PR (secrets are withheld there) — the plan then says so.
-      SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Full history + tags: the diff against the PR base, or against what
-          # each Worker serves, and the last `v*` tag as the fallback base.
-          fetch-depth: 0
-          fetch-tags: true
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - name: deploy plan --affected
-        run: |
-          if [ "$RELEASE_PR" = "true" ]; then
-            npm run --silent cli -- deploy plan --affected --json > plan.json
-          else
-            npm run --silent cli -- deploy plan --affected --base "$(git rev-parse HEAD^)" --json > plan.json
-          fi
-          jq -r '.affected.markdown' plan.json | tee targets.md
-          {
-            if [ "$RELEASE_PR" = "true" ]; then echo "## What merging this release deploys"; else echo "## What this PR's diff would deploy"; fi
-            echo
-            cat targets.md
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: the release PR carries the plan
-        if: env.RELEASE_PR == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          marker='<!-- switchboard:deploy-targets -->'
-          {
-            echo "$marker"
-            echo
-            echo "### What merging this release deploys"
-            echo
-            cat targets.md
-            echo
-            echo "_Judged per Worker against the commit it is serving right now. Re-rendered on every push to this branch by the \`deploy targets\` CI job; merging runs \`deploy all --affected\` and deploys exactly the Workers marked **deploy**._"
-          } > comment.md
-          existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -n 1)
-          if [ -n "$existing" ]; then
-            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" -F body=@comment.md > /dev/null
-            echo "updated comment ${existing}"
-          else
-            gh pr comment "$PR" --body-file comment.md
-          fi
-
-  bot-worker:
-    name: bot worker typecheck + deploy preflight tests
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: deploy/cloudflare
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: deploy/cloudflare/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck
-      # Deploy preflight decision logic (plain Node, no workerd).
-      - run: npm test
-
-  sandbox-worker:
-    name: sandbox worker typecheck
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: deploy/cloudflare-sandbox
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: deploy/cloudflare-sandbox/package-lock.json
-      - run: npm ci
-      - run: npx tsc --noEmit
-
-  memory-worker:
-    name: memory worker typecheck + tests
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: deploy/cloudflare-memory
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: deploy/cloudflare-memory/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck
-      # Runs inside workerd (vitest-pool-workers) against the real SQLite DO.
-      - run: npm test
-
-  resident-worker:
-    name: resident worker typecheck + tests
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: deploy/cloudflare-resident
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: deploy/cloudflare-resident/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck
-      # Deploy preflight decision logic (plain Node, no workerd).
-      - run: npm test
+        # `npm run deploy` in the docs Worker builds docs/ first, so the upload
+        # can never be a stale dist. CLOUDFLARE_ACCOUNT_ID is deliberately NOT
+        # set — the account is pinned in wrangler.jsonc and the env var would
+        # override it. A missing token is a loud skip (the step's `if`), not a
+        # red main on every docs edit: the token is a one-time repository-secret
+        # setup.
+        run: npm run deploy -w deploy/cloudflare-docs

@@ -216,15 +216,19 @@ The per-Worker steps below are what the runner executes, for first-time setup (s
 #    Shared bearers (SANDBOX_TOKEN, RESIDENT_*_TOKEN, MEMORY_TOKEN) must be the same
 #    value on every Worker the manifest lists — the manifest is the list.
 
+# 0b. One install for every package: the root lockfile covers the bot, web/,
+#     docs/, and all five Workers (npm workspaces).
+npm ci
+
 # 1. Sandbox worker — per-thread execution VMs at switchboard-sandbox.coreplanelabs.dev
-cd deploy/cloudflare-sandbox && npm install
+cd deploy/cloudflare-sandbox
 npm run secrets   # SANDBOX_TOKEN (manifest: sandbox)
 npm run deploy
 
 # 2. Resident worker — always-warm per-repo environments at
 #    switchboard-resident.coreplanelabs.dev (per-repo Durable Objects on
 #    Cloudflare Sandbox 1.0, R2 bucket for stamped snapshots, watchdog cron)
-cd ../cloudflare-resident && npm install
+cd ../cloudflare-resident
 npm run secrets   # manifest: resident — RESIDENT_ADMIN/OPERATOR/READ_TOKEN, GITHUB_APP_*,
                   # MEMORY_TOKEN (watchdog firing records; STATE_WORKER_URL is a wrangler var)
                   # (the resident holds its own copy of the App key — the
@@ -237,13 +241,13 @@ RESIDENT_ADMIN_TOKEN=… env -u CLOUDFLARE_API_TOKEN npm run deploy
 # 3. Memory worker — durable cross-session memory at
 #    switchboard-memory.coreplanelabs.dev (one SQLite Durable Object per memory
 #    scope; no container, no Docker needed). Optional: only if memory.enabled.
-cd ../cloudflare-memory && npm install
+cd ../cloudflare-memory
 npm test          # runs the DO tests inside workerd
 npm run secrets   # manifest: memory — MEMORY_TOKEN
 env -u CLOUDFLARE_API_TOKEN npm run deploy   # ends with a wake ping: /healthz 200
 
 # 4. Bot worker — always-on Switchboard container
-cd ../cloudflare && npm install
+cd ../cloudflare
 npm run secrets   # manifest: bot — Slack, Anthropic, Brave, SANDBOX_TOKEN, RESIDENT_OPERATOR/ADMIN_TOKEN,
                   # MEMORY_TOKEN, GitHub App, CF_ANALYTICS_TOKEN (costs dash); ANTHROPIC_ADMIN_KEY
                   # (LLM spend on /costs) is optional and skipped when there is no local file
@@ -345,7 +349,7 @@ permissions:
 3. **GitHub identity for coding/review agents**: create a **GitHub App** on the org (Settings → Developer settings → GitHub Apps → New): permissions Contents (read & write) + Pull requests (read & write) + Issues (read & write — agents read issues for task context and comment on them; without it any `gh issue` call 403s with "Resource not accessible by integration"), webhook off; generate a private key; install it on the repos the bot may touch. Set `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY` — the bot mints 1-hour installation tokens on demand and injects them into sandboxes; PRs are authored as `<app-name>[bot]`. (Fallback: a repo-scoped fine-grained `GH_TOKEN` PAT.) With sandboxed execution the bot host itself needs no git/gh.
 4. **Run**:
    ```bash
-   npm install
+   npm ci
    npm run dev          # or: npm run build && npm start
    ```
 5. **Resident repo environments** (optional — always-warm per-repo executors):

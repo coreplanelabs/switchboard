@@ -10,6 +10,7 @@
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
+    "verify": "npm run typecheck && npm test",
     "typegen": "wrangler types",
     "tail": "wrangler tail switchboard-memory",
     "secrets": "node ../bin/put-secrets.mjs memory",

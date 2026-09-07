@@ -9,6 +9,7 @@
     "deploy": "node preflight.mjs && node write-build.mjs && wrangler deploy && npm run wake",
     "preflight": "node preflight.mjs",
     "test": "vitest run",
+    "verify": "npm run typecheck && npm test",
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typegen": "wrangler types",

@@ -8,7 +8,8 @@
   "scripts": {
     "dev": "vitepress dev",
     "build": "vitepress build",
-    "preview": "vitepress preview"
+    "preview": "vitepress preview",
+    "verify": "npm run build"
   },
   "devDependencies": {
     "mermaid": "^11.4.1",

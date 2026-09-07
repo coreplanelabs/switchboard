@@ -8,6 +8,7 @@
   "scripts": {
     "build": "npm --prefix ../../docs run build",
     "deploy": "npm run build && wrangler deploy",
+    "verify": "wrangler deploy --dry-run",
     "dev": "wrangler dev",
     "tail": "wrangler tail switchboard-docs"
   },
