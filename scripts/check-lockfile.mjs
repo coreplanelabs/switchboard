@@ -16,6 +16,7 @@
 //   rm -rf node_modules && npm install
 
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 /** Native packages → the platform variants that must be recorded whenever
  *  any variant of that package is in the lockfile. Linux x64 is what CI and
@@ -63,4 +64,4 @@ function main() {
   process.exit(1);
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
