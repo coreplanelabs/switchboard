@@ -390,7 +390,7 @@ describe("run-visibility events", () => {
       onEvent: (e) => events.push(e),
     });
     expect(events.filter((e) => e.type !== "turn")).toEqual([
-      { type: "tool_call", tool: "bash", summary: expect.stringContaining("echo hi"), callId: "t1", at: expect.any(Number) },
+      { type: "tool_call", tool: "bash", summary: expect.stringContaining("echo hi"), command: "echo hi", callId: "t1", at: expect.any(Number) },
       { type: "tool_result", tool: "bash", ok: true, summary: expect.stringContaining("ok"), callId: "t1", exitCode: 0, output: "ok", at: expect.any(Number) },
     ]);
   });

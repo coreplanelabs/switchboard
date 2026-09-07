@@ -645,6 +645,18 @@ describe("pushedBranchOf (the branch a run's own git push named)", () => {
       expect(track(call("c1", "npm test -- --grep 'git push'"), bash(PUSH_NEW, { callId: "c1" }))).toBeUndefined(); // `git push` inside an argument: git is not in command position
     });
 
+    it("a chained command whose `git push` sits past the 200-char summary cap is still a push call when the event carries the full command (live 2026-09-07: the receipt run's single chained command lost its push to the cap and the post-step fell back to the checkout)", () => {
+      const chained = `git checkout -b receipt/x origin/main && mkdir -p .receipts && echo 'receipt for #469: the PR head is the branch the run named' > .receipts/469.txt && git add .receipts/469.txt && git commit -q -m 'receipt: live check for #469' && git log --oneline -1 && git push -u origin receipt/x && git checkout -b receipt/other`;
+      const summary = `$ ${chained}`.slice(0, 200); // what the runner's redactAndCap leaves on `summary`
+      expect(summary).toHaveLength(200);
+      expect(summary).not.toMatch(/git push/);
+      const withCommand: RunEvent = { type: "tool_call", tool: "bash", summary, callId: "c1", command: chained };
+      expect(track(withCommand, bash(PUSH_NEW.replace(/feat\/x/g, "receipt/x"), { callId: "c1" }))).toBe("receipt/x");
+      // A legacy event without `command` (a record written before the field existed) is judged on its capped summary — and misses.
+      const legacy: RunEvent = { type: "tool_call", tool: "bash", summary, callId: "c1" };
+      expect(track(legacy, bash(PUSH_NEW.replace(/feat\/x/g, "receipt/x"), { callId: "c1" }))).toBeUndefined();
+    });
+
     it("a result with no callId, or one whose call was never seen, is not paired to any push", () => {
       expect(track(bash(PUSH_NEW))).toBeUndefined();
       expect(track(call("c1", "git push -u origin feat/x"), bash(PUSH_NEW, { callId: "c2" }))).toBeUndefined();

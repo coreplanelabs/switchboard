@@ -104,7 +104,14 @@ export type ShipRoundOutcome =
 export type RunEvent =
   /** `callId` is the provider's tool_use id — the explicit pair key between a
    *  call and its result (live-view item 13); absent only on legacy captures. */
-  | { type: "tool_call"; tool: string; summary: string; callId?: string; seq?: number; at?: number }
+  /** `command` rides on bash calls only: the FULL command (redacted, capped at
+   *  `COMMAND_CAP`, far above the 200-char `summary`), for consumers that must
+   *  judge what the command did — the pushed-branch tracker
+   *  (features/pr-description.md item 5) reads it, because an agent's chained
+   *  `git add … && git commit … && git push …` routinely carries its `push`
+   *  past the summary cap. The status card and friction analyzer keep reading
+   *  `summary`. */
+  | { type: "tool_call"; tool: string; summary: string; command?: string; callId?: string; seq?: number; at?: number }
   /** `ok` is "the tool succeeded": false when it threw AND (bash) when the
    *  command exited nonzero. `exitCode` rides on bash results (parsed from the
    *  executors' shared `exit N:` prefix, 0 for a clean run; absent when the code
@@ -385,6 +392,12 @@ export function parseExitPrefix(output: string): { failed: boolean; exitCode?: n
  *  bytes — `RunRegistry`, 5000 events / 4 MiB — so an output-heavy run trims its
  *  oldest events rather than growing without bound). */
 export const TOOL_OUTPUT_CAP = 8_000;
+
+/** Cap on a bash `tool_call.command` (the full command beside the 200-char
+ *  `summary`). Generous — an agent's chained `checkout && add && commit && push`
+ *  is a few hundred chars; a heredoc-fed script can be a few thousand — and
+ *  still a small fraction of `MAX_EVENT_BYTES`. */
+export const COMMAND_CAP = 4_000;
 
 /** The full tool output as it may leave the process: control-stripped, then
  *  redacted, then capped (that order — see redactAndCap). Empty output → "". */
