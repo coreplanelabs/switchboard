@@ -36,6 +36,11 @@ updates:
       # bump the memory Worker and lift this.
       - dependency-name: "vitest"
         update-types: ["version-update:semver-major"]
+      # The @cloudflare/sandbox SDK and the container image it drives are one
+      # protocol in two artifacts; `check:sandbox-pair` fails verify when a
+      # package pin and its Dockerfile tag differ. They move together, by hand,
+      # with a deploy validation (#498), so no automated bump of any size.
+      - dependency-name: "@cloudflare/sandbox"
 
   - package-ecosystem: github-actions
     directory: "/"
