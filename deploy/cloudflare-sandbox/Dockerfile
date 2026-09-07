@@ -2,11 +2,12 @@
 # coding/review agents work out of the box.
 # The tag MUST match the @cloudflare/sandbox version in package.json exactly
 # (no 'latest' tag exists) — bump both together.
-FROM docker.io/cloudflare/sandbox:0.3.7
+FROM docker.io/cloudflare/sandbox:0.12.9
 USER root
 # The SDK's container server kills any command after COMMAND_TIMEOUT_MS
-# (default 30s) — far too short for clones, installs, and test runs. exec()
-# in 0.3.x ignores per-call timeouts, so this env var is the only lever.
+# (default 30s) — far too short for clones, installs, and test runs. worker.ts
+# passes no per-call timeout (the SDK honours one since 0.7.15), so this env
+# var is the container-level lever.
 # Pure BACKSTOP: the real per-command limit is coreutils `timeout` in
 # worker.ts (280s default, raisable per call via the bash tool's timeoutMs up
 # to the 20-min ceiling BASH_TIMEOUT_MAX_MS), which yields a genuine exit 124
@@ -27,35 +28,27 @@ RUN apt-get update \
   && git config --system user.name "switchboard-bot" \
   && git config --system user.email "switchboard-bot@users.noreply.github.com"
 
-# Node 22: the base image ships Node 20 (NodeSource `nodejs` deb, with the
-# NodeSource keyring + node_20.x apt list already in place), but this repo pins
-# `engines: node >=22` (undici@8 needs Node 22's `webidl.util.markAsUncloneable`),
-# so a review run that falls back off the resident onto a fresh sandbox
-# couldn't even LOAD 15 vitest suites (#372). The resident image gets Node 24
-# from its newer base; here the base tag is pinned to the 0.3.x SDK, so instead
-# retarget the base's own NodeSource apt list at the Node 22 repo and upgrade
-# the same `nodejs` package (npm + corepack ride along with the deb). Must run
-# BEFORE the corepack/pnpm step below so pnpm is prepared by the final Node.
-# The greps assert the retarget and the upgrade took, failing the build
-# otherwise (e.g. if a base bump moves the list file or Node lands below 22).
-RUN sed -i 's|node_20\.x|node_22.x|' /etc/apt/sources.list.d/nodesource.list \
-  && grep -q 'node_22\.x' /etc/apt/sources.list.d/nodesource.list \
-  && apt-get update && apt-get install -y --no-install-recommends nodejs \
-  && rm -rf /var/lib/apt/lists/* \
-  && node --version | grep -q '^v22\.'
+# Node comes from the base: the published 0.12.9 image ships Node 22.23 (copied
+# from node:22-slim, with npm; no NodeSource deb), so the retarget-and-upgrade
+# layer the 0.3.x image needed (#372) is gone. This repo pins `engines: node
+# >=22` (undici@8 needs Node 22's `webidl.util.markAsUncloneable`), and a
+# review run that falls back off the resident onto a fresh sandbox must load
+# the full vitest suite; the assertion fails the build if a base bump ever
+# lands below 22. (The resident image gets Node 24 from its 0.13.0-next base.)
+RUN node --version | grep -Eq '^v(2[2-9]|[3-9][0-9])\.'
 
-# pnpm: the base image ships Node/npm/corepack but not pnpm, so coding runs in
-# pnpm repos hit `pnpm: command not found` on install/build. corepack ships with
-# the base Node (no apt package needed); `prepare` fetches and pins pnpm at
-# build time, so this version is here before any run needs it. It is not
-# necessarily the version that RUNS: corepack honours a repo's own
-# `packageManager` field and fetches it, so a pnpm repo that pins one still
-# needs the registry on its first install.
+# pnpm: the base image ships Node + npm (corepack is under
+# /usr/local/lib/node_modules but not on PATH) and not pnpm, so coding runs in pnpm repos hit
+# `pnpm: command not found` on install/build. Installed globally with npm, the
+# same way the resident image does it, so this version is here before any run
+# needs it. It is not necessarily the version that RUNS: pnpm ≥10 honours a
+# repo's own `packageManager` field and fetches it, so a pnpm repo that pins
+# one still needs the registry on its first install.
 #
 # EXACT version, enforced by src/deploy/imagePins.test.ts, same pin and same
 # reason as the resident image (deploy/cloudflare-resident/Dockerfile): with
 # `@latest` here the pnpm major moved on a rebuild, and pnpm 11 stopped
-# reading `package.json`'s `pnpm` field. corepack still honours a repo's own
+# reading `package.json`'s `pnpm` field. pnpm still honours a repo's own
 # `packageManager`, so this is the floor for repos that name none.
-RUN corepack enable && corepack prepare pnpm@10.34.5 --activate \
+RUN npm install -g pnpm@10.34.5 \
   && pnpm --version | grep -qx '10\.34\.5'

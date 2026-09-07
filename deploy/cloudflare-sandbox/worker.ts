@@ -47,7 +47,8 @@ export class SwitchboardSandbox extends Sandbox {
     );
   }
 
-  // SDK 0.3.x caches its default ExecutionSession in Durable Object memory
+  // The SDK (observed on 0.3.x; kept through 0.12.9) caches its default
+  // ExecutionSession in Durable Object memory
   // (`private defaultSession`), but the session itself lives in the
   // container's memory. When the container restarts under a live DO (image
   // rollout, crash, sleep/wake), every subsequent call fails with
@@ -128,7 +129,7 @@ export default {
     if (!threadKey) return json({ error: "missing X-Thread-Key" }, 400);
 
     // One sandbox per thread; the DO name is the thread key. getSandbox's
-    // 0.3.x typing is fixed to the base Sandbox class — cast the stub so the
+    // typing is fixed to the base Sandbox class — cast the stub so the
     // subclass's resetDefaultSession is callable over RPC.
     const sandbox = getSandbox(
       env.Sandbox as unknown as Parameters<typeof getSandbox>[0],
@@ -145,7 +146,8 @@ export default {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
 
     // Env injection is inline per command (base64-safe export prefix): the
-    // per-exec `env` option is ignored in SDK 0.3.7, and setEnvVars only
+    // per-exec `env` option was ignored in SDK 0.3.7 (#447 tracks whether 0.12
+    // honours it), and setEnvVars only
     // applies when a session is first created — inline is correct every time
     // and persists nothing in the sandbox beyond the command's lifetime.
     const envPrefix = Object.entries(envVars)
