@@ -4,7 +4,7 @@ import StepItems from "./StepItems.vue";
 import MarkdownText from "../MarkdownText.vue";
 import { durationTone, heatStyle } from "../../lib/durationTone";
 import { formatClock, formatElapsed, formatLocalIso } from "../../lib/format";
-import type { StepVm } from "../../lib/runPageModel";
+import { modelName, type StepVm } from "../../lib/runPageModel";
 
 // ONE STEP = ONE BLOCK, read top to bottom (item 18): a rail marks where it
 // starts and ends. Its head is ONE meta row — `thought <span> · <token facts>`
@@ -76,6 +76,14 @@ const firstCallAt = computed(() => {
             :data-heat="turnHeat?.level"
             :title="step.turn.label"
             >thought {{ step.turn.chip }}</span
+          >
+          <!-- A turn that ran on a different model than the run was on: the
+               switch is the thing to notice, so it is a loud chip, not a fact. -->
+          <span
+            v-if="step.turn.switched"
+            class="model-switch rounded border border-warn/40 bg-warn/10 px-1.5 font-semibold text-warn"
+            :title="`model changed: this turn ran on ${step.turn.model}`"
+            >⇄ {{ modelName(step.turn.model) }}</span
           >
           <span v-for="(f, i) in step.turn.facts" :key="i" class="fact">{{ f }}</span>
         </div>

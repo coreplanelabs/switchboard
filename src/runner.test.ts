@@ -1252,7 +1252,15 @@ describe("model turn events (features/live-view.md item 15)", () => {
       now: () => t,
     });
     expect(events.map((e) => e.type)).toEqual(["turn", "tool_call", "tool_result", "turn"]);
-    expect(events[0]).toEqual({ type: "turn", startedAt: 1_000, durationMs: 5_000, stopReason: "tool_use", at: 6_000 });
+    // every turn names the model that took it (the page badges a silent model and flags a switch)
+    expect(events[0]).toEqual({
+      type: "turn",
+      model: "m",
+      startedAt: 1_000,
+      durationMs: 5_000,
+      stopReason: "tool_use",
+      at: 6_000,
+    });
     // the final text-only completion is a turn too (its output is the `answer`, published by the dispatcher)
     expect(events[3]).toMatchObject({ type: "turn", stopReason: "end_turn", durationMs: 5_000 });
   });

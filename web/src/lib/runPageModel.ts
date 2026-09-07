@@ -70,6 +70,11 @@ export interface TurnVm {
   quick: boolean;
   durationMs: number;
   facts: string[];
+  /** `<provider>/<model>` that took the turn, when the event named one. */
+  model?: string;
+  /** True when this turn's model differs from the model the run had before
+   *  it (the previous stamped turn's, else `run_meta`'s) — the head flags it. */
+  switched: boolean;
   at?: number;
 }
 
@@ -154,6 +159,9 @@ export interface RunPageModel {
     placeholder: boolean;
     allOpen: boolean;
     stopMode: "soft" | "hard" | null;
+    /** The model the run is on right now: `run_meta`'s, then whatever the
+     *  newest stamped `turn` named. What the pending-turn row badges. */
+    model: string | null;
     /** Runner-clock span of the run so far (first event's `at` → last). */
     firstAt: number | null;
     lastAt: number | null;
@@ -178,13 +186,17 @@ export interface RunPageModel {
   opensByDefault(tags: string[]): boolean;
 }
 
-function turnVm(change: Extract<TimelineChange, { kind: "turn" }>): TurnVm {
+function turnVm(change: Extract<TimelineChange, { kind: "turn" }>, modelBefore: string | null): TurnVm {
   return {
     label: change.label,
     chip: change.label.replace(/^Thought for /, ""),
     quick: change.durationMs < 60_000,
     durationMs: change.durationMs,
     facts: change.facts,
+    ...(change.model ? { model: change.model } : {}),
+    // A switch is a change from a KNOWN model; the first stamped turn of a
+    // run whose meta never named one is not a switch.
+    switched: !!change.model && modelBefore !== null && change.model !== modelBefore,
     at: change.at,
   };
 }
@@ -222,6 +234,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     placeholder: true,
     allOpen: false,
     stopMode: null,
+    model: null,
     firstAt: null,
     lastAt: null,
     lastAtWall: null,
@@ -362,9 +375,12 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         return;
       case "turn":
         flushTurn("");
-        pendingTurn = turnVm(change);
+        pendingTurn = turnVm(change, state.model);
+        if (change.model) state.model = change.model;
         return;
       case "meta":
+        // The declared model until a stamped turn says otherwise.
+        if (state.model === null && change.model) state.model = change.model;
         state.meta = {
           agent: change.agent,
           model: change.model,
@@ -472,6 +488,17 @@ export function runningHeader(state: RunPageModel["state"], nowWall: number): st
  *  running card can tick its own elapsed in place (null on a history page:
  *  nothing there is live, so nothing ticks). */
 export const RunnerClockKey: InjectionKey<Ref<number | null>> = Symbol("sb-runner-clock");
+
+/** The short name a badge shows for a `<provider>/<model>` ref: the part after
+ *  the last slash (`anthropic/claude-fable-5` → `claude-fable-5`); a bare
+ *  model name is itself; nothing known reads `model`. The full ref is the
+ *  badge's hover. */
+export function modelName(ref: string | null | undefined): string {
+  if (!ref) return "model";
+  const slash = ref.lastIndexOf("/");
+  const name = slash === -1 ? ref : ref.slice(slash + 1);
+  return name || ref;
+}
 
 /** A pending model turn this long is amber — the same minute at which the
  *  finished `thought …` head it becomes turns amber (`TurnVm.quick`). */
