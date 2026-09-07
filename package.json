@@ -61,7 +61,8 @@
     "deploy:targets": "node scripts/deploy-targets.mjs",
     "docs:dev": "npm run dev -w docs",
     "docs:build": "npm run build -w docs",
-    "web:preview": "tsx scripts/web-preview.ts"
+    "web:preview": "tsx scripts/web-preview.ts",
+    "load": "tsx scripts/load.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",

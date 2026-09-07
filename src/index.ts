@@ -35,6 +35,7 @@ import { resolveUserEmail } from "./channels/slack.js";
 import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { buildFrictionLedger, WorkerFrictionLedger } from "./core/frictionLedgerWorker.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
+import { startProcessMetrics } from "./channels/processMetrics.js";
 import { selectFrictionLedger } from "./core/frictionLedger.js";
 import { buildRunStore, FileRunStore, retentionPolicyOf } from "./core/runStore.js";
 import { createRunsService } from "./core/runsService.js";
@@ -71,6 +72,9 @@ const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.js
 // Process start for `/healthz.startedAt` — `deploy restart`'s live gate tells
 // the restarted container (same image, same `build.commit`) from the old one by it.
 const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
+// Memory and event-loop lag for `/healthz.process` — the bot is one Node
+// process, and under many concurrent runs it is the first thing to fail.
+const sampleProcessMetrics = startProcessMetrics();
 
 /** Total budget for the drain deadline's `interrupted` full-transcript writes
  *  (#375) — the runs are being abandoned anyway; the tombstones written at
@@ -531,6 +535,7 @@ async function main() {
               build,
               startedAt: PROCESS_STARTED_AT,
               httpListeningAt,
+              process: sampleProcessMetrics(),
             }),
           ),
         );

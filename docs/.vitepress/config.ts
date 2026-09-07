@@ -74,6 +74,7 @@ export default withMermaid(
             { text: "Deploy and rotate a secret", link: "/how-to/deploy-and-rotate-a-secret" },
             { text: "Operate production", link: "/how-to/operate-production" },
             { text: "Configure the repository", link: "/how-to/configure-the-repository" },
+            { text: "Run a load test", link: "/how-to/run-a-load-test" },
           ],
         },
         {
