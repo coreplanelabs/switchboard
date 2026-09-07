@@ -49,9 +49,11 @@ Runtime and build dependencies are declared in the `package.json` files at the
 repository root and under `web/`, `docs/`, and `deploy/*/`. Each package
 carries its own license in its published tarball. `npm run licenses:check` (at
 the root and in `web/`, both run by CI) fails when a production dependency's
-license is outside the allowed set: MIT, ISC, Apache-2.0, BSD-2-Clause,
-BSD-3-Clause, 0BSD, BlueOak-1.0.0, CC0-1.0, Unlicense, MPL-2.0, Python-2.0,
-CC-BY-4.0.
+license is outside the allowed set. The set, and the documented exceptions for
+packages whose manifests misreport their license, live in one place:
+[`scripts/licenses-check.mjs`](scripts/licenses-check.mjs). Today the set is
+MIT, ISC, Apache-2.0, BSD-2-Clause, BSD-3-Clause, 0BSD, BlueOak-1.0.0, CC0-1.0,
+Unlicense, MPL-2.0, Python-2.0, CC-BY-4.0.
 
 Two entries need a note:
 
@@ -60,5 +62,5 @@ Two entries need a note:
   its own source, not to this project.
 - `vaul-vue` (a dashboard component dependency) publishes no `license` field
   in its package manifest, so the checker reports it as unknown. Its
-  repository is licensed MIT; the check excludes the package by name for that
-  reason.
+  repository is licensed MIT; the script's exception list says so and skips
+  the package by name.

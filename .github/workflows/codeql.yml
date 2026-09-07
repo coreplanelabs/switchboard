@@ -2,8 +2,11 @@
 # main, and weekly so newly published queries are applied to unchanged code.
 #
 # Code scanning is a GitHub Advanced Security feature: free on public repos,
-# unavailable on a private one without a GHAS seat. The visibility step keeps
-# the workflow green on a private fork instead of failing at the upload.
+# unavailable on a private one without a GHAS seat. The `visibility` job asks
+# the API once; on a private repository the `analyze` job is SKIPPED (grey in
+# the checks list, never a green that did nothing). Do not make `analyze` a
+# required status check before the repository is public — a skipped required
+# check satisfies branch protection, so requiring it would be vacuous.
 name: codeql
 
 on:
@@ -17,8 +20,28 @@ permissions:
   contents: read
 
 jobs:
+  visibility:
+    name: is the repository public?
+    runs-on: ubuntu-latest
+    outputs:
+      public: ${{ steps.check.outputs.public }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          private=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)
+          if [ "$private" = "true" ]; then
+            echo "public=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::private repository — code scanning needs GitHub Advanced Security; the analyze job is skipped, not passed"
+          else
+            echo "public=true" >> "$GITHUB_OUTPUT"
+          fi
+
   analyze:
     name: analyze javascript-typescript
+    needs: visibility
+    if: needs.visibility.outputs.public == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -26,22 +49,10 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - id: visibility
-        name: is the repository public?
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          private=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)
-          echo "private=$private" >> "$GITHUB_OUTPUT"
-          if [ "$private" = "true" ]; then
-            echo "::notice::private repository — code scanning needs GitHub Advanced Security; skipping"
-          fi
-      - if: steps.visibility.outputs.private == 'false'
-        uses: github/codeql-action/init@a35ac6e6798d72df5475948b28efb89edc2e19ca # v4.37.9
+      - uses: github/codeql-action/init@a35ac6e6798d72df5475948b28efb89edc2e19ca # v4.37.9
         with:
           languages: javascript-typescript
           queries: security-and-quality
-      - if: steps.visibility.outputs.private == 'false'
-        uses: github/codeql-action/analyze@a35ac6e6798d72df5475948b28efb89edc2e19ca # v4.37.9
+      - uses: github/codeql-action/analyze@a35ac6e6798d72df5475948b28efb89edc2e19ca # v4.37.9
         with:
           category: "/language:javascript-typescript"

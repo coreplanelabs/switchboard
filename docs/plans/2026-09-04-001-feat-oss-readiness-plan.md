@@ -48,6 +48,7 @@ Drawn from [opensource.guide](https://opensource.guide/starting-a-project/), the
 6. **Contribution is safe and predictable.** CONTRIBUTING, CODE_OF_CONDUCT, SECURITY with private reporting, CODEOWNERS, templates, labels, Discussions; CI is the gate; conventional commits + release-please; pinned actions; Dependabot; CodeQL; Scorecard badge.
 7. **Deployment config lives outside the repo.** The repo ships examples and templates; our production values live in `coreplanelabs/infrastructure`.
 8. **Docs are a product surface**: public, pretty, searchable, with a landing page, architecture diagrams, screenshots, a demo video, and the four Diataxis kinds pruned to what a stranger needs.
+9. **The repo demonstrates how we work.** World-class code and a world-class process a visitor can read off the repo: CI runs only the scripts a human or an agent runs locally (nothing lives only in YAML); one `npm run verify` is the whole gate; conventional commits are enforced, not suggested; every generated artifact has a `gen` and a `check`; the toolchain is pinned so the same command gives the same result on every machine; AGENTS.md is an opinionated statement of what agentic development looks like here, drives agents through those scripts, and has its command table generated from `package.json`; the development rules are written in terms of Switchboard's own agents, so the product reviews, implements, and ships its own changes in the open.
 
 ---
 
@@ -58,15 +59,16 @@ Taken 2026-09-07 (Justin). The recommendations below are kept for the record; th
 | # | Taken | Consequence for the phases |
 |---|---|---|
 | D1 | **Apache-2.0** (first answered MIT, changed the same day) | Explicit patent grant; contributions covered by the license's own §5, so no DCO/CLA is needed for inbound = outbound. `NOTICE` carries the copyright line; `THIRD_PARTY_NOTICES.md` carries the vendored skills' MIT notice. |
-| D2 | **Fresh public repo, curated history.** The private repo was written assuming privacy: commit messages and PR bodies are as internal as the comments, and 464 issues/PRs would need triage. Decisions are codified in ADRs, so the history's explanatory value is captured elsewhere; a v0.1.0 does not need 489 commits of provenance. | Phases 1–9 still run as reviewed PRs in the private repo. Phase 10 becomes an **export**: the scrubbed tree lands in a new `coreplanelabs/switchboard` (the private repo is renamed to `switchboard-private` first, or the public one takes a new name) with a small number of coherent commits, then settings, then v0.1.0. Open issues that belong to the public roadmap are re-filed cleanly. |
-| D3 | **Dissolve `features/` into the Diataxis tree.** Not kept as a parallel `specs/` folder. | Behavioral contracts become **reference specs** (`docs/reference/specs/<feature>.md`: precise behavior + criteria + the proving test, scrubbed and tightened); the *why* moves to `docs/explanation/` and ADRs; operator steps embedded in `[agent]` criteria become `docs/how-to/` pages or are dropped. AGENTS.md's same-PR discipline points at the reference specs. `features/` is deleted at the end of Phase 6. |
-| D4 | Product domain, **Justin to choose**. | Phase 8 hosts on it; until then the site builds locally. |
-| D5 | Pluggable `dashboard.auth` (`access` \| `token`), `none` on loopback only. | Phase 4. |
-| D6 | **1Password env bootstrap stays** as a generic optional integration (a secrets-manager → agent-environment bridge is useful to any self-hoster); scrubbed of our service names and documented as a how-to. **Auto-approve-LGTM** becomes a documented *template* (a how-to page + an example workflow parameterized on the bot identity), not a live workflow in the public repo. **`docs/plans/`** dissolves into ADRs + explanation, then is deleted. **`config.production.yaml`** becomes `config/examples/*.yaml` with placeholders (`minimal`, `docker-local`, `cloudflare-full`); our real values move to the infra repo. | Phases 2, 3, 6, 7. |
+| D2 | **Same repo, same name, history rewritten in place before the flip.** The private history was written assuming privacy: commit messages and PR bodies are as internal as the comments. Decisions are codified in ADRs, so the history's explanatory value is captured elsewhere; a v0.1.0 does not need 489 commits of provenance. The repo name `coreplanelabs/switchboard` is kept (2026-09-07). | Phases 1–10 run as reviewed PRs on the existing history. Phase 11 **rewrites history in place** once the tooling from Phase 2 is in: a fresh root commit plus a small number of coherent commits built from the scrubbed tree, force-pushed to `main` with branch protection lifted for the operation, every other branch deleted, and a note in the changelog naming the cut. Issues and PRs stay attached to the repo and become public with it, so the scripted scan + triage of their bodies and comments is in scope; the old history remains reachable only in maintainers' local clones (a private archive fork is taken first). |
+| D3 | **Dissolve `features/` into the Diataxis tree.** Not kept as a parallel `specs/` folder. | Behavioral contracts become **reference specs** (`docs/reference/specs/<feature>.md`: precise behavior + criteria + the proving test, scrubbed and tightened); the *why* moves to `docs/explanation/` and ADRs; operator steps embedded in `[agent]` criteria become `docs/how-to/` pages or are dropped. AGENTS.md's same-PR discipline points at the reference specs. `features/` is deleted at the end of Phase 7. |
+| D4 | Public docs domain **TBD** (2026-09-07). | Phase 9 hosts on it once chosen; until then the site builds locally and every link to it goes through the one project-facts source (Phase 2), so the change is one line. |
+| D5 | Pluggable `dashboard.auth` (`access` \| `token`), `none` on loopback only. | Phase 5. |
+| D6 | **1Password env bootstrap stays** as a generic optional integration (a secrets-manager → agent-environment bridge is useful to any self-hoster); scrubbed of our service names and documented as a how-to. **Auto-approve-LGTM** becomes a documented *template* (a how-to page + an example workflow parameterized on the bot identity), not a live workflow in the public repo. **`docs/plans/`** dissolves into ADRs + explanation, then is deleted. **`config.production.yaml`** becomes `config/examples/*.yaml` with placeholders (`minimal`, `docker-local`, `cloudflare-full`); our real values move to the infra repo. | Phases 3, 4, 7, 8. |
 | D7 | **No DCO/CLA**: Apache-2.0 §5 already places intentional submissions under the license; CONTRIBUTING says so. DCO would add sign-off friction to agent-authored commits for no added coverage. | Phase 1. |
 | D8 | Company-stewarded, `GOVERNANCE.md`. | Phase 1. |
-| D9 | release-please + conventional commits; GHCR image with provenance + SBOM; `0.x`. | Phases 1, 10. |
+| D9 | release-please + conventional commits; GHCR image with provenance + SBOM; `0.x`. | Phases 1, 2, 11. |
 | D10 | Keep the name. | — |
+| D11 | **Contact address `dev@coreplane.ai`** for conduct and security reports, for now; everything of this kind must be easy to change later (2026-09-07). | Phase 1 uses it. Phase 2 makes it, the repo URL, the docs URL, and the org name a single **project-facts** source with a `check` that fails on a stale copy anywhere in the tree. |
 
 The original recommendations, for the record:
 
@@ -89,7 +91,7 @@ Human-gated steps regardless of the answers: the visibility flip, enabling org s
 
 ## Phases
 
-Ordering rule: delete and reshape before you scrub, scrub before you document, document before you flip. Phases 1 and 3 have no dependencies and run in parallel with the D-list.
+Ordering rule: delete and reshape before you scrub, scrub before you document, document before you flip. Phases 1, 2, and 3 have no dependencies on each other and run in parallel once the D-list is answered.
 
 ### Phase 1 — Community and supply-chain scaffolding (1 PR, small)
 
@@ -99,7 +101,22 @@ Ordering rule: delete and reshape before you scrub, scrub before you document, d
 - Labels: `area/*` (channels, providers, execution, dashboard, docs), `good first issue`, `help wanted`, `needs-decision`; drop `receipts`, `spec-gap`, `self-improvement` (D6/D3).
 - **Acceptance**: GitHub's community-profile checklist is 100 %; Scorecard runs green on the checks we control.
 
-### Phase 2 — Deployment config out of the repo (1–2 PRs, medium)
+### Phase 2 — Engineering process and toolchain: the repo shows how we work (3–4 PRs, medium)
+
+Added 2026-09-07: the repo doubles as the public demonstration of coreplanelabs' engineering process. Every item below is something a visitor can verify by reading the repo, and something an agent can run with the same result every time.
+
+- **CI runs scripts, never bespoke YAML.** Every job step is `npm run <script>`; the scripts live in `package.json` and run identically locally. `npm run verify` is the entire gate (typecheck, tests, lint, format check, generated-artifact checks, license check, hygiene check) and is what CI, the PR template, CONTRIBUTING, and AGENTS.md all name. `npm run fix` applies every auto-fix.
+- **One toolchain, pinned.** npm workspaces over the eight package roots (bot, web, docs, five Workers): one `npm ci`, one lockfile, one Dependabot entry, one cache key. `packageManager` + `engines` + `.nvmrc` pin Node and npm; CI and the Dockerfile read them rather than restating versions. Workers keep their own `vitest.config` (workerd) and `wrangler.jsonc`; the workspace only unifies install and scripts.
+- **Formatting and linting, enforced.** Prettier for every file type in the tree (TS, Vue, YAML, JSON, Markdown) and ESLint flat config with `typescript-eslint` type-checked rules and `eslint-plugin-vue`; both run in `verify`, both fixable by `fix`. One formatting commit lands first so later diffs stay readable.
+- **Conventional commits, enforced.** PR titles are validated against the Conventional Commits grammar in CI (squash merges use the title, and release-please reads it); `npm run check:commits` validates a branch locally. Squash-only merges, `delete_branch_on_merge`, and the merge queue (`merge_group` trigger in `ci.yml`) are repo settings recorded in `docs/how-to/` so a fork can reproduce them.
+- **Every generated artifact has a `gen` and a `check`.** The pattern `docs:gen`/`docs:check` and `skills:sync`/`skills:check` already follow becomes the rule: the AGENTS.md command table, the config reference, the CLI reference, the third-party notices are all generated, and `verify` fails on drift. Nothing an agent needs to know about running the repo is hand-maintained prose.
+- **One source of project facts.** Name, repo URL, docs URL, contact email, org name, and the bot identity live in one place (`package.json` fields plus a small `project.json` for what npm has no field for); the community files, the docs site config, the dashboard footer, and the self-description read or are generated from it, and `check:project-facts` fails on a stale copy anywhere in the tree. Changing the docs domain or the contact address is one line and one PR.
+- **AGENTS.md as a world-class, opinionated operating contract** (Justin, 2026-09-07: showcase how to work with the codebase and what agentic development looks like). Not a slimmed map but a rewritten document with a point of view: (1) *how we develop* — spec first, failing test, implementation, a PR whose body is a Tour, an agent review in the open, the merge queue, an automated release; (2) the invariants; (3) the map; (4) the generated **Commands** table (script, what it does, when to run it, exit codes; every entry deterministic, non-interactive, free of ambient-environment dependence, failing fast by variable name when a credential is missing); (5) the rules for agents — comments for the stranger, decisions as ADRs, Tidy First, conventional titles, never hand-edit a generated region, tests move with code; (6) **Switchboard develops Switchboard**: the development rules are written in terms of the product's own agents — every PR is reviewed by `agent:review` (the verdict contract and the auto-approve template are the process), issues are implemented by `agent:coding` with the vendored skills as its house style, `agent:ship` runs the coding → review → fix loop, run pages are the audit trail, `friction propose` files the process's own improvement issues. The same file is read by Claude Code, by Switchboard's agents working on this repo, and by a human visitor asking "how do these people work?"
+- **CI/CD shape a visitor recognizes.** Fast parallel PR checks with required status; Dependabot minors auto-merged after green; docs preview per PR; release-please → tag → GHCR image with provenance + SBOM (Phase 11) → a deploy workflow template with a staging step and a manually approved production environment; README badges for CI, Scorecard, license, and release.
+- **The loop, written down.** `docs/explanation/how-we-work.md`: spec → failing test → implementation → PR with a Tour → Switchboard reviews it in the open → merge queue → release-please → deploy, with the AGENTS.md contract as the agent's half of it.
+- **Acceptance**: `ci.yml` contains no `run:` step other than `npm run …` (a unit test asserts it); `npm run verify` passes locally and is the only thing CI calls; a PR titled outside the grammar fails a required check; the AGENTS.md command table matches `package.json` under `check`; a fresh clone at the pinned Node runs `verify` green with no other setup.
+
+### Phase 3 — Deployment config out of the repo (1–2 PRs, medium)
 
 - `config/config.production.yaml` moves to `coreplanelabs/infrastructure`; the image reads config from a mounted/env path; `config.example.yaml` becomes the only config in the repo and every block documents its off-state.
 - `deploy/*/wrangler.jsonc`: no `account_id`, no `coreplanelabs.dev` routes; per-environment values via `env.<name>` blocks or a gitignored `wrangler.<env>.jsonc` overlay with a checked-in `.example`; `CLOUDFLARE_ACCOUNT_ID` from the environment.
@@ -108,7 +125,7 @@ Ordering rule: delete and reshape before you scrub, scrub before you document, d
 - `deploy/secrets.manifest.json` keeps the *names* (they are the contract) but loses the 1Password/vault prose; `put-secrets.mjs` reads from a configurable directory.
 - **Acceptance**: `grep -r coreplane deploy src config` is empty; `npm run cli -- deploy plan` runs from the example profile; `src/config.production.test.ts` moves with the config to the infra repo (or becomes a golden over the example).
 
-### Phase 3 — Delete before you scrub (2–3 PRs, medium, some risk)
+### Phase 4 — Delete before you scrub (2–3 PRs, medium, some risk)
 
 Things already scheduled for removal, or internal-only, that are cheaper to delete than to de-imprint:
 
@@ -118,7 +135,7 @@ Things already scheduled for removal, or internal-only, that are cheaper to dele
 - `docs/self-improvement-architecture.md` folds into explanation pages.
 - **Acceptance**: tests green; `features/` index has no rows for removed behavior; the conformance snapshot is updated deliberately.
 
-### Phase 4 — Composability: the product adapts to what is on (2–3 PRs, medium-large)
+### Phase 5 — Composability: the product adapts to what is on (2–3 PRs, medium-large)
 
 Design vocabulary for this phase (the patterns are the spec, not decoration):
 
@@ -139,7 +156,7 @@ Introduce one **capabilities** value computed once at startup from config (`resi
 - Docs: a **"Turn features on and off"** matrix page — capability, config block, what appears/disappears, what it costs.
 - **Acceptance**: a new unit suite runs the whole surface (help text, catalogue, dashboard seeds, self-description, deploy plan) under `minimal` (Slack + one provider), `local-full`, and `cloud-full` capability fixtures and snapshots each; the conformance suite gains a capability axis.
 
-### Phase 5 — Simplify to off-the-shelf shapes (3–5 PRs, medium, behavior-preserving)
+### Phase 6 — Simplify to off-the-shelf shapes (3–5 PRs, medium, behavior-preserving)
 
 Method: Beck's **Tidy First** — every PR in this phase is a tidying, never a behavior change, so the diff is reviewable by structure alone; a behavior change that turns out to be needed gets its own PR before or after. Each move is named with its entry in Fowler's refactoring catalog in the commit message (*Extract Function*, *Move Function*, *Rename*, *Replace Conditional with Polymorphism*, *Introduce Special Case*, *Remove Dead Code*), and the acceptance test is Beck's four rules of Simple Design: passes the tests, reveals intention, no duplication, fewest elements.
 
@@ -149,27 +166,27 @@ Method: Beck's **Tidy First** — every PR in this phase is a tidying, never a b
 - **YAGNI** audit: anything with one implementation and no second caller in sight loses its abstraction (the reverse of invariant 2, which asks for ≥2 implementations before a seam exists). Replace bespoke helpers with the standard library or an existing dependency where one is already present (e.g. `mapLimit` stays — it is 30 lines and tested; a hand-rolled JWT verifier would not).
 - **Acceptance**: `npm test` and the conformance snapshot unchanged except for file moves; no file over ~800 lines in `src/core/`; every commit message names its refactoring.
 
-### Phase 6 — De-imprint, and make it impossible to regress (parallel by directory, large)
+### Phase 7 — De-imprint, and make it impossible to regress (parallel by directory, large)
 
 Policy for every comment, docstring, fixture, and prose line in the public tree:
 
 1. No company, product, or person names other than integrations the code talks to (Slack, GitHub, Anthropic, OpenAI, Cloudflare, E2B, Brave). Forbidden: `coreplane*`, `nominal` (the repo), `polylane`, `terrateam`, `justin`, `Claude Tag`, `#switchboard-prompting`, 1Password vault paths, Slack/Cloudflare ids.
-2. No private trackers: no `#NNN`, no `github.com/coreplanelabs/...`, no project-board links in `src/`, `deploy/`, `web/`, `scripts/`, `config/`, `specs/`, `docs/`. Provenance goes to `CHANGELOG.md` and ADRs (Phase 7), which may cite PRs.
+2. No private trackers: no `#NNN`, no `github.com/coreplanelabs/...`, no project-board links in `src/`, `deploy/`, `web/`, `scripts/`, `config/`, `docs/` (the reference specs included). Provenance goes to `CHANGELOG.md` and ADRs (Phase 8), which may cite PRs.
 3. No plan ids (`KTD…`, `KD…`, `OQ…`, `R1…`, `U…`) and no dated incident narratives. Rewrite each as the timeless rule it encodes ("a re-review must fetch the PR head, because the worktree can lag the remote") or delete it.
 4. Test fixtures use `acme/api`-style names; `src/core/authz/testing.ts`'s `REPOS` and friends change accordingly.
 
-Mechanics: one worktree per directory (`src/core`, `src/channels+execution+mcp`, `src/rest`, `deploy`, `web`, `specs`, `docs`), each a PR; a shared `docs/decisions/` index (Phase 7) so scrubbers can point at an ADR instead of an issue. **`scripts/public-hygiene.test.ts`** encodes the policy as regexes with a per-line allowlist file and runs in CI from the first PR (warn) and fails from the last (error). The word "nominal" as English (backoff) is allowlisted by line.
+Mechanics: one worktree per directory (`src/core`, `src/channels+execution+mcp`, `src/rest`, `deploy`, `web`, `features`→`docs/reference/specs`, `docs`), each a PR; a shared `docs/decisions/` index (Phase 8) so scrubbers can point at an ADR instead of an issue. **`scripts/public-hygiene.test.ts`** encodes the policy as regexes with a per-line allowlist file and runs in CI from the first PR (warn) and fails from the last (error). The word "nominal" as English (backoff) is allowlisted by line.
 
 - **Acceptance**: the hygiene test passes in error mode over the whole tracked tree; a reviewer opening any file at random finds every comment answerable from the repo alone.
 
-### Phase 7 — Design decisions as ADRs (1 PR, medium)
+### Phase 8 — Design decisions as ADRs (1 PR, medium)
 
 - `docs/decisions/` with ~20 ADRs distilled from the four plans, AGENTS.md, and the KTD/KD ids that comments lean on today: seams with ≥2 implementations; dispatcher as the only orchestrator; outbound-only Slack (Socket Mode) and what it costs; platform-namespaced ids; layered config and effort as a first-class dimension; runs have two lives (live registry, then history); one command definition → every surface; authorization as a policy table over a closed condition vocabulary; residents as a second credential domain; typed LLM output; thread admission; reconnect catch-up as recovery; capability tokens for live run pages; why the dashboard is CSP `script-src 'self'`; deploy order and "deployed ≠ live"; why not serverless-native; why memory is off by default.
 - Each ADR: context, decision, consequences, alternatives rejected, status, and **the named pattern it instantiates** (Ports & Adapters for the seams; Strategy for providers/executors/auth; Registry for agents, commands, schedules; Composite for tool sources; Null Object for off-states; Fowler's feature toggles for capabilities; capability-based security for live-run tokens; a rules table for authorization) so a newcomer maps code to a concept they already know in one lookup. An index page in the docs site under **Explanation → Design decisions**.
 - Comments that need provenance say `see docs/decisions/0007-authorization-policy-table.md`.
-- `AGENTS.md` shrinks to invariants + map + how to verify (target ≤ 12 KB); the ops runbook content moves to `docs/operations/` (generic) and the infra repo (ours).
+- `AGENTS.md` takes its Phase 2 shape (the opinionated contract, ≈ 15 KB, command table generated): the ops runbook content it carries today moves to `docs/operations/` (generic) and the infra repo (ours), and the map's row-per-file detail moves into the ADRs and reference specs it points at, so the file reads as a manifesto with pointers, not an index.
 
-### Phase 8 — README, docs site, landing page (3–4 PRs, large)
+### Phase 9 — README, docs site, landing page (3–4 PRs, large)
 
 **README (≤ 200 lines)**: the pitch in one sentence; a 30-second GIF (Slack mention → status card → PR link); the four-seam diagram; **What you need** table (required: Slack app, one model key; optional: GitHub App, Cloudflare account, E2B, Brave, with what each unlocks); **Quick start** (three commands with the published image); links: docs, architecture, contributing, security, license. Everything else moves to the site.
 
@@ -178,21 +195,22 @@ Mechanics: one worktree per directory (`src/core`, `src/channels+execution+mcp`,
 - Home: hero with a custom **animated request-flow** (message → dispatcher → agent → executor → PR, SVG + CSS, reduced-motion aware), the one-sentence pitch, three CTAs (Try in 60 s / Deploy / Read the design); feature grid of the four seams; a screenshot strip (Slack thread, run page, residents); the demo video; footer with license + Discussions.
 - Theme: a deliberate palette and type pairing (not the VitePress defaults), dark mode, consistent diagram styling for mermaid.
 - Public hosting on the D4 domain; the docs Worker loses Access; CI deploy stays.
-- New pages: **Get started** (CLI-only in 2 minutes → Slack locally → production), **Set up accounts** (Slack via a checked-in `slack-app-manifest.yaml`, model keys, GitHub App step-by-step, Cloudflare optional with what it buys, E2B optional), **Turn features on and off** (Phase 4), **Deploy** (docker compose with the GHCR image / Fly / Cloudflare), **Security model**, **Architecture** (the diagrams from README, redrawn to one style), **Design decisions** (ADR index), **Contributing**.
+- New pages: **Get started** (CLI-only in 2 minutes → Slack locally → production), **Set up accounts** (Slack via a checked-in `slack-app-manifest.yaml`, model keys, GitHub App step-by-step, Cloudflare optional with what it buys, E2B optional), **Turn features on and off** (Phase 5), **How we work** (Phase 2), **Deploy** (docker compose with the GHCR image / Fly / Cloudflare), **Security model**, **Architecture** (the diagrams from README, redrawn to one style), **Design decisions** (ADR index), **Contributing**.
 - Every existing page rewritten in Diataxis voice with the 17 internal references removed; reference tables stay generated from the registry (`docs:gen`).
 - **Acceptance**: dead-link build green; Lighthouse ≥ 95 on home; a first-time reader reaches a running `ask` from the home page in ≤ 3 clicks; human read of README + home + Get started (Justin).
 
-### Phase 9 — Visuals and demo (1 PR + human-gated captures)
+### Phase 10 — Visuals and demo (1 PR + human-gated captures)
 
 - Dashboard screenshots from `scripts/web-preview.ts` fixtures (deterministic, no real data), both themes.
 - Slack thread screenshots and the 30-second GIF/MP4 need a real workspace: a script of the three moments to capture (mention → 👀 + status card → PR link; `config set channel`; `repo list`) for Justin or a fresh workspace with fixture data.
 - Architecture diagrams: one visual system across README, site, and ADRs (mermaid theme tokens shared by the site theme).
 
-### Phase 10 — Release pipeline and go-public (2 PRs + human-gated flip)
+### Phase 11 — Release pipeline, history rewrite, and go-public (2 PRs + human-gated flip)
 
 - Release workflow: release-please PR → tag → GHCR image `ghcr.io/coreplanelabs/switchboard:<version>` with build provenance attestation and SBOM; docker-compose and the docs pin the image.
-- Scripted scan of every issue and PR body/comment for the Phase 6 forbidden list plus Slack ids, account ids, vault paths; a triage list for Justin (edit, close, or leave). Close stale issues; move the receipts process out (D3).
-- Repo settings: Discussions on, wiki off, secret scanning + push protection on, private vulnerability reporting on, Dependabot alerts on, branch protection on `main` (PR + 1 CODEOWNERS review + CI + linear history + no force push), squash-only merges, delete branch on merge, `homepage` = docs URL, topics.
+- **History rewrite in place (D2)**, scripted and rehearsed on a throwaway fork first: take a private archive fork of the repo as-is; build the new history from the scrubbed tree as a fresh root commit plus a handful of coherent commits (one per area, conventional titles); lift branch protection, force-push `main`, delete every other branch and tag, re-point release-please's `bootstrap-sha` at the new root, restore protection; run the Phase 7 hygiene test over `git log -p` of the new history so no old message survives. The archive fork is where the pre-rewrite history lives from then on.
+- Scripted scan of every issue and PR body/comment for the Phase 7 forbidden list plus Slack ids, account ids, vault paths; a triage list for Justin (edit, close, or leave). Close stale issues; move the receipts process out (D3).
+- Repo settings: Discussions on, wiki off, secret scanning + push protection on, private vulnerability reporting on, Dependabot alerts on, branch protection on `main` (PR + 1 CODEOWNERS review + CI + linear history + no force push; `codeql`/`analyze` becomes a required check only now, once the repo is public and the job actually runs), squash-only merges, delete branch on merge, `homepage` = docs URL, topics.
 - Flip to public; cut `v0.1.0`; announce (Discussions post, the release notes).
 - **Acceptance**: Scorecard ≥ 8; community profile 100 %; a clean clone follows README to a running `ask` without asking anyone.
 
@@ -202,20 +220,22 @@ Mechanics: one worktree per directory (`src/core`, `src/channels+execution+mcp`,
 
 ```
 D-list ──► Phase 1 ─┐
-       └─► Phase 2 ─┤
-                    ├─► Phase 3 ─► Phase 4 ─► Phase 5 ─► Phase 6 (7 parallel worktrees) ─► Phase 7 ─► Phase 8 ─► Phase 9 ─► Phase 10
+       ├─► Phase 2 ─┤
+       └─► Phase 3 ─┤
+                    ├─► Phase 4 ─► Phase 5 ─► Phase 6 ─► Phase 7 (7 parallel worktrees) ─► Phase 8 ─► Phase 9 ─► Phase 10 ─► Phase 11
                     │                                          ▲
-                    └── Phase 7 ADR drafts can start here ─────┘
+                    └── Phase 8 ADR drafts can start here ─────┘
 ```
 
-Rough size, agent-days: P1 0.5 · P2 1 · P3 1.5 · P4 2.5 · P5 2 · P6 4 (parallel, ~1.5 wall) · P7 1 · P8 3 · P9 0.5 + human · P10 1 + human. About two weeks of wall clock with the parallel scrub, dominated by P6 (`features/`) and P8.
+Rough size, agent-days: P1 0.5 · P2 2.5 · P3 1 · P4 1.5 · P5 2.5 · P6 2 · P7 4 (parallel, ~1.5 wall) · P8 1 · P9 3 · P10 0.5 + human · P11 1 + human. About two and a half weeks of wall clock with the parallel scrub, dominated by P7 (`features/`), P9, and P2's workspace unification.
 
 ## Risks
 
 - **`features/` scrub scale** (D3): 152 k words. Mitigation: parallel worktrees, the hygiene test as the definition of done, and the fallback of archiving files whose criteria are all `[agent]` receipts.
-- **Behavior drift during Phase 5**: the dispatcher split is the riskiest edit. Mitigation: file moves only, tests move with code, conformance snapshot unchanged, one PR per extracted stage.
-- **Prod continuity during Phase 2/4**: memory org key, PR-author identity, config path, dashboard auth all change shape. Mitigation: prod profile in the infra repo mirrors today's values; deploy through `deploy all` with the live gate; receipts on the tracker before the next phase.
-- **Public issues/PRs** (D2): 464 items of internal chatter become public. Mitigation: the scripted scan in Phase 10 and a triage pass; nothing secret is known to be there.
+- **Workspace unification (Phase 2)**: hoisting can change what the Workers' `vitest-pool-workers` and wrangler resolve, and the Dockerfile's two-stage install assumes separate lockfiles. Mitigation: convert one package root at a time behind the existing CI jobs; keep per-Worker `vitest.config` and `wrangler.jsonc`; the Docker build is part of `verify` (a `docker build --target build` smoke) before the switch lands.
+- **Behavior drift during Phase 6**: the dispatcher split is the riskiest edit. Mitigation: file moves only, tests move with code, conformance snapshot unchanged, one PR per extracted stage.
+- **Prod continuity during Phases 3 and 5**: memory org key, PR-author identity, config path, dashboard auth all change shape. Mitigation: prod profile in the infra repo mirrors today's values; deploy through `deploy all` with the live gate; receipts on the tracker before the next phase.
+- **Public issues/PRs** (D2): 464 items of internal chatter become public. Mitigation: the scripted scan in Phase 11 and a triage pass; nothing secret is known to be there.
 - **Docs domain and Access removal**: the dashboards stay behind Access; only the docs Worker opens up. No product surface becomes public.
 
 ## Validation summary
@@ -223,10 +243,12 @@ Rough size, agent-days: P1 0.5 · P2 1 · P3 1.5 · P4 2.5 · P5 2 · P6 4 (para
 | Criterion | Proof |
 |---|---|
 | No forbidden tokens anywhere in the tracked tree | `scripts/public-hygiene.test.ts` in error mode, in CI |
-| Every optional subsystem has an off-state the surfaces reflect | capability-fixture snapshot suite (Phase 4) |
+| Every optional subsystem has an off-state the surfaces reflect | capability-fixture snapshot suite (Phase 5) |
 | One authorization model, no translation layer | `src/core/authz/*.test.ts`; `config.example.yaml` has no `permissions` block |
 | Deploy tooling runs from a profile, not constants | `src/deploy/plan.test.ts` over the example profile |
 | Docs build with no dead links; reference tables match the registry | `npm run docs:check`, `npm --prefix docs run build` in CI |
+| CI calls only `npm run` scripts; `verify` is the whole gate; PR titles are conventional | a unit test over `ci.yml`; the required title check on every PR |
+| The AGENTS.md command table matches `package.json` | its `check` script, in `verify` |
 | Community profile complete; Scorecard green on controllable checks | GitHub community tab; Scorecard action badge |
 | A stranger runs `ask` from a clean clone | Get-started page followed in a fresh container in CI (`docs-smoke` job) |
 | README, home page, tutorials read as human-edited | Justin's read (human-gated) |
