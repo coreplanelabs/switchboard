@@ -15,7 +15,7 @@ flowchart LR
     A["1 · memory<br/>(state Worker — DO migrations<br/>must land before anything writes to them)"] --> B["2 · bot"] --> C["3 · resident"] --> D["4 · sandbox"]
 ```
 
-A Worker is deployed when one of its inputs changed since the commit it serves: a file its `worker.ts` imports (transitively — a shared `src/` module deploys every Worker that imports it), anything in its own `deploy/` directory, a *production* dependency in its lockfile, and for the bot anything its Dockerfile copies. A `vitest` bump, a docs page, a test, a CI file deploy nothing. A path no rule recognises deploys **everything** and says which path — that is the fail-safe, not a bug; classify the path in `src/deploy/affected.ts`.
+A Worker is deployed when one of its inputs changed since the commit it serves: a file its `worker.ts` imports (transitively — a shared `src/` module deploys every Worker that imports it), anything in its own `deploy/` directory, a *production* dependency of its workspace moving in the root lockfile, and for the bot anything its Dockerfile copies or installs. A `vitest` bump, a docs page, a test, a CI file deploy nothing. A path no rule recognises deploys **everything** and says which path — that is the fail-safe, not a bug; classify the path in `src/deploy/affected.ts`.
 
 If a deploy step finds runs in flight, it **waits and retries** (every 60 s, up to 45 min in CI) instead of killing them — a heartbeat line per retry in the job log. **Deployed ≠ live**: the bot step isn't done until `/healthz` reports a non-draining container running the release commit — the old container keeps answering while it drains for up to 15 minutes. The job summary ends with what each Worker is serving after the run.
 
