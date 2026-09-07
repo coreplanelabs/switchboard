@@ -174,6 +174,25 @@ interface LockPackage {
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
+  /** npm ≥7 installs peers too; an optional peer (`peerDependenciesMeta`) may legitimately be absent. */
+  peerDependencies?: Record<string, string>;
+  peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+  /** Shipped INSIDE this package's tarball: no lockfile entry of their own, moved by this package's version. */
+  bundleDependencies?: string[];
+}
+
+/** The edges npm follows out of one installed package (or the workspace itself). */
+function lockEdges(pkg: LockPackage, { includeDev }: { includeDev: boolean }): { name: string; peer: boolean }[] {
+  const bundled = new Set(pkg.bundleDependencies ?? []);
+  const names = new Set(
+    Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies, ...(includeDev ? pkg.devDependencies : {}) }),
+  );
+  const edges = [...names].filter((n) => !bundled.has(n)).map((name) => ({ name, peer: false }));
+  for (const name of Object.keys(pkg.peerDependencies ?? {})) {
+    if (names.has(name) || bundled.has(name) || pkg.peerDependenciesMeta?.[name]?.optional) continue;
+    edges.push({ name, peer: true });
+  }
+  return edges;
 }
 
 /** npm's own resolution over the lockfile's `packages` keys: the nearest
@@ -217,31 +236,25 @@ export function workspaceDependencies(
   const root = all[workspace];
   if (typeof root !== "object" || root === null) return undefined;
   const out = new Map<string, string>();
-  const queue: { from: string; names: string[] }[] = [
-    {
-      from: workspace,
-      names: Object.keys({
-        ...root.dependencies,
-        ...root.optionalDependencies,
-        ...(includeDev ? root.devDependencies : {}),
-      }),
-    },
+  const queue: { from: string; edges: { name: string; peer: boolean }[] }[] = [
+    { from: workspace, edges: lockEdges(root, { includeDev }) },
   ];
   while (queue.length > 0) {
-    const { from, names } = queue.shift()!;
-    for (const name of names) {
+    const { from, edges } = queue.shift()!;
+    for (const { name, peer } of edges) {
       const key = resolveLockPackage(all, from, name);
       if (key === undefined) {
-        // Not in the lockfile at all: record the fact so a diff shows it.
-        out.set(`${from ? `${from}/` : ""}node_modules/${name}`, "unresolved");
+        // A peer nobody installed is not part of what ships. Anything else
+        // named but absent from the lockfile is recorded, so a diff shows it.
+        if (!peer) out.set(`${from ? `${from}/` : ""}node_modules/${name}`, "unresolved");
         continue;
       }
       if (out.has(key)) continue;
       const pkg = all[key];
       out.set(key, typeof pkg.version === "string" ? pkg.version : "?");
-      // Inside the closure only production edges matter: a dependency's own
-      // devDependencies are never installed.
-      queue.push({ from: key, names: Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies }) });
+      // Inside the closure only what npm installs matters: a dependency's own
+      // devDependencies never are; its peers are (npm ≥7), unless optional.
+      queue.push({ from: key, edges: lockEdges(pkg, { includeDev: false }) });
     }
   }
   return out;
@@ -517,7 +530,7 @@ function markdownReason(reason: string): string {
   if (reason.startsWith("unsure:"))
     return reason.replace(/(unclassified path |import )(\S+)/, (_m, pre: string, p: string) => `${pre}\`${p}\``);
   return reason
-    .replace(/^(\S+?)(?=$| \(imported by |: production dependencies)/, "`$1`")
+    .replace(/^(\S+?)(?=$| \(imported by |: (production )?dependencies)/, "`$1`")
     .replace(/\(imported by (\S+)\)/, "(imported by `$1`)");
 }
 
