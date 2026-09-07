@@ -1,0 +1,47 @@
+# Static analysis of the TypeScript across the repo. Runs on every PR, on
+# main, and weekly so newly published queries are applied to unchanged code.
+#
+# Code scanning is a GitHub Advanced Security feature: free on public repos,
+# unavailable on a private one without a GHAS seat. The visibility step keeps
+# the workflow green on a private fork instead of failing at the upload.
+name: codeql
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze javascript-typescript
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: visibility
+        name: is the repository public?
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          private=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)
+          echo "private=$private" >> "$GITHUB_OUTPUT"
+          if [ "$private" = "true" ]; then
+            echo "::notice::private repository — code scanning needs GitHub Advanced Security; skipping"
+          fi
+      - if: steps.visibility.outputs.private == 'false'
+        uses: github/codeql-action/init@a35ac6e6798d72df5475948b28efb89edc2e19ca # v4.37.9
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+      - if: steps.visibility.outputs.private == 'false'
+        uses: github/codeql-action/analyze@a35ac6e6798d72df5475948b28efb89edc2e19ca # v4.37.9
+        with:
+          category: "/language:javascript-typescript"

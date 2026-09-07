@@ -1,0 +1,38 @@
+# Dependency updates. One weekly PR per ecosystem per package root, with
+# minor and patch bumps grouped so the queue stays readable; majors arrive
+# on their own so the change is visible in the title.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - "/"
+      - "/web"
+      - "/docs"
+      - "/deploy/cloudflare"
+      - "/deploy/cloudflare-memory"
+      - "/deploy/cloudflare-resident"
+      - "/deploy/cloudflare-sandbox"
+      - "/deploy/cloudflare-docs"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    open-pull-requests-limit: 10
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directories:
+      - "/"
+      - "/deploy/cloudflare-resident"
+      - "/deploy/cloudflare-sandbox"
+    schedule:
+      interval: weekly
+      day: monday
