@@ -13,14 +13,36 @@ type RunFn = (
   opts: { cwd: string; timeoutMs: number },
 ) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 
-function e2bWith(run: RunFn): { ex: E2BExecutor; run: ReturnType<typeof vi.fn> } {
+function e2bWith(
+  run: RunFn,
+  resolveEnvs: () => Promise<Record<string, string>> = async () => ({}),
+): { ex: E2BExecutor; run: ReturnType<typeof vi.fn> } {
   const spy = vi.fn(run);
   const ex = Object.create(E2BExecutor.prototype) as E2BExecutor;
   (ex as unknown as { sbx: unknown }).sbx = { commands: { run: spy } };
+  (ex as unknown as { resolveEnvs: unknown }).resolveEnvs = resolveEnvs;
   return { ex, run: spy };
 }
 
 const OK = { stdout: "ok", stderr: "", exitCode: 0 };
+
+// Feature: features/execution.md item 5 — the credential is resolved per
+// command on this path too: the micro-VM's creation-time env would otherwise
+// carry the token minted for the thread's FIRST command forever.
+describe("E2BExecutor credential freshness", () => {
+  it("each command carries the envs resolved at its start", async () => {
+    let token = "ghs_first";
+    const { ex, run } = e2bWith(
+      async () => OK,
+      async () => ({ GH_TOKEN: token }),
+    );
+    await ex.exec("gh pr view 1");
+    token = "ghs_second";
+    await ex.exec("gh pr diff 1");
+    expect(run.mock.calls[0][1]).toMatchObject({ envs: { GH_TOKEN: "ghs_first" } });
+    expect(run.mock.calls[1][1]).toMatchObject({ envs: { GH_TOKEN: "ghs_second" } });
+  });
+});
 
 describe("E2BExecutor per-call timeout", () => {
   it("runs under the 5-min default when no timeoutMs is passed (today's behavior)", async () => {

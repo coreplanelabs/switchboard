@@ -102,7 +102,8 @@ describe("makeExecutor per-agent provisioning", () => {
   // prompt-injected diff — post/review/push. Least-privilege closes it at the
   // token: a `readonly` toolset gets a READ-scoped token, a `full` toolset gets
   // WRITE. (The bot-process review post uses its own write token, unaffected.)
-  const envOf = (ex: unknown) => (ex as { opts: { envs: Record<string, string> } }).opts.envs;
+  const envOf = (ex: unknown) =>
+    (ex as { opts: { resolveEnvs: () => Promise<Record<string, string>> } }).opts.resolveEnvs();
 
   it("a readonly agent's sandbox gets a READ-scoped token; a full agent gets WRITE", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
@@ -114,11 +115,31 @@ describe("makeExecutor per-agent provisioning", () => {
     const review = await makeExecutor(cf, ctx("review")); // toolset "readonly"
     const coding = await makeExecutor(cf, ctx("coding")); // toolset "full"
 
+    // …and the scoped token is exactly what lands in the sandbox env.
+    expect((await envOf(review.executor)).GH_TOKEN).toBe("ghs_read");
+    expect((await envOf(coding.executor)).GH_TOKEN).toBe("ghs_write");
     expect(resolveGithubToken).toHaveBeenCalledWith("read");
     expect(resolveGithubToken).toHaveBeenCalledWith("write");
-    // …and the scoped token is exactly what lands in the sandbox env.
-    expect(envOf(review.executor).GH_TOKEN).toBe("ghs_read");
-    expect(envOf(coding.executor).GH_TOKEN).toBe("ghs_write");
+  });
+
+  // Feature: features/execution.md item 5 — the credential is resolved when a
+  // command runs, never captured when the executor is built (2026-09-07: a
+  // token captured at build time expired under a 20-minute first command).
+  it("the sandbox credential is resolved per command, not captured at executor construction", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.mocked(resolveGithubToken).mockClear();
+    const cf: ExecutorFactoryOptions = {
+      execution: { type: "cloudflare", url: "https://sandbox.example" },
+      ...dirs(),
+    };
+    const review = await makeExecutor(cf, ctx("review"));
+    expect(resolveGithubToken).not.toHaveBeenCalled();
+
+    expect((await envOf(review.executor)).GH_TOKEN).toBe("ghs_read");
+    // The mint rotates (a fresh token after the reuse margin): the next command
+    // sees the new one, because nothing was captured.
+    vi.mocked(resolveGithubToken).mockResolvedValueOnce("ghs_read_rotated");
+    expect((await envOf(review.executor)).GH_TOKEN).toBe("ghs_read_rotated");
   });
 });
 

@@ -206,9 +206,12 @@ async function runLoop(
   };
 
   // The wall clock is the real budget; turns are a backstop. At the deadline
-  // the loop ends and the agent is forced to write up findings so far.
+  // the loop ends and the agent is forced to write up findings so far. Tools
+  // get the deadline too, so the bash tool can clip a command that would
+  // otherwise outlive the run (features/execution.md item 12).
   const deadline = now() + opts.agent.maxMinutes * 60_000;
   const warnAt = deadline - Math.min(3 * 60_000, opts.agent.maxMinutes * 15_000);
+  toolContext.remainingMs = () => deadline - now();
   let warned = false;
   // Set when consecutive exec-infra failures cross the threshold: the loop ends
   // and the finale reports a dead sandbox instead of the ordinary budget notice.

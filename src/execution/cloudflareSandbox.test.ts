@@ -11,7 +11,7 @@ const OPTS = {
   url: "https://sandbox.example",
   token: "t",
   threadKey: "slack:CX:1.0",
-  envs: {},
+  resolveEnvs: async () => ({}),
 };
 
 function stubFetch(body: unknown) {
@@ -28,6 +28,35 @@ const sentBody = (c: { init: RequestInit }) => JSON.parse(String(c.init.body)) a
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+// Feature: features/execution.md item 5 — the sandbox credential is resolved
+// per command, not per run. 2026-09-07 (review of #521): the token captured at
+// executor construction expired while the run's first command ran for 20
+// minutes, and every later command carried the same dead token.
+describe("CloudflareSandboxExecutor credential freshness", () => {
+  const envHeader = (c: { init: RequestInit }) => (c.init.headers as Record<string, string>)["x-env-GH_TOKEN"];
+
+  it("resolves the sandbox env on EVERY call, so each command carries the credential current at its start", async () => {
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    let token = "ghs_first";
+    const resolveEnvs = vi.fn(async () => ({ GH_TOKEN: token }));
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs });
+
+    await ex.exec("gh pr view 1");
+    token = "ghs_second";
+    await ex.exec("gh pr diff 1");
+
+    expect(resolveEnvs).toHaveBeenCalledTimes(2);
+    expect(envHeader(calls[0])).toBe("ghs_first");
+    expect(envHeader(calls[1])).toBe("ghs_second");
+  });
+
+  it("resolves nothing at construction — building the executor mints no credential", () => {
+    const resolveEnvs = vi.fn(async () => ({ GH_TOKEN: "ghs_x" }));
+    new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs });
+    expect(resolveEnvs).not.toHaveBeenCalled();
+  });
 });
 
 describe("CloudflareSandboxExecutor per-call timeout", () => {
