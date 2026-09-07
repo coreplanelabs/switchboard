@@ -12,6 +12,7 @@ import {
   type HealthzBody,
 } from "./liveGate.js";
 import {
+  capabilityProblem,
   classifyDeployOutput,
   decideAccount,
   UNSET_ENV,
@@ -124,6 +125,21 @@ async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]
   });
   if (account.ok) io.log(`[deploy:all] account: ${account.how}`);
   else problems.push(account.problem);
+  // Capabilities BEFORE any Worker deploys: the same command each is about to
+  // need, run read-only in its dir. One check per distinct command.
+  const checked = new Map<string, Promise<RunResult>>();
+  for (const step of plan.steps) {
+    for (const check of step.capabilities) {
+      const key = check.command.join(" ");
+      let r = checked.get(key);
+      if (!r)
+        checked.set(key, (r = run("npx", [...check.command], { cwd: join(REPO_ROOT, step.dir), unset: UNSET_ENV })));
+      const result = await r;
+      const problem = capabilityProblem(step.name, check, result.code, result.output);
+      if (problem) problems.push(problem);
+      else io.log(`[deploy:all] ${step.name}: credential can \`${key}\` (${check.needs})`);
+    }
+  }
   const status = await run("git", ["status", "--porcelain"], { cwd: REPO_ROOT });
   if (status.output.trim() !== "")
     problems.push(

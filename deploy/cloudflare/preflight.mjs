@@ -56,6 +56,32 @@ export async function fetchHealth(baseUrl, { timeoutMs = 20_000 } = {}) {
   }
 }
 
+/**
+ * The words to keep from a failed wrangler command. wrangler prints its
+ * errors on STDOUT (`✘ [ERROR] A request to the Cloudflare API … failed.
+ * Authentication error [code: 10000]`), so a message built from stderr alone
+ * says "Command failed: npx wrangler containers list --json" and nothing else
+ * — which is exactly what the first CI release deploy showed while its token
+ * lacked the Containers scope. Prefer wrangler's own error lines; else the
+ * last non-empty lines of both streams; else the exit description. Pure.
+ */
+/** ANSI colour sequences (ESC `[` … `m`), built from the code point so the regex literal carries no control character. */
+const ANSI_SEQUENCE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+
+export function wranglerFailureText(err, stdout, stderr, { maxLines = 3 } = {}) {
+  const lines = `${String(stdout ?? "")}\n${String(stderr ?? "")}`
+    .split("\n")
+    .map((l) => l.replace(ANSI_SEQUENCE, "").trim())
+    .filter((l) => l.length > 0 && !/^npm (ERR|WARN|warn)/i.test(l));
+  const errorLines = lines.filter((l) =>
+    /\[ERROR\]|✘|error|Authentication|Unauthorized|not authorized|permission/i.test(l),
+  );
+  const picked = (errorLines.length > 0 ? errorLines : lines).slice(-maxLines);
+  const exit =
+    err && typeof err.code === "number" ? `exit ${err.code}` : err && err.killed ? "killed (timeout?)" : "failed";
+  return picked.length > 0 ? `${exit}: ${picked.join(" | ")}` : `${exit}, no output`;
+}
+
 /** `wrangler containers list --json`, run from this directory so wrangler.jsonc
  *  selects the account. Never throws: `{ok:true,payload}` or `{ok:false,error}`. */
 export function listContainerApps({ cwd = dirname(fileURLToPath(import.meta.url)), timeoutMs = 60_000 } = {}) {
@@ -68,7 +94,7 @@ export function listContainerApps({ cwd = dirname(fileURLToPath(import.meta.url)
         if (err)
           return resolve({
             ok: false,
-            error: `wrangler containers list failed: ${err.message} ${String(stderr).slice(0, 200)}`.trim(),
+            error: `wrangler containers list failed (${wranglerFailureText(err, stdout, stderr)}) — the credential may lack the Containers scope`,
           });
         // wrangler prints its banner before the JSON; the payload starts at the first `[`.
         const start = String(stdout).indexOf("[");
