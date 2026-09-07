@@ -14,13 +14,39 @@
 // The Sandbox SDK only runs inside Workers — that's why this proxy exists.
 // Verify method names against https://developers.cloudflare.com/sandbox/ on
 // first deploy; the SDK is young and its surface may shift.
-import { getSandbox, Sandbox } from "@cloudflare/sandbox";
+import { getSandbox, Sandbox, type ExecOptions, type ExecResult } from "@cloudflare/sandbox";
 import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
+import {
+  EXEC_KEEPALIVE_INTERVAL_MS,
+  SANDBOX_SLEEP_AFTER,
+  recycledMidCommandMessage,
+  withActivityKeepalive,
+} from "../../src/execution/sandboxKeepalive.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
 import { fleetBusyAnswer, fleetBusyExecAnswer, isFleetBusy } from "../../src/execution/sandboxErrors.js";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 
 export class SwitchboardSandbox extends Sandbox {
+  // Idle lifetime of a thread's container. The base class renews its activity
+  // clock once per proxied fetch and its alarm loop SIGTERMs the container
+  // the moment the clock expires, in-flight request or not — so on 2026-09-07
+  // the #521 review's first command (a 20-minute budget under the SDK's
+  // 20-minute default) was killed at 20:00 exactly, surfaced as "Command
+  // execution failed", and the next command found a fresh container with an
+  // empty /workspace. `exec` below renews the clock every minute while a
+  // command runs, which makes this a true idle timeout (features/execution.md
+  // item 2); 5 minutes of idle frees the slot far sooner than 20 while a
+  // prompt follow-up still reuses the warm workspace.
+  sleepAfter = SANDBOX_SLEEP_AFTER;
+
+  override async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
+    return withActivityKeepalive(
+      () => this.renewActivityTimeout(),
+      () => super.exec(command, options),
+      EXEC_KEEPALIVE_INTERVAL_MS,
+    );
+  }
+
   // SDK 0.3.x caches its default ExecutionSession in Durable Object memory
   // (`private defaultSession`), but the session itself lives in the
   // container's memory. When the container restarts under a live DO (image
@@ -203,6 +229,10 @@ function streamExec(
   execTimeoutSecs: number,
 ): Response {
   const encoder = new TextEncoder();
+  // Per ATTEMPT, not per request: withSessionRecovery may run the command a
+  // second time after a stale-session reset, and a retry's own failure must be
+  // judged on its own clock, not the first attempt's.
+  let attemptStartedAt = Date.now();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const beat = setInterval(() => {
@@ -221,7 +251,10 @@ function streamExec(
           // stream already errored/cancelled — nothing left to deliver to
         }
       };
-      withSessionRecovery(sandbox, () => sandbox.exec(command))
+      withSessionRecovery(sandbox, () => {
+        attemptStartedAt = Date.now();
+        return sandbox.exec(command);
+      })
         .then((result) => {
           const exitCode = result.exitCode ?? 0;
           // coreutils `timeout` exits 124 when the deadline killed the
@@ -239,16 +272,21 @@ function streamExec(
           });
         })
         .catch((err: unknown) => {
-          const msg = err instanceof Error ? err.message : String(err);
+          const raw = err instanceof Error ? err.message : String(err);
           // A full fleet (features/execution.md item 14): session creation
           // failed because no container instance was free, so the command
           // never started — re-sending it is safe by construction. The named
           // `reason` is what the executor waits on; the dual shape below is
           // kept so an older executor still renders it as exit 127.
-          if (isFleetBusy(msg)) {
-            finish(fleetBusyExecAnswer(msg));
+          if (isFleetBusy(raw)) {
+            finish(fleetBusyExecAnswer(raw));
             return;
           }
+          // A recycle-shaped failure minutes into this attempt means the
+          // container was replaced under the command (features/execution.md
+          // item 2) — say so, and that /workspace is gone. Still exit 127:
+          // the workspace really is gone.
+          const msg = recycledMidCommandMessage(Date.now() - attemptStartedAt, raw);
           // Carry the failure in BOTH shapes so rollout order can't create
           // a silent-success window: a new executor throws on `error`, and
           // an executor that predates in-body errors (only checks exitCode)
