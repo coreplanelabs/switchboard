@@ -2,14 +2,17 @@
 // The `deploy targets` CI job (features/release-and-deploy.md item 8): which
 // Workers this PR's diff would deploy, judged by `deploy plan --affected`.
 //
-// On an ordinary PR the base is the PR's own base (HEAD^ of the merge commit CI
-// checks out) and the table lands in the job summary. On the release PR the
-// same command runs against production instead — each Worker's live commit —
-// and the table is kept as ONE sticky comment on the PR, re-rendered on every
-// push, so what merging the release will deploy is on the PR itself.
+// On an ordinary PR (ci.yml) the base is the PR's own base (HEAD^ of the merge
+// commit CI checks out) and the table lands in the job summary. For the RELEASE
+// PR the same script runs from release-please.yml on the push to main that
+// opened or updated it — its own pull_request runs sit at `action_required`
+// (the branch is pushed by github-actions[bot]) — against production instead:
+// each Worker's live commit, and the table is kept as ONE sticky comment on the
+// PR, re-rendered on every merge to main, so what merging the release will
+// deploy is on the PR itself.
 //
 // Environment (all set by the workflow; the script is the only logic):
-//   RELEASE_PR          "true" on the release-please branch, else "false"
+//   RELEASE_PR          "true" when run for the release PR, else unset/"false"
 //   GITHUB_STEP_SUMMARY the job summary file (optional: printed only when unset)
 //   GITHUB_REPOSITORY   owner/name, for the comment API
 //   PR                  the pull request number (release PR only)
@@ -20,7 +23,7 @@ import { appendFileSync, writeFileSync } from "node:fs";
 
 export const MARKER = "<!-- switchboard:deploy-targets -->";
 export const FOOTER =
-  "_Judged per Worker against the commit it is serving right now. Re-rendered on every push to this branch by the `deploy targets` CI job; merging runs `deploy all --affected` and deploys exactly the Workers marked **deploy**._";
+  "_Judged per Worker against the commit it is serving right now. Re-rendered by the `release-please` workflow on every merge to `main`; merging this PR runs `deploy all --affected` and deploys exactly the Workers marked **deploy**._";
 
 /** The summary block for the job page: heading, blank line, the table. Pure. */
 export function summaryBlock(releasePr, table) {

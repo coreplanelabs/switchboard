@@ -4,8 +4,8 @@
 # that PR tags the version, publishes the GitHub release — and deploys
 # production: deploy-production.yml runs `deploy all --affected`, so only the
 # Workers whose inputs this release changed roll, in the one supported order.
-# The release PR itself shows that plan before anyone merges it (the
-# `deploy targets` job in ci.yml).
+# The release PR itself shows that plan before anyone merges it: the
+# release-pr-deploy-targets job below posts it on every push to main.
 name: release-please
 
 on:
@@ -24,12 +24,55 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      prs_created: ${{ steps.release.outputs.prs_created }}
+      pr: ${{ steps.release.outputs.pr }}
     steps:
       - id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  # The release PR carries its deploy plan (features/release-and-deploy.md
+  # item 8). Posted from HERE, on the push to main that opened or updated the
+  # release PR, because the PR's own pull_request runs sit at `action_required`
+  # (its branch is pushed by github-actions[bot]) and never run unattended.
+  # The plan is `deploy plan --affected` on the release branch's tree — main
+  # plus the release commit — judged against what production serves right now.
+  release-pr-deploy-targets:
+    name: the release PR carries its deploy plan
+    needs: release-please
+    if: needs.release-please.outputs.prs_created == 'true' && needs.release-please.outputs.release_created != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    # The same script as ci.yml's `deploy targets` job (scripts/deploy-targets.mjs),
+    # in its release-PR mode: judge against production, upsert the sticky comment.
+    env:
+      RELEASE_PR: "true"
+      # Optional: lets the plan read the sandbox's live commit; without it the
+      # sandbox is judged against the last release tag (unsure before the first).
+      SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      # `pr` is release-please's PullRequest JSON ({ number, headBranchName, … }).
+      # Read here and not at the workflow level: the job's `if` guarantees it is set.
+      PR: ${{ fromJSON(needs.release-please.outputs.pr).number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          # Full history + tags: the diff against each Worker's live commit, and
+          # the last `v*` tag as the fallback base.
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run deploy:targets
 
   # Only when this push IS the release (the release PR merged): the ordinary
   # merge to main that merely updates the release PR deploys nothing.

@@ -95,34 +95,23 @@ jobs:
 
   # Which Workers this PR's diff would deploy (features/release-and-deploy.md
   # item 8): `deploy plan --affected --base HEAD^` — HEAD is the merge commit,
-  # so HEAD^ is the PR's base — into the job summary, on every PR. On the
-  # RELEASE PR the same command runs against production instead (each Worker's
-  # live commit), and the result is one sticky comment on the PR: what merging
-  # it will deploy, re-rendered on every push to the release branch. An
+  # so HEAD^ is the PR's base — into the job summary, on every PR. An
   # unclassified path shows here as "every Worker deploys" long before it
   # reaches a release. The logic is scripts/deploy-targets.mjs, like every
-  # other step here: `npm run deploy:targets` runs it locally too.
+  # other step here: `npm run deploy:targets` runs it locally too. The RELEASE
+  # PR's plan (judged against production, kept as a sticky comment) is the same
+  # script run from release-please.yml on the push to main — a pull_request
+  # run on a branch pushed by github-actions[bot] sits at `action_required`
+  # until someone approves it, so it cannot be this job.
   deploy-targets:
     name: deploy targets
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-    env:
-      RELEASE_PR: ${{ startsWith(github.head_ref, 'release-please--') }}
-      # Optional: lets the release-PR plan read the sandbox's live commit. Empty
-      # on a fork PR (secrets are withheld there) — the plan then says so.
-      SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
-      GH_TOKEN: ${{ github.token }}
-      PR: ${{ github.event.pull_request.number }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history + tags: the diff against the PR base, or against what
-          # each Worker serves, and the last `v*` tag as the fallback base.
+          # Full history: the diff against the PR base needs both commits.
           fetch-depth: 0
-          fetch-tags: true
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
