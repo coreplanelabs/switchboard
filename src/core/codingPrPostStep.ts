@@ -221,7 +221,10 @@ export function trackPushedBranch(): { observe(event: RunEvent): void; branch():
   return {
     observe(event) {
       if (event.type === "tool_call") {
-        if (event.tool === "bash" && event.callId !== undefined && PUSH_COMMAND_RE.test(event.summary)) pushCalls.add(event.callId);
+        // The full command when the event carries it (runner ≥ this fix); the
+        // 200-char summary otherwise (older records) — where a chained command's
+        // push past the cap is a known false negative (falls back to the checkout).
+        if (event.tool === "bash" && event.callId !== undefined && PUSH_COMMAND_RE.test(event.command ?? event.summary)) pushCalls.add(event.callId);
         return;
       }
       if (event.type !== "tool_result" || event.tool !== "bash" || event.callId === undefined) return;

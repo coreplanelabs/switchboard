@@ -1,7 +1,7 @@
 import type { AgentDef } from "./agents/registry.js";
 import type { Effort } from "./effort.js";
 import { toolResultText, type ChatMessage, type ContentPart, type Provider } from "./providers/types.js";
-import { parseExitPrefix, prepareToolResult, redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
+import { COMMAND_CAP, parseExitPrefix, prepareToolResult, redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "./core/runEvents.js";
 import type { RunControl } from "./core/runRegistry.js";
 import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
 import { ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
@@ -343,8 +343,14 @@ async function runLoop(
     };
     // Redact THEN cap (redactAndCap): a pre-truncated command could sever a
     // token below its detector's length floor and leak a raw fragment.
-    const announce = (tu: ToolUsePart) =>
-      emit({ type: "tool_call", tool: tu.name, summary: redactAndCap(describeToolCall(tu)), callId: tu.id });
+    // A bash call also carries its full command (redacted, capped far above the
+    // summary) so the pushed-branch tracker can see a `git push` that a chained
+    // command pushed past the 200-char summary (runEvents `tool_call.command`).
+    const announce = (tu: ToolUsePart) => {
+      const input = tu.input as Record<string, unknown> | undefined;
+      const command = tu.name === "bash" && typeof input?.command === "string" ? { command: redactAndCap(input.command, COMMAND_CAP) } : {};
+      emit({ type: "tool_call", tool: tu.name, summary: redactAndCap(describeToolCall(tu)), callId: tu.id, ...command });
+    };
     // Execution order: a mutating tool runs alone, in the model's order; a run
     // of consecutive side-effect-free tools (several read_file/web_fetch in one
     // turn — each a round trip to the resident or the web) runs concurrently.
