@@ -23,7 +23,7 @@ Switchboard can diagnose **what cost a run time or made it stumble** from its ow
 
 | Criterion | Evidence |
 |-----------|----------|
-| Empty stream → zeroed diagnosis, no findings, `no friction detected` | `[unit]` `src/core/runFriction.test.ts::analyzeRunFriction — empty / untimed input::an empty stream yields a clean, zeroed diagnosis` |
+| Empty stream → zeroed diagnosis, no findings, `no friction detected` | `[unit]` `src/core/runFriction.test.ts::analyzeRunFriction — empty / untimed input::an empty stream yields a clean, zeroed diagnosis…` |
 | Clean fast run → no findings; `runMs`/`toolTimeMs` computed | `[unit]` `::a clean, fast run has no findings and a no-friction verdict` |
 | Untimed (legacy) stream still classifies, with no durations | `[unit]` `::untimed events (legacy stream) still classify failures/retries, with no durations` |
 | Deterministic; input not mutated | `[unit]` `::is deterministic: the same stream yields a deep-equal diagnosis`, `::does not mutate its input` |
@@ -41,12 +41,12 @@ Switchboard can diagnose **what cost a run time or made it stumble** from its ow
 | Finished stream: unpaired trailing call → `infra_failure`; unfinished: not flagged | `[unit]` `::an unpaired trailing tool_call (run died mid-tool) is reported as an infra failure`, `::an unpaired trailing tool_call in an UNFINISHED stream (finished:false) is not flagged` |
 | Verdict = most time (with share) / most findings without timings; `byCategory` complete | `[unit]` `::the verdict names the category that cost the most time…`, `::with no timings the verdict falls back…`, `::byCategory always lists every category` |
 | Text report renders verdict, totals (incl. `model time`), category table, findings | `[unit]` `formatFrictionReport::*` |
-| Runner stamps `at` from its clock on every event | `[unit]` `src/runner.test.ts::run-friction signals…::stamps every event with \`at\`` |
+| Runner stamps `at` from its clock on every event | `[unit]` `src/runner.test.ts::run-friction signals…::stamps every event with \`at\`…` |
 | Runner marks `ExecInfraError` results `infra:true` and nothing else | `[unit]` `::marks an ExecInfraError result with infra:true; an ordinary tool error is NOT marked` |
 | Runner emits `run_note` for wrap-up, turn/time budget exhaustion, sandbox death | `[unit]` `::emits a run_note for the wrap-up warning and for turn-budget exhaustion`, `::emits time_budget_exhausted…`, `::emits sandbox_dead…` |
-| Existing consumers unaffected: card + registry receive notes; page renders them | `[unit]` `src/core/dispatcher.test.ts::live run-view wiring::registers the run, publishes its events, and finishes it` (asserts the note reaches the registry) |
-| `snapshot` is token-gated, returns a copy + finished flag | `[unit]` `src/core/runRegistry.test.ts::snapshot::*` |
-| `/runs/:id/friction`: route parsed; 404 on bad/missing token; JSON diagnosis (`no-store`, 405 non-GET); mid-run `finished:false` | `[unit]` `src/channels/liveView.test.ts::GET /runs/:id/friction::*` |
+| Existing consumers unaffected: card + registry receive notes; page renders them | `[unit]` `src/core/dispatcher.test.ts::live run-view wiring…::registers the run, publishes its events, and finishes it` (asserts the note reaches the registry) |
+| `snapshot` is token-gated, returns a copy + finished flag | `[unit]` `src/core/runRegistry.test.ts::snapshot — token-gated read of a run's backlog (#84)::*` |
+| `/runs/:id/friction`: route parsed; 404 on bad/missing token; JSON diagnosis (`no-store`, 405 non-GET); mid-run `finished:false` | `[unit]` `src/channels/liveView.test.ts::GET /runs/:id/friction…::*` |
 | `parseRunEventLines` parses JSONL and raw SSE captures, skips garbage AND wrong-shaped events; `friction analyze [source] [--slow-ms n] [--in-progress]` reads a file or stdin, renders the report + skipped count, `--slow-ms`/`--in-progress` reach the analyzer, a missing file is `not_found`, a stream without events `invalid_input`, and the command is CLI-only | `[unit]` `src/core/runEventLines.test.ts::*`, `src/core/commands/friction.test.ts::friction.analyze (CLI only) — the former frictionCli::*` |
 | The `--in-progress` hint appears only when a default analysis blames a trailing unpaired call | `[unit]` `src/core/commands/friction.test.ts::friction.analyze (CLI only)…::--slow-ms and --in-progress reach the analyzer…` |
 | CLI end-to-end over a saved SSE capture prints a report | `[agent]` `npx tsx src/cli.ts friction analyze <capture.sse>` on a `curl`-saved `/runs/:id/events` stream → a `verdict:` line, totals, category table, findings. |

@@ -34,18 +34,18 @@ The coding → review → fix loop to LGTM as one pipeline ([#131](https://githu
 
 | Criterion | Proof |
 |---|---|
-| `AGENTS["ship"]`: repo required, full toolset, nominal budgets; directive resolves on Slack/CLI | `[unit]` `src/agents/registry.test.ts::ship agent` |
+| `AGENTS["ship"]`: repo required, full toolset, nominal budgets; directive resolves on Slack/CLI | `[unit]` `src/agents/registry.test.ts::ship agent…` |
 | HTTP/MCP refuse `agent:ship` with a run-page pointer, no pipeline | `[unit]` `src/core/dispatcher.test.ts::agent:ship (pipeline)::channel guard…` |
 | Compound gate: allowed ship but denied coding → refused naming coding, no child run; denied repo → refused, no child run | `[unit]` `::permission: user allowed ship but not coding…`, `::allowed all three agents but denied the target repo…` |
 | Auto-merge repo refused before round 0 | `[unit]` `::auto-merge repo → refused before round 0` |
 | LGTM round 1: coding → PR → approve → merge-ready reply (PR URL, rounds, pending human merge) | `[unit]` `::LGTM round 1…` |
 | Findings round trip: request_changes → fix child gets the payload verbatim → re-review → approve; dispositions in the final report | `[unit]` `::findings round trip…` |
-| Approve + failed post → honest report, no merge-ready claim; approve + guard-refused post → same; the post step's typed outcome | `[unit]` `::approve whose post FAILED…`, `::approve whose post was REFUSED…`, `src/core/reviewRound.test.ts::runReviewPostStep…` (posted/skip/failure outcome rows) |
+| Approve + failed post → honest report, no merge-ready claim; approve + guard-refused post → same; the post step's typed outcome | `[unit]` `src/core/dispatcher.test.ts::agent:ship (pipeline)::approve whose post FAILED…`, `::approve whose post was REFUSED…`, `src/core/reviewRound.test.ts::runReviewPostStep…` (posted/skip/failure outcome rows) |
 | Merge-ready re-check that cannot fetch the PR → "could not be re-verified", never "no longer open" | `[unit]` `::merge-ready re-check that cannot fetch…` |
 | No verdict from a review child → abort report naming the terminal, no fix round | `[unit]` `::no verdict from review child…` |
 | `maxRounds` cap → report splits declined vs unaddressed; a later round reusing a finding id inherits nothing (listed unaddressed) | `[unit]` `::maxRounds cap…`, `::a later round reusing a finding id…` |
 | Child budgets clipped to remaining wall clock; reservation check refuses a round before the deadline passes | `[unit]` `::wall-clock: a child is dispatched with clipped maxMinutes…`, `::reservation check…` |
-| Branch binding (KTD12): round 0 creates the pipeline branch from base on origin BEFORE the first attach (422 already-exists tolerated; creation failure → abort, no attach; a resume never creates); every round's attach sha equals the pinned head; a thread bound to another ref → coding-round refusal naming both refs | `[unit]` `::branch binding…`, `::fresh pipeline: the bot creates…`, `::branch creation fails…`, `::a thread already bound to another ref…`, `src/execution/githubPulls.test.ts::createBranchRef` |
+| Branch binding (KTD12): round 0 creates the pipeline branch from base on origin BEFORE the first attach (422 already-exists tolerated; creation failure → abort, no attach; a resume never creates); every round's attach sha equals the pinned head; a thread bound to another ref → coding-round refusal naming both refs | `[unit]` `src/core/dispatcher.test.ts::agent:ship (pipeline)::branch binding…`, `::fresh pipeline: the bot creates…`, `::branch creation fails…`, `::a thread already bound to another ref…`, `src/execution/githubPulls.test.ts::createBranchRef…` |
 | Fix round with no new head → abort carrying the post-step's reason, no second review; a fix round's NEW PR adopted for later rounds + report | `[unit]` `::a fix round that repushed nothing…`, `::a fix round that opened a NEW PR…` |
 | Entry checks: bot-authored user-named open PR + no new task → resume at review, no create; new task over open PR → refusal naming it; human-authored PR → refusal | `[unit]` `::thread with user-named, bot-authored open PR…`, `::thread PR open + new task…`, `::thread PR authored by a human…` |
 | Resident unavailable → plain report, no cold clone | `[unit]` `::resident attach fails…` |

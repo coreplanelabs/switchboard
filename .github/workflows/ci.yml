@@ -32,7 +32,7 @@ jobs:
     # One static check per job — typecheck, lint, and prettier each take 15–25 s
     # on a runner; in one chain they were the slowest half of the slowest job.
     # `check:consistency` groups the sub-second checks (lockfile platforms,
-    # vendored skills, licenses, generated docs tables) so they do not each pay
+    # vendored skills, licenses, generated docs tables, spec proof bindings) so they do not each pay
     # an install.
     name: bot / ${{ matrix.check }}
     runs-on: ubuntu-latest
