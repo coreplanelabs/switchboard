@@ -99,6 +99,14 @@ const RESIDENTS = {
         lastRefreshAt: "2026-08-30T19:30:00.000Z",
         snapshot: { ref: "main", sha: "0123456789abcdef0123456789abcdef01234567", createdAt: "2026-08-30T19:31:00.000Z", mirrorBackupId: "bk_1", checkoutBackupId: "bk_2" },
         schedules: { refresh: 1, provisionRun: 0, provisionDeadline: 0 },
+        // The last disk sample (resident-repos item 55) — the nominal shape measured 2026-09-07.
+        disk: {
+          at: "2026-09-07T15:30:00.000Z",
+          totalKiB: 15_086_920,
+          usedKiB: 4_262_360,
+          freeKiB: 10_808_176,
+          parts: { mirror: 371_264, deps: 2_244_052, checkout: 462_888, threads: { "slack:C1:1787954209.398379": 541_860 }, homes: { worker1: 4, worker3: 2_100_000 }, other: 640_000 },
+        },
         threads: [
           { threadKey: "slack:C1:1787954209.398379", ref: "feat/retries", sha: "abcdef1234567890abcdef1234567890abcdef12", user: "worker3", deps: "hardlink", boundAt: "2026-08-30T21:40:00.000Z", lastAttachAt: "2026-08-30T21:45:00.000Z", evicted: false },
           { threadKey: "slack:C1:1787900000.000001", ref: "main", user: "", deps: "install", boundAt: "2026-08-20T10:00:00.000Z", lastAttachAt: "2026-08-20T10:05:00.000Z", evicted: true, evictedAt: "2026-08-27T10:00:00.000Z", evictedWhy: "merged #12" },

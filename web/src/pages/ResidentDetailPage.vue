@@ -6,12 +6,14 @@ import { useSeed } from "../lib/seed";
 import {
   RESIDENT_SLUG_RE,
   rec,
+  residentDisk,
   residentLive,
   residentSlug,
   residentStateTone,
   str,
   type ResidentRecordView,
 } from "@core/channels/residentsModel.js";
+import { diskReserveKiB, effectiveFreeKiB, formatDiskGauge, formatGiB, projectThreadCostKiB } from "@core/execution/residentDiskBudget.js";
 
 // One resident's detail page: lifecycle, pinned facts, snapshot stamp, thread
 // worktrees, pending schedules, command table, registry settings — the browser
@@ -79,6 +81,47 @@ const liveThreads = computed(() => threads.value.filter((t) => !t.evicted).lengt
 const lastRestore = computed(() => {
   const v = live.value.lastRestore;
   return v ? JSON.stringify(v) : "";
+});
+
+// Item 55: the last disk sample and the budget arithmetic over it — the same
+// pure functions the resident's attach admission runs, so the page shows the
+// numbers the next admission will decide on.
+const disk = computed(() => residentDisk(record.value));
+const diskBudgetMb = computed(() => (typeof record.value.diskBudgetMb === "number" ? record.value.diskBudgetMb : undefined));
+const diskFacts = computed(() => {
+  const d = disk.value;
+  if (!d) return [];
+  const reserve = diskReserveKiB(d);
+  const { freeKiB, capped, capacityKiB } = effectiveFreeKiB(d, diskBudgetMb.value);
+  const headroom = freeKiB - reserve.totalKiB;
+  const room = (kind: "hardlink" | "install"): string => {
+    const cost = projectThreadCostKiB(d.parts, kind);
+    if (cost === null) return "? (checkout not measured)";
+    if (cost === 0) return "?";
+    return `${Math.max(0, Math.floor(headroom / cost))} more (${formatGiB(cost)} each)`;
+  };
+  return [
+    ["used / total", formatDiskGauge(d)],
+    ["free", `${formatGiB(freeKiB)}${capped ? ` under the ${formatGiB(capacityKiB)} diskBudgetMb cap` : ""}`],
+    ["reserve", `${formatGiB(reserve.totalKiB)} (snapshot staging ${formatGiB(reserve.stagingKiB)} + floor ${formatGiB(reserve.floorKiB)})`],
+    ["headroom", `${formatGiB(Math.max(0, headroom))} — room for ${room("hardlink")} hardlinked trees, ${room("install")} deps-installing`],
+    ["measured", d.at || "—"],
+  ];
+});
+const diskParts = computed(() => {
+  const d = disk.value;
+  if (!d) return [];
+  const rows: Array<[string, string]> = [
+    ["mirror", formatGiB(d.parts.mirror)],
+    ["checkout deps (node_modules)", formatGiB(d.parts.deps)],
+    ["checkout (history + tree + build)", formatGiB(d.parts.checkout)],
+  ];
+  for (const [key, kib] of Object.entries(d.parts.threads).sort((a, b) => b[1] - a[1])) rows.push([`thread ${key}`, formatGiB(kib)]);
+  // Homes hold an install thread's pnpm store / npm cache; a bare home (a few
+  // KiB of dotfiles) is noise, so only ones above 1 MiB are listed.
+  for (const [user, kib] of Object.entries(d.parts.homes).sort((a, b) => b[1] - a[1])) if (kib >= 1024) rows.push([`home ${user}`, formatGiB(kib)]);
+  rows.push(["other (image, /tmp, …)", formatGiB(d.parts.other)]);
+  return rows;
 });
 </script>
 
@@ -180,6 +223,30 @@ const lastRestore = computed(() => {
           </tr>
         </tbody>
       </table>
+    </section>
+
+    <section class="mt-4">
+      <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Disk</h2>
+      <template v-if="disk">
+        <table class="w-full border-collapse text-[0.8125rem]">
+          <tbody>
+            <tr v-for="[label, value] in diskFacts" :key="label" class="border-t border-muted">
+              <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">{{ label }}</td>
+              <td class="break-all px-2 py-1 align-top">{{ value }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="mb-1 mt-2 text-xs text-muted">components (one du, hardlinks counted once — a thread tree shows only what it does not share with the checkout)</p>
+        <table class="w-full border-collapse text-[0.8125rem]">
+          <tbody>
+            <tr v-for="[label, value] in diskParts" :key="label" class="border-t border-muted">
+              <td class="w-32 break-all px-2 py-1 align-top text-muted sm:w-96 sm:break-words">{{ label }}</td>
+              <td class="px-2 py-1 align-top">{{ value }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </template>
+      <p v-else class="text-xs text-muted">not measured yet — the first refresh cycle or attach of this container measures it</p>
     </section>
 
     <section class="mt-4">

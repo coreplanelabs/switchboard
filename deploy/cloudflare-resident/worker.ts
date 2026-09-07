@@ -112,6 +112,23 @@ import {
   type RefreshOutcome,
 } from "../../src/execution/residentRefresh.js";
 import { DF_FREE_ARGV, DISK_FULL_FREE_KIB, isDiskFullReason, parseDfFreeKiB, planDiskFullRecovery } from "../../src/execution/residentDisk.js";
+import {
+  assembleDiskSample,
+  checkDiskAdmission,
+  DISK_PRESSURE_REASON,
+  diskPressureReason,
+  duArgv,
+  formatDiskGauge,
+  formatGiB,
+  orderEvictionCandidates,
+  parseDfKiB,
+  parseDu,
+  rawFreeAfterEviction,
+  threadUserCacheCleanArgv,
+  type DiskEvictionCandidate,
+  type DiskSample,
+  type ThreadCostKind,
+} from "../../src/execution/residentDiskBudget.js";
 import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
 import { describeStepFailure, stepFailureLog, type StepResult } from "../../src/execution/residentStepReport.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
@@ -325,6 +342,17 @@ const DISK_FULL_RECYCLE_KEY = "resident:diskFullRecycleAt";
 /** A disk-full attach pulls the refresh cycle this close (seconds) so the
  *  recovery decision runs now, not at the next 600 s alarm. */
 const DISK_FULL_REARM_S = 1;
+/** The last disk measurement (#448, item 55; `residentDiskBudget.ts`): one
+ *  `df` + one `du` over the parts, taken at the end of every refresh cycle and
+ *  (deferred by DISK_MEASURE_DELAY_S, off the hot path) after every attach,
+ *  detach and sweep eviction. Surfaced as the live view's `disk`; the attach
+ *  admission projects a new tree's cost from its parts. */
+const DISK_KEY = "resident:disk";
+const DISK_MEASURE_CALLBACK = "onDiskMeasure";
+const DISK_MEASURE_DELAY_S = 1;
+/** A `du` over a multi-GB checkout plus every live tree is seconds warm, tens
+ *  of seconds on a cold page cache — the same class as a git network step. */
+const DU_TIMEOUT_MS = GIT_NETWORK_TIMEOUT_MS;
 function isNonEvidenceReason(reason: string): boolean {
   return NON_EVIDENCE_REASON.test(reason);
 }
@@ -1826,6 +1854,9 @@ export class ResidentDO extends Sandbox<Env> {
       } catch (err) {
         console.log(`reclaim ${resource}: pass failed: ${errMsg(err)}`);
       }
+      // Item 55: the cycle's disk sample — what /residents, `repo list`, the
+      // watchdog line and the next attach admission read. Housekeeping too.
+      await this.measureDisk().catch((err) => console.log(`disk: measure failed: ${errMsg(err)}`));
     } catch (err) {
       if (err instanceof ResidentDownError) return; // already down with reason; chain stops below
       // A step killed from OUTSIDE (the container replaced under it — an
@@ -1967,6 +1998,178 @@ export class ResidentDO extends Sandbox<Env> {
     this.rearmOutcome = "disk-full-restart";
   }
 
+  // -- disk budget (#448, item 55) ----------------------------------------------
+
+  /** The `df` half: total/used/free of the workspace mount; null when df
+   *  cannot answer (never 0 — unknown must not read as full or as empty). */
+  private async dfSample(): Promise<{ totalKiB: number; usedKiB: number; freeKiB: number } | null> {
+    try {
+      const r = await this.run([...DF_FREE_ARGV]);
+      return r.exitCode === 0 ? parseDfKiB(r.stdout) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** One `df` + one `du -xsk` over the parts — mirror, the checkout's
+   *  node_modules, the checkout, each live thread dir, every pool user's home —
+   *  in `duArgv`'s order, so a hardlinked inode is counted once and charged to
+   *  the checkout's deps term, never to the thread that shares it. Persisted at
+   *  DISK_KEY and read back by `getResidentInfo` (`live.disk`) and the attach
+   *  admission. Never wakes a sleeping container (a slept disk is gone anyway);
+   *  best effort — a failure is a log line, never a lifecycle flip. `du` exits
+   *  1 when any argument is unreadable or absent and still prints every line it
+   *  could measure, so its exit code is deliberately not checked. */
+  private async measureDisk(): Promise<DiskSample | null> {
+    if (!(await this.isRuntimeActive().catch(() => false))) return null;
+    const df = await this.dfSample();
+    if (!df) {
+      console.log("disk: df did not answer — no sample taken");
+      return null;
+    }
+    const live = await this.liveBindings();
+    const layout = {
+      mirrorDir: MIRROR_DIR,
+      checkoutDir: CHECKOUT_DIR,
+      threads: live.map((b) => ({ threadKey: b.threadKey, dir: parentDir(b.worktreePath) })),
+      homes: [BUILD_USER, ...THREAD_USERS].map((user) => ({ user, dir: `/home/${user}` })),
+    };
+    const du = await this.run(duArgv(layout), { timeoutMs: DU_TIMEOUT_MS });
+    const sample = assembleDiskSample({ at: new Date().toISOString(), df, du: parseDu(du.stdout), layout });
+    await this.ctx.storage.put(DISK_KEY, sample);
+    const p = sample.parts;
+    console.log(
+      `disk: ${formatDiskGauge(sample)} — mirror ${formatGiB(p.mirror)}, deps ${formatGiB(p.deps)}, checkout ${formatGiB(p.checkout)}, ` +
+        `${Object.keys(p.threads).length} thread tree(s) ${formatGiB(Object.values(p.threads).reduce((a, n) => a + n, 0))}, ` +
+        `homes ${formatGiB(Object.values(p.homes).reduce((a, n) => a + n, 0))}, other ${formatGiB(p.other)}`,
+    );
+    return sample;
+  }
+
+  /** Schedule callback: the deferred measurement an attach/detach/sweep arms. */
+  async onDiskMeasure(_payload: string): Promise<void> {
+    await this.measureDisk().catch((err) => console.log(`disk: measure failed: ${errMsg(err)}`));
+  }
+
+  /** Arm one deferred measurement (at most one pending): the attach's hot path
+   *  pays a `df`, not the `du`. */
+  private async scheduleDiskMeasure(resource: string): Promise<void> {
+    if ((await this.listSchedules(DISK_MEASURE_CALLBACK)).length > 0) return;
+    await this.schedule(DISK_MEASURE_DELAY_S, DISK_MEASURE_CALLBACK, resource);
+  }
+
+  /** `{usedKiB, totalKiB, at}` of the last sample for the watchdog line (storage
+   *  only — the watchdog never touches the container). */
+  private async diskGauge(): Promise<{ usedKiB: number; totalKiB: number; freeKiB: number; at: string } | null> {
+    const s = await this.ctx.storage.get<DiskSample>(DISK_KEY);
+    return s ? { usedKiB: s.usedKiB, totalKiB: s.totalKiB, freeKiB: s.freeKiB, at: s.at } : null;
+  }
+
+  /** Projected bytes of attaches admitted but not yet on disk: the DO yields
+   *  between an admission's `df` and its clone, so two concurrent attaches would
+   *  otherwise each see the same free space. Added on admit, released when the
+   *  attach settles (`attachThreadBody`'s finally). */
+  private diskCommittedKiB = 0;
+
+  /** Attach admission (item 55): a new thread tree is created only when its
+   *  projected cost fits under `free − reserve` (`checkDiskAdmission`, with the
+   *  record's `diskBudgetMb` as a cap and the in-flight commitments deducted).
+   *  The cost is projected from the last sample's checkout parts: `hardlink`
+   *  (history + tree) unless the committed lockfile at the ref's mirror tip
+   *  differs from the warm checkout's (`install`: plus the deps term); a tree
+   *  already on disk is `reuse` (0 — a dirty/stale recreate frees the old one
+   *  first). A ref not yet in the mirror (fetched under the lock, moments later)
+   *  is projected as `hardlink`, the common case. When it does not fit, the
+   *  coldest clean idle trees go first (`orderEvictionCandidates`: never the
+   *  requesting thread, a busy tree, the default branch, or one attached within
+   *  DISK_EVICT_MIN_IDLE_MS; cleanliness checked as the thread user, dirty or
+   *  unreadable kept — the sweep's rules), `df` re-probed after each; still
+   *  short → `503 {reason:"disk-pressure"}` with the whole math in `error`, the
+   *  same shape as `mirror-busy`, so the bot falls back cold legibly. Never a
+   *  lifecycle flip: the checkout is intact and every existing tree keeps
+   *  serving. Runs BEFORE the mirror lock — evictions take the lock themselves.
+   *  No `df` answer → admitted (unknown is never refused, #472's rule). */
+  private async admitThreadDisk(input: { threadKey: string; binding: ThreadBinding; facts: RepoFacts; record: ResidentRecord }): Promise<{ admitted: true; committedKiB: number } | ThreadErr> {
+    const wt = input.binding.worktreePath;
+    if ((await this.run(["test", "-d", `${wt}/.git`])).exitCode === 0) return { admitted: true, committedKiB: 0 };
+    let kind: ThreadCostKind = "hardlink";
+    const tip = await this.run(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", `refs/heads/${input.binding.ref}`]);
+    if (tip.exitCode === 0) {
+      const key = await this.lockfileKey(tip.stdout.trim()).catch(() => null);
+      if (key !== null && key !== input.facts.lockfileHash) kind = "install";
+    }
+    const df = await this.dfSample();
+    if (!df) {
+      console.log(`attach ${input.threadKey}: disk admission skipped — df did not answer`);
+      return { admitted: true, committedKiB: 0 };
+    }
+    // The parts come from the last full sample; total/used/free from this df.
+    const stored = await this.ctx.storage.get<DiskSample>(DISK_KEY);
+    const sample: DiskSample = { at: stored?.at ?? "", ...df, parts: stored?.parts ?? { mirror: null, deps: null, checkout: null, threads: {}, homes: {}, other: 0 } };
+    // `rawFree` is always the last RAW df reading: `checkDiskAdmission`
+    // deducts the in-flight commitments itself, exactly once, so a re-check
+    // after an eviction never deducts them twice (review F1).
+    const decide = (rawFreeKiB: number) => checkDiskAdmission({ sample, freeKiB: rawFreeKiB, committedKiB: this.diskCommittedKiB, diskBudgetMb: input.record.diskBudgetMb, kind });
+    let rawFree = df.freeKiB;
+    let verdict = decide(rawFree);
+    const evicted: Array<{ threadKey: string; freedKiB: number | null }> = [];
+    const kept: Array<{ threadKey: string; detail: string }> = [];
+    if (!verdict.fits) {
+      const live = await this.liveBindings();
+      const candidates: DiskEvictionCandidate[] = live.map((b) => ({
+        threadKey: b.threadKey,
+        ref: b.ref,
+        lastAttachAt: b.lastAttachAt,
+        busy: this.threadOpsInFlight.get(b.threadKey) ?? 0,
+        isDefaultRef: b.ref === input.facts.defaultRef,
+        sizeKiB: sample.parts.threads[b.threadKey] ?? null,
+      }));
+      const ordered = orderEvictionCandidates({ candidates, now: Date.now(), requestingThreadKey: input.threadKey });
+      kept.push(...ordered.kept.map((k) => ({ threadKey: k.threadKey, detail: k.detail })));
+      for (const c of ordered.order) {
+        if (verdict.fits) break;
+        const binding = live.find((b) => b.threadKey === c.threadKey);
+        if (!binding) continue;
+        const clean = await this.worktreeCleanliness(binding);
+        if (!clean.clean) {
+          kept.push({ threadKey: c.threadKey, detail: clean.reason ?? "dirty" });
+          continue;
+        }
+        // Same re-read guards as the sweep: the clean check awaited.
+        const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(c.threadKey));
+        if (!current || current.evicted || current.lastAttachAt !== binding.lastAttachAt || (this.threadOpsInFlight.get(c.threadKey) ?? 0) > 0) {
+          kept.push({ threadKey: c.threadKey, detail: "re-attached or busy during the clean check" });
+          continue;
+        }
+        if (!(await this.evictBinding(current, true, "disk-pressure", DISK_PRESSURE_REASON))) {
+          kept.push({ threadKey: c.threadKey, detail: "re-attached during eviction" });
+          continue;
+        }
+        evicted.push({ threadKey: c.threadKey, freedKiB: c.sizeKiB });
+        console.log(`disk-pressure: evicted ${c.threadKey} (${c.ref}, ${formatGiB(c.sizeKiB)} back) to make room for ${input.threadKey}`);
+        rawFree = rawFreeAfterEviction(rawFree, await this.dfSample(), c.sizeKiB);
+        verdict = decide(rawFree);
+      }
+    }
+    // `=== false`, not `!`: this package typechecks without `strict`, where
+    // truthiness does not narrow a boolean-literal discriminant.
+    const final = verdict;
+    if (final.fits === false) {
+      const reason = diskPressureReason({ verdict: final, evicted, kept });
+      console.log(`attach ${input.threadKey}: ${reason}`);
+      const s = await this.getStatus();
+      return { error: reason, status: 503, state: s.state, reason: DISK_PRESSURE_REASON };
+    }
+    const m = final.math;
+    console.log(
+      `attach ${input.threadKey}: disk admitted — ${kind} ${formatGiB(m.projectedKiB)} projected, ${formatGiB(m.freeKiB)} free, ` +
+        `reserve ${formatGiB(m.reserve.totalKiB)}, headroom ${formatGiB(m.headroomKiB)}${evicted.length > 0 ? `, evicted ${evicted.map((e) => e.threadKey).join(", ")}` : ""}`,
+    );
+    const committedKiB = m.projectedKiB ?? 0;
+    this.diskCommittedKiB += committedKiB;
+    return { admitted: true, committedKiB };
+  }
+
   /** Refresh-on-attach, BOUNDED: if the resident was idle (or the last
    *  refresh is older than the active cadence), fetch the mirror now — seconds,
    *  under the mirror lock — so the ref this thread binds is current, clear
@@ -2036,7 +2239,19 @@ export class ResidentDO extends Sandbox<Env> {
    *  one strike per pass, rebuild at AUTO_REBUILD_AFTER_STRIKES). Storage/
    *  schedule reads (plus the strike counter) only — containers start via the
    *  re-armed alarms, never in this pass. */
-  async watchdogCheck(): Promise<{ resource: string; state: ResidentState; reason: string; action: "none" | "rearmed" | "provision-timed-out" | "auto-rebuilt" }> {
+  async watchdogCheck(): Promise<{
+    resource: string;
+    state: ResidentState;
+    reason: string;
+    action: "none" | "rearmed" | "provision-timed-out" | "auto-rebuilt";
+    /** Item 55: the last disk sample's gauge, for the watchdog's status line. */
+    disk: { usedKiB: number; totalKiB: number; freeKiB: number; at: string } | null;
+  }> {
+    const [check, disk] = await Promise.all([this.watchdogCheckLifecycle(), this.diskGauge()]);
+    return { ...check, disk };
+  }
+
+  private async watchdogCheckLifecycle(): Promise<{ resource: string; state: ResidentState; reason: string; action: "none" | "rearmed" | "provision-timed-out" | "auto-rebuilt" }> {
     const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
     const status = await this.getStatus();
     if (status.state === "onboarding") {
@@ -2360,6 +2575,38 @@ export class ResidentDO extends Sandbox<Env> {
       else await this.ctx.storage.delete(threadBindingKey(threadKey));
     };
 
+    // Disk admission (item 55): before the lock, since making room takes it.
+    const admission = await this.admitThreadDisk({ threadKey, binding, facts, record });
+    if ("error" in admission) {
+      await rollback();
+      return admission;
+    }
+    try {
+      return await this.attachThreadCreate({ threadKey, refHint, wantSha, resource, slug, t0, facts, record, binding, mode, rollback });
+    } finally {
+      this.diskCommittedKiB -= admission.committedKiB;
+    }
+  }
+
+  /** The second half of an attach, past disk admission: mint, fetch + clone
+   *  under the mirror lock, deps, credentials, the binding write. Split from
+   *  `attachThreadBody` only so the admission's commitment is released on every
+   *  exit path in one `finally`. */
+  private async attachThreadCreate(input: {
+    threadKey: string;
+    refHint: string | null;
+    wantSha: string | null;
+    resource: string;
+    slug: string;
+    t0: number;
+    facts: RepoFacts;
+    record: ResidentRecord;
+    binding: ThreadBinding;
+    mode: ReturnType<typeof planReadonlyAttach>;
+    rollback: () => Promise<void>;
+  }): Promise<AttachOk | ThreadErr> {
+    const { threadKey, refHint, wantSha, resource, slug, t0, facts, record, binding, mode, rollback } = input;
+
     // Command-level token mint (KTD12) — before the lock so mint latency
     // never holds the mutex, and failure never blocks the attach.
     let token: string | null = null;
@@ -2461,6 +2708,9 @@ export class ResidentDO extends Sandbox<Env> {
     if ((await this.listSchedules(SWEEP_CALLBACK)).length === 0) {
       await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
     }
+    // Item 55: the tree is on disk now — measure it (deferred; the `du` stays
+    // off this hot path) so the next admission projects from current parts.
+    await this.scheduleDiskMeasure(resource);
 
     return {
       workspace: binding.worktreePath,
@@ -2875,6 +3125,13 @@ export class ResidentDO extends Sandbox<Env> {
       } catch (err) {
         console.log(`${logCtx}: rm failed for ${binding.threadKey}: ${errMsg(err)}`);
       }
+      // Item 55: what an `install` thread's package manager left OUTSIDE the
+      // tree — its pnpm store (the tree's hardlink source: 0 unique bytes while
+      // the tree lived, all of them now), npm/yarn/bun caches — goes with it.
+      // Pool users only, never the build user (its store backs the warm checkout).
+      if ((THREAD_USERS as readonly string[]).includes(binding.user)) {
+        await this.run(threadUserCacheCleanArgv(`/home/${binding.user}`)).catch((err) => console.log(`${logCtx}: home cache rm failed for ${binding.user}: ${errMsg(err)}`));
+      }
     }
     // The rm above awaited the mirror lock; a re-attach that STARTED in that
     // window has since bumped lastAttachAt (and will recreate the tree under
@@ -2944,6 +3201,9 @@ export class ResidentDO extends Sandbox<Env> {
     if (!(await this.evictBinding(current, activeNow, `detach`, "detach"))) {
       return { released: false, reason: "re-attached during eviction — kept", user };
     }
+    // Item 55: the tree is gone — re-measure (deferred) so the gauge and the
+    // next admission see the space back.
+    await this.scheduleDiskMeasure((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
     return { released: true, user };
   }
 
@@ -3090,6 +3350,7 @@ export class ResidentDO extends Sandbox<Env> {
       if (live) await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
       this.sweepInFlight = false;
     }
+    if (evicted.length > 0) await this.scheduleDiskMeasure(resource); // item 55
     return { evicted, kept };
   }
 
@@ -3364,6 +3625,11 @@ export class ResidentDO extends Sandbox<Env> {
     return { reclaimed, kept };
   }
 
+  /** Debug: measure the disk now (admin) — the exact cycle/attach function. */
+  async debugMeasureDisk(): Promise<DiskSample | null> {
+    return this.measureDisk();
+  }
+
   /** Debug: run the reclamation pass now (the exact refresh-cycle function,
    *  with a fresh mint when the App is configured). Runs a `fetch --prune`
    *  first so a branch deleted seconds ago already reads as gone. */
@@ -3420,9 +3686,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  lifecycle + recorded sha/cache keys/snapshot stamp/refresh telemetry.
    *  Backup handles are reduced to ids — never the raw handle internals. */
   async getResidentInfo(): Promise<Record<string, unknown>> {
-    const map = await this.ctx.storage.get<unknown>([RESOURCE_KEY, STATE_KEY, REASON_KEY, UPDATED_KEY, FACTS_KEY, SNAPSHOT_KEY]);
+    const map = await this.ctx.storage.get<unknown>([RESOURCE_KEY, STATE_KEY, REASON_KEY, UPDATED_KEY, FACTS_KEY, SNAPSHOT_KEY, DISK_KEY]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const snap = map.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
+    const disk = (map.get(DISK_KEY) as DiskSample | undefined) ?? null;
     const [refresh, provisionRun, provisionDeadline, bindings] = await Promise.all([
       this.listSchedules(REFRESH_CALLBACK),
       this.listSchedules(PROVISION_RUN_CALLBACK),
@@ -3463,6 +3730,9 @@ export class ResidentDO extends Sandbox<Env> {
       schedules: { refresh: refresh.length, provisionRun: provisionRun.length, provisionDeadline: provisionDeadline.length },
       inFlight: this.inFlightCount(),
       threads,
+      // Item 55: the last disk sample (`residentDiskBudget.ts` DiskSample), or
+      // null before the first measurement of this incarnation.
+      disk,
     };
   }
 
@@ -4711,6 +4981,10 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       return json(await stub.debugSweepNow());
     case "reclaim-now":
       return json(await stub.debugReclaimNow());
+    case "measure-disk":
+      // Item 55: take the sample now (df + one du) and answer it — the live
+      // check's way to read the gauge without waiting for a cycle.
+      return json({ disk: await stub.debugMeasureDisk() });
     case "backdate-thread": {
       const threadKey = parseThreadKey(body.threadKey);
       if ("error" in threadKey) return json({ error: threadKey.error }, 400);
@@ -4720,7 +4994,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     }
     default:
       return json(
-        { error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, backdate-thread)` },
+        { error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, measure-disk, backdate-thread)` },
         400,
       );
   }
@@ -4746,7 +5020,7 @@ async function runWatchdog(env: Env): Promise<WatchdogSummary> {
   const results: WatchdogSummary["results"][number][] = residents.map((record, i) => {
     const s = settled[i];
     return s.status === "fulfilled"
-      ? { resource: record.resource, state: s.value.state, reason: s.value.reason, action: s.value.action }
+      ? { resource: record.resource, state: s.value.state, reason: s.value.reason, action: s.value.action, disk: s.value.disk }
       : { resource: record.resource, error: errMsg(s.reason) };
   });
   return { cap: (await registry.limits()).cap, count: residents.length, results };

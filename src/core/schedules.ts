@@ -327,8 +327,23 @@ export function interpretIngressResponse(schedule: RunSchedule, firedAt: number,
 export interface WatchdogSummary {
   cap: number;
   count: number;
-  /** `error` is already a message (`runWatchdog` passes rejections through `errMsg`). */
-  results: ReadonlyArray<{ resource: string; state?: unknown; reason?: unknown; action?: unknown; error?: string }>;
+  /** `error` is already a message (`runWatchdog` passes rejections through `errMsg`).
+   *  `disk` is the resident's last disk sample gauge (`{usedKiB, totalKiB, …}`,
+   *  features/resident-repos.md item 55) when it has one. */
+  results: ReadonlyArray<{ resource: string; state?: unknown; reason?: unknown; action?: unknown; error?: string; disk?: unknown }>;
+}
+
+/** The fullest resident's disk, as `<pct>% (<owner/name>)`, from the per-resident
+ *  gauges a watchdog pass carries; undefined when no resident has measured. */
+function fullestDisk(results: WatchdogSummary["results"]): string | undefined {
+  let best: { pct: number; resource: string } | undefined;
+  for (const r of results) {
+    const d = r.disk as { usedKiB?: unknown; totalKiB?: unknown } | null | undefined;
+    if (!d || typeof d.usedKiB !== "number" || typeof d.totalKiB !== "number" || d.totalKiB <= 0) continue;
+    const pct = Math.round((d.usedKiB / d.totalKiB) * 100);
+    if (!best || pct > best.pct) best = { pct, resource: r.resource };
+  }
+  return best ? `${best.pct}% (${best.resource.replace(/^repo:/, "")})` : undefined;
 }
 
 /** Turn a watchdog pass (or the error it threw) into a firing record. A pass is
@@ -339,7 +354,8 @@ export function watchdogFiring(schedule: ScheduleDef, firedAt: number, result: W
   const errors = result.results.filter((r) => r.error !== undefined);
   const reArmed = result.results.filter((r) => r.action === "re-armed").length;
   const timedOut = result.results.filter((r) => r.action === "provision-timed-out").length;
-  const counts = `${result.count}/${result.cap} residents · ${reArmed} re-armed · ${timedOut} timed out · ${errors.length} errors`;
+  const disk = fullestDisk(result.results);
+  const counts = `${result.count}/${result.cap} residents · ${reArmed} re-armed · ${timedOut} timed out · ${errors.length} errors${disk ? ` · disk max ${disk}` : ""}`;
   const first = errors[0];
   return {
     schedule: schedule.name,

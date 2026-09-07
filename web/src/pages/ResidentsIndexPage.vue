@@ -5,12 +5,14 @@ import StatusDot from "../components/StatusDot.vue";
 import { useSeed } from "../lib/seed";
 import {
   RESIDENT_SLUG_RE,
+  residentDisk,
   residentLive,
   residentSlug,
   residentStateTone,
   str,
   type ResidentRecordView,
 } from "@core/channels/residentsModel.js";
+import { formatDiskGauge } from "@core/execution/residentDiskBudget.js";
 import { formatRelative } from "../lib/format";
 
 // The residents index: every onboarded repo, its lifecycle state and why,
@@ -30,6 +32,9 @@ const rows = computed(() =>
     const refreshed = str(live.lastRefreshAt);
     // "refreshed 3 hours ago" reads in a second; the exact stamp rides the hover.
     const refreshedAt = refreshed ? Date.parse(refreshed) : Number.NaN;
+    // Item 55: the last disk sample's gauge — the same used/total (pct) reading
+    // as `repo list` and the watchdog line; absent until the resident measures.
+    const disk = residentDisk(record);
     return {
       key: `${slug || "?"}-${i}`,
       display: slug || str(record.resource) || "?",
@@ -40,6 +45,8 @@ const rows = computed(() =>
       sha: sha ? sha.slice(0, 8) : "",
       refreshed,
       refreshedLabel: Number.isFinite(refreshedAt) ? formatRelative(refreshedAt, now) : refreshed,
+      disk: disk ? formatDiskGauge(disk) : "",
+      diskAt: disk?.at ?? "",
       href: RESIDENT_SLUG_RE.test(slug) ? `/residents/${slug}` : null,
     };
   }),
@@ -68,7 +75,8 @@ const count = computed(() => str(seed?.count) || String(rows.value.length));
                  breaking mid-token at the left edge. -->
             <span class="text-xs text-muted max-sm:basis-full max-sm:pl-5" :title="row.refreshed || undefined">
               ref {{ row.ref }}<template v-if="row.sha"> · sha {{ row.sha }}</template
-              ><template v-if="row.refreshedLabel"> · refreshed {{ row.refreshedLabel }}</template>
+              ><template v-if="row.refreshedLabel"> · refreshed {{ row.refreshedLabel }}</template
+              ><template v-if="row.disk"> · <span :title="row.diskAt ? `measured ${row.diskAt}` : undefined">disk {{ row.disk }}</span></template>
             </span>
             <span v-if="row.reason" class="basis-full pl-5 text-xs text-warning">{{ row.reason }}</span>
           </component>

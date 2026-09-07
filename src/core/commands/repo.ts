@@ -3,6 +3,7 @@ import { CommandError, commandDefiner, flag, type Caller, type CommandDef, type 
 import type { Operations, OpName } from "../operations.js";
 import { parseSlug, repoResourceId, validRef, type ResidentAdminClient, type ResidentAdminResponse } from "../residentAdmin.js";
 import { NO_OP_COMMAND, NPM_FALLBACK_COMMANDS, detectCommands, type DetectedCommands } from "../repoToolchain.js";
+import { formatDiskGauge } from "../../execution/residentDiskBudget.js";
 import type { RepoInspector } from "../../execution/githubRepoInspect.js";
 
 // The `repo.*` registrations (#157 R13 + phase 4b): the whole repo surface on
@@ -118,7 +119,11 @@ export function renderResidentList(data: Record<string, unknown>): string {
     const reason = String(live.reason ?? "");
     const sha = typeof live.sha === "string" && live.sha ? ` · sha \`${live.sha.slice(0, 8)}\`` : "";
     const refreshed = typeof live.lastRefreshAt === "string" && live.lastRefreshAt ? ` · refreshed ${live.lastRefreshAt}` : "";
-    return `• \`${slug}\` — *${state}*${reason ? ` (${reason})` : ""} · ref \`${String(rec.defaultRef ?? "?")}\`${sha}${refreshed}`;
+    // Item 55: the disk gauge from the resident's last sample (`live.disk`),
+    // the same used/total (pct) reading as /residents and the watchdog line.
+    const d = obj(live.disk);
+    const disk = typeof d.usedKiB === "number" && typeof d.totalKiB === "number" ? ` · disk ${formatDiskGauge({ usedKiB: d.usedKiB, totalKiB: d.totalKiB })}` : "";
+    return `• \`${slug}\` — *${state}*${reason ? ` (${reason})` : ""} · ref \`${String(rec.defaultRef ?? "?")}\`${sha}${refreshed}${disk}`;
   });
   const out = [`*Resident repos* (${n(data.count)}/${n(data.cap)}):`, ...lines];
   // Item 49: a test override lowers the enforced cap/floor for live checks —
@@ -137,7 +142,7 @@ export const repoList = defineCommand({
   id: "repo.list",
   action: "repo:read",
   effect: "read",
-  describe: "Every onboarded resident repo with its live state, ref, sha, and last refresh.",
+  describe: "Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge.",
   render: (output) => renderResidentList(output as Record<string, unknown>),
   handler: async ({ deps }) => {
     const res = await call(async () => (await adminOf(deps)).residents());

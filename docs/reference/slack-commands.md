@@ -61,7 +61,7 @@ One table per group. "Who can run it" is what the authorization policy decides f
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `repo list` | Every onboarded resident repo with its live state, ref, sha, and last refresh. | anyone |
+| `repo list` | Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge. | anyone |
 | `repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--evict-coldest]` | Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated). | repo managers (`repoManagement`) |
 | `repo offboard <slug> [--dry-run]` | Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only). | repo managers (`repoManagement`) |
 | `repo reconfigure <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>]` | Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach). | repo managers (`repoManagement`) |

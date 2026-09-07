@@ -136,6 +136,24 @@ describe("repo.list", () => {
     expect(c.residents).toHaveBeenCalledTimes(2);
   });
 
+  it("item 55: a resident with a disk sample gets ` · disk <used>/<total> (<pct>%)` on its line; one without stays as before", async () => {
+    const withDisk = bind({
+      admin: mockClient({
+        residents: ok({
+          cap: 6,
+          count: 2,
+          residents: [
+            { resource: "repo:coreplanelabs/nominal", defaultRef: "main", live: { state: "warm", disk: { at: "t", totalKiB: 15_086_920, usedKiB: 4_262_360, freeKiB: 10_808_176, parts: {} } } },
+            { resource: "repo:acme/api", defaultRef: "main", live: { state: "warm", disk: { totalKiB: "x" } } },
+          ],
+        }),
+      }),
+    });
+    const reply = (await say(withDisk, "repo list", chat("slack:U1"))).text;
+    expect(reply).toContain("• `coreplanelabs/nominal` — *warm* · ref `main` · disk 4.06 GiB/14.4 GiB (28%)");
+    expect(reply.split("\n")[2]).toBe("• `acme/api` — *warm* · ref `main`"); // a malformed sample adds nothing
+  });
+
   it("an empty registry and an active test override keep their wording", async () => {
     const empty = bind({ admin: mockClient({ residents: ok({ cap: 6, count: 0, residents: [] }) }) });
     expect((await say(empty, "repo list", chat("slack:U1"))).text).toBe("No repos onboarded (0/6). Onboard one with `repo onboard <owner/name>`.");
