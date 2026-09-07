@@ -47,7 +47,7 @@ This is delivered in stages. **PR1 (this spec) ships the seam + two stores + the
 | `use_skill` returns the requested skill's full body into the tool result; refuses out-of-scope and unknown names; unavailable-graceful with no store | `[unit]` `src/tools/skills.test.ts::use_skill tool` |
 | Both skill tools are in the coding (full) and review (readonly) toolsets, not web/none | `[unit]` `src/tools/skills.test.ts::skill toolset wiring` |
 | A review run's system prompt gains the review skill list (excluding coding skills); general (no scoped skills) is byte-identical with or without a store; no store → no block | `[unit]` `src/core/dispatcher.test.ts::skill loading / progressive disclosure (#100)` |
-| The store reaches the tool context: `use_skill` in a run returns the body into the next model turn | `[unit]` `src/core/dispatcher.test.ts::skill loading / progressive disclosure (#100) > passes the store to the tool context` |
+| The store reaches the tool context: `use_skill` in a run returns the body into the next model turn | `[unit]` `src/core/dispatcher.test.ts::skill loading / progressive disclosure (#100) > passes the store to the tool context…` |
 | Review invariants intact under progressive disclosure (read-only; defers PR posting, #79) | `[unit]` `src/agents/registry.test.ts::review post-step: prompts defer posting to the system (issue #69)` |
 | Manifest parse: sources + skills resolved; unpinned source allowed; undeclared source, duplicate name, non-GitHub repo, malformed commit, missing field all throw naming the entry | `[unit]` `src/skills/manifest.test.ts::parseManifest` (4) |
 | Pinned upstream URLs: blob URL for `source`, raw URL for the fetch | `[unit]` `src/skills/manifest.test.ts::upstream URLs` |
