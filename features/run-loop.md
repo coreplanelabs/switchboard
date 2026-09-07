@@ -32,7 +32,7 @@ The runner is provider-blind: complete → execute tools → append results → 
 | Turn exhaustion → tool-less forced write-up labeled `N-turn` | `[unit]` `src/runner.test.ts::forces a write-up…turns run out` |
 | Deadline exhaustion → write-up labeled `N-minute` | `[unit]` `src/runner.test.ts::labels the write-up with the minute budget` |
 | Status-only turns don't consume the turn budget | `[unit]` `src/runner.test.ts::update_status-only turns` |
-| Refusal and truncation surfaced legibly | `[unit]` `src/runner.test.ts::refusals / truncated` |
+| Refusal and truncation surfaced legibly | `[unit]` `src/runner.test.ts::surfaces safety refusals as a user-facing message`, `::marks truncated answers when the token limit was hit` |
 | Wrap-up warning fires once near the deadline | `[unit]` `src/runner.test.ts::emits the wrap-up warning` (runner takes an injectable `now` clock). |
 | `RunOptions.system` override reaches every provider call; absent → `agent.system` | `[unit]` `src/runner.test.ts::a system override in RunOptions reaches the provider request`, `::the system override also governs the forced write-up call`, `::without an override the agent's own system prompt is used` |
 | K consecutive infra failures → fast abort via the finale with the diagnostic, not toil to the wall clock | `[unit]` `src/runner.test.ts::aborts via the finale after consecutive infra failures instead of toiling into a dead sandbox` |
