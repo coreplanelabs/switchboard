@@ -52,6 +52,16 @@ describe("parseRunEventLines", () => {
     expect(out.skipped).toBe(4);
   });
 
+  it("accepts every declared run_note kind, fleet_busy included (features/execution.md item 14)", () => {
+    const text = [
+      '{"type":"run_note","kind":"fleet_busy","summary":"⏳ Sandbox fleet busy — no free per-thread sandbox after waiting 300s","at":5}',
+      '{"type":"run_note","kind":"sandbox_dead","summary":"dead","at":6}',
+    ].join("\n");
+    const out = parseRunEventLines(text);
+    expect(out.events.map((e) => (e.type === "run_note" ? e.kind : e.type))).toEqual(["fleet_busy", "sandbox_dead"]);
+    expect(out.skipped).toBe(0);
+  });
+
   it("skips events whose fields have the wrong shape (a recognized type is not enough) — the analyzer must never be fed junk", () => {
     const text = [
       '{"type":"tool_call","tool":"bash","summary":42}',

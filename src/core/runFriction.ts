@@ -362,6 +362,16 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
           eventIndex: index,
         });
         return;
+      case "fleet_busy":
+        // Capacity, not a dead sandbox: the run went on, but the minutes spent
+        // waiting for an instance are friction the fleet's sizing owns.
+        findings.push({
+          category: "infra_failure",
+          severity: "medium",
+          summary: `fleet busy: ${ev.summary}`,
+          eventIndex: index,
+        });
+        return;
     }
   });
 

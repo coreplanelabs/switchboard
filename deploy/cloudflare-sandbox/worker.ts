@@ -17,6 +17,7 @@
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
+import { fleetBusyAnswer, fleetBusyExecAnswer, isFleetBusy } from "../../src/execution/sandboxErrors.js";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 
 export class SwitchboardSandbox extends Sandbox {
@@ -176,7 +177,14 @@ export default {
           return json({ error: "unknown route" }, 404);
       }
     } catch (err) {
-      return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      const msg = err instanceof Error ? err.message : String(err);
+      // A full fleet (features/execution.md item 14): the SDK could not get a
+      // container instance for this thread's Durable Object, so no session
+      // exists and the file op never started — re-sending is safe by
+      // construction. Named so the executor waits instead of reading it as a
+      // dead sandbox; 503 because that is what it is.
+      if (isFleetBusy(msg)) return json(fleetBusyAnswer(msg), 503);
+      return json({ error: msg }, 500);
     }
   },
 } satisfies ExportedHandler<Env>;
@@ -232,6 +240,15 @@ function streamExec(
         })
         .catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
+          // A full fleet (features/execution.md item 14): session creation
+          // failed because no container instance was free, so the command
+          // never started — re-sending it is safe by construction. The named
+          // `reason` is what the executor waits on; the dual shape below is
+          // kept so an older executor still renders it as exit 127.
+          if (isFleetBusy(msg)) {
+            finish(fleetBusyExecAnswer(msg));
+            return;
+          }
           // Carry the failure in BOTH shapes so rollout order can't create
           // a silent-success window: a new executor throws on `error`, and
           // an executor that predates in-body errors (only checks exitCode)

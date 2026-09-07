@@ -2,7 +2,14 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ExecHealthTracker, ExecInfraError, LocalExecutor, LocalOperations, type Executor } from "./executor.js";
+import {
+  ExecCapacityError,
+  ExecHealthTracker,
+  ExecInfraError,
+  LocalExecutor,
+  LocalOperations,
+  type Executor,
+} from "./executor.js";
 
 // Feature: features/resident-repos.md — U6 LocalOperations: the dev-only
 // second Operations implementation (≥2-implementations invariant, KTD8).
@@ -128,6 +135,26 @@ describe("ExecHealthTracker", () => {
     expect(t.consecutiveInfraFailures).toBe(1);
     await expect(t.exec("x")).rejects.toThrow("Path escapes workspace");
     expect(t.consecutiveInfraFailures).toBe(1); // unchanged
+  });
+
+  // Feature: features/execution.md item 14 — a full fleet is capacity, not a
+  // dead sandbox: ExecCapacityError is deliberately NOT an ExecInfraError, so
+  // it must neither count toward fail-fast nor reset a real streak.
+  it("leaves the count untouched on ExecCapacityError (a full fleet is not a dead sandbox)", async () => {
+    let calls = 0;
+    const t = new ExecHealthTracker(
+      scripted(async () => {
+        calls++;
+        if (calls === 1) throw new ExecInfraError("boom");
+        throw new ExecCapacityError("sandbox fleet busy — no free per-thread sandbox after waiting 300s");
+      }),
+    );
+    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecInfraError);
+    expect(t.consecutiveInfraFailures).toBe(1);
+    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecCapacityError);
+    await expect(t.exec("x")).rejects.toBeInstanceOf(ExecCapacityError);
+    expect(t.consecutiveInfraFailures).toBe(1); // unchanged: neither counted nor reset
+    expect(t.lastInfraError).toBe("boom");
   });
 
   it("remembers the LAST infra error's text (for a truthful abort diagnosis) and forgets it on success", async () => {
