@@ -307,6 +307,18 @@ describe("makeExecutor resident selection", () => {
     expect(calls).toEqual(["/status", "/attach"]);
   });
 
+  it("item 55: a warm probe then a disk-pressure attach (503, the math in `error`) → per-thread fallback, the note carries the whole refusal", async () => {
+    stubEnvs();
+    const reason =
+      "disk-pressure: need 2.47 GiB for a new tree (install), but 3.10 GiB free minus the 2.76 GiB reserve (snapshot staging 1.76 GiB + floor 1.00 GiB) leaves 0.34 GiB — short by 2.13 GiB; evicted 1 idle tree(s) (0.52 GiB back): slack:C1:old; kept 1: slack:C1:busy (2 operation(s) in flight)";
+    const { calls } = stubFetch({ body: { state: "warm", reason: "" } }, { status: 503, body: { error: reason, state: "warm", reason: "disk-pressure" } });
+    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+    expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(resident).toBeFalsy();
+    expect(note).toBe(`resident attach failed (resident attach failed for repo:jshttp/vary: ${reason}) — using fresh sandbox`);
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
   // The engine-owned states: nothing serviceable to attach to.
   it.each([
     ["onboarding", ""],

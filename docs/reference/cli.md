@@ -63,7 +63,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 | Command | What it does | Surfaces |
 |---|---|---|
-| `repo list` | Every onboarded resident repo with its live state, ref, sha, and last refresh. | every surface |
+| `repo list` | Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge. | every surface |
 | `repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--evict-coldest]` | Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated). | every surface |
 | `repo offboard <slug> [--dry-run]` | Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only). | every surface |
 | `repo reconfigure <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>]` | Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach). | every surface |

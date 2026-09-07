@@ -10,8 +10,8 @@ Every route below sits behind Cloudflare Access (browser session or, for machine
 | `GET /runs/<id>/events` | Raw SSE event stream for that run | What the run page itself consumes; resumable via `Last-Event-ID` |
 | `GET /runs/<id>/friction` | Why a finished run was slow, if it was | Read-only diagnosis, no side effects |
 | `POST /runs/<id>/stop?mode=soft\|hard` | — | Stops a live run; `soft` lets it wrap up and answer, `hard` aborts in-flight |
-| `GET /residents` | Every onboarded repo and its lifecycle state | The dashboard twin of `repo list` |
-| `GET /residents/<owner>/<name>` | One repo's resident: mirror status, warm checkout, active thread worktrees | |
+| `GET /residents` | Every onboarded repo, its lifecycle state, and its disk gauge (used/total) | The dashboard twin of `repo list` |
+| `GET /residents/<owner>/<name>` | One repo's resident: mirror status, warm checkout, active thread worktrees, and its disk — used/total, free, the reserve it keeps back, headroom in "more trees", and every component (mirror, deps, checkout, each thread tree, leftover caches) | The same numbers the resident's attach admission decides on — see [onboard a repo → Disk](../how-to/onboard-a-repo.md#disk) |
 | `GET /costs` | Daily spend across every configured group | Priced live from Cloudflare + (optionally) Anthropic billing data, nothing cached |
 | `GET /costs/<group>` | Spend for one group | |
 | `GET /costs/<group>.json` | Same data, machine-readable | For scripting/alerting, not for embedding a live dashboard elsewhere |
@@ -38,7 +38,7 @@ Every registered command has an HTTP twin behind the same Access gate, plus an M
 | `/api/runs.stop` | `POST` | `runs:write` | Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor. |
 | `/api/friction.report` | `GET`, `POST` | `friction:read` | Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted. |
 | `/api/friction.propose` | `POST` | `friction:write` | Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues. |
-| `/api/repo.list` | `GET`, `POST` | `repo:read` | Every onboarded resident repo with its live state, ref, sha, and last refresh. |
+| `/api/repo.list` | `GET`, `POST` | `repo:read` | Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge. |
 | `/api/repo.onboard` | `POST` | `repo:write` | Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated). |
 | `/api/repo.offboard` | `POST` | `repo:write` | Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only). |
 | `/api/repo.reconfigure` | `POST` | `repo:write` | Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach). |

@@ -35,15 +35,24 @@ export const DISK_FULL_FREE_KIB = 128 * 1024;
  *  no locale or column-wrapping surprises (`-P`). */
 export const DF_FREE_ARGV = ["df", "-Pk", "/workspace"] as const;
 
-/** The "Available" column of `df -Pk <path>` output, in KiB; `null` when there
- *  is no data row or the column is not a number — unknown is never reported as
- *  0, because 0 would classify every failure as disk-full. */
-export function parseDfFreeKiB(stdout: string): number | null {
+/** The three size columns of `df -Pk <path>` output (1024-blocks, Used,
+ *  Available), in KiB; `null` when there is no data row or a column is not a
+ *  number — unknown is never reported as 0. The disk budget (#448,
+ *  `residentDiskBudget.ts`) samples all three; the disk-full classifier below
+ *  reads only `free`. */
+export function parseDfKiB(stdout: string): { totalKiB: number; usedKiB: number; freeKiB: number } | null {
   const rows = stdout.split("\n").filter((l) => l.trim() !== "");
   if (rows.length < 2) return null;
   const cols = rows[1].trim().split(/\s+/);
-  if (cols.length < 4 || !/^\d+$/.test(cols[3])) return null;
-  return Number(cols[3]);
+  if (cols.length < 4 || !cols.slice(1, 4).every((c) => /^\d+$/.test(c))) return null;
+  return { totalKiB: Number(cols[1]), usedKiB: Number(cols[2]), freeKiB: Number(cols[3]) };
+}
+
+/** The "Available" column alone — what the disk-full classifier compares to
+ *  the floor; `null` when unknown, because 0 would classify every failure as
+ *  disk-full. */
+export function parseDfFreeKiB(stdout: string): number | null {
+  return parseDfKiB(stdout)?.freeKiB ?? null;
 }
 
 const DISK_FULL_PREFIX = "disk-full:";

@@ -81,6 +81,25 @@ const DOWN = {
   },
 };
 
+// Item 55: a resident's last disk sample (the nominal shape measured 2026-09-07:
+// 14.4 GiB disk, 4.07 GiB used, deps 2.14 GiB, checkout 0.44 GiB, one 0.52 GiB
+// hardlinked thread tree, the build user's home empty).
+const DISK = {
+  at: "2026-09-07T15:30:00.000Z",
+  totalKiB: 15_086_920,
+  usedKiB: 4_262_360,
+  freeKiB: 10_808_176,
+  parts: {
+    mirror: 371_264,
+    deps: 2_244_052,
+    checkout: 462_888,
+    threads: { "slack:C0BQS7KPJHK:1787954209.398379": 541_860 },
+    homes: { worker1: 4, worker3: 2_100_000 },
+    other: 640_000,
+  },
+};
+const MEASURED = { ...WARM, live: { ...WARM.live, disk: DISK } };
+
 const indexSeed = (residents: unknown[], cap: unknown = 5, count: unknown = residents.length): ResidentsIndexSeed => ({
   page: "residents",
   cap,
@@ -128,6 +147,14 @@ describe("ResidentsIndexPage", () => {
   it("marks Residents current in the shared nav", () => {
     const w = mountApp(ResidentsIndexPage, { seed: indexSeed([WARM]) });
     expect(w.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/residents");
+  });
+
+  it("item 55: a measured resident's row carries the disk gauge (used/total, pct) with the sample time on hover; an unmeasured one shows no disk", () => {
+    const w = mountApp(ResidentsIndexPage, { seed: indexSeed([MEASURED, DOWN], 5, 2) });
+    expect(w.text()).toContain("disk 4.06 GiB/14.4 GiB (28%)");
+    expect(w.find('[title="measured 2026-09-07T15:30:00.000Z"]').exists()).toBe(true);
+    const rows = w.findAll("a.row");
+    expect(rows[1].text()).not.toContain("disk");
   });
 });
 
@@ -210,6 +237,37 @@ describe("ResidentDetailPage", () => {
     expect(w.text()).toContain("DO unreachable");
     expect(w.find('[data-tone="grey"]').exists()).toBe(true);
     expect(w.text()).toContain("unreachable");
+  });
+
+  it("item 55: the Disk section shows the gauge, free, the reserve and its two terms, the headroom in trees, the sample time, and every component — hardlinked thread trees at their unique bytes, homes only above 1 MiB", () => {
+    const w = mountApp(ResidentDetailPage, { seed: detailSeed(MEASURED) });
+    const t = w.text();
+    expect(t).toContain("4.06 GiB/14.4 GiB (28%)");
+    expect(t).toContain("10.3 GiB"); // free
+    // reserve = 0.6 × (mirror + deps + checkout) + max(1 GiB, 5 %) = 0.6 × 2.94 GiB + 1 GiB
+    expect(t).toMatch(/reserve\s*2\.76 GiB \(snapshot staging 1\.76 GiB \+ floor 1\.00 GiB\)/);
+    // headroom = 10.3 − 2.76 = 7.5 GiB → 17 hardlinked (0.44 GiB each) or 2 deps-installing (2.58 GiB each)
+    expect(t).toMatch(/headroom\s*7\.5\d GiB — room for 17 more \(0\.44 GiB each\) hardlinked trees, 2 more \(2\.58 GiB each\) deps-installing/);
+    expect(t).toContain("2026-09-07T15:30:00.000Z");
+    expect(t).toMatch(/mirror\s*0\.35 GiB/);
+    expect(t).toMatch(/checkout deps \(node_modules\)\s*2\.14 GiB/);
+    expect(t).toMatch(/checkout \(history \+ tree \+ build\)\s*0\.44 GiB/);
+    expect(t).toMatch(/thread slack:C0BQS7KPJHK:1787954209\.398379\s*0\.52 GiB/);
+    expect(t).toMatch(/home worker3\s*2\.00 GiB/);
+    expect(t).not.toContain("home worker1"); // 4 KiB of dotfiles is noise
+    expect(t).toMatch(/other \(image, \/tmp, …\)\s*0\.61 GiB/);
+  });
+
+  it("item 55: a diskBudgetMb below the disk caps the free space and says so; an unmeasured resident says it is not measured yet; a malformed sample is unmeasured, never NaN", () => {
+    const capped = mountApp(ResidentDetailPage, { seed: detailSeed({ ...MEASURED, diskBudgetMb: 8 * 1024 }) }).text();
+    // cap 8 GiB − used 4.06 GiB = 3.94 GiB free under the cap
+    expect(capped).toContain("3.94 GiB under the 8.00 GiB diskBudgetMb cap");
+    expect(mountApp(ResidentDetailPage, { seed: detailSeed(WARM) }).text()).toContain("not measured yet");
+    const broken = { ...WARM, live: { ...WARM.live, disk: { totalKiB: "lots", usedKiB: -1, freeKiB: null, parts: "<b>x</b>" } } };
+    const bw = mountApp(ResidentDetailPage, { seed: detailSeed(broken) });
+    expect(bw.text()).toContain("not measured yet");
+    expect(bw.text()).not.toContain("NaN");
+    expect(bw.find("table b").exists()).toBe(false);
   });
 
   it("marks Residents current in the shared nav and offers the way back", () => {

@@ -2,6 +2,8 @@
 // the /residents pages and looks records up by slug) and the web app (which
 // renders them). Node-free and dependency-free: the web bundle imports it.
 
+import type { DiskSample } from "../execution/residentDiskBudget.js";
+
 /** Lowercase `owner/name` — the resident Worker's REPO_ID_RE shape. */
 export const RESIDENT_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9](?:[a-z0-9._-]{0,98}[a-z0-9])?$/;
 
@@ -52,6 +54,39 @@ export const rec = (v: unknown): Record<string, unknown> => (v && typeof v === "
 
 export function residentSlug(record: ResidentRecordView): string {
   return str(record.resource).replace(/^repo:/, "");
+}
+
+/** The live view's `disk` (features/resident-repos.md item 55): the resident's
+ *  last `df` + `du` sample, or null when it has not measured yet (a fresh
+ *  container before its first cycle) or the field is malformed. The shape is
+ *  the resident's `DiskSample` (KiB; a `parts` value may be null = unmeasured,
+ *  rendered "?"), validated field by field — the view displays, never trusts. */
+export interface ResidentDiskView extends DiskSample {}
+
+const kib = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+const kibMap = (v: unknown): Record<string, number> => {
+  const out: Record<string, number> = {};
+  for (const [k, n] of Object.entries(rec(v))) {
+    const value = kib(n);
+    if (value !== null) out[k] = value;
+  }
+  return out;
+};
+
+export function residentDisk(record: ResidentRecordView): ResidentDiskView | null {
+  const d = rec(residentLive(record).disk);
+  const total = kib(d.totalKiB);
+  const used = kib(d.usedKiB);
+  const free = kib(d.freeKiB);
+  if (total === null || used === null || free === null) return null;
+  const p = rec(d.parts);
+  return {
+    at: str(d.at),
+    totalKiB: total,
+    usedKiB: used,
+    freeKiB: free,
+    parts: { mirror: kib(p.mirror), deps: kib(p.deps), checkout: kib(p.checkout), threads: kibMap(p.threads), homes: kibMap(p.homes), other: kib(p.other) ?? 0 },
+  };
 }
 
 /** The live engine view, normalized: `state` is "unreachable" when the DO

@@ -134,6 +134,21 @@ describe("watchdogFiring (the resident's firing record)", () => {
     expect(watchdogFiring(watchdog, T0, summary)).toMatchObject({ outcome: "failed", detail: "4/10 residents · 1 re-armed · 1 timed out · 1 errors — c: boom" });
   });
 
+  it("item 55: the fullest resident's disk gauge rides on the line when any resident has measured; malformed or absent gauges are skipped", () => {
+    const summary = {
+      cap: 6,
+      count: 3,
+      results: [
+        { resource: "repo:a/one", action: "none", disk: { usedKiB: 4_262_360, totalKiB: 15_086_920, at: "t" } },
+        { resource: "repo:b/two", action: "none", disk: { usedKiB: 12_000_000, totalKiB: 15_086_920, at: "t" } },
+        { resource: "repo:c/three", action: "none", disk: null },
+        { resource: "repo:d/four", action: "none", disk: { usedKiB: "x", totalKiB: 0 } },
+      ],
+    };
+    expect(watchdogFiring(watchdog, T0, summary).detail).toBe("3/6 residents · 0 re-armed · 0 timed out · 0 errors · disk max 80% (b/two)");
+    expect(watchdogFiring(watchdog, T0, { cap: 6, count: 1, results: [{ resource: "repo:a/one", action: "none" }] }).detail).toBe("1/6 residents · 0 re-armed · 0 timed out · 0 errors");
+  });
+
   it("a thrown watchdog is `failed` with the message; detail stays capped", () => {
     expect(watchdogFiring(watchdog, T0, new Error("registry unreachable"))).toMatchObject({ outcome: "failed", detail: "watchdog threw: registry unreachable" });
     const many = { cap: 1, count: 1, results: Array.from({ length: 200 }, (_, i) => ({ resource: `r${i}`, error: "x".repeat(50) })) };

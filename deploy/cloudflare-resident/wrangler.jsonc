@@ -34,14 +34,19 @@
       // of disk requires 8 GiB. The sizing is arithmetic over measured parts,
       // checked by instanceSizing.test.ts against this file: 2026-09-04 the
       // nominal resident filled the previous 8 GB in 45 min (provision 21:02Z,
-      // one thread attached 21:44Z, ENOSPC at 21:50Z) — nominal at that day's
-      // main measures 357 MB of history, a 75 MB tree and 2.1 GB of pnpm
-      // node_modules; a resident holds the mirror, the warm checkout, and one
-      // FULL clone per active thread (deps hardlinked, but a thread whose
-      // lockfile differs installs its own 2.1 GB under its own user's pnpm
-      // store), plus the ~0.5 GB OS image on the same filesystem and the
-      // refresh snapshot in flight. Three deps-installing threads: ~12.7 GB.
-      // 8 GB was the platform default, never a budget.
+      // one thread attached 21:44Z, ENOSPC at 21:50Z). Re-measured 2026-09-07
+      // inside the resident (features/resident-repos.md item 55, #448): image
+      // 552 MB + mirror 380 + warm checkout 2772 (history 380, tree 94, pnpm
+      // node_modules 2298) + the reserve the attach admission holds back
+      // (snapshot staging + a 1 GiB floor, 2965) = 6669 MB base; a hardlinked
+      // thread tree 555 MB; a thread whose lockfile differs 2853 MB; 16 000 MB
+      // mounts as 15 449 MB usable → 10 hardlinked + 1 installing trees (or
+      // 5 + 2) fit; the pool's 16 + 2 fits neither this nor the 20 GB ceiling,
+      // so the disk is a BUDGET (residentDiskBudget.ts): the next tree past it
+      // is refused `disk-pressure` and runs cold, never ENOSPC. The pnpm store
+      // holds no second copy of the deps (measured). 8 GB was the platform
+      // default, never a budget; the 12 GiB / 20 GB step (+$26/mo/resident)
+      // buys 16 + 1 or 12 + 2 — take it when `disk-pressure` shows on the dash.
       //
       // Cost: vCPU bills on ACTIVE use only; memory and disk bill on the
       // provisioned size while awake, and a resident is effectively always-on
