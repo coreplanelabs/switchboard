@@ -282,18 +282,27 @@ describe("authorize: deny reasons are machine tokens without resource ids (KTD8)
     const ids = [...USERS, ...Object.values(CHANNELS).map((c) => c.id), ...REPOS, "coding"];
     const actors = Object.values(A);
     const resources: Resource[] = [...runFixture(), ...scopeFixture(), { type: "agent", name: "coding" }, { type: "repo", owner: "coreplanelabs", name: "switchboard" }];
+    // Collect, then assert ONCE per property: the loop is actors × 7 actions ×
+    // resources × ids, and an `expect` per iteration made it tens of
+    // thousands of assertion objects — 0.4 s here, past vitest's 5 s timeout
+    // on a slow host (#473: the review sandbox failed it on PRs that never
+    // touched authz). The failure message keeps every offender.
     let denies = 0;
+    const unknownReasons = new Set<string>();
+    const leaks = new Set<string>();
     for (const a of actors) {
       for (const action of ["runs:read", "runs:write", "memory:read", "memory:write", "agent:run", "repo:exec", "schedule:fire"]) {
         for (const resource of resources) {
           const d = authorize(a, action, resource);
           if (d.allow) continue;
           denies += 1;
-          expect(REASONS.has(d.reason), d.reason).toBe(true);
-          for (const id of ids) expect(d.reason.includes(id), `${d.reason} leaks ${id}`).toBe(false);
+          if (!REASONS.has(d.reason)) unknownReasons.add(d.reason);
+          for (const id of ids) if (d.reason.includes(id)) leaks.add(`${d.reason} leaks ${id}`);
         }
       }
     }
+    expect([...unknownReasons]).toEqual([]);
+    expect([...leaks]).toEqual([]);
     expect(denies).toBeGreaterThan(100);
   });
 });
