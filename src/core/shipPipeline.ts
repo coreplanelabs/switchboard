@@ -252,6 +252,11 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       `🚫 This thread names PR ${repo}#${repoCtx.prUnpostable.number} but it could not be fetched to run ship's entry checks — refusing fail-closed. Retry in a moment, or check the PR on GitHub.`,
     );
   }
+  // resolveRepoContext sets repoCtx.ref to a cited PR's head branch. When that
+  // PR does not bind as ship's target (a foreign PR quoted as evidence, #512),
+  // its head branch must not become round 0's base — remember it here so the
+  // fall-through can drop it and start from the default branch instead.
+  let citedPrHeadRef: string | undefined;
   if (repoCtx.pr !== undefined) {
     const where = `${repo}#${repoCtx.pr}`;
     const facts = await input.prFacts({ repo, number: repoCtx.pr }).catch(() => undefined);
@@ -262,23 +267,30 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
         `🚫 Could not fetch ${where} to run ship's entry checks (open? bot-authored? same-repo head?) — refusing fail-closed. Retry in a moment.`,
       );
     }
-    if (facts.state === "open") {
-      // Authorship first: a human-authored PR is never ship's to drive, so
-      // the refusal must say THAT — refusing on "new task over open PR" first
-      // would advise a PR-URL resume that the author check then rejects.
-      const author = facts.author;
-      if (!(author?.login === SHIP_PR_AUTHOR.login && author?.id === SHIP_PR_AUTHOR.id)) {
-        return refuse(
-          "human-authored PR",
-          "not started (not ship's PR)",
-          `🚫 ${where} was not authored by \`${SHIP_PR_AUTHOR.login}\` — it is not ship's to drive. Use \`agent:review\` for a one-off review, or drive the loop manually.`,
-        );
-      }
+    citedPrHeadRef = facts.headRef;
+    const author = facts.author;
+    const shipAuthored = author?.login === SHIP_PR_AUTHOR.login && author?.id === SHIP_PR_AUTHOR.id;
+    if (facts.state === "open" && !(task && !shipAuthored)) {
+      // Binding rule (#512): a PR quoted as evidence inside a NEW task is not
+      // the PR to drive — with task text present, someone ELSE's PR mention
+      // does not bind; execution falls through to round 0 below and the
+      // reference stays in the task text as context for the coding child.
       if (task) {
+        // Ship's OWN open PR + new task text: the refusal protecting the
+        // thread's in-flight PR is still correct.
         return refuse(
           "new task over open PR",
           "not started (open PR)",
           `🚫 This thread's PR ${where} is still open — a new task over it is refused. Re-issue \`agent:ship\` with only the PR URL to resume its review loop, or finish/close ${where} and start the new task in a fresh thread.`,
+        );
+      }
+      // A bare PR reference (no task text) IS a resume request — authorship
+      // decides whether it is ship's to drive (spec item 10).
+      if (!shipAuthored) {
+        return refuse(
+          "human-authored PR",
+          "not started (not ship's PR)",
+          `🚫 ${where} was not authored by \`${SHIP_PR_AUTHOR.login}\` — it is not ship's to drive. Use \`agent:review\` for a one-off review, or drive the loop manually.`,
         );
       }
       if (!facts.sameRepoHead) {
@@ -324,11 +336,17 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       `🚫 Nothing to ship: give ship a task (\`agent:ship in ${repo}: <task>\`), or name an open ship PR by URL to resume its review loop.`,
     );
   }
-  // Belt-and-braces under the repoContext fix: a base that is repo-shaped
-  // (the slug itself, or any owner/name the API would 404 on as a ref) can
-  // only be a misparse — createBranchRef would fail on it. Fall back to the
-  // repo's default branch rather than aborting round 0 on bad prose.
-  const ref = repoCtx.ref && repoCtx.ref.toLowerCase() !== repo.toLowerCase() ? repoCtx.ref : undefined;
+  // The round-0 base is a user-phrased "on <ref>" or the repo default — never
+  // a ref that resolveRepoContext derived from a cited PR's head branch (#512
+  // F1): that PR did not bind as ship's target, so basing the new work on its
+  // head would carry the stranger's commits and dangle when the PR merges.
+  // Belt-and-braces guard stays: a repo-shaped ref (the slug itself, or any
+  // owner/name the API would 404 on as a ref) can only be a misparse —
+  // createBranchRef would fail on it. Any of these → the repo's default branch.
+  const ref =
+    repoCtx.ref && repoCtx.ref.toLowerCase() !== repo.toLowerCase() && repoCtx.ref !== citedPrHeadRef
+      ? repoCtx.ref
+      : undefined;
   return {
     ok: true,
     entry: { repo, branch: shipBranchName(task, input.threadKey), base: resolveBaseRef([ref], info.defaultBranch) },
