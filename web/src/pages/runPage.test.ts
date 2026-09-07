@@ -389,7 +389,7 @@ describe("RunPage — live mode", () => {
     expect(wrapper.findAll("#log .note")).toHaveLength(1);
   });
 
-  it("in-progress work draws where it will end up: a running card ticks its elapsed from its own start, a pending model turn is a provisional thinking head timed from the last stamped event, and the header keeps the whole run's stopwatch", async () => {
+  it("in-progress work draws where it will end up: a running card ticks its elapsed from its own start, a silent model is a pending-turn row (pulse, model badge, rotating verb) timed from the last stamped event, and the header keeps the whole run's stopwatch", async () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(1_000_000);
@@ -423,19 +423,24 @@ describe("RunPage — live mode", () => {
       expect(cards[0].find(".facts").text()).toContain("1m 07s"); // 3000 → 70_000, the fact the tick was counting toward
       const thinking = wrapper.find("#thinking");
       expect(thinking.exists()).toBe(true);
-      expect(thinking.find(".thought").text()).toBe("thinking 3s"); // since the last stamped event (70_500)
-      expect(thinking.find(".thought").classes()).not.toContain("text-warn");
+      expect(thinking.find(".pulse").text()).toBe("∿");
+      expect(thinking.find(".badge").text()).toBe("model"); // whose silence this is
+      const firstVerb = thinking.find(".verb").text();
+      expect(firstVerb).toMatch(/…$/);
+      expect(thinking.find(".since").text()).toBe("3s"); // since the last stamped event (70_500)
+      expect(thinking.find(".since").classes()).not.toContain("text-warn");
       vi.advanceTimersByTime(60_000);
       await wrapper.vm.$nextTick();
-      expect(wrapper.find("#thinking .thought").text()).toBe("thinking 1m 03s");
-      expect(wrapper.find("#thinking .thought").classes()).toContain("text-warn"); // amber past a minute, like the head it becomes
-      // The turn lands: the provisional head becomes the step's real head, and the model is thinking again.
+      expect(wrapper.find("#thinking .since").text()).toBe("1m 03s");
+      expect(wrapper.find("#thinking .since").classes()).toContain("text-warn"); // amber past a minute, like the head it becomes
+      expect(wrapper.find("#thinking .verb").text()).not.toBe(firstVerb); // the verb rotates (every 6 s)
+      // The turn lands: the real step takes its place, and the model is silent again.
       es().emitMessage({ type: "turn", durationMs: 63_000, at: 133_500 }, "6");
       es().emitMessage(assistant("all green now", 133_600), "7");
       await wrapper.vm.$nextTick();
       const heads = wrapper.findAll("#log .step .thought");
       expect(heads[heads.length - 1].text()).toBe("thought 1m 03s");
-      expect(wrapper.find("#thinking .thought").text()).toBe("thinking 0s");
+      expect(wrapper.find("#thinking .since").text()).toBe("0s");
       es().emitNamed("end");
       await wrapper.vm.$nextTick();
       expect(wrapper.find("#thinking").exists()).toBe(false);
