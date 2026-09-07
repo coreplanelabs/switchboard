@@ -77,6 +77,7 @@ import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
 import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
+import { selectBindingsToPurge } from "../../src/execution/bindingPurge.js";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
 import {
@@ -4164,6 +4165,20 @@ export class ResidentDO extends Sandbox<Env> {
     return { threads: [...all.values()].map(({ worktreePath: _internal, ...rest }) => rest) };
   }
 
+  /** Delete the EVICTED bindings whose threadKey starts with `prefix` (item 60):
+   *  eviction keeps a binding on purpose (KTD6), so a load run's synthetic
+   *  threads would otherwise stay on the detail page forever. The decision is
+   *  `selectBindingsToPurge` — a whole non-production namespace or longer,
+   *  never a live binding. Nothing on disk is touched: an evicted binding has
+   *  no worktree and no pool user. */
+  async debugPurgeBindings(prefix: string): Promise<{ purged: string[]; keptLive: string[] } | { error: string }> {
+    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    const decision = selectBindingsToPurge([...all.values()], prefix);
+    if (!decision.ok) return { error: decision.error };
+    if (decision.purge.length > 0) await this.ctx.storage.delete(decision.purge.map(threadBindingKey));
+    return { purged: decision.purge, keptLive: decision.keptLive };
+  }
+
   /** Debug fault injection: age a binding so the sweep's TTL path can be
    *  exercised without waiting N days. */
   async debugBackdateThread(threadKey: string, days: number): Promise<{ ok: boolean; lastAttachAt?: string }> {
@@ -5757,6 +5772,13 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       return json(await stub.debugSweepNow());
     case "reclaim-now":
       return json(await stub.debugReclaimNow());
+    case "purge-bindings": {
+      // Item 56: drop a load run's evicted synthetic bindings. `prefix` is
+      // validated by the pure decision (a whole non-production namespace).
+      const prefix = typeof body.prefix === "string" ? body.prefix : "";
+      const r = await stub.debugPurgeBindings(prefix);
+      return "error" in r ? json({ error: r.error }, 400) : json(r);
+    }
     case "measure-disk":
       // Item 55: take the sample now (df + one du) and answer it — the live
       // check's way to read the gauge without waiting for a cycle.
@@ -5771,7 +5793,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     default:
       return json(
         {
-          error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, measure-disk, backdate-thread)`,
+          error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, measure-disk, purge-bindings, backdate-thread)`,
         },
         400,
       );

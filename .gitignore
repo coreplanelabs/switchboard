@@ -9,6 +9,9 @@ node_modules
 build.json
 .DS_Store
 
+# Load-harness receipts (npm run load:*) are posted to the tracker, never committed.
+load-results/
+
 # The docs site is built in place (docs/.vitepress/dist is covered by dist/
 # above); its dev-server cache is not.
 .vitepress/cache

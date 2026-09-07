@@ -84,6 +84,7 @@ The whole interface to this repository. Each script is deterministic and non-int
 | `npm run docs:dev` | Serves the docs site locally with live reload. | Writing docs. |
 | `npm run docs:build` | Builds the docs site to `docs/.vitepress/dist`. | Rarely by hand; `verify -w docs` and the docs Worker's deploy run it. |
 | `npm run web:preview` | Serves the dashboard bundle over fixtures for a visual check. | After a `web/` change. |
+| `npm run load` | Load harness: `-- history\|resident\|sandbox\|e2e\|cards\|provider`. | Capacity receipts (features/load-harness.md). |
 
 <!-- /generated:commands -->
 

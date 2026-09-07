@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { DRAIN_DEADLINE_MS } from "../core/drain.js";
+import type { ProcessMetrics } from "./processMetrics.js";
 import type { CatchUpStatus } from "./slackCatchUpStatus.js";
 import type { SlackSocketStatus } from "./slackSocketStatus.js";
 
@@ -78,6 +79,11 @@ export interface HealthState {
    *  clock: `httpListeningAt < slack.since` — no race against the boot window,
    *  which the Worker shim's coarse port polling makes externally unobservable. */
   httpListeningAt?: number;
+  /** The process's memory and event-loop lag (`startProcessMetrics()`), when
+   *  the entrypoint samples them. The bot is one Node process on a small
+   *  container: under many concurrent runs it is the first thing to fail, and
+   *  nothing else shows it off-box (the load harness reads these). */
+  process?: ProcessMetrics;
 }
 
 export interface HealthPayload {
@@ -106,6 +112,8 @@ export interface HealthPayload {
   /** ISO instant the HTTP server began accepting; compare with `slack.since`
    *  (same clock) for the listen-before-connect receipt. Absent until listen. */
   httpListeningAt?: string;
+  /** Present whenever `HealthState.process` is given (always on the live `/healthz`). */
+  process?: ProcessMetrics;
 }
 
 export function healthPayload(state: HealthState): HealthPayload {
@@ -137,5 +145,6 @@ export function healthPayload(state: HealthState): HealthPayload {
     };
   if (state.startedAt !== undefined) payload.startedAt = new Date(state.startedAt).toISOString();
   if (state.httpListeningAt !== undefined) payload.httpListeningAt = new Date(state.httpListeningAt).toISOString();
+  if (state.process) payload.process = { ...state.process };
   return payload;
 }

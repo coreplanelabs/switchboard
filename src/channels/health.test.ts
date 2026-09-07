@@ -142,3 +142,11 @@ describe("healthPayload — slack socket state", () => {
     expect(healthPayload({ inFlight: 0, draining: false }).slack).toBeUndefined();
   });
 });
+
+describe("healthPayload — process metrics", () => {
+  it("carries rss, heap and event-loop lag when the entrypoint samples them, and no key when not", () => {
+    const metrics = { rssMb: 210, heapUsedMb: 80, eventLoopLagP99Ms: 12.3 };
+    expect(healthPayload({ inFlight: 0, draining: false, process: metrics }).process).toEqual(metrics);
+    expect(healthPayload({ inFlight: 0, draining: false }).process).toBeUndefined();
+  });
+});

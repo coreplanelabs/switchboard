@@ -127,6 +127,10 @@
     "web:preview": {
       "does": "Serves the dashboard bundle over fixtures for a visual check.",
       "when": "After a `web/` change."
+    },
+    "load": {
+      "does": "Load harness: `-- history|resident|sandbox|e2e|cards|provider`.",
+      "when": "Capacity receipts (features/load-harness.md)."
     }
   }
 }
