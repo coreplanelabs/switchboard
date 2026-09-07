@@ -389,14 +389,78 @@ describe("RunPage — live mode", () => {
     expect(wrapper.findAll("#log .note")).toHaveLength(1);
   });
 
-  it("shows the live tail (rotating verb · since-last-event) while connected, and removes it at end", async () => {
+  it("in-progress work draws where it will end up: a running card ticks its elapsed from its own start, a pending model turn is a provisional thinking head timed from the last stamped event, and the header keeps the whole run's stopwatch", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_000);
+      const { wrapper, es } = mountLive();
+      expect(wrapper.find("#placeholder").text()).toBe("Waiting for activity…"); // nothing stamped yet — no clock to show
+      expect(wrapper.find("#thinking").exists()).toBe(false);
+      es().emitOpen();
+      es().emitMessage(input, "1"); // at 1000
+      es().emitMessage(call("c1", "$ pnpm run typegen 2>&1 | tail -5", 3000), "2");
+      es().emitMessage(call("c2", "$ echo later", 4000), "3");
+      vi.advanceTimersByTime(65_000);
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find("#placeholder").exists()).toBe(false);
+      const cards = wrapper.findAll("details.call");
+      expect(cards[0].find(".facts .elapsed").text()).toBe("1m 06s"); // runner clock 4000 + 65s, minus the call's 3000 start
+      expect(cards[1].find(".facts .elapsed").text()).toBe("1m 05s"); // each card counts from ITS start
+      expect(wrapper.find("#thinking").exists()).toBe(false); // a command is out — the model is not the wait
+      expect(wrapper.find("#state").text()).toBe("running · 1m 08s"); // the whole run: 1000 → 69_000
+      // A reconnect's replay notice carries no runner stamp — no clock restarts.
+      es().emitMessage({ type: "replay_note", summary: "replaying last 200 of 300 events" }, "");
+      vi.advanceTimersByTime(1_000);
+      await wrapper.vm.$nextTick();
+      expect(cards[0].find(".facts .elapsed").text()).toBe("1m 07s");
+      expect(wrapper.find("#state").text()).toBe("running · 1m 09s");
+      // Both calls settle: the ticking fact gives way to the settled duration; the model is now the wait.
+      es().emitMessage(result("c1", { at: 70_000 }), "4");
+      es().emitMessage(result("c2", { at: 70_500 }), "5");
+      vi.advanceTimersByTime(3_000);
+      await wrapper.vm.$nextTick();
+      expect(cards[0].find(".facts .elapsed").exists()).toBe(false);
+      expect(cards[0].find(".facts").text()).toContain("1m 07s"); // 3000 → 70_000, the fact the tick was counting toward
+      const thinking = wrapper.find("#thinking");
+      expect(thinking.exists()).toBe(true);
+      expect(thinking.find(".thought").text()).toBe("thinking 3s"); // since the last stamped event (70_500)
+      expect(thinking.find(".thought").classes()).not.toContain("text-warn");
+      vi.advanceTimersByTime(60_000);
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find("#thinking .thought").text()).toBe("thinking 1m 03s");
+      expect(wrapper.find("#thinking .thought").classes()).toContain("text-warn"); // amber past a minute, like the head it becomes
+      // The turn lands: the provisional head becomes the step's real head, and the model is thinking again.
+      es().emitMessage({ type: "turn", durationMs: 63_000, at: 133_500 }, "6");
+      es().emitMessage(assistant("all green now", 133_600), "7");
+      await wrapper.vm.$nextTick();
+      const heads = wrapper.findAll("#log .step .thought");
+      expect(heads[heads.length - 1].text()).toBe("thought 1m 03s");
+      expect(wrapper.find("#thinking .thought").text()).toBe("thinking 0s");
+      es().emitNamed("end");
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find("#thinking").exists()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a running card: the spinner, a ticking elapsed in the facts slot, and a body that says no output yet — never the word running", async () => {
     const { wrapper, es } = mountLive();
-    expect(wrapper.find("#tail").exists()).toBe(true);
-    expect(wrapper.find("#tail .verb").text()).toMatch(/…$/);
     es().emitOpen();
-    es().emitNamed("end");
+    es().emitMessage(call("c1", "$ npm test", 3000), "1");
     await wrapper.vm.$nextTick();
-    expect(wrapper.find("#tail").exists()).toBe(false);
+    const card = wrapper.find("details.call");
+    expect(card.find(".spin").exists()).toBe(true);
+    expect(card.find(".facts .elapsed").text()).toMatch(/^\d+s$/);
+    expect(card.find(".body").text()).toBe("no output yet");
+    expect(card.text()).not.toMatch(/running/);
+  });
+
+  it("a history page never ticks: a record's un-resulted call shows no elapsed", () => {
+    const w = mountApp(RunPage, { seed: historySeed([input, call("c1", "$ npm test", 3000)] as LiveFrame[]) });
+    expect(w.find("details.call").attributes("data-status")).toBe("running");
+    expect(w.find("details.call .facts .elapsed").exists()).toBe(false);
+    expect(w.find("#thinking").exists()).toBe(false);
   });
 
   it("at `end`: the outcome chip it can know (grey `ended`, never a guessed success), the duration, actions hidden, stream closed", async () => {
