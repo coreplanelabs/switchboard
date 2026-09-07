@@ -95,7 +95,17 @@ export interface NoteVm {
   text: string;
 }
 
-export type LogItem = StepVm | TurnRowVm | NoteVm;
+/** A thread follow-up steered into this run (features/thread-admission.md
+ *  item 2): every `input` after the first, rendered as its own block in the
+ *  timeline at the moment the run read it — the Request's visual treatment,
+ *  not a note. One run, several inputs; never a second request block. */
+export interface FollowUpVm {
+  kind: "followup";
+  key: string;
+  input: RequestVm;
+}
+
+export type LogItem = StepVm | TurnRowVm | NoteVm | FollowUpVm;
 
 export interface RequestVm {
   text: string;
@@ -125,12 +135,9 @@ export interface AnswerVm {
 
 export interface RunPageModel {
   state: {
-    /** The FIRST `input` event — what started the run. */
+    /** The FIRST `input` event — what started the run. Every later `input`
+     *  is a steered follow-up and lives in `log` as a `FollowUpVm`. */
     request: RequestVm | null;
-    /** Every later `input`: a thread follow-up steered into this run
-     *  (features/thread-admission.md item 2), listed under the request. One
-     *  run, several inputs — never a second request block. */
-    followUps: RequestVm[];
     meta: MetaVm | null;
     context: ContextTurnVm[];
     log: LogItem[];
@@ -192,7 +199,6 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
 
   const state: RunPageModel["state"] = reactive({
     request: null,
-    followUps: [],
     meta: null,
     context: [],
     log: [],
@@ -323,8 +329,9 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         const vm: RequestVm = { text: change.text, at: change.at, ...(change.source ? { source: change.source } : {}) };
         // The first input is the request; a later one is a steered follow-up
         // and must never replace it (live 2026-09-05: the header showed the
-        // follow-up as THE request).
-        if (state.request) state.followUps.push(vm);
+        // follow-up as THE request). It takes its place in the timeline —
+        // the runner emits it at the step boundary that read it.
+        if (state.request) state.log.push({ kind: "followup", key: key("followup"), input: vm });
         else state.request = vm;
         return;
       }
@@ -358,6 +365,9 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         state.context.push({ key: key("ctx"), at: change.at, text: change.text });
         return;
       case "note":
+        // The follow-up's snippet note stays on the record for the card; on
+        // the page the follow-up block that precedes it is the marker.
+        if (change.noteKind === "follow_up") return;
         state.log.push({ kind: "note", key: key("note"), at: change.at, replay: false, text: change.text });
         if (
           (change.noteKind === "stop_requested" || change.noteKind === "stopped") &&

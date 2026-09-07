@@ -144,6 +144,23 @@ const HIST_EVENTS = [
     at: NOW - 850_000,
     seq: 9,
   },
+  // A thread follow-up steered into the run (features/thread-admission.md
+  // item 2): the `input` + `follow_up` note pair the runner records when it
+  // drains the inbox at a step boundary.
+  {
+    type: "input",
+    text: "additional constraints for this change, please fold them in: (1) the `sendWebhook` signature stays as-is — callers in `src/jobs/` must not change; (2) jitter the backoff (±20%) so a burst of failures doesn't retry in lockstep; (3) log each give-up with the status code at `warn`.",
+    at: NOW - 845_000,
+    seq: 10,
+    source: { user: "justin", url: "https://example.slack.com/archives/C1/p2" },
+  },
+  {
+    type: "run_note",
+    kind: "follow_up",
+    summary: "follow-up folded in: additional constraints for this change, please fold them in: (1) the `sendWebho…",
+    at: NOW - 845_000,
+    seq: 11,
+  },
   {
     type: "skill_use",
     skill: "http-retries",
@@ -152,19 +169,19 @@ const HIST_EVENTS = [
     bodyBytes: 2048,
     source: "https://example.com/skills/http-retries",
     at: NOW - 840_000,
-    seq: 10,
+    seq: 12,
   },
-  { type: "assistant", text: "Tests are red as expected — implementing the backoff now.", at: NOW - 830_000, seq: 11 },
+  { type: "assistant", text: "Tests are red as expected — implementing the backoff now.", at: NOW - 830_000, seq: 13 },
   {
     type: "tool_call",
     callId: "c3",
     tool: "update_status",
     summary: "update_status implementing backoff",
     at: NOW - 829_000,
-    seq: 12,
+    seq: 14,
   },
-  { type: "tool_result", callId: "c3", tool: "update_status", ok: true, summary: "", at: NOW - 829_000, seq: 13 },
-  { type: "tool_call", callId: "c4", tool: "bash", summary: "$ npm test", at: NOW - 800_000, seq: 14 },
+  { type: "tool_result", callId: "c3", tool: "update_status", ok: true, summary: "", at: NOW - 829_000, seq: 15 },
+  { type: "tool_call", callId: "c4", tool: "bash", summary: "$ npm test", at: NOW - 800_000, seq: 16 },
   {
     type: "tool_result",
     callId: "c4",
@@ -173,13 +190,13 @@ const HIST_EVENTS = [
     summary: "(400 chars, 31 lines)",
     output: "PASS webhooks.test.ts (12 tests)",
     at: NOW - 760_000,
-    seq: 15,
+    seq: 17,
   },
   {
     type: "answer",
     text: "Done — `sendWebhook` now retries with exponential backoff (5 attempts, 4xx gives up immediately). PR updated.",
     at: NOW - 750_000,
-    seq: 16,
+    seq: 18,
   },
 ];
 
