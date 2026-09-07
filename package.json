@@ -26,7 +26,7 @@
     "cli": "tsx src/cli.ts",
     "skills:sync": "tsx scripts/skills-sync.ts",
     "skills:check": "tsx scripts/skills-sync.ts --check",
-    "licenses:check": "license-checker-rseidelsohn --production --excludePrivatePackages --onlyAllow \"MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;BlueOak-1.0.0;CC0-1.0;Unlicense;MPL-2.0;Python-2.0;CC-BY-4.0;(Apache-2.0 AND BSD-3-Clause)\"",
+    "licenses:check": "node scripts/licenses-check.mjs",
     "docs:gen": "tsx scripts/docs-gen.ts",
     "docs:check": "tsx scripts/docs-gen.ts --check",
     "docs:dev": "npm --prefix docs run dev",

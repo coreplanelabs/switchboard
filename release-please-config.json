@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "release-type": "node",
   "include-component-in-tag": false,
-  "bootstrap-sha": "7fbab03c02285a33ae64f93cf8cd94817f23533a",
+  "bootstrap-sha": "347ee7b7488285dcfc89b14614b4c4ad583d585a",
   "changelog-sections": [
     { "type": "feat", "section": "Features" },
     { "type": "fix", "section": "Bug fixes" },

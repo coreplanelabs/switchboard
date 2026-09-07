@@ -1,11 +1,9 @@
 # OpenSSF Scorecard: supply-chain health checks (pinned dependencies, branch
 # protection, dangerous workflow patterns, token permissions, ...). Runs on
-# main and weekly; results are published to the Scorecard API and uploaded to
-# code scanning so the badge and the Security tab stay current.
-#
-# Publishing and the SARIF upload both need a public repository; on a private
-# one the workflow still runs the checks and prints the results, so a fork can
-# see its score without failing the run.
+# main and weekly. The checks run on any repository and the SARIF is always
+# kept as a run artifact; publishing to the Scorecard API and uploading to
+# code scanning need a public repository, so the `visibility` job decides
+# those two steps and a private run says so instead of silently passing.
 name: scorecard
 
 on:
@@ -18,8 +16,27 @@ on:
 permissions: read-all
 
 jobs:
+  visibility:
+    name: is the repository public?
+    runs-on: ubuntu-latest
+    outputs:
+      public: ${{ steps.check.outputs.public }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          private=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)
+          if [ "$private" = "true" ]; then
+            echo "public=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::private repository — Scorecard results are kept as an artifact only; publishing and code-scanning upload wait for the repository to be public"
+          else
+            echo "public=true" >> "$GITHUB_OUTPUT"
+          fi
+
   analysis:
     name: scorecard analysis
+    needs: visibility
     runs-on: ubuntu-latest
     permissions:
       security-events: write
@@ -30,19 +47,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - id: visibility
-        name: is the repository public?
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          private=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)
-          echo "private=$private" >> "$GITHUB_OUTPUT"
       - name: run analysis
         uses: ossf/scorecard-action@55891bbd73f2425e97637d96e306fc9d491d0b21 # v2.4.4
         with:
           results_file: results.sarif
           results_format: sarif
-          publish_results: ${{ steps.visibility.outputs.private == 'false' }}
+          publish_results: ${{ needs.visibility.outputs.public == 'true' }}
       - name: keep the results as a run artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -50,7 +60,7 @@ jobs:
           path: results.sarif
           retention-days: 5
       - name: upload to code scanning
-        if: steps.visibility.outputs.private == 'false'
+        if: needs.visibility.outputs.public == 'true'
         uses: github/codeql-action/upload-sarif@a35ac6e6798d72df5475948b28efb89edc2e19ca # v4.37.9
         with:
           sarif_file: results.sarif
