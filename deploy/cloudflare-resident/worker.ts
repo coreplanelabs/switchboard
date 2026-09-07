@@ -84,6 +84,9 @@ import {
   mutableCachePaths,
   mutableCacheSwapScript,
   parseDepCacheScriptOutput,
+  planThreadDeps,
+  threadDepsMechanism,
+  type ThreadDepsMechanism,
 } from "../../src/execution/residentDepCache.js";
 import { parseWorktreeCleanliness, worktreeCleanlinessScript } from "../../src/execution/residentCleanliness.js";
 import {
@@ -800,8 +803,6 @@ interface ThreadBinding {
    *  (`shouldRefreshThreadCredentials`); cleared by a read-only attach. */
   credentialsWrittenAt?: number;
 }
-
-type ThreadDepsMechanism = "hardlink" | "copy" | "install" | "none";
 
 /** Named, RPC-cloneable error shape for the thread data plane. The Worker
  *  maps `status` to the HTTP status; extra fields (`needs`, `state`,
@@ -2263,7 +2264,13 @@ export class ResidentDO extends Sandbox<Env> {
     const tip = await this.run(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", `refs/heads/${input.binding.ref}`]);
     if (tip.exitCode === 0) {
       const key = await this.lockfileKey(tip.stdout.trim()).catch(() => null);
-      if (key !== null && key !== input.facts.lockfileHash) kind = "install";
+      // A diverged lockfile is seeded from the shared cache and then reconciled
+      // by the install (planThreadDeps): the delta share of the deps, not the
+      // deps again. Without an install command nothing is seeded (the tree is
+      // history + source only), so the hardlink projection is already an upper bound.
+      if (key !== null && key !== input.facts.lockfileHash && input.record.commands.install !== undefined) {
+        kind = "reconcile";
+      }
     }
     const df = await this.dfSample();
     if (!df) {
@@ -3118,10 +3125,16 @@ export class ResidentDO extends Sandbox<Env> {
   ): Promise<{ deps: ThreadDepsMechanism; reconciled: boolean }> {
     const wt = binding.worktreePath;
     const hasDeps = (await this.run(["test", "-d", `${wt}/node_modules`])).exitCode === 0;
-    if (hasDeps) return { deps: "none", reconciled: false }; // reused tree, cache already in place
-
-    if (threadLockKey === warmLockKey) {
-      let mech: "hardlink" | "copy" | "none" = "none";
+    // The plan is pure (planThreadDeps): a reused tree is left alone; a matching
+    // lockfile is seeded from the shared cache; a DIVERGED lockfile is seeded
+    // too and then reconciled by the install — a delta on top of hardlinked
+    // read-only inodes the install can only replace, never write through.
+    // Before this the diverged case installed from an empty node_modules: 1.94
+    // GiB projected and 5+ min on the vCPU shared with the refresh cycle (live
+    // 2026-09-07, #552 and the 21:38 disk-pressure refusal).
+    const plan = planThreadDeps({ hasDeps, threadLockKey, warmLockKey, installCmd });
+    let seeded: "hardlink" | "copy" | "none" = "none";
+    if (plan.seed) {
       // Serialize the hardlink-copy on the mirror mutex (FIX 2): `cp -al` reads
       // CHECKOUT_DIR, which the refresh alarm rebuilds under the same lock, so
       // this can never hardlink a half-rebuilt checkout into the thread tree.
@@ -3144,7 +3157,7 @@ export class ResidentDO extends Sandbox<Env> {
           "deps-materialize",
           REFRESH_BUILD_TIMEOUT_MS,
         );
-        mech = parsed.mech;
+        seeded = parsed.mech;
         const nmDst = `${wt}/node_modules`;
         const paths = mutableCachePaths(nmDst, parsed.mutableListing);
         if (paths.length > 0) {
@@ -3155,17 +3168,18 @@ export class ResidentDO extends Sandbox<Env> {
           );
         }
       }, ATTACH_MUTEX_WAIT_MS);
-      return { deps: mech, reconciled: false };
+    }
+    if (!plan.install || installCmd === undefined) {
+      return { deps: threadDepsMechanism({ seeded, installed: false }), reconciled: false };
     }
 
-    // Committed lockfile differs from the warm checkout: scoped, token-free
-    // incremental install as the thread user (KTD7). A table with no install
-    // (a repo with no root package.json — resident-repos item 52) has nothing
-    // to reconcile; before item 52 this fell back to `npm install`, which can
-    // only fail there.
-    if (installCmd === undefined) return { deps: "none", reconciled: false };
+    // Committed lockfile differs from the warm checkout: the install runs as
+    // the thread user, token-free (KTD7), on top of the seed — reconciling the
+    // packages whose version differs and leaving the shared inodes untouched.
+    // Outside the mirror lock: it reads nothing of the checkout.
+    console.log(`deps ${binding.worktreePath}: ${plan.why}`);
     await this.threadRunOk(binding.user, wt, installCmd, "thread-install", REFRESH_BUILD_TIMEOUT_MS);
-    return { deps: "install", reconciled: true };
+    return { deps: threadDepsMechanism({ seeded, installed: true }), reconciled: true };
   }
 
   /** The per-user 700 staging dir (`install -d` is idempotent), memoized per

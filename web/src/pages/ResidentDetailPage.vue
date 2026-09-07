@@ -102,7 +102,7 @@ const diskFacts = computed(() => {
   const reserve = diskReserveKiB(d);
   const { freeKiB, capped, capacityKiB } = effectiveFreeKiB(d, diskBudgetMb.value);
   const headroom = freeKiB - reserve.totalKiB;
-  const room = (kind: "hardlink" | "install"): string => {
+  const room = (kind: "hardlink" | "reconcile"): string => {
     const cost = projectThreadCostKiB(d.parts, kind);
     if (cost === null) return "? (checkout not measured)";
     if (cost === 0) return "?";
@@ -117,7 +117,7 @@ const diskFacts = computed(() => {
     ],
     [
       "headroom",
-      `${formatGiB(Math.max(0, headroom))} — room for ${room("hardlink")} hardlinked trees, ${room("install")} deps-installing`,
+      `${formatGiB(Math.max(0, headroom))} — room for ${room("hardlink")} hardlinked trees, ${room("reconcile")} lockfile-diverged (reconciling)`,
     ],
     ["measured", d.at || "—"],
   ];

@@ -4,6 +4,7 @@ import {
   DISK_FLOOR_FRACTION,
   DISK_FLOOR_MIN_KIB,
   DF_SAMPLE_ARGV,
+  RECONCILE_DEPS_RATIO,
   SNAPSHOT_STAGING_RATIO,
   THREAD_USER_CACHE_DIRS,
   assembleDiskSample,
@@ -167,14 +168,21 @@ describe("the reserve — snapshot staging + a floor", () => {
 
 describe("projecting a thread tree's cost from the checkout", () => {
   const parts = sample().parts;
-  it("hardlink-eligible → the checkout's non-deps bytes (history + tree); lockfile differs → plus the deps; reuse → 0", () => {
+  it("hardlink-eligible → the checkout's non-deps bytes (history + tree); lockfile differs → plus the reconcile share of the deps; reuse → 0", () => {
     expect(projectThreadCostKiB(parts, "hardlink")).toBe(430 * MB);
-    expect(projectThreadCostKiB(parts, "install")).toBe((430 + 2100) * MB);
+    expect(projectThreadCostKiB(parts, "reconcile")).toBe(430 * MB + Math.round(2100 * MB * RECONCILE_DEPS_RATIO));
     expect(projectThreadCostKiB(parts, "reuse")).toBe(0);
   });
-  it("an unmeasured checkout (or deps, for an install) is null, never a guess", () => {
+  it("the reconcile share is a real fraction of the deps: strictly between a hardlink and a full copy (a delta install writes only the packages that differ)", () => {
+    expect(RECONCILE_DEPS_RATIO).toBeGreaterThan(0);
+    expect(RECONCILE_DEPS_RATIO).toBeLessThan(1);
+    const reconcile = projectThreadCostKiB(parts, "reconcile") ?? 0;
+    expect(reconcile).toBeGreaterThan(projectThreadCostKiB(parts, "hardlink") ?? 0);
+    expect(reconcile).toBeLessThan((430 + 2100) * MB);
+  });
+  it("an unmeasured checkout (or deps, for a reconcile) is null, never a guess", () => {
     expect(projectThreadCostKiB({ ...parts, checkout: null }, "hardlink")).toBeNull();
-    expect(projectThreadCostKiB({ ...parts, deps: null }, "install")).toBeNull();
+    expect(projectThreadCostKiB({ ...parts, deps: null }, "reconcile")).toBeNull();
     expect(projectThreadCostKiB({ ...parts, deps: null }, "hardlink")).toBe(430 * MB);
   });
 });
@@ -200,20 +208,24 @@ describe("checkDiskAdmission — free − reserve ≥ projected", () => {
     expect(v.math.headroomKiB).toBe(11 * GIB - v.math.reserve.totalKiB - 430 * MB);
   });
 
-  it("an install thread that would eat into the reserve does not fit, and the shortfall is exact", () => {
-    const s = sample({ usedKiB: 10 * GIB, freeKiB: 5 * GIB });
-    const v = checkDiskAdmission({ sample: s, kind: "install" });
+  it("a reconciling thread that would eat into the reserve does not fit, and the shortfall is exact", () => {
+    // Free = reserve + a hardlinked tree + 100 MB: the hardlink fits, the
+    // reconcile share of the deps does not, and the shortfall is that share
+    // minus the 100 MB of slack.
+    const reserve = diskReserveKiB(sample()).totalKiB;
+    const free = reserve + 430 * MB + 100 * MB;
+    const s = sample({ usedKiB: 15 * GIB - free, freeKiB: free });
+    const v = checkDiskAdmission({ sample: s, kind: "reconcile" });
     expect(v.fits).toBe(false);
-    const reserve = diskReserveKiB(s).totalKiB;
-    expect(v.fits === false && v.shortfallKiB).toBe((430 + 2100) * MB - (5 * GIB - reserve));
+    expect(v.fits === false && v.shortfallKiB).toBe(Math.round(2100 * MB * RECONCILE_DEPS_RATIO) - 100 * MB);
     // The same disk admits a hardlinked tree.
     expect(checkDiskAdmission({ sample: s, kind: "hardlink" }).fits).toBe(true);
   });
 
   it("a fresher df free reading overrides the sample's (the attach re-probes df, the du parts are the last cycle's)", () => {
     const s = sample({ usedKiB: 4 * GIB, freeKiB: 11 * GIB });
-    expect(checkDiskAdmission({ sample: s, kind: "install", freeKiB: 3 * GIB }).fits).toBe(false);
-    expect(checkDiskAdmission({ sample: s, kind: "install", freeKiB: 6 * GIB }).fits).toBe(true);
+    expect(checkDiskAdmission({ sample: s, kind: "reconcile", freeKiB: 3 * GIB }).fits).toBe(false);
+    expect(checkDiskAdmission({ sample: s, kind: "reconcile", freeKiB: 6 * GIB }).fits).toBe(true);
   });
 
   it("the budget cap lowers free: a 6 GB budget on a 15 GiB disk with 4 GiB used leaves ~2 GB, under the reserve → refused", () => {
@@ -225,7 +237,7 @@ describe("checkDiskAdmission — free − reserve ≥ projected", () => {
 
   it("an unmeasured projection admits only while free clears the reserve (never refuses a fresh resident on a guess; never admits past the floor blind)", () => {
     const fresh = sample({}, { checkout: null, deps: null, mirror: null });
-    const ok = checkDiskAdmission({ sample: fresh, kind: "install" });
+    const ok = checkDiskAdmission({ sample: fresh, kind: "reconcile" });
     expect(ok.fits).toBe(true);
     expect(ok.math.projectedKiB).toBeNull();
     const tight = checkDiskAdmission({
@@ -326,8 +338,8 @@ describe("orderEvictionCandidates — coldest clean idle trees first, every keep
 
 describe("diskPressureReason — the refusal names free, reserve, projected, what was evicted and what was kept", () => {
   it("full shape", () => {
-    const s = sample({ usedKiB: 10 * GIB, freeKiB: 5 * GIB });
-    const v = checkDiskAdmission({ sample: s, kind: "install" });
+    const s = sample({ usedKiB: 12 * GIB, freeKiB: 3 * GIB });
+    const v = checkDiskAdmission({ sample: s, kind: "reconcile" });
     if (v.fits) throw new Error("fixture must not fit");
     const text = diskPressureReason({
       verdict: v,
@@ -337,9 +349,9 @@ describe("diskPressureReason — the refusal names free, reserve, projected, wha
         { threadKey: "slack:C1:dirty", detail: "dirty: uncommitted changes" },
       ],
     });
-    // 2530 MB projected; reserve = 0.6 × 2890 MB + 1 GiB = 1734 MB + 1024 MB = 2.69 GiB; 5 − 2.69 = 2.31 left; short 0.16.
+    // 430 MB + 0.25 × 2100 MB = 955 MB (0.93 GiB) projected; reserve = 0.6 × 2890 MB + 1 GiB = 1734 MB + 1024 MB = 2.69 GiB; 3 − 2.69 = 0.31 left; short 0.63.
     expect(text).toMatch(
-      /^disk-pressure: need 2\.47 GiB for a new tree \(install\), but 5\.00 GiB free minus the 2\.69 GiB reserve \(snapshot staging 1\.69 GiB \+ floor 1\.00 GiB\) leaves 2\.31 GiB — short by 0\.16 GiB; /,
+      /^disk-pressure: need 0\.93 GiB for a new tree \(reconcile\), but 3\.00 GiB free minus the 2\.69 GiB reserve \(snapshot staging 1\.69 GiB \+ floor 1\.00 GiB\) leaves 0\.31 GiB — short by 0\.63 GiB; /,
     );
     expect(text).not.toContain("cap"); // no diskBudgetMb → no cap named
     expect(text).toContain("evicted 1 idle tree(s) (0.43 GiB back): slack:C1:old");

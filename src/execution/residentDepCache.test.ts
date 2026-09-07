@@ -8,6 +8,8 @@ import {
   mutableCachePaths,
   mutableCacheSwapScript,
   parseDepCacheScriptOutput,
+  planThreadDeps,
+  threadDepsMechanism,
 } from "./residentDepCache.js";
 
 describe("depCacheMaterialization (KTD7 dep/build cache, per directory)", () => {
@@ -199,5 +201,52 @@ describe("mutableCacheSwapScript (the per-path rm/cp/chown swaps in ONE fork)", 
     expect(s).toContain("chown -Rh 'worker4:worker4' '/wt/node_modules/.cache'");
     for (const step of ["deps-mutable-rm", "deps-mutable-copy", "deps-mutable-chown"])
       expect(s).toContain(`err=${step}`);
+  });
+});
+
+describe("planThreadDeps (a lockfile-diverged thread reconciles ON TOP of the shared cache, never from an empty tree)", () => {
+  // Live 2026-09-07 (#552 + the 21:38 disk-pressure refusal): a thread whose
+  // committed lockfile differed from the warm checkout's key ran `npm install`
+  // from nothing — 1.94 GiB projected, 5+ min on the 1 vCPU shared with the
+  // refresh cycle — and the bot's /attach died first. Seeding the tree from the
+  // checkout's hardlinked node_modules first turns that into a delta install.
+  it("a reused tree (node_modules already present) is left alone", () => {
+    expect(planThreadDeps({ hasDeps: true, threadLockKey: "a", warmLockKey: "a", installCmd: "npm ci" })).toEqual({
+      seed: false,
+      install: false,
+      why: "reused tree — cache already in place",
+    });
+  });
+
+  it("same lockfile key → seed from the checkout, no install", () => {
+    expect(planThreadDeps({ hasDeps: false, threadLockKey: "a", warmLockKey: "a", installCmd: "npm ci" })).toEqual({
+      seed: true,
+      install: false,
+      why: "lockfile matches the warm checkout — shared cache, nothing to reconcile",
+    });
+  });
+
+  it("different key WITH an install command → seed from the checkout THEN install (the install reconciles the delta)", () => {
+    expect(planThreadDeps({ hasDeps: false, threadLockKey: "b", warmLockKey: "a", installCmd: "npm ci" })).toEqual({
+      seed: true,
+      install: true,
+      why: "lockfile differs from the warm checkout — seeded from the shared cache, install reconciles the delta",
+    });
+  });
+
+  it("different key WITHOUT an install command → nothing: a stale seed with no way to reconcile would hand the thread the wrong deps", () => {
+    expect(planThreadDeps({ hasDeps: false, threadLockKey: "b", warmLockKey: "a", installCmd: undefined })).toEqual({
+      seed: false,
+      install: false,
+      why: "lockfile differs and the command table has no install — nothing to reconcile with",
+    });
+  });
+
+  it("the attach answer names the mechanism: a seeded-then-installed tree is `reconcile`, whatever the seed's own mechanism was", () => {
+    expect(threadDepsMechanism({ seeded: "hardlink", installed: true })).toBe("reconcile");
+    expect(threadDepsMechanism({ seeded: "copy", installed: true })).toBe("reconcile");
+    expect(threadDepsMechanism({ seeded: "hardlink", installed: false })).toBe("hardlink");
+    expect(threadDepsMechanism({ seeded: "copy", installed: false })).toBe("copy");
+    expect(threadDepsMechanism({ seeded: "none", installed: false })).toBe("none");
   });
 });
