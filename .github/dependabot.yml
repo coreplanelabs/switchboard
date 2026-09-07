@@ -1,15 +1,18 @@
 # Dependency updates. One weekly PR per ecosystem per package root, with
 # minor and patch bumps grouped so the queue stays readable; majors arrive
 # on their own so the change is visible in the title.
+#
+# Ignore rules encode two things and say which: pairs that must move together
+# by hand (runtime + types, container image + SDK), and blockers upstream
+# with the condition that lifts them. The policy lives here, reviewable in
+# the tree, rather than in `@dependabot ignore` comments on closed PRs.
 version: 2
 updates:
   - package-ecosystem: npm
     directories:
       - "/"
-      - "/web"
       - "/docs"
       - "/deploy/cloudflare"
-      - "/deploy/cloudflare-memory"
       - "/deploy/cloudflare-resident"
       - "/deploy/cloudflare-sandbox"
       - "/deploy/cloudflare-docs"
@@ -20,6 +23,44 @@ updates:
       minor-and-patch:
         update-types: ["minor", "patch"]
     open-pull-requests-limit: 10
+    ignore:
+      # Types follow the runtime: the Node major moves with the image, CI and
+      # .nvmrc in one deliberate change (#497), not one package root at a time.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # vue-tsc (3.3.x) resolves `typescript/lib/tsc`, which TypeScript 7 does
+      # not export. Lift once a vue-tsc release supports TypeScript 7.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: npm
+    directory: "/deploy/cloudflare-memory"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # @cloudflare/vitest-pool-workers (0.22.x) peers on vitest ^4.1. Lift
+      # once a pool-workers release supports vitest 5.
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
@@ -28,6 +69,7 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
   - package-ecosystem: docker
     directories:
       - "/"
@@ -36,3 +78,12 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    ignore:
+      # The bot runtime moves to an LTS line deliberately, together with CI,
+      # .nvmrc and @types/node (#497).
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+      # The sandbox image and the @cloudflare/sandbox SDK are one protocol in
+      # two artifacts; they move together, by hand, with a deploy validation
+      # (#498). Covers the cold sandbox and the resident.
+      - dependency-name: "cloudflare/sandbox"
