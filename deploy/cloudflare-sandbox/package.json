@@ -12,10 +12,10 @@
     "tail": "wrangler tail switchboard-sandbox",
     "secrets": "node ../bin/put-secrets.mjs sandbox"
   },
-  "dependencies": { "@cloudflare/sandbox": "^0.3.0" },
+  "dependencies": { "@cloudflare/sandbox": "^0.12.9" },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260810.1",
+    "@cloudflare/workers-types": "^5.20260904.1",
     "typescript": "^7.0.2",
-    "wrangler": "^4.120.1"
+    "wrangler": "^4.129.0"
   }
 }
