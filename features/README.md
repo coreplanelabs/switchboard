@@ -21,6 +21,16 @@ The behavioral contract of Switchboard, versioned with the code. Every file in t
 
 Nothing else goes on a criterion: no dates, no receipt links, no "observed live" prose. Proof *status* is read from the receipts issue and the test suite, not from the spec.
 
+## Bindings are checked
+
+`npm run specs:check` (part of `npm run verify`) reads every spec and fails when a binding no longer holds:
+
+- A `[unit]` proof `file::describe::it` must name a test that exists — the file, then the title path. `…` or `*` is a wildcard; a bare `::it` continues the row's `file`; `file::` alone means the whole file. A test title with a parameter (`it.each` with `%s`, a template literal) matches at the parameter. A bare file name (`worker.test.ts`) is allowed when the spec's **Tests** header, or the repository, has exactly one.
+- Every path in the **Code** and **Tests** headers must exist. Those headers are what maps a changed file back to the spec that covers it.
+- Every `[gap]` row must link its tracker issue.
+
+Rename a test and the build is red until the spec changes with it. References that were already stale when the check arrived are listed in [`specs-check.baseline.json`](specs-check.baseline.json); the check fails on any reference not in that list and on any listed reference that has since been fixed, so the file only shrinks — fix a reference, delete its line. A bare truncation of a title (`title` for a test called `title and more`) is not a binding; `npm run specs:check -- --fix` rewrites such a reference to `title…` where that is the one match in the file and leaves anything ambiguous for a person.
+
 ## Index
 
 | Feature | What it covers |
