@@ -1,9 +1,11 @@
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   INTERRUPTED_REARM_MAX_CONSECUTIVE,
   INTERRUPTED_REARM_S,
   checkoutUpdateCommand,
   classifyRefreshFailure,
+  killStaleBuildProcessesCommand,
   nextRefreshDelayS,
   planRefresh,
   withTimeout,
@@ -125,6 +127,37 @@ describe("checkoutUpdateCommand", () => {
     expect(cmd).toMatch(/git clean -fdx$/);
     expect(cmd).not.toContain("-e node_modules");
     expect(cmd).not.toContain("find .");
+  });
+});
+
+describe("killStaleBuildProcessesCommand (a build-user step never starts beside a process the last one left behind)", () => {
+  const argv = killStaleBuildProcessesCommand("worker1");
+  const script = argv[2];
+
+  it("runs as a root shell (never `su`): the sweep must outrank the processes it kills", () => {
+    expect(argv.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(script).not.toContain("su ");
+  });
+
+  it("names every survivor before killing it, so the Worker log shows WHAT was still running", () => {
+    expect(script.indexOf("pgrep -a -u worker1")).toBeLessThan(script.indexOf("pkill -KILL -u worker1"));
+  });
+
+  it("SIGKILL, not SIGTERM: an npm mid-extract must stop writing NOW, not at its leisure", () => {
+    expect(script).toContain("pkill -KILL -u worker1");
+    expect(script).not.toMatch(/pkill -TERM|pkill -15|pkill -u/);
+  });
+
+  it("waits (bounded) until the user has no process left — the next step must not race the dying ones", () => {
+    expect(script).toMatch(/while pgrep -u worker1/);
+    expect(script).toMatch(/exit 1/);
+  });
+
+  it("nothing running → exits 0 silently (pgrep's 'no match' exit 1 is not a failure)", () => {
+    // A user that owns no process here: the sweep must be a no-op, not an error.
+    const r = spawnSync(argv[0], [argv[1], killStaleBuildProcessesCommand("nobody")[2]], { encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
   });
 });
 

@@ -67,6 +67,7 @@ import {
   getSandbox,
   isDurableObjectCodeUpdateReset,
   OperationInterruptedError,
+  ProcessWaitTimeoutError,
   RPCTransportError,
   RuntimeIdentityInactiveError,
   Sandbox,
@@ -119,6 +120,7 @@ import {
 import {
   checkoutUpdateCommand,
   classifyRefreshFailure,
+  killStaleBuildProcessesCommand,
   nextRefreshDelayS,
   planRefresh,
   RUNTIME_REPLACEMENT_WORDING,
@@ -152,7 +154,12 @@ import {
   type ThreadCostKind,
 } from "../../src/execution/residentDiskBudget.js";
 import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
-import { describeStepFailure, stepFailureLog, type StepResult } from "../../src/execution/residentStepReport.js";
+import {
+  abandonedWaitStepResult,
+  describeStepFailure,
+  stepFailureLog,
+  type StepResult,
+} from "../../src/execution/residentStepReport.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 
 /** The commit this bundle was built from, injected by the deploy
@@ -232,6 +239,20 @@ const MAX_PROVISIONING_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 const GIT_NETWORK_TIMEOUT_MS = 5 * 60_000;
 const REFRESH_BUILD_TIMEOUT_MS = 5 * 60_000;
+/** The refresh install budget. Twice the build's: a full `npm install` of the
+ *  switchboard lockfile takes ~4 min on the resident's 1 vCPU when nothing
+ *  else runs, and thread runs (tests, a review's greps) share that vCPU —
+ *  live 2026-09-07 it crossed 5 min four cycles in a row while main kept
+ *  moving. A timed-out install is worse than a slow one: the cycle's whole
+ *  budget is spent and the checkout is left without deps, so the next cycle
+ *  starts the same install over. The cycle runs in the background (runs keep
+ *  attaching to the last snapshot); the cost of a longer budget is a longer
+ *  mirror-lock window, bounded well inside STALE_MIDFLIGHT_MS. */
+const REFRESH_INSTALL_TIMEOUT_MS = 10 * 60_000;
+/** After `output()`'s wait gives up on a process the supervisor should have
+ *  killed at `timeout`, how long to wait for the exit status of OUR kill
+ *  before reporting the step without one. */
+const KILL_EXIT_WAIT_MS = 10_000;
 /** Budget per R2 snapshot/restore transfer (#356 item 7a). The SDK's
  *  createBackup/restoreBackup accept no timeout or AbortSignal, so each call
  *  is raced against this (withTimeout): a hung upload/download fails the
@@ -1191,6 +1212,25 @@ export class ResidentDO extends Sandbox<Env> {
         this.clearIncarnationMemos(); // the container this incarnation's memos described is gone
         throw new RuntimeReplacedError("collect", err);
       }
+      if (err instanceof ProcessWaitTimeoutError) {
+        // The supervisor should have killed the process at `timeout`; 30 s
+        // later it still had not exited (a starved container kills late).
+        // Rejecting here used to abandon a LIVE process — live 2026-09-07 an
+        // `npm install` kept extracting into the checkout while the next
+        // cycle's `git clean -fdx` ran over it (`Directory not empty`) and
+        // the resident spiralled. Kill it, then report the step's own timeout.
+        let exitCode: number | null = null;
+        try {
+          await proc.kill(9);
+          exitCode = (await proc.waitForExit({ timeout: KILL_EXIT_WAIT_MS })).code;
+        } catch {
+          // no exit observed within the wait: the report says so
+        }
+        console.log(
+          `exec: ${argv.join(" ").slice(0, 200)} outlived its ${timeout}ms budget — killed (exit ${exitCode ?? "unobserved"})`,
+        );
+        return abandonedWaitStepResult({ detail: errMsg(err), exitCode });
+      }
       throw err;
     }
   }
@@ -1220,6 +1260,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  checkout. KTD5: never root. KTD7/KTD12: never a GitHub token — the env
    *  is whatever `su` grants the target user, nothing injected. */
   private async buildUserRun(command: string, step: string, timeoutMs: number): Promise<string> {
+    // Steps are sequential, so a live build-user process here is a leftover
+    // (a step whose wait was abandoned, or one orphaned by a Worker-only
+    // deploy resetting the DO) — and it is writing into the tree this step is
+    // about to clean or install into (see killStaleBuildProcessesCommand).
+    const swept = await this.runOk(killStaleBuildProcessesCommand(BUILD_USER), `${step}-stale-sweep`);
+    if (swept.trim()) console.log(`${step}: ${swept.trim()}`);
     return this.runOk(["su", "-s", "/bin/bash", BUILD_USER, "-c", `cd ${CHECKOUT_DIR} && ${command}`], step, {
       timeoutMs,
     });
@@ -1894,7 +1940,7 @@ export class ResidentDO extends Sandbox<Env> {
             await this.buildUserRun(checkoutUpdateCommand(sha, plan.clean), "checkout-update", GIT_NETWORK_TIMEOUT_MS);
             if (plan.install) {
               if (record.commands.install) {
-                await this.buildUserRun(record.commands.install, "install", REFRESH_BUILD_TIMEOUT_MS);
+                await this.buildUserRun(record.commands.install, "install", REFRESH_INSTALL_TIMEOUT_MS);
               }
               await this.writeDiskMarkers({ depsKey: lockfileHash });
             }
