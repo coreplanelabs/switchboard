@@ -136,16 +136,35 @@ if (!isHistory) {
 }
 
 // ---- what is happening now ------------------------------------------------------
-// In-progress work draws where it will end up, looking like what it becomes:
-// a running card ticks its elapsed in its own facts slot (it reads the clock
-// provided here), and a pending model turn is a provisional step head —
-// `thinking 30s` — at the foot of the log that turns into the real `thought …`
-// head when the turn lands. The header times the WHOLE run. There is no
-// separate "tail" row: the timeline is live, and its last row is now.
+// In-progress work draws where it will end up: a running card ticks its
+// elapsed in its own facts slot (it reads the clock provided here), and a
+// pending model turn — the model silent, nothing running — is a pending-turn
+// ROW at the foot of the log (∿ · `model` · a rotating verb · elapsed since
+// the last stamped event) that the real step replaces when the turn lands.
+// The header times the WHOLE run. There is no separate "tail": the timeline
+// is live, and its last row is now.
 const live = computed(() => !isHistory && phase.value !== "ended" && phase.value !== "disconnected");
 const runnerClock = computed(() => (live.value ? runnerNow(state, nowWall.value) : null));
 provide(RunnerClockKey, runnerClock);
 const waiting = computed(() => (live.value ? liveWait(state, model.pendingCall(), nowWall.value) : null));
+// The silent model's verbs: a fixed list, a new word every 6 s in order —
+// predictable, not twitchy — so the row is visibly alive without a spinner.
+const THINKING = [
+  "Thinking",
+  "Pondering",
+  "Mulling it over",
+  "Reasoning",
+  "Cogitating",
+  "Weighing options",
+  "Puzzling",
+  "Deliberating",
+  "Noodling",
+  "Chewing on it",
+  "Ruminating",
+  "Reticulating splines",
+];
+const verbIndex = ref(0);
+let verbSince = Date.now();
 
 // ---- fold toggle ---------------------------------------------------------------
 function toggleAll(): void {
@@ -187,6 +206,10 @@ if (seed?.mode === "history") {
 onMounted(() => {
   tick = setInterval(() => {
     nowWall.value = Date.now();
+    if (nowWall.value - verbSince > 6000) {
+      verbIndex.value = (verbIndex.value + 1) % THINKING.length;
+      verbSince = nowWall.value;
+    }
   }, 1000);
 
   if (seed?.mode !== "live") return;
@@ -516,26 +539,30 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             >
           </li>
         </template>
-        <!-- A pending model turn: the provisional head of the step it will
-             open — the same `thought <span>` row StepBlock paints, in the
-             present tense, ticking from the last stamped event on the runner
-             clock. A running command needs nothing here: its card ticks. -->
+        <!-- A pending model turn: the model is silent and nothing is running.
+             It reads as a ROW like the others — the dashed outline of the
+             card that has not landed yet — and says plainly whose silence it
+             is: the ∿ pulse, a `model` badge, a rotating verb, and the time
+             since the last stamped event on the runner clock. A running
+             command needs nothing here: its card ticks. -->
         <li
           v-if="waiting?.kind === 'thinking'"
           id="thinking"
-          class="pending relative mt-5 border-l-2 border-ok/40 pb-3 pl-3 pt-2 first:mt-0"
+          class="pending ml-3.5 mr-3 mt-5 flex items-center gap-3 rounded-md border border-dashed border-accented px-3 py-2 text-sm first:mt-0"
           aria-live="off"
+          title="the model is working on its next turn — nothing back yet (since the last event, runner clock)"
         >
-          <div class="head flex items-baseline gap-x-6 pb-1.5 pr-3">
-            <div class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 text-xs tabular-nums text-dimmed">
-              <span
-                class="thought"
-                :class="waiting.slow ? 'text-warn' : 'text-toned'"
-                title="the model has been working since the last result came back (runner clock)"
-                >thinking {{ formatElapsed(waiting.elapsedMs) }}</span
-              >
-            </div>
-          </div>
+          <span class="pulse text-[1.1em] leading-none text-info motion-safe:animate-pulse">∿</span>
+          <span
+            class="badge shrink-0 rounded bg-accented px-1.5 text-[0.68rem] font-semibold uppercase leading-normal tracking-wider text-muted"
+            >model</span
+          >
+          <span class="verb min-w-0 truncate text-toned">{{ THINKING[verbIndex] }}…</span>
+          <span
+            class="since ml-auto shrink-0 text-xs tabular-nums"
+            :class="waiting.slow ? 'text-warn' : 'text-dimmed'"
+            >{{ formatElapsed(waiting.elapsedMs) }}</span
+          >
         </li>
         <li ref="logEnd" aria-hidden="true" />
       </ol>

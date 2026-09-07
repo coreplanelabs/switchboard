@@ -215,8 +215,8 @@ function serveLiveStream(res: import("node:http").ServerResponse): void {
     const e = { ...HIST_EVENTS[i], at: Date.now() };
     res.write(`id: ${e.seq}\ndata: ${JSON.stringify(e)}\n\n`);
     i++;
-    // The last command stays out for half a minute so the tail's `running`
-    // state (and its stopwatch) can be seen; then the model "thinks" forever.
+    // The last command stays out for half a minute so a ticking running card
+    // can be seen; then the model "thinks" forever (the pending-turn row).
     nextAt = Date.now() + (i === HIST_EVENTS.length - 2 ? 30_000 : 1500);
   }, 500);
   res.on("close", () => clearInterval(timer));
