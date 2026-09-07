@@ -1,7 +1,7 @@
 # Switchboard — single-process Slack bot (Socket Mode, no inbound port needed).
 # git + gh are installed because the coding/review agents shell out to them.
 
-FROM node:22-slim AS build
+FROM node:24-slim AS build
 WORKDIR /app
 # One lockfile covers every workspace. npm needs each workspace's manifest on
 # disk to resolve the tree, so the manifests are copied before the install;
@@ -27,7 +27,7 @@ RUN npm run build
 # Runtime dependencies alone: the bot's production dependencies, no dev tools,
 # no web toolchain — a clean install rather than a prune, so nothing hoisted
 # for the build survives into the image.
-FROM node:22-slim AS deps
+FROM node:24-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY web/package.json ./web/
@@ -39,7 +39,7 @@ COPY deploy/cloudflare-sandbox/package.json ./deploy/cloudflare-sandbox/
 COPY deploy/cloudflare-docs/package.json ./deploy/cloudflare-docs/
 RUN npm ci --omit=dev --workspaces=false --include-workspace-root
 
-FROM node:22-slim
+FROM node:24-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git curl ca-certificates \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \

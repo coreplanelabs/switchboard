@@ -2,7 +2,7 @@
 
 Get Switchboard answering questions on your own machine, then run an agent against a real repo — all from one CLI command. Slack is one front door among several; this tutorial uses the one that needs no external setup.
 
-**Needs:** Node 22+ (`.nvmrc` pins it), an Anthropic API key.
+**Needs:** Node 24 (`.nvmrc` pins it; 22+ runs), an Anthropic API key.
 
 ## Install and configure
 
