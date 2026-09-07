@@ -21,6 +21,8 @@
  *  leaves the container disk alone, so the next alarm can pick up where the
  *  interrupted one stopped instead of redoing the whole rebuild. */
 
+import { DISK_FULL_FREE_KIB, diskFullReason, isDiskFullMessage } from "./residentDisk.js";
+
 export interface RefreshDisk {
   /** `git rev-parse HEAD` of the warm checkout; null when unreadable. */
   head: string | null;
@@ -100,9 +102,12 @@ export function checkoutUpdateCommand(sha: string, clean: CleanScope): string {
 export interface RefreshFailure {
   /** The `degraded` reason to record. Interruptions are prefixed
    *  `refresh-interrupted:` so the park-streak gate can exclude them by prefix,
-   *  exactly like the watchdog's stamps; real failures keep `<step>-failed:`. */
+   *  exactly like the watchdog's stamps; a full disk is `disk-full:` (#457,
+   *  `residentDisk.ts` — the cycle's entry gate and the recycle decision key
+   *  on it); real failures keep `<step>-failed:`. */
   reason: string;
   interrupted: boolean;
+  diskFull: boolean;
 }
 
 /** Signature of a step killed from OUTSIDE its own budget: the exit status of
@@ -126,13 +131,26 @@ const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM/;
 export const RUNTIME_REPLACEMENT_WORDING =
   /previous runtime incarnation|interrupted because the runtime changed|runtime identity is no longer active|sandbox lifetime is no longer current|platform was updating the sandbox runtime|no longer identifies pid|process supervisor is closed/i;
 
-export function classifyRefreshFailure(input: { step: string; message: string }): RefreshFailure {
+/** `freeKiB` is the `df` probe's answer (`parseDfFreeKiB`), taken AFTER the
+ *  step failed and only consulted when the message itself carries no errno:
+ *  a message saying ENOSPC is disk-full outright (the disk is the actionable
+ *  fact, whatever else the message says); a kill signature without it is an
+ *  interruption whatever the disk holds (the kill ended the step); otherwise a
+ *  probe below the floor names the disk, and no probe (`undefined`/`null`)
+ *  leaves the step's own failure — unknown is never full. */
+export function classifyRefreshFailure(input: { step: string; message: string; freeKiB?: number | null }): RefreshFailure {
   const { step, message } = input;
+  if (isDiskFullMessage(message)) {
+    return { interrupted: false, diskFull: true, reason: diskFullReason({ step, message, freeKiB: input.freeKiB ?? null }) };
+  }
   const timedOut = /\(timed out\)/.test(message);
   if (!timedOut && (INTERRUPTION_SIGNATURE.test(message) || RUNTIME_REPLACEMENT_WORDING.test(message))) {
-    return { interrupted: true, reason: `refresh-interrupted: ${step} ${message}` };
+    return { interrupted: true, diskFull: false, reason: `refresh-interrupted: ${step} ${message}` };
   }
-  return { interrupted: false, reason: `${step}-failed: ${message}` };
+  if (input.freeKiB !== undefined && input.freeKiB !== null && input.freeKiB < DISK_FULL_FREE_KIB) {
+    return { interrupted: false, diskFull: true, reason: diskFullReason({ step, message, freeKiB: input.freeKiB }) };
+  }
+  return { interrupted: false, diskFull: false, reason: `${step}-failed: ${message}` };
 }
 
 /** Re-arm delay after a cycle that did not run to completion for a reason
@@ -151,6 +169,9 @@ export type RefreshOutcome =
   | "interrupted"
   /** `reconcileImage` stopped the container so it restarts on the new image. */
   | "image-stale-restart"
+  /** The disk-full recovery stopped the container so it restarts on an empty
+   *  disk and the next alarm restores from R2 (#457, `residentDisk.ts`). */
+  | "disk-full-restart"
   /** Idle gate parked the resident. */
   | "idle";
 
@@ -176,6 +197,7 @@ export function nextRefreshDelayS(input: {
     case "interrupted":
       return (input.consecutiveInterrupted ?? 1) > INTERRUPTED_REARM_MAX_CONSECUTIVE ? input.intervalS : INTERRUPTED_REARM_S;
     case "image-stale-restart":
+    case "disk-full-restart":
       return INTERRUPTED_REARM_S;
     default:
       return input.intervalS;

@@ -35,6 +35,9 @@ describe("isServiceable", () => {
       "snapshot-failed: createBackup timed out",
       "refresh-failed: something else",
       "facts-failed: no repo facts recorded despite hydration",
+      // #457: a full disk cannot take a worktree, a credential file, or even
+      // /etc/gitconfig.lock — attaching would fail at git-setup every time
+      "disk-full: fetch Failed to write file '/workspace/.resident/git-credentials': ENOSPC: no space left on device (/workspace: 0 KiB free)",
       "",
       undefined,
       "github-unreachable-ish-but-not: x", // prefix must end at a word boundary

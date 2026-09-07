@@ -41,6 +41,8 @@ Any coding/review request that names the repo — by slug, GitHub URL, or PR lin
 
 `--dry-run` is worth using before any destructive change — it prints exactly what would happen without doing it.
 
+A resident whose container disk fills up shows `degraded` with a `disk-full: …` reason on the dashboard, and requests for that repo run cold (the status card says so) until it recovers. It recovers on its own: the disk is only a cache, so the resident restarts its container and restores from its snapshot — usually within a couple of minutes — as long as no run is in flight and no thread has uncommitted work on it. If it fills again within the hour, the resident keeps the container and the detail page's last refresh error says why: the repo's working set no longer fits the instance disk, so resize it or offboard a repo.
+
 ## Who can use a warm repo
 
 Onboarding is separate from *using* an onboarded repo. Restrict the latter per repo with `permissions.repos` — see [restrict who can do what](restrict-who-can-do-what.md).

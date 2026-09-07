@@ -9,6 +9,7 @@ import {
   withTimeout,
   type RefreshDisk,
 } from "./residentRefresh.js";
+import { DISK_FULL_FREE_KIB } from "./residentDisk.js";
 
 const KEY_A = "a".repeat(64);
 const KEY_B = "b".repeat(64);
@@ -127,7 +128,7 @@ describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an inte
 
   it("an ordinary build failure stays <step>-failed with the message verbatim", () => {
     const f = classifyRefreshFailure({ step: "build", message: "exit 1: src/x.ts(3,1): error TS2304" });
-    expect(f).toEqual({ interrupted: false, reason: "build-failed: exit 1: src/x.ts(3,1): error TS2304" });
+    expect(f).toEqual({ interrupted: false, diskFull: false, reason: "build-failed: exit 1: src/x.ts(3,1): error TS2304" });
   });
 
   it("our own timeout kill is NOT an interruption — the build really did not finish in budget", () => {
@@ -178,11 +179,62 @@ describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an inte
   });
 });
 
+describe("classifyRefreshFailure (#457: a full container disk is `disk-full`, not GitHub's fault and not the repo's)", () => {
+  // The refresh reason the nominal resident actually carried on 2026-09-04
+  // while every attach failed at git-setup — recorded as github-unreachable.
+  const credWrite = "Failed to write file '/workspace/.resident/git-credentials': ENOSPC: no space left on device, write '/workspace/.resident/git-credentials'";
+
+  it("ENOSPC wording in the message decides on its own — no probe needed", () => {
+    const f = classifyRefreshFailure({ step: "fetch", message: credWrite });
+    expect(f.diskFull).toBe(true);
+    expect(f.interrupted).toBe(false);
+    expect(f.reason).toBe(`disk-full: fetch ${credWrite}`);
+    expect(f.reason).not.toMatch(/github-unreachable|fetch-failed/);
+  });
+
+  it("an errno-less message (git config's exit 4) becomes disk-full when the probe says the disk is below the floor", () => {
+    const msg = "exit 4: stderr: error: failed to write new configuration file /etc/gitconfig.lock";
+    const f = classifyRefreshFailure({ step: "git-setup", message: msg, freeKiB: 0 });
+    expect(f.diskFull).toBe(true);
+    expect(f.reason).toBe(`disk-full: git-setup ${msg} (/workspace: 0 KiB free)`);
+    expect(classifyRefreshFailure({ step: "git-setup", message: msg, freeKiB: DISK_FULL_FREE_KIB - 1 }).diskFull).toBe(true);
+  });
+
+  it("the same message with room on the disk, or with no probe answer, stays the step's own failure", () => {
+    const msg = "exit 4: stderr: error: failed to write new configuration file /etc/gitconfig.lock";
+    expect(classifyRefreshFailure({ step: "git-setup", message: msg, freeKiB: DISK_FULL_FREE_KIB })).toEqual({
+      interrupted: false,
+      diskFull: false,
+      reason: `git-setup-failed: ${msg}`,
+    });
+    expect(classifyRefreshFailure({ step: "git-setup", message: msg, freeKiB: null }).diskFull).toBe(false);
+    expect(classifyRefreshFailure({ step: "git-setup", message: msg }).diskFull).toBe(false);
+  });
+
+  it("a step killed from outside is an interruption even on a low disk — the kill, not the disk, ended it", () => {
+    const f = classifyRefreshFailure({ step: "build", message: "exit 143: Session terminated, killing shell...", freeKiB: 0 });
+    expect(f.interrupted).toBe(true);
+    expect(f.diskFull).toBe(false);
+    expect(f.reason).toMatch(/^refresh-interrupted: build /);
+  });
+
+  it("ENOSPC in the message wins over a kill signature in the same message (the disk is the actionable fact)", () => {
+    const f = classifyRefreshFailure({ step: "install", message: "exit 143: ENOSPC: no space left on device; Session terminated" });
+    expect(f.diskFull).toBe(true);
+    expect(f.interrupted).toBe(false);
+  });
+});
+
 describe("nextRefreshDelayS (#216: re-arm short after an interruption or an image-stale restart)", () => {
   const cadence = { intervalS: 600, idleIntervalS: 21600 };
 
   it("normal outcome → the regular interval", () => {
     expect(nextRefreshDelayS({ outcome: "normal", ...cadence })).toBe(600);
+  });
+
+  it("disk-full restart → the same short re-arm as an image-stale restart (the container is coming back on an empty disk), uncapped", () => {
+    expect(nextRefreshDelayS({ outcome: "disk-full-restart", ...cadence })).toBe(INTERRUPTED_REARM_S);
+    expect(nextRefreshDelayS({ outcome: "disk-full-restart", consecutiveInterrupted: 50, ...cadence })).toBe(INTERRUPTED_REARM_S);
   });
 
   it("interrupted → the short re-arm, well under the regular interval", () => {
