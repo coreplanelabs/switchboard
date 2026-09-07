@@ -267,6 +267,16 @@ describe("analyzeRunFriction — per-category classification", () => {
     expect(categories(analyzeRunFriction(events))).toEqual(["failed_tool"]);
   });
 
+  it("infra_failure: a fleet_busy note is an infra finding too (capacity is friction), at medium severity — the run went on", () => {
+    const d = analyzeRunFriction([
+      call("bash", "$ npm test", T0),
+      note("fleet_busy", "⏳ Sandbox fleet busy — no free per-thread sandbox after waiting 300s", T0 + 300_000),
+      result("bash", false, "⏳ Sandbox fleet busy — …", T0 + 300_500),
+    ]);
+    const fleet = d.findings.find((f) => f.summary.startsWith("fleet busy"));
+    expect(fleet).toMatchObject({ category: "infra_failure", severity: "medium" });
+  });
+
   it("infra_failure: the sandbox_dead note is an infra failure and leads the verdict", () => {
     const d = analyzeRunFriction([
       call("bash", "$ pnpm install", T0),

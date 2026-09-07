@@ -28,6 +28,10 @@ export type RunNoteKind =
   | "time_budget_exhausted"
   | "turn_budget_exhausted"
   | "sandbox_dead"
+  /** The sandbox fleet had no free instance for this thread within the
+   *  executor's bounded wait (features/execution.md item 14). Capacity, not a
+   *  dead sandbox: the run goes on and the model is told to retry or finish. */
+  | "fleet_busy"
   | "stop_requested"
   | "stopped"
   /** The PR head moved while a review ran and the same run is re-reviewing at

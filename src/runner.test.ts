@@ -3,7 +3,7 @@ import type { AgentDef } from "./agents/registry.js";
 import type { ChatMessage, CompletionRequest, CompletionResult, Provider } from "./providers/types.js";
 import { RunControl } from "./core/runRegistry.js";
 import type { Executor } from "./execution/executor.js";
-import { ExecInfraError } from "./execution/executor.js";
+import { ExecCapacityError, ExecInfraError } from "./execution/executor.js";
 import type { RunEvent } from "./core/runEvents.js";
 import { runAgent } from "./runner.js";
 import type { RunnableTool } from "./tools/workspace.js";
@@ -407,6 +407,97 @@ describe("fail-fast on an unrecoverable sandbox (#92)", () => {
     expect(execCalls).toBe(2);
     expect(answer).toBe("recovered and finished");
     expect(answer).not.toMatch(/transport failed/i);
+  });
+});
+
+// Feature: features/run-loop.md item 7 + features/execution.md item 14 — a full
+// sandbox fleet is capacity, not a dead sandbox. 2026-09-07: the #525 review
+// aborted in 33 s on two identical `Failed to create session: 503` errors that
+// the breaker read as a wedged sandbox. ExecCapacityError does not count toward
+// fail-fast; the model is told to retry or finish, and the stream carries a
+// typed `fleet_busy` note.
+describe("fleet-busy capacity errors do not trip fail-fast", () => {
+  const CAPACITY_MESSAGE =
+    "sandbox fleet busy — no free per-thread sandbox after waiting 300s (the fleet's max_instances is reached); try again in a few minutes";
+
+  it("two consecutive ExecCapacityErrors leave the run going: it finishes normally with the model's own answer", async () => {
+    let execCalls = 0;
+    const fullFleet: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        execCalls++;
+        throw new ExecCapacityError(CAPACITY_MESSAGE);
+      },
+    };
+    const provider = scripted([bashUse("t1"), bashUse("t2"), text("finished with what I have")]);
+    const events: RunEvent[] = [];
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10, maxMinutes: 30 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fullFleet },
+      onEvent: (e) => events.push(e),
+    });
+    expect(execCalls).toBe(2);
+    expect(answer).toBe("finished with what I have");
+    expect(answer).not.toMatch(/transport failed|aborting/i);
+    // The third provider call was an ordinary tool-offering step, not a finale.
+    expect(provider.requests.at(-1)!.tools).toBeDefined();
+    // Neither result is marked infra — a full fleet is not a dead sandbox.
+    const results = events.filter((e) => e.type === "tool_result");
+    expect(results).toHaveLength(2);
+    for (const r of results) {
+      expect(r).toMatchObject({ ok: false });
+      expect("infra" in r).toBe(false);
+    }
+  });
+
+  it("emits a typed fleet_busy note per occurrence and never sandbox_dead", async () => {
+    const fullFleet: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        throw new ExecCapacityError(CAPACITY_MESSAGE);
+      },
+    };
+    const events: RunEvent[] = [];
+    const notes: string[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), bashUse("t2"), text("done")]),
+      model: "m",
+      agent: agent({ maxTurns: 10, maxMinutes: 30 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fullFleet },
+      onEvent: (e) => events.push(e),
+      onProgress: (n) => notes.push(n),
+    });
+    const noteEvents = events.filter((e) => e.type === "run_note");
+    expect(noteEvents.map((n) => n.kind)).toEqual(["fleet_busy", "fleet_busy"]);
+    expect(noteEvents[0].summary).toContain("after waiting 300s");
+    expect(notes.some((n) => n.includes("Sandbox fleet busy"))).toBe(true);
+  });
+
+  it("the model sees the ⏳ text with the error and the two ways forward (retry in a minute, or finish)", async () => {
+    const fullFleet: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        throw new ExecCapacityError(CAPACITY_MESSAGE);
+      },
+    };
+    const provider = scripted([bashUse("t1"), text("done")]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 10, maxMinutes: 30 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fullFleet },
+    });
+    const seen = provider.requests[1].messages.at(-1)!;
+    const part = (seen.content as Array<Record<string, unknown>>).find((p) => p.type === "tool_result")!;
+    expect(part.isError).toBe(true);
+    expect(part.content).toBe(
+      `⏳ Sandbox fleet busy — ${CAPACITY_MESSAGE}. Retry the command in a minute or finish with what you have.`,
+    );
   });
 });
 

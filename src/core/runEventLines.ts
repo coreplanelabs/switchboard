@@ -5,7 +5,13 @@ import type { RunEvent, RunNoteKind } from "./runEvents.js";
 // `/runs/:id/events` (`data: {...}` frames). Analysis-only input handling;
 // nothing here touches a run, a sandbox, or GitHub.
 
-const NOTE_KINDS = new Set<RunNoteKind>(["wrap_up", "time_budget_exhausted", "turn_budget_exhausted", "sandbox_dead"]);
+const NOTE_KINDS = new Set<RunNoteKind>([
+  "wrap_up",
+  "time_budget_exhausted",
+  "turn_budget_exhausted",
+  "sandbox_dead",
+  "fleet_busy",
+]);
 
 /**
  * Parse run events from text: one JSON object per line, OR a raw SSE capture of

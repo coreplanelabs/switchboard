@@ -20,7 +20,14 @@
       // repo's test suite during a cold review (vitest forks per vCPU); the
       // cold path clones + installs + tests a whole repo per thread.
       "instance_type": "standard-3",
-      "max_instances": 10
+      // The fleet's ceiling on AWAKE per-thread sandboxes; the next thread past
+      // it waits (features/execution.md item 14). Billing is per awake
+      // instance, so a higher ceiling costs nothing while instances sleep, and
+      // the account has ~150x headroom on the containers limits (6 TiB memory /
+      // 1500 vCPU against 25 × 8 GiB / 25 × 2 vCPU). 2026-09-07: thirteen cold
+      // runs in 45 min exhausted the previous 10 and the #525 review aborted in
+      // 33 s reading the wait as a dead sandbox.
+      "max_instances": 25
     }
   ],
   "durable_objects": {

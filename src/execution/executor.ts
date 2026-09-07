@@ -79,6 +79,22 @@ export class ExecInfraError extends Error {
   }
 }
 
+/** An exec-CAPACITY failure: the sandbox fleet had no free instance for this
+ *  thread within the executor's bounded wait (features/execution.md item 14).
+ *  Nothing ran and nothing is broken — the fleet's `max_instances` is reached
+ *  — so this is deliberately NOT an `ExecInfraError`: `ExecHealthTracker`
+ *  neither counts it nor resets on it, and the runner hands it to the model as
+ *  a retry-later outcome instead of aborting the run (2026-09-07: two of these
+ *  in a row, read as infra, aborted the #525 review in 33 s). `extends Error`
+ *  so message/`instanceof Error` callers are unaffected. */
+export class ExecCapacityError extends Error {
+  readonly capacity = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "ExecCapacityError";
+  }
+}
+
 /** Decorates an Executor to track CONSECUTIVE exec-infrastructure failures
  *  (`ExecInfraError`) with no successful operation between them — the signal the
  *  runner uses to detect an unrecoverable sandbox (#92). A successful op resets

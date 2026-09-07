@@ -1,5 +1,11 @@
-import { clampBashTimeout } from "./bashTimeout.js";
-import { ExecInfraError, truncate, type ExecOptions, type Executor } from "./executor.js";
+import { BASH_TIMEOUT_MS, clampBashTimeout } from "./bashTimeout.js";
+import { ExecCapacityError, ExecInfraError, truncate, type ExecOptions, type Executor } from "./executor.js";
+import {
+  FLEET_BUSY_BACKOFF_MS,
+  FLEET_BUSY_REASON,
+  FLEET_BUSY_WAIT_MAX_MS,
+  fleetBusyExhaustedMessage,
+} from "./sandboxErrors.js";
 
 // Remote execution in a Cloudflare Sandbox, via the authenticated proxy Worker
 // in deploy/cloudflare-sandbox/ (the Sandbox SDK only runs inside Workers).
@@ -24,13 +30,53 @@ export interface CloudflareSandboxOptions {
   ref?: string;
 }
 
+/** The Worker named a full fleet (features/execution.md item 14): in-body on
+ *  the streamed /exec answer, or as an HTTP 503 on /read and /write. Matched on
+ *  the machine token only — an older Worker's bare SDK message stays an
+ *  ordinary in-body error (infra), so a bot deployed ahead of its Worker
+ *  changes nothing. */
+function isFleetBusyAnswer(res: Response, data: Record<string, unknown>): boolean {
+  return (res.ok || res.status === 503) && data.reason === FLEET_BUSY_REASON;
+}
+
+/** Resolve after `ms`, or reject with `ExecCapacityError` the moment `signal`
+ *  fires — a hard stop (#101) must not sit out a fleet wait. */
+function waitForSlot(ms: number, waitedMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const stopped = () =>
+      new ExecCapacityError(
+        `sandbox fleet busy — stopped waiting for a free per-thread sandbox after ${Math.round(waitedMs / 1000)}s: the run was stopped`,
+      );
+    if (signal?.aborted) return reject(stopped());
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(stopped());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export class CloudflareSandboxExecutor implements Executor {
   constructor(private opts: CloudflareSandboxOptions) {}
 
+  /** One request to the Worker, with the transport-level retries, and the
+   *  fleet-busy wait around it: a busy answer re-sends the IDENTICAL request
+   *  (same route, body, headers — the envs resolved once here, so the wait
+   *  never mints a new credential mid-command) after 10 s, 20 s, then 30 s,
+   *  until the total wait reaches `waitBudgetMs` capped at
+   *  FLEET_BUSY_WAIT_MAX_MS; then throws `ExecCapacityError` (never
+   *  `ExecInfraError` — a full fleet is not a dead sandbox, item 14). Safe to
+   *  re-send by construction: the Worker answers busy only when session
+   *  creation failed, before the command or file op ever started. */
   private async call(
     route: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
+    waitBudgetMs: number = BASH_TIMEOUT_MS,
   ): Promise<Record<string, unknown>> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
@@ -39,6 +85,30 @@ export class CloudflareSandboxExecutor implements Executor {
     };
     for (const [k, v] of Object.entries(await this.opts.resolveEnvs())) headers[`x-env-${k}`] = v;
 
+    const budget = Math.min(waitBudgetMs, FLEET_BUSY_WAIT_MAX_MS);
+    let waited = 0;
+    for (let attempt = 0; ; attempt++) {
+      const answer = await this.send(route, body, headers, signal);
+      if (answer.kind === "ok") return answer.data;
+      if (waited >= budget) throw new ExecCapacityError(fleetBusyExhaustedMessage(waited));
+      const delay = Math.min(
+        FLEET_BUSY_BACKOFF_MS[Math.min(attempt, FLEET_BUSY_BACKOFF_MS.length - 1)],
+        budget - waited,
+      );
+      await waitForSlot(delay, waited, signal);
+      waited += delay;
+    }
+  }
+
+  /** One send with the transport-level retries. Returns the parsed answer, or
+   *  `busy` when the Worker named a full fleet; every other failure throws
+   *  `ExecInfraError` here, after exactly one send for an in-body error. */
+  private async send(
+    route: string,
+    body: Record<string, unknown>,
+    headers: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<{ kind: "ok"; data: Record<string, unknown> } | { kind: "busy" }> {
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
     const delays = [0, 3000, 6000, 12000];
     let lastErr = "";
@@ -69,6 +139,9 @@ export class CloudflareSandboxExecutor implements Executor {
         );
       }
       const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      // A full fleet is the ONE answer that is re-sent (by `call`): the Worker
+      // names it only when no session could be created, so nothing ran.
+      if (isFleetBusyAnswer(res, data)) return { kind: "busy" };
       // /exec streams its response (heartbeat whitespace + one JSON document,
       // always HTTP 200 since headers are sent before the outcome is known),
       // so failures arrive as {error} in an ok response. Not retried: by the
@@ -80,7 +153,7 @@ export class CloudflareSandboxExecutor implements Executor {
         // even a bare echo). Infra, not a command exit — counts toward fail-fast.
         throw new ExecInfraError(`sandbox worker ${route}: ${data.error}`);
       }
-      if (res.ok) return data;
+      if (res.ok) return { kind: "ok", data };
       lastErr = `sandbox worker ${route} HTTP ${res.status}: ${String(data.error ?? "")}`;
       if (res.status < 500) break; // 4xx is not retryable
     }
@@ -95,7 +168,9 @@ export class CloudflareSandboxExecutor implements Executor {
     // server-side with the same [1s, 20 min] bounds — never this number alone.
     const body: Record<string, unknown> = { command };
     if (opts?.timeoutMs !== undefined) body.timeoutMs = clampBashTimeout(opts.timeoutMs);
-    const r = await this.call("/exec", body, opts?.signal);
+    // The fleet wait may spend up to the command's own budget (item 14) — a
+    // command the run gave 60 s should not wait five minutes for a slot.
+    const r = await this.call("/exec", body, opts?.signal, clampBashTimeout(opts?.timeoutMs));
     const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
     const exitCode = Number(r.exitCode ?? 0);
     if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);

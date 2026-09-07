@@ -13,7 +13,7 @@ import {
 } from "./core/runEvents.js";
 import type { RunControl } from "./core/runRegistry.js";
 import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
-import { ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
+import { ExecCapacityError, ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
 
 // The runner is the provider-neutral agent loop: send messages, execute any
@@ -354,6 +354,17 @@ async function runLoop(
           throw err;
         }
         const message = err instanceof Error ? err.message : String(err);
+        // A full sandbox fleet (features/execution.md item 14) is capacity, not
+        // a dead sandbox: the executor already waited its bounded time, nothing
+        // ran, and the tracker did not count it — so the run goes on. The model
+        // is told plainly what happened and its two ways forward; the stream
+        // carries a typed note so the friction analyzer sees the minutes lost.
+        if (err instanceof ExecCapacityError) {
+          const text = `⏳ Sandbox fleet busy — ${message}. Retry the command in a minute or finish with what you have.`;
+          emit({ type: "tool_result", tool: tu.name, ok: false, callId: tu.id, ...prepareToolResult(text) });
+          note("fleet_busy", text);
+          return { type: "tool_result", toolUseId: tu.id, content: text, isError: true };
+        }
         // `infra` marks a sandbox/transport failure (not the command's own error)
         // so downstream analysis never mistakes a dead sandbox for a failing command.
         emit({
