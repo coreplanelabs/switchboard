@@ -275,8 +275,13 @@ const READY_MARKER = `${RESIDENT_STATE_DIR}/ready`; // holds the sha the disk wa
  *  cycle reads them (plus the checkout's real HEAD) to skip work the disk
  *  already holds — a DO reset mid-cycle leaves the container disk intact. */
 const DEPS_MARKER = `${RESIDENT_STATE_DIR}/deps-key`;
+/** The lockfile key an install was STARTED for: written before `install`,
+ *  removed once DEPS_MARKER lands. Left behind by a cycle whose install did
+ *  not finish, it lets the next cycle resume that install on the partial
+ *  tree instead of wiping it (planRefresh). */
+const INSTALLING_MARKER = `${RESIDENT_STATE_DIR}/deps-installing`;
 const BUILT_MARKER = `${RESIDENT_STATE_DIR}/built`;
-const DISK_MARKERS = [READY_MARKER, DEPS_MARKER, BUILT_MARKER];
+const DISK_MARKERS = [READY_MARKER, DEPS_MARKER, INSTALLING_MARKER, BUILT_MARKER];
 
 /** Unprivileged user for default-branch install/build (KTD5: repo code never
  *  runs as root). worker2..worker17 stay free for U4's per-thread users. */
@@ -1376,9 +1381,15 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Write the disk markers that a materialized checkout leaves behind (see
    *  DEPS_MARKER/BUILT_MARKER); omitted fields are left as they are. */
-  private async writeDiskMarkers(m: { ready?: string; depsKey?: string; builtSha?: string }): Promise<void> {
+  private async writeDiskMarkers(m: {
+    ready?: string;
+    depsKey?: string;
+    installingKey?: string;
+    builtSha?: string;
+  }): Promise<void> {
     if (m.ready !== undefined) await this.writeFile(READY_MARKER, `${m.ready}\n`);
     if (m.depsKey !== undefined) await this.writeFile(DEPS_MARKER, `${m.depsKey}\n`);
+    if (m.installingKey !== undefined) await this.writeFile(INSTALLING_MARKER, `${m.installingKey}\n`);
     if (m.builtSha !== undefined) await this.writeFile(BUILT_MARKER, `${m.builtSha}\n`);
   }
 
@@ -1392,18 +1403,19 @@ export class ResidentDO extends Sandbox<Env> {
     const script = [
       `echo "head=$(su -s /bin/bash ${BUILD_USER} -c 'git -C ${CHECKOUT_DIR} rev-parse --verify HEAD' 2>/dev/null)"`,
       `echo "deps=$(cat ${DEPS_MARKER} 2>/dev/null)"`,
+      `echo "installing=$(cat ${INSTALLING_MARKER} 2>/dev/null)"`,
       `echo "built=$(cat ${BUILT_MARKER} 2>/dev/null)"`,
     ].join("; ");
     const r = await this.run(["sh", "-c", script]);
     const fields = new Map<string, string>();
     if (r.exitCode === 0) {
       for (const line of r.stdout.split("\n")) {
-        const m = /^(head|deps|built)=(.*)$/.exec(line.trim());
+        const m = /^(head|deps|installing|built)=(.*)$/.exec(line.trim());
         if (m) fields.set(m[1], m[2].trim());
       }
     }
     const get = (tag: string) => fields.get(tag) || null;
-    return { head: get("head"), installedKey: get("deps"), builtSha: get("built") };
+    return { head: get("head"), installedKey: get("deps"), installingKey: get("installing"), builtSha: get("built") };
   }
 
   /** Snapshot mirror + checkout to R2 (localBucket: the SDK resolves the
@@ -1939,10 +1951,19 @@ export class ResidentDO extends Sandbox<Env> {
             await this.runOk(["rm", "-f", BUILT_MARKER, ...(plan.install ? [DEPS_MARKER] : [])], "clear-markers");
             await this.buildUserRun(checkoutUpdateCommand(sha, plan.clean), "checkout-update", GIT_NETWORK_TIMEOUT_MS);
             if (plan.install) {
+              // The installing marker brackets the step: written before, removed
+              // after the deps key lands. A cycle that ends in between leaves it
+              // behind, and the next plan resumes THIS install on the partial
+              // tree (keep-deps clean + install) instead of wiping it — npm
+              // reconciles to the lockfile, so an install longer than one budget
+              // still converges over cycles (live 2026-09-07: four full installs
+              // in a row, none finishing under contention with thread attaches).
+              await this.writeDiskMarkers({ installingKey: lockfileHash });
               if (record.commands.install) {
                 await this.buildUserRun(record.commands.install, "install", REFRESH_INSTALL_TIMEOUT_MS);
               }
               await this.writeDiskMarkers({ depsKey: lockfileHash });
+              await this.runOk(["rm", "-f", INSTALLING_MARKER], "clear-installing-marker");
             }
             await this.buildUserRun(record.commands.build, "build", REFRESH_BUILD_TIMEOUT_MS);
             await this.writeDiskMarkers({ builtSha: sha });
@@ -2012,6 +2033,12 @@ export class ResidentDO extends Sandbox<Env> {
       // Set BEFORE the writes on purpose: if either throws, the finally still
       // re-arms short — the safe direction for an interruption.
       if (failure.interrupted) this.rearmOutcome = "interrupted";
+      // The classified reason, always in the log: a StepError logged its own
+      // output block above, but a failure between steps (an SDK error, the
+      // markers, the snapshot) reached only the state entry — which the next
+      // cycle's failure overwrites (live 2026-09-07: the install timeout that
+      // started an incident left no trace once the follow-up cycle failed).
+      console.log(`refresh: cycle failed — ${failure.reason.slice(0, 400)}`);
       // Record on the facts too (#335): the degraded state write below can be
       // clobbered within seconds by a concurrent attach/exec whose
       // ensureHydrated flips the state to `restoring · rehydrating` (that is
