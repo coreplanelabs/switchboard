@@ -47,6 +47,6 @@
     "license-checker-rseidelsohn": "^5.0.1",
     "tsx": "^4.19.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.0"
   }
 }
