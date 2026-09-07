@@ -22,7 +22,9 @@ concurrency:
 
 jobs:
   bot:
-    name: bot — typecheck, tests, skills, licenses, docs tables, dist
+    # Job names are the stable identifiers the branch ruleset requires (bot,
+    # web, docs, workers, image); what each one runs is its script.
+    name: bot
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,7 +37,7 @@ jobs:
       - run: npm run verify:root
 
   web:
-    name: web — typecheck, tests, licenses, build
+    name: web
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,7 +50,7 @@ jobs:
       - run: npm run verify -w web
 
   docs:
-    name: docs — site build, completeness, deploy dry-run
+    name: docs
     runs-on: ubuntu-latest
     env:
       WRANGLER_SEND_METRICS: "false"
@@ -68,7 +70,7 @@ jobs:
       - run: npm run verify -w deploy/cloudflare-docs
 
   workers:
-    name: workers — typecheck and tests (memory runs inside workerd)
+    name: workers
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,7 +83,7 @@ jobs:
       - run: npm run verify -w deploy/cloudflare -w deploy/cloudflare-memory -w deploy/cloudflare-resident -w deploy/cloudflare-sandbox
 
   image:
-    name: image — the Dockerfile builds
+    name: image
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
