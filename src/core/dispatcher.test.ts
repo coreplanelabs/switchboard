@@ -2412,20 +2412,49 @@ describe("coding PR post-step (features/pr-description.md)", () => {
    *  clone (`gh repo clone … -- --depth 50`, single-branch), `@{u}` never
    *  resolves there even after a successful push (#438); a resident tree is a
    *  full clone, so its `@{u}` answers `remoteHead`. A `bindingRef` makes the
-   *  selection a resident one bound to that ref. Records the order of
+   *  selection a resident one bound to that ref. With `pushed`, the agent's
+   *  own `git push` answers git's status block for that branch (the run's
+   *  push, as the runner records it, #458), `rev-parse 'refs/heads/<b>'`
+   *  answers its tip and the remote holds it at `pushed.remoteHead`
+   *  (defaults to the tip; `null` = not on the remote) — while `branch`/`head`
+   *  stay the CHECKOUT, which may have moved on. Records the order of
    *  exec/release calls. */
-  function codingExecutor(opts: { head?: string; branch?: string; remoteHead?: string | null; remote?: string; cloneDir?: string; bindingRef?: string } = {}) {
+  function codingExecutor(
+    opts: {
+      head?: string;
+      branch?: string;
+      remoteHead?: string | null;
+      remote?: string;
+      cloneDir?: string;
+      bindingRef?: string;
+      pushed?: { branch: string; head: string; remoteHead?: string | null };
+    } = {},
+  ) {
     const order: string[] = [];
     const remoteHead = opts.remoteHead === null ? undefined : (opts.remoteHead ?? opts.head);
+    const pushedRemoteHead = opts.pushed?.remoteHead === null ? undefined : (opts.pushed?.remoteHead ?? opts.pushed?.head);
     const notARepo = "fatal: not a git repository\nexit 128";
+    const pushBlock = opts.pushed
+      ? `remote: \nremote: Create a pull request for '${opts.pushed.branch}' on GitHub by visiting:\nremote:      https://github.com/acme/api/pull/new/${opts.pushed.branch}\nremote: \nTo https://github.com/acme/api.git\n * [new branch]      ${opts.pushed.branch} -> ${opts.pushed.branch}\nbranch '${opts.pushed.branch}' set up to track 'origin/${opts.pushed.branch}'.\n`
+      : "";
     const git = (cmd: string) => {
+      // The push itself prints the block; so does `cat push.log` — a transcript
+      // of it, which must NOT count as a push (PR #469 F2).
+      if (/^git push\b/.test(cmd) || /^cat push\.log\b/.test(cmd)) return pushBlock;
       if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return opts.branch ? `${opts.branch}\n` : notARepo;
       if (/rev-parse @\{u\}/.test(cmd)) {
         if (opts.cloneDir) return `exit 128:\nfatal: upstream branch 'refs/heads/${opts.branch}' not stored as a remote-tracking branch\n`;
         return remoteHead ? `${remoteHead}\n` : "exit 128:\nfatal: no upstream configured for branch\n";
       }
+      if (/rev-parse '[^']+@\{u\}'/.test(cmd)) return "exit 128:\nfatal: upstream branch not stored as a remote-tracking branch\n";
       if (/rev-parse HEAD/.test(cmd)) return opts.head ? `${opts.head}\n` : notARepo;
-      if (/ls-remote --exit-code origin/.test(cmd)) return remoteHead ? `${remoteHead}\trefs/heads/${opts.branch}\n` : "exit 2:\n";
+      const tip = /rev-parse 'refs\/heads\/([^']+)'/.exec(cmd);
+      if (tip) return opts.pushed && tip[1] === opts.pushed.branch ? `${opts.pushed.head}\n` : `exit 128:\nfatal: ambiguous argument '${tip[0]}': unknown revision\n`;
+      const lsRemote = /ls-remote --exit-code origin 'refs\/heads\/([^']+)'/.exec(cmd);
+      if (lsRemote) {
+        if (opts.pushed && lsRemote[1] === opts.pushed.branch) return pushedRemoteHead ? `${pushedRemoteHead}\trefs/heads/${opts.pushed.branch}\n` : "exit 2:\n";
+        return remoteHead && lsRemote[1] === opts.branch ? `${remoteHead}\trefs/heads/${opts.branch}\n` : "exit 2:\n";
+      }
       if (/remote get-url origin/.test(cmd)) return opts.remote ? `${opts.remote}\n` : "error: No such remote 'origin'\nexit 2";
       return "";
     };
@@ -2492,6 +2521,90 @@ describe("coding PR post-step (features/pr-description.md)", () => {
     expect(target.body).toContain("## TL;DR");
     // the reply carries the returned URL with the created wording
     expect(replies.some((r) => r.includes("https://github.com/acme/api/pull/7") && /PR opened/.test(r))).toBe(true);
+  });
+
+  /** A coding-agent provider that runs `steps` as bash commands in order, then
+   *  submits the description, then answers — the shape of a run that pushes
+   *  and keeps working in the checkout afterwards. */
+  function bashThenDescribe(steps: string[], desc: Record<string, unknown>, answer = "Done — branch pushed."): Provider {
+    let n = 0;
+    return {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        const i = n++;
+        if (i < steps.length) return { content: [{ type: "tool_use", id: `b${i}`, name: "bash", input: { command: steps[i] } }], stopReason: "tool_use" };
+        if (i === steps.length) return { content: [{ type: "tool_use", id: "d1", name: "submit_pr_description", input: desc }], stopReason: "tool_use" };
+        return { content: [{ type: "text", text: answer }], stopReason: "end_turn" };
+      },
+    };
+  }
+
+  // #458 — live incident 2026-09-04 (#justin-prompting 1788561130.012549):
+  // the run pushed `remove-legacy-maps-mcp-references`, then HEAD moved to
+  // ANOTHER branch before the post-step probed the workspace (a second run's
+  // `git checkout -b` in the shared sandbox — and just as well the agent
+  // itself checking out another branch after its push). The post-step read
+  // the checkout's branch, asked the remote for THAT one, and reported "not
+  // found on the remote": the pushed work was orphaned without a PR. The head
+  // branch is now the branch the run's own `git push` named, read off its
+  // bash result as the events stream by; the checkout is only the fallback.
+  it("HEAD moved to another branch after the push (#458) → the PR still opens from the PUSHED branch, the body rendered at that branch's tip", async () => {
+    const OTHER = "0123456789abcdef0123456789abcdef01234567";
+    const deps = codingDeps(bashThenDescribe(["git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION));
+    // The checkout ended on chore/other at a different commit; feat/login-fix was pushed at HEAD.
+    codingExecutor({ head: OTHER, branch: "chore/other", pushed: { branch: "feat/login-fix", head: HEAD }, bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix the login redirect", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].headBranch).toBe("feat/login-fix"); // the pushed branch, not the checkout
+    expect(spy.calls[0].base).toBe("main");
+    expect(spy.calls[0].body).toContain(`https://github.com/acme/api/blob/${HEAD}/src/login.ts#L10-L20`); // at the pushed tip, never the checkout's commit
+    expect(spy.calls[0].body).not.toContain(OTHER);
+    expect(replies.some((r) => /PR opened/.test(r) && r.includes("`feat/login-fix`"))).toBe(true);
+  });
+
+  it("the pushed branch is gone from the remote while the checkout moved on → the note names BOTH branches, no PR call", async () => {
+    const deps = codingDeps(bashThenDescribe(["git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION));
+    // Neither branch is on the remote any more: the checkout never was, the pushed one was deleted after the push.
+    codingExecutor({ head: HEAD, branch: "chore/other", remoteHead: null, pushed: { branch: "feat/login-fix", head: HEAD, remoteHead: null }, bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const note = replies.find((r) => r.includes("was not found on the remote"));
+    expect(note).toBeDefined();
+    expect(note).toContain("`feat/login-fix`"); // the branch the push named…
+    expect(note).toContain("`chore/other`"); // …and the branch the workspace sat on
+    expect(note).not.toContain("github.com");
+  });
+
+  // Review nit (PR #469, F2): the block is read only from a `git push` call's
+  // own result, paired by callId — a transcript printed by another command is
+  // not a push, so the run falls back to the checkout exactly as if nothing
+  // had been pushed.
+  it("a push block printed by `cat push.log` (not a git push) is not a push → the checkout stays the head branch", async () => {
+    const deps = codingDeps(bashThenDescribe(["cat push.log", "git checkout -b chore/other"], DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "chore/other", pushed: { branch: "feat/login-fix", head: HEAD }, bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].headBranch).toBe("chore/other"); // the checkout — the transcript named no push
+  });
+
+  it("no push observed in the run → the checkout is the head branch, exactly as before", async () => {
+    const deps = codingDeps(bashThenDescribe(["git status --short"], DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].headBranch).toBe("feat/login-fix");
   });
 
   it("an existing open PR is edited (open-or-edit): created:false → the reply says updated, not opened", async () => {

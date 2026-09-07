@@ -43,7 +43,7 @@ import {
   settleReviewedHead,
   type RoundWorkspace,
 } from "./reviewRound.js";
-import { observeCodingWorkspace, runCodingPrPostStep } from "./codingPrPostStep.js";
+import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "./codingPrPostStep.js";
 import { recognizeOperation } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
@@ -992,12 +992,19 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // Live run-visibility (Area 2): each tool call/result refreshes the card
     // immediately, so activity is visible without waiting for the heartbeat.
     let toolCalls = 0; // "did real work" signal for the memory reflection gate
+    // The branch the run's own `git push` named, read off its bash calls and
+    // results as they stream by (features/pr-description.md item 5, #458):
+    // the PR post-step opens from THIS branch, and from the checkout only
+    // when no push was observed — the checkout can move between the push and
+    // the post. The latest push wins.
+    const pushes = trackPushedBranch();
     // The registry backlog is the run's ONE event store (#157 KTD9): the live
     // page, the post-run friction diagnosis and the run record all read it back
     // via `registry.snapshot` — there is no second copy to drift from it.
     const onEvent = (e: RunEvent) => {
       registry.publish(run.id, e); // feed the external live-view stream
       if (e.type === "tool_call") toolCalls++;
+      if (isCodingPrRun) pushes.observe(e);
       lastActivityAt = Date.now();
       lastActivity = activityLine(e);
       console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
@@ -1070,13 +1077,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // finished — read by us, not reported by the model — for the reviewed-head
     // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
     let observedHead: string | undefined;
-    // The branch that commit sits on (coding runs), read alongside it for the
-    // PR post-step. Undefined when unreadable or detached ("HEAD" is not a
-    // branch — nothing a PR could be opened from).
+    // The PR head branch (coding runs), read alongside it for the PR
+    // post-step: the branch the run's push named, else the checked-out branch.
+    // Undefined when unreadable or detached ("HEAD" is not a branch — nothing
+    // a PR could be opened from) with no push observed.
     let observedBranch: string | undefined;
+    // The branch checked out when the workspace was observed — the same as
+    // observedBranch unless HEAD moved after the push (#458), in which case
+    // observedHead is the PUSHED branch's tip, not HEAD.
+    let observedCheckedOut: string | undefined;
     // The commit the remote holds for that branch (`git ls-remote origin
     // refs/heads/<branch>`), the post-step's proof of a push: the branch
-    // counts as pushed only when this matches the observed HEAD. Undefined
+    // counts as pushed only when this matches the observed head. Undefined
     // when the remote has no such branch or could not be asked.
     let observedRemoteHead: string | undefined;
     // `owner/name` parsed from the workspace's origin remote, probed only when
@@ -1163,8 +1175,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         carried = settled.carried;
       }
       // PR post-step observation (features/pr-description.md item 5): for a
-      // writable coding run, read the workspace HEAD, its branch name, and
-      // the remote's head for that branch NOW — after the model is done, BEFORE the
+      // writable coding run, read the workspace's head branch — the one the
+      // run's `git push` named, else the checkout — its tip, and the remote's
+      // head for that branch NOW — after the model is done, BEFORE the
       // finally below can release the workspace (a resident re-attach would
       // show the ref's current tip, not what this run pushed). The cold path
       // clones into a SUBDIRECTORY of the workspace root, so a failed root
@@ -1175,9 +1188,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // hard stop tore the work down mid-flight — nothing observed, nothing
       // posted.
       if (isCodingPrRun && run.control.requested !== "hard") {
-        const observed = await observeCodingWorkspace(executor, { probeRemote: repoCtx.repo === undefined });
+        const pushedBranch = pushes.branch();
+        const observed = await observeCodingWorkspace(executor, { probeRemote: repoCtx.repo === undefined, ...(pushedBranch !== undefined ? { pushedBranch } : {}) });
         observedHead = observed.head;
         observedBranch = observed.branch;
+        observedCheckedOut = observed.checkedOut;
         observedRemoteHead = observed.remoteHead;
         observedRemoteRepo = observed.remoteRepo;
       }
@@ -1204,7 +1219,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // hard stop observed nothing above and posts nothing.
       if (isCodingPrRun && run.control.requested !== "hard") {
         prNote = await runCodingPrPostStep({
-          observed: { head: observedHead, branch: observedBranch, remoteHead: observedRemoteHead, remoteRepo: observedRemoteRepo },
+          observed: { head: observedHead, branch: observedBranch, checkedOut: observedCheckedOut, remoteHead: observedRemoteHead, remoteRepo: observedRemoteRepo },
           description: prDescription,
           target: { repo: repoCtx.repo, baseRef: repoCtx.baseRef, bindingRef: binding?.ref, resolvedRef: repoCtx.ref },
           openPullRequest: deps.openPullRequest ?? openPullRequest,

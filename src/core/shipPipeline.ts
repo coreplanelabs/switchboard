@@ -39,7 +39,7 @@ import type { RepoContext } from "./repoContext.js";
 import type { RunEvent, ShipRoundOutcome } from "./runEvents.js";
 import type { RunControl } from "./runRegistry.js";
 import { normalizeHead, sameCommit } from "./reviewedHead.js";
-import { observeCodingWorkspace, runCodingPrPostStep } from "./codingPrPostStep.js";
+import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "./codingPrPostStep.js";
 import {
   attachRoundWorkspace,
   checkPrHeadPreflight,
@@ -692,6 +692,10 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     });
     let answer: string;
     let observed: Awaited<ReturnType<typeof observeCodingWorkspace>> | undefined;
+    // The branch the child's own `git push` named (pr-description item 5,
+    // #458): the post-step opens from it, and from the checkout only when no
+    // push was observed. The latest push wins.
+    const pushes = trackPushedBranch();
     try {
       answer = await runAgent({
         provider: spec.provider,
@@ -707,24 +711,29 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         effort: spec.effort,
         toolContext,
         onProgress: input.onProgress,
-        onEvent: input.onEvent,
+        onEvent: (e) => {
+          pushes.observe(e);
+          input.onEvent(e);
+        },
         control,
       });
       // A hard stop tore the work down mid-flight — observe nothing, post nothing.
-      if (control.requested !== "hard") observed = await observeCodingWorkspace(executor, { probeRemote: false });
+      const pushedBranch = pushes.branch();
+      if (control.requested !== "hard") observed = await observeCodingWorkspace(executor, { probeRemote: false, ...(pushedBranch !== undefined ? { pushedBranch } : {}) });
     } finally {
       await ws.release({ hardStopped: control.requested === "hard" });
     }
     if (description) input.publish({ type: "pr_description", description: input.redactDescription(description), at: now() });
     // Branch contract enforced structurally, before any PR write: a child
-    // that ended on another branch pushed work this pipeline cannot reach
-    // (the thread binding stays on the ship branch) — opening or editing a
-    // PR from it would strand the loop, as the first live run proved.
+    // whose head branch (the one it pushed, else the one it ended on) is not
+    // the pipeline branch pushed work this pipeline cannot reach (the thread
+    // binding stays on the ship branch) — opening or editing a PR from it
+    // would strand the loop, as the first live run proved.
     if (observed?.branch !== undefined && observed.branch !== entry.branch) {
       return {
         answer,
         refusal:
-          `⚠️ The coding round left the pipeline branch: it ended on \`${observed.branch}\` instead of \`${entry.branch}\`, ` +
+          `⚠️ The coding round left the pipeline branch: its work is on \`${observed.branch}\` instead of \`${entry.branch}\`, ` +
           `so no PR was opened or edited from it — work pushed there is unreachable to this pipeline.`,
       };
     }
