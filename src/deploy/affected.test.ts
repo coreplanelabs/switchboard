@@ -38,6 +38,9 @@ type LockPkg = {
   dev?: boolean;
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+  bundleDependencies?: string[];
 };
 
 /** The one root lockfile of an npm workspace, shaped like ours: the root package
@@ -68,8 +71,20 @@ const ROOT_LOCK_PACKAGES: Record<string, LockPkg> = {
   "node_modules/@cloudflare/sandbox": { version: "0.13.0", dependencies: { "@cloudflare/containers": "^0.3.7" } },
   "node_modules/@cloudflare/containers": { version: "0.3.7" },
   "node_modules/zod": { version: "4.0.0" },
-  "node_modules/vue": { version: "3.5.0" },
-  "node_modules/vite": { version: "7.0.0", dev: true },
+  // vue declares a peer the lockfile installs (npm ≥7) and an optional peer nobody installed.
+  "node_modules/vue": {
+    version: "3.5.0",
+    peerDependencies: { "@vue/compiler-sfc": "3.5.0", typescript: "*" },
+    peerDependenciesMeta: { typescript: { optional: true } },
+  },
+  "node_modules/@vue/compiler-sfc": { version: "3.5.0" },
+  // vite ships a dependency INSIDE its tarball: no lockfile entry of its own.
+  "node_modules/vite": {
+    version: "7.0.0",
+    dev: true,
+    bundleDependencies: ["rollup"],
+    dependencies: { rollup: "^4.0.0" },
+  },
   "node_modules/vitest": { version: "5.0.0", dev: true },
   "node_modules/typescript": { version: "7.0.2", dev: true },
   "node_modules/wrangler": { version: "4.120.1", dev: true },
@@ -361,6 +376,13 @@ describe("lockfile workspace dependencies", () => {
       "node_modules/typescript",
     ]);
     expect([...workspaceDependencies(rootLock, "", { includeDev: false })!.keys()]).toEqual(["node_modules/zod"]);
+    // web: vue's installed peer is followed, its optional peer nobody installed is not; vite's bundled
+    // rollup has no entry of its own and is NOT recorded as unresolved — vite's version tracks it.
+    expect([...workspaceDependencies(rootLock, "web", { includeDev: true })!.entries()]).toEqual([
+      ["node_modules/vue", "3.5.0"],
+      ["node_modules/vite", "7.0.0"],
+      ["node_modules/@vue/compiler-sfc", "3.5.0"],
+    ]);
   });
 
   it("a devDependency bump is no production change; a production dependency moving, appearing or disappearing is a named change", () => {
@@ -398,14 +420,17 @@ describe("lockfile workspace dependencies", () => {
     expect(workspaceDependencies(rootLock, "deploy/cloudflare-queue", { includeDev: false })).toBeUndefined();
   });
 
-  it("the real root lockfile: every Worker's workspace resolves, and the resident's and the sandbox's closures each carry that Worker's own pinned SDK", () => {
+  it("the real root lockfile: every Worker's workspace resolves with nothing unresolved, and the resident's and the sandbox's closures each carry that Worker's own pinned SDK", () => {
     const real = readFileSync(join(REPO_ROOT, "package-lock.json"), "utf8");
     for (const w of WORKERS) {
       for (const { workspace, includeDev } of w.inputs.lockfile) {
+        const closure = workspaceDependencies(real, workspace, { includeDev });
+        // Bundled deps (tailwind's wasm runtime) and optional peers must not read as missing.
         expect(
-          workspaceDependencies(real, workspace, { includeDev }),
-          `${w.name}: ${workspace || "root"}`,
-        ).toBeDefined();
+          [...(closure ?? new Map()).entries()].filter(([, v]) => v === "unresolved"),
+          `${w.name}: ${workspace || "root"} unresolved`,
+        ).toEqual([]);
+        expect(closure, `${w.name}: ${workspace || "root"}`).toBeDefined();
       }
     }
     for (const dir of ["deploy/cloudflare-resident", "deploy/cloudflare-sandbox"]) {
