@@ -8,9 +8,10 @@ import StepBlock from "../components/run/StepBlock.vue";
 import { useSeed } from "../lib/seed";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
-import { createRunPageModel, liveWait, runnerNow, RunnerClockKey, runningHeader, runSpan } from "../lib/runPageModel";
+import { createRunPageModel, liveWait, runnerNow, RunnerClockKey, runningHeader } from "../lib/runPageModel";
 import { createPrReviewCollector } from "../lib/prReviewCollector";
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
+import { durationTone, heatStyle } from "../lib/durationTone";
 import { formatClock, formatDateTime, formatElapsed, formatLocalIso } from "../lib/format";
 import { statusLabel } from "../lib/indexRow";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
@@ -65,13 +66,18 @@ const endChip = computed(() => {
     word: mode === "hard" ? "killed" : mode === "soft" ? "stopped early" : "ended",
   };
 });
-const endDuration = computed(() =>
+const endMs = computed(() =>
   isHistory && seed?.mode === "history"
-    ? seed.durationMs !== undefined
-      ? formatElapsed(seed.durationMs)
-      : ""
-    : runSpan(state),
+    ? seed.durationMs
+    : state.firstAt !== null && state.lastAt !== null && state.lastAt > state.firstAt
+      ? state.lastAt - state.firstAt
+      : undefined,
 );
+const endDuration = computed(() => (endMs.value === undefined ? "" : formatElapsed(endMs.value)));
+// The header's total is painted on the run scale (item 24): a 40-minute run
+// announces itself before the reader scrolls to find where the time went.
+const endHeat = computed(() => durationTone(endMs.value, "run"));
+const endPaint = computed(() => heatStyle(endHeat.value));
 const CHIP_CLS: Record<string, string> = {
   red: "border-bad/30 text-bad",
   amber: "border-warn/30 text-warn",
@@ -285,7 +291,14 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           <span v-else class="chip rounded border px-1.5 text-[0.7rem]" :class="CHIP_CLS[endChip.cls]">{{
             endChip.word
           }}</span>
-          <span id="state" class="dur text-xs tabular-nums text-muted">{{ endDuration }}</span>
+          <span
+            id="state"
+            class="dur text-xs tabular-nums"
+            :class="[endPaint ? 'heat' : 'text-muted', endHeat.level >= 2 ? 'font-medium' : '']"
+            :style="endPaint"
+            :data-heat="endHeat.level"
+            >{{ endDuration }}</span
+          >
         </template>
         <template v-else>
           <span id="statedot" class="pulse text-[1.1em] leading-none" :class="pulseCls">∿</span>
