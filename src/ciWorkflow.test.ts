@@ -9,7 +9,14 @@ import { describe, expect, it } from "vitest";
 // a `run:` step that is not `npm ci` or `npm run …` fails here before it can
 // land, and every action is pinned to a commit so what CI executes is what was
 // reviewed. `verify` at the root is the whole gate; the jobs split it by area
-// for parallelism, and each script they name must exist.
+// — and, since the fan-out, by check and by test shard — for parallelism, and
+// each script they name must exist in the package it runs in.
+//
+// The branch ruleset requires status checks by NAME. A fan-out (a matrix job)
+// cannot be that name, so each required name that fans out is a gate job:
+// `needs:` the legs, `if: always()`, `npm run ci:gate` over the `needs`
+// context. The tests below hold the gate to that shape — a gate that only runs
+// on success would be skipped (and so never red) when a leg fails.
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const read = (p: string) => readFileSync(new URL(p, `file://${root}`), "utf8");
@@ -20,8 +27,13 @@ interface Step {
   with?: Record<string, unknown>;
 }
 interface Job {
+  name?: string;
   steps: Step[];
   "runs-on": string;
+  needs?: string | string[];
+  if?: string;
+  env?: Record<string, string>;
+  strategy?: { matrix?: Record<string, unknown[]> };
 }
 interface Workflow {
   on: Record<string, unknown>;
@@ -35,14 +47,37 @@ const GATE_WORKFLOWS = [".github/workflows/ci.yml", ".github/workflows/pr-title.
 const ci = parse(read(".github/workflows/ci.yml")) as Workflow;
 const rootPkg = JSON.parse(read("package.json")) as { scripts: Record<string, string>; workspaces: string[] };
 
-const NPM_STEP = /^npm (ci( --[a-z-]+(=[^\s]+)?)*|run [a-z:-]+( -w [^\s]+)*( --[a-z-]+)*)$/;
+/** The status checks `main-ci-required` requires (AGENTS.md); each must be a job's name. */
+const REQUIRED_CHECKS = ["bot", "web", "docs", "workers", "image"];
 
-function runLines(step: Step): string[] {
-  return (step.run ?? "")
+// `npm test -- --shard=i/N` is the one argument a step may pass through: it
+// selects a slice of the same suite, it adds nothing.
+const NPM_STEP = /^npm (ci( --[a-z-]+(=[^\s]+)?)*|run [a-z:-]+( -w [^\s]+)*( --[a-z-]+)*|test( -- --shard=\d+\/\d+)?)$/;
+
+/** Every concrete line a step runs: `${{ matrix.<key> }}` expands to each value
+ *  of the job's matrix (so a matrix step is checked once per leg) and
+ *  `${{ strategy.job-total }}` to the number of legs. */
+function runLines(step: Step, job: Job): string[] {
+  const matrix = job.strategy?.matrix ?? {};
+  const legs = Object.values(matrix).reduce((n, values) => n * values.length, 1);
+  const lines = (step.run ?? "")
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => l.length > 0 && !l.startsWith("#"));
+    .filter((l) => l.length > 0 && !l.startsWith("#"))
+    .map((l) => l.replaceAll("${{ strategy.job-total }}", String(legs)));
+  return lines.flatMap((line) => expandMatrix(line, matrix));
 }
+
+function expandMatrix(line: string, matrix: Record<string, unknown[]>): string[] {
+  const m = /\$\{\{ matrix\.([a-z-]+) \}\}/.exec(line);
+  if (!m) return [line];
+  const values = matrix[m[1]];
+  if (!values) throw new Error(`${line} names matrix.${m[1]}, which the job's matrix does not define`);
+  return values.flatMap((v) => expandMatrix(line.replace(m[0], String(v)), matrix));
+}
+
+const needsOf = (job: Job): string[] => (Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : []);
+const isGate = (job: Job) => job.steps.some((s) => s.run?.trim() === "npm run ci:gate");
 
 describe("the gate workflows run only the repository's own scripts", () => {
   const jobs = GATE_WORKFLOWS.flatMap((file) =>
@@ -53,9 +88,9 @@ describe("the gate workflows run only the repository's own scripts", () => {
     expect(jobs.length).toBeGreaterThan(3);
   });
 
-  it.each(jobs)("job %s: every run step is `npm ci` or `npm run <script>`", (_name, job) => {
+  it.each(jobs)("job %s: every run step is `npm ci`, `npm run <script>`, or `npm test`", (_name, job) => {
     for (const step of job.steps) {
-      for (const line of runLines(step)) {
+      for (const line of runLines(step, job)) {
         expect(line, `step runs a bespoke command: ${line}`).toMatch(NPM_STEP);
       }
     }
@@ -63,7 +98,7 @@ describe("the gate workflows run only the repository's own scripts", () => {
 
   it.each(jobs)("job %s: every `npm run` names a script that exists in the package it runs in", (_name, job) => {
     for (const step of job.steps) {
-      for (const line of runLines(step)) {
+      for (const line of runLines(step, job)) {
         const m = /^npm run ([a-z:-]+)((?: -w [^\s]+)*)/.exec(line);
         if (!m) continue;
         const script = m[1];
@@ -126,6 +161,67 @@ describe("the gate workflows run only the repository's own scripts", () => {
   });
 });
 
+describe("the required status checks and their gates", () => {
+  const jobs = Object.values(ci.jobs);
+
+  it.each(REQUIRED_CHECKS)("a job is named `%s` — the ruleset waits on that name", (check) => {
+    const named = jobs.filter((j) => j.name === check);
+    expect(named, `no job is named ${check}`).toHaveLength(1);
+    expect(named[0].strategy?.matrix, `${check} is a matrix, so its check names would carry the leg`).toBeUndefined();
+  });
+
+  const gates = Object.entries(ci.jobs).filter(([, job]) => isGate(job));
+
+  it("the fan-outs end in gates: bot and workers", () => {
+    expect(gates.map(([, j]) => j.name).sort()).toEqual(["bot", "workers"]);
+  });
+
+  it.each(gates)(
+    "gate %s: needs existing jobs, runs even when a leg failed, and judges the needs context",
+    (_id, job) => {
+      const needs = needsOf(job);
+      expect(needs.length).toBeGreaterThan(0);
+      for (const id of needs) expect(ci.jobs, `gate needs unknown job ${id}`).toHaveProperty(id);
+      // `if: always()` is what makes a failed leg turn the gate RED instead of
+      // leaving it skipped — a skipped required check never reports.
+      expect(job.if).toMatch(/always\(\)/);
+      expect(job.env?.NEEDS).toBe("${{ toJSON(needs) }}");
+    },
+  );
+
+  it.each(gates)("gate %s: stands for every leg the ruleset used to require in one job", (_id, job) => {
+    // Each needed job is a fan-out or a single job that runs real scripts; the
+    // gate itself runs nothing but ci:gate (no work hides behind a green gate).
+    const runSteps = job.steps.filter((s) => s.run);
+    expect(runSteps.map((s) => s.run?.trim())).toEqual(["npm run ci:gate"]);
+    for (const id of needsOf(job)) {
+      const leg = ci.jobs[id];
+      expect(
+        leg.steps.some((s) => /^npm (run |test)/.test(s.run?.trim() ?? "")),
+        `${id} runs no script`,
+      ).toBe(true);
+    }
+  });
+});
+
+describe("the test shards", () => {
+  const SHARD_STEP = "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}";
+  const shards = Object.entries(ci.jobs).filter(([, job]) => job.steps.some((s) => s.run?.includes("--shard=")));
+
+  it("one job shards the vitest suite", () => {
+    expect(shards).toHaveLength(1);
+  });
+
+  it("the shard index comes from the matrix and the count from the matrix length — N lives in one place", () => {
+    const [, job] = shards[0];
+    expect(job.steps.map((s) => s.run?.trim()).filter((r) => r?.includes("--shard="))).toEqual([SHARD_STEP]);
+    const legs = job.strategy?.matrix?.shard ?? [];
+    expect(legs.length).toBeGreaterThan(1);
+    expect(legs).toEqual(legs.map((_, i) => i + 1)); // 1..N, each file in exactly one shard
+    expect(Object.keys(job.strategy?.matrix ?? {})).toEqual(["shard"]); // job-total IS the shard count
+  });
+});
+
 describe("the verify scripts", () => {
   it("`verify` at the root fans out to the root checks and every workspace's own `verify`", () => {
     expect(rootPkg.scripts.verify).toContain("npm run verify:root");
@@ -139,12 +235,38 @@ describe("the verify scripts", () => {
     }
   });
 
-  it("`verify:root` chains only scripts that exist", () => {
-    const parts = rootPkg.scripts["verify:root"].split("&&").map((s) => s.trim());
+  it.each(["verify:root", "check:consistency"])("`%s` chains only scripts that exist", (name) => {
+    const parts = rootPkg.scripts[name].split("&&").map((s) => s.trim());
     for (const part of parts) {
       const m = /^npm (run ([a-z:-]+)|test)$/.exec(part);
-      expect(m, `verify:root has a non-script segment: ${part}`).not.toBeNull();
+      expect(m, `${name} has a non-script segment: ${part}`).not.toBeNull();
       if (m && m[2]) expect(rootPkg.scripts).toHaveProperty(m[2]);
     }
+  });
+
+  it("CI's bot legs together run exactly what `verify:root` runs locally", () => {
+    // The fan-out is a split of verify:root, never a subset of it or a superset
+    // with checks that only CI runs.
+    const local = rootPkg.scripts["verify:root"]
+      .split("&&")
+      .map((s) =>
+        s
+          .trim()
+          .replace(/^npm run /, "")
+          .replace(/^npm test$/, "test"),
+      )
+      .sort();
+    const gate = Object.values(ci.jobs).find((j) => j.name === "bot")!;
+    const ran: string[] = [];
+    for (const id of needsOf(gate)) {
+      const leg = ci.jobs[id];
+      for (const step of leg.steps) {
+        for (const line of runLines(step, leg)) {
+          const m = /^npm (?:run ([a-z:-]+)|(test))/.exec(line);
+          if (m) ran.push(m[1] ?? m[2]);
+        }
+      }
+    }
+    expect([...new Set(ran)].sort()).toEqual(local);
   });
 });

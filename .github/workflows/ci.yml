@@ -4,6 +4,13 @@
 # lives only in this file; src/ciWorkflow.test.ts fails the suite if a step
 # ever does. One lockfile at the root covers every workspace (bot, web, docs,
 # the five Workers), so there is one install and one cache key.
+#
+# The work fans out so the wall clock is one leg, not a chain: the bot's
+# static checks run one per job, its test suite runs as shards, and each
+# Worker verifies in its own job. The branch ruleset requires the checks by
+# NAME (bot, web, docs, workers, image), so a fan-out ends in a gate job with
+# that name — `needs:` every leg, `if: always()`, `npm run ci:gate` over the
+# `needs` context — green only when every leg succeeded.
 name: ci
 
 on:
@@ -21,11 +28,18 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  bot:
-    # Job names are the stable identifiers the branch ruleset requires (bot,
-    # web, docs, workers, image); what each one runs is its script.
-    name: bot
+  bot-checks:
+    # One static check per job — typecheck, lint, and prettier each take 15–25 s
+    # on a runner; in one chain they were the slowest half of the slowest job.
+    # `check:consistency` groups the sub-second checks (lockfile platforms,
+    # vendored skills, licenses, generated docs tables) so they do not each pay
+    # an install.
+    name: bot / ${{ matrix.check }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [check:consistency, typecheck, lint, format:check, check:dist]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -34,7 +48,40 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
-      - run: npm run verify:root
+      - run: npm run ${{ matrix.check }}
+
+  bot-tests:
+    # The vitest suite (every project in vitest.config.ts) split by file across
+    # N shards; N is the length of the matrix and nothing else. A shard
+    # reproduces locally as `npm test -- --shard=2/4`.
+    name: bot / test ${{ matrix.shard }} of ${{ strategy.job-total }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+
+  bot:
+    # The required check `bot`: green only when every static check and every
+    # test shard succeeded (scripts/ci-gate.mjs).
+    name: bot
+    needs: [bot-checks, bot-tests]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    env:
+      NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: npm run ci:gate
 
   web:
     name: web
@@ -69,9 +116,15 @@ jobs:
       - run: npm run check:site
       - run: npm run verify -w deploy/cloudflare-docs
 
-  workers:
-    name: workers
+  workers-each:
+    # One job per Worker: the memory Worker's tests run inside workerd and take
+    # ~30 s on a runner; the other three verify in a few seconds each.
+    name: workers / ${{ matrix.worker }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [deploy/cloudflare, deploy/cloudflare-memory, deploy/cloudflare-resident, deploy/cloudflare-sandbox]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -80,7 +133,19 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
-      - run: npm run verify -w deploy/cloudflare -w deploy/cloudflare-memory -w deploy/cloudflare-resident -w deploy/cloudflare-sandbox
+      - run: npm run verify -w ${{ matrix.worker }}
+
+  workers:
+    # The required check `workers`: green only when every Worker's job succeeded.
+    name: workers
+    needs: [workers-each]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    env:
+      NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: npm run ci:gate
 
   image:
     name: image

@@ -49,7 +49,9 @@ npm run verify
 ```
 
 That is the whole gate, and CI runs nothing else. For a faster loop while you
-work: `npm test` for the bot, `npm test -w web` for the dashboard.
+work, run only what your change reaches: `npx vitest run --changed origin/main`
+from the root covers the bot and the dashboard at once (see
+[CONTRIBUTING](https://github.com/coreplanelabs/switchboard/blob/main/CONTRIBUTING.md#running-tests)).
 
 ## Next
 

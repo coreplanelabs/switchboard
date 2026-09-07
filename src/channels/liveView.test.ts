@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import type { IncomingHttpHeaders } from "node:http";
 import {
   createLiveViewHandler,
   escapeHtml,
@@ -132,6 +131,55 @@ function recordingSink() {
       return ended;
     },
     fireClose: () => closeCb?.(),
+  };
+}
+
+/** A request/response pair the handler drives without a socket: records the
+ *  status, headers and body it writes; `finished` resolves the moment the
+ *  handler ends the response (the await every async route needs — an event,
+ *  not a poll); `fireClose` plays the client going away. */
+function fakeReqRes(method: string, url: string) {
+  const listeners: Record<string, Array<() => void>> = {};
+  const req = {
+    method,
+    url,
+    headers: {},
+    socket: { remoteAddress: "203.0.113.9" },
+    on: (ev: string, cb: () => void) => void (listeners[ev] ??= []).push(cb),
+  };
+  let status = 0;
+  let outHeaders: Record<string, string> = {};
+  const chunks: string[] = [];
+  let ended = false;
+  let finish!: () => void;
+  const finished = new Promise<void>((resolve) => (finish = resolve));
+  const res = {
+    writeHead: (s: number, h?: Record<string, string>) => {
+      status = s;
+      outHeaders = h ?? {};
+    },
+    write: (c: string) => void chunks.push(c),
+    end: (c?: string) => {
+      if (c) chunks.push(c);
+      ended = true;
+      finish();
+    },
+  };
+  return {
+    req: req as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[0],
+    res: res as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[1],
+    get status() {
+      return status;
+    },
+    get headers() {
+      return outHeaders;
+    },
+    body: () => chunks.join(""),
+    get ended() {
+      return ended;
+    },
+    finished,
+    fireClose: () => listeners.close?.forEach((cb) => cb()),
   };
 }
 
@@ -496,46 +544,6 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
 });
 
 describe("createLiveViewHandler (node:http)", () => {
-  function fakeReqRes(method: string, url: string, headers: IncomingHttpHeaders = {}) {
-    const listeners: Record<string, Array<() => void>> = {};
-    const req = {
-      method,
-      url,
-      headers,
-      on: (ev: string, cb: () => void) => void (listeners[ev] ??= []).push(cb),
-    };
-    let status = 0;
-    let outHeaders: Record<string, string> = {};
-    const chunks: string[] = [];
-    let ended = false;
-    const res = {
-      writeHead: (s: number, h?: Record<string, string>) => {
-        status = s;
-        outHeaders = h ?? {};
-      },
-      write: (c: string) => void chunks.push(c),
-      end: (c?: string) => {
-        if (c) chunks.push(c);
-        ended = true;
-      },
-    };
-    return {
-      req: req as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[0],
-      res: res as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[1],
-      get status() {
-        return status;
-      },
-      get headers() {
-        return outHeaders;
-      },
-      body: () => chunks.join(""),
-      get ended() {
-        return ended;
-      },
-      fireClose: () => listeners.close?.forEach((cb) => cb()),
-    };
-  }
-
   it("returns false for a non-run path (server falls through to its other routes)", () => {
     const handler = liveOnlyHandler(fixedRegistry());
     const t = fakeReqRes("GET", "/ingress");
@@ -584,12 +592,14 @@ describe("createLiveViewHandler (node:http)", () => {
     const handler = liveOnlyHandler(reg);
     const wrong = fakeReqRes("GET", `/runs/${id}?t=nope`);
     handler(wrong.req, wrong.res);
-    await vi.waitFor(() => expect(wrong.status).toBe(404));
+    await wrong.finished;
+    expect(wrong.status).toBe(404);
     expect((seedOf(wrong.body()) as RunNotFoundSeed).page).toBe("runNotFound"); // no live page leaked
 
     const missing = fakeReqRes("GET", `/runs/${id}`);
     handler(missing.req, missing.res);
-    await vi.waitFor(() => expect(missing.status).toBe(404));
+    await missing.finished;
+    expect(missing.status).toBe(404);
   });
 
   it("streams SSE for a valid id+token and forwards events", () => {
@@ -613,7 +623,8 @@ describe("createLiveViewHandler (node:http)", () => {
     const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", `/runs/${id}/events?t=nope`);
     handler(t.req, t.res);
-    await vi.waitFor(() => expect(t.status).toBe(404));
+    await t.finished;
+    expect(t.status).toBe(404);
     expect(t.headers["content-type"]).not.toContain("event-stream");
   });
 
@@ -754,34 +765,6 @@ describe("createLiveViewHandler (node:http)", () => {
 });
 
 describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => {
-  function fakeReqRes(method: string, url: string) {
-    const req = { method, url, headers: {}, on: () => {} };
-    let status = 0;
-    let outHeaders: Record<string, string> = {};
-    const chunks: string[] = [];
-    const res = {
-      writeHead: (s: number, h?: Record<string, string>) => {
-        status = s;
-        outHeaders = h ?? {};
-      },
-      write: (c: string) => void chunks.push(c),
-      end: (c?: string) => {
-        if (c) chunks.push(c);
-      },
-    };
-    return {
-      req: req as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[0],
-      res: res as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[1],
-      get status() {
-        return status;
-      },
-      get headers() {
-        return outHeaders;
-      },
-      body: () => chunks.join(""),
-    };
-  }
-
   it("parseRunRoute matches the friction route", () => {
     expect(parseRunRoute("/runs/abc123/friction")).toEqual({ id: "abc123", kind: "friction" });
     expect(parseRunRoute("/runs/abc123/friction/")).toEqual({ id: "abc123", kind: "friction" });
@@ -796,7 +779,8 @@ describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => 
     for (const url of [`/runs/${id}/friction?t=nope`, `/runs/${id}/friction`, `/runs/unknown/friction?t=x`]) {
       const t = fakeReqRes("GET", url);
       expect(handler(t.req, t.res)).toBe(true);
-      await vi.waitFor(() => expect(t.status).toBe(404));
+      await t.finished;
+      expect(t.status).toBe(404);
       expect(t.body()).not.toContain("npm install");
     }
   });
@@ -844,35 +828,6 @@ describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => 
 // Feature: features/live-view.md item 10 — run control from /runs (#101):
 // `POST /runs/:id/stop?t=…&mode=soft|hard` behind the same token gate.
 describe("run control: POST /runs/:id/stop (#101)", () => {
-  function fakeReqRes(method: string, url: string) {
-    const listeners: Record<string, Array<() => void>> = {};
-    const req = { method, url, headers: {}, on: (ev: string, cb: () => void) => void (listeners[ev] ??= []).push(cb) };
-    let status = 0;
-    let outHeaders: Record<string, string> = {};
-    const chunks: string[] = [];
-    const res = {
-      writeHead: (s: number, h?: Record<string, string>) => {
-        status = s;
-        outHeaders = h ?? {};
-      },
-      write: (c: string) => void chunks.push(c),
-      end: (c?: string) => {
-        if (c) chunks.push(c);
-      },
-    };
-    return {
-      req: req as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[0],
-      res: res as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[1],
-      get status() {
-        return status;
-      },
-      get headers() {
-        return outHeaders;
-      },
-      body: () => chunks.join(""),
-    };
-  }
-
   it("parseRunRoute matches the stop route", () => {
     expect(parseRunRoute("/runs/abc/stop")).toEqual({ id: "abc", kind: "stop" });
     expect(parseRunRoute("/runs/abc/stop/")).toEqual({ id: "abc", kind: "stop" });
@@ -924,7 +879,8 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
     ]) {
       const t = fakeReqRes("POST", url);
       handler(t.req, t.res);
-      await vi.waitFor(() => expect(t.status).toBe(404));
+      await t.finished;
+      expect(t.status).toBe(404);
     }
     expect(control.requested).toBeUndefined();
     expect(control.hardSignal.aborted).toBe(false);
@@ -1068,47 +1024,6 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     };
   }
 
-  function fakeReqRes(method: string, url: string, remoteAddress = "203.0.113.9") {
-    const listeners: Record<string, Array<() => void>> = {};
-    const req = {
-      method,
-      url,
-      headers: {},
-      socket: { remoteAddress },
-      on: (ev: string, cb: () => void) => void (listeners[ev] ??= []).push(cb),
-    };
-    let status = 0;
-    let outHeaders: Record<string, string> = {};
-    const chunks: string[] = [];
-    let ended = false;
-    const res = {
-      writeHead: (s: number, h?: Record<string, string>) => {
-        status = s;
-        outHeaders = h ?? {};
-      },
-      write: (c: string) => void chunks.push(c),
-      end: (c?: string) => {
-        if (c) chunks.push(c);
-        ended = true;
-      },
-    };
-    return {
-      req: req as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[0],
-      res: res as unknown as Parameters<ReturnType<typeof createLiveViewHandler>>[1],
-      get status() {
-        return status;
-      },
-      get headers() {
-        return outHeaders;
-      },
-      body: () => chunks.join(""),
-      get ended() {
-        return ended;
-      },
-      fireClose: () => listeners.close?.forEach((cb) => cb()),
-    };
-  }
-
   /** Registry + store + service + handler, with every knob injectable. */
   function harness(
     opts: {
@@ -1139,7 +1054,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     return { registry, store, service, handler, tick: (ms: number) => (clock += ms) };
   }
 
-  const done = (t: { ended: boolean }) => vi.waitFor(() => expect(t.ended).toBe(true));
+  const done = (t: { finished: Promise<void> }) => t.finished;
 
   describe("persisted run page (history mode)", () => {
     it("200s tokenless: the seed is history mode with the record's events, status and duration — no token anywhere", async () => {
