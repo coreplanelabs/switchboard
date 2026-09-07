@@ -11,3 +11,6 @@ It is still not the contract: the versioned behavioral contract is [`features/`]
 - [One definition, every surface](one-command-many-surfaces.md) — how one command definition becomes chat, CLI, HTTP, and MCP with no per-surface code.
 - [Runs: live, then remembered](runs-live-and-history.md) — why a run has two lives, and what a restart does and doesn't lose.
 - [How Switchboard improves itself](../self-improvement-architecture.md) — the friction → pattern → GitHub-issue loop, and where each piece runs.
+- [How we work](how-we-work.md) — spec, failing test, implementation, a PR with a Tour, an agent review in the open, an automated release.
+- [Capacity and sizing](capacity-and-sizing.md) — one Node process per container, and why the resident is sized by disk.
+- [Known limits](known-limits.md) — what is off by default, unproven, or mid-transition, and who owns each item.

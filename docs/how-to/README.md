@@ -12,3 +12,4 @@ If you're new and want a guided first success instead, start with a [tutorial](.
 - [Add a provider or an agent](add-a-provider-or-agent.md) — extend Switchboard without touching the dispatcher.
 - [Deploy and rotate a secret](deploy-and-rotate-a-secret.md) — the one command to ship, the runbook to rotate a credential.
 - [Configure the repository](configure-the-repository.md) — the GitHub settings a fork reproduces: squash-only merges, the required checks, the merge queue.
+- [Operate production](operate-production.md) — deploys from the release, deploy order, preflights, rotating a bot secret, keeping the service graph current.
