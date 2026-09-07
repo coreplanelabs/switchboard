@@ -27,7 +27,7 @@ model provider.
 ```bash
 git clone https://github.com/coreplanelabs/switchboard.git
 cd switchboard
-npm install
+npm ci
 cp config/config.example.yaml config/config.yaml
 cp .env.example .env            # set ANTHROPIC_API_KEY (or another provider's key)
 npx tsx src/cli.ts ask "what can you do?"
@@ -37,21 +37,26 @@ That last command runs the whole pipeline with the terminal as the channel, so
 you can work on almost everything without a Slack workspace. The tutorial
 [Run it locally](docs/tutorials/run-it-locally.md) goes further.
 
-The dashboard is its own package: `cd web && npm install`. The docs site too:
-`cd docs && npm install`.
+The repository is one npm workspace: the bot at the root, the dashboard in
+`web/`, the docs site in `docs/`, and the five Workers under `deploy/`. One
+`npm ci` installs all of them from the single lockfile; run a package's script
+with `npm run <script> -w <path>` (for example `npm test -w web`).
 
-## The three checks
+## The one check
 
-Every pull request must pass all of these; CI runs them.
+Every pull request must pass `npm run verify`; CI runs exactly that, split by
+area for speed, and nothing else.
 
 ```bash
-npm run typecheck && npm test                 # the bot
-cd web && npm run typecheck && npm test       # the dashboard
-npm run docs:check && npm --prefix docs run build   # the docs
+npm run verify        # everything CI runs, in one command
+npm run verify:root   # the bot: typecheck, tests, skills, licenses, docs tables, dist
+npm run verify -w web # one package's own checks
+npm run fix           # regenerate what can be regenerated (docs tables, vendored skills)
 ```
 
 `npm test` is fast (a few seconds) and is the proof layer: a behavior without a
-test is a behavior we do not know we have.
+test is a behavior we do not know we have. The Docker image has its own check,
+`npm run check:image`, which CI runs and which needs Docker locally.
 
 ## How changes are made
 

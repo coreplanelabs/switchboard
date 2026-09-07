@@ -8,7 +8,7 @@ Get Switchboard answering questions on your own machine, then run an agent again
 
 ```bash
 git clone <this repo> && cd switchboard
-npm install
+npm ci
 cp config/config.example.yaml config/config.yaml
 cp .env.example .env
 ```
@@ -45,11 +45,11 @@ npx tsx src/cli.ts runs events <id>
 ## Run the same checks CI does
 
 ```bash
-npm run typecheck
-npm test
+npm run verify
 ```
 
-If you're touching the dashboard: `cd web && npm run typecheck && npm test`.
+That is the whole gate, and CI runs nothing else. For a faster loop while you
+work: `npm test` for the bot, `npm test -w web` for the dashboard.
 
 ## Next
 

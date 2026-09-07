@@ -4,6 +4,15 @@ data
 workspaces
 .env
 deploy
+# The Workers' manifests ARE needed: npm resolves the workspace tree from every
+# workspace's package.json, even when only root + web are installed.
+!deploy/cloudflare/package.json
+!deploy/cloudflare-memory/package.json
+!deploy/cloudflare-resident/package.json
+!deploy/cloudflare-sandbox/package.json
+!deploy/cloudflare-docs/package.json
+docs
+!docs/package.json
 README.md
 # .dockerignore patterns are root-anchored: `node_modules` above does NOT
 # cover web/'s tree. COPY web ./web runs after the image's own `npm ci` in

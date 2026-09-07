@@ -3,17 +3,41 @@
 
 FROM node:22-slim AS build
 WORKDIR /app
+# One lockfile covers every workspace. npm needs each workspace's manifest on
+# disk to resolve the tree, so the manifests are copied before the install;
+# only the root and web dependencies are installed here (the Workers' toolchains
+# are never part of the image).
 COPY package.json package-lock.json ./
-RUN npm ci
-COPY web/package.json web/package-lock.json ./web/
-RUN cd web && npm ci
+COPY web/package.json ./web/
+COPY docs/package.json ./docs/
+COPY deploy/cloudflare/package.json ./deploy/cloudflare/
+COPY deploy/cloudflare-memory/package.json ./deploy/cloudflare-memory/
+COPY deploy/cloudflare-resident/package.json ./deploy/cloudflare-resident/
+COPY deploy/cloudflare-sandbox/package.json ./deploy/cloudflare-sandbox/
+COPY deploy/cloudflare-docs/package.json ./deploy/cloudflare-docs/
+RUN npm ci --include-workspace-root --workspace web
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 COPY web ./web
 # The web app (Vue, served as hashed assets under /assets/*): vite build reads
 # the shared pure modules from ../src, so src must be in place first.
-RUN cd web && npm run build
-RUN npm run build && npm prune --omit=dev
+RUN npm run build -w web
+RUN npm run build
+
+# Runtime dependencies alone: the bot's production dependencies, no dev tools,
+# no web toolchain — a clean install rather than a prune, so nothing hoisted
+# for the build survives into the image.
+FROM node:22-slim AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY web/package.json ./web/
+COPY docs/package.json ./docs/
+COPY deploy/cloudflare/package.json ./deploy/cloudflare/
+COPY deploy/cloudflare-memory/package.json ./deploy/cloudflare-memory/
+COPY deploy/cloudflare-resident/package.json ./deploy/cloudflare-resident/
+COPY deploy/cloudflare-sandbox/package.json ./deploy/cloudflare-sandbox/
+COPY deploy/cloudflare-docs/package.json ./deploy/cloudflare-docs/
+RUN npm ci --omit=dev --workspaces=false --include-workspace-root
 
 FROM node:22-slim
 RUN apt-get update \
@@ -28,7 +52,7 @@ RUN apt-get update \
 # Non-root user; agents run bash with this user's (container-scoped) permissions.
 RUN useradd -m -u 1001 switchboard
 WORKDIR /app
-COPY --from=build /app/node_modules ./node_modules
+COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 # The built web app: index.ts loads /app/web/dist at startup (manifest + assets).
 COPY --from=build /app/web/dist ./web/dist

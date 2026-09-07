@@ -14,3 +14,12 @@ export function evaluate(
   report: Record<string, LicenseReportEntry>,
   options?: { allowed?: string[]; exceptions?: Record<string, string> },
 ): Offending[];
+export interface NpmLsNode {
+  name?: string;
+  version?: string;
+  path?: string;
+  license?: unknown;
+  extraneous?: boolean;
+  dependencies?: Record<string, NpmLsNode>;
+}
+export function reportFromNpmLs(tree: NpmLsNode): Record<string, LicenseReportEntry>;

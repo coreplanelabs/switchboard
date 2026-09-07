@@ -1,6 +1,7 @@
-# Dependency updates. One weekly PR per ecosystem per package root, with
-# minor and patch bumps grouped so the queue stays readable; majors arrive
-# on their own so the change is visible in the title.
+# Dependency updates. One weekly PR per ecosystem, with minor and patch bumps
+# grouped so the queue stays readable; majors arrive on their own so the
+# change is visible in the title. npm is one entry: the root lockfile covers
+# every workspace, so an npm ignore rule holds for the whole workspace.
 #
 # Ignore rules encode two things and say which: pairs that must move together
 # by hand (runtime + types, container image + SDK), and blockers upstream
@@ -9,13 +10,7 @@
 version: 2
 updates:
   - package-ecosystem: npm
-    directories:
-      - "/"
-      - "/docs"
-      - "/deploy/cloudflare"
-      - "/deploy/cloudflare-resident"
-      - "/deploy/cloudflare-sandbox"
-      - "/deploy/cloudflare-docs"
+    directory: "/"
     schedule:
       interval: weekly
       day: monday
@@ -25,39 +20,20 @@ updates:
     open-pull-requests-limit: 10
     ignore:
       # Types follow the runtime: the Node major moves with the image, CI and
-      # .nvmrc in one deliberate change (#497), not one package root at a time.
+      # .nvmrc in one deliberate change (#497), not one package at a time.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
-
-  - package-ecosystem: npm
-    directory: "/web"
-    schedule:
-      interval: weekly
-      day: monday
-    groups:
-      minor-and-patch:
-        update-types: ["minor", "patch"]
-    ignore:
-      - dependency-name: "@types/node"
-        update-types: ["version-update:semver-major"]
-      # vue-tsc (3.3.x) resolves `typescript/lib/tsc`, which TypeScript 7 does
-      # not export. Lift once a vue-tsc release supports TypeScript 7.
+      # One TypeScript for the whole workspace, and the dashboard's typechecker
+      # (vue-tsc 3.3.x) resolves `typescript/lib/tsc`, which TypeScript 7 does
+      # not export. Lift once a vue-tsc release supports TypeScript 7, then
+      # bump every package together.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
-
-  - package-ecosystem: npm
-    directory: "/deploy/cloudflare-memory"
-    schedule:
-      interval: weekly
-      day: monday
-    groups:
-      minor-and-patch:
-        update-types: ["minor", "patch"]
-    ignore:
-      - dependency-name: "@types/node"
-        update-types: ["version-update:semver-major"]
-      # @cloudflare/vitest-pool-workers (0.22.x) peers on vitest ^4.1. Lift
-      # once a pool-workers release supports vitest 5.
+      # @cloudflare/vitest-pool-workers (0.22.x) peers on vitest ^4.1, so the
+      # memory Worker stays on vitest 4 while the rest of the workspace is on
+      # 5 (npm nests its copy). One lockfile means one rule: no vitest major
+      # moves until a pool-workers release supports the current vitest; then
+      # bump the memory Worker and lift this.
       - dependency-name: "vitest"
         update-types: ["version-update:semver-major"]
 
