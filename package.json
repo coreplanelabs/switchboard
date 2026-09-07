@@ -38,6 +38,7 @@
     "fix": "npm run docs:gen && npm run skills:sync && npm run lint:fix && npm run format",
     "check:lockfile": "node scripts/check-lockfile.mjs",
     "check:sandbox-pair": "node scripts/check-sandbox-pair.mjs",
+    "check:pr-title": "node scripts/check-pr-title.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

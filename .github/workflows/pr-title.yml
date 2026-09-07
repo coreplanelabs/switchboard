@@ -1,0 +1,35 @@
+# The pull request title becomes the squash commit's subject on main and a
+# changelog line, so it is checked on every PR as a required status (job name
+# `title`). Its own workflow rather than a job in ci.yml because it must re-run
+# when the title is EDITED — and `edited` fires on body edits too, which would
+# cancel and restart the whole test matrix for a description tweak. Like ci.yml
+# it only calls a repository script: `npm run check:pr-title` gives the same
+# verdict locally. In the merge queue there is no title to read; the script
+# passes with a note so the required check is never missing there.
+name: pr-title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-title-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  title:
+    name: title
+    runs-on: ubuntu-latest
+    env:
+      PR_TITLE: ${{ github.event.pull_request.title }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      # No install: the script uses Node alone and reads release-please-config.json.
+      - run: npm run check:pr-title

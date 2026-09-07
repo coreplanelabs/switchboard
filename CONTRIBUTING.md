@@ -91,9 +91,13 @@ retell an incident. The changelog and the decision records carry provenance.
 
 - Keep a PR to one coherent change. Stacked PRs are fine for a series.
 - Use [conventional commits](https://www.conventionalcommits.org) for the PR
-  title and the squash commit: `feat(slack): …`, `fix(runner): …`,
-  `docs: …`, `refactor: …`, `chore: …`. A breaking change carries `!` after the
-  type. Release notes and version bumps are generated from these.
+  title: `feat(slack): …`, `fix(runner): …`, `docs: …`, `refactor: …`,
+  `chore: …`. A breaking change carries `!` after the type. The title is the
+  squash commit's subject and a changelog line, so the `title` check requires
+  the grammar on every PR; the allowed types are the ones
+  `release-please-config.json` maps to changelog sections. Try a title locally
+  with `npm run check:pr-title -- "feat(slack): …"`. A revert is
+  `revert: <the original title>` (retitle what GitHub's Revert button opens).
 - Fill in the template: two sentences a stranger can read, what and why, how
   you proved it. Visual changes include before/after screenshots.
 - Rewrite the branch before review so each commit is a reviewable unit; a
