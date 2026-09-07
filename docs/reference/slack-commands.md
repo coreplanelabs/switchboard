@@ -96,7 +96,7 @@ One table per group. "Who can run it" is what the authorization policy decides f
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `deploy plan [--only <string>] [--skip <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. | admins |
+| `deploy plan [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why. | admins |
 
 <!-- /generated:chat-commands -->
 

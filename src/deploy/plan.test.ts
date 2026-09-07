@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { BOT_HEALTH_URL, classifyDeployOutput, DEPLOY_ORDER, formatPlan, planDeploy, PRODUCTION_ACCOUNT_ID, WORKERS, type CheckoutProbe, type DeployOptions } from "./plan.js";
+import type { AffectedReport } from "./affected.js";
+import { BOT_HEALTH_URL, classifyDeployOutput, decideAccount, DEPLOY_ORDER, formatPlan, planDeploy, PRODUCTION_ACCOUNT_ID, RESIDENT_BEARER_ENVS, WORKERS, type CheckoutProbe, type DeployOptions } from "./plan.js";
 
 // The one production deploy order, as a pure plan (README "Deploying on
 // Cloudflare Containers", AGENTS.md "Deploy order"). The runner
@@ -20,14 +21,28 @@ describe("WORKERS / DEPLOY_ORDER", () => {
     expect(new Set(WORKERS.map((w) => w.script)).size).toBe(4);
   });
 
-  it("names which steps are preflighted and how each preflight is forced; the resident needs its bearer", () => {
+  it("names which steps are preflighted and how each preflight is forced; the resident needs any one of its three bearers — read is enough", () => {
     const byName = Object.fromEntries(WORKERS.map((w) => [w.name, w]));
     expect(byName.memory.preflight).toBeUndefined();
     expect(byName.sandbox.preflight).toBeUndefined();
     expect(byName.bot.preflight).toEqual({ forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: BOT_HEALTH_URL });
     expect(byName.resident.preflight).toEqual({ forceEnv: "RESIDENT_DEPLOY_FORCE" });
-    expect(byName.resident.requiredEnv).toEqual(["RESIDENT_ADMIN_TOKEN"]);
+    // The same three the resident's preflight.mjs reads (TOKEN_ENV_VARS): CI holds the read token and nothing more.
+    expect(byName.resident.requiredEnv).toEqual([{ anyOf: ["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"] }]);
+    expect(RESIDENT_BEARER_ENVS).toEqual(["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"]);
+    expect(formatPlan(plan())).toContain("needs one of RESIDENT_ADMIN_TOKEN / RESIDENT_OPERATOR_TOKEN / RESIDENT_READ_TOKEN");
     expect(PRODUCTION_ACCOUNT_ID).toBe("3c7b28f23cc93f09e77bb0a9ffcb7e6f");
+  });
+
+  it("every Worker names its entry, its /healthz and its inputs; only the sandbox's /healthz needs a bearer", () => {
+    for (const w of WORKERS) {
+      expect(w.entry, w.name).toBe(`${w.dir}/worker.ts`);
+      expect(w.healthUrl, w.name).toMatch(/^https:\/\/switchboard(-memory|-resident|-sandbox)?\.coreplanelabs\.dev\/healthz$/);
+      expect(w.inputs.paths, w.name).toContain(`${w.dir}/`);
+      expect(w.inputs.prodDepsLockfiles, w.name).toEqual([`${w.dir}/package-lock.json`]);
+    }
+    expect(WORKERS.map((w) => w.healthBearerEnv)).toEqual([undefined, undefined, undefined, "SANDBOX_TOKEN"]);
+    expect(WORKERS.find((w) => w.name === "bot")!.healthUrl).toBe(BOT_HEALTH_URL);
   });
 
   it("only the bot has a live gate — deployed ≠ live for the container; the other Workers swap instantly", () => {
@@ -61,10 +76,10 @@ describe("planDeploy", () => {
     expect(plan({ only: ["bot", "resident"], skip: ["resident"] }).steps.map((s) => s.name)).toEqual(["bot"]);
   });
 
-  it("each step spawns its dir's deploy script with the Cloudflare env vars removed and never a force env unless --force", () => {
+  it("each step spawns its dir's deploy script with only CLOUDFLARE_ACCOUNT_ID removed (the API token is CI's credential; the account is asserted, not assumed) and never a force env unless --force", () => {
     for (const s of plan().steps) {
       expect(s.command).toEqual(["npm", "run", "deploy"]);
-      expect(s.unsetEnv).toEqual(["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"]);
+      expect(s.unsetEnv).toEqual(["CLOUDFLARE_ACCOUNT_ID"]);
       expect(s.setEnv).toEqual({});
     }
     const forced = plan({ force: true });
@@ -121,6 +136,78 @@ describe("planDeploy", () => {
     expect(formatPlan(p)).not.toContain("present in every dir");
     // Only the planned steps are probed: a skipped Worker's dir is nobody's business.
     expect(plan({ only: ["bot"] }, partial).checks.nodeModulesMissing).toEqual([]);
+  });
+
+  it("an affected report selects the steps (in canonical order, minus --skip), rides on the plan, and renders before the checks; an empty selection is a plan with no steps that says so", () => {
+    const report: AffectedReport = {
+      head: "f".repeat(40),
+      workers: [
+        { name: "memory", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
+        { name: "bot", decision: "deploy", base: { kind: "live", commit: "a".repeat(40) }, reasons: ["src/index.ts"] },
+        { name: "resident", decision: "deploy", base: { kind: "release", tag: "v0.1.0", commit: "c".repeat(40) }, reasons: ["deploy/cloudflare-resident/Dockerfile"] },
+        { name: "sandbox", decision: "deploy", base: { kind: "none", reason: "/healthz: HTTP 401" }, reasons: ["unsure: no base — /healthz: HTTP 401; no release tag before HEAD"] },
+      ],
+      selected: ["bot", "resident", "sandbox"],
+      unclassified: [],
+      deployAll: false,
+      markdown: "(md)",
+    };
+    const p = plan({ affected: report });
+    expect(p.steps.map((s) => s.name)).toEqual(["bot", "resident", "sandbox"]);
+    // `--only` narrows the selection, never widens it: memory is asked for but not affected.
+    expect(plan({ affected: report, only: ["memory", "resident"] }).steps.map((s) => s.name)).toEqual(["resident"]);
+    expect(p.affected).toBe(report);
+    const text = formatPlan(p);
+    expect(text.indexOf("Affected: bot, resident, sandbox")).toBe(0);
+    expect(text).toContain("  - memory: skip — live aaaaaaa — no input changed");
+    expect(text).toContain("  - sandbox: deploy — none — unsure: no base — /healthz: HTTP 401; no release tag before HEAD");
+    expect(text.indexOf("Affected:")).toBeLessThan(text.indexOf("Checks:"));
+    expect(plan({ affected: report, skip: ["sandbox"] }).steps.map((s) => s.name)).toEqual(["bot", "resident"]);
+    const nothing = plan({ affected: { ...report, workers: report.workers.map((w) => ({ ...w, decision: "skip", reasons: [] })), selected: [] } });
+    expect(nothing.steps).toEqual([]);
+    expect(formatPlan(nothing)).toContain("Affected: nothing to deploy — every Worker already serves this tree's inputs");
+    expect(formatPlan(nothing)).toContain("Steps: none — nothing to deploy");
+    expect(plan().affected).toBeUndefined();
+  });
+});
+
+describe("decideAccount", () => {
+  const account = PRODUCTION_ACCOUNT_ID;
+  const listing = `Getting User settings...\n👋 You are logged in with an OAuth Token, associated with the email justin@coreplane.ai.\n┌ Account Name │ Account ID ┐\n│ coreplane-infra │ ${account} │\n└───┘`;
+
+  it("passes when `wrangler whoami` lists the production account — a login or a user-owned token", () => {
+    expect(decideAccount({ account, whoamiOutput: listing, whoamiExit: 0, tokenSet: false })).toEqual({ ok: true, how: `wrangler whoami lists account ${account}` });
+    expect(decideAccount({ account, whoamiOutput: listing, whoamiExit: 0, tokenSet: true }).ok).toBe(true);
+  });
+
+  it("passes when the account is not listed but the token verifies active against it (an account-owned token has no memberships to list), and says so", () => {
+    const noMemberships = "Getting User settings...\n👋 You are logged in with an API Token. Unable to retrieve email for this user. Are you missing the `User->User Details->Read` permission?";
+    const verified = decideAccount({ account, whoamiOutput: noMemberships, whoamiExit: 0, tokenSet: true, tokenVerify: { status: 200, body: JSON.stringify({ success: true, result: { id: "t", status: "active" } }) } });
+    expect(verified).toEqual({ ok: true, how: `CLOUDFLARE_API_TOKEN verifies active against account ${account} (account-owned token; wrangler whoami lists no memberships)` });
+    // Expired, disabled, or the wrong account (Cloudflare answers 200 with a non-active status, or 4xx): refused.
+    for (const tokenVerify of [
+      { status: 200, body: JSON.stringify({ result: { status: "expired" } }) },
+      { status: 401, body: JSON.stringify({ success: false, errors: [{ code: 1000, message: "Invalid API Token" }] }) },
+      { status: 200, body: "not json" },
+    ]) {
+      const r = decideAccount({ account, whoamiOutput: noMemberships, whoamiExit: 0, tokenSet: true, tokenVerify });
+      expect(r.ok).toBe(false);
+      expect(r.ok ? "" : r.problem).toContain(`does not verify against it (HTTP ${tokenVerify.status})`);
+    }
+  });
+
+  it("refuses with wrangler's own words and the way out — the foreign token, or the missing login — never a silent switch of credential", () => {
+    const foreign = `┌ Account Name │ Account ID ┐\n│ baseberry-uat │ ${"1".repeat(32)} │\n└───┘`;
+    const withToken = decideAccount({ account, whoamiOutput: foreign, whoamiExit: 0, tokenSet: true, tokenVerify: { status: 403, body: "{}" } });
+    expect(withToken).toEqual({
+      ok: false,
+      problem: `wrangler whoami does not list account ${account} (coreplane-infra) and the token does not verify against it (HTTP 403) — unset a CLOUDFLARE_API_TOKEN that belongs to another account, or use one for this account. wrangler said: ┌ Account Name │ Account ID ┐ | │ baseberry-uat │ ${"1".repeat(32)} │ | └───┘`,
+    });
+    const noLogin = decideAccount({ account, whoamiOutput: "", whoamiExit: 1, tokenSet: false });
+    expect(noLogin).toEqual({ ok: false, problem: `wrangler whoami does not list account ${account} (coreplane-infra) — run \`npx wrangler login\` in deploy/cloudflare. wrangler said: exit 1, no output` });
+    // A token that could not even be checked (network) is still a refusal, and says the check did not happen.
+    const unchecked = decideAccount({ account, whoamiOutput: "", whoamiExit: 1, tokenSet: true });
+    expect(unchecked.ok ? "" : unchecked.problem).toContain("and the token could not be verified against it");
   });
 });
 

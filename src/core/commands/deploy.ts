@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AffectedReport } from "../../deploy/affected.js";
 import { DEPLOY_ORDER, formatPlan, planDeploy, type CheckoutProbe, type DeployOptions, type DeployPlan, type WorkerName } from "../../deploy/plan.js";
 import { planRestart, type RestartPlan } from "../../deploy/restart.js";
 import { formatDeployResults, type DeployRunResult, type RestartRunResult } from "../../deploy/run.js";
@@ -22,6 +23,8 @@ export interface DeployCommandDeps {
     restart(plan: RestartPlan): Promise<RestartRunResult>;
     /** The checkout the plan describes — which step dirs lack `node_modules` (`checks.nodeModulesMissing`). */
     checkout: CheckoutProbe;
+    /** `--affected`: which Workers this tree needs deployed, judged per Worker against what it serves (or `base`) — src/deploy/affected.ts over the host (src/deploy/run.ts `computeAffectedOnHost`). */
+    affected(opts: { base?: string }): Promise<AffectedReport>;
   };
 }
 
@@ -33,26 +36,44 @@ const workerList = z
   .refine((names) => names.every((n) => (DEPLOY_ORDER as readonly string[]).includes(n)), `expected a comma list of Workers (${DEPLOY_ORDER.join(", ")})`)
   .transform((names) => [...new Set(names)] as WorkerName[]);
 const positiveInt = z.coerce.number().int().positive();
+/** A git revision as `git rev-parse` accepts one — never shell-interpreted, but keep it to revision
+ *  characters, and never a leading `-`: that would reach git's argv looking like an option. */
+const gitRef = z.string().regex(/^[A-Za-z0-9_.\/^~@{}][A-Za-z0-9_.\/^~@{}-]{0,199}$/, "expected a git revision (a sha, tag, branch, or HEAD^)");
 
 const deployOptions = z.object({
-  only: workerList.optional().describe(`deploy only these Workers (comma list of ${DEPLOY_ORDER.join(", ")})`),
+  only: workerList.optional().describe(`deploy only these Workers (comma list of ${DEPLOY_ORDER.join(", ")}); with --affected, only those of them that are affected`),
   skip: workerList.optional().describe("skip these Workers (comma list)"),
+  affected: flag.optional().describe("select the Workers whose inputs changed since the commit each one serves (its /healthz build.commit; else the last release tag; else unsure → deploy) — what the release deploy runs"),
+  base: gitRef.optional().describe("with --affected: judge every Worker against this revision instead of what it serves (a PR's CI uses HEAD^)"),
   force: flag.optional().describe("bypass the bot/resident preflights — in-flight runs are SIGTERM-drained and killed only at the drain deadline"),
   allowBranch: flag.optional().describe("deploy from a branch other than origin/main (deliberately)"),
   waitMax: positiveInt.optional().describe("minutes to wait out a refusing preflight (default 30)"),
   poll: positiveInt.optional().describe("seconds between preflight retries (default 60)"),
 });
 
-function toOptions(o: z.output<typeof deployOptions>, dryRun: boolean): DeployOptions {
+function toOptions(o: z.output<typeof deployOptions>, dryRun: boolean, affected: AffectedReport | undefined): DeployOptions {
   return {
     only: o.only,
     skip: o.skip,
+    ...(affected ? { affected } : {}),
     dryRun,
     force: o.force ?? false,
     allowBranch: o.allowBranch ?? false,
     waitMaxMinutes: o.waitMax ?? 30,
     pollSeconds: o.poll ?? 60,
   };
+}
+
+/** The plan both commands compute: `--affected` asks the probe and lets the
+ *  report select (`--only`/`--skip` then narrow that selection); otherwise
+ *  `--only/--skip` select, and an empty selection is a mistake in the
+ *  invocation. An empty AFFECTED selection is a true answer. */
+async function computePlan(options: z.output<typeof deployOptions>, deps: DeployCommandDeps, dryRun: boolean): Promise<DeployPlan> {
+  if (options.base !== undefined && !options.affected) throw new CommandError("invalid_input", "--base only means something with --affected");
+  const affected = options.affected ? await deps.deploy.affected(options.base !== undefined ? { base: options.base } : {}) : undefined;
+  const plan = planDeploy(toOptions(options, dryRun, affected), deps.deploy.checkout);
+  if (plan.steps.length === 0 && !affected) throw new CommandError("invalid_input", "nothing to deploy after --only/--skip filters");
+  return plan;
 }
 
 const planJson = (plan: DeployPlan): JsonValue => plan as unknown as JsonValue;
@@ -62,13 +83,9 @@ export const deployPlan = defineCommand({
   options: deployOptions,
   action: "deploy:read",
   effect: "read",
-  describe: "The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed.",
+  describe: "The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.",
   render: (output) => formatPlan(output as unknown as DeployPlan),
-  handler: async ({ options, deps }) => {
-    const plan = planDeploy(toOptions(options, true), deps.deploy.checkout);
-    if (plan.steps.length === 0) throw new CommandError("invalid_input", "nothing to deploy after --only/--skip filters");
-    return planJson(plan);
-  },
+  handler: async ({ options, deps }) => planJson(await computePlan(options, deps, true)),
 });
 
 export const deployAll = defineCommand({
@@ -77,14 +94,16 @@ export const deployAll = defineCommand({
   action: "deploy:write",
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
-  describe: "Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and the bot's drain until the new container is live.",
+  describe: "Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and the bot's drain until the new container is live. --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.",
   render: (output) => {
     const o = output as JsonObject;
-    return `deployed and live\n${formatDeployResults(o.results as unknown as Parameters<typeof formatDeployResults>[0], [])}`;
+    const results = o.results as unknown as Parameters<typeof formatDeployResults>[0];
+    if (results.length === 0) return `nothing to deploy — every Worker already serves this tree's inputs\n${formatPlan(o.plan as unknown as DeployPlan)}`;
+    return `deployed and live\n${formatDeployResults(results, [])}`;
   },
   handler: async ({ options, deps }) => {
-    const plan = planDeploy(toOptions(options, false), deps.deploy.checkout);
-    if (plan.steps.length === 0) throw new CommandError("invalid_input", "nothing to deploy after --only/--skip filters");
+    const plan = await computePlan(options, deps, false);
+    if (plan.steps.length === 0) return { plan: planJson(plan), results: [] };
     const result = await deps.deploy.run(plan);
     if (result.kind === "refused") throw new CommandError("unavailable", `refusing —\n  - ${result.problems.join("\n  - ")}`);
     if (!result.ok) throw new CommandError("unavailable", `deploy stopped —\n${formatDeployResults(result.results, result.notAttempted)}`);

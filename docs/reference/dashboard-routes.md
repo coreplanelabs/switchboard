@@ -53,7 +53,7 @@ Every registered command has an HTTP twin behind the same Access gate, plus an M
 | `/api/mcp.show` | `GET`, `POST` | `mcp:read` | One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential. |
 | `/api/mcp.remove` | `POST` | `mcp:write` | Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights). |
 | `/api/schedule.list` | `GET`, `POST` | `schedule:read` | Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did. |
-| `/api/deploy.plan` | `GET`, `POST` | `deploy:read` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. |
+| `/api/deploy.plan` | `GET`, `POST` | `deploy:read` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why. |
 
 <!-- /generated:api-routes -->
 

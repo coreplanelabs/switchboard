@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { AGENTS } from "../agents/registry.js";
 import { bootstrapOnHost } from "../agentEnv/host.js";
 import type { ConfigStore } from "../config.js";
-import { hasNodeModules, runBotRestart, runDeployPlan } from "../deploy/run.js";
+import type { AffectedReport } from "../deploy/affected.js";
+import { computeAffectedOnHost, hasNodeModules, runBotRestart, runDeployPlan } from "../deploy/run.js";
 import { LocalOperations } from "../execution/executor.js";
 import { localWorkspaceDir } from "../execution/factory.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -50,6 +51,8 @@ export interface CoreCommandWiring {
   /** The process's memory store (index.ts shares the one the reflection pass
    *  writes to); absent → the in-process fallback when memory is enabled. */
   memory?: () => MemoryStore | undefined;
+  /** `deploy plan|all --affected`'s selection; default: the host probe over this checkout and the live fleet (tests inject a report). */
+  affected?: (opts: { base?: string }) => Promise<AffectedReport>;
   /** Where scheduled firings are recorded; absent → `schedule list` shows no history. */
   scheduleStore?: ScheduleStore;
   /** The MCP service (#394) behind `mcp.*`, or why MCP is off; absent → the
@@ -168,6 +171,7 @@ export function buildCoreCommands(config: Provided<ConfigStore>, store: Provided
       run: (plan) => runDeployPlan(plan, { log: (l) => console.log(l), warn: (l) => console.error(l), stream: (c) => process.stdout.write(c) }),
       restart: (plan) => runBotRestart(plan, { log: (l) => console.log(l), warn: (l) => console.error(l) }),
       checkout: { hasNodeModules },
+      affected: wiring.affected ?? computeAffectedOnHost,
     },
     env: { bootstrap: bootstrapOnHost },
   };

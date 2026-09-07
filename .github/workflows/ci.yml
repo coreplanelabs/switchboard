@@ -120,8 +120,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # An assets-only Worker (deploy/cloudflare-docs/): no container, no Durable
-    # Object, nothing that can be mid-rollout — which is why this one deploy is
-    # safe to automate while the bot's stays hand-driven and preflighted.
+    # Object, nothing that can be mid-rollout — which is why this one deploys on
+    # every docs push, while the four runtime Workers deploy on the RELEASE
+    # (release-please.yml → deploy-production.yml), preflighted and in order.
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
@@ -171,6 +172,75 @@ jobs:
           npm ci
           npm --prefix ../../docs ci
           npm run deploy
+
+  # Which Workers this PR's diff would deploy (features/release-and-deploy.md
+  # item 8): `deploy plan --affected --base HEAD^` — HEAD is the merge commit,
+  # so HEAD^ is the PR's base — into the job summary, on every PR. On the
+  # RELEASE PR the same command runs against production instead (each Worker's
+  # live commit), and the result is one sticky comment on the PR: what merging
+  # it will deploy, re-rendered on every push to the release branch. An
+  # unclassified path shows here as "every Worker deploys" long before it
+  # reaches a release.
+  deploy-targets:
+    name: deploy targets
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      RELEASE_PR: ${{ startsWith(github.head_ref, 'release-please--') }}
+      # Optional: lets the release-PR plan read the sandbox's live commit. Empty
+      # on a fork PR (secrets are withheld there) — the plan then says so.
+      SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history + tags: the diff against the PR base, or against what
+          # each Worker serves, and the last `v*` tag as the fallback base.
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: deploy plan --affected
+        run: |
+          if [ "$RELEASE_PR" = "true" ]; then
+            npm run --silent cli -- deploy plan --affected --json > plan.json
+          else
+            npm run --silent cli -- deploy plan --affected --base "$(git rev-parse HEAD^)" --json > plan.json
+          fi
+          jq -r '.affected.markdown' plan.json | tee targets.md
+          {
+            if [ "$RELEASE_PR" = "true" ]; then echo "## What merging this release deploys"; else echo "## What this PR's diff would deploy"; fi
+            echo
+            cat targets.md
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: the release PR carries the plan
+        if: env.RELEASE_PR == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- switchboard:deploy-targets -->'
+          {
+            echo "$marker"
+            echo
+            echo "### What merging this release deploys"
+            echo
+            cat targets.md
+            echo
+            echo "_Judged per Worker against the commit it is serving right now. Re-rendered on every push to this branch by the \`deploy targets\` CI job; merging runs \`deploy all --affected\` and deploys exactly the Workers marked **deploy**._"
+          } > comment.md
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -n 1)
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" -F body=@comment.md > /dev/null
+            echo "updated comment ${existing}"
+          else
+            gh pr comment "$PR" --body-file comment.md
+          fi
 
   bot-worker:
     name: bot worker typecheck + deploy preflight tests

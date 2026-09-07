@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { ConfigStore } from "./config.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./core/commands/all.js";
+import type { AffectedReport } from "./deploy/affected.js";
 
 // Feature: features/command-registry.md — the derived CLI (`npx tsx src/cli.ts
 // <group> <verb> [args…] [--option value…] [--json]`, KTD21): argv goes through
@@ -225,7 +226,30 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     const dir = mkdtempSync(join(tmpdir(), "swb-cli-"));
     const cfg = join(dir, "config.yaml");
     writeFileSync(cfg, "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n");
-    const commands = buildCoreCommands(new ConfigStore(cfg, join(dir, "overrides.json")), null, { registry: new RunRegistry({ now: () => NOW }), env: {}, dataDir: dir, warn: () => {} });
+    const affectedCalls: { base?: string }[] = [];
+    const report: AffectedReport = {
+      head: "f".repeat(40),
+      workers: [
+        { name: "memory", decision: "deploy", base: { kind: "live", commit: "a".repeat(40) }, reasons: ["deploy/cloudflare-memory/worker.ts"] },
+        { name: "bot", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
+        { name: "resident", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
+        { name: "sandbox", decision: "skip", base: { kind: "release", tag: "v0.1.0", commit: "c".repeat(40) }, reasons: [] },
+      ],
+      selected: ["memory"],
+      unclassified: [],
+      deployAll: false,
+      markdown: "(md)",
+    };
+    const commands = buildCoreCommands(new ConfigStore(cfg, join(dir, "overrides.json")), null, {
+      registry: new RunRegistry({ now: () => NOW }),
+      env: {},
+      dataDir: dir,
+      warn: () => {},
+      affected: async (opts) => {
+        affectedCalls.push(opts);
+        return report;
+      },
+    });
     const command = (argv: string[], c: CommandInvoker) => {
       const parsed = parseCliArgv(argv, c);
       if (parsed.kind !== "command") throw new Error(JSON.stringify(parsed));
@@ -243,6 +267,12 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     const plan = await runCommand(commands, command(["deploy", "plan", "--only", "memory", "--json"], commands), CLI_CALLER);
     expect(plan.exitCode).toBe(0);
     expect(JSON.parse(plan.stdout)).toMatchObject({ dryRun: true, steps: [{ name: "memory" }] });
+    expect(affectedCalls).toEqual([]); // `--only` never consults the probe
+    // `--affected --json`: what CI runs on the release PR and in the release deploy — the report rides on the plan.
+    const affected = await runCommand(commands, command(["deploy", "plan", "--affected", "--base", "HEAD^", "--json"], commands), CLI_CALLER);
+    expect(affected.exitCode).toBe(0);
+    expect(affectedCalls).toEqual([{ base: "HEAD^" }]);
+    expect(JSON.parse(affected.stdout)).toMatchObject({ dryRun: true, steps: [{ name: "memory" }], affected: { selected: ["memory"], markdown: "(md)" } });
     // `config show` from the CLI needs a channel: the caller has no origin.
     const show = await runCommand(commands, command(["config", "show"], commands), CLI_CALLER);
     expect(show).toMatchObject({ exitCode: 2, stderr: "error (invalid_input): channel: required on this surface — pass --channel <id>" });

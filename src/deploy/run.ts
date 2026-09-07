@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { computeAffected, formatAffectedText, type AffectedProbe, type AffectedReport } from "./affected.js";
 import { decideLive, decideRestarted, heartbeatLine, LIVE_GATE_DEADLINE_MS, LIVE_GATE_POLL_MS, parseHealthz, type HealthzBody } from "./liveGate.js";
-import { classifyDeployOutput, type DeployPlan, type DeployStep } from "./plan.js";
+import { classifyDeployOutput, decideAccount, UNSET_ENV, WORKERS, type DeployPlan, type DeployStep, type TokenVerifyResult, type WorkerName } from "./plan.js";
 import { classifyRestartResponse, type RestartPlan } from "./restart.js";
 
 // The production deploy RUNNER behind the registry's `deploy all` (CLI only):
@@ -72,14 +73,31 @@ function run(cmd: string, args: string[], opts: { cwd: string; unset?: readonly 
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-async function preChecks(plan: DeployPlan): Promise<string[]> {
-  const problems: string[] = [];
-  const who = await run("npx", ["wrangler", "whoami"], { cwd: join(REPO_ROOT, "deploy/cloudflare"), unset: plan.steps[0]?.unsetEnv ?? [] });
-  if (!who.output.includes(plan.checks.account)) {
-    // Keep wrangler's own words (not logged in, network, ...) — the check must be debuggable when it fails.
-    const said = who.output.trim().split("\n").filter(Boolean).slice(-3).join(" | ") || `exit ${who.code}, no output`;
-    problems.push(`wrangler whoami does not list account ${plan.checks.account} (coreplane-infra) — run \`npx wrangler login\` in deploy/cloudflare. wrangler said: ${said}`);
+/** Cloudflare's per-account token verify — the only way an ACCOUNT-owned token
+ *  (no `/user`, so `wrangler whoami` lists nothing) proves which account it is
+ *  for. Never throws: a network failure is "not verified", and refused. */
+async function verifyTokenAgainstAccount(account: string, token: string): Promise<TokenVerifyResult | undefined> {
+  try {
+    const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/tokens/verify`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20_000) });
+    return { status: res.status, body: await res.text() };
+  } catch {
+    return undefined;
   }
+}
+
+async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]> {
+  const problems: string[] = [];
+  const who = await run("npx", ["wrangler", "whoami"], { cwd: join(REPO_ROOT, "deploy/cloudflare"), unset: UNSET_ENV });
+  const token = process.env.CLOUDFLARE_API_TOKEN;
+  const account = decideAccount({
+    account: plan.checks.account,
+    whoamiOutput: who.output,
+    whoamiExit: who.code,
+    tokenSet: !!token,
+    ...(token && !who.output.includes(plan.checks.account) ? { tokenVerify: await verifyTokenAgainstAccount(plan.checks.account, token) } : {}),
+  });
+  if (account.ok) io.log(`[deploy:all] account: ${account.how}`);
+  else problems.push(account.problem);
   const status = await run("git", ["status", "--porcelain"], { cwd: REPO_ROOT });
   if (status.output.trim() !== "") problems.push("working tree is not clean — commit, stash, or deploy from a fresh checkout (wrangler builds the CURRENT tree)");
   if (plan.checks.atOriginMain) {
@@ -91,7 +109,9 @@ async function preChecks(plan: DeployPlan): Promise<string[]> {
     if (head !== main) problems.push(`HEAD ${head.slice(0, 7)} != origin/main ${main.slice(0, 7)} — \`git checkout --detach origin/main\`, or pass --allow-branch deliberately`);
   }
   for (const s of plan.steps) {
-    for (const v of s.requiredEnv) if (!process.env[v]) problems.push(`${s.name}: ${v} is not set in the environment`);
+    for (const req of s.requiredEnv) {
+      if (!req.anyOf.some((v) => process.env[v])) problems.push(`${s.name}: none of ${req.anyOf.join(" / ")} is set in the environment`);
+    }
   }
   return problems;
 }
@@ -180,7 +200,12 @@ async function deployStep(step: DeployStep, plan: DeployPlan, expectedCommit: st
 /** Execute a plan for real: pre-checks, then the steps in order, stopping at
  *  the first failure so the order holds (later Workers are NOT deployed). */
 export async function runDeployPlan(plan: DeployPlan, io: DeployRunnerIO): Promise<DeployRunResult> {
-  const problems = await preChecks(plan);
+  if (plan.affected) io.log(formatAffectedText(plan.affected));
+  if (plan.steps.length === 0) {
+    io.log("[deploy:all] nothing to deploy — every Worker already serves this tree's inputs");
+    return { kind: "ran", ok: true, results: [], notAttempted: [] };
+  }
+  const problems = await preChecks(plan, io);
   if (problems.length > 0) return { kind: "refused", problems };
   for (const w of plan.warnings) io.warn(`[deploy:all] WARNING ${w}`);
 
@@ -224,6 +249,69 @@ export function formatDeployResults(results: readonly DeployStepResult[], notAtt
   for (const r of results) lines.push(`  ${r.name.padEnd(9)} ${r.script.padEnd(22)} ${(r.versionId ?? "-").padEnd(38)} ${r.live.padEnd(8)} ${r.status}`);
   if (notAttempted.length > 0) lines.push(`  not attempted: ${notAttempted.join(", ")}`);
   return lines.join("\n");
+}
+
+// ---- `--affected` (src/deploy/affected.ts is the pure half) ---------------------------------------
+
+/** One git command in the repo root; `undefined` on a non-zero exit. */
+async function git(args: string[]): Promise<string | undefined> {
+  const r = await run("git", args, { cwd: REPO_ROOT });
+  return r.code === 0 ? r.output : undefined;
+}
+
+/**
+ * The `AffectedProbe` over this checkout and the live Workers: git for HEAD,
+ * ancestry, the last `v*` tag before HEAD, diffs and file contents at a ref
+ * (`git show`, after one `ls-tree` per ref so a candidate path that does not
+ * exist costs no spawn — the import crawler tries up to three per specifier);
+ * `GET /healthz` per Worker for the commit it serves, with the sandbox's
+ * bearer from `env` when present. Every failure is a value the pure half
+ * turns into "unsure", never a throw.
+ */
+export function hostAffectedProbe(env: Record<string, string | undefined> = process.env): AffectedProbe {
+  const trees = new Map<string, Promise<Set<string> | undefined>>();
+  const listTree = (ref: string) => {
+    let t = trees.get(ref);
+    if (!t) trees.set(ref, (t = git(["ls-tree", "-r", "--name-only", ref]).then((out) => (out === undefined ? undefined : new Set(out.split("\n").filter(Boolean))))));
+    return t;
+  };
+  return {
+    head: async () => (await git(["rev-parse", "HEAD"]))?.trim() ?? "",
+    liveCommit: async (worker: WorkerName) => {
+      const w = WORKERS.find((x) => x.name === worker)!;
+      const bearer = w.healthBearerEnv ? env[w.healthBearerEnv] : undefined;
+      if (w.healthBearerEnv && !bearer) return { error: `${w.healthBearerEnv} is not set — cannot read ${w.healthUrl}` };
+      try {
+        const res = await fetch(w.healthUrl, { headers: bearer ? { authorization: `Bearer ${bearer}` } : {}, signal: AbortSignal.timeout(20_000) });
+        const text = await res.text();
+        if (!res.ok) return { error: `GET ${w.healthUrl} → HTTP ${res.status}` };
+        const body = parseHealthz(text);
+        const commit = body && typeof body.build === "object" && body.build !== null ? (body.build as { commit?: unknown }).commit : undefined;
+        return typeof commit === "string" && commit !== "" ? { commit } : { error: `GET ${w.healthUrl} carries no build.commit` };
+      } catch (err) {
+        return { error: `GET ${w.healthUrl} failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    },
+    isAncestor: async (commit, head) => (await run("git", ["merge-base", "--is-ancestor", commit, head], { cwd: REPO_ROOT })).code === 0,
+    lastRelease: async () => {
+      const tag = (await git(["describe", "--tags", "--match", "v*", "--abbrev=0", "HEAD^"]))?.trim();
+      if (!tag) return undefined;
+      const commit = (await git(["rev-parse", `${tag}^{commit}`]))?.trim();
+      return commit ? { tag, commit } : undefined;
+    },
+    // `undefined` on a git failure (an unknown base) — the pure half reads that as unsure, never as "nothing changed".
+    changedPaths: async (base, head) => (await git(["diff", "--name-only", "--no-renames", base, head, "--"]))?.split("\n").filter(Boolean),
+    fileAt: async (ref, path) => {
+      const tree = await listTree(ref);
+      if (tree && !tree.has(path)) return undefined;
+      return git(["show", `${ref}:${path}`]);
+    },
+  };
+}
+
+/** `deploy plan|all --affected` on the host: the selection over this checkout and the live fleet. */
+export function computeAffectedOnHost(opts: { base?: string }): Promise<AffectedReport> {
+  return computeAffected(hostAffectedProbe(), opts);
 }
 
 // ---- `deploy restart` (src/deploy/restart.ts is the pure half) -----------------------------------

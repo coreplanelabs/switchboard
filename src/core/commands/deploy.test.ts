@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { AffectedReport } from "../../deploy/affected.js";
 import { BOT_HEALTH_URL, formatPlan, type DeployPlan } from "../../deploy/plan.js";
 import type { DeployRunResult } from "../../deploy/run.js";
 import { CommandRegistry, bindCommands, renderText, type Caller } from "../commandRegistry.js";
@@ -22,11 +23,37 @@ const neverRestarts = async (): Promise<RestartRunResult> => {
   throw new Error("must not restart");
 };
 
-function bind(run: (plan: DeployPlan) => Promise<DeployRunResult>, hasNodeModules: (dir: string) => boolean = () => true, restart: (plan: RestartPlan) => Promise<RestartRunResult> = neverRestarts) {
+const neverAffected = async (): Promise<AffectedReport> => {
+  throw new Error("must not compute affected");
+};
+
+/** A report as src/deploy/affected.ts would produce: the bot and resident selected, memory and sandbox not. */
+const REPORT: AffectedReport = {
+  head: "f".repeat(40),
+  workers: [
+    { name: "memory", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
+    { name: "bot", decision: "deploy", base: { kind: "live", commit: "a".repeat(40) }, reasons: ["src/index.ts"] },
+    { name: "resident", decision: "deploy", base: { kind: "release", tag: "v0.1.0", commit: "c".repeat(40) }, reasons: ["deploy/cloudflare-resident/Dockerfile"] },
+    { name: "sandbox", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
+  ],
+  selected: ["bot", "resident"],
+  unclassified: [],
+  deployAll: false,
+  markdown: "(md)",
+};
+const NOTHING: AffectedReport = { ...REPORT, workers: REPORT.workers.map((w) => ({ ...w, decision: "skip", reasons: [] })), selected: [] };
+
+function bind(
+  run: (plan: DeployPlan) => Promise<DeployRunResult>,
+  hasNodeModules: (dir: string) => boolean = () => true,
+  restart: (plan: RestartPlan) => Promise<RestartRunResult> = neverRestarts,
+  affected: (opts: { base?: string }) => Promise<AffectedReport> = neverAffected,
+) {
   const registry = new CommandRegistry<DeployCommandDeps>({ audit: () => {} });
   registerDeployCommands(registry);
   const plans: DeployPlan[] = [];
   const restartPlans: RestartPlan[] = [];
+  const affectedCalls: { base?: string }[] = [];
   const commands = bindCommands(registry, {
     deploy: {
       run: (plan) => {
@@ -38,13 +65,18 @@ function bind(run: (plan: DeployPlan) => Promise<DeployRunResult>, hasNodeModule
         return restart(plan);
       },
       checkout: { hasNodeModules },
+      affected: (opts) => {
+        affectedCalls.push(opts);
+        return affected(opts);
+      },
     },
   });
-  return { commands, plans, restartPlans };
+  return { commands, plans, restartPlans, affectedCalls };
 }
-const neverRuns = () => bind(async () => {
+const neverRunsPlan = async (): Promise<DeployRunResult> => {
   throw new Error("must not run");
-});
+};
+const neverRuns = () => bind(neverRunsPlan);
 
 describe("deploy.plan", () => {
   it("computes the canonical plan (memory → bot → resident → sandbox) with the bot's live gate, and renders formatPlan", async () => {
@@ -94,6 +126,51 @@ describe("deploy.plan", () => {
     expect(JSON.stringify(bad)).not.toContain("frontend");
     expect(await commands.invoke("deploy.plan", { options: { only: "bot", skip: "bot" } }, cli)).toMatchObject({ ok: false, error: "invalid_input", message: "nothing to deploy after --only/--skip filters" });
     expect(await commands.invoke("deploy.plan", { options: { waitMax: "0" } }, cli)).toMatchObject({ ok: false, error: "invalid_input" });
+  });
+
+  it("--affected asks the probe once and plans exactly the report's selection (in order, minus --skip); the report rides on the plan and renders first; --base reaches the probe", async () => {
+    const { commands, affectedCalls } = bind(neverRunsPlan, () => true, neverRestarts, async () => REPORT);
+    const res = await commands.invoke("deploy.plan", { options: { affected: true } }, cli);
+    if (!res.ok) throw new Error(res.message);
+    const plan = res.value as unknown as DeployPlan;
+    expect(affectedCalls).toEqual([{}]);
+    expect(plan.steps.map((s) => s.name)).toEqual(["bot", "resident"]);
+    expect(plan.affected).toEqual(REPORT);
+    const text = renderText(commands.get("deploy.plan")!, res.value);
+    expect(text.startsWith("Affected: bot, resident (HEAD fffffff; judged per Worker against what it serves)")).toBe(true);
+    expect(text).toContain("  - resident: deploy — release v0.1.0 — deploy/cloudflare-resident/Dockerfile");
+    const skipped = await commands.invoke("deploy.plan", { options: { affected: true, skip: "resident" } }, cli);
+    expect(skipped.ok && (skipped.value as unknown as DeployPlan).steps.map((s) => s.name)).toEqual(["bot"]);
+    const bound = parseInvocation(commands.get("deploy.plan")!, ["--affected", "--base", "HEAD^"]);
+    expect(bound.kind).toBe("invoke");
+    await commands.invoke("deploy.plan", bound.kind === "invoke" ? bound.input : {}, cli);
+    expect(affectedCalls.at(-1)).toEqual({ base: "HEAD^" });
+    // Without --affected the probe is never consulted (the checkout may be no repo at all).
+    const plain = await bind(neverRunsPlan).commands.invoke("deploy.plan", {}, cli);
+    expect(plain.ok && (plain.value as unknown as DeployPlan).affected).toBeUndefined();
+  });
+
+  it("--only narrows an --affected selection (never widens it); --base without --affected is invalid_input; a hostile --base never reaches the probe", async () => {
+    const { commands, affectedCalls } = bind(neverRunsPlan, () => true, neverRestarts, async () => REPORT);
+    const narrowed = await commands.invoke("deploy.plan", { options: { affected: true, only: "bot,memory" } }, cli);
+    expect(narrowed.ok && (narrowed.value as unknown as DeployPlan).steps.map((s) => s.name)).toEqual(["bot"]); // memory is not affected; resident is, but was not asked for
+    expect(affectedCalls).toEqual([{}]);
+    expect(await commands.invoke("deploy.plan", { options: { base: "HEAD^" } }, cli)).toMatchObject({ ok: false, error: "invalid_input", message: "--base only means something with --affected" });
+    const hostile = await commands.invoke("deploy.plan", { options: { affected: true, base: "HEAD; rm -rf /" } }, cli);
+    expect(hostile).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(JSON.stringify(hostile)).not.toContain("rm -rf");
+    // A leading `-` would reach git's argv looking like an option.
+    expect(await commands.invoke("deploy.plan", { options: { affected: true, base: "-Ofile" } }, cli)).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(affectedCalls).toEqual([{}]); // only the narrowed call above reached the probe
+  });
+
+  it("an empty --affected selection is a successful plan with no steps — nothing to deploy is an answer, not a mistake", async () => {
+    const { commands } = bind(neverRunsPlan, () => true, neverRestarts, async () => NOTHING);
+    const res = await commands.invoke("deploy.plan", { options: { affected: true } }, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect((res.value as unknown as DeployPlan).steps).toEqual([]);
+    expect(renderText(commands.get("deploy.plan")!, res.value)).toContain("Affected: nothing to deploy — every Worker already serves this tree's inputs");
+    expect(renderText(commands.get("deploy.plan")!, res.value)).toContain("Steps: none — nothing to deploy");
   });
 
   it("is operator-gated in chat, deploy:read on machine surfaces, and exposed everywhere; deploy.all is CLI-only", async () => {
@@ -147,6 +224,29 @@ describe("deploy.all", () => {
     expect(res.ok ? "" : res.message).toContain("FAILED: deployed but NOT live");
     expect(res.ok ? "" : res.message).toContain("not attempted: resident, sandbox");
     expect(await stopped.commands.invoke("deploy.all", { options: { skip: "memory,bot,resident,sandbox" } }, cli)).toMatchObject({ ok: false, error: "invalid_input" });
+  });
+
+  it("--affected hands the runner the report's plan (dryRun false, the report attached); an empty selection runs nothing and says so with exit 0", async () => {
+    const { commands, plans } = bind(
+      async (plan) => ({ kind: "ran", ok: true, results: plan.steps.map((s) => ({ name: s.name, script: s.script, versionId: `v-${s.name}`, live: s.liveGate ? "live" : "n/a", status: "deployed" })), notAttempted: [] }),
+      () => true,
+      neverRestarts,
+      async () => REPORT,
+    );
+    const res = await commands.invoke("deploy.all", { options: { affected: true } }, cli);
+    expect(res.ok).toBe(true);
+    expect(plans).toHaveLength(1);
+    expect(plans[0].steps.map((s) => s.name)).toEqual(["bot", "resident"]);
+    expect(plans[0]).toMatchObject({ dryRun: false, affected: REPORT });
+    expect(renderText(commands.get("deploy.all")!, res.ok ? res.value : null)).toContain("bot       switchboard            v-bot");
+
+    const nothing = bind(neverRunsPlan, () => true, neverRestarts, async () => NOTHING);
+    const idle = await nothing.commands.invoke("deploy.all", { options: { affected: true } }, cli);
+    expect(idle.ok).toBe(true);
+    expect(nothing.plans).toEqual([]); // the runner was never called
+    const text = renderText(commands.get("deploy.all")!, idle.ok ? idle.value : null);
+    expect(text.startsWith("nothing to deploy — every Worker already serves this tree's inputs\n")).toBe(true);
+    expect(text).toContain("Steps: none — nothing to deploy");
   });
 });
 

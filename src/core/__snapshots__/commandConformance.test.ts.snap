@@ -155,6 +155,16 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
       {
+        "name": "affected",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "base",
+        "required": false,
+        "type": "string",
+      },
+      {
         "name": "force",
         "required": false,
         "type": "boolean",
@@ -193,6 +203,16 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
       },
       {
         "name": "skip",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "affected",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "base",
         "required": false,
         "type": "string",
       },
