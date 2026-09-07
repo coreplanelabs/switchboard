@@ -1,4 +1,4 @@
-import { reactive } from "vue";
+import { reactive, type InjectionKey, type Ref } from "vue";
 import {
   createRunTimeline,
   type TimelineCall,
@@ -142,10 +142,16 @@ export interface RunPageModel {
     /** Runner-clock span of the run so far (first event's `at` → last). */
     firstAt: number | null;
     lastAt: number | null;
-    /** Wall-clock receipt time of the newest event. */
-    lastEventAt: number;
+    /** Wall-clock receipt time of the event stamped `lastAt` — the anchor
+     *  `runnerNow` projects from. Only a stamped event moves it: a replay
+     *  notice or any other unstamped frame leaves both untouched, so a
+     *  reconnect can never restart a stopwatch. */
+    lastAtWall: number | null;
   };
   handle(event: unknown): void;
+  /** The oldest call card still without a result (never a quiet call) — what
+   *  the run is waiting on right now, or null while the model is thinking. */
+  pendingCall(): CallVm | null;
   /** Flush a held model turn as its own row (the page calls this at `end`: a
    *  run that ended without an answer still shows its last turn). */
   flushPendingTurn(note: string): void;
@@ -202,7 +208,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     stopMode: null,
     firstAt: null,
     lastAt: null,
-    lastEventAt: Date.now(),
+    lastAtWall: null,
   });
 
   const stepVms = new Map<number, StepVm>();
@@ -377,13 +383,21 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
   }
 
   function handle(event: unknown): void {
-    state.lastEventAt = Date.now();
     const e = event as { at?: unknown } | null;
     if (e && typeof e.at === "number") {
       if (state.firstAt === null || e.at < state.firstAt) state.firstAt = e.at;
-      if (state.lastAt === null || e.at > state.lastAt) state.lastAt = e.at;
+      if (state.lastAt === null || e.at >= state.lastAt) {
+        state.lastAt = e.at;
+        state.lastAtWall = Date.now();
+      }
     }
     for (const change of timeline.push(event)) apply(change);
+  }
+
+  function pendingCall(): CallVm | null {
+    // Arrival order: the Map keeps insertion order, and quiet calls never enter it.
+    for (const c of callVms.values()) if (c.status === "running") return c;
+    return null;
   }
 
   function setAllOpen(open: boolean): void {
@@ -398,6 +412,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
   return {
     state,
     handle,
+    pendingCall,
     flushPendingTurn: flushTurn,
     setAllOpen,
     toggleGroup(step) {
@@ -416,12 +431,52 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
  *  stream ended); exposed as a helper so the wording lives in one place. */
 export const TURN_END_NOTE = "the run ended here";
 
-/** The header stopwatch while live (item 22): the runner-clock span so far
- *  plus the wall time since the last event ARRIVED — never browser-minus-
- *  runner clock math, so clock skew cannot show in the tick. */
+/** The runner's clock as the page best knows it: the newest stamped event's
+ *  `at` plus the wall time since that event arrived. Every live stopwatch on
+ *  the page subtracts a runner stamp from THIS — never browser-minus-runner
+ *  math, so clock skew cannot show in a tick. Null until a stamped event. */
+export function runnerNow(state: RunPageModel["state"], nowWall: number): number | null {
+  if (state.lastAt === null || state.lastAtWall === null) return null;
+  return state.lastAt + (nowWall - state.lastAtWall);
+}
+
+/** The header stopwatch while live (item 22): the whole run, from its first
+ *  event to the projected runner clock. */
 export function runningHeader(state: RunPageModel["state"], nowWall: number): string | null {
-  if (state.firstAt === null || state.lastAt === null) return null;
-  return `running · ${formatElapsed(state.lastAt - state.firstAt + (nowWall - state.lastEventAt))}`;
+  const now = runnerNow(state, nowWall);
+  if (state.firstAt === null || now === null) return null;
+  return `running · ${formatElapsed(now - state.firstAt)}`;
+}
+
+/** The projected runner clock, provided by the run page to every card so a
+ *  running card can tick its own elapsed in place (null on a history page:
+ *  nothing there is live, so nothing ticks). */
+export const RunnerClockKey: InjectionKey<Ref<number | null>> = Symbol("sb-runner-clock");
+
+/** A pending model turn this long is amber — the same minute at which the
+ *  finished `thought …` head it becomes turns amber (`TurnVm.quick`). */
+export const SLOW_TURN_MS = 60_000;
+
+export type LiveWait =
+  /** No stamped event yet — nothing to time. */
+  | { kind: "starting" }
+  /** A command or tool is running: timed from ITS start on the runner clock
+   *  (its card ticks in place — the page draws nothing extra). */
+  | { kind: "call"; call: CallVm; elapsedMs: number }
+  /** Every call has settled and the model has not spoken: timed from the last
+   *  stamped event — the turn began when the last result landed. The page
+   *  draws it as a provisional step head that becomes the real one. */
+  | { kind: "thinking"; elapsedMs: number; slow: boolean };
+
+/** What the run is waiting on right now, and for how long. `pending` is
+ *  `model.pendingCall()`. */
+export function liveWait(state: RunPageModel["state"], pending: CallVm | null, nowWall: number): LiveWait {
+  const now = runnerNow(state, nowWall);
+  if (now === null || state.lastAt === null) return { kind: "starting" };
+  if (pending)
+    return { kind: "call", call: pending, elapsedMs: Math.max(0, now - (pending.startedAt ?? state.lastAt)) };
+  const elapsedMs = Math.max(0, now - state.lastAt);
+  return { kind: "thinking", elapsedMs, slow: elapsedMs >= SLOW_TURN_MS };
 }
 
 /** The finished duration on the runner clock (first → last event). */

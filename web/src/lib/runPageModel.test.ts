@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { createRunPageModel, runningHeader, runSpan, type StepVm } from "./runPageModel";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createRunPageModel, liveWait, runnerNow, runningHeader, runSpan, type StepVm } from "./runPageModel";
 
 // The run page's fold, driven by real event streams (the same shapes the SSE
 // stream and the history seed carry). One fold for both — `handle` is the
@@ -281,20 +281,80 @@ describe("notes and stops", () => {
 });
 
 describe("header stopwatch (item 22)", () => {
-  it("running header = runner-clock span + wall time since the last event arrived; runSpan is the finished duration", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("the stopwatch projects the runner clock — newest stamped event + wall time since it arrived; runSpan is the finished duration", () => {
     const m = model();
-    const wall = Date.now();
+    vi.setSystemTime(1_000_000);
     m.handle({ type: "assistant", text: "x", at: 10_000 });
+    vi.setSystemTime(1_000_500);
     m.handle({ type: "assistant", text: "y", at: 40_000 });
     expect(runSpan(m.state)).toBe("30s");
-    const header = runningHeader(m.state, m.state.lastEventAt + 5_000);
-    expect(header).toBe("running · 35s");
-    expect(wall).toBeGreaterThan(0);
+    expect(runnerNow(m.state, 1_005_500)).toBe(45_000);
+    expect(runningHeader(m.state, 1_005_500)).toBe("running · 35s");
   });
 
-  it("no events yet → no running header, empty span", () => {
+  it("a frame without a runner stamp (a replay notice) never moves the clock — the stopwatch cannot reset on a reconnect", () => {
     const m = model();
+    vi.setSystemTime(1_000_000);
+    m.handle({ type: "assistant", text: "x", at: 10_000 });
+    vi.setSystemTime(1_600_000); // ten minutes later the stream reconnects and replays
+    m.handle({ type: "replay_note", summary: "replaying last 200 of 300 events" });
+    expect(m.state.lastAtWall).toBe(1_000_000);
+    expect(runningHeader(m.state, 1_600_000)).toBe("running · 10m 00s");
+  });
+
+  it("no stamped events yet → no clock, no running header, empty span", () => {
+    const m = model();
+    expect(runnerNow(m.state, Date.now())).toBeNull();
     expect(runningHeader(m.state, Date.now())).toBeNull();
     expect(runSpan(m.state)).toBe("");
+  });
+});
+
+describe("live wait — what the run is waiting on, and for how long", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("before the first stamped event the tail is `starting`", () => {
+    const m = model();
+    expect(liveWait(m.state, m.pendingCall(), Date.now())).toEqual({ kind: "starting" });
+  });
+
+  it("a running call: the tail names the OLDEST un-resulted card and counts from ITS start on the runner clock — not from the last frame", () => {
+    const m = model();
+    vi.setSystemTime(1_000_000);
+    m.handle(input);
+    m.handle(call("c1", "$ pnpm run typegen 2>&1 | tail -5", 3_000));
+    m.handle(call("c2", "$ echo later", 3_500));
+    // A frame with no stamp arrives much later (a reconnect's replay notice): the wait must not restart.
+    vi.setSystemTime(1_900_000);
+    m.handle({ type: "replay_note", summary: "replaying" });
+    const tail = liveWait(m.state, m.pendingCall(), 2_200_000);
+    expect(tail.kind).toBe("call");
+    if (tail.kind !== "call") return;
+    expect(tail.call.headline).toBe("pnpm run typegen 2>&1 | tail -5");
+    // runner clock now = 3_500 + (2_200_000 − 1_000_000) = 1_203_500; the call began at 3_000.
+    expect(tail.elapsedMs).toBe(1_200_500);
+  });
+
+  it("between calls the tail is `thinking` and counts from the last stamped event; amber (slow) past a minute — the threshold of the head it becomes", () => {
+    const m = model();
+    vi.setSystemTime(1_000_000);
+    m.handle(call("c1", "$ npm test", 3_000));
+    vi.setSystemTime(1_004_000);
+    m.handle(result("c1", { at: 7_000 }));
+    expect(m.pendingCall()).toBeNull();
+    expect(liveWait(m.state, null, 1_010_000)).toEqual({ kind: "thinking", elapsedMs: 6_000, slow: false });
+    expect(liveWait(m.state, null, 1_064_000)).toEqual({ kind: "thinking", elapsedMs: 60_000, slow: true });
+  });
+
+  it("a quiet call (update_status) is never what the run waits on", () => {
+    const m = model();
+    m.handle(call("q1", "update_status", 3_000, "update_status"));
+    expect(m.pendingCall()).toBeNull();
+    m.handle(call("c1", "$ npm test", 3_100));
+    expect(m.pendingCall()?.id).toBe("c1");
   });
 });

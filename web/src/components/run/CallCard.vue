@@ -1,13 +1,25 @@
 <script setup lang="ts">
-import { formatLocalIso } from "../../lib/format";
-import type { CallVm } from "../../lib/runPageModel";
+import { computed, inject } from "vue";
+import { formatElapsed, formatLocalIso } from "../../lib/format";
+import { RunnerClockKey, type CallVm } from "../../lib/runPageModel";
 
 // A call card: <details> — header row is the summary (status glyph, $ or tool
 // chip, the command with a one-line collapsed headline, right-hand facts,
 // chevron), the redacted output inside. The call's start time is pacing
 // information, not a headline: it rides on the card's hover.
+//
+// In-progress work draws where it will end up: while the call runs, the facts
+// slot ticks its elapsed on the page's projected runner clock — the same slot
+// its settled duration lands in. A history page provides no clock, so its
+// cards never tick.
 
 const props = defineProps<{ call: CallVm }>();
+const clock = inject(RunnerClockKey, null);
+const elapsed = computed(() => {
+  const now = clock?.value;
+  if (props.call.status !== "running" || typeof now !== "number" || props.call.startedAt === undefined) return "";
+  return formatElapsed(Math.max(0, now - props.call.startedAt));
+});
 
 function toggle(): void {
   // `open` is UI state on the page's own view-model object, shared with the
@@ -60,6 +72,7 @@ function toggle(): void {
       </template>
       <span v-else class="cmd min-w-0 flex-1" />
       <span class="facts ml-auto flex shrink-0 gap-2.5 text-xs tabular-nums text-muted">
+        <span v-if="elapsed" class="fact elapsed" title="since this call started (runner clock)">{{ elapsed }}</span>
         <span
           v-for="(fact, i) in call.facts"
           :key="i"
@@ -81,7 +94,10 @@ function toggle(): void {
         :class="call.status === 'failed' ? 'text-bad' : 'text-toned'"
         >{{ call.output }}</pre>
       <div v-else-if="call.hasResult" class="none px-3 py-1.5 text-xs italic text-dimmed">no output</div>
-      <div v-else class="none px-3 py-1.5 text-xs italic text-dimmed">running…</div>
+      <!-- Still running: the spinner in the header is the ONE live mark on a
+           card (the tail names the wait and times it); the body only says
+           what it holds. -->
+      <div v-else class="none px-3 py-1.5 text-xs italic text-dimmed">no output yet</div>
     </div>
   </details>
 </template>

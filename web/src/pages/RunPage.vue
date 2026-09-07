@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import AppShell from "../components/AppShell.vue";
 import MarkdownText from "../components/MarkdownText.vue";
 import SlackMark from "../components/SlackMark.vue";
@@ -8,7 +8,7 @@ import StepBlock from "../components/run/StepBlock.vue";
 import { useSeed } from "../lib/seed";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
-import { createRunPageModel, runningHeader, runSpan } from "../lib/runPageModel";
+import { createRunPageModel, liveWait, runnerNow, RunnerClockKey, runningHeader, runSpan } from "../lib/runPageModel";
 import { createPrReviewCollector } from "../lib/prReviewCollector";
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
 import { formatClock, formatDateTime, formatElapsed, formatLocalIso } from "../lib/format";
@@ -135,26 +135,17 @@ if (!isHistory) {
   });
 }
 
-// ---- the live tail -----------------------------------------------------------
-const THINKING = [
-  "Thinking",
-  "Pondering",
-  "Mulling it over",
-  "Reasoning",
-  "Cogitating",
-  "Weighing options",
-  "Puzzling",
-  "Deliberating",
-  "Noodling",
-  "Chewing on it",
-  "Ruminating",
-  "Reticulating splines",
-];
-const verbIndex = ref(0);
-let verbSince = Date.now();
-const tailVisible = computed(() => !isHistory && phase.value !== "ended" && phase.value !== "disconnected");
-const tailSince = computed(() => nowWall.value - state.lastEventAt);
-const SLOW_MS = 120_000;
+// ---- what is happening now ------------------------------------------------------
+// In-progress work draws where it will end up, looking like what it becomes:
+// a running card ticks its elapsed in its own facts slot (it reads the clock
+// provided here), and a pending model turn is a provisional step head —
+// `thinking 30s` — at the foot of the log that turns into the real `thought …`
+// head when the turn lands. The header times the WHOLE run. There is no
+// separate "tail" row: the timeline is live, and its last row is now.
+const live = computed(() => !isHistory && phase.value !== "ended" && phase.value !== "disconnected");
+const runnerClock = computed(() => (live.value ? runnerNow(state, nowWall.value) : null));
+provide(RunnerClockKey, runnerClock);
+const waiting = computed(() => (live.value ? liveWait(state, model.pendingCall(), nowWall.value) : null));
 
 // ---- fold toggle ---------------------------------------------------------------
 function toggleAll(): void {
@@ -196,11 +187,6 @@ if (seed?.mode === "history") {
 onMounted(() => {
   tick = setInterval(() => {
     nowWall.value = Date.now();
-    // A new word every 6 s, in order — predictable, not twitchy.
-    if (nowWall.value - verbSince > 6000) {
-      verbIndex.value = (verbIndex.value + 1) % THINKING.length;
-      verbSince = nowWall.value;
-    }
   }, 1000);
 
   if (seed?.mode !== "live") return;
@@ -279,9 +265,15 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         </template>
         <template v-else>
           <span id="statedot" class="pulse text-[1.1em] leading-none" :class="pulseCls">∿</span>
-          <span id="state" class="text-xs tabular-nums" :class="stopError ? 'text-bad' : 'text-muted'">{{
-            headerText
-          }}</span>
+          <span
+            id="state"
+            class="text-xs tabular-nums"
+            :class="stopError ? 'text-bad' : 'text-muted'"
+            :title="
+              phase === 'running' && !stopError ? 'the whole run, since its first event (runner clock)' : undefined
+            "
+            >{{ headerText }}</span
+          >
         </template>
       </span>
     </template>
@@ -463,9 +455,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
 
       <!-- The timeline -->
       <ol id="log" class="m-0 list-none p-0">
-        <li v-if="state.placeholder && !tailVisible" id="placeholder" class="empty text-muted">
-          Waiting for activity…
-        </li>
+        <li v-if="state.placeholder" id="placeholder" class="empty text-muted">Waiting for activity…</li>
         <template v-for="item in state.log" :key="item.key">
           <StepBlock
             v-if="item.kind === 'step'"
@@ -506,20 +496,26 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             >
           </li>
         </template>
-        <!-- The live tail: what is happening right now, always last while connected. -->
+        <!-- A pending model turn: the provisional head of the step it will
+             open — the same `thought <span>` row StepBlock paints, in the
+             present tense, ticking from the last stamped event on the runner
+             clock. A running command needs nothing here: its card ticks. -->
         <li
-          v-if="tailVisible"
-          id="tail"
-          class="tail mt-10 flex items-center gap-3 border-t border-dashed border-accented py-3 pl-6 pr-8 text-[0.8rem] text-muted"
+          v-if="waiting?.kind === 'thinking'"
+          id="thinking"
+          class="pending relative mt-5 border-l-2 border-ok/40 pb-3 pl-3 pt-2 first:mt-0"
+          aria-live="off"
         >
-          <span class="pulse text-[1.1em] leading-none text-info motion-safe:animate-pulse">∿</span>
-          <span class="verb text-toned">{{ THINKING[verbIndex] }}…</span>
-          <span
-            class="since ml-auto shrink-0 tabular-nums"
-            :class="tailSince >= SLOW_MS ? 'text-warn' : 'text-dimmed'"
-            title="since the last event arrived"
-            >{{ formatElapsed(tailSince) }}</span
-          >
+          <div class="head flex items-baseline gap-x-6 pb-1.5 pr-3">
+            <div class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 text-xs tabular-nums text-dimmed">
+              <span
+                class="thought"
+                :class="waiting.slow ? 'text-warn' : 'text-toned'"
+                title="the model has been working since the last result came back (runner clock)"
+                >thinking {{ formatElapsed(waiting.elapsedMs) }}</span
+              >
+            </div>
+          </div>
         </li>
         <li ref="logEnd" aria-hidden="true" />
       </ol>
