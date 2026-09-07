@@ -21,8 +21,45 @@ const NEW = "2222222222222222222222222222222222222222";
 const disk = (over: Partial<RefreshDisk> = {}): RefreshDisk => ({
   head: OLD,
   installedKey: KEY_A,
+  installingKey: null,
   builtSha: OLD,
   ...over,
+});
+
+describe("planRefresh: a timed-out install resumes instead of starting over", () => {
+  // Live 2026-09-07 19:06–19:52 UTC: switchboard's cold `npm install` outran
+  // the 5-min step budget four cycles in a row; each cycle found no deps
+  // marker, wiped node_modules and began again from zero — never converging.
+  it("no deps marker but an installing marker for THIS lockfile → rebuild WITH install on a keep-deps clean (npm reconciles the partial tree)", () => {
+    const plan = planRefresh({
+      sha: NEW,
+      factsSha: OLD,
+      lockfileKey: KEY_B,
+      disk: disk({ head: NEW, installedKey: null, installingKey: KEY_B, builtSha: null }),
+    });
+    expect(plan).toMatchObject({ action: "rebuild", install: true, clean: "keep-deps" });
+    expect((plan as { why: string }).why).toMatch(/resumes/);
+  });
+
+  it("an installing marker for ANOTHER lockfile is stale evidence → the conservative full clean + install", () => {
+    const plan = planRefresh({
+      sha: NEW,
+      factsSha: OLD,
+      lockfileKey: KEY_B,
+      disk: disk({ head: NEW, installedKey: null, installingKey: KEY_A, builtSha: null }),
+    });
+    expect(plan).toMatchObject({ action: "rebuild", install: true, clean: "all" });
+  });
+
+  it("a completed deps key always wins over a leftover installing marker (the rm after the key landed did not happen)", () => {
+    const plan = planRefresh({
+      sha: NEW,
+      factsSha: OLD,
+      lockfileKey: KEY_A,
+      disk: disk({ head: OLD, installedKey: KEY_A, installingKey: KEY_A, builtSha: OLD }),
+    });
+    expect(plan).toMatchObject({ action: "rebuild", install: false, clean: "keep-deps" });
+  });
 });
 
 describe("planRefresh (#163: lockfile-hash install gate + on-disk checkpoints)", () => {

@@ -28,6 +28,9 @@ export interface RefreshDisk {
   head: string | null;
   /** Lockfile key whose install fully completed into the checkout's node_modules; null when absent. */
   installedKey: string | null;
+  /** Lockfile key an install was STARTED for and never completed (the marker is
+   *  written before `install` and removed after the deps key lands); null when absent. */
+  installingKey: string | null;
   /** Sha whose build fully completed in the checkout; null when absent. */
   builtSha: string | null;
 }
@@ -61,6 +64,22 @@ export function planRefresh(input: {
   }
   if (depsMatch) {
     return { action: "rebuild", install: false, clean: "keep-deps", why: "lockfile unchanged — deps kept, build only" };
+  }
+  if (disk.installedKey === null && disk.installingKey !== null && disk.installingKey === lockfileKey) {
+    // A previous cycle started this very install and ended before the deps
+    // key landed (its step timed out, or its DO isolate died; the pre-step
+    // sweep has killed any writer it left). npm reconciles a partial tree to
+    // the lockfile, so resuming converges where wipe-and-restart cannot: a
+    // repo whose cold install outruns one step budget still lands over cycles
+    // (live 2026-09-07: four consecutive full installs, none finishing).
+    // Safe for the hardlink invariant (review 1b): threads only link deps
+    // whose key the deps marker vouches for, and no marker vouched for these.
+    return {
+      action: "rebuild",
+      install: true,
+      clean: "keep-deps",
+      why: "install resumes — a previous attempt for this lockfile ended before the deps marker; npm reconciles the partial tree",
+    };
   }
   const why = disk.installedKey === null ? "no deps marker on disk — full install" : "lockfile changed — full install";
   return { action: "rebuild", install: true, clean: "all", why };
