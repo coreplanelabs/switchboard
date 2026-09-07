@@ -8,7 +8,7 @@ This is the condensed operator runbook. The exhaustive per-Worker manual steps (
 
 You do not deploy. Every merge to `main` lands in the one open release PR (`chore(main): release <version>`, opened and kept current by release-please). Merging that PR tags the version, publishes the GitHub release, and CI deploys production — the `deploy-production` job in the `release-please` workflow run.
 
-Before you merge, read the sticky comment on the release PR: it lists each of the four Workers with **deploy** or skip, the commit it was judged against (what that Worker is serving right now), and why — the changed files that are its inputs. Merging deploys exactly the Workers marked **deploy**, in the only safe order:
+Before you merge, read the sticky comment on the release PR (posted by the `release-please` workflow run of every merge to `main`, so it always describes the PR's current head): it lists each of the four Workers with **deploy** or skip, the commit it was judged against (what that Worker is serving right now), and why — the changed files that are its inputs. The release PR's own checks may show "action required" — that is GitHub gating a bot-authored PR's workflows, not a failed plan. Merging deploys exactly the Workers marked **deploy**, in the only safe order:
 
 ```mermaid
 flowchart LR
