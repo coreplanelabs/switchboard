@@ -26,10 +26,15 @@ updates:
       # .nvmrc in one deliberate change (#497), not one package at a time.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
-      # One TypeScript for the whole workspace, and the dashboard's typechecker
-      # (vue-tsc 3.3.x) resolves `typescript/lib/tsc`, which TypeScript 7 does
-      # not export. Lift once a vue-tsc release supports TypeScript 7, then
-      # bump every package together.
+      # One TypeScript for the whole workspace, and two of its consumers need
+      # the TypeScript JS API, which the 7.x package does not ship (only
+      # `unstable/*` entry points; the API is planned for 7.1):
+      #   - vue-tsc 3.3.x loads `typescript/lib/tsc`, gone in 7 —
+      #     vuejs/language-tools#5381 (closed 2026-07; published vue-tsc
+      #     still needs the TS 6 API, waiting on microsoft/TypeScript#63800).
+      #   - typescript-eslint 8.70 peers on `typescript <6.1` —
+      #     typescript-eslint/typescript-eslint#10940.
+      # Lift once both run on TypeScript 7, then bump every package together.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
       # @cloudflare/vitest-pool-workers (0.22.x) peers on vitest ^4.1, so the
