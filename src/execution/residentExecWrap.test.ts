@@ -1,9 +1,9 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { capBytesFor, capWrappedCommand, recoverCapturedOutput } from "./residentExecWrap.js";
 
 const run = promisify(execFile);
@@ -24,6 +24,22 @@ async function bash(script: string): Promise<{ stdout: string; stderr: string; c
 }
 
 const cwd = mkdtempSync(join(tmpdir(), "execwrap-"));
+
+/** Resolves once `text` has been written to `file` — the command under test is
+ *  still running (it sleeps after its echos), so this is the moment to kill it. */
+const landed = (file: string, text: string) =>
+  vi.waitFor(
+    () => {
+      let content = "";
+      try {
+        content = readFileSync(file, "utf8");
+      } catch {
+        // not created yet
+      }
+      expect(content).toContain(text);
+    },
+    { interval: 5 },
+  );
 
 describe("capWrappedCommand (run under real bash)", () => {
   it("passes stdout and stderr through separately and preserves exit 0", async () => {
@@ -84,7 +100,8 @@ describe("capWrappedCommand (run under real bash)", () => {
     // effect) so its own head/cleanup lines never run.
     const wrapper = capWrappedCommand(cwd, `echo early-clue && echo early-err >&2 && sleep 30`, 1024, files);
     const child = spawn("bash", ["-c", wrapper], { stdio: "ignore" });
-    await new Promise((r) => setTimeout(r, 500)); // let the echos land in the files
+    await landed(files.out, "early-clue");
+    await landed(files.err, "early-err");
     child.kill("SIGKILL");
     await new Promise((r) => child.once("close", r));
     // The kill skipped the trap: files survive with the pre-kill output.
@@ -104,7 +121,7 @@ describe("capWrappedCommand (run under real bash)", () => {
     const files = { out: join(cwd, `term.out`), err: join(cwd, `term.err`) };
     const wrapper = capWrappedCommand(cwd, `echo term-clue && sleep 30`, 1024, files);
     const child = spawn("bash", ["-c", wrapper], { stdio: "ignore", detached: true });
-    await new Promise((r) => setTimeout(r, 500));
+    await landed(files.out, "term-clue");
     process.kill(-child.pid!, "SIGTERM"); // the whole process group, like a supervisor kill
     await new Promise((r) => child.once("close", r));
     const rec = await bash(recoverCapturedOutput(files, 1024));

@@ -58,6 +58,25 @@ npm run fix           # regenerate what can be regenerated (docs tables, vendore
 test is a behavior we do not know we have. The Docker image has its own check,
 `npm run check:image`, which CI runs and which needs Docker locally.
 
+## Running tests
+
+One vitest entry at the root covers every package (the bot, `web/`, and the
+Workers' plain-Node tests), so run from the root and filter — the loop while
+you work is the tests your change reaches, not the suite:
+
+```bash
+npx vitest run --changed origin/main   # only the files whose imports reach what you changed
+npx vitest run liveView                # one file, by any fragment of its path
+npx vitest run -t "404s the page"      # one test, by name
+npx vitest run --project web           # one package: bot | web | worker-bot | worker-resident
+npx vitest run -u                      # update snapshots — deliberately
+npm test                               # everything, all cores (~4 s)
+npm test -w deploy/cloudflare-memory   # the one exception: runs inside workerd on vitest 4
+```
+
+CI runs the same suite as shards, one job each; `npm test -- --shard=2/4`
+reproduces a shard locally.
+
 ## How changes are made
 
 **Tests first.** Write the failing test that describes the behavior, then make

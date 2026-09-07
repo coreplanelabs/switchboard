@@ -42,6 +42,8 @@ export default defineConfig({
     },
   },
   test: {
+    // Also a project of the root vitest.config.ts: `npx vitest run --project web`.
+    name: "web",
     environment: "happy-dom",
     include: ["src/**/*.test.ts"],
   },
