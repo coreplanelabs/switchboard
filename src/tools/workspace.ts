@@ -7,6 +7,7 @@ import {
   type FindingDisposition,
   type ReviewVerdict,
 } from "../core/reviewVerdict.js";
+import { BASH_TIMEOUT_MS, bashBudgetWithinRun } from "../execution/bashTimeout.js";
 import { clampBashTimeout, type ExecOptions, type Executor } from "../execution/executor.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { distillDiff } from "../core/diffDigest.js";
@@ -28,6 +29,11 @@ export interface ToolContext {
    *  (bash → `executor.exec`) pass it through; the runner stops waiting on the
    *  tool regardless, so a tool that ignores it degrades safely. */
   signal?: AbortSignal;
+  /** Wall clock left in the run, on the runner's own clock. The bash tool
+   *  clips a command's budget to it (minus the write-up reserve), so one
+   *  command can never outlive the run. Absent → no clipping (a tool used
+   *  outside a run). */
+  remainingMs?: () => number;
   /** Replace the user-facing progress checklist on the status card. */
   reportProgress?: (checklist: string) => void;
   /** Web fetch + search capability (Area 5). Injected by the dispatcher;
@@ -95,7 +101,8 @@ export const bashTool: RunnableTool = {
   description:
     "Run a bash command in the workspace directory. Use for git, gh, tests, builds, and inspecting files. " +
     "Commands time out after 5 minutes (300000 ms) by default; pass timeoutMs when a command legitimately needs " +
-    "longer — a full test suite, a large build — up to the 1200000 ms (20 minute) maximum. " +
+    "longer — a full test suite, a large build — up to the 1200000 ms (20 minute) maximum; a command is " +
+    "also clipped to the run's own remaining time, so it can never outlive the run. " +
     "Output is truncated at 30k characters.",
   inputSchema: {
     type: "object",
@@ -110,21 +117,34 @@ export const bashTool: RunnableTool = {
     },
     required: ["command"],
   },
-  run(input, ctx) {
+  async run(input, ctx) {
     // A finite number is clamped to [1s, 20 min] (clampBashTimeout); anything
     // else is dropped so executors run on the 5-minute default — no timeoutMs
     // in the input is byte-for-byte the pre-timeoutMs call.
     const requested = input.timeoutMs;
+    let timeoutMs =
+      typeof requested === "number" && Number.isFinite(requested) ? clampBashTimeout(requested) : undefined;
+    // …then clipped to the run's remaining wall clock (features/execution.md
+    // item 12): a command may never outlive the run it serves, and inside the
+    // write-up reserve nothing starts at all.
+    let clipNote = "";
+    if (ctx.remainingMs) {
+      const budget = bashBudgetWithinRun(timeoutMs ?? BASH_TIMEOUT_MS, ctx.remainingMs());
+      if (budget.kind === "exhausted") return `exit 124:\n${budget.note}`;
+      if (budget.kind === "clipped") {
+        timeoutMs = budget.timeoutMs;
+        clipNote = budget.note;
+      }
+    }
     const opts: ExecOptions = {
       ...(ctx.signal ? { signal: ctx.signal } : {}),
-      ...(typeof requested === "number" && Number.isFinite(requested)
-        ? { timeoutMs: clampBashTimeout(requested) }
-        : {}),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     };
-    return ctx.executor.exec(
+    const out = await ctx.executor.exec(
       String(input.command ?? ""),
       opts.signal !== undefined || opts.timeoutMs !== undefined ? opts : undefined,
     );
+    return clipNote ? `${out}\n${clipNote}` : out;
   },
 };
 

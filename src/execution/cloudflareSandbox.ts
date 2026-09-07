@@ -13,8 +13,12 @@ export interface CloudflareSandboxOptions {
   /** Bearer token shared with the Worker (SANDBOX_TOKEN secret). */
   token: string;
   threadKey: string;
-  /** env vars forwarded into the sandbox (e.g. GH_TOKEN) */
-  envs: Record<string, string>;
+  /** Env vars forwarded into the sandbox (e.g. GH_TOKEN), resolved on EVERY
+   *  call — the Worker injects them inline per command, so each command
+   *  carries the credential current at its own start, never one captured
+   *  when the run began (2026-09-07: a run-start token expired under a
+   *  20-minute first command and every later command carried it dead). */
+  resolveEnvs: () => Promise<Record<string, string>>;
   /** resident repo/ref context — reserved for resident environments (not yet used) */
   repo?: string;
   ref?: string;
@@ -33,7 +37,7 @@ export class CloudflareSandboxExecutor implements Executor {
       authorization: `Bearer ${this.opts.token}`,
       "x-thread-key": this.opts.threadKey,
     };
-    for (const [k, v] of Object.entries(this.opts.envs)) headers[`x-env-${k}`] = v;
+    for (const [k, v] of Object.entries(await this.opts.resolveEnvs())) headers[`x-env-${k}`] = v;
 
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
     const delays = [0, 3000, 6000, 12000];

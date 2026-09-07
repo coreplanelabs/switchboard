@@ -30,15 +30,20 @@ export interface E2BOptions {
   timeoutMs: number;
   /** JSON file persisting threadKey -> sandboxId */
   statePath: string;
-  /** env vars injected into the sandbox (e.g. GH_TOKEN) */
-  envs: Record<string, string>;
+  /** Env vars for the sandbox (e.g. GH_TOKEN), resolved on EVERY command: the
+   *  micro-VM's creation-time env would otherwise carry the token minted for
+   *  the thread's first command for the sandbox's whole (reusable) life. */
+  resolveEnvs: () => Promise<Record<string, string>>;
   /** resident repo/ref context — reserved for resident environments (not yet used) */
   repo?: string;
   ref?: string;
 }
 
 export class E2BExecutor implements Executor {
-  private constructor(private sbx: Sandbox) {}
+  private constructor(
+    private sbx: Sandbox,
+    private resolveEnvs: () => Promise<Record<string, string>>,
+  ) {}
 
   static async open(opts: E2BOptions): Promise<E2BExecutor> {
     const state = readState(opts.statePath);
@@ -48,7 +53,7 @@ export class E2BExecutor implements Executor {
       try {
         const sbx = await Sandbox.connect(existing, { apiKey: opts.apiKey });
         await sbx.setTimeout(opts.timeoutMs);
-        return new E2BExecutor(sbx);
+        return new E2BExecutor(sbx, opts.resolveEnvs);
       } catch {
         // expired or gone — fall through and create a fresh one
         delete state[opts.threadKey];
@@ -58,14 +63,14 @@ export class E2BExecutor implements Executor {
     const sbx = await Sandbox.create({
       apiKey: opts.apiKey,
       timeoutMs: opts.timeoutMs,
-      envs: opts.envs,
+      envs: await opts.resolveEnvs(),
     });
     await sbx.commands.run(SETUP, { timeoutMs: 3 * 60_000 }).catch(() => {
       // gh install is best-effort; agents report failures via tool output
     });
     state[opts.threadKey] = sbx.sandboxId;
     writeState(opts.statePath, state);
-    return new E2BExecutor(sbx);
+    return new E2BExecutor(sbx, opts.resolveEnvs);
   }
 
   /** The e2b command API takes no AbortSignal, so a hard run stop (#101)
@@ -75,7 +80,8 @@ export class E2BExecutor implements Executor {
    *  honored — it maps onto the SDK's own command timeout. */
   async exec(command: string, opts?: ExecOptions): Promise<string> {
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
-    const result = await this.sbx.commands.run(command, { cwd: WORKDIR, timeoutMs }).catch((err: unknown) => {
+    const envs = await this.resolveEnvs();
+    const result = await this.sbx.commands.run(command, { cwd: WORKDIR, timeoutMs, envs }).catch((err: unknown) => {
       const e = err as { name?: string; exitCode?: number; stdout?: string; stderr?: string; message?: string };
       // The SDK's deadline kill throws TimeoutError with no exit code —
       // render it as exit 124 naming the limit that fired, so the model can

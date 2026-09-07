@@ -1,9 +1,11 @@
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
 
-// Feature: features/execution.md — GitHub App identity: 1-hour installation
-// tokens minted on demand, cached until 5 minutes before expiry, falling back
-// to a static GH_TOKEN (or nothing) when the App isn't configured.
+// Feature: features/execution.md item 5 — GitHub App identity: 1-hour
+// installation tokens minted on demand, reused only while they have at least
+// TOKEN_REUSE_MARGIN_MS of life left (the longest single command plus slack),
+// falling back to a static GH_TOKEN (or nothing) when the App isn't configured.
 //
 // The module keeps its token cache in module state, so each test imports a
 // fresh copy via vi.resetModules() + dynamic import.
@@ -128,15 +130,36 @@ describe("resolveGithubToken", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2); // one mint each, then cache hits
   });
 
-  it("re-mints when the cached token is within 5 minutes of expiry", async () => {
-    configureApp();
-    const fetchMock = mockMint("ghs_shortlived", 4 * 60_000); // < 5-min buffer
-    vi.stubGlobal("fetch", fetchMock);
+  // 2026-09-07 (review of #521): a token minted 51 minutes earlier was handed
+  // to a run whose first command then took the full 20-minute ceiling — the
+  // token expired under it and every later command got 401 Bad credentials.
+  // The reuse margin must cover the longest single command plus slack, so a
+  // command that STARTS on a token always FINISHES on it.
+  it("the reuse margin covers the longest single command (BASH_TIMEOUT_MAX_MS) plus slack", async () => {
     const mod = await freshModule();
+    expect(mod.TOKEN_REUSE_MARGIN_MS).toBeGreaterThanOrEqual(BASH_TIMEOUT_MAX_MS + 5 * 60_000);
+  });
+
+  it("re-mints when the cached token has less than the reuse margin left", async () => {
+    configureApp();
+    const mod = await freshModule();
+    const fetchMock = mockMint("ghs_shortlived", mod.TOKEN_REUSE_MARGIN_MS - 60_000);
+    vi.stubGlobal("fetch", fetchMock);
 
     await mod.resolveGithubToken();
     await mod.resolveGithubToken();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reuses the cached token while it still has at least the reuse margin left", async () => {
+    configureApp();
+    const mod = await freshModule();
+    const fetchMock = mockMint("ghs_fresh", mod.TOKEN_REUSE_MARGIN_MS + 60_000);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await mod.resolveGithubToken();
+    await mod.resolveGithubToken();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces mint failures with the HTTP status", async () => {

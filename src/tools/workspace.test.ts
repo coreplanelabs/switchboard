@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { RUN_DEADLINE_RESERVE_MS } from "../execution/bashTimeout.js";
 import type { ExecOptions, Executor } from "../execution/executor.js";
 import type { PrDescription } from "../core/prDescription.js";
 import {
@@ -519,6 +520,45 @@ describe("bash tool timeoutMs", () => {
     expect(seen[0].opts?.timeoutMs).toBeUndefined();
     await bashTool.run({ command: "ls", timeoutMs: Number.NaN }, ctx);
     expect(seen[1].opts?.timeoutMs).toBeUndefined();
+  });
+
+  // Feature: features/execution.md item 12 — a command's budget is clipped to
+  // the run's remaining wall clock minus a reserve for the write-up. 2026-09-07
+  // (review of #521): one 20-minute command consumed 80% of a 25-minute review
+  // budget; the model had ~4 minutes left to recover and none to review.
+  describe("clipped to the run's remaining wall clock", () => {
+    it("plenty of run left changes nothing: the request passes through and no request stays no request", async () => {
+      const { seen, ctx } = capturing();
+      const far = { ...ctx, remainingMs: () => 30 * 60_000 };
+      await bashTool.run({ command: "npm test", timeoutMs: 600_000 }, far);
+      expect(seen[0].opts?.timeoutMs).toBe(600_000);
+      await bashTool.run({ command: "ls" }, far);
+      expect(seen[1].opts?.timeoutMs).toBeUndefined();
+    });
+
+    it("little run left clips a requested budget to what is left minus the reserve, and says so", async () => {
+      const { seen, ctx } = capturing();
+      const near = { ...ctx, remainingMs: () => 90_000 };
+      const out = await bashTool.run({ command: "npm test", timeoutMs: 600_000 }, near);
+      expect(seen[0].opts?.timeoutMs).toBe(90_000 - RUN_DEADLINE_RESERVE_MS);
+      expect(String(out)).toContain("clipped");
+    });
+
+    it("little run left also clips the 5-minute default, which the executor would otherwise apply", async () => {
+      const { seen, ctx } = capturing();
+      const near = { ...ctx, remainingMs: () => 90_000 };
+      await bashTool.run({ command: "ls" }, near);
+      expect(seen[0].opts?.timeoutMs).toBe(90_000 - RUN_DEADLINE_RESERVE_MS);
+    });
+
+    it("inside the reserve nothing runs: the tool refuses legibly instead of starting a command that cannot finish", async () => {
+      const { seen, ctx } = capturing();
+      const spent = { ...ctx, remainingMs: () => RUN_DEADLINE_RESERVE_MS + 500 };
+      const out = await bashTool.run({ command: "npm test" }, spent);
+      expect(seen).toHaveLength(0);
+      expect(String(out)).toMatch(/^exit 124:/);
+      expect(String(out)).toContain("run budget");
+    });
   });
 
   it("still forwards the hard-stop signal alongside timeoutMs", async () => {

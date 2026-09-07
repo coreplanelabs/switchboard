@@ -6,6 +6,7 @@ import type { Executor } from "./execution/executor.js";
 import { ExecInfraError } from "./execution/executor.js";
 import type { RunEvent } from "./core/runEvents.js";
 import { runAgent } from "./runner.js";
+import type { RunnableTool } from "./tools/workspace.js";
 import { InMemorySkillStore } from "./skills/index.js";
 import { FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
 
@@ -76,6 +77,37 @@ describe("runAgent budgets", () => {
       toolContext: { executor: fakeExecutor },
     });
     expect(answer).toBe("all done");
+  });
+
+  // Feature: features/execution.md item 12 — tools learn the run's remaining
+  // wall clock (on the runner's own clock) so the bash tool can clip a command
+  // that would otherwise outlive the run.
+  it("hands tools the run's remaining wall clock (maxMinutes at the start)", async () => {
+    let seen: number | undefined;
+    const probe: RunnableTool = {
+      name: "probe",
+      description: "records the remaining wall clock it was handed",
+      inputSchema: { type: "object", properties: {} },
+      run: async (_input, ctx) => {
+        seen = ctx.remainingMs?.();
+        return "ok";
+      },
+    };
+    const t = 1_700_000_000_000;
+    const provider = scripted([
+      { content: [{ type: "tool_use", id: "p1", name: "probe", input: {} }], stopReason: "tool_use" },
+      text("done"),
+    ]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxMinutes: 25 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      extraTools: [probe],
+      now: () => t,
+    });
+    expect(seen).toBe(25 * 60_000);
   });
 
   it("forces a write-up labeled with the turn budget when turns run out", async () => {

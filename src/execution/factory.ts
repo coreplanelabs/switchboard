@@ -359,13 +359,12 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: Executor
     const apiKeyEnv = opts.execution?.apiKeyEnv ?? "E2B_API_KEY";
     const apiKey = process.env[apiKeyEnv];
     if (!apiKey) throw new Error(`execution.type is "e2b" but ${apiKeyEnv} is not set`);
-    const envs = await githubEnvs(ctx.agent);
     return E2BExecutor.open({
       apiKey,
       threadKey,
       timeoutMs: (opts.execution?.timeoutMinutes ?? 30) * 60_000,
       statePath: resolve(opts.dataDir, "sandboxes.json"),
-      envs,
+      resolveEnvs: () => githubEnvs(ctx.agent),
       repo: ctx.repo,
       ref: ctx.ref,
     });
@@ -378,12 +377,11 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: Executor
     const apiKeyEnv = opts.execution.apiKeyEnv ?? "SANDBOX_TOKEN";
     const token = process.env[apiKeyEnv];
     if (!token) throw new Error(`execution.type is "cloudflare" but ${apiKeyEnv} is not set`);
-    const envs = await githubEnvs(ctx.agent);
     return new CloudflareSandboxExecutor({
       url: opts.execution.url,
       token,
       threadKey,
-      envs,
+      resolveEnvs: () => githubEnvs(ctx.agent),
       repo: ctx.repo,
       ref: ctx.ref,
     });
