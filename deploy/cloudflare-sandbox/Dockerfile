@@ -4,17 +4,18 @@
 # (no 'latest' tag exists) — bump both together.
 FROM docker.io/cloudflare/sandbox:0.12.9
 USER root
-# The SDK's container server kills any command after COMMAND_TIMEOUT_MS
-# (default 30s) — far too short for clones, installs, and test runs. worker.ts
-# passes no per-call timeout (the SDK honours one since 0.7.15), so this env
-# var is the container-level lever.
+# The SDK's container server kills any command after COMMAND_TIMEOUT_MS. On
+# 0.12.x the default is unlimited (unset → no limit; 0.3.x defaulted to 30s),
+# a per-exec `timeout` option wins over it, and a kill by it lands as a normal
+# result with a synthetic exit code (143/137), not a rejection. worker.ts
+# passes no per-call timeout, so this env var is the container-level lever.
 # Pure BACKSTOP: the real per-command limit is coreutils `timeout` in
 # worker.ts (280s default, raisable per call via the bash tool's timeoutMs up
 # to the 20-min ceiling BASH_TIMEOUT_MAX_MS), which yields a genuine exit 124
 # through the normal result path. This sits 40s above the 20-min ceiling so it
-# never wins the race (the SDK's rejection surfaces only a useless generic
-# error). Bump alongside BASH_TIMEOUT_MAX_MS (src/execution/bashTimeout.ts);
-# changing it requires a container rebuild + redeploy.
+# never wins the race. Bump alongside BASH_TIMEOUT_MAX_MS
+# (src/execution/bashTimeout.ts); changing it requires a container rebuild +
+# redeploy.
 ENV COMMAND_TIMEOUT_MS=1240000
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git curl ca-certificates \

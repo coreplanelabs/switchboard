@@ -19,24 +19,34 @@ import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashT
 import {
   EXEC_KEEPALIVE_INTERVAL_MS,
   SANDBOX_SLEEP_AFTER,
+  isRecycleError,
   recycledMidCommandMessage,
   withActivityKeepalive,
 } from "../../src/execution/sandboxKeepalive.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
-import { fleetBusyAnswer, fleetBusyExecAnswer, isFleetBusy } from "../../src/execution/sandboxErrors.js";
+import {
+  fleetBusyAnswer,
+  fleetBusyExecAnswer,
+  isContainerStarting,
+  isFleetBusyError,
+  thrownShape,
+} from "../../src/execution/sandboxErrors.js";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 
 export class SwitchboardSandbox extends Sandbox {
-  // Idle lifetime of a thread's container. The base class renews its activity
-  // clock once per proxied fetch and its alarm loop SIGTERMs the container
-  // the moment the clock expires, in-flight request or not — so on 2026-09-07
-  // the #521 review's first command (a 20-minute budget under the SDK's
-  // 20-minute default) was killed at 20:00 exactly, surfaced as "Command
-  // execution failed", and the next command found a fresh container with an
-  // empty /workspace. `exec` below renews the clock every minute while a
-  // command runs, which makes this a true idle timeout (features/execution.md
-  // item 2); 5 minutes of idle frees the slot far sooner than 20 while a
-  // prompt follow-up still reuses the warm workspace.
+  // Idle lifetime of a thread's container (the SDK's own default is 10 min on
+  // 0.12.x, 20 on 0.3.x). On the 0.0.28 containers base the activity clock was
+  // renewed once per proxied fetch and the alarm loop SIGTERMed the container
+  // the moment it expired, in-flight request or not — so on 2026-09-07 the
+  // #521 review's first command (a 20-minute budget under a 20-minute default)
+  // was killed at 20:00 exactly, surfaced as "Command execution failed", and
+  // the next command found a fresh container with an empty /workspace. `exec`
+  // below renews the clock every minute while a command runs, which makes
+  // this a true idle timeout (features/execution.md item 2). The 0.3.x
+  // containers base tracks in-flight requests itself, so the keepalive is now
+  // belt-and-braces — kept until the live long-command receipt (#228). 5
+  // minutes of idle frees the slot sooner while a prompt follow-up still
+  // reuses the warm workspace.
   sleepAfter = SANDBOX_SLEEP_AFTER;
 
   override async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
@@ -47,34 +57,35 @@ export class SwitchboardSandbox extends Sandbox {
     );
   }
 
-  // The SDK (observed on 0.3.x; kept through 0.12.9) caches its default
-  // ExecutionSession in Durable Object memory
-  // (`private defaultSession`), but the session itself lives in the
-  // container's memory. When the container restarts under a live DO (image
-  // rollout, crash, sleep/wake), every subsequent call fails with
-  // "Session '<id>' not found" forever — the SDK never invalidates the cache.
-  // Clearing it makes the next call recreate the session on the fresh
-  // container. The workspace disk is gone either way; repos re-clone — the
-  // same graceful degradation as an expired E2B sandbox.
+  // A fence from the 0.3.x days, kept until the live container-restart receipt
+  // (#228) retires it: 0.3.x cached its default ExecutionSession in Durable
+  // Object memory while the session lived in the container, so a container
+  // restart under a live DO (image rollout, crash, sleep/wake) made every later
+  // call fail with "Session '<id>' not found" forever. 0.12.x persists the
+  // session id in DO storage, clears it itself in `onStop`, and its container
+  // recreates a missing session on the next exec — so this should never run;
+  // if it does, nulling the cached id only makes the SDK recreate the session,
+  // which is what it would have done anyway. The workspace disk is gone either
+  // way; repos re-clone — the same graceful degradation as an expired E2B
+  // sandbox.
   resetDefaultSession(): void {
     (this as unknown as { defaultSession: unknown }).defaultSession = null;
   }
 }
 
-// Stale-session detection. /exec throws the container's literal
-// "Session '<id>' not found". /read and /write cannot: the SDK's file handler
-// (container_src/handler/file.ts, createServerErrorResponse) buries that text
-// in a `message` field the client discards, and throws only a generic
-// "Failed to read file" / "Failed to write file". Treat those as potentially
-// stale too — reads are pure and a same-content rewrite is idempotent, so a
-// one-shot reset+retry is safe even when the real cause was something else
-// (the retry then fails identically and the error propagates).
+/** The 0.3.x stale-session text; see `resetDefaultSession`. */
 const STALE_SESSION = /session '[^']*' not found/i;
-const STALE_FILE_OP = /^failed to (read|write) file/i;
 
-/** Run a sandbox call; on a (possibly) stale-session error, reset the cached
- *  session and retry once. Safe to retry: the session lookup fails before the
- *  command or file op ever executes. */
+/** Run a sandbox call and retry it ONCE when the failure says nothing ran: a
+ *  stale session (0.3.x; reset the cached id first) or a container still
+ *  booting (0.12.x's "Container is starting. Please retry in a moment.", after
+ *  a short pause). Both fail before the command or file op executes, so the
+ *  re-send is safe by construction. Anything else propagates: a failure whose
+ *  command MAY have run (a session shell that exited mid-command, a container
+ *  that stopped under the call) is never re-run here — /exec names it a
+ *  recycle instead (features/execution.md item 9). */
+const CONTAINER_STARTING_RETRY_DELAY_MS = 3_000;
+
 async function withSessionRecovery<T>(
   sandbox: { resetDefaultSession(): void | Promise<void> },
   fn: () => Promise<T>,
@@ -82,10 +93,16 @@ async function withSessionRecovery<T>(
   try {
     return await fn();
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (!STALE_SESSION.test(msg) && !STALE_FILE_OP.test(msg)) throw err;
-    await sandbox.resetDefaultSession();
-    return await fn();
+    const { message } = thrownShape(err);
+    if (message && STALE_SESSION.test(message)) {
+      await sandbox.resetDefaultSession();
+      return await fn();
+    }
+    if (isContainerStarting(err)) {
+      await new Promise((r) => setTimeout(r, CONTAINER_STARTING_RETRY_DELAY_MS));
+      return await fn();
+    }
+    throw err;
   }
 }
 
@@ -128,15 +145,18 @@ export default {
     const threadKey = request.headers.get("x-thread-key");
     if (!threadKey) return json({ error: "missing X-Thread-Key" }, 400);
 
-    // One sandbox per thread; the DO name is the thread key. getSandbox's
-    // typing is fixed to the base Sandbox class — cast the stub so the
-    // subclass's resetDefaultSession is callable over RPC.
-    const sandbox = getSandbox(
-      env.Sandbox as unknown as Parameters<typeof getSandbox>[0],
-      threadKey,
-    ) as unknown as DurableObjectStub<SwitchboardSandbox>;
+    // One sandbox per thread; the DO name is the thread key. getSandbox is
+    // generic over the namespace's class since 0.12, so the subclass's
+    // resetDefaultSession is callable over RPC without a cast.
+    const sandbox = getSandbox(env.Sandbox, threadKey);
 
-    // Optional env passthrough (e.g. GH_TOKEN) — set on the sandbox process env.
+    // Optional env passthrough (e.g. GH_TOKEN). It rides in the SDK's per-exec
+    // `env` option, which the container applies to that one command and
+    // restores afterwards (0.12.x; 0.3.7 ignored it, so the value used to be
+    // an inline base64 `export` prefix — which put the live GH_TOKEN into every
+    // "Command executed" line the SDK logs, #447). Nothing persists in the
+    // sandbox beyond the command's lifetime, and the command text the SDK
+    // logs never carries a credential.
     const envVars: Record<string, string> = {};
     for (const [k, v] of request.headers.entries()) {
       if (k.toLowerCase().startsWith("x-env-")) envVars[k.slice(6).toUpperCase()] = v;
@@ -144,15 +164,6 @@ export default {
 
     const url = new URL(request.url);
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-
-    // Env injection is inline per command (base64-safe export prefix): the
-    // per-exec `env` option was ignored in SDK 0.3.7 (#447 tracks whether 0.12
-    // honours it), and setEnvVars only
-    // applies when a session is first created — inline is correct every time
-    // and persists nothing in the sandbox beyond the command's lifetime.
-    const envPrefix = Object.entries(envVars)
-      .map(([k, v]) => `export ${k}="$(echo '${btoa(v)}' | base64 -d)" && `)
-      .join("");
 
     try {
       switch (url.pathname) {
@@ -188,8 +199,13 @@ export default {
             typeof requested === "number" && Number.isFinite(requested)
               ? Math.ceil(clampBashTimeout(requested) / 1000)
               : EXEC_TIMEOUT_SECS;
-          const full = `${envPrefix}mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${String(body.command ?? "")}`;
-          return streamExec(sandbox, `timeout -k 10 ${execTimeoutSecs} bash -c ${shellQuote(full)}`, execTimeoutSecs);
+          const full = `mkdir -p ${WORKDIR} && cd ${WORKDIR} && ${String(body.command ?? "")}`;
+          return streamExec(
+            sandbox,
+            `timeout -k 10 ${execTimeoutSecs} bash -c ${shellQuote(full)}`,
+            { env: envVars },
+            execTimeoutSecs,
+          );
         }
         case "/read": {
           const file = await withSessionRecovery(sandbox, () => sandbox.readFile(abs(String(body.path ?? ""))));
@@ -205,13 +221,13 @@ export default {
           return json({ error: "unknown route" }, 404);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = thrownShape(err).message ?? String(err);
       // A full fleet (features/execution.md item 14): the SDK could not get a
       // container instance for this thread's Durable Object, so no session
       // exists and the file op never started — re-sending is safe by
       // construction. Named so the executor waits instead of reading it as a
       // dead sandbox; 503 because that is what it is.
-      if (isFleetBusy(msg)) return json(fleetBusyAnswer(msg), 503);
+      if (isFleetBusyError(err)) return json(fleetBusyAnswer(msg), 503);
       return json({ error: msg }, 500);
     }
   },
@@ -225,9 +241,10 @@ export default {
 function streamExec(
   sandbox: {
     resetDefaultSession(): void | Promise<void>;
-    exec(command: string): Promise<{ stdout?: string; stderr?: string; exitCode?: number }>;
+    exec(command: string, options?: ExecOptions): Promise<{ stdout?: string; stderr?: string; exitCode?: number }>;
   },
   command: string,
+  options: ExecOptions,
   execTimeoutSecs: number,
 ): Response {
   const encoder = new TextEncoder();
@@ -255,7 +272,7 @@ function streamExec(
       };
       withSessionRecovery(sandbox, () => {
         attemptStartedAt = Date.now();
-        return sandbox.exec(command);
+        return sandbox.exec(command, options);
       })
         .then((result) => {
           const exitCode = result.exitCode ?? 0;
@@ -274,21 +291,24 @@ function streamExec(
           });
         })
         .catch((err: unknown) => {
-          const raw = err instanceof Error ? err.message : String(err);
+          const shape = thrownShape(err);
+          const raw = shape.message ?? String(err);
           // A full fleet (features/execution.md item 14): session creation
           // failed because no container instance was free, so the command
           // never started — re-sending it is safe by construction. The named
           // `reason` is what the executor waits on; the dual shape below is
           // kept so an older executor still renders it as exit 127.
-          if (isFleetBusy(raw)) {
+          if (isFleetBusyError(err)) {
             finish(fleetBusyExecAnswer(raw));
             return;
           }
-          // A recycle-shaped failure minutes into this attempt means the
-          // container was replaced under the command (features/execution.md
-          // item 2) — say so, and that /workspace is gone. Still exit 127:
-          // the workspace really is gone.
-          const msg = recycledMidCommandMessage(Date.now() - attemptStartedAt, raw);
+          // The container was replaced under the command (features/execution.md
+          // item 2): certain when the SDK says so with a typed error, inferred
+          // when a recycle-shaped text arrives minutes into this attempt. Say
+          // so, and that /workspace is gone. Still exit 127: the workspace
+          // really is gone.
+          const certain = shape.name !== undefined && isRecycleError({ name: shape.name });
+          const msg = recycledMidCommandMessage(Date.now() - attemptStartedAt, raw, certain);
           // Carry the failure in BOTH shapes so rollout order can't create
           // a silent-success window: a new executor throws on `error`, and
           // an executor that predates in-body errors (only checks exitCode)

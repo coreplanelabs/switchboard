@@ -11,8 +11,9 @@
 // package.json pin to be exact and equal to the Dockerfile tag. Bump them
 // together, then deploy and validate (#498). Dependabot ignores both sides.
 
-import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** The Workers whose image and SDK must agree. */
 export const PAIRS = [
@@ -64,16 +65,61 @@ export function pairMismatches(pairs) {
   return problems;
 }
 
+/** Pure: the problems for a set of `{ label, sdkPin, installed }` pairs, where
+ *  `installed` is the version of the SDK actually present under the Worker's
+ *  node_modules (null when nothing is installed — a fresh clone before
+ *  `npm ci`, which is not a mismatch). The pin and the lockfile can agree
+ *  while the tree on disk is something else: the main checkout carried a
+ *  nested 0.12.9 install against a 0.3.7 pin (#553), and wrangler bundles
+ *  whatever is installed. */
+export function installMismatches(pairs) {
+  const problems = [];
+  for (const { label, sdkPin: pin, installed } of pairs) {
+    if (installed === null || pin === null) continue;
+    if (installed !== pin) {
+      problems.push({
+        label,
+        reason: `${SDK} ${installed} is installed under the Worker but package.json pins ${pin} — run \`npm ci\` before deploying`,
+      });
+    }
+  }
+  return problems;
+}
+
+/** The repository root, anchored to this script's location — never the
+ *  process's working directory, so the check reads the same tree from `npm
+ *  run`, CI, or a shell in any subdirectory. */
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** The installed `@cloudflare/sandbox` version a Worker would bundle, by
+ *  Node's own resolution: its nested node_modules first (npm nests a
+ *  workspace's divergent pin there), else the repository root's hoisted copy
+ *  (what a Worker whose pin matches the root resolves to), else null. */
+export function installedSdkVersion(manifestPath) {
+  if (!existsSync(manifestPath)) return null;
+  const dir = dirname(manifestPath);
+  for (const candidate of [
+    join(dir, "node_modules", SDK, "package.json"),
+    join(REPO_ROOT, "node_modules", SDK, "package.json"),
+  ]) {
+    if (existsSync(candidate)) return JSON.parse(readFileSync(candidate, "utf8")).version ?? null;
+  }
+  return null;
+}
+
 function main() {
+  // Every path is repo-root-relative and resolved against REPO_ROOT, so the
+  // check reads the same tree whatever the working directory is.
   const observed = PAIRS.map(({ label, dockerfile, manifest }) => ({
     label,
-    imageTag: imageTag(readFileSync(dockerfile, "utf8")),
-    sdkPin: sdkPin(JSON.parse(readFileSync(manifest, "utf8"))),
+    imageTag: imageTag(readFileSync(join(REPO_ROOT, dockerfile), "utf8")),
+    sdkPin: sdkPin(JSON.parse(readFileSync(join(REPO_ROOT, manifest), "utf8"))),
+    installed: installedSdkVersion(join(REPO_ROOT, manifest)),
   }));
-  const problems = pairMismatches(observed);
+  const problems = [...pairMismatches(observed), ...installMismatches(observed)];
   if (problems.length === 0) {
     console.log(
-      `check:sandbox-pair ok — ${observed.map((o) => `${o.label} ${o.imageTag}`).join(", ")}: image tag and ${SDK} pin agree`,
+      `check:sandbox-pair ok — ${observed.map((o) => `${o.label} ${o.imageTag}${o.installed ? ` (installed ${o.installed})` : ""}`).join(", ")}: image tag, ${SDK} pin and the installed SDK agree`,
     );
     return;
   }

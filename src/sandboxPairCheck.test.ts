@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { PAIRS, imageTag, pairMismatches, sdkPin } from "../scripts/check-sandbox-pair.mjs";
+import {
+  PAIRS,
+  imageTag,
+  installMismatches,
+  installedSdkVersion,
+  pairMismatches,
+  sdkPin,
+} from "../scripts/check-sandbox-pair.mjs";
 
 // The image/SDK gate's decision, and the repository's own Workers against it.
 // A Worker built on the cloudflare/sandbox image drives its container through
@@ -69,6 +76,37 @@ describe("check-sandbox-pair pairMismatches", () => {
   });
 });
 
+// #553: the pin and the lockfile agreed on 0.3.7 while the main checkout's
+// nested node_modules held 0.12.9 — wrangler bundles what is INSTALLED, so a
+// deploy from that tree would have shipped an SDK the image did not speak.
+describe("check-sandbox-pair installMismatches", () => {
+  it("passes when the installed SDK equals the pin, and when nothing is installed yet (a fresh clone)", () => {
+    expect(
+      installMismatches([
+        { label: "a", sdkPin: "0.12.9", installed: "0.12.9" },
+        { label: "b", sdkPin: "0.13.0-next.751.1", installed: null },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("fails an installed SDK that differs from the pin and says how to fix it", () => {
+    const problems = installMismatches([{ label: "cold", sdkPin: "0.3.7", installed: "0.12.9" }]);
+    expect(problems).toHaveLength(1);
+    expect(problems[0].reason).toContain("0.12.9 is installed");
+    expect(problems[0].reason).toContain("pins 0.3.7");
+    expect(problems[0].reason).toContain("npm ci");
+  });
+
+  it("reads the version a Worker would bundle: its nested install first, else the root's", () => {
+    // this repository: the cold sandbox nests its own pin; the resident's is hoisted
+    const cold = installedSdkVersion("deploy/cloudflare-sandbox/package.json");
+    const resident = installedSdkVersion("deploy/cloudflare-resident/package.json");
+    expect(cold === null || /^\d/.test(cold)).toBe(true);
+    expect(resident === null || /^\d/.test(resident)).toBe(true);
+    expect(installedSdkVersion("does/not/exist/package.json")).toBeNull();
+  });
+});
+
 describe("the repository's sandbox-image Workers", () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const read = (p: string) => readFileSync(new URL(p, `file://${root}`), "utf8");
@@ -77,12 +115,14 @@ describe("the repository's sandbox-image Workers", () => {
     expect(PAIRS.map((p) => p.label).sort()).toEqual(["deploy/cloudflare-resident", "deploy/cloudflare-sandbox"]);
   });
 
-  it("pin @cloudflare/sandbox to exactly the image tag they build FROM", () => {
+  it("pin @cloudflare/sandbox to exactly the image tag they build FROM, and the installed SDK matches", () => {
     const observed = PAIRS.map(({ label, dockerfile, manifest }) => ({
       label,
       imageTag: imageTag(read(dockerfile)),
       sdkPin: sdkPin(JSON.parse(read(manifest)) as Parameters<typeof sdkPin>[0]),
+      installed: installedSdkVersion(new URL(manifest, `file://${root}`).pathname),
     }));
     expect(pairMismatches(observed)).toEqual([]);
+    expect(installMismatches(observed)).toEqual([]);
   });
 });
