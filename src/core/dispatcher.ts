@@ -483,11 +483,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // anything slow (the setup card, repo resolution, the executor attach), so
     // no window exists in which two runs can attach the same per-thread
     // workspace. A thread with a run in flight either folds this message into
-    // that run (its inbox; the runner reads it at the next step boundary) or
-    // refuses it with a pointer to the live run — a different agent asked for
-    // explicitly, or an agent whose run takes no mid-flight input. Either way
+    // that run (its inbox; the runner reads it at the next step boundary — for
+    // a ship run, the child round in flight) or refuses it with a pointer to
+    // the live run when a DIFFERENT agent was asked for explicitly. Either way
     // this dispatch ends here: no card, no run, no workspace.
-    const claim = admission.claim(msg.threadKey, { agent: agent.name, policy: agent.followUps ?? "steer" });
+    const claim = admission.claim(msg.threadKey, { agent: agent.name });
     if (claim.kind === "live") {
       // The gate above ran against THIS message's resolved agent; a steered
       // follow-up is read by the LIVE agent, so its sender must be allowed to
@@ -504,7 +504,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         console.log(
           `[dispatch] ${msg.threadKey} follow-up refused (${decision.reason}): ${claim.live.agent} run in flight`,
         );
-        await io.reply(refusalReply(claim.live, decision, directives.agent, Date.now()));
+        await io.reply(refusalReply(claim.live, decision, Date.now()));
         return;
       }
       claim.live.inbox.push({
@@ -1816,6 +1816,7 @@ async function runShipBranch(
       threadKey: msg.threadKey,
       caps: resolveShipCaps(deps.config.config.ship),
       control: run.control,
+      inbox: ctx.live.inbox, // thread follow-ups steered into this run reach the child round in flight (thread-admission item 2)
       onEvent,
       onProgress,
       reportProgress,

@@ -6783,6 +6783,55 @@ workspaceDir: __WORKDIR__
     expect(AGENTS.review.maxMinutes).toBe(25);
   });
 
+  it("a thread reply during a ship run is folded into the live child round, and every child runs on the thread's ONE inbox (ship steers like every agent)", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const inner = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const second = fakeIO();
+    let calls = 0;
+    // The thread reply lands while the coding child's FIRST model call is in
+    // flight: the second dispatch runs to completion inside that call.
+    const provider: Provider & { requests: CompletionRequest[] } = {
+      name: "fake",
+      requests: inner.requests,
+      async complete(req) {
+        if (calls++ === 0) await dispatch(deps, msg("also add a changelog entry", "slack:UADMIN"), second.io);
+        return inner.complete(req);
+      },
+    };
+    const { deps } = shipDeps(provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    queueWorkspaces(
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+    );
+    const { io } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    // No rival run: the reply got the steer ack naming the ship run, not a card.
+    expect(second.statuses).toEqual([]);
+    expect(second.replies).toEqual([expect.stringMatching(/^↪ Folded into the \*ship\* run already in flight/)]);
+    expect(second.replies[0]).toContain(" · https://sb.example/runs/r1?t=t");
+    // The coding child read it on its next turn, after its tool results...
+    const codingSecond = inner.requests[1].messages.at(-1)!;
+    expect(codingSecond.role).toBe("user");
+    expect(JSON.stringify(codingSecond.content)).toContain("also add a changelog entry");
+    // ...and every child round runs on the thread's one inbox, so a reply that
+    // lands between rounds reaches the next child instead of a rival run.
+    const runs = vi.mocked(runAgent).mock.calls.map((c) => c[0]);
+    expect(runs).toHaveLength(2);
+    expect(runs[0].inbox).toBeDefined();
+    expect(runs[1].inbox).toBe(runs[0].inbox);
+    // On the one run record: the follow-up as an `input` under the request.
+    const events = registry.snapshotById("r1")?.events ?? [];
+    expect(events).toContainEqual(expect.objectContaining({ type: "input", text: "also add a changelog entry" }));
+    expect(deps.admission!.size).toBe(0); // released
+  });
+
   it("reservation check: a round is refused when the remaining budget cannot hold a useful child, before the deadline passes → cap report, no child", async () => {
     const provider = shipProvider();
     const { deps } = shipDeps(provider, SHIP_YAML + "ship:\n  maxMinutes: 2\n"); // < the 3-minute reservation
@@ -7802,12 +7851,54 @@ describe("thread admission (features/thread-admission.md)", () => {
     expect(first.replies).toEqual(["done"]);
   });
 
-  it("a follow-up into a non-steerable agent's run is refused (review/ship refuse; coding/general/research steer)", async () => {
-    expect(AGENTS.review.followUps).toBe("refuse");
-    expect(AGENTS.ship.followUps).toBe("refuse");
-    expect(AGENTS.coding.followUps).toBeUndefined();
-    expect(AGENTS.general.followUps).toBeUndefined();
-    expect(AGENTS.research.followUps).toBeUndefined();
+  it("a re-review sent into a LIVE review run is folded in, not refused: one run, the follow-up on its next model turn, one review posted", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
+    const PR_HEAD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+    deps.fetchPrHead = vi.fn(async () => PR_HEAD);
+    deps.fetchPrCommits = vi.fn(async () => undefined);
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: {
+        exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${PR_HEAD}\n` : ""),
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => ({ released: true }),
+      },
+    } as Awaited<ReturnType<typeof makeExecutor>>);
+    const posts: string[] = [];
+    deps.postReviewComment = vi.fn(async (_target: ReviewCommentTarget, body: string) => void posts.push(body));
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("agent:review https://github.com/acme/api/pull/42"), first.io);
+    await firstStarted; // the review's first model call is in flight
+    const second = fakeIO();
+    await dispatch(
+      deps,
+      threadMsg(
+        "agent:review https://github.com/acme/api/pull/42 — re-review: rebased onto main, also check the migration",
+      ),
+      second.io,
+    );
+    // Same agent as the live run → a nudge, not a rival run: one run, no
+    // second card, the steer ack with the run link.
+    expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
+    expect(second.statuses).toEqual([]);
+    expect(second.replies).toEqual([expect.stringMatching(/^↪ Folded into the \*review\* run already in flight/)]);
+    expect(second.replies[0]).toContain(" · https://sb.example/runs/r1?t=t");
+    settle().answer("verdict draft");
+    await run;
+    expect(requests).toHaveLength(2);
+    const last = requests[1].messages.at(-1)!;
+    expect(last.role).toBe("user");
+    expect((last.content[0] as { text: string }).text).toContain("also check the migration");
+    expect(posts).toHaveLength(1); // one review run → one post, carrying the answer that heard the follow-up
+    expect(posts[0]).toContain("answer 2");
+    expect(deps.admission!.size).toBe(0); // released
   });
 
   it("registry commands still answer inline while a run is in flight in the thread (they never start a run)", async () => {

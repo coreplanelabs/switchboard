@@ -14,9 +14,12 @@ import type { DocumentAttachment, ImageAttachment } from "./types.js";
 //            hears "one more thing" mid-task instead of a rival run hearing it.
 //            The live run is never interrupted or restarted for it.
 //   refuse — the follow-up gets a short reply naming the live run and is not
-//            run: when the live agent does not steer (a review or a ship
-//            pipeline is a unit of work, not a conversation), or when the
-//            follow-up asks for a DIFFERENT agent than the one running.
+//            run: only when it asks for a DIFFERENT agent than the one running
+//            (`agent:review` in a live coding thread is a new request, not a
+//            nudge). Every agent steers — a review hears "also check the
+//            migration" mid-pass, a ship pipeline hands the nudge to the child
+//            round in flight — so no agent ever answers a follow-up with
+//            "wait for it to finish".
 //
 // The dispatcher claims a thread's slot at entry — before history, the setup
 // card, or any executor attach — and releases it when the run has fully ended.
@@ -36,9 +39,6 @@ export interface FollowUpInput {
   /** When it arrived (ms epoch). */
   at: number;
 }
-
-/** Whether follow-ups fold into a running instance of an agent. */
-export type FollowUpPolicy = "steer" | "refuse";
 
 /**
  * The queue between the dispatcher (producer: a steered follow-up) and the
@@ -70,7 +70,6 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
 /** The run a thread is currently occupied by, as admission sees it. */
 export interface LiveThread<T extends FollowUpInput = FollowUpInput> {
   agent: string;
-  policy: FollowUpPolicy;
   inbox: FollowUpInbox<T>;
   startedAt: number;
   /** Set by the owning dispatch once its run is registered (the run page link
@@ -90,15 +89,10 @@ export type ClaimOutcome<T extends FollowUpInput = FollowUpInput> =
 export class ThreadAdmission<T extends FollowUpInput = FollowUpInput> {
   private readonly live = new Map<string, LiveThread<T>>();
 
-  claim(threadKey: string, run: { agent: string; policy: FollowUpPolicy; now?: number }): ClaimOutcome<T> {
+  claim(threadKey: string, run: { agent: string; now?: number }): ClaimOutcome<T> {
     const existing = this.live.get(threadKey);
     if (existing) return { kind: "live", live: existing };
-    const live: LiveThread<T> = {
-      agent: run.agent,
-      policy: run.policy,
-      inbox: new FollowUpInbox<T>(),
-      startedAt: run.now ?? Date.now(),
-    };
+    const live: LiveThread<T> = { agent: run.agent, inbox: new FollowUpInbox<T>(), startedAt: run.now ?? Date.now() };
     this.live.set(threadKey, live);
     return { kind: "start", live };
   }
@@ -121,17 +115,17 @@ export class ThreadAdmission<T extends FollowUpInput = FollowUpInput> {
   }
 }
 
-export type FollowUpDecision = { kind: "steer" } | { kind: "refuse"; reason: "agent_mismatch" | "not_steerable" };
+export type FollowUpDecision = { kind: "steer" } | { kind: "refuse"; reason: "agent_mismatch"; requestedAgent: string };
 
 /**
  * Steer unless the follow-up explicitly asks for a different agent than the
  * one running (`agent:review` in a live coding thread is a new request, not a
- * nudge) or the live agent does not take mid-run input at all.
+ * nudge). The live agent's identity is the only input: every agent takes
+ * mid-run follow-ups.
  */
 export function decideFollowUp(live: LiveThread, requested: { agent?: string }): FollowUpDecision {
   if (requested.agent !== undefined && requested.agent !== live.agent)
-    return { kind: "refuse", reason: "agent_mismatch" };
-  if (live.policy === "refuse") return { kind: "refuse", reason: "not_steerable" };
+    return { kind: "refuse", reason: "agent_mismatch", requestedAgent: requested.agent };
   return { kind: "steer" };
 }
 
@@ -148,17 +142,11 @@ export function steerAck(live: LiveThread, now: number): string {
 }
 
 /** The reply a refused follow-up gets: what is live, why it was not run, what to do. */
-export function refusalReply(
-  live: LiveThread,
-  decision: { reason: "agent_mismatch" | "not_steerable" },
-  requestedAgent: string | undefined,
-  now: number,
-): string {
-  const head = `⏳ A *${live.agent}* run is already in flight in this thread (${elapsed(live, now)} in).${linkSuffix(live)}`;
-  if (decision.reason === "agent_mismatch") {
-    return `${head}\nAn \`agent:${requestedAgent}\` request cannot start beside it — one run per thread. Wait for it to finish and re-send, or start a new thread.`;
-  }
-  return `${head}\nA *${live.agent}* run does not take follow-ups mid-flight — wait for it to finish, then re-send (or stop it from the live run page).`;
+export function refusalReply(live: LiveThread, decision: { requestedAgent: string }, now: number): string {
+  return (
+    `⏳ A *${live.agent}* run is already in flight in this thread (${elapsed(live, now)} in).${linkSuffix(live)}\n` +
+    `An \`agent:${decision.requestedAgent}\` request cannot start beside it — one run per thread. Wait for it to finish and re-send, or start a new thread.`
+  );
 }
 
 /** The header for follow-ups drained on a tool turn: the model is mid-task. */
