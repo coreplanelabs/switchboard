@@ -184,7 +184,17 @@ export function diskReserveKiB(sample: Pick<DiskSample, "totalKiB" | "parts">): 
  *  warm checkout's, so node_modules is `cp -al` — the tree costs history +
  *  tree (the checkout's own non-deps bytes). `install`: the lockfile differs
  *  and the thread installs its own node_modules — plus the deps term. */
-export type ThreadCostKind = "reuse" | "hardlink" | "install";
+export type ThreadCostKind = "reuse" | "hardlink" | "reconcile";
+
+/** The share of the checkout's deps a lockfile-diverged thread is projected to
+ *  write on top of its hardlinked seed: the delta install replaces only the
+ *  packages whose version differs, so the tree costs a fraction of the deps,
+ *  not the deps again (before this, such a thread installed from an empty
+ *  node_modules — 1.94 GiB projected on the switchboard resident, and the disk
+ *  refused the seventh concurrent review at 21:38 UTC 2026-09-07). A bound to
+ *  re-measure against `du` of live reconciled trees, deliberately above the
+ *  typical few-package delta so admission errs toward refusing. */
+export const RECONCILE_DEPS_RATIO = 0.25;
 
 /** `null` when the parts needed are not measured yet (no sample, or du could
  *  not read the checkout) — the caller decides what an unknown cost means
@@ -194,7 +204,7 @@ export function projectThreadCostKiB(parts: DiskParts, kind: ThreadCostKind): nu
   if (parts.checkout === null) return null;
   if (kind === "hardlink") return parts.checkout;
   if (parts.deps === null) return null;
-  return parts.checkout + parts.deps;
+  return parts.checkout + Math.round(parts.deps * RECONCILE_DEPS_RATIO);
 }
 
 /** The disk the resident may use: the physical total, lowered by the record's

@@ -53,7 +53,7 @@ const WARM = {
         threadKey: "slack:C0BQS7KPJHK:1787900000.000001",
         ref: "master",
         user: "",
-        deps: "install",
+        deps: "reconcile",
         boundAt: "2026-08-20T10:00:00.000Z",
         lastAttachAt: "2026-08-20T10:05:00.000Z",
         evicted: true,
@@ -263,9 +263,10 @@ describe("ResidentDetailPage", () => {
     expect(t).toContain("10.3 GiB"); // free
     // reserve = 0.6 × (mirror + deps + checkout) + max(1 GiB, 5 %) = 0.6 × 2.94 GiB + 1 GiB
     expect(t).toMatch(/reserve\s*2\.76 GiB \(snapshot staging 1\.76 GiB \+ floor 1\.00 GiB\)/);
-    // headroom = 10.3 − 2.76 = 7.5 GiB → 17 hardlinked (0.44 GiB each) or 2 deps-installing (2.58 GiB each)
+    // headroom = 10.3 − 2.76 = 7.5 GiB → 17 hardlinked (0.44 GiB each) or 7 lockfile-diverged
+    // (0.44 + 0.25 × 2.14 = 0.98 GiB each: the seed plus the reconcile share of the deps)
     expect(t).toMatch(
-      /headroom\s*7\.5\d GiB — room for 17 more \(0\.44 GiB each\) hardlinked trees, 2 more \(2\.58 GiB each\) deps-installing/,
+      /headroom\s*7\.5\d GiB — room for 17 more \(0\.44 GiB each\) hardlinked trees, 7 more \(0\.98 GiB each\) lockfile-diverged \(reconciling\)/,
     );
     expect(t).toContain("2026-09-07T15:30:00.000Z");
     expect(t).toMatch(/mirror\s*0\.35 GiB/);

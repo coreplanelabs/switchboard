@@ -32,6 +32,66 @@ export function depCacheMaterialization(dir: DepCacheDir): DepCacheMaterializati
   return dir === "node_modules" ? "hardlink" : "copy";
 }
 
+// -- the per-attach plan ----------------------------------------------------------
+
+/** What `materializeThreadDeps` does for one tree: `seed` = bring the cached
+ *  dirs in from the warm checkout (node_modules hardlinked, per
+ *  depCacheMaterialization); `install` = run the command table's install in the
+ *  tree afterwards. A lockfile-diverged thread gets BOTH — the install then
+ *  reconciles only the delta on top of the seed, because npm/pnpm replace a
+ *  changed package with fresh inodes and can never write through a shared one
+ *  (the seed's file inodes are worker1-owned with group/world write stripped).
+ *  Before this the diverged case installed from an empty tree: 1.94 GiB
+ *  projected and 5+ min on the 1 vCPU it shares with the refresh cycle (live
+ *  2026-09-07, #552 and the 21:38 disk-pressure refusal). No install command
+ *  (item 52's package.json-less table) leaves a diverged tree unseeded: a seed
+ *  nothing can reconcile would be the WRONG deps presented as ready. */
+export interface ThreadDepsPlan {
+  seed: boolean;
+  install: boolean;
+  why: string;
+}
+
+export function planThreadDeps(input: {
+  hasDeps: boolean;
+  threadLockKey: string;
+  warmLockKey: string;
+  installCmd: string | undefined;
+}): ThreadDepsPlan {
+  if (input.hasDeps) return { seed: false, install: false, why: "reused tree — cache already in place" };
+  if (input.threadLockKey === input.warmLockKey) {
+    return {
+      seed: true,
+      install: false,
+      why: "lockfile matches the warm checkout — shared cache, nothing to reconcile",
+    };
+  }
+  if (input.installCmd === undefined) {
+    return {
+      seed: false,
+      install: false,
+      why: "lockfile differs and the command table has no install — nothing to reconcile with",
+    };
+  }
+  return {
+    seed: true,
+    install: true,
+    why: "lockfile differs from the warm checkout — seeded from the shared cache, install reconciles the delta",
+  };
+}
+
+/** The `deps` field on the attach answer. `reconcile` = seeded then installed
+ *  (the seed's own mechanism is secondary: the install decided the tree's
+ *  contents); otherwise the seed's mechanism, or `none`. */
+export type ThreadDepsMechanism = DepCacheMaterialization | "reconcile" | "none";
+
+export function threadDepsMechanism(input: {
+  seeded: DepCacheMaterialization | "none";
+  installed: boolean;
+}): ThreadDepsMechanism {
+  return input.installed ? "reconcile" : input.seeded;
+}
+
 /** Inside a HARDLINKED node_modules, the paths tools rewrite in place and so
  *  must be real copies (fresh thread-owned inodes) rather than shared
  *  read-only inodes — the same EACCES class as the build dirs, one level
