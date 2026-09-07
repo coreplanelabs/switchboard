@@ -1,3 +1,4 @@
+import { isTimedOutExit } from "./durationTone";
 import { reactive, type InjectionKey, type Ref } from "vue";
 import {
   createRunTimeline,
@@ -38,6 +39,11 @@ export interface CallVm {
   /** A call whose summary is only the tool name shows the chip alone. */
   chipOnly: boolean;
   durationMs?: number;
+  /** The shell exit code when the sandbox reported one. */
+  exitCode?: number;
+  /** The sandbox killed the command at its deadline (exit 124 — the runtime's
+   *  own timeout signal; a SIGKILL 137 is not one): over budget. */
+  timedOut: boolean;
   open: boolean;
 }
 
@@ -60,7 +66,9 @@ export interface TurnVm {
   label: string;
   /** The chip reads "5m 04s" — label minus the "Thought for " prefix. */
   chip: string;
+  /** Under the friction analyzer's 60 s slow-turn threshold. */
   quick: boolean;
+  durationMs: number;
   facts: string[];
   at?: number;
 }
@@ -174,8 +182,8 @@ function turnVm(change: Extract<TimelineChange, { kind: "turn" }>): TurnVm {
   return {
     label: change.label,
     chip: change.label.replace(/^Thought for /, ""),
-    // Amber by default — thinking time is the thing to notice; a sub-minute turn is quiet.
     quick: change.durationMs < 60_000,
+    durationMs: change.durationMs,
     facts: change.facts,
     at: change.at,
   };
@@ -195,6 +203,8 @@ function callVm(call: TimelineCall, open: boolean): CallVm {
     hasResult: call.result !== undefined,
     chipOnly: !call.shell && call.title === call.tool,
     durationMs: call.durationMs,
+    exitCode: call.result?.exitCode,
+    timedOut: isTimedOutExit(call.result?.exitCode),
     open,
   };
 }

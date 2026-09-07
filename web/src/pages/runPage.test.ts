@@ -291,7 +291,9 @@ describe("RunPage — history mode", () => {
     expect(w.find(".think").exists()).toBe(false); // the chip dissolved into the meta row
     expect(w.find("#log").text()).not.toMatch(/\[\d\d:\d\d:\d\d\]/); // the bracket gutter grammar is gone
     // a long think is the one tinted fact
-    expect(head.find(".thought").classes().join(" ")).toContain("text-warn");
+    // A five-minute think is hot on the turn scale (item 24): heat level + an inline OKLCH colour.
+    expect(Number(head.find(".thought").attributes("data-heat"))).toBeGreaterThanOrEqual(2);
+    expect(head.find(".thought").attributes("style")).toContain("--heat-t");
   });
 
   it("a step with no turn shares its one line: the prose left, the clock right", () => {
@@ -309,7 +311,71 @@ describe("RunPage — history mode", () => {
       seed: historySeed([{ type: "turn", durationMs: 5_000, at: 900 }, assistant("quick", 1000)] as LiveFrame[]),
     });
     expect(w.find(".step .meta .thought").text()).toBe("thought 5.0s");
-    expect(w.find(".step .meta .thought").classes().join(" ")).not.toContain("text-warn");
+    expect(w.find(".step .meta .thought").attributes("data-heat")).toBe("0");
+    expect(w.find(".step .meta .thought").attributes("style")).toBeUndefined();
+  });
+
+  it("a slow call's duration reads warm and a timed-out one reads over budget: heat on the card, the label, and the group tally (item 24)", () => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([
+        assistant("work", 1),
+        call("c1", "$ pnpm typegen", 1_000),
+        result("c1", { ok: false, exitCode: 124, at: 1_000 + 15 * 60_000 }),
+        call("c2", "$ pnpm tsgo", 2_000_000),
+        result("c2", { ok: true, at: 2_000_000 + 214_000 }),
+        call("c3", "$ git status", 3_000_000),
+        result("c3", { ok: true, at: 3_000_000 + 200 }),
+      ] as LiveFrame[]),
+    });
+    const cards = w.findAll("details.call");
+    expect(cards).toHaveLength(3);
+    // Over budget: categorical — level 4, the label, a red bold duration, no ramp colour.
+    expect(cards[0].attributes("data-heat")).toBe("4");
+    expect(cards[0].find(".over").text()).toBe("timed out");
+    const overFact = cards[0].findAll(".fact").at(-1)!;
+    expect(overFact.text()).toBe("15m 00s");
+    expect(overFact.classes()).toContain("text-bad");
+    expect(overFact.attributes("style")).toBeUndefined();
+    // Slow: on the ramp, painted with the theme's constant-lightness OKLCH.
+    expect(Number(cards[1].attributes("data-heat"))).toBeGreaterThanOrEqual(2);
+    const slowFact = cards[1].findAll(".fact").at(-1)!;
+    expect(slowFact.text()).toBe("3m 34s");
+    expect(slowFact.attributes("style")).toContain("--heat-t");
+    expect(cards[1].find(".over").exists()).toBe(false);
+    // Quick: inherits — no heat, no inline colour.
+    expect(cards[2].attributes("data-heat")).toBe("0");
+    expect(cards[2].findAll(".fact").at(-1)!.attributes("style")).toBeUndefined();
+    // The group tally carries the over state of its worst call.
+    const tally = w.find(".gsummary .gtime");
+    expect(tally.attributes("data-heat")).toBe("4");
+    expect(tally.text()).toContain("timed out");
+    expect(tally.classes()).toContain("text-bad");
+  });
+
+  it("a timed-out call with no computable span still wears the label; a SIGKILL 137 is a plain failure (item 24)", () => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([
+        assistant("work", 1),
+        call("c1", "$ pnpm typegen", 1_000),
+        // exit 124 but no result stamp: the fold cannot compute a duration.
+        result("c1", { ok: false, exitCode: 124 }),
+        call("c2", "$ pnpm build", 2_000),
+        result("c2", { ok: false, exitCode: 137, at: 2_000 + 90_000 }),
+      ] as LiveFrame[]),
+    });
+    const cards = w.findAll("details.call");
+    expect(cards).toHaveLength(2);
+    // Over budget without a duration fact: still level 4 and labelled, after the exit fact.
+    expect(cards[0].attributes("data-heat")).toBe("4");
+    expect(cards[0].find(".over").text()).toBe("timed out");
+    const facts = cards[0].findAll(".fact").map((f) => f.text());
+    expect(facts).toEqual(["exit 124"]);
+    expect(cards[0].findAll(".fact").at(-1)!.attributes("style")).toBeUndefined();
+    // 137 is not the runtime's timeout signal: red exit fact, no label, its 90 s on the ramp.
+    expect(cards[1].attributes("data-heat")).not.toBe("4");
+    expect(cards[1].find(".over").exists()).toBe(false);
+    expect(cards[1].findAll(".fact")[0]!.text()).toBe("exit 137");
+    expect(cards[1].findAll(".fact")[0]!.classes()).toContain("text-bad");
   });
 
   it("the context fold announces itself with a rotating chevron and shares the toolbar line with the fold toggle", () => {

@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import StepItems from "./StepItems.vue";
 import MarkdownText from "../MarkdownText.vue";
+import { durationTone, heatStyle } from "../../lib/durationTone";
 import { formatClock, formatElapsed, formatLocalIso } from "../../lib/format";
 import type { StepVm } from "../../lib/runPageModel";
 
@@ -14,6 +15,10 @@ import type { StepVm } from "../../lib/runPageModel";
 //
 // The timeline speaks TWO text sizes: `text-xs` for metadata (this head row,
 // card facts, quiet rows) and the body size for everything a person reads.
+//
+// Both durations on this block, the turn's thinking time and the group's
+// tallied tool time, are painted by the duration heat scale (item 24), so a
+// step that ate the run reads warm before anyone opens it.
 
 const props = defineProps<{ step: StepVm }>();
 const emit = defineEmits<{ toggleGroup: [] }>();
@@ -37,6 +42,11 @@ const tally = computed(() => {
   }
   return { n: ok + bad + infra + running, ok, bad, infra, running, ms };
 });
+const timedOut = computed(() => cards.value.some((i) => i.kind === "call" && i.call.timedOut));
+const tallyHeat = computed(() => durationTone(tally.value.ms, "tool", timedOut.value));
+const tallyPaint = computed(() => heatStyle(tallyHeat.value));
+const turnHeat = computed(() => (props.step.turn ? durationTone(props.step.turn.durationMs, "turn") : undefined));
+const turnPaint = computed(() => (turnHeat.value ? heatStyle(turnHeat.value) : undefined));
 
 const firstCallAt = computed(() => {
   const first = cards.value[0];
@@ -59,7 +69,12 @@ const firstCallAt = computed(() => {
           v-if="step.turn"
           class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 text-xs tabular-nums text-dimmed"
         >
-          <span class="thought" :class="step.turn.quick ? '' : 'text-warn'" :title="step.turn.label"
+          <span
+            class="thought"
+            :class="[turnPaint ? 'heat' : '', turnHeat && turnHeat.level >= 2 ? 'font-medium' : '']"
+            :style="turnPaint"
+            :data-heat="turnHeat?.level"
+            :title="step.turn.label"
             >thought {{ step.turn.chip }}</span
           >
           <span v-for="(f, i) in step.turn.facts" :key="i" class="fact">{{ f }}</span>
@@ -106,9 +121,17 @@ const firstCallAt = computed(() => {
           <span v-if="tally.bad" class="gbad text-bad">✗ {{ tally.bad }}</span>
           <span v-if="tally.infra" class="ginfra text-warn">⚠ {{ tally.infra }}</span>
           <span v-if="tally.running" class="grun text-info">{{ tally.running }} running</span>
-          <span v-if="tally.ms > 0" class="gtime ml-auto text-xs tabular-nums text-muted">{{
-            formatElapsed(tally.ms)
-          }}</span>
+          <span
+            v-if="tally.ms > 0"
+            class="gtime ml-auto text-xs tabular-nums text-muted"
+            :class="[
+              tallyPaint ? 'heat' : '',
+              tallyHeat.over ? 'font-semibold text-bad' : tallyHeat.level >= 2 ? 'font-medium' : '',
+            ]"
+            :style="tallyPaint"
+            :data-heat="tallyHeat.level"
+            ><template v-if="tallyHeat.over">timed out · </template>{{ formatElapsed(tally.ms) }}</span
+          >
         </summary>
         <div class="gbody flex flex-col gap-2 pb-1 pt-2">
           <StepItems :items="step.items" />

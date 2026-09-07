@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, inject } from "vue";
+import { durationTone, heatStyle } from "../../lib/durationTone";
 import { formatElapsed, formatLocalIso } from "../../lib/format";
 import { RunnerClockKey, type CallVm } from "../../lib/runPageModel";
 
@@ -12,6 +13,13 @@ import { RunnerClockKey, type CallVm } from "../../lib/runPageModel";
 // slot ticks its elapsed on the page's projected runner clock — the same slot
 // its settled duration lands in. A history page provides no clock, so its
 // cards never tick.
+//
+// The duration fact (always the last one) is painted by the duration heat
+// scale (item 24): quiet when quick, amber→red as it grows, and the `bad`
+// palette plus a "timed out" label when the sandbox killed the command at its
+// deadline. Over budget is a fact about the exit, not the clock: a timed-out
+// call with no computable span (no duration fact) still wears the label, after
+// its last fact.
 
 const props = defineProps<{ call: CallVm }>();
 const clock = inject(RunnerClockKey, null);
@@ -20,6 +28,11 @@ const elapsed = computed(() => {
   if (props.call.status !== "running" || typeof now !== "number" || props.call.startedAt === undefined) return "";
   return formatElapsed(Math.max(0, now - props.call.startedAt));
 });
+
+const heat = computed(() => durationTone(props.call.durationMs, "tool", props.call.timedOut));
+const heatPaint = computed(() => heatStyle(heat.value));
+/** Index of the duration fact, or -1 when the call has none yet. */
+const durationIndex = computed(() => (props.call.durationMs === undefined ? -1 : props.call.facts.length - 1));
 
 function toggle(): void {
   // `open` is UI state on the page's own view-model object, shared with the
@@ -37,6 +50,7 @@ function toggle(): void {
     :open="call.open"
     :title="typeof call.startedAt === 'number' ? `started ${formatLocalIso(call.startedAt)}` : undefined"
     :data-status="call.status"
+    :data-heat="heat.level"
   >
     <!-- Open on a phone, the full command takes its own line under the glyph
          row (an inline pre-wrap column would wrap character by character). -->
@@ -73,12 +87,24 @@ function toggle(): void {
       <span v-else class="cmd min-w-0 flex-1" />
       <span class="facts ml-auto flex shrink-0 gap-2.5 text-xs tabular-nums text-muted">
         <span v-if="elapsed" class="fact elapsed" title="since this call started (runner clock)">{{ elapsed }}</span>
-        <span
-          v-for="(fact, i) in call.facts"
-          :key="i"
-          class="fact"
-          :class="call.status !== 'ok' && i === 0 ? 'text-bad' : ''"
-          >{{ fact }}</span
+        <template v-for="(fact, i) in call.facts" :key="i">
+          <span v-if="i === durationIndex && heat.over" class="over rounded bg-bad/15 px-1 font-semibold text-bad"
+            >timed out</span
+          >
+          <span
+            class="fact"
+            :class="[
+              call.status !== 'ok' && i === 0 ? 'text-bad' : '',
+              i === durationIndex && heat.over ? 'font-semibold text-bad' : '',
+              i === durationIndex && heatPaint ? 'heat' : '',
+              i === durationIndex && heat.level >= 2 && !heat.over ? 'font-medium' : '',
+            ]"
+            :style="i === durationIndex ? heatPaint : undefined"
+            >{{ fact }}</span
+          >
+        </template>
+        <span v-if="heat.over && durationIndex === -1" class="over rounded bg-bad/15 px-1 font-semibold text-bad"
+          >timed out</span
         >
       </span>
       <span

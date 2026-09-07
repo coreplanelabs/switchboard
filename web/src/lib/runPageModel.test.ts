@@ -151,6 +151,26 @@ describe("steps and turns", () => {
 });
 
 describe("calls, groups, folding", () => {
+  it("a call carries its exit code and reads timed out on 124 only — a SIGKILL 137 is a failure, not a timeout (item 24)", () => {
+    const m = createRunPageModel();
+    m.handle(assistant("work", 1));
+    m.handle(call("c1", "$ pnpm typegen", 2));
+    m.handle(call("c2", "$ pnpm test", 3));
+    m.handle(call("c3", "$ git status", 4));
+    m.handle(call("c4", "$ pnpm build", 5));
+    m.handle(result("c1", { ok: false, exitCode: 124, at: 2_000 }));
+    m.handle(result("c2", { ok: false, exitCode: 1, at: 3_000 }));
+    m.handle(result("c3", { ok: true, exitCode: 0, at: 4_000 }));
+    m.handle(result("c4", { ok: false, exitCode: 137, at: 5_000 }));
+    const calls = step(m).items.flatMap((i) => (i.kind === "call" ? [i.call] : []));
+    expect(calls.map((c) => [c.exitCode, c.timedOut])).toEqual([
+      [124, true],
+      [1, false],
+      [0, false],
+      [137, false],
+    ]);
+  });
+
   it("cards carry the classification: shell $, headline vs full title, facts, status transitions", () => {
     const m = model();
     m.handle(call("c1", "$ npm test", 2));

@@ -141,6 +141,19 @@ describe("RunRow", () => {
     expect(done.find(".count").text()).toBe("1 event");
   });
 
+  it("a finished row's stopwatch reads warm when the run was long; a short run and a live row are unpainted (item 24)", () => {
+    const long = mountRow(finished("completed", { finishedAt: 1_000_000 + 40 * 60_000 })).find(".elapsed");
+    expect(long.text()).toBe("40m 00s");
+    expect(Number(long.attributes("data-heat"))).toBeGreaterThanOrEqual(2);
+    expect(long.attributes("style")).toContain("--heat-t");
+    const short = mountRow(finished("completed", { finishedAt: 1_000_000 + 40_000 })).find(".elapsed");
+    expect(short.attributes("data-heat")).toBe("0");
+    expect(short.attributes("style")).toBeUndefined();
+    const live = mountRow(row()).find(".elapsed");
+    expect(live.attributes("data-heat")).toBeUndefined();
+    expect(live.classes()).toContain("text-ok");
+  });
+
   it("the actions cell is always present (fixed width); the buttons appear only while the run is stoppable", () => {
     const live = mountRow(row({ token: "tok-1" }));
     expect(live.find(".actions").exists()).toBe(true);

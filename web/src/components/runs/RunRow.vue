@@ -3,6 +3,7 @@ import { computed, reactive } from "vue";
 import StatusDot from "../StatusDot.vue";
 import SourceMark from "./SourceMark.vue";
 import { browser } from "../../lib/browser";
+import { durationTone, heatStyle } from "../../lib/durationTone";
 import { formatDateTime, formatLocalIso, formatRelative, splitRunLabel } from "../../lib/format";
 import {
   agentHue,
@@ -47,6 +48,18 @@ const sourceUrl = computed(() => safeSourceUrl(props.run));
 const expires = computed(() => expiresAt(props.run, props.retentionMs));
 const leaving = computed(() => expires.value !== undefined && expires.value - props.now <= LEAVING_WINDOW_MS);
 const stoppable = computed(() => !props.run.finished && !props.run.stop);
+// A finished row's stopwatch is painted by the duration heat scale (item 24) on
+// the run scale, so a 40-minute run stands out of a page of 3-minute ones; a
+// live row stays green — its clock is still moving.
+const elapsedHeat = computed(() =>
+  durationTone(
+    props.run.finished && typeof props.run.finishedAt === "number"
+      ? props.run.finishedAt - props.run.startedAt
+      : undefined,
+    "run",
+  ),
+);
+const elapsedPaint = computed(() => heatStyle(elapsedHeat.value));
 const outcome = computed(() =>
   props.run.finished && props.run.status && props.run.status !== "completed" ? statusLabel(props.run.status) : "",
 );
@@ -204,7 +217,13 @@ function onRowClick(ev: MouseEvent): void {
       <UTooltip :text="run.finished ? 'start to finish' : 'running for'">
         <span
           class="elapsed pointer-events-auto ml-auto shrink-0 text-right text-xs tabular-nums max-sm:order-4 sm:min-w-[4.5em]"
-          :class="run.finished ? 'text-muted' : 'text-ok'"
+          :class="
+            run.finished
+              ? [elapsedPaint ? 'heat' : 'text-muted', elapsedHeat.level >= 2 ? 'font-medium' : '']
+              : 'text-ok'
+          "
+          :style="run.finished ? elapsedPaint : undefined"
+          :data-heat="run.finished ? elapsedHeat.level : undefined"
           >{{ elapsedText(run, now) }}</span
         >
       </UTooltip>

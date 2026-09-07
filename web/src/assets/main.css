@@ -30,6 +30,9 @@
   --sb-skill: #6639ba;
   --sb-review: #8250df;
   --sb-research: #1b7c83;
+  /* Duration heat (item 24): the ONE lightness every heat colour shares in this
+     theme, so the amber→red ramp keeps constant contrast against the ground. */
+  --sb-heat-l: 0.52;
   --ui-bg: #f5f7fa;
   --ui-bg-muted: #eef1f5;
   --ui-bg-elevated: #ffffff;
@@ -51,6 +54,7 @@
   --sb-skill: #a78bfa;
   --sb-review: #d2a8ff;
   --sb-research: #76e3ea;
+  --sb-heat-l: 0.8;
   --ui-bg: #0b0d12;
   --ui-bg-muted: #0f1218;
   --ui-bg-elevated: #12151c;
@@ -62,6 +66,16 @@
   --ui-text-muted: #8b93a7;
   --ui-text-dimmed: #5f677a;
   --ui-text-highlighted: #ffffff;
+}
+
+/*
+ * Duration heat (item 24). `--heat-t` (0..1, set inline by `heatStyle`) is
+ * where a duration landed on its log scale; lightness is the theme's
+ * `--sb-heat-l`, hue walks amber (88°) → red (28°) and chroma 0.06 → 0.17, so
+ * every step of the ramp keeps the same contrast and only warmth changes.
+ */
+@utility heat {
+  color: oklch(var(--sb-heat-l) calc(0.06 + 0.11 * var(--heat-t)) calc(88 - 60 * var(--heat-t)));
 }
 
 @layer base {
