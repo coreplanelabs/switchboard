@@ -86,6 +86,7 @@ import {
   parseDepCacheScriptOutput,
   planThreadDeps,
   threadDepsMechanism,
+  type DepCacheMaterialization,
   type ThreadDepsMechanism,
 } from "../../src/execution/residentDepCache.js";
 import { parseWorktreeCleanliness, worktreeCleanlinessScript } from "../../src/execution/residentCleanliness.js";
@@ -163,6 +164,21 @@ import {
   stepFailureLog,
   type StepResult,
 } from "../../src/execution/residentStepReport.js";
+import {
+  DEPS_STORE_DIR,
+  depsCompletePath,
+  depsEntryPath,
+  depsInstallSemaphoreSize,
+  depsScratchCloneArgv,
+  depsScratchPath,
+  depsStagingPath,
+  depsStoreCommitScript,
+  depsStoreListScript,
+  depsUsedPath,
+  parseDepsStoreListing,
+  planDepsEviction,
+  planDepsMaterialization,
+} from "../../src/execution/residentDepsStore.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 
 /** The commit this bundle was built from, injected by the deploy
@@ -802,6 +818,10 @@ interface ThreadBinding {
    *  per-exec refresh). Absent = unknown → the next writable exec re-mints
    *  (`shouldRefreshThreadCredentials`); cleared by a read-only attach. */
   credentialsWrittenAt?: number;
+  /** The deps-store entry this tree's node_modules is a view of (item 59);
+   *  protects the entry from eviction while the binding lives. Absent on a
+   *  binding made before the store, or on a tree with no deps. */
+  depsKey?: string;
 }
 
 /** Named, RPC-cloneable error shape for the thread data plane. The Worker
@@ -1114,6 +1134,8 @@ export class ResidentDO extends Sandbox<Env> {
     this.hydratedVerdictAt = 0;
     this.gitSetupDone = false;
     this.stageDirsReady.clear();
+    this.depsStoreDirReady = false;
+    this.depsInstallSlots = null;
   }
 
   /** Mirror mutex (KTD5): a DO yields at every await, so two in-flight
@@ -1266,11 +1288,13 @@ export class ResidentDO extends Sandbox<Env> {
    *  checkout. KTD5: never root. KTD7/KTD12: never a GitHub token — the env
    *  is whatever `su` grants the target user, nothing injected. */
   private async buildUserRun(command: string, step: string, timeoutMs: number): Promise<string> {
-    // Steps are sequential, so a live build-user process here is a leftover
-    // (a step whose wait was abandoned, or one orphaned by a Worker-only
-    // deploy resetting the DO) — and it is writing into the tree this step is
-    // about to clean or install into (see killStaleBuildProcessesCommand).
-    const swept = await this.runOk(killStaleBuildProcessesCommand(BUILD_USER), `${step}-stale-sweep`);
+    // Steps on the checkout are sequential, so a live build-user process
+    // INSIDE it here is a leftover (a step whose wait was abandoned, or one
+    // orphaned by a Worker-only deploy resetting the DO) — and it is writing
+    // into the tree this step is about to clean or build. Scoped to the
+    // checkout: the same user's deps-store installs run in their own scratch
+    // trees, in parallel, and are live work (killStaleBuildProcessesCommand).
+    const swept = await this.runOk(killStaleBuildProcessesCommand(BUILD_USER, CHECKOUT_DIR), `${step}-stale-sweep`);
     if (swept.trim()) console.log(`${step}: ${swept.trim()}`);
     return this.runOk(["su", "-s", "/bin/bash", BUILD_USER, "-c", `cd ${CHECKOUT_DIR} && ${command}`], step, {
       timeoutMs,
@@ -1577,8 +1601,19 @@ export class ResidentDO extends Sandbox<Env> {
       });
       await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, CHECKOUT_DIR], "chown");
 
-      // Full install + build, unprivileged and token-free (KTD5/KTD7).
-      if (record.commands.install) await this.buildUserRun(record.commands.install, "install", stepBudget);
+      // Deps into the store (item 59), the checkout a hardlink view of the
+      // entry; then the build, unprivileged and token-free (KTD5/KTD7). The
+      // install budget is at least the refresh's: a provisioning budget below
+      // a real install time just fails the onboarding.
+      if (record.commands.install) {
+        const entry = await this.materializeDeps(
+          lockfileHash,
+          sha,
+          record.commands.install,
+          Math.max(stepBudget, REFRESH_INSTALL_TIMEOUT_MS),
+        );
+        await this.linkDepsView(`${entry}/node_modules`, CHECKOUT_DIR, BUILD_USER);
+      }
       await this.buildUserRun(record.commands.build, "build", stepBudget);
 
       const snap = await this.takeSnapshot(resource, ref, sha, lockfileHash);
@@ -1730,6 +1765,15 @@ export class ResidentDO extends Sandbox<Env> {
     }
 
     await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, CHECKOUT_DIR], "chown");
+    // The snapshot carries the checkout's tree, not the store (item 59): adopt
+    // its node_modules as the entry for the stamp's key — a rename plus a
+    // hardlink view, seconds — so the first attach on the warm key hits.
+    // Housekeeping on the restore path: a failure here leaves the checkout
+    // whole (the entry is either absent or complete) and the first attach
+    // adopts instead.
+    await this.adoptCheckoutDeps(snap.lockfileHash).catch((err) =>
+      console.log(`deps: adopt after restore failed: ${errMsg(err)}`),
+    );
     // The restored checkout carries the snapshot's deps + build, so the
     // refresh checkpoints are exactly the stamp.
     await this.writeDiskMarkers({ ready: snap.sha, depsKey: snap.lockfileHash, builtSha: snap.sha });
@@ -1923,45 +1967,64 @@ export class ResidentDO extends Sandbox<Env> {
         // No wait timeout, exactly like the fetch lock above: the background
         // refresh queues behind an in-flight attach instead of flipping to
         // degraded on transient lock contention.
+        // Token-free from here on: repo code runs during install/build (KTD7).
+        //
+        // Deps come from the store (item 59): a changed lockfile key is
+        // materialized ONCE into `/workspace/deps/<key>` — OUTSIDE the mirror
+        // lock, because the install runs in its own scratch clone and touches
+        // no consumer's tree (#170's staging step) — and the checkout's
+        // node_modules becomes a hardlink view of that entry. An attach that
+        // needs the same key joins this very install instead of starting its
+        // own. Checkpoint: the deps marker comes off BEFORE the install so an
+        // interruption mid-install can never read as completion.
+        let depsEntry: string | null = null;
+        if (plan.action === "rebuild") {
+          await this.runOk(["rm", "-f", BUILT_MARKER, ...(plan.install ? [DEPS_MARKER] : [])], "clear-markers");
+          if (plan.install && record.commands.install) {
+            // The installing marker brackets the install (item 57): written
+            // before, removed after the deps key lands, so a cycle that ends in
+            // between is planned as a resume. The install is seeded from the
+            // key the checkout holds now — npm reconciles the delta; a resumed
+            // install finds its key already in the store when the last attempt
+            // completed, or reconciles from the warm key again when it did not.
+            await this.writeDiskMarkers({ installingKey: lockfileHash });
+            depsEntry = await this.materializeDeps(
+              lockfileHash,
+              sha,
+              record.commands.install,
+              REFRESH_INSTALL_TIMEOUT_MS,
+              {
+                seedFromKey: facts.lockfileHash,
+              },
+            );
+          }
+        }
         await this.withMirrorLock(async () => {
-          // Token-free from here on: repo code runs during install/build (KTD7).
           if (plan.action === "rebuild") {
-            // Isolation invariant (review 1b): attach hardlink-copies (cp -al)
-            // CHECKOUT_DIR's node_modules/build dirs into already-attached,
-            // sha-pinned thread worktrees, so those FILE inodes are shared and
-            // worker1-owned. A rebuild that writes THROUGH an existing inode —
+            // Isolation invariant (review 1b): attached, sha-pinned thread
+            // worktrees hold hardlinks to the store entry's FILE inodes, and so
+            // does the checkout. A build that writes THROUGH an existing inode —
             // many bundlers do (e.g. .next incremental manifests open+truncate
-            // rather than recreate) — would silently mutate an attached thread's
-            // pinned artifacts, breaking the sha pin the whole cache keys on.
-            // `git clean -fdq` (no -x) leaves these gitignored dirs in place, so
-            // the rebuild would reuse the very inodes threads still hold. `-x`
-            // removes them, so install/build allocate FRESH inodes; a thread's
-            // outstanding hardlink just keeps the old inode (link count drops).
+            // rather than recreate) — would mutate every consumer's pinned
+            // artifacts. The `-x` clean removes the checkout's build output so
+            // the build allocates FRESH inodes; the entry's own files are
+            // owner-read-only (deps-harden), so a write through them fails
+            // loudly instead of silently reaching the store; the tool caches
+            // inside node_modules are the checkout's private copies (item 18).
             //
             // Install gate (#163): when the committed lockfile key is unchanged,
-            // node_modules is excluded from that clean (`-e node_modules`) and
-            // install is skipped — nothing is about to write through those
-            // inodes, and a full reinstall per default-branch advance (1–3 min
-            // live) is what pushed refreshes past the bot's 60 s attach wait.
-            // A changed key takes the full clean + install exactly as before,
-            // which is also what purges deps the new lockfile dropped.
-            //
-            // Checkpoints: the markers for the steps being redone come off
-            // BEFORE the step starts, so an interruption mid-step can never be
-            // mistaken for completion by the next cycle.
-            await this.runOk(["rm", "-f", BUILT_MARKER, ...(plan.install ? [DEPS_MARKER] : [])], "clear-markers");
+            // node_modules (the view) is excluded from the clean and no deps
+            // work happens; a changed key takes the full clean and re-links the
+            // view to the new entry — which is also what drops deps the new
+            // lockfile no longer has.
             await this.buildUserRun(checkoutUpdateCommand(sha, plan.clean), "checkout-update", GIT_NETWORK_TIMEOUT_MS);
             if (plan.install) {
-              // The installing marker brackets the step: written before, removed
-              // after the deps key lands. A cycle that ends in between leaves it
-              // behind, and the next plan resumes THIS install on the partial
-              // tree (keep-deps clean + install) instead of wiping it — npm
-              // reconciles to the lockfile, so an install longer than one budget
-              // still converges over cycles (live 2026-09-07: four full installs
-              // in a row, none finishing under contention with thread attaches).
-              await this.writeDiskMarkers({ installingKey: lockfileHash });
-              if (record.commands.install) {
-                await this.buildUserRun(record.commands.install, "install", REFRESH_INSTALL_TIMEOUT_MS);
+              // The old view (a resumed install's keep-deps clean leaves it in
+              // place, item 57) makes way for the new entry's: hardlinks only,
+              // the entry's inodes are untouched.
+              if (depsEntry) {
+                await this.runOk(["rm", "-rf", `${CHECKOUT_DIR}/node_modules`], "unlink-deps-view");
+                await this.linkDepsView(`${depsEntry}/node_modules`, CHECKOUT_DIR, BUILD_USER);
               }
               await this.writeDiskMarkers({ depsKey: lockfileHash });
               await this.runOk(["rm", "-f", INSTALLING_MARKER], "clear-installing-marker");
@@ -2193,6 +2256,7 @@ export class ResidentDO extends Sandbox<Env> {
     const live = await this.liveBindings();
     const layout = {
       mirrorDir: MIRROR_DIR,
+      depsStoreDir: DEPS_STORE_DIR,
       checkoutDir: CHECKOUT_DIR,
       threads: live.map((b) => ({ threadKey: b.threadKey, dir: parentDir(b.worktreePath) })),
       homes: [BUILD_USER, ...THREAD_USERS].map((user) => ({ user, dir: `/home/${user}` })),
@@ -2200,6 +2264,9 @@ export class ResidentDO extends Sandbox<Env> {
     const du = await this.run(duArgv(layout), { timeoutMs: DU_TIMEOUT_MS });
     const sample = assembleDiskSample({ at: new Date().toISOString(), df, du: parseDu(du.stdout), layout });
     await this.ctx.storage.put(DISK_KEY, sample);
+    // Item 57: the store's cache upkeep rides on every measurement (the same
+    // cadence as the gauge; never on an attach's hot path).
+    await this.sweepDepsStore().catch((err) => console.log(`deps: sweep failed: ${errMsg(err)}`));
     const p = sample.parts;
     console.log(
       `disk: ${formatDiskGauge(sample)} — mirror ${formatGiB(p.mirror)}, deps ${formatGiB(p.deps)}, checkout ${formatGiB(p.checkout)}, ` +
@@ -2926,13 +2993,14 @@ export class ResidentDO extends Sandbox<Env> {
       return this.attachFailed(err, resource);
     }
 
-    let deps: { deps: ThreadDepsMechanism; reconciled: boolean };
+    let deps: { deps: ThreadDepsMechanism; reconciled: boolean; depsKey?: string };
     let credentials: AttachOk["credentials"] = mode.readonly ? "none" : "unavailable";
     let credentialsWrittenAt: number | undefined;
     try {
       deps = await this.materializeThreadDeps(
         binding,
         locked.value.threadLockKey,
+        locked.value.sha,
         facts.lockfileHash,
         record.commands.install,
       );
@@ -2964,6 +3032,8 @@ export class ResidentDO extends Sandbox<Env> {
       ...bindingSansCred,
       lastAttachAt: new Date().toISOString(),
       deps: deps.deps,
+      // A reused tree keeps the key it was linked from (spread above).
+      ...(deps.depsKey ? { depsKey: deps.depsKey } : {}),
       sha: locked.value.sha,
       readonly: mode.readonly,
       // A writable attach that could not mint keeps nothing to date: the next
@@ -3120,66 +3190,303 @@ export class ResidentDO extends Sandbox<Env> {
   private async materializeThreadDeps(
     binding: { user: string; worktreePath: string }, // a ThreadBinding, or U6's per-op checkout
     threadLockKey: string,
+    sha: string,
     warmLockKey: string,
     installCmd: string | undefined,
-  ): Promise<{ deps: ThreadDepsMechanism; reconciled: boolean }> {
+  ): Promise<{ deps: ThreadDepsMechanism; reconciled: boolean; depsKey?: string }> {
     const wt = binding.worktreePath;
     const hasDeps = (await this.run(["test", "-d", `${wt}/node_modules`])).exitCode === 0;
-    // The plan is pure (planThreadDeps): a reused tree is left alone; a matching
-    // lockfile is seeded from the shared cache; a DIVERGED lockfile is seeded
-    // too and then reconciled by the install — a delta on top of hardlinked
-    // read-only inodes the install can only replace, never write through.
-    // Before this the diverged case installed from an empty node_modules: 1.94
-    // GiB projected and 5+ min on the vCPU shared with the refresh cycle (live
-    // 2026-09-07, #552 and the 21:38 disk-pressure refusal).
+    // The plan is pure (planThreadDeps, item 58): a reused tree is left alone;
+    // a matching lockfile is seeded from the shared cache; a diverged lockfile
+    // is seeded AND reconciled by the install. Item 59 moves where that
+    // happens: the shared cache is the deps store, and the reconcile runs ONCE
+    // per key inside the store's install (seeded from the warm key's entry) —
+    // every thread on the key, this one included, then hardlinks the result.
     const plan = planThreadDeps({ hasDeps, threadLockKey, warmLockKey, installCmd });
-    let seeded: "hardlink" | "copy" | "none" = "none";
-    if (plan.seed) {
-      // Serialize the hardlink-copy on the mirror mutex (FIX 2): `cp -al` reads
-      // CHECKOUT_DIR, which the refresh alarm rebuilds under the same lock, so
-      // this can never hardlink a half-rebuilt checkout into the thread tree.
-      // Bounded by ATTACH_MUTEX_WAIT_MS — an attach waits out an in-flight
-      // rebuild, else MirrorBusyError → 503 mirror-busy (the bot-side fallback
-      // retries). Callers invoke materializeThreadDeps OUTSIDE their own mirror
-      // lock, so this fresh acquire is not a re-entrant double-lock.
-      //
-      // The mechanism itself — per-dir src/dst gating, `cp -al` with the
-      // dirs-only chown plus the group/world-write strip on the shared FILE
-      // inodes (one combined walk), the plain-copy fallback and the copy-dir
-      // path, and the swap of the tool-managed paths inside a hardlinked
-      // node_modules for real copies — is the pure `depCacheScript` /
-      // `mutableCacheSwapScript` (residentDepCache.ts, where the WHY of every
-      // ownership/permission rule is documented): two forks total, tagged
-      // lines back, instead of a spawn per probe/walk/path (#356 item 4).
-      await this.withMirrorLock(async () => {
+    if (!plan.seed) return { deps: "none", reconciled: false };
+    if (installCmd === undefined) {
+      // No install command (item 52): there is no deps entry, but the build
+      // step still ran at provisioning, so the tree still gets the checkout's
+      // build dirs (and its node_modules, if a build produced one) — the
+      // pre-store view, from the checkout itself.
+      const seeded = await this.materializeDepsView(null, wt, binding.user);
+      return { deps: threadDepsMechanism({ seeded, installed: false }), reconciled: false };
+    }
+    // The warm key's entry is guaranteed: provisioning/refresh put it there,
+    // and a disk from before the store (or a fresh restore) adopts the
+    // checkout's own node_modules into it.
+    await this.ensureWarmDepsInStore(warmLockKey);
+    if (plan.install) console.log(`deps ${wt}: ${plan.why}`);
+    const entry = await this.materializeDeps(threadLockKey, sha, installCmd, REFRESH_INSTALL_TIMEOUT_MS, {
+      seedFromKey: warmLockKey,
+    });
+    const seeded = await this.materializeDepsView(`${entry}/node_modules`, wt, binding.user);
+    return {
+      deps: threadDepsMechanism({ seeded, installed: plan.install }),
+      reconciled: plan.install,
+      depsKey: threadLockKey,
+    };
+  }
+
+  // -- deps store (item 59) ----------------------------------------------------
+
+  private depsStoreDirReady = false;
+  /** key → the entry path promise of the install running for it in this
+   *  incarnation; a second caller joins instead of installing twice. */
+  private depsInFlight = new Map<string, Promise<string>>();
+  /** Parallel install slots = cores (`nproc`, read once per incarnation). */
+  private depsInstallSlots: number | null = null;
+  private depsInstallRunning = 0;
+  private depsInstallWaiters: Array<() => void> = [];
+
+  private async ensureDepsStoreDir(): Promise<void> {
+    if (this.depsStoreDirReady) return;
+    await this.runOk(["install", "-d", "-m", "755", "-o", "root", "-g", "root", DEPS_STORE_DIR], "deps-store-dir");
+    this.depsStoreDirReady = true;
+  }
+
+  private async depsEntryComplete(key: string): Promise<boolean> {
+    return (await this.run(["test", "-f", depsCompletePath(key)])).exitCode === 0;
+  }
+
+  /** THE primitive (item 59): the store path holding `key`'s node_modules,
+   *  complete. Hit → touch `.used`, return. An install already running for
+   *  the key → join its promise. Miss → install once, outside every lock: the
+   *  scratch clone reads the mirror's objects through alternates and touches
+   *  no consumer's tree, so a full install no longer holds every attach
+   *  behind the mirror mutex (#170). `budgetMs` bounds the install step; a
+   *  joiner inherits the running install's budget. */
+  private async materializeDeps(
+    key: string,
+    sha: string,
+    installCmd: string,
+    budgetMs: number,
+    /** `seedFromKey`: a complete entry to hardlink into the scratch tree
+     *  before the install, so npm reconciles the delta (item 58) instead of
+     *  extracting every package — and the two entries share every unchanged
+     *  inode. Ignored when it is the key itself or has no complete entry. */
+    opts: { seedFromKey?: string } = {},
+  ): Promise<string> {
+    const plan = planDepsMaterialization({
+      complete: await this.depsEntryComplete(key),
+      inFlight: this.depsInFlight.has(key),
+    });
+    if (plan.action === "hit") {
+      await this.run(["touch", depsUsedPath(key)]);
+      return depsEntryPath(key);
+    }
+    if (plan.action === "join") return this.depsInFlight.get(key) as Promise<string>;
+    const p = this.installDepsEntry(key, sha, installCmd, budgetMs, opts).finally(() => this.depsInFlight.delete(key));
+    this.depsInFlight.set(key, p);
+    return p;
+  }
+
+  private async installDepsEntry(
+    key: string,
+    sha: string,
+    installCmd: string,
+    budgetMs: number,
+    opts: { seedFromKey?: string },
+  ): Promise<string> {
+    await this.acquireDepsInstallSlot();
+    const attempt = crypto.randomUUID().slice(0, 8);
+    const scratch = depsScratchPath(attempt);
+    const staging = depsStagingPath(key, attempt);
+    const t0 = Date.now();
+    try {
+      await this.ensureDepsStoreDir();
+      console.log(`deps: installing ${key.slice(0, 8)} at ${sha.slice(0, 8)} in ${scratch}`);
+      await this.runOk(depsScratchCloneArgv({ mirrorDir: MIRROR_DIR, scratchDir: scratch, sha }), "deps-scratch", {
+        timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+      });
+      await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, scratch], "deps-scratch-chown");
+      // Seed (item 58, once per key now): a hardlink view of the seed entry
+      // into the scratch tree, tool caches as writable copies, so the install
+      // below reconciles the delta — replacing what differs, never writing
+      // through a shared inode (they are owner-read-only). `depCacheScript`
+      // with the scratch as its own "checkout": the build-dir sources do not
+      // exist there, so only node_modules is materialized.
+      const seed = opts.seedFromKey;
+      if (seed && seed !== key && (await this.depsEntryComplete(seed))) {
+        const seedNm = `${depsEntryPath(seed)}/node_modules`;
         const parsed = await this.runDepScript(
-          depCacheScript(CHECKOUT_DIR, wt, binding.user),
-          "deps-materialize",
+          depCacheScript(scratch, scratch, BUILD_USER, { nodeModulesSrc: seedNm }),
+          "deps-seed",
           REFRESH_BUILD_TIMEOUT_MS,
         );
-        seeded = parsed.mech;
-        const nmDst = `${wt}/node_modules`;
-        const paths = mutableCachePaths(nmDst, parsed.mutableListing);
+        const paths = mutableCachePaths(`${scratch}/node_modules`, parsed.mutableListing);
         if (paths.length > 0) {
           await this.runDepScript(
-            mutableCacheSwapScript(`${CHECKOUT_DIR}/node_modules`, nmDst, binding.user, paths),
-            "deps-mutable-swap",
+            mutableCacheSwapScript(seedNm, `${scratch}/node_modules`, BUILD_USER, paths),
+            "deps-seed-swap",
             GIT_NETWORK_TIMEOUT_MS,
           );
         }
-      }, ATTACH_MUTEX_WAIT_MS);
+        console.log(`deps: ${key.slice(0, 8)} seeded from ${seed.slice(0, 8)} (${parsed.mech})`);
+      }
+      // Unprivileged and token-free (KTD5/KTD7), in a tree only this attempt
+      // knows — no stale sweep needed: nothing else can be running in it.
+      await this.runOk(["su", "-s", "/bin/bash", BUILD_USER, "-c", `cd ${scratch} && ${installCmd}`], "deps-install", {
+        timeoutMs: budgetMs,
+      });
+      // Owner write stripped before the entry becomes visible: every consumer
+      // hardlinks these inodes, and worker1 (the checkout's build) owns them —
+      // a build writing outside the tool-cache paths must fail EACCES, never
+      // mutate the store (review 1b, now with one source instead of three).
+      await this.runOk(
+        ["sh", "-c", `find ${scratch}/node_modules -type f -perm -u+w -exec chmod u-w {} +`],
+        "deps-harden",
+        {
+          timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+        },
+      );
+      await this.runOk(
+        [
+          "sh",
+          "-c",
+          depsStoreCommitScript({
+            scratchDir: scratch,
+            stagingDir: staging,
+            entryDir: depsEntryPath(key),
+            completePath: depsCompletePath(key),
+          }),
+        ],
+        "deps-commit",
+        { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
+      );
+      console.log(`deps: installed ${key.slice(0, 8)} in ${Date.now() - t0}ms`);
+      return depsEntryPath(key);
+    } catch (err) {
+      await this.run(["rm", "-rf", scratch, staging]).catch(() => {});
+      throw err;
+    } finally {
+      this.releaseDepsInstallSlot();
     }
-    if (!plan.install || installCmd === undefined) {
-      return { deps: threadDepsMechanism({ seeded, installed: false }), reconciled: false };
-    }
+  }
 
-    // Committed lockfile differs from the warm checkout: the install runs as
-    // the thread user, token-free (KTD7), on top of the seed — reconciling the
-    // packages whose version differs and leaving the shared inodes untouched.
-    // Outside the mirror lock: it reads nothing of the checkout.
-    console.log(`deps ${binding.worktreePath}: ${plan.why}`);
-    await this.threadRunOk(binding.user, wt, installCmd, "thread-install", REFRESH_BUILD_TIMEOUT_MS);
-    return { deps: threadDepsMechanism({ seeded, installed: true }), reconciled: true };
+  private async acquireDepsInstallSlot(): Promise<void> {
+    if (this.depsInstallSlots === null) {
+      const r = await this.run(["nproc"]);
+      this.depsInstallSlots = depsInstallSemaphoreSize(r.exitCode === 0 ? r.stdout : null);
+    }
+    while (this.depsInstallRunning >= this.depsInstallSlots) {
+      await new Promise<void>((resolve) => this.depsInstallWaiters.push(resolve));
+    }
+    this.depsInstallRunning++;
+  }
+
+  private releaseDepsInstallSlot(): void {
+    this.depsInstallRunning--;
+    this.depsInstallWaiters.shift()?.();
+  }
+
+  /** A hardlink view of a store entry's node_modules into `tree` for `user`,
+   *  plus the tool-cache swap — the pure `depCacheScript` / `mutableCacheSwapScript`
+   *  (residentDepCache.ts, where the WHY of every ownership/permission rule
+   *  is documented) with the entry as the node_modules source; the build dirs
+   *  still come from the checkout (they are build output at its sha).
+   *  Serialized on the mirror mutex because the build-dir copies read
+   *  CHECKOUT_DIR, which the refresh rebuilds under the same lock; bounded by
+   *  ATTACH_MUTEX_WAIT_MS → MirrorBusyError → 503 mirror-busy for an attach.
+   *  Callers hold no mirror lock of their own here. */
+  private async materializeDepsView(
+    /** The store entry's node_modules; null = the checkout is the source for
+     *  every dir (a repo with no install command, item 52). */
+    entryNodeModules: string | null,
+    tree: string,
+    user: string,
+  ): Promise<DepCacheMaterialization | "none"> {
+    let mech: DepCacheMaterialization | "none" = "none";
+    await this.withMirrorLock(async () => {
+      mech = await this.linkDepsView(entryNodeModules, tree, user);
+    }, ATTACH_MUTEX_WAIT_MS);
+    return mech;
+  }
+
+  /** The view itself, for callers already holding the mirror lock (the
+   *  refresh rebuild and provisioning link the CHECKOUT this way). */
+  private async linkDepsView(
+    entryNodeModules: string | null,
+    tree: string,
+    user: string,
+  ): Promise<DepCacheMaterialization | "none"> {
+    const parsed = await this.runDepScript(
+      depCacheScript(CHECKOUT_DIR, tree, user, entryNodeModules ? { nodeModulesSrc: entryNodeModules } : {}),
+      "deps-materialize",
+      REFRESH_BUILD_TIMEOUT_MS,
+    );
+    const nmDst = `${tree}/node_modules`;
+    const paths = mutableCachePaths(nmDst, parsed.mutableListing);
+    if (paths.length > 0) {
+      await this.runDepScript(
+        mutableCacheSwapScript(entryNodeModules ?? `${CHECKOUT_DIR}/node_modules`, nmDst, user, paths),
+        "deps-mutable-swap",
+        GIT_NETWORK_TIMEOUT_MS,
+      );
+    }
+    return parsed.mech;
+  }
+
+  /** Adopt a checkout that already holds node_modules but whose key has no
+   *  store entry (a disk from before the store, or a fresh R2 restore — the
+   *  snapshot carries the checkout's tree, not the store): MOVE it into the
+   *  entry (a rename, same filesystem) and re-link the checkout as a view. The
+   *  inodes are the same before and after, so threads that hardlinked from the
+   *  checkout earlier are untouched. Under the mirror lock: the checkout
+   *  mutates. A no-op when the entry is complete or the checkout has no deps. */
+  private async ensureWarmDepsInStore(warmKey: string): Promise<void> {
+    if (await this.depsEntryComplete(warmKey)) return;
+    await this.withMirrorLock(async () => this.adoptCheckoutDeps(warmKey), ATTACH_MUTEX_WAIT_MS);
+  }
+
+  private async adoptCheckoutDeps(warmKey: string): Promise<void> {
+    if (await this.depsEntryComplete(warmKey)) return;
+    if ((await this.run(["test", "-d", `${CHECKOUT_DIR}/node_modules`])).exitCode !== 0) return;
+    await this.ensureDepsStoreDir();
+    const attempt = crypto.randomUUID().slice(0, 8);
+    console.log(`deps: adopting the checkout's node_modules as ${warmKey.slice(0, 8)}`);
+    await this.runOk(
+      [
+        "sh",
+        "-c",
+        depsStoreCommitScript({
+          scratchDir: CHECKOUT_DIR,
+          stagingDir: depsStagingPath(warmKey, attempt),
+          entryDir: depsEntryPath(warmKey),
+          completePath: depsCompletePath(warmKey),
+          keepScratch: true,
+        }),
+      ],
+      "deps-adopt",
+      { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
+    );
+    await this.linkDepsView(`${depsEntryPath(warmKey)}/node_modules`, CHECKOUT_DIR, BUILD_USER);
+  }
+
+  /** Cache upkeep after every disk measurement (item 59): list the store,
+   *  protect the checkout's key, every live binding's key and every install
+   *  in flight, and remove what `planDepsEviction` names — debris first, then
+   *  the coldest spares beyond DEPS_STORE_MAX_UNREFERENCED. Housekeeping:
+   *  a failure is a log line, never a lifecycle flip. */
+  private async sweepDepsStore(): Promise<void> {
+    const listed = await this.run(["sh", "-c", depsStoreListScript()], { timeoutMs: DU_TIMEOUT_MS });
+    if (listed.exitCode !== 0) return;
+    const listing = parseDepsStoreListing(listed.stdout);
+    if (listing.entries.length === 0 && listing.leftovers.length === 0) return;
+    const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
+    const protectedKeys = new Set<string>(this.depsInFlight.keys());
+    if (facts?.lockfileHash) protectedKeys.add(facts.lockfileHash);
+    for (const b of await this.liveBindings()) if (b.depsKey) protectedKeys.add(b.depsKey);
+    // A scratch/staging dir of an install still running in this incarnation
+    // is live work, not debris; the listing cannot tell them apart, so
+    // leftovers wait for a sweep with nothing in flight.
+    const leftovers = this.depsInFlight.size > 0 ? [] : listing.leftovers;
+    const plan = planDepsEviction({ entries: listing.entries, leftovers, protectedKeys });
+    if (plan.remove.length === 0) return;
+    await this.runOk(["rm", "-rf", ...plan.remove], "deps-evict", { timeoutMs: DU_TIMEOUT_MS });
+    console.log(
+      `deps: evicted ${plan.remove.length} path(s) — ${plan.remove.map((p) => p.slice(DEPS_STORE_DIR.length + 1, DEPS_STORE_DIR.length + 9)).join(", ")}; kept ${plan.keep.map((k) => k.slice(0, 8)).join(", ")}`,
+    );
   }
 
   /** The per-user 700 staging dir (`install -d` is idempotent), memoized per
@@ -3800,6 +4107,7 @@ export class ResidentDO extends Sandbox<Env> {
       const deps = await this.materializeThreadDeps(
         { user, worktreePath: checkout },
         locked.value.lockKey,
+        locked.value.sha,
         facts.lockfileHash,
         record.commands.install,
       );
@@ -5172,9 +5480,16 @@ async function handleAttach(env: Env, body: Record<string, unknown>): Promise<Re
   if ("error" in readonly) return json({ error: readonly.error }, 400);
   const want = parseWantSha(body.sha);
   if ("error" in want) return json({ error: want.error }, 400);
-  const result = await ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly, want.sha, ctx.record);
-  if ("error" in result) return threadErrResponse(result);
-  return json(result);
+  // Post-validation, the answer streams like /exec (item 59): heartbeat
+  // whitespace then ONE JSON document over HTTP 200, so an attach that waits
+  // on a deps install (minutes) cannot lose the connection the way a plain
+  // response did live 2026-09-07 (`fetch failed` at 272 s, #552). A refusal
+  // carries its `status` in the body; `ResidentExecutor.attach` reads it there.
+  return streamHeartbeatJson(
+    ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly, want.sha, ctx.record),
+    (result) => result,
+    (err) => ({ error: errMsg(err), status: 500 }),
+  );
 }
 
 async function handleDetach(env: Env, body: Record<string, unknown>): Promise<Response> {

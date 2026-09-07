@@ -167,8 +167,8 @@ describe("checkoutUpdateCommand", () => {
   });
 });
 
-describe("killStaleBuildProcessesCommand (a build-user step never starts beside a process the last one left behind)", () => {
-  const argv = killStaleBuildProcessesCommand("worker1");
+describe("killStaleBuildProcessesCommand (a build-user step never starts beside a process the last one left behind IN ITS TREE)", () => {
+  const argv = killStaleBuildProcessesCommand("worker1", "/workspace/checkout");
   const script = argv[2];
 
   it("runs as a root shell (never `su`): the sweep must outrank the processes it kills", () => {
@@ -176,23 +176,34 @@ describe("killStaleBuildProcessesCommand (a build-user step never starts beside 
     expect(script).not.toContain("su ");
   });
 
+  it("scopes by cwd: only the user's processes whose cwd is the tree or below it — a parallel install into another store entry is live work, not a leftover", () => {
+    expect(script).toContain("pgrep -u worker1");
+    expect(script).toContain("readlink /proc/$p/cwd");
+    expect(script).toContain("/workspace/checkout|/workspace/checkout/*)");
+    expect(script).not.toMatch(/pkill/);
+  });
+
   it("names every survivor before killing it, so the Worker log shows WHAT was still running", () => {
-    expect(script.indexOf("pgrep -a -u worker1")).toBeLessThan(script.indexOf("pkill -KILL -u worker1"));
+    expect(script.indexOf("ps -o pid=,args=")).toBeLessThan(script.indexOf("kill -KILL"));
+    expect(script).toContain("killing stale worker1 processes under /workspace/checkout:");
   });
 
   it("SIGKILL, not SIGTERM: an npm mid-extract must stop writing NOW, not at its leisure", () => {
-    expect(script).toContain("pkill -KILL -u worker1");
-    expect(script).not.toMatch(/pkill -TERM|pkill -15|pkill -u/);
+    expect(script).toContain("kill -KILL $stale");
+    expect(script).not.toMatch(/kill -TERM|kill -15/);
   });
 
-  it("waits (bounded) until the user has no process left — the next step must not race the dying ones", () => {
-    expect(script).toMatch(/while pgrep -u worker1/);
+  it("waits (bounded) until EVERY matched pid is gone — one survivor among several must keep the loop waiting", () => {
+    expect(script).toContain('for p in $stale; do kill -0 $p 2>/dev/null && alive="$alive$p "; done');
+    expect(script).toContain('[ -z "$alive" ] && break');
     expect(script).toMatch(/exit 1/);
   });
 
-  it("nothing running → exits 0 silently (pgrep's 'no match' exit 1 is not a failure)", () => {
+  it("nothing matching → exits 0 silently (pgrep's 'no match' exit 1 is not a failure)", () => {
     // A user that owns no process here: the sweep must be a no-op, not an error.
-    const r = spawnSync(argv[0], [argv[1], killStaleBuildProcessesCommand("nobody")[2]], { encoding: "utf8" });
+    const r = spawnSync(argv[0], [argv[1], killStaleBuildProcessesCommand("nobody", "/nonexistent")[2]], {
+      encoding: "utf8",
+    });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
   });

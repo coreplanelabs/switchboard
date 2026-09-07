@@ -39,6 +39,7 @@ const MB = 1024; // KiB per MB, near enough for the fixtures below
 // deps 2.1 GB, checkout rest 0.43 GB (history + tree).
 const LAYOUT: DiskLayout = {
   mirrorDir: "/workspace/mirror",
+  depsStoreDir: "/workspace/deps",
   checkoutDir: "/workspace/checkout",
   threads: [
     { threadKey: "slack:C1:1.1", dir: "/workspace/threads/slack-C1-1.1-aaaaaaaa" },
@@ -52,7 +53,7 @@ const LAYOUT: DiskLayout = {
 
 const DU_OUT = [
   "360000\t/workspace/mirror",
-  "2100000\t/workspace/checkout/node_modules",
+  "2100000\t/workspace/deps",
   "430000\t/workspace/checkout",
   "450000\t/workspace/threads/slack-C1-1.1-aaaaaaaa",
   "2550000\t/workspace/threads/slack-C1-2.2-bbbbbbbb",
@@ -83,12 +84,12 @@ describe("measurement — one df, one du, hardlinks counted once", () => {
     expect(parseDfKiB("Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay x 2 3 3% /\n")).toBeNull();
   });
 
-  it("du argv: mirror, then the checkout's node_modules BEFORE the checkout, then threads, then homes — the order that charges shared inodes to the deps term", () => {
+  it("du argv: mirror, then the deps store BEFORE the checkout, then threads, then homes — the order that charges shared inodes to the deps term", () => {
     expect(duArgv(LAYOUT)).toEqual([
       "du",
       "-xsk",
       "/workspace/mirror",
-      "/workspace/checkout/node_modules",
+      "/workspace/deps",
       "/workspace/checkout",
       "/workspace/threads/slack-C1-1.1-aaaaaaaa",
       "/workspace/threads/slack-C1-2.2-bbbbbbbb",

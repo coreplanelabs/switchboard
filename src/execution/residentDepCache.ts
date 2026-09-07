@@ -228,10 +228,21 @@ export interface DepCacheScriptParse {
  *     emitted as `mutable=` lines). `cp -al` failure → rm + plain-copy
  *     fallback, same as before;
  *   - copy dirs: `cp -R` + `chown -Rh` (never dereference a planted symlink). */
-export function depCacheScript(checkoutDir: string, worktree: string, user: string): string {
+export function depCacheScript(
+  checkoutDir: string,
+  worktree: string,
+  user: string,
+  /** `nodeModulesSrc`: the deps store entry's node_modules (item 59) — the
+   *  immutable source every view hardlinks from; the checkout stays the
+   *  source for the build dirs (they are build output at the checkout's sha).
+   *  Omitted → the checkout's own node_modules, the pre-store behavior. */
+  opts: { nodeModulesSrc?: string } = {},
+): string {
   const owner = shellQuote(`${user}:${user}`);
   const blocks = DEP_CACHE_DIRS.map((dir) => {
-    const src = shellQuote(`${checkoutDir}/${dir}`);
+    const src = shellQuote(
+      dir === "node_modules" && opts.nodeModulesSrc ? opts.nodeModulesSrc : `${checkoutDir}/${dir}`,
+    );
     const dst = shellQuote(`${worktree}/${dir}`);
     const copyFallback = [
       `  cp -R ${src} ${dst} || { echo err=deps-copy; exit 1; }`,
@@ -299,6 +310,10 @@ export function mutableCacheSwapScript(
     const rel = p.slice(root.length);
     lines.push(`rm -rf ${shellQuote(p)} || { echo err=deps-mutable-rm; exit 1; }`);
     lines.push(`cp -R ${shellQuote(`${srcRoot}${rel}`)} ${shellQuote(p)} || { echo err=deps-mutable-copy; exit 1; }`);
+    // cp copies mode bits: a store entry's files are owner-read-only (item 59,
+    // hardened so no consumer can write through the shared inodes), and a
+    // cache the tree's own tools must rewrite in place has to be writable.
+    lines.push(`chmod -R u+w ${shellQuote(p)} || { echo err=deps-mutable-chmod; exit 1; }`);
     lines.push(`chown -Rh ${owner} ${shellQuote(p)} || { echo err=deps-mutable-chown; exit 1; }`);
   }
   return lines.join("\n");
