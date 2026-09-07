@@ -1,5 +1,6 @@
 import { escapeHtml } from "./liveView/html.js";
-import { FAVICON_DEFAULT, FAVICON_IDLE } from "./favicon.js";
+import { FAVICON_BY_TONE, FAVICON_DEFAULT, FAVICON_IDLE } from "./favicon.js";
+import { residentsFleetTone, type ResidentRecordView } from "./residentsModel.js";
 import { serializeSeed, SEED_ELEMENT_ID, type WebSeed } from "./webSeed.js";
 
 // The one HTML document the server renders: a shell that mounts the web app
@@ -47,10 +48,7 @@ export interface ShellAssets {
  */
 export function renderShell(title: string, seed: WebSeed, assets: ShellAssets): string {
   const css = assets.css.map((href) => `<link rel="stylesheet" href="${escapeHtml(href)}">`).join("\n");
-  // Run-state pages wear the dot (the app repaints it green/gray by id);
-  // every other page wears the neutral mark — a dot there would claim a
-  // run state the page does not have.
-  const favicon = seed.page === "runs" || seed.page === "run" ? FAVICON_IDLE : FAVICON_DEFAULT;
+  const favicon = pageFavicon(seed);
   return `<!doctype html>
 <html lang="en" class="dark">
 <head>
@@ -67,6 +65,23 @@ ${css}
 <script type="module" src="${escapeHtml(assets.js)}"></script>
 </body>
 </html>`;
+}
+
+/** Pages with a state to claim wear the dot: run-state pages start idle (the
+ *  app repaints it green/gray by id as the feed moves); the residents index
+ *  wears the fleet's worst tone straight from the seed (a snapshot page — no
+ *  feed to repaint from, so this render is the truth). Every other page wears
+ *  the neutral mark — a dot there would claim a state the page does not have. */
+function pageFavicon(seed: WebSeed): string {
+  switch (seed.page) {
+    case "runs":
+    case "run":
+      return FAVICON_IDLE;
+    case "residents":
+      return FAVICON_BY_TONE[residentsFleetTone(seed.residents as ResidentRecordView[])];
+    default:
+      return FAVICON_DEFAULT;
+  }
 }
 
 /** A bound shell renderer: what the page handlers receive (they know the title
