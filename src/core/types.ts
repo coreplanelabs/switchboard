@@ -136,4 +136,11 @@ export interface ChannelIO {
    * can name the run it caused. Optional: Slack/CLI need nothing from it.
    */
   runFinished?(receipt: RunReceipt): void;
+  /**
+   * Called once by the core the moment a run has been CREATED in the registry
+   * (before it executes), with the run id. The async HTTP ingress path uses it
+   * to answer `202 Accepted` with the run id while the run continues in the
+   * background; Slack/CLI need nothing from it. Optional, like runFinished.
+   */
+  runStarted?(started: { id: string }): void;
 }

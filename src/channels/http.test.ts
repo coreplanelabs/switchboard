@@ -511,3 +511,162 @@ describe("run receipt in the response (#244)", () => {
     expect(io.run()).toEqual({ id: "r", status: "stopped_soft" });
   });
 });
+
+describe('async mode (`"async": true` → 202 Accepted, run continues in background)', () => {
+  const good = authConfig({ tok: { subject: "alice" } });
+
+  /** A dispatch double modelling the real one: "in flight" from its first line
+   *  (the drain counter), runStarted fired once the run exists, resolution
+   *  controlled by the test. */
+  function slowRunDispatch(runId = "run-42") {
+    let inFlight = 0;
+    let finish!: () => void;
+    const gate = new Promise<void>((r) => (finish = r));
+    const fn: DispatchFn = async (_deps, _msg, io) => {
+      inFlight++; // first line, like the real dispatch() (drain counts this)
+      try {
+        io.runStarted?.({ id: runId });
+        await gate;
+        await io.reply("background answer");
+        io.runFinished?.({ id: runId, status: "completed" });
+      } finally {
+        inFlight--;
+      }
+    };
+    return { fn, finish, inFlight: () => inFlight };
+  }
+
+  it("answers 202 with runId, runUrl (PUBLIC_BASE_URL) and threadKey before the run finishes", async () => {
+    const d = slowRunDispatch("run-7");
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "go", channel: "ops", async: true }) },
+      deps,
+      { auth: good, dispatch: d.fn, publicBaseUrl: "https://sb.example.com/" },
+    );
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({
+      runId: "run-7",
+      runUrl: "https://sb.example.com/runs/run-7",
+      threadKey: "http:ops:default",
+    });
+    expect(d.inFlight()).toBe(1); // still running when the 202 went out
+    d.finish();
+  });
+
+  it("runUrl degrades to a path when no publicBaseUrl is configured", async () => {
+    const d = slowRunDispatch("run-8");
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "go", async: true }) },
+      deps,
+      { auth: good, dispatch: d.fn },
+    );
+    expect((res.body as { runUrl: string }).runUrl).toBe("/runs/run-8");
+    d.finish();
+  });
+
+  it("the sync path is unchanged: same body without `async` → 200 with the reply", async () => {
+    const d = slowRunDispatch("run-9");
+    const pending = handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "go" }) },
+      deps,
+      { auth: good, dispatch: d.fn },
+    );
+    d.finish(); // sync mode awaits the whole run
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ reply: "background answer", run: { id: "run-9", status: "completed" } });
+  });
+
+  it("`async: false` behaves exactly like omitting it", async () => {
+    const d = fakeDispatch("sync answer");
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "go", async: false }) },
+      deps,
+      { auth: good, dispatch: d.fn },
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ reply: "sync answer" });
+  });
+
+  it("a non-boolean `async` → 400, dispatch never called", async () => {
+    const d = fakeDispatch();
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "go", async: "yes" }) },
+      deps,
+      { auth: good, dispatch: d.fn },
+    );
+    expect(res.status).toBe(400);
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it("authorization applies unchanged on the async path: unknown token → 401, dispatch never called", async () => {
+    const d = fakeDispatch();
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("wrong"), body: JSON.stringify({ text: "go", async: true }) },
+      deps,
+      { auth: good, dispatch: d.fn },
+    );
+    expect(res.status).toBe(401);
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it("a dispatch-less token is refused on the async path too (403, fail-closed)", async () => {
+    const d = fakeDispatch();
+    const auth = authConfig({ tok: { subject: "reader", scopes: ["runs:read"] } });
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "go", async: true }) },
+      deps,
+      { auth, dispatch: d.fn },
+    );
+    expect(res.status).toBe(403);
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it("the token's channel pin applies on the async path (threadKey reflects the pinned channel)", async () => {
+    const d = slowRunDispatch("run-10");
+    const pinned = authConfig({ tok: { subject: "alice", channel: "locked" } });
+    const res = await handleIngressRequest(
+      {
+        method: "POST",
+        headers: bearer("tok"),
+        body: JSON.stringify({ text: "go", channel: "attacker", async: true }),
+      },
+      deps,
+      { auth: pinned, dispatch: d.fn },
+    );
+    expect((res.body as { threadKey: string }).threadKey).toBe("http:locked:default");
+    d.finish();
+  });
+
+  it("drain semantics: the run counts in flight after the 202 and completes in the background with its receipt", async () => {
+    const d = slowRunDispatch("run-11");
+    const io: HttpIO[] = [];
+    const capture: DispatchFn = async (dd, m, i) => {
+      io.push(i as HttpIO);
+      await d.fn(dd, m, i);
+    };
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "go", async: true }) },
+      deps,
+      { auth: good, dispatch: capture },
+    );
+    expect(res.status).toBe(202);
+    expect(d.inFlight()).toBe(1); // a drain polling the counter would wait
+    d.finish();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(d.inFlight()).toBe(0); // ...and see it complete
+    expect(io[0].run()).toEqual({ id: "run-11", status: "completed" }); // record receipt landed
+  });
+
+  it("an async request the core answers WITHOUT a run (no runStarted) falls back to the sync 200 shape", async () => {
+    const d = fakeDispatch("config reply"); // never calls runStarted
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "config show", async: true }) },
+      deps,
+      { auth: good, dispatch: d.fn },
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ reply: "config reply" });
+  });
+});
