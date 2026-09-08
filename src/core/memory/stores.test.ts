@@ -31,17 +31,17 @@ describe("NullMemoryStore", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("list returns [] and forget returns false (#278 human controls)", async () => {
+  it("list returns [] and forget returns false (human controls)", async () => {
     const store = new NullMemoryStore();
     expect(await store.list("org:acme", 10)).toEqual([]);
     expect(await store.forget("org:acme", "mem:org:acme:0")).toBe(false);
   });
 });
 
-// Feature: features/memory.md §24 (#278) — human controls: list a scope's active
+// Feature: features/memory.md §24 — human controls: list a scope's active
 // records newest first; forget = soft-delete (status `forgotten`, provenance
 // kept) that hides the record from retrieval, list, and dedup.
-describe("InMemoryMemoryStore.list / forget (#278)", () => {
+describe("InMemoryMemoryStore.list / forget", () => {
   const seed = () =>
     new InMemoryMemoryStore(
       [
@@ -62,7 +62,7 @@ describe("InMemoryMemoryStore.list / forget (#278)", () => {
     expect(await store.list("user:slack:UBOB", 10)).toEqual([]);
   });
 
-  it("list with a query keeps only records a query token hits (whole-token, text or keywords), newest first, no usage bump (#293)", async () => {
+  it("list with a query keeps only records a query token hits (whole-token, text or keywords), newest first, no usage bump", async () => {
     const store = seed();
     const hits = await store.list("org:acme", 10, "newest oldest");
     expect(hits.map((r) => r.id)).toEqual(["c", "a"]);
@@ -290,9 +290,9 @@ describe("selectMemoryStore", () => {
   });
 });
 
-// Feature: features/memory.md — per-scope cap (#253): applied on write in the
+// Feature: features/memory.md — per-scope cap: applied on write in the
 // in-process store; evicted rows are soft-deleted and invisible everywhere.
-describe("InMemoryMemoryStore per-scope cap (#253)", () => {
+describe("InMemoryMemoryStore per-scope cap", () => {
   const c = (text: string): MemoryCandidate => ({
     kind: "fact",
     text,

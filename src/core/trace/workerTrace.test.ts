@@ -16,11 +16,14 @@ import {
   workerLogSink,
 } from "./workerTrace.js";
 
-const TP = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+/** The W3C Trace Context specification's own example trace id and parent span id. */
+const W3C_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+const W3C_SPAN = "00f067aa0ba902b7";
+const TP = `00-${W3C_TRACE}-${W3C_SPAN}-01`;
 
 describe("adoptedParent", () => {
   it("names the trace and parent of a well-formed traceparent and nothing for an absent or malformed one", () => {
-    expect(adoptedParent(TP)).toEqual({ traceId: "4bf92f3577b34da6a3ce929d0e0e4736", parentId: "00f067aa0ba902b7" });
+    expect(adoptedParent(TP)).toEqual({ traceId: W3C_TRACE, parentId: W3C_SPAN });
     expect(adoptedParent(null)).toBeUndefined();
     expect(adoptedParent("00-0000-nope")).toBeUndefined();
   });
@@ -114,16 +117,16 @@ describe("startAdoptedRoot", () => {
       startedAt: 900,
       attrs: { route: "/runs/put" },
     });
-    expect(adopted.traceId).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
+    expect(adopted.traceId).toBe(W3C_TRACE);
     expect(adopted.record()).toMatchObject({
-      parentSpanId: "00f067aa0ba902b7",
+      parentSpanId: W3C_SPAN,
       startedAt: 900,
       attrs: { route: "/runs/put" },
     });
     adopted.end("ok");
-    expect(log.ends[0]!.traceId).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
+    expect(log.ends[0]!.traceId).toBe(W3C_TRACE);
     const own = startAdoptedRoot(tracer, "sandbox.exec", { sinks: [log], traceparent: "garbage" });
-    expect(own.traceId).not.toBe("4bf92f3577b34da6a3ce929d0e0e4736");
+    expect(own.traceId).not.toBe(W3C_TRACE);
     expect(own.record().parentSpanId).toBeUndefined();
     const none = startAdoptedRoot(tracer, "sandbox.exec", { sinks: [log] });
     expect(none.record().parentSpanId).toBeUndefined();

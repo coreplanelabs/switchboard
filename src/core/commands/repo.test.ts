@@ -281,7 +281,7 @@ describe("repo.list", () => {
   });
 });
 
-describe("gates (KTD9 fail-closed) and scopes", () => {
+describe("gates (fail-closed) and scopes", () => {
   it("the mutating verbs are `repoManager` + `repo:write`; a plain chat user is refused before any resident call", async () => {
     const c = mockClient();
     const commands = bind({ admin: c });
@@ -348,7 +348,7 @@ describe("repo onboard", () => {
   it("item 52: a repo with no root package.json gets NO install and no-op build/test — the resident's table simply lacks `install`", async () => {
     const c = mockClient();
     const { text } = await say(
-      bind({ admin: c, inspect: inspecting({ entries: ["Taskfile.yaml", "terrateam"] }) }),
+      bind({ admin: c, inspect: inspecting({ entries: ["Taskfile.yaml", "infra"] }) }),
       "repo onboard acme/infra",
       admin,
     );
@@ -486,7 +486,7 @@ describe("repo onboard", () => {
     });
   });
 
-  it("--evict-coldest opts the onboard into LRU eviction (#50); an evicting onboard says which resident went", async () => {
+  it("--evict-coldest opts the onboard into LRU eviction; an evicting onboard says which resident went", async () => {
     const c = mockClient({
       onboard: ok(
         {
@@ -693,7 +693,7 @@ describe("provisioning follow-up (item 52): repo onboard / repo rebuild settle",
     }
   });
 
-  it("down elsewhere (snapshot, clone, timeout, no reason): a retry hint, never the command-table hint (#416)", async () => {
+  it("down elsewhere (snapshot, clone, timeout, no reason): a retry hint, never the command-table hint", async () => {
     for (const reason of [
       "provision-failed at snapshot: put: Please look at https://www.cloudflarestatus.com for issues or contact customer support. (10043)",
       "provision-failed at clone: exit 128: fatal: could not read Username",
@@ -830,7 +830,7 @@ describe("repo reconfigure", () => {
   });
 });
 
-describe("repo test / repo build (deterministic ops, U6/KTD8)", () => {
+describe("repo test / repo build (deterministic ops)", () => {
   const OK_RESULT: OperationResult = {
     kind: "result",
     ok: true,
@@ -870,7 +870,7 @@ describe("repo test / repo build (deterministic ops, U6/KTD8)", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("the per-repo allowlist (KD7) is the handler's refusal, naming the repo; the op never runs", async () => {
+  it("the per-repo allowlist is the handler's refusal, naming the repo; the op never runs", async () => {
     const { ops, calls } = fakeOps(OK_RESULT);
     const res = await bind({ ops, canUseRepo: (_u, slug) => slug !== "acme/api" }).invoke(
       "repo.test",

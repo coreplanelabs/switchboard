@@ -49,7 +49,7 @@ describe("redactSecrets", () => {
     const cases: Array<[string, string]> = [
       ["curl -u admin:SuperSecretPass123 https://x", "SuperSecretPass123"],
       ["DATABASE_URL=postgres://appuser:hunter2hunter2@db.internal:5432/prod", "hunter2hunter2"],
-      ["Set-Cookie: session=abcdef0123456789abcdef0123456789; Path=/", "abcdef0123456789"],
+      ["Set-Cookie: session=abcdef0123456789abcdef01234567; Path=/", "abcdef0123456789"],
       ["Cookie: sessionid=zzzzzzzzzzzzzzzzzzzz", "zzzzzzzzzzzzzzzzzzzz"],
       ["Authorization: Basic dXNlcjpTdXBlclNlY3JldFBhc3N3b3Jk", "dXNlcjpTdXBlclNlY3JldFBhc3N3b3Jk"],
       ["AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEX", "wJalrXUtnFEMIK7MDENGbPxRfiCYEX"],
@@ -77,7 +77,7 @@ describe("redactSecrets", () => {
     for (const s of safe) expect(redactSecrets(s), s).toBe(s);
   });
 
-  // #157 U1: message events carry pasted user text, where a secret most often
+  // Message events carry pasted user text, where a secret most often
   // arrives as a JSON member — the name is quoted, so the assignment pass must
   // see through the closing quote.
   it("redacts the value of a quoted JSON member whose name marks it secret", () => {
@@ -211,7 +211,7 @@ describe("prepareToolResult", () => {
   });
 });
 
-describe("redactSecrets — linear on long unbroken tokens (#213 CI timeout)", () => {
+describe("redactSecrets — linear on long unbroken tokens", () => {
   it("a 200 KB single token redacts in well under a second (unanchored patterns were O(n²): ~0.5 s per 20 KB)", () => {
     const token = "x".repeat(200_000);
     const started = performance.now();

@@ -12,13 +12,15 @@ import { InMemoryMemoryStore } from "../memory/stores.js";
 import type { MemoryConfig, MemoryRecord, MemoryStore } from "../memory/types.js";
 import { MEMORY_OFF_MESSAGE, registerMemoryCommands, scopeKeyOfMemoryId, type MemoryCommandDeps } from "./memory.js";
 
-// Feature: features/memory.md §24–26 (#278, #293, #253) / features/command-registry.md
+// Feature: features/memory.md §24–26 / features/command-registry.md
 // (phase 4b): `memory list` / `memory forget` as registry commands — deterministic
 // (no model turn), caller-scoped on every surface: a caller manages its OWN
 // scope freely, the shared scopes (org, repo, channel) are admin-gated
 // (fail-closed like repo management), and another user's scope is unreachable.
 
-const NOW = 1_700_000_000_000;
+const NOW = Date.UTC(2023, 10, 14);
+/** The day `renderRecord` prints for a record created at NOW. */
+const NOW_DAY = new Date(NOW).toISOString().slice(0, 10);
 function rec(over: Partial<MemoryRecord>): MemoryRecord {
   return {
     id: "mem:org:acme:0",
@@ -111,9 +113,14 @@ describe("memory.list", () => {
 
   it("shows the caller's own scope, this repo's, this channel's, and the org scope with ids — never another user's", async () => {
     const { value, text } = await list(bind(), chat("slack:UALICE", { repo: "acme/api" }));
-    expect(value.scopes.map((s) => s.key)).toEqual(["user:slack:UALICE", "repo:acme/api", "channel:slack:C1", "org:acme"]);
+    expect(value.scopes.map((s) => s.key)).toEqual([
+      "user:slack:UALICE",
+      "repo:acme/api",
+      "channel:slack:C1",
+      "org:acme",
+    ]);
     expect(text).toContain(
-      "*your records* (`user:slack:UALICE`)\n• `mem:user:slack:UALICE:0` [fact, 2023-11-14] this user likes TL;DR lines (source: `slack:C1:1.0`)",
+      `*your records* (\`user:slack:UALICE\`)\n• \`mem:user:slack:UALICE:0\` [fact, ${NOW_DAY}] this user likes TL;DR lines (source: \`slack:C1:1.0\`)`,
     );
     expect(text).toContain("*this repo's records* (`repo:acme/api`)");
     expect(text).toContain("*this channel's records* (`channel:slack:C1`)");
@@ -125,7 +132,7 @@ describe("memory.list", () => {
   it("--scope narrows to one scope; an empty scope says so; the repo scope is skipped silently under `all` and named under `--scope repo`", async () => {
     const commands = bind();
     expect((await list(commands, chat("slack:UALICE"), { options: { scope: "me" } })).text).toBe(
-      "*your records* (`user:slack:UALICE`)\n• `mem:user:slack:UALICE:0` [fact, 2023-11-14] this user likes TL;DR lines (source: `slack:C1:1.0`)",
+      `*your records* (\`user:slack:UALICE\`)\n• \`mem:user:slack:UALICE:0\` [fact, ${NOW_DAY}] this user likes TL;DR lines (source: \`slack:C1:1.0\`)`,
     );
     expect((await list(commands, chat("slack:UALICE"), { options: { scope: "org" } })).text).toMatch(
       /^\*shared org records\*/,
@@ -146,17 +153,19 @@ describe("memory.list", () => {
         (s) => s.key,
       ),
     ).toEqual(["repo:acme/api"]);
-    expect(await commands.invoke("memory.list", { options: { scope: "everyone" } }, chat("slack:UALICE"))).toMatchObject({
+    expect(
+      await commands.invoke("memory.list", { options: { scope: "everyone" } }, chat("slack:UALICE")),
+    ).toMatchObject({
       ok: false,
       error: "invalid_input",
       message: 'scope: expected one of "me", "org", "repo", "channel", "all"',
     });
   });
 
-  // #344: `memory list org deploy` — the documented "scope word first" chat
+  // `memory list org deploy` — the documented "scope word first" chat
   // syntax. A leading bare scope word is consumed as --scope when --scope is
   // absent; with --scope given it stays an ordinary filter word.
-  it("consumes a leading bare scope word from the query when --scope is absent (#344)", async () => {
+  it("consumes a leading bare scope word from the query when --scope is absent", async () => {
     const commands = bind();
     const narrowed = await list(commands, chat("slack:UALICE"), { args: ["org deploy"] });
     expect(narrowed.value.scopes.map((s) => s.key)).toEqual(["org:acme"]);
@@ -169,7 +178,7 @@ describe("memory.list", () => {
     expect(explicitAll.value.scopes.map((s) => s.key)).toEqual(["user:slack:UALICE", "channel:slack:C1", "org:acme"]);
   });
 
-  it("a leading scope word stays a filter word when --scope IS given; a non-scope first word is never consumed (#344)", async () => {
+  it("a leading scope word stays a filter word when --scope IS given; a non-scope first word is never consumed", async () => {
     const commands = bind();
     const kept = await list(commands, chat("slack:UALICE"), { args: ["org deploy"], options: { scope: "all" } });
     expect(kept.value.scopes.map((s) => s.key)).toEqual(["user:slack:UALICE", "channel:slack:C1", "org:acme"]);
@@ -221,7 +230,7 @@ describe("memory.list", () => {
     const { value } = await list(commands, mcp("memory:read"));
     expect(value.scopes.map((s) => s.key)).toEqual(["user:mcp:alice", "org:acme"]);
     for (const s of value.scopes) for (const r of s.records) expect(r.text).toContain(UNTRUSTED_OPEN);
-    expect(JSON.stringify(value)).not.toContain("U1:0");
+    expect(JSON.stringify(value)).not.toMatch(/U(ALICE|BOB):0/);
     const fromCli = await list(commands, cli);
     expect(fromCli.value.scopes.map((s) => s.key)).toEqual(["user:cli:local", "org:acme"]);
   });
@@ -294,7 +303,9 @@ describe("memory.forget", () => {
       error: "invalid_input",
       message: "id: expected a memory id like mem:<scope>:<n> (see `memory list`)",
     });
-    expect(await commands.invoke("memory.forget", { args: ["mem:user:slack:UALICE:99"] }, chat("slack:UALICE"))).toMatchObject({
+    expect(
+      await commands.invoke("memory.forget", { args: ["mem:user:slack:UALICE:99"] }, chat("slack:UALICE")),
+    ).toMatchObject({
       ok: false,
       error: "not_found",
       message: "Nothing to forget: no active record `mem:user:slack:UALICE:99` in `user:slack:UALICE`.",

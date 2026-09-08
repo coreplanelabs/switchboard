@@ -5,6 +5,10 @@ import { classifyError } from "./classify.js";
 import { createLogSink, logLineOf, NULL_SINK } from "./sinks.js";
 import { createTracer } from "./tracer.js";
 
+/** The W3C Trace Context specification's own example trace id and parent span id. */
+const W3C_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+const W3C_SPAN = "00f067aa0ba902b7";
+
 function run(level: "roots" | "slow") {
   const clock = createTickingClock(5_000_000);
   const lines: string[] = [];
@@ -33,7 +37,7 @@ describe("createLogSink", () => {
       const tracer = createTracer({ clock: clock.now });
       const root = tracer.start("state.fetch", {
         sinks: [createLogSink({ level, write: (l) => lines.push(l) })],
-        parent: { traceId: "4bf92f3577b34da6a3ce929d0e0e4736", parentId: "00f067aa0ba902b7" },
+        parent: { traceId: W3C_TRACE, parentId: W3C_SPAN },
         attrs: { route: "/retrieve" },
       });
       await root.span("state.put", () => clock.tick(50));
@@ -42,8 +46,8 @@ describe("createLogSink", () => {
       const parsed = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
       expect(parsed.map((l) => l.span)).toEqual(["state.fetch"]);
       expect(parsed[0]).toMatchObject({
-        traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
-        parentSpanId: "00f067aa0ba902b7",
+        traceId: W3C_TRACE,
+        parentSpanId: W3C_SPAN,
         ms: 150,
         attrs: { route: "/retrieve", httpStatus: 200 },
       });

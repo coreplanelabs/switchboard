@@ -305,7 +305,7 @@ describe("isRunRecord", () => {
     expect(isRunRecord({ ...record(), schema: -1 })).toBe(false);
   });
 
-  it("accepts every terminal status — `interrupted` (#375, the tombstone/drain status) included — and the Worker shares this validator", () => {
+  it("accepts every terminal status — `interrupted` (the tombstone/drain status) included — and the Worker shares this validator", () => {
     for (const status of ["completed", "stopped_soft", "stopped_hard", "failed", "interrupted"] as const) {
       expect(isRunRecord(record({ status }))).toBe(true);
     }
@@ -316,7 +316,7 @@ describe("isRunRecord", () => {
       {
         type: "input",
         text: "please review",
-        source: { url: "https://x.slack.com/archives/C1/p1", channel: "general", user: "justin" },
+        source: { url: "https://x.slack.com/archives/C1/p1", channel: "general", user: "alice" },
         seq: 1,
         at: 1,
       },
@@ -371,9 +371,9 @@ describe("isRunRecord", () => {
     expect(isRunRecord({ ...rec, diagnosis: { ...rec.diagnosis, byCategory: null } })).toBe(false);
   });
 
-  it("a record written before `slow_model_turn` existed (#269) still loads; the category is zero-filled and `modelTimeMs` round-trips", () => {
+  it("a record written before `slow_model_turn` existed still loads; the category is zero-filled and `modelTimeMs` round-trips", () => {
     const rec = record();
-    const { slow_model_turn: _pre269, ...byCategory } = rec.diagnosis.byCategory;
+    const { slow_model_turn: _addedLater, ...byCategory } = rec.diagnosis.byCategory;
     const stored: unknown = JSON.parse(
       JSON.stringify({ ...rec, diagnosis: { ...rec.diagnosis, byCategory, modelTimeMs: 4_200 } }),
     );

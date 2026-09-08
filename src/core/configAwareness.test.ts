@@ -121,7 +121,7 @@ describe("configAwarenessBlock — effort", () => {
   });
 });
 
-describe("configAwarenessBlock — custom instructions (#107 phase 2)", () => {
+describe("configAwarenessBlock — custom instructions", () => {
   const base = {
     agentName: "general",
     modelRef: "anthropic/m",
@@ -151,7 +151,7 @@ describe("configAwarenessBlock — custom instructions (#107 phase 2)", () => {
   });
 });
 
-describe("configAwarenessBlock — MCP (#394, features/mcp-tools.md item 17)", () => {
+describe("configAwarenessBlock — MCP (features/mcp-tools.md item 17)", () => {
   it("is absent without `mcp` (byte-identical to before the feature)", () => {
     expect(configAwarenessBlock(base)).not.toContain("MCP");
   });

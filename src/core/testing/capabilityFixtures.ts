@@ -117,7 +117,7 @@ schedules:
 mcp:
   credentialKeyEnv: MCP_CREDENTIAL_KEY
 costs:
-  cloudflareAccountId: 1234567890abcdef1234567890abcdef
+  cloudflareAccountId: acct-fixture
   cloudflareTokenEnv: CF_ANALYTICS_TOKEN
   groups:
     switchboard:

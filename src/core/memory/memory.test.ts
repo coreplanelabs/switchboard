@@ -7,7 +7,7 @@ import { memoryContextBlock, reflect } from "./index.js";
 import { createTracer } from "../trace/tracer.js";
 
 // The one authorization entry point, spied so the read-path test below can
-// prove it is never consulted (authorization R11: reads are unchanged).
+// prove it is never consulted (the write gate is reflection's alone: reads are unchanged).
 vi.mock("../authz/index.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../authz/index.js")>();
   return { ...mod, authorize: vi.fn(mod.authorize) };
@@ -73,15 +73,15 @@ describe("memoryContextBlock", () => {
   });
 });
 
-// Feature: features/memory.md (#107 PR B) — user-scoped memory on the read
+// Feature: features/memory.md — user-scoped memory on the read
 // path: org + the requesting user's records, never another user's.
-// Feature: features/memory.md §21–22 (#253) — repo and channel scopes join the
+// Feature: features/memory.md §21–22 — repo and channel scopes join the
 // one ranked pool; repo may arrive late (a promise) because the dispatcher
 // starts the memory read before repo resolution finishes.
-// Feature: features/authorization.md item 8, features/memory.md §22 (R11):
+// Feature: features/authorization.md item 8, features/memory.md §22:
 // reads are unchanged — the write gate is reflection's alone. The read path
 // derives its scopes from the request and never asks the policy.
-describe("memoryContextBlock — reads are not policy-gated (authorization R11)", () => {
+describe("memoryContextBlock — reads are not policy-gated", () => {
   it("retrieving every scope of a request never calls `authorize`; the write path (reflect) does — the same spy sees both", async () => {
     const store = new InMemoryMemoryStore(
       [
@@ -137,7 +137,11 @@ describe("memoryContextBlock — reads are not policy-gated (authorization R11)"
       model: "cheap-model",
       store,
       scopeKeys: { org: "org:acme", user: "user:slack:UALICE" },
-      actor: { kind: "user", id: "slack:UALICE", grants: { actions: new Set(), channels: new Set(), repos: new Set() } },
+      actor: {
+        kind: "user",
+        id: "slack:UALICE",
+        grants: { actions: new Set(), channels: new Set(), repos: new Set() },
+      },
       originChannelVisibility: "public",
       history: [],
       request: "how do we deploy?",
@@ -152,7 +156,7 @@ describe("memoryContextBlock — reads are not policy-gated (authorization R11)"
   });
 });
 
-describe("memoryContextBlock — repo + channel scopes (#253)", () => {
+describe("memoryContextBlock — repo + channel scopes", () => {
   const orgRec = rec({ id: "mem:org:acme:1", text: "deploy is npm run deploy", keywords: ["deploy"] });
   const repoRec = rec({
     id: "mem:repo:acme/api:0",
@@ -215,7 +219,7 @@ describe("memoryContextBlock — repo + channel scopes (#253)", () => {
   });
 });
 
-describe("memoryContextBlock — user scope (#107 PR B)", () => {
+describe("memoryContextBlock — user scope", () => {
   const orgRec = rec({ id: "mem:org:acme:1", text: "deploy is npm run deploy", keywords: ["deploy"] });
   const u1Rec = rec({
     id: "mem:user:slack:UALICE:0",
@@ -273,7 +277,13 @@ describe("memoryContextBlock — user scope (#107 PR B)", () => {
       ),
     ];
     const store = new InMemoryMemoryStore(seed, { now: () => NOW });
-    const block = await memoryContextBlock("acme", { enabled: true, limit: 3 }, store, "deploy preview", "slack:UALICE");
+    const block = await memoryContextBlock(
+      "acme",
+      { enabled: true, limit: 3 },
+      store,
+      "deploy preview",
+      "slack:UALICE",
+    );
     const bullets = block!.split("\n").filter((l) => l.startsWith("- "));
     expect(bullets).toHaveLength(3);
     // Both query tokens hit the user notes, one hits the org notes → the user

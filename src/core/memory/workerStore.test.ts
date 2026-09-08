@@ -6,7 +6,7 @@ import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../t
 import { parseTraceparent } from "../trace/traceparent.js";
 import { createTracer } from "../trace/tracer.js";
 
-// Feature: features/memory.md — the durable MemoryStore (PR3, #85): an HTTPS
+// Feature: features/memory.md — the durable MemoryStore: an HTTPS
 // client to the Memory Worker, mirroring ResidentExecutor's remote plane. The
 // contract is asserted here against a fake fetch; the Worker's own behavior is
 // proven by deploy/cloudflare-memory/worker.test.ts.
@@ -116,8 +116,8 @@ describe("WorkerMemoryStore.write", () => {
   });
 });
 
-// Feature: features/memory.md §24 (#278) — human controls over the wire.
-describe("WorkerMemoryStore.list / forget (#278)", () => {
+// Feature: features/memory.md §24 — human controls over the wire.
+describe("WorkerMemoryStore.list / forget", () => {
   it("list POSTs /list {scopeKey, limit} and returns the Worker's records (malformed ones dropped)", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ records: [record, { junk: true }] }));
     expect(await store(fetch).list("org:acme", 20)).toEqual([record]);
@@ -126,7 +126,7 @@ describe("WorkerMemoryStore.list / forget (#278)", () => {
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer secret-token");
   });
 
-  it("list sends `query` only when a filter is given (#293)", async () => {
+  it("list sends `query` only when a filter is given", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ records: [] }));
     await store(fetch).list("org:acme", 20, "deploy command");
     expect(JSON.parse(String(calls[0].init.body))).toEqual({
@@ -168,8 +168,8 @@ describe("WorkerMemoryStore construction", () => {
   });
 });
 
-// Feature: features/memory.md — per-scope cap (#253) reaches the Worker on the /write body.
-describe("WorkerMemoryStore cap on the wire (#253)", () => {
+// Feature: features/memory.md — per-scope cap reaches the Worker on the /write body.
+describe("WorkerMemoryStore cap on the wire", () => {
   it("sends `cap` on /write when configured, and omits it (server default) when not", async () => {
     const capped = fakeFetch(() => jsonRes({ ok: true, inserted: 1, deduped: 0, superseded: 0, evicted: 0 }));
     await new WorkerMemoryStore({ baseUrl: "https://memory.example", token: "t", fetch: capped.fetch, cap: 250 }).write(

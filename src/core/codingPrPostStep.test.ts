@@ -19,18 +19,18 @@ const unreachable = async (): Promise<RepoShipInfo | undefined> => {
 };
 
 // Feature: features/pr-description.md item 5 — the coding PR post-step as a
-// callable unit (agent:ship plan U4): given a workspace observation and the
-// run's submitted PrDescription, open or edit the PR from typed values and
-// return the honest reply note. The dispatcher suite proves the end-to-end
-// behavior byte-identical; here the unit is driven directly, as a ship round
-// (U7) will drive it — no dispatch state, only explicit inputs.
+// callable unit: given a workspace observation and the run's submitted
+// PrDescription, open or edit the PR from typed values and return the honest
+// reply note. The dispatcher suite proves the end-to-end behavior
+// byte-identical; here the unit is driven directly, as a ship round drives it
+// — no dispatch state, only explicit inputs.
 
 const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 
 const DESCRIPTION = {
   title: "Fix the login redirect",
   tldr: "Restores the session cookie on login. Users can sign in again.",
-  whatWhy: "The handler dropped the cookie after #12; this restores it.",
+  whatWhy: "The handler dropped the cookie after the session refactor; this restores it.",
   tour: [
     { title: "The fix", description: "The cookie is set again.", anchor: { path: "src/login.ts", from: 10, to: 20 } },
   ],
@@ -104,12 +104,12 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(spy.calls[0]?.base).toBe("main");
   });
 
-  // Live incident (2026-09-04): a bare issue-link coding run has no
-  // bound PR and no explicit ref, and the resident attach failed for an infra
-  // reason (not needs-ref) — target's three fields were ALL undefined, so no
-  // PR could open despite a real push. The fix: the repo's own default branch,
-  // fetched from GitHub, is the true last resort (resolveBaseRefLazy,
-  // githubPulls.ts) — shared with agent:ship's identical resolution.
+  // A bare issue-link coding run has no bound PR and no explicit ref, and when
+  // the resident attach fails for an infra reason (not needs-ref) the target's
+  // three fields are ALL undefined — no PR could open despite a real push. The
+  // repo's own default branch, fetched from GitHub, is the true last resort
+  // (resolveBaseRefLazy, githubPulls.ts) — shared with agent:ship's identical
+  // resolution.
   it("no explicit base signal anywhere, but GitHub's default branch resolves one → PR opens against it", async () => {
     const spy = openSpy();
     const fetchRepoInfo = vi.fn(async (repo: string): Promise<RepoShipInfo | undefined> => {
@@ -131,7 +131,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).toContain("PR opened");
   });
 
-  // Review nit (PR #425, F1): the fetch fires here BECAUSE we don't yet know
+  // The fetch fires here BECAUSE we don't yet know
   // whether the observed branch IS the default branch — that's exactly what
   // this test proves out. Once fetched, the "sat on the base branch, nothing
   // pushed" guard must win over "PR opened": no PR call, no compare-URL note,
@@ -249,13 +249,13 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(fetchRepoInfo).not.toHaveBeenCalled();
   });
 
-  // #458 — the incident shape (2026-09-04): the run pushed `feat/x`, then HEAD
-  // moved to another branch before the post-step ran (a second run's
+  // The shape: the run pushed `feat/x`, then HEAD moved to another branch
+  // before the post-step ran (a second run's
   // `git checkout -b` in the shared sandbox; equally the agent itself checking
   // out another branch after its push). The PR head is the branch the run's
   // push named — the observation carries it as `branch` with the checkout
   // beside it — so the PR opens from the pushed work, at its own tip.
-  it("HEAD moved to another branch after the push (#458) → the PR still opens from the PUSHED branch, the body rendered at its tip", async () => {
+  it("HEAD moved to another branch after the push → the PR still opens from the PUSHED branch, the body rendered at its tip", async () => {
     const spy = openSpy();
     const note = await runCodingPrPostStep({
       observed: observation({ branch: "feat/x", checkedOut: "chore/other", head: HEAD, remoteHead: HEAD }),
@@ -331,7 +331,7 @@ const LS_REMOTE = "ls-remote --exit-code origin 'refs/heads/feat/x'";
 const STALE = "0123456789abcdef0123456789abcdef01234567";
 // What `git rev-parse @{u}` prints in a `--depth`/`--single-branch` clone after
 // a successful `git push -u`: the fetch refspec covers only the default
-// branch, so the remote-tracking ref for the pushed branch never exists (#438).
+// branch, so the remote-tracking ref for the pushed branch never exists.
 const SINGLE_BRANCH_UPSTREAM =
   "exit 128:\nfatal: upstream branch 'refs/heads/feat/x' not stored as a remote-tracking branch\n";
 const NO_SUCH_REMOTE_BRANCH = "exit 2:\n";
@@ -380,11 +380,11 @@ describe("observeCodingWorkspace", () => {
     expect(exec.mock.calls.map(([c]) => c)).toContain(`git -C 'api' ${LS_REMOTE}`);
   });
 
-  // #438 — the incident shape: a cold sandbox clone (`gh repo clone … -- --depth 50`)
+  // The shape: a cold sandbox clone (`gh repo clone … -- --depth 50`)
   // is single-branch, `git push -u origin <branch>` succeeds and records the
   // upstream in config, but `@{u}` cannot resolve. The push is proven by the
   // remote's own refs/heads/<branch>, not by the clone's tracking state.
-  it("single-branch clone (#438): @{u} fails after a successful push, the remote's refs/heads/<branch> at HEAD proves the push", async () => {
+  it("single-branch clone: @{u} fails after a successful push, the remote's refs/heads/<branch> at HEAD proves the push", async () => {
     const ws = workspace([
       [/abbrev-ref/, "feat/x\n"],
       [/@\{u\}/, SINGLE_BRANCH_UPSTREAM],
@@ -486,11 +486,11 @@ describe("observeCodingWorkspace", () => {
     expect(observed.remoteHead).toBe(HEAD);
   });
 
-  // #458 — the checkout is not the PR head when the run's push named another
+  // The checkout is not the PR head when the run's push named another
   // branch: the pushed branch's LOCAL tip (`refs/heads/<branch>`) is the head
   // the body renders at, its own upstream the `@{u}` stand-in, and the remote
   // is asked for the pushed branch; the checkout rides beside it for the note.
-  it("a push named another branch than the checkout (#458): the pushed branch is the head branch — its local tip the head, its remote ref the proof — with the checkout reported beside it", async () => {
+  it("a push named another branch than the checkout: the pushed branch is the head branch — its local tip the head, its remote ref the proof — with the checkout reported beside it", async () => {
     const ws = workspace([
       [/abbrev-ref/, "chore/other\n"],
       [/rev-parse HEAD/, `${STALE}\n`], // the checkout's commit is NOT the pushed head
@@ -575,7 +575,7 @@ describe("observeCodingWorkspace", () => {
   });
 });
 
-// The branch a run's own `git push` named, read off its bash results (#458):
+// The branch a run's own `git push` named, read off its bash results:
 // git's per-ref status lines under the `To <url>` header — ` * [new branch]
 // feat/x -> feat/x`, `   abc..def  feat/x -> feat/x`, ` + abc...def feat/x ->
 // feat/x (forced update)`, ` = [up to date] …` — name the remote branch the
@@ -656,7 +656,7 @@ describe("pushedBranchOf (the branch a run's own git push named)", () => {
     ).toBeUndefined();
   });
 
-  // Review nit (PR #469, F1): a deletion's line has no `->`, so it must not
+  // A deletion's line has no `->`, so it must not
   // end the block — the update printed after it in the same push still counts.
   it("a mixed push (a deletion, then an update, in one block) → the deletion names nothing and the update still counts", () => {
     expect(
@@ -711,7 +711,7 @@ describe("pushedBranchOf (the branch a run's own git push named)", () => {
     expect(pushedBranchOf({ type: "run_note", kind: "wrap_up", summary: "x" })).toBeUndefined();
   });
 
-  // Review nit (PR #469, F2): the output alone is spoofable — an `echo` or a
+  // The output alone is spoofable — an `echo` or a
   // `cat` of a transcript prints the same block. The tracker pairs each result
   // with its call by callId and reads a block only from a `git push` command.
   describe("trackPushedBranch (paired with the command that produced the output)", () => {
@@ -739,8 +739,8 @@ describe("pushedBranchOf (the branch a run's own git push named)", () => {
       expect(track(call("c1", "npm test -- --grep 'git push'"), bash(PUSH_NEW, { callId: "c1" }))).toBeUndefined(); // `git push` inside an argument: git is not in command position
     });
 
-    it("a chained command whose `git push` sits past the 200-char summary cap is still a push call when the event carries the full command (live 2026-09-07: the receipt run's single chained command lost its push to the cap and the post-step fell back to the checkout)", () => {
-      const chained = `git checkout -b receipt/x origin/main && mkdir -p .receipts && echo 'receipt for #469: the PR head is the branch the run named' > .receipts/469.txt && git add .receipts/469.txt && git commit -q -m 'receipt: live check for #469' && git log --oneline -1 && git push -u origin receipt/x && git checkout -b receipt/other`;
+    it("a chained command whose `git push` sits past the 200-char summary cap is still a push call when the event carries the full command (read from the summary alone, a single chained command loses its push to the cap and the post-step falls back to the checkout)", () => {
+      const chained = `git checkout -b receipt/x origin/main && mkdir -p .receipts && echo 'receipt: the PR head is the branch the run named' > .receipts/head.txt && git add .receipts/head.txt && git commit -q -m 'receipt: live check of the pushed head' && git log --oneline -1 && git push -u origin receipt/x && git checkout -b receipt/other`;
       const summary = `$ ${chained}`.slice(0, 200); // what the runner's redactAndCap leaves on `summary`
       expect(summary).toHaveLength(200);
       expect(summary).not.toMatch(/git push/);

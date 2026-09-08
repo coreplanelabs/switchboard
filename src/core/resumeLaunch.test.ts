@@ -36,7 +36,7 @@ const row = (over: Partial<LiveRunRow> = {}): LiveRunRow => ({
     ref: "feat/x",
     pr: 12,
     headSha: "a".repeat(40),
-    userName: "justin",
+    userName: "alice",
     sourceUrl: "https://acme.slack.com/archives/C1/p1",
   },
   card: { channel: "C1", ts: "1.1" },
@@ -89,7 +89,7 @@ describe("the pure pieces", () => {
       userId: "slack:UALICE",
       threadKey: "slack:C1:1.0",
       text: "agent:review model:anthropic/review-model effort:high please review",
-      userName: "justin",
+      userName: "alice",
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
     });
     const bare = row({

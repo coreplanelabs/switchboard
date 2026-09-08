@@ -23,7 +23,7 @@ import { callerWith } from "./testing/callers.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
 
 // Feature: features/command-registry.md — the one seam every surface adapts,
-// in its typed form (KTD20): positional `args` + named `options`, both
+// in its typed form: positional `args` + named `options`, both
 // inferred into the handler. Authorization is the policy table's
 // (features/authorization.md): the demo commands declare REAL actions so the
 // real rows decide, and the callers hold exactly the grants config would give.
@@ -519,7 +519,7 @@ describe("CommandRegistry audit line", () => {
     expect(JSON.stringify(audit.mock.calls)).not.toMatch(/limit|"7"|status/);
   });
 
-  it("the deny reason is the audit line's, never the reply's (KTD8)", async () => {
+  it("the deny reason is the audit line's, never the reply's", async () => {
     const { registry, audit, deps } = setup();
     const res = await registry.invoke("demo.echo", opts({ status: "all" }), chatRandom, deps);
     expect(res).toMatchObject({
@@ -736,9 +736,9 @@ describe("who decided a failure (phase 4b): registry vs handler; the wider Comma
       error: "unauthorized",
     });
     expect((await registry.invoke("demo.exec", {}, mcp("repo:exec"), {})).ok).toBe(true);
-    expect((await registry.invoke("demo.exec", {}, callerWith("chat", "slack:UALICE", ["agent:run:coding"]), {})).ok).toBe(
-      true,
-    );
+    expect(
+      (await registry.invoke("demo.exec", {}, callerWith("chat", "slack:UALICE", ["agent:run:coding"]), {})).ok,
+    ).toBe(true);
     // A browser Access session holds reads, never exec.
     expect(await registry.invoke("demo.exec", {}, callerWith("access", "access:u", ["repo:read"]), {})).toMatchObject({
       ok: false,

@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { recognizeOperation } from "./operations.js";
 
-// Feature: features/resident-repos.md, features/routing-and-config.md — U6
-// deterministic-ops recognition (KTD8): natural language only, for the
+// Feature: features/resident-repos.md, features/routing-and-config.md —
+// deterministic-ops recognition: natural language only, for the
 // conservative explicit forms ("run the tests on <ref> [in <owner/name>]",
 // "build <ref> [in <owner/name>]") with the repo resolved from the message or
 // thread history; the explicit `repo test/build` command is the registry's
 // (src/core/commands/repo.ts), never recognized here. Anything ambiguous or
 // non-matching returns null — the dispatcher falls through to the agent path
-// (KD3: never guess). Recognition is pure and sync: no network, no shell, and
+// (never guess). Recognition is pure and sync: no network, no shell, and
 // request text NEVER becomes a command string.
 
 const NO_HISTORY: Array<{ role: string; text: string }> = [];

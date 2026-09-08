@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { NO_OP_COMMAND, NPM_FALLBACK_COMMANDS, detectCommands } from "./repoToolchain.js";
 
 // Feature: features/resident-repos.md item 52 — the onboard command table is
-// derived from the repo root, never assumed. The two shapes that broke on
-// 2026-09-03 (a pnpm workspace and a repo with no package.json) are pinned.
+// derived from the repo root, never assumed. The two shapes the npm-only
+// defaults broke on (a pnpm workspace and a repo with no package.json) are pinned.
 
 describe("detectCommands", () => {
   it("a pnpm workspace (pnpm-lock.yaml, no root build script) installs with pnpm and skips the build", () => {
@@ -17,7 +17,7 @@ describe("detectCommands", () => {
   });
 
   it("a repo with no root package.json (Terraform, Taskfile) gets no install and no-op build/test — never npm", () => {
-    const d = detectCommands({ entries: [".github", "Taskfile.yaml", "terrateam", "README.md"] });
+    const d = detectCommands({ entries: [".github", "Taskfile.yaml", "infra", "README.md"] });
     expect(d.toolchain).toBe("none");
     expect(d.commands).toEqual({ build: NO_OP_COMMAND, test: NO_OP_COMMAND });
     expect(d.commands).not.toHaveProperty("install");

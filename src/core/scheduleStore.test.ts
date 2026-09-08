@@ -8,7 +8,7 @@ import {
 } from "./scheduleStore.js";
 import type { ScheduleFiring } from "./schedules.js";
 
-// Feature: features/live-view.md item 13 (#244): where a schedule's firings
+// Feature: features/live-view.md item 13: where a schedule's firings
 // live. Two implementations of one seam (AGENTS.md invariant 2): the durable
 // Worker client (ScheduleDO on the state Worker — the production choice, so
 // the record survives bot restarts, invariant 6) and the in-memory store for

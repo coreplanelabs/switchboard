@@ -14,7 +14,7 @@ import {
 } from "./testing.js";
 import type { Actor, Predicate, Resource, ResourceKind, Rule } from "./types.js";
 
-// Plan U1 / R6, KTD2 — THE load-bearing test: the predicate a store runs for
+// THE load-bearing test: the predicate a store runs for
 // a list-shaped read admits EXACTLY the records `authorize` allows one at a
 // time, for every actor shape, over a corpus spanning every channel visibility.
 
@@ -107,7 +107,7 @@ describe("predicateFor ⇔ authorize differential over runs", () => {
     expect(filterByAuthorize(runs, A.token, "runs:read")).toEqual(
       new Set(runs.filter((r) => r.channelId === CHANNELS.http.id || isPublic(r)).map((r) => r.id)),
     );
-    // No channel grants at all: the public runs and nothing else (an unpinned token, OQ4 a).
+    // No channel grants at all: the public runs and nothing else (an unpinned token).
     expect(
       filterByAuthorize(runs, actor("service", "http:ci", { actions: new Set(["runs:read"]) }), "runs:read"),
     ).toEqual(new Set(runs.filter(isPublic).map((r) => r.id)));
@@ -252,13 +252,13 @@ describe("matchesPredicate", () => {
     expect(matchesPredicate({ kind: "user-is", userId: "slack:UCAROL" }, rec)).toBe(false);
     expect(matchesPredicate({ kind: "repos-in", repos: new Set([REPOS[0]]) }, rec)).toBe(true);
     expect(matchesPredicate({ kind: "repos-in", repos: new Set([REPOS[1]]) }, rec)).toBe(false);
-    expect(matchesPredicate({ kind: "or", of: [{ kind: "none" }, { kind: "user-is", userId: "slack:UBOB" }] }, rec)).toBe(
-      true,
-    );
+    expect(
+      matchesPredicate({ kind: "or", of: [{ kind: "none" }, { kind: "user-is", userId: "slack:UBOB" }] }, rec),
+    ).toBe(true);
     expect(matchesPredicate({ kind: "or", of: [] }, rec)).toBe(false);
-    expect(matchesPredicate({ kind: "and", of: [{ kind: "all" }, { kind: "user-is", userId: "slack:UBOB" }] }, rec)).toBe(
-      true,
-    );
+    expect(
+      matchesPredicate({ kind: "and", of: [{ kind: "all" }, { kind: "user-is", userId: "slack:UBOB" }] }, rec),
+    ).toBe(true);
     expect(
       matchesPredicate({ kind: "and", of: [{ kind: "none" }, { kind: "user-is", userId: "slack:UBOB" }] }, rec),
     ).toBe(false);

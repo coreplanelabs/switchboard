@@ -14,10 +14,10 @@ import {
   runReviewPostStep,
 } from "./reviewRound.js";
 
-// Feature: agent:ship plan U4 (docs/plans/2026-08-30-001) — the review-round
-// and coding-PR machinery extracted from dispatch() as callable units, each
-// parameterized on an explicit AgentDef instead of the dispatch's top-level
-// resolved agent, so a ship round (U7) can invoke them per child round. The
+// Feature: features/agent-ship.md — the review-round and coding-PR machinery
+// extracted from dispatch() as callable units, each parameterized on an
+// explicit AgentDef instead of the dispatch's top-level resolved agent, so a
+// ship round can invoke them per child round. The
 // dispatcher suites prove the plain paths byte-identical; the tests here
 // prove the SEAMS: each unit is callable with an explicit agent, and the
 // attach/release pairing follows that agent's toolset.

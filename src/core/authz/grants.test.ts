@@ -39,7 +39,7 @@ const restriction = (r: { agents?: string[]; repos?: string[] }): Restriction =>
 };
 
 describe("parseGrantsConfig — the native `grants` block", () => {
-  it('absent field = empty set (fail-closed, R7); "all" is explicit', () => {
+  it('absent field = empty set (fail-closed); "all" is explicit', () => {
     const parsed = parseGrantsConfig({
       "slack:UALICE": { actions: ["runs:read"] },
       "http:ci": { actions: "all", channels: ["http:ops"] },
@@ -112,7 +112,7 @@ describe("parseRestrictConfig — what is closed unless granted", () => {
   });
 });
 
-describe("the baselines — what an id holds by its namespace, listed or not (KTD5/KTD10)", () => {
+describe("the baselines — what an id holds by its namespace, listed or not", () => {
   const table = {
     everyone: grants({ actions: set(...CHAT_OPEN_ACTIONS) }),
     browserReads: grants({ actions: browserReadActions(["runs", "friction"]) }),
@@ -182,7 +182,7 @@ describe("grantsTable / grantsIn / grantsFor — the lookup", () => {
     expect(grantsFor("slack:UADMIN", source)).toEqual(ALL_GRANTS);
   });
 
-  it("a schedule actor's grants are the registry's declared ones (R9) unless the native block names the id — then config wins whole", () => {
+  it("a schedule actor's grants are the registry's declared ones unless the native block names the id — then config wins whole", () => {
     const declared = grants({ actions: set("friction:read", "friction:write"), channels: "all" });
     const schedules = [{ id: "schedule:self-improvement", grants: declared }];
     expect(grantsFor("schedule:self-improvement", { schedules })).toEqual(declared);

@@ -9,7 +9,7 @@ import {
 } from "./runFriction.js";
 
 // Feature: features/run-friction.md — the pure, deterministic analyzer that
-// turns a run's RunEvent stream into a structured friction diagnosis (#84).
+// turns a run's RunEvent stream into a structured friction diagnosis.
 // Streams below are synthetic: one per friction category, plus edges.
 
 const T0 = 1_700_000_000_000;
@@ -297,9 +297,9 @@ describe("analyzeRunFriction — per-category classification", () => {
 });
 
 describe("analyzeRunFriction — slow_model_turn (the time between a result and the model's next move)", () => {
-  // Live run 2026-08-30 (30dc0210): 1850 s wall clock, 50 s of tool time, 35
-  // tool calls, verdict "no friction detected" — every gap was the model
-  // thinking for 2–4 min between one-line greps. The analyzer must see it.
+  // A run of 1850 s wall clock with 50 s of tool time across 35 tool calls once
+  // got the verdict "no friction detected" — every gap was the model thinking
+  // for 2–4 min between one-line greps. The analyzer must see it.
   const input: RunEvent = { type: "input", text: "fix the thing", at: T0 };
 
   it("flags a model turn (tool_result → next tool_call) at or past the threshold; under it is not flagged", () => {
@@ -470,7 +470,7 @@ describe("formatFrictionReport", () => {
   });
 });
 
-// Feature: features/run-visibility.md — the narrative events (#157 U1: `input`,
+// Feature: features/run-visibility.md — the narrative events (`input`,
 // `context`, `assistant`, `answer`) are the run's story, not its steps: none of
 // them counts toward `eventCount`. `input`/`assistant`/`answer` still drive the
 // model-turn clock (run-friction.md, slow_model_turn); `context` — replayed

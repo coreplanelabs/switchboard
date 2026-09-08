@@ -3,10 +3,9 @@ import type { RunEvent } from "./runEvents.js";
 import { QUIET_SUFFIX_AFTER_MS, inFlightToolAfter, quietSuffix } from "./statusCardLabel.js";
 
 // Feature: features/run-visibility.md item 2 — the live card's title suffix
-// tells model time from tool time. 2026-09-07 (#531): a `pnpm typecheck` in
-// flight for an hour was rendered as `thinking (3601s since last tool)`; the
-// last event WAS a tool call, so the card claimed the model was thinking while
-// the run was waiting on the sandbox.
+// tells model time from tool time. A `pnpm typecheck` in flight for an hour
+// must never render as `thinking (3601s since last tool)`: when the last event
+// WAS a tool call, the run is waiting on the sandbox, not on the model.
 
 describe("quietSuffix", () => {
   it("is empty inside the first 20 s, with or without a tool in flight", () => {

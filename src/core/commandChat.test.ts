@@ -20,8 +20,8 @@ import { InMemoryRunStore } from "./runStore.js";
 import { createRunsService } from "./runsService.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./commands/runs.js";
 
-// Feature: features/command-registry.md — the chat adapter (U13, KTD18/KTD19/
-// KTD21): `<group> <verb> <args…> [--kebab-flag value…]` recognized for
+// Feature: features/command-registry.md — the chat adapter:
+// `<group> <verb> <args…> [--kebab-flag value…]` recognized for
 // registered, chat-exposed, non-reserved ids and bound by the SAME grammar the
 // CLI uses; a recognized form with a malformed tail is a usage reply; help is
 // derived; the plain-text reply is `renderText` — no Slack escaping in the core.
@@ -226,7 +226,7 @@ describe("parseChatCommand", () => {
     });
   });
 
-  it("the bare word `help` is `help show` when it is registered and chat-exposed — else prose (KTD25)", () => {
+  it("the bare word `help` is `help show` when it is registered and chat-exposed — else prose", () => {
     expect(parseChatCommand("help", registry)).toBeNull();
     expect(parseChatCommand("help me", registry)).toBeNull();
     const withHelp = demoRegistry();
@@ -342,7 +342,7 @@ describe("chatCallerFor", () => {
     expect(chatCallerFor(msg("x"), config, resolve).origin?.repo).toBe(resolve);
   });
 
-  it("carries the message's user as the Actor the table decides on (plan U2/U4): admin → everything, a plain user → the open chat commands + the unrestricted agents, a machine channel's user → a service actor", async () => {
+  it("carries the message's user as the Actor the table decides on: admin → everything, a plain user → the open chat commands + the unrestricted agents, a machine channel's user → a service actor", async () => {
     const { chatCallerFor } = await import("./commandChat.js");
     const { ALL_GRANTS, CHAT_OPEN_ACTIONS } = await import("./authz/grants.js");
     const config = configStore(ADMIN_YAML);
@@ -370,7 +370,7 @@ describe("chatCallerFor", () => {
       id: "http:cron",
       origin: { channelId: "http:cron", threadKey: "http:cron:t" },
     });
-    // A schedule firing that reaches chat as its `schedule:` actor (R9): the registry's declared grants, kind `schedule`.
+    // A schedule firing that reaches chat as its `schedule:` actor: the registry's declared grants, kind `schedule`.
     const schedule = chatCallerFor(
       { userId: "schedule:self-improvement", channelId: "http:cron", threadKey: "http:cron:t" },
       config,
@@ -496,7 +496,7 @@ describe("handleChatCommand", () => {
   });
 });
 
-describe("runs list on chat (KTD18)", () => {
+describe("runs list on chat", () => {
   function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): RunRecord {
     const events = [
       { type: "input" as const, text: "please do the thing", seq: 1 },

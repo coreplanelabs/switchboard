@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { deriveScopeKey, listScopeKeys, requestScopeKeys } from "./scope.js";
 
-// Feature: features/memory.md — the pure scope deriver. Org-scoped (#85 PR1) +
-// user-scoped (#107 PR B), namespaced per AGENTS.md invariant 4. The org is the
+// Feature: features/memory.md — the pure scope deriver. Org-scoped +
+// user-scoped, namespaced per AGENTS.md invariant 4. The org is the
 // config's `organization`, an input like the others — the code names none.
 
 const ORG = "acme";
@@ -28,9 +28,9 @@ describe("deriveScopeKey", () => {
   });
 });
 
-// #253 — repo and channel scopes: shared by everyone who runs in that repo /
+// Repo and channel scopes: shared by everyone who runs in that repo /
 // channel, namespaced per invariant 4 (channelId arrives already namespaced).
-describe("deriveScopeKey — repo / channel (#253)", () => {
+describe("deriveScopeKey — repo / channel", () => {
   it("derives repo and channel keys", () => {
     expect(deriveScopeKey("repo", { repo: "acme/api" })).toBe("repo:acme/api");
     expect(deriveScopeKey("channel", { channelId: "slack:C0123" })).toBe("channel:slack:C0123");
@@ -48,7 +48,7 @@ describe("requestScopeKeys", () => {
     expect(requestScopeKeys(ORG, "slack:U0123")).toEqual({ org: "org:acme", user: "user:slack:U0123" });
   });
 
-  it("adds repo and channel keys when the request has them; listScopeKeys orders org, repo, channel, user (#253)", () => {
+  it("adds repo and channel keys when the request has them; listScopeKeys orders org, repo, channel, user", () => {
     const keys = requestScopeKeys(ORG, "slack:U0123", { repo: "acme/api", channelId: "slack:C0123" });
     expect(keys).toEqual({
       org: "org:acme",

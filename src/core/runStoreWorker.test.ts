@@ -91,7 +91,7 @@ describe("WorkerRunStore", () => {
     expect(typeof calls[0].rawBody).toBe("string");
     const bytes = Buffer.byteLength(calls[0].rawBody as string);
     expect(bytes).toBeGreaterThan(1_900_000);
-    // #313: a hand-set Content-Length was the one header the working clients do not send;
+    // A hand-set Content-Length was the one header the working clients do not send;
     // the runtime derives it from the string body.
     expect(calls[0].headers["content-length"]).toBeUndefined();
     expect(calls[0].headers.authorization).toBe("Bearer tok");
@@ -204,7 +204,7 @@ describe("WorkerRunStore", () => {
   });
 });
 
-describe("describeError — the cause chain survives into the warn line (#313)", () => {
+describe("describeError — the cause chain survives into the warn line", () => {
   it("appends nested causes and error codes, so a bare `fetch failed` names its reason", () => {
     const socket = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
     const undici = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET", cause: socket });

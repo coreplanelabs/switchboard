@@ -8,7 +8,7 @@ import type { RunEvent } from "./runEvents.js";
 import { buildRunStore, FileRunStore, InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
 import { WorkerRunStore } from "./runStoreWorker.js";
 
-// Feature: features/run-history.md — the RunStore seam (U2): in-memory and
+// Feature: features/run-history.md — the RunStore seam: in-memory and
 // directory-backed file stores sharing one retention function with the Worker.
 
 const DAY = 86_400_000;
@@ -106,7 +106,7 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
     // and rewrite the index — O(n) I/O per put by design (self-healing index).
     // ~300 ms on an idle SSD, but on a busy runner it has blown the default
     // timeout twice now (a CI runner at 260 records; a resident review worktree
-    // under build contention, #403). The generous ceiling keeps the test's
+    // under build contention). The generous ceiling keeps the test's
     // coverage without racing the disk.
     it(
       "list is newest-first, capped at 200 (default 50), with a `before` cursor and filters",
@@ -158,7 +158,11 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
         record("ops", NOW - 3000, { channelId: "http:ops", userId: "http:ci", channelVisibility: "machine" }),
       );
       await store.put(
-        record("old-style", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:UCAROL", channelVisibility: "unknown" }),
+        record("old-style", NOW - 4000, {
+          channelId: "slack:C_PUB",
+          userId: "slack:UCAROL",
+          channelVisibility: "unknown",
+        }),
       );
       const ids = async (visibleTo: RunListOptions["visibleTo"], more: Partial<RunListOptions> = {}) =>
         (await store.list({ visibleTo, ...more })).map((r) => r.id);

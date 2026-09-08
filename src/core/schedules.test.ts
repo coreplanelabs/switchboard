@@ -18,13 +18,13 @@ import {
   type ScheduleWorker,
 } from "./schedules.js";
 
-// Feature: features/self-improvement.md item 7c + features/live-view.md item 13
-// (#244): the schedule registry is the single source of truth for every cron
+// Feature: features/self-improvement.md item 7c + features/live-view.md item 13:
+// the schedule registry is the single source of truth for every cron
 // the Worker shim runs — wrangler.jsonc `triggers.crons` and the shim both
 // derive from it — and the pure helpers the shim uses to turn a firing into a
 // normal /ingress run and to record the outcome.
 
-const T0 = Date.UTC(2026, 7, 29, 12, 34, 56); // Sat 2026-08-29 12:34:56Z
+const T0 = Date.UTC(2026, 7, 29, 12, 34, 56); // a Saturday, 12:34:56Z
 
 /** wrangler.jsonc is JSON with comments; strip them string-aware (URLs in
  *  string values contain `//`). */
@@ -113,7 +113,7 @@ describe("schedule registry", () => {
     expect(SCHEDULES.filter(isRunSchedule).map((s) => s.name)).toEqual(["self-improvement"]);
   });
 
-  it("every run schedule declares its `schedule` actor as schedule:<name> WITH its grants (plan U3, R9): self-improvement reads the fleet's runs and files proposals, no repos, no exec", () => {
+  it("every run schedule declares its `schedule` actor as schedule:<name> WITH its grants: self-improvement reads the fleet's runs and files proposals, no repos, no exec", () => {
     for (const s of SCHEDULES.filter(isRunSchedule)) {
       expect(s.action.actor).toMatchObject({ kind: "schedule", id: `schedule:${s.name}` });
       expect(s.action.actor.grants).toBeDefined();
@@ -296,7 +296,7 @@ describe("cron evaluation (nextFire, UTC)", () => {
 });
 
 describe("planScheduledFiring (the shim's request plan)", () => {
-  const map = JSON.stringify({ aaaa: { subject: "justin-ingress" }, cccc: { subject: "cron", channel: "cron" } });
+  const map = JSON.stringify({ aaaa: { subject: "ops-ingress" }, cccc: { subject: "cron", channel: "cron" } });
 
   it("finds the cron identity's token and plans a POST /ingress of the schedule's command", () => {
     const plan = planScheduledFiring(selfImprovement, map, T0);
@@ -316,7 +316,7 @@ describe("planScheduledFiring (the shim's request plan)", () => {
       ok: false,
       reason: "SWITCHBOARD_INGRESS_TOKENS is not valid JSON",
     });
-    expect(planScheduledFiring(selfImprovement, JSON.stringify({ aaaa: { subject: "justin-ingress" } }), T0)).toEqual({
+    expect(planScheduledFiring(selfImprovement, JSON.stringify({ aaaa: { subject: "ops-ingress" } }), T0)).toEqual({
       ok: false,
       reason: 'SWITCHBOARD_INGRESS_TOKENS has no entry with subject "cron"',
     });

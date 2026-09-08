@@ -5,6 +5,10 @@ import { createAlsContext, createTickingClock } from "../testing/tickingClock.js
 import { classifyError } from "./classify.js";
 import { createTracer, ERROR_MESSAGE_CAP, sanitizeSpanName, SPAN_NAME_MAX } from "./tracer.js";
 
+/** The W3C Trace Context specification's own example trace id and parent span id. */
+const W3C_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+const W3C_SPAN = "00f067aa0ba902b7";
+
 function setup() {
   const clock = createTickingClock(1_000_000);
   const sink = recordingSink();
@@ -21,22 +25,22 @@ describe("createTracer", () => {
     const tracer = createTracer({ clock: () => 1_000 });
     const adopted = tracer.start("state.fetch", {
       sinks: [log],
-      parent: { traceId: "4bf92f3577b34da6a3ce929d0e0e4736", parentId: "00f067aa0ba902b7" },
+      parent: { traceId: W3C_TRACE, parentId: W3C_SPAN },
     });
-    expect(adopted.traceId).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
-    expect(adopted.record().parentSpanId).toBe("00f067aa0ba902b7");
+    expect(adopted.traceId).toBe(W3C_TRACE);
+    expect(adopted.record().parentSpanId).toBe(W3C_SPAN);
     expect(adopted.record().adopted).toBe(true);
     const child = adopted.start("state.put");
-    expect(child.traceId).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
+    expect(child.traceId).toBe(W3C_TRACE);
     expect(child.record().parentSpanId).toBe(adopted.id);
     expect(child.record().adopted).toBeUndefined();
     adopted.end("ok");
     expect(log.ends.at(-1)).toMatchObject({
-      traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
-      parentSpanId: "00f067aa0ba902b7",
+      traceId: W3C_TRACE,
+      parentSpanId: W3C_SPAN,
     });
     const own = tracer.start("request", { sinks: [log] });
-    expect(own.traceId).not.toBe("4bf92f3577b34da6a3ce929d0e0e4736");
+    expect(own.traceId).not.toBe(W3C_TRACE);
     expect(own.record().parentSpanId).toBeUndefined();
     expect(own.record().adopted).toBeUndefined();
   });

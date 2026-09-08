@@ -651,7 +651,7 @@ export interface ConformanceMatrix {
   summary: { commands: number; surfaces: number; variants: number; cells: number };
 }
 
-// ---- authorization (R13): the fixed actor set × every command, decided by the table --------------
+// ---- authorization: the fixed actor set × every command, decided by the table --------------
 // Every gate is a policy row (features/authorization.md). The suite derives
 // the expected admission of each command for each actor here — `authorize` over
 // the resource the command names for its happy-path input — and drives the real

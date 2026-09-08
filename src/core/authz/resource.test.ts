@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { attributesOf, targetOf, targetOfResource } from "./resource.js";
 import { scope } from "./testing.js";
 
-// Plan U1 / KTD1: the attributes a condition may read off each resource, and
+// The attributes a condition may read off each resource, and
 // the (type, kind) targets a rule row may name.
 
 describe("attributesOf", () => {

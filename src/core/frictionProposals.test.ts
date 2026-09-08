@@ -15,8 +15,8 @@ import {
 } from "./frictionProposals.js";
 
 // Feature: features/self-improvement.md — the PURE half of the friction
-// proposer (#84, Area 7b second piece): cluster the per-run diagnoses the
-// analyzer (#105) already produces into recurring cross-run patterns, rank
+// proposer: cluster the per-run diagnoses the
+// analyzer already produces into recurring cross-run patterns, rank
 // them, render each as an issue proposal with its evidence and a concrete
 // suggested fix, and dedupe against proposals that are already open.
 
