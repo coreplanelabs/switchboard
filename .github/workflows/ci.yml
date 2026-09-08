@@ -1,0 +1,309 @@
+# CI is a thin caller of the repository's own scripts: every step below is
+# `npm ci` or `npm run <script>`, so a contributor or an agent runs the exact
+# same checks locally with `npm run verify` (or one area's `verify`). Nothing
+# lives only in this file; src/ciWorkflow.test.ts fails the suite if a step
+# ever does. One lockfile at the root covers every workspace (bot, web, docs,
+# the five Workers), so there is one install and one cache key.
+#
+# The work fans out so the wall clock is one leg, not a chain: the bot's
+# static checks run one per job, its test suite runs as shards, and each
+# Worker verifies in its own job. The branch ruleset requires the checks by
+# NAME (bot, web, docs, workers, image, package), so a fan-out ends in a gate job with
+# that name — `needs:` every leg, `if: always()`, `npm run ci:gate` over the
+# `needs` context — green only when every leg succeeded.
+name: ci
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # actions/cache (inside setup-node's `cache: npm`) downloads the cache in
+  # segments and, by default, waits 10 MINUTES for a segment that stopped
+  # arriving before it gives up and falls through to `npm ci`. A job's restore
+  # has hung for exactly that while its sibling jobs restored the same key in
+  # seconds — ten idle minutes for a cache the job then did without.
+  # One minute is plenty for a segment on a healthy connection; a stalled one
+  # costs 60 s and a full install instead of 600 s.
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
+
+# Rapid successive pushes to the same PR cancel the stale run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bot-checks:
+    # One static check per job — typecheck, lint, and prettier each take 15–25 s
+    # on a runner; in one chain they were the slowest half of the slowest job.
+    # `check:consistency` groups the sub-second checks (lockfile platforms,
+    # vendored skills, licenses, generated docs tables, spec proof bindings) so they do not each pay
+    # an install.
+    name: bot / ${{ matrix.check }}
+    runs-on: namespace-profile-mid
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [check:consistency, typecheck, lint, format:check, check:dist]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `decisions:check` (in check:consistency) diffs accepted records against origin/main;
+          # a shallow clone has no origin/main and would skip that half.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run ${{ matrix.check }}
+
+  bot-tests:
+    # The vitest suite (every project in vitest.config.ts) split by file across
+    # N shards; N is the length of the matrix and nothing else. A shard
+    # reproduces locally as `npm test -- --shard=2/4`.
+    name: bot / test ${{ matrix.shard }} of ${{ strategy.job-total }}
+    runs-on: namespace-profile-mid
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+
+  bot:
+    # The required check `bot`: green only when every static check and every
+    # test shard succeeded (scripts/ci-gate.mjs).
+    name: bot
+    needs: [bot-checks, bot-tests]
+    if: ${{ always() }}
+    runs-on: namespace-profile-smidge
+    env:
+      NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: npm run ci:gate
+
+  web:
+    name: web
+    runs-on: namespace-profile-mid
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run verify -w web
+
+  docs:
+    name: docs
+    runs-on: namespace-profile-mid
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      # A dead internal link fails the build; the site check proves the pages
+      # the dashboard links to exist; the dry-run proves wrangler would accept
+      # the deploy without touching an account.
+      - run: npm run verify -w docs
+      - run: npm run check:site
+      - run: npm run verify -w deploy/cloudflare-docs
+
+  package:
+    # The npm package's own verify: build the bundle and its assets, typecheck,
+    # licenses, then the smoke test — pack, install the tarball into a temp
+    # directory, run the installed `switchboard`. A required check like the
+    # others once the ruleset in docs/how-to/configure-the-repository.md is applied.
+    name: package
+    runs-on: namespace-profile-mid
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run verify -w packages/switchboard
+
+  workers-each:
+    # One job per Worker: the memory Worker's tests run inside workerd and take
+    # ~30 s on a runner; the other three verify in a few seconds each. The name
+    # says what the leg does — `verify` — because the matrix values are
+    # `deploy/<worker>` directories, and a check called `workers / deploy/…`
+    # read as a deploy. Nothing here deploys; deploy-production.yml does.
+    name: workers / verify ${{ matrix.worker }}
+    runs-on: namespace-profile-mid
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [deploy/cloudflare, deploy/cloudflare-memory, deploy/cloudflare-resident, deploy/cloudflare-sandbox]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run verify -w ${{ matrix.worker }}
+
+  workers:
+    # The required check `workers`: green only when every Worker's job succeeded.
+    name: workers
+    needs: [workers-each]
+    if: ${{ always() }}
+    runs-on: namespace-profile-smidge
+    env:
+      NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: npm run ci:gate
+
+  image-each:
+    # One leg per image the deploy builds — the same Dockerfiles, from the same
+    # contexts, that wrangler builds on a release: the bot's (the root
+    # Dockerfile, also docker-compose's), the resident's and the sandbox's.
+    # Until this job existed a broken bot Dockerfile was found at deploy time;
+    # until it covered every image, so was a broken resident one (a RUN whose
+    # last command exits 1 on the base image).
+    # The runner's own npm is enough to invoke the script; whatever runs inside
+    # an image comes from its Dockerfile.
+    name: image / build ${{ matrix.worker }}
+    runs-on: namespace-profile-mid
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [deploy/cloudflare, deploy/cloudflare-resident, deploy/cloudflare-sandbox]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: npm run check:image -w ${{ matrix.worker }}
+
+  image:
+    # The required check `image`: green only when every image built.
+    name: image
+    needs: [image-each]
+    if: ${{ always() }}
+    runs-on: namespace-profile-smidge
+    env:
+      NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: npm run ci:gate
+
+  # Which Workers this PR's diff would deploy (docs/reference/specs/release-and-deploy.md
+  # item 8): `deploy plan --affected --base HEAD^` — HEAD is the merge commit,
+  # so HEAD^ is the PR's base — into the job summary, on every PR. An
+  # unclassified path shows here as "every Worker deploys" long before it
+  # reaches a release. The logic is scripts/deploy-targets.mjs, like every
+  # other step here: `npm run deploy:targets` runs it locally too. The RELEASE
+  # PR's plan (judged against PRODUCTION, not a base — kept as a sticky comment
+  # and re-rendered on every merge to main) is the same script run from
+  # release-please.yml on the push to main; this job still runs on the release
+  # PR and shows the release diff against its base like any other PR.
+  deploy-targets:
+    name: deploy targets
+    if: github.event_name == 'pull_request'
+    runs-on: namespace-profile-mid
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: the diff against the PR base needs both commits.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run deploy:targets
+
+  docs-deploy:
+    name: deploy the docs site
+    # Only after the site is proven to build, and only for main.
+    needs: docs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: namespace-profile-mid
+    # An assets-only Worker (deploy/cloudflare-docs/): no container, no Durable
+    # Object, nothing that can be mid-rollout — which is why this one deploys on
+    # every docs push, while the four runtime Workers deploy on the RELEASE
+    # (release-please.yml → deploy-production.yml), preflighted and in order.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Two commits: enough to see what this push changed.
+          fetch-depth: 2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      # Deploy only when this push touched the docs or their build; the script
+      # fails OPEN (deploys) when the diff cannot be computed, so the published
+      # site is never silently older than main.
+      - id: touched
+        run: npm run docs:changed
+      # The docs Worker's wrangler.jsonc is generated from the deployment
+      # profile (account, hostname), and production's profile lives in the
+      # installation's configuration repository (the SWITCHBOARD_DEPLOY_PROFILE
+      # variable) — read with a read-only App token minted for that repository
+      # alone, like the release deploy's. Without the variable there is no
+      # production to deploy the docs to, and the job skips like it does
+      # without the token.
+      - name: load the App's credentials
+        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: true
+          version: 2.39.0
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          APP_CLIENT_ID: op://CI/coreplane-bot/client-id
+          APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
+      - name: mint the App token that reads the configuration repository
+        id: infra-token
+        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ env.APP_CLIENT_ID }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
+          owner: ${{ vars.CONFIG_REPO_OWNER }}
+          repositories: ${{ vars.CONFIG_REPO_NAME }}
+          permission-contents: read
+      - name: build + deploy
+        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
+        # `npm run deploy` in the docs Worker renders its wrangler.jsonc from
+        # the profile and builds docs/ first, so the upload can never be a
+        # stale dist or an example-valued config. CLOUDFLARE_ACCOUNT_ID is
+        # deliberately NOT set — the account comes from the profile and the env
+        # var would override it. A missing token is a loud skip (the step's
+        # `if`), not a red main on every docs edit: the token is a one-time
+        # repository-secret setup.
+        run: npm run deploy -w deploy/cloudflare-docs
+        env:
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_DEPLOY_PROFILE }}
+          CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}

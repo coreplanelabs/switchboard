@@ -1,0 +1,219 @@
+# Lines the public-hygiene ratchet leaves alone, one per line: <path><TAB><the line, trimmed>.
+# Each entry is a line that matches a forbidden class but is right as written — the English word
+# "nominal", a CSS colour that looks like an issue number, an integration's own identifier. Say why
+# in a comment above the entry. An entry is stale — and fails `npm run hygiene:check` — when its line is gone or no
+# longer matches any class.
+
+# The spec names the plan vocabulary it forbids.
+docs/reference/specs/public-hygiene.md	A repository that grew inside one company is full of that company: its name in URLs and workflow files, its people in comments, its private issue numbers as provenance, its planning vocabulary (`KTD16`, `U3`) in docstrings, its Slack and account ids in fixtures, and dated retellings of incidents where a timeless rule should stand. None of it helps a reader who is not that company, and some of it is a leak. The policy is that every comment, docstring, fixture and prose line in the public tree is answerable from the repo alone; the mechanism is a check, because a policy held by discipline lasts one busy week.
+
+# The spec's red step quotes the forbidden form it plants.
+docs/reference/specs/public-hygiene.md	| The tree equals the committed list and no allow entry is stale (item 3) | `[agent]` `npm run hygiene:check` → `public-hygiene ok — N file(s), M hit(s) still listed, K line(s) allowed`, exit 0. Red step: add `// see #123` to any source file and re-run — it must name the file, the class, `0 → 1`, and exit 1. |
+
+# The record names the plan vocabulary it retires.
+docs/decisions/0022-public-tree-carries-no-imprint.md	Switchboard was built inside one company, by a handful of people, against a private issue tracker and a set of dated planning documents. That history is in the tree: the company's name in workflow files and URLs, people's names in comments, issue numbers as the only explanation for a line of code, plan vocabulary (`KTD16`, `U3`, `R1`) in docstrings, Slack and account identifiers in fixtures, and dated incident retellings where a rule should stand. For a reader outside the company every one of those is noise, and several are leaks.
+
+# The spec's second red step quotes the forbidden form it plants.
+docs/reference/specs/public-hygiene.md	| `hygiene:gen` with growth in the tree exits 1 and leaves the list unchanged; `-- --force` records it (item 3) | `[agent]` add `// see #123` to a source file; `npm run hygiene:gen` → names the file, `0 → 1`, exit 1, `scripts/public-hygiene.allowlist.json` byte-identical (`shasum` before and after); `npm run hygiene:gen -- --force` → records it, exit 0; revert the line and `hygiene:gen` again. |
+
+# The cost page formats calendar days; its fixture needs literal ISO dates, not a narrative.
+web/src/pages/costs.test.ts	const days = [day("2026-08-27", 0.3, 4), day("2026-08-28", 1.3, 12.5), day("2026-08-29", 0.9, 3)];
+web/src/pages/costs.test.ts	range: { from: "2026-08-27", to: "2026-08-29", days: 3, partialLastDay: true },
+web/src/pages/costs.test.ts	expect(t).toContain("$14.10"); // 2026-08-28: 1.3 + 0.3 + 12.5 — not the partial day
+web/src/pages/costs.test.ts	expect(t).toContain("2026-08-28 · last full day");
+web/src/pages/costs.test.ts	expect(titles).toContain("2026-08-28 · bot · $1.30");
+web/src/pages/costs.test.ts	expect(titles).toContain("2026-08-28 · Workers · storage · R2 · $0.05");
+web/src/pages/costs.test.ts	expect(titles).toContain("2026-08-28 · LLM (Anthropic) · $12.50");
+web/src/pages/costs.test.ts	expect(w.find('table.data td[title="2026-08-27"]').exists()).toBe(true);
+
+# The W3C Trace Context specification's own example trace id, not an account id.
+web/src/pages/scheduled.test.ts	traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+web/src/pages/scheduled.test.ts	expect(w.find(".trace").attributes("title")).toBe("trace 4bf92f3577b34da6a3ce929d0e0e4736");
+
+# `#42` is an issue in the example repo `acme/api`, the fixture name the tests use.
+docs/how-to/configure-your-defaults.md	@switchboard agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix issue #42
+docs/reference/slack-commands.md	Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix #42`.
+
+# A made-up Slack user id in an example `grants` block; the root README and the config example use the same one.
+docs/how-to/restrict-who-can-do-what.md	slack:U0123ADMIN:
+docs/how-to/restrict-who-can-do-what.md	slack:U0100FOUNDER:
+docs/reference/authorization.md	slack:U0123ADMIN:                 # an admin, spelled out
+
+# The project's own repository and docs URL: real infrastructure, held equal to project.json by check:project-facts.
+src/core/selfDescription.ts	export const SWITCHBOARD_REPO = "coreplanelabs/switchboard";
+src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Source of truth: the code lives in the GitHub repo coreplanelabs/switchboard — README.md (architecture + agents), AGENTS.md (invariants + map), and one behavioral spec per feature under docs/reference/specs/*.md (e.g. docs/reference/specs/resident-repos.md, docs/reference/specs/routing-and-config.md, docs/reference/specs/github-tools.md). For a question about how Switchboard works beyond this block, read those files with the GitHub tools when you have them (github_tree / github_file on coreplanelabs/switchboard) — they are private, so a public-web fetch 404s; if you have no GitHub tools, answer from this block and point at that path. Never describe yourself as stateless, tool-less by design, or unable to know your own workings."
+
+# Synthetic Slack ids of the real shape: mention-rendering and directive-position tests need a valid <@U…>/<#C…|name> token.
+src/core/dispatch/reply.test.ts	composeRunLabel({ ...base, repo: "o/r", text: "<@U0AAAAAAAAA> review this. Sent using <@U0BBBBBBBBB|Claude>" }),
+src/core/dispatch/reply.test.ts	expect(composeRunLabel({ ...base, repo: "o/r", text: "post in <#C0AAAAAAAAA|general> and <#C0BQ>" })).toBe(
+src/core/repoContext.test.ts	msg("<@U0AAAAAAAAA> agent:coding model:anthropic/claude-fable-5 in api: fix it"),
+
+# Anthropic's API version header: the integration's own version string, not a date of ours.
+src/core/costs.ts	const ANTHROPIC_VERSION = "2023-06-01";
+src/core/costs.test.ts	expect(h["anthropic-version"]).toBe("2023-06-01");
+
+# The W3C Trace Context specification's own example trace id, one hoisted constant per test file.
+src/core/trace/sinks.test.ts	const W3C_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+src/core/trace/tracer.test.ts	const W3C_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+src/core/trace/workerTrace.test.ts	const W3C_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+src/core/trace/traceparent.test.ts	const TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+# The issue body `friction propose` files links its tracking issue and spec permalinks on the project's repository; the test pins that text. Should come from project.json rather than be hard-coded.
+src/core/frictionProposals.ts	const TRACKING_ISSUE_URL = "https://github.com/coreplanelabs/switchboard/issues/84";
+src/core/frictionProposals.ts	`Switchboard's self-improvement pass ([#84](${TRACKING_ISSUE_URL})) found this friction recurring across its own recent runs. This issue is a **proposal for a human to triage** — nothing was changed automatically.`,
+src/core/frictionProposals.ts	`Generated by \`friction propose\` from the friction ledger: each run's event stream was diagnosed by \`analyzeRunFriction\` ([docs/reference/specs/run-friction.md](https://github.com/coreplanelabs/switchboard/blob/main/docs/reference/specs/run-friction.md)) and the diagnoses clustered across runs ([docs/reference/specs/self-improvement.md](https://github.com/coreplanelabs/switchboard/blob/main/docs/reference/specs/self-improvement.md)). Finding text is redacted at the source. Dedupe key \`${p.key}\`: re-running the pass will not refile this pattern while this issue is open.`,
+src/core/frictionProposals.test.ts	expect(p.body).toContain("#84");
+
+# Rendered schedule timestamps the `schedule list` test pins literally; a helper would only re-implement the formatter.
+src/core/commands/schedule.test.ts	"• `self-improvement` — `0 14 * * 1` · bot · `friction propose` as `cron` · next 2026-08-31 14:00 UTC · no firing recorded",
+src/core/commands/schedule.test.ts	"• `resident-watchdog` — `*/10 * * * *` · resident · resident watchdog — not a run · next 2026-08-30 12:10 UTC",
+src/core/commands/schedule.test.ts	expect(text).toContain("last 2026-08-30 11:00 UTC → completed (run run-abcd)");
+
+# The one credential step the release, release-plan and docs-deploy workflows keep for this installation: the GitHub App's client id and private key come from its secrets manager. The profile location and the repository it names are repository variables; another operator replaces this step with their own source of the App's credentials.
+.github/workflows/ci.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
+.github/workflows/ci.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
+.github/workflows/deploy-production.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
+.github/workflows/deploy-production.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
+
+# The published package the reusable deploy runs in `package` mode — spelled out because a caller in another repository has no checkout of this one to read project.json from; check:project-facts holds it equal to `npmPackage`.
+.github/workflows/deploy-production.yml	echo "cli=npx --yes @coreplane/switchboard@$v" >> "$GITHUB_OUTPUT"
+.github/workflows/deploy-production.yml	echo "label=@coreplane/switchboard@$v" >> "$GITHUB_OUTPUT"
+.github/workflows/release-please.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
+.github/workflows/release-please.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
+
+# The project's own home, docs URL, contact address and steward — the facts in project.json, which check:project-facts holds equal everywhere.
+package.json	"homepage": "https://github.com/coreplanelabs/switchboard#readme",
+package.json	"url": "git+https://github.com/coreplanelabs/switchboard.git"
+package.json	"url": "https://github.com/coreplanelabs/switchboard/issues"
+.github/ISSUE_TEMPLATE/config.yml	url: https://github.com/coreplanelabs/switchboard/discussions
+.github/ISSUE_TEMPLATE/config.yml	url: https://github.com/coreplanelabs/switchboard/security/advisories/new
+CODE_OF_CONDUCT.md	<dev@coreplane.ai>. All complaints will be reviewed and investigated promptly
+SECURITY.md	repository's Security tab, or email <dev@coreplane.ai> with a description, the
+CONTRIBUTING.md	git clone https://github.com/coreplanelabs/switchboard.git
+README.md	[![CI](https://github.com/coreplanelabs/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/coreplanelabs/switchboard/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coreplanelabs/switchboard/badge)](https://scorecard.dev/viewer/?uri=github.com/coreplanelabs/switchboard) [![Latest release](https://img.shields.io/github/v/release/coreplanelabs/switchboard)](https://github.com/coreplanelabs/switchboard/releases/latest) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+SUPPORT.md	[GitHub Discussions](https://github.com/coreplanelabs/switchboard/discussions).
+GOVERNANCE.md	OpenSwitchboard is an open-source project stewarded by [Coreplane Labs](https://coreplane.ai).
+
+# Cloudflare's compatibility date is a runtime setting the Worker pins, not a narrative.
+deploy/cloudflare-docs/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+deploy/cloudflare-memory/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+deploy/cloudflare-resident/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+deploy/cloudflare-sandbox/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+deploy/cloudflare/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+
+# The example profile's placeholder account id: src/deploy/profile.ts requires exactly 32 hex characters, so the placeholder keeps the shape.
+deploy/profile.example.json	"account": "00000000000000000000000000000000",
+
+# The profile schema and the registry path require a 32-hex Cloudflare account id; these are the documented placeholder and synthetic test ids, not an account.
+src/deploy/profile.ts	export const EXAMPLE_ACCOUNT = "00000000000000000000000000000000";
+src/deploy/sandboxGateRun.test.ts	const REGISTRY = "registry.cloudflare.com/0123456789abcdef0123456789abcdef/switchboard-sandbox-switchboardsandbox";
+src/deploy/sandboxLiveGate.test.ts	const REGISTRY = "registry.cloudflare.com/0123456789abcdef0123456789abcdef/switchboard-sandbox-switchboardsandbox";
+src/deploy/testing/profile.ts	account: "1234567890abcdef1234567890abcdef",
+src/deploy/wranglerTemplate.test.ts	'{ "name": "switchboard", "account_id": "1234567890abcdef1234567890abcdef",',
+
+# The MCP protocol's own version identifier is a date string.
+src/channels/mcp.test.ts	const res = await handleMcpRequest(rpc("initialize", { protocolVersion: "2025-06-18" }), deps, { auth: good });
+src/channels/mcp.ts	const PROTOCOL_VERSION = "2025-06-18";
+src/mcp/client.ts	export const MCP_PROTOCOL_VERSION = "2025-06-18";
+
+# Cost-report fixture days: a per-day cost row is an ISO date by shape; the values are arbitrary.
+src/channels/costsView.test.ts	const days = [day("2026-08-27", 0.3, 4), day("2026-08-28", 1.3, 12.5), day("2026-08-29", 0.9, 3)];
+src/channels/costsView.test.ts	range: { from: "2026-08-27", to: "2026-08-29", days: 3, partialLastDay: true },
+
+# Record fixtures: frontmatter and plan file names need an ISO date; the values are arbitrary.
+src/docs/decisions.test.ts	record("0002-b.md", { title: "B decides", status: "accepted", date: "2026-09-08", pattern: "Strategy" }),
+src/docs/decisions.test.ts	date: "2026-09-01",
+src/docs/decisions.test.ts	"| 0001 | [A decides](../decisions/0001-a.md) | Ports & Adapters | implemented | 2026-09-01 |",
+src/docs/decisions.test.ts	"| 0002 | [B decides](../decisions/0002-b.md) | Strategy | accepted | 2026-09-08 |",
+src/docs/decisions.test.ts	record("0003-c.md", { title: "C | old", status: "superseded", date: "2026-09-02", superseded_by: "0004-d.md" }),
+src/docs/decisions.test.ts	date: "2026-09-03",
+src/docs/decisions.test.ts	date: "2026-09-04",
+src/docs/decisions.test.ts	superseded_by: "docs/plans/2026-09-09-001-feat-h-plan.md",
+src/docs/decisions.test.ts	"| 0003 | [C \\| old](../decisions/0003-c.md) | — | superseded → [0004-d.md](../decisions/0004-d.md) | 2026-09-02 |",
+src/docs/decisions.test.ts	"| 0005 | [E](../decisions/0005-e.md) | — | superseded → [0006-f.md](../decisions/0006-f.md) | 2026-09-03 |",
+src/docs/decisions.test.ts	"| 0007 | [G](../decisions/0007-g.md) | — | superseded → [2026-09-09-001-feat-h-plan.md](../plans/2026-09-09-001-feat-h-plan.md) | 2026-09-04 |",
+src/docs/decisions.test.ts	{ path: "docs/plans/2026-09-08-001-feat-x-plan.md", text: "---\ntitle: P\nstatus: accepted\n---\n" },
+src/docs/records.test.ts	const { fields, body } = parseFrontmatter("---\ntitle: X\nstatus: accepted\ndate: 2026-09-08\n---\n# X\n\nbody\n");
+src/docs/records.test.ts	expect(fields).toEqual({ title: "X", status: "accepted", date: "2026-09-08" });
+src/docs/records.test.ts	const good = rec("docs/decisions/0001-x.md", { title: "X", status: "accepted", date: "2026-09-08" });
+
+# A CSS colour in the connect page's stylesheet looks like an issue number.
+src/channels/mcpConnectView.ts	`<style>body{font:15px system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#222}code{background:#f3f3f3;padding:.1em .3em;border-radius:3px}label{display:block;margin:1rem 0 .3rem;font-weight:600}input{width:100%;padding:.6rem;font-size:1rem;border:1px solid #bbb;border-radius:4px}button{margin-top:1rem;padding:.6rem 1.2rem;font-size:1rem;border-radius:4px;border:0;background:#1f6feb;color:#fff}.err{color:#b00020}.warn{color:#8a6d00}</style>` +
+
+# A W3C trace id is 32 hex characters by definition; this fixture is one.
+src/channels/scheduledPanel.test.ts	const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+# The `deploy plan` snapshot prints the documented placeholder account id, not an account.
+src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Checks: wrangler account = 00000000000000000000000000000000; clean tree; HEAD == origin/main; node_modules present in every dir
+
+# load/history: perDay is keyed by UTC date by contract; the fixture's dates are arbitrary.
+src/load/history.test.ts	expect(perDay).toEqual({ "2026-09-04": 2, "2026-09-07": 1 });
+
+# The English word "nominal": a jittered delay's pre-jitter value.
+docs/reference/specs/run-history.md	17. **Retry policy.** `createRunHistoryWriter({ store, warn, onPersisted?, sleep?, random? })` retries twice with jittered backoff (nominal 1 s then 4 s, each ±50%) on a `TransientStoreError` (network, timeout, 408/429/5xx) or any unclassified error; never on a `PermanentStoreError` (4xx such as 413, malformed response — one warn, `failures() + 1`); a `RouteMissingError` (404 — the deployed Worker predates the run-history routes) logs `[run-history] state Worker has no /runs/put — deploy the state Worker with run-history routes before this bot version` ONCE per process, sets `degraded()`, never retries, and counts every loss. Retries exhausted → one warn naming the run id and attempt count, `failures() + 1`. On success `onPersisted(id)` runs (exception-isolated) — the dispatcher wires it to `registry.markPersisted`, which sets `persisted: true` on the run's `RunSummary` (the key is absent until then) and emits one index `upsert`; a no-op for an unknown or already-evicted run. A 404/413 on `/runs/put` loses that run for the friction ledger too — it reads run history and has no other source.
+
+# The spec lists the class patterns by example.
+docs/reference/specs/public-hygiene.md	1. **Five classes, one regex each, tested per line.** `names` (the company, its sibling products, people, the private Slack channel — case-insensitive; a 1Password `op://` reference is an integration's own syntax, not imprint, and a vault path that names the company is caught by the company), `trackers` (`#NNN` issue references and the private org's GitHub URLs; a line anchor, an HTML entity, a heading or a hex colour is not a tracker), `planIds` (`KTD…`, `KD…`, `OQ…`, and the bare `U1`–`U9` / `R1`–`R99` markers; a Slack user id and Cloudflare's `R2` are not), `ids` (Slack channel/user/DM ids and 32-hex account ids), `dates` (a full ISO date). A line can hit several classes; each is counted.
+
+# The spec names "nominal" as the canonical allowed English word.
+docs/reference/specs/public-hygiene.md	4. **A legitimate line is allowed by name.** `scripts/public-hygiene.allow` holds `path<TAB>trimmed line` entries with a comment saying why (the English word "nominal", a colour that looks like an issue number, an integration's own identifier). An allowed line is skipped whole. An entry is stale — and fails the check — when its line no longer exists or no longer matches any class, so the file carries neither ghosts nor dead weight.
+
+# The install path names the project's own published artifacts — the npm package (`project.json`'s `npmPackage`, held equal by check:project-facts), the image, the repository URL a contributor clones — the way an operator types them.
+CONTRIBUTING.md	published CLI package in `packages/switchboard/` (what `npx @coreplane/switchboard`
+README.md	npx @coreplane/switchboard ask "what can you do?"
+README.md	npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key <your key>
+README.md	Off means absent from `help`, the dashboard and the plan ([Turn features on and off](docs/how-to/turn-features-on-and-off.md)). The bot is `npx @coreplane/switchboard start` on any machine with Node, or the published image `ghcr.io/coreplanelabs/switchboard`.
+docs/public/install.sh	# and can be run by hand: `npx @coreplane/switchboard init --help`.
+docs/public/install.sh	# runs the published installer — `npx @coreplane/switchboard init` — with every
+docs/public/install.sh	PACKAGE="@coreplane/switchboard"
+docs/reference/specs/README.md	| [packaging.md](packaging.md) | The npm package the release publishes (`@coreplane/switchboard`, the CLI bundled with the files it reads under `dist/assets/` — and the bot, which `start` runs from any directory with no Docker): one resolver finds those files in a checkout, the image and the package; the smoke test installs the tarball and runs it; one release-please component moves the version; `publish-npm` publishes with provenance; the curl front door checks Node and hands off to `npx`; what stays clone-only and why |
+docs/reference/specs/packaging.md	1. **One package, the CLI, under the project's scope.** `packages/switchboard/` is a workspace whose name is `project.json`'s `npmPackage` (`@coreplane/switchboard`); `check:project-facts` holds the manifest's `name`, `description`, `license` (the root's), `homepage` (the docs URL), `repository.url` and `.directory`, and `bugs.url` to the facts. `bin` is `switchboard` → `dist/cli.js`; `files` is `dist` alone (npm adds the manifest, and the README and LICENSE the build copies in — the README is the repository's own, `packageReadme` in `build.mts` making every relative link and image absolute against the repository on GitHub at `HEAD` and dropping the generated diagram regions, so the npm page reads as GitHub does and the two can never diverge); `engines.node` is `>=<the .nvmrc major>`; `publishConfig` is `access: public` (provenance is the release workflow's call, item 5). Its `dependencies` are exactly the npm packages the bundled CLI imports, at the root's ranges — derived by a test from esbuild's metafile, so a dependency the CLI stops or starts importing fails the suite until the manifest follows.
+docs/reference/specs/packaging.md	| The first publish: once the placeholder exists on the registry with this repository as its trusted publisher and `SWITCHBOARD_PUBLISH_NPM` is `true`, the next release has a green `publish the npm package` job and the package is on the registry at the release's version — without provenance while the repository is private, with it after the flip; until then every release carries the `npm publish is off` notice and the job is skipped (item 5) | `[agent]` **Human-gated once:** an org admin publishes `0.0.0` from an empty directory and sets the trusted publisher (repository `coreplanelabs/switchboard`, workflow `release-please.yml`); `gh variable set SWITCHBOARD_PUBLISH_NPM --body true`. Then, after the next release PR merges: the `release-please` run shows `publish the npm package` green, `npm view @coreplane/switchboard version` is the release's, and a clean machine's `npx @coreplane/switchboard init --dry-run` runs. Receipt on the release issue. |
+docs/reference/specs/packaging.md	Switchboard is installed, not forked ([one production target](../../decisions/0023-one-production-target.md)). The source stays one public monorepo; what an operator installs are the two artifacts each release publishes: the container image (`ghcr.io/<owner>/<repo>`, [release-and-deploy.md](release-and-deploy.md) item 21) that IS the bot, and the npm package this spec covers — the CLI and, through it, the bot: `npx @coreplane/switchboard init` reaches a running `ask` from an empty directory with no clone, and `npx @coreplane/switchboard start` runs the bot from that directory with no Docker (item 8). The package is the same CLI the checkout runs (`src/cli.ts`, bundled — and the bot's entry with it, since `start` runs it) and the same files it reads (the examples, the Worker templates, the manifests, the dashboard's build — copied), under one rule for finding them; nothing is a second implementation.
+docs/how-to/configure-your-defaults.md	Examples are chat messages; the same commands work on the CLI (`npx @coreplane/switchboard config set me --model openai/gpt-5`), HTTP and MCP.
+docs/how-to/deploy.md	MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx @coreplane/switchboard deploy all --only memory,bot
+docs/how-to/deploy.md	docker run -d --name switchboard --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ghcr.io/coreplanelabs/switchboard:latest
+docs/how-to/deploy.md	npx @coreplane/switchboard deploy plan --only memory,bot
+docs/how-to/deploy.md	npx @coreplane/switchboard deploy secrets bot
+docs/how-to/deploy.md	npx @coreplane/switchboard deploy secrets memory
+docs/how-to/deploy.md	npx @coreplane/switchboard init --organization <org> --anthropic-key <key> --slack-app-token <xapp-token> --slack-bot-token <xoxb-token> --cloudflare <account id> --zone <zone>
+docs/how-to/deploy.md	npx @coreplane/switchboard start
+docs/how-to/operate-production.md	npx @coreplane/switchboard deploy all --affected
+docs/how-to/operate-production.md	npx @coreplane/switchboard deploy config     # from the profile's configSource, or --source <path|github://…|op://…>
+docs/how-to/operate-production.md	npx @coreplane/switchboard deploy plan --affected
+docs/how-to/operate-production.md	npx @coreplane/switchboard deploy restart    # the running container keeps the config it started with
+docs/how-to/rotate-a-secret.md	SWITCHBOARD_DEPLOY_TOKEN=<token> npx @coreplane/switchboard deploy restart
+docs/how-to/rotate-a-secret.md	npx @coreplane/switchboard deploy secrets <memory|bot|resident|sandbox> --only <NAME>
+docs/how-to/set-up-accounts.md	npx @coreplane/switchboard init --force --organization <org> --anthropic-key <key> --github-app-id <app id> --github-installation-id <installation id> --github-private-key-file <path to .pem>
+docs/how-to/ship-a-release.md	The run also publishes the images as `ghcr.io/<owner>/<repo>` (bot), `-resident` and `-sandbox`, at `:<version>` and `:latest`, with provenance and an SBOM ([Deploy](deploy.md#run-the-container-yourself) verifies one). A third job publishes `@coreplane/switchboard` to npm only for a release cut from the default branch and only while the variable `SWITCHBOARD_PUBLISH_NPM` is `true` — turn it off before merging a release PR and that release ships everything but the package — on the run's own identity — npm trusts this workflow as the package's publisher, so no token is stored anywhere ([Configure the repository](configure-the-repository.md#5-repository-secrets-and-variables)).
+docs/reference/specs/init.md	| From an empty directory, `init` with real values followed by the tutorial's Part 1 reaches an answer from `ask`; with `--cloudflare`, Part 3 reaches a live `/healthz` from the written profile (items 1–4, 8, 11) | `[agent]` Follow [Get started](../../tutorials/get-started.md) as written on a machine with nothing set up, in an empty directory: `npx @coreplane/switchboard init --organization <org> --anthropic-key <key>` → `wrote:` lists `.env  (mode 600)` and `config/config.yaml`, `ls -l .env` shows `-rw-------`, `npx @coreplane/switchboard ask "what can you do?"` answers; then `npx @coreplane/switchboard init --force --organization <org> --anthropic-key <key> --cloudflare <account> --zone <zone>` → `deploy/profile.json` and `Worker configs from deploy/profile.json:` with a `written .switchboard/deploy/<worker>/wrangler.jsonc` line per Worker, and the tutorial's Part 3 from `deploy secrets memory` on ends with `curl -sS https://<name>.<zone>/healthz` answering JSON. Human-gated: needs a real key, a Slack workspace and a Cloudflare account. |
+docs/reference/cli.md	Not a registered command either — the **bot process** itself, the one the container image runs: Slack over Socket Mode and, with `PORT` set, the HTTP server and the dashboard, until Ctrl-C. It reads `.env` and `config/config.yaml` from the installation (`SWITCHBOARD_HOME`, else the directory you run it in when that holds one, else `~/.switchboard`; a checkout is always its own); `start --help` lists everything it reads. From the published package it is `npx @coreplane/switchboard start` — the bot from an empty directory with no Docker.
+docs/tutorials/get-started.md	MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx @coreplane/switchboard deploy all --only memory,bot
+docs/tutorials/get-started.md	npx @coreplane/switchboard ask "what can you do?"
+docs/tutorials/get-started.md	npx @coreplane/switchboard deploy plan --only memory,bot
+docs/tutorials/get-started.md	npx @coreplane/switchboard deploy secrets bot
+docs/tutorials/get-started.md	npx @coreplane/switchboard deploy secrets memory
+docs/tutorials/get-started.md	npx @coreplane/switchboard init --force --organization <org> --anthropic-key <key> --slack-app-token <xapp-token> --slack-bot-token <xoxb-token>
+docs/tutorials/get-started.md	npx @coreplane/switchboard init --force --organization <org> --anthropic-key <key> --slack-app-token <xapp-token> --slack-bot-token <xoxb-token> --cloudflare <account id> --zone <zone>
+docs/tutorials/get-started.md	npx @coreplane/switchboard init --organization <org> --anthropic-key <key>
+docs/tutorials/get-started.md	npx @coreplane/switchboard start
+docs/tutorials/run-it-locally.md	`npm run cli --` is the checkout's spelling of the published CLI; the same code ships as `@coreplane/switchboard`.
+docs/tutorials/run-it-locally.md	git clone https://github.com/coreplanelabs/switchboard.git
+
+# The npm package is the project under its published name — `npmPackage` in project.json, held equal here by check:project-facts — and its manifest and README name the repository and the image the same way the root's do.
+packages/switchboard/package.json	"name": "@coreplane/switchboard",
+packages/switchboard/package.json	"url": "git+https://github.com/coreplanelabs/switchboard.git",
+packages/switchboard/package.json	"url": "https://github.com/coreplanelabs/switchboard/issues"
+
+# The deploy how-to's operator-directory example runs the package by its published name.
+
+# The smoke test's --cloudflare refusal needs an account id of the real shape (32 hex characters); this is the documented synthetic one, not an account.
+packages/switchboard/smoke.test.mts	const account = "0123456789abcdef0123456789abcdef";
+
+# `deploy plan` from the example profile prints the example's placeholder account inside each account-registry image reference.
+
+# The package README names the package once.
+
+# The plan snapshots print the example profile's placeholder account (32 zeros), not an account.
+src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Images: registry (version 1.2.3) — not probed (the example profile) — bot: registry.cloudflare.com/00000000000000000000000000000000/switchboard:1.2.3
+src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Images: registry (version 1.2.3) — not probed (the example profile) — bot: registry.cloudflare.com/00000000000000000000000000000000/switchboard:1.2.3, resident: registry.cloudflare.com/00000000000000000000000000000000/switchboard-resident:1.2.3, sandbox: registry.cloudflare.com/00000000000000000000000000000000/switchboard-sandbox:1.2.3

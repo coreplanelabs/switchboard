@@ -1,0 +1,53 @@
+name: Bug report
+description: Something behaves differently from what the docs say.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you saw instead. Paste replies or errors verbatim.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0, or the `build.commit` from GET /healthz
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Slack
+        - CLI
+        - HTTP or MCP
+        - Dashboard
+        - Deploy tooling
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: execution
+    attributes:
+      label: Execution backend
+      options:
+        - local
+        - e2b
+        - cloudflare sandbox
+        - resident
+        - not relevant
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: The relevant part of your `config.yaml`, secrets removed.
+      render: yaml
+  - type: textarea
+    id: events
+    attributes:
+      label: Run events
+      description: If a run is involved, the output of `runs events <id>` or the run page's event list.
+      render: text

@@ -1,0 +1,82 @@
+# Dependency updates. One weekly PR per ecosystem, with minor and patch bumps
+# grouped so the queue stays readable; majors arrive on their own so the
+# change is visible in the title. npm is one entry: the root lockfile covers
+# every workspace, so an npm ignore rule holds for the whole workspace.
+#
+# Ignore rules encode two things and say which: pairs that must move together
+# by hand (runtime + types, container image + SDK), and blockers upstream
+# with the condition that lifts them. The policy lives here, reviewable in
+# the tree, rather than in `@dependabot ignore` comments on closed PRs.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    open-pull-requests-limit: 10
+    # PR titles are conventional (the `title` check): `chore(deps): bump …`.
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      # Types follow the runtime: the Node major moves with the image, CI and
+      # .nvmrc in one deliberate change, not one package at a time.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # One TypeScript for the whole workspace, and two of its consumers need
+      # the TypeScript JS API, which the 7.x package does not ship (only
+      # `unstable/*` entry points; the API is planned for 7.1):
+      #   - vue-tsc 3.3.x loads `typescript/lib/tsc`, gone in 7 —
+      #     vuejs/language-tools#5381 (closed 2026-07; published vue-tsc
+      #     still needs the TS 6 API, waiting on microsoft/TypeScript#63800).
+      #   - typescript-eslint 8.70 peers on `typescript <6.1` —
+      #     typescript-eslint/typescript-eslint#10940.
+      # Lift once both run on TypeScript 7, then bump every package together.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # @cloudflare/vitest-pool-workers (0.22.x) peers on vitest ^4.1, so the
+      # memory Worker stays on vitest 4 while the rest of the workspace is on
+      # 5 (npm nests its copy). One lockfile means one rule: no vitest major
+      # moves until a pool-workers release supports the current vitest; then
+      # bump the memory Worker and lift this.
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
+      # The @cloudflare/sandbox SDK and the container image it drives are one
+      # protocol in two artifacts; `check:sandbox-pair` fails verify when a
+      # package pin and its Dockerfile tag differ. They move together, by hand,
+      # with a deploy validation, so no automated bump of any size.
+      - dependency-name: "@cloudflare/sandbox"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci(deps)"
+
+  - package-ecosystem: docker
+    directories:
+      - "/"
+      - "/deploy/cloudflare-resident"
+      - "/deploy/cloudflare-sandbox"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      # The bot runtime moves to an LTS line deliberately, together with CI,
+      # .nvmrc and @types/node.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+      # The sandbox image and the @cloudflare/sandbox SDK are one protocol in
+      # two artifacts; they move together, by hand, with a deploy validation
+      # Covers the cold sandbox and the resident.
+      - dependency-name: "cloudflare/sandbox"

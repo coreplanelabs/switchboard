@@ -1,0 +1,76 @@
+# OpenSSF Scorecard: supply-chain health checks (pinned dependencies, branch
+# protection, dangerous workflow patterns, token permissions, ...). Runs on
+# main and weekly. The checks run on any repository and the SARIF is always
+# kept as a run artifact; publishing to the Scorecard API and uploading to
+# code scanning need a public repository, so the `visibility` job decides
+# those two steps and a private run says so instead of silently passing.
+name: scorecard
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "31 7 * * 1"
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  visibility:
+    name: is the repository public?
+    runs-on: namespace-profile-smidge
+    outputs:
+      public: ${{ steps.check.outputs.public }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          private=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)
+          if [ "$private" = "true" ]; then
+            echo "public=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::private repository — Scorecard results are kept as an artifact only; publishing and code-scanning upload wait for the repository to be public"
+          else
+            echo "public=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  analysis:
+    name: scorecard analysis
+    needs: visibility
+    runs-on: namespace-profile-mid
+    # A job-level block REPLACES the workflow's `read-all`, so every read the
+    # action needs must be named here. On a private repository the action's
+    # GraphQL setup (ListCommits: commits with their pull requests, reviews and
+    # checks) fails with "Resource not accessible by integration" without the
+    # last three — every run did until they were added. These are the reads
+    # the action's README lists for private repositories; the writes are for
+    # publishing, which `visibility` gates.
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+      actions: read
+      issues: read
+      pull-requests: read
+      checks: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: ${{ needs.visibility.outputs.public == 'true' }}
+      - name: keep the results as a run artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-sarif
+          path: results.sarif
+          retention-days: 5
+      - name: upload to code scanning
+        if: needs.visibility.outputs.public == 'true'
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: results.sarif

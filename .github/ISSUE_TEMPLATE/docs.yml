@@ -1,0 +1,23 @@
+name: Documentation
+description: A page is wrong, missing, or unclear.
+labels: ["documentation"]
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Page
+      description: The URL or file path.
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is wrong or missing
+      description: Quote the passage if it is wrong; describe what you were looking for if it is missing.
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: Suggested wording
+      description: Optional. A pull request is even better; every page has an edit link.
