@@ -767,9 +767,14 @@ describe("executor provisioning by agent resources", () => {
     }
     expect(grafts[0]!.startedAt).toBe(attach.startedAt); // rebased: the resident's start is the span's start
     expect(attach.attrs).toMatchObject({ backend: "resident", clockSkewMs: expect.any(Number) });
-    // The grafts stream with the setup, before the request: head material.
+    // The request is published at the reservation, before the attach; the
+    // grafts stream live after it and before the agent loop — head material
+    // all the way, so the protected head runs from the root through the loop.
     const inputAt = events.findIndex((e) => e.type === "input");
-    expect(events.indexOf(grafts[0]!)).toBeLessThan(inputAt);
+    const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
+    expect(events.indexOf(grafts[0]!)).toBeGreaterThan(inputAt);
+    expect(events.indexOf(grafts[0]!)).toBeLessThan(loopAt);
+    expect(events.slice(0, loopAt).every(isHeadMaterial)).toBe(true);
   });
 
   // Feature: docs/reference/specs/tracing.md item 19 — a resident attach that FAILS still
@@ -1810,6 +1815,8 @@ describe("repo/ref resolution + resident prompt selection", () => {
     });
     const provider = capturingProvider();
     const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const registry = new RunRegistry({ genId: () => "run-adopt", genToken: () => "tok" });
+    deps.runRegistry = registry;
     const ctx = { repo: "acme/api", ref: "patch-1", pr: 42, headSha: resolvedHead, baseRef: "main" };
     deps.resolveRepoContext = () => ctx;
     deps.fetchPrHead = async () => attached;
@@ -1818,6 +1825,14 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
     expect(provider.requests).toHaveLength(1); // the review ran
+    // The run's meta went out at the reservation with the head as resolved, and
+    // again at the adoption with the head attached — readers take the latest,
+    // so the record and the page name the head actually reviewed.
+    const metaHeads = registry
+      .snapshotById("run-adopt")!
+      .events.filter((e) => e.type === "run_meta")
+      .map((e) => (e as { headSha?: string }).headSha);
+    expect(metaHeads).toEqual([resolvedHead, attached]);
     const system = provider.requests[0].system ?? "";
     expect(system).toContain(
       reviewTargetBlock({
@@ -3670,13 +3685,19 @@ describe("live run-view wiring (Area 2)", () => {
       "-post.reply",
       "-request",
     ]);
-    // Every setup step ended before the request was published: the stream
-    // opens with the root and the setup, then the content.
+    // The stream opens with the root and the setup steps that ran before the
+    // reservation; the request follows (published at the reservation, before
+    // the attach); the rest of the setup — the attach above all — streams live
+    // between the request and the loop. Every event before the loop is head
+    // material, so the protected head runs unbroken from the root through the
+    // request (run-history item 42).
     const inputAt = events.findIndex((e) => e.type === "input");
-    const setup = shapeOf(events.slice(0, inputAt));
-    expect(setup[0]).toBe("+request");
-    expect(setup.slice(1).every((x) => /^[+-]dispatch\./.test(x))).toBe(true);
-    expect(new Set(setup.filter((x) => x.startsWith("-")).map((x) => x.slice(1)))).toEqual(
+    const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
+    const before = shapeOf(events.slice(0, inputAt));
+    expect(before[0]).toBe("+request");
+    expect(before.slice(1).every((x) => /^[+-]dispatch\./.test(x))).toBe(true);
+    const setupEnded = shapeOf(events.slice(0, loopAt)).filter((x) => x.startsWith("-dispatch."));
+    expect(new Set(setupEnded.map((x) => x.slice(1)))).toEqual(
       new Set([
         "dispatch.history",
         "dispatch.repo_context",
@@ -3688,6 +3709,10 @@ describe("live run-view wiring (Area 2)", () => {
         "dispatch.channel_visibility",
       ]),
     );
+    const attachEndAt = events.findIndex((e) => e.type === "span_end" && e.name === "dispatch.workspace.attach");
+    expect(attachEndAt).toBeGreaterThan(inputAt); // the attach streams live, after the request…
+    expect(attachEndAt).toBeLessThan(loopAt); // …and before the loop
+    expect(events.slice(0, loopAt).every(isHeadMaterial)).toBe(true);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
 
@@ -3809,24 +3834,18 @@ describe("live run-view wiring (Area 2)", () => {
       "-post.reply",
       "-request",
     ]);
-    // Every setup step ended before the request was published: the stream
-    // opens with the root and the setup, then the content.
+    // The setup spans that ran before the reservation precede the request; the
+    // attach and the rest stream live after it, before the loop; all of it is
+    // head material (the same partition the wiring test above pins).
     const inputAt = events.findIndex((e) => e.type === "input");
-    const setup = shapeOf(events.slice(0, inputAt));
-    expect(setup[0]).toBe("+request");
-    expect(setup.slice(1).every((x) => /^[+-]dispatch\./.test(x))).toBe(true);
-    expect(new Set(setup.filter((x) => x.startsWith("-")).map((x) => x.slice(1)))).toEqual(
-      new Set([
-        "dispatch.history",
-        "dispatch.repo_context",
-        "dispatch.memory_read",
-        "dispatch.ack_card",
-        "dispatch.workspace.attach",
-        "dispatch.mcp_discovery",
-        "dispatch.compose",
-        "dispatch.channel_visibility",
-      ]),
+    const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
+    const before = shapeOf(events.slice(0, inputAt));
+    expect(before[0]).toBe("+request");
+    expect(before.slice(1).every((x) => /^[+-]dispatch\./.test(x))).toBe(true);
+    expect(events.findIndex((e) => e.type === "span_end" && e.name === "dispatch.workspace.attach")).toBeGreaterThan(
+      inputAt,
     );
+    expect(events.slice(0, loopAt).every(isHeadMaterial)).toBe(true);
     const input = events.find((e) => e.type === "input")!;
     if (input.type !== "input") throw new Error("unreachable");
     expect(input.text).toBe("please rotate «redacted-github-token» now [+2 images, 1 document]"); // directives stripped, redacted
@@ -9172,11 +9191,13 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     let rowAtAttach: ReturnType<InMemoryRunLedger["live"]["get"]>;
     let registryAtAttach: ReturnType<RunRegistry["getById"]> = null;
     let indexAtAttach: ReturnType<RunRegistry["listActive"]> = [];
+    let streamAtAttach: RunEvent[] = [];
     const real = vi.mocked(makeExecutor).getMockImplementation()!;
     vi.mocked(makeExecutor).mockImplementationOnce(async (...args) => {
       rowAtAttach = structuredClone(ledger.live.get("run-l"));
       registryAtAttach = registry.getById("run-l");
       indexAtAttach = registry.listActive();
+      streamAtAttach = registry.snapshotById("run-l")?.events ?? [];
       return real(...args);
     });
     let rowAtFirstCall: ReturnType<InMemoryRunLedger["live"]["get"]>;
@@ -9211,9 +9232,22 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       agent: "general",
       finished: false,
       startedAt: rowAtAttach!.startedAt,
-      eventCount: 0,
     });
     expect(indexAtAttach.map((r) => r.id)).toEqual(["run-l"]);
+    // …and its stream is already live at the attach: the setup spans so far
+    // (the attach itself still open, its start streamed live), then the
+    // request and its meta. The record's first CONTENT event is still `input`,
+    // and everything ahead of it is head material — the protected head runs
+    // unbroken from the first event through the request.
+    expect(streamAtAttach.filter((e) => !isSpanRecord(e)).map((e) => e.type)).toEqual(["input", "run_meta", "context"]);
+    // The attach span has started (its start streamed live, the mock runs inside it).
+    expect(streamAtAttach.map((e) => (e.type === "span_start" ? e.name : e.type))).toEqual(
+      expect.arrayContaining(["dispatch.ack_card", "input", "run_meta", "dispatch.workspace.attach"]),
+    );
+    const firstContentAt = streamAtAttach.findIndex((e) => !isSpanRecord(e));
+    expect(firstContentAt).toBeGreaterThan(0); // setup spans precede the request…
+    expect(streamAtAttach.slice(0, firstContentAt).every(isHeadMaterial)).toBe(true); // …and every one is head material
+    expect(streamAtAttach.find((e) => e.type === "input")).toMatchObject({ text: "hello there [+1 image]" });
     // At the attach: reserved — identity, request, card; no prompt yet.
     expect(rowAtAttach).toMatchObject({
       runId: "run-l",
@@ -9282,7 +9316,12 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.live.size).toBe(0);
     expect(ledger.finished.size).toBe(0);
     expect(registry.listActive()).toEqual([]);
-    expect(index.map((ev) => ev.type)).toEqual(["upsert", "removed"]);
+    // The row came (the create, then one upsert per content event published at
+    // the reservation — request, meta, context) and went (the discard), and
+    // nothing came after the removal.
+    expect(index[0]?.type).toBe("upsert");
+    expect(index.at(-1)).toEqual({ type: "removed", id: "run-l" });
+    expect(index.filter((ev) => ev.type === "removed")).toHaveLength(1);
     expect(warnings).toEqual([]);
   });
 

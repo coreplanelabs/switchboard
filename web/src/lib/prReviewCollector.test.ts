@@ -38,6 +38,13 @@ describe("createPrReviewCollector", () => {
     ]);
   });
 
+  it("a later run_meta replaces the head — the dispatcher re-publishes it when the attach adopts a moved PR head (live-view item 19), so the panel names the head actually reviewed", () => {
+    const c = createPrReviewCollector();
+    c.handle({ type: "run_meta", agent: "review", model: "m", repo: "acme/api", pr: 42, headSha: "e".repeat(40) });
+    c.handle({ type: "run_meta", agent: "review", model: "m", repo: "acme/api", pr: 42, headSha: "d".repeat(40) });
+    expect(c.state.pr).toEqual({ repo: "acme/api", number: 42, headSha: "d".repeat(40) });
+  });
+
   it("keeps one diff per producer — a re-review's later artifact replaces the earlier one; meat and git coexist", () => {
     const c = createPrReviewCollector();
     c.handle(artifact());
