@@ -6,7 +6,10 @@
   "repository": "https://github.com/coreplanelabs/switchboard",
   "docs": "https://docs.switchboard.coreplanelabs.dev",
   "contact": "dev@coreplane.ai",
-  "steward": { "name": "Coreplane Labs", "url": "https://coreplane.ai" },
+  "steward": {
+    "name": "Coreplane Labs",
+    "url": "https://coreplane.ai"
+  },
   "commands": {
     "$comment": "What each root npm script does and when to run it — the source of the Commands table in AGENTS.md (npm run agents:gen). A script without an entry fails agents:check, so a new script cannot ship undocumented.",
     "verify": {
@@ -29,10 +32,22 @@
       "does": "TypeScript over the bot and its scripts, no emit.",
       "when": "After type-level changes; `verify:root` runs it."
     },
-    "lint": { "does": "ESLint over the whole tree.", "when": "`npm run fix` repairs what it can." },
-    "lint:fix": { "does": "ESLint with autofix.", "when": "Part of `fix`." },
-    "format": { "does": "Prettier over the whole tree (not Markdown).", "when": "Part of `fix`." },
-    "format:check": { "does": "Prettier in check mode.", "when": "Part of `verify:root`." },
+    "lint": {
+      "does": "ESLint over the whole tree.",
+      "when": "`npm run fix` repairs what it can."
+    },
+    "lint:fix": {
+      "does": "ESLint with autofix.",
+      "when": "Part of `fix`."
+    },
+    "format": {
+      "does": "Prettier over the whole tree (not Markdown).",
+      "when": "Part of `fix`."
+    },
+    "format:check": {
+      "does": "Prettier in check mode.",
+      "when": "Part of `verify:root`."
+    },
     "fix": {
       "does": "Regenerates every generated artifact and repairs lint and formatting.",
       "when": "Before committing; whenever `check:consistency` reports drift."
@@ -41,8 +56,14 @@
       "does": "Compiles the bot to `dist/`.",
       "when": "`check:dist` and the Docker image run it; rarely by hand."
     },
-    "start": { "does": "Runs the compiled bot from `dist/`.", "when": "Production entry (the container's CMD)." },
-    "dev": { "does": "Runs the bot from source with tsx.", "when": "Local development against a real Slack app." },
+    "start": {
+      "does": "Runs the compiled bot from `dist/`.",
+      "when": "Production entry (the container's CMD)."
+    },
+    "dev": {
+      "does": "Runs the bot from source with tsx.",
+      "when": "Local development against a real Slack app."
+    },
     "cli": {
       "does": "The operator CLI over the command registry (`-- <group> <verb> …`), plus `ask` to drive the full pipeline without Slack.",
       "when": "Smoke tests, deploys, config, run history."
@@ -111,6 +132,14 @@
       "does": "AGENTS.md is under its size budget, its Commands table is current, and every root script is described here.",
       "when": "Part of `check:consistency`."
     },
+    "clock:gen": {
+      "does": "Regenerates the clock-read allowlist (`src/core/trace/clockAllowlist.json`) from the tree.",
+      "when": "After removing a direct `Date.now()`; part of `fix`."
+    },
+    "clock:check": {
+      "does": "No production file reads the wall clock more than its allowlist entry permits, and no entry is stale.",
+      "when": "Part of `check:consistency`."
+    },
     "docs:changed": {
       "does": "Says whether the last push touched the docs or their build (a CI job output).",
       "when": "CI only — gates the docs deploy."
@@ -127,7 +156,10 @@
       "does": "Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment.",
       "when": "CI only — the `deploy targets` job."
     },
-    "docs:dev": { "does": "Serves the docs site locally with live reload.", "when": "Writing docs." },
+    "docs:dev": {
+      "does": "Serves the docs site locally with live reload.",
+      "when": "Writing docs."
+    },
     "docs:build": {
       "does": "Builds the docs site to `docs/.vitepress/dist`.",
       "when": "Rarely by hand; `verify -w docs` and the docs Worker's deploy run it."

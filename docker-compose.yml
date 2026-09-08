@@ -10,6 +10,11 @@ services:
       - switchboard-ws:/app/workspaces
     ports:
       - "127.0.0.1:8080:8080" # health only; Slack traffic is outbound websocket
+    logging: # one JSON span line per request (config `tracing.log`); rotate so a busy month cannot fill the disk
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 volumes:
   switchboard-data:

@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { TRACING_LOG_LEVELS, type TracingLogLevel } from "./core/trace/sinks.js";
 import { dirname, resolve } from "node:path";
 import { EFFORT_LEVELS_HINT, isEffort, type Effort } from "./effort.js";
 import YAML from "yaml";
@@ -201,6 +202,12 @@ export interface AppConfig {
    * comes from `tokenEnv` (default `MEMORY_TOKEN`). Validated at load.
    */
   runtimeOverrides?: { worker?: { baseUrl: string; tokenEnv?: string } };
+  /**
+   * Span log verbosity (features/tracing.md): `roots` prints one JSON line per
+   * root span (a request, a cron firing); `slow` adds every span of 1 s or
+   * more. Absent → `roots`. Never text, summary or output on a line.
+   */
+  tracing?: TracingConfig;
   /**
    * External MCP servers as agent tools (#394, features/mcp-tools.md item 11):
    * `servers[]` of `{ name, url, auth?: { type: bearer, tokenEnv }, agents? }`.
@@ -1129,6 +1136,7 @@ function validateConfig(cfg: AppConfig, warn: (message: string) => void): void {
     );
   }
   if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory, cfg.selfImprovement, warn);
+  if (cfg.tracing !== undefined) validateTracing(cfg.tracing);
   validateRuntimeOverrides(cfg.runtimeOverrides);
   if (cfg.ship !== undefined) validateShip(cfg.ship);
   validateGrants(cfg.grants);
@@ -1152,6 +1160,19 @@ function validateShip(ship: ShipConfig): void {
     const v = ship[key];
     if (v !== undefined && (!Number.isInteger(v) || v < 1))
       throw new Error(`config.yaml: ship.${key} must be an integer >= 1`);
+  }
+}
+
+export interface TracingConfig {
+  log?: TracingLogLevel;
+}
+
+/** `tracing.log` (features/tracing.md): the two verbosity levels the log sink
+ *  knows; anything else is a typo, refused at load. */
+function validateTracing(t: TracingConfig): void {
+  if (typeof t !== "object" || t === null) throw new Error("config.yaml: tracing must be a mapping");
+  if (t.log !== undefined && !TRACING_LOG_LEVELS.includes(t.log)) {
+    throw new Error(`config.yaml: tracing.log must be one of ${TRACING_LOG_LEVELS.join(", ")}`);
   }
 }
 

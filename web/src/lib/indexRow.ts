@@ -1,5 +1,5 @@
 import type { RunIndexRowSeed } from "@core/channels/webSeed.js";
-import { formatElapsed, formatLocalIso } from "./format";
+import { formatDuration, formatLocalIso } from "./format";
 
 // The runs-index row model, ported from the old isomorphic `indexRowRenderer`:
 // every display decision the row makes, as pure functions the RunRow component
@@ -64,8 +64,9 @@ export function shortId(id: string): string {
 /** The stopwatch cell: a finished row's start→finish, fixed; a live row's
  *  elapsed since `now`. */
 export function elapsedText(run: IndexRow, now: number | undefined): string {
-  if (run.finished) return typeof run.finishedAt === "number" ? formatElapsed(run.finishedAt - run.startedAt) : "";
-  return typeof now === "number" ? formatElapsed(now - run.startedAt) : "";
+  if (run.finished)
+    return typeof run.finishedAt === "number" ? formatDuration(run.finishedAt - run.startedAt, "clock") : "";
+  return typeof now === "number" ? formatDuration(now - run.startedAt, "clock") : "";
 }
 
 /** The trigger surface: the platform prefix of the ids (AGENTS.md invariant 4)
@@ -89,7 +90,7 @@ export const SURFACE_NAME: Record<string, string> = { slack: "Slack", http: "HTT
 export function dotTip(run: IndexRow): string {
   if (!run.finished) return run.activity ? `now: ${run.activity}` : "starting…";
   let t = statusWord(run);
-  if (typeof run.finishedAt === "number") t += ` in ${formatElapsed(run.finishedAt - run.startedAt)}`;
+  if (typeof run.finishedAt === "number") t += ` in ${formatDuration(run.finishedAt - run.startedAt, "clock")}`;
   if (run.status && run.status !== "completed" && run.activity) t += `\n${run.activity}`;
   return t;
 }

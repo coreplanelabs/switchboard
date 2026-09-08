@@ -1160,3 +1160,16 @@ describe("organization", () => {
     );
   });
 });
+
+// Feature: features/tracing.md item 3 — the span log's verbosity knob.
+describe("tracing", () => {
+  it("accepts `log: roots` and `log: slow`, refuses anything else at load, and defaults to absent", () => {
+    expect(store(`${YAML_FIXTURE}\ntracing:\n  log: slow\n`).config.tracing).toEqual({ log: "slow" });
+    expect(store(`${YAML_FIXTURE}\ntracing:\n  log: roots\n`).config.tracing).toEqual({ log: "roots" });
+    expect(store().config.tracing).toBeUndefined();
+    expect(() => store(`${YAML_FIXTURE}\ntracing:\n  log: verbose\n`)).toThrow(
+      /tracing\.log must be one of roots, slow/,
+    );
+    expect(() => store(`${YAML_FIXTURE}\ntracing: 3\n`)).toThrow(/tracing must be a mapping/);
+  });
+});

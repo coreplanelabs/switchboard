@@ -8,7 +8,7 @@ import {
   type TimelineSource,
   type TimelineStep,
 } from "@core/channels/runTimeline.js";
-import { formatElapsed } from "./format";
+import { formatDuration } from "./format";
 
 // The run page's view model: the ONE fold for seeded history and live frames
 // (both go through `handle`, exactly like the old inline script — a seeded
@@ -489,7 +489,7 @@ export function runnerNow(state: RunPageModel["state"], nowWall: number): number
 export function runningHeader(state: RunPageModel["state"], nowWall: number): string | null {
   const now = runnerNow(state, nowWall);
   if (state.firstAt === null || now === null) return null;
-  return `running · ${formatElapsed(now - state.firstAt)}`;
+  return `running · ${formatDuration(now - state.firstAt, "clock")}`;
 }
 
 /** The projected runner clock, provided by the run page to every card so a
@@ -550,6 +550,6 @@ export function liveWait(state: RunPageModel["state"], pending: CallVm | null, n
 /** The finished duration on the runner clock (first → last event). */
 export function runSpan(state: RunPageModel["state"]): string {
   return state.firstAt !== null && state.lastAt !== null && state.lastAt > state.firstAt
-    ? formatElapsed(state.lastAt - state.firstAt)
+    ? formatDuration(state.lastAt - state.firstAt, "clock")
     : "";
 }

@@ -3,19 +3,6 @@
 // straight from here), so a server-rendered row and its client repaint agree
 // byte for byte. Pure leaf module: no imports, no module-scope state.
 
-/** A stopwatch reading for a run: `38s`, `4m 12s`, `1h 03m`. Two parts above a
- *  minute so the column stays a fixed width as the numbers tick. Negative or
- *  non-finite input (clock skew, a missing stamp) reads `0s`, never `NaN`. */
-export function formatElapsed(ms: number): string {
-  if (!(ms > 0)) return "0s";
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return s + "s";
-  const m = Math.floor(s / 60);
-  if (m < 60) return m + "m " + (s % 60 < 10 ? "0" : "") + (s % 60) + "s";
-  const h = Math.floor(m / 60);
-  return h + "h " + (m % 60 < 10 ? "0" : "") + (m % 60) + "m";
-}
-
 /** When a run started, the way GitHub and Linear say it (live-view item 20):
  *  `just now` (< 45 s), `1 minute ago` … `59 minutes ago`, `1 hour ago` … `23
  *  hours ago`, `yesterday`, `2 days ago` … `6 days ago`, then the date — `Aug 28`

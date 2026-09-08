@@ -1,11 +1,11 @@
 import {
-  formatMs,
   isSetupInstallCommand,
   type FrictionCategory,
   type FrictionDiagnosis,
   type FrictionFinding,
   type FrictionSeverity,
 } from "./runFriction.js";
+import { formatDuration } from "./time/formatDuration.js";
 
 // Friction proposer (Area 7b / #84, second piece): the PURE half of turning
 // the run-friction ANALYSIS (#105, `analyzeRunFriction`) into ACTION. Given the
@@ -435,7 +435,7 @@ export function clusterFriction(records: readonly FrictionRunRecord[], opts: Clu
         agent,
         rec,
         {
-          summary: `run took ${formatMs(runMs)} (median ${formatMs(med)} across ${timed.length} timed runs)`,
+          summary: `run took ${formatDuration(runMs, "report")} (median ${formatDuration(med, "report")} across ${timed.length} timed runs)`,
           severity: runMs >= threshold * LONG_RUN_FACTOR ? "high" : "medium",
           durationMs: runMs,
         },
@@ -534,7 +534,7 @@ function proposalBody(p: FrictionPattern, runsAnalyzed: number): string {
   const rows = p.examples.map((e) => {
     const run = e.label ? `\`${e.runId}\` — ${escapeCell(e.label)}` : `\`${e.runId}\``;
     const when = Number.isFinite(e.finishedAt) ? new Date(e.finishedAt).toISOString() : "?";
-    return `| ${run} | ${when} | ${escapeCell(e.summary)} | ${e.durationMs !== undefined ? formatMs(e.durationMs) : "-"} |`;
+    return `| ${run} | ${when} | ${escapeCell(e.summary)} | ${e.durationMs !== undefined ? formatDuration(e.durationMs, "report") : "-"} |`;
   });
   // Runs not represented in the examples table (a run can contribute several
   // examples, so this is set difference, not arithmetic on the counts).
@@ -552,7 +552,7 @@ function proposalBody(p: FrictionPattern, runsAnalyzed: number): string {
     `- **Kind:** \`${p.kind}\` (${KIND_LABEL[p.kind]})`,
     `- **Signature:** \`${p.signature}\``,
     `- **Recurrence:** ${p.runIds.length} of ${runsAnalyzed} runs analyzed${share}, ${p.occurrences} occurrence${p.occurrences === 1 ? "" : "s"}`,
-    `- **Attributed time:** ${p.durationMs > 0 ? formatMs(p.durationMs) : "n/a (untimed)"}`,
+    `- **Attributed time:** ${p.durationMs > 0 ? formatDuration(p.durationMs, "report") : "n/a (untimed)"}`,
     `- **Peak severity:** ${p.severity}`,
     "",
     "## Evidence",
@@ -616,9 +616,9 @@ function suggestedFix(p: FrictionPattern): string {
     case "slow_tool":
       return `\`${p.signature}\` is the slow step. Cut its wall time: cache its inputs (a dependency cache in the sandbox image, or a resident worktree), narrow the command (targeted tests instead of the whole suite when the task is local), or move the affected agent to a larger sandbox tier if the step is CPU/RAM-bound (AGENTS.md → container sizing).`;
     case "slow_model_turn":
-      return `The model itself is the slow step: ${p.occurrences} turns across ${p.runIds.length} runs spent ${formatMs(p.durationMs)} thinking between one tool result and the next call. Lower the affected agent's \`effort\` (\`src/agents/registry.ts\`; review runs \`medium\` for this reason), or make each turn do more — prompt for batched gathering (several files / commands per call) so the same work takes fewer, cheaper thinks. The evidence rows show what each slow turn produced: a one-line grep after minutes of thought is the signature of the wrong effort tier.`;
+      return `The model itself is the slow step: ${p.occurrences} turns across ${p.runIds.length} runs spent ${formatDuration(p.durationMs, "report")} thinking between one tool result and the next call. Lower the affected agent's \`effort\` (\`src/agents/registry.ts\`; review runs \`medium\` for this reason), or make each turn do more — prompt for batched gathering (several files / commands per call) so the same work takes fewer, cheaper thinks. The evidence rows show what each slow turn produced: a one-line grep after minutes of thought is the signature of the wrong effort tier.`;
     case "wrap_up":
-      return `Runs keep reaching the wrap-up warning (${p.runIds.length} runs; ${formatMs(p.durationMs)} spent winding down). Either the affected agent's \`maxMinutes\` (\`src/agents/registry.ts\`) is too tight for this shape of work, or the prompt should push batching (fewer, larger tool calls) — the evidence rows say which agent and how close to the deadline each run got.`;
+      return `Runs keep reaching the wrap-up warning (${p.runIds.length} runs; ${formatDuration(p.durationMs, "report")} spent winding down). Either the affected agent's \`maxMinutes\` (\`src/agents/registry.ts\`) is too tight for this shape of work, or the prompt should push batching (fewer, larger tool calls) — the evidence rows say which agent and how close to the deadline each run got.`;
     case "budget_hit":
       return p.signature === "turns"
         ? `Runs exhaust the TURN budget. Raise \`maxTurns\` for the affected agent (\`src/agents/registry.ts\`) or have its prompt batch tool calls (several commands per \`bash\` call) so the same work takes fewer turns.`

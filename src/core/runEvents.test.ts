@@ -9,6 +9,7 @@ import {
   redactSecrets,
   serializedOnce,
   summarizeToolResult,
+  RUN_NOTE_KINDS,
 } from "./runEvents.js";
 
 // Feature: features/run-visibility.md — the run-event stream and its redaction.
@@ -263,5 +264,24 @@ describe("ship_round events", () => {
   it("carries typed index/agent/outcome and serializes like any event", () => {
     const e: RunEvent = { type: "ship_round", index: 2, agent: "review", outcome: "approve", at: 5 };
     expect(JSON.parse(serializedOnce(e))).toEqual(e);
+  });
+});
+
+// Feature: features/tracing.md item 11 — the note-kind list is derived from the union.
+describe("RUN_NOTE_KINDS", () => {
+  it("lists every kind the union names, including spans_dropped, with no duplicates", () => {
+    expect(new Set(RUN_NOTE_KINDS).size).toBe(RUN_NOTE_KINDS.length);
+    for (const kind of [
+      "wrap_up",
+      "time_budget_exhausted",
+      "turn_budget_exhausted",
+      "sandbox_dead",
+      "fleet_busy",
+      "stop_requested",
+      "stopped",
+      "spans_dropped",
+    ]) {
+      expect(RUN_NOTE_KINDS).toContain(kind);
+    }
   });
 });

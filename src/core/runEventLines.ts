@@ -1,17 +1,13 @@
-import type { RunEvent, RunNoteKind } from "./runEvents.js";
+import { RUN_NOTE_KINDS, type RunEvent, type RunNoteKind } from "./runEvents.js";
 
 // Parsing a SAVED run-event stream (Area 7b / #84) — the input of
 // `friction analyze`: one JSON object per line, OR a raw SSE capture of
 // `/runs/:id/events` (`data: {...}` frames). Analysis-only input handling;
 // nothing here touches a run, a sandbox, or GitHub.
 
-const NOTE_KINDS = new Set<RunNoteKind>([
-  "wrap_up",
-  "time_budget_exhausted",
-  "turn_budget_exhausted",
-  "sandbox_dead",
-  "fleet_busy",
-]);
+// Derived from the union, so a new note kind reaches `friction analyze` the day
+// it is added (features/tracing.md).
+const NOTE_KINDS = new Set<RunNoteKind>(RUN_NOTE_KINDS);
 
 /**
  * Parse run events from text: one JSON object per line, OR a raw SSE capture of

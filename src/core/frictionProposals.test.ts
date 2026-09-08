@@ -338,7 +338,7 @@ describe("clusterFriction", () => {
     expect(p.key).toBe("long_run:coding");
     expect(p.runIds).toEqual(["d", "e"]);
     expect(p.durationMs).toBe(85 * minute);
-    expect(p.examples[0].summary).toMatch(/run took 45m 0s/);
+    expect(p.examples[0].summary).toMatch(/run took 45m 00s/);
   });
 
   it("does not flag long runs when every run is long (no outlier) or when only one is", () => {

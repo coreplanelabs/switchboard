@@ -1,4 +1,5 @@
 import type { RunEvent } from "./runEvents.js";
+import { formatDuration } from "./time/formatDuration.js";
 
 // Run-friction analyzer (Area 7b / #84, first piece): a PURE, deterministic
 // function from a run's RunEvent stream to a structured diagnosis of what cost
@@ -185,7 +186,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       findings.push({
         category: "slow_model_turn",
         severity: durationMs >= 2 * slowModelTurnMs ? "high" : "medium",
-        summary: `model turn took ${formatMs(durationMs)} before: ${produced}`,
+        summary: `model turn took ${formatDuration(durationMs, "report")} before: ${produced}`,
         durationMs,
         eventIndex: index,
       });
@@ -322,7 +323,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
           timed({
             category: "slow_tool",
             severity: durationMs >= 2 * slowToolMs ? "high" : "medium",
-            summary: `took ${formatMs(durationMs)}: ${callSummary}`,
+            summary: `took ${formatDuration(durationMs, "report")}: ${callSummary}`,
             tool: ev.tool,
             eventIndex: anchor,
           }),
@@ -436,37 +437,29 @@ function verdictOf(d: FrictionDiagnosis): string {
   if (!d.hasTimings || t.durationMs === 0) return what;
   const [denominator, of] = top === "slow_model_turn" ? [d.runMs, "run time"] : [d.toolTimeMs, "tool time"];
   const share = denominator ? ` (${Math.round((t.durationMs / denominator) * 100)}% of ${of})` : "";
-  return `${what}, ${formatMs(t.durationMs)}${share}`;
-}
-
-/** Compact duration: `850ms`, `45s`, `1m 18s`. */
-export function formatMs(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${what}, ${formatDuration(t.durationMs, "report")}${share}`;
 }
 
 /** Plain-text report for the CLI / terminal. */
 export function formatFrictionReport(d: FrictionDiagnosis): string {
   const lines: string[] = [`verdict: ${d.verdict}`];
   const totals = [`events: ${d.eventCount}`, `tool calls: ${d.toolCalls}`];
-  if (d.runMs !== undefined) totals.push(`run: ${formatMs(d.runMs)}`);
-  if (d.toolTimeMs !== undefined) totals.push(`tool time: ${formatMs(d.toolTimeMs)}`);
-  if (d.modelTimeMs !== undefined) totals.push(`model time: ${formatMs(d.modelTimeMs)}`);
+  if (d.runMs !== undefined) totals.push(`run: ${formatDuration(d.runMs, "report")}`);
+  if (d.toolTimeMs !== undefined) totals.push(`tool time: ${formatDuration(d.toolTimeMs, "report")}`);
+  if (d.modelTimeMs !== undefined) totals.push(`model time: ${formatDuration(d.modelTimeMs, "report")}`);
   if (!d.hasTimings) totals.push("(no timestamps — durations unavailable)");
   if (d.truncatedInput) totals.push("(input truncated — the oldest events were dropped before analysis)");
   lines.push(totals.join(" · "), "", "category         count  time");
   for (const c of FRICTION_CATEGORIES) {
     const t = d.byCategory[c];
     lines.push(
-      `${c.padEnd(16)} ${String(t.count).padStart(5)}  ${t.count && d.hasTimings ? formatMs(t.durationMs) : "-"}`,
+      `${c.padEnd(16)} ${String(t.count).padStart(5)}  ${t.count && d.hasTimings ? formatDuration(t.durationMs, "report") : "-"}`,
     );
   }
   if (d.findings.length > 0) {
     lines.push("", "findings (stream order):");
     for (const f of d.findings) {
-      const dur = f.durationMs !== undefined ? ` (${formatMs(f.durationMs)})` : "";
+      const dur = f.durationMs !== undefined ? ` (${formatDuration(f.durationMs, "report")})` : "";
       lines.push(`  #${f.eventIndex} [${f.category}] ${f.severity}${dur} ${f.summary}`);
     }
   }

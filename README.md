@@ -48,7 +48,7 @@ Runtime overrides persist where `runtimeOverrides.worker` in `config.yaml` says 
 
 ## Architecture
 
-One long-lived Node process, no inbound server. The Slack adapter opens an **outbound websocket** (Socket Mode), so there is no public URL, webhook endpoint, or signature verification to host. State lives in the channel's own thread history, on the **state Worker** (memory, the friction ledger, and the run history — every finished run's record — in Durable Objects, see [features/run-history.md](features/run-history.md)), and on disk. A restart loses nothing durable: conversation context rebuilds from the thread, finished runs stay readable from the run history, and only runs that were in flight at the restart end without a record.
+One long-lived Node process, no inbound server. Every awaited step it takes runs inside a span (`src/core/trace/`), so a run's timeline is a side effect of the code's shape; see [features/tracing.md](features/tracing.md). The Slack adapter opens an **outbound websocket** (Socket Mode), so there is no public URL, webhook endpoint, or signature verification to host. State lives in the channel's own thread history, on the **state Worker** (memory, the friction ledger, and the run history — every finished run's record — in Durable Objects, see [features/run-history.md](features/run-history.md)), and on disk. A restart loses nothing durable: conversation context rebuilds from the thread, finished runs stay readable from the run history, and only runs that were in flight at the restart end without a record.
 
 ```mermaid
 flowchart LR
