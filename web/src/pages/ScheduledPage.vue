@@ -102,6 +102,13 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
                 >
                 <template v-else>run {{ r.last.runId.slice(0, 8) }}</template>
               </template>
+              <template v-if="r.last.traceId">
+                <span class="mx-1.5 text-accented max-sm:mx-0" aria-hidden="true">·</span>
+                <!-- The firing's trace id: what the shim's cron root line and the run's meta share (features/tracing.md item 22). -->
+                <span class="trace font-mono text-dimmed" :title="`trace ${r.last.traceId}`"
+                  >trace {{ r.last.traceId.slice(0, 8) }}</span
+                >
+              </template>
               <template v-if="r.last.detail && firingDetailSummary(r.last.detail)">
                 <span class="mx-1.5 text-accented max-sm:hidden" aria-hidden="true">·</span>
                 <!-- The reply's facts: one ellipsized line on desktop, a clamped block of its own on phones. -->

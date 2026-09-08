@@ -29,6 +29,7 @@ const RUN_ROW: ScheduledRow = {
     runId: "0a1b2c3d4e5f6789",
     runHref: "/runs/0a1b2c3d4e5f6789?t=tok-live",
     detail: "*Friction proposals* — 2 filed  1. `long_run` …",
+    traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
   },
 };
 
@@ -79,16 +80,20 @@ describe("ScheduledPage", () => {
     const run = w.findAll("a").find((a) => a.text().startsWith("run "));
     expect(run?.attributes("href")).toBe("/runs/0a1b2c3d4e5f6789?t=tok-live");
     expect(run?.text()).toBe("run 0a1b2c3d");
+    // the firing's trace id, shortened, the full id on hover (features/tracing.md item 22)
+    expect(w.find(".trace").text()).toBe("trace 4bf92f35");
+    expect(w.find(".trace").attributes("title")).toBe("trace 4bf92f3577b34da6a3ce929d0e0e4736");
     // the detail drops the reply's own title and keeps the facts, full text on hover
     expect(w.find(".detail").text()).toContain("2 filed");
     expect(w.find(".detail").text()).not.toContain("*Friction proposals*");
     expect(w.find(".detail").attributes("title")).toContain("*Friction proposals*");
   });
 
-  it("shows a bare run id (no link) when the firing's run is not live", () => {
-    const row: ScheduledRow = { ...RUN_ROW, last: { ...RUN_ROW.last!, runHref: undefined } };
+  it("shows a bare run id (no link) when the firing's run is not live, and no trace cell for a firing recorded without one", () => {
+    const row: ScheduledRow = { ...RUN_ROW, last: { ...RUN_ROW.last!, runHref: undefined, traceId: undefined } };
     const w = mountApp(ScheduledPage, { seed: seed([row]) });
     expect(w.text()).toContain("run 0a1b2c3d");
+    expect(w.find(".trace").exists()).toBe(false);
     expect(w.findAll("a").some((a) => a.text().startsWith("run "))).toBe(false);
   });
 

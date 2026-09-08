@@ -38,6 +38,9 @@ export interface ScheduledRow {
      *  otherwise (resolves once run history lands, #157). */
     runHref?: string;
     detail?: string;
+    /** The trace the firing's root started (features/tracing.md item 22): the id
+     *  the shim's `cron.<schedule>` line and the run's `run_meta` share. */
+    traceId?: string;
   };
 }
 
@@ -79,6 +82,7 @@ export function buildScheduledRows(
               }
             : {}),
           ...(f.detail !== undefined ? { detail: f.detail } : {}),
+          ...(f.traceId !== undefined ? { traceId: f.traceId } : {}),
         };
       }
       return row;
