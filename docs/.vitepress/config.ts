@@ -8,10 +8,17 @@
 //
 // Build: `npm run build` in docs/ → docs/.vitepress/dist, deployed by CI from
 // deploy/cloudflare-docs/ (an assets-only Worker). Dead links FAIL the build.
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vitepress";
 import { withMermaid } from "vitepress-plugin-mermaid";
 
-const GITHUB_REPO = "https://github.com/coreplanelabs/switchboard";
+// The project's identity — its repository and steward — is stated once in
+// project.json (npm run check:project-facts); the site reads it, never copies it.
+const project = JSON.parse(readFileSync(new URL("../../project.json", import.meta.url), "utf8")) as {
+  repository: string;
+  steward: { name: string };
+};
+const GITHUB_REPO = project.repository;
 
 export default withMermaid(
   defineConfig({
@@ -117,7 +124,7 @@ export default withMermaid(
       outline: { level: [2, 3] },
       footer: {
         message: `Built from <a href="${GITHUB_REPO}/tree/main/docs">docs/</a> on every push to main. The behavioral contract is <a href="${GITHUB_REPO}/tree/main/features">features/</a>.`,
-        copyright: "Coreplane Labs",
+        copyright: project.steward.name,
       },
     },
   }),

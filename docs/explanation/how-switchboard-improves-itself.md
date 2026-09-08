@@ -6,7 +6,7 @@ A human-first tour of the self-improvement loop: what it watches, what it rememb
 
 ## "Proposals" is the accurate word
 
-The system is shipped and live, and it is a *proposal* system on purpose. The original brief ([Area 7b, #84](https://github.com/coreplanelabs/switchboard/issues/84), requirement R19 in the golden product plan) said "proposes fixes as PRs". What shipped narrows that: the only side effect is **opening a labeled issue**. It never opens a PR, never merges, never edits config. The fix itself is a separate, human-initiated step, typically pointing `agent:coding` or `agent:ship` at the filed issue.
+The system is shipped and live, and it is a *proposal* system on purpose. The brief it grew from said "proposes fixes as PRs". What shipped narrows that: the only side effect is **opening a labeled issue**. It never opens a PR, never merges, never edits config. The fix itself is a separate, human-initiated step, typically pointing `agent:coding` or `agent:ship` at the filed issue.
 
 That narrowing is a deliberate safety boundary, not an unfinished feature. A self-modifying system with an automatic PR arm would need its own review, budget, and rollback story. Today the human is the gate between "we noticed this keeps happening" and "we changed something". So: *observe → diagnose → propose*, with the arrow into *fix* held by a person.
 
@@ -158,4 +158,4 @@ All of these are the same registered command with the same JSON output and the s
 - [`features/run-friction.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/run-friction.md): the per-run diagnosis, its categories, thresholds, and the `friction analyze` CLI for one saved stream.
 - [`features/run-history.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/run-history.md): where the diagnoses persist and for how long.
 - [`features/command-registry.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/command-registry.md): why one command definition serves Slack, HTTP, MCP, and the CLI.
-- Filed proposals: [issues labeled `self-improvement`](https://github.com/coreplanelabs/switchboard/issues?q=label%3Aself-improvement).
+- Filed proposals carry the `self-improvement` label in the repository the proposer targets.
