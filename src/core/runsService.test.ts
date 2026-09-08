@@ -735,7 +735,13 @@ describe("RunsService.getRunFriction", () => {
     reg.publish(id, call("$ ls"));
     reg.finish(id);
     await svc.getRunFriction(id);
-    expect(analyze).toHaveBeenCalledWith([expect.objectContaining({ seq: 1 })], { finished: true, truncated: false });
+    // The live stream is schema 2 and a finished run's window is its own stamps (features/tracing.md).
+    expect(analyze).toHaveBeenCalledWith([expect.objectContaining({ seq: 1 })], {
+      finished: true,
+      truncated: false,
+      schema: 2,
+      window: { start: expect.any(Number), end: expect.any(Number) },
+    });
   });
 });
 

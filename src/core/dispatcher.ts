@@ -13,7 +13,7 @@ import { systemClock } from "./trace/index.js";
 import type { Clock, Span, SpanSink, Tracer } from "./trace/types.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
-import { cardShapeLine, queuedCaption } from "./runShape.js";
+import { cardShapeLine, cardShapeLineOf, queuedCaption } from "./runShape.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { makeWebCapability } from "../tools/web.js";
 import { residentOnboardedProbe, residentSlugsLister } from "../execution/factory.js";
@@ -459,6 +459,12 @@ export async function dispatch(
   // done close the whole window to the finish.
   const closeLines = (end: number, finished: boolean, owner: RunOwner = "agent") =>
     cardLines(trace, { end, finished, owner, queued });
+  // A done close reads the finish-site diagnosis (features/tracing.md item 5):
+  // the same shape the record carries and the friction report prints.
+  const doneLines = (diagnosis: FrictionDiagnosis | undefined) => {
+    const shape = diagnosis?.shape ? cardShapeLineOf(diagnosis.shape) : undefined;
+    return { ...(shape ? { shape } : {}), ...(queued ? { queued } : {}) };
+  };
   let caught = false;
   // Counted in flight from the first line — before history, repo resolution,
   // the setup card and the executor attach — until the post-run steps (reply,
@@ -894,6 +900,7 @@ export async function dispatch(
         trace,
         closeLines,
         refuse,
+        doneLines,
       });
       return;
     }
@@ -1286,7 +1293,11 @@ export async function dispatch(
             repo: repoCtx.repo,
             finishedAt: startSnap.startedAt,
             status: "interrupted",
-            diagnosis: analyzeRunFriction(startSnap.events, { finished: false, truncated: startSnap.truncated }),
+            diagnosis: analyzeRunFriction(startSnap.events, {
+              finished: false,
+              truncated: startSnap.truncated,
+              schema: SPAN_SCHEMA,
+            }),
           }),
           { provisional: true },
         );
@@ -1550,7 +1561,7 @@ export async function dispatch(
     // is told the review was carried forward.
     let carried: { reviewed: string; current: string; commits: number } | undefined;
     let runFailed = false; // the runner threw → terminal status `failed`
-    let runFinishedAt: number | undefined; // the registry's finish stamp, for the done card's window
+    let runDiagnosis: FrictionDiagnosis | undefined; // the finish-site diagnosis: the done card's shape line
     // Give the workspace back now rather than at the inactivity sweep: a
     // resident's pool user is a scarce slot (features/resident-repos.md item
     // 16a). The release mode is paired to the round's agent by the attach
@@ -1782,12 +1793,20 @@ export async function dispatch(
       // must not depend on winning that race. Skipped entirely when neither
       // consumer is wired (nothing to diagnose for, nothing to persist). The
       // backlog is byte-bounded (oldest evicted), so the diagnosis is told when
-      // it is looking at a head-truncated stream.
-      const snap = deps.runHistoryWriter ? registry.snapshot(run.id, run.token) : null;
+      // it is looking at a head-truncated stream. Read with or without a
+      // writer: the closed card's shape line comes from this diagnosis too.
+      const snap = registry.snapshot(run.id, run.token);
       const events = snap?.events ?? [];
-      const diagnosis = analyzeRunFriction(events, { finished: true, truncated: snap?.truncated ?? false });
       const finishedAt = snap?.finishedAt ?? Date.now(); // the registry's finish clock: row and record agree
-      runFinishedAt = finishedAt;
+      // The diagnosis over the run's window (features/tracing.md): its shape is
+      // what the closed card and the record carry.
+      const diagnosis = analyzeRunFriction(events, {
+        finished: true,
+        truncated: snap?.truncated ?? false,
+        schema: SPAN_SCHEMA,
+        window: { start: snap?.receivedAt ?? startedAt, end: finishedAt },
+      });
+      runDiagnosis = diagnosis;
       // The channel's receipt (id + terminal status, never the token): a
       // single-shot channel hands it to its caller — the Worker shim records a
       // scheduled firing's run from it (#244).
@@ -1830,9 +1849,7 @@ export async function dispatch(
       if (runFailed)
         await root
           .span("post.card_close", () =>
-            card.done(
-              shell.close({ kind: "done", icon: "❌", detail: finalDetail(), ...closeLines(finishedAt, true) }),
-            ),
+            card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail(), ...doneLines(diagnosis) })),
           )
           .catch(() => {});
     }
@@ -1894,7 +1911,7 @@ export async function dispatch(
                 kind: "done",
                 icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
                 detail: stopped ? finalDetail() : checkedOffDetail(),
-                ...closeLines(runFinishedAt ?? clock(), true),
+                ...doneLines(runDiagnosis),
               }),
             ),
           ),
@@ -2106,6 +2123,8 @@ interface ShipBranchContext {
   closeLines: (end: number, finished: boolean, owner?: RunOwner) => { shape?: string; queued?: string };
   /** A refusal as one `dispatch.refuse` span. */
   refuse: <T>(outcome: string, fn: () => Promise<T>) => Promise<T>;
+  /** The done card's shape and queued lines, from the finish-site diagnosis. */
+  doneLines: (diagnosis: FrictionDiagnosis | undefined) => { shape?: string; queued?: string };
 }
 
 /**
@@ -2126,7 +2145,7 @@ async function runShipBranch(
   // `closeLines` keeps its default owner (`agent`): a ship run's children are
   // agent runs, so its `run.command` grafts — none today — would count as
   // getting ready, never as a command's own tools.
-  const { agent, card, directives, history, repoCtx, label, ending, trace, closeLines, refuse } = ctx;
+  const { agent, card, directives, history, repoCtx, label, ending, trace, closeLines, refuse, doneLines } = ctx;
   const root = trace.root;
   const clock = deps.clock ?? systemClock;
   // The same one-builder card shell as the main path, on the same label and clock.
@@ -2234,7 +2253,11 @@ async function runShipBranch(
           repo: repoCtx.repo,
           finishedAt: startSnap.startedAt,
           status: "interrupted",
-          diagnosis: analyzeRunFriction(startSnap.events, { finished: false, truncated: startSnap.truncated }),
+          diagnosis: analyzeRunFriction(startSnap.events, {
+            finished: false,
+            truncated: startSnap.truncated,
+            schema: SPAN_SCHEMA,
+          }),
         }),
         { provisional: true },
       );
@@ -2369,7 +2392,7 @@ async function runShipBranch(
   shell.setLink(liveLink);
   const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
   let outcome: ShipOutcome | undefined;
-  let shipFinishedAt: number | undefined;
+  let shipDiagnosis: FrictionDiagnosis | undefined;
   try {
     outcome = await runShipPipeline({
       span: root,
@@ -2437,9 +2460,15 @@ async function runShipBranch(
     // With a writer the finish write (below, through the ledger sink) closes
     // the ledger row; without one the heartbeat must stop here.
     if (!deps.runHistoryWriter) void ledgerRun?.close();
-    const snap = deps.runHistoryWriter ? registry.snapshot(run.id, run.token) : null;
-    const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
+    const snap = registry.snapshot(run.id, run.token); // the card's shape needs it, writer or not
     const finishedAt = snap?.finishedAt ?? Date.now();
+    const diagnosis = analyzeRunFriction(snap?.events ?? [], {
+      finished: true,
+      truncated: snap?.truncated ?? false,
+      schema: SPAN_SCHEMA,
+      window: { start: trace.receivedAt, end: finishedAt },
+    });
+    shipDiagnosis = diagnosis;
     io.runFinished?.({ id: run.id, status });
     ending.finished(run.id);
     shell.freeze(finishedAt);
@@ -2476,10 +2505,9 @@ async function runShipBranch(
     if (outcome === undefined)
       await root
         .span("post.card_close", () =>
-          card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail(), ...closeLines(finishedAt, true) })),
+          card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail(), ...doneLines(diagnosis) })),
         )
         .catch(() => {});
-    shipFinishedAt = finishedAt;
   }
   if (!outcome) return; // unreachable: the catch above rethrew
   console.log(`[done] ${msg.threadKey} ship ${outcome.reply.length} chars (${outcome.status})`);
@@ -2517,7 +2545,7 @@ async function runShipBranch(
             kind: "done",
             icon,
             detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(),
-            ...closeLines(shipFinishedAt ?? clock(), true),
+            ...doneLines(shipDiagnosis),
           }),
         ),
       ),
@@ -2689,7 +2717,14 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean }>(
       const writer = deps.runHistoryWriter;
       const snap = registry.snapshot(run.id, run.token);
       const finishedAt = snap?.finishedAt ?? Date.now();
-      const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
+      // A command run owns its window's tools: `run.command` is the work.
+      const diagnosis = analyzeRunFriction(snap?.events ?? [], {
+        finished: true,
+        truncated: snap?.truncated ?? false,
+        schema: SPAN_SCHEMA,
+        owner: "command",
+        window: { start: trace.receivedAt, end: finishedAt },
+      });
       ending.register({
         runId: run.id,
         flipOnPostFinishFailure: false,
@@ -2792,7 +2827,7 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
     repo: summary.repo,
     finishedAt,
     status: "interrupted",
-    diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated }),
+    diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated, schema: SPAN_SCHEMA }),
   });
 }
 
@@ -2837,7 +2872,14 @@ export function reclaimedRunRecord(input: {
     repo: row.meta.repo,
     finishedAt,
     status,
-    diagnosis: analyzeRunFriction(events, { finished: status !== "interrupted", truncated: false }),
+    diagnosis: analyzeRunFriction(events, {
+      finished: status !== "interrupted",
+      truncated: false,
+      schema: SPAN_SCHEMA,
+      // A reclaimed run that did finish has its window: the row's start to the
+      // finish the closing generation stamped.
+      ...(status !== "interrupted" ? { window: { start: row.startedAt, end: finishedAt } } : {}),
+    }),
   });
 }
 
@@ -2915,6 +2957,9 @@ function assembleRunRecord(input: {
     threadKey: msg.threadKey,
     channelVisibility: input.channelVisibility,
     ...(input.repo !== undefined ? { repo: input.repo } : {}),
+    // The window's opening rides the record (features/tracing.md): every
+    // duration surface and the diagnosis's window start here, not at create.
+    ...(snap?.receivedAt !== undefined ? { receivedAt: snap.receivedAt } : {}),
     startedAt: snap?.startedAt ?? input.finishedAt,
     finishedAt: input.finishedAt,
     ...(seal?.sealedAt !== undefined ? { sealedAt: seal.sealedAt } : {}),

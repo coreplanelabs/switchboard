@@ -307,7 +307,7 @@ describe("friction.propose", () => {
       chat("slack:UDEV", { repoManager: true }),
     );
     expect(text(commands, "friction.propose", filed)).toBe(
-      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 filed\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Filed:*\n• https://github.com/coreplanelabs/switchboard/issues/1 — [friction] setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
+      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 filed\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Filed:*\n• https://github.com/coreplanelabs/switchboard/issues/1 — [friction] the repo's setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
     );
     expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
 
@@ -330,7 +330,7 @@ describe("friction.propose", () => {
       mcp("friction:write"),
     );
     expect(text(commands, "friction.propose", dry)).toBe(
-      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · dry run (nothing filed)\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Would file (dry run):*\n• [friction] setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
+      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · dry run (nothing filed)\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Would file (dry run):*\n• [friction] the repo's setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
     );
     expect(tracker.issues("coreplanelabs/switchboard")).toEqual([]);
     const wet = await commands.invoke("friction.propose", { options: { dryRun: "false" } }, mcp("friction:write"));

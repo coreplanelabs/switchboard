@@ -3279,6 +3279,7 @@ describe("live run-view wiring (Area 2)", () => {
         log.push("finish");
       },
       has: () => true,
+      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -3369,6 +3370,7 @@ describe("live run-view wiring (Area 2)", () => {
         order.push("finish");
       },
       has: () => true,
+      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -3410,6 +3412,7 @@ describe("live run-view wiring (Area 2)", () => {
       },
       finish() {},
       has: () => true,
+      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -3507,6 +3510,7 @@ describe("live run-view wiring (Area 2)", () => {
       },
       finish() {},
       has: () => true,
+      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -3696,6 +3700,7 @@ describe("closed-card checklist and review verdict run link", () => {
       publish: (_id: string, e: RunEvent) => void events.push(e),
       finish: () => {},
       has: () => true,
+      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -3746,6 +3751,7 @@ describe("typed answer output (features/llm-output.md)", () => {
       publish: (_id: string, e: RunEvent) => void events.push(e),
       finish: () => {},
       has: () => true,
+      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -5545,7 +5551,17 @@ describe("friction diagnosis reads the registry backlog (#157 U11)", () => {
     const [rec] = await new RunStoreFrictionLedger(store).recent();
     const snap = registry.snapshot("run-f", "tok");
     expect(snap).not.toBeNull();
-    expect(rec.diagnosis).toEqual(analyzeRunFriction(snap!.events, { finished: true }));
+    // The record's diagnosis is the finish-site one: over the run's window
+    // (the registry row's stamps), so it carries the shape (features/tracing.md).
+    const row = registry.getById("run-f")!;
+    expect(rec.diagnosis).toEqual(
+      analyzeRunFriction(snap!.events, {
+        finished: true,
+        schema: 2,
+        window: { start: row.receivedAt ?? row.startedAt, end: row.finishedAt! },
+      }),
+    );
+    expect(rec.diagnosis.shape).toBeDefined();
     expect(rec.diagnosis.eventCount).toBe(2); // the narrative events (input/answer/turn) do not count
   });
 });
@@ -5789,6 +5805,10 @@ describe("run history write path (#157 U4)", () => {
     const rec = await store.get("run-h");
     expect(rec).not.toBeNull();
     expect(rec!.status).toBe("completed");
+    // The record carries the window's opening (features/tracing.md): the same
+    // `receivedAt` the registry row has, so every reader's window starts there.
+    expect(rec!.receivedAt).toBeDefined();
+    expect(rec!.receivedAt).toBe(registry.getById("run-h")!.receivedAt);
     expect(rec!.eventCount).toBe(registry.snapshot("run-h", "tok")!.eventCount);
     expect(rec!.storedEventCount).toBe(rec!.events.length);
     expect(rec!.eventCount).toBe(rec!.events.length);
@@ -5803,7 +5823,13 @@ describe("run history write path (#157 U4)", () => {
     expect(rec!.model).toBe("anthropic/general-model");
     expect(rec!.label).toContain("general");
     expect(rec!.finishedAt).toBeGreaterThanOrEqual(rec!.startedAt);
-    expect(rec!.diagnosis).toEqual(analyzeRunFriction(rec!.events, { finished: true }));
+    expect(rec!.diagnosis).toEqual(
+      analyzeRunFriction(rec!.events, {
+        finished: true,
+        schema: 2,
+        window: { start: rec!.receivedAt ?? rec!.startedAt, end: rec!.finishedAt },
+      }),
+    );
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
     expect(registry.listActive()[0].persisted).toBe(true);
     expect(writer.pending()).toBe(0);

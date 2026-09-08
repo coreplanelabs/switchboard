@@ -1,6 +1,6 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { runDurationMs } from "../core/runDuration.js";
-import { normalizeSpans } from "../core/normalizeSpans.js";
+import { normalizeSpans, SPAN_SCHEMA } from "../core/normalizeSpans.js";
 import {
   authorize,
   matchesPredicate,
@@ -486,7 +486,13 @@ export function createLiveViewHandler(
           text(res, 404, NOT_FOUND);
           return true;
         }
-        const diagnosis = analyzeRunFriction(snap.events, { finished: snap.finished });
+        // The window is the run's own stamps, to now while live (features/tracing.md):
+        // a finished run's diagnosis here equals its record's shape.
+        const diagnosis = analyzeRunFriction(snap.events, {
+          finished: snap.finished,
+          schema: SPAN_SCHEMA,
+          window: { start: snap.receivedAt ?? snap.startedAt, end: snap.finishedAt ?? now() },
+        });
         res.writeHead(200, JSON_NO_STORE);
         res.end(JSON.stringify({ id: route.id, finished: snap.finished, diagnosis }));
         return true;
