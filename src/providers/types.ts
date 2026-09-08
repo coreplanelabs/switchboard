@@ -105,6 +105,11 @@ export interface CompletionRequest {
 
 export interface CompletionObserver {
   onFirstToken?(): void;
+  /** A content block began / ended, by kind (`text`, `thinking`, `redacted_thinking`,
+   *  `tool_use`, …) and stream index: the span layer sums a turn's thinking and
+   *  writing time from these (features/tracing.md; live-view item 15). */
+  onBlockStart?(kind: string, index: number): void;
+  onBlockEnd?(kind: string, index: number): void;
 }
 
 /** Token accounting for ONE model call, normalized across providers. Cache

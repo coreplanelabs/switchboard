@@ -379,6 +379,13 @@ export function createRunTimeline(): RunTimeline {
           if (inTok !== undefined) facts.push(fmtTokens(inTok) + " in");
           if (outTok !== undefined) facts.push(fmtTokens(outTok) + " out");
           if (cached !== undefined) facts.push(fmtTokens(cached) + " cached");
+          // The turn's own timing, when the provider streamed it (live-view item 15).
+          const ttft = num(attrs.ttftMs);
+          if (ttft !== undefined) facts.push("first token " + formatDuration(ttft, "precise"));
+          const thinking = num(attrs.thinkingMs);
+          if (thinking !== undefined) facts.push("thinking " + formatDuration(thinking, "precise"));
+          const writing = num(attrs.textMs);
+          if (writing !== undefined) facts.push("writing " + formatDuration(writing, "precise"));
           const model = str(attrs.model);
           return [
             {

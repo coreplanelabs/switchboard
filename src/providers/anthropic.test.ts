@@ -227,6 +227,57 @@ function fakeClient(msg: Record<string, unknown>, captured: Captured[]) {
     },
   } as unknown as ConstructorParameters<typeof AnthropicProvider>[2];
 }
+// Feature: features/live-view.md item 15 — the stream's block boundaries reach the
+// observer by kind and index; the first text or block is the first token, once.
+describe("stream timing hooks", () => {
+  it("content_block_start/stop reach onBlockStart/onBlockEnd with the block's kind and index; onFirstToken fires once at the first text or block; a double without `on` still completes", async () => {
+    const listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+    const fire = (event: string, ...args: unknown[]) => (listeners.get(event) ?? []).forEach((cb) => cb(...args));
+    const client = {
+      messages: {
+        stream: () => ({
+          on: (event: string, cb: (...args: unknown[]) => void) => {
+            listeners.set(event, [...(listeners.get(event) ?? []), cb]);
+          },
+          finalMessage: async () => {
+            fire("streamEvent", { type: "message_start" });
+            fire("streamEvent", { type: "content_block_start", index: 0, content_block: { type: "thinking" } });
+            fire("text", "");
+            fire("streamEvent", { type: "content_block_stop", index: 0 });
+            fire("streamEvent", { type: "content_block_start", index: 1, content_block: { type: "text" } });
+            fire("text", "hi");
+            fire("contentBlock", { type: "text", text: "hi" });
+            fire("streamEvent", { type: "content_block_stop", index: 1 });
+            fire("streamEvent", { type: "content_block_stop", index: 9 }); // a stop for a start we never saw
+            return TEXT_MSG;
+          },
+        }),
+      },
+    } as unknown as ConstructorParameters<typeof AnthropicProvider>[2];
+    const seen: string[] = [];
+    const p = new AnthropicProvider("a", { type: "anthropic" }, client);
+    await p.complete(
+      ttlReq({
+        observer: {
+          onFirstToken: () => void seen.push("first"),
+          onBlockStart: (kind, index) => void seen.push(`start ${kind}#${index}`),
+          onBlockEnd: (kind, index) => void seen.push(`end ${kind}#${index}`),
+        },
+      }),
+    );
+    expect(seen).toEqual(["start thinking#0", "first", "end thinking#0", "start text#1", "end text#1", "end other#9"]);
+    // no hooks asked for: nothing is subscribed
+    listeners.clear();
+    await p.complete(ttlReq({}));
+    expect([...listeners.keys()]).toEqual([]);
+    // a client double without `on` completes as before
+    const bare = new AnthropicProvider("a", { type: "anthropic" }, fakeClient(TEXT_MSG, []));
+    await expect(bare.complete(ttlReq({ observer: { onBlockStart: () => {} } }))).resolves.toMatchObject({
+      stopReason: "end_turn",
+    });
+  });
+});
+
 const TEXT_MSG = {
   content: [{ type: "text", text: "hi" }],
   stop_reason: "end_turn",
