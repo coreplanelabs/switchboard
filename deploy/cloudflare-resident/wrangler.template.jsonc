@@ -39,39 +39,44 @@
       // match the @cloudflare/sandbox version in package.json EXACTLY (no
       // 'latest' tag exists) — bump both together.
       "image": "./Dockerfile",
-      // Custom 1 vCPU / 8 GiB / 16 GB. This ONE type is every resident's
-      // container (one DO per repo, one container class), so it is sized for
-      // the largest onboarded repo — and the disk is the binding constraint,
-      // not memory: Cloudflare caps disk at 2 GB per GiB of memory, so 16 GB
-      // of disk requires 8 GiB. The sizing is arithmetic over measured parts,
-      // checked by instanceSizing.test.ts against this file: the resident of
-      // a large monorepo filled the previous 8 GB in 45 min (provision, one
-      // thread attached 42 min later, ENOSPC 6 min after that). Measured
-      // inside the resident (docs/reference/specs/resident-repos.md item 55): image
-      // 552 MB + mirror 380 + warm checkout 2772 (history 380, tree 94, pnpm
-      // node_modules 2298) + the reserve the attach admission holds back
-      // (snapshot staging + a 1 GiB floor, 2965) = 6669 MB base; a hardlinked
-      // thread tree 555 MB; a thread whose lockfile differs 2853 MB; 16 000 MB
-      // mounts as 15 449 MB usable → 10 hardlinked + 1 installing trees (or
-      // 5 + 2) fit; the pool's 16 + 2 fits neither this nor the 20 GB ceiling,
-      // so the disk is a BUDGET (residentDiskBudget.ts): the next tree past it
-      // is refused `disk-pressure` and runs cold, never ENOSPC. The pnpm store
-      // holds no second copy of the deps (measured). 8 GB was the platform
-      // default, never a budget; the 12 GiB / 20 GB step (+$26/mo/resident)
-      // buys 16 + 1 or 12 + 2 — take it when `disk-pressure` shows on the dash.
+      // Custom 4 vCPU / 12 GiB / 20 GB — the platform's custom-type ceiling
+      // (the same shape as standard-4, kept in object form so the sizing test
+      // can read it). This ONE type is every resident's container (one DO per
+      // repo, one container class), so it is sized for the largest onboarded
+      // repo and for 16 threads sharing it. The CPU is the decision now: with
+      // one vCPU every thread's test run and the refresh cycle's own install
+      // shared a single core (the fifty-concurrent-runs plan, D6). Memory
+      // follows the CPU (Cloudflare requires >=3 GiB per vCPU → 12 GiB), and
+      // the disk follows the memory (<=2 GB per GiB → 20 GB). The disk
+      // arithmetic is over measured parts, checked by instanceSizing.test.ts
+      // against this file: the resident of a large monorepo filled the
+      // original 8 GB in 45 min (provision, one thread attached 42 min later,
+      // ENOSPC 6 min after that). Measured inside the resident
+      // (docs/reference/specs/resident-repos.md item 55): image 552 MB + mirror 380
+      // + warm checkout 2772 (history 380, tree 94, pnpm node_modules 2298) +
+      // the reserve the attach admission holds back (snapshot staging + a
+      // 1 GiB floor, 2965) = 6669 MB base; a hardlinked thread tree 555 MB; a
+      // thread whose lockfile differs 2853 MB; 20 000 MB mounts as ~18 858 MB
+      // usable → 16 hardlinked + 1 installing trees (or 12 + 2) fit; the
+      // pool's 16 + 2 does not fit even this ceiling, so the disk stays a
+      // BUDGET (residentDiskBudget.ts): the next tree past it is refused
+      // `disk-pressure` and runs cold, never ENOSPC. The pnpm store holds no
+      // second copy of the deps (measured).
       //
       // Cost: vCPU bills on ACTIVE use only; memory and disk bill on the
       // provisioned size while awake, and a resident is effectively always-on
-      // (10-min refresh alarm < 20m sleepAfter) — memory-only ~$52/mo at
-      // 8 GiB vs ~$26/mo at 4 GiB, per resident. History: standard-1 (½ vCPU /
-      // 4 GiB / 8 GB) → doubled CPU (a resident pinned at 100% of ½ vCPU,
-      // memory fine) → doubled memory for the disk it unlocks. That
-      // monorepo's console build asks for a 16 GB node heap, so if
-      // `build` ever becomes a real command this is still not the ceiling.
-      // Custom-type constraints: whole vCPUs 1-4, >=3 GiB per vCPU, <=2 GB
-      // disk per GiB. (The thread-sandbox Worker is standard-3 — it lives only
-      // for one run.)
-      "instance_type": { "vcpu": 1, "memory_mib": 8192, "disk_mb": 16000 },
+      // (10-min refresh alarm < 20m sleepAfter) — about $83/mo provisioned per
+      // resident (memory ~$79 + disk ~$4) vs ~$55 at 8 GiB / 16 GB, plus vCPU
+      // when the cores are busy (up to ~$210/mo with all four pinned, which
+      // under load they are meant to be). History: standard-1 (½ vCPU / 4 GiB
+      // / 8 GB) → 1 vCPU (a resident pinned at 100% of ½ vCPU, memory fine) →
+      // 8 GiB for the 16 GB of disk it unlocks → 4 vCPU / 12 GiB / 20 GB for
+      // 16 concurrent seats. That monorepo's console build asks for a 16 GB
+      // node heap, so if `build` ever becomes a real command this is still
+      // not the ceiling. Custom-type constraints: whole vCPUs 1-4, >=3 GiB per
+      // vCPU, <=2 GB disk per GiB, at most 12 GiB / 20 GB. (The thread-sandbox
+      // Worker is standard-3 — it lives only for one run.)
+      "instance_type": { "vcpu": 4, "memory_mib": 12288, "disk_mb": 20000 },
       // Platform ceiling only. The enforced cap is RESIDENT_CAP (6) in
       // worker.ts — deliberately below this so an onboard is always refused
       // atomically by the registry, never by a platform scheduling failure.
