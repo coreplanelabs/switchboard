@@ -58,6 +58,7 @@ const residentAdmin: ResidentAdminClient = {
 };
 
 const CONFIG_YAML = `
+organization: acme
 providers:
   anthropic:
     type: anthropic

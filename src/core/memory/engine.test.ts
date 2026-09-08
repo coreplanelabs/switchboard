@@ -7,11 +7,11 @@ import type { MemoryCandidate, MemoryRecord } from "./types.js";
 // store tests prove each backend applies the plan; these prove the plan.
 
 const NOW = 1_700_000_000_000;
-const SCOPE = "org:coreplanelabs";
+const SCOPE = "org:acme";
 
 function rec(over: Partial<MemoryRecord> = {}): MemoryRecord {
   return {
-    id: "mem:org:coreplanelabs:0",
+    id: "mem:org:acme:0",
     scopeKey: SCOPE,
     kind: "fact",
     text: "the deploy command is npm run deploy",
@@ -125,7 +125,7 @@ describe("planEviction (#253)", () => {
   const NOW = 1_700_000_000_000;
   const mk = (id: string, createdAt: number, lastUsedAt?: number): MemoryRecord => ({
     id,
-    scopeKey: "org:coreplanelabs",
+    scopeKey: "org:acme",
     kind: "fact",
     text: id,
     keywords: [id],

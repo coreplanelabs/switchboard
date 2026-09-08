@@ -32,7 +32,8 @@ import type { RunEvent } from "./runEvents.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
 import { runAgent } from "../runner.js";
-import { SHIP_PR_AUTHOR, shipBranchName, shipTaskText } from "./shipPipeline.js";
+import { shipBranchName, shipTaskText } from "./shipPipeline.js";
+import type { GithubIdentity } from "../execution/githubApp.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
 import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
 import { matchesPredicate, NO_GRANTS, predicateFor, type Actor, type ChannelDirectory } from "./authz/index.js";
@@ -123,6 +124,7 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
 }
 
 const YAML_FIXTURE = `
+organization: acme
 providers:
   anthropic:
     type: anthropic
@@ -708,6 +710,7 @@ describe("executor provisioning by agent resources", () => {
 // sees a NAMED refusal, never a silent per-thread fallback) and the KTD10
 // fallback note surfacing on the status card.
 const REPO_PERMS_YAML = `
+organization: acme
 providers:
   anthropic:
     type: anthropic
@@ -3664,8 +3667,8 @@ memory:
 
 function memRecord(over: Partial<MemoryRecord> = {}): MemoryRecord {
   return {
-    id: "mem:org:coreplanelabs:0",
-    scopeKey: "org:coreplanelabs",
+    id: "mem:org:acme:0",
+    scopeKey: "org:acme",
     kind: "fact",
     text: "the deploy command is npm run deploy",
     keywords: ["deploy", "command", "npm"],
@@ -3718,7 +3721,7 @@ describe("cross-session memory (Area 7c, #85)", () => {
     // The block names every scope read: the org, then the requesting user's.
     expect(
       sys!.startsWith(
-        "Background memory for org:coreplanelabs + channel:slack:CX + user:slack:UX (may be outdated — verify before acting):",
+        "Background memory for org:acme + channel:slack:CX + user:slack:UX (may be outdated — verify before acting):",
       ),
     ).toBe(true);
     expect(sys).toContain("the deploy command is npm run deploy");
@@ -3939,7 +3942,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     const { io, replies } = fakeIO(history);
     await dispatch(deps, msg("how do we deploy?"), io);
     await drainReflections();
-    const written = await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy command", limit: 10 });
+    const written = await store.retrieve({ scopeKey: "org:acme", query: "deploy command", limit: 10 });
     return { requests, order, replies, written, store };
   }
 
@@ -3968,7 +3971,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     await dispatch(deps, msg("agent:review how do we deploy?"), fakeIO(longHistory).io);
     await drainReflections();
     expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(0);
-    expect(await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy command", limit: 10 })).toEqual([]);
+    expect(await store.retrieve({ scopeKey: "org:acme", query: "deploy command", limit: 10 })).toEqual([]);
   });
 
   it("a `coding` run that used tools still reflects (#292)", async () => {
@@ -4024,7 +4027,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     await drainReflections();
     expect(replies.some((r) => r.includes("aborted"))).toBe(true);
     expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(0);
-    expect(await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy command", limit: 10 })).toEqual([]);
+    expect(await store.retrieve({ scopeKey: "org:acme", query: "deploy command", limit: 10 })).toEqual([]);
   });
 
   // Feature: features/memory.md (#107 PR B) — user-scoped memory end to end:
@@ -4060,22 +4063,20 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     expect(
       (await store.retrieve({ scopeKey: "user:slack:U1", query: "preview link deploy", limit: 10 })).map((r) => r.text),
     ).toEqual(["this user wants a preview link before every deploy"]);
-    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.text)).toEqual([
-      "the deploy command is npm run deploy",
-    ]);
+    expect((await store.list("org:acme", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
     expect(await store.retrieve({ scopeKey: "user:slack:U2", query: "preview link deploy", limit: 10 })).toEqual([]);
 
     requests.length = 0;
     await dispatch(deps, msg("deploy preview link?", "slack:U1"), fakeIO().io);
     const u1System = requests[0].system!;
-    expect(u1System).toContain("Background memory for org:coreplanelabs + channel:slack:CX + user:slack:U1");
+    expect(u1System).toContain("Background memory for org:acme + channel:slack:CX + user:slack:U1");
     expect(u1System).toContain("this user wants a preview link before every deploy");
     expect(u1System).toContain("the deploy command is npm run deploy");
 
     requests.length = 0;
     await dispatch(deps, msg("deploy preview link?", "slack:U2"), fakeIO().io);
     const u2System = requests[0].system!;
-    expect(u2System).toContain("Background memory for org:coreplanelabs + channel:slack:CX + user:slack:U2");
+    expect(u2System).toContain("Background memory for org:acme + channel:slack:CX + user:slack:U2");
     expect(u2System).not.toContain("preview link before every deploy");
     expect(u2System).toContain("the deploy command is npm run deploy");
   });
@@ -4112,7 +4113,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
       fakeIO(longHistory).io,
     );
     await drainReflections();
-    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.text)).toEqual([]);
+    expect((await store.list("org:acme", 10)).map((r) => r.text)).toEqual([]);
     expect((await store.list("user:slack:U1", 10)).map((r) => r.text)).toEqual([
       "the deploy command is npm run deploy",
     ]);
@@ -4132,9 +4133,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     };
     await dispatch(publicDeps, msg("how do we deploy?", "slack:U1"), fakeIO(longHistory).io);
     await drainReflections();
-    expect((await pub.list("org:coreplanelabs", 10)).map((r) => r.text)).toEqual([
-      "the deploy command is npm run deploy",
-    ]);
+    expect((await pub.list("org:acme", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
     expect(await pub.list("user:slack:U1", 10)).toEqual([]);
   });
 
@@ -4175,14 +4174,12 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     expect((await store.list("channel:slack:CX", 10)).map((r) => r.text)).toEqual([
       "this channel coordinates acme deploys",
     ]);
-    expect((await store.list("org:coreplanelabs", 10)).map((r) => r.text)).toEqual([
-      "the deploy command is npm run deploy",
-    ]);
+    expect((await store.list("org:acme", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
 
     requests.length = 0;
     await dispatch(deps, msg("acme deploy release?", "slack:U2"), fakeIO().io); // same channel (slack:CX), toolless general
     const sameChannel = requests[0].system!;
-    expect(sameChannel).toContain("Background memory for org:coreplanelabs + channel:slack:CX + user:slack:U2");
+    expect(sameChannel).toContain("Background memory for org:acme + channel:slack:CX + user:slack:U2");
     expect(sameChannel).toContain("this channel coordinates acme deploys");
     expect(sameChannel).not.toContain("make release"); // no repo bound on a toolless general run
 
@@ -4193,7 +4190,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
       fakeIO().io,
     );
     const otherChannel = requests[0].system!;
-    expect(otherChannel).toContain("Background memory for org:coreplanelabs + channel:slack:CY + user:slack:U2");
+    expect(otherChannel).toContain("Background memory for org:acme + channel:slack:CY + user:slack:U2");
     expect(otherChannel).not.toContain("coordinates acme deploys");
     expect(otherChannel).toContain("the deploy command is npm run deploy");
   });
@@ -4243,7 +4240,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     release();
     await drainReflections();
     expect(pendingReflectionCount()).toBe(0);
-    expect(await store.retrieve({ scopeKey: "org:coreplanelabs", query: "deploy command", limit: 10 })).not.toEqual([]);
+    expect(await store.retrieve({ scopeKey: "org:acme", query: "deploy command", limit: 10 })).not.toEqual([]);
   });
 
   it("the run stays counted in flight through the reply and reflection scheduling (drain cannot see 0/0 in between)", async () => {
@@ -4321,7 +4318,7 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
     const provider = capturingProvider();
     await dispatch(makeDeps(YAML_FIXTURE, provider), msg("how does your resident system work?"), fakeIO().io);
     const sys = provider.requests[0].system ?? "";
-    expect(sys).toContain(selfDescriptionBlock(AGENTS));
+    expect(sys).toContain(selfDescriptionBlock(AGENTS, "acme"));
     expect(sys.indexOf("Switchboard runtime config")).toBeLessThan(sys.indexOf(SELF_DESCRIPTION_HEADER));
     expect(sys.indexOf(SELF_DESCRIPTION_HEADER)).toBeLessThan(sys.indexOf("You are Switchboard"));
     expect(sys.split(SELF_DESCRIPTION_HEADER)).toHaveLength(2); // exactly once
@@ -4644,7 +4641,7 @@ describe("self-improvement wiring (Area 7b / #84)", () => {
     expect(provider.requests).toHaveLength(0);
     expect(deps.invoked).toEqual(["memory.list"]);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("mem:org:coreplanelabs:0");
+    expect(replies[0]).toContain("mem:org:acme:0");
     expect(repoResolutions).toBe(0);
     // `all` (the default) includes the repo scope, so the thread's repo is resolved — lazily, through the caller's origin.
     await dispatch(deps, msg("memory list"), io);
@@ -6412,6 +6409,7 @@ describe("agent:ship (pipeline)", () => {
   const SHIP_BRANCH = shipBranchName(shipTaskText("in acme/api: fix the login redirect", "acme/api"), "slack:CX:1.0");
 
   const SHIP_YAML = `
+organization: acme
 providers:
   anthropic:
     type: anthropic
@@ -6524,9 +6522,11 @@ workspaceDir: __WORKDIR__
       vi.mocked(makeExecutor).mockResolvedValueOnce(s as Awaited<ReturnType<typeof makeExecutor>>);
   }
 
+  /** The identity the tests' bot acts as (agent-ship.md item 10) — injected, never a name the code knows. */
+  const SHIP_BOT: GithubIdentity = { login: "acme-switchboard[bot]", id: 4242 };
   const openBotPr = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
     state: "open",
-    author: { login: SHIP_PR_AUTHOR.login, id: SHIP_PR_AUTHOR.id },
+    author: { ...SHIP_BOT },
     headRef: SHIP_BRANCH,
     headSha: HEAD_A,
     sameRepoHead: true,
@@ -6540,6 +6540,7 @@ workspaceDir: __WORKDIR__
     deps.statusUpdateMinMs = 0;
     deps.fetchRepoShipInfo = vi.fn(async () => ({ allowAutoMerge: false, defaultBranch: "main" }));
     deps.fetchPrFacts = vi.fn(async () => openBotPr());
+    deps.fetchSelfIdentity = vi.fn(async () => SHIP_BOT);
     deps.fetchPrHead = vi.fn(async () => HEAD_A);
     deps.fetchPrCommits = vi.fn(async () => undefined);
     const opened: PullRequestTarget[] = [];
@@ -7035,6 +7036,27 @@ workspaceDir: __WORKDIR__
     const final = replies[replies.length - 1];
     expect(final).toContain("Merge-ready");
     expect(final).toContain("1 review round");
+  });
+
+  it("the bot's own GitHub identity unresolvable → an open PR's authorship cannot be judged → refused fail-closed, no child run", async () => {
+    const provider = shipProvider();
+    const { deps, opened } = shipDeps(provider);
+    deps.fetchSelfIdentity = vi.fn(async () => undefined);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("🚫");
+    expect(replies[0]).toContain("identity this bot acts as");
+    expect(replies[0]).toContain("acme/api#7");
+    expect(opened).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
+    // The refusal names the resolved identity when it IS known and the author is someone else.
+    deps.fetchSelfIdentity = vi.fn(async () => SHIP_BOT);
+    deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "someone", id: 1 } }));
+    const second = fakeIO();
+    await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), second.io);
+    expect(second.replies[0]).toContain("was not authored by `acme-switchboard[bot]`");
   });
 
   it("thread PR open + new task text → refusal naming the open PR, no child run", async () => {

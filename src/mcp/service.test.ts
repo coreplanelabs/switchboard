@@ -14,6 +14,7 @@ import type { McpServerSpec } from "./types.js";
 
 const KEY = importCredentialKey("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
 const YAML = `
+organization: acme
 providers:
   anthropic:
     type: anthropic

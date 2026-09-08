@@ -1,9 +1,10 @@
 # Reference: config.yaml
 
-Every top-level block, what it's for, and what happens when it's absent. Copy `config/config.example.yaml` to `config/config.yaml` to start — every block below except `providers` and `defaults` is optional and off by default.
+Every top-level block, what it's for, and what happens when it's absent. Copy `config/config.example.yaml` to `config/config.yaml` to start — every block below except `organization`, `providers` and `defaults` is optional and off by default.
 
 | Block | Purpose | When absent |
 |---|---|---|
+| `organization` | The GitHub organization (or user) this installation serves — the account its GitHub App is installed on. Names the shared memory scope (`org:<organization>`) and the About block every model run carries | required — nothing in the code assumes an organization |
 | `providers` | Model providers (`anthropic`, `openai-compatible` + a `baseUrl`) and which env var holds each one's key | required — nothing to route to |
 | `defaults` | `agent` used with no other signal; `models`/`efforts` per agent | required — the built-in agent floor is the last resort, not a real default |
 | `channels` / `users` | Static per-scope defaults, keyed by platform-namespaced id (`slack:C…`, `slack:U…`) | that scope has no static defaults; runtime `config set` still applies |

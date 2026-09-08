@@ -346,7 +346,7 @@ describe("channel visibility (authorization.md items 5–7)", () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-runs-authz-"));
     writeFileSync(
       join(dir, "config.yaml"),
-      'providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\npermissions:\n  admins: ["slack:UADMIN"]\n',
+      'organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\npermissions:\n  admins: ["slack:UADMIN"]\n',
     );
     const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"), () => {}, {
       ingressTokens: TOKENS,

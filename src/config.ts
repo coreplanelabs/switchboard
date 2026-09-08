@@ -112,6 +112,13 @@ export interface Permissions {
 }
 
 export interface AppConfig {
+  /**
+   * The GitHub organization (or user) this installation serves — the account
+   * its GitHub App is installed on. Required: it names the shared memory scope
+   * (`org:<organization>`, features/memory.md item 4) and the About block every
+   * model run carries (routing-and-config item 11). The code never assumes one.
+   */
+  organization: string;
   providers: Record<string, ProviderConfig>;
   defaults: {
     agent: string;
@@ -1095,6 +1102,11 @@ function holdsEverything(g: Grants): boolean {
 function validateConfig(cfg: AppConfig, warn: (message: string) => void): void {
   validateScopeEfforts(cfg, "config.yaml");
   validateMcpServers(cfg, "config.yaml");
+  if (typeof cfg.organization !== "string" || cfg.organization.trim() === "") {
+    throw new Error(
+      "config.yaml must name the organization this installation serves (organization: <GitHub org or user login>)",
+    );
+  }
   if (!cfg.providers || Object.keys(cfg.providers).length === 0) {
     throw new Error("config.yaml must define at least one provider");
   }

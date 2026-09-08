@@ -120,6 +120,7 @@ function configStore(yaml: string): ConfigStore {
 }
 
 const ADMIN_YAML = `
+organization: acme
 providers:
   anthropic:
     type: anthropic

@@ -14,10 +14,13 @@ import {
 // can never name an agent or a chat command that does not exist.
 
 describe("selfDescriptionBlock", () => {
-  const block = selfDescriptionBlock(AGENTS);
+  const block = selfDescriptionBlock(AGENTS, "acme");
 
   it("leads with the header and names every registered agent with its description", () => {
     expect(block.startsWith(SELF_DESCRIPTION_HEADER)).toBe(true);
+    // Whose gateway: the config's organization, never a name baked into the code.
+    expect(block).toContain("the agent gateway of the acme organization");
+    expect(selfDescriptionBlock(AGENTS, "other-org")).toContain("the agent gateway of the other-org organization");
     for (const a of Object.values(AGENTS)) {
       expect(block).toContain(`\`${a.name}\` — ${a.description}`);
     }

@@ -188,6 +188,7 @@ const NOBODY = "slack:UNOBODY";
 const CHAT_CHANNEL = "slack:CX";
 
 const BASE_YAML = `
+organization: acme
 providers:
   anthropic:
     type: anthropic
@@ -316,7 +317,7 @@ function memoryRecord(scopeKey: string): MemoryRecord {
 /** Records in EVERY scope a command can reach: each caller's own, org, the fixture repo, the chat channel. */
 const MEMORY_SEED = [
   ...CALLER_IDS.map((id) => `user:${id}`),
-  "org:coreplanelabs",
+  "org:acme",
   `repo:${FIXTURE.repo}`,
   `channel:${CHAT_CHANNEL}`,
 ].map(memoryRecord);
@@ -494,7 +495,7 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
           .join("\n"),
     },
     repo: { admin: async () => admin, operations: async () => operations, canUseRepo: async () => true },
-    memory: { config: async () => ({ enabled: true }), store: s.memory },
+    memory: { config: async () => ({ enabled: true }), organization: async () => "acme", store: s.memory },
     mcp: { service: async () => fakeMcpService() },
     schedule: { schedules: SCHEDULES, store: s.schedules, now: () => NOW },
     deploy: {

@@ -203,6 +203,7 @@ export function buildCoreCommands(
     },
     memory: {
       config: async () => (await cfg()).config.memory,
+      organization: async () => (await cfg()).config.organization,
       get store() {
         return wiring.memory?.();
       },

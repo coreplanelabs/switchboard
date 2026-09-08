@@ -18,7 +18,7 @@ import type { MemoryConfig, MemoryRecord, MemoryStore } from "../memory/types.js
 //   memory list [query…] [--scope <me|org|repo|channel|all>] [--limit <n>] [--repo owner/name]
 //   memory forget <id>
 // Caller-scoped on EVERY surface: the only user scope a caller can list or
-// forget is its own (`requestScopeKeys(caller.id)` — `user:slack:U…` for a
+// forget is its own (`requestScopeKeys(organization, caller.id)` — `user:slack:U…` for a
 // Slack person, `user:cli:local` for the CLI, `user:mcp:<subject>` for a
 // machine caller); the channel scope is the channel the caller speaks from
 // (`caller.origin`), the repo scope the repo the thread is bound to (resolved
@@ -33,6 +33,8 @@ export interface MemoryCommandDeps {
   memory: {
     /** The live `memory` config section (read per call: config reloads). */
     config(): Promise<MemoryConfig | undefined>;
+    /** The config's `organization` — the shared org scope's name (read per call, like `config()`). */
+    organization(): Promise<string>;
     /** The process's store (index.ts shares the one the reflection pass writes
      *  to); absent → the in-process fallback `selectMemoryStore` picks. */
     store?: MemoryStore;
@@ -173,7 +175,7 @@ export const memoryList = defineCommand({
   render: renderList,
   handler: async ({ args, options, caller, deps }) => {
     const store = await storeOf(deps);
-    const keys = requestScopeKeys(caller.id);
+    const keys = requestScopeKeys(await deps.memory.organization(), caller.id);
     // #344: the chat-documented "scope word first" form (`memory list org
     // deploy`). A leading bare scope word is the scope when --scope is absent;
     // an explicit --scope keeps every query word as filter text. A first word
@@ -239,7 +241,7 @@ export const memoryForget = defineCommand({
   },
   handler: async ({ args, caller, deps }) => {
     const store = await storeOf(deps);
-    const keys = requestScopeKeys(caller.id);
+    const keys = requestScopeKeys(await deps.memory.organization(), caller.id);
     const target = scopeKeyOfMemoryId(args.id) as string;
     if (target === keys.user) {
       // own scope: always allowed

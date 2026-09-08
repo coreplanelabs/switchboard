@@ -36,7 +36,7 @@ function fakeProvider(reply: string | (() => string)): Provider & { requests: Co
   };
 }
 
-const SCOPE = "org:coreplanelabs";
+const SCOPE = "org:acme";
 const PROVENANCE = { sourceThreadKey: "slack:CX:1.0", sourceRunId: "run-1" };
 /** The requesting user, as every routing test below sees them: a plain Slack
  *  user speaking from a PUBLIC channel — the origin under which org writes are
@@ -47,7 +47,7 @@ const PUBLIC_ORIGIN = { actor: PRINCIPAL, originChannelVisibility: "public" as C
 
 function existing(over: Partial<MemoryRecord> = {}): MemoryRecord {
   return {
-    id: "mem:org:coreplanelabs:0",
+    id: "mem:org:acme:0",
     scopeKey: SCOPE,
     kind: "fact",
     text: "the deploy command is npm run deploy",
@@ -117,7 +117,7 @@ describe("buildReflectionInput", () => {
     expect(text).toContain("how do we deploy?");
     expect(text).toContain("and staging?");
     expect(text).toContain("npm run deploy:staging");
-    expect(text).toContain("mem:org:coreplanelabs:0");
+    expect(text).toContain("mem:org:acme:0");
     expect(text).toContain("the deploy command is npm run deploy");
   });
 
@@ -158,7 +158,7 @@ describe("buildReflectionInput", () => {
 });
 
 describe("parseReflection", () => {
-  const knownIds = new Set(["mem:org:coreplanelabs:0"]);
+  const knownIds = new Set(["mem:org:acme:0"]);
 
   it("accepts a well-formed reply and yields ≤5 facts + 1 summary as candidates", () => {
     const raw = JSON.stringify({
@@ -262,8 +262,8 @@ describe("parseReflection", () => {
     const out = parseReflection(
       JSON.stringify({
         facts: [
-          { text: "the deploy command is now npm run ship", confidence: 1, supersedes: "mem:org:coreplanelabs:0" },
-          { text: "something else", confidence: 1, supersedes: "mem:org:coreplanelabs:999" },
+          { text: "the deploy command is now npm run ship", confidence: 1, supersedes: "mem:org:acme:0" },
+          { text: "something else", confidence: 1, supersedes: "mem:org:acme:999" },
         ],
         summary: "s",
       }),
@@ -273,7 +273,7 @@ describe("parseReflection", () => {
     expect(out.ok).toBe(true);
     if (!out.ok) return;
     const facts = out.candidates.filter((c) => c.kind === "fact");
-    expect(facts[0].supersedes).toBe("mem:org:coreplanelabs:0");
+    expect(facts[0].supersedes).toBe("mem:org:acme:0");
     expect(facts[1].supersedes).toBeUndefined();
   });
 
@@ -299,7 +299,7 @@ describe("parseReflection", () => {
 
 describe("reflect (one extractor call → store.write)", () => {
   const goodReply = JSON.stringify({
-    facts: [{ text: "the deploy command is now npm run ship", confidence: 0.9, supersedes: "mem:org:coreplanelabs:0" }],
+    facts: [{ text: "the deploy command is now npm run ship", confidence: 0.9, supersedes: "mem:org:acme:0" }],
     summary: "Deploy command changed to npm run ship.",
   });
   const base = {
@@ -327,7 +327,7 @@ describe("reflect (one extractor call → store.write)", () => {
     const store = new InMemoryMemoryStore([existing()]);
     await reflect({ ...base, provider, store });
     const text = (provider.requests[0].messages[0].content[0] as { text: string }).text;
-    expect(text).toContain("mem:org:coreplanelabs:0");
+    expect(text).toContain("mem:org:acme:0");
 
     const active = await store.retrieve({ scopeKey: SCOPE, query: "deploy command ship", limit: 10 });
     expect(active.map((r) => r.text)).toContain("the deploy command is now npm run ship");
@@ -729,8 +729,8 @@ describe("reflect — write gate (authorization R11, deliberate change c)", () =
   });
 
   it("a correction of an org record from a DM cannot follow it into org: the fact is written narrowed WITHOUT `supersedes`, and the org record stands", async () => {
-    const stale = existing({ id: "mem:org:coreplanelabs:0", scopeKey: SCOPE, text: "the org standup is at 9am" });
-    const correction = JSON.stringify({ facts: [{ ...orgFact, supersedes: "mem:org:coreplanelabs:0" }], summary: "" });
+    const stale = existing({ id: "mem:org:acme:0", scopeKey: SCOPE, text: "the org standup is at 9am" });
+    const correction = JSON.stringify({ facts: [{ ...orgFact, supersedes: "mem:org:acme:0" }], summary: "" });
     const store = new InMemoryMemoryStore([stale]);
     await reflect({ ...base, originChannelVisibility: "dm", provider: fakeProvider(correction), store });
     expect(await texts(store, SCOPE)).toEqual(["the org standup is at 9am"]);

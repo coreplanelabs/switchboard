@@ -48,7 +48,7 @@ import { handleAdminCrash } from "./channels/adminCrash.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
-import { DOCS_BASE_URL, docsRedirectTarget } from "./core/docsLink.js";
+import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
 import {
   activeRunCount,
   DEPLOY_RESTART_NOTICE,
@@ -404,9 +404,10 @@ async function main() {
     // the ONE localhost rule (shared with commandHttp); a malformed
     // PUBLIC_BASE_URL is "not localhost", never a boot crash.
     const publicBaseUrl = process.env.PUBLIC_BASE_URL;
-    // Where /docs* sends a caller. Deploy-constant (src/core/docsLink.ts);
-    // DOCS_BASE_URL points it at a local `npm run docs:dev` instead.
-    const docsBaseUrl = process.env.DOCS_BASE_URL ?? DOCS_BASE_URL;
+    // Where /docs* sends a caller: this installation's docs site, the DOCS_BASE_URL
+    // var the bot Worker renders from the profile (or a local `npm run docs:dev`);
+    // without one, the project's published docs (src/core/docsLink.ts).
+    const docsBaseUrl = process.env.DOCS_BASE_URL ?? PROJECT_DOCS_URL;
     const devBypassActive = accessConfig === null && accessDevBypass;
     const liveView = createLiveViewHandler({
       shell,

@@ -21,8 +21,8 @@ const NOW = 1_700_000_000_000;
 
 function rec(over: Partial<MemoryRecord> = {}): MemoryRecord {
   return {
-    id: "mem:org:coreplanelabs:1",
-    scopeKey: "org:coreplanelabs",
+    id: "mem:org:acme:1",
+    scopeKey: "org:acme",
     kind: "fact",
     text: "the deploy command is npm run deploy",
     keywords: ["deploy", "command", "npm"],
@@ -109,8 +109,7 @@ describe("estimateTokens", () => {
 });
 
 describe("applyBudget", () => {
-  const many = (n: number, text: string) =>
-    Array.from({ length: n }, (_, i) => rec({ id: `mem:org:coreplanelabs:${i}`, text }));
+  const many = (n: number, text: string) => Array.from({ length: n }, (_, i) => rec({ id: `mem:org:acme:${i}`, text }));
 
   it("caps at maxRecords", () => {
     const out = applyBudget(many(12, "x"), { maxRecords: 8, maxTokens: 800 });
@@ -138,11 +137,9 @@ describe("applyBudget", () => {
     // budget estimate must be an upper bound on what is actually rendered.
     const maxTokens = 800;
     const angle = "<".repeat(230); // raw 230 chars; escaped → 920 chars (4×)
-    const records = Array.from({ length: 6 }, (_, i) =>
-      rec({ id: `mem:org:coreplanelabs:${i}`, text: angle, keywords: [] }),
-    );
+    const records = Array.from({ length: 6 }, (_, i) => rec({ id: `mem:org:acme:${i}`, text: angle, keywords: [] }));
     const budgeted = applyBudget(records, { maxRecords: 8, maxTokens });
-    const block = renderMemoryBlock("org:coreplanelabs", budgeted);
+    const block = renderMemoryBlock("org:acme", budgeted);
     // No single record here alone exceeds the cap, so the documented
     // first-record exception does not apply: the whole escaped block must fit.
     expect(estimateTokens(block)).toBeLessThanOrEqual(maxTokens);
@@ -151,17 +148,17 @@ describe("applyBudget", () => {
 
 describe("renderMemoryBlock", () => {
   it("prefix is the exact advisory line", () => {
-    expect(memoryBlockPrefix("org:coreplanelabs")).toBe(
-      "Background memory for org:coreplanelabs (may be outdated — verify before acting):",
+    expect(memoryBlockPrefix("org:acme")).toBe(
+      "Background memory for org:acme (may be outdated — verify before acting):",
     );
   });
   it("leads with the exact prefix, then one provenance-tagged bullet per record", () => {
-    const block = renderMemoryBlock("org:coreplanelabs", [
+    const block = renderMemoryBlock("org:acme", [
       rec({ text: "prefers squashed history", sourceThreadKey: "slack:C1:1.0" }),
       rec({ text: "deploy is npm run deploy", sourceThreadKey: "slack:C2:2.0" }),
     ]);
     const lines = block.split("\n");
-    expect(lines[0]).toBe("Background memory for org:coreplanelabs (may be outdated — verify before acting):");
+    expect(lines[0]).toBe("Background memory for org:acme (may be outdated — verify before acting):");
     expect(lines[1]).toBe("<background_memory>");
     expect(lines[2]).toBe("- prefers squashed history (source: slack:C1:1.0)");
     expect(lines[3]).toBe("- deploy is npm run deploy (source: slack:C2:2.0)");
@@ -175,9 +172,9 @@ describe("renderMemoryBlock", () => {
         sourceThreadKey: "slack:C1\n:1.0",
       }),
     ];
-    const block = renderMemoryBlock("org:coreplanelabs", records);
+    const block = renderMemoryBlock("org:acme", records);
     const lines = block.split("\n");
-    const prefixLines = memoryBlockPrefix("org:coreplanelabs").split("\n").length;
+    const prefixLines = memoryBlockPrefix("org:acme").split("\n").length;
     // prefix + 2 delimiter lines + one line per record: the adversarial record
     // contributed exactly ONE line, not a trail of injected ones.
     expect(lines).toHaveLength(prefixLines + 2 + records.length);
@@ -202,7 +199,7 @@ describe("renderMemoryBlock", () => {
         sourceThreadKey: "slack:C1:1.0",
       }),
     ];
-    const block = renderMemoryBlock("org:coreplanelabs", records);
+    const block = renderMemoryBlock("org:acme", records);
     const lines = block.split("\n");
     // Exactly one REAL open and one REAL close fence line — the renderer's own —
     // even though the record text echoed both delimiter tokens inline.

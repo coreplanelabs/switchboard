@@ -24,6 +24,7 @@ import { resolveShipCaps, SHIP_DEFAULT_MAX_MINUTES, SHIP_DEFAULT_MAX_ROUNDS } fr
 // Feature: features/routing-and-config.md — layered resolution & permission gates.
 
 const YAML_FIXTURE = `
+organization: acme
 providers:
   anthropic:
     type: anthropic
@@ -111,6 +112,7 @@ describe("layered resolution", () => {
 
 describe("effort resolution (the same layers as model)", () => {
   const EFFORT_YAML = `
+organization: acme
 providers:
   anthropic:
     type: anthropic
@@ -970,6 +972,7 @@ describe("Scope.mcpServers (MCP servers layered through config)", () => {
       notion: { url: "https://mcp.notion.so/mcp", auth: none }
 `.replace("channels:\n", "channels:\n");
   const withDefaults = `
+organization: acme
 providers:
   anthropic:
     type: anthropic
@@ -1134,6 +1137,26 @@ users:
     });
     expect(() => new ConfigStore(cfg, { backing, initial: backing.document })).toThrow(
       /overrides \(in-memory\): users\.slack:UX\.mcpServers\.vanta\.url/,
+    );
+  });
+});
+
+// Feature: routing-and-config.md item 15 — `organization` is required: it names
+// the shared memory scope and the About block, and the code assumes no
+// particular organization.
+describe("organization", () => {
+  it("is read from the config", () => {
+    expect(store().config.organization).toBe("acme");
+  });
+
+  it("a config without one, or with an empty or non-string one, is refused naming the field", () => {
+    const without = YAML_FIXTURE.replace("organization: acme\n", "");
+    expect(() => store(without)).toThrow(/must name the organization.*organization: <GitHub org or user login>/);
+    expect(() => store(YAML_FIXTURE.replace("organization: acme\n", 'organization: "  "\n'))).toThrow(
+      /must name the organization/,
+    );
+    expect(() => store(YAML_FIXTURE.replace("organization: acme\n", "organization: 42\n"))).toThrow(
+      /must name the organization/,
     );
   });
 });

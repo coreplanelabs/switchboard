@@ -17,6 +17,7 @@ import {
 // validators every repo surface shares.
 
 const YAML_FIXTURE = `
+organization: acme
 providers:
   anthropic:
     type: anthropic

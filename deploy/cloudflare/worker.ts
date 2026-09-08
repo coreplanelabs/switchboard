@@ -43,6 +43,7 @@ interface Env {
   GITHUB_APP_INSTALLATION_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   PUBLIC_BASE_URL?: string; // live-view: base for /runs/<id>?t=… links on the status card
+  DOCS_BASE_URL?: string; // var: this installation's docs site (profile `workers.docs`) — the /docs redirect target; absent → the project's published docs
   ACCESS_TEAM_DOMAIN?: string; // live-view SSO gate: Cloudflare Access team domain (JWKS + iss)
   ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
   SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map); the `cron` entry is what scheduled runs present; an entry with `deploy:write` may POST /admin/restart
@@ -67,6 +68,7 @@ const FORWARDED_OPTIONAL = [
   "GITHUB_APP_INSTALLATION_ID",
   "GITHUB_APP_PRIVATE_KEY",
   "PUBLIC_BASE_URL",
+  "DOCS_BASE_URL",
   "ACCESS_TEAM_DOMAIN",
   "ACCESS_AUD",
   "CF_ANALYTICS_TOKEN",

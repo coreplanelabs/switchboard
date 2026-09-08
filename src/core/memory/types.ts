@@ -12,7 +12,7 @@
 export interface MemoryRecord {
   /** Internal id, namespaced per AGENTS.md invariant 4 (`mem:<scopeKey>:<n>`). */
   id: string;
-  /** The resource this record belongs to: `org:coreplanelabs` or `user:slack:U…`. */
+  /** The resource this record belongs to: `org:<organization>` (the config's organization) or `user:slack:U…`. */
   scopeKey: string;
   /** Semantic fact vs. episodic thread summary. */
   kind: "fact" | "summary";
