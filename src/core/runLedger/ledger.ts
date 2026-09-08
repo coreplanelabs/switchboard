@@ -71,6 +71,11 @@ export interface RunLedger {
    *  a true finish to record. The double-answer protection is `finishing`,
    *  which the reply path MUST take first; `finish` does not check it. */
   finish(runId: string, gen: string, record: RunRecord): Promise<FinishResult>;
+  /** The live rows go with NO record (item 42): a run reserved at admission
+   *  whose dispatch ended before its prompt existed — a refusal, a failed
+   *  attach — never started, so there is nothing to record and nothing to
+   *  restart. Fenced by generation like `finish`. */
+  abandon(runId: string, gen: string): Promise<FenceResult>;
   /** Take over expired and handed-off runs; the transcript owner is updated before this resolves. */
   reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]>;
   listLive(): Promise<LiveRunRow[]>;

@@ -24,7 +24,11 @@ export const ATTACHMENT_REF_BYTES = 1_000_000;
 /** A generation id: the bot's process start plus a random suffix. */
 export const GEN_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 
-export type LivePhase = "live" | "handoff" | "finishing";
+/** `attaching`: reserved at admission (item 42) — the row holds the request
+ *  and no prompt yet; a reclaim restarts the run from the request. `live`:
+ *  the prompt and seed landed. `handoff`: the owner drained. `finishing`: the
+ *  owner replied. */
+export type LivePhase = "attaching" | "live" | "handoff" | "finishing";
 export type StopMode = "soft" | "hard";
 
 /** Where the run's status card is, so a resumed run edits the same message. */
@@ -55,6 +59,11 @@ export interface LiveRunMeta {
   selection?: "resident" | "sandbox" | "local" | "none";
   /** The worktree path the system prompt names. */
   workspace?: string;
+  /** The request the run was admitted for (item 42), in the durable inbox
+   *  row's shape — text with its directives, sender, link, arrival time, the
+   *  attachments when they fit — so a reclaim of an `attaching` row can
+   *  dispatch it again under the same run id and card. */
+  request?: Record<string, unknown>;
 }
 
 /** Dispatcher-local run state a resume must restore (the `submit_*` callbacks,
@@ -122,6 +131,10 @@ export interface ClaimRequest {
   system: string;
   tools: ToolDef[];
   state?: RunState;
+  /** `attaching` reserves the thread at admission with an empty prompt (item
+   *  42); absent (or `live`) is the claim with the prompt — which, on the
+   *  owner's own attaching row, promotes it in place. */
+  phase?: "attaching" | "live";
 }
 
 export type ClaimResult =

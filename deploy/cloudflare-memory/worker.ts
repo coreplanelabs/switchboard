@@ -33,7 +33,14 @@ import {
   type StoredRunEvent,
 } from "../../src/core/runRecord.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
-import { checkFence, decideClaim, phaseTransition, selectReclaim } from "../../src/core/runLedger/decisions.ts";
+import {
+  checkFence,
+  decideClaim,
+  decideClaimWrite,
+  phaseTransition,
+  reclaimPhase,
+  selectReclaim,
+} from "../../src/core/runLedger/decisions.ts";
 import {
   GEN_PATTERN,
   type ClaimRequest,
@@ -1001,15 +1008,40 @@ export class RunHistoryDO extends DurableObject<Env> {
           : undefined,
         req,
       );
-      if (!out.ok || existing) return;
+      if (!out.ok) return;
+      switch (decideClaimWrite(existing, req)) {
+        case "keep":
+          return;
+        case "refresh":
+          this.sql.exec(`UPDATE live_runs SET lease_until = ? WHERE run_id = ?`, now + req.leaseMs, req.runId);
+          return;
+        case "promote":
+          // The prompt landed on the owner's own attaching row (item 42): the
+          // claim the dispatcher always made, applied in place — identity,
+          // thread and start stay; the row goes live.
+          this.sql.exec(
+            `UPDATE live_runs SET lease_until = ?, phase = 'live', meta_json = ?, card_json = ?, system_text = ?, tools_json = ?, state_json = ? WHERE run_id = ?`,
+            now + req.leaseMs,
+            JSON.stringify(req.meta),
+            req.card ? JSON.stringify(req.card) : null,
+            req.system,
+            JSON.stringify(req.tools),
+            JSON.stringify(req.state ?? {}),
+            req.runId,
+          );
+          return;
+        case "insert":
+          break;
+      }
       this.sql.exec(
         `INSERT INTO live_runs (run_id, thread_key, owner_gen, lease_until, started_at, phase, stop, meta_json, card_json, system_text, tools_json, state_json)
-         VALUES (?, ?, ?, ?, ?, 'live', NULL, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
         req.runId,
         req.threadKey,
         req.gen,
         now + req.leaseMs,
         req.startedAt,
+        req.phase ?? "live",
         JSON.stringify(req.meta),
         req.card ? JSON.stringify(req.card) : null,
         req.system,
@@ -1176,6 +1208,18 @@ export class RunHistoryDO extends DurableObject<Env> {
     return out;
   }
 
+  /** The live rows go with no record (item 42): a reserved run that never
+   *  started. Fenced. */
+  async abandon(runId: string, gen: string): Promise<FenceResult> {
+    let out: FenceResult = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      out = checkFence(this.liveRow(runId), gen);
+      if (!out.ok) return;
+      this.deleteLiveRows([runId]);
+    });
+    return out;
+  }
+
   private deleteLiveRows(runIds: string[]): void {
     for (const id of runIds) {
       this.sql.exec(`DELETE FROM live_runs WHERE run_id = ?`, id);
@@ -1192,10 +1236,12 @@ export class RunHistoryDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       const rows = this.sql.exec<LiveRow>(`SELECT * FROM live_runs`).toArray().map(rowToLive);
       for (const row of selectReclaim(rows, now)) {
+        const phase = reclaimPhase(row.phase);
         this.sql.exec(
-          `UPDATE live_runs SET owner_gen = ?, lease_until = ?, phase = 'live' WHERE run_id = ?`,
+          `UPDATE live_runs SET owner_gen = ?, lease_until = ?, phase = ? WHERE run_id = ?`,
           gen,
           now + leaseMs,
+          phase,
           row.runId,
         );
         const stepRow = this.sql
@@ -1216,7 +1262,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           .toArray()
           .map((r) => ({ kind: r.kind, payload: JSON.parse(r.json) as unknown }));
         out.push({
-          row: { ...row, ownerGen: gen, leaseUntil: now + leaseMs, phase: "live" },
+          row: { ...row, ownerGen: gen, leaseUntil: now + leaseMs, phase },
           reclaimedFrom: row.phase,
           lastStep,
           inbox,
@@ -2122,6 +2168,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/handoff",
   "/runs/finishing",
   "/runs/finish",
+  "/runs/abandon",
   "/runs/reclaim",
   "/runs/live",
   "/runs/live-events",
@@ -2170,6 +2217,8 @@ function parseClaim(b: Record<string, unknown>): Validated<ClaimRequest> {
   }
   if (r.state !== undefined && (typeof r.state !== "object" || r.state === null))
     return invalid("run.state must be an object");
+  if (r.phase !== undefined && r.phase !== "attaching" && r.phase !== "live")
+    return invalid("run.phase must be attaching or live");
   return {
     ok: true,
     value: {
@@ -2183,6 +2232,7 @@ function parseClaim(b: Record<string, unknown>): Validated<ClaimRequest> {
       system: r.system,
       tools: r.tools as ClaimRequest["tools"],
       ...(r.state ? { state: r.state as RunState } : {}),
+      ...(r.phase !== undefined ? { phase: r.phase as "attaching" | "live" } : {}),
     },
   };
 }
@@ -2362,6 +2412,11 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     return fenced(await stub.setState(runId.value, g.value, b.state as RunState));
   }
   if (pathname === "/runs/finishing") return fenced(await stub.finishing(runId.value, g.value));
+  if (pathname === "/runs/abandon") {
+    const r = await stub.abandon(runId.value, g.value);
+    console.log(`[runs/abandon] ${key.value} ${runId.value} ok=${r.ok}${r.ok ? "" : ` ${r.reason}`}`);
+    return fenced(r);
+  }
   if (pathname === "/runs/finish") {
     const parsed = parseRunPut({ ...b, storeKey: key.value });
     if (!parsed.ok) return json({ error: parsed.error }, 400);

@@ -3,7 +3,14 @@
 // also documents the storage shape in the plainest form.
 
 import type { RunRecord } from "../runRecord.js";
-import { checkFence, decideClaim, phaseTransition, selectReclaim } from "./decisions.js";
+import {
+  checkFence,
+  decideClaim,
+  decideClaimWrite,
+  phaseTransition,
+  reclaimPhase,
+  selectReclaim,
+} from "./decisions.js";
 import type { FinishResult, HeartbeatResult, RunLedger } from "./ledger.js";
 import { assembleTranscript, turnRows, type AssembledTranscript } from "./transcript.js";
 import type {
@@ -63,14 +70,33 @@ export class InMemoryRunLedger implements RunLedger {
       req,
     );
     if (!decision.ok) return decision;
-    if (existing) return decision; // idempotent re-claim
+    switch (decideClaimWrite(existing, req)) {
+      case "keep":
+        return decision; // idempotent re-claim
+      case "refresh":
+        existing!.leaseUntil = this.now() + req.leaseMs;
+        return decision;
+      case "promote":
+        Object.assign(existing!, {
+          leaseUntil: this.now() + req.leaseMs,
+          phase: "live",
+          meta: req.meta,
+          card: req.card ?? null,
+          system: req.system,
+          tools: req.tools,
+          state: req.state ?? {},
+        });
+        return decision;
+      case "insert":
+        break;
+    }
     this.live.set(req.runId, {
       runId: req.runId,
       threadKey: req.threadKey,
       ownerGen: req.gen,
       leaseUntil: this.now() + req.leaseMs,
       startedAt: req.startedAt,
-      phase: "live",
+      phase: req.phase ?? "live",
       stop: null,
       meta: req.meta,
       card: req.card ?? null,
@@ -187,6 +213,17 @@ export class InMemoryRunLedger implements RunLedger {
     return { ok: true, stored: true };
   }
 
+  async abandon(runId: string, gen: string): Promise<FenceResult> {
+    const fence = this.fence(runId, gen);
+    if (!fence.ok) return fence;
+    this.live.delete(runId);
+    this.steps.delete(runId);
+    this.inbox.delete(runId);
+    this.jobs.delete(runId);
+    this.transcripts.delete(runId);
+    return { ok: true };
+  }
+
   async reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]> {
     const taken = selectReclaim([...this.live.values()], now);
     const out: ReclaimedRun[] = [];
@@ -194,7 +231,7 @@ export class InMemoryRunLedger implements RunLedger {
       const reclaimedFrom = row.phase;
       row.ownerGen = gen;
       row.leaseUntil = now + leaseMs;
-      row.phase = "live";
+      row.phase = reclaimPhase(reclaimedFrom);
       const t = this.transcripts.get(row.runId);
       if (t) t.ownerGen = gen;
       const steps = this.steps.get(row.runId) ?? [];

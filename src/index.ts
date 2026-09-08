@@ -732,7 +732,7 @@ async function main() {
       close: async (run, why) => {
         const closed = await closeReclaimed(ledgerReclaim.client, generation, {
           row: run.row,
-          events: run.events,
+          events: run.kind === "restart" ? [] : run.events,
           status: "interrupted",
           finishedAt: systemClock(),
         });

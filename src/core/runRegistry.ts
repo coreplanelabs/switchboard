@@ -475,6 +475,13 @@ export class RunRegistry {
    *  a `RunSummary`, the index, or the run record; the handle carries the
    *  redacted label so callers persist that one. `meta` (identity fields) is
    *  stored as given and projected onto every summary. */
+  /** A run id from this registry's generator, for a caller that needs the id
+   *  before `create()` (the ledger reservation at admission, item 42) — passed
+   *  back as `CreateOptions.id`. */
+  mintId(): string {
+    return this.genId();
+  }
+
   create(label?: string, meta?: RunMeta, opts: CreateOptions = {}): RunHandle {
     this.sweep();
     const id = opts.id ?? this.genId();

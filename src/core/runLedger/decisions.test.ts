@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { checkFence, decideClaim, phaseTransition, selectReclaim, transcriptCompleteness } from "./decisions.js";
+import {
+  checkFence,
+  decideClaim,
+  decideClaimWrite,
+  phaseTransition,
+  reclaimPhase,
+  selectReclaim,
+  transcriptCompleteness,
+} from "./decisions.js";
 
 // The ledger's decisions (features/run-history.md items 28–31), pure: the
 // Durable Object applies them inside one transaction and the in-memory ledger
@@ -62,6 +70,38 @@ describe("phaseTransition — the CAS table", () => {
     expect(phaseTransition("finishing", "handoff")).toBe(false);
     expect(phaseTransition("handoff", "finishing")).toBe(true);
     expect(phaseTransition("live", "live")).toBe(false);
+  });
+
+  it("an `attaching` row (reserved at admission, item 42) goes live when its prompt lands or finishing when the dispatch fails before that; nothing goes back to attaching and an attaching row is never handed off (it is not resumable — a restart re-dispatches it)", () => {
+    expect(phaseTransition("attaching", "live")).toBe(true);
+    expect(phaseTransition("attaching", "finishing")).toBe(true);
+    expect(phaseTransition("attaching", "handoff")).toBe(false);
+    expect(phaseTransition("live", "attaching")).toBe(false);
+    expect(phaseTransition("handoff", "attaching")).toBe(false);
+    expect(phaseTransition("finishing", "attaching")).toBe(false);
+  });
+});
+
+describe("decideClaimWrite — what a claim does to the thread's row (item 42)", () => {
+  const owner = { runId: "r1", ownerGen: "g1" };
+  it("no row → insert; the owner's claim WITH a prompt on its attaching row → promote (the prompt lands, phase live); the owner's re-reserve → refresh (a retry after a lost response); anything on a live row → keep (idempotent, as before)", () => {
+    expect(decideClaimWrite(undefined, { ...owner, gen: "g1" })).toBe("insert");
+    expect(decideClaimWrite({ ...owner, phase: "attaching" }, { ...owner, gen: "g1" })).toBe("promote");
+    expect(decideClaimWrite({ ...owner, phase: "attaching" }, { ...owner, gen: "g1", phase: "attaching" })).toBe(
+      "refresh",
+    );
+    expect(decideClaimWrite({ ...owner, phase: "live" }, { ...owner, gen: "g1" })).toBe("keep");
+    expect(decideClaimWrite({ ...owner, phase: "live" }, { ...owner, gen: "g1", phase: "attaching" })).toBe("keep");
+    expect(decideClaimWrite({ ...owner, phase: "handoff" }, { ...owner, gen: "g1" })).toBe("keep");
+  });
+});
+
+describe("reclaimPhase — the phase a reclaimed row lands in", () => {
+  it("an attaching row stays attaching (the launcher restarts it from its request); every other phase becomes live", () => {
+    expect(reclaimPhase("attaching")).toBe("attaching");
+    expect(reclaimPhase("live")).toBe("live");
+    expect(reclaimPhase("handoff")).toBe("live");
+    expect(reclaimPhase("finishing")).toBe("live");
   });
 });
 

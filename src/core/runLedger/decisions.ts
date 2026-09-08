@@ -25,6 +25,30 @@ export function decideClaim(
   };
 }
 
+/** What an accepted claim does to the thread's row (item 42). `insert`: no row.
+ *  `promote`: the owner's claim WITH a prompt on its own `attaching` row — the
+ *  prompt, tools, card and state land and the phase goes `live`, identity and
+ *  start untouched. `refresh`: the owner re-reserves (a retry after a lost
+ *  response) — the lease only. `keep`: any owner re-claim on a row past
+ *  attaching — idempotent, nothing written (as it always was). Decided only
+ *  after `decideClaim` accepted. */
+export type ClaimWrite = "insert" | "promote" | "refresh" | "keep";
+export function decideClaimWrite(
+  existing: { runId: string; ownerGen: string; phase: LivePhase } | undefined,
+  req: { runId: string; gen: string; phase?: "attaching" | "live" },
+): ClaimWrite {
+  if (!existing) return "insert";
+  if (existing.phase !== "attaching") return "keep";
+  return (req.phase ?? "live") === "attaching" ? "refresh" : "promote";
+}
+
+/** The phase a reclaimed row lands in: an `attaching` row stays so — the
+ *  launcher restarts it from its request rather than resuming a transcript it
+ *  does not have; every other row becomes `live` under the new owner. */
+export function reclaimPhase(from: LivePhase): LivePhase {
+  return from === "attaching" ? "attaching" : "live";
+}
+
 /** The fencing token: only the generation that holds the lease may write. */
 export function checkFence(row: { ownerGen: string } | undefined, gen: string): FenceResult {
   if (!row) return { ok: false, reason: "unknown-run" };
@@ -41,13 +65,18 @@ export function selectReclaim<T extends { leaseUntil: number; phase: LivePhase }
   return rows.filter((r) => r.phase === "handoff" || r.leaseUntil <= now);
 }
 
-/** The compare-and-swap table for a run's phase. `live → handoff` (SIGTERM),
- *  `live → finishing` (before the reply), `handoff → finishing` (the owner
- *  finished inside its own handoff window, before any reclaim — the fence on
- *  the generation still keeps a reclaimed row from it), and back to `live`
- *  from `handoff` or `finishing` by a reclaim. Nothing else. */
+/** The compare-and-swap table for a run's phase. `attaching → live` (the
+ *  prompt landed) or `→ finishing` (the dispatch failed before it — never
+ *  handoff: an attaching run has nothing to resume from, so the drain waits
+ *  for it and a dead owner's row is restarted instead), `live → handoff`
+ *  (SIGTERM), `live → finishing` (before the reply), `handoff → finishing`
+ *  (the owner finished inside its own handoff window, before any reclaim —
+ *  the fence on the generation still keeps a reclaimed row from it), and back
+ *  to `live` from `handoff` or `finishing` by a reclaim. Nothing else. */
 export function phaseTransition(from: LivePhase, to: LivePhase): boolean {
   switch (from) {
+    case "attaching":
+      return to === "live" || to === "finishing";
     case "live":
       return to === "handoff" || to === "finishing";
     case "handoff":

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "../agents/registry.js";
 import type { ChatMessage } from "../providers/types.js";
-import type { ResumableRun } from "./boot.js";
+import type { ResumableRun, ResumeRun } from "./boot.js";
 import type { CoreDeps, DispatchOptions } from "./dispatcher.js";
 import { inputTextOf, knownToolsFor, launchResumes, repoContextOf, resumeMessage } from "./resumeLaunch.js";
 import type { LiveRunRow, StepRecord } from "./runLedger/types.js";
@@ -56,7 +56,7 @@ const step = (over: Partial<StepRecord> = {}): StepRecord => ({
   iteration: 0,
   ...over,
 });
-const resumable = (over: Partial<ResumableRun> = {}): ResumableRun => ({
+const resumable = (over: Partial<ResumeRun> = {}): ResumeRun => ({
   row: row(),
   reclaimedFrom: "live",
   lastStep: step(),
@@ -163,6 +163,55 @@ describe("launchResumes", () => {
     expect((await b.run([resumable()])).closed[0].why).toMatch(/agent review is unknown/);
     const c = harness({ io: undefined });
     expect((await c.run([resumable()])).closed[0].why).toMatch(/channel slack:C1 cannot be resumed on/);
+  });
+
+  it("a restart (item 42) dispatches the row's own request — text with its directives, sender, link, attachments — under the row's identity with a RestartContext carrying the row and the inbox; a row whose request cannot be read is closed with the reason", async () => {
+    const h = harness();
+    const request = {
+      channelId: "slack:C1",
+      userId: "slack:UA",
+      threadKey: "slack:C1:1.0",
+      text: "agent:review model:anthropic/review-model please review",
+      at: 900,
+      userName: "uma",
+      sourceUrl: "https://acme.slack.com/archives/C1/p1",
+      channelName: "eng",
+      images: [{ mediaType: "image/png", data: "QUJD" }],
+    };
+    const restart: ResumableRun = {
+      kind: "restart",
+      row: row({ phase: "attaching", meta: { ...row().meta, request } }),
+      reclaimedFrom: "attaching",
+      inbox: [{ seq: 1, message: { text: "also the numbers", userId: "slack:UB" } }],
+    };
+    const outcome = await h.run([restart]);
+    expect(outcome).toEqual({ launched: ["r1"], closed: [] });
+    const { msg, opts } = h.dispatched[0];
+    expect(msg).toEqual({
+      channelId: "slack:C1",
+      userId: "slack:UA",
+      threadKey: "slack:C1:1.0",
+      text: "agent:review model:anthropic/review-model please review",
+      userName: "uma",
+      sourceUrl: "https://acme.slack.com/archives/C1/p1",
+      channelName: "eng",
+      images: [{ mediaType: "image/png", data: "QUJD" }],
+    });
+    expect(opts.resume).toBeUndefined();
+    expect(opts.restart).toEqual({ row: restart.row, inbox: restart.inbox });
+    expect(h.logs[0]).toMatch(
+      /r1 slack:C1:1.0: restarting from its request \(killed while attaching; 1 follow-up\(s\) pending\)/,
+    );
+    const bad = harness();
+    const unreadable: ResumableRun = {
+      ...restart,
+      row: row({ phase: "attaching", meta: { ...row().meta, request: { text: 7 } } }),
+    };
+    expect(await bad.run([unreadable])).toEqual({
+      launched: [],
+      closed: [{ runId: "r1", why: expect.stringMatching(/request/) }],
+    });
+    expect(bad.dispatched).toEqual([]);
   });
 
   it("a dispatch that throws is logged, never propagated; the other runs still launch", async () => {
