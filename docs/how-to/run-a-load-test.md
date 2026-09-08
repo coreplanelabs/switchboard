@@ -75,7 +75,7 @@ Each thread posts one run at a time and records its terminal status; `/healthz` 
 npm run load -- cards --cards 50 --hold 600 --channels 5
 ```
 
-No network: a simulation in virtual time over the real status coalescer against a fake Slack API that enforces the published limits (the Tier 3 budget for `chat.update`, the per-channel rate). It reports card update lag, refused edits, retries wasted on stale frames, and how many cards never got their terminal frame. Lift the limits with `--per-app-per-minute 1000000` to see the coalescer alone.
+No network: a simulation in virtual time over the real status coalescer and the real process-wide status budget against a fake Slack API that enforces the published limits (the Tier 3 budget for `chat.update`, the per-channel rate). It reports card update lag, edits the budget held back, edits Slack refused, terminal frames that waited for a funded slot, and how many cards got their terminal frame. `--client retrying` runs the same cards through the pre-budget adapter (the WebClient's own retry-after loop), the baseline the budget is measured against: refused edits, retries wasted on stale frames, terminal frames lost. Lift the limits with `--per-app-per-minute 1000000` to see the budget alone; `--budget-per-minute N` moves the budget's rate.
 
 ## Where receipts go
 

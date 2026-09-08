@@ -1,6 +1,7 @@
 import { extname } from "node:path";
-import { App, SocketModeReceiver, type webApi } from "@slack/bolt";
+import { App, SocketModeReceiver, webApi } from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
+import { createStatusBudget, STATUS_EDITS_PER_MINUTE, type StatusBudget } from "../core/statusBudget.js";
 import { startRequestRoot, withProcessRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { Span } from "../core/trace/types.js";
@@ -35,6 +36,50 @@ import type {
 // No routing, config, or agent logic lives here.
 
 type SlackClient = webApi.WebClient;
+
+/** The two Web API clients the adapter runs on. Replies, card posts and reads
+ *  go through `client` (Bolt's, with its 30-minute rate-limit retry). Card
+ *  EDITS go through `statusClient` (`createStatusClient`) so a 429 on a
+ *  heartbeat never pauses the queue a reply is waiting in
+ *  (docs/reference/specs/run-visibility.md item 8). */
+export interface SlackClients {
+  client: SlackClient;
+  statusClient: SlackClient;
+}
+
+/** The one budget every card in this process draws from. */
+const processStatusBudget = createStatusBudget({ perMinute: STATUS_EDITS_PER_MINUTE });
+
+/** The client card edits ride on: a rate-limited call REJECTS at once instead of
+ *  pausing the queue and retrying for up to 30 minutes (the default policy) —
+ *  a refused progress frame is dropped, a refused terminal frame is re-sent
+ *  after Slack's Retry-After up to `TERMINAL_RESENDS` times (`SlackIO.status`).
+ *  One retry for transport errors. */
+export function createStatusClient(token: string | undefined): SlackClient {
+  return new webApi.WebClient(token, { rejectRateLimitedCalls: true, retryConfig: { retries: 1 } });
+}
+
+/** Slack's Retry-After, in seconds, when `err` is the status client's rate-limit rejection. */
+function retryAfterSeconds(err: unknown): number | undefined {
+  const e = err as { code?: string; retryAfter?: unknown } | undefined;
+  return e?.code === webApi.ErrorCode.RateLimitedError && typeof e.retryAfter === "number" ? e.retryAfter : undefined;
+}
+
+/** How many times a rate-limited terminal frame is re-sent (each after Slack's Retry-After) before it is given up. */
+const TERMINAL_RESENDS = 10;
+
+/** An error's one-line name for a log: the message of an `Error`, the `code` of a
+ *  Slack Web API rejection (a plain object, e.g. `slack_webapi_rate_limited_error`), else its JSON. */
+function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  const code = (err as { code?: unknown } | undefined)?.code;
+  if (typeof code === "string") return code;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
 
 const PLATFORM = "slack";
 const SLACK_MSG_LIMIT = 3500;
@@ -299,6 +344,7 @@ export function createSlackApp(deps: CoreDeps) {
   // (docs/decisions/0012-reconnect-catch-up-as-recovery.md).
   const receiver = new SocketModeReceiver({ appToken: process.env.SLACK_APP_TOKEN ?? "" });
   const app = new App({ token: process.env.SLACK_BOT_TOKEN, receiver });
+  const statusClient = createStatusClient(process.env.SLACK_BOT_TOKEN);
 
   let botUserId: string | undefined;
   /** The bot-scope check runs once per process, on the first `connected`. */
@@ -371,16 +417,20 @@ export function createSlackApp(deps: CoreDeps) {
                 console.log(`[catch-up] ${m.channel}:${m.ts}: skipped — handled live since the scan`);
                 return;
               }
-              void handle(deps, app.client, {
-                channel: m.channel,
-                user: m.user,
-                text: stripMention(m.text, id),
-                ts: m.ts,
-                threadTs: m.threadTs,
-                files: m.files as SlackFile[] | undefined,
-                botUserId: id,
-                caughtUp: true,
-              }).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
+              void handle(
+                deps,
+                { client: app.client, statusClient },
+                {
+                  channel: m.channel,
+                  user: m.user,
+                  text: stripMention(m.text, id),
+                  ts: m.ts,
+                  threadTs: m.threadTs,
+                  files: m.files as SlackFile[] | undefined,
+                  botUserId: id,
+                  caughtUp: true,
+                },
+              ).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
             },
           });
           root.setAttrs({
@@ -401,15 +451,19 @@ export function createSlackApp(deps: CoreDeps) {
 
   app.event("app_mention", async ({ event, client }) => {
     botUserId ??= (await client.auth.test()).user_id ?? undefined;
-    await handle(deps, client, {
-      channel: event.channel,
-      user: event.user ?? "unknown",
-      text: stripMention(event.text ?? "", botUserId),
-      ts: event.ts,
-      threadTs: event.thread_ts ?? event.ts,
-      files: (event as { files?: SlackFile[] }).files,
-      botUserId,
-    });
+    await handle(
+      deps,
+      { client, statusClient },
+      {
+        channel: event.channel,
+        user: event.user ?? "unknown",
+        text: stripMention(event.text ?? "", botUserId),
+        ts: event.ts,
+        threadTs: event.thread_ts ?? event.ts,
+        files: (event as { files?: SlackFile[] }).files,
+        botUserId,
+      },
+    );
   });
 
   // DMs to the bot, and follow-up replies in threads the bot participates in
@@ -440,23 +494,27 @@ export function createSlackApp(deps: CoreDeps) {
       thread = await threadIfBotInIt(client, m.channel, m.thread_ts!, botUserId);
       if (!thread) return;
     }
-    await handle(deps, client, {
-      channel: m.channel,
-      user: m.user ?? "unknown",
-      text: stripMention(m.text ?? "", botUserId),
-      ts: m.ts,
-      threadTs: m.thread_ts ?? m.ts,
-      files: m.files,
-      botUserId,
-      thread,
-    });
+    await handle(
+      deps,
+      { client, statusClient },
+      {
+        channel: m.channel,
+        user: m.user ?? "unknown",
+        text: stripMention(m.text ?? "", botUserId),
+        ts: m.ts,
+        threadTs: m.thread_ts ?? m.ts,
+        files: m.files,
+        botUserId,
+        thread,
+      },
+    );
   });
 
   // The receiver rides along for the Bolt-level wiring test: emitting
   // `connected` on `receiver.client` is exactly what a real reconnect does, so
   // the test can drive the hook without a live socket. Production
   // (src/index.ts) uses only `app`.
-  return { app, receiver };
+  return { app, receiver, statusClient };
 }
 
 interface SlackEvent {
@@ -585,7 +643,7 @@ async function resolveTeamUrl(client: SlackClient): Promise<string | undefined> 
   return teamUrl;
 }
 
-async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Promise<void> {
+async function handle(deps: CoreDeps, { client, statusClient }: SlackClients, ev: SlackEvent): Promise<void> {
   // The request's root (docs/reference/specs/tracing.md): our process saw the message NOW,
   // before the redelivery guard — a dropped redelivery is a root with one
   // child and no run. Everything the adapter does before `dispatch()` is one
@@ -599,7 +657,12 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
       trace.root.end("ok", { status: "refused" });
       return;
     }
-    await dispatch(deps, { ...received, receivedAt, originAt: tsMs(ev.ts) }, new SlackIO(client, ev), { trace });
+    await dispatch(
+      deps,
+      { ...received, receivedAt, originAt: tsMs(ev.ts) },
+      new SlackIO(client, ev, { statusClient }),
+      { trace },
+    );
   } finally {
     // Reached un-ended only when the receive itself threw (a download, a lookup):
     // `dispatch()` ends the root on every path of its own.
@@ -822,6 +885,7 @@ export async function fetchDocuments(
 export function resumeSlackIO(
   client: SlackClient,
   run: { channel: string; threadTs: string; user: string; cardTs?: string; botUserId?: string },
+  opts: { statusClient?: SlackClient; statusBudget?: StatusBudget } = {},
 ): SlackIO {
   return new SlackIO(
     client,
@@ -833,7 +897,7 @@ export function resumeSlackIO(
       threadTs: run.threadTs,
       botUserId: run.botUserId,
     },
-    run.cardTs ? { existingCard: { ts: run.cardTs } } : {},
+    { ...opts, ...(run.cardTs ? { existingCard: { ts: run.cardTs } } : {}) },
   );
 }
 
@@ -843,8 +907,10 @@ export class SlackIO implements ChannelIO {
     private ev: SlackEvent,
     /** `existingCard`: the status message a resumed run already has in the
      *  thread (docs/reference/specs/run-history.md item 38) — `status()` edits it instead
-     *  of posting a second card. */
-    private opts: { existingCard?: { ts: string } } = {},
+     *  of posting a second card. `statusClient`: where card edits go (default
+     *  `client`; production passes `createStatusClient`'s). `statusBudget`: the
+     *  edit budget drawn from (default the process's one). */
+    private opts: { existingCard?: { ts: string }; statusClient?: SlackClient; statusBudget?: StatusBudget } = {},
   ) {}
 
   async reply(text: string): Promise<void> {
@@ -883,12 +949,17 @@ export class SlackIO implements ChannelIO {
   }
 
   async status(initial: StatusUpdate): Promise<StatusHandle> {
+    // Card edits and the shimmer ride the status client and draw from the
+    // process budget (docs/reference/specs/run-visibility.md item 8); the card's post
+    // and a resumed card's first edit stay on the main client — they must land.
+    const statusClient = this.opts.statusClient ?? this.client;
+    const budget = this.opts.statusBudget ?? processStatusBudget;
     // Native Slack shimmer: rotating loading phrases shown inline in the
     // thread ("Switchboard is <phrase>"). Works in channel threads since
     // March 2026 with chat:write; auto-clears when the bot replies, times out
     // after ~2 min idle, so re-up every 75s during long turns.
     const setShimmer = () =>
-      this.client.assistant.threads
+      statusClient.assistant.threads
         .setStatus({
           channel_id: this.ev.channel,
           thread_ts: this.ev.threadTs,
@@ -929,17 +1000,55 @@ export class SlackIO implements ChannelIO {
     await setShimmer();
     const shimmerTimer = setInterval(() => void setShimmer(), 75_000);
     liveCards.add(liveCardKey(this.ev.channel, ts));
-    const edit = (frame: StatusUpdate) =>
-      this.client.chat.update({ channel: this.ev.channel, ts, ...render(frame) }).catch(() => {});
+    const card = `${this.ev.channel}:${ts}`;
+    budget.open(card);
+    const edit = (frame: StatusUpdate) => statusClient.chat.update({ channel: this.ev.channel, ts, ...render(frame) });
+    // Progress frames the budget refused: the card was stale until the next
+    // heartbeat that got a token. Counted for the close's log line.
+    let dropped = 0;
+    // The terminal frame is the one a reader waits for, so it is never dropped:
+    // a 429 is re-sent after Slack's Retry-After, up to TERMINAL_RESENDS times,
+    // on unref'd timers off the reply's path (a process exiting first leaves the
+    // card to the orphan sweep).
+    const sendTerminal = async (frame: StatusUpdate, attempt: number): Promise<void> => {
+      try {
+        await edit(frame);
+      } catch (err) {
+        const retryAfter = retryAfterSeconds(err);
+        if (retryAfter === undefined || attempt >= TERMINAL_RESENDS) {
+          console.warn(
+            `[slack] card ${card}: terminal frame not painted (${describeError(err)}) after ${attempt + 1} attempts`,
+          );
+          return;
+        }
+        setTimeout(() => void sendTerminal(frame, attempt + 1), retryAfter * 1000).unref();
+      }
+    };
     return {
       handle: { channel: this.ev.channel, ts },
-      update: (frame) => void edit(frame),
+      update: (frame) => {
+        if (!budget.tryProgress(card, this.ev.channel)) {
+          dropped++;
+          return;
+        }
+        // A rate-limited or failed progress edit is dropped: the next frame repaints.
+        void edit(frame).catch(() => {});
+      },
       done: async (frame) => {
         clearInterval(shimmerTimer);
         liveCards.delete(liveCardKey(this.ev.channel, ts));
-        await edit(frame);
+        budget.close(card);
+        // Funded now: one round trip before the reply, the common case. Not
+        // funded: the edit goes out when the budget says, and the reply does not wait.
+        const waitMs = budget.takeTerminal(this.ev.channel);
+        if (waitMs === 0) await sendTerminal(frame, 0);
+        else {
+          console.warn(`[slack] card ${card}: terminal frame waits ${waitMs} ms for the status budget`);
+          setTimeout(() => void sendTerminal(frame, 0), waitMs).unref();
+        }
+        if (dropped > 0) console.log(`[slack] card ${card}: ${dropped} progress frames dropped by the status budget`);
         // reply auto-clears the shimmer; clear explicitly for error paths
-        await this.client.assistant.threads
+        await statusClient.assistant.threads
           .setStatus({ channel_id: this.ev.channel, thread_ts: this.ev.threadTs, status: "" })
           .catch(() => {});
       },

@@ -319,7 +319,7 @@ async function main() {
   // registration, every surface.
   deps.commands = commands;
   // --- end command registry ---
-  const { app } = createSlackApp(deps);
+  const { app, statusClient } = createSlackApp(deps);
   // Channel facts for the run stamp (authorization.md item 7): with
   // the Slack adapter up, `conversations.info` decides whether a `slack:C…`
   // channel is public or private — cached per channel per TTL, `unknown` on any
@@ -742,12 +742,16 @@ async function main() {
       ioFor: (row) => {
         const [platform, channel, threadTs] = row.threadKey.split(":");
         if (platform === "slack" && channel && threadTs) {
-          return resumeSlackIO(app.client, {
-            channel,
-            threadTs,
-            user: row.meta.userId.replace(/^slack:/, ""),
-            ...(row.card ? { cardTs: row.card.ts } : {}),
-          });
+          return resumeSlackIO(
+            app.client,
+            {
+              channel,
+              threadTs,
+              user: row.meta.userId.replace(/^slack:/, ""),
+              ...(row.card ? { cardTs: row.card.ts } : {}),
+            },
+            { statusClient },
+          );
         }
         if (platform === "http" || platform === "mcp") return nullChannelIO(row.threadKey);
         return undefined;

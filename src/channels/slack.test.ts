@@ -10,6 +10,7 @@ import {
   fetchImages,
   isLiveCard,
   closeReclaimedCards,
+  createStatusClient,
   markForeignLiveCards,
   ownsLiveCard,
   refreshForeignLiveCards,
@@ -23,6 +24,7 @@ import {
   stripMention,
   threadIncludesBot,
 } from "./slack.js";
+import { createStatusBudget, type StatusBudget } from "../core/statusBudget.js";
 
 // Feature: docs/reference/specs/slack-channel.md — trigger gating (which events start a
 // run) and image-attachment ingestion within budgets.
@@ -1046,5 +1048,170 @@ describe("SlackIO.attach (docs/reference/specs/slack-channel.md item 10)", () =>
     expect(texts[0]).toContain("`vanta` (user)");
     expect(texts.join("")).toContain("Tools (100):");
     for (const c of postMessage.mock.calls) expect(c[0]).toMatchObject({ channel: "C1", thread_ts: "1.0" });
+  });
+});
+
+// Feature: docs/reference/specs/run-visibility.md item 8 — card edits ride a status client of
+// their own and draw from one process-wide budget; the terminal frame never
+// waits behind a rate limit and never blocks the reply.
+describe("SlackIO.status — status budget", () => {
+  const ev = { channel: "C1", user: "UA", text: "", ts: "1.0", threadTs: "1.0", botUserId: "UBOT" };
+  const RATE_LIMITED = { code: "slack_webapi_rate_limited_error", retryAfter: 2 };
+  function clients() {
+    const main = {
+      update: vi.fn(async (_o: Record<string, unknown>) => ({ ok: true })),
+      postMessage: vi.fn(async (_o: Record<string, unknown>) => ({ ok: true, ts: "card.1" })),
+      setStatus: vi.fn(async (_o: Record<string, unknown>) => ({ ok: true })),
+    };
+    const status = {
+      update: vi.fn(async (_o: Record<string, unknown>) => ({ ok: true })),
+      setStatus: vi.fn(async (_o: Record<string, unknown>) => ({ ok: true })),
+    };
+    type Client = ConstructorParameters<typeof SlackIO>[0];
+    const client = {
+      chat: { update: main.update, postMessage: main.postMessage },
+      assistant: { threads: { setStatus: main.setStatus } },
+    } as unknown as Client;
+    const statusClient = {
+      chat: { update: status.update },
+      assistant: { threads: { setStatus: status.setStatus } },
+    } as unknown as Client;
+    return { client, statusClient, main, status };
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** A budget that never binds: the tests below are about the adapter, the budget's rules are its module's tests. */
+  const openBudget = () => createStatusBudget({ perMinute: 600, channelSpacingMs: 0, now: () => 0 });
+
+  it("the card is posted on the main client; every edit, the shimmer and the close go through the status client", async () => {
+    const { client, statusClient, main, status } = clients();
+    const budget = openBudget();
+    const handle = await new SlackIO(client, ev, { statusClient, statusBudget: budget }).status({ title: "👀" });
+    handle.update({ title: "⚡ 5s" });
+    await handle.done({ title: "✅ 6s" });
+    expect(main.postMessage).toHaveBeenCalledTimes(1);
+    expect(main.update).not.toHaveBeenCalled();
+    expect(status.update.mock.calls.map((c) => (c[0] as { text: string }).text)).toEqual(["⚡ 5s", "✅ 6s"]);
+    expect(status.setStatus).toHaveBeenCalledTimes(2); // the shimmer on, then cleared by done
+    expect(main.setStatus).not.toHaveBeenCalled();
+  });
+
+  it("progress frames the budget refuses are dropped and counted; the terminal frame still goes out", async () => {
+    const { client, statusClient, status } = clients();
+    // A scripted budget: three progress tokens, then refusals (the budget's own rules are its module's tests).
+    let progress = 3;
+    const budget: StatusBudget = {
+      open: () => {},
+      close: () => {},
+      tryProgress: () => progress-- > 0,
+      takeTerminal: () => 0,
+      tokens: () => progress,
+    };
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const handle = await new SlackIO(client, ev, { statusClient, statusBudget: budget }).status({ title: "👀" });
+    for (let i = 1; i <= 5; i++) handle.update({ title: `⚡ ${i}` });
+    await handle.done({ title: "✅" });
+    expect(status.update.mock.calls.map((c) => (c[0] as { text: string }).text)).toEqual([
+      "⚡ 1",
+      "⚡ 2",
+      "⚡ 3",
+      "✅",
+    ]);
+    expect(log.mock.calls.map((c) => String(c[0]))).toContain(
+      "[slack] card C1:card.1: 2 progress frames dropped by the status budget",
+    );
+  });
+
+  it("a rate-limited terminal frame is re-sent after Retry-After, again and again, without holding done(); a rate-limited progress frame is not", async () => {
+    vi.useFakeTimers();
+    const { client, statusClient, status } = clients();
+    const handle = await new SlackIO(client, ev, { statusClient, statusBudget: openBudget() }).status({ title: "👀" });
+    status.update.mockRejectedValueOnce(RATE_LIMITED);
+    handle.update({ title: "⚡ 1" });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(status.update).toHaveBeenCalledTimes(1); // no re-send for a progress frame
+    status.update.mockRejectedValueOnce(RATE_LIMITED).mockRejectedValueOnce(RATE_LIMITED);
+    await handle.done({ title: "✅" }); // resolves at once
+    expect(status.update).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(status.update).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(status.update).toHaveBeenCalledTimes(3); // refused again → one more Retry-After
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(status.update).toHaveBeenCalledTimes(4);
+    expect((status.update.mock.calls[3]![0] as { text: string }).text).toBe("✅");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(status.update).toHaveBeenCalledTimes(4); // accepted: no more sends
+  });
+
+  it("a terminal frame refused past the re-send cap is given up with a warning", async () => {
+    vi.useFakeTimers();
+    const { client, statusClient, status } = clients();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const handle = await new SlackIO(client, ev, { statusClient, statusBudget: openBudget() }).status({ title: "👀" });
+    status.update.mockRejectedValue(RATE_LIMITED);
+    await handle.done({ title: "✅" });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(status.update).toHaveBeenCalledTimes(11); // the first send + 10 re-sends
+    expect(warn.mock.calls.map((c) => String(c[0]))).toContain(
+      "[slack] card C1:card.1: terminal frame not painted (slack_webapi_rate_limited_error) after 11 attempts",
+    );
+  });
+
+  it("a terminal frame the budget cannot fund now is sent when the budget says, and done() does not wait for it", async () => {
+    vi.useFakeTimers();
+    const { client, statusClient, status } = clients();
+    let t = 0;
+    const budget = createStatusBudget({ perMinute: 60, reserve: 0, channelSpacingMs: 0, now: () => t }); // one token a second
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const handle = await new SlackIO(client, ev, { statusClient, statusBudget: budget }).status({ title: "👀" });
+    for (let i = 0; i < 60; i++) budget.tryProgress(`other${i}`, `C${i}`); // the fleet spent the bucket
+    expect(budget.tokens()).toBe(0);
+    await handle.done({ title: "✅" });
+    expect(status.update).not.toHaveBeenCalled();
+    expect(warn.mock.calls.map((c) => String(c[0]))).toContain(
+      "[slack] card C1:card.1: terminal frame waits 1000 ms for the status budget",
+    );
+    t = 1_000;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(status.update).toHaveBeenCalledTimes(1);
+    expect((status.update.mock.calls[0]![0] as { text: string }).text).toBe("✅");
+  });
+
+  it("a terminal frame refused for any other reason is dropped, not re-sent", async () => {
+    vi.useFakeTimers();
+    const { client, statusClient, status } = clients();
+    const handle = await new SlackIO(client, ev, { statusClient, statusBudget: openBudget() }).status({ title: "👀" });
+    status.update.mockRejectedValueOnce(new Error("message_not_found"));
+    await handle.done({ title: "✅" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(status.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("createStatusClient builds a WebClient that rejects rate-limited calls instead of pausing and retrying", () => {
+    const c = createStatusClient("xoxb-test") as unknown as {
+      rejectRateLimitedCalls: boolean;
+      retryConfig: { retries: number };
+    };
+    expect(c.rejectRateLimitedCalls).toBe(true);
+    expect(c.retryConfig.retries).toBe(1);
+  });
+
+  it("a resumed run's IO edits its card through the status client too", async () => {
+    const { client, statusClient, main, status } = clients();
+    const io = resumeSlackIO(
+      client,
+      { channel: "C1", threadTs: "1.0", user: "UA", cardTs: "9.9" },
+      { statusClient, statusBudget: openBudget() },
+    );
+    const handle = await io.status({ title: "👀 resuming" });
+    expect(main.update).toHaveBeenCalledTimes(1); // the resumed card's first edit must land: main client
+    handle.update({ title: "⚡" });
+    expect(status.update).toHaveBeenCalledTimes(1);
+    expect(status.update.mock.calls[0]![0]).toMatchObject({ channel: "C1", ts: "9.9" });
   });
 });
