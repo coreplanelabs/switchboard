@@ -113,10 +113,24 @@ export function decide(fetched, { force = false } = {}) {
           // counter bug (double release, unmatched decrement). We cannot tell
           // idle from busy, so it is unknown — never an implicit "0 busy".
           unknown.push({ resource, error: `live view carries an impossible inFlight=${live.inFlight} (counter bug)` });
+        } else if (
+          live.runsInFlight !== undefined &&
+          (typeof live.runsInFlight !== "number" || !Number.isInteger(live.runsInFlight) || live.runsInFlight < 0)
+        ) {
+          unknown.push({
+            resource,
+            error: `live view carries an impossible runsInFlight=${live.runsInFlight} (counter bug)`,
+          });
         } else {
-          // Runs and cycles are independent facts; report BOTH so an operator
-          // who waits for the runs to drain is not surprised by a second refusal.
-          if (live.inFlight > 0) busy.push({ resource, inFlight: live.inFlight });
+          // `inFlight` counts the refresh cycle itself along with the runs, so a
+          // resident that is merely refreshing reads ≥ 1. The busy decision is
+          // about what a swap kills for a USER — the runs — which a Worker since
+          // item 44's revision reports apart as `runsInFlight`; an older Worker
+          // without the field is judged on `inFlight` as before (over-refusing,
+          // never under). Runs and cycles are independent facts; report BOTH so
+          // an operator who waits for the runs is not surprised by a second refusal.
+          const runs = typeof live.runsInFlight === "number" ? live.runsInFlight : live.inFlight;
+          if (runs > 0) busy.push({ resource, inFlight: runs });
           if (PROVISIONING_STATES.has(live.state)) {
             // Provisioning is mid-flight. An isolate swap kills it just like a
             // thread run (seen live: `build-failed: exit 143: Session

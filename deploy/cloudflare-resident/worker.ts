@@ -4564,8 +4564,17 @@ export class ResidentDO extends Sandbox<Env> {
    *  as idle: thread exec/read/write, disposable /op runs, and attaches past
    *  their own image check (mid clone/install under the mirror lock). */
   private inFlightCount(): number {
+    return this.runsInFlightCount() + this.refreshesInFlight;
+  }
+  /** The RUNS part of inFlightCount — what a deploy's isolate swap kills for a
+   *  user: thread exec/read/write, disposable /op runs, attaches mid-flight.
+   *  Without the refresh cycles, which resume from their checkpoints after a
+   *  swap (item 44): the deploy preflight refuses on this number and only
+   *  warns for a cycle, so a resident that is merely refreshing no longer
+   *  reads as busy. */
+  private runsInFlightCount(): number {
     const threadOps = [...this.threadOpsInFlight.values()].reduce((a, n) => a + n, 0);
-    return threadOps + this.opUsersInUse.size + this.attachesInFlight + this.refreshesInFlight;
+    return threadOps + this.opUsersInUse.size + this.attachesInFlight;
   }
   /** In-flight activity for the deploy preflight (GET /status, GET /residents).
    *  In-memory by nature: a fresh isolate answers 0, which is correct — nothing
@@ -5140,6 +5149,8 @@ export class ResidentDO extends Sandbox<Env> {
         provisionDeadline: provisionDeadline.length,
       },
       inFlight: this.inFlightCount(),
+      // The runs alone (no refresh cycle): what the deploy preflight refuses on.
+      runsInFlight: this.runsInFlightCount(),
       threads,
       // Item 55: the last disk sample (`residentDiskBudget.ts` DiskSample), or
       // null before the first measurement of this incarnation.

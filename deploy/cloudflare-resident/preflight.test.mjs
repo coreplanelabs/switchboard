@@ -116,6 +116,26 @@ describe("resident deploy preflight — decide()", () => {
     expect(refreshingBusy.message).toContain("repo:x/y (1 in flight)");
   });
 
+  it("`runsInFlight` decides busy when the live view carries it: a refreshing resident whose only in-flight work is its own cycle (inFlight 1, runsInFlight 0) → allow with the WARNING; a run in flight → refuse; a Worker without the field → inFlight decides as before", () => {
+    const cycleOnly = decide(
+      payload([{ resource: "repo:x/y", live: { state: "refreshing", inFlight: 1, runsInFlight: 0 } }]),
+    );
+    expect(cycleOnly.allow).toBe(true);
+    expect(cycleOnly.busy).toEqual([]);
+    expect(cycleOnly.interrupting).toEqual([{ resource: "repo:x/y", state: "refreshing" }]);
+    expect(cycleOnly.message).toMatch(/^preflight ok:/);
+    expect(cycleOnly.message).toContain("WARNING");
+    const withRun = decide(
+      payload([{ resource: "repo:x/y", live: { state: "refreshing", inFlight: 2, runsInFlight: 1 } }]),
+    );
+    expect(withRun.allow).toBe(false);
+    expect(withRun.busy).toEqual([{ resource: "repo:x/y", inFlight: 1 }]);
+    expect(withRun.message).toContain("repo:x/y (1 in flight)");
+    const bad = decide(payload([{ resource: "repo:x/y", live: { state: "warm", inFlight: 0, runsInFlight: -1 } }]));
+    expect(bad.allow).toBe(false);
+    expect(bad.unknown[0].error).toContain("runsInFlight=-1");
+  });
+
   // Allow-list of settled states: this script is plain JS outside the shared
   // ResidentLifecycleState type, so a state it has never heard of must fail
   // closed rather than be assumed idle.
