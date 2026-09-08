@@ -754,7 +754,7 @@ async function main() {
   // leaves a frozen status card in the thread. Cloudflare's rollout sends
   // SIGTERM and waits up to 15 min before SIGKILL — but a SECOND deploy on top
   // of a draining instance replaces it at once (live 2026-08-29 23:51Z, a
-  // review killed at 153 s). The deploy preflight refuses while `draining` is
+  // review killed at 153 s). The deploy preflight warns while `draining` is
   // true; the live cards say what is happening meanwhile. Run-history writes
   // drain here too (see `inFlight` above).
   //

@@ -34,25 +34,20 @@ describe("decideRestart", () => {
     expect(decideRestart(idle, { force: false })).toMatchObject({ allow: true, forced: false, problems: [] });
   });
 
-  it("runs in flight → refuse, naming the count; --force allows with the warning", () => {
-    const refused = decideRestart({ ...idle, inFlight: 2 }, { force: false });
-    expect(refused.allow).toBe(false);
-    expect(refused.problems).toEqual(["2 run(s) in flight — a restart would kill them"]);
-    expect(refused.message).toMatch(/REFUSED/);
-    const forced = decideRestart({ ...idle, inFlight: 2 }, { force: true });
-    expect(forced).toMatchObject({
-      allow: true,
-      forced: true,
-      problems: ["2 run(s) in flight — a restart would kill them"],
-    });
-    expect(forced.message).toMatch(/SIGTERM'd into the drain/);
-    expect(forced.message).not.toMatch(/WILL be killed/); // stop() drains; nothing is killed before the deadline
+  it("runs in flight → allow with a WARNING naming the count and the handoff (run-history item 39); --force changes nothing here", () => {
+    const d = decideRestart({ ...idle, inFlight: 2 }, { force: false });
+    expect(d).toMatchObject({ allow: true, forced: false, problems: [] });
+    expect(d.warnings).toEqual([expect.stringMatching(/^2 run\(s\) in flight — handed to the next generation/)]);
+    expect(d.message).toMatch(/restart ok/);
+    expect(d.message).toContain("\n  - 2 run(s) in flight"); // a real newline before each warning, never a literal \n
+    expect(d.message).not.toMatch(/REFUSED|WILL be killed/);
+    expect(decideRestart({ ...idle, inFlight: 2 }, { force: true })).toMatchObject({ allow: true, forced: false });
   });
 
-  it("already draining → refuse even with 0 in flight (the bot is restarting on its own)", () => {
+  it("already draining → allow with a WARNING even at 0 in flight (the bot is restarting on its own; a second stop is harmless)", () => {
     const d = decideRestart({ ...idle, draining: true }, { force: false });
-    expect(d.allow).toBe(false);
-    expect(d.problems[0]).toMatch(/already draining/);
+    expect(d).toMatchObject({ allow: true, forced: false, problems: [] });
+    expect(d.warnings[0]).toMatch(/already draining/);
   });
 
   it("fails closed: no JSON body or an impossible inFlight refuses (force still bypasses)", () => {

@@ -17,7 +17,7 @@ flowchart LR
 
 A Worker is deployed when one of its inputs changed since the commit it serves: a file its `worker.ts` imports (transitively — a shared `src/` module deploys every Worker that imports it), anything in its own `deploy/` directory, a *production* dependency of its workspace moving in the root lockfile, and for the bot anything its Dockerfile copies or installs. A `vitest` bump, a docs page, a test, a CI file deploy nothing. A path no rule recognises deploys **everything** and says which path — that is the fail-safe, not a bug; classify the path in `src/deploy/affected.ts`.
 
-If a deploy step finds runs in flight, it **waits and retries** (every 60 s, up to 45 min in CI) instead of killing them — a heartbeat line per retry in the job log. If the bot is still busy when that budget runs out, nothing is broken: `deploy all` exits 75 (`busy`), the job ends with a warning instead of red, and it dispatches itself again at the head of `main` (up to 8 attempts, about 6 hours). Because the retry is `--affected`, it deploys whatever is behind at that moment — a later release included — so a string of busy attempts needs no attention; only the eighth timeout, or a real failure (exit 1, never retried), asks for a person. **Deployed ≠ live**: the bot step isn't done until `/healthz` reports a non-draining container running the release commit — the old container keeps answering while it drains for up to 15 minutes. The job summary ends with what each Worker is serving after the run.
+A deploy step that finds runs in flight **does not wait for them**: on SIGTERM the bot hands every resumable run to the next container, which continues it within seconds under the same Slack card (the run ledger, `features/run-history.md` item 39). The preflight says so as a warning in the job log and proceeds. What it still waits out (every 60 s, up to 10 min) is a container rollout that has not settled yet; still refusing after that is a real failure — red, for a person — as is any other non-zero exit. **Deployed ≠ live**: the bot step isn't done until `/healthz` reports a container running the release commit — the old one keeps answering for the few seconds of its handoff, or up to 15 minutes if a ship pipeline is finishing there. The job summary ends with what each Worker is serving after the run.
 
 ## See what a PR would deploy
 
@@ -56,7 +56,7 @@ npm run secrets -- --only <NAME>   # = `deploy secrets bot --only <NAME>`; or: w
 SWITCHBOARD_DEPLOY_TOKEN=… npm run cli -- deploy restart
 ```
 
-`deploy restart` drains the container gracefully and starts the next request on the new secret — no image build, no release. It waits out in-flight runs the same way a deploy does; done once `/healthz` reports a later `startedAt` (~30s when idle).
+`deploy restart` drains the container gracefully and starts the next request on the new secret — no image build, no release. Runs in flight hand off to the next container the same way a deploy's do; done once `/healthz` reports a later `startedAt` (~30s).
 
 A **shared** bearer (`MEMORY_TOKEN`, `SANDBOX_TOKEN`, `RESIDENT_*_TOKEN`) must be the same value on every Worker `deploy/secrets.manifest.json` lists for it — rotating it means putting the new value everywhere it's listed, not just on the Worker where you noticed it. Rotating `RESIDENT_READ_TOKEN` or `SANDBOX_TOKEN` also means updating the repository secret CI deploys with.
 

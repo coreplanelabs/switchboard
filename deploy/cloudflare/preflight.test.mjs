@@ -61,17 +61,24 @@ describe("bot deploy preflight — decide()", () => {
     expect(d.message).toMatch(/preflight ok/);
   });
 
-  it("runs in flight → refuse, naming the count", () => {
+  it("runs in flight → allow with a WARNING naming the count and the handoff (run-history item 39) — never a refusal, nobody waits", () => {
     const d = decide({ health: health(2), apps: apps("active") });
-    expect(d.allow).toBe(false);
+    expect(d.allow).toBe(true);
+    expect(d.forced).toBe(false);
+    expect(d.problems).toEqual([]);
+    expect(d.warnings).toEqual([expect.stringMatching(/^2 run\(s\) in flight — handed to the next generation/)]);
+    expect(d.message).toMatch(/preflight ok/);
+    expect(d.message).toMatch(/WARNING/);
     expect(d.message).toContain("2 run(s) in flight");
-    expect(d.message).toMatch(/SWITCHBOARD_DEPLOY_FORCE=1/);
+    expect(d.message).not.toMatch(/SWITCHBOARD_DEPLOY_FORCE=1/); // nothing to force
   });
 
-  it("bot already draining (a previous deploy's SIGTERM landed) → refuse even with 0 in flight", () => {
+  it("bot already draining (a previous deploy's SIGTERM landed) → allow with a WARNING: its resumable runs were handed off; a ship pipeline still in flight is what the warning names", () => {
     const d = decide({ health: health(0, true), apps: apps("active") });
-    expect(d.allow).toBe(false);
-    expect(d.message).toMatch(/draining/);
+    expect(d.allow).toBe(true);
+    expect(d.problems).toEqual([]);
+    expect(d.warnings).toEqual([expect.stringMatching(/draining/)]);
+    expect(d.message).toMatch(/ship pipeline/);
   });
 
   it("container rollout still in progress (provisioning / updating / anything not settled) → refuse", () => {
@@ -111,8 +118,11 @@ describe("bot deploy preflight — decide()", () => {
     expect(d.message).toContain("state=provisioning");
   });
 
-  it("problems are all reported at once (an operator waits for the runs and is not surprised by a second refusal)", () => {
+  it("problems and warnings are all reported at once: a rollout in progress refuses, the runs in flight are said alongside", () => {
     const d = decide({ health: health(3, false), apps: apps("updating") });
+    expect(d.allow).toBe(false);
+    expect(d.problems).toEqual([expect.stringContaining("state=updating")]);
+    expect(d.warnings).toEqual([expect.stringContaining("3 run(s) in flight")]);
     expect(d.message).toContain("3 run(s) in flight");
     expect(d.message).toContain("state=updating");
   });
@@ -162,13 +172,13 @@ describe("bot deploy preflight — catchUpWarnings()", () => {
     expect(d.message).toContain("missing_scope");
   });
 
-  it("a refusal still lists the catch-up warnings", () => {
+  it("a refusal (a rollout still in progress) still lists the catch-up warnings", () => {
     const d = decide({
       health: {
         ok: true,
-        payload: { ok: true, inFlight: 1, draining: false, catchUp: { missingScopes: ["groups:read"] } },
+        payload: { ok: true, inFlight: 0, draining: false, catchUp: { missingScopes: ["groups:read"] } },
       },
-      apps: apps("active"),
+      apps: apps("updating"),
     });
     expect(d.allow).toBe(false);
     expect(d.message).toContain("groups:read");

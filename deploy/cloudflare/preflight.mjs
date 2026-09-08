@@ -1,21 +1,21 @@
 #!/usr/bin/env node
 // Deploy preflight for the bot Worker (features/slack-channel.md item 8).
 //
-// `wrangler deploy` rolls the bot container. Cloudflare's rollout sends SIGTERM
-// and allows up to 15 min for the graceful drain (src/index.ts), which is why
-// ONE deploy on top of a run finishes the run first. But a SECOND deploy while
-// that instance is still draining replaces it immediately: live 2026-08-29,
-// deploys at 23:49:45Z and 23:51:15Z landed on a review started 23:48:40Z; the
-// run was killed at 153 s, its status card froze forever ("153s — thinking")
-// and it vanished from /runs (the registry is in-memory). So `npm run deploy`
-// runs this first and refuses while
-//   - the bot reports runs in flight (`GET /healthz` → `inFlight > 0`),
-//   - the bot is already draining from an earlier rollout (`draining: true`),
+// `wrangler deploy` rolls the bot container. Cloudflare's rollout sends SIGTERM;
+// since the run ledger's handoff (features/run-history.md item 39) the bot
+// hands every resumable run to the next generation and exits within seconds,
+// and the next generation continues the runs under their own cards — so a
+// deploy no longer waits on runs, and this preflight no longer refuses for
+// them. `npm run deploy` runs it first and refuses only while
 //   - the container application is not in a settled state (a rollout is still
-//     provisioning/updating — `wrangler containers list --json`).
-// It also WARNS (never refuses — this deploy may be the fix) when /healthz
-// says the reconnect catch-up is failing or the bot token lacks required
-// scopes (#271; `catchUp.error`, `catchUp.missingScopes`).
+//     provisioning/updating — `wrangler containers list --json`): a second
+//     rollout on top of one in progress is what killed a review at 153 s on
+//     2026-08-29 (deploys at 23:49:45Z and 23:51:15Z on a run started 23:48:40Z).
+// It WARNS (never refuses) when the bot reports runs in flight (`inFlight > 0`
+// — they hand off) or is already draining (`draining: true` — its resumable
+// runs were handed off; a ship pipeline still in flight would be killed), and
+// when /healthz says the reconnect catch-up is failing or the bot token lacks
+// required scopes (#271; `catchUp.error`, `catchUp.missingScopes`).
 //
 // Fail closed: unreachable bot, a body without the JSON shape (a Worker that
 // predates this preflight answers a bare `ok`), a wrangler failure, or an app
@@ -39,7 +39,7 @@ export const APP_NAME = "switchboard-switchboardserver";
 const SETTLED_APP_STATES = new Set(["active", "ready"]);
 
 const HOW_TO_FORCE =
-  "to deploy anyway (this WILL kill in-flight runs and freeze their status cards): `SWITCHBOARD_DEPLOY_FORCE=1 npm run deploy` (`node preflight.mjs --force` checks alone)";
+  "to deploy anyway (over a rollout in progress, or blind when the bot cannot be consulted): `SWITCHBOARD_DEPLOY_FORCE=1 npm run deploy` (`node preflight.mjs --force` checks alone)";
 
 /** GET /healthz. Never throws: `{ok:true,payload}` (parsed JSON, or the raw text when not JSON) or `{ok:false,error}`. */
 export async function fetchHealth(baseUrl, { timeoutMs = 20_000 } = {}) {
@@ -150,10 +150,6 @@ export function catchUpWarnings(payload) {
 export function decide({ health, apps }, { force = false } = {}) {
   const problems = [];
   const warnings = health?.ok === true ? catchUpWarnings(health.payload) : [];
-  const warningText =
-    warnings.length > 0
-      ? `\n  WARNING (not blocking — deploy may be the fix):\n${warnings.map((w) => `  - ${w}`).join("\n")}`
-      : "";
 
   if (!health || health.ok !== true) {
     problems.push(`bot not consulted: ${health?.error ?? "unknown error"}`);
@@ -167,11 +163,15 @@ export function decide({ health, apps }, { force = false } = {}) {
       if (!Number.isInteger(p.inFlight) || p.inFlight < 0) {
         problems.push(`bot reports an impossible inFlight=${JSON.stringify(p.inFlight)} (counter bug or old Worker)`);
       } else if (p.inFlight > 0) {
-        problems.push(`${p.inFlight} run(s) in flight — a rollout would kill them`);
+        // Not a refusal since the handoff (run-history item 39): SIGTERM hands
+        // every resumable run to the next generation, which continues it.
+        warnings.push(
+          `${p.inFlight} run(s) in flight — handed to the next generation on SIGTERM (run-history item 39); they continue there under their own cards`,
+        );
       }
       if (p.draining === true) {
-        problems.push(
-          "bot is already draining from a previous deploy — a second rollout replaces the draining instance at once (the 2026-08-29 incident)",
+        warnings.push(
+          "bot is already draining from a previous deploy — its resumable runs are handed off; a ship pipeline still in flight would be killed when this rollout replaces the draining instance",
         );
       }
     }
@@ -190,13 +190,15 @@ export function decide({ health, apps }, { force = false } = {}) {
     }
   }
 
+  const warningText =
+    warnings.length > 0 ? `\n  WARNING (not blocking):\n${warnings.map((w) => `  - ${w}`).join("\n")}` : "";
   if (problems.length === 0) {
     return {
       allow: true,
       forced: false,
       problems,
       warnings,
-      message: `preflight ok: no runs in flight, not draining, container application settled${warningText}`,
+      message: `preflight ok: container application settled${warningText}`,
     };
   }
   const detail = problems.map((p) => `  - ${p}`).join("\n");
@@ -206,7 +208,7 @@ export function decide({ health, apps }, { force = false } = {}) {
       forced: true,
       problems,
       warnings,
-      message: `preflight WARNING: deploying by force despite —\n${detail}\n  in-flight runs are SIGTERM-drained — they finish if they can, else are killed at the drain deadline — and their status cards left for the next connect's sweep to close${warningText}`,
+      message: `preflight WARNING: deploying by force despite —\n${detail}\n  a rollout landing on one in progress can disrupt it; in-flight runs hand off regardless (run-history item 39)${warningText}`,
     };
   }
   return {

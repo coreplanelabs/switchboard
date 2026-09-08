@@ -108,10 +108,12 @@ const deployOptions = z.object({
   force: flag
     .optional()
     .describe(
-      "bypass the bot/resident preflights — in-flight runs are SIGTERM-drained and killed only at the drain deadline",
+      "bypass the bot/resident preflights — deploy over a rollout in progress, or blind when a Worker cannot be consulted (in-flight bot runs hand off regardless)",
     ),
   allowBranch: flag.optional().describe("deploy from a branch other than origin/main (deliberately)"),
-  waitMax: positiveInt.optional().describe("minutes to wait out a refusing preflight (default 30)"),
+  waitMax: positiveInt
+    .optional()
+    .describe("minutes to wait out a refusing preflight — a container rollout still settling (default 10)"),
   poll: positiveInt.optional().describe("seconds between preflight retries (default 60)"),
 });
 
@@ -127,7 +129,7 @@ function toOptions(
     dryRun,
     force: o.force ?? false,
     allowBranch: o.allowBranch ?? false,
-    waitMaxMinutes: o.waitMax ?? 30,
+    waitMaxMinutes: o.waitMax ?? 10,
     pollSeconds: o.poll ?? 60,
   };
 }
@@ -197,19 +199,14 @@ export const deployAll = defineCommand({
     if (result.kind === "refused")
       throw new CommandError("unavailable", `refusing —\n  - ${result.problems.join("\n  - ")}`);
     if (!result.ok) {
-      // The run stops at its first failure, so at most one result failed. When
-      // that failure is a preflight that never cleared, nothing is broken: the
-      // same deploy succeeds once the runs in flight finish — `busy` (exit 75),
-      // which is what the release workflow re-dispatches on. Any other failure
-      // needs a person.
-      const failed = result.results.filter((r) => r.status.startsWith("FAILED"));
-      const timedOut = failed.length > 0 && failed.every((r) => r.preflightTimedOut);
-      const table = formatDeployResults(result.results, result.notAttempted);
-      if (timedOut) {
-        const waited = failed.map((r) => `${r.name}: ${r.status.replace(/^FAILED: /, "")}`).join("; ");
-        throw new CommandError("busy", `deploy waited out its budget — ${waited}\n${table}`);
-      }
-      throw new CommandError("unavailable", `deploy stopped —\n${table}`);
+      // The run stops at its first failure, so at most one result failed; every
+      // failure needs a person. (Runs in flight no longer hold a deploy — the
+      // handoff, run-history item 39 — so a preflight still refusing past the
+      // wait budget is a rollout stuck in progress, not a busy bot.)
+      throw new CommandError(
+        "unavailable",
+        `deploy stopped —\n${formatDeployResults(result.results, result.notAttempted)}`,
+      );
     }
     return { plan: planJson(plan), results: result.results as unknown as JsonValue };
   },
@@ -222,10 +219,12 @@ const restartOptions = z.object({
     .describe("the Worker to restart — only `bot` has a long-lived container (default bot)"),
   force: flag
     .optional()
-    .describe("restart even while runs are in flight — they are SIGTERM-drained and killed only at the drain deadline"),
+    .describe(
+      "restart even when the bot cannot be consulted (no JSON on /healthz) — the fail-closed cases; runs in flight never refuse, they hand off",
+    ),
   waitMax: positiveInt
     .optional()
-    .describe("minutes to wait out a refusal (runs in flight) before giving up (default 30)"),
+    .describe("minutes to wait out a refusal (the bot not answering with JSON) before giving up (default 10)"),
   poll: positiveInt.optional().describe("seconds between retries while refused (default 60)"),
 });
 
@@ -236,7 +235,7 @@ export const deployRestart = defineCommand({
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): refused while runs are in flight unless --force; done once /healthz answers with a later startedAt.",
+    "Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.",
   render: (output) => {
     const o = output as JsonObject;
     return `${o.target} restarted — startedAt ${o.startedAt} (was ${o.previousStartedAt ?? "unknown"}), live after ${Math.round((o.waitedMs as number) / 1000)}s`;
@@ -252,7 +251,7 @@ export const deployRestart = defineCommand({
       {
         only: options.only ?? "bot",
         force: options.force ?? false,
-        waitMaxMinutes: options.waitMax ?? 30,
+        waitMaxMinutes: options.waitMax ?? 10,
         pollSeconds: options.poll ?? 60,
       },
       loaded.profile,

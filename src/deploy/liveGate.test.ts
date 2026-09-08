@@ -51,6 +51,37 @@ describe("decideLive", () => {
     });
   });
 
+  it("a draining container that serves the deployed commit is live only when its startedAt is later than the pre-upload reading — a same-commit rollout drains an old container that serves the commit too (run-history item 39; review F2)", () => {
+    const draining = (startedAt?: string) => ({
+      ok: true,
+      inFlight: 1,
+      draining: true,
+      build: { commit: HEAD },
+      ...(startedAt ? { startedAt } : {}),
+    });
+    const before = "2026-08-30T10:00:00.000Z";
+    const after = "2026-08-30T10:05:00.000Z";
+    // Provably the new container: it started after the reading taken before the upload.
+    expect(decideLive(draining(after), HEAD, 0, LIVE_GATE_DEADLINE_MS, { previousStartedAt: before })).toEqual({
+      kind: "live",
+      commit: HEAD,
+    });
+    // The same commit, the same start: the old container, draining under a same-commit rollout.
+    expect(decideLive(draining(before), HEAD, 0, LIVE_GATE_DEADLINE_MS, { previousStartedAt: before })).toEqual({
+      kind: "waiting",
+      reason: `the deployed commit answers but is draining (started ${before}) — a same-commit rollout replaces it; waiting for the new container`,
+    });
+    // No pre-upload reading, or a container without startedAt: a draining same-commit body waits.
+    expect(decideLive(draining(after), HEAD, 0).kind).toBe("waiting");
+    expect(decideLive(draining(), HEAD, 0, LIVE_GATE_DEADLINE_MS, { previousStartedAt: before })).toEqual({
+      kind: "waiting",
+      reason:
+        "the deployed commit answers but is draining — a same-commit rollout replaces it; waiting for the new container",
+    });
+    // Not draining: the commit alone proves it, as before.
+    expect(decideLive({ ...draining(before), draining: false }, HEAD, 0).kind).toBe("live");
+  });
+
   it("waiting while an OLD commit answers (not draining yet, rollout not started) — names both commits", () => {
     const d = decideLive(live("610682f7abcdef0123456789"), HEAD, 0);
     expect(d).toEqual({
@@ -135,6 +166,13 @@ describe("decideRestarted", () => {
       reason: "/healthz carries no startedAt — a container that predates `deploy restart` is answering",
     });
     expect(decideRestarted(at("not a date"), before, 0).kind).toBe("waiting");
+  });
+
+  it("a draining container with a LATER startedAt is restarted — the restart landed and a further stop is draining it (run-history item 39)", () => {
+    expect(decideRestarted(at(after, { draining: true, inFlight: 1 }), before, 0)).toEqual({
+      kind: "live",
+      startedAt: after,
+    });
   });
 
   it("when the previous startedAt is unknown (old container predated it), any non-draining startedAt counts as restarted", () => {
