@@ -88,6 +88,33 @@ describe("resolveGithubToken", () => {
     expect(JSON.parse(Buffer.from(payload, "base64url").toString())).toMatchObject({ iss: "12345" });
   });
 
+  // Feature: features/tracing.md item 23 — the mint under the caller's span.
+  it("under a span the mint is a github.token_mint child carrying scope, cached and expiresInMs, with the access_tokens request as its github.rest child; a cache hit is a mint span with cached: true and no request", async () => {
+    configureApp();
+    const fetchMock = mockMint("ghs_traced", 60 * 60_000);
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshModule();
+    const { createTracer } = await import("../core/trace/tracer.js");
+    const { recordingSink } = await import("../core/testing/recordingSink.js");
+    const log = recordingSink();
+    const root = createTracer({ clock: () => Date.now() }).start("request", { sinks: [log] });
+    const call = root.start("tool.github_file");
+    expect(await mod.resolveGithubToken("read", call)).toBe("ghs_traced");
+    expect(await mod.resolveGithubToken("read", call)).toBe("ghs_traced");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const mints = log.ends.filter((e) => e.name === "github.token_mint");
+    expect(mints).toHaveLength(2);
+    expect(mints[0]!.parentSpanId).toBe(call.id);
+    expect(mints[0]!.attrs).toMatchObject({ scope: "read", cached: false });
+    expect(mints[0]!.attrs.expiresInMs).toBeGreaterThan(0);
+    expect(mints[1]!.attrs).toMatchObject({ scope: "read", cached: true });
+    const rest = log.ends.filter((e) => e.name === "github.rest");
+    expect(rest.map((r) => [r.parentSpanId, r.attrs.route, r.attrs.method, r.attrs.httpStatus])).toEqual([
+      [mints[0]!.spanId, "app_installation_token", "POST", 201],
+    ]);
+    expect(JSON.stringify(log.ends)).not.toContain("ghs_traced");
+  });
+
   it("mints a READ-scoped token with a least-privilege permissions subset", async () => {
     configureApp();
     const fetchMock = mockMint("ghs_read", 60 * 60_000);

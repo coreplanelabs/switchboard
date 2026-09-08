@@ -138,6 +138,21 @@ describe("tracedFetch", () => {
     expect(log.ends.filter((e) => e.name === "http.client").at(-1)!.errorKind).toBe("timeout");
   });
 
+  it("a named client's span carries its name — github.rest — with the same attrs and no trace context for a foreign host", async () => {
+    const { log, parent, seen, fetchImpl } = harness();
+    await tracedFetch(
+      parent,
+      "https://api.github.com/repos/x/y/issues",
+      { method: "POST" },
+      { route: "issue_create", name: "github.rest", hosts, fetchImpl },
+    );
+    const span = log.ended("github.rest")!;
+    expect(span.parentSpanId).toBe(parent.id);
+    expect(span.attrs).toEqual({ host: "api.github.com", route: "issue_create", method: "POST", httpStatus: 201 });
+    expect(new Headers(seen[0]!.init?.headers).has("traceparent")).toBe(false);
+    expect(log.ended("http.client")).toBeUndefined();
+  });
+
   it("an unparseable input or an unknown method still spans the call, without the host or method attr", async () => {
     const { log, parent, fetchImpl } = harness();
     await tracedFetch(parent, "not a url", { method: "BREW" }, { route: "/x", hosts, fetchImpl });

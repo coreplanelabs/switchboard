@@ -367,6 +367,11 @@ async function runLoop(
             span: callSpan,
             executor: new TracingExecutor(execTracker, callSpan, opts.backend),
             publish: (e) => emit(withSpanId(e, callSpan.id)),
+            // The GitHub client as a view under this call: its requests and any
+            // token mint become `github.*` children (features/tracing.md item 23).
+            ...(toolContext.github?.api.withSpan
+              ? { github: { ...toolContext.github, api: toolContext.github.api.withSpan(callSpan) } }
+              : {}),
           }
         : toolContext;
       try {

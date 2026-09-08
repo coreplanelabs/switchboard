@@ -16,6 +16,8 @@ import type { Span } from "./types.js";
 export interface TracedFetchOptions {
   /** The route as the caller names it — a literal from a closed table, never the URL's path. */
   route: string;
+  /** The span's name: `http.client` unless the caller is a named client (`github.rest`). */
+  name?: "http.client" | "github.rest";
   /** The internal-host set; the process's configured set by default. */
   hosts?: InternalHosts;
   /** The fetch to use; the global one (read at call time, so a test's stub applies) by default. */
@@ -43,7 +45,7 @@ export async function tracedFetch(
     ...(METHODS.has(method) ? { method: method as AttrDomain["method"] } : {}),
   };
   return parent.span(
-    "http.client",
+    opts.name ?? "http.client",
     async (span) => {
       const headers = new Headers(init?.headers);
       if (host && hosts.has(host)) headers.set("traceparent", formatTraceparent(span.traceId, span.id));

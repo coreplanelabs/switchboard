@@ -2,6 +2,8 @@ import { createSign } from "node:crypto";
 import { redactAndCap } from "../core/redact.js";
 import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
 import { systemClock } from "../core/trace/clock.js";
+import { tracedFetch } from "../core/trace/tracedFetch.js";
+import type { Span } from "../core/trace/types.js";
 
 // GitHub App authentication: the idiomatic org-owned bot identity.
 // No machine user, no seat, no long-lived PAT. The bot holds the app's
@@ -79,8 +81,8 @@ export function githubAppConfigured(): boolean {
  * so least-privilege for the review sandbox requires the GitHub App — the
  * production configuration.
  */
-export async function resolveGithubToken(scope: GithubTokenScope = "write"): Promise<string | null> {
-  if (githubAppConfigured()) return mintInstallationToken(scope);
+export async function resolveGithubToken(scope: GithubTokenScope = "write", span?: Span): Promise<string | null> {
+  if (githubAppConfigured()) return mintInstallationToken(scope, span);
   return process.env.GH_TOKEN ?? null;
 }
 
@@ -149,11 +151,22 @@ async function githubJson(url: string, bearer: string): Promise<unknown> {
   return res.json();
 }
 
-async function mintInstallationToken(scope: GithubTokenScope): Promise<string> {
+/** The mint as the caller's `github.token_mint` child when it has a span
+ *  (features/tracing.md item 23): `scope`, whether the cache answered, and how
+ *  long the token lives. Without a span the same work, unmeasured. */
+async function mintInstallationToken(scope: GithubTokenScope, span?: Span): Promise<string> {
+  if (!span) return mintCore(scope);
+  return span.span("github.token_mint", (s) => mintCore(scope, s), { attrs: { scope } });
+}
+
+async function mintCore(scope: GithubTokenScope, span?: Span): Promise<string> {
   // Reuse only while the token outlives the longest possible command; the
   // executors call this per command, so no run is ever pinned to one token.
   const cached = cache.get(scope);
-  if (cached && systemClock() < cached.expiresAtMs - TOKEN_REUSE_MARGIN_MS) return cached.token;
+  if (cached && systemClock() < cached.expiresAtMs - TOKEN_REUSE_MARGIN_MS) {
+    span?.setAttrs({ cached: true, expiresInMs: cached.expiresAtMs - systemClock() });
+    return cached.token;
+  }
 
   const appId = process.env.GITHUB_APP_ID!;
   const installationId = process.env.GITHUB_APP_INSTALLATION_ID!;
@@ -169,17 +182,21 @@ async function mintInstallationToken(scope: GithubTokenScope): Promise<string> {
   };
   if (body) headers["content-type"] = "application/json";
 
-  const res = await fetch(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
-    method: "POST",
-    headers,
-    ...(body ? { body } : {}),
-  });
+  // One `github.rest` child under the mint (never a `traceparent`: GitHub is not one of our hosts).
+  const res = await tracedFetch(
+    span,
+    `https://api.github.com/app/installations/${installationId}/access_tokens`,
+    { method: "POST", headers, ...(body ? { body } : {}) },
+    { route: "app_installation_token", name: "github.rest" },
+  );
   if (!res.ok) {
     const errBody = await res.text().catch(() => "");
     throw new Error(`GitHub App token mint failed: HTTP ${res.status} ${redactAndCap(errBody, 300)}`);
   }
   const data = (await res.json()) as { token: string; expires_at: string };
-  cache.set(scope, { token: data.token, expiresAtMs: Date.parse(data.expires_at) });
+  const expiresAtMs = Date.parse(data.expires_at);
+  cache.set(scope, { token: data.token, expiresAtMs });
+  span?.setAttrs({ cached: false, expiresInMs: expiresAtMs - systemClock() });
   return data.token;
 }
 

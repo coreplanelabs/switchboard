@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { GithubApiError, InMemoryGithubApi, MAX_FILE_CHARS, RestGithubApi, readTextCapped } from "./githubApi.js";
+import { createTracer } from "../core/trace/tracer.js";
+import { recordingSink } from "../core/testing/recordingSink.js";
 
 // Feature: features/github-tools.md — the GithubApi seam behind the github_*
 // tools. RestGithubApi speaks the REST (+ one GraphQL mutation) API from the
@@ -461,5 +463,52 @@ describe("InMemoryGithubApi", () => {
     expect((await gh.listIssues("acme/api")).map((i) => i.title)).toEqual(["second", "third", "bug"]);
     await gh.commentIssue("acme/api", 1, "bump");
     expect((await gh.listIssues("acme/api")).map((i) => i.title)).toEqual(["bug", "second", "third"]);
+  });
+});
+// Feature: features/tracing.md item 23 — a span-bound view of the client: each
+// request is a `github.rest` child with the route word, never the path.
+describe("RestGithubApi.withSpan", () => {
+  it("a view's requests are github.rest children of the span with host/route/method/status and no path, query or token; the token resolver receives the span; the unbound client spans nothing; no traceparent leaves for GitHub", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [log] });
+    const call = root.start("tool.github_file");
+    const spansSeen: Array<string | undefined> = [];
+    const f = fakeFetch((c) =>
+      c.url.includes("/contents/")
+        ? {
+            status: 200,
+            body: {
+              type: "file",
+              encoding: "base64",
+              size: 2,
+              content: Buffer.from("hi").toString("base64"),
+              sha: "s",
+              html_url: "u",
+            },
+          }
+        : { status: 200, body: [] },
+    );
+    const client = new RestGithubApi({
+      fetch: f.fetch,
+      token: async (scope, span) => {
+        spansSeen.push(span?.name);
+        return `tok-${scope}`;
+      },
+    });
+    const view = client.withSpan(call);
+    await view.readFile("acme/web", "src/secret-path.ts", "main");
+    await view.listIssues("acme/web", { limit: 5 });
+    const rest = log.ends.filter((e) => e.name === "github.rest");
+    expect(rest.map((r) => [r.parentSpanId, r.attrs])).toEqual([
+      [call.id, { host: "api.github.com", route: "contents", method: "GET", httpStatus: 200 }],
+      [call.id, { host: "api.github.com", route: "issues", method: "GET", httpStatus: 200 }],
+    ]);
+    expect(JSON.stringify(rest)).not.toMatch(/secret-path|tok-read|acme\/web|ref=/);
+    expect(spansSeen).toEqual(["tool.github_file", "tool.github_file"]);
+    for (const c of f.calls) expect(new Headers(c.headers as HeadersInit).has("traceparent")).toBe(false);
+    // The shared client, unbound: the same calls, no span at all.
+    await client.listIssues("acme/web", { limit: 5 });
+    expect(log.ends.filter((e) => e.name === "github.rest")).toHaveLength(2);
+    expect(spansSeen.at(-1)).toBeUndefined();
   });
 });
