@@ -50,7 +50,7 @@ The other 18 commands are on in every installation.
 
 ## Three shapes to start from
 
-Each of these is a complete `config.yaml` plus an environment, kept as a test fixture the suite round-trips through the capability computation — so they cannot drift from the rules above. Copy the one nearest to you from [`src/core/testing/capabilityFixtures.ts`](https://github.com/coreplanelabs/switchboard/blob/main/src/core/testing/capabilityFixtures.ts) and turn things on one block at a time.
+Each of these is a complete `config.yaml` plus an environment, kept as a test fixture the suite round-trips through the capability computation — so they cannot drift from the rules above. Copy the one nearest to you from [`src/core/testing/capabilityFixtures.ts`](../../src/core/testing/capabilityFixtures.ts) and turn things on one block at a time.
 
 | Shape | What is on | Start here |
 |---|---|---|
