@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.1](https://github.com/coreplanelabs/switchboard/compare/v0.6.0...v0.6.1) (2026-09-08)
+
+
+### Bug fixes
+
+* **ci:** the scorecard job grants the reads a private repository needs — issues, pull-requests, checks — so its GraphQL setup stops failing ([#600](https://github.com/coreplanelabs/switchboard/issues/600)) ([8265dd0](https://github.com/coreplanelabs/switchboard/commit/8265dd0d1c18f97a53d11f0486c2922dc79fed20))
+* **deploy:** the memory Worker's RunTranscriptDO binding and v6 migration live in the wrangler template — [#592](https://github.com/coreplanelabs/switchboard/issues/592) edited the generated file after [#588](https://github.com/coreplanelabs/switchboard/issues/588) made it a render ([#595](https://github.com/coreplanelabs/switchboard/issues/595)) ([4557eb4](https://github.com/coreplanelabs/switchboard/commit/4557eb48aeacfa8fe0f9ccc7beb730eb0a79072a))
+* **deploy:** the sandbox gate waits for the rollout wrangler printed — never live against the pre-deploy version ([#598](https://github.com/coreplanelabs/switchboard/issues/598)) ([fbf8d22](https://github.com/coreplanelabs/switchboard/commit/fbf8d22b5f4474ab2a74d3468ede2b9d64693f24))
+* **execution:** the sandbox env map rides in the request body, not x-env-* headers — Workers Logs record headers ([#597](https://github.com/coreplanelabs/switchboard/issues/597)) ([2848d26](https://github.com/coreplanelabs/switchboard/commit/2848d2621e75a08aeab1873f20c763224706b9a2))
+
 ## [0.6.0](https://github.com/coreplanelabs/switchboard/compare/v0.5.0...v0.6.0) (2026-09-08)
 
 
