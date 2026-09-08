@@ -240,6 +240,51 @@ export const RUN_LABEL_MAX = 200;
 export const DEFAULT_BACKLOG_LIMIT = 5000;
 export const DEFAULT_BACKLOG_BYTES = 4 * 1024 * 1024;
 
+/** The replay budget a late subscriber gets from the retained backlog
+ *  (features/live-view.md item 5): at most this many events and at most
+ *  `DEFAULT_REPLAY_BYTES` of UTF-8 JSON, the newest first. The backlog keeps
+ *  more than a browser needs to follow a live run, and a page must not stall on
+ *  a 4 MiB burst; what the budget leaves out is reported as `elided`, never
+ *  silently dropped. */
+export const DEFAULT_REPLAY_LIMIT = 2000;
+export const DEFAULT_REPLAY_BYTES = 1024 * 1024;
+
+/** The budget override for a subscriber that must see every retained event —
+ *  the run ledger, which is a store, not a viewer. Viewers take the defaults. */
+export const REPLAY_EVERYTHING: Pick<SubscribeOptions, "limit" | "byteLimit"> = {
+  limit: Number.POSITIVE_INFINITY,
+  byteLimit: Number.POSITIVE_INFINITY,
+};
+
+/** What `subscribe()` needs: the two callbacks, the resume cursor and a replay
+ *  budget override (`REPLAY_EVERYTHING` for a store; tests). */
+export interface SubscribeOptions {
+  onEvent: RunSubscriber;
+  /** Called once when the run finishes (immediately for a finished run). */
+  onFinish?: RunFinishListener;
+  /** The SSE `Last-Event-ID`: only events with a higher `seq` are offered; 0
+   *  (the default) offers the whole retained backlog. */
+  afterSeq?: number;
+  /** Replay budget by count; default `DEFAULT_REPLAY_LIMIT`. At least one
+   *  event is always replayed when any is retained. */
+  limit?: number;
+  /** Replay budget by bytes (each event's UTF-8 JSON); default
+   *  `DEFAULT_REPLAY_BYTES`. The newest event is replayed even when it alone
+   *  exceeds it. */
+  byteLimit?: number;
+}
+
+/** The successful result of `subscribe()`: how to detach, how many retained
+ *  events were replayed, and — when the budget left retained events out — the
+ *  contiguous `seq` range that was skipped (the transport's `replay_elided`
+ *  frame). Events the backlog itself no longer holds are not elided: they are
+ *  a `seq` gap, and the record is the only place that still has them. */
+export interface Subscribed {
+  unsubscribe: Unsubscribe;
+  replayed: number;
+  elided?: { fromSeq: number; toSeq: number };
+}
+
 export interface RunRegistryOptions {
   /** Max events retained per run (oldest dropped past it). Default 5000. */
   backlogLimit?: number;
@@ -528,34 +573,53 @@ export class RunRegistry {
 
   /**
    * Subscribe to a run's events: validates the token in constant time, replays
-   * the bounded backlog, then live-forwards new events. Returns an unsubscribe
-   * fn, or `null` if the run is unknown or the token is wrong (the caller maps
-   * both to a 404 — never reveal which). If the run is already finished (but not
-   * yet evicted), the backlog is replayed and `onFinish` fires immediately.
-   * `afterSeq` resumes a dropped stream: only events with a higher `seq` are
-   * replayed (the SSE `Last-Event-ID`); 0 replays the whole retained backlog.
+   * the retained backlog within the replay budget, then live-forwards new
+   * events. Returns `null` if the run is unknown or the token is wrong (the
+   * caller maps both to a 404 — never reveal which). If the run is already
+   * finished (but not yet evicted), the replay happens and `onFinish` fires
+   * immediately. `afterSeq` resumes a dropped stream: only events with a higher
+   * `seq` are offered (the SSE `Last-Event-ID`); 0 offers the whole retained
+   * backlog. Of the offered events the NEWEST are replayed, up to `limit` and
+   * `byteLimit`; the older ones the budget skipped come back as `elided`, a
+   * contiguous `seq` range, so the transport can say what a viewer did not get.
    */
-  subscribe(
-    id: string,
-    token: string,
-    onEvent: RunSubscriber,
-    onFinish?: RunFinishListener,
-    afterSeq = 0,
-  ): Unsubscribe | null {
+  subscribe(id: string, token: string, opts: SubscribeOptions): Subscribed | null {
     this.sweep();
     const run = this.validate(id, token);
     if (!run) return null;
 
-    for (const event of run.backlog) if ((event.seq ?? 0) > afterSeq) onEvent(event, event.seq ?? 0);
+    const { onEvent, onFinish, afterSeq = 0 } = opts;
+    const limit = Math.max(1, Math.floor(opts.limit ?? DEFAULT_REPLAY_LIMIT));
+    const byteLimit = opts.byteLimit ?? DEFAULT_REPLAY_BYTES;
+    const { backlog, backlogSizes } = run;
+    // The backlog is `seq`-ascending: the offered events are one suffix, and the
+    // replayed ones a suffix of that. Walk newest-first, admitting an event while
+    // both bounds hold; the newest is admitted unconditionally.
+    let first = backlog.findIndex((e) => (e.seq ?? 0) > afterSeq);
+    if (first === -1) first = backlog.length;
+    let start = backlog.length;
+    let bytes = 0;
+    while (start > first) {
+      const next = start - 1;
+      const count = backlog.length - next;
+      const size = backlogSizes[next] ?? 0;
+      if (count > 1 && (count > limit || bytes + size > byteLimit)) break;
+      bytes += size;
+      start = next;
+    }
+    const elided =
+      start > first ? { fromSeq: backlog[first]!.seq ?? 0, toSeq: backlog[start - 1]!.seq ?? 0 } : undefined;
+    for (let i = start; i < backlog.length; i++) onEvent(backlog[i]!, backlog[i]!.seq ?? 0);
+    const replayed = backlog.length - start;
 
     if (run.finished) {
       onFinish?.();
-      return () => {};
+      return { unsubscribe: () => {}, replayed, ...(elided ? { elided } : {}) };
     }
 
     const sub: Subscription = { onEvent, onFinish };
     run.subscribers.add(sub);
-    return () => void run.subscribers.delete(sub);
+    return { unsubscribe: () => void run.subscribers.delete(sub), replayed, ...(elided ? { elided } : {}) };
   }
 
   /**

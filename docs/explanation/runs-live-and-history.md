@@ -15,7 +15,7 @@ stateDiagram-v2
 
 ## Why "live" is in-memory and cheap
 
-While a run is active, every tool call, every status edit, every intermediate note is held in an in-memory registry on the bot process — bounded by count and by bytes, evicted on a TTL, capability-token-gated (the token in a run's URL *is* the access control, alongside Access at the edge). This is what makes the live run page and its SSE stream fast and free of any durable-write cost per event: nothing here is designed to survive a restart, because a run *in flight* during a restart is genuinely gone — there's no safe way to resume a half-finished tool call across a process boundary, so the system doesn't pretend to.
+While a run is active, every tool call, every status edit, every intermediate note is held in an in-memory registry on the bot process — bounded by count and by bytes, evicted on a TTL, capability-token-gated (the token in a run's URL *is* the access control, alongside Access at the edge). A viewer who opens the page mid-run is replayed the newest of what the registry holds, within a budget (2000 events, 1 MiB), and is told the `seq` range it did not get (`replay_elided`); the record keeps everything, so nothing a viewer skipped is lost. This is what makes the live run page and its SSE stream fast and free of any durable-write cost per event: nothing here is designed to survive a restart, because a run *in flight* during a restart is genuinely gone — there's no safe way to resume a half-finished tool call across a process boundary, so the system doesn't pretend to.
 
 ## Why "finished" is a deliberate, separate write
 

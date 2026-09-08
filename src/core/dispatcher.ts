@@ -94,6 +94,7 @@ import {
   type RunRegistry,
   type RunSnapshot,
   type RunSummary,
+  REPLAY_EVERYTHING,
 } from "./runRegistry.js";
 import { inFlightToolAfter, quietSuffix } from "./statusCardLabel.js";
 import { coalesceStatus } from "./statusCoalescer.js";
@@ -1187,15 +1188,23 @@ export async function dispatch(
       if (opened) {
         ledgerRun = opened;
         // Every event published so far (the request, run_meta, context) and
-        // every one to come, in `seq` order, through the batched flusher.
-        registry.subscribe(run.id, run.token, (event, seq) => opened.event(event, seq));
+        // every one to come, in `seq` order, through the batched flusher. The
+        // ledger is a store: the viewer replay budget never applies to it.
+        registry.subscribe(run.id, run.token, {
+          onEvent: (event, seq) => opened.event(event, seq),
+          ...REPLAY_EVERYTHING,
+        });
       }
     }
     if (resume && ledgerRun) {
       // The events before the restart are on the ledger already (and in the
       // registry by replay); only what this generation publishes is appended.
       const adopted = ledgerRun;
-      registry.subscribe(run.id, run.token, (event, seq) => adopted.event(event, seq), undefined, resume.lastSeq);
+      registry.subscribe(run.id, run.token, {
+        onEvent: (event, seq) => adopted.event(event, seq),
+        afterSeq: resume.lastSeq,
+        ...REPLAY_EVERYTHING,
+      });
     }
     // The card body is the agent's own checklist (via the update_status tool)
     // plus a live one-line activity trace (current tool call + redacted result
@@ -1966,7 +1975,10 @@ async function runShipBranch(
     });
     if (ledgerRun) {
       const opened = ledgerRun;
-      registry.subscribe(run.id, run.token, (event, seq) => opened.event(event, seq));
+      registry.subscribe(run.id, run.token, {
+        onEvent: (event, seq) => opened.event(event, seq),
+        ...REPLAY_EVERYTHING,
+      });
     }
   }
 

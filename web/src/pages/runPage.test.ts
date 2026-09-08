@@ -461,6 +461,21 @@ describe("RunPage — live mode", () => {
     expect(wrapper.findAll("#log .note")).toHaveLength(1);
   });
 
+  it("a replay_elided frame renders as a replay row naming the range the record still has; a malformed or empty one marks nothing", async () => {
+    const { wrapper, es } = mountLive();
+    es().emitOpen();
+    es().emitNamed("replay_elided", '{"fromSeq":1,"toSeq":1000}');
+    es().emitNamed("replay_elided", "garbage");
+    es().emitNamed("replay_elided");
+    es().emitMessage(assistant("after the gap", 2000), "1001");
+    await wrapper.vm.$nextTick();
+    const notes = wrapper.findAll("#log .note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0].text()).toContain("1000 events not loaded (events 1–1000) — the record has them");
+    expect(wrapper.findAll("#log .step")).toHaveLength(1);
+    expect(wrapper.find("#state").text()).toMatch(/^running/); // a named frame is not an end
+  });
+
   it("in-progress work draws where it will end up: a running card ticks its elapsed from its own start, a silent model is a pending-turn row (pulse, model badge, rotating verb) timed from the last stamped event, and the header keeps the whole run's stopwatch", async () => {
     vi.useFakeTimers();
     try {

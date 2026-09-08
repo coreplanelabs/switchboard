@@ -1,11 +1,12 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { serializedOnce, type RunEvent } from "../../core/runEvents.js";
-import type { IndexEvent, Unsubscribe } from "../../core/runRegistry.js";
+import type { IndexEvent, Subscribed, Unsubscribe } from "../../core/runRegistry.js";
 
-// Server-Sent Events transport for the live view: the per-run stream (live
-// replay ring + forward, or the stored history replay), the runs-index feed,
-// the node:http sink and keepalive heartbeat. The `serve*` functions drive an
-// abstract `SseSink`, so they are unit-testable without a socket.
+// Server-Sent Events transport for the live view: the per-run stream (the
+// registry's budgeted replay + forward, or the stored history replay), the
+// runs-index feed, the node:http sink and keepalive heartbeat. The `serve*`
+// functions drive an abstract `SseSink`, so they are unit-testable without a
+// socket.
 
 /** SSE response headers. `no-transform` + `x-accel-buffering: no` keep proxies
  *  from buffering the stream, so events arrive as they are written. */
@@ -27,15 +28,18 @@ export interface SseSink {
 }
 
 /** A frame on the per-run stream: a run event, or a notice from the transport
- *  itself. `replay_note` is emitted once, first, when a late subscriber's replay
- *  was capped — it is NOT a run event and never enters the registry or the run
- *  record (the full stream stays readable via `snapshot` / the history page). */
+ *  itself. `replay_note` marks records MISSING from a stored stream
+ *  (`withOmittedMarkers`) — it is NOT a run event and never enters the registry
+ *  or the run record. A live replay that skipped retained events says so with
+ *  the named `replay_elided` frame instead (`sseElided`), so the two are never
+ *  confused: elided events still exist in the registry and on the record. */
 export type LiveFrame = RunEvent | { type: "replay_note"; summary: string };
 
-/** Most backlog frames a late subscriber is replayed (#157 KTD9); the newest
- *  win. The registry keeps up to 5000 — the browser does not need them all to
- *  follow a live run, and the page must not stall on a 4 MiB burst. */
-export const REPLAY_LIMIT = 1000;
+/** The named frame a live replay writes, once and first, when the registry's
+ *  replay budget left retained events out: the contiguous `seq` range the
+ *  viewer did not get. A named event carries no `id:`, so it never moves a
+ *  resuming client's cursor. */
+export type ReplayElided = { fromSeq: number; toSeq: number };
 
 /** One SSE frame for a run event: `id:` is its position in the run's stream (the
  *  registry's `seq`), so a browser that reconnects (proxy drop, deploy, laptop
@@ -50,6 +54,11 @@ function sseData(event: RunEvent, seq: number): string {
  *  notice has no stream position, so it must not move the client's cursor. */
 function sseNotice(frame: Exclude<LiveFrame, RunEvent>): string {
   return `data: ${JSON.stringify(frame)}\n\n`;
+}
+
+/** The `replay_elided` frame (see `ReplayElided`). */
+function sseElided(range: ReplayElided): string {
+  return `event: replay_elided\ndata: ${JSON.stringify({ fromSeq: range.fromSeq, toSeq: range.toSeq })}\n\n`;
 }
 
 /** The `Last-Event-ID` a reconnecting EventSource sends, as the stream position
@@ -96,28 +105,27 @@ export function startSseHeartbeat(req: HttpRequest, res: ServerResponse): void {
 
 /**
  * Serve one run's event stream to an SseSink, given a bound `subscribe` fn
- * (already carrying the run id + token — token validation lives in the
- * registry). Ordering matters: the registry replays the backlog synchronously
- * during `subscribe`, before we've decided the status code, so those frames are
- * buffered and flushed only after a 200 head is written. A `null` subscribe
- * result (unknown run or bad token) is a 404 — existence is never revealed.
+ * (already carrying the run id + token, the resume cursor and the replay budget
+ * — token validation and the budget live in the registry). Ordering matters:
+ * the registry replays synchronously during `subscribe`, before we've decided
+ * the status code, so those frames are buffered and flushed only after a 200
+ * head is written. A `null` subscribe result (unknown run or bad token) is a
+ * 404 — existence is never revealed.
  *
- * The replay is capped at the newest `REPLAY_LIMIT` events; when the backlog
- * held more, a leading `replay_note` frame says how many of how many were
- * replayed. Live events after the replay are never capped. The buffer is a
- * bounded ring — the oldest event is shifted out once it holds `REPLAY_LIMIT`
- * — and `replayed` counts everything the backlog offered, for the note. With a
- * resume cursor (`Last-Event-ID` → `subscribe(…, afterSeq)`) the registry
- * offers only the events after it, so the ring and the note both count from
- * the cursor — the two mechanisms compose rather than overlap.
+ * The registry replays the newest events within its budget and reports the
+ * retained range it skipped; when it did, one `replay_elided` frame precedes
+ * the replay so the page can mark what it did not load. Live events after the
+ * replay are never capped. With a resume cursor (`Last-Event-ID` →
+ * `subscribe({ afterSeq })`) the registry offers only the events after it, so
+ * the budget and the cursor compose: the elided range, if any, starts after
+ * the cursor.
  */
 export function serveEvents(
-  subscribe: (onEvent: (e: RunEvent, seq: number) => void, onFinish: () => void) => Unsubscribe | null,
+  subscribe: (onEvent: (e: RunEvent, seq: number) => void, onFinish: () => void) => Subscribed | null,
   sink: SseSink,
   onLive?: () => void,
 ): void {
   const replay: Array<{ event: RunEvent; seq: number }> = [];
-  let replayed = 0;
   let live = false;
   let endedDuringReplay = false;
   const onFinish = () => {
@@ -127,16 +135,11 @@ export function serveEvents(
     } else endedDuringReplay = true;
   };
 
-  const unsubscribe = subscribe((e, seq) => {
-    if (live) {
-      sink.write(sseData(e, seq));
-      return;
-    }
-    replayed++;
-    if (replay.length === REPLAY_LIMIT) replay.shift();
-    replay.push({ event: e, seq });
+  const subscribed = subscribe((e, seq) => {
+    if (live) sink.write(sseData(e, seq));
+    else replay.push({ event: e, seq });
   }, onFinish);
-  if (!unsubscribe) {
+  if (!subscribed) {
     sink.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     sink.write("run not found");
     sink.end();
@@ -146,9 +149,7 @@ export function serveEvents(
   sink.writeHead(200, SSE_HEADERS);
   live = true;
   sink.write(SSE_PRELUDE); // flush the head immediately (a run with no events yet has an empty backlog)
-  if (replayed > REPLAY_LIMIT) {
-    sink.write(sseNotice({ type: "replay_note", summary: `replaying last ${REPLAY_LIMIT} of ${replayed} events` }));
-  }
+  if (subscribed.elided) sink.write(sseElided(subscribed.elided));
   for (const { event, seq } of replay) sink.write(sseData(event, seq));
   replay.length = 0;
   if (endedDuringReplay) {
@@ -156,7 +157,7 @@ export function serveEvents(
     sink.end();
     return;
   }
-  sink.onClose(unsubscribe);
+  sink.onClose(subscribed.unsubscribe);
   onLive?.(); // stream stays open → safe to start the keepalive heartbeat
 }
 

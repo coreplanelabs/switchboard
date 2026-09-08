@@ -170,8 +170,15 @@ export interface RunPageModel {
      *  notice or any other unstamped frame leaves both untouched, so a
      *  reconnect can never restart a stopwatch. */
     lastAtWall: number | null;
+    /** Retained `seq` ranges the live replay did not send (`replay_elided`
+     *  frames, features/live-view.md item 5): the record still has them. Kept
+     *  for the partition's `not loaded` term (features/tracing.md). */
+    elided: ReplayElidedRange[];
   };
   handle(event: unknown): void;
+  /** A `replay_elided` frame: note the range in the log (a replay row, like a
+   *  stored stream's omission marker) and keep it on the state. */
+  noteElided(range: ReplayElidedRange): void;
   /** The oldest call card still without a result (never a quiet call) — what
    *  the run is waiting on right now, or null while the model is thinking. */
   pendingCall(): CallVm | null;
@@ -184,6 +191,35 @@ export interface RunPageModel {
   markStopping(mode: "soft" | "hard"): void;
   /** True when the call's tags open it by default (failed/infra, or ?open=). */
   opensByDefault(tags: string[]): boolean;
+}
+
+export interface ReplayElidedRange {
+  fromSeq: number;
+  toSeq: number;
+}
+
+/** Parse a `replay_elided` frame's payload: two positive integers in order, or
+ *  null for anything else (a malformed frame marks nothing). */
+export function parseReplayElided(data: string | undefined): ReplayElidedRange | null {
+  if (typeof data !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { fromSeq, toSeq } = parsed as { fromSeq?: unknown; toSeq?: unknown };
+  const int = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+  if (!int(fromSeq) || !int(toSeq) || fromSeq > toSeq) return null;
+  return { fromSeq, toSeq };
+}
+
+/** The replay row for an elided range: what was skipped and where it still is. */
+export function elidedText(range: ReplayElidedRange): string {
+  const n = range.toSeq - range.fromSeq + 1;
+  const span = n === 1 ? `event ${range.fromSeq}` : `events ${range.fromSeq}–${range.toSeq}`;
+  return `${n} ${n === 1 ? "event" : "events"} not loaded (${span}) — the record has them`;
 }
 
 function turnVm(change: Extract<TimelineChange, { kind: "turn" }>, modelBefore: string | null): TurnVm {
@@ -244,6 +280,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     firstAt: null,
     lastAt: null,
     lastAtWall: null,
+    elided: [],
   });
 
   const stepVms = new Map<number, StepVm>();
@@ -456,9 +493,16 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     state.stopMode = mode;
   }
 
+  function noteElided(range: ReplayElidedRange): void {
+    state.elided.push(range);
+    state.log.push({ kind: "note", key: key("note"), replay: true, text: elidedText(range) });
+    state.placeholder = false;
+  }
+
   return {
     state,
     handle,
+    noteElided,
     pendingCall,
     flushPendingTurn: flushTurn,
     setAllOpen,
