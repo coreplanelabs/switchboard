@@ -4,11 +4,14 @@ import {
   capabilityProblem,
   classifyDeployOutput,
   CONFIG_DESTINATION,
+  containerApplicationName,
   decideAccount,
   DEPLOY_ORDER,
   formatPlan,
   planDeploy,
   RESIDENT_BEARER_ENVS,
+  SANDBOX_BEARER_ENV,
+  SANDBOX_CONTAINER_CLASS,
   WORKER_SPECS,
   workersFor,
   type CheckoutProbe,
@@ -30,6 +33,7 @@ import { TEST_PROFILE } from "./testing/profile.js";
 const LOADED: LoadedProfile = { profile: TEST_PROFILE, origin: "profile", path: "deploy/profile.json" };
 const WORKERS = workersFor(TEST_PROFILE);
 const BOT_HEALTH_URL = profileUrls(TEST_PROFILE).healthUrl("bot");
+const SANDBOX_HEALTH_URL = profileUrls(TEST_PROFILE).healthUrl("sandbox");
 
 const DEFAULTS: DeployOptions = {
   only: undefined,
@@ -57,7 +61,7 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     expect(new Set(WORKERS.map((w) => w.script)).size).toBe(4);
   });
 
-  it("names which steps are preflighted and how each preflight is forced; the resident needs any one of its three bearers — read is enough", () => {
+  it("names which steps are preflighted and how each preflight is forced; the resident needs any one of its three bearers — read is enough; the sandbox needs SANDBOX_TOKEN (its live gate reads everything with it)", () => {
     const byName = Object.fromEntries(WORKERS.map((w) => [w.name, w]));
     expect(byName.memory.preflight).toBeUndefined();
     expect(byName.sandbox.preflight).toBeUndefined();
@@ -70,6 +74,12 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     expect(RESIDENT_BEARER_ENVS).toEqual(["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"]);
     expect(formatPlan(plan())).toContain(
       "needs one of RESIDENT_ADMIN_TOKEN / RESIDENT_OPERATOR_TOKEN / RESIDENT_READ_TOKEN",
+    );
+    expect(byName.sandbox.requiredEnv).toEqual([{ anyOf: ["SANDBOX_TOKEN"] }]);
+    expect(byName.memory.requiredEnv).toBeUndefined();
+    expect(byName.bot.requiredEnv).toBeUndefined();
+    expect(formatPlan(plan())).toContain(
+      "sandbox (switchboard-sandbox) — deploy/cloudflare-sandbox: npm run deploy — needs SANDBOX_TOKEN",
     );
   });
 
@@ -96,7 +106,18 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
       script: "sb",
       healthUrl: "https://sb.example.test/healthz",
       preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: "https://sb.example.test/healthz" },
-      liveGate: { healthUrl: "https://sb.example.test/healthz" },
+      liveGate: { kind: "health", healthUrl: "https://sb.example.test/healthz" },
+    });
+    // The sandbox's container application follows its script name: another script, another app.
+    const renamed = workersFor({
+      ...TEST_PROFILE,
+      workers: { ...TEST_PROFILE.workers, sandbox: { script: "sbx", hostname: "sbx.example.test" } },
+    });
+    expect(renamed.find((w) => w.name === "sandbox")!.liveGate).toEqual({
+      kind: "sandbox",
+      healthUrl: "https://sbx.example.test/healthz",
+      bearerEnv: "SANDBOX_TOKEN",
+      containerApp: "sbx-switchboardsandbox",
     });
   });
 
@@ -137,21 +158,49 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     expect(WORKERS.find((w) => w.name === "bot")!.healthUrl).toBe(BOT_HEALTH_URL);
   });
 
-  it("only the bot has a live gate — deployed ≠ live for the container; the other Workers swap instantly", () => {
+  it("the bot and the sandbox carry live gates — deployed ≠ live for a container rollout; memory and resident have none", () => {
     const byName = Object.fromEntries(WORKERS.map((w) => [w.name, w]));
-    expect(byName.bot.liveGate).toEqual({ healthUrl: BOT_HEALTH_URL });
+    const specs = Object.fromEntries(WORKER_SPECS.map((w) => [w.name, w]));
+    expect(specs.bot.liveGate).toEqual({ kind: "health" });
+    expect(byName.bot.liveGate).toEqual({ kind: "health", healthUrl: BOT_HEALTH_URL });
     expect(BOT_HEALTH_URL).toBe("https://switchboard.example.test/healthz");
-    for (const n of ["memory", "resident", "sandbox"] as const) expect(byName[n].liveGate, n).toBeUndefined();
+    // The sandbox gate (#569) reads its Worker, its container application and an /exec probe, all with the
+    // same bearer its /healthz needs — so the gate's bearer IS the health bearer — and the application is the
+    // one wrangler names from the profile's script + the static class in deploy/cloudflare-sandbox/wrangler.jsonc.
+    expect(specs.sandbox.liveGate).toEqual({
+      kind: "sandbox",
+      bearerEnv: "SANDBOX_TOKEN",
+      containerClass: "SwitchboardSandbox",
+    });
+    expect(byName.sandbox.liveGate).toEqual({
+      kind: "sandbox",
+      healthUrl: SANDBOX_HEALTH_URL,
+      bearerEnv: SANDBOX_BEARER_ENV,
+      containerApp: "switchboard-sandbox-switchboardsandbox",
+    });
+    expect(SANDBOX_HEALTH_URL).toBe("https://switchboard-sandbox.example.test/healthz");
+    expect(SANDBOX_BEARER_ENV).toBe(byName.sandbox.healthBearerEnv);
+    // The same rule names the bot's application (deploy/cloudflare/preflight.mjs APP_NAME).
+    expect(containerApplicationName("switchboard", "SwitchboardServer")).toBe("switchboard-switchboardserver");
+    expect(SANDBOX_CONTAINER_CLASS).toBe("SwitchboardSandbox");
+    for (const n of ["memory", "resident"] as const) expect(byName[n].liveGate, n).toBeUndefined();
     const p = plan({ dryRun: true });
     expect(p.steps.find((s) => s.name === "bot")).toMatchObject({
       healthUrl: BOT_HEALTH_URL,
-      liveGate: { healthUrl: BOT_HEALTH_URL },
+      liveGate: { kind: "health", healthUrl: BOT_HEALTH_URL },
     });
+    expect(p.steps.find((s) => s.name === "sandbox")).toMatchObject({ liveGate: byName.sandbox.liveGate });
+    expect(p.steps.find((s) => s.name === "sandbox")).not.toHaveProperty("healthUrl"); // no preflight heartbeat
     expect(p.steps.find((s) => s.name === "resident")).not.toHaveProperty("liveGate");
     expect(p.steps.find((s) => s.name === "resident")).not.toHaveProperty("healthUrl");
-    expect(formatPlan(p)).toContain(
+    const text = formatPlan(p);
+    expect(text).toContain(
       "then wait until live (https://switchboard.example.test/healthz not draining + build.commit == HEAD)",
     );
+    expect(text).toContain(
+      "then wait until live (https://switchboard-sandbox.example.test/healthz build.commit == HEAD + every running switchboard-sandbox-switchboardsandbox instance on the app version + an /exec probe answers ok from one)",
+    );
+    expect(byName.sandbox.why).toContain("#569");
   });
 
   it("the bot step says how a rotated secret goes live — `wrangler secret put` alone leaves the running container on its old env; `deploy restart` (no build) restarts it", () => {

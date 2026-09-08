@@ -31,10 +31,12 @@
 #                         docs Worker's narrower token)
 #   RESIDENT_READ_TOKEN   the resident preflight reads GET /residents with it;
 #                         read scope is enough (any of the three bearers works)
-#   SANDBOX_TOKEN         optional: lets --affected read the sandbox's live
-#                         commit; without it the sandbox falls back to the last
-#                         release tag (and is "unsure" — deployed — before the
-#                         first tag exists)
+#   SANDBOX_TOKEN         required whenever the sandbox is selected: its live
+#                         gate reads GET /healthz and probes POST /exec with it
+#                         (a sandbox step is refused before anything deploys
+#                         without it); it also lets --affected read the
+#                         sandbox's live commit instead of falling back to the
+#                         last release tag
 name: deploy-production
 
 on:
@@ -122,7 +124,7 @@ jobs:
           echo "Cloudflare credential: $DEPLOY_TOKEN_SOURCE"
           if [ "${DEPLOY_TOKEN_SOURCE#CLOUDFLARE_API_TOKEN}" != "$DEPLOY_TOKEN_SOURCE" ]; then echo "::warning::deploying with the docs Worker's token — it may lack the Containers/R2 scopes; deploy all checks before touching a Worker"; fi
           if [ -z "$RESIDENT_READ_TOKEN" ]; then echo "::warning::RESIDENT_READ_TOKEN is not set — a resident step would be refused before anything deploys"; fi
-          if [ -z "$SANDBOX_TOKEN" ]; then echo "::notice::SANDBOX_TOKEN is not set — the sandbox is judged against the last release tag, not what it serves"; fi
+          if [ -z "$SANDBOX_TOKEN" ]; then echo "::warning::SANDBOX_TOKEN is not set — a sandbox step would be refused before anything deploys, and --affected judges the sandbox against the last release tag, not what it serves"; fi
       - name: the selection
         id: selection
         env:

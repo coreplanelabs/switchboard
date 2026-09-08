@@ -163,7 +163,7 @@ export const deployAll = defineCommand({
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and the bot's drain until the new container is live. --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.",
+    "Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an `echo ok` probe — until the new containers are live. --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.",
   render: (output) => {
     const o = output as JsonObject;
     const results = o.results as unknown as Parameters<typeof formatDeployResults>[0];

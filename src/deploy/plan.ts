@@ -68,6 +68,37 @@ export interface CapabilityCheck {
   needs: string;
 }
 
+/** The sandbox Worker's container class (deploy/cloudflare-sandbox/wrangler.jsonc `class_name`);
+ *  wrangler names the Containers application `<script>-<class lowercased>`. */
+export const SANDBOX_CONTAINER_CLASS = "SwitchboardSandbox";
+/** The bearer every route on the sandbox Worker needs, `/healthz` included (execution.md item 13). */
+export const SANDBOX_BEARER_ENV = "SANDBOX_TOKEN";
+
+/** The Containers application `wrangler deploy` creates for a Worker's container class —
+ *  `<script>-<class_name lowercased>` (the bot's is `switchboard-switchboardserver`,
+ *  deploy/cloudflare/preflight.mjs `APP_NAME`). The script name is the profile's. */
+export function containerApplicationName(script: string, className: string): string {
+  return `${script}-${className.toLowerCase()}`;
+}
+
+/** The static half of a live gate — WHICH proof a step needs; the profile supplies where to read it. */
+export type LiveGateSpec =
+  /** The bot: `/healthz` answered by a container that is not draining AND reporting
+   *  the deployed commit as its `build.commit` (src/deploy/liveGate.ts `decideLive`). */
+  | { kind: "health" }
+  /** The sandbox (#569): the Worker serves the deployed commit (bearer from `bearerEnv`),
+   *  every RUNNING instance of its container application is on the application's
+   *  version, and an `/exec` probe answers `echo ok` from an instance on that version
+   *  (src/deploy/sandboxLiveGate.ts `decideSandboxLive`). */
+  | { kind: "sandbox"; bearerEnv: string; containerClass: string };
+
+/** A live gate bound to an installation: the spec plus the URL (and application) the profile gives it. */
+export type LiveGate =
+  | { kind: "health"; healthUrl: string }
+  | { kind: "sandbox"; healthUrl: string; bearerEnv: string; containerApp: string };
+
+export type SandboxLiveGate = Extract<LiveGate, { kind: "sandbox" }>;
+
 /** The static half of a Worker — true for every installation. */
 export interface WorkerSpec {
   name: WorkerName;
@@ -80,10 +111,8 @@ export interface WorkerSpec {
   inputs: WorkerInputs;
   /** Present when the dir's `npm run deploy` runs a preflight that can refuse. */
   preflight?: { forceEnv: string };
-  /** True when "deployed" is not "live": the step is done only once the Worker's
-   *  `/healthz` is answered by a container that is not draining AND reports the
-   *  deployed commit as its `build.commit` (src/deploy/liveGate.ts). */
-  liveGated?: boolean;
+  /** Present when "deployed" is not "live": which proof the step waits for (`LiveGateSpec`). */
+  liveGate?: LiveGateSpec;
   /** Env the step needs present (the runner fails fast when a requirement has none of its alternatives). */
   requiredEnv?: readonly EnvRequirement[];
   /** The credential capabilities this Worker's deploy needs beyond Workers Scripts: Edit — each one checked before any Worker deploys. */
@@ -92,7 +121,7 @@ export interface WorkerSpec {
 }
 
 /** A Worker bound to an installation: the spec plus what the profile says about it. */
-export interface WorkerDef extends Omit<WorkerSpec, "preflight" | "liveGated"> {
+export interface WorkerDef extends Omit<WorkerSpec, "preflight" | "liveGate"> {
   /** The Cloudflare Worker script name (what `wrangler deployments list` shows). */
   script: string;
   /** `GET /healthz` — answers `build.commit`, the commit this Worker serves (execution.md item 13). */
@@ -101,8 +130,8 @@ export interface WorkerDef extends Omit<WorkerSpec, "preflight" | "liveGated"> {
    *  `healthUrl` is the bot's public `/healthz`: the heartbeat reads it while
    *  waiting, and the live gate polls it after the deploy. */
   preflight?: { forceEnv: string; healthUrl?: string };
-  /** Present when "deployed" is not "live" (see `WorkerSpec.liveGated`). */
-  liveGate?: { healthUrl: string };
+  /** Present when "deployed" is not "live": the spec's gate bound to this installation's URLs. */
+  liveGate?: LiveGate;
 }
 
 /** The three bearer scopes the resident preflight accepts (deploy/cloudflare-resident/preflight.mjs `TOKEN_ENV_VARS`); read is enough. */
@@ -158,7 +187,7 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
       ],
     },
     preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE" },
-    liveGated: true,
+    liveGate: { kind: "health" },
     // The preflight reads the container application and the deploy pushes the image: both need Containers.
     capabilities: [CONTAINERS_CAPABILITY],
     why: "container shim — preflight refuses while runs are in flight; done only when the new container is live. A rotated bot secret needs no build: `wrangler secret put` alone leaves the running container on its old env — `deploy restart` restarts it on the current env",
@@ -186,31 +215,54 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
     name: "sandbox",
     dir: "deploy/cloudflare-sandbox",
     entry: "deploy/cloudflare-sandbox/worker.ts",
-    healthBearerEnv: "SANDBOX_TOKEN",
+    healthBearerEnv: SANDBOX_BEARER_ENV,
     inputs: {
       paths: ["deploy/cloudflare-sandbox/"],
       lockfile: [{ workspace: "deploy/cloudflare-sandbox", includeDev: false }],
     },
+    // A Worker + image pair: the upload is instant, the image rollout is not, and a
+    // thread placed in between lands on the previous image (#569). Done only when the
+    // Worker, the rollout and a probe agree — all three read with the bearer, so the
+    // step needs it in the env.
+    liveGate: { kind: "sandbox", bearerEnv: SANDBOX_BEARER_ENV, containerClass: SANDBOX_CONTAINER_CLASS },
+    requiredEnv: [{ anyOf: [SANDBOX_BEARER_ENV] }],
     // Its image needs Containers too.
     capabilities: [CONTAINERS_CAPABILITY],
-    why: "per-thread exec proxy — stateless per run",
+    why: "per-thread exec proxy — stateless per run; done only when the Worker serves the commit, every running container is on the new image and an `echo ok` probe answers from one (#569)",
   },
 ];
 
 export const DEPLOY_ORDER: readonly WorkerName[] = WORKER_SPECS.map((w) => w.name);
 
+/** Pure: a gate spec bound to the installation — the Worker's `/healthz`, and for the
+ *  sandbox the Containers application wrangler names from the profile's script name. */
+function bindLiveGate(gate: LiveGateSpec, script: string, healthUrl: string): LiveGate {
+  return gate.kind === "health"
+    ? { kind: "health", healthUrl }
+    : {
+        kind: "sandbox",
+        healthUrl,
+        bearerEnv: gate.bearerEnv,
+        containerApp: containerApplicationName(script, gate.containerClass),
+      };
+}
+
 /** Pure: the Workers of one installation — each spec bound to the script name
  *  and hostname its profile gives it. Health URLs are derived, never typed. */
 export function workersFor(profile: DeploymentProfile): WorkerDef[] {
   const urls = profileUrls(profile);
-  return WORKER_SPECS.map(({ preflight, liveGated, ...spec }) => {
+  return WORKER_SPECS.map(({ preflight, liveGate, ...spec }) => {
     const healthUrl = urls.healthUrl(spec.name);
+    const script = profile.workers[spec.name].script;
     return {
       ...spec,
-      script: profile.workers[spec.name].script,
+      script,
       healthUrl,
-      ...(preflight ? { preflight: liveGated ? { forceEnv: preflight.forceEnv, healthUrl } : preflight } : {}),
-      ...(liveGated ? { liveGate: { healthUrl } } : {}),
+      // A preflighted step with a health gate reads the same URL for its wait heartbeat.
+      ...(preflight
+        ? { preflight: liveGate?.kind === "health" ? { forceEnv: preflight.forceEnv, healthUrl } : preflight }
+        : {}),
+      ...(liveGate ? { liveGate: bindLiveGate(liveGate, script, healthUrl) } : {}),
     };
   });
 }
@@ -246,8 +298,8 @@ export interface DeployStep {
   retryOnPreflightRefusal: boolean;
   /** `/healthz` to read for the wait heartbeat (preflighted steps with a health URL). */
   healthUrl?: string;
-  /** After the deploy, poll this `/healthz` until the new container is live (bot only). */
-  liveGate?: { healthUrl: string };
+  /** After the deploy, wait until the step's gate holds (the bot's drain; the sandbox's rollout + probe). */
+  liveGate?: LiveGate;
   why: string;
 }
 
@@ -359,7 +411,9 @@ export function formatPlan(plan: DeployPlan): string {
         ? ` — needs ${s.requiredEnv.map((r) => (r.anyOf.length === 1 ? r.anyOf[0] : `one of ${r.anyOf.join(" / ")}`)).join(", ")}`
         : "";
     const live = s.liveGate
-      ? ` — then wait until live (${s.liveGate.healthUrl} not draining + build.commit == HEAD)`
+      ? s.liveGate.kind === "health"
+        ? ` — then wait until live (${s.liveGate.healthUrl} not draining + build.commit == HEAD)`
+        : ` — then wait until live (${s.liveGate.healthUrl} build.commit == HEAD + every running ${s.liveGate.containerApp} instance on the app version + an /exec probe answers ok from one)`
       : "";
     const cap =
       s.capabilities.length > 0
