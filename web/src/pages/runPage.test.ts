@@ -34,7 +34,7 @@ const input = {
   type: "input",
   text: "fix the **build**",
   at: 1000,
-  source: { channel: "dev", user: "justin", url: "https://acme.slack.com/archives/C1/p1" },
+  source: { channel: "dev", user: "alice", url: "https://acme.slack.com/archives/C1/p1" },
 };
 const assistant = (text: string, at: number) => ({ type: "assistant", text, at });
 /** A model turn's timing record (features/tracing.md): the `model.turn` span end the runner emits. */
@@ -253,7 +253,7 @@ describe("RunPage — history mode", () => {
     });
     expect(w.find("#request").text()).toContain("fix the"); // the original stays the request
     expect(w.find("#request").text()).not.toContain("numbers"); // and carries no copy of the follow-up
-    expect(w.find("#request .source").text()).toContain("justin");
+    expect(w.find("#request .source").text()).toContain("alice");
     const followUps = w.findAll("#log .followup");
     expect(followUps).toHaveLength(1);
     expect(followUps[0].find("h2").text()).toContain("Follow-up");
@@ -287,7 +287,7 @@ describe("RunPage — history mode", () => {
     expect(w.find("#request strong").text()).toBe("build"); // markdown, via the shared renderer
     expect(w.find("#request .source a").attributes("href")).toBe("https://acme.slack.com/archives/C1/p1");
     expect(w.find("#request .source").text()).toContain("#dev");
-    expect(w.find("#request .source").text()).toContain("justin");
+    expect(w.find("#request .source").text()).toContain("alice");
     expect(w.find("#log").text()).toContain("running tests");
     expect(w.find("details.call").attributes("data-status")).toBe("failed");
     expect(w.find("details.call .facts").text()).toContain("exit 1");
@@ -870,7 +870,7 @@ describe("RunPage — live mode", () => {
       seed: historySeed([
         input,
         { type: "run_meta", agent: "review", model: "anthropic/claude-fable-5", at: 1000 },
-        modelTurn({ durationMs: 3_400, at: 2000 }), // unstamped (pre-#559 runner)
+        modelTurn({ durationMs: 3_400, at: 2000 }), // unstamped (a runner from before per-turn stamps)
         assistant("looking", 2100),
         modelTurn({ durationMs: 16_300, model: "anthropic/claude-fable-5", at: 5000 }), // stamped, same model
         assistant("still looking", 5100),

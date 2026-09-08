@@ -20,3 +20,16 @@ docs/decisions/0022-public-tree-carries-no-imprint.md	Switchboard was built insi
 
 # The spec's second red step quotes the forbidden form it plants.
 features/public-hygiene.md	| `hygiene:gen` with growth in the tree exits 1 and leaves the list unchanged; `-- --force` records it (item 3) | `[agent]` add `// see #123` to a source file; `npm run hygiene:gen` → names the file, `0 → 1`, exit 1, `scripts/public-hygiene.allowlist.json` byte-identical (`shasum` before and after); `npm run hygiene:gen -- --force` → records it, exit 0; revert the line and `hygiene:gen` again. |
+
+# The cost page formats calendar days; its fixture needs literal ISO dates, not a narrative.
+web/src/pages/costs.test.ts	const days = [day("2026-08-27", 0.3, 4), day("2026-08-28", 1.3, 12.5), day("2026-08-29", 0.9, 3)];
+web/src/pages/costs.test.ts	range: { from: "2026-08-27", to: "2026-08-29", days: 3, partialLastDay: true },
+web/src/pages/costs.test.ts	expect(t).toContain("$14.05"); // 2026-08-28: 1.3 + 0.25 + 12.5 — not the partial day
+web/src/pages/costs.test.ts	expect(t).toContain("2026-08-28 · last full day");
+web/src/pages/costs.test.ts	expect(titles).toContain("2026-08-28 · bot · $1.30");
+web/src/pages/costs.test.ts	expect(titles).toContain("2026-08-28 · LLM (Anthropic) · $12.50");
+web/src/pages/costs.test.ts	expect(w.find('table.data td[title="2026-08-27"]').exists()).toBe(true);
+
+# The W3C Trace Context specification's own example trace id, not an account id.
+web/src/pages/scheduled.test.ts	traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+web/src/pages/scheduled.test.ts	expect(w.find(".trace").attributes("title")).toBe("trace 4bf92f3577b34da6a3ce929d0e0e4736");

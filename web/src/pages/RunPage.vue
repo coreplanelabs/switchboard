@@ -174,7 +174,7 @@ const timeline = computed(() => {
 /** The stored events as JSON lines — history mode only (a live page's URL carries its token). */
 const eventsHref = isHistory && seed?.mode === "history" ? `/runs/${encodeURIComponent(seed.id)}/events` : undefined;
 
-// ---- stop control (#101) -----------------------------------------------------
+// ---- stop control -----------------------------------------------------------
 const actionsHidden = ref(isHistory);
 const stopDisabled = ref(false);
 

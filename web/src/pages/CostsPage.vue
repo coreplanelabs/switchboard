@@ -17,7 +17,7 @@ const tiles = computed(() => (report.value ? tilesOf(report.value) : null));
 const split = computed(() => (report.value ? resourceSplitOf(report.value) : []));
 const ranges = [7, 30, 90];
 
-/** `2026-08-01` → `Aug 1` — the range line and the table read at a glance. */
+/** An ISO day (`YYYY-MM-DD`) → `Aug 1` — the range line and the table read at a glance. */
 function monthDay(date: string): string {
   const d = new Date(`${date}T00:00:00Z`);
   if (Number.isNaN(d.getTime())) return date;

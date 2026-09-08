@@ -43,7 +43,7 @@ export function delivering(run: IndexRow): boolean {
 export function statusDot(run: IndexRow): DotTone {
   if (!run.finished) return "green";
   if (delivering(run)) return "amber";
-  // `interrupted` (#375): the run was cut down before finish (container
+  // `interrupted`: the run was cut down before finish (container
   // replaced or crashed) — as red as a failure. The word itself passes through
   // `statusLabel` unchanged.
   if (run.status === "failed" || run.status === "stopped_hard" || run.status === "interrupted") return "red";
@@ -75,7 +75,7 @@ export function countTip(run: Pick<IndexRow, "stepCount">): string {
     : "events published, span records included";
 }
 
-/** A live row links with its capability token; a finished row never does (R10). */
+/** A live row links with its capability token; a finished row never does. */
 export function runHref(run: IndexRow): string {
   return `/runs/${encodeURIComponent(run.id)}${!run.finished && run.token ? `?t=${encodeURIComponent(run.token)}` : ""}`;
 }

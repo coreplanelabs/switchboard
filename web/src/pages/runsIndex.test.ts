@@ -10,7 +10,7 @@ const live = (id: string, over: Partial<RunIndexRowSeed> = {}): RunIndexRowSeed 
   id,
   label: `coding · acme/web · "${id}"`,
   channelId: "slack:C1",
-  userId: "slack:U1",
+  userId: "slack:UACME1",
   finished: false,
   startedAt: 1_000_000,
   eventCount: 1,

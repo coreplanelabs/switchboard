@@ -40,7 +40,7 @@ const WARM = {
     schedules: { refresh: 1, provisionRun: 0, provisionDeadline: 0 },
     threads: [
       {
-        threadKey: "slack:C0BQS7KPJHK:1787954209.398379",
+        threadKey: "slack:CACME0001:1787954209.398379",
         ref: "feat/residents-dash",
         sha: "abcdef1234567890abcdef1234567890abcdef12",
         user: "worker3",
@@ -50,7 +50,7 @@ const WARM = {
         evicted: false,
       },
       {
-        threadKey: "slack:C0BQS7KPJHK:1787900000.000001",
+        threadKey: "slack:CACME0001:1787900000.000001",
         ref: "master",
         user: "",
         deps: "reconcile",
@@ -58,14 +58,14 @@ const WARM = {
         lastAttachAt: "2026-08-20T10:05:00.000Z",
         evicted: true,
         evictedAt: "2026-08-27T10:00:00.000Z",
-        evictedWhy: "merged #12 <b>",
+        evictedWhy: "branch merged <b>",
       },
     ],
   },
 };
 
 const DOWN = {
-  resource: "repo:coreplanelabs/switchboard",
+  resource: "repo:acme/api",
   commands: { test: "npm test", build: "npm run build --if-present" },
   defaultRef: "main",
   provisioningTimeoutMs: 900000,
@@ -81,9 +81,9 @@ const DOWN = {
   },
 };
 
-// Item 55: a resident's last disk sample (the nominal shape measured 2026-09-07:
-// 14.4 GiB disk, 4.07 GiB used, deps 2.14 GiB, checkout 0.44 GiB, one 0.52 GiB
-// hardlinked thread tree, the build user's home empty).
+// Item 55: a resident's last disk sample (a typical shape: 14.4 GiB disk, 4.07 GiB
+// used, deps 2.14 GiB, checkout 0.44 GiB, one 0.52 GiB hardlinked thread tree, the
+// build user's home empty).
 const DISK = {
   at: "2026-09-07T15:30:00.000Z",
   totalKiB: 15_086_920,
@@ -93,7 +93,7 @@ const DISK = {
     mirror: 371_264,
     deps: 2_244_052,
     checkout: 462_888,
-    threads: { "slack:C0BQS7KPJHK:1787954209.398379": 541_860 },
+    threads: { "slack:CACME0001:1787954209.398379": 541_860 },
     homes: { worker1: 4, worker3: 2_100_000 },
     other: 640_000,
   },
@@ -113,7 +113,7 @@ describe("ResidentsIndexPage", () => {
   it("renders one full-row link per resident to its detail page, with state, reason, ref and short sha", () => {
     const w = mountApp(ResidentsIndexPage, { seed: indexSeed([WARM, DOWN], 5, 2) });
     const hrefs = w.findAll("a.row").map((a) => a.attributes("href"));
-    expect(hrefs).toEqual(["/residents/jshttp/vary", "/residents/coreplanelabs/switchboard"]);
+    expect(hrefs).toEqual(["/residents/jshttp/vary", "/residents/acme/api"]);
     expect(w.text()).toContain("2/5 resident slots in use");
     expect(w.text()).toContain("live registry read, not cached");
     expect(w.text()).toContain("warm");
@@ -192,7 +192,7 @@ describe("ResidentDetailPage", () => {
   });
 
   it("names the failure reason and last refresh error for a down resident and omits a commit link without a sha", () => {
-    const w = mountApp(ResidentDetailPage, { seed: detailSeed(DOWN, "coreplanelabs/switchboard") });
+    const w = mountApp(ResidentDetailPage, { seed: detailSeed(DOWN, "acme/api") });
     expect(w.text()).toContain("provision-failed at clone: fatal: could not read Username");
     expect(w.text()).toContain("clone failed");
     expect(w.find('[data-tone="red"]').exists()).toBe(true);
@@ -215,7 +215,7 @@ describe("ResidentDetailPage", () => {
     const w = mountApp(ResidentDetailPage, { seed: detailSeed(WARM) });
     const t = w.text();
     const a = t.indexOf("feat/residents-dash");
-    const b = t.indexOf("slack:C0BQS7KPJHK:1787900000.000001");
+    const b = t.indexOf("slack:CACME0001:1787900000.000001");
     expect(a).toBeGreaterThan(-1);
     expect(b).toBeGreaterThan(a);
     expect(w.findAll("a").map((x) => x.attributes("href"))).toContain(
@@ -224,12 +224,12 @@ describe("ResidentDetailPage", () => {
     expect(t).toContain("hardlink");
     expect(t).toContain("worker3");
     expect(t).toContain("2026-08-28T21:45:00.000Z");
-    expect(t).toContain("evicted 2026-08-27T10:00:00.000Z · merged #12 <b>");
+    expect(t).toContain("evicted 2026-08-27T10:00:00.000Z · branch merged <b>");
     expect(t).toContain("1 live · 1 evicted");
   });
 
   it("says so when a resident has no thread worktrees, and never links a non-hex sha", () => {
-    expect(mountApp(ResidentDetailPage, { seed: detailSeed(DOWN, "coreplanelabs/switchboard") }).text()).toContain(
+    expect(mountApp(ResidentDetailPage, { seed: detailSeed(DOWN, "acme/api") }).text()).toContain(
       "no thread worktrees",
     );
     const hostile = {
@@ -249,7 +249,7 @@ describe("ResidentDetailPage", () => {
 
   it("shows the resident's live-view error when the registry record has no reachable engine", () => {
     const w = mountApp(ResidentDetailPage, {
-      seed: detailSeed({ ...DOWN, live: { error: "DO unreachable" } }, "coreplanelabs/switchboard"),
+      seed: detailSeed({ ...DOWN, live: { error: "DO unreachable" } }, "acme/api"),
     });
     expect(w.text()).toContain("DO unreachable");
     expect(w.find('[data-tone="grey"]').exists()).toBe(true);
@@ -272,7 +272,7 @@ describe("ResidentDetailPage", () => {
     expect(t).toMatch(/mirror\s*0\.35 GiB/);
     expect(t).toMatch(/checkout deps \(node_modules\)\s*2\.14 GiB/);
     expect(t).toMatch(/checkout \(history \+ tree \+ build\)\s*0\.44 GiB/);
-    expect(t).toMatch(/thread slack:C0BQS7KPJHK:1787954209\.398379\s*0\.52 GiB/);
+    expect(t).toMatch(/thread slack:CACME0001:1787954209\.398379\s*0\.52 GiB/);
     expect(t).toMatch(/home worker3\s*2\.00 GiB/);
     expect(t).not.toContain("home worker1"); // 4 KiB of dotfiles is noise
     expect(t).toMatch(/other \(image, \/tmp, …\)\s*0\.61 GiB/);

@@ -2,7 +2,7 @@
 //
 // This folder is deliberately self-contained — no imports from the app's lib/,
 // pages/, or the runs domain — so the whole module can be lifted into another
-// product (nominal) as-is. Consumers adapt THEIR data (for Switchboard: run
+// product as-is. Consumers adapt THEIR data (for Switchboard: run
 // events — see ../../lib/prReviewCollector.ts) into these shapes; the module
 // never knows where they came from.
 

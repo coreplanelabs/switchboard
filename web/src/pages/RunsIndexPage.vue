@@ -14,7 +14,7 @@ import { retentionSentence } from "@core/channels/webSeed.js";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 
 // The runs index: the server-seeded snapshot kept live by the index SSE feed.
-// The default view is the live registry only (R11); ?all=1 merges finished +
+// The default view is the live registry only; ?all=1 merges finished +
 // persisted rows in and pages by the service cursor. Reconciliation and the
 // repaint merge live in lib/indexRow.ts (feedAction / mergeRow).
 
@@ -63,7 +63,7 @@ watch(
 );
 
 function onToggleCompleted(ev: Event): void {
-  // The completed toggle switches the server view (R11): a change navigates.
+  // The completed toggle switches the server view: a change navigates.
   browser.navigate((ev.target as HTMLInputElement).checked ? "/runs?all=1" : "/runs");
 }
 
