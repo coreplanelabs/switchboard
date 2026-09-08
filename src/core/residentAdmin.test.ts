@@ -246,7 +246,7 @@ describe("makeResidentAdminClient trace context", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 13 — the Special Case a process
+// Feature: features/routing-and-config.md item 16 — the Special Case a process
 // without residents is wired with: every route answers 503 with the reason.
 describe("NullResidentAdminClient — the admin plane of a process without residents", () => {
   it("every route answers 503 with the configured reason (the no-resident sentence by default); withSpan is itself; nothing is fetched", async () => {

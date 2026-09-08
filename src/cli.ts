@@ -53,6 +53,8 @@ import { buildRunStore, NullRunStore, type RunStore } from "./core/runStore.js";
 import { mintGeneration, NullLedgerWriteThrough } from "./core/runLedger/writeThrough.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { buildMemoryStore, NullMemoryStore } from "./core/memory/index.js";
+import { residentAdminFromConfig } from "./core/residentAdmin.js";
+import { NO_FLEET, watchResidentFleet, type ResidentFleetFacts } from "./core/residentFleet.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
@@ -414,7 +416,7 @@ async function main(): Promise<void> {
   // carries the same prompt blocks and card notes as one started in Slack.
   const capabilities = capabilitiesFrom(config.config, process.env);
   // Every optional subsystem is a real implementation or its Null Object
-  // (features/routing-and-config.md item 13), as in the bot. The CLI has no
+  // (features/routing-and-config.md item 16), as in the bot. The CLI has no
   // run ledger: a one-shot process reclaims and resumes nothing.
   const mcp = (await mcpWiring()).source ?? new NullMcpToolSource();
   const memory =
@@ -422,12 +424,21 @@ async function main(): Promise<void> {
   const runHistoryWriter = capabilities.runHistory
     ? createRunHistoryWriter({ store: runStore, warn, onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
     : new NullRunHistoryWriter();
+  // The resident fleet's cap for the About block (routing-and-config item 11):
+  // one read for this one-shot process, from the admin plane the config names;
+  // nothing to know without residents or without the admin bearer.
+  const residentAdmin = capabilities.residents ? residentAdminFromConfig(config, process.env) : undefined;
+  const fleetWatcher =
+    residentAdmin && !("unavailable" in residentAdmin) ? watchResidentFleet(residentAdmin, { warn }) : undefined;
+  await fleetWatcher?.refresh();
+  const residentFleet: ResidentFleetFacts = fleetWatcher ?? NO_FLEET;
   // The chat fast path (`runs list`, `friction report`, …) answers from the same
   // catalogue the bot binds — without it those messages would go to the model.
   const deps: CoreDeps = {
     config,
     providers,
     capabilities,
+    residentFleet,
     skills,
     mcp,
     memory,

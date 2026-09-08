@@ -299,7 +299,7 @@ describe("createRunHistoryWriter", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 13 — the Null Object a process
+// Feature: features/routing-and-config.md item 16 — the Null Object a process
 // without run history is wired with: the dispatcher writes unconditionally.
 describe("NullRunHistoryWriter — the writer of a process without run history", () => {
   it("drops every write (final, provisional, via a sink), never counts pending or failures, is never degraded, and settles at once", async () => {

@@ -185,7 +185,7 @@ export interface LedgerWriteThrough {
 }
 
 /** The write-through of a process without a run ledger (a Null Object,
- *  routing-and-config item 13): nothing is claimed, so `open` answers as the
+ *  routing-and-config item 16): nothing is claimed, so `open` answers as the
  *  real one does for an untracked run and every run goes on exactly as it did
  *  before the ledger existed; the inbox and the handoff hold nothing. `adopt`
  *  has nothing to adopt — a reclaim needs a ledger — and answers a detached run

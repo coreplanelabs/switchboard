@@ -41,7 +41,7 @@ export const RESIDENTS_OFF_MESSAGE =
   "Resident repo environments aren't configured — set `execution.resident.baseUrl` in config.yaml.";
 
 /** The admin client of a process without residents (Fowler's Special Case,
- *  routing-and-config item 13): every route answers 503 with the reason there
+ *  routing-and-config item 16): every route answers 503 with the reason there
  *  is no fleet, so a view or a command that reaches it renders that reason
  *  instead of branching on a missing client. The reason is the config's —
  *  no resident Worker, or one whose admin bearer is unset. */

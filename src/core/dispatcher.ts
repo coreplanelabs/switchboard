@@ -1,5 +1,6 @@
 import type { ConfigStore } from "../config.js";
 import type { Capabilities } from "./capabilities.js";
+import type { ResidentFleetFacts } from "./residentFleet.js";
 import { configAwarenessBlock } from "./configAwareness.js";
 import { selfDescriptionBlock } from "./selfDescription.js";
 import { customInstructionsBlock } from "./customInstructions.js";
@@ -131,6 +132,10 @@ export interface CoreDeps {
    *  the prompt blocks, the status card, the command catalogue, the web seed.
    *  Nothing below re-derives a capability from `config`. */
   capabilities: Capabilities;
+  /** What the resident Worker last said about the fleet (its cap), read in the
+   *  background so the About block names the Worker's number, never a constant
+   *  (routing-and-config item 11). `NO_FLEET` without residents. */
+  residentFleet: ResidentFleetFacts;
   /** The wall clock (features/tracing.md): `systemClock` in production, a ticking clock in tests. */
   clock?: Clock;
   /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */
@@ -1298,7 +1303,12 @@ export async function dispatch(
     // the live agent registry, on every agent's prompt, so "how does your
     // resident system work?" is answered from fact instead of a public-web
     // 404 on our private repo.
-    const aboutBlock = selfDescriptionBlock(AGENTS, deps.config.config.organization);
+    const aboutBlock = selfDescriptionBlock(
+      AGENTS,
+      deps.config.config.organization,
+      deps.capabilities,
+      deps.residentFleet.cap(),
+    );
 
     // Custom instructions (#107 phase 2): the requester's user text + this
     // channel's text, as ONE advisory block. Read from the same resolved
@@ -2588,7 +2598,7 @@ async function runShipBranch(
       // roadmap), and a line inviting `mcp add` into a run that could not use
       // the result would mislead. The line arrives with the tools.
     }),
-    about: selfDescriptionBlock(AGENTS, deps.config.config.organization),
+    about: selfDescriptionBlock(AGENTS, deps.config.config.organization, deps.capabilities, deps.residentFleet.cap()),
     instructions: instructionsBlock,
     skills: deps.skills ? skillGuidanceBlock(deps.skills, spec.agent.name) : undefined,
   });
