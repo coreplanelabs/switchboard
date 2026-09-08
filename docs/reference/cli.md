@@ -121,6 +121,7 @@ A command that needs bot config loads `SWITCHBOARD_CONFIG` (default `./config/co
 | `0` | success |
 | `1` | the command ran and failed (a real error — a stack trace is never shown) |
 | `2` | the invocation itself was rejected — bad usage, or `invalid_input` from the grammar or the command's own validation |
+| `75` | the command was `busy` (sysexits `EX_TEMPFAIL`): refused for a reason that clears on its own — runs in flight a deploy must wait out — with nothing for you to change; the same invocation later may simply succeed |
 
 The same distinction (rejected-before-running vs. failed-while-running) applies identically over HTTP and MCP: it's one error vocabulary per fault, not per surface. See [explanation: one definition, every surface](../explanation/one-command-many-surfaces.md).
 

@@ -54,6 +54,12 @@ export interface DeployStepResult {
   /** `live` (gated and confirmed), `n/a` (no gate), `not deployed`, or `deployed, not live: <reason>`. */
   live: string;
   status: string;
+  /** The step never deployed because its preflight was still refusing when the
+   *  wait budget ran out — runs in flight, a drain under way. Nothing is
+   *  broken and nothing needs changing: the same deploy later succeeds once
+   *  they finish. Absent on every other outcome, so the caller can tell
+   *  "wait and retry" from "fix something". */
+  preflightTimedOut?: true;
 }
 
 export type DeployRunResult =
@@ -197,6 +203,7 @@ interface StepOutcome {
   versionId?: string;
   live: string;
   reason?: string;
+  preflightTimedOut?: true;
 }
 
 /**
@@ -272,6 +279,7 @@ async function deployStep(
           ok: false,
           live: "not deployed",
           reason: `preflight still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to kill what is in flight`,
+          preflightTimedOut: true,
         };
       // Never a silent wait: say what is in flight and how far into the budget we are.
       const body = step.healthUrl ? await fetchHealthz(step.healthUrl) : undefined;
@@ -328,6 +336,7 @@ export async function runDeployPlan(plan: DeployPlan, io: DeployRunnerIO): Promi
       ...(r.versionId !== undefined ? { versionId: r.versionId } : {}),
       live: r.live,
       status: r.ok ? (r.versionId ? "deployed" : "deployed (no version id in output?)") : `FAILED: ${r.reason}`,
+      ...(r.preflightTimedOut ? { preflightTimedOut: true } : {}),
     });
     if (!r.ok) {
       io.warn(`[deploy:all] ${step.name} failed — stopping here so the order holds (later Workers were NOT deployed)`);

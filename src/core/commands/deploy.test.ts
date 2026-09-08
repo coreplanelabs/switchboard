@@ -322,6 +322,49 @@ describe("deploy.all", () => {
     ).toMatchObject({ ok: false, error: "invalid_input" });
   });
 
+  it("a step whose preflight was still refusing at the end of the wait budget is `busy`, not `unavailable`: nothing is broken, the same deploy succeeds once the runs in flight finish (exit 75 on the CLI — the workflow's cue to re-dispatch)", async () => {
+    const busy = bind(async () => ({
+      kind: "ran",
+      ok: false,
+      results: [
+        { name: "memory", script: "switchboard-memory", versionId: "v1", live: "n/a", status: "deployed" },
+        {
+          name: "bot",
+          script: "switchboard",
+          live: "not deployed",
+          status: "FAILED: preflight still refusing after 45 min (2 run(s) in flight)",
+          preflightTimedOut: true,
+        },
+      ],
+      notAttempted: ["resident", "sandbox"],
+    }));
+    const res = await busy.commands.invoke("deploy.all", {}, cli);
+    expect(res).toMatchObject({ ok: false, error: "busy" });
+    const message = res.ok ? "" : res.message;
+    expect(message).toMatch(
+      /^deploy waited out its budget — bot: preflight still refusing after 45 min \(2 run\(s\) in flight\)/,
+    );
+    expect(message).toContain("memory    switchboard-memory     v1");
+    expect(message).toContain("not attempted: resident, sandbox");
+    // A real failure after a timed-out step elsewhere in the table is still a failure: the
+    // table is read as a whole, and only "every failure is a timeout" is busy.
+    const mixed = bind(async () => ({
+      kind: "ran",
+      ok: false,
+      results: [
+        {
+          name: "bot",
+          script: "switchboard",
+          versionId: "v2",
+          live: "deployed, not live: old container still draining",
+          status: "FAILED: deployed but NOT live",
+        },
+      ],
+      notAttempted: ["resident", "sandbox"],
+    }));
+    expect(await mixed.commands.invoke("deploy.all", {}, cli)).toMatchObject({ ok: false, error: "unavailable" });
+  });
+
   it("--affected hands the runner the report's plan (dryRun false, the report attached); an empty selection runs nothing and says so with exit 0", async () => {
     const { commands, plans } = bind(
       async (plan) => ({

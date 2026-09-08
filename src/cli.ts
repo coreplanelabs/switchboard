@@ -141,9 +141,18 @@ export function cliCatalogue(commands: Pick<CommandInvoker, "list">): string {
 }
 
 export interface CommandRunOutput {
-  exitCode: 0 | 1 | 2;
+  /** 0 ok · 1 failed · 2 the invocation was rejected · 75 `busy` (sysexits
+   *  EX_TEMPFAIL — nothing to change, try the same thing later). */
+  exitCode: 0 | 1 | 2 | 75;
   stdout: string;
   stderr: string;
+}
+
+/** The exit code for a failed invoke: one rule for every command, read by shells. */
+function exitCodeFor(error: InvokeErrorCode): 1 | 2 | 75 {
+  if (error === "invalid_input") return 2;
+  if (error === "busy") return 75;
+  return 1;
 }
 
 /** `error (<code>): <message>` — the one stderr shape for every refusal, whoever decided it. */
@@ -155,9 +164,10 @@ function errorLine(code: InvokeErrorCode, message: string): string {
  * Run one bound registry command. Transport-free so the contract test drives
  * the very path `main()` uses: a failure is `error (<code>): <message>` on
  * stderr and nothing on stdout — exit 2 when the registry rejected the input
- * (`invalid_input`, the same exit the grammar's rejection gets), exit 1 for
- * any other failure; success prints the exact `invoke` JSON (`--json`) or
- * `renderText` of it.
+ * (`invalid_input`, the same exit the grammar's rejection gets), exit 75 when
+ * the command was `busy` (a transient refusal — the caller retries the same
+ * thing later), exit 1 for any other failure; success prints the exact
+ * `invoke` JSON (`--json`) or `renderText` of it.
  */
 export async function runCommand(
   commands: CommandInvoker,
@@ -169,7 +179,7 @@ export async function runCommand(
   const result = await commands.invoke(parsed.id, parsed.input, caller);
   if (!result.ok)
     return {
-      exitCode: result.error === "invalid_input" ? 2 : 1,
+      exitCode: exitCodeFor(result.error),
       stdout: "",
       stderr: errorLine(result.error, result.message),
     };

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import {
   CommandError,
   CommandRegistry,
   bindCommands,
+  defineCommand,
   renderCompact,
   type CommandInvoker,
 } from "./core/commandRegistry.js";
@@ -259,6 +261,28 @@ describe("runCommand", () => {
       exitCode: 1,
       stdout: "",
       stderr: expect.stringMatching(/^error \(not_found\)/),
+    });
+  });
+
+  it("a `busy` failure is exit 75 (sysexits EX_TEMPFAIL): the same request may succeed later without any change — how a caller in a shell tells 'retry' from 'broken'", async () => {
+    const registry = new CommandRegistry<{ readonly [k: string]: never }>({ audit: () => {} });
+    registry.register(
+      defineCommand({
+        id: "demo.busy",
+        options: z.object({}),
+        action: "runs:read",
+        effect: "read",
+        describe: "always busy",
+        handler: async () => {
+          throw new CommandError("busy", "1 run in flight — try again once it finishes");
+        },
+      }),
+    );
+    const commands = bindCommands(registry, {});
+    expect(await runCommand(commands, command(["demo", "busy"], commands), CLI_CALLER)).toEqual({
+      exitCode: 75,
+      stdout: "",
+      stderr: "error (busy): 1 run in flight — try again once it finishes",
     });
   });
 

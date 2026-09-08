@@ -5,6 +5,17 @@
 # to run — with `--affected` by default, so only the Workers whose inputs the
 # release changed roll (judged per Worker against the commit it is serving).
 #
+# A busy bot never needs a person (features/release-and-deploy.md item 13).
+# The bot step refuses while runs are in flight and `deploy all` waits that out
+# for 45 min; if it is STILL refusing then, the CLI exits 75 (`busy` — nothing
+# is broken, nothing to change) and this job dispatches itself again at the
+# head of main with `attempt` + 1, up to MAX_ATTEMPTS. The retry is
+# `--affected` at that moment, so it deploys whatever is behind — including any
+# release since — and five timed-out releases collapse into one deploy of the
+# newest state. The job-level concurrency group keeps the chain to one run
+# (GitHub holds one running and one pending; a newer pending replaces the
+# older). A REAL failure (exit 1) never retries: it is red, for a person.
+#
 # Secrets (repository secrets, set once by a maintainer — never by code):
 #   CLOUDFLARE_DEPLOY_TOKEN  wrangler's credential for the four runtime Workers on
 #                         the coreplane-infra account. Its own token, distinct
@@ -37,6 +48,10 @@ on:
         description: Bypass the bot/resident preflights — in-flight runs are SIGTERM-drained and killed at the drain deadline
         type: boolean
         default: false
+      attempt:
+        description: Which try this is (1 = the release or a person; a retry passes its own + 1)
+        type: string
+        default: "1"
   workflow_dispatch:
     inputs:
       targets:
@@ -47,14 +62,22 @@ on:
         description: Bypass the bot/resident preflights — in-flight runs are SIGTERM-drained and killed at the drain deadline
         type: boolean
         default: false
+      attempt:
+        description: Leave at 1 — a retry the workflow dispatches for itself passes its own attempt + 1
+        type: string
+        default: "1"
 
 permissions:
   contents: read
 
 jobs:
   deploy:
-    name: deploy ${{ inputs.targets }}
+    name: deploy ${{ inputs.targets }}${{ inputs.attempt != '1' && format(' (attempt {0})', inputs.attempt) || '' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # `gh workflow run` for the retry a busy bot forces.
+      actions: write
     # One production deploy at a time, in order, never cancelled: a second
     # deploy landing on a draining bot container kills its runs
     # (slack-channel.md item 8). Job-level so it holds when this workflow is
@@ -145,11 +168,51 @@ jobs:
           # Prove it: the tree `deploy all` is about to build is the commit, nothing else.
           git status --porcelain
       - name: deploy
+        id: deploy
         env:
           ARGS: ${{ steps.selection.outputs.args }}
         run: |
+          # Exit 75 is `busy`: the bot preflight was still refusing (runs in
+          # flight) when the 45-min budget ran out. Nothing is broken, so this
+          # step does not fail on it — the next step dispatches the retry.
+          # Every other non-zero exit is a real failure and fails here.
+          set +e
           # shellcheck disable=SC2086
           npm run --silent cli -- deploy all $ARGS --allow-branch --wait-max 45
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "outcome=deployed" >> "$GITHUB_OUTPUT" ;;
+            75) echo "outcome=busy" >> "$GITHUB_OUTPUT" ;;
+            *) echo "outcome=failed" >> "$GITHUB_OUTPUT"; exit "$code" ;;
+          esac
+      - name: not deployed yet — the bot was busy; dispatch the retry
+        if: steps.deploy.outputs.outcome == 'busy'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTEMPT: ${{ inputs.attempt }}
+          TARGETS: ${{ inputs.targets }}
+          # 8 × 45 min ≈ 6 h of waiting for a quiet bot before a person decides.
+          MAX_ATTEMPTS: "8"
+        run: |
+          if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
+            echo "::error::production is NOT deployed — the bot preflight was still refusing after $ATTEMPT attempts of 45 min each (runs in flight every time). A person decides: wait and dispatch again, or dispatch with force=true (SIGTERM-drains in-flight runs and kills them at the drain deadline)."
+            exit 1
+          fi
+          next=$((ATTEMPT + 1))
+          # Always the head of main, always --affected: the retry deploys what is
+          # behind at that moment, so interim releases need no attention of their own.
+          gh workflow run deploy-production.yml --repo "$GITHUB_REPOSITORY" --ref main -f "targets=${TARGETS:-affected}" -f "attempt=$next"
+          runs_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/deploy-production.yml"
+          echo "::warning::production is not deployed yet — the bot preflight was still refusing after 45 min (runs in flight). Retry $next of $MAX_ATTEMPTS dispatched at the head of main: $runs_url"
+          {
+            echo
+            echo "### Not deployed yet — retry $next of $MAX_ATTEMPTS dispatched"
+            echo
+            echo "The bot preflight was still refusing when the 45-min budget ran out (runs in flight; nothing is broken). The retry runs \`deploy all --affected\` at the head of \`main\` — whatever is behind then, including any release since — so this run needs no attention of its own. A real failure never retries."
+            echo
+            echo "[deploy-production runs]($runs_url)"
+          } >> "$GITHUB_STEP_SUMMARY"
       # What production serves now, whatever happened above — the receipt.
       - name: what is live
         if: always()

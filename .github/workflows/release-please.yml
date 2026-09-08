@@ -80,6 +80,11 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
     uses: ./.github/workflows/deploy-production.yml
+    # `actions: write` is the ceiling for the called workflow's own permissions:
+    # a deploy the bot's in-flight runs held up dispatches its own retry.
+    permissions:
+      contents: read
+      actions: write
     with:
       targets: affected
     secrets: inherit

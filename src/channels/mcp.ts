@@ -133,6 +133,7 @@ const RPC_CODE_FOR: Readonly<Record<InvokeErrorCode, number>> = {
   not_found: -32002,
   conflict: -32003,
   unavailable: -32004,
+  busy: -32004, // as over HTTP (503 for both): `data.code` tells the transient refusal apart
   internal: -32603, // INTERNAL_ERROR
 };
 
