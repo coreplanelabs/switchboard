@@ -312,6 +312,49 @@ describe("RunRegistry.finish", () => {
   });
 });
 
+// Feature: docs/reference/specs/run-history.md item 42 — a run created at its
+// reservation whose dispatch ended before the run loop is discarded, not finished.
+describe("RunRegistry.discard", () => {
+  it("drops a live run without a finished frame: the index feed sees the removal, a live subscriber gets the end frame with no replyOk, and the run is unknown afterwards (a wrong-token lookup and a discard tell the same story)", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create("coding · acme/api");
+    const index: IndexEvent[] = [];
+    reg.subscribeIndex((ev) => index.push(ev));
+    const seen: RunEvent[] = [];
+    let finished = false;
+    let sealed: SealedFrame | undefined;
+    reg.subscribe(id, token, {
+      onEvent: (e) => seen.push(e),
+      onFinished: () => (finished = true),
+      onSealed: (f) => (sealed = f),
+    });
+    reg.publish(id, call("attaching"));
+
+    reg.discard(id);
+
+    expect(index.at(-1)).toEqual({ type: "removed", id });
+    expect(finished).toBe(false);
+    expect(sealed).toEqual({ sealedAt: 1000 });
+    expect(reg.getById(id)).toBeNull();
+    expect(reg.listActive()).toEqual([]);
+    expect(reg.subscribe(id, token, { onEvent: () => {} })).toBeNull();
+    reg.publish(id, call("after")); // a discarded run takes nothing
+    expect(seen).toEqual([seq(1, call("attaching"))]);
+  });
+
+  it("is a no-op for an unknown run and for a finished one — a finished run has a record, so the sweep evicts it in its own time", () => {
+    const { reg } = testRegistry();
+    const { id } = reg.create("review · acme/api#1");
+    reg.finish(id, "completed");
+    const index: IndexEvent[] = [];
+    reg.subscribeIndex((ev) => index.push(ev));
+    expect(() => reg.discard("ghost")).not.toThrow();
+    reg.discard(id);
+    expect(index.filter((ev) => ev.type === "removed")).toEqual([]);
+    expect(reg.getById(id)?.finished).toBe(true);
+  });
+});
+
 // Feature: docs/reference/specs/live-view.md item 4, docs/reference/specs/tracing.md — finish and seal.
 describe("RunRegistry — finish and seal", () => {
   it("finish sends `finished` to attached subscribers and leaves them attached; the seal, later, sends `end` from its own clock read — two index upserts per run, one each", () => {
