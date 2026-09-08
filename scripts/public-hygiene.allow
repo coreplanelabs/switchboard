@@ -1,0 +1,22 @@
+# Lines the public-hygiene ratchet leaves alone, one per line: <path><TAB><the line, trimmed>.
+# Each entry is a line that matches a forbidden class but is right as written — the English word
+# "nominal", a CSS colour that looks like an issue number, an integration's own identifier. Say why
+# in a comment above the entry. A stale entry (the line no longer exists) fails `npm run hygiene:check`.
+
+# The spec names the plan vocabulary it forbids.
+features/public-hygiene.md	A repository that grew inside one company is full of that company: its name in URLs and workflow files, its people in comments, its private issue numbers as provenance, its planning vocabulary (`KTD16`, `U3`) in docstrings, its Slack and account ids in fixtures, and dated retellings of incidents where a timeless rule should stand. None of it helps a reader who is not that company, and some of it is a leak. The policy is that every comment, docstring, fixture and prose line in the public tree is answerable from the repo alone; the mechanism is a check, because a policy held by discipline lasts one busy week.
+
+# The spec lists the class patterns by example.
+features/public-hygiene.md	1. **Five classes, one regex each, tested per line.** `names` (the company, its sibling products, people, the private Slack channel, vault paths — case-insensitive), `trackers` (`#NNN` issue references and the private org's GitHub URLs; a line anchor, an HTML entity, a heading or a hex colour is not a tracker), `planIds` (`KTD…`, `KD…`, `OQ…`, and the bare `U1`–`U9` / `R1`–`R99` markers; a Slack user id and Cloudflare's `R2` are not), `ids` (Slack channel/user/DM ids and 32-hex account ids), `dates` (a full ISO date). A line can hit several classes; each is counted.
+
+# The spec names "nominal" as the canonical allowed English word.
+features/public-hygiene.md	4. **A legitimate line is allowed by name.** `scripts/public-hygiene.allow` holds `path<TAB>trimmed line` entries with a comment saying why (the English word "nominal", a colour that looks like an issue number, an integration's own identifier). An allowed line is skipped whole. An entry whose line no longer exists is stale and fails the check, so the file cannot rot.
+
+# The spec's red step quotes the forbidden form it plants.
+features/public-hygiene.md	| The tree equals the committed list and no allow entry is stale (item 3) | `[agent]` `npm run hygiene:check` → `public-hygiene ok — N file(s), M hit(s) still listed, K line(s) allowed`, exit 0. Red step: add `// see #123` to any source file and re-run — it must name the file, the class, `0 → 1`, and exit 1. |
+
+# The record names the plan vocabulary it retires.
+docs/decisions/0022-public-tree-carries-no-imprint.md	Switchboard was built inside one company, by a handful of people, against a private issue tracker and a set of dated planning documents. That history is in the tree: the company's name in workflow files and URLs, people's names in comments, issue numbers as the only explanation for a line of code, plan vocabulary (`KTD16`, `U3`, `R1`) in docstrings, Slack and account identifiers in fixtures, and dated incident retellings where a rule should stand. For a reader outside the company every one of those is noise, and several are leaks.
+
+# The spec's second red step quotes the forbidden form it plants.
+features/public-hygiene.md	| `hygiene:gen` with growth in the tree exits 1 and leaves the list unchanged; `-- --force` records it (item 3) | `[agent]` add `// see #123` to a source file; `npm run hygiene:gen` → names the file, `0 → 1`, exit 1, `scripts/public-hygiene.allowlist.json` byte-identical (`shasum` before and after); `npm run hygiene:gen -- --force` → records it, exit 0; revert the line and `hygiene:gen` again. |

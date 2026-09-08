@@ -31,6 +31,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0019 | [A run outlives the container through a leased, fenced ledger with a write-ahead step record](../decisions/0019-durable-run-ledger-resume-after-kill.md) | Lease with a fencing token | implemented | 2026-09-08 |
 | 0020 | [A span is the one measurement primitive; every duration a user sees falls out of it](../decisions/0020-spans-one-measurement-primitive.md) | Execute Around Method | implemented | 2026-09-08 |
 | 0021 | [Records are immutable and specs are checked; documentation drift is prevented by CI, not discipline](../decisions/0021-records-are-immutable-specs-are-checked.md) | Two kinds of document | implemented | 2026-09-08 |
+| 0022 | [The public tree carries no imprint of the company that grew it, and a ratchet holds that line](../decisions/0022-public-tree-carries-no-imprint.md) | Ratchet | accepted | 2026-09-08 |
 
 <!-- /generated:decision-records -->
 
