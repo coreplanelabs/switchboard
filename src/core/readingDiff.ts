@@ -1,6 +1,8 @@
 import { shellQuote } from "../execution/shellQuote.js";
 import { redactSecrets, stripAnsi, type RunEvent } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
+import type { Span } from "./trace/types.js";
+import type { ExecTraceOptions } from "../execution/executor.js";
 
 // The reading diff (features/reading-diff.md): every PR review run publishes a
 // `review_artifact` event carrying the change as a reviewer would read it —
@@ -168,28 +170,41 @@ function failedOutput(out: string): boolean {
  *    lands iff it finishes within the review — a late publish is dropped by
  *    the registry's finished-run rule, and the baseline still stands. */
 export function startReviewReadingDiff(args: {
-  executor: { exec(command: string): Promise<string> };
+  executor: { exec(command: string, opts?: ExecTraceOptions): Promise<string> };
   cfg: ReadingDiffConfig | undefined;
   env: Record<string, string | undefined>;
   baseRef: string | undefined;
   publish: (event: RunEvent) => void;
+  /** The request's root: each production becomes a `run.reading_diff` /
+   *  `run.reading_diff.upgrade` background span under it, `outcome` saying
+   *  whether it published, and the diff's exec is that span's child
+   *  (features/tracing.md item 18). Absent, nothing is measured. */
+  parent?: Span;
 }): { baseline: Promise<boolean>; upgrade?: Promise<boolean> } {
   const resolved = resolveReadingDiff(args.cfg, args.env);
   if (!resolved) return { baseline: Promise.resolve(false) };
-  const publishArtifact = async (provider: ReadingDiffProviderName): Promise<boolean> => {
+  const produce = async (provider: ReadingDiffProviderName, span: Span | undefined): Promise<boolean> => {
     try {
-      const artifact = await produceReadingDiff(args.executor, {
-        provider,
-        baseRef: args.baseRef,
-        meatModel: resolved.meatModel,
-        meatTimeoutS: resolved.meatTimeoutS,
-      });
+      const artifact = await produceReadingDiff(
+        args.executor,
+        { provider, baseRef: args.baseRef, meatModel: resolved.meatModel, meatTimeoutS: resolved.meatTimeoutS },
+        span,
+      );
       if (!artifact) return false;
       args.publish({ type: "review_artifact", artifact: "reading_diff", ...artifact, at: systemClock() });
       return true;
     } catch {
       return false;
     }
+  };
+  const publishArtifact = (provider: ReadingDiffProviderName): Promise<boolean> => {
+    if (!args.parent) return produce(provider, undefined);
+    const baseline = provider === "git";
+    return args.parent.span(baseline ? "run.reading_diff" : "run.reading_diff.upgrade", async (span) => {
+      const published = await produce(provider, span);
+      span.setAttrs({ outcome: published ? "published" : baseline ? "none" : "did_not_land" });
+      return published;
+    });
   };
   return {
     baseline: publishArtifact("git"),
@@ -203,12 +218,17 @@ export function startReviewReadingDiff(args: {
  *  run that owns the executor; the baseline/upgrade split above is what keeps
  *  an artifact guaranteed. */
 export async function produceReadingDiff(
-  executor: { exec(command: string): Promise<string> },
+  executor: { exec(command: string, opts?: ExecTraceOptions): Promise<string> },
   opts: { provider: ReadingDiffProviderName; baseRef: string | undefined; meatModel?: string; meatTimeoutS?: number },
+  /** The production's own span; the executor's `exec.exec` hangs under it. */
+  span?: Span,
 ): Promise<ReadingDiffArtifact | null> {
   const baseRef = opts.baseRef ?? "HEAD";
   try {
-    const out = await executor.exec(readingDiffCommand(opts.provider, opts.baseRef, opts.meatModel, opts.meatTimeoutS));
+    const out = await executor.exec(
+      readingDiffCommand(opts.provider, opts.baseRef, opts.meatModel, opts.meatTimeoutS),
+      span ? { span } : undefined,
+    );
     if (opts.provider === "meat") {
       const meat = parseMeatJson(out); // throws → null below (the baseline covers)
       const capped = capDiff(sanitize(meat.diff));
