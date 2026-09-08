@@ -25,6 +25,7 @@
 // functions.
 
 import { formatAffectedText, type AffectedReport } from "./affected.js";
+import { BASE_CONFIG_DOCUMENT_KEY } from "../configDocument.js";
 import { profileUrls, type DeploymentProfile, type LoadedProfile, type WorkerKind } from "./profile.js";
 
 /** Env vars removed from every deploy step's environment. */
@@ -176,7 +177,8 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
     dir: WORKER_DIRS.bot,
     entry: "deploy/cloudflare/worker.ts",
     // The Worker shim's dir, plus everything the root Dockerfile COPYs into the
-    // image (src/, web/, config/, skills/, the package files, the tsconfigs)
+    // image (src/, web/, skills/, the package files, the tsconfigs — never
+    // config/: the bot reads its config from the state Worker, not the image)
     // and the two files that decide what it copies. The lockfile counts for
     // the root package and web INCLUDING devDependencies (the Dockerfile's
     // `npm ci --include-workspace-root --workspace web`: tsc and vite build
@@ -192,7 +194,6 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
         "tsconfig.build.json",
         "src/",
         "web/",
-        "config/",
         "skills/",
       ],
       lockfile: [
@@ -281,9 +282,10 @@ export function workersFor(profile: DeploymentProfile): WorkerDef[] {
   });
 }
 
-/** Where the bot's runtime config lands in the build context — the path the
- *  Dockerfile copies and the bot Worker points its container at. */
-export const CONFIG_DESTINATION = "config/config.production.yaml";
+/** Where the bot's runtime config lands: the `base` document on the state
+ *  Worker's ConfigDO (src/configDocument.ts), which the bot Worker points its
+ *  container at with `SWITCHBOARD_CONFIG=state://base`. */
+export const CONFIG_DOCUMENT_KEY = BASE_CONFIG_DOCUMENT_KEY;
 
 export interface DeployOptions {
   only: WorkerName[] | undefined;
@@ -341,8 +343,8 @@ export interface DeployPlan {
   };
   /** The deployment profile the plan was computed from. `deploy all` refuses a plan from the example. */
   profile: { origin: LoadedProfile["origin"]; path: string };
-  /** The bot's runtime config: where it comes from, where the runner places it before the image builds. */
-  config: { source: string; destination: string };
+  /** The bot's runtime config: where it comes from, and the state Worker document the runner pushes it to before the bot step. */
+  config: { source: string; document: string; stateWorkerUrl: string };
   warnings: string[];
 }
 
@@ -396,7 +398,11 @@ export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe, loaded:
       nodeModulesMissing: steps.filter((s) => !checkout.hasNodeModules(s.dir)).map((s) => s.dir),
     },
     profile: { origin: loaded.origin, path: loaded.path },
-    config: { source: profile.configSource, destination: CONFIG_DESTINATION },
+    config: {
+      source: profile.configSource,
+      document: CONFIG_DOCUMENT_KEY,
+      stateWorkerUrl: profileUrls(profile).stateWorkerUrl,
+    },
     warnings: [
       ...(loaded.origin === "example"
         ? [
@@ -421,7 +427,7 @@ export function formatPlan(plan: DeployPlan): string {
       : `node_modules missing in ${missing.join(", ")} — the runner will \`npm ci\` there first`;
   const lines = [
     ...(plan.affected ? [formatAffectedText(plan.affected)] : []),
-    `Profile: ${plan.profile.path}${plan.profile.origin === "example" ? " (example)" : ""}; config: ${plan.config.source} → ${plan.config.destination}`,
+    `Profile: ${plan.profile.path}${plan.profile.origin === "example" ? " (example)" : ""}; config: ${plan.config.source} → document "${plan.config.document}" on ${plan.config.stateWorkerUrl}`,
     `Checks: wrangler account = ${plan.checks.account}; clean tree; ${plan.checks.atOriginMain ? "HEAD == origin/main" : "any branch (--allow-branch)"}; ${nodeModules}`,
     ...plan.warnings.map((w) => `WARNING ${w}`),
     plan.steps.length === 0 ? "Steps: none — nothing to deploy" : "Steps:",

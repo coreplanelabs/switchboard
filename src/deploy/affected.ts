@@ -41,6 +41,8 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
   // The deployment profile says WHERE the fleet is; it is read by the deploy
   // tooling, never bundled or copied into an image.
   { rule: "deployment profile", test: /^deploy\/profile(\.example)?\.json$/ },
+  // The bot reads its config from the state Worker (`deploy config` pushes it); the image never holds it.
+  { rule: "bot runtime config (pushed to the state Worker, never built into the image)", test: /^config\// },
   {
     rule: "repo metadata",
     test: /^(\.gitignore|\.nvmrc|\.env\.example|LICENSE|NOTICE|docker-compose\.yml|fly\.toml|tsconfig\.scripts\.json|release-please-config\.json|\.release-please-manifest\.json|project\.json|switchboard\.png)$/,

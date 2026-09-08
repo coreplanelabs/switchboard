@@ -269,7 +269,7 @@ SWITCHBOARD_DEPLOY_TOKEN=… npm run cli -- deploy restart  # from the repo root
                   # done once /healthz reports a later startedAt
 ```
 
-The bot shim mirrors terrateam exactly: singleton Durable Object, `sleepAfter: 2h`, 5-minute cron keep-alive, secrets forwarded as container env, `startAndWaitForPorts` with generous timeout. Production behavior comes from `config/config.production.yaml` (committed, no secrets), selected via `SWITCHBOARD_CONFIG`; the sandbox and resident Workers get stable custom domains on the `coreplanelabs.dev` zone so that config never changes. Repos are onboarded to the resident Worker at runtime from chat (`repo onboard` — next section), never at deploy time.
+The bot shim mirrors terrateam exactly: singleton Durable Object, `sleepAfter: 2h`, 5-minute cron keep-alive, secrets forwarded as container env, `startAndWaitForPorts` with generous timeout. Production behavior comes from the `base` config document on the state Worker — `deploy all` pushes it from the profile's `configSource` before the bot step, `deploy config` pushes it alone, and the container reads it at start (`SWITCHBOARD_CONFIG=state://base`); the image holds no config; the sandbox and resident Workers get stable custom domains on the `coreplanelabs.dev` zone so that config never changes. Repos are onboarded to the resident Worker at runtime from chat (`repo onboard` — next section), never at deploy time.
 
 ### What any host must provide
 

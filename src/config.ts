@@ -10,6 +10,7 @@ import type { RunHistoryConfig } from "./core/runStore.js";
 import type { ShipConfig } from "./core/shipPipeline.js";
 import { hasAction } from "./core/authz/authorize.js";
 import { grantsIn, grantsTable, parseGrantsConfig, type GrantsConfig, type GrantsTable } from "./core/authz/grants.js";
+import { ConfigDocumentClient, parseConfigLocation, stateWorkerFromEnv } from "./configDocument.js";
 import type { Grants } from "./core/authz/types.js";
 import type { IngressTokenMap } from "./core/ingressTokens.js";
 import { isRunSchedule, SCHEDULES } from "./core/schedules.js";
@@ -423,11 +424,49 @@ export function overridesBackingFor(
   return new WorkerOverridesBacking({ baseUrl: worker.baseUrl, token, ...(opts.fetch ? { fetch: opts.fetch } : {}) });
 }
 
-/** Read + validate `config.yaml` once; `warn` receives the non-fatal findings. */
-export function loadAppConfig(configPath: string, warn: (message: string) => void): AppConfig {
-  const config = YAML.parse(readFileSync(resolve(configPath), "utf8")) as AppConfig;
+/** Parse + validate config YAML text; `warn` receives the non-fatal findings. */
+export function parseAppConfigText(text: string, warn: (message: string) => void): AppConfig {
+  const config = YAML.parse(text) as AppConfig;
   validateConfig(config, warn);
   return config;
+}
+
+/** Read + validate `config.yaml` once; `warn` receives the non-fatal findings. */
+export function loadAppConfig(configPath: string, warn: (message: string) => void): AppConfig {
+  return parseAppConfigText(readFileSync(resolve(configPath), "utf8"), warn);
+}
+
+/**
+ * The config from wherever `SWITCHBOARD_CONFIG` points (src/configDocument.ts):
+ * a file path, or `state://base` — the document `deploy config` pushed to the
+ * state Worker named by `STATE_WORKER_URL`, read with `MEMORY_TOKEN`. On
+ * Cloudflare the image carries no config, so production reads the document;
+ * local dev reads the file. A missing document, variable, or Worker is a
+ * startup error naming what to do — never a silent empty config.
+ */
+export async function loadAppConfigFrom(
+  location: string,
+  opts: { env: Record<string, string | undefined>; warn: (message: string) => void; fetch?: typeof fetch },
+): Promise<AppConfig> {
+  const parsed = parseConfigLocation(location);
+  if (parsed.kind === "file") return loadAppConfig(parsed.path, opts.warn);
+  const worker = stateWorkerFromEnv(opts.env);
+  if (!worker.ok) throw new Error(`SWITCHBOARD_CONFIG=${location}: ${worker.problem}`);
+  const client = new ConfigDocumentClient({
+    baseUrl: worker.baseUrl,
+    token: worker.token,
+    ...(opts.fetch ? { fetch: opts.fetch } : {}),
+  });
+  const read = await client.readBase(parsed.key);
+  if (!read.ok) throw new Error(`SWITCHBOARD_CONFIG=${location}: ${read.problem}`);
+  if (!read.document)
+    throw new Error(
+      `SWITCHBOARD_CONFIG=${location}: no "${parsed.key}" document on ${client.describe()} — push one with \`deploy config\``,
+    );
+  opts.warn(
+    `[config] base document "${parsed.key}" v${read.version} from ${read.document.source} (sha256 ${read.document.sha256.slice(0, 12)}, pushed ${read.document.pushedAt})`,
+  );
+  return parseAppConfigText(read.document.yaml, opts.warn);
 }
 
 /** What the grants table needs beyond config.yaml: the ingress token map (its
@@ -453,7 +492,11 @@ export async function openConfigStore(
   } & ConfigStoreOptions,
 ): Promise<ConfigStore> {
   const warn = opts.warn ?? ((m: string) => console.warn(m));
-  const config = loadAppConfig(configPath, warn);
+  const config = await loadAppConfigFrom(configPath, {
+    env: opts.env,
+    warn,
+    ...(opts.fetch ? { fetch: opts.fetch } : {}),
+  });
   const backing = overridesBackingFor(config, opts);
   const initial = await backing.load();
   return new ConfigStore({ validated: config }, { backing, initial }, warn, {

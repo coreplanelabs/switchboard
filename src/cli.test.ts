@@ -414,6 +414,7 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
       "deploy plan",
       "deploy all",
       "deploy secrets",
+      "deploy config",
       "env bootstrap",
     ]) {
       expect(cat.stdout, form).toContain(form);

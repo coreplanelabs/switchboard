@@ -17,6 +17,7 @@ import {
   deployInit,
   deployPlan,
   deployRestart,
+  deployConfig,
   deploySecrets,
   registerDeployCommands,
   type DeployCommandDeps,
@@ -79,6 +80,7 @@ function bind(
   profile: () => Promise<LoadedProfile> = async () => LOADED,
   disk: Map<string, string> = new Map(),
   secrets: SecretsHostIO = noSecrets,
+  pushConfig: DeployCommandDeps["deploy"]["pushConfig"] = neverPushes,
 ) {
   const registry = new CommandRegistry<DeployCommandDeps>({ audit: () => {} });
   registerDeployCommands(registry);
@@ -103,6 +105,7 @@ function bind(
       },
       profile,
       secrets,
+      pushConfig,
       files: {
         read: async (path) => disk.get(path),
         write: async (path, text) => {
@@ -115,6 +118,10 @@ function bind(
   return { commands, plans, restartPlans, affectedCalls, disk, writes };
 }
 
+/** A config push that must never happen — every test but `deploy.config`'s binds it. */
+const neverPushes: DeployCommandDeps["deploy"]["pushConfig"] = async () => {
+  throw new Error("must not push config");
+};
 /** A secrets host that must never be reached — every test but `deploy.secrets`'s binds it. */
 const noSecrets: SecretsHostIO = {
   manifest: async () => {
@@ -824,5 +831,94 @@ describe("deploy.secrets", () => {
     );
     expect(bad).toMatchObject({ ok: false, error: "unavailable" });
     expect(bad.ok ? "" : bad.message).toContain("unknown scheme");
+  });
+});
+
+describe("deploy.config", () => {
+  function pusher(outcome: Awaited<ReturnType<DeployCommandDeps["deploy"]["pushConfig"]>>) {
+    const calls: { source: string; stateWorkerUrl: string; key: string }[] = [];
+    const pushConfig: DeployCommandDeps["deploy"]["pushConfig"] = async (o) => {
+      calls.push(o);
+      return outcome;
+    };
+    return { calls, pushConfig };
+  }
+  const withPush = (
+    p: DeployCommandDeps["deploy"]["pushConfig"],
+    profile: () => Promise<LoadedProfile> = async () => LOADED,
+  ) => bind(neverRunsPlan, () => true, neverRestarts, neverAffected, profile, new Map(), noSecrets, p);
+  const PUSHED = {
+    ok: true as const,
+    how: "config from config/config.production.yaml",
+    version: 7,
+    sha256: "ab".repeat(32),
+    bytes: 9007,
+  };
+
+  it("is CLI-only, deploy:write, operator-gated — like deploy.all", async () => {
+    const { commands } = withPush(pusher(PUSHED).pushConfig);
+    expect(deployConfig).toMatchObject({
+      action: "deploy:write",
+      effect: "write",
+      surfaces: { chat: false, mcp: false, http: false },
+    });
+    expect(await commands.invoke("deploy.config", {}, admin)).toMatchObject({ ok: false, error: "not_found" });
+    expect(await commands.invoke("deploy.config", {}, mcp("deploy:write"))).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+  });
+
+  it("pushes the profile's configSource to the `base` document on the profile's state Worker and says how to make it live", async () => {
+    const p = pusher(PUSHED);
+    const { commands } = withPush(p.pushConfig);
+    const res = await commands.invoke("deploy.config", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(p.calls).toEqual([
+      {
+        source: "config/config.production.yaml",
+        stateWorkerUrl: "https://switchboard-memory.example.test",
+        key: "base",
+      },
+    ]);
+    expect(res.value).toEqual({
+      source: "config/config.production.yaml",
+      how: "config from config/config.production.yaml",
+      document: "base",
+      stateWorkerUrl: "https://switchboard-memory.example.test",
+      version: 7,
+      sha256: "ab".repeat(32),
+      bytes: 9007,
+    });
+    expect(renderText(commands.get("deploy.config")!, res.value)).toBe(
+      [
+        'pushed config from config/config.production.yaml → document "base" v7 on https://switchboard-memory.example.test (sha256 abababababab, 9007 bytes)',
+        "the bot reads it on its next start: `deploy restart`",
+      ].join("\n"),
+    );
+  });
+
+  it("--source overrides the profile's configSource", async () => {
+    const p = pusher(PUSHED);
+    const { commands } = withPush(p.pushConfig);
+    const res = await commands.invoke(
+      "deploy.config",
+      { options: { source: "github://acme/infra/switchboard/config.yaml@main" } },
+      cli,
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(p.calls[0].source).toBe("github://acme/infra/switchboard/config.yaml@main");
+  });
+
+  it("an unreadable or invalid source, a missing bearer, or a refusing Worker is `unavailable` with the host's problem", async () => {
+    const p = pusher({
+      ok: false,
+      problem: "configSource config/nope.yaml: the config does not validate — No model configured",
+    });
+    const res = await withPush(p.pushConfig).commands.invoke("deploy.config", {}, cli);
+    expect(res).toMatchObject({ ok: false, error: "unavailable" });
+    expect(res.ok ? "" : res.message).toBe(
+      "configSource config/nope.yaml: the config does not validate — No model configured",
+    );
   });
 });

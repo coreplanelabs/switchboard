@@ -543,6 +543,15 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
         present: async (_source, names) => ({ ok: true, present: new Set(names) }),
         put: async (_source, dir, name) => exec(`deploy.secrets put ${name} → ${dir}`, { code: 0, output: "" }),
       },
+      // `deploy config`: the push is the effect and is recorded; the fake never reads a source.
+      pushConfig: async (o) =>
+        exec(`deploy.config push ${o.source} → ${o.key}@${o.stateWorkerUrl}`, {
+          ok: true,
+          how: `config from ${o.source}`,
+          version: 1,
+          sha256: "ab".repeat(32),
+          bytes: 12,
+        }),
       affected: async (opts) => ({
         head: "f".repeat(40),
         workers: [

@@ -60,8 +60,9 @@ COPY --from=build /app/web/dist ./web/dist
 # served on /healthz as `build`; the glob keeps it optional so a bare
 # `wrangler deploy` / docker compose still builds (the bot then says "unknown").
 COPY package.json build.jso[n] ./
-# config.yaml is expected at /app/config/config.yaml — bake it in or mount it.
-COPY config ./config
+# No config in the image: SWITCHBOARD_CONFIG names a file mounted at run time
+# (docker compose: ./config → /app/config) or `state://base`, the document
+# `deploy config` pushed to the state Worker (what the Cloudflare shim sets).
 # Bundled skills (#100): loaded at startup by BundledSkillStore from /app/skills.
 COPY skills ./skills
 RUN mkdir -p /app/data /app/workspaces && chown -R switchboard:switchboard /app

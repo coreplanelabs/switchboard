@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { AffectedReport } from "../../deploy/affected.js";
 import {
+  CONFIG_DOCUMENT_KEY,
   DEPLOY_ORDER,
   formatPlan,
   planDeploy,
@@ -11,7 +12,13 @@ import {
 } from "../../deploy/plan.js";
 import type { LoadedProfile } from "../../deploy/profile.js";
 import { planRestart, type RestartPlan } from "../../deploy/restart.js";
-import { formatDeployResults, type DeployRunResult, type RestartRunResult } from "../../deploy/run.js";
+import {
+  formatDeployResults,
+  type ConfigPushOutcome,
+  type DeployRunResult,
+  type RestartRunResult,
+} from "../../deploy/run.js";
+import { profileUrls } from "../../deploy/profile.js";
 import { renderWorkerConfigs, workerConfigTargets } from "../../deploy/wranglerTemplate.js";
 import { MANIFEST_PATH, parseManifest, parseSecretsSource, planSecretPuts, secretRef } from "../../deploy/secrets.js";
 import type { SecretsHostIO } from "../../deploy/secretsHost.js";
@@ -54,6 +61,8 @@ export interface DeployCommandDeps {
     };
     /** `deploy secrets`: the manifest, which names the source has a value for, and one `wrangler secret put` (src/deploy/secretsHost.ts). */
     secrets: SecretsHostIO;
+    /** `deploy config`: read the source, validate, push the `base` document to the state Worker (src/deploy/run.ts `pushConfigOnHost`). */
+    pushConfig(opts: { source: string; stateWorkerUrl: string; key: string }): Promise<ConfigPushOutcome>;
   };
 }
 
@@ -324,6 +333,57 @@ export const deployInit = defineCommand({
   },
 });
 
+const configOptions = z.object({
+  source: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "read the config from this source instead of the profile's configSource (a path, github://owner/repo/path@ref, or op://Vault/Item/field)",
+    ),
+});
+
+interface ConfigPushOutput {
+  source: string;
+  how: string;
+  document: string;
+  stateWorkerUrl: string;
+  version: number;
+  sha256: string;
+  bytes: number;
+}
+
+export const deployConfig = defineCommand({
+  id: "deploy.config",
+  options: configOptions,
+  action: "deploy:write",
+  effect: "write",
+  surfaces: { chat: false, mcp: false, http: false },
+  describe:
+    "Push the bot's config to the state Worker as the `base` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until `deploy restart`.",
+  render: (output) => {
+    const o = output as unknown as ConfigPushOutput;
+    return `pushed ${o.how} → document "${o.document}" v${o.version} on ${o.stateWorkerUrl} (sha256 ${o.sha256.slice(0, 12)}, ${o.bytes} bytes)\nthe bot reads it on its next start: \`deploy restart\``;
+  },
+  handler: async ({ options, deps }) => {
+    const loaded = await loadProfile(deps);
+    const source = options.source ?? loaded.profile.configSource;
+    const stateWorkerUrl = profileUrls(loaded.profile).stateWorkerUrl;
+    const pushed = await deps.deploy.pushConfig({ source, stateWorkerUrl, key: CONFIG_DOCUMENT_KEY });
+    if (!pushed.ok) throw new CommandError("unavailable", pushed.problem);
+    const output: ConfigPushOutput = {
+      source,
+      how: pushed.how,
+      document: CONFIG_DOCUMENT_KEY,
+      stateWorkerUrl,
+      version: pushed.version,
+      sha256: pushed.sha256,
+      bytes: pushed.bytes,
+    };
+    return output as unknown as JsonValue;
+  },
+});
+
 const secretNames = z
   .string()
   .transform((s) =>
@@ -426,6 +486,7 @@ export const deployCommands: readonly CommandDef<DeployCommandDeps>[] = [
   deployRestart,
   deployInit,
   deploySecrets,
+  deployConfig,
 ] as unknown as CommandDef<DeployCommandDeps>[];
 
 export function registerDeployCommands<D extends DeployCommandDeps>(registry: CommandRegistry<D>): void {

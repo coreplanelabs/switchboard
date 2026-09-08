@@ -107,13 +107,3 @@ export async function readConfigSource(source: ConfigSource, io: ConfigSourceIO)
     }
   }
 }
-
-/** Pure: is materializing a no-op because the source IS the destination? A
- *  path source equal to the destination means the file is already in place. */
-export function sourceIsDestination(source: ConfigSource, destination: string): boolean {
-  return source.kind === "path" && normalize(source.path) === normalize(destination);
-}
-
-function normalize(p: string): string {
-  return p.replace(/^\.\//, "").replace(/\/+/g, "/");
-}

@@ -6,6 +6,7 @@ import {
   ConfigStore,
   FileOverridesBacking,
   InMemoryOverridesBacking,
+  loadAppConfigFrom,
   MAX_INSTRUCTIONS_LENGTH,
   openConfigStore,
   OverridesConflictError,
@@ -818,6 +819,71 @@ describe("overrides backing (item 12: durable runtime overrides)", () => {
     const warnings: string[] = [];
     await openConfigStore(cfg, { overridesPath: join(dir, "overrides.json"), env: {}, warn: (m) => warnings.push(m) });
     expect(warnings.filter((w) => w.includes("ledgerMax"))).toHaveLength(1);
+  });
+});
+
+describe("loadAppConfigFrom", () => {
+  const env = { STATE_WORKER_URL: "https://state.example", MEMORY_TOKEN: "tok" };
+  /** A state Worker whose `base` document is `document` (null = never pushed). */
+  const stateWorker =
+    (document: unknown, version = 3): typeof fetch =>
+    async (input, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { key?: string };
+      if (String(input) === "https://state.example/config/get" && body.key === "base")
+        return Response.json({ document, version });
+      return new Response("{}", { status: 404 });
+    };
+  const pushed = {
+    yaml: YAML_FIXTURE,
+    sha256: "a".repeat(64),
+    source: "config/config.production.yaml",
+    pushedAt: "2026-09-08T00:00:00.000Z",
+  };
+
+  it("a file path reads the file, as before", async () => {
+    const cfg = join(mkdtempSync(join(tmpdir(), "swb-config-")), "config.yaml");
+    writeFileSync(cfg, YAML_FIXTURE);
+    const config = await loadAppConfigFrom(cfg, { env: {}, warn: () => {} });
+    expect(config.defaults.agent).toBe("general");
+  });
+
+  it("state://base reads the pushed document from the state Worker, validates its YAML, and says which version it started on", async () => {
+    const warnings: string[] = [];
+    const config = await loadAppConfigFrom("state://base", {
+      env,
+      warn: (m) => warnings.push(m),
+      fetch: stateWorker(pushed),
+    });
+    expect(config.defaults.models.general).toBe("anthropic/general-model");
+    expect(warnings.some((w) => w.includes('base document "base" v3 from config/config.production.yaml'))).toBe(true);
+  });
+
+  it("no document yet is a startup error naming `deploy config`; a wrong-shaped one, a missing variable, and an unreachable Worker name the cause", async () => {
+    await expect(loadAppConfigFrom("state://base", { env, warn: () => {}, fetch: stateWorker(null) })).rejects.toThrow(
+      'SWITCHBOARD_CONFIG=state://base: no "base" document on state Worker https://state.example — push one with `deploy config`',
+    );
+    await expect(
+      loadAppConfigFrom("state://base", { env, warn: () => {}, fetch: stateWorker({ channels: {} }) }),
+    ).rejects.toThrow('the "base" document is not a base config document');
+    await expect(loadAppConfigFrom("state://base", { env: { MEMORY_TOKEN: "tok" }, warn: () => {} })).rejects.toThrow(
+      "STATE_WORKER_URL is not set",
+    );
+    await expect(
+      loadAppConfigFrom("state://base", {
+        env,
+        warn: () => {},
+        fetch: async () => {
+          throw new Error("ECONNREFUSED");
+        },
+      }),
+    ).rejects.toThrow("/config/get failed — ECONNREFUSED");
+  });
+
+  it("a pushed document whose YAML does not validate fails startup with the validation error, never a silent partial config", async () => {
+    const broken = { ...pushed, yaml: "defaults:\n  agent: general\n  models: {}\n" };
+    await expect(
+      loadAppConfigFrom("state://base", { env, warn: () => {}, fetch: stateWorker(broken) }),
+    ).rejects.toThrow();
   });
 });
 

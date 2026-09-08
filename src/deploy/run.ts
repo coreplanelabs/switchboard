@@ -25,7 +25,9 @@ import {
   type WorkerDef,
   type WorkerName,
 } from "./plan.js";
-import { parseConfigSource, readConfigSource, sourceIsDestination, type ConfigSourceIO } from "./configSource.js";
+import { parseAppConfigText } from "../config.js";
+import { baseConfigDocument, ConfigDocumentClient, STATE_WORKER_TOKEN_ENV } from "../configDocument.js";
+import { parseConfigSource, readConfigSource, type ConfigSourceIO } from "./configSource.js";
 import {
   isExampleProfile,
   parseProfile,
@@ -282,28 +284,88 @@ function hostConfigSourceIO(): ConfigSourceIO {
   };
 }
 
+/** A config read from a `configSource` and validated — what `deploy all` and `deploy config` push. */
+export type ConfigRead = { ok: true; text: string; how: string } | { ok: false; problem: string };
+
 /**
- * Place the bot's runtime config where the image build reads it, from the
- * profile's `configSource`. A path source that already IS the destination is
- * a no-op (the file is in the tree); anything else is written over whatever
- * is there. Returns the problem, if any, for the runner to refuse on.
+ * Read the bot's config from a `configSource` and validate it. `deploy all`
+ * does this BEFORE any Worker deploys: a source that cannot be read or a
+ * config that does not validate is a refusal up front, never something the
+ * bot discovers at startup after the memory Worker has already rolled.
  */
-export async function materializeConfig(
-  plan: DeployPlan,
-  io: DeployRunnerIO,
+export async function readConfigForPush(
+  source: string,
   sourceIO: ConfigSourceIO = hostConfigSourceIO(),
-): Promise<string | undefined> {
-  const parsed = parseConfigSource(plan.config.source);
-  if (!parsed.ok) return parsed.problem;
-  if (sourceIsDestination(parsed.source, plan.config.destination)) {
-    io.log(`[deploy:all] config: ${plan.config.destination} is in the tree`);
-    return undefined;
-  }
+): Promise<ConfigRead> {
+  const parsed = parseConfigSource(source);
+  if (!parsed.ok) return { ok: false, problem: parsed.problem };
   const read = await readConfigSource(parsed.source, sourceIO);
-  if (!read.ok) return read.problem;
-  writeFileSync(join(REPO_ROOT, plan.config.destination), read.text);
-  io.log(`[deploy:all] ${read.how} → ${plan.config.destination}`);
-  return undefined;
+  if (!read.ok) return { ok: false, problem: read.problem };
+  try {
+    parseAppConfigText(read.text, () => {});
+  } catch (err) {
+    return {
+      ok: false,
+      problem: `configSource ${source}: the config does not validate — ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  return { ok: true, text: read.text, how: read.how };
+}
+
+export type ConfigPushOutcome =
+  { ok: true; how: string; version: number; sha256: string; bytes: number } | { ok: false; problem: string };
+
+/** What the runner needs to push: the plan's state Worker, the document key, the bearer's env. */
+export interface ConfigPushTarget {
+  stateWorkerUrl: string;
+  key: string;
+  env: Record<string, string | undefined>;
+  fetch?: typeof fetch;
+  now?: () => Date;
+}
+
+/** Push a validated config as the `base` document on the state Worker (src/configDocument.ts); the
+ *  bearer is `MEMORY_TOKEN`, named when missing. The bot picks the document up on its next start. */
+export async function pushConfigDocument(
+  read: Extract<ConfigRead, { ok: true }>,
+  target: ConfigPushTarget,
+): Promise<ConfigPushOutcome> {
+  const token = target.env[STATE_WORKER_TOKEN_ENV];
+  if (!token)
+    return {
+      ok: false,
+      problem: `${STATE_WORKER_TOKEN_ENV} is not set — the config is pushed to ${target.stateWorkerUrl} with the state Worker's bearer`,
+    };
+  const client = new ConfigDocumentClient({
+    baseUrl: target.stateWorkerUrl,
+    token,
+    ...(target.fetch ? { fetch: target.fetch } : {}),
+  });
+  const document = baseConfigDocument(
+    read.text,
+    read.how.replace(/^config from /, ""),
+    (target.now ?? (() => new Date()))(),
+  );
+  const pushed = await client.pushBase(document, target.key);
+  if (!pushed.ok) return pushed;
+  return {
+    ok: true,
+    how: read.how,
+    version: pushed.version,
+    sha256: document.sha256,
+    bytes: Buffer.byteLength(read.text),
+  };
+}
+
+/** `deploy config` on this host: read the source, validate, push. */
+export async function pushConfigOnHost(opts: {
+  source: string;
+  stateWorkerUrl: string;
+  key: string;
+}): Promise<ConfigPushOutcome> {
+  const read = await readConfigForPush(opts.source);
+  if (!read.ok) return read;
+  return pushConfigDocument(read, { stateWorkerUrl: opts.stateWorkerUrl, key: opts.key, env: process.env });
 }
 
 async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO): Promise<boolean> {
@@ -678,12 +740,24 @@ export async function runDeployPlan(
   }
   const problems = await preChecks(plan, io);
   if (problems.length > 0) return { kind: "refused", problems };
-  // The bot's image copies config/ — place this installation's config there
-  // first, from wherever the profile says it lives. Refused before any Worker
-  // deploys: a missing config is not something the build should discover.
+  // The bot reads its config from the state Worker, so the bot step is preceded
+  // by a push of this installation's config from wherever the profile says it
+  // lives. Read and validated HERE, before any Worker deploys: an unreadable
+  // source or an invalid config is a refusal up front, not a bot that fails to
+  // start after the memory Worker has already rolled.
+  let configToPush: Extract<ConfigRead, { ok: true }> | undefined;
   if (plan.steps.some((s) => s.name === "bot")) {
-    const problem = await materializeConfig(plan, io);
-    if (problem) return { kind: "refused", problems: [problem] };
+    const read = await readConfigForPush(plan.config.source);
+    if (!read.ok) return { kind: "refused", problems: [read.problem] };
+    if (!process.env[STATE_WORKER_TOKEN_ENV])
+      return {
+        kind: "refused",
+        problems: [
+          `${STATE_WORKER_TOKEN_ENV} is not set — the bot step pushes the config to ${plan.config.stateWorkerUrl} with it`,
+        ],
+      };
+    configToPush = read;
+    io.log(`[deploy:all] config: ${read.how} validates; pushed to ${plan.config.stateWorkerUrl} before the bot step`);
   }
   for (const w of plan.warnings) io.warn(`[deploy:all] WARNING ${w}`);
 
@@ -703,6 +777,26 @@ export async function runDeployPlan(
 
   const results: DeployStepResult[] = [];
   for (const step of plan.steps) {
+    if (step.name === "bot" && configToPush) {
+      // After the memory step (the document lives there), before the bot rolls (it reads it on start).
+      const pushed = await pushConfigDocument(configToPush, {
+        stateWorkerUrl: plan.config.stateWorkerUrl,
+        key: plan.config.document,
+        env: process.env,
+      });
+      if (!pushed.ok) {
+        results.push({
+          name: step.name,
+          script: step.script,
+          live: "not deployed",
+          status: `FAILED: config push — ${pushed.problem}`,
+        });
+        break;
+      }
+      io.log(
+        `[deploy:all] config: ${pushed.how} → document "${plan.config.document}" v${pushed.version} on ${plan.config.stateWorkerUrl} (sha256 ${pushed.sha256.slice(0, 12)}, ${pushed.bytes} bytes)`,
+      );
+    }
     if (!(await ensureNodeModules(step, io))) {
       results.push({ name: step.name, script: step.script, live: "not deployed", status: "npm ci failed" });
       break;
