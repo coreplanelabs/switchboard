@@ -14,6 +14,7 @@ import {
   type FetchLike,
   type WebCapability,
   type WebSearch,
+  MAX_FETCH_TEXT_CHARS,
 } from "./web.js";
 import { toolResultText } from "../providers/types.js";
 
@@ -220,15 +221,105 @@ describe("web_fetch tool", () => {
     expect(out).not.toContain("<p>");
   });
 
-  it("truncates oversized responses", async () => {
-    const big = "a".repeat(2_000_000);
+  it("hands the model at most MAX_FETCH_TEXT_CHARS of a page and says how to read the rest (#615: one 1 MB page was 307k tokens)", async () => {
+    const big = Array.from({ length: 300_000 }, (_, i) => `w${i}`).join(" "); // ~2 MB of distinct words
     const fetchSpy = vi.fn<FetchLike>(async () =>
       fakeResponse({ headers: { "content-type": "text/plain" }, text: big }),
     );
     const out = await webFetchTool.run({ url: "https://example.com" }, ctxWith({ fetch: fetchSpy }));
-    expect(out).toContain("[truncated]");
-    // Body capped to ~MAX_FETCH_BYTES (1_000_000) + a short header — far below the 2 MB input.
-    expect(out.length).toBeLessThan(1_100_000);
+    expect(typeof out).toBe("string");
+    const text = out as string;
+    // The body reaches the model capped far below a model context — the header
+    // plus MAX_FETCH_TEXT_CHARS — never the 1 MB the fetch itself read.
+    expect(text.length).toBeLessThan(MAX_FETCH_TEXT_CHARS + 400);
+    expect(text).toContain(`showing characters 0–${MAX_FETCH_TEXT_CHARS} of`);
+    expect(text).toContain(`pass offset=${MAX_FETCH_TEXT_CHARS} to continue`);
+    // The fetch itself was still capped at MAX_FETCH_BYTES, and says so.
+    expect(text).toContain("[truncated at 1 MB]");
+    expect(text.startsWith("Fetched https://example.com/")).toBe(true);
+    expect(text).toContain("w0 w1 w2");
+  });
+
+  it("offset pages through a long page; past the end says so; a bad offset is refused", async () => {
+    const body = Array.from({ length: 30_000 }, (_, i) => `t${i}`).join(" "); // ~200k chars, well under 1 MB
+    const fetchSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "text/plain" }, text: body }),
+    );
+    const ctx = ctxWith({ fetch: fetchSpy });
+    const first = (await webFetchTool.run({ url: "https://example.com/p" }, ctx)) as string;
+    const second = (await webFetchTool.run(
+      { url: "https://example.com/p", offset: MAX_FETCH_TEXT_CHARS },
+      ctx,
+    )) as string;
+    expect(second).toContain(
+      `showing characters ${MAX_FETCH_TEXT_CHARS}–${2 * MAX_FETCH_TEXT_CHARS} of ${body.length}`,
+    );
+    // The pages tile the body: the second starts exactly where the first stopped.
+    const firstBody = first.slice(first.indexOf(":\n\n") + 3);
+    const secondBody = second.slice(second.indexOf(":\n\n") + 3);
+    expect(firstBody.length).toBe(MAX_FETCH_TEXT_CHARS);
+    expect(firstBody + secondBody.slice(0, 10)).toBe(body.slice(0, MAX_FETCH_TEXT_CHARS + 10));
+    // The last page has no "continue" hint; it is the end.
+    const last = (await webFetchTool.run(
+      { url: "https://example.com/p", offset: 4 * MAX_FETCH_TEXT_CHARS },
+      ctx,
+    )) as string;
+    expect(last).toContain(`showing characters ${4 * MAX_FETCH_TEXT_CHARS}–${body.length} of ${body.length}`);
+    expect(last).not.toContain("to continue");
+    // Past the end: nothing to show, said plainly, not an empty body.
+    const past = (await webFetchTool.run(
+      { url: "https://example.com/p", offset: 10 * MAX_FETCH_TEXT_CHARS },
+      ctx,
+    )) as string;
+    expect(past).toMatch(/offset \d+ is past the end \(the page is \d+ characters\)/);
+    // A short page never carries the paging note at all.
+    const shortSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "text/plain" }, text: "tiny" }),
+    );
+    const tiny = (await webFetchTool.run({ url: "https://example.com/t" }, ctxWith({ fetch: shortSpy }))) as string;
+    expect(tiny).not.toContain("showing characters");
+    expect(tiny).toContain("tiny");
+    expect(await webFetchTool.run({ url: "https://example.com/p", offset: -5 }, ctx)).toMatch(/offset must be/);
+    expect(await webFetchTool.run({ url: "https://example.com/p", offset: "abc" }, ctx)).toMatch(/offset must be/);
+  });
+
+  it("never tears a surrogate pair at a window edge: the pair moves whole to the next window, and an offset landing inside one starts after it", async () => {
+    // An emoji (two UTF-16 units) straddles the 40k boundary: units 39_999 and 40_000.
+    const body = "a".repeat(MAX_FETCH_TEXT_CHARS - 1) + "😀" + "b".repeat(1000);
+    const fetchSpy = vi.fn<FetchLike>(async () =>
+      fakeResponse({ headers: { "content-type": "text/plain" }, text: body }),
+    );
+    const ctx = ctxWith({ fetch: fetchSpy });
+    const first = (await webFetchTool.run({ url: "https://example.com/e" }, ctx)) as string;
+    const firstBody = first.slice(first.indexOf(":\n\n") + 3);
+    expect(firstBody).toBe("a".repeat(MAX_FETCH_TEXT_CHARS - 1)); // one unit shorter, no lone surrogate
+    expect(first).toContain(
+      `showing characters 0–${MAX_FETCH_TEXT_CHARS - 1} of ${body.length}; pass offset=${MAX_FETCH_TEXT_CHARS - 1}`,
+    );
+    const second = (await webFetchTool.run(
+      { url: "https://example.com/e", offset: MAX_FETCH_TEXT_CHARS - 1 },
+      ctx,
+    )) as string;
+    expect(second.slice(second.indexOf(":\n\n") + 3)).toBe("😀" + "b".repeat(1000));
+    // A caller's offset that lands on the low surrogate starts one unit later.
+    const mid = (await webFetchTool.run({ url: "https://example.com/e", offset: MAX_FETCH_TEXT_CHARS }, ctx)) as string;
+    expect(mid.slice(mid.indexOf(":\n\n") + 3)).toBe("b".repeat(1000));
+    expect(mid).toContain(`showing characters ${MAX_FETCH_TEXT_CHARS + 1}–${body.length} of ${body.length}`);
+    // No window carries a lone surrogate (a high unit not followed by a low one, or a low unit not preceded by a high one).
+    const hasLoneSurrogate = (s: string): boolean => {
+      for (let i = 0; i < s.length; i++) {
+        const u = s.charCodeAt(i);
+        if (u >= 0xd800 && u <= 0xdbff) {
+          const next = s.charCodeAt(i + 1);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+          i++;
+        } else if (u >= 0xdc00 && u <= 0xdfff) return true;
+      }
+      return false;
+    };
+    for (const out of [first, second, mid]) expect(hasLoneSurrogate(out)).toBe(false);
+    // And the naive slice WOULD have torn the pair — the guard is doing work.
+    expect(hasLoneSurrogate(body.slice(0, MAX_FETCH_TEXT_CHARS))).toBe(true);
   });
 
   it("reports a timeout gracefully", async () => {

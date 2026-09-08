@@ -266,7 +266,16 @@ export function assertUrlAllowed(raw: string): URL {
 
 // ---- web_fetch tool ---------------------------------------------------------
 
+/** How much of a page is READ: enough to strip a script-heavy HTML document
+ *  down to its text. Not what the model sees — that is MAX_FETCH_TEXT_CHARS. */
 const MAX_FETCH_BYTES = 1_000_000;
+/** How much text ONE fetch hands the model. #615: a single ~1 MB page handed
+ *  over whole was 307k tokens and killed the run with `prompt is too long`
+ *  before a second tool call. 40k characters is ~10k tokens — a documentation
+ *  page or two per call, and a dozen calls still fit a 200k context. Longer
+ *  pages are read in pages of this size with `offset`; the header says where
+ *  the window sits and how to get the rest, so nothing is cut silently. */
+export const MAX_FETCH_TEXT_CHARS = 40_000;
 // Binary links reach the model as image/document blocks (M1b), so the caps
 // match the attachment path's per-file limits (src/channels/slack.ts): the
 // provider's per-image hard limit and the PDF cap. Truncating a binary is
@@ -279,6 +288,9 @@ const PDF_TYPE = "application/pdf";
 const FETCH_TIMEOUT_MS = 12_000;
 const SEARCH_TIMEOUT_MS = 10_000;
 const MAX_REDIRECTS = 3;
+
+const isHighSurrogate = (unit: number): boolean => unit >= 0xd800 && unit <= 0xdbff;
+const isLowSurrogate = (unit: number): boolean => unit >= 0xdc00 && unit <= 0xdfff;
 
 function htmlToText(html: string): string {
   return html
@@ -350,18 +362,23 @@ function fileNameOf(u: URL): string | undefined {
 export const webFetchTool: RunnableTool = {
   sideEffectFree: true,
   name: "web_fetch",
-  description:
-    "Fetch a public web page or file by URL. Pages and text files come back as readable text; an image (jpeg/png/gif/webp) or PDF link comes back as the image/document itself so you can look at it. Use it to read a link the user shared, a doc, a spec, an issue, a screenshot. http(s) only; private/internal addresses are refused for safety.",
+  description: `Fetch a public web page or file by URL. Pages and text files come back as readable text, at most ${MAX_FETCH_TEXT_CHARS} characters per call — a long page says how many characters it has and you pass \`offset\` to read the next window. An image (jpeg/png/gif/webp) or PDF link comes back as the image/document itself so you can look at it. Use it to read a link the user shared, a doc, a spec, an issue, a screenshot. http(s) only; private/internal addresses are refused for safety.`,
   inputSchema: {
     type: "object",
     properties: {
       url: { type: "string", description: "The absolute http(s) URL to fetch" },
+      offset: {
+        type: "number",
+        description: `Character offset into the page's text to start from (default 0). A long page is read ${MAX_FETCH_TEXT_CHARS} characters at a time; the previous result's header names the next offset.`,
+      },
     },
     required: ["url"],
   },
   async run(input, ctx) {
     if (!ctx.web) return "web tools are not available in this context.";
     const raw = String(input.url ?? "").trim();
+    const offset = input.offset == null ? 0 : Number(input.offset);
+    if (!Number.isInteger(offset) || offset < 0) return "web_fetch: offset must be a non-negative whole number.";
     try {
       // Sync literal guard first; the connect-time dispatcher guard (production
       // fetch) validates hostnames' resolved IPs and pins them.
@@ -410,8 +427,23 @@ export const webFetchTool: RunnableTool = {
       const body = await readCapped(res, MAX_FETCH_BYTES);
       const decoded = body.bytes.toString("utf8");
       const text = mediaType === "text/html" ? htmlToText(decoded) : decoded.trim();
-      const header = `Fetched ${where}${body.truncated ? " [truncated]" : ""}:\n\n`;
-      return header + text;
+      const readNote = body.truncated ? ` [truncated at ${Math.round(MAX_FETCH_BYTES / 1_000_000)} MB]` : "";
+      if (offset > 0 && offset >= text.length) {
+        return `web_fetch: ${where}${readNote} — offset ${offset} is past the end (the page is ${text.length} characters).`;
+      }
+      // Never split a surrogate pair at a window edge: a lone surrogate is
+      // invalid JSON text to some providers. A window ending on a high
+      // surrogate gives that unit to the next window; a caller's offset landing
+      // on a low surrogate starts one unit later, so the pair is never torn.
+      const start = offset > 0 && isLowSurrogate(text.charCodeAt(offset)) ? offset + 1 : offset;
+      let end = Math.min(start + MAX_FETCH_TEXT_CHARS, text.length);
+      if (end < text.length && isHighSurrogate(text.charCodeAt(end - 1))) end -= 1;
+      const window = text.slice(start, end);
+      const paged = text.length > MAX_FETCH_TEXT_CHARS;
+      const pageNote = paged
+        ? ` — showing characters ${start}–${end} of ${text.length}${end < text.length ? `; pass offset=${end} to continue` : ""}`
+        : "";
+      return `Fetched ${where}${readNote}${pageNote}:\n\n${window}`;
     } catch (e) {
       if (e instanceof BlockedUrlError) return `web_fetch refused: ${e.message}`;
       if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
