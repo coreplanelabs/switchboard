@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { planRestart } from "./restart.js";
 import { runBotRestart, type RestartRunnerDeps } from "./run.js";
+import { TEST_PROFILE } from "./testing/profile.js";
 
 // `deploy restart`'s runner (src/deploy/run.ts): POST the Worker's
 // /admin/restart with the operator's bearer, wait out a 409 (runs in flight)
@@ -10,7 +11,7 @@ import { runBotRestart, type RestartRunnerDeps } from "./run.js";
 
 const BEFORE = "2026-08-30T10:00:00.000Z";
 const AFTER = "2026-08-30T10:00:41.000Z";
-const plan = (force = false) => planRestart({ only: "bot", force, waitMaxMinutes: 2, pollSeconds: 30 });
+const plan = (force = false) => planRestart({ only: "bot", force, waitMaxMinutes: 2, pollSeconds: 30 }, TEST_PROFILE);
 
 interface Scripted {
   /** Successive /healthz bodies (the last one repeats). */
@@ -84,7 +85,7 @@ describe("runBotRestart", () => {
     expect(r).toMatchObject({ kind: "ran", ok: true, previousStartedAt: BEFORE, startedAt: AFTER });
     expect(h.calls[0]).toMatchObject({
       method: "POST",
-      url: "https://switchboard.coreplanelabs.dev/admin/restart",
+      url: "https://switchboard.example.test/admin/restart",
       auth: "Bearer tok-deployer",
       body: '{"force":false}',
     });

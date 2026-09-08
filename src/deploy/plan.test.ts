@@ -1,19 +1,21 @@
 import { describe, expect, it } from "vitest";
 import type { AffectedReport } from "./affected.js";
 import {
-  BOT_HEALTH_URL,
   capabilityProblem,
   classifyDeployOutput,
+  CONFIG_DESTINATION,
   decideAccount,
   DEPLOY_ORDER,
   formatPlan,
   planDeploy,
-  PRODUCTION_ACCOUNT_ID,
   RESIDENT_BEARER_ENVS,
-  WORKERS,
+  WORKER_SPECS,
+  workersFor,
   type CheckoutProbe,
   type DeployOptions,
 } from "./plan.js";
+import { EXAMPLE_ACCOUNT, profileUrls, type LoadedProfile } from "./profile.js";
+import { TEST_PROFILE } from "./testing/profile.js";
 
 // The one production deploy order, as a pure plan (README "Deploying on
 // Cloudflare Containers", AGENTS.md "Deploy order"). The runner
@@ -21,7 +23,13 @@ import {
 // this module plans, so the order, the filters, the force gating, and the
 // checks the plan reports are provable here without touching wrangler. The
 // options are the registry's `deploy.*` parse (src/core/commands/deploy.ts);
-// here they are built directly.
+// here they are built directly. WHERE the Workers live comes from a deployment
+// profile (src/deploy/profile.ts); the fixture is an installation that is
+// nobody's, so nothing here pins a real account or hostname.
+
+const LOADED: LoadedProfile = { profile: TEST_PROFILE, origin: "profile", path: "deploy/profile.json" };
+const WORKERS = workersFor(TEST_PROFILE);
+const BOT_HEALTH_URL = profileUrls(TEST_PROFILE).healthUrl("bot");
 
 const DEFAULTS: DeployOptions = {
   only: undefined,
@@ -33,12 +41,13 @@ const DEFAULTS: DeployOptions = {
   pollSeconds: 60,
 };
 const installed: CheckoutProbe = { hasNodeModules: () => true };
-const plan = (opts: Partial<DeployOptions> = {}, checkout: CheckoutProbe = installed) =>
-  planDeploy({ ...DEFAULTS, ...opts }, checkout);
+const plan = (opts: Partial<DeployOptions> = {}, checkout: CheckoutProbe = installed, loaded: LoadedProfile = LOADED) =>
+  planDeploy({ ...DEFAULTS, ...opts }, checkout, loaded);
 
-describe("WORKERS / DEPLOY_ORDER", () => {
+describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
   it("is state Worker → bot → resident → sandbox, each once, each with its dir and command", () => {
     expect(DEPLOY_ORDER).toEqual(["memory", "bot", "resident", "sandbox"]);
+    expect(WORKER_SPECS.map((w) => w.name)).toEqual(DEPLOY_ORDER);
     expect(WORKERS.map((w) => w.dir)).toEqual([
       "deploy/cloudflare-memory",
       "deploy/cloudflare",
@@ -62,14 +71,52 @@ describe("WORKERS / DEPLOY_ORDER", () => {
     expect(formatPlan(plan())).toContain(
       "needs one of RESIDENT_ADMIN_TOKEN / RESIDENT_OPERATOR_TOKEN / RESIDENT_READ_TOKEN",
     );
-    expect(PRODUCTION_ACCOUNT_ID).toBe("3c7b28f23cc93f09e77bb0a9ffcb7e6f");
+  });
+
+  it("the profile binds each Worker to its script name and hostname; the account, the health URLs and the config source are the profile's, never a constant", () => {
+    expect(WORKERS.map((w) => [w.name, w.script, w.healthUrl])).toEqual([
+      ["memory", "switchboard-memory", "https://switchboard-memory.example.test/healthz"],
+      ["bot", "switchboard", "https://switchboard.example.test/healthz"],
+      ["resident", "switchboard-resident", "https://switchboard-resident.example.test/healthz"],
+      ["sandbox", "switchboard-sandbox", "https://switchboard-sandbox.example.test/healthz"],
+    ]);
+    const p = plan();
+    expect(p.checks.account).toBe(TEST_PROFILE.account);
+    expect(p.profile).toEqual({ origin: "profile", path: "deploy/profile.json" });
+    expect(p.config).toEqual({ source: "config/config.production.yaml", destination: CONFIG_DESTINATION });
+    expect(formatPlan(p)).toContain(
+      "Profile: deploy/profile.json; config: config/config.production.yaml → config/config.production.yaml",
+    );
+    // Another installation, another fleet — the same specs.
+    const other = workersFor({
+      ...TEST_PROFILE,
+      workers: { ...TEST_PROFILE.workers, bot: { script: "sb", hostname: "sb.example.test" } },
+    });
+    expect(other.find((w) => w.name === "bot")).toMatchObject({
+      script: "sb",
+      healthUrl: "https://sb.example.test/healthz",
+      preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: "https://sb.example.test/healthz" },
+      liveGate: { healthUrl: "https://sb.example.test/healthz" },
+    });
+  });
+
+  it("a plan from the example profile can be read, says so, and carries the origin `deploy all` refuses on", () => {
+    const example: LoadedProfile = {
+      profile: { ...TEST_PROFILE, account: EXAMPLE_ACCOUNT },
+      origin: "example",
+      path: "deploy/profile.example.json",
+    };
+    const p = plan({}, installed, example);
+    expect(p.profile.origin).toBe("example");
+    expect(p.warnings[0]).toContain("deploy/profile.example.json is the EXAMPLE");
+    expect(formatPlan(p)).toContain("Profile: deploy/profile.example.json (example)");
   });
 
   it("every Worker names its entry, its /healthz and its inputs; only the sandbox's /healthz needs a bearer", () => {
     for (const w of WORKERS) {
       expect(w.entry, w.name).toBe(`${w.dir}/worker.ts`);
       expect(w.healthUrl, w.name).toMatch(
-        /^https:\/\/switchboard(-memory|-resident|-sandbox)?\.coreplanelabs\.dev\/healthz$/,
+        /^https:\/\/switchboard(-memory|-resident|-sandbox)?\.example\.test\/healthz$/,
       );
       expect(w.inputs.paths, w.name).toContain(`${w.dir}/`);
       // One root lockfile: each Worker is judged by its own workspace's closure; only the
@@ -93,7 +140,7 @@ describe("WORKERS / DEPLOY_ORDER", () => {
   it("only the bot has a live gate — deployed ≠ live for the container; the other Workers swap instantly", () => {
     const byName = Object.fromEntries(WORKERS.map((w) => [w.name, w]));
     expect(byName.bot.liveGate).toEqual({ healthUrl: BOT_HEALTH_URL });
-    expect(BOT_HEALTH_URL).toBe("https://switchboard.coreplanelabs.dev/healthz");
+    expect(BOT_HEALTH_URL).toBe("https://switchboard.example.test/healthz");
     for (const n of ["memory", "resident", "sandbox"] as const) expect(byName[n].liveGate, n).toBeUndefined();
     const p = plan({ dryRun: true });
     expect(p.steps.find((s) => s.name === "bot")).toMatchObject({
@@ -103,7 +150,7 @@ describe("WORKERS / DEPLOY_ORDER", () => {
     expect(p.steps.find((s) => s.name === "resident")).not.toHaveProperty("liveGate");
     expect(p.steps.find((s) => s.name === "resident")).not.toHaveProperty("healthUrl");
     expect(formatPlan(p)).toContain(
-      "then wait until live (https://switchboard.coreplanelabs.dev/healthz not draining + build.commit == HEAD)",
+      "then wait until live (https://switchboard.example.test/healthz not draining + build.commit == HEAD)",
     );
   });
 
@@ -161,15 +208,15 @@ describe("planDeploy", () => {
     expect(text.indexOf("1. memory")).toBeLessThan(text.indexOf("2. bot"));
     expect(text).toContain("deploy/cloudflare-memory");
     expect(text).toContain("preflight (retry every 60s up to 30 min)");
-    expect(text).toContain(PRODUCTION_ACCOUNT_ID);
+    expect(text).toContain(TEST_PROFILE.account);
     expect(text).toContain("origin/main");
     expect(text).not.toContain("resident");
   });
 
   it("--allow-branch relaxes only the branch check, never the clean-tree or account checks", () => {
-    expect(plan().checks).toMatchObject({ account: PRODUCTION_ACCOUNT_ID, cleanTree: true, atOriginMain: true });
+    expect(plan().checks).toMatchObject({ account: TEST_PROFILE.account, cleanTree: true, atOriginMain: true });
     expect(plan({ allowBranch: true }).checks).toMatchObject({
-      account: PRODUCTION_ACCOUNT_ID,
+      account: TEST_PROFILE.account,
       cleanTree: true,
       atOriginMain: false,
     });
@@ -300,8 +347,8 @@ describe("capabilityProblem", () => {
 });
 
 describe("decideAccount", () => {
-  const account = PRODUCTION_ACCOUNT_ID;
-  const listing = `Getting User settings...\n👋 You are logged in with an OAuth Token, associated with the email justin@coreplane.ai.\n┌ Account Name │ Account ID ┐\n│ coreplane-infra │ ${account} │\n└───┘`;
+  const account = TEST_PROFILE.account;
+  const listing = `Getting User settings...\n👋 You are logged in with an OAuth Token, associated with the email someone@example.test.\n┌ Account Name │ Account ID ┐\n│ example-infra │ ${account} │\n└───┘`;
 
   it("passes when `wrangler whoami` lists the production account — a login or a user-owned token", () => {
     expect(decideAccount({ account, whoamiOutput: listing, whoamiExit: 0, tokenSet: false })).toEqual({
@@ -338,7 +385,7 @@ describe("decideAccount", () => {
   });
 
   it("refuses with wrangler's own words and the way out — the foreign token, or the missing login — never a silent switch of credential", () => {
-    const foreign = `┌ Account Name │ Account ID ┐\n│ baseberry-uat │ ${"1".repeat(32)} │\n└───┘`;
+    const foreign = `┌ Account Name │ Account ID ┐\n│ other-account │ ${"1".repeat(32)} │\n└───┘`;
     const withToken = decideAccount({
       account,
       whoamiOutput: foreign,
@@ -348,12 +395,12 @@ describe("decideAccount", () => {
     });
     expect(withToken).toEqual({
       ok: false,
-      problem: `wrangler whoami does not list account ${account} (coreplane-infra) and the token does not verify against it (HTTP 403) — unset a CLOUDFLARE_API_TOKEN that belongs to another account, or use one for this account. wrangler said: ┌ Account Name │ Account ID ┐ | │ baseberry-uat │ ${"1".repeat(32)} │ | └───┘`,
+      problem: `wrangler whoami does not list account ${account} (the deployment profile's) and the token does not verify against it (HTTP 403) — unset a CLOUDFLARE_API_TOKEN that belongs to another account, or use one for this account. wrangler said: ┌ Account Name │ Account ID ┐ | │ other-account │ ${"1".repeat(32)} │ | └───┘`,
     });
     const noLogin = decideAccount({ account, whoamiOutput: "", whoamiExit: 1, tokenSet: false });
     expect(noLogin).toEqual({
       ok: false,
-      problem: `wrangler whoami does not list account ${account} (coreplane-infra) — run \`npx wrangler login\` in deploy/cloudflare. wrangler said: exit 1, no output`,
+      problem: `wrangler whoami does not list account ${account} (the deployment profile's) — run \`npx wrangler login\` in deploy/cloudflare. wrangler said: exit 1, no output`,
     });
     // A token that could not even be checked (network) is still a refusal, and says the check did not happen.
     const unchecked = decideAccount({ account, whoamiOutput: "", whoamiExit: 1, tokenSet: true });

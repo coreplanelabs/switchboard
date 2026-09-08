@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { computeAffected, formatAffectedText, type AffectedProbe, type AffectedReport } from "./affected.js";
 import {
@@ -16,12 +16,22 @@ import {
   classifyDeployOutput,
   decideAccount,
   UNSET_ENV,
-  WORKERS,
+  workersFor,
   type DeployPlan,
   type DeployStep,
   type TokenVerifyResult,
+  type WorkerDef,
   type WorkerName,
 } from "./plan.js";
+import { parseConfigSource, readConfigSource, sourceIsDestination, type ConfigSourceIO } from "./configSource.js";
+import {
+  isExampleProfile,
+  parseProfile,
+  PROFILE_ENV,
+  PROFILE_EXAMPLE_PATH,
+  PROFILE_PATH,
+  type LoadedProfile,
+} from "./profile.js";
 import { classifyRestartResponse, type RestartPlan } from "./restart.js";
 
 // The production deploy RUNNER behind the registry's `deploy all` (CLI only):
@@ -179,6 +189,87 @@ export function hasNodeModules(dir: string): boolean {
   return existsSync(join(REPO_ROOT, dir, "node_modules"));
 }
 
+/**
+ * The deployment profile on this host: `$SWITCHBOARD_DEPLOY_PROFILE`, else
+ * `deploy/profile.json`, else the checked-in example — which a plan may be
+ * read from (a pull request's CI, a fresh clone) and `deploy all` refuses. An
+ * unreadable or invalid profile is an error naming the file and each problem;
+ * never a silent fall-through to the example.
+ */
+export async function loadProfileOnHost(env: Record<string, string | undefined> = process.env): Promise<LoadedProfile> {
+  const override = env[PROFILE_ENV];
+  const candidates: { path: string; origin: LoadedProfile["origin"] }[] = override
+    ? [{ path: override, origin: "profile" }]
+    : [
+        { path: PROFILE_PATH, origin: "profile" },
+        { path: PROFILE_EXAMPLE_PATH, origin: "example" },
+      ];
+  for (const c of candidates) {
+    const abs = c.path.startsWith("/") ? c.path : join(REPO_ROOT, c.path);
+    if (!existsSync(abs)) {
+      if (c.origin === "profile" && override) throw new Error(`${PROFILE_ENV}=${override}: no such file`);
+      continue;
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(abs, "utf8"));
+    } catch (err) {
+      throw new Error(`${c.path}: not valid JSON — ${err instanceof Error ? err.message : String(err)}`, {
+        cause: err,
+      });
+    }
+    const parsed = parseProfile(raw);
+    if (!parsed.ok) throw new Error(`${c.path}: invalid deployment profile —\n  - ${parsed.problems.join("\n  - ")}`);
+    // The example is the example wherever it was read from — a copy of it
+    // pointed at by the env var, too — so the runner's refusal holds.
+    return { profile: parsed.profile, origin: isExampleProfile(parsed.profile) ? "example" : c.origin, path: c.path };
+  }
+  throw new Error(`no deployment profile: write ${PROFILE_PATH} (see ${PROFILE_EXAMPLE_PATH}) or set ${PROFILE_ENV}`);
+}
+
+/** The config-source loaders' I/O on this host: files under the repo root, real fetch, the `op` CLI. */
+function hostConfigSourceIO(): ConfigSourceIO {
+  return {
+    readFile: async (path) => {
+      const abs = path.startsWith("/") ? path : join(REPO_ROOT, path);
+      return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
+    },
+    fetch: async (url, init) => {
+      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) });
+      return { status: res.status, text: () => res.text() };
+    },
+    opRead: async (ref) => {
+      const r = await run("op", ["read", ref], { cwd: REPO_ROOT });
+      return r.code === 127 ? undefined : r;
+    },
+    env: process.env,
+  };
+}
+
+/**
+ * Place the bot's runtime config where the image build reads it, from the
+ * profile's `configSource`. A path source that already IS the destination is
+ * a no-op (the file is in the tree); anything else is written over whatever
+ * is there. Returns the problem, if any, for the runner to refuse on.
+ */
+export async function materializeConfig(
+  plan: DeployPlan,
+  io: DeployRunnerIO,
+  sourceIO: ConfigSourceIO = hostConfigSourceIO(),
+): Promise<string | undefined> {
+  const parsed = parseConfigSource(plan.config.source);
+  if (!parsed.ok) return parsed.problem;
+  if (sourceIsDestination(parsed.source, plan.config.destination)) {
+    io.log(`[deploy:all] config: ${plan.config.destination} is in the tree`);
+    return undefined;
+  }
+  const read = await readConfigSource(parsed.source, sourceIO);
+  if (!read.ok) return read.problem;
+  writeFileSync(join(REPO_ROOT, plan.config.destination), read.text);
+  io.log(`[deploy:all] ${read.how} → ${plan.config.destination}`);
+  return undefined;
+}
+
 async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO): Promise<boolean> {
   const dir = join(REPO_ROOT, step.dir);
   if (hasNodeModules(step.dir)) return true;
@@ -304,8 +395,23 @@ export async function runDeployPlan(plan: DeployPlan, io: DeployRunnerIO): Promi
     io.log("[deploy:all] nothing to deploy — every Worker already serves this tree's inputs");
     return { kind: "ran", ok: true, results: [], notAttempted: [] };
   }
+  if (plan.profile.origin === "example") {
+    return {
+      kind: "refused",
+      problems: [
+        `${plan.profile.path} is the example profile — write deploy/profile.json for this installation (or point ${PROFILE_ENV} at one)`,
+      ],
+    };
+  }
   const problems = await preChecks(plan, io);
   if (problems.length > 0) return { kind: "refused", problems };
+  // The bot's image copies config/ — place this installation's config there
+  // first, from wherever the profile says it lives. Refused before any Worker
+  // deploys: a missing config is not something the build should discover.
+  if (plan.steps.some((s) => s.name === "bot")) {
+    const problem = await materializeConfig(plan, io);
+    if (problem) return { kind: "refused", problems: [problem] };
+  }
   for (const w of plan.warnings) io.warn(`[deploy:all] WARNING ${w}`);
 
   // The commit being deployed — what the bot's /healthz must report before the
@@ -378,7 +484,10 @@ async function git(args: string[]): Promise<string | undefined> {
  * bearer from `env` when present. Every failure is a value the pure half
  * turns into "unsure", never a throw.
  */
-export function hostAffectedProbe(env: Record<string, string | undefined> = process.env): AffectedProbe {
+export function hostAffectedProbe(
+  workers: readonly WorkerDef[],
+  env: Record<string, string | undefined> = process.env,
+): AffectedProbe {
   const trees = new Map<string, Promise<Set<string> | undefined>>();
   const listTree = (ref: string) => {
     let t = trees.get(ref);
@@ -394,7 +503,7 @@ export function hostAffectedProbe(env: Record<string, string | undefined> = proc
   return {
     head: async () => (await git(["rev-parse", "HEAD"]))?.trim() ?? "",
     liveCommit: async (worker: WorkerName) => {
-      const w = WORKERS.find((x) => x.name === worker)!;
+      const w = workers.find((x) => x.name === worker)!;
       const bearer = w.healthBearerEnv ? env[w.healthBearerEnv] : undefined;
       if (w.healthBearerEnv && !bearer)
         return { error: `${w.healthBearerEnv} is not set — cannot read ${w.healthUrl}` };
@@ -436,9 +545,11 @@ export function hostAffectedProbe(env: Record<string, string | undefined> = proc
   };
 }
 
-/** `deploy plan|all --affected` on the host: the selection over this checkout and the live fleet. */
-export function computeAffectedOnHost(opts: { base?: string }): Promise<AffectedReport> {
-  return computeAffected(hostAffectedProbe(), opts);
+/** `deploy plan|all --affected` on the host: the selection over this checkout
+ *  and the live fleet — the fleet being the installation the profile names. */
+export async function computeAffectedOnHost(opts: { base?: string }): Promise<AffectedReport> {
+  const { profile } = await loadProfileOnHost();
+  return computeAffected(hostAffectedProbe(workersFor(profile)), opts);
 }
 
 // ---- `deploy restart` (src/deploy/restart.ts is the pure half) -----------------------------------
