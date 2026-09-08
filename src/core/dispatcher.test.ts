@@ -991,6 +991,8 @@ describe("resident repo dispatch", () => {
   it("fresh thread + rejected bare slug + a repo-needing agent → one not-onboarded reply, no run (#316)", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
+    // The note is a resident installation's (item 16); the fixture names no resident Worker, so say there is one.
+    deps.capabilities = { ...deps.capabilities, residents: true };
     deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UADMIN"), io);
@@ -1003,6 +1005,21 @@ describe("resident repo dispatch", () => {
     expect(provider.requests).toHaveLength(0); // no model turn
     expect(makeExecutor).not.toHaveBeenCalled(); // no workspace of any kind
     expect(statuses[statuses.length - 1].title).toContain("not started");
+  });
+
+  // Feature: features/routing-and-config.md item 16 — the note names `repo
+  // onboard`, a command an installation without residents does not have: the
+  // gate reads the capability, and a rejected slug is then no reason to stop.
+  it("the not-onboarded note is a resident installation's: with residents off the same rejected slug starts no such refusal and never mentions `repo onboard`", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.capabilities = { ...deps.capabilities, residents: false };
+    deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UADMIN"), io);
+    expect(replies.some((r) => r.includes("not onboarded"))).toBe(false);
+    expect(replies.some((r) => r.includes("repo onboard"))).toBe(false);
+    expect(provider.requests.length).toBeGreaterThan(0); // the run went ahead in a per-thread workspace
   });
 
   // #445 F2: the registry did not ANSWER for the repo the message addressed.
@@ -1029,6 +1046,7 @@ describe("resident repo dispatch", () => {
   it("a non-admin gets the not-onboarded reply with an ask-an-admin hint, never a command they cannot run (#316)", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.capabilities = { ...deps.capabilities, residents: true };
     deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UDEV"), io);
