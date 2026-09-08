@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/coreplanelabs/switchboard/compare/v1.0.0...v1.1.0) (2026-09-08)
+
+
+### Features
+
+* **resident:** content-addressed snapshots — the checkout archive drops node_modules, each deps-store entry is archived once, a wake restores it ([#654](https://github.com/coreplanelabs/switchboard/issues/654)) ([52ee450](https://github.com/coreplanelabs/switchboard/commit/52ee450354a31094050508af3ce78f543b026e62))
+* **tracing:** the resident admin client, the memory store's retrieve and the run store's put join the trace as http.client spans ([#655](https://github.com/coreplanelabs/switchboard/issues/655)) ([56dcab9](https://github.com/coreplanelabs/switchboard/commit/56dcab9310a38291cf50c041f04f54aba5156182))
+
+
+### Bug fixes
+
+* **dispatcher:** a resumed run's admission slot carries the row's original start — the steer ack says the run's elapsed time, not the resume's ([#656](https://github.com/coreplanelabs/switchboard/issues/656)) ([760abe5](https://github.com/coreplanelabs/switchboard/commit/760abe5295e48fd57eea7e71d10cc754623ed628))
+
 ## [1.0.0](https://github.com/coreplanelabs/switchboard/compare/v0.11.0...v1.0.0) (2026-09-08)
 
 
