@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.3.0](https://github.com/coreplanelabs/switchboard/compare/v1.2.0...v1.3.0) (2026-09-08)
+
+
+### Features
+
+* **tracing:** the bot keeps its own span log and serves it to a trace:read bearer — the container's stdout, readable by us and never from the outside ([#675](https://github.com/coreplanelabs/switchboard/issues/675)) ([421134b](https://github.com/coreplanelabs/switchboard/commit/421134b97c7849a1d91d4eb636cdfa1c2dcd44c4))
+
+
+### Bug fixes
+
+* **resident:** the image build asserts unsquashfs with command -v — unsquashfs -version exits 1 on squashfs-tools 4.5 and failed the 1.2.0 resident image ([#678](https://github.com/coreplanelabs/switchboard/issues/678)) ([7d256b1](https://github.com/coreplanelabs/switchboard/commit/7d256b11dacf8e16f0008f31d3fdd23f23b92a26))
+
+
+### Documentation
+
+* **plans:** the durable-runs plan record is implemented — Phases 0–5 merged and live-receipted 2026-09-08 ([#674](https://github.com/coreplanelabs/switchboard/issues/674)) ([0b63ac7](https://github.com/coreplanelabs/switchboard/commit/0b63ac7466b0c24f84f2d79006e3adea653cc912))
+
 ## [1.2.0](https://github.com/coreplanelabs/switchboard/compare/v1.1.0...v1.2.0) (2026-09-08)
 
 
