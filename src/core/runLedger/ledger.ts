@@ -8,6 +8,7 @@
 import type { RunRecord } from "../runRecord.js";
 import type { AssembledTranscript } from "./transcript.js";
 import type {
+  InboxItem,
   AppendableEvent,
   ClaimRequest,
   ClaimResult,
@@ -53,6 +54,10 @@ export interface RunLedger {
   setState(runId: string, gen: string, state: RunState): Promise<FenceResult>;
   /** Any generation: a steer arrives on whichever container is up. */
   pushInbox(runId: string, message: Record<string, unknown>): Promise<{ ok: boolean; seq?: number }>;
+  /** The inbox items with `seq > afterSeq`, in seq order — the resume's re-read
+   *  at adopt time (run-history item 40), so a steer that landed after the
+   *  reclaim's snapshot is not lost. Empty for an unknown run. */
+  readInbox(runId: string, afterSeq: number): Promise<InboxItem[]>;
   /** Any generation; `ownerLive` says whether the owner's lease is current. */
   requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }>;
   /** SIGTERM: mark this generation's runs for the next one. */

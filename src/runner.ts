@@ -111,6 +111,8 @@ export interface RunOptions {
 export interface ResumeEntry {
   settlements: Settlement[];
   stepRecorded: boolean;
+  /** The last record's inbox seq (run-history item 40): the counter starts there. */
+  inboxConsumedSeq: number;
   turn: number;
   iteration: number;
   remainingMs: number;
@@ -129,6 +131,9 @@ export interface StepReport {
   turn: number;
   iteration: number;
   remainingMs: number;
+  /** The highest run-ledger inbox seq among the follow-ups drained so far
+   *  (run-history item 40): a resume folds in only what lies past it. */
+  inboxConsumedSeq: number;
 }
 
 /** The static toolset plus this run's extra tools. A duplicate name is a
@@ -307,9 +312,14 @@ async function runLoop(
   // everything pending becomes ONE text part (plus the inputs' attachments) on
   // the next user turn, each input recorded on the stream as it is consumed.
   const pendingFollowUps = () => (opts.inbox?.size ?? 0) > 0;
+  // How far the durable inbox has been consumed (run-history item 40): the
+  // highest ledger seq drained, reported on every step record so a resume
+  // folds in only the follow-ups past it. Starts where the last record left it.
+  let inboxConsumedSeq = opts.resume?.inboxConsumedSeq ?? 0;
   const drainFollowUps = (superseded = false): ContentPart[] => {
     const inputs: FollowUpInput[] = opts.inbox?.drain() ?? [];
     for (const input of inputs) {
+      if (input.ledgerSeq !== undefined && input.ledgerSeq > inboxConsumedSeq) inboxConsumedSeq = input.ledgerSeq;
       const source = {
         ...(input.sourceUrl ? { url: input.sourceUrl } : {}),
         ...(input.userName ? { user: input.userName } : {}),
@@ -527,6 +537,7 @@ async function runLoop(
           turn,
           iteration: resume.iteration,
           remainingMs: deadline - now(),
+          inboxConsumedSeq,
         });
       }
       const settled: ContentPart[] = [];
@@ -619,6 +630,7 @@ async function runLoop(
         turn,
         iteration,
         remainingMs: deadline - now(),
+        inboxConsumedSeq,
       });
       reportedUpTo = messages.length;
     }

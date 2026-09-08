@@ -7,7 +7,8 @@ import { lastThreadDirectives, parseDirectives, type RequestDirectives, type Thr
 import { mergeTools, runAgent } from "../runner.js";
 import { TOOLSETS } from "../tools/workspace.js";
 import type { LedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js";
-import type { AppendableEvent, LiveRunRow, StepRecord } from "./runLedger/types.js";
+import type { AppendableEvent, InboxItem, LiveRunRow, StepRecord } from "./runLedger/types.js";
+import type { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
 import type { ResumePlan } from "./runLedger/resume.js";
 import { systemClock } from "./trace/index.js";
 import { COMMAND_RUN_AGENT } from "./runOwner.js";
@@ -279,6 +280,10 @@ export interface CoreDeps {
    * ledger and a claimed row closes only by lease expiry (a test-only pairing).
    */
   runLedger?: LedgerWriteThrough;
+  /** The threads whose live run is on the ledger but not in this process
+   *  (thread-admission item 5), fed by the reclaim sweep: a follow-up on one
+   *  is steered into that run's durable inbox instead of starting a rival. */
+  threadsElsewhere?: Pick<ThreadsElsewhere, "get" | "forget">;
   /**
    * Channel facts for the run record (authorization KTD4/KTD7): every run is
    * stamped with its channel's visibility at create, asked of this directory
@@ -396,6 +401,61 @@ export interface ResumeContext {
   /** The highest event seq on the ledger; appends continue past it. */
   lastSeq: number;
   repoCtx: RepoContext;
+  /** The durable inbox past the last record (item 40): folded in at the run's first boundary. */
+  inbox: InboxItem[];
+}
+
+/** The durable copy of a steered follow-up (run-history item 40): the message
+ *  without its attachment bytes — the text is what a resume must not lose;
+ *  images and documents stay with the in-memory copy. */
+export function durableInboxMessage(msg: IncomingMessage, text: string, at: number): Record<string, unknown> {
+  return {
+    channelId: msg.channelId,
+    userId: msg.userId,
+    threadKey: msg.threadKey,
+    text,
+    at,
+    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+    ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
+  };
+}
+
+/** A durable inbox item back as a follow-up for the resumed run, on the
+ *  resume's channel handle; undefined when the stored shape is not one this
+ *  build wrote (skipped, never fatal). */
+export function followUpFromInbox(item: InboxItem, io: ChannelIO, fallbackAt: number): DispatchFollowUp | undefined {
+  const m = item.message;
+  const str = (k: string): string | undefined => (typeof m[k] === "string" ? (m[k] as string) : undefined);
+  const text = str("text");
+  const userId = str("userId");
+  const threadKey = str("threadKey");
+  const channelId = str("channelId");
+  if (text === undefined || userId === undefined || threadKey === undefined || channelId === undefined)
+    return undefined;
+  const userName = str("userName");
+  const sourceUrl = str("sourceUrl");
+  const channelName = str("channelName");
+  const at = typeof m.at === "number" && Number.isFinite(m.at) ? m.at : fallbackAt;
+  const msg: IncomingMessage = {
+    channelId,
+    userId,
+    threadKey,
+    text,
+    ...(userName !== undefined ? { userName } : {}),
+    ...(sourceUrl !== undefined ? { sourceUrl } : {}),
+    ...(channelName !== undefined ? { channelName } : {}),
+  };
+  return {
+    text,
+    userId,
+    ...(userName !== undefined ? { userName } : {}),
+    ...(sourceUrl !== undefined ? { sourceUrl } : {}),
+    at,
+    ledgerSeq: item.seq,
+    msg,
+    io,
+  };
 }
 
 export interface DispatchOptions {
@@ -624,7 +684,7 @@ export async function dispatch(
     // a ship run, the child round in flight) or refuses it with a pointer to
     // the live run when a DIFFERENT agent was asked for explicitly. Either way
     // this dispatch ends here: no card, no run, no workspace.
-    const claim = admission.claim(msg.threadKey, { agent: agent.name });
+    let claim = admission.claim(msg.threadKey, { agent: agent.name });
     if (claim.kind === "live" && resume) {
       // A resume is not a follow-up (run-history item 38): its message is
       // synthetic, so it must never be steered into — or refuse against — the
@@ -671,6 +731,23 @@ export async function dispatch(
         await refuse("follow_up_refused", () => io.reply(refusalReply(claim.live, decision, clock())));
         return;
       }
+      // The durable copy first (run-history item 40), so its seq rides on the
+      // in-memory item and the next step record says the run consumed it. A
+      // run with no row yet (still in setup) has no durable copy: it is not
+      // resumable until its seed lands anyway.
+      const at = clock();
+      const ledgerSeq =
+        deps.runLedger && claim.live.runId
+          ? await deps.runLedger.pushInbox(claim.live.runId, durableInboxMessage(msg, directives.text, at))
+          : undefined;
+      if (admission.get(msg.threadKey) !== claim.live) {
+        // The run finished and released the thread during the round trip: an
+        // item pushed now would sit on a dead slot (and its durable copy went
+        // with the finish). Nothing is dropped silently — the follow-up is a
+        // request of its own now (item 4's rule, taken early).
+        console.log(`[dispatch] ${msg.threadKey} the run finished during the steer — running the follow-up fresh`);
+        return dispatch(deps, msg, io);
+      }
       claim.live.inbox.push({
         text: directives.text,
         userId: msg.userId,
@@ -678,17 +755,95 @@ export async function dispatch(
         ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
         ...(msg.images !== undefined ? { images: msg.images } : {}),
         ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
-        at: clock(),
+        at,
+        ...(ledgerSeq !== undefined ? { ledgerSeq } : {}),
         msg,
         io,
       });
       console.log(
-        `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending)`,
+        `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
       );
-      await root.span("dispatch.admission", () => io.reply(steerAck(claim.live, clock())), {
+      await root.span("dispatch.admission", () => io.reply(steerAck(claim.live, at)), {
         attrs: { outcome: "steered" },
       });
       return;
+    }
+    // The thread is free here, but its live run may be on the ledger under
+    // another generation, or reclaimed and not yet launched (thread-admission
+    // item 5 — the boot gap). Then the follow-up is steered into that run's
+    // durable inbox: the resume folds it in. The same gates as an in-process
+    // steer apply (the live agent's allowlist, no agent switch). A push the
+    // ledger refuses means the row is gone — the map is stale — so the message
+    // runs fresh and the thread is forgotten until the next sweep.
+    const elsewhere = resume ? undefined : deps.threadsElsewhere?.get(msg.threadKey);
+    const farAgent = elsewhere?.agent;
+    if (elsewhere && deps.runLedger && farAgent === undefined) {
+      // No agent on the row: the no-agent-switch gate cannot be judged, so the
+      // message is not steered into it (a claim always records the agent; this
+      // is a guard, not a path).
+      console.log(`[dispatch] ${msg.threadKey} run ${elsewhere.runId} on the ledger names no agent — running fresh`);
+    } else if (elsewhere && deps.runLedger && farAgent !== undefined) {
+      // This dispatch holds the slot for nothing but a steer: release it NOW,
+      // before any round trip, so the resume's own dispatch (which may launch
+      // this instant) finds the thread free instead of a rival that closes its
+      // row as "a newer run in flight".
+      admission.release(msg.threadKey, claim.live);
+      const far: LiveThread<DispatchFollowUp> = {
+        agent: farAgent,
+        inbox: claim.live.inbox,
+        startedAt: elsewhere.startedAt,
+        runId: elsewhere.runId,
+      };
+      if (!deps.config.canRunAgent(msg.userId, far.agent)) {
+        await io.reply(
+          `🚫 You're not on the allowlist for the \`${far.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
+        );
+        return;
+      }
+      const decision = decideFollowUp(far, { agent: directives.agent });
+      const now = clock();
+      if (decision.kind === "refuse") {
+        console.log(
+          `[dispatch] ${msg.threadKey} follow-up refused (${decision.reason}): ${far.agent} run ${far.runId} live on another generation`,
+        );
+        await io.reply(refusalReply(far, decision, now));
+        return;
+      }
+      const seq = await deps.runLedger.pushInbox(elsewhere.runId, durableInboxMessage(msg, directives.text, now));
+      if (seq !== undefined) {
+        // The run may have been launched here during the round trip (its
+        // adopt-time re-read ran before this push landed, or after — either
+        // way the inbox folds one seq in once): hand the item to it as well.
+        const nowLive = admission.get(msg.threadKey);
+        if (nowLive && nowLive.runId === elsewhere.runId) {
+          nowLive.inbox.push({
+            text: directives.text,
+            userId: msg.userId,
+            ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+            ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+            ...(msg.images !== undefined ? { images: msg.images } : {}),
+            ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
+            at: now,
+            ledgerSeq: seq,
+            msg,
+            io,
+          });
+        }
+        console.log(
+          `[dispatch] ${msg.threadKey} follow-up steered into run ${elsewhere.runId} live on another generation (durable seq ${seq}${nowLive ? ", now live here" : ""})`,
+        );
+        await io.reply(steerAck(far, now));
+        return;
+      }
+      deps.threadsElsewhere?.forget(msg.threadKey);
+      console.log(`[dispatch] ${msg.threadKey} run ${elsewhere.runId} is no longer on the ledger — running fresh`);
+      // Take the slot back for the fresh run below.
+      const again = admission.claim(msg.threadKey, { agent: agent.name });
+      if (again.kind === "live") {
+        // Someone claimed it during the round trip: this message steers into them as any follow-up would.
+        return dispatch(deps, msg, io);
+      }
+      claim = again;
     }
     admitted = claim.live;
     // A resumed run (run-history item 38): its ledger row has been this
@@ -705,6 +860,40 @@ export async function dispatch(
         onStop: (mode) => void liveControl?.requestStop(mode),
         onFenced: () => void liveControl?.requestStop("hard"),
       });
+    }
+    if (resume) {
+      // The follow-ups steered in after the last record (item 40): the reclaim's
+      // snapshot PLUS whatever landed since — a boot-gap steer between the
+      // reclaim and this claim wrote to the ledger and was acked, so the inbox
+      // is re-read here, past the highest seq already known. From this point
+      // the thread is claimed in-process and steers reach the run directly. The
+      // runner folds them in at its first boundary and records the seq it
+      // reached. Their acks were the admitting generation's — none is sent again.
+      // Name the run on the slot NOW — its id is the row's — so a boot-gap steer
+      // whose push lands after the re-read below finds the run it belongs to and
+      // hands the item over in memory (the registry row is created seconds later,
+      // after the workspace attach, which is too late for that check).
+      admitted.runId = resume.row.runId;
+      const known = Math.max(resume.lastStep.inboxConsumedSeq, ...resume.inbox.map((i) => i.seq));
+      const late = deps.runLedger ? await deps.runLedger.readInbox(resume.row.runId, known) : [];
+      const items = [...resume.inbox, ...late.filter((i) => i.seq > known)];
+      const fallbackAt = clock();
+      let folded = 0;
+      for (const item of items) {
+        const followUp = followUpFromInbox(item, io, fallbackAt);
+        if (!followUp) {
+          console.warn(
+            `[resume] ${msg.threadKey} run ${resume.row.runId}: inbox item ${item.seq} has a shape this build cannot read — skipped`,
+          );
+          continue;
+        }
+        admitted.inbox.push(followUp);
+        folded++;
+      }
+      if (folded > 0)
+        console.log(
+          `[resume] ${msg.threadKey} run ${resume.row.runId}: ${folded} follow-up(s) from the durable inbox pending (${late.length} landed after the reclaim)`,
+        );
     }
 
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
@@ -1636,6 +1825,7 @@ export async function dispatch(
               resume: {
                 settlements: resume.plan.settlements,
                 stepRecorded: resume.plan.stepRecorded,
+                inboxConsumedSeq: resume.plan.inboxConsumedSeq,
                 turn: resume.plan.turn,
                 iteration: resume.plan.iteration,
                 remainingMs: resume.plan.remainingMs,

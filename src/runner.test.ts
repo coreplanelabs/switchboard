@@ -1868,6 +1868,57 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
     );
   });
 
+  it("the step report carries the highest ledger seq drained so far (run-history item 40): 0 before any, unchanged by a follow-up the ledger never saw", async () => {
+    const inbox = new FollowUpInbox();
+    const reports: StepReport[] = [];
+    let calls = 0;
+    const provider = scripted([bashUse("t1"), bashUse("t2"), bashUse("t3"), text("done")]);
+    const inner = provider.complete.bind(provider);
+    provider.complete = async (req) => {
+      calls++;
+      if (calls === 1) {
+        inbox.push(followUp("a", { ledgerSeq: 3 }));
+        inbox.push(followUp("b", { ledgerSeq: 5 }));
+      }
+      if (calls === 2) inbox.push(followUp("c")); // never reached the ledger: no seq
+      return inner(req);
+    };
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 6 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      inbox,
+      onStep: async (s) => void reports.push(structuredClone(s)),
+    });
+    // Step 1's report precedes the drain (a and b ride its results turn); step 2's
+    // says 5; c (no seq) leaves step 3's at 5.
+    expect(reports.map((r) => r.inboxConsumedSeq)).toEqual([0, 5, 5]);
+  });
+
+  it("a resumed run's counter starts at its last record's inbox seq", async () => {
+    const reports: StepReport[] = [];
+    const provider = scripted([bashUse("t1"), text("done")]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onStep: async (s) => void reports.push(structuredClone(s)),
+      resume: {
+        settlements: [],
+        stepRecorded: true,
+        turn: 1,
+        iteration: 1,
+        remainingMs: 5 * 60_000,
+        inboxConsumedSeq: 4,
+      },
+    });
+    expect(reports.map((r) => r.inboxConsumedSeq)).toEqual([4]);
+  });
+
   it("two follow-ups drained together arrive as ONE text part listing both, one input event each", async () => {
     const inbox = new FollowUpInbox();
     let calls = 0;
@@ -2195,6 +2246,7 @@ describe("resume (features/run-history.md item 37)", () => {
         turn: 1,
         iteration: 0,
         remainingMs: 5 * 60_000,
+        inboxConsumedSeq: 0,
       },
     });
     expect(answer).toBe("done");
@@ -2260,6 +2312,7 @@ describe("resume (features/run-history.md item 37)", () => {
         turn: 2,
         iteration: 1,
         remainingMs: 60_000,
+        inboxConsumedSeq: 0,
       },
     });
     expect(reports).toHaveLength(1);
@@ -2273,6 +2326,7 @@ describe("resume (features/run-history.md item 37)", () => {
       turn: 2,
       iteration: 1,
       remainingMs: expect.any(Number),
+      inboxConsumedSeq: 0,
     });
     expect(log).toEqual(["probe"]);
     // bash is not in the toolset here: the re-run yields the runner's own unknown-tool result, never a throw.
@@ -2292,7 +2346,7 @@ describe("resume (features/run-history.md item 37)", () => {
       toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
       now: () => 1_000,
-      resume: { settlements: [], stepRecorded: true, turn: 1, iteration: 3, remainingMs: 0 },
+      resume: { settlements: [], stepRecorded: true, turn: 1, iteration: 3, remainingMs: 0, inboxConsumedSeq: 0 },
     });
     // No step ran; the loop went straight to the budget finale (whose own
     // deadline, also spent, yields the budget notice rather than a write-up).

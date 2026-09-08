@@ -152,6 +152,15 @@ describe("WorkerRunLedger", () => {
     expect(w.calls).toHaveLength(0);
   });
 
+  it("readInbox posts the run id and the seq to read past, and returns the Worker's items (item 40)", async () => {
+    const items = [{ seq: 3, message: { text: "late" } }];
+    const w = stubWorker(() => ({ status: 200, data: { items } }));
+    expect(await w.ledger.readInbox("r1", 2)).toEqual(items);
+    expect(w.calls.at(-1)).toMatchObject({ path: "/runs/inbox/read", body: { runId: "r1", afterSeq: 2 } });
+    const empty = stubWorker(() => ({ status: 200, data: {} }));
+    expect(await empty.ledger.readInbox("r1", 0)).toEqual([]);
+  });
+
   it("readTranscript assembles the Worker's rows and attachments", async () => {
     const rows = [{ idx: 0, part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "hi" } }) }];
     const w = stubWorker(() => ({ status: 200, data: { rows, attachments: [] } }));

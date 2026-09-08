@@ -118,6 +118,7 @@ export async function launchResumes(
       lastStep: run.lastStep,
       plan,
       events: run.events,
+      inbox: run.inbox,
       lastSeq,
       repoCtx: repoContextOf(row),
     };

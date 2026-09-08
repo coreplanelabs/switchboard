@@ -143,6 +143,10 @@ export class InMemoryRunLedger implements RunLedger {
     return { ok: true, seq };
   }
 
+  async readInbox(runId: string, afterSeq: number): Promise<InboxItem[]> {
+    return (this.inbox.get(runId) ?? []).filter((i) => i.seq > afterSeq);
+  }
+
   async requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }> {
     const row = this.live.get(runId);
     if (!row) return { ok: false };

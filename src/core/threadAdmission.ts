@@ -39,6 +39,11 @@ export interface FollowUpInput {
   documents?: DocumentAttachment[];
   /** When it arrived (ms epoch). */
   at: number;
+  /** The run ledger's inbox seq for this follow-up (run-history item 40):
+   *  set when the dispatcher wrote a durable copy, so the runner can record
+   *  how far the run has consumed the durable inbox. Absent when the ledger
+   *  is off, refused the push, or the run had no row yet. */
+  ledgerSeq?: number;
 }
 
 /**
@@ -51,8 +56,17 @@ export interface FollowUpInput {
  */
 export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
   private pending: T[] = [];
+  /** The ledger seqs ever pushed (item 5): a durable follow-up can reach the
+   *  run by two paths — the reclaim's snapshot or the re-read at adopt, and a
+   *  boot-gap steer that finds the run live once its push lands — and must
+   *  fold in once. Items without a seq are never deduplicated. */
+  private readonly seen = new Set<number>();
 
   push(input: T): void {
+    if (input.ledgerSeq !== undefined) {
+      if (this.seen.has(input.ledgerSeq)) return;
+      this.seen.add(input.ledgerSeq);
+    }
     this.pending.push(input);
   }
 

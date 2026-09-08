@@ -26,6 +26,7 @@ import {
   turnContent,
   writeAbandonedRunRecords,
   type CoreDeps,
+  type DispatchFollowUp,
 } from "./dispatcher.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { RunControl, RunRegistry, activityOfEvents } from "./runRegistry.js";
@@ -57,6 +58,8 @@ import { isRunRecord, type RunRecord } from "./runRecord.js";
 import { createRunHistoryWriter } from "./runHistoryWriter.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
+import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
+import type { StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
 import type { Operations } from "./operations.js";
@@ -8918,7 +8921,7 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     const events = await ledger.readEvents("run-old");
     const { io, replies } = ioWithCard();
     await dispatch(deps, resumeMessage(reclaimed.row, "hello there"), io, {
-      resume: { row: reclaimed.row, lastStep: reclaimed.lastStep!, plan, events, lastSeq: 4, repoCtx: {} },
+      resume: { row: reclaimed.row, lastStep: reclaimed.lastStep!, plan, events, lastSeq: 4, repoCtx: {}, inbox: [] },
     });
     await writer.settled();
 
@@ -9018,6 +9021,7 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
         events: await ledger.readEvents("run-old"),
         lastSeq: 1,
         repoCtx: {},
+        inbox: [],
       },
     });
     await writer.settled();
@@ -9079,6 +9083,7 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
         events: [],
         lastSeq: 0,
         repoCtx: { repo: "acme/api" },
+        inbox: [],
       },
     });
     await writer.settled();
@@ -9087,6 +9092,462 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     expect(registry.listActive()).toEqual([]);
     expect(ledger.live.has("run-old")).toBe(false);
     expect(ledger.finished.get("run-old")?.status).toBe("interrupted");
+  });
+
+  it("a steered follow-up is written to the run's durable inbox with its seq, and the next step record says the run consumed it (thread-admission item 5, run-history item 40)", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const stepRecords: StepRecord[] = [];
+    const origStep = ledger.step.bind(ledger);
+    ledger.step = async (runId, gen, record, turns) => {
+      stepRecords.push(record);
+      return origStep(runId, gen, record, turns);
+    };
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let firstStarted!: () => void;
+    const started = new Promise<void>((r) => (firstStarted = r));
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        calls++;
+        if (calls === 1) {
+          firstStarted();
+          await gate;
+        }
+        if (calls <= 2) {
+          return {
+            content: [{ type: "tool_use", id: `s${calls}`, name: "update_status", input: { checklist: `○ ${calls}` } }],
+            stopReason: "tool_use",
+          };
+        }
+        return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, registry, writer } = wired(provider, { ledger });
+    deps.admission = new ThreadAdmission();
+    const first = ioWithCard();
+    const run = dispatch(deps, msg("write the report"), first.io);
+    await started; // the run is registered, its row claimed, its first model call in flight
+    const second = fakeIO();
+    await dispatch(
+      deps,
+      { ...msg("and also the numbers", "slack:UY"), userName: "uy", sourceUrl: "https://s/2" },
+      second.io,
+    );
+    expect(second.replies[0]).toMatch(/^↪ Folded into the \*general\* run already in flight/);
+    // The durable copy: the message without attachment bytes, under the ledger's seq.
+    expect(ledger.inbox.get("run-l")!.map((i) => [i.seq, i.message])).toEqual([
+      [
+        1,
+        expect.objectContaining({
+          text: "and also the numbers",
+          userId: "slack:UY",
+          userName: "uy",
+          sourceUrl: "https://s/2",
+          threadKey: "slack:CX:1.0",
+          channelId: "slack:CX",
+        }),
+      ],
+    ]);
+    release();
+    await run;
+    await writer.settled();
+    expect(registry.listActive().map((r) => r.id)).toEqual(["run-l"]); // no rival run
+    expect(first.replies.at(-1)).toBe("done");
+    // Step 1's record precedes the boundary the follow-up rode; step 2's says it was consumed.
+    expect(stepRecords.map((s) => [s.step, s.inboxConsumedSeq])).toEqual([
+      [0, 0],
+      [1, 0],
+      [2, 1],
+    ]);
+    expect(
+      ledger.finished.get("run-l")!.events.some((e) => e.type === "input" && e.text === "and also the numbers"),
+    ).toBe(true);
+  });
+
+  it("a follow-up on a thread whose live run is on the ledger but not in this process (the boot gap) is steered into that run's durable inbox and acked — no card, no second run; a row the ledger no longer has means a fresh run and the thread is forgotten", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    await ledger.claim({
+      runId: "run-far",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0", agent: "general" },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    const { deps, registry } = wired(capturingProvider("fresh answer"), { ledger });
+    const elsewhere = new ThreadsElsewhere();
+    elsewhere.replace([{ threadKey: "slack:CX:1.0", runId: "run-far", startedAt: 5_000, meta: { agent: "general" } }]);
+    deps.threadsElsewhere = elsewhere;
+    deps.admission = new ThreadAdmission();
+    const a = fakeIO();
+    await dispatch(deps, { ...msg("and also the numbers", "slack:UY"), userName: "uy" }, a.io);
+    expect(a.statuses).toEqual([]); // no card
+    expect(registry.listActive()).toEqual([]); // no run here
+    expect(a.replies).toHaveLength(1);
+    expect(a.replies[0]).toMatch(/^↪ Folded into the \*general\* run already in flight in this thread/);
+    expect(a.replies[0]).not.toContain(" · "); // no run link: the run page token is the other generation's
+    expect(ledger.inbox.get("run-far")!.map((i) => [i.seq, i.message.text, i.message.userName])).toEqual([
+      [1, "and also the numbers", "uy"],
+    ]);
+    expect(deps.admission.size).toBe(0); // the in-process slot was released
+    // The map is stale — the other generation finished the run — so the push is
+    // refused; the message runs fresh and the thread is forgotten.
+    ledger.live.delete("run-far");
+    const b = fakeIO();
+    await dispatch(deps, msg("start over", "slack:UY"), b.io);
+    expect(registry.listActive().map((r) => r.id)).toEqual(["run-l"]);
+    expect(b.replies.at(-1)).toBe("fresh answer");
+    expect(elsewhere.get("slack:CX:1.0")).toBeUndefined();
+  });
+
+  it("a resumed run inherits the follow-ups the durable inbox holds past its last record (item 40) — the reclaim's snapshot plus what landed before the launch, re-read at adopt: folded in at its first boundary, recorded as inputs; the ack was the admitting generation's, none is sent again", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const transcript: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "hello there" }] }];
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        agent: "general",
+        model: "anthropic/general-model",
+      },
+      card: { channel: "CX", ts: "1.2" },
+      system: "the stored prompt, verbatim",
+      tools: [],
+      state: {},
+    });
+    await ledger.seed("run-old", "gen-OLD", [{ idx: 0, message: transcript[0] }]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      [],
+    );
+    await ledger.append("run-old", "gen-OLD", [{ type: "input", text: "hello there", at: 1, seq: 1 }]);
+    await ledger.pushInbox("run-old", {
+      channelId: "slack:CX",
+      userId: "slack:UY",
+      userName: "uy",
+      threadKey: "slack:CX:1.0",
+      text: "and also the numbers",
+      sourceUrl: "https://s/2",
+      at: 9_000,
+    });
+    await ledger.pushInbox("run-old", { garbage: true }); // an item the parser cannot read is skipped, not fatal
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    expect(reclaimed.inbox.map((i) => i.seq)).toEqual([1, 2]);
+    // Landed AFTER the reclaim's snapshot, before the launch (the boot gap's
+    // durable steer): the resume re-reads the inbox at adopt time (review F1).
+    await ledger.pushInbox("run-old", {
+      channelId: "slack:CX",
+      userId: "slack:UZ",
+      threadKey: "slack:CX:1.0",
+      text: "and the dates",
+      at: 9_500,
+    });
+    const requests: ChatMessage[][] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(structuredClone(req.messages));
+        return {
+          content: [{ type: "text", text: requests.length === 1 ? "resumed" : "with the numbers" }],
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const { deps, writer } = wired(provider, { ledger });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const plan = planResume({
+      transcript: { complete: true, turns: 1, messages: transcript },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("general")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.why);
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, resumeMessage(reclaimed.row, "hello there"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events: await ledger.readEvents("run-old"),
+        lastSeq: 1,
+        repoCtx: {},
+        inbox: reclaimed.inbox,
+      },
+    });
+    await writer.settled();
+    // The first answer was superseded by the pending follow-up (thread-admission
+    // item 3); the second model call saw it as the next user turn.
+    expect(requests).toHaveLength(2);
+    const last = requests[1].at(-1)!;
+    expect(last.role).toBe("user");
+    expect(JSON.stringify(last.content)).toContain("and also the numbers");
+    expect(JSON.stringify(last.content)).toContain("and the dates"); // the late item, folded in with the snapshot's
+    expect(replies.filter((r) => r.startsWith("↪"))).toEqual([]); // no second ack
+    expect(replies.at(-1)).toBe("with the numbers");
+    const record = ledger.finished.get("run-old")!;
+    expect(record.events.filter((e) => e.type === "input").map((e) => e.text)).toEqual([
+      "hello there",
+      "and also the numbers",
+      "and the dates",
+    ]);
+    expect(record.events.find((e) => e.type === "input" && e.text === "and also the numbers")).toMatchObject({
+      source: { user: "uy", url: "https://s/2" },
+    });
+    expect(
+      warnSpy.mock.calls.some((c) => /inbox item 2 has a shape this build cannot read — skipped/.test(String(c[0]))),
+    ).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it("a steer whose run finished during the durable push does not land on a dead slot: the follow-up runs fresh instead (review F2)", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let releasePush!: () => void;
+    const pushGate = new Promise<void>((r) => (releasePush = r));
+    let pushReached!: () => void;
+    const pushStarted = new Promise<void>((r) => (pushReached = r));
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "pushInbox") {
+          return async (runId: string, message: Record<string, unknown>) => {
+            pushReached();
+            await pushGate;
+            return target.pushInbox(runId, message);
+          };
+        }
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+    let calls = 0;
+    let answerFirst!: () => void;
+    const firstGate = new Promise<void>((r) => (answerFirst = r));
+    let firstReached!: () => void;
+    const firstStarted = new Promise<void>((r) => (firstReached = r));
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (++calls === 1) {
+          firstReached();
+          await firstGate;
+        }
+        return { content: [{ type: "text", text: `answer ${calls}` }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, writer } = wired(provider, { ledger });
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => "tok" });
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = ioWithCard();
+    const run1 = dispatch(deps, msg("write the report"), first.io);
+    await firstStarted;
+    const second = fakeIO();
+    const steer = dispatch(deps, msg("and also the numbers", "slack:UY"), second.io);
+    await pushStarted; // the steer is inside the ledger round trip, holding nothing but a reference to the slot
+    answerFirst();
+    await run1; // the run finished and released the thread meanwhile
+    releasePush();
+    await steer;
+    await writer.settled();
+    // No ack for a fold-in that could never happen; the follow-up ran as its own run.
+    expect(second.replies.some((r) => r.startsWith("↪"))).toBe(false);
+    expect(second.replies.at(-1)).toBe("answer 2");
+    expect(
+      registry
+        .listActive()
+        .map((r) => r.id)
+        .sort(),
+    ).toEqual(["run-1", "run-2"]);
+    expect(registry.snapshotById("run-2")!.events.find((e) => e.type === "input")).toMatchObject({
+      text: "and also the numbers",
+    });
+  });
+
+  it("the boot-gap steer holds no slot across the ledger round trip; a resume that claims the thread meanwhile names its run id at the claim, so a push landing after its re-read reaches it in memory — folded in once (review F1's window at the launch edge)", async () => {
+    // The row a resume is about to take up: claimed, seeded, one record, one
+    // event; reclaimed by this generation and (as the sweep would) listed in
+    // the map until the launch claims the thread in-process.
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const transcript: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "hello there" }] }];
+    await inner.claim({
+      runId: "run-far",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        agent: "general",
+        model: "anthropic/general-model",
+      },
+      card: { channel: "CX", ts: "1.2" },
+      system: "the stored prompt, verbatim",
+      tools: [],
+      state: {},
+    });
+    await inner.seed("run-far", "gen-OLD", [{ idx: 0, message: transcript[0] }]);
+    await inner.step(
+      "run-far",
+      "gen-OLD",
+      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      [],
+    );
+    await inner.append("run-far", "gen-OLD", [{ type: "input", text: "hello there", at: 1, seq: 1 }]);
+    inner.live.get("run-far")!.leaseUntil = 0;
+    const [reclaimed] = await inner.reclaim("gen-T", 10_000, 30_000);
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const requests: ChatMessage[][] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(structuredClone(req.messages));
+        return {
+          content: [{ type: "text", text: requests.length === 1 ? "resumed" : "with the numbers" }],
+          stopReason: "end_turn",
+        };
+      },
+    };
+    let deps!: CoreDeps;
+    let resumeRun: Promise<void> | undefined;
+    let slotAtResumeClaim: "free" | "taken" | undefined;
+    // The resumed dispatch is held between its claim (and re-read) and its card
+    // — in production the card, the repo resolution and the workspace attach
+    // take seconds, and the registry row (whose id would name the run on the
+    // slot) is created only after them. Here nothing else would take time.
+    let landed!: () => void;
+    const pushLanded = new Promise<void>((r) => (landed = r));
+    const base = ioWithCard();
+    const resumeIo = {
+      replies: base.replies,
+      io: {
+        ...base.io,
+        status: async (...args: Parameters<ChannelIO["status"]>) => {
+          await pushLanded;
+          return base.io.status(...args);
+        },
+      } satisfies ChannelIO,
+    };
+    let reread = false;
+    let atPush: { slot: boolean; registryRow: boolean } | undefined;
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "readInbox") {
+          return async (runId: string, afterSeq: number) => {
+            const items = await target.readInbox(runId, afterSeq);
+            reread = true;
+            return items;
+          };
+        }
+        if (prop === "pushInbox") {
+          return async (runId: string, message: Record<string, unknown>) => {
+            // The resume launches while the steer's push is in flight — the
+            // production interleaving (`launchResumes` follows the sweep at
+            // once). Its dispatch must find the thread FREE; it claims and
+            // re-reads the inbox BEFORE this push lands, so only the hand-off can
+            // deliver the item — and only if the slot already names the run.
+            slotAtResumeClaim = admission.get("slack:CX:1.0") ? "taken" : "free";
+            const plan = planResume({
+              transcript: { complete: true, turns: 1, messages: transcript },
+              lastStep: reclaimed.lastStep!,
+              tools: knownToolsFor(getAgent("general")),
+            });
+            if (plan.kind !== "resume") throw new Error(plan.why);
+            resumeRun = dispatch(deps, resumeMessage(reclaimed.row, "hello there"), resumeIo.io, {
+              resume: {
+                row: reclaimed.row,
+                lastStep: reclaimed.lastStep!,
+                plan,
+                events: await inner.readEvents("run-far"),
+                lastSeq: 1,
+                repoCtx: {},
+                inbox: reclaimed.inbox,
+              },
+            });
+            // Until the resume has claimed the thread and named its run on the slot.
+            for (let i = 0; !reread; i++) {
+              if (i > 1_000) throw new Error("the resume never re-read the inbox");
+              await new Promise((r) => setTimeout(r, 0));
+            }
+            // Observed here, asserted below: an assertion thrown inside a ledger
+            // call would be swallowed by the write-through's own try/catch.
+            atPush = {
+              slot: admission.get("slack:CX:1.0") !== undefined,
+              registryRow: !!deps.runRegistry?.getById("run-far"),
+            };
+            const result = await target.pushInbox(runId, message);
+            landed();
+            return result;
+          };
+        }
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+    const wiredDeps = wired(provider, { ledger });
+    deps = wiredDeps.deps;
+    const elsewhere = new ThreadsElsewhere();
+    elsewhere.replace([{ threadKey: "slack:CX:1.0", runId: "run-far", startedAt: 5_000, meta: { agent: "general" } }]);
+    deps.threadsElsewhere = elsewhere;
+    deps.admission = admission;
+    const a = fakeIO();
+    await dispatch(deps, { ...msg("and also the numbers", "slack:UY"), userName: "uy" }, a.io);
+    expect(slotAtResumeClaim).toBe("free"); // released before the round trip
+    expect(atPush).toEqual({ slot: true, registryRow: false }); // the push landed after the claim, before the registry row
+    expect(a.replies).toEqual([expect.stringMatching(/^↪ Folded into the \*general\* run/)]);
+    await resumeRun;
+    await wiredDeps.writer.settled();
+    // The resumed run got the follow-up exactly once — by the hand-off, since
+    // its re-read ran before the push landed — and answered the thread once.
+    expect(requests).toHaveLength(2); // "resumed" superseded by the pending follow-up, then the answer
+    expect(JSON.stringify(requests[1].at(-1)!.content)).toContain("and also the numbers");
+    const record = inner.finished.get("run-far")!;
+    expect(record.status).toBe("completed");
+    expect(record.events.filter((e) => e.type === "input").map((e) => e.text)).toEqual([
+      "hello there",
+      "and also the numbers",
+    ]);
+    expect(resumeIo.replies.at(-1)).toBe("with the numbers");
+    expect(resumeIo.replies.filter((r) => r.startsWith("↪"))).toEqual([]); // the steer's ack was the only one
+  });
+
+  it("a row live elsewhere whose meta names no agent is not steered into — the no-agent-switch gate cannot be judged, so the message runs fresh (review F3)", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    await ledger.claim({
+      runId: "run-far",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0" },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    const { deps, registry } = wired(capturingProvider("fresh answer"), { ledger });
+    const elsewhere = new ThreadsElsewhere();
+    elsewhere.replace([{ threadKey: "slack:CX:1.0", runId: "run-far", startedAt: 5_000, meta: {} }]);
+    deps.threadsElsewhere = elsewhere;
+    deps.admission = new ThreadAdmission();
+    const a = fakeIO();
+    await dispatch(deps, msg("and also the numbers", "slack:UY"), a.io);
+    expect(a.replies.at(-1)).toBe("fresh answer");
+    expect(registry.listActive().map((r) => r.id)).toEqual(["run-l"]);
+    expect(ledger.inbox.get("run-far")).toBeUndefined();
   });
 
   it("a fenced finishing means another generation owns the run: nothing more reaches the thread and no record is written from here — the run is theirs (D9)", async () => {
