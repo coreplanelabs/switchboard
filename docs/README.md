@@ -17,18 +17,22 @@ You can read this tree here on GitHub or as a site — [openswitchboard.dev](htt
 
 | You're... | Start with | Then |
 |---|---|---|
+| new to all of it | [Get started](tutorials/get-started.md) | [Architecture](explanation/architecture.md) |
 | new, talking to the bot in Slack | [Your first request in Slack](tutorials/first-request-in-slack.md) | [Configure your defaults](how-to/configure-your-defaults.md) |
 | watching runs or spend on the dashboard | [Watch a run and check spend](how-to/watch-a-run-and-check-spend.md) | [Dashboard routes](reference/dashboard-routes.md) |
 | developing or extending Switchboard | [Run it locally](tutorials/run-it-locally.md) | [How a request flows](explanation/how-a-request-flows.md) |
-| operating it in production | [Deploy and rotate a secret](how-to/deploy-and-rotate-a-secret.md) | [Worker topology](explanation/worker-topology.md) |
+| operating it in production | [Deploy](how-to/deploy.md) | [Security model](explanation/security-model.md) |
 
 ## Tutorials
 
+- [Get started](tutorials/get-started.md) — from nothing to an answer in your terminal, then in Slack, then from production, one part each.
 - [Your first request in Slack](tutorials/first-request-in-slack.md) — mention it, follow up, ask for something real, in ten minutes.
 - [Run it locally](tutorials/run-it-locally.md) — get an answer from Switchboard on your own machine, no Slack required.
 
 ## How-to guides
 
+- [Set up accounts](how-to/set-up-accounts.md) — the Slack app from its manifest, model keys, the GitHub App step by step, and what Cloudflare, E2B and Brave each buy.
+- [Deploy](how-to/deploy.md) — Cloudflare, the one supported target: the profile, `deploy init`, `deploy secrets`, `deploy config`, `deploy all`, and what the release workflow does with them.
 - [Configure your defaults](how-to/configure-your-defaults.md) — agent, model, and effort, per you or per channel.
 - [Connect an MCP server](how-to/connect-an-mcp-server.md) — give an agent tools from Linear, Notion, or your own service.
 - [Onboard a repo](how-to/onboard-a-repo.md) — make a repo always-warm instead of cloning cold every time.
@@ -49,6 +53,8 @@ You can read this tree here on GitHub or as a site — [openswitchboard.dev](htt
 
 ## Explanation
 
+- [Architecture](explanation/architecture.md) — the four seams, one request end to end, and where it runs, in three diagrams.
+- [Security model](explanation/security-model.md) — the three planes, what each holds, what a compromise of each yields, and the defaults that fail closed.
 - [How a request flows](explanation/how-a-request-flows.md) — channel → dispatcher → provider/executor, the one pipeline everything shares.
 - [Why config is layered](explanation/config-layers.md) — six independent layers, and why effort is one of them.
 - [Execution and trust](explanation/execution-and-trust.md) — where `bash` actually runs, and why blast radius is the design constraint.

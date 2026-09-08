@@ -4,6 +4,8 @@
 
 It is still not the contract: the versioned behavioral contract is [`docs/reference/specs/`](../reference/specs/README.md).
 
+- [Architecture](architecture.md) — the four seams, one request end to end, and where it runs, in three diagrams.
+- [Security model](security-model.md) — the three planes, what each holds, what a compromise of each yields, and the defaults that fail closed.
 - [How a request flows](how-a-request-flows.md) — channel → dispatcher → provider/executor, the one pipeline everything shares.
 - [Why config is layered](config-layers.md) — six independent layers, and why effort is one of them.
 - [Execution and trust](execution-and-trust.md) — where `bash` actually runs, and why blast radius is the design constraint.

@@ -167,3 +167,6 @@ docs/reference/specs/public-hygiene.md	1. **Five classes, one regex each, tested
 
 # The spec names "nominal" as the canonical allowed English word.
 docs/reference/specs/public-hygiene.md	4. **A legitimate line is allowed by name.** `scripts/public-hygiene.allow` holds `path<TAB>trimmed line` entries with a comment saying why (the English word "nominal", a colour that looks like an issue number, an integration's own identifier). An allowed line is skipped whole. An entry is stale — and fails the check — when its line no longer exists or no longer matches any class, so the file carries neither ghosts nor dead weight.
+
+# The tutorial's clone command: the project's own repository URL, held equal to project.json by check:project-facts.
+docs/tutorials/get-started.md	git clone https://github.com/coreplanelabs/switchboard.git
