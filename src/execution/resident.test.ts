@@ -322,6 +322,44 @@ describe("ResidentExecutor infra classification through ExecHealthTracker (#92)"
     expect(err).toBeInstanceOf(ExecInfraError);
     expect(tracker.consecutiveInfraFailures).toBe(1);
   });
+
+  // #566: a deploy that ROLLS the container (not just swaps the isolate) makes
+  // the resident answer the SAME `reason:"runtime-replaced"` it does for an
+  // isolate swap — because worker.ts now classifies the raw workerd refusal
+  // "The container is not running, consider calling start()" as a replacement.
+  // Before that fix the resident answered it as a bare infra error, so two of
+  // them in a row tripped MAX_CONSECUTIVE_INFRA_FAILURES (2) and aborted the run
+  // with a misleading "Sandbox exec transport failed". These two assert the new
+  // contract at the fail-fast boundary the bug tripped.
+  const containerRolled = {
+    error:
+      "resident /exec: runtime-replaced: the resident runtime was replaced (a deploy) while this command was " +
+      "starting; its output is lost (The container is not running, consider calling start())",
+    reason: "runtime-replaced",
+    stdout: "",
+    stderr: "runtime-replaced",
+    exitCode: 127,
+  };
+
+  it("a single container roll rides through as recoverable — 0 infra failures, re-attached once", async () => {
+    const { calls } = stubFetch({ body: containerRolled }, { body: ATTACH_OK });
+    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    const out = await tracker.exec("git status");
+    expect(out).toMatch(/consider calling start/); // the named outcome reaches the model, not an abort
+    expect(out).toMatch(/re-check/i);
+    expect(calls.map(route)).toEqual(["/exec", "/attach"]); // re-attach restarts + rehydrates the container
+    expect(tracker.consecutiveInfraFailures).toBe(0);
+  });
+
+  it("bound: a container that cannot come back still aborts — a second roll with no success between is infra", async () => {
+    stubFetch({ body: containerRolled }, { body: ATTACH_OK }, { body: containerRolled }, { body: ATTACH_OK });
+    const tracker = new ExecHealthTracker(new ResidentExecutor(OPTS));
+    await expect(tracker.exec("git status")).resolves.toMatch(/consider calling start/);
+    const err = await tracker.exec("git status").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/2 times in a row/);
+    expect(tracker.consecutiveInfraFailures).toBe(1);
+  });
 });
 
 describe("ResidentExecutor.readFile / writeFile", () => {

@@ -540,8 +540,13 @@ class RuntimeReplacedError extends Error {
  *  check alone would miss them. */
 // RUNTIME_REPLACEMENT_WORDING moved to src/execution/residentRefresh.ts (#335)
 // so the refresh classifier and this file's isRuntimeReplacement share ONE
-// message-wording list (it now also carries "Process supervisor is closed" —
-// the spawn-refusal a stopped container answers until it restarts).
+// message-wording list. It carries both "Process supervisor is closed" (the
+// spawn-refusal a stopped container answers until it restarts) and, since #566,
+// "The container is not running, consider calling start()" — the raw workerd
+// binding refusal a deploy that ROLLS the container (not just swaps the isolate)
+// surfaces, which the SDK re-throws untyped when the roll outlasts its own
+// port-ready bound. Both take the message fallback below; neither has a typed
+// class to match.
 
 /** `err` and its `cause` chain, bounded like the SDK's own `selfAndCauses`
  *  walker: the SDK wraps platform errors, so the telling message can sit one or

@@ -6,6 +6,7 @@ import {
   RESTORE_MAX_MS,
   RESTORE_POLL_MS,
   RESTORE_STALL_MS,
+  RUNTIME_REPLACEMENT_WORDING,
   checkoutUpdateCommand,
   classifyRefreshFailure,
   killStaleBuildProcessesCommand,
@@ -292,6 +293,45 @@ describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an inte
   it("'killed' inside ordinary compiler output does not count without the signal signature", () => {
     expect(
       classifyRefreshFailure({ step: "build", message: "exit 1: error: process killed by OOM killer" }).interrupted,
+    ).toBe(false);
+  });
+});
+
+describe("RUNTIME_REPLACEMENT_WORDING (#566: a deploy that ROLLS the container, not just swaps the isolate)", () => {
+  // The exact string the resident logged when a review run aborted at 23:08 UTC
+  // 2026-09-07 — `sandbox.exec error … The container is not running, consider
+  // calling start()` — twice, as the deploy rolled the container onto an empty
+  // ephemeral disk. It is a raw workerd binding refusal (no typed SDK class),
+  // so the shared message wording is the ONLY signal isRuntimeReplacement has.
+  const CONTAINER_ROLLED = "The container is not running, consider calling start()";
+
+  it("classifies the stopped-container spawn refusal as a runtime replacement", () => {
+    expect(RUNTIME_REPLACEMENT_WORDING.test(CONTAINER_ROLLED)).toBe(true);
+  });
+
+  it("matches on the cause chain too (the resident walks selfAndCauses), and is case-insensitive", () => {
+    expect(RUNTIME_REPLACEMENT_WORDING.test("the container is not running, consider calling start()")).toBe(true);
+    // wrapped one link down, the shape the SDK produces when it re-throws the
+    // binding refusal untyped from its own auto-start path
+    expect(RUNTIME_REPLACEMENT_WORDING.test(`sandbox.exec failed: ${CONTAINER_ROLLED}`)).toBe(true);
+  });
+
+  it("a container roll under a refresh step is refresh-interrupted, not <step>-failed (re-arm SHORT, keep the snapshot)", () => {
+    const f = classifyRefreshFailure({ step: "snapshot", message: CONTAINER_ROLLED });
+    expect(f.interrupted).toBe(true);
+    expect(f.reason).toBe(`refresh-interrupted: snapshot ${CONTAINER_ROLLED}`);
+  });
+
+  it("does NOT broaden to genuinely-fatal container failures — a crash or the readiness probe stay ordinary failures", () => {
+    // A container that exited non-zero has genuinely crashed; the readiness
+    // probe not listening yet is a different condition. Neither is a deploy
+    // replacement, so neither may be classified as runtime-replaced (that would
+    // paper a real failure as recoverable). Anchoring on "consider calling
+    // start" keeps them out.
+    expect(RUNTIME_REPLACEMENT_WORDING.test("container exited with unexpected exit code: 1")).toBe(false);
+    expect(RUNTIME_REPLACEMENT_WORDING.test("the container is not listening")).toBe(false);
+    expect(
+      classifyRefreshFailure({ step: "build", message: "container exited with unexpected exit code: 1" }).interrupted,
     ).toBe(false);
   });
 });

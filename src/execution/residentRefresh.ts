@@ -178,15 +178,28 @@ const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM/;
  *  container went away UNDER a live SDK call, so the failure never reaches the
  *  shell-kill signature above: a step that dies this way surfaces as
  *  `StaleProcessHandleError` ("previous runtime incarnation"),
- *  `ProcessSpawnFailedError` ("Process supervisor is closed"), or one of the
- *  SDK's interruption messages. Shared with the resident Worker's
- *  `isRuntimeReplacement` (deploy/cloudflare-resident/worker.ts) as its
- *  message-level fallback, so the exec path and the refresh classifier agree on
- *  one wording list (#335: a `stop-container` mid-snapshot produced
- *  "Process supervisor is closed" and was classified as the repo's own
- *  `snapshot-failed`, re-arming at the full cadence). */
+ *  `ProcessSpawnFailedError` ("Process supervisor is closed"), one of the SDK's
+ *  interruption messages, or — when a deploy ROLLS the container out from under
+ *  the run rather than just swapping the DO isolate — the raw workerd binding
+ *  refusal "The container is not running, consider calling start()" (#566). That
+ *  last one is a spawn-phase refusal: workerd rejected the process start because
+ *  the container was not running at all, so nothing launched (safe to re-attach
+ *  and let the model re-check). It is NOT a typed SDK error (the SDK's own
+ *  auto-start path re-throws it raw when a roll outlasts its port-ready bound)
+ *  and NOT the `container_stopped` `OperationInterruptedError` reason (that is a
+ *  stop UNDER an in-flight op, already covered by the typed check), so the
+ *  message wording is the only signal — deliberately anchored to the full
+ *  "consider calling start" phrase so it can never match a genuine container
+ *  crash ("container exited with unexpected exit code") or the readiness probe
+ *  ("the container is not listening"), which must stay ordinary failures.
+ *  Shared with the resident Worker's `isRuntimeReplacement`
+ *  (deploy/cloudflare-resident/worker.ts) as its message-level fallback, so the
+ *  exec path and the refresh classifier agree on one wording list (#335: a
+ *  `stop-container` mid-snapshot produced "Process supervisor is closed" and was
+ *  classified as the repo's own `snapshot-failed`, re-arming at the full
+ *  cadence). */
 export const RUNTIME_REPLACEMENT_WORDING =
-  /previous runtime incarnation|interrupted because the runtime changed|runtime identity is no longer active|sandbox lifetime is no longer current|platform was updating the sandbox runtime|no longer identifies pid|process supervisor is closed/i;
+  /previous runtime incarnation|interrupted because the runtime changed|runtime identity is no longer active|sandbox lifetime is no longer current|platform was updating the sandbox runtime|no longer identifies pid|process supervisor is closed|container is not running, consider calling start/i;
 
 /** `freeKiB` is the `df` probe's answer (`parseDfFreeKiB`), taken AFTER the
  *  step failed and only consulted when the message itself carries no errno:
