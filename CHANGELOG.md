@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.5.0](https://github.com/coreplanelabs/switchboard/compare/v1.4.0...v1.5.0) (2026-09-08)
+
+
+### Features
+
+* **run-ledger:** a run is on the ledger from before its workspace attach — reserved attaching with its request, promoted at the claim, restarted from the request if its owner dies there ([#698](https://github.com/coreplanelabs/switchboard/issues/698)) ([ee2972e](https://github.com/coreplanelabs/switchboard/commit/ee2972e2be6a3620772db20e11341430b6b661c5))
+* **tracing:** the resident's step vocabulary is one typed table shared by the Worker's runners and the run page's labels ([#691](https://github.com/coreplanelabs/switchboard/issues/691)) ([cc3161f](https://github.com/coreplanelabs/switchboard/commit/cc3161f28c2f6d7a9ac10341b8090bde883d0d35))
+
+
+### Bug fixes
+
+* **deploy:** the resident preflight holds a deploy only for runs in flight and a provisioning — a refresh or restore mid-cycle warns — and its step waits 30 min ([#692](https://github.com/coreplanelabs/switchboard/issues/692)) ([73add50](https://github.com/coreplanelabs/switchboard/commit/73add50acffa4b8eddaaa29549faf56cee614785))
+* **tracing:** the coding post step's workspace probes and the ship pipeline's workspace releases carry their span ([#687](https://github.com/coreplanelabs/switchboard/issues/687)) ([0049d0c](https://github.com/coreplanelabs/switchboard/commit/0049d0ce011c66e1cde413f39af8b6a55c356fee))
+
 ## [1.4.0](https://github.com/coreplanelabs/switchboard/compare/v1.3.0...v1.4.0) (2026-09-08)
 
 
