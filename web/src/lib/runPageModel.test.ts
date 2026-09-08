@@ -25,6 +25,22 @@ const input = {
   source: { channel: "dev", user: "justin", url: "https://acme.slack.com/x" },
 };
 const assistant = (text: string, at: number) => ({ type: "assistant", text, at });
+/** A model turn's timing record (features/tracing.md): the `model.turn` span end the runner emits. */
+const modelTurn = (t: {
+  durationMs: number;
+  at: number;
+  model?: string;
+  usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number };
+}) => ({
+  type: "span_end",
+  spanId: `turn-${t.at}`,
+  name: "model.turn",
+  startedAt: t.at - t.durationMs,
+  durationMs: t.durationMs,
+  status: "ok",
+  attrs: { stopReason: "tool_use", ...(t.model ? { model: t.model } : {}), ...(t.usage ?? {}) },
+  at: t.at,
+});
 const call = (id: string, summary: string, at: number, tool = "bash") => ({
   type: "tool_call",
   callId: id,
@@ -117,7 +133,7 @@ describe("request / context / answer / placeholder", () => {
 describe("steps and turns", () => {
   it("a turn is held for the step it produced and painted in that step's head (chip reads the bare duration)", () => {
     const m = model();
-    m.handle({ type: "turn", durationMs: 304_000, at: 10, usage: { inputTokens: 12_300, outputTokens: 800 } });
+    m.handle(modelTurn({ durationMs: 304_000, at: 10, usage: { inputTokens: 12_300, outputTokens: 800 } }));
     expect(m.state.log).toHaveLength(0); // held
     m.handle(assistant("now I will test", 11));
     const s = step(m);
@@ -129,8 +145,8 @@ describe("steps and turns", () => {
 
   it("a sub-minute turn is quiet; a turn followed by another turn is flushed as its own row", () => {
     const m = model();
-    m.handle({ type: "turn", durationMs: 5_000, at: 10 });
-    m.handle({ type: "turn", durationMs: 61_000, at: 20 });
+    m.handle(modelTurn({ durationMs: 5_000, at: 10 }));
+    m.handle(modelTurn({ durationMs: 61_000, at: 20 }));
     expect(m.state.log).toHaveLength(1);
     const row = m.state.log[0];
     expect(row.kind).toBe("turn");
@@ -146,7 +162,7 @@ describe("steps and turns", () => {
 
   it("flushPendingTurn paints the held turn when the stream ends without an answer", () => {
     const m = model();
-    m.handle({ type: "turn", durationMs: 61_000, at: 20 });
+    m.handle(modelTurn({ durationMs: 61_000, at: 20 }));
     m.flushPendingTurn("the run ended here");
     const row = m.state.log[0];
     expect(row.kind).toBe("turn");
@@ -398,15 +414,15 @@ describe("the run's model — badged on the pending-turn row, flagged when it sw
     expect(m.state.model).toBeNull();
     m.handle(meta);
     expect(m.state.model).toBe("anthropic/claude-fable-5");
-    m.handle({ type: "turn", durationMs: 5_000, model: "anthropic/claude-fable-5", at: 10 });
+    m.handle(modelTurn({ durationMs: 5_000, model: "anthropic/claude-fable-5", at: 10 }));
     m.handle(assistant("one", 11));
     expect(step(m, 0).turn).toMatchObject({ model: "anthropic/claude-fable-5", switched: false });
-    m.handle({ type: "turn", durationMs: 5_000, model: "anthropic/claude-opus-5", at: 20 });
+    m.handle(modelTurn({ durationMs: 5_000, model: "anthropic/claude-opus-5", at: 20 }));
     m.handle(assistant("two", 21));
     expect(step(m, 1).turn).toMatchObject({ model: "anthropic/claude-opus-5", switched: true });
     expect(m.state.model).toBe("anthropic/claude-opus-5");
     // back again: also a switch, relative to the model the run was on
-    m.handle({ type: "turn", durationMs: 5_000, model: "anthropic/claude-fable-5", at: 30 });
+    m.handle(modelTurn({ durationMs: 5_000, model: "anthropic/claude-fable-5", at: 30 }));
     m.handle(assistant("three", 31));
     expect(step(m, 2).turn?.switched).toBe(true);
   });
@@ -414,20 +430,20 @@ describe("the run's model — badged on the pending-turn row, flagged when it sw
   it("an unstamped turn (a stream from before model stamps) keeps the declared model and never reads as a switch; the first stamped turn of a meta-less run is not a switch either", () => {
     const m = model();
     m.handle(meta);
-    m.handle({ type: "turn", durationMs: 5_000, at: 10 });
+    m.handle(modelTurn({ durationMs: 5_000, at: 10 }));
     m.handle(assistant("one", 11));
     // the head still names the run's declared model — every head carries its badge
     expect(step(m, 0).turn).toMatchObject({ model: "anthropic/claude-fable-5", switched: false });
     expect(m.state.model).toBe("anthropic/claude-fable-5");
 
     const bare = model();
-    bare.handle({ type: "turn", durationMs: 5_000, model: "openai/gpt-5", at: 10 });
+    bare.handle(modelTurn({ durationMs: 5_000, model: "openai/gpt-5", at: 10 }));
     bare.handle(assistant("one", 11));
     expect(step(bare, 0).turn).toMatchObject({ model: "openai/gpt-5", switched: false });
     expect(bare.state.model).toBe("openai/gpt-5");
 
     const nothing = model();
-    nothing.handle({ type: "turn", durationMs: 5_000, at: 10 });
+    nothing.handle(modelTurn({ durationMs: 5_000, at: 10 }));
     nothing.handle(assistant("one", 11));
     expect(step(nothing, 0).turn?.model).toBeUndefined(); // nothing known → no badge, no guess
     expect(step(nothing, 0).turn?.switched).toBe(false);
@@ -436,11 +452,11 @@ describe("the run's model — badged on the pending-turn row, flagged when it sw
   it("a bare stamp (v0.4.0's runner) naming the model run_meta already names by its ref is NOT a switch — the head and the run keep the ref; a bare id for a different model still switches", () => {
     const m = model();
     m.handle(meta); // anthropic/claude-fable-5
-    m.handle({ type: "turn", durationMs: 4_900, model: "claude-fable-5", at: 10 });
+    m.handle(modelTurn({ durationMs: 4_900, model: "claude-fable-5", at: 10 }));
     m.handle(assistant("one", 11));
     expect(step(m, 0).turn).toMatchObject({ model: "anthropic/claude-fable-5", switched: false });
     expect(m.state.model).toBe("anthropic/claude-fable-5");
-    m.handle({ type: "turn", durationMs: 4_900, model: "claude-opus-5", at: 20 });
+    m.handle(modelTurn({ durationMs: 4_900, model: "claude-opus-5", at: 20 }));
     m.handle(assistant("two", 21));
     expect(step(m, 1).turn).toMatchObject({ model: "claude-opus-5", switched: true });
     expect(m.state.model).toBe("claude-opus-5");

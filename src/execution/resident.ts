@@ -1,4 +1,5 @@
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
+import { classifyError } from "../core/trace/classify.js";
 import { redactSecrets, stripAnsi } from "../core/redact.js";
 import { residentState, sanitizeResidentBody } from "./residentText.js";
 import { repoResourceId } from "../core/residentAdmin.js";
@@ -264,9 +265,12 @@ export class ResidentExecutor implements Executor {
       // still be running (or have run) in the resident — never blind-retry a
       // possibly side-effectful call. Infra (not a command exit): the runner
       // counts these toward fail-fast (#92).
-      throw new ExecInfraError(
-        `resident worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
-          "The operation may still have run in the resident; re-check its effects before re-running it.",
+      throw classifyError(
+        new ExecInfraError(
+          `resident worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
+            "The operation may still have run in the resident; re-check its effects before re-running it.",
+        ),
+        { kind: err instanceof Error && err.name === "TimeoutError" ? "timeout" : "transport" },
       );
     }
   }
@@ -360,9 +364,12 @@ export class ResidentExecutor implements Executor {
     // (mid-restore or worse). Infra, not a command exit: counts toward
     // fail-fast so the run doesn't keep dispatching into it (#92).
     const stillGone = (data: Record<string, unknown>): ExecInfraError =>
-      new ExecInfraError(
-        `resident ${route}: worktree still unavailable after a re-attach (${String(data.error ?? "")}) — ` +
-          "the resident may be mid-restore; try again shortly.",
+      classifyError(
+        new ExecInfraError(
+          `resident ${route}: worktree still unavailable after a re-attach (${String(data.error ?? "")}) — ` +
+            "the resident may be mid-restore; try again shortly.",
+        ),
+        { kind: "infra", code: "attach" },
       );
     let r = await this.call(route, body, callTimeoutMs, signal);
     if (r.data.needs === "attach") {
@@ -389,9 +396,12 @@ export class ResidentExecutor implements Executor {
   private noteRuntimeReplaced(route: string, data: Record<string, unknown>): void {
     this.runtimeReplacedStreak++;
     if (this.runtimeReplacedStreak >= 2) {
-      throw new ExecInfraError(
-        `resident ${route}: runtime replaced ${this.runtimeReplacedStreak} times in a row with no successful operation ` +
-          `between (${String(data.error ?? "")}) — a deploy storm or a flapping resident, not a one-off deploy.`,
+      throw classifyError(
+        new ExecInfraError(
+          `resident ${route}: runtime replaced ${this.runtimeReplacedStreak} times in a row with no successful operation ` +
+            `between (${String(data.error ?? "")}) — a deploy storm or a flapping resident, not a one-off deploy.`,
+        ),
+        { kind: "infra", code: "runtime-replaced" },
       );
     }
   }
@@ -432,9 +442,11 @@ export class ResidentExecutor implements Executor {
       // post-validation failure (exitCode 127 shape) — legible, never retried.
       // Infra (the exec transport failed), not a command exit: counts toward
       // fail-fast (#92).
-      throw new ExecInfraError(`resident /exec: ${data.error}`);
+      throw classifyError(new ExecInfraError(`resident /exec: ${data.error}`), { kind: "infra" });
     }
-    if (status !== 200) throw new ExecInfraError(`resident /exec HTTP ${status}`);
+    if (status !== 200) {
+      throw classifyError(new ExecInfraError(`resident /exec HTTP ${status}`), { kind: "http", code: String(status) });
+    }
     const parts = [data.stdout, data.stderr].filter(Boolean).join("\n--- stderr ---\n");
     const exitCode = Number(data.exitCode ?? 0);
     if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);
@@ -443,13 +455,23 @@ export class ResidentExecutor implements Executor {
 
   async readFile(path: string): Promise<string> {
     const { status, data } = await this.opWithReattach("/read", { path });
-    if (status !== 200) throw new ExecInfraError(`resident /read: ${String(data.error ?? `HTTP ${status}`)}`);
+    if (status !== 200) {
+      throw classifyError(new ExecInfraError(`resident /read: ${String(data.error ?? `HTTP ${status}`)}`), {
+        kind: "http",
+        code: String(status),
+      });
+    }
     return truncate(String(data.content ?? ""));
   }
 
   async writeFile(path: string, content: string): Promise<string> {
     const { status, data } = await this.opWithReattach("/write", { path, content });
-    if (status !== 200) throw new ExecInfraError(`resident /write: ${String(data.error ?? `HTTP ${status}`)}`);
+    if (status !== 200) {
+      throw classifyError(new ExecInfraError(`resident /write: ${String(data.error ?? `HTTP ${status}`)}`), {
+        kind: "http",
+        code: String(status),
+      });
+    }
     return `Wrote ${path}`;
   }
 }

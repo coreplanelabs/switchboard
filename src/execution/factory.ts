@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { oneLine } from "../core/redact.js";
+import type { Backend } from "../core/trace/attrs.js";
 import { mkdirSync } from "node:fs";
 import type { AgentDef } from "../agents/registry.js";
 import { LocalExecutor, type Executor } from "./executor.js";
@@ -81,6 +82,10 @@ export interface ExecutorSelection {
   executor: Executor;
   note?: string;
   resident?: boolean;
+  /** Where the run's commands execute (features/tracing.md): recorded on its
+   *  `exec.*` spans. Every production selection names one; a test double may
+   *  leave it out. */
+  backend?: Backend;
   /** The resident's attach answer (ref, sha, worktree path) on the resident
    *  path — the dispatcher names the path to the model and checks the sha
    *  against the PR head before a review runs (#282). Unset on every other path. */
@@ -122,7 +127,7 @@ export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorCo
   // to provision: no workspace dir, no sandbox created or reconnected, no
   // credential required. The general agent (toolset "none") lands here.
   if (ctx.agent.resources?.repo !== "required") {
-    return { executor: new NullExecutor(ctx.agent.name) };
+    return { executor: new NullExecutor(ctx.agent.name), backend: "local" };
   }
 
   // Resident selection (KTD11): only when a target repo was resolved AND the
@@ -190,7 +195,7 @@ export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorCo
     }
   }
 
-  return { executor: await makePerThreadExecutor(opts, ctx), note };
+  return { executor: await makePerThreadExecutor(opts, ctx), note, backend: perThreadBackend(opts) };
 }
 
 /** Attach to a serviceable resident and name the result POSITIVELY: the note
@@ -250,6 +255,7 @@ async function openResident(
   return {
     executor,
     resident: true,
+    backend: "resident",
     binding,
     note: nonWarm
       ? `resident ${nonWarm} · ${where}${why} — attached to the last snapshot`
@@ -430,4 +436,10 @@ async function githubEnvs(agent: AgentDef): Promise<Record<string, string>> {
   const scope = agent.toolset === "readonly" ? "read" : "write";
   const token = await resolveGithubToken(scope);
   return token ? { GH_TOKEN: token } : {};
+}
+
+/** The per-thread executor's backend, from the configured execution type. */
+function perThreadBackend(opts: ExecutorFactoryOptions): Backend {
+  const type = opts.execution?.type ?? "local";
+  return type === "e2b" ? "e2b" : type === "cloudflare" ? "sandbox" : "local";
 }

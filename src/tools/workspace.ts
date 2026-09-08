@@ -9,6 +9,7 @@ import {
 } from "../core/reviewVerdict.js";
 import { BASH_TIMEOUT_MS, bashBudgetWithinRun } from "../execution/bashTimeout.js";
 import { clampBashTimeout, type ExecOptions, type Executor } from "../execution/executor.js";
+import type { Span } from "../core/trace/types.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { distillDiff } from "../core/diffDigest.js";
 import { webFetchTool, webSearchTool, type WebCapability } from "./web.js";
@@ -25,6 +26,10 @@ import type { RunEvent } from "../core/runEvents.js";
 
 export interface ToolContext {
   executor: Executor;
+  /** The tool call's own span (features/tracing.md): what a tool measures
+   *  itself (an MCP round trip, an executor op) is a child of it. Absent (CLI,
+   *  most unit tests) → the tool measures nothing. */
+  span?: Span;
   /** Aborted on a hard run stop (#101). Tools that run something cancellable
    *  (bash → `executor.exec`) pass it through; the runner stops waiting on the
    *  tool regardless, so a tool that ignores it degrades safely. */

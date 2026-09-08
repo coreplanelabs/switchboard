@@ -27,8 +27,11 @@ export interface PendingRecord {
 }
 
 export interface RunEnding {
-  /** The run finished: seal it at the next drain. */
-  finished(runId: string): void;
+  /** The run finished: seal it at the next drain. `afterSeal` runs right after
+   *  that seal, whether or not it succeeded — the run's root span ends there
+   *  (features/tracing.md), so its `span_end` lands after the stream closed and
+   *  the record shows the request as the one span still open. */
+  finished(runId: string, hooks?: { afterSeal?: () => void }): void;
   /** Its record writer, run once after the seal. */
   register(entry: Omit<PendingRecord, "failedAfterFinish">): void;
   /** Forget a registered writer (another generation owns the run — the record is theirs). */
@@ -54,15 +57,20 @@ export interface RunEndingDeps {
 
 export function createRunEnding(deps: RunEndingDeps): RunEnding {
   const log = deps.log ?? console.error;
-  const finishedIds: string[] = [];
+  const finished: Array<{ id: string; afterSeal?: () => void }> = [];
   const pending: PendingRecord[] = [];
 
   const drain = (replyOk: boolean | undefined): void => {
-    for (const id of finishedIds.splice(0)) {
+    for (const { id, afterSeal } of finished.splice(0)) {
       try {
         deps.registry.seal(id, replyOk === undefined ? {} : { replyOk });
       } catch (err) {
         log(`[ending] seal ${id}: ${describe(err)}`);
+      }
+      try {
+        afterSeal?.();
+      } catch (err) {
+        log(`[ending] after seal ${id}: ${describe(err)}`);
       }
     }
     for (const entry of pending.splice(0)) {
@@ -80,8 +88,8 @@ export function createRunEnding(deps: RunEndingDeps): RunEnding {
   };
 
   return {
-    finished(runId) {
-      finishedIds.push(runId);
+    finished(runId, hooks) {
+      finished.push({ id: runId, ...(hooks?.afterSeal ? { afterSeal: hooks.afterSeal } : {}) });
     },
     register(entry) {
       pending.push({ ...entry, failedAfterFinish: false });

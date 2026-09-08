@@ -1,10 +1,11 @@
 /** Span attributes: one flat key union with a value domain per key, and the
  *  keys each span name may carry (features/tracing.md). Literal unions,
- *  numbers and booleans only; the four string-valued keys (`host`, `route`,
- *  `command`, `agent`) come from closed tables at the emitter and are validated
- *  as sanitized identifiers here. `model`, `traceId` and free text are not
- *  attrs — an error's message has its own field, and a run's model lives on
- *  `run_meta`. */
+ *  numbers and booleans only; the string-valued keys (`host`, `route`,
+ *  `command`, `agent`, `model`) come from closed tables at the emitter — a
+ *  model is the parsed `<provider>/<model>` ref the registry resolved, never
+ *  the typed directive — and are validated as sanitized identifiers here.
+ *  `traceId` and free text are not attrs — an error's message has its own
+ *  field. */
 
 export type Backend = "local" | "resident" | "sandbox" | "e2b";
 export type Channel = "slack" | "http" | "mcp" | "cli";
@@ -28,6 +29,9 @@ export interface AttrDomain {
   // run.command
   command: string;
   // model.turn
+  /** The `<provider>/<model>` that took the turn — a ship run's children answer
+   *  on different models, and the run page badges the switch per step. */
+  model: string;
   stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "other";
   inputTokens: number;
   outputTokens: number;
@@ -89,6 +93,7 @@ const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
   "host",
   "callId",
   "agent",
+  "model",
 ]);
 const IDENTIFIER_RE = /^[A-Za-z0-9_./:@+-]{1,64}$/;
 
@@ -131,6 +136,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   count: "number",
   backend: "string",
   command: "string",
+  model: "string",
   stopReason: "string",
   inputTokens: "number",
   outputTokens: "number",

@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { wrapUntrusted } from "../core/commandRegistry.js";
 import type { RunnableTool } from "../tools/workspace.js";
 import { McpError, type McpCallResult, type McpClient, type McpServerSpec, type McpToolInfo } from "./types.js";
+import { classifyError } from "../core/trace/classify.js";
+import type { Span } from "../core/trace/types.js";
 
 // The bridge (features/mcp-tools.md items 5–7, 10): one remote tool → one
 // `RunnableTool` the runner can call like any built-in. Names are mechanical
@@ -80,35 +82,64 @@ export function bridgeMcpTools(
           return `Refused: this run has reached its MCP call cap (${MCP_MAX_CALLS_PER_RUN} calls across all servers).`;
         }
         opts.budget.calls++;
-        const startedAt = now();
-        let result: McpCallResult;
-        try {
-          result = await client.callTool(t.name, input ?? {}, { signal: ctx.signal });
-        } catch (err) {
-          ctx.publish?.({
-            type: "mcp_tool_use",
-            server: server.name,
-            tool: t.name,
-            ok: false,
-            durationMs: now() - startedAt,
-            bytes: 0,
-          });
-          const message = err instanceof McpError ? err.message : err instanceof Error ? err.message : String(err);
-          throw new Error(`MCP ${server.name}/${t.name} failed: ${message}`, { cause: err });
-        }
-        const text = renderContent(result);
-        const clipped = clip(text, MCP_RESULT_CAP);
-        ctx.publish?.({
-          type: "mcp_tool_use",
-          server: server.name,
-          tool: t.name,
-          ok: result.isError !== true,
-          durationMs: now() - startedAt,
-          bytes: Buffer.byteLength(text, "utf8"),
-        });
-        const wrapped = wrapUntrusted(clipped);
-        if (result.isError === true) throw new Error(`MCP ${server.name}/${t.name} reported an error:\n${wrapped}`);
-        return wrapped;
+        // The remote call is one `mcp.<server>.<tool>` span under the tool
+        // call's span (features/tracing.md): ok and the result size as attrs,
+        // the failure classified (never the body). Without a span (CLI, a bare
+        // tool test) the legacy `mcp_tool_use` event carries the same facts.
+        const call = async (span: Span | undefined): Promise<string> => {
+          const startedAt = now();
+          let result: McpCallResult;
+          try {
+            result = await client.callTool(t.name, input ?? {}, { signal: ctx.signal });
+          } catch (err) {
+            if (!span) {
+              ctx.publish?.({
+                type: "mcp_tool_use",
+                server: server.name,
+                tool: t.name,
+                ok: false,
+                durationMs: now() - startedAt,
+                bytes: 0,
+              });
+            }
+            const message = err instanceof McpError ? err.message : err instanceof Error ? err.message : String(err);
+            const failed = classifyError(
+              new Error(`MCP ${server.name}/${t.name} failed: ${message}`, { cause: err }),
+              mcpClass(err),
+            );
+            // Classify BEFORE ending: the end emits the record, and the
+            // wrapper's own `fail` would come too late to reach it.
+            span?.fail(failed);
+            span?.end("error", { ok: false, bytes: 0 });
+            throw failed;
+          }
+          const text = renderContent(result);
+          const clipped = clip(text, MCP_RESULT_CAP);
+          const ok = result.isError !== true;
+          const bytes = Buffer.byteLength(text, "utf8");
+          if (!span) {
+            ctx.publish?.({
+              type: "mcp_tool_use",
+              server: server.name,
+              tool: t.name,
+              ok,
+              durationMs: now() - startedAt,
+              bytes,
+            });
+          }
+          const wrapped = wrapUntrusted(clipped);
+          if (!ok) {
+            const refused = classifyError(new Error(`MCP ${server.name}/${t.name} reported an error:\n${wrapped}`), {
+              kind: "refused",
+            });
+            span?.fail(refused);
+            span?.end("error", { ok, bytes });
+            throw refused;
+          }
+          span?.end("ok", { ok, bytes });
+          return wrapped;
+        };
+        return ctx.span ? ctx.span.span(`mcp.${server.name}.${t.name}`, call) : call(undefined);
       },
     };
     return tool;
@@ -140,4 +171,16 @@ function isObjectSchema(s: Record<string, unknown>): boolean {
 
 function clip(text: string, cap: number): string {
   return text.length > cap ? `${text.slice(0, cap)}\n…(truncated at ${cap} characters)` : text;
+}
+
+/** A failed MCP call's classification: the client's own discriminator when it
+ *  is one (`transport`, `timeout`, `protocol` and a numeric code read as
+ *  transport / timeout / http), else `other`. */
+function mcpClass(err: unknown): { kind: "timeout" | "transport" | "http" | "other"; code?: string } {
+  if (!(err instanceof McpError)) return { kind: "other" };
+  if (err.code === "timeout") return { kind: "timeout" };
+  if (err.code === "transport" || err.code === "protocol" || err.code === "too_large") {
+    return { kind: "transport", code: err.code };
+  }
+  return { kind: "http", code: String(err.code) };
 }

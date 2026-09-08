@@ -124,6 +124,7 @@ export function normalizeSpans(events: readonly RunEvent[], opts: NormalizeOptio
         const spanId = `synth:${index}`;
         const parent = parentFor(agents, e.startedAt);
         const attrs: Record<string, string | number | boolean> = { stopReason: e.stopReason };
+        if (typeof e.model === "string" && e.model) attrs.model = e.model;
         if (e.usage?.inputTokens !== undefined) attrs.inputTokens = e.usage.inputTokens;
         if (e.usage?.outputTokens !== undefined) attrs.outputTokens = e.usage.outputTokens;
         if (e.usage?.cacheReadTokens !== undefined) attrs.cacheReadTokens = e.usage.cacheReadTokens;

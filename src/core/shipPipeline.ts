@@ -42,6 +42,7 @@ import {
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import type { ToolContext } from "../tools/workspace.js";
+import type { Span } from "../core/trace/types.js";
 import type { WebCapability } from "../tools/web.js";
 import type { GithubCapability } from "../tools/github.js";
 import type { SkillStore } from "../skills/index.js";
@@ -520,6 +521,10 @@ export interface ShipPipelineInput {
    *  pr_description, pr_opened; the ship_round boundaries) — the dispatcher's
    *  hook also feeds the card's round header off the `ship_round` events. */
   publish: (event: RunEvent) => void;
+  /** The run's root span (features/tracing.md): every round is a `ship.round`
+   *  child of it, every child run's `run.agent` a child of its round. Absent
+   *  (tests) → no spans. */
+  span?: Span;
   /** Thread reply for mid-pipeline notes (review-post notes, the PR link). */
   reply: (text: string) => Promise<void>;
   web?: WebCapability;
@@ -712,11 +717,18 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     );
 
   // ---- one coding child (round 0, and every fix round) ----------------------
-  const runCodingChild = async (opts: {
-    messages: ChatMessage[];
-    knownFindingIds?: string[];
-    attachHeadSha?: string;
-  }): Promise<CodingRoundResult> => {
+  /** One round as a `ship.round` span (features/tracing.md), when traced. */
+  const round = <T>(index: number, agentName: "coding" | "review", fn: (span: Span | undefined) => Promise<T>) =>
+    input.span ? input.span.span("ship.round", fn, { attrs: { index, agent: agentName } }) : fn(undefined);
+
+  const runCodingChild = async (
+    opts: {
+      messages: ChatMessage[];
+      knownFindingIds?: string[];
+      attachHeadSha?: string;
+    },
+    roundSpan: Span | undefined,
+  ): Promise<CodingRoundResult> => {
     const spec = input.child("coding");
     const ws = await attachRoundWorkspace({
       factory: input.factory,
@@ -789,6 +801,8 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         model: spec.model,
         agent: clip(spec.agent),
         messages: opts.messages,
+        ...(roundSpan ? { span: roundSpan } : {}),
+        backend: ws.selection.backend,
         // The branch contract OVERRIDES the coding prompt's generic "create a
         // branch" step — the first live run (2026-09-03) followed that step,
         // pushed its own branch, and stranded the pipeline: the thread's
@@ -859,7 +873,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
   };
 
   // ---- one review child (pinned head, extracted units) ----------------------
-  const runReviewChild = async (round: number): Promise<ReviewRoundResult> => {
+  const runReviewChild = async (roundIndex: number, roundSpan: Span | undefined): Promise<ReviewRoundResult> => {
     const spec = input.child("review");
     const pr = { repo: entry.repo, number: prNumber! };
     let pinned = normalizeHead(await github.fetchPrHead(pr).catch(() => undefined));
@@ -928,16 +942,16 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
               type: "text",
               text: buildShipReviewTurn({
                 where: `${entry.repo}#${pr.number}`,
-                round,
+                round: roundIndex,
                 headSha: pinned,
                 // The PREVIOUS review round's findings with THAT round's
                 // dispositions — never an accumulated flat set, where a
                 // reused finding id would drag an old disposition along.
                 prior:
-                  round > 1
+                  roundIndex > 1
                     ? {
-                        findings: findingsByRound.get(round - 1) ?? [],
-                        dispositions: [...(dispositionsByRound.get(round - 1)?.values() ?? [])],
+                        findings: findingsByRound.get(roundIndex - 1) ?? [],
+                        dispositions: [...(dispositionsByRound.get(roundIndex - 1)?.values() ?? [])],
                       }
                     : undefined,
               }),
@@ -950,6 +964,8 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         model: spec.model,
         agent: clipped,
         messages,
+        ...(roundSpan ? { span: roundSpan } : {}),
+        backend: ws.selection.backend,
         system: composeSystem({ sha: pinned, verified }),
         effort: spec.effort,
         toolContext,
@@ -960,6 +976,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       });
       if (control.requested === "hard") return { answer };
       settled = await settleReviewedHead({
+        ...(roundSpan ? { span: roundSpan } : {}),
         pr,
         baseRef: entry.base,
         reviewHead: pinned,
@@ -1066,7 +1083,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       );
     }
     emitRound(0, "coding", "started");
-    const r0 = await runCodingChild({ messages: input.round0Messages });
+    const r0 = await round(0, "coding", (span) => runCodingChild({ messages: input.round0Messages }, span));
     if (r0.residentUnavailable) {
       emitRound(0, "coding", "aborted");
       return residentOutcome(r0.residentUnavailable);
@@ -1111,7 +1128,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     if (remainingMs() < SHIP_ROUND_RESERVE_MS) return wallClockCap();
     reviewRounds += 1;
     emitRound(reviewRounds, "review", "started");
-    const rv = await runReviewChild(reviewRounds);
+    const rv = await round(reviewRounds, "review", (span) => runReviewChild(reviewRounds, span));
     // A stop short-circuits here only when the round settled NO verdict: a
     // verdict that was already posted to the PR is a fact no stop can
     // un-post, so it settles first below and the stop is honored around it.
@@ -1171,25 +1188,30 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     if (reviewRounds >= caps.maxRounds) return capOutcome(`the ${caps.maxRounds}-round cap`);
     if (remainingMs() < SHIP_ROUND_RESERVE_MS) return wallClockCap();
     emitRound(reviewRounds, "coding", "started");
-    const fx = await runCodingChild({
-      messages: [
+    const fx = await round(reviewRounds, "coding", (span) =>
+      runCodingChild(
         {
-          role: "user",
-          content: [
+          messages: [
             {
-              type: "text",
-              text: buildShipFixTurn({
-                where: `${entry.repo}#${prNumber}`,
-                findings: lastFindings,
-                review: rv.answer ?? "",
-              }),
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: buildShipFixTurn({
+                    where: `${entry.repo}#${prNumber}`,
+                    findings: lastFindings,
+                    review: rv.answer ?? "",
+                  }),
+                },
+              ],
             },
           ],
+          knownFindingIds: lastFindings.map((f) => f.id),
+          attachHeadSha: lastReviewHead,
         },
-      ],
-      knownFindingIds: lastFindings.map((f) => f.id),
-      attachHeadSha: lastReviewHead,
-    });
+        span,
+      ),
+    );
     if (fx.residentUnavailable) {
       emitRound(reviewRounds, "coding", "aborted");
       return residentOutcome(fx.residentUnavailable);

@@ -28,6 +28,7 @@ import { grantsFor, type GrantsSource } from "../core/authz/grants.js";
 import { NO_GRANTS, predicateFor } from "../core/authz/index.js";
 import { RunRegistry, type RunRegistryOptions } from "../core/runRegistry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
+import { normalizeSpans } from "../core/normalizeSpans.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { RunRecord } from "../core/runRecord.js";
 import { INDEX_PAGE_SIZE } from "./liveView.js";
@@ -1152,7 +1153,11 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
       const seed = runSeedOf(t.body()) as RunHistorySeed;
       expect(seed.mode).toBe("history");
-      expect(seed.events).toEqual(record("r1").events);
+      // The seed is the record's stream normalized (features/tracing.md): this
+      // legacy record's tool pair gains its `tool.bash` twin, nothing else moves.
+      expect(seed.events).toEqual(normalizeSpans(record("r1").events));
+      expect(seed.events.filter((e) => e.type === "span_end")).toMatchObject([{ name: "tool.bash", status: "ok" }]);
+      expect(seed.events.filter((e) => e.type !== "span_start" && e.type !== "span_end")).toEqual(record("r1").events);
       expect(seed.status).toBe("completed");
       expect(seed.eventCount).toBe(5);
       expect(seed.durationMs).toBe(10_000);
@@ -1314,7 +1319,11 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       h.handler(page.req, page.res);
       await done(page);
       const seed = runSeedOf(page.body()) as RunHistorySeed;
-      expect(seed.events).toEqual(withOmittedMarkers(events, 9));
+      // Markers sit where the `seq` gaps are, around the normalized stream's
+      // synthesized (seq-less) spans: 5 omitted between seq 2 and 8, in place.
+      expect(seed.events).toEqual(withOmittedMarkers(normalizeSpans(events), 9));
+      const contentAndMarkers = seed.events.filter((e) => e.type !== "span_start" && e.type !== "span_end");
+      expect(contentAndMarkers).toEqual(withOmittedMarkers(events, 9));
       const stream = fakeReqRes("GET", "/runs/r1/events");
       h.handler(stream.req, stream.res);
       await done(stream);

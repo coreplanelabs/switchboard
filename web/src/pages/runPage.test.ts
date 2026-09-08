@@ -37,6 +37,22 @@ const input = {
   source: { channel: "dev", user: "justin", url: "https://acme.slack.com/archives/C1/p1" },
 };
 const assistant = (text: string, at: number) => ({ type: "assistant", text, at });
+/** A model turn's timing record (features/tracing.md): the `model.turn` span end the runner emits. */
+const modelTurn = (t: {
+  durationMs: number;
+  at: number;
+  model?: string;
+  usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number };
+}) => ({
+  type: "span_end",
+  spanId: `turn-${t.at}`,
+  name: "model.turn",
+  startedAt: t.at - t.durationMs,
+  durationMs: t.durationMs,
+  status: "ok",
+  attrs: { stopReason: "tool_use", ...(t.model ? { model: t.model } : {}), ...(t.usage ?? {}) },
+  at: t.at,
+});
 const call = (id: string, summary: string, at: number, tool = "bash") => ({
   type: "tool_call",
   callId: id,
@@ -279,7 +295,7 @@ describe("RunPage — history mode", () => {
   it("the step head is ONE row — thought duration + token facts left, the 12-hour clock right; the prose sits flush under it, no chip, no gutter", () => {
     const w = mountApp(RunPage, {
       seed: historySeed([
-        { type: "turn", durationMs: 304_000, at: 900, usage: { inputTokens: 12_300, outputTokens: 800 } },
+        modelTurn({ durationMs: 304_000, at: 900, usage: { inputTokens: 12_300, outputTokens: 800 } }),
         assistant("now I will test", 1000),
         call("c1", "$ npm test", 2000),
         result("c1"),
@@ -313,7 +329,7 @@ describe("RunPage — history mode", () => {
 
   it("a sub-minute think reads as plain meta, not a warning", () => {
     const w = mountApp(RunPage, {
-      seed: historySeed([{ type: "turn", durationMs: 5_000, at: 900 }, assistant("quick", 1000)] as LiveFrame[]),
+      seed: historySeed([modelTurn({ durationMs: 5_000, at: 900 }), assistant("quick", 1000)] as LiveFrame[]),
     });
     expect(w.find(".step .meta .thought").text()).toBe("thought 5.0s");
     expect(w.find(".step .meta .thought").attributes("data-heat")).toBe("0");
@@ -609,7 +625,7 @@ describe("RunPage — live mode", () => {
       expect(wrapper.find("#thinking .verb").text()).not.toBe(firstVerb); // the verb rotates (every 6 s)
       // The turn lands — on a DIFFERENT model: the real step takes the row's place with the
       // switch flagged in its head, the badge names the new model, and the silence restarts.
-      es().emitMessage({ type: "turn", durationMs: 63_000, model: "anthropic/claude-opus-5", at: 133_500 }, "6");
+      es().emitMessage(modelTurn({ durationMs: 63_000, model: "anthropic/claude-opus-5", at: 133_500 }), "6");
       es().emitMessage(assistant("all green now", 133_600), "7");
       await wrapper.vm.$nextTick();
       const heads = wrapper.findAll("#log .step .thought");
@@ -621,7 +637,7 @@ describe("RunPage — live mode", () => {
       expect(wrapper.find("#thinking .since").text()).toBe("0s");
       expect(wrapper.find("#thinking .verb").text()).toBe("Thinking…"); // a new silence, back at the top of the list
       // A turn on the SAME model is not a switch.
-      es().emitMessage({ type: "turn", durationMs: 2_000, model: "anthropic/claude-opus-5", at: 140_000 }, "8");
+      es().emitMessage(modelTurn({ durationMs: 2_000, model: "anthropic/claude-opus-5", at: 140_000 }), "8");
       es().emitMessage(assistant("still green", 140_100), "9");
       await wrapper.vm.$nextTick();
       expect(wrapper.findAll("#log .step").at(-1)!.find(".model-switch").exists()).toBe(false);
@@ -650,11 +666,11 @@ describe("RunPage — live mode", () => {
       seed: historySeed([
         input,
         { type: "run_meta", agent: "review", model: "anthropic/claude-fable-5", at: 1000 },
-        { type: "turn", durationMs: 3_400, at: 2000 }, // unstamped (pre-#559 runner)
+        modelTurn({ durationMs: 3_400, at: 2000 }), // unstamped (pre-#559 runner)
         assistant("looking", 2100),
-        { type: "turn", durationMs: 16_300, model: "anthropic/claude-fable-5", at: 5000 }, // stamped, same model
+        modelTurn({ durationMs: 16_300, model: "anthropic/claude-fable-5", at: 5000 }), // stamped, same model
         assistant("still looking", 5100),
-        { type: "turn", durationMs: 2_000, model: "anthropic/claude-opus-5", at: 8000 }, // stamped, switched
+        modelTurn({ durationMs: 2_000, model: "anthropic/claude-opus-5", at: 8000 }), // stamped, switched
         { type: "answer", text: "done", at: 8100 },
       ] as LiveFrame[]),
     });
@@ -670,7 +686,7 @@ describe("RunPage — live mode", () => {
     expect(turnRow.find(".model-badge").exists()).toBe(false);
 
     const bare = mountApp(RunPage, {
-      seed: historySeed([{ type: "turn", durationMs: 3_400, at: 2000 }, assistant("x", 2100)] as LiveFrame[]),
+      seed: historySeed([modelTurn({ durationMs: 3_400, at: 2000 }), assistant("x", 2100)] as LiveFrame[]),
     });
     expect(bare.find("#log .step .model-badge").exists()).toBe(false);
   });

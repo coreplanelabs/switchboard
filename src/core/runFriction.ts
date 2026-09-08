@@ -185,10 +185,13 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   const durationOf = (start?: number, end?: number) =>
     start !== undefined && end !== undefined ? Math.max(0, end - start) : undefined;
 
-  const endModelTurn = (ev: RunEvent, index: number, produced: string) => {
-    const durationMs = durationOf(turnStartAt, ev.at);
-    turnStartAt = undefined;
-    if (durationMs === undefined) return;
+  // A stream that carries `model.turn` spans (features/tracing.md) is timed by
+  // them: the runner's own measurement of each call, not the gap between a
+  // result and the model's next event, which also holds the runner's per-call
+  // overhead. Legacy streams keep the gap rule until the analyzer reads every
+  // duration from the normalized span set.
+  const spanTimed = events.some((ev) => ev.type === "span_end" && ev.name === "model.turn");
+  const accountModelTurn = (durationMs: number, index: number, produced: string) => {
     modelTimeMs += durationMs;
     if (durationMs >= slowModelTurnMs) {
       findings.push({
@@ -199,6 +202,12 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
         eventIndex: index,
       });
     }
+  };
+  const endModelTurn = (ev: RunEvent, index: number, produced: string) => {
+    const durationMs = durationOf(turnStartAt, ev.at);
+    turnStartAt = undefined;
+    if (durationMs === undefined || spanTimed) return;
+    accountModelTurn(durationMs, index, produced);
   };
 
   // The narrative events — the request (`input`), the thread context fed to
@@ -214,6 +223,10 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   events.forEach((ev, index) => {
     if (isSpanEvent(ev)) {
       spanEvents++;
+      if (ev.type === "span_end" && ev.name === "model.turn") {
+        const stop = typeof ev.attrs?.stopReason === "string" ? ev.attrs.stopReason : undefined;
+        accountModelTurn(ev.durationMs, index, stop ? `(${stop})` : "(a model turn)");
+      }
       return;
     }
     if (isNarrative(ev)) narrativeEvents++;

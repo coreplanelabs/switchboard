@@ -342,6 +342,7 @@ export type RunEvent =
       /** Structured vendoring provenance (`Skill.upstream`, recorded by skills:sync). */
       upstream?: { repo: string; commit: string };
       bodyBytes: number;
+      spanId?: string;
       seq?: number;
       at?: number;
     }
@@ -362,6 +363,7 @@ export type RunEvent =
       ok: boolean;
       durationMs: number;
       bytes: number;
+      spanId?: string;
       seq?: number;
       at?: number;
     }
