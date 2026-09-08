@@ -36,7 +36,18 @@ const HOW_TO_FORCE =
  *  plain JS outside the shared `ResidentLifecycleState` type, so an allow-list
  *  of settled states is what keeps vocabulary drift from silently allowing. */
 const SETTLED_STATES = new Set(["warm", "degraded", "down"]);
-const MID_CYCLE_STATES = new Set(["refreshing", "restoring", "onboarding"]);
+/** The engine is executing and an isolate swap would FAIL it: provisioning
+ *  (`onboarding`) has no checkpoint to resume from — a killed install or build
+ *  is `provision-failed`, `down`, and only a rebuild recovers it. */
+const PROVISIONING_STATES = new Set(["onboarding"]);
+/** The engine is executing and an isolate swap merely INTERRUPTS it: a refresh
+ *  cycle re-arms in 45 s and resumes from its disk checkpoints (resident-repos
+ *  items 44 and 48); a restore is retried by the next hydrate, which first
+ *  unmounts and removes whatever the interrupted one left (item 61). These
+ *  used to refuse like `onboarding`, and a release deploy once spent its whole
+ *  budget behind a resident stuck in `restoring` — a state an isolate swap
+ *  would have HELPED. Allowed with a warning. */
+const INTERRUPTIBLE_STATES = new Set(["refreshing", "restoring"]);
 
 /** First present, non-blank bearer in preference order; null when none. */
 export function readToken(env) {
@@ -70,11 +81,12 @@ export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000 } = {}
 
 /**
  * The decision, pure. `fetched` is the result of `fetchResidents`.
- * @returns {{ allow: boolean, forced: boolean, busy: {resource:string,inFlight:number}[], midCycle: {resource:string,state:string}[], unknown: {resource:string,error:string}[], message: string }}
+ * @returns {{ allow: boolean, forced: boolean, busy: {resource:string,inFlight:number}[], provisioning: {resource:string,state:string}[], interrupting: {resource:string,state:string}[], unknown: {resource:string,error:string}[], message: string }}
  */
 export function decide(fetched, { force = false } = {}) {
   const busy = [];
-  const midCycle = [];
+  const provisioning = [];
+  const interrupting = [];
   const unknown = [];
   const problems = [];
 
@@ -105,12 +117,14 @@ export function decide(fetched, { force = false } = {}) {
           // Runs and cycles are independent facts; report BOTH so an operator
           // who waits for the runs to drain is not surprised by a second refusal.
           if (live.inFlight > 0) busy.push({ resource, inFlight: live.inFlight });
-          if (MID_CYCLE_STATES.has(live.state)) {
-            // #188: the engine itself is mid-flight — a refresh's fetch/rebuild,
-            // a restore, or provisioning. An isolate swap kills that just like a
-            // thread run (live 2026-08-29: `build-failed: exit 143: Session
-            // terminated` right after a deploy that passed the inFlight check).
-            midCycle.push({ resource, state: live.state });
+          if (PROVISIONING_STATES.has(live.state)) {
+            // #188: provisioning is mid-flight. An isolate swap kills it just
+            // like a thread run (live 2026-08-29: `build-failed: exit 143:
+            // Session terminated` right after a deploy that passed the
+            // inFlight check), and unlike a refresh it cannot resume.
+            provisioning.push({ resource, state: live.state });
+          } else if (INTERRUPTIBLE_STATES.has(live.state)) {
+            interrupting.push({ resource, state: live.state });
           } else if (!SETTLED_STATES.has(live.state)) {
             // A state this script does not know: fail closed rather than assume settled.
             unknown.push({
@@ -122,14 +136,20 @@ export function decide(fetched, { force = false } = {}) {
       }
       if (busy.length)
         problems.push(`in flight: ${busy.map((b) => `${b.resource} (${b.inFlight} in flight)`).join(", ")}`);
-      if (midCycle.length)
+      if (provisioning.length)
         problems.push(
-          `mid-cycle: ${midCycle.map((m) => `${m.resource} (${m.state})`).join(", ")} — the refresh/restore would be killed`,
+          `provisioning: ${provisioning.map((m) => `${m.resource} (${m.state})`).join(", ")} — the provision would be killed and only a rebuild recovers it`,
         );
       if (unknown.length)
         problems.push(`unknown state: ${unknown.map((u) => `${u.resource} (${u.error})`).join(", ")}`);
     }
   }
+
+  // Interruptible cycles never refuse; they are named so the log says what the
+  // swap interrupts and why that is fine.
+  const warningText = interrupting.length
+    ? ` — WARNING: mid-cycle: ${interrupting.map((m) => `${m.resource} (${m.state})`).join(", ")} — the isolate swap interrupts it; a refresh re-arms in 45 s from its checkpoints, a restore is retried by the next hydrate (resident-repos items 44/61)`
+    : "";
 
   if (problems.length === 0) {
     const count = fetched.payload.residents.length;
@@ -137,9 +157,10 @@ export function decide(fetched, { force = false } = {}) {
       allow: true,
       forced: false,
       busy,
-      midCycle,
+      provisioning,
+      interrupting,
       unknown,
-      message: `preflight ok: ${count} residents, no resident has work in flight or a cycle running`,
+      message: `preflight ok: ${count} residents, no resident has work in flight or a provision running${warningText}`,
     };
   }
   const detail = problems.map((p) => `  - ${p}`).join("\n");
@@ -148,9 +169,10 @@ export function decide(fetched, { force = false } = {}) {
       allow: true,
       forced: true,
       busy,
-      midCycle,
+      provisioning,
+      interrupting,
       unknown,
-      message: `preflight WARNING: deploying by force despite —\n${detail}\n  in-flight runs and cycles on the residents above WILL be killed (process handles invalidated by the isolate swap)`,
+      message: `preflight WARNING: deploying by force despite —\n${detail}\n  in-flight runs and provisions on the residents above WILL be killed (process handles invalidated by the isolate swap)${warningText}`,
     };
   }
   const hints = [HOW_TO_FORCE];
@@ -159,9 +181,10 @@ export function decide(fetched, { force = false } = {}) {
     allow: false,
     forced: false,
     busy,
-    midCycle,
+    provisioning,
+    interrupting,
     unknown,
-    message: `preflight REFUSED: a Worker deploy swaps every ResidentDO isolate and kills in-flight runs and cycles —\n${detail}\n  wait for them to finish and retry; ${hints.join("; ")}`,
+    message: `preflight REFUSED: a Worker deploy swaps every ResidentDO isolate and kills in-flight runs and provisions —\n${detail}\n  wait for them to finish and retry; ${hints.join("; ")}${warningText}`,
   };
 }
 

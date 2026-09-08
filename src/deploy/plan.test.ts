@@ -10,6 +10,7 @@ import {
   formatPlan,
   planDeploy,
   RESIDENT_BEARER_ENVS,
+  RESIDENT_WAIT_MAX_MS,
   SANDBOX_BEARER_ENV,
   SANDBOX_CONTAINER_CLASS,
   WORKER_SPECS,
@@ -296,6 +297,19 @@ describe("planDeploy", () => {
     expect(p.waitMaxMs).toBe(7 * 60_000);
     expect(p.pollMs).toBe(30_000);
     expect(plan({ force: true }).steps.every((s) => !s.retryOnPreflightRefusal)).toBe(true); // forced → nothing to wait for
+  });
+
+  it("the resident step carries its own wait budget (RESIDENT_WAIT_MAX_MS, 30 min): its refusals are runs in flight and a provisioning, which last minutes, not a rollout; the bot keeps the plan's", () => {
+    const p = plan({ waitMaxMinutes: 7 });
+    const byName = Object.fromEntries(p.steps.map((s) => [s.name, s]));
+    expect(byName.resident.waitMaxMs).toBe(RESIDENT_WAIT_MAX_MS);
+    expect(RESIDENT_WAIT_MAX_MS).toBe(30 * 60_000);
+    expect(byName.bot.waitMaxMs).toBeUndefined();
+    expect(byName.memory.waitMaxMs).toBeUndefined();
+    const text = formatPlan(p);
+    expect(text).toContain("resident");
+    expect(text).toMatch(/resident.*up to 30 min/);
+    expect(text).toMatch(/bot.*up to 7 min/);
   });
 
   it("--dry-run marks the plan and formatPlan renders it in order with the checks it would run", () => {

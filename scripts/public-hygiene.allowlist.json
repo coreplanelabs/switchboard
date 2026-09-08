@@ -122,7 +122,6 @@
     "dates": 1
   },
   "deploy/cloudflare-resident/preflight.test.mjs": {
-    "names": 10,
     "trackers": 1,
     "dates": 1
   },
@@ -398,7 +397,7 @@
   "features/resident-repos.md": {
     "trackers": 62,
     "planIds": 114,
-    "names": 46,
+    "names": 45,
     "dates": 20
   },
   "features/routing-and-config.md": {

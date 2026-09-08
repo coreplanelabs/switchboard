@@ -120,6 +120,8 @@ export interface WorkerSpec {
   requiredEnv?: readonly EnvRequirement[];
   /** The credential capabilities this Worker's deploy needs beyond Workers Scripts: Edit — each one checked before any Worker deploys. */
   capabilities?: readonly CapabilityCheck[];
+  /** A wait budget of this step's own for a preflight refusal, when the plan's default does not fit what it refuses for. */
+  waitMaxMs?: number;
   why: string;
 }
 
@@ -141,6 +143,15 @@ export interface WorkerDef extends Omit<WorkerSpec, "preflight" | "liveGate"> {
 
 /** The three bearer scopes the resident preflight accepts (deploy/cloudflare-resident/preflight.mjs `TOKEN_ENV_VARS`); read is enough. */
 export const RESIDENT_BEARER_ENVS = ["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"] as const;
+
+/** The resident step's own wait budget (release-and-deploy item 13). The
+ *  plan's default (10 min) is sized for the bot's one refusal, a container
+ *  rollout still settling. The resident preflight refuses for runs in flight
+ *  (a coding run is up to 25 min) and for a provisioning (up to its 5-min
+ *  deadline) — states that clear on their own within half an hour, and that a
+ *  10-min budget once turned into a red release. Past this budget a refusal is
+ *  a real anomaly and fails like any stopped run. */
+export const RESIDENT_WAIT_MAX_MS = 30 * 60_000;
 
 /** Every Worker with a container image needs this: the bot's preflight reads the
  *  application with it, and `wrangler deploy` pushes the image with it. */
@@ -225,7 +236,8 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
       CONTAINERS_CAPABILITY,
       { command: ["wrangler", "r2", "bucket", "list"], needs: "Workers R2 Storage: Edit" },
     ],
-    why: "per-repo DOs — preflight refuses while a resident has work in flight",
+    waitMaxMs: RESIDENT_WAIT_MAX_MS,
+    why: "per-repo DOs — preflight refuses while a resident has a run in flight or is provisioning (a refresh or restore mid-cycle only warns: it resumes after the swap)",
   },
   {
     name: "sandbox",
@@ -325,6 +337,8 @@ export interface DeployStep {
   capabilities: readonly CapabilityCheck[];
   /** A "preflight REFUSED" exit is waited out and retried (never for forced or unpreflighted steps). */
   retryOnPreflightRefusal: boolean;
+  /** This step's wait budget for that retry loop; absent → the plan's `waitMaxMs`. */
+  waitMaxMs?: number;
   /** `/healthz` to read for the wait heartbeat (preflighted steps with a health URL). */
   healthUrl?: string;
   /** After the deploy, wait until the step's gate holds (the bot's drain; the sandbox's rollout + probe). */
@@ -385,6 +399,7 @@ export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe, loaded:
     requiredEnv: w.requiredEnv ?? [],
     capabilities: w.capabilities ?? [],
     retryOnPreflightRefusal: !!w.preflight && !opts.force,
+    ...(w.waitMaxMs !== undefined ? { waitMaxMs: w.waitMaxMs } : {}),
     ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
     ...(w.liveGate ? { liveGate: w.liveGate } : {}),
     ...(!w.liveGate && !w.healthBearerEnv ? { wakeUrl: w.healthUrl } : {}),
@@ -451,7 +466,7 @@ export function formatPlan(plan: DeployPlan): string {
   ];
   plan.steps.forEach((s, i) => {
     const pf = s.retryOnPreflightRefusal
-      ? ` — preflight (retry every ${plan.pollMs / 1000}s up to ${plan.waitMaxMs / 60_000} min)`
+      ? ` — preflight (retry every ${plan.pollMs / 1000}s up to ${(s.waitMaxMs ?? plan.waitMaxMs) / 60_000} min)`
       : s.forcedBy
         ? ` — preflight FORCED (${s.forcedBy}=1)`
         : "";

@@ -733,7 +733,10 @@ async function deployStepTraced(
   root: Span,
 ): Promise<StepOutcome> {
   const started = deps.now();
-  const deadline = started + plan.waitMaxMs;
+  // A step may carry its own budget (the resident's, sized for runs and a
+  // provisioning rather than a rollout — plan.ts RESIDENT_WAIT_MAX_MS).
+  const waitMaxMs = step.waitMaxMs ?? plan.waitMaxMs;
+  const deadline = started + waitMaxMs;
   for (;;) {
     io.log(`\n[deploy:all] ▶ ${step.name} (${step.script}) — ${step.dir}: ${step.command.join(" ")}`);
     const sandbox =
@@ -794,13 +797,13 @@ async function deployStepTraced(
         return {
           ok: false,
           live: "not deployed",
-          reason: `preflight still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to deploy over it`,
+          reason: `preflight still refusing after ${waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to deploy over it`,
         };
       // Never a silent wait: say what is in flight and how far into the budget we are.
       const body = step.healthUrl ? await fetchHealthz(step.healthUrl) : undefined;
       io.log(
         step.healthUrl
-          ? heartbeatLine(step.name, body, deps.now() - started, plan.waitMaxMs)
+          ? heartbeatLine(step.name, body, deps.now() - started, waitMaxMs)
           : `[deploy:all] ${step.name}: still waiting — ${outcome.reason}`,
       );
       io.log(`[deploy:all] ${step.name}: retrying in ${plan.pollMs / 1000}s (${Math.ceil(left / 60_000)} min left)`);
