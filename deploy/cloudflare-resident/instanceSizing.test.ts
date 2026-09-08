@@ -162,24 +162,34 @@ describe("resident instance type (deploy/cloudflare-resident/wrangler.jsonc)", (
     );
   });
 
-  it("the configured disk fits the target working set: 10 hardlinked + 1 deps-installing trees, or 5 hardlinked + 2 deps-installing, each with the reserve", () => {
-    expect(requiredDiskMb(LARGE_MONOREPO, 10, 1, usable)).toBeLessThanOrEqual(usable);
-    expect(requiredDiskMb(LARGE_MONOREPO, 5, 2, usable)).toBeLessThanOrEqual(usable);
-    // Not over-provisioned either: memory (and so cost) follows disk.
-    expect(usable).toBeLessThan(requiredDiskMb(LARGE_MONOREPO, 5, 2, usable) * 1.25);
+  it("the previous 16 GB fit 10 hardlinked + 1 deps-installing trees (or 5 + 2), not the 16 seats the pool offers", () => {
+    const previousUsable = Math.round(16_000 * FS_USABLE_RATIO);
+    expect(requiredDiskMb(LARGE_MONOREPO, 10, 1, previousUsable)).toBeLessThanOrEqual(previousUsable);
+    expect(requiredDiskMb(LARGE_MONOREPO, 5, 2, previousUsable)).toBeLessThanOrEqual(previousUsable);
+    expect(requiredDiskMb(LARGE_MONOREPO, 16, 1, previousUsable)).toBeGreaterThan(previousUsable);
   });
 
-  it("the pool's theoretical maximum (16 hardlinked + 2 installing) fits NEITHER this disk NOR the 20 GB platform ceiling — admission is not optional at any affordable size", () => {
+  it("the configured disk fits the pool's seats: 16 hardlinked + 1 deps-installing trees, or 12 hardlinked + 2 deps-installing, each with the reserve", () => {
+    expect(requiredDiskMb(LARGE_MONOREPO, 16, 1, usable)).toBeLessThanOrEqual(usable);
+    expect(requiredDiskMb(LARGE_MONOREPO, 12, 2, usable)).toBeLessThanOrEqual(usable);
+    // Not over-provisioned either: the disk is within a quarter of the 16 + 1 working set.
+    expect(usable).toBeLessThan(requiredDiskMb(LARGE_MONOREPO, 16, 1, usable) * 1.25);
+  });
+
+  it("the pool's theoretical maximum (16 hardlinked + 2 installing) does not fit even the platform ceiling this IS — admission stays mandatory at every size", () => {
+    expect(it_.disk_mb).toBe(MAX_DISK_MB);
     expect(requiredDiskMb(LARGE_MONOREPO, 16, 2, usable)).toBeGreaterThan(usable);
-    const ceilingUsable = Math.round(MAX_DISK_MB * FS_USABLE_RATIO);
-    expect(requiredDiskMb(LARGE_MONOREPO, 16, 2, ceilingUsable)).toBeGreaterThan(ceilingUsable);
-    // What the +$26/mo step to 12 GiB / 20 GB would buy: 16 + 1, or 12 + 2.
-    expect(requiredDiskMb(LARGE_MONOREPO, 16, 1, ceilingUsable)).toBeLessThanOrEqual(ceilingUsable);
-    expect(requiredDiskMb(LARGE_MONOREPO, 12, 2, ceilingUsable)).toBeLessThanOrEqual(ceilingUsable);
   });
 
-  it("memory is the minimum the disk requires, not a memory decision (2 GB disk per GiB)", () => {
-    const minimumMemoryForDisk = Math.ceil(it_.disk_mb / MAX_DISK_MB_PER_MEMORY_GIB) * 1024;
-    expect(it_.memory_mib).toBe(minimumMemoryForDisk);
+  it("the CPU is the decision: four vCPUs for 16 threads sharing the container, memory is what those vCPUs require, and the disk is what that memory unlocks", () => {
+    // One vCPU was every thread's test run plus the refresh cycle's install on
+    // one core (the fifty-concurrent-runs plan, decision D6).
+    expect(it_.vcpu).toBe(4);
+    const memoryForVcpu = MIN_MEMORY_MIB_PER_VCPU * it_.vcpu;
+    const memoryForDisk = Math.ceil(it_.disk_mb / MAX_DISK_MB_PER_MEMORY_GIB) * 1024;
+    expect(it_.memory_mib).toBe(Math.max(memoryForVcpu, memoryForDisk));
+    expect(memoryForVcpu).toBeGreaterThan(memoryForDisk); // the CPU, not the disk, sets the memory now
+    // And the disk takes all the platform allows: the memory would permit 24 GB, the ceiling is 20.
+    expect(it_.disk_mb).toBe(Math.min(MAX_DISK_MB, (it_.memory_mib / 1024) * MAX_DISK_MB_PER_MEMORY_GIB));
   });
 });

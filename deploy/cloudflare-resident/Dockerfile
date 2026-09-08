@@ -14,18 +14,22 @@ FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1
 RUN git config --system user.name "switchboard-resident" \
   && git config --system user.email "switchboard-resident@users.noreply.github.com"
 
-# The container is ONE vCPU (wrangler.jsonc). Node test runners size their
-# worker pools from the CPU count the kernel reports — the HOST's, not the
-# cgroup's — so an unconfigured `vitest`/`jest` run forks a dozen workers onto
-# one core and thrashes (seen live: a resident pinned at 100% CPU, 2.2 GiB).
-# These defaults inherit into every thread's `su … -c` shell (su without `-`
-# keeps the environment) and are the runners' documented env knobs; a repo's
-# own config or CLI flags still win. CI=1 makes runners non-interactive (no
-# watch mode, no TTY progress spinners in captured output). The heap cap keeps
-# one runaway process from taking the whole 4 GiB from its neighbours.
+# The container is FOUR vCPUs shared by up to 16 threads (wrangler.jsonc).
+# Node test runners size their worker pools from the CPU count the kernel
+# reports — the HOST's, not the cgroup's — so an unconfigured `vitest`/`jest`
+# run forks a dozen workers and thrashes (seen live on the 1 vCPU resident: a
+# resident pinned at 100% CPU, 2.2 GiB). The runner pins stay at ONE worker per
+# thread: the cores are for concurrent threads, not for one thread's test
+# parallelism, and a repo's own config or CLI flags still win. The libuv pool
+# is one thread per vCPU (it is per Node process; more would oversubscribe the
+# cores once several threads run). These defaults inherit into every thread's
+# `su … -c` shell (su without `-` keeps the environment). CI=1 makes runners
+# non-interactive (no watch mode, no TTY progress spinners in captured
+# output). The heap cap keeps one runaway process to an eighth of the 12 GiB
+# so its neighbours keep theirs.
 ENV CI=1 \
     VITEST_MAX_WORKERS=1 VITEST_MAX_THREADS=1 VITEST_MAX_FORKS=1 VITEST_MIN_THREADS=1 VITEST_MIN_FORKS=1 \
-    UV_THREADPOOL_SIZE=2 \
+    UV_THREADPOOL_SIZE=4 \
     NODE_OPTIONS=--max-old-space-size=1536
 
 # pnpm + yarn: the base ships Node 24 + npm + bun but neither pnpm nor yarn, so a
