@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "./agents/registry.js";
-import type { ChatMessage, CompletionRequest, CompletionResult, Provider } from "./providers/types.js";
+import {
+  MAX_TOOL_RESULT_CHARS,
+  type ChatMessage,
+  type CompletionRequest,
+  type CompletionResult,
+  type ContentPart,
+  type Provider,
+} from "./providers/types.js";
 import { RunControl } from "./core/runRegistry.js";
 import type { Executor } from "./execution/executor.js";
 import { ExecCapacityError, ExecInfraError } from "./execution/executor.js";
@@ -108,6 +115,92 @@ describe("runAgent budgets", () => {
       now: () => t,
     });
     expect(seen).toBe(25 * 60_000);
+  });
+
+  it("caps every tool result the model sees at MAX_TOOL_RESULT_CHARS, visibly — the suite-wide guard behind #615 (a 1 MB tool result was 307k tokens)", async () => {
+    const huge = "x".repeat(MAX_TOOL_RESULT_CHARS + 50_000);
+    const firehose: RunnableTool = {
+      name: "firehose",
+      description: "returns far more than any model context should carry",
+      inputSchema: { type: "object", properties: {} },
+      run: async () => huge,
+    };
+    const parts: RunnableTool = {
+      name: "parts",
+      description: "a parts-array result with an oversize text part and an image",
+      inputSchema: { type: "object", properties: {} },
+      run: async () => [
+        { type: "text", text: huge },
+        { type: "image", mediaType: "image/png", data: "aGk=" },
+      ],
+    };
+    const provider = scripted([
+      {
+        content: [
+          { type: "tool_use", id: "f1", name: "firehose", input: {} },
+          { type: "tool_use", id: "p1", name: "parts", input: {} },
+        ],
+        stopReason: "tool_use",
+      },
+      text("done"),
+    ]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({}),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      extraTools: [firehose, parts],
+    });
+    // The second request carries the tool results the model will read.
+    const results = provider.requests[1].messages.flatMap((m) =>
+      m.content.filter((p): p is Extract<ContentPart, { type: "tool_result" }> => p.type === "tool_result"),
+    );
+    expect(results).toHaveLength(2);
+    const str = results[0].content;
+    expect(typeof str).toBe("string");
+    expect((str as string).length).toBeLessThan(MAX_TOOL_RESULT_CHARS + 200);
+    expect(str).toContain(
+      `…[tool result truncated: ${huge.length - MAX_TOOL_RESULT_CHARS} of ${huge.length} characters cut`,
+    );
+    const arr = results[1].content;
+    expect(Array.isArray(arr)).toBe(true);
+    const textPart = (arr as ContentPart[]).find((p) => p.type === "text");
+    expect(textPart && textPart.type === "text" ? textPart.text.length : 0).toBeLessThan(MAX_TOOL_RESULT_CHARS + 200);
+    // The image part rides through untouched: the cap is on text, not on blocks the model views.
+    expect((arr as ContentPart[]).some((p) => p.type === "image" && p.data === "aGk=")).toBe(true);
+  });
+
+  it("caps a tool's thrown error the same way — a huge error message is still a tool result the model reads", async () => {
+    const huge = "e".repeat(MAX_TOOL_RESULT_CHARS + 10_000);
+    const thrower: RunnableTool = {
+      name: "thrower",
+      description: "throws with an enormous message",
+      inputSchema: { type: "object", properties: {} },
+      run: async () => {
+        throw new Error(huge);
+      },
+    };
+    const provider = scripted([
+      { content: [{ type: "tool_use", id: "t1", name: "thrower", input: {} }], stopReason: "tool_use" },
+      text("done"),
+    ]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({}),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      extraTools: [thrower],
+    });
+    const result = provider.requests[1].messages
+      .flatMap((m) => m.content)
+      .find((p): p is Extract<ContentPart, { type: "tool_result" }> => p.type === "tool_result");
+    expect(result?.isError).toBe(true);
+    expect(typeof result?.content).toBe("string");
+    expect((result?.content as string).startsWith("Error: eeee")).toBe(true);
+    expect((result?.content as string).length).toBeLessThan(MAX_TOOL_RESULT_CHARS + 200);
+    expect(result?.content).toContain("[tool result truncated:");
   });
 
   it("forces a write-up labeled with the turn budget when turns run out", async () => {

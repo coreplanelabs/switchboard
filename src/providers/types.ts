@@ -46,6 +46,26 @@ export function toolResultText(content: ToolResultContent): string {
     .join("\n");
 }
 
+/** The most text ONE tool result may hand the model, whatever the tool. Each
+ *  tool caps its own output where it knows the shape (bash 120k, GitHub files
+ *  200k, web pages 40k with paging); this is the ceiling behind all of them, so
+ *  a tool that forgets — or a new one — can never fill the context in one
+ *  call (#615: a 1 MB `web_fetch` result was 307k tokens and killed the run).
+ *  Sized to the bash cap: the largest a tool legitimately returns. */
+export const MAX_TOOL_RESULT_CHARS = 120_000;
+
+/** Pure: the tool result the model actually receives. Text over the cap is cut
+ *  with a visible note (never silently); image/document parts ride through —
+ *  they are bounded by their own byte caps and are not text. */
+export function capToolResultContent(content: ToolResultContent, cap = MAX_TOOL_RESULT_CHARS): ToolResultContent {
+  const capText = (text: string): string =>
+    text.length > cap
+      ? `${text.slice(0, cap)}\n…[tool result truncated: ${text.length - cap} of ${text.length} characters cut — ask for a narrower slice]`
+      : text;
+  if (typeof content === "string") return capText(content);
+  return content.map((p) => (p.type === "text" ? { ...p, text: capText(p.text) } : p));
+}
+
 function base64Bytes(b64: string): number {
   const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
   return Math.floor((b64.length * 3) / 4) - padding;

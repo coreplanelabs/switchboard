@@ -1,6 +1,12 @@
 import type { AgentDef } from "./agents/registry.js";
 import type { Effort } from "./effort.js";
-import { toolResultText, type ChatMessage, type ContentPart, type Provider } from "./providers/types.js";
+import {
+  capToolResultContent,
+  toolResultText,
+  type ChatMessage,
+  type ContentPart,
+  type Provider,
+} from "./providers/types.js";
 import {
   COMMAND_CAP,
   parseExitPrefix,
@@ -383,7 +389,9 @@ async function runLoop(
           ...(exit?.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
           ...prepareToolResult(text),
         });
-        return { type: "tool_result", toolUseId: tu.id, content: output };
+        // The model never receives more than MAX_TOOL_RESULT_CHARS of text from
+        // one tool, whatever the tool returned (providers/types.ts, #615).
+        return { type: "tool_result", toolUseId: tu.id, content: capToolResultContent(output) };
       } catch (err) {
         // A hard stop is not a tool error to feed back to the model — unwind.
         // A genuine tool error that merely coincides with the hard request is
@@ -418,7 +426,15 @@ async function runLoop(
           ...prepareToolResult(message),
           ...(err instanceof ExecInfraError ? { infra: true as const } : {}),
         });
-        return { type: "tool_result", toolUseId: tu.id, content: `Error: ${message}`, isError: true };
+        // The same ceiling on the error path: a tool that throws with a huge
+        // message (an executor echoing its output into the error) is still a
+        // tool result the model reads.
+        return {
+          type: "tool_result",
+          toolUseId: tu.id,
+          content: capToolResultContent(`Error: ${message}`),
+          isError: true,
+        };
       }
     };
     // Redact THEN cap (redactAndCap): a pre-truncated command could sever a
