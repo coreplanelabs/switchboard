@@ -96,10 +96,10 @@ export default withMermaid(
     },
     themeConfig: {
       nav: [
-        { text: "Tutorials", link: "/tutorials/first-request-in-slack" },
-        { text: "How-to", link: "/how-to/configure-your-defaults" },
+        { text: "Tutorials", link: "/tutorials/get-started" },
+        { text: "How-to", link: "/how-to/set-up-accounts" },
         { text: "Reference", link: "/reference/slack-commands" },
-        { text: "Explanation", link: "/explanation/how-a-request-flows" },
+        { text: "Explanation", link: "/explanation/architecture" },
       ],
       // Diataxis, one group per kind — the same four the docs/README.md hub
       // lists, in the same order.
@@ -108,6 +108,7 @@ export default withMermaid(
           text: "Tutorials",
           collapsed: false,
           items: [
+            { text: "Get started", link: "/tutorials/get-started" },
             { text: "Your first request in Slack", link: "/tutorials/first-request-in-slack" },
             { text: "Run it locally", link: "/tutorials/run-it-locally" },
           ],
@@ -116,6 +117,8 @@ export default withMermaid(
           text: "How-to guides",
           collapsed: false,
           items: [
+            { text: "Set up accounts", link: "/how-to/set-up-accounts" },
+            { text: "Deploy", link: "/how-to/deploy" },
             { text: "Configure your defaults", link: "/how-to/configure-your-defaults" },
             { text: "Connect an MCP server", link: "/how-to/connect-an-mcp-server" },
             { text: "Onboard a repo", link: "/how-to/onboard-a-repo" },
@@ -147,6 +150,8 @@ export default withMermaid(
           text: "Explanation",
           collapsed: false,
           items: [
+            { text: "Architecture", link: "/explanation/architecture" },
+            { text: "Security model", link: "/explanation/security-model" },
             { text: "How a request flows", link: "/explanation/how-a-request-flows" },
             { text: "The agents and their toolsets", link: "/explanation/agents-and-toolsets" },
             { text: "Why config is layered", link: "/explanation/config-layers" },

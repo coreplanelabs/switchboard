@@ -4,6 +4,8 @@
 
 If you're new and want a guided first success instead, start with a [tutorial](../tutorials/).
 
+- [Set up accounts](set-up-accounts.md) — the Slack app from its manifest, model keys, the GitHub App step by step, and what Cloudflare, E2B and Brave each buy.
+- [Deploy](deploy.md) — Cloudflare, the one supported target: the profile, `deploy init`, `deploy secrets`, `deploy config`, `deploy all`, and what the release workflow does with them.
 - [Configure your defaults](configure-your-defaults.md) — agent, model, and effort, per you or per channel.
 - [Connect an MCP server](connect-an-mcp-server.md) — give an agent tools from Linear, Notion, or your own service.
 - [Onboard a repo](onboard-a-repo.md) — make a repo always-warm instead of cloning cold every time.

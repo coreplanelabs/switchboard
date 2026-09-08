@@ -4,5 +4,6 @@
 
 If you already know what you want and just need the steps for *your* situation, you want a [how-to guide](../how-to/) instead.
 
+- [Get started](get-started.md) — from nothing to an answer in your terminal, then in Slack, then from production, one part each.
 - [Your first request in Slack](first-request-in-slack.md) — mention it, follow up, ask for something real, in ten minutes.
 - [Run it locally](run-it-locally.md) — get an answer from Switchboard on your own machine, no Slack required.
