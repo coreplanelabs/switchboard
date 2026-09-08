@@ -72,14 +72,18 @@ export async function withActivityKeepalive<T>(
  *  sessions were cleared. 0.12.x: the typed `SessionTerminatedError` text
  *  (`Session '<id>' shell exited (exit code: <n>)`) and the
  *  `OperationInterruptedError` text for a container that stopped under a
- *  pending call. Anything else — a transport error, a file-op failure — is
- *  never recycle-shaped, whenever it arrives. */
+ *  pending call, and the disconnect text for a sandbox `destroy()`ed under a
+ *  pending call — which the Worker's own one-shot heal of a legacy-image
+ *  container can cause for a command concurrently pending on the same
+ *  Durable Object (#569). Anything else — a transport error, a file-op
+ *  failure — is never recycle-shaped, whenever it arrives. */
 const RECYCLE_SHAPED: readonly RegExp[] = [
   /^Command execution failed$/,
   /^Session terminated$/i,
   /^Session '[^']*' not found$/i,
   /^Session '[^']*' shell exited \(exit code: /i,
   /^The sandbox container stopped while the operation was pending\.?$/i,
+  /^The sandbox was destroyed while the operation was pending\.?$/i,
 ];
 
 /** The 0.12.x typed errors that MEAN the container went away under the call.

@@ -130,3 +130,57 @@ export function fleetBusyExhaustedMessage(waitedMs: number): string {
     "(the fleet's max_instances is reached); try again in a few minutes"
   );
 }
+
+/** The text the Worker carries in-body for a thrown value: the SDK's own
+ *  message when it has one, else a sentence that says the SDK gave none —
+ *  naming the error's name and code, and the one condition known to produce
+ *  it. Never the empty string (features/execution.md items 3 and 6).
+ *
+ *  Why (2026-09-07, #569): during the 0.4.0 Worker+image rollout a new
+ *  thread's Durable Object landed on a container still running the 0.3.7
+ *  image. The 0.12.9 client posted `{command, sessionId}`, the old server
+ *  answered 400 `{"error": "Session ID and command are required"}`, and the
+ *  client built a `SandboxError` from a body with no `message` — so
+ *  `err.message` was `""`. The Worker's `shape.message ?? String(err)` kept
+ *  the empty string (`??` only fires on null/undefined), every classifier
+ *  fell through, and seven commands reached the model as silent `exit 127`s
+ *  that read as a dead shell. Classifiers (`isFleetBusyError`,
+ *  `isRecycleError`, `recycledMidCommandMessage`) keep reading the raw shape;
+ *  this is only the text that leaves the Worker. */
+export function thrownText(shape: ThrownShape): string {
+  const text = shape.message?.trim() ?? "";
+  if (text) return text;
+  const who = shape.name
+    ? `${shape.name}${shape.code !== undefined ? `, code ${String(shape.code)}` : ""}`
+    : "no error name";
+  return (
+    `sandbox exec failed with no message from the SDK (${who}); the container may still be running a previous image ` +
+    "while a Worker/image rollout is in progress — retry in a minute"
+  );
+}
+
+/** The shape a 0.12.x client produces against a 0.3.x container (#569): the
+ *  base `SandboxError` — not one of its typed subclasses — whose message is
+ *  empty and whose `code` is undefined, carrying the old server's body as
+ *  `errorResponse` with a non-empty `error` string and NO `message` (the
+ *  0.3.x handlers answered `{error: "…"}`; every 0.12.x body has `message`
+ *  and a `code`). The 400 is pre-dispatch, so a command that failed this way
+ *  never ran. Matched INSIDE the Durable Object (the Worker's
+ *  `SwitchboardSandbox` subclass), where the prototype, the `code` getter and
+ *  `errorResponse` are intact; `SandboxError` itself is not exported by the
+ *  package, so `instanceof Error` + the name stands in for the class. The
+ *  match is SHAPE-based, not provenance-based: a future message-less body from
+ *  something other than an old image would match too — which is why the heal
+ *  that acts on it is bounded to one destroy and one retry per exec. */
+export function legacyContainerError(err: unknown): boolean {
+  if (!(err instanceof Error) || err.name !== "SandboxError" || err.message !== "") return false;
+  if ((err as { code?: unknown }).code !== undefined) return false;
+  const body = (err as { errorResponse?: { error?: unknown; message?: unknown } }).errorResponse;
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    typeof body.error === "string" &&
+    body.error.length > 0 &&
+    body.message === undefined
+  );
+}

@@ -233,3 +233,36 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
     expect(calls).toHaveLength(1);
   });
 });
+
+// Feature: features/execution.md items 3 and 9 — a present-but-empty `error`
+// is the Worker's failure shape with its text missing, never a command exit.
+// 2026-09-07 (#569): a thread placed on a previous-image container during a
+// rollout got `{error: "", stdout: "", stderr: "", exitCode: 127}` for every
+// command; the truthy-only check let it through as a plain `exit 127`, the
+// health tracker counted a success, and the model reported its shell "down".
+// A success body has no `error` key at all, so the key's PRESENCE is the
+// signal — a bare exit 127 with no output stays a legitimate command result.
+describe("CloudflareSandboxExecutor in-body empty error", () => {
+  it("an empty-string error is ExecInfraError after exactly one fetch — the Worker's failure shape with its text missing", async () => {
+    const { calls } = stubFetch({ error: "", stdout: "", stderr: "", exitCode: 127 });
+    const ex = new CloudflareSandboxExecutor(OPTS);
+    const err = await ex.exec("echo hi").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe(
+      "sandbox worker /exec: failure with an empty message (the Worker's failure shape with its text missing)",
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a body WITHOUT an error key and exit 127 with empty output is the normal `exit 127:` result — `foo 2>/dev/null` is legitimate", async () => {
+    stubFetch({ stdout: "", stderr: "", exitCode: 127 });
+    const ex = new CloudflareSandboxExecutor(OPTS);
+    await expect(ex.exec("foo 2>/dev/null")).resolves.toBe("exit 127:\n");
+  });
+
+  it("exit 0 with no error key and no output renders (no output)", async () => {
+    stubFetch({ stdout: "", stderr: "", exitCode: 0 });
+    const ex = new CloudflareSandboxExecutor(OPTS);
+    await expect(ex.exec("true")).resolves.toBe("(no output)");
+  });
+});

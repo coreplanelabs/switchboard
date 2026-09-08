@@ -142,6 +142,19 @@ export class CloudflareSandboxExecutor implements Executor {
       // A full fleet is the ONE answer that is re-sent (by `call`): the Worker
       // names it only when no session could be created, so nothing ran.
       if (isFleetBusyAnswer(res, data)) return { kind: "busy" };
+      // A success body has no `error` key at all, so a PRESENT but empty
+      // `error` is the Worker's failure shape with its text missing — infra,
+      // not a command exit. 2026-09-07 (#569): a thread placed on a
+      // previous-image container during a rollout got `{error: ""}` for every
+      // command; the truthy check below let it through as a plain `exit 127`,
+      // the health tracker counted a success, and the model reported its
+      // shell "down". A bare exit 127 with no output and NO error key is not
+      // this: `foo 2>/dev/null` is a legitimate silent 127.
+      if (res.ok && "error" in data && data.error === "") {
+        throw new ExecInfraError(
+          `sandbox worker ${route}: failure with an empty message (the Worker's failure shape with its text missing)`,
+        );
+      }
       // /exec streams its response (heartbeat whitespace + one JSON document,
       // always HTTP 200 since headers are sent before the outcome is known),
       // so failures arrive as {error} in an ok response. Not retried: by the

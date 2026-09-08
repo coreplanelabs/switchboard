@@ -137,6 +137,18 @@ describe("recycledMidCommandMessage", () => {
     );
   });
 
+  // #569: the Worker's one-shot heal of a legacy-image container calls
+  // `destroy()`; a command concurrently pending on the same Durable Object is
+  // disconnected with this text — the container really is gone.
+  it("recognizes the destroy-time disconnect text as a recycle", () => {
+    expect(recycledMidCommandMessage(90_000, "The sandbox was destroyed while the operation was pending.")).toMatch(
+      RECYCLED,
+    );
+    expect(recycledMidCommandMessage(5_000, "The sandbox was destroyed while the operation was pending.")).toBe(
+      "The sandbox was destroyed while the operation was pending.",
+    );
+  });
+
   it("a typed recycle error (certain) is named at any elapsed time — the SDK is stating the container stopped", () => {
     const msg = recycledMidCommandMessage(3_000, "Session 'x' shell exited (exit code: 143)", true);
     expect(msg).toMatch(RECYCLED);
@@ -158,6 +170,9 @@ describe("isRecycleError", () => {
     expect(isRecycleError({ name: "Error", message: "Command execution failed" })).toBe(true);
     expect(
       isRecycleError({ name: "Error", message: "The sandbox container stopped while the operation was pending." }),
+    ).toBe(true);
+    expect(
+      isRecycleError({ name: "Error", message: "The sandbox was destroyed while the operation was pending." }),
     ).toBe(true);
     expect(isRecycleError({ name: "ContainerUnavailableError", message: "no Container instance available" })).toBe(
       false,
@@ -194,5 +209,28 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).toMatch(/env:\s*envVars/);
     expect(worker).not.toContain("base64 -d");
     expect(worker).not.toContain("btoa(");
+  });
+
+  // #569 (features/execution.md items 3 and 6): a failure text is never
+  // empty, and a container on a previous image is named and healed. Both
+  // Worker catches go through `thrownText`; the bare `shape.message ??
+  // String(err)` that kept the SDK's "" is gone.
+  it("every failure text goes through thrownText — the empty-string fallthrough is gone", () => {
+    expect(worker).toContain("thrownText(");
+    expect(worker).not.toContain(".message ?? String(err)");
+  });
+
+  it("onStart logs the container/SDK version skew and exec heals a legacy-image container once", () => {
+    expect(worker).toContain("getVersion(");
+    expect(worker).toContain("legacyContainerError(");
+  });
+
+  // The rollout window a NEW thread can fall into is closed by replacing the
+  // old-image instances in ONE wave: rollout_step_percentage 100, not the
+  // platform's default [10, 100] that left minutes between the waves.
+  it("wrangler.jsonc rolls the sandbox image out in one wave (rollout_step_percentage 100)", () => {
+    const wrangler = readFileSync(resolve(ROOT, "deploy/cloudflare-sandbox/wrangler.jsonc"), "utf8");
+    const m = /"rollout_step_percentage":\s*(\d+)/.exec(wrangler);
+    expect(m?.[1]).toBe("100");
   });
 });
