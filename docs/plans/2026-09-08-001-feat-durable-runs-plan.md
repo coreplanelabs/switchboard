@@ -2,7 +2,7 @@
 title: Durable runs - Plan
 type: feat
 date: 2026-09-08
-status: proposed
+status: implemented
 extends: 2026-09-07-001-feat-fifty-concurrent-runs-plan.md
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: review-ready
