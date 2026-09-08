@@ -2,6 +2,8 @@ import type { OperationResult, Operations, OpName } from "../core/operations.js"
 import { classifyError } from "../core/trace/classify.js";
 import { redactSecrets, stripAnsi } from "../core/redact.js";
 import { residentState, sanitizeResidentBody } from "./residentText.js";
+import type { ResidentStep } from "./residentStepTrace.js";
+import { sanitizeGraftedSteps, withResidentTrace } from "./residentTrace.js";
 import { repoResourceId } from "../core/residentAdmin.js";
 import { EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
 import {
@@ -72,6 +74,11 @@ export interface ResidentBinding {
    *  every /exec. Advisory (named to the model so it never goes looking for
    *  the repository, #282); undefined if the attach answer lacked it. */
   workspace?: string;
+  /** The resident's own step trace for the attach (features/tracing.md item
+   *  19), sanitized at the parse; absent from a Worker predating it. */
+  trace?: ResidentStep[];
+  /** The resident's total for the attach (`attachMs`), for the clock-skew attr. */
+  attachMs?: number;
 }
 
 /** 409 needs:"ref" from /attach — the thread has no ref binding yet (KTD6:
@@ -158,7 +165,17 @@ export class ResidentOperations implements Operations {
       .filter((s): s is string => typeof s === "string" && s.length > 0)
       .map((s) => redactSecrets(stripAnsi(s)))
       .join("\n--- stderr ---\n");
-    return { kind: "result", ok, summary, ...(output ? { output: truncate(output) } : {}) };
+    const trace = sanitizeGraftedSteps(data.trace);
+    return {
+      kind: "result",
+      ok,
+      summary,
+      ...(output ? { output: truncate(output) } : {}),
+      ...(trace.length > 0 ? { trace } : {}),
+      ...(typeof data.durationMs === "number" && Number.isFinite(data.durationMs)
+        ? { residentMs: data.durationMs }
+        : {}),
+    };
   }
 }
 
@@ -300,21 +317,31 @@ export class ResidentExecutor implements Executor {
       if (typeof data.ref !== "string" || typeof data.sha !== "string") {
         throw new Error(`resident attach: malformed answer for ${this.opts.resource} (missing ref/sha)`);
       }
-      this.lastBinding =
-        typeof data.workspace === "string" && data.workspace
-          ? { ref: data.ref, sha: data.sha, workspace: data.workspace }
-          : { ref: data.ref, sha: data.sha };
+      const trace = sanitizeGraftedSteps(data.trace);
+      this.lastBinding = {
+        ref: data.ref,
+        sha: data.sha,
+        ...(typeof data.workspace === "string" && data.workspace ? { workspace: data.workspace } : {}),
+        ...(trace.length > 0 ? { trace } : {}),
+        ...(typeof data.attachMs === "number" && Number.isFinite(data.attachMs) ? { attachMs: data.attachMs } : {}),
+      };
       return this.lastBinding;
     }
     const err = String(data.error ?? `HTTP ${status}`);
+    // The steps the resident ran before refusing ride the error (features/
+    // tracing.md item 19): the dispatcher grafts them under its attach span.
+    const failedTrace = sanitizeGraftedSteps(data.trace);
+    const fail = (e: Error): never => {
+      throw failedTrace.length > 0 ? withResidentTrace(e, { steps: failedTrace }) : e;
+    };
     if (status === 409 && data.needs === "ref") {
       const defaultRef = typeof data.defaultRef === "string" && data.defaultRef ? data.defaultRef : undefined;
-      throw new ResidentNeedsRefError(this.opts.resource, defaultRef);
+      return fail(new ResidentNeedsRefError(this.opts.resource, defaultRef));
     }
     if (status === 404) {
-      throw new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`);
+      return fail(new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`));
     }
-    throw new Error(`resident attach failed for ${this.opts.resource}: ${err}`);
+    return fail(new Error(`resident attach failed for ${this.opts.resource}: ${err}`));
   }
 
   /** Move the thread's worktree to `sha` (agent-review.md item 12): one more

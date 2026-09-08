@@ -1,6 +1,8 @@
 import { resolve } from "node:path";
 import { oneLine } from "../core/redact.js";
 import type { Backend } from "../core/trace/attrs.js";
+import type { ResidentStep } from "./residentStepTrace.js";
+import { residentTraceOf, type ResidentTrace } from "./residentTrace.js";
 import { mkdirSync } from "node:fs";
 import type { AgentDef } from "../agents/registry.js";
 import { LocalExecutor, type Executor } from "./executor.js";
@@ -86,6 +88,13 @@ export interface ExecutorSelection {
    *  `exec.*` spans. Every production selection names one; a test double may
    *  leave it out. */
   backend?: Backend;
+  /** The resident's step trace for the attach (features/tracing.md item 19):
+   *  the dispatcher grafts it under its attach span. On the resident path, or
+   *  on the sandbox fallback after a resident attach failed (the steps that
+   *  led to the failure). */
+  trace?: ResidentStep[];
+  /** The resident's own total for the attach, for the clock-skew attr. */
+  attachMs?: number;
   /** The resident's attach answer (ref, sha, worktree path) on the resident
    *  path — the dispatcher names the path to the model and checks the sha
    *  against the PR head before a review runs (#282). Unset on every other path. */
@@ -137,6 +146,8 @@ export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorCo
   // stall). A repo that is simply not onboarded also runs per-thread, but
   // carries a note so the cold fall-through is visible (with the onboarding fix).
   let note: string | undefined;
+  /** The steps of a resident attach that failed before the sandbox fallback. */
+  let failedAttach: ResidentTrace | undefined;
   if (ctx.repo && opts.execution?.resident) {
     const resident = opts.execution.resident;
     const tokenEnv = resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN";
@@ -176,6 +187,7 @@ export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorCo
         );
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
+        failedAttach = residentTraceOf(err);
         note = oneLine(
           `resident attach failed (${err instanceof Error ? err.message : String(err)}) — using fresh sandbox`,
         );
@@ -195,7 +207,12 @@ export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorCo
     }
   }
 
-  return { executor: await makePerThreadExecutor(opts, ctx), note, backend: perThreadBackend(opts) };
+  return {
+    executor: await makePerThreadExecutor(opts, ctx),
+    note,
+    backend: perThreadBackend(opts),
+    ...(failedAttach ? { trace: failedAttach.steps } : {}),
+  };
 }
 
 /** Attach to a serviceable resident and name the result POSITIVELY: the note
@@ -256,6 +273,8 @@ async function openResident(
     executor,
     resident: true,
     backend: "resident",
+    ...(binding.trace ? { trace: binding.trace } : {}),
+    ...(binding.attachMs !== undefined ? { attachMs: binding.attachMs } : {}),
     binding,
     note: nonWarm
       ? `resident ${nonWarm} · ${where}${why} — attached to the last snapshot`

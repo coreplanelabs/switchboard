@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ExecHealthTracker, ExecInfraError } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations } from "./resident.js";
+import { residentTraceOf } from "./residentTrace.js";
 
 // Feature: features/resident-repos.md — bot-side resident client (U5): every
 // route POSTs {resource, threadKey, ...}; /exec streams heartbeat whitespace
@@ -58,7 +59,70 @@ describe("ResidentExecutor.attach over a heartbeat stream (#555 item 59: an atta
       ref: "master",
       sha: "1220b9c4",
       workspace: ATTACH_OK.workspace,
+      attachMs: 2500,
     });
+  });
+
+  // Feature: features/tracing.md item 19 — the resident's step trace rides the
+  // binding, rebuilt from the allowlist; a Worker without one binds as before.
+  it("carries the resident's step trace on the binding, sanitized: hostile names and malformed steps never survive, and a trace-less answer has no trace", async () => {
+    stubFetch({
+      raw: JSON.stringify({
+        ...ATTACH_OK,
+        trace: [
+          { name: "mutex_wait", startMs: 0, durationMs: 300, status: "ok", waitedMs: 300 },
+          { name: "Clone (mirror)", startMs: 300, durationMs: 1_800, status: "ok", exitCode: 0, error: "ghp_leak" },
+          { name: "install", startMs: "2100", durationMs: 400 },
+        ],
+      }),
+    });
+    const traced = await new ResidentExecutor(OPTS).attach();
+    expect(traced.trace).toEqual([
+      { name: "mutex_wait", startMs: 0, durationMs: 300, status: "ok", waitedMs: 300 },
+      { name: "clone-mirror", startMs: 300, durationMs: 1_800, status: "ok", exitCode: 0 },
+    ]);
+    expect(JSON.stringify(traced)).not.toContain("leak");
+    stubFetch({ raw: JSON.stringify({ ...ATTACH_OK, attachMs: undefined }) });
+    const plain = await new ResidentExecutor(OPTS).attach();
+    expect(plain.trace).toBeUndefined();
+    expect(plain.attachMs).toBeUndefined();
+  });
+
+  // Feature: features/tracing.md item 19 — a refused attach's steps ride the
+  // error it becomes, sanitized, so the dispatcher can still graft them.
+  it("pins a refused attach's step trace on the thrown error, sanitized; a trace-less refusal pins nothing", async () => {
+    stubFetch({
+      status: 503,
+      body: {
+        error: "install timed out",
+        state: "warm",
+        reason: "install-timeout",
+        trace: [
+          { name: "mutex_wait", startMs: 0, durationMs: 100, status: "ok", waitedMs: 100 },
+          {
+            name: "install",
+            startMs: 100,
+            durationMs: 600_000,
+            status: "error",
+            exitCode: 124,
+            timedOut: true,
+            error: "ghp_leak",
+          },
+        ],
+      },
+    });
+    const err = await new ResidentExecutor(OPTS).attach().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(residentTraceOf(err)).toEqual({
+      steps: [
+        { name: "mutex_wait", startMs: 0, durationMs: 100, status: "ok", waitedMs: 100 },
+        { name: "install", startMs: 100, durationMs: 600_000, status: "error", exitCode: 124, timedOut: true },
+      ],
+    });
+    expect(JSON.stringify(residentTraceOf(err))).not.toContain("leak");
+    stubFetch({ status: 503, body: { error: "mirror busy", state: "refreshing", reason: "mirror-busy" } });
+    const plain = await new ResidentExecutor(OPTS).attach().catch((e: unknown) => e);
+    expect(residentTraceOf(plain)).toBeUndefined();
   });
 
   it("a refusal streamed over HTTP 200 carries its status IN THE BODY and is handled like the same real status", async () => {
@@ -516,6 +580,37 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
 describe("ResidentOperations.run", () => {
   const OPS = { baseUrl: "https://resident.example", token: "op-token" };
 
+  // Feature: features/tracing.md item 19 — an op's step trace and total ride the result.
+  it("carries the resident's step trace and total on the result, sanitized", async () => {
+    stubFetch({
+      raw: JSON.stringify({
+        ok: true,
+        op: "test",
+        summary: "test passed",
+        stdout: "",
+        stderr: "",
+        exitCode: 0,
+        durationMs: 8_200,
+        trace: [
+          { name: "op-clone", startMs: 0, durationMs: 2_000, status: "ok", exitCode: 0 },
+          { name: "test", startMs: 2_100, durationMs: 6_000, status: "ok", exitCode: 0 },
+          { bogus: true },
+        ],
+      }),
+    });
+    const res = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
+    expect(res).toEqual({
+      kind: "result",
+      ok: true,
+      summary: "test passed",
+      residentMs: 8_200,
+      trace: [
+        { name: "op-clone", startMs: 0, durationMs: 2_000, status: "ok", exitCode: 0 },
+        { name: "test", startMs: 2_100, durationMs: 6_000, status: "ok", exitCode: 0 },
+      ],
+    });
+  });
+
   it("POSTs {resource, op, ref} with the operator bearer and parses the streamed result", async () => {
     const { calls } = stubFetch({
       raw:
@@ -537,6 +632,7 @@ describe("ResidentOperations.run", () => {
     if (res.kind === "result") {
       expect(res.summary).toContain("test passed");
       expect(res.output).toContain("1 passing");
+      expect(res.trace).toBeUndefined(); // a Worker without a step trace
     }
     expect(route(calls[0])).toBe("/op");
     expect(sentBody(calls[0])).toEqual({ resource: "repo:jshttp/vary", op: "test", ref: "master" });

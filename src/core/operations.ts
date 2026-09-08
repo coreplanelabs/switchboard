@@ -1,3 +1,4 @@
+import type { ResidentStep } from "../execution/residentStepTrace.js";
 import { repoFromThread } from "./repoContext.js";
 import { parseSlug, validRef } from "./residentAdmin.js";
 
@@ -29,7 +30,16 @@ export type OpName = (typeof OP_NAMES)[number];
  *  runs (a failing test run is a result, not an error path); the other kinds
  *  are the named non-run outcomes the command maps to registry errors. */
 export type OperationResult =
-  | { kind: "result"; ok: boolean; summary: string; output?: string }
+  | {
+      kind: "result";
+      ok: boolean;
+      summary: string;
+      output?: string;
+      /** The resident's own step trace (features/tracing.md item 19), sanitized at the parse. */
+      trace?: ResidentStep[];
+      /** The resident's total for the op, for the clock-skew attr. */
+      residentMs?: number;
+    }
   /** the backend refused by policy (e.g. a mutating command-table entry) */
   | { kind: "refused"; reason: string }
   /** the repo has no resident — the natural-language path falls through */

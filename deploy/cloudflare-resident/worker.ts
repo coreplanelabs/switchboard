@@ -73,6 +73,7 @@ import {
   Sandbox,
   StaleProcessHandleError,
 } from "@cloudflare/sandbox";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
@@ -175,6 +176,7 @@ import {
   stepFailureLog,
   type StepResult,
 } from "../../src/execution/residentStepReport.js";
+import { createStepTrace, type ResidentStep, type StepTrace } from "../../src/execution/residentStepTrace.js";
 import { backupTransferMode } from "../../src/execution/residentBackupTransfer.js";
 import {
   DEPS_STORE_DIR,
@@ -880,6 +882,9 @@ interface ThreadBinding {
 interface ThreadErr {
   error: string;
   status: number;
+  /** The steps the request ran before it failed (features/tracing.md item 19):
+   *  a failed attach's trace is the one that says which step blew the budget. */
+  trace?: ResidentStep[];
   needs?: string;
   /** With needs:"ref" — the resident's default branch, so the caller can bind by default. */
   defaultRef?: string;
@@ -906,6 +911,9 @@ interface AttachOk {
   readonly: boolean;
   mutexWaitMs: number;
   attachMs: number;
+  /** Every command this attach ran, as offsets from its start (features/
+   *  tracing.md item 19): the bot grafts them under its attach span. */
+  trace: ResidentStep[];
 }
 
 /** Result of one /op test/build execution (U6, KTD8). `ok` is the command's
@@ -925,6 +933,8 @@ interface OpRunOk {
   deps: ThreadDepsMechanism;
   reconciled: boolean;
   durationMs: number;
+  /** Every command this op ran, as offsets from its start (features/tracing.md item 19). */
+  trace: ResidentStep[];
 }
 
 /** DO-recorded repo facts — the truth the disk is rehydrated against (KTD3). */
@@ -1160,6 +1170,17 @@ export class ResidentDO extends Sandbox<Env> {
    *  survives, so hydration state is always probed from disk. */
   private hydration: Promise<void> | null = null;
 
+  /** The step trace of the request in flight (features/tracing.md item 19):
+   *  `attachThread` and `runOp` each run inside their own collector, so the
+   *  commands `runOk` runs and the mirror-lock waits land on the answer that
+   *  caused them — never on a concurrent request's. Empty outside a traced
+   *  request (a refresh cycle, a watchdog). */
+  private readonly stepTrace = new AsyncLocalStorage<StepTrace>();
+
+  private currentSteps(): ResidentStep[] {
+    return this.stepTrace.getStore()?.steps() ?? [];
+  }
+
   /** R2 restores this incarnation started and has not seen settle. The SDK's
    *  restoreBackup cannot be cancelled: a restore the wake path gave up on
    *  keeps writing into its target directory, so the next hydrate must not
@@ -1309,6 +1330,7 @@ export class ResidentDO extends Sandbox<Env> {
       await prev.catch(() => {});
     }
     const waitedMs = Date.now() - started;
+    this.stepTrace.getStore()?.mutexWait(waitedMs, Date.now());
     try {
       return { value: await fn(), waitedMs };
     } finally {
@@ -1410,7 +1432,13 @@ export class ResidentDO extends Sandbox<Env> {
     step: string,
     opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {},
   ): Promise<string> {
-    return this.assertOk(await this.run(argv, opts), step);
+    const startedAt = Date.now();
+    const r = await this.run(argv, opts);
+    // The step's own measurement, on the request's trace when one is in flight.
+    this.stepTrace
+      .getStore()
+      ?.record(step, { startedAt, endedAt: Date.now(), exitCode: r.exitCode, timedOut: r.timedOut });
+    return this.assertOk(r, step);
   }
 
   /** Run one command-table entry as the unprivileged build user in the warm
@@ -2976,7 +3004,25 @@ export class ResidentDO extends Sandbox<Env> {
     wantSha: string | null = null,
     record?: ResidentRecord,
   ): Promise<AttachOk | ThreadErr> {
+    // One step trace per attach (features/tracing.md item 19): every command
+    // the attach runs lands on it, and the answer carries it.
     const t0 = Date.now();
+    const trace = createStepTrace(t0);
+    const res = await this.stepTrace.run(trace, () =>
+      this.attachThreadTraced(threadKey, refHint, readonly, wantSha, record, t0),
+    );
+    // A refusal carries the steps that led to it; a success already does.
+    return "error" in res ? { ...res, trace: trace.steps() } : res;
+  }
+
+  private async attachThreadTraced(
+    threadKey: string,
+    refHint: string | null,
+    readonly: boolean,
+    wantSha: string | null,
+    record: ResidentRecord | undefined,
+    t0: number,
+  ): Promise<AttachOk | ThreadErr> {
     try {
       await this.ensureHydrated();
       const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
@@ -3263,6 +3309,7 @@ export class ResidentDO extends Sandbox<Env> {
       readonly: mode.readonly,
       mutexWaitMs: locked.waitedMs,
       attachMs: Date.now() - t0,
+      trace: this.currentSteps(),
     };
   }
 
@@ -4266,7 +4313,14 @@ export class ResidentDO extends Sandbox<Env> {
    *  lockfile-keyed cache, scoped token-free install only when the committed
    *  key differs. No snapshot is ever written here (KTD3). */
   async runOp(op: "test" | "build", refArg: string | null): Promise<OpRunOk | ThreadErr> {
+    // One step trace per op (features/tracing.md item 19), like an attach.
     const t0 = Date.now();
+    const trace = createStepTrace(t0);
+    const res = await this.stepTrace.run(trace, () => this.runOpTraced(op, refArg, t0));
+    return "error" in res ? { ...res, trace: trace.steps() } : res;
+  }
+
+  private async runOpTraced(op: "test" | "build", refArg: string | null, t0: number): Promise<OpRunOk | ThreadErr> {
     try {
       await this.ensureHydrated();
     } catch (err) {
@@ -4337,7 +4391,12 @@ export class ResidentDO extends Sandbox<Env> {
         record.commands.install,
       );
 
+      const commandStartedAt = Date.now();
       const r = await this.threadRunCapped(user, checkout, command, OP_EXEC_TIMEOUT_MS, EXEC_OUTPUT_CAP);
+      // The command itself is the op's step, named for the op (`test`, `build`).
+      this.stepTrace
+        .getStore()
+        ?.record(op, { startedAt: commandStartedAt, endedAt: Date.now(), exitCode: r.exitCode, timedOut: r.timedOut });
       const ok = r.exitCode === 0 && !r.timedOut;
       const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP;
       const notes: string[] = [];
@@ -4362,6 +4421,7 @@ export class ResidentDO extends Sandbox<Env> {
         deps: deps.deps,
         reconciled: deps.reconciled,
         durationMs,
+        trace: this.currentSteps(),
       };
     } catch (err) {
       if (err instanceof MirrorBusyError) {

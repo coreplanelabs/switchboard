@@ -14,6 +14,8 @@ import type { Clock, Span, SpanSink, Tracer } from "./trace/types.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
 import { cardShapeLine, cardShapeLineOf, queuedCaption } from "./runShape.js";
+import { graftResidentSteps, residentTraceOf, sanitizeGraftedSteps } from "../execution/residentTrace.js";
+import type { ResidentStep } from "../execution/residentStepTrace.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { makeWebCapability } from "../tools/web.js";
 import { residentOnboardedProbe, residentSlugsLister } from "../execution/factory.js";
@@ -938,16 +940,35 @@ export async function dispatch(
       // The attach is one `dispatch.workspace.attach` span naming its backend
       // (features/tracing.md): the setup step that takes minutes on a cold clone.
       round = await root.span("dispatch.workspace.attach", async (span) => {
-        const attached = await attachRoundWorkspace({
-          factory: {
-            execution: deps.config.config.execution,
-            workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
-            dataDir: deps.dataDir ?? "./data",
-          },
-          round: { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref, headSha: repoCtx.headSha },
-          logKey: msg.threadKey,
-        });
+        // The resident's own steps (clone, install, the mutex wait…) graft under
+        // this span, rebased to its start (features/tracing.md item 19) — on a
+        // failed attach too, where the trace says which step blew the budget.
+        const graft = (steps: readonly ResidentStep[], residentTotalMs?: number) =>
+          graftResidentSteps(steps, {
+            parent: span,
+            prefix: "dispatch.workspace.attach",
+            baseAt: span.record().startedAt,
+            clipAt: clock(),
+            ...(residentTotalMs !== undefined ? { residentTotalMs } : {}),
+          });
+        let attached: Awaited<ReturnType<typeof attachRoundWorkspace>>;
+        try {
+          attached = await attachRoundWorkspace({
+            factory: {
+              execution: deps.config.config.execution,
+              workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
+              dataDir: deps.dataDir ?? "./data",
+            },
+            round: { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref, headSha: repoCtx.headSha },
+            logKey: msg.threadKey,
+          });
+        } catch (err) {
+          const failed = residentTraceOf(err);
+          if (failed) graft(failed.steps, failed.residentMs);
+          throw err;
+        }
         if (attached.selection.backend) span.setAttrs({ backend: attached.selection.backend });
+        if (attached.selection.trace) graft(attached.selection.trace, attached.selection.attachMs);
         return attached;
       });
     } catch (err) {
@@ -2653,7 +2674,7 @@ function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined
  * reply as its `answer`) and the error propagates to the dispatcher's outer
  * handler.
  */
-async function runInlineCommandRun<T extends { text: string; ok: boolean }>(
+async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?: unknown; residentMs?: number }>(
   deps: CoreDeps,
   msg: IncomingMessage,
   command: string,
@@ -2664,6 +2685,7 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean }>(
 ): Promise<T> {
   const registry = deps.runRegistry ?? defaultRunRegistry;
   const root = trace.root;
+  const clock = deps.clock ?? systemClock;
   const channelVisibility = await root.span("dispatch.channel_visibility", () =>
     channelVisibilityOf(deps, msg.channelId),
   );
@@ -2695,8 +2717,25 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean }>(
   registry.publish(run.id, { type: "run_meta", agent: COMMAND_RUN_AGENT, traceId: root.traceId, at: Date.now() });
   let result: T | undefined;
   try {
-    // The command's deterministic body is the run's one counted step (`tools` for a command run).
-    result = await root.span("run.command", execute, { attrs: { command } });
+    // The command's deterministic body is the run's one counted step (`tools`
+    // for a command run); a resident op's own steps graft under it.
+    result = await root.span(
+      "run.command",
+      async (span) => {
+        const r = await execute();
+        const steps = sanitizeGraftedSteps(r.trace);
+        if (steps.length > 0)
+          graftResidentSteps(steps, {
+            parent: span,
+            prefix: "run.command",
+            baseAt: span.record().startedAt,
+            clipAt: clock(),
+            ...(r.residentMs !== undefined ? { residentTotalMs: r.residentMs } : {}),
+          });
+        return r;
+      },
+      { attrs: { command } },
+    );
     registry.publish(run.id, { type: "answer", text: redactSecrets(result.text), at: Date.now() });
     return result;
   } catch (err) {

@@ -26,6 +26,8 @@ import type {
   SpanSink,
   SpanStatus,
   Tracer,
+  ErrorKind,
+  GraftOptions,
 } from "./types.js";
 
 export const SPAN_NAME_MAX = 64;
@@ -161,6 +163,42 @@ class SpanImpl implements Span {
     });
     child.emitStart();
     return child;
+  }
+
+  graft(name: string, opts: GraftOptions): SpanRecord {
+    const child = new SpanImpl(this.shared, {
+      traceId: this.traceId,
+      parentId: this.id,
+      name,
+      sinks: this.sinks,
+      startedAt: opts.startedAt,
+      attrs: opts.attrs,
+    });
+    child.emitStart();
+    child.endAt(Math.max(opts.startedAt, opts.endedAt), opts.status ?? "ok", opts.errorKind, opts.errorCode);
+    return child.record();
+  }
+
+  /** `end` with the end stamp supplied (a graft); the same idempotence and sinks. */
+  private endAt(endedAt: number, status: SpanStatus, errorKind?: ErrorKind, errorCode?: string): void {
+    if (this.ended) return;
+    this.ended = true;
+    this.rec.endedAt = endedAt;
+    this.rec.durationMs = Math.max(0, endedAt - this.rec.startedAt);
+    this.rec.status = status;
+    if (errorKind !== undefined) {
+      this.rec.errorKind = errorKind;
+      if (errorCode !== undefined) this.rec.errorCode = errorCode;
+    }
+    for (const s of this.sinks) {
+      try {
+        s.onEnd(this.record());
+      } catch (err) {
+        this.shared.warn(
+          `[trace] sink onEnd threw for ${this.name}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
   end(status?: SpanStatus, attrs?: SpanAttrs): void {

@@ -34,6 +34,7 @@ import { classOf, isStreamed } from "./trace/streamSpans.js";
 import { partition } from "./trace/partition.js";
 import type { SpanRecord } from "./trace/types.js";
 import { recordingSink } from "./testing/recordingSink.js";
+import { withResidentTrace } from "../execution/residentTrace.js";
 import { createAlsContext, createTickingClock, timedFakes, type Tick } from "./testing/tickingClock.js";
 import { ThreadAdmission } from "./threadAdmission.js";
 import { isHeadMaterial, isSpanRecord, type RunEvent } from "./runEvents.js";
@@ -686,6 +687,102 @@ describe("executor provisioning by agent resources", () => {
     expect(afterSetup.length).toBeGreaterThan(0);
     expect(afterSetup.every((s) => !s.title.includes("—"))).toBe(true);
     expect(statuses.at(-1)!.title).toContain("✅");
+  });
+
+  // Feature: features/tracing.md item 19 — a resident's attach steps graft
+  // under the run's `dispatch.workspace.attach` span, rebased to its start.
+  it("a resident attach's step trace lands on the run's stream as dispatch.workspace.attach.<step> spans under the attach span, clipped to the attach, with the resident backend and a clock-skew attr on the parent", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const registry = new RunRegistry({ genId: () => "run-g", genToken: () => "tok" });
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, capturingProvider());
+    deps.runRegistry = registry;
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+    vi.mocked(makeExecutor).mockImplementationOnce(async () => ({
+      executor: fake,
+      backend: "resident" as const,
+      resident: true,
+      binding: { ref: "main", sha: "abc", workspace: "/workspace/threads/x/main" },
+      attachMs: 30,
+      trace: [
+        { name: "mutex_wait", startMs: 0, durationMs: 5, status: "ok" as const, waitedMs: 5 },
+        { name: "clone", startMs: 5, durationMs: 20, status: "ok" as const, exitCode: 0 },
+        { name: "install", startMs: 25, durationMs: 5_000, status: "error" as const, exitCode: 1, timedOut: true }, // runs past the attach: clipped
+      ],
+    }));
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    const events = registry.snapshot("run-g", "tok")!.events;
+    const attach = events.find((e) => e.type === "span_end" && e.name === "dispatch.workspace.attach");
+    if (!attach || attach.type !== "span_end") throw new Error("no attach span");
+    const grafts = events.filter(
+      (e): e is Extract<RunEvent, { type: "span_end" }> =>
+        e.type === "span_end" && e.name.startsWith("dispatch.workspace.attach."),
+    );
+    expect(grafts.map((g) => [g.name, g.status, g.attrs, g.parentSpanId])).toEqual([
+      ["dispatch.workspace.attach.mutex_wait", "ok", { backend: "resident", waitedMs: 5 }, attach.spanId],
+      ["dispatch.workspace.attach.clone", "ok", { backend: "resident", exitCode: 0 }, attach.spanId],
+      [
+        "dispatch.workspace.attach.install",
+        "error",
+        { backend: "resident", exitCode: 1, timedOut: true },
+        attach.spanId,
+      ],
+    ]);
+    for (const g of grafts) {
+      expect(g.startedAt).toBeGreaterThanOrEqual(attach.startedAt);
+      expect(g.startedAt + g.durationMs).toBeLessThanOrEqual(attach.startedAt + attach.durationMs);
+      expect(g.error).toBeUndefined(); // a graft carries a classification, never text
+    }
+    expect(grafts[0]!.startedAt).toBe(attach.startedAt); // rebased: the resident's start is the span's start
+    expect(attach.attrs).toMatchObject({ backend: "resident", clockSkewMs: expect.any(Number) });
+    // The grafts stream with the setup, before the request: head material.
+    const inputAt = events.findIndex((e) => e.type === "input");
+    expect(events.indexOf(grafts[0]!)).toBeLessThan(inputAt);
+  });
+
+  // Feature: features/tracing.md item 19 — a resident attach that FAILS still
+  // grafts the steps it ran under the (failed) attach span; no run exists, so
+  // they reach the process sinks.
+  it("a failed resident attach's step trace grafts under the failed dispatch.workspace.attach span, on the process sink", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const log = recordingSink();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, capturingProvider());
+    deps.sinks = [log];
+    vi.mocked(makeExecutor).mockImplementationOnce(async () => {
+      throw withResidentTrace(new Error("resident attach failed for repo:acme/widgets: install timed out"), {
+        steps: [
+          { name: "mutex_wait", startMs: 0, durationMs: 5, status: "ok", waitedMs: 5 },
+          { name: "install", startMs: 5, durationMs: 20, status: "error", exitCode: 124, timedOut: true },
+        ],
+      });
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(replies.join("\n")).toContain("install timed out");
+    const attach = log.ends.find((e) => e.name === "dispatch.workspace.attach");
+    expect(attach?.status).toBe("error");
+    const grafts = log.ends.filter((e) => e.name.startsWith("dispatch.workspace.attach."));
+    expect(grafts.map((g) => [g.name, g.status, g.attrs, g.parentSpanId, g.errorKind, g.errorMessage])).toEqual([
+      [
+        "dispatch.workspace.attach.mutex_wait",
+        "ok",
+        { backend: "resident", waitedMs: 5 },
+        attach!.spanId,
+        undefined,
+        undefined,
+      ],
+      [
+        "dispatch.workspace.attach.install",
+        "error",
+        { backend: "resident", exitCode: 124, timedOut: true },
+        attach!.spanId,
+        "infra",
+        undefined,
+      ],
+    ]);
+    // Grafted before the parent ended: they precede it on the sink.
+    expect(log.ends.indexOf(grafts[0]!)).toBeLessThan(log.ends.indexOf(attach!));
   });
 
   it("closes the ack card with a reason when setup stops before the run (ask-once for a branch)", async () => {
