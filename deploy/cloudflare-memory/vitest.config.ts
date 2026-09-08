@@ -11,5 +11,15 @@ export default defineConfig({
       miniflare: { bindings: { MEMORY_TOKEN: "test-token" } },
     }),
   ],
-  test: { include: ["worker.test.ts", "friction.test.ts", "schedules.test.ts", "runs.test.ts", "config.test.ts"] },
+  test: {
+    include: [
+      "worker.test.ts",
+      "friction.test.ts",
+      "schedules.test.ts",
+      "runs.test.ts",
+      "config.test.ts",
+      "runLedger.test.ts",
+      "runTranscript.test.ts",
+    ],
+  },
 });

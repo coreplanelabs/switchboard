@@ -25,6 +25,7 @@ import {
   sameStoredVersion,
   storedEventSeqs,
   utf8ByteLength,
+  MAX_EVENT_BYTES,
   type RetentionPolicy,
   type RunListItem,
   type RunListOptions,
@@ -33,6 +34,21 @@ import {
   type StoredRunEvent,
 } from "../../src/core/runRecord.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
+import { checkFence, decideClaim, phaseTransition, selectReclaim } from "../../src/core/runLedger/decisions.ts";
+import {
+  GEN_PATTERN,
+  type ClaimRequest,
+  type ClaimResult,
+  type FenceResult,
+  type LivePhase,
+  type LiveRunRow,
+  type ReclaimedRun,
+  type RunState,
+  type StepRecord,
+  type StopMode,
+  type TranscriptAttachment,
+  type TranscriptRow,
+} from "../../src/core/runLedger/types.ts";
 import {
   isMcpTicket,
   isSealedCredential,
@@ -101,6 +117,8 @@ export interface Env {
   RUNS: DurableObjectNamespace<RunHistoryDO>;
   /** Runtime config documents (routing-and-config item 12): ONE ConfigDO (named "config"). */
   CONFIG: DurableObjectNamespace<ConfigDO>;
+  /** Live-run transcripts (run-history item 32): one RunTranscriptDO per live run, named by run id. */
+  RUN_TRANSCRIPTS: DurableObjectNamespace<RunTranscriptDO>;
   MEMORY_TOKEN?: string;
 }
 
@@ -928,6 +946,41 @@ export interface RunPolicyProposal {
 /** What retention needs from a `runs` row. */
 type RetentionRow = { run_id: string; finished_at: number; bytes: number };
 
+/** A `live_runs` row as SQLite returns it. */
+type LiveRow = {
+  run_id: string;
+  thread_key: string;
+  owner_gen: string;
+  lease_until: number;
+  started_at: number;
+  phase: string;
+  stop: string | null;
+  meta_json: string;
+  card_json: string | null;
+  system_text: string;
+  tools_json: string;
+  state_json: string;
+};
+
+function rowToLive(r: LiveRow): LiveRunRow {
+  return {
+    runId: r.run_id,
+    threadKey: r.thread_key,
+    ownerGen: r.owner_gen,
+    leaseUntil: r.lease_until,
+    startedAt: r.started_at,
+    phase: r.phase as LivePhase,
+    stop: (r.stop as StopMode | null) ?? null,
+    meta: JSON.parse(r.meta_json) as LiveRunRow["meta"],
+    card: r.card_json ? (JSON.parse(r.card_json) as LiveRunRow["card"]) : null,
+    system: r.system_text,
+    tools: JSON.parse(r.tools_json) as LiveRunRow["tools"],
+    state: JSON.parse(r.state_json) as RunState,
+  };
+}
+
+type HeartbeatAnswer = FenceResult & { stop?: StopMode | null; phase?: LivePhase };
+
 export class RunHistoryDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
 
@@ -990,6 +1043,284 @@ export class RunHistoryDO extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS runs_visibility_finished ON runs(channel_visibility, finished_at DESC, run_id DESC);
       CREATE INDEX IF NOT EXISTS runs_user_finished ON runs(user_id, finished_at DESC, run_id DESC);
     `);
+    // The live-run ledger (run-history items 28–34): live runs never enter
+    // `runs` — that table's finished_at drives retention and listing — they
+    // live here until `finish` moves them across in one transaction.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS live_runs (
+        run_id TEXT PRIMARY KEY,
+        thread_key TEXT NOT NULL UNIQUE,
+        owner_gen TEXT NOT NULL,
+        lease_until INTEGER NOT NULL,
+        started_at INTEGER NOT NULL,
+        phase TEXT NOT NULL,
+        stop TEXT,
+        meta_json TEXT NOT NULL,
+        card_json TEXT,
+        system_text TEXT NOT NULL,
+        tools_json TEXT NOT NULL,
+        state_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS run_steps (
+        run_id TEXT NOT NULL,
+        step INTEGER NOT NULL,
+        json TEXT NOT NULL,
+        PRIMARY KEY (run_id, step)
+      );
+      CREATE TABLE IF NOT EXISTS run_inbox (
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        json TEXT NOT NULL,
+        PRIMARY KEY (run_id, seq)
+      );
+      CREATE TABLE IF NOT EXISTS run_jobs (
+        run_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        json TEXT NOT NULL,
+        PRIMARY KEY (run_id, kind)
+      );
+    `);
+  }
+
+  // ---- the live-run ledger (run-history items 28–34) --------------------------
+
+  private liveRow(runId: string): LiveRunRow | undefined {
+    const r = this.sql.exec<LiveRow>(`SELECT * FROM live_runs WHERE run_id = ?`, runId).toArray()[0];
+    return r ? rowToLive(r) : undefined;
+  }
+
+  private liveByThread(threadKey: string): LiveRunRow | undefined {
+    const r = this.sql.exec<LiveRow>(`SELECT * FROM live_runs WHERE thread_key = ?`, threadKey).toArray()[0];
+    return r ? rowToLive(r) : undefined;
+  }
+
+  /** One live run per thread (item 29): the UNIQUE on thread_key is the
+   *  store-level guarantee; the decision names the live run for the steer. */
+  async claim(req: ClaimRequest, now: number): Promise<ClaimResult> {
+    let out: ClaimResult = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      const existing = this.liveByThread(req.threadKey);
+      out = decideClaim(
+        existing
+          ? {
+              runId: existing.runId,
+              agent: existing.meta.agent,
+              startedAt: existing.startedAt,
+              ownerGen: existing.ownerGen,
+            }
+          : undefined,
+        req,
+      );
+      if (!out.ok || existing) return;
+      this.sql.exec(
+        `INSERT INTO live_runs (run_id, thread_key, owner_gen, lease_until, started_at, phase, stop, meta_json, card_json, system_text, tools_json, state_json)
+         VALUES (?, ?, ?, ?, ?, 'live', NULL, ?, ?, ?, ?, ?)`,
+        req.runId,
+        req.threadKey,
+        req.gen,
+        now + req.leaseMs,
+        req.startedAt,
+        JSON.stringify(req.meta),
+        req.card ? JSON.stringify(req.card) : null,
+        req.system,
+        JSON.stringify(req.tools),
+        JSON.stringify(req.state ?? {}),
+      );
+    });
+    return out;
+  }
+
+  /** Extends the lease iff the caller owns the run; answers what another generation asked for. */
+  async heartbeat(runId: string, gen: string, leaseMs: number, now: number): Promise<HeartbeatAnswer> {
+    let out: HeartbeatAnswer = { ok: false, reason: "unknown-run" };
+    this.ctx.storage.transactionSync(() => {
+      const row = this.liveRow(runId);
+      const fence = checkFence(row, gen);
+      if (!fence.ok || !row) {
+        out = fence;
+        return;
+      }
+      this.sql.exec(`UPDATE live_runs SET lease_until = ? WHERE run_id = ?`, now + leaseMs, runId);
+      out = { ok: true, stop: row.stop, phase: row.phase };
+    });
+    return out;
+  }
+
+  /** Append events with their registry seq (item 30). Fenced. */
+  async appendEvents(runId: string, gen: string, events: Array<{ seq: number; json: string }>): Promise<FenceResult> {
+    let out: FenceResult = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      out = checkFence(this.liveRow(runId), gen);
+      if (!out.ok) return;
+      for (let i = 0; i < events.length; i += RUN_EVENT_INSERT_BATCH) {
+        const batch = events.slice(i, i + RUN_EVENT_INSERT_BATCH);
+        const params: (string | number)[] = [];
+        for (const e of batch) params.push(runId, e.seq, e.json);
+        this.sql.exec(
+          `INSERT OR REPLACE INTO run_events (run_id, seq, json) VALUES ${batch.map(() => "(?, ?, ?)").join(",")}`,
+          ...params,
+        );
+      }
+    });
+    return out;
+  }
+
+  /** The step record (item 31), written by the client AFTER the transcript turns. Fenced. */
+  async recordStep(runId: string, gen: string, record: StepRecord): Promise<FenceResult> {
+    let out: FenceResult = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      out = checkFence(this.liveRow(runId), gen);
+      if (!out.ok) return;
+      this.sql.exec(
+        `INSERT OR REPLACE INTO run_steps (run_id, step, json) VALUES (?, ?, ?)`,
+        runId,
+        record.step,
+        JSON.stringify(record),
+      );
+    });
+    return out;
+  }
+
+  async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {
+    let out: FenceResult = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      out = checkFence(this.liveRow(runId), gen);
+      if (!out.ok) return;
+      this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(state), runId);
+    });
+    return out;
+  }
+
+  /** Any generation: a steer arrives on whichever container is up. */
+  async pushInbox(runId: string, message: Record<string, unknown>): Promise<{ ok: boolean; seq?: number }> {
+    let out: { ok: boolean; seq?: number } = { ok: false };
+    this.ctx.storage.transactionSync(() => {
+      if (!this.liveRow(runId)) return;
+      const last = this.sql
+        .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_inbox WHERE run_id = ?`, runId)
+        .one().m;
+      const seq = (last ?? 0) + 1;
+      this.sql.exec(`INSERT INTO run_inbox (run_id, seq, json) VALUES (?, ?, ?)`, runId, seq, JSON.stringify(message));
+      out = { ok: true, seq };
+    });
+    return out;
+  }
+
+  async requestStop(runId: string, mode: StopMode, now: number): Promise<{ ok: boolean; ownerLive?: boolean }> {
+    let out: { ok: boolean; ownerLive?: boolean } = { ok: false };
+    this.ctx.storage.transactionSync(() => {
+      const row = this.liveRow(runId);
+      if (!row) return;
+      this.sql.exec(`UPDATE live_runs SET stop = ? WHERE run_id = ?`, mode, runId);
+      out = { ok: true, ownerLive: row.leaseUntil > now };
+    });
+    return out;
+  }
+
+  /** SIGTERM: mark this generation's live runs for the next one (item 33). */
+  async handoff(gen: string, runIds: string[]): Promise<{ marked: string[] }> {
+    const marked: string[] = [];
+    this.ctx.storage.transactionSync(() => {
+      for (const id of runIds) {
+        const row = this.liveRow(id);
+        if (row && row.ownerGen === gen && phaseTransition(row.phase, "handoff")) {
+          this.sql.exec(`UPDATE live_runs SET phase = 'handoff' WHERE run_id = ?`, id);
+          marked.push(id);
+        }
+      }
+    });
+    return { marked };
+  }
+
+  /** CAS live → finishing, taken before the reply (item 33). Fenced. */
+  async finishing(runId: string, gen: string): Promise<FenceResult> {
+    let out: FenceResult = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      const row = this.liveRow(runId);
+      const fence = checkFence(row, gen);
+      if (!fence.ok || !row) {
+        out = fence;
+        return;
+      }
+      if (!phaseTransition(row.phase, "finishing")) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      this.sql.exec(`UPDATE live_runs SET phase = 'finishing' WHERE run_id = ?`, runId);
+    });
+    return out;
+  }
+
+  /** The finished record replaces the live rows in ONE transaction (item 33). Fenced. */
+  async finish(
+    runId: string,
+    gen: string,
+    record: RunRecord,
+    proposal?: RunPolicyProposal,
+  ): Promise<FenceResult & { stored?: boolean }> {
+    let out: FenceResult & { stored?: boolean } = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      const fence = checkFence(this.liveRow(runId), gen);
+      if (!fence.ok) {
+        out = fence;
+        return;
+      }
+      const put = this.upsertInTransaction(record, proposal);
+      this.deleteLiveRows([runId]);
+      out = { ok: true, stored: put.stored };
+    });
+    if ((await this.ctx.storage.getAlarm()) === null)
+      await this.ctx.storage.setAlarm(Date.now() + RUN_SWEEP_INTERVAL_MS);
+    return out;
+  }
+
+  private deleteLiveRows(runIds: string[]): void {
+    for (const id of runIds) {
+      this.sql.exec(`DELETE FROM live_runs WHERE run_id = ?`, id);
+      this.sql.exec(`DELETE FROM run_steps WHERE run_id = ?`, id);
+      this.sql.exec(`DELETE FROM run_inbox WHERE run_id = ?`, id);
+      this.sql.exec(`DELETE FROM run_jobs WHERE run_id = ?`, id);
+    }
+  }
+
+  /** A booting generation takes every expired or handed-off run (item 31),
+   *  atomically, with what a resume needs. */
+  async reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]> {
+    const out: ReclaimedRun[] = [];
+    this.ctx.storage.transactionSync(() => {
+      const rows = this.sql.exec<LiveRow>(`SELECT * FROM live_runs`).toArray().map(rowToLive);
+      for (const row of selectReclaim(rows, now)) {
+        this.sql.exec(
+          `UPDATE live_runs SET owner_gen = ?, lease_until = ?, phase = 'live' WHERE run_id = ?`,
+          gen,
+          now + leaseMs,
+          row.runId,
+        );
+        const stepRow = this.sql
+          .exec<{ json: string }>(`SELECT json FROM run_steps WHERE run_id = ? ORDER BY step DESC LIMIT 1`, row.runId)
+          .toArray()[0];
+        const lastStep = stepRow ? (JSON.parse(stepRow.json) as StepRecord) : null;
+        const consumed = lastStep?.inboxConsumedSeq ?? 0;
+        const inbox = this.sql
+          .exec<{ seq: number; json: string }>(
+            `SELECT seq, json FROM run_inbox WHERE run_id = ? AND seq > ? ORDER BY seq ASC`,
+            row.runId,
+            consumed,
+          )
+          .toArray()
+          .map((r) => ({ seq: r.seq, message: JSON.parse(r.json) as Record<string, unknown> }));
+        const jobs = this.sql
+          .exec<{ kind: string; json: string }>(`SELECT kind, json FROM run_jobs WHERE run_id = ?`, row.runId)
+          .toArray()
+          .map((r) => ({ kind: r.kind, payload: JSON.parse(r.json) as unknown }));
+        out.push({ row: { ...row, ownerGen: gen, leaseUntil: now + leaseMs, phase: "live" }, lastStep, inbox, jobs });
+      }
+    });
+    return out;
+  }
+
+  async listLive(): Promise<LiveRunRow[]> {
+    return this.sql.exec<LiveRow>(`SELECT * FROM live_runs ORDER BY started_at ASC`).toArray().map(rowToLive);
   }
 
   // ---- policy ---------------------------------------------------------------
@@ -1123,6 +1454,21 @@ export class RunHistoryDO extends DurableObject<Env> {
   ): Promise<{ ok: true; retained: number; stored: boolean; rewritten: boolean }> {
     let result = { ok: true as const, retained: 0, stored: false, rewritten: false };
     this.ctx.storage.transactionSync(() => {
+      result = this.upsertInTransaction(record, proposal);
+    });
+    if ((await this.ctx.storage.getAlarm()) === null)
+      await this.ctx.storage.setAlarm(Date.now() + RUN_SWEEP_INTERVAL_MS);
+    return result;
+  }
+
+  /** The body of `put`, for a caller already inside `transactionSync` — the
+   *  ledger's `finish` writes the finished record and deletes the live rows in
+   *  ONE transaction (run-history item 33), so this cannot open its own. */
+  private upsertInTransaction(
+    record: RunRecord,
+    proposal?: RunPolicyProposal,
+  ): { ok: true; retained: number; stored: boolean; rewritten: boolean } {
+    {
       const now = Date.now();
       const policy = proposal ? this.applyProposal(proposal, now).policy : this.policyState().policy;
       const finishedAt = Math.min(record.finishedAt, now + RUN_MAX_FUTURE_MS);
@@ -1188,16 +1534,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       // The just-written row is either kept or was deleted by the trim (it is
       // always `first`), so kept membership IS whether it is still stored.
       const { kept } = this.trim(policy, now, RUN_TRIM_FENCE, record.id);
-      result = {
-        ok: true,
+      return {
+        ok: true as const,
         retained: kept.size,
         stored: kept.has(record.id),
         rewritten: existing !== undefined && !unchanged,
       };
-    });
-    if ((await this.ctx.storage.getAlarm()) === null)
-      await this.ctx.storage.setAlarm(Date.now() + RUN_SWEEP_INTERVAL_MS);
-    return result;
+    }
   }
 
   /** Remove a run and its events. Returns whether a run row existed. */
@@ -1745,10 +2088,353 @@ function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 }
 
+// ---------------------------------------------------------------------------
+// Live-run transcripts (run-history item 32)
+// ---------------------------------------------------------------------------
+
+/** One object per LIVE run, named by run id: the raw transcript a resumed run
+ *  continues from, one row per content part (never near the 2 MB row limit),
+ *  attachments over the reference threshold stored once. Fenced by its own
+ *  `owner` row — set at claim, replaced by reclaim — because this object and
+ *  the history object commit independently, and a zombie generation whose
+ *  history write is about to be refused must not land transcript rows either. */
+export class RunTranscriptDO extends DurableObject<Env> {
+  private readonly sql: SqlStorage;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS owner (k INTEGER PRIMARY KEY CHECK (k = 1), gen TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS run_messages (
+        idx INTEGER NOT NULL,
+        part INTEGER NOT NULL,
+        json TEXT NOT NULL,
+        PRIMARY KEY (idx, part)
+      );
+      CREATE TABLE IF NOT EXISTS attachments (
+        ref TEXT PRIMARY KEY,
+        media_type TEXT NOT NULL,
+        data TEXT NOT NULL
+      );
+    `);
+  }
+
+  async setOwner(gen: string): Promise<{ ok: true }> {
+    this.sql.exec(`INSERT INTO owner (k, gen) VALUES (1, ?) ON CONFLICT(k) DO UPDATE SET gen = excluded.gen`, gen);
+    return { ok: true };
+  }
+
+  private owner(): string | undefined {
+    return this.sql.exec<{ gen: string }>(`SELECT gen FROM owner WHERE k = 1`).toArray()[0]?.gen;
+  }
+
+  async write(gen: string, rows: TranscriptRow[], attachments: TranscriptAttachment[]): Promise<FenceResult> {
+    let out: FenceResult = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      const owner = this.owner();
+      if (owner === undefined) {
+        out = { ok: false, reason: "unknown-run" };
+        return;
+      }
+      if (owner !== gen) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      for (const a of attachments) {
+        this.sql.exec(
+          `INSERT OR REPLACE INTO attachments (ref, media_type, data) VALUES (?, ?, ?)`,
+          a.ref,
+          a.mediaType,
+          a.data,
+        );
+      }
+      for (const r of rows) {
+        this.sql.exec(`INSERT OR REPLACE INTO run_messages (idx, part, json) VALUES (?, ?, ?)`, r.idx, r.part, r.json);
+      }
+    });
+    return out;
+  }
+
+  async read(): Promise<{ rows: TranscriptRow[]; attachments: TranscriptAttachment[] }> {
+    const rows = this.sql
+      .exec<{ idx: number; part: number; json: string }>(`SELECT idx, part, json FROM run_messages ORDER BY idx, part`)
+      .toArray();
+    const attachments = this.sql
+      .exec<{ ref: string; media_type: string; data: string }>(`SELECT ref, media_type, data FROM attachments`)
+      .toArray()
+      .map((a) => ({ ref: a.ref, mediaType: a.media_type, data: a.data }));
+    return { rows, attachments };
+  }
+
+  async clear(): Promise<{ ok: true }> {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(`DELETE FROM run_messages`);
+      this.sql.exec(`DELETE FROM attachments`);
+      this.sql.exec(`DELETE FROM owner`);
+    });
+    return { ok: true };
+  }
+}
+
+const LEDGER_ROUTES = new Set([
+  "/runs/claim",
+  "/runs/heartbeat",
+  "/runs/append",
+  "/runs/step",
+  "/runs/state",
+  "/runs/inbox",
+  "/runs/stop",
+  "/runs/handoff",
+  "/runs/finishing",
+  "/runs/finish",
+  "/runs/reclaim",
+  "/runs/live",
+  "/runs/transcript/owner",
+  "/runs/transcript/write",
+  "/runs/transcript/read",
+  "/runs/transcript/clear",
+]);
+
+/** Routes whose bodies may carry a record, a transcript chunk, or an event batch. */
+const WIDE_BODY_ROUTES = new Set(["/runs/put", "/runs/finish", "/runs/append", "/runs/transcript/write"]);
+
+const gen = (v: unknown): Validated<string> =>
+  typeof v === "string" && GEN_PATTERN.test(v)
+    ? { ok: true, value: v }
+    : invalid("gen must match the generation pattern");
+
+function parseLeaseMs(v: unknown): Validated<number> {
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1_000 || v > 3_600_000) {
+    return invalid("leaseMs must be an integer between 1000 and 3600000");
+  }
+  return { ok: true, value: v };
+}
+
+function parseClaim(b: Record<string, unknown>): Validated<ClaimRequest> {
+  const run = b.run;
+  if (typeof run !== "object" || run === null) return invalid("run must be an object");
+  const r = run as Record<string, unknown>;
+  const runId = parseRunId(r.runId);
+  if (!runId.ok) return runId;
+  const g = gen(r.gen);
+  if (!g.ok) return g;
+  const lease = parseLeaseMs(r.leaseMs);
+  if (!lease.ok) return lease;
+  if (typeof r.threadKey !== "string" || r.threadKey.length === 0 || r.threadKey.length > 256) {
+    return invalid("run.threadKey must be a non-empty string");
+  }
+  if (typeof r.startedAt !== "number" || !Number.isFinite(r.startedAt))
+    return invalid("run.startedAt must be a number");
+  if (typeof r.meta !== "object" || r.meta === null) return invalid("run.meta must be an object");
+  if (typeof r.system !== "string") return invalid("run.system must be a string");
+  if (!Array.isArray(r.tools)) return invalid("run.tools must be an array");
+  if (r.card !== undefined && r.card !== null) {
+    const c = r.card as Record<string, unknown>;
+    if (typeof c.channel !== "string" || typeof c.ts !== "string") return invalid("run.card must be {channel, ts}");
+  }
+  if (r.state !== undefined && (typeof r.state !== "object" || r.state === null))
+    return invalid("run.state must be an object");
+  return {
+    ok: true,
+    value: {
+      runId: runId.value,
+      threadKey: r.threadKey,
+      gen: g.value,
+      leaseMs: lease.value,
+      startedAt: r.startedAt,
+      meta: r.meta as ClaimRequest["meta"],
+      card: (r.card as ClaimRequest["card"]) ?? null,
+      system: r.system,
+      tools: r.tools as ClaimRequest["tools"],
+      ...(r.state ? { state: r.state as RunState } : {}),
+    },
+  };
+}
+
+function parseStep(v: unknown): Validated<StepRecord> {
+  if (typeof v !== "object" || v === null) return invalid("record must be an object");
+  const s = v as Record<string, unknown>;
+  for (const k of ["step", "seq", "turnIndex", "inboxConsumedSeq", "remainingMs", "turn", "iteration"] as const) {
+    if (typeof s[k] !== "number" || !Number.isInteger(s[k]) || (s[k] as number) < 0) {
+      return invalid(`record.${k} must be a non-negative integer`);
+    }
+  }
+  if (!Array.isArray(s.inFlight)) return invalid("record.inFlight must be an array");
+  for (const c of s.inFlight) {
+    const call = c as Record<string, unknown>;
+    if (typeof call?.callId !== "string" || typeof call?.tool !== "string")
+      return invalid("record.inFlight entries must be {callId, tool}");
+  }
+  return { ok: true, value: s as unknown as StepRecord };
+}
+
+function parseTranscriptRows(v: unknown): Validated<TranscriptRow[]> {
+  if (!Array.isArray(v)) return invalid("rows must be an array");
+  for (const r of v) {
+    const row = r as Record<string, unknown>;
+    if (
+      typeof row?.idx !== "number" ||
+      !Number.isInteger(row.idx) ||
+      row.idx < 0 ||
+      typeof row?.part !== "number" ||
+      !Number.isInteger(row.part) ||
+      row.part < 0 ||
+      typeof row?.json !== "string"
+    ) {
+      return invalid("rows entries must be {idx, part, json}");
+    }
+  }
+  return { ok: true, value: v as TranscriptRow[] };
+}
+
+function parseAttachments(v: unknown): Validated<TranscriptAttachment[]> {
+  if (!Array.isArray(v)) return invalid("attachments must be an array");
+  for (const a of v) {
+    const att = a as Record<string, unknown>;
+    if (typeof att?.ref !== "string" || typeof att?.mediaType !== "string" || typeof att?.data !== "string") {
+      return invalid("attachments entries must be {ref, mediaType, data}");
+    }
+  }
+  return { ok: true, value: v as TranscriptAttachment[] };
+}
+
+/** The ledger routes (run-history items 28–34). Bodies are validated before
+ *  any object call; fenced answers are 409 with the reason; observability
+ *  lines carry ids and counts only. */
+async function handleLedger(pathname: string, body: unknown, env: Env): Promise<Response> {
+  if (typeof body !== "object" || body === null) return json({ error: "body must be a JSON object" }, 400);
+  const b = body as Record<string, unknown>;
+  const fenced = (r: FenceResult) => (r.ok ? json(r) : json(r, 409));
+
+  if (pathname.startsWith("/runs/transcript/")) {
+    const runId = parseRunId(b.runId);
+    if (!runId.ok) return json({ error: runId.error }, 400);
+    const stub = env.RUN_TRANSCRIPTS.get(env.RUN_TRANSCRIPTS.idFromName(runId.value));
+    if (pathname === "/runs/transcript/owner") {
+      const g = gen(b.gen);
+      if (!g.ok) return json({ error: g.error }, 400);
+      return json(await stub.setOwner(g.value));
+    }
+    if (pathname === "/runs/transcript/write") {
+      const g = gen(b.gen);
+      if (!g.ok) return json({ error: g.error }, 400);
+      const rows = parseTranscriptRows(b.rows);
+      if (!rows.ok) return json({ error: rows.error }, 400);
+      const attachments = parseAttachments(b.attachments);
+      if (!attachments.ok) return json({ error: attachments.error }, 400);
+      const r = await stub.write(g.value, rows.value, attachments.value);
+      console.log(
+        `[runs/transcript/write] ${runId.value} <- ${rows.value.length} row(s), ${attachments.value.length} attachment(s), ok=${r.ok}`,
+      );
+      return fenced(r);
+    }
+    if (pathname === "/runs/transcript/read") return json(await stub.read());
+    return json(await stub.clear());
+  }
+
+  const key = parseStoreKey(b);
+  if (!key.ok) return json({ error: key.error }, 400);
+  const stub = env.RUNS.get(env.RUNS.idFromName(key.value));
+  const now = Date.now();
+
+  if (pathname === "/runs/claim") {
+    const req = parseClaim(b);
+    if (!req.ok) return json({ error: req.error }, 400);
+    const r = await stub.claim(req.value, now);
+    console.log(
+      `[runs/claim] ${key.value} ${req.value.runId} on ${req.value.threadKey} → ${r.ok ? "claimed" : r.reason}`,
+    );
+    return r.ok ? json(r) : json(r, 409);
+  }
+  if (pathname === "/runs/live") return json({ runs: await stub.listLive() });
+  if (pathname === "/runs/reclaim") {
+    const g = gen(b.gen);
+    if (!g.ok) return json({ error: g.error }, 400);
+    const lease = parseLeaseMs(b.leaseMs);
+    if (!lease.ok) return json({ error: lease.error }, 400);
+    const at = typeof b.now === "number" && Number.isFinite(b.now) ? b.now : now;
+    // The RPC type mapping reads the row's open-ended JSON fields as
+    // unserializable; the values are plain JSON, so the cast only restores the
+    // declared shape.
+    const runs = (await stub.reclaim(g.value, at, lease.value)) as unknown as ReclaimedRun[];
+    console.log(`[runs/reclaim] ${key.value} ${g.value} took ${runs.length} run(s)`);
+    return json({ runs });
+  }
+  if (pathname === "/runs/handoff") {
+    const g = gen(b.gen);
+    if (!g.ok) return json({ error: g.error }, 400);
+    const ids: unknown[] = Array.isArray(b.runIds) ? b.runIds : [];
+    if (!Array.isArray(b.runIds) || !ids.every((id) => typeof id === "string" && RUN_ID_PATTERN.test(id))) {
+      return json({ error: "runIds must be an array of run ids" }, 400);
+    }
+    const runIds = ids as string[];
+    const r = await stub.handoff(g.value, runIds);
+    console.log(`[runs/handoff] ${key.value} ${g.value} marked ${r.marked.length}/${runIds.length}`);
+    return json(r);
+  }
+
+  const runId = parseRunId(b.runId);
+  if (!runId.ok) return json({ error: runId.error }, 400);
+  if (pathname === "/runs/inbox") {
+    if (typeof b.message !== "object" || b.message === null) return json({ error: "message must be an object" }, 400);
+    return json(await stub.pushInbox(runId.value, b.message as Record<string, unknown>));
+  }
+  if (pathname === "/runs/stop") {
+    if (b.mode !== "soft" && b.mode !== "hard") return json({ error: "mode must be soft or hard" }, 400);
+    return json(await stub.requestStop(runId.value, b.mode, now));
+  }
+
+  const g = gen(b.gen);
+  if (!g.ok) return json({ error: g.error }, 400);
+  if (pathname === "/runs/heartbeat") {
+    const lease = parseLeaseMs(b.leaseMs);
+    if (!lease.ok) return json({ error: lease.error }, 400);
+    const r = await stub.heartbeat(runId.value, g.value, lease.value, now);
+    return r.ok ? json(r) : json(r, 409);
+  }
+  if (pathname === "/runs/append") {
+    if (!Array.isArray(b.events)) return json({ error: "events must be an array" }, 400);
+    const events: Array<{ seq: number; json: string }> = [];
+    for (const e of b.events) {
+      const ev = e as Record<string, unknown>;
+      if (typeof ev?.seq !== "number" || !Number.isInteger(ev.seq) || ev.seq < 1)
+        return json({ error: "every event needs an integer seq ≥ 1" }, 400);
+      const text = JSON.stringify(e);
+      if (utf8ByteLength(text) > MAX_EVENT_BYTES)
+        return json({ error: `event ${ev.seq} exceeds ${MAX_EVENT_BYTES} bytes` }, 400);
+      events.push({ seq: ev.seq, json: text });
+    }
+    const r = await stub.appendEvents(runId.value, g.value, events);
+    console.log(`[runs/append] ${key.value} ${runId.value} <- ${events.length} event(s), ok=${r.ok}`);
+    return fenced(r);
+  }
+  if (pathname === "/runs/step") {
+    const record = parseStep(b.record);
+    if (!record.ok) return json({ error: record.error }, 400);
+    return fenced(await stub.recordStep(runId.value, g.value, record.value));
+  }
+  if (pathname === "/runs/state") {
+    if (typeof b.state !== "object" || b.state === null) return json({ error: "state must be an object" }, 400);
+    return fenced(await stub.setState(runId.value, g.value, b.state as RunState));
+  }
+  if (pathname === "/runs/finishing") return fenced(await stub.finishing(runId.value, g.value));
+  if (pathname === "/runs/finish") {
+    const parsed = parseRunPut({ ...b, storeKey: key.value });
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    if (parsed.value.record.id !== runId.value) return json({ error: "record.id must equal runId" }, 400);
+    const r = await stub.finish(runId.value, g.value, parsed.value.record, parsed.value.proposal);
+    console.log(`[runs/finish] ${key.value} ${runId.value} ok=${r.ok}${r.ok ? ` stored=${r.stored}` : ` ${r.reason}`}`);
+    return r.ok ? json(r) : json(r, 409);
+  }
+  return json({ error: "not found" }, 404);
+}
+
 /** The `/runs/*` routes (#157). Observability lines carry ids + counts only —
  *  never event text. A bad `id` is 400 before any DO call (R4). */
 async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Response> {
   const stub = (key: string) => env.RUNS.get(env.RUNS.idFromName(key));
+  if (LEDGER_ROUTES.has(pathname)) return handleLedger(pathname, body, env);
   if (pathname === "/runs/put") {
     const parsed = parseRunPut(body);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
@@ -1821,6 +2507,7 @@ export default {
       "/runs/list",
       "/runs/events",
       "/runs/delete",
+      ...LEDGER_ROUTES,
     ]);
     if (!ROUTES.has(url.pathname)) return json({ error: "not found" }, 404);
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
@@ -1840,7 +2527,9 @@ export default {
     if (header === null || !/^\d+$/.test(header.trim())) {
       return json({ error: "body must declare a numeric Content-Length" }, 411);
     }
-    const maxBodyBytes = url.pathname === "/runs/put" ? MAX_RUN_PUT_BODY_BYTES : MAX_BODY_BYTES;
+    // The ledger's bulk routes carry a finished record, a transcript chunk, or
+    // an event batch (32 × 64 KiB) and share /runs/put's fence.
+    const maxBodyBytes = WIDE_BODY_ROUTES.has(url.pathname) ? MAX_RUN_PUT_BODY_BYTES : MAX_BODY_BYTES;
     if (Number(header) > maxBodyBytes) {
       return json({ error: `body must be at most ${maxBodyBytes} bytes` }, 413);
     }
