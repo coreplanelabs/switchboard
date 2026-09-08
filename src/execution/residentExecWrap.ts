@@ -1,4 +1,4 @@
-// Source-side output capping for resident thread commands (#356 item 8).
+// Source-side output capping for resident thread commands.
 //
 // The resident DO used to collect a command's ENTIRE stdout/stderr through the
 // sandbox RPC (`proc.output()`) and only then slice to the per-stream cap — a
@@ -6,7 +6,7 @@
 // before truncation, which is an OOM (→ `runtime-replaced` mid-run) waiting to
 // happen. This wrapper bounds the streams INSIDE the container: the command's
 // full output goes to two temp files on the container disk (disk is a cache
-// and is recycled freely — KTD3), and only the capped head of each crosses the
+// and is recycled freely), and only the capped head of each crosses the
 // RPC.
 //
 // Contract preserved exactly:
@@ -27,7 +27,7 @@
 //   returned whatever streamed pre-kill; with mktemp-only paths a timeout
 //   would return nothing at all). Recoverable mode deliberately sets NO EXIT
 //   trap — bash runs EXIT traps when TERM ends it, and a cleanup trap deleted
-//   the files before recovery could read them (live 2026-08-30);
+//   the files before recovery could read them;
 // - `mktemp` failing (disk full) exits 125 before the command runs — legible,
 //   and a full disk would have failed the command anyway.
 
@@ -69,8 +69,8 @@ export function capWrappedCommand(
     // Recoverable (fixed-file) mode sets NO trap, deliberately: the sandbox
     // SDK's timeout kill is TERM-based, and bash runs EXIT traps when TERM
     // ends it — a cleanup trap deleted the files BEFORE the caller's recovery
-    // leg could salvage them (live 2026-08-30: prod salvage returned empty
-    // while the SIGKILL-based test stayed green). Cleanup in this mode is the
+    // leg could salvage them (a salvage under a TERM kill returned empty
+    // while a SIGKILL-based test stayed green). Cleanup in this mode is the
     // explicit rm after the heads (normal completion) or the recovery command
     // (any kill). mktemp mode has no recovery reader, so the trap remains the
     // right tool there.

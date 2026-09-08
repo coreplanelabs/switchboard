@@ -15,7 +15,7 @@ import {
 // recycles its (cache) disk once nothing live would be lost.
 
 describe("isDiskFullMessage — the errno wording tools print when the disk is full", () => {
-  it("the SDK's writeFile error (the 2026-09-04 refresh reason) and git's own ENOSPC wording", () => {
+  it("the SDK's writeFile error (the refresh reason a full disk produces) and git's own ENOSPC wording", () => {
     expect(
       isDiskFullMessage(
         "Failed to write file '/workspace/.resident/git-credentials': ENOSPC: no space left on device, write '/workspace/.resident/git-credentials'",

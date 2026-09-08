@@ -359,9 +359,9 @@ export class RestGithubApi implements GithubApi {
     const body = (await gql.json()) as { errors?: Array<{ message?: string; type?: string }> };
     if (body.errors?.length) {
       const msg = body.errors.map((e) => e.message ?? e.type ?? "error").join("; ");
-      // Live 2026-09-03: an App installation gets "Viewer not authorized to
-      // delete" — GitHub lets only a repo admin's USER credential delete an
-      // issue. The tool words that for the model (github.ts).
+      // An App installation gets "Viewer not authorized to delete" (no `type`)
+      // — GitHub lets only a repo admin's USER credential delete an issue. The
+      // tool words that for the model (github.ts).
       const forbidden = body.errors.some(
         (e) => e.type === "FORBIDDEN" || /permission|not accessible|not authorized/i.test(e.message ?? ""),
       );

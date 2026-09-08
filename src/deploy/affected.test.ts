@@ -217,7 +217,7 @@ describe("classifyPath", () => {
       ".prettierrc.json",
       ".prettierignore",
       "eslint.config.mjs",
-      // One root lockfile since #496: a per-workspace one in a diff is the retired file disappearing.
+      // One root lockfile: a per-workspace one in a diff is the retired file disappearing.
       "deploy/cloudflare-resident/package-lock.json",
       "web/package-lock.json",
       "docs/package-lock.json",

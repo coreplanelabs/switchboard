@@ -356,7 +356,7 @@ describe("parseAccessConfig", () => {
   });
 });
 
-// --- Service tokens (KTD13) -------------------------------------------------
+// --- Service tokens ---------------------------------------------------------
 
 describe("verifyAccessJwt — Cloudflare Access service tokens", () => {
   it("accepts an empty sub + non-empty common_name as a service-token identity", async () => {

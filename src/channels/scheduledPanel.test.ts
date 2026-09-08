@@ -4,7 +4,7 @@ import type { RunSummary } from "../core/runRegistry.js";
 import type { ScheduleDef, ScheduleFiring } from "../core/schedules.js";
 
 /** A registry-shaped fixture: the panel tests must not depend on the production
- *  registry's cron values (which move for live receipts, e.g. #197 / #244). */
+ *  registry's cron values (which move whenever a schedule is retimed). */
 export const FIXTURE_SCHEDULES: readonly ScheduleDef[] = [
   {
     name: "keep-alive",
@@ -36,7 +36,7 @@ export const FIXTURE_SCHEDULES: readonly ScheduleDef[] = [
 ];
 import { buildScheduledRows, firingDetailSummary, formatRelative, type FiringsState } from "./scheduledPanel.js";
 
-// Feature: features/live-view.md item 14 (#244): the /runs "Scheduled" panel —
+// Feature: features/live-view.md item 14: the /runs "Scheduled" panel —
 // what is armed, next fire (computed), last fire + outcome, link to the run.
 // Rendering lives in web/src/pages/ScheduledPage.vue (tested there); these
 // tests own the pure row model both sides share.

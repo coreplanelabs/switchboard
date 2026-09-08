@@ -1,9 +1,9 @@
-// Catch-up observability (#271, features/slack-channel.md item 7). Live
-// 2026-08-30 the reconnect catch-up was a silent no-op for hours: the bot
-// token lacked `channels:read`/`groups:read`, `users.conversations` answered
-// `missing_scope`, the runner logged one line to container stdout — which is
-// not in Workers Logs — and returned. Nothing else showed it. This module is
-// the ONE place the last outcome and the token's missing scopes are kept so
+// Catch-up observability (features/slack-channel.md item 7). Without it the
+// reconnect catch-up can be a silent no-op indefinitely: a bot token that
+// lacks `channels:read`/`groups:read` gets `missing_scope` from
+// `users.conversations`, the runner logs one line to container stdout — which
+// is not queryable off-box — and returns. Nothing else shows it. This module
+// is the ONE place the last outcome and the token's missing scopes are kept so
 // `GET /healthz` (src/channels/health.ts) can report them and the deploy
 // preflight can warn.
 //

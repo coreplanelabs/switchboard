@@ -28,7 +28,7 @@ export class AnthropicProvider implements Provider {
     // Stream to avoid HTTP timeouts on large max_tokens; collect the final message.
     const stream = this.client.messages.stream(
       buildAnthropicParams(req),
-      // A hard run stop (#101) aborts the stream mid-flight instead of letting
+      // A hard run stop aborts the stream mid-flight instead of letting
       // it run to completion in the background.
       req.signal ? { signal: req.signal } : undefined,
     );

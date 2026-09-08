@@ -12,7 +12,7 @@ import {
   threadDepsMechanism,
 } from "./residentDepCache.js";
 
-describe("depCacheMaterialization (KTD7 dep/build cache, per directory)", () => {
+describe("depCacheMaterialization (dep/build cache, per directory)", () => {
   it("node_modules is hardlinked: shared read-only inodes, consumed never rewritten", () => {
     expect(depCacheMaterialization("node_modules")).toBe("hardlink");
   });
@@ -65,11 +65,11 @@ describe("mutableCachePaths (tool-managed paths inside a hardlinked node_modules
       `${ROOT}/.package-lock.json`,
     ]);
   });
-  // 2026-09-05: the nominal resident (a pnpm workspace) took ~190 s per fresh
-  // attach and every thread tree cost 2.6 GB of real disk — `.pnpm`, pnpm's
-  // virtual store holding ALL package content, is a top-level dot entry and
-  // was being swapped for a plain copy, undoing the hardlink sharing for 100%
-  // of the dependency bytes (and filling the old 8 GB disk with one thread).
+  // A pnpm workspace's resident took minutes per fresh attach and every thread
+  // tree cost gigabytes of real disk — `.pnpm`, pnpm's virtual store holding
+  // ALL package content, is a top-level dot entry and was being swapped for a
+  // plain copy, undoing the hardlink sharing for 100% of the dependency bytes
+  // (one thread could fill the disk).
   it("pnpm's `.pnpm` store is package content, never a cache: it stays hardlinked, while a `.cache` nested inside it is still copied", () => {
     const listing = [
       `${ROOT}/.pnpm`,
@@ -124,7 +124,7 @@ describe("mutableCachePaths (tool-managed paths inside a hardlinked node_modules
   });
 });
 
-describe("depCacheScript with a store-backed node_modules source (#555 item 59)", () => {
+describe("depCacheScript with a store-backed node_modules source (item 59)", () => {
   const script = depCacheScript("/workspace/checkout", "/wt", "worker4", {
     nodeModulesSrc: "/workspace/deps/" + "a".repeat(64) + "/node_modules",
   });
@@ -141,7 +141,7 @@ describe("depCacheScript with a store-backed node_modules source (#555 item 59)"
   });
 });
 
-describe("depCacheScript (#356 item 4: all five dirs in ONE fork, tagged output)", () => {
+describe("depCacheScript (all five dirs in ONE fork, tagged output)", () => {
   const script = depCacheScript("/workspace/checkout", "/wt", "worker4");
   it("handles every cached dir, each gated on src-exists and dst-absent exactly like the old per-dir spawns", () => {
     for (const dir of DEP_CACHE_DIRS) {
@@ -234,11 +234,11 @@ describe("mutableCacheSwapScript (the per-path rm/cp/chown swaps in ONE fork)", 
 });
 
 describe("planThreadDeps (a lockfile-diverged thread reconciles ON TOP of the shared cache, never from an empty tree)", () => {
-  // Live 2026-09-07 (#552 + the 21:38 disk-pressure refusal): a thread whose
-  // committed lockfile differed from the warm checkout's key ran `npm install`
-  // from nothing — 1.94 GiB projected, 5+ min on the 1 vCPU shared with the
-  // refresh cycle — and the bot's /attach died first. Seeding the tree from the
-  // checkout's hardlinked node_modules first turns that into a delta install.
+  // A thread whose committed lockfile differs from the warm checkout's key used
+  // to run `npm install` from nothing — gigabytes projected, minutes on the
+  // 1 vCPU shared with the refresh cycle — and the bot's /attach died first.
+  // Seeding the tree from the checkout's hardlinked node_modules first turns
+  // that into a delta install.
   it("a reused tree (node_modules already present) is left alone", () => {
     expect(planThreadDeps({ hasDeps: true, threadLockKey: "a", warmLockKey: "a", installCmd: "npm ci" })).toEqual({
       seed: false,

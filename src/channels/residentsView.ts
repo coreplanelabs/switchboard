@@ -9,7 +9,7 @@ import { WEB_HTML_HEADERS } from "./webShell.js";
 // and why, what commit/lockfile they are warm on, snapshot stamps, schedules,
 // and the command table — with a per-repo detail page. It is the browser
 // twin of the `repo list` chat command and reads the SAME admin `/residents`
-// route on EVERY request (KTD9: membership is never cached by the bot).
+// route on EVERY request (membership is never cached by the bot).
 //
 // Auth: like the runs index, this surface has no token of its own — Cloudflare
 // Access is the "who" gate in front of `/residents*`, re-verified fail-closed

@@ -12,10 +12,10 @@ import {
 
 // Feature: features/execution.md item 2 — one in-flight exec never outlives
 // the container's activity timeout. The Container base class renews its
-// activity clock once per proxied fetch, BEFORE the fetch; a 20-minute
-// command therefore expired the clock at 20:00 exactly and the alarm loop
-// SIGTERMed the container under it (2026-09-07, the #521 review's first
-// command). The keepalive renews the clock every minute while a command
+// activity clock once per proxied fetch, BEFORE the fetch; a command longer
+// than sleepAfter therefore expires the clock at exactly sleepAfter and the
+// alarm loop SIGTERMs the container under it. The keepalive renews the clock
+// every minute while a command
 // runs, which turns sleepAfter into a pure idle timeout.
 
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -137,7 +137,7 @@ describe("recycledMidCommandMessage", () => {
     );
   });
 
-  // #569: the Worker's one-shot heal of a legacy-image container calls
+  // The Worker's one-shot heal of a legacy-image container calls
   // `destroy()`; a command concurrently pending on the same Durable Object is
   // disconnected with this text — the container really is gone.
   it("recognizes the destroy-time disconnect text as a recycle", () => {
@@ -202,7 +202,7 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).toContain("isFleetBusyError(");
   });
 
-  // #447: the credential rides in the SDK's per-exec `env` option, so it never
+  // The credential rides in the SDK's per-exec `env` option, so it never
   // appears in the command text the SDK logs. The 0.3.x base64 export prefix
   // put the live GH_TOKEN into every "Command executed" log line.
   it("the credential goes through the exec env option, never through the command text", () => {
@@ -211,13 +211,11 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).not.toContain("btoa(");
   });
 
-  // #447, the last channel retired: Workers Logs record an invocation's
-  // request headers (redacted by a name heuristic only — the probe header was
-  // logged in clear on 2026-09-07), not its body. The Worker reads the env map
-  // from the body alone through ONE helper, and the executor sends it in the
-  // body alone — neither source names the header channel any more. The one-
-  // release header fallback (#597) that carried a body-only bot against a
-  // header-only Worker is gone now the body reader is live everywhere (#447).
+  // Workers Logs record an invocation's request headers (redacted by a name
+  // heuristic only, so a header not named like a token is logged in clear),
+  // not its body. The Worker reads the env map from the body alone through ONE
+  // helper, and the executor sends it in the body alone — neither source names
+  // the header channel.
   it("the Worker reads the env map through envFromRequest and names no x-env header channel", () => {
     expect(worker).toMatch(/const envVars\s*=\s*envFromRequest\(/);
     expect(worker).not.toMatch(/x-env-/i);
@@ -230,7 +228,7 @@ describe("sandbox Worker wiring (static)", () => {
     expect(executor).not.toMatch(/x-env-/i);
   });
 
-  // #569 (features/execution.md items 3 and 6): a failure text is never
+  // features/execution.md items 3 and 6: a failure text is never
   // empty, and a container on a previous image is named and healed. Both
   // Worker catches go through `thrownText`; the bare `shape.message ??
   // String(err)` that kept the SDK's "" is gone.

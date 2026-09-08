@@ -1,5 +1,5 @@
 import { systemClock } from "../core/trace/clock.js";
-// Socket-state observability (companion to slackCatchUpStatus.ts, #271
+// Socket-state observability (companion to slackCatchUpStatus.ts, same
 // pattern). The HTTP server starts BEFORE the Slack Socket Mode handshake
 // (src/index.ts), so there is a real window where `/healthz` answers while the
 // bot cannot hear Slack — and a socket that silently dies leaves the same

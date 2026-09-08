@@ -140,7 +140,7 @@ describe("classifyMessage (trigger gating)", () => {
 // never a section: Slack folds a section's mrkdwn behind "Show more" at five
 // rendered lines and re-renders a folded card expanded-then-collapsed on every
 // edit, so a section-bodied card makes the whole thread jump on each heartbeat
-// (measured live 2026-08-30; see the render() doc comment). rich_text `text`
+// (measured against the live client; see the render() doc comment). rich_text `text`
 // elements are also literal, so untrusted detail cannot smuggle a <!channel>.
 describe("render (status card rich_text body)", () => {
   type ContextBlock = { type: string; elements: { text: string }[] };
@@ -227,7 +227,7 @@ describe("threadIncludesBot (participation, re-derived from history)", () => {
     expect(
       threadIncludesBot(
         [
-          { user: "U1", text: "q" },
+          { user: "UA", text: "q" },
           { user: BOT, text: "a" },
         ],
         BOT,
@@ -236,11 +236,11 @@ describe("threadIncludesBot (participation, re-derived from history)", () => {
   });
 
   it("true when the bot was mentioned anywhere in the thread", () => {
-    expect(threadIncludesBot([{ user: "U1", text: `<@${BOT}> help` }], BOT)).toBe(true);
+    expect(threadIncludesBot([{ user: "UA", text: `<@${BOT}> help` }], BOT)).toBe(true);
   });
 
   it("false otherwise, and false without a bot user id", () => {
-    expect(threadIncludesBot([{ user: "U1", text: "just people talking" }], BOT)).toBe(false);
+    expect(threadIncludesBot([{ user: "UA", text: "just people talking" }], BOT)).toBe(false);
     expect(threadIncludesBot([{ user: BOT, text: "a" }], undefined)).toBe(false);
   });
 });
@@ -260,63 +260,60 @@ describe("stripMention — Slack app 'Sent using' footer", () => {
   // Slack plugin) carry a trailing "*Sent using* <@APP|Name>" line. It is
   // platform chrome, not user text: a `repo onboard owner/name` followed by it
   // must parse exactly like the bare command.
-  // Regression (2026-08-29, live, raw event text): the plugin's footer arrives
-  // on the SAME line as the command — `<@BOT> friction report *Sent using*
-  // <@U0BJJMDUCKY>` — so a line-anchored regex never matched and `*Sent`
-  // reached the parser (`Unknown option \`*Sent\``). `repo list` had masked
-  // this for months because it ignores trailing text.
+  // The raw event text carries the footer on the SAME line as the command —
+  // `<@BOT> friction report *Sent using* <@APP>` — so a line-anchored regex
+  // never matches and `*Sent` reaches the parser (`Unknown option \`*Sent\``).
+  // `repo list` masks this because it ignores trailing text.
   it("drops a same-line trailing footer (the shape Slack actually delivers)", () => {
-    expect(stripMention(`<@${BOT}> friction report *Sent using* <@U0BJJMDUCKY>`, BOT)).toBe("friction report");
-    expect(
-      stripMention(`<@${BOT}> repo onboard acme/api test="npm test" *Sent using* <@U0BJJMDUCKY|Claude>`, BOT),
-    ).toBe('repo onboard acme/api test="npm test"');
+    expect(stripMention(`<@${BOT}> friction report *Sent using* <@UAPPFOOTER>`, BOT)).toBe("friction report");
+    expect(stripMention(`<@${BOT}> repo onboard acme/api test="npm test" *Sent using* <@UAPPFOOTER|Claude>`, BOT)).toBe(
+      'repo onboard acme/api test="npm test"',
+    );
     // Still anchored to the END: the phrase mid-text is the user's own words.
-    expect(stripMention(`<@${BOT}> why does *Sent using* <@U0BJJMDUCKY> appear in my messages?`, BOT)).toBe(
-      "why does *Sent using* <@U0BJJMDUCKY> appear in my messages?",
+    expect(stripMention(`<@${BOT}> why does *Sent using* <@UAPPFOOTER> appear in my messages?`, BOT)).toBe(
+      "why does *Sent using* <@UAPPFOOTER> appear in my messages?",
     );
   });
 
   it("drops the footer when a bracketed sender attribution follows the mention", () => {
     expect(
-      stripMention(`<@${BOT}> friction report\n*Sent using* <@U0BJJMDUCKY|Claude> [justin <justin@coreplane.ai>]`, BOT),
+      stripMention(`<@${BOT}> friction report\n*Sent using* <@UAPPFOOTER|Claude> [ada <ada@example.com>]`, BOT),
     ).toBe("friction report");
-    expect(stripMention(`<@${BOT}> repo list\nSent using <@U0BJJMDUCKY> [Justin Helmer]`, BOT)).toBe("repo list");
+    expect(stripMention(`<@${BOT}> repo list\nSent using <@UAPPFOOTER> [Ada Lovelace]`, BOT)).toBe("repo list");
     // Attribution text is never treated as the footer on its own.
-    expect(stripMention(`<@${BOT}> hello [justin <justin@coreplane.ai>]`, BOT)).toBe(
-      "hello [justin <justin@coreplane.ai>]",
-    );
+    expect(stripMention(`<@${BOT}> hello [ada <ada@example.com>]`, BOT)).toBe("hello [ada <ada@example.com>]");
   });
 
   it("drops a trailing '*Sent using* <@APP|Name>' footer line", () => {
-    expect(
-      stripMention(`<@${BOT}> repo onboard coreplanelabs/switchboard\n*Sent using* <@U0BJJMDUCKY|Claude>`, BOT),
-    ).toBe("repo onboard coreplanelabs/switchboard");
+    expect(stripMention(`<@${BOT}> repo onboard acme/api\n*Sent using* <@UAPPFOOTER|Claude>`, BOT)).toBe(
+      "repo onboard acme/api",
+    );
   });
 
   it("accepts the unbolded and label-less forms and surrounding whitespace", () => {
-    expect(stripMention(`<@${BOT}> repo list\n\nSent using <@U0BJJMDUCKY>  `, BOT)).toBe("repo list");
+    expect(stripMention(`<@${BOT}> repo list\n\nSent using <@UAPPFOOTER>  `, BOT)).toBe("repo list");
   });
 
   it("strips only the two real shapes: asymmetric bold is not a footer", () => {
-    expect(stripMention(`<@${BOT}> repo list\n*Sent using <@U0BJJMDUCKY|Claude>`, BOT)).toBe(
-      "repo list\n*Sent using <@U0BJJMDUCKY|Claude>",
+    expect(stripMention(`<@${BOT}> repo list\n*Sent using <@UAPPFOOTER|Claude>`, BOT)).toBe(
+      "repo list\n*Sent using <@UAPPFOOTER|Claude>",
     );
   });
 
   it("strips stacked footers (a forwarded app message can carry two)", () => {
     expect(
-      stripMention(`<@${BOT}> repo list\n*Sent using* <@U0BJJMDUCKY|Claude>\n*Sent using* <@U0BJJMDUCKY|Claude>`, BOT),
+      stripMention(`<@${BOT}> repo list\n*Sent using* <@UAPPFOOTER|Claude>\n*Sent using* <@UAPPFOOTER|Claude>`, BOT),
     ).toBe("repo list");
   });
 
   it("a message that is only a mention plus the footer strips to empty", () => {
-    expect(stripMention(`<@${BOT}> *Sent using* <@U0BJJMDUCKY|Claude>`, BOT)).toBe("");
+    expect(stripMention(`<@${BOT}> *Sent using* <@UAPPFOOTER|Claude>`, BOT)).toBe("");
   });
 
   it("leaves 'Sent using' alone when it is part of the user's own text (not a trailing footer line)", () => {
     expect(stripMention(`<@${BOT}> what does "Sent using" mean here?`, BOT)).toBe('what does "Sent using" mean here?');
-    expect(stripMention(`<@${BOT}> Sent using <@U0BJJMDUCKY> is the footer\nplease explain`, BOT)).toBe(
-      "Sent using <@U0BJJMDUCKY> is the footer\nplease explain",
+    expect(stripMention(`<@${BOT}> Sent using <@UAPPFOOTER> is the footer\nplease explain`, BOT)).toBe(
+      "Sent using <@UAPPFOOTER> is the footer\nplease explain",
     );
   });
 });
@@ -336,16 +333,16 @@ describe("resolveChannelName / resolveUserName (best-effort, cached)", () => {
   function fakeClient(over: { channelInfo?: ChannelInfo; userInfo?: UserInfo } = {}) {
     return {
       conversations: {
-        info: vi.fn(over.channelInfo ?? (async () => ({ channel: { name: "switchboard-prompting" } }))),
+        info: vi.fn(over.channelInfo ?? (async () => ({ channel: { name: "eng-prompting" } }))),
       },
       users: {
         info: vi.fn(
           over.userInfo ??
             (async () => ({
               user: {
-                name: "juser",
-                real_name: "Justin Helmer",
-                profile: { display_name: "justin", real_name: "Justin Helmer" },
+                name: "alovelace",
+                real_name: "Ada Lovelace",
+                profile: { display_name: "ada", real_name: "Ada Lovelace" },
               },
             })),
         ),
@@ -355,27 +352,27 @@ describe("resolveChannelName / resolveUserName (best-effort, cached)", () => {
 
   it("resolves a channel name and a user display name", async () => {
     const c = fakeClient();
-    expect(await resolveChannelName(c, "C1")).toBe("switchboard-prompting");
-    expect(await resolveUserName(c, "U1")).toBe("justin");
+    expect(await resolveChannelName(c, "C1")).toBe("eng-prompting");
+    expect(await resolveUserName(c, "UA")).toBe("ada");
   });
 
   it("prefers profile.display_name, then real_name, then name", async () => {
     const realNameOnly = fakeClient({
-      userInfo: async () => ({ user: { name: "juser", real_name: "Justin Helmer", profile: { display_name: "" } } }),
+      userInfo: async () => ({ user: { name: "alovelace", real_name: "Ada Lovelace", profile: { display_name: "" } } }),
     });
-    expect(await resolveUserName(realNameOnly, "U2")).toBe("Justin Helmer");
+    expect(await resolveUserName(realNameOnly, "UB")).toBe("Ada Lovelace");
     resetSlackNameCaches();
-    const handleOnly = fakeClient({ userInfo: async () => ({ user: { name: "juser", profile: {} } }) });
-    expect(await resolveUserName(handleOnly, "U3")).toBe("juser");
+    const handleOnly = fakeClient({ userInfo: async () => ({ user: { name: "alovelace", profile: {} } }) });
+    expect(await resolveUserName(handleOnly, "UC")).toBe("alovelace");
   });
 
   it("caches: a second lookup for the same id does NOT re-call the API", async () => {
     const c = fakeClient();
-    expect(await resolveChannelName(c, "C1")).toBe("switchboard-prompting");
-    expect(await resolveChannelName(c, "C1")).toBe("switchboard-prompting");
+    expect(await resolveChannelName(c, "C1")).toBe("eng-prompting");
+    expect(await resolveChannelName(c, "C1")).toBe("eng-prompting");
     expect(c.conversations.info).toHaveBeenCalledTimes(1);
-    expect(await resolveUserName(c, "U1")).toBe("justin");
-    expect(await resolveUserName(c, "U1")).toBe("justin");
+    expect(await resolveUserName(c, "UA")).toBe("ada");
+    expect(await resolveUserName(c, "UA")).toBe("ada");
     expect(c.users.info).toHaveBeenCalledTimes(1);
   });
 
@@ -413,15 +410,15 @@ describe("resolveChannelName / resolveUserName (best-effort, cached)", () => {
 describe("SlackIO.history — thread reuse and concurrent attachment downloads", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  const ev = { channel: "C1", user: "U1", text: "hi", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
+  const ev = { channel: "C1", user: "UA", text: "hi", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
 
   it("uses the thread the handler already fetched instead of calling conversations.replies again", async () => {
     const replies = vi.fn();
     const client = { conversations: { replies } } as unknown as ConstructorParameters<typeof SlackIO>[0];
     const thread = [
-      { user: "U1", text: "<@UBOT> first ask", ts: "1.0" },
+      { user: "UA", text: "<@UBOT> first ask", ts: "1.0" },
       { bot_id: "B1", text: "an answer", ts: "2.0" },
-      { user: "U1", text: "hi", ts: "3.0" }, // the triggering message — skipped
+      { user: "UA", text: "hi", ts: "3.0" }, // the triggering message — skipped
     ];
     const items = await new SlackIO(client, { ...ev, thread }).history();
     expect(replies).not.toHaveBeenCalled();
@@ -432,7 +429,7 @@ describe("SlackIO.history — thread reuse and concurrent attachment downloads",
   });
 
   it("fetches the thread itself when no prefetched page is given (mention path)", async () => {
-    const replies = vi.fn(async () => ({ messages: [{ user: "U1", text: "earlier", ts: "1.0" }] }));
+    const replies = vi.fn(async () => ({ messages: [{ user: "UA", text: "earlier", ts: "1.0" }] }));
     const client = { conversations: { replies } } as unknown as ConstructorParameters<typeof SlackIO>[0];
     const items = await new SlackIO(client, ev).history();
     expect(replies).toHaveBeenCalledWith({ channel: "C1", ts: "1.0", limit: 50 });
@@ -801,8 +798,8 @@ describe("fetchDocuments (secret files skipped-with-note, never decoded)", () =>
 
 describe("slackPermalink (the Request block's link back to the thread)", () => {
   it("builds Slack's own permalink shape from the team URL, channel and ts", () => {
-    expect(slackPermalink("https://acme.slack.com/", "C0BQS7KPJHK", "1788045076.113369", "1788045076.113369")).toBe(
-      "https://acme.slack.com/archives/C0BQS7KPJHK/p1788045076113369",
+    expect(slackPermalink("https://acme.slack.com/", "C1234567890", "1788045076.113369", "1788045076.113369")).toBe(
+      "https://acme.slack.com/archives/C1234567890/p1788045076113369",
     );
   });
   it("adds the thread qualifier for a reply inside a thread", () => {
@@ -813,8 +810,8 @@ describe("slackPermalink (the Request block's link back to the thread)", () => {
 });
 
 // Feature: features/slack-channel.md item 7 — a message the reconnect catch-up
-// replays tells the thread how late the pickup was (2026-08-30: PR #300's
-// re-review sat 7.5 min with no 👀 through a deploy drain; the caller could not
+// replays tells the thread how late the pickup was (a mention can sit for
+// minutes with no 👀 through a deploy drain; from the thread the caller cannot
 // tell "ignored" from "bot restarting").
 describe("catchUpDelayNote", () => {
   it("names the delay in whole minutes and says not to re-send", () => {
@@ -830,14 +827,13 @@ describe("catchUpDelayNote", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 9 (#346) — Slack re-delivers an
-// event whose original delivery was never acked (a deploy blackout), and the
-// live path used to run it unconditionally. Live 2026-08-30: a mention posted
-// at 20:25:51Z into a drain was answered by the reconnect catch-up at 20:28,
-// then RE-delivered at 20:31:57Z (+6 min) and run again in full — a duplicate
-// run and a duplicate LGTM review on the PR. Both deploy-window mentions that
-// evening double-ran the same way.
-describe("dedupeDelivery (redelivery guard, #346)", () => {
+// Feature: features/slack-channel.md item 9 — Slack re-delivers an event whose
+// original delivery was never acked (a deploy blackout), and a live path that
+// runs it unconditionally double-runs it: a mention posted into a drain is
+// answered by the reconnect catch-up within minutes, then RE-delivered ~6 min
+// after it was posted and run again in full — a duplicate run and a duplicate
+// answer in the thread. The guard drops that redelivery.
+describe("dedupeDelivery (redelivery guard)", () => {
   /** In-memory handled-set standing in for the module's process-wide one. */
   function memState(seed: string[] = []) {
     const set = new Set(seed);
@@ -863,13 +859,13 @@ describe("dedupeDelivery (redelivery guard, #346)", () => {
     };
   }
 
-  // The incident's own timestamps.
-  const TS = "1788121551.504339"; // mention posted 2026-08-30T20:25:51Z
-  const REDELIVERY_MS = Date.UTC(2026, 7, 30, 20, 31, 57, 633); // the ghost [run]
-  const ev = { channel: "C0BQS7KPJHK", ts: TS, threadTs: TS, botUserId: BOT } as const;
+  // A redelivery's real shape: posted at TS, re-delivered ~6 min later.
+  const TS = "1788121551.504339"; // the mention, 20:25:51Z
+  const REDELIVERY_MS = Date.UTC(2026, 7, 30, 20, 31, 57, 633); // the ghost delivery, 20:31:57Z
+  const ev = { channel: "C1234567890", ts: TS, threadTs: TS, botUserId: BOT } as const;
 
-  it("same-process redelivery (the incident: catch-up answered it at 20:28, Slack re-delivered at +6 min) → dropped without any API call", async () => {
-    const state = memState([`C0BQS7KPJHK:${TS}`]); // catch-up's handle() claimed it
+  it("same-process redelivery (catch-up answered it, Slack re-delivered at +6 min) → dropped without any API call", async () => {
+    const state = memState([`C1234567890:${TS}`]); // catch-up's handle() claimed it
     const client = repliesClient(new Error("must not be called"));
     await expect(dedupeDelivery(client, ev, REDELIVERY_MS, state)).resolves.toBe(
       "already handled in this process (a Slack redelivery)",
@@ -880,7 +876,7 @@ describe("dedupeDelivery (redelivery guard, #346)", () => {
   it("cross-process redelivery (the first handling died with the old container): stale + bot already replied in the thread → dropped after one replies fetch", async () => {
     const state = memState(); // fresh process: nothing handled here
     const client = repliesClient([
-      { ts: TS, user: "U1" }, // the mention
+      { ts: TS, user: "UA" }, // the mention
       { ts: "1788121677.778409", bot_id: "B1" }, // ⏱ late-pickup note
       { ts: "1788121678.289369", bot_id: "B1" }, // status card
       { ts: "1788121716.609039", bot_id: "B1" }, // the answer
@@ -889,16 +885,16 @@ describe("dedupeDelivery (redelivery guard, #346)", () => {
     expect(drop).toMatch(
       /^already answered in its thread \(delivered 36\ds after it was posted — a Slack redelivery\)$/,
     );
-    expect(client.calls).toEqual([{ channel: "C0BQS7KPJHK", ts: TS }]);
+    expect(client.calls).toEqual([{ channel: "C1234567890", ts: TS }]);
     // The pair is claimed either way — a third delivery is dropped by check 1.
-    expect(state.was("C0BQS7KPJHK", TS)).toBe(true);
+    expect(state.was("C1234567890", TS)).toBe(true);
   });
 
-  it("stale but UNANSWERED (👀-then-killed, #317's shape) → runs; bot messages before it don't count", async () => {
+  it("stale but UNANSWERED (the 👀-then-killed shape) → runs; bot messages before it don't count", async () => {
     const state = memState();
     const client = repliesClient([
       { ts: "1788121000.000000", bot_id: "B1" }, // bot spoke earlier in the thread
-      { ts: TS, user: "U1" },
+      { ts: TS, user: "UA" },
     ]);
     await expect(dedupeDelivery(client, ev, REDELIVERY_MS, state)).resolves.toBeNull();
   });
@@ -932,18 +928,18 @@ describe("dedupeDelivery (redelivery guard, #346)", () => {
   });
 
   it("a catch-up replay skips both checks — the scan already judged it against Slack state — but still claims the pair", async () => {
-    const state = memState([`C0BQS7KPJHK:${TS}`]);
+    const state = memState([`C1234567890:${TS}`]);
     const client = repliesClient(new Error("must not be called"));
     await expect(dedupeDelivery(client, { ...ev, caughtUp: true }, REDELIVERY_MS, state)).resolves.toBeNull();
     expect(client.calls).toHaveLength(0);
-    expect(state.was("C0BQS7KPJHK", TS)).toBe(true);
+    expect(state.was("C1234567890", TS)).toBe(true);
   });
 });
 
 // Feature: features/run-history.md item 38 — a resumed run keeps the card the
 // previous generation posted: `status()` edits it instead of posting a second one.
 describe("SlackIO.status on a resumed run (existing card)", () => {
-  const ev = { channel: "C1", user: "U1", text: "", ts: "1.0", threadTs: "1.0", botUserId: "UBOT" };
+  const ev = { channel: "C1", user: "UA", text: "", ts: "1.0", threadTs: "1.0", botUserId: "UBOT" };
   function client() {
     const update = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
     const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true, ts: "new.1" }));
@@ -984,14 +980,14 @@ describe("SlackIO.status on a resumed run (existing card)", () => {
 
   it("resumeSlackIO builds the thread IO from the ledger row's parts: replies land in the thread, the card is the existing one; without a card ts a fresh card is posted", async () => {
     const a = client();
-    const withCard = resumeSlackIO(a.c, { channel: "C1", threadTs: "1.0", user: "U1", cardTs: "9.9" });
+    const withCard = resumeSlackIO(a.c, { channel: "C1", threadTs: "1.0", user: "UA", cardTs: "9.9" });
     await withCard.status({ title: "👀" });
     expect(a.postMessage).not.toHaveBeenCalled();
     await withCard.reply("hello again");
     expect(a.postMessage).toHaveBeenCalledTimes(1);
     expect(a.postMessage.mock.calls[0][0]).toMatchObject({ channel: "C1", thread_ts: "1.0" });
     const b = client();
-    const noCard = resumeSlackIO(b.c, { channel: "C1", threadTs: "1.0", user: "U1" });
+    const noCard = resumeSlackIO(b.c, { channel: "C1", threadTs: "1.0", user: "UA" });
     const handle = await noCard.status({ title: "👀" });
     expect(b.postMessage).toHaveBeenCalledTimes(1);
     expect(handle.handle).toEqual({ channel: "C1", ts: "new.1" });
@@ -999,7 +995,7 @@ describe("SlackIO.status on a resumed run (existing card)", () => {
 });
 
 describe("SlackIO.attach (features/slack-channel.md item 10)", () => {
-  const ev = { channel: "C1", user: "U1", text: "hi", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
+  const ev = { channel: "C1", user: "UA", text: "hi", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
   const file = {
     name: "mcp-show.txt",
     text: "Tools (100):\n" + "  - `tool` — long\n".repeat(400),

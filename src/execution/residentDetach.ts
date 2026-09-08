@@ -3,7 +3,7 @@
  *  it is unit-testable from src/ and imported across packages by the resident
  *  Worker (like shellQuote) — the tested code IS the shipped code.
  *
- *  Background (#159): a hard stop (#137) makes the bot drop its `/exec` fetch
+ *  Background: a hard stop makes the bot drop its `/exec` fetch
  *  and call `/detach {force:true}`, but the command keeps running in the
  *  container, so a busy guard alone would keep the pool user until the hourly
  *  sweep. Force therefore kills the thread's processes first; a non-force

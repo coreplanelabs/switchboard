@@ -7,7 +7,7 @@
   "features/access-gate.md": {
     "names": 3,
     "trackers": 2,
-    "planIds": 2
+    "planIds": 1
   },
   "features/agent-coding.md": {
     "names": 1,
@@ -35,7 +35,7 @@
   "features/authorization.md": {
     "names": 8,
     "trackers": 8,
-    "planIds": 16,
+    "planIds": 14,
     "dates": 1
   },
   "features/capabilities.md": {
@@ -46,7 +46,7 @@
   "features/command-registry.md": {
     "names": 7,
     "trackers": 6,
-    "planIds": 32,
+    "planIds": 27,
     "dates": 2
   },
   "features/costs.md": {
@@ -54,7 +54,7 @@
     "trackers": 3
   },
   "features/distilled-diffs.md": {
-    "planIds": 6,
+    "planIds": 5,
     "names": 1,
     "trackers": 1
   },
@@ -64,7 +64,7 @@
   },
   "features/execution.md": {
     "names": 16,
-    "trackers": 24,
+    "trackers": 21,
     "dates": 11,
     "planIds": 1
   },
@@ -80,8 +80,8 @@
   },
   "features/live-view.md": {
     "names": 16,
-    "trackers": 25,
-    "planIds": 11,
+    "trackers": 19,
+    "planIds": 7,
     "dates": 3
   },
   "features/llm-output.md": {
@@ -122,7 +122,7 @@
     "dates": 1
   },
   "features/resident-repos.md": {
-    "trackers": 61,
+    "trackers": 55,
     "planIds": 114,
     "names": 45,
     "dates": 20
@@ -139,8 +139,8 @@
   },
   "features/run-history.md": {
     "names": 10,
-    "trackers": 15,
-    "planIds": 5,
+    "trackers": 12,
+    "planIds": 2,
     "dates": 6
   },
   "features/run-loop.md": {
@@ -165,7 +165,7 @@
   },
   "features/slack-channel.md": {
     "names": 11,
-    "trackers": 11,
+    "trackers": 10,
     "dates": 6
   },
   "features/thread-admission.md": {
@@ -175,8 +175,7 @@
   "features/tracing.md": {
     "dates": 1,
     "names": 2,
-    "trackers": 4,
-    "planIds": 1
+    "trackers": 1
   },
   "features/web-tools.md": {
     "planIds": 2,
@@ -190,167 +189,12 @@
     "trackers": 2,
     "names": 21
   },
-  "src/agents/registry.test.ts": {
-    "dates": 3,
-    "planIds": 4,
-    "trackers": 2,
-    "names": 2
-  },
-  "src/agents/registry.ts": {
-    "planIds": 5,
-    "trackers": 1,
-    "dates": 1,
-    "names": 1
-  },
-  "src/channels/accessAuth.test.ts": {
-    "planIds": 1
-  },
-  "src/channels/accessAuth.ts": {
-    "names": 1,
-    "planIds": 1
-  },
-  "src/channels/adminCrash.ts": {
-    "dates": 1
-  },
-  "src/channels/adminRestartAuthorize.test.ts": {
-    "trackers": 1
-  },
-  "src/channels/commandContract.test.ts": {
-    "planIds": 5
-  },
-  "src/channels/commandHttp.test.ts": {
-    "planIds": 13
-  },
-  "src/channels/commandHttp.ts": {
-    "trackers": 1,
-    "planIds": 10
-  },
-  "src/channels/costsView.test.ts": {
-    "dates": 2
-  },
-  "src/channels/health.test.ts": {
-    "trackers": 3
-  },
-  "src/channels/health.ts": {
-    "dates": 1,
-    "trackers": 3
-  },
-  "src/channels/http.test.ts": {
-    "trackers": 1
-  },
-  "src/channels/indexFormat.test.ts": {
-    "names": 5,
-    "trackers": 2
-  },
-  "src/channels/liveView.test.ts": {
-    "trackers": 10,
-    "planIds": 12
-  },
-  "src/channels/liveView.ts": {
-    "trackers": 10,
-    "planIds": 16
-  },
-  "src/channels/liveView/sse.ts": {
-    "planIds": 3
-  },
-  "src/channels/markdownLite.test.ts": {
-    "trackers": 5
-  },
-  "src/channels/markdownLite.ts": {
-    "trackers": 3
-  },
-  "src/channels/mcp.test.ts": {
-    "dates": 1,
-    "trackers": 2,
-    "planIds": 5
-  },
-  "src/channels/mcp.ts": {
-    "trackers": 1,
-    "planIds": 6,
-    "dates": 1
-  },
-  "src/channels/mcpConnectView.test.ts": {
-    "planIds": 2,
-    "names": 5
-  },
-  "src/channels/mcpConnectView.ts": {
-    "dates": 1,
-    "trackers": 1
-  },
-  "src/channels/mrkdwn.test.ts": {
-    "dates": 1,
-    "trackers": 4
-  },
-  "src/channels/residentsView.test.ts": {
-    "names": 3
-  },
-  "src/channels/residentsView.ts": {
-    "planIds": 1
-  },
-  "src/channels/runTimeline.test.ts": {
-    "trackers": 2
-  },
-  "src/channels/scheduledPanel.test.ts": {
-    "trackers": 2,
-    "ids": 1
-  },
-  "src/channels/scheduledPanel.ts": {
-    "trackers": 2
-  },
-  "src/channels/slack.test.ts": {
-    "dates": 4,
-    "planIds": 18,
-    "ids": 23,
-    "names": 17,
-    "trackers": 4
-  },
-  "src/channels/slack.ts": {
-    "trackers": 10,
-    "dates": 5,
-    "ids": 1
-  },
-  "src/channels/slackCatchUp.test.ts": {
-    "trackers": 6,
-    "dates": 5
-  },
-  "src/channels/slackCatchUp.ts": {
-    "trackers": 10,
-    "dates": 2
-  },
-  "src/channels/slackCatchUpStatus.test.ts": {
-    "trackers": 1,
-    "dates": 2
-  },
-  "src/channels/slackCatchUpStatus.ts": {
-    "trackers": 1,
-    "dates": 1
-  },
-  "src/channels/slackChannelDirectory.test.ts": {
-    "planIds": 5
-  },
-  "src/channels/slackChannelDirectory.ts": {
-    "planIds": 5
-  },
-  "src/channels/slackConnectedHook.test.ts": {
-    "trackers": 2,
-    "planIds": 1
-  },
-  "src/channels/slackSocketStatus.ts": {
-    "trackers": 1
-  },
-  "src/channels/webSeed.ts": {
-    "planIds": 1
-  },
   "src/ciWorkflow.test.ts": {
     "dates": 1
   },
   "src/cli.test.ts": {
     "planIds": 6,
     "trackers": 3
-  },
-  "src/cli.ts": {
-    "trackers": 6,
-    "planIds": 5
   },
   "src/config.test.ts": {
     "planIds": 9,
@@ -361,96 +205,7 @@
     "planIds": 6
   },
   "src/core/__snapshots__/capabilitySurfaces.test.ts.snap": {
-    "ids": 2,
-    "trackers": 1
-  },
-  "src/deploy/affected.test.ts": {
-    "trackers": 1
-  },
-  "src/deploy/affected.ts": {
-    "trackers": 2
-  },
-  "src/deploy/buildStamp.test.ts": {
-    "dates": 1
-  },
-  "src/deploy/buildStamp.ts": {
-    "trackers": 2,
-    "dates": 1
-  },
-  "src/deploy/configSource.test.ts": {
-    "names": 5
-  },
-  "src/deploy/configSource.ts": {
-    "names": 6
-  },
-  "src/deploy/imagePins.test.ts": {
-    "dates": 2,
-    "trackers": 1
-  },
-  "src/deploy/imagePins.ts": {
-    "names": 1,
-    "trackers": 1,
-    "dates": 2
-  },
-  "src/deploy/liveGate.test.ts": {
-    "dates": 1
-  },
-  "src/deploy/liveGate.ts": {
-    "dates": 1
-  },
-  "src/deploy/loadProfile.test.ts": {
-    "names": 1
-  },
-  "src/deploy/plan.test.ts": {
-    "trackers": 2
-  },
-  "src/deploy/plan.ts": {
-    "trackers": 5
-  },
-  "src/deploy/profile.test.ts": {
-    "names": 1
-  },
-  "src/deploy/profile.ts": {
-    "names": 2,
-    "ids": 1
-  },
-  "src/deploy/restart.test.ts": {
-    "trackers": 1
-  },
-  "src/deploy/run.ts": {
-    "dates": 1,
-    "trackers": 4,
-    "names": 1
-  },
-  "src/deploy/sandboxGateRun.test.ts": {
-    "trackers": 3,
-    "ids": 3
-  },
-  "src/deploy/sandboxLiveGate.test.ts": {
-    "trackers": 5,
-    "dates": 3,
-    "ids": 4,
-    "names": 1
-  },
-  "src/deploy/sandboxLiveGate.ts": {
-    "dates": 2,
-    "trackers": 6
-  },
-  "src/deploy/secrets.test.ts": {
-    "names": 6,
-    "dates": 1
-  },
-  "src/deploy/secrets.ts": {
-    "names": 9
-  },
-  "src/deploy/secretsHost.ts": {
-    "names": 7
-  },
-  "src/deploy/testing/profile.ts": {
-    "ids": 1
-  },
-  "src/deploy/wranglerTemplate.test.ts": {
-    "ids": 1
+    "ids": 2
   },
   "src/directives.test.ts": {
     "trackers": 2
@@ -458,266 +213,11 @@
   "src/directives.ts": {
     "trackers": 1
   },
-  "src/docs/decisions.test.ts": {
-    "dates": 12
-  },
-  "src/docs/links.test.ts": {
-    "trackers": 1
-  },
-  "src/docs/records.test.ts": {
-    "dates": 3
-  },
-  "src/execution/bashTimeout.ts": {
-    "trackers": 1,
-    "dates": 1
-  },
-  "src/execution/bindingPurge.test.ts": {
-    "planIds": 1
-  },
-  "src/execution/bindingPurge.ts": {
-    "planIds": 1
-  },
-  "src/execution/cloudflareSandbox.test.ts": {
-    "trackers": 8,
-    "dates": 4
-  },
-  "src/execution/cloudflareSandbox.ts": {
-    "dates": 4,
-    "trackers": 10
-  },
-  "src/execution/e2b.ts": {
-    "trackers": 1
-  },
-  "src/execution/executor.test.ts": {
-    "planIds": 2,
-    "trackers": 3
-  },
-  "src/execution/executor.ts": {
-    "trackers": 7,
-    "dates": 1,
-    "planIds": 1
-  },
-  "src/execution/factory.test.ts": {
-    "trackers": 4,
-    "dates": 2,
-    "planIds": 5
-  },
-  "src/execution/factory.ts": {
-    "planIds": 12,
-    "trackers": 2,
-    "dates": 3,
-    "names": 1
-  },
-  "src/execution/githubApi.test.ts": {
-    "dates": 1
-  },
-  "src/execution/githubApi.ts": {
-    "dates": 1
-  },
-  "src/execution/githubApp.test.ts": {
-    "trackers": 1,
-    "dates": 1
-  },
-  "src/execution/githubApp.ts": {
-    "dates": 1,
-    "trackers": 1
-  },
-  "src/execution/githubComments.ts": {
-    "trackers": 1
-  },
-  "src/execution/githubIssues.ts": {
-    "trackers": 3
-  },
-  "src/execution/githubPulls.test.ts": {
-    "planIds": 2,
-    "names": 2
-  },
-  "src/execution/githubPulls.ts": {
-    "trackers": 1,
-    "planIds": 2
-  },
-  "src/execution/githubRepoInspect.test.ts": {
-    "names": 6
-  },
-  "src/execution/resident.test.ts": {
-    "planIds": 4,
-    "trackers": 10
-  },
-  "src/execution/resident.ts": {
-    "planIds": 6,
-    "trackers": 8
-  },
-  "src/execution/residentBackupTransfer.test.ts": {
-    "trackers": 2,
-    "dates": 1,
-    "ids": 1
-  },
-  "src/execution/residentBackupTransfer.ts": {
-    "trackers": 2,
-    "names": 1,
-    "dates": 1
-  },
-  "src/execution/residentCleanliness.test.ts": {
-    "trackers": 1
-  },
-  "src/execution/residentCleanliness.ts": {
-    "trackers": 1,
-    "planIds": 1
-  },
-  "src/execution/residentCredentials.test.ts": {
-    "planIds": 1,
-    "trackers": 2
-  },
-  "src/execution/residentCredentials.ts": {
-    "planIds": 2,
-    "trackers": 3
-  },
-  "src/execution/residentDepCache.test.ts": {
-    "planIds": 1,
-    "names": 1,
-    "dates": 2,
-    "trackers": 3
-  },
-  "src/execution/residentDepCache.ts": {
-    "planIds": 2,
-    "dates": 3,
-    "trackers": 3,
-    "names": 1
-  },
-  "src/execution/residentDepsStore.test.ts": {
-    "trackers": 2
-  },
-  "src/execution/residentDepsStore.ts": {
-    "trackers": 6,
-    "dates": 2,
-    "planIds": 2
-  },
-  "src/execution/residentDetach.test.ts": {
-    "trackers": 1
-  },
-  "src/execution/residentDetach.ts": {
-    "trackers": 1
-  },
-  "src/execution/residentDisk.test.ts": {
-    "dates": 1
-  },
-  "src/execution/residentDisk.ts": {
-    "trackers": 2,
-    "names": 2,
-    "dates": 1,
-    "planIds": 1
-  },
-  "src/execution/residentDiskBudget.test.ts": {
-    "names": 2,
-    "trackers": 2,
-    "dates": 1
-  },
-  "src/execution/residentDiskBudget.ts": {
-    "trackers": 4,
-    "names": 2,
-    "dates": 2
-  },
-  "src/execution/residentExecWrap.test.ts": {
-    "dates": 1
-  },
-  "src/execution/residentExecWrap.ts": {
-    "trackers": 1,
-    "planIds": 1,
-    "dates": 2
-  },
-  "src/execution/residentHead.ts": {
-    "planIds": 1
-  },
-  "src/execution/residentReadonly.ts": {
-    "trackers": 2,
-    "dates": 1
-  },
-  "src/execution/residentRefresh.test.ts": {
-    "dates": 5,
-    "trackers": 14,
-    "names": 1
-  },
-  "src/execution/residentRefresh.ts": {
-    "trackers": 10,
-    "planIds": 2,
-    "dates": 6
-  },
-  "src/execution/residentRestoreExtract.ts": {
-    "trackers": 1,
-    "dates": 2,
-    "names": 1
-  },
-  "src/execution/residentState.test.ts": {
-    "trackers": 2
-  },
-  "src/execution/residentState.ts": {
-    "trackers": 1,
-    "dates": 1
-  },
-  "src/execution/residentStepReport.test.ts": {
-    "names": 1,
-    "dates": 2
-  },
-  "src/execution/residentStepReport.ts": {
-    "names": 2,
-    "dates": 1
-  },
-  "src/execution/sandboxEnv.test.ts": {
-    "trackers": 2,
-    "dates": 1
-  },
-  "src/execution/sandboxEnv.ts": {
-    "trackers": 3,
-    "dates": 1
-  },
-  "src/execution/sandboxErrors.test.ts": {
-    "trackers": 2,
-    "dates": 2
-  },
-  "src/execution/sandboxErrors.ts": {
-    "dates": 3,
-    "trackers": 4
-  },
-  "src/execution/sandboxKeepalive.test.ts": {
-    "trackers": 7,
-    "dates": 2
-  },
-  "src/execution/sandboxKeepalive.ts": {
-    "dates": 2,
-    "trackers": 3
-  },
-  "src/index.ts": {
-    "trackers": 20,
-    "planIds": 10,
-    "dates": 1
-  },
   "src/load/history.test.ts": {
     "dates": 1
   },
   "src/load/residentLoad.ts": {
     "dates": 1
-  },
-  "src/mcp/client.ts": {
-    "dates": 1
-  },
-  "src/mcp/connect.test.ts": {
-    "planIds": 1,
-    "names": 26
-  },
-  "src/mcp/fake.ts": {
-    "dates": 1
-  },
-  "src/mcp/secretStore.test.ts": {
-    "planIds": 3
-  },
-  "src/mcp/service.test.ts": {
-    "names": 42
-  },
-  "src/mcp/source.test.ts": {
-    "planIds": 8
-  },
-  "src/mcp/types.ts": {
-    "trackers": 1
   },
   "src/prTitleCheck.test.ts": {
     "planIds": 1
@@ -725,15 +225,6 @@
   "src/projectFacts.test.ts": {
     "names": 20,
     "trackers": 7
-  },
-  "src/providers/anthropic.ts": {
-    "trackers": 1
-  },
-  "src/providers/openaiCompat.ts": {
-    "trackers": 1
-  },
-  "src/providers/types.ts": {
-    "trackers": 2
   },
   "src/runner.test.ts": {
     "trackers": 8,
@@ -747,52 +238,7 @@
   "src/sandboxPairCheck.test.ts": {
     "trackers": 3
   },
-  "src/skills/index.ts": {
-    "trackers": 1
-  },
-  "src/skills/manifest.test.ts": {
-    "trackers": 2
-  },
-  "src/skills/prTourSkill.test.ts": {
-    "trackers": 1
-  },
-  "src/skills/skills.test.ts": {
-    "trackers": 1
-  },
-  "src/skills/types.ts": {
-    "trackers": 1
-  },
   "src/specsCheck.test.ts": {
     "trackers": 3
-  },
-  "src/tools/github.test.ts": {
-    "names": 44,
-    "trackers": 8
-  },
-  "src/tools/github.ts": {
-    "names": 1,
-    "dates": 1
-  },
-  "src/tools/skills.test.ts": {
-    "trackers": 2
-  },
-  "src/tools/skills.ts": {
-    "trackers": 1
-  },
-  "src/tools/web.test.ts": {
-    "trackers": 1
-  },
-  "src/tools/web.ts": {
-    "planIds": 1,
-    "trackers": 1
-  },
-  "src/tools/workspace.test.ts": {
-    "planIds": 3,
-    "dates": 1,
-    "trackers": 1
-  },
-  "src/tools/workspace.ts": {
-    "trackers": 3,
-    "planIds": 3
   }
 }

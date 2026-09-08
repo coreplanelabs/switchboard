@@ -36,7 +36,7 @@ grants:
 const admin: McpActor = { id: "slack:UADMIN", orgAdmin: true, channelAdmin: true };
 const alice: McpActor = { id: "slack:UALICE", orgAdmin: false, channelAdmin: true };
 const bob: McpActor = { id: "slack:UBOB", orgAdmin: false, channelAdmin: false };
-const justin = { sub: "cf-justin", email: "justin@coreplane.ai" };
+const ada = { sub: "cf-ada", email: "ada@example.com" };
 const stranger = { sub: "cf-stranger", email: "x@else.example" };
 const ME = (a: McpActor): McpTarget => ({ kind: "user", id: a.id });
 const ORG: McpTarget = { kind: "org" };
@@ -235,7 +235,7 @@ describe("McpService — tiers and authorization (items 13–14)", () => {
 
 describe("McpService — the connect flow (items 15–16)", () => {
   it("a bearer add mints a ticket and a link; without the key or PUBLIC_BASE_URL it is refused as unavailable", async () => {
-    const h = harness({ email: { [alice.id]: "Justin@CorePlane.ai" } });
+    const h = harness({ email: { [alice.id]: "Ada@Example.com" } });
     const out = await h.service.add(alice, ME(alice), {
       name: "vanta",
       url: "https://mcp.vanta.com/mcp",
@@ -248,7 +248,7 @@ describe("McpService — the connect flow (items 15–16)", () => {
     expect(await h.secrets.getTicket("nonce-00000000000000000001")).toMatchObject({
       serverId: "user:slack:UALICE/vanta",
       requesterId: alice.id,
-      requesterEmail: "justin@coreplane.ai",
+      requesterEmail: "ada@example.com",
       state: "pending",
     });
     expect(
@@ -272,24 +272,24 @@ describe("McpService — the connect flow (items 15–16)", () => {
   });
 
   it("open → complete: identity-bound, token verified against the server, sealed at rest, single-use; the next run uses it", async () => {
-    const h = harness({ email: { [alice.id]: "justin@coreplane.ai" } });
+    const h = harness({ email: { [alice.id]: "ada@example.com" } });
     await h.service.add(alice, ME(alice), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "bearer" });
     const nonce = "nonce-00000000000000000001";
     expect((await h.service.openTicket(nonce, stranger)).decision).toEqual({
       ok: false,
       refusal: { kind: "wrong_identity" },
     });
-    const opened = await h.service.openTicket(nonce, justin);
+    const opened = await h.service.openTicket(nonce, ada);
     expect(opened.decision.ok).toBe(true);
     expect(opened.server?.name).toBe("vanta");
-    const done = await h.service.completeTicket(nonce, justin, "  vanta_live_TOKEN  ");
+    const done = await h.service.completeTicket(nonce, ada, "  vanta_live_TOKEN  ");
     expect(done).toMatchObject({ verified: true, toolCount: 2 });
     expect(done.server?.state).toBe("connected");
     const sealed = await h.secrets.getCredential("user:slack:UALICE/vanta");
     expect(sealed?.sealed).not.toContain("vanta_live");
     expect(JSON.stringify(h.backing.document)).not.toContain("vanta_live"); // never in the config document
     expect(h.clients.at(-1)?.spec.auth).toEqual({ type: "bearer", token: "vanta_live_TOKEN" });
-    expect((await h.service.completeTicket(nonce, justin, "again")).decision).toEqual({
+    expect((await h.service.completeTicket(nonce, ada, "again")).decision).toEqual({
       ok: false,
       refusal: { kind: "used" },
     });
@@ -306,14 +306,14 @@ describe("McpService — the connect flow (items 15–16)", () => {
     const h = harness({ rejectTokens: ["bad"] });
     await h.service.add(alice, ME(alice), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "bearer" });
     const nonce = "nonce-00000000000000000001";
-    const rejected = await h.service.completeTicket(nonce, justin, "bad");
+    const rejected = await h.service.completeTicket(nonce, ada, "bad");
     expect(rejected.verified).toBe(false);
     expect(rejected.warning).toMatch(/rejected the token/);
     expect(await h.secrets.getCredential("user:slack:UALICE/vanta")).toBeNull();
-    expect((await h.service.completeTicket(nonce, justin, "good")).verified).toBe(true);
+    expect((await h.service.completeTicket(nonce, ada, "good")).verified).toBe(true);
     const down = harness({ serverDown: true });
     await down.service.add(alice, ME(alice), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "bearer" });
-    const stored = await down.service.completeTicket("nonce-00000000000000000001", justin, "tok");
+    const stored = await down.service.completeTicket("nonce-00000000000000000001", ada, "tok");
     expect(stored.verified).toBe(true);
     expect(stored.warning).toMatch(/could not be reached to verify/);
     const again = await h.service.connect(alice, ME(alice), "vanta");
@@ -328,7 +328,7 @@ describe("McpService — the connect flow (items 15–16)", () => {
     await h.service.add(alice, ME(alice), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "bearer" });
     const n1 = "nonce-00000000000000000001";
     expect((await h.service.openTicket(n1, stranger)).decision).toMatchObject({ ok: true, bound: true });
-    expect((await h.service.openTicket(n1, justin)).decision).toEqual({
+    expect((await h.service.openTicket(n1, ada)).decision).toEqual({
       ok: false,
       refusal: { kind: "wrong_identity" },
     });
@@ -345,8 +345,8 @@ describe("McpService — the connect flow (items 15–16)", () => {
     const n1 = "nonce-00000000000000000001";
     // Two POSTs racing on a pending ticket: both read `pending`, both verify, one claims it.
     const [a, b] = await Promise.all([
-      h.service.completeTicket(n1, justin, "tok-a"),
-      h.service.completeTicket(n1, justin, "tok-b"),
+      h.service.completeTicket(n1, ada, "tok-a"),
+      h.service.completeTicket(n1, ada, "tok-b"),
     ]);
     const outcomes = [a, b].map((r) => (r.decision.ok ? "ok" : r.decision.refusal.kind)).sort();
     expect(outcomes).toEqual(["ok", "used"]);
@@ -355,16 +355,16 @@ describe("McpService — the connect flow (items 15–16)", () => {
     // Two strangers opening an unbound ticket at once: one binds, the other is refused as the wrong identity.
     await h.service.connect(alice, ME(alice), "vanta");
     const n2 = "nonce-00000000000000000002";
-    const [o1, o2] = await Promise.all([h.service.openTicket(n2, stranger), h.service.openTicket(n2, justin)]);
+    const [o1, o2] = await Promise.all([h.service.openTicket(n2, stranger), h.service.openTicket(n2, ada)]);
     const opens = [o1, o2]
       .map((r) => (r.decision.ok ? (r.decision.bound ? "bound" : "open") : r.decision.refusal.kind))
       .sort();
     expect(opens).toEqual(["bound", "wrong_identity"]);
     const bound = (await h.secrets.getTicket(n2))?.openedBy?.sub;
-    expect([stranger.sub, justin.sub]).toContain(bound);
+    expect([stranger.sub, ada.sub]).toContain(bound);
     // The binder completes; the loser cannot.
-    const winner = bound === stranger.sub ? stranger : justin;
-    const loser = winner === stranger ? justin : stranger;
+    const winner = bound === stranger.sub ? stranger : ada;
+    const loser = winner === stranger ? ada : stranger;
     expect((await h.service.completeTicket(n2, loser, "tok")).decision).toEqual({
       ok: false,
       refusal: { kind: "wrong_identity" },
@@ -422,7 +422,7 @@ describe("McpService — the run-time view (item 17)", () => {
       expect.objectContaining({ spec: expect.anything() }),
       { name: "vanta", unavailable: "no credential stored — run `mcp connect`" },
     ]);
-    await h.service.completeTicket("nonce-00000000000000000001", justin, "tok");
+    await h.service.completeTicket("nonce-00000000000000000001", ada, "tok");
     const sealed = (await h.secrets.getCredential("user:slack:UALICE/vanta"))!;
     await h.secrets.putCredential({ ...sealed, keyId: "k9" });
     expect((await h.service.resolveForRun("general", { userId: alice.id }))[1]).toEqual({
@@ -443,7 +443,7 @@ describe("McpService — OAuth (item 18)", () => {
   const VANTA = "https://mcp.vanta.com/mcp";
   const NONCE1 = "nonce-00000000000000000001";
   const startFlow = async (h: ReturnType<typeof harness>, nonce = NONCE1) => {
-    const started = (await h.service.startOAuth(nonce, justin)) as { ok: true; redirectUrl: string };
+    const started = (await h.service.startOAuth(nonce, ada)) as { ok: true; redirectUrl: string };
     expect(started.ok).toBe(true);
     return {
       redirectUrl: started.redirectUrl,
@@ -495,7 +495,7 @@ describe("McpService — OAuth (item 18)", () => {
   });
 
   it("startOAuth: discovers, registers Switchboard as a public client, seals the PKCE record onto the ticket (now `authorizing`), returns the authorization URL; only the ticket's owner may start; a bearer server's ticket is refused", async () => {
-    const h = harness({ oauth: { server: VANTA }, email: { [alice.id]: "justin@coreplane.ai" } });
+    const h = harness({ oauth: { server: VANTA }, email: { [alice.id]: "ada@example.com" } });
     await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
     expect(await h.service.startOAuth(NONCE1, stranger)).toMatchObject({
       ok: false,
@@ -521,11 +521,11 @@ describe("McpService — OAuth (item 18)", () => {
       client_uri: "https://switchboard.test",
     });
     await h.service.add(alice, ME(alice), { name: "linear", url: "https://mcp.linear.app/mcp", auth: "bearer" });
-    expect(await h.service.startOAuth("nonce-00000000000000000002", justin)).toMatchObject({
+    expect(await h.service.startOAuth("nonce-00000000000000000002", ada)).toMatchObject({
       ok: false,
       refusal: { kind: "oauth_failed", reason: expect.stringMatching(/does not sign in with OAuth/) },
     });
-    expect(await h.service.startOAuth("nonce-00000000000000000009", justin)).toMatchObject({
+    expect(await h.service.startOAuth("nonce-00000000000000000009", ada)).toMatchObject({
       ok: false,
       refusal: { kind: "not_found" },
     });
@@ -534,7 +534,7 @@ describe("McpService — OAuth (item 18)", () => {
   it("startOAuth failures are sentences and leave the ticket untouched", async () => {
     const h = harness({ oauth: { server: VANTA, registrationStatus: 400 } });
     await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
-    expect(await h.service.startOAuth(NONCE1, justin)).toMatchObject({
+    expect(await h.service.startOAuth(NONCE1, ada)).toMatchObject({
       ok: false,
       refusal: { kind: "oauth_failed", reason: expect.stringMatching(/registration was refused/) },
     });
@@ -557,10 +557,10 @@ describe("McpService — OAuth (item 18)", () => {
       };
     };
     raceWith((cur) => ({ ...cur, state: "cancelled" }));
-    expect(await h.service.startOAuth(NONCE1, justin)).toMatchObject({ ok: false, refusal: { kind: "cancelled" } });
+    expect(await h.service.startOAuth(NONCE1, ada)).toMatchObject({ ok: false, refusal: { kind: "cancelled" } });
     await h.service.connect(alice, ME(alice), "vanta");
     raceWith((cur) => ({ ...cur, state: "authorizing", oauth: { keyId: "k1", sealed: "the-other-tab" } }));
-    expect(await h.service.startOAuth("nonce-00000000000000000002", justin)).toMatchObject({
+    expect(await h.service.startOAuth("nonce-00000000000000000002", ada)).toMatchObject({
       ok: false,
       refusal: { kind: "oauth_failed", reason: expect.stringMatching(/changed while sign-in was starting/) },
     });
@@ -574,7 +574,7 @@ describe("McpService — OAuth (item 18)", () => {
     const h = harness({ oauth: { server: VANTA } });
     await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
     const { state, code: c } = await startFlow(h);
-    expect(await h.service.completeOAuth(justin, { state, code: c })).toMatchObject({
+    expect(await h.service.completeOAuth(ada, { state, code: c })).toMatchObject({
       ok: true,
       toolCount: 2,
       server: { state: "connected" },
@@ -592,7 +592,7 @@ describe("McpService — OAuth (item 18)", () => {
     expect(await tokenFor(h)).toBe("at-1");
     expect(h.clients.at(-1)?.spec.auth).toEqual({ type: "bearer", token: "at-1" });
     // The ticket is spent: the callback cannot run twice.
-    expect(await h.service.completeOAuth(justin, { state, code: c })).toMatchObject({
+    expect(await h.service.completeOAuth(ada, { state, code: c })).toMatchObject({
       ok: false,
       refusal: { kind: "used" },
     });
@@ -606,37 +606,37 @@ describe("McpService — OAuth (item 18)", () => {
       ok: false,
       refusal: { kind: "wrong_identity" },
     });
-    expect(await h.service.completeOAuth(justin, { state: `${NONCE1}.wrong`, code: c })).toMatchObject({
+    expect(await h.service.completeOAuth(ada, { state: `${NONCE1}.wrong`, code: c })).toMatchObject({
       ok: false,
       refusal: { kind: "oauth_failed", reason: expect.stringMatching(/state/) },
     });
-    expect(await h.service.completeOAuth(justin, { state: "no-dot", code: c })).toMatchObject({
+    expect(await h.service.completeOAuth(ada, { state: "no-dot", code: c })).toMatchObject({
       ok: false,
       refusal: { kind: "not_found" },
     });
     expect(
-      await h.service.completeOAuth(justin, { state, error: "access_denied", errorDescription: "user cancelled" }),
+      await h.service.completeOAuth(ada, { state, error: "access_denied", errorDescription: "user cancelled" }),
     ).toMatchObject({
       ok: false,
       refusal: { kind: "oauth_failed", reason: expect.stringMatching(/access_denied.*user cancelled/) },
     });
     // The state is proven before the server's error is relayed: a wrong state carrying an `error` is a state mismatch, not that error.
-    expect(await h.service.completeOAuth(justin, { state: `${NONCE1}.wrong`, error: "access_denied" })).toMatchObject({
+    expect(await h.service.completeOAuth(ada, { state: `${NONCE1}.wrong`, error: "access_denied" })).toMatchObject({
       ok: false,
       refusal: { kind: "oauth_failed", reason: expect.stringMatching(/state/) },
     });
-    expect(await h.service.completeOAuth(justin, { state, code: "never-issued" })).toMatchObject({
+    expect(await h.service.completeOAuth(ada, { state, code: "never-issued" })).toMatchObject({
       ok: false,
       refusal: { kind: "oauth_failed", reason: expect.stringMatching(/invalid_grant/) },
     });
-    expect(await h.service.completeOAuth(justin, { state, code: c })).toMatchObject({
+    expect(await h.service.completeOAuth(ada, { state, code: c })).toMatchObject({
       ok: false,
       refusal: { kind: "oauth_failed", reason: expect.stringMatching(/rejected the token/) },
     });
     expect(await h.secrets.getCredential("user:slack:UALICE/vanta")).toBeNull();
     expect((await h.secrets.getTicket(NONCE1))?.state).toBe("authorizing");
     await h.service.add(alice, ME(alice), { name: "other", url: VANTA, auth: "oauth" });
-    expect(await h.service.completeOAuth(justin, { state: "nonce-00000000000000000002.x", code: "c" })).toMatchObject({
+    expect(await h.service.completeOAuth(ada, { state: "nonce-00000000000000000002.x", code: "c" })).toMatchObject({
       ok: false,
       refusal: { kind: "not_authorizing" },
     });
@@ -646,7 +646,7 @@ describe("McpService — OAuth (item 18)", () => {
     const h = harness({ oauth: { server: VANTA } });
     await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
     const { state, code: c } = await startFlow(h);
-    expect((await h.service.completeOAuth(justin, { state, code: c })).ok).toBe(true);
+    expect((await h.service.completeOAuth(ada, { state, code: c })).ok).toBe(true);
     expect(await tokenFor(h)).toBe("at-1");
     h.tick(3600_000 - 30_000); // inside the 60 s skew
     expect(await Promise.all([tokenFor(h), tokenFor(h), tokenFor(h)])).toEqual(["at-2", "at-2", "at-2"]);
@@ -669,7 +669,7 @@ describe("McpService — OAuth (item 18)", () => {
       connectUrl: `https://switchboard.test/mcp/connect/${NONCE1}`,
     });
     const { state, code: c } = await startFlow(h);
-    expect((await h.service.completeOAuth(justin, { state, code: c })).ok).toBe(true);
+    expect((await h.service.completeOAuth(ada, { state, code: c })).ok).toBe(true);
     expect(await h.secrets.getCredential("channel:slack:CSTATIC/compliance")).toBeTruthy();
     const inChannel = (await h.service.resolveForRun("general", { userId: bob.id, channelId: "slack:CSTATIC" })).find(
       (s) => "spec" in s && s.spec.name === "compliance",
@@ -689,7 +689,7 @@ describe("McpService — OAuth (item 18)", () => {
       state: "awaiting_credential",
     });
     const { state, code: c } = await startFlow(h, "nonce-00000000000000000002");
-    expect((await h.service.completeOAuth(justin, { state, code: c })).ok).toBe(true);
+    expect((await h.service.completeOAuth(ada, { state, code: c })).ok).toBe(true);
     expect(JSON.stringify(await h.service.show(alice, ME(alice), "vanta"))).not.toMatch(/at-1|rt-1|client-1/);
     await h.service.remove(alice, ME(alice), "vanta");
     expect(await h.secrets.getCredential("user:slack:UALICE/vanta")).toBeNull();
@@ -704,17 +704,17 @@ describe("McpService — the connect follow-up (item 19)", () => {
   it("a bearer completion records the tool count on the claimed ticket; an OAuth completion does too; a server that could not be reached records the verify warning instead", async () => {
     const h = harness();
     await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA, auth: "bearer" });
-    await h.service.completeTicket(NONCE1, justin, "tok-1");
+    await h.service.completeTicket(NONCE1, ada, "tok-1");
     expect((await h.secrets.getTicket(NONCE1))?.outcome).toEqual({ toolCount: 2 });
     const o = harness({ oauth: { server: VANTA } });
     await o.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
-    const started = (await o.service.startOAuth(NONCE1, justin)) as { ok: true; redirectUrl: string };
+    const started = (await o.service.startOAuth(NONCE1, ada)) as { ok: true; redirectUrl: string };
     const state = new URL(started.redirectUrl).searchParams.get("state") as string;
-    expect((await o.service.completeOAuth(justin, { state, code: o.as.issueCode(started.redirectUrl) })).ok).toBe(true);
+    expect((await o.service.completeOAuth(ada, { state, code: o.as.issueCode(started.redirectUrl) })).ok).toBe(true);
     expect((await o.secrets.getTicket(NONCE1))?.outcome).toEqual({ toolCount: 2 });
     const down = harness({ serverDown: true });
     await down.service.add(alice, ME(alice), { name: "vanta", url: VANTA, auth: "bearer" });
-    await down.service.completeTicket(NONCE1, justin, "tok-1");
+    await down.service.completeTicket(NONCE1, ada, "tok-1");
     expect((await down.secrets.getTicket(NONCE1))?.outcome).toEqual({
       warning: expect.stringMatching(/could not be reached/),
     });
@@ -727,7 +727,7 @@ describe("McpService — the connect follow-up (item 19)", () => {
     const waiting = h.service.awaitTicket(NONCE1, {
       sleep: async () => {
         polls += 1;
-        if (polls === 3) await h.service.completeTicket(NONCE1, justin, "tok-1");
+        if (polls === 3) await h.service.completeTicket(NONCE1, ada, "tok-1");
       },
     });
     expect(await waiting).toEqual({ kind: "completed", outcome: { toolCount: 2 } });

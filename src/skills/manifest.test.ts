@@ -100,7 +100,7 @@ describe("parseManifest", () => {
   });
 
   // The name is the vendored directory name: a path-shaped name would make the
-  // sync write outside skills/ (review nit on #331).
+  // sync write outside skills/.
   it("rejects a skill name that is not a plain slug (a path, `..`, uppercase)", () => {
     for (const bad of ["../escape", "a/b", "Code-Review", "has space", "-leading"]) {
       expect(() => parseManifest(MANIFEST.replace("name: test-driven-development", `name: "${bad}"`))).toThrow(/name must be a lowercase slug/);
@@ -192,8 +192,8 @@ describe("checkVendoredSkills (the offline drift check)", () => {
     expect(problems[1]).toMatch(/test-driven-development.*agents \[review\].*manifest says \[coding\]/);
   });
 
-  // Review finding on #331: the check compared frontmatter only, so a hand
-  // edit to the body — the thing most likely to be tweaked — passed cleanly.
+  // A check that compares frontmatter only lets a hand
+  // edit to the body — the thing most likely to be tweaked — pass cleanly.
   it("reports a vendored file whose BODY was edited by hand (digest mismatch), with no network call", () => {
     const edited = crq.trimEnd() + "\nHAND EDITED LINE\n";
     const dir = fixture(MANIFEST, { "code-review-and-quality": edited, "test-driven-development": tdd });

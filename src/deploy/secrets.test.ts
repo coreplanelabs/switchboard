@@ -50,31 +50,31 @@ describe("parseManifest", () => {
 });
 
 describe("parseSecretsSource / secretRef", () => {
-  it("the default is a directory of <NAME> files; a path is a directory; op://Vault/Item is an item whose fields are the secrets", () => {
+  it("the default is a directory of <NAME> files; a path is a directory; an op item reference is an item whose fields are the secrets", () => {
     expect(parseSecretsSource(undefined)).toEqual({ ok: true, source: { kind: "dir", path: DEFAULT_SECRETS_DIR } });
     expect(parseSecretsSource("/etc/switchboard/secrets")).toEqual({
       ok: true,
       source: { kind: "dir", path: "/etc/switchboard/secrets" },
     });
-    expect(parseSecretsSource("op://Prod/Switchboard secrets")).toEqual({
+    expect(parseSecretsSource("op://Acme/Switchboard secrets")).toEqual({
       ok: true,
-      source: { kind: "op", vault: "Prod", item: "Switchboard secrets" },
+      source: { kind: "op", vault: "Acme", item: "Switchboard secrets" },
     });
     expect(secretRef({ kind: "dir", path: "~/.secrets/switchboard" }, "MEMORY_TOKEN")).toBe(
       "~/.secrets/switchboard/MEMORY_TOKEN",
     );
-    expect(secretRef({ kind: "op", vault: "Prod", item: "Switchboard secrets" }, "MEMORY_TOKEN")).toBe(
-      "op://Prod/Switchboard secrets/MEMORY_TOKEN",
+    expect(secretRef({ kind: "op", vault: "Acme", item: "Switchboard secrets" }, "MEMORY_TOKEN")).toBe(
+      "op://Acme/Switchboard secrets/MEMORY_TOKEN",
     );
   });
 
   it("refuses an empty value, an op reference with a field or without an item, and an unknown scheme", () => {
     expect(parseSecretsSource("  ")).toEqual({ ok: false, problem: "secretsSource is empty" });
-    expect(parseSecretsSource("op://Prod/Item/FIELD")).toMatchObject({
+    expect(parseSecretsSource("op://Acme/Item/FIELD")).toMatchObject({
       ok: false,
       problem: expect.stringContaining("expected op://Vault/Item"),
     });
-    expect(parseSecretsSource("op://Prod")).toMatchObject({ ok: false });
+    expect(parseSecretsSource("op://Acme")).toMatchObject({ ok: false });
     expect(parseSecretsSource("s3://bucket/prefix")).toMatchObject({
       ok: false,
       problem: expect.stringContaining("unknown scheme"),
@@ -132,7 +132,7 @@ describe("wranglerFailureLine — what a failed `wrangler secret put` gets quote
       "✘ [ERROR] A request to the Cloudflare API (/accounts/abc/workers/scripts/switchboard/secrets) failed.",
       "  Authentication error [code: 10000]",
       "📎 It looks like you are authenticating Wrangler via a custom API token set in an environment variable.",
-      '🪵  Logs were written to "/Users/me/Library/Preferences/.wrangler/logs/wrangler-2026-09-08.log"',
+      '🪵  Logs were written to "/Users/me/Library/Preferences/.wrangler/logs/wrangler-<date>.log"',
     ].join("\n");
     expect(wranglerFailureLine(out)).toBe(
       "[ERROR] A request to the Cloudflare API (/accounts/abc/workers/scripts/switchboard/secrets) failed.",

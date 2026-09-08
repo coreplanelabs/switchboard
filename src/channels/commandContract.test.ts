@@ -26,8 +26,8 @@ import { createRunsService } from "../core/runsService.js";
 import { createCommandHttpHandler } from "./commandHttp.js";
 import { handleMcpRequest } from "./mcp.js";
 
-// Feature: features/command-registry.md — the SHARED ADAPTER CONTRACT (AE3,
-// R7/R10, KTD21). One fixture (a live run with a `tok-` capability token and a
+// Feature: features/command-registry.md — the SHARED ADAPTER CONTRACT. One
+// fixture (a live run with a `tok-` capability token and a
 // persisted run, the friction ledger served from the same store, and a resident
 // registry stub) is driven through every adapter; each row must hand back the
 // exact JSON object `invoke` produced, and no surface may leak a token. Every
@@ -85,7 +85,7 @@ function record(id: string, finishedAt: number): RunRecord {
     agent: "coding",
     model: "anthropic/claude",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UA",
     threadKey: `slack:C1:${id}`,
     channelVisibility: "public", // every adapter caller may read a public run: the contract is about transport, not visibility
     startedAt: finishedAt - 10_000,
@@ -106,7 +106,7 @@ async function fixture() {
     agent: "coding",
     model: "anthropic/claude",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UA",
     threadKey: "slack:C1:t",
     channelVisibility: "public",
   });
@@ -332,7 +332,7 @@ describe.each(rows)("adapter contract — $name", (row) => {
 // Red-verified: adding `token: s.token` to `liveView()` in runsService.ts fails
 // the rows above on the `tok-` scan.
 
-// ---- migrated chat commands (U9, R13) ----------------------------------------
+// ---- migrated chat commands --------------------------------------------------
 
 describe.each(rows)("adapter contract for migrated commands — $name", (row) => {
   it("friction.report --limit 5 hands back the exact invoke JSON: the recurring lockfile pattern over the two persisted runs, no token", async () => {
@@ -458,7 +458,7 @@ describe("adapter contract — chat", () => {
 
 // ---- naming: one definition, four spellings ---------------------------------------
 
-describe("derived naming across surfaces (KTD2/KTD21)", () => {
+describe("derived naming across surfaces", () => {
   it("every registered option key is camelCase in TypeScript/MCP/JSON and kebab-case on the CLI/chat; every id is snake_case as an MCP tool and /api/<id> over HTTP", async () => {
     const f = await fixture();
     const seen: Record<string, string> = {};

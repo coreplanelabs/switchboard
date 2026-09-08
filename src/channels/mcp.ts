@@ -35,9 +35,9 @@ import {
 // Anything else is a proper JSON-RPC error.
 //
 // Tools: the hand-written `dispatch` (starts an agent run through dispatch())
-// PLUS every command registry entry exposed to MCP (#157 U7, KTD2/KTD11): tool
+// PLUS every command registry entry exposed to MCP: tool
 // `runs_list` ↔ command `runs.list`, `inputSchema` derived from the typed
-// arguments + options (all addressed by name, camelCase — KTD21),
+// arguments + options (all addressed by name, camelCase),
 // result text = one header line + the JSON object `invoke` returned, errors as
 // JSON-RPC errors carrying `data.code`. No per-command code lives here; the
 // registry authorizes the `mcp:<subject>` actor over the policy table, whose
@@ -97,7 +97,7 @@ export interface McpOptions {
   grantsFor?: GrantsLookup;
 }
 
-/** KTD2/KTD11: `runs.list` → tool `runs_list`; `inputSchema` = the command's
+/** `runs.list` → tool `runs_list`; `inputSchema` = the command's
  *  arguments (by name) + options (camelCase keys), derived from the definition. */
 function toMcpTool(cmd: CommandDef<unknown>): {
   name: string;
@@ -111,11 +111,12 @@ function mcpExposed(commands: CommandInvoker | undefined): CommandDef<unknown>[]
   return (commands?.list() ?? []).filter((c) => CommandRegistry.exposedTo(c, "mcp"));
 }
 
-/** R9: the Caller an MCP bearer identity resolves to — the `service` Actor
+/** The Caller an MCP bearer identity resolves to — the `service` Actor
  *  `mcp:<subject>` with the grants config names for it (its `channels` name the
  *  runs it may read, in the `mcp:<channel>` namespace `toIncomingMessage` gives a
  *  dispatch's channelId); a token with no entry holds nothing and sees no run
- *  (authorization.md item 9). Nothing here decides what it may do (KTD3). */
+ *  (authorization.md item 9). Nothing here decides what it may do
+ *  (docs/decisions/0007-authorization-policy-table.md). */
 export function toCaller(identity: IngressIdentity, lookup: GrantsLookup): Caller {
   return {
     kind: "mcp",
@@ -267,7 +268,7 @@ async function route(
       const command = options.commands && mcpExposed(options.commands).find((c) => mcpToolName(c.id) === name);
       if (command) {
         // Registry tool: the by-name arguments split onto the definition's
-        // `{ args, options }` and handed to invoke (KTD10 authorization and the
+        // `{ args, options }` and handed to invoke (authorization and the
         // schemas live there), the returned object straight back out.
         const input = namedToInput(command, args, "camel");
         if ("error" in input) return err(id, INVALID_PARAMS, input.error, { code: "invalid_input" });

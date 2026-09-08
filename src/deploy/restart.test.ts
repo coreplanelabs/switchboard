@@ -125,7 +125,7 @@ describe("authorizeRestart", () => {
     expect(JSON.stringify(authenticateRestart("Bearer tok-secret-value", tokens))).not.toContain("tok-secret-value");
   });
 
-  it("authorizeRestartSubject (the bot's half for a subject the Worker already authenticated) decides on the grants alone — no token map involved, so a rotation in flight cannot refuse it (#667)", () => {
+  it("authorizeRestartSubject (the bot's half for a subject the Worker already authenticated) decides on the grants alone — no token map involved, so a rotation in flight cannot refuse it", () => {
     expect(authorizeRestartSubject("ops", grantsFor)).toEqual({ ok: true, subject: "ops" });
     expect(authorizeRestartSubject("reader", grantsFor)).toMatchObject({ ok: false, status: 403 });
     expect(authorizeRestartSubject("unknown", grantsFor)).toMatchObject({ ok: false, status: 403 });

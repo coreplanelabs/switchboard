@@ -1,11 +1,12 @@
-// Disk as a measured, budgeted resource on a resident (#448, features/
+// Disk as a measured, budgeted resource on a resident (features/
 // resident-repos.md item 55). Pure decisions the resident Worker (deploy/
 // cloudflare-resident/worker.ts) imports, like residentDisk / residentRefresh:
 // no I/O, no clock — `now` is an input, `df`/`du` output comes in as text.
 //
-// Why this exists: until #457/#472 nothing measured a resident's disk and
-// ENOSPC was the first signal (2026-09-04: nominal filled 8 GB in 45 min). #472
-// names a FULL disk after the fact; this module keeps it from filling: every
+// Why this exists: with nothing measuring a resident's disk, ENOSPC is the
+// first signal, and a handful of concurrent thread trees can fill a disk in
+// under an hour. `residentDisk.ts` names a FULL disk after the fact; this
+// module keeps it from filling: every
 // refresh cycle and every attach measures the disk (one `df`, one `du` over
 // the components — hardlinks counted once), the sample is persisted on the
 // resident's live view, and a thread tree is created only when the projected
@@ -156,10 +157,10 @@ export { parseDfKiB };
 export const SNAPSHOT_STAGING_RATIO = 0.6;
 
 /** The fixed floor under the staging term: at least 1 GiB, or 5 % of the disk
- *  when that is more. 1 GiB is ~2.5 hardlinked nominal thread trees of slack
+ *  when that is more. 1 GiB is a couple of hardlinked thread trees of slack
  *  for what no projection sees — git's pack scratch, a `cp -al` fallback to a
  *  plain copy, an exec writing under /tmp, `du` racing a write — and it is
- *  eight times #472's 128 MiB `disk-full` floor, so admission always refuses
+ *  eight times `residentDisk.ts`'s 128 MiB `disk-full` floor, so admission always refuses
  *  well before the failure classifier would have to speak. 5 % keeps the
  *  margin proportional on a larger instance (20 GB → 1 GB, the same number
  *  today; the fraction is for when the cap moves). */
@@ -194,8 +195,8 @@ export type ThreadCostKind = "reuse" | "hardlink" | "reconcile";
  *  write on top of its hardlinked seed: the delta install replaces only the
  *  packages whose version differs, so the tree costs a fraction of the deps,
  *  not the deps again (before this, such a thread installed from an empty
- *  node_modules — 1.94 GiB projected on the switchboard resident, and the disk
- *  refused the seventh concurrent review at 21:38 UTC 2026-09-07). A bound to
+ *  node_modules — the whole deps term projected again, which is what makes a
+ *  disk refuse the next concurrent review). A bound to
  *  re-measure against `du` of live reconciled trees, deliberately above the
  *  typical few-package delta so admission errs toward refusing. */
 export const RECONCILE_DEPS_RATIO = 0.25;

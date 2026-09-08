@@ -5,22 +5,22 @@ import { decideLive, LIVE_GATE_DEADLINE_MS, type HealthzBody } from "./liveGate.
 // artifacts: the Worker version `wrangler deploy` uploads at once, and the
 // container image Cloudflare rolls out afterwards, instance by instance. In
 // between, the new Worker code can be handed a container still running the
-// previous image, and a Durable Object created then stays on it: 2026-09-07
-// (#569) the review of #520 started 111 s after the upload, landed on a 0.3.7
-// container under the 0.12.9 SDK, and every exec failed with an EMPTY error
-// for 90 s. "Deployed" therefore means nothing here until three independent
+// previous image, and a Durable Object created then stays on it: a thread
+// placed a minute or two after the upload runs its whole life on the old
+// image, and every exec fails with an EMPTY error. "Deployed" therefore means
+// nothing here until three independent
 // signals agree — the Worker serves the deployed commit, every RUNNING
 // instance of the container application is on the application's version, and
 // a real `echo ok` through a probe thread answers from an instance on that
 // version. Each signal has its own named `waiting` reason, and nothing the
 // rollout can cause (a full fleet, a booting container, an in-body error) is
-// a failure before the deadline. The rollout signal has a TARGET: 2026-09-08
-// (#589) the first production gate passed 7 s after the 0.5.0 upload with
-// "rollout complete (1 running instance(s) on version 11)" — the application
-// still reported the PRE-deploy version because the deploy's version 12 had
-// not registered yet, so every running instance trivially matched it and the
-// probe ran on the old image. Now the runner reads the application before the
-// upload and takes the target from wrangler's own container diff; the rollout
+// a failure before the deadline. The rollout signal has a TARGET: seconds
+// after the upload the application can still report the PRE-deploy version —
+// the deploy's new version has not registered yet — so every running instance
+// trivially matches it and a probe runs on the old image; a gate judging
+// "all instances on the app version" alone passes at once. So the runner
+// reads the application before the upload and takes the target from
+// wrangler's own container diff; the rollout
 // counts only once the application has left the pre-deploy version. No node:*
 // imports; src/deploy/run.ts does the fetching, the wrangler calls and the clock.
 
@@ -74,7 +74,7 @@ export interface SandboxLiveInput {
   /** The probe's thread key — the instance `name` the probe must be found under. */
   probeThreadKey: string;
   deployedCommit: string;
-  /** The application as read BEFORE the upload — the version the rollout must leave (#589). */
+  /** The application as read BEFORE the upload — the version the rollout must leave. */
   before: Read<AppState>;
   /** wrangler's diff; `null` when it printed no container change (Worker-only deploy, no rollout expected). */
   target: RolloutTarget | null;
@@ -168,8 +168,8 @@ function judge(input: SandboxLiveInput): SandboxLiveDecision {
 
   // The rollout, first its target: when wrangler printed a container change the
   // application must have LEFT the version read before the upload — instances
-  // "all on the app version" mean nothing while that version is the old one
-  // (#589). A Worker-only deploy (no change printed) rolls no container: the
+  // "all on the app version" mean nothing while that version is the old one.
+  // A Worker-only deploy (no change printed) rolls no container: the
   // current version is the one to be on.
   if (input.app === null || input.instances === null) return waiting("rollout: not read yet");
   if ("error" in input.app) return waiting(`rollout: ${input.app.error}`);
@@ -198,8 +198,8 @@ function judge(input: SandboxLiveInput): SandboxLiveDecision {
 
   // The probe: `echo ok` through the gate's own thread. Everything the rollout
   // can cause is `waiting`: a full fleet (capacity, execution.md item 14), a
-  // booting container, ANY in-body error — an EMPTY one included, which is the
-  // #569 shape: the 0.12.9 SDK against a previous-image container — and a
+  // booting container, ANY in-body error — an EMPTY one included, which is
+  // what a newer SDK gets from a previous-image container — and a
   // nonzero exit. Only the deadline turns these into a failure.
   if (input.probe === null) return waiting("probe: not sent yet");
   if ("error" in input.probe) return waiting(`probe: ${input.probe.error}`);
@@ -211,7 +211,7 @@ function judge(input: SandboxLiveInput): SandboxLiveDecision {
   if ("error" in body)
     return waiting(
       body.error === ""
-        ? "probe: /exec failed with an EMPTY error — the probe's container may still run the previous image (#569)"
+        ? "probe: /exec failed with an EMPTY error — the probe's container may still run the previous image"
         : `probe: /exec failed — ${typeof body.error === "string" ? body.error : JSON.stringify(body.error)}`,
     );
   if (body.exitCode !== 0) {

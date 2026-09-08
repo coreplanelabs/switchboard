@@ -41,8 +41,9 @@ export function clampBashTimeout(requested: unknown): number {
  *  `clipped` to what fits (with the line the model sees so it knows why the
  *  command ended early), or `exhausted` when even the 1s floor does not fit —
  *  the tool then refuses to start a command that cannot finish, and the model
- *  writes up what it has. Live 2026-09-07 (review of #521): one 20-minute
- *  first command consumed 80% of a 25-minute review budget. */
+ *  writes up what it has. Without the reserve one first command at the
+ *  20-minute ceiling can consume most of a 25-minute run budget and leave
+ *  nothing for the write-up. */
 export type RunBudget =
   { kind: "unchanged" } | { kind: "clipped"; timeoutMs: number; note: string } | { kind: "exhausted"; note: string };
 

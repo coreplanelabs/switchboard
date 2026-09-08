@@ -38,8 +38,8 @@ import {
  *  naturally. */
 export type IndexRow = RunIndexRowSeed;
 
-// Live-view channel: the external, browser-facing surface for a live agent run
-// (Area 2 / #43). It streams the SAME redacted RunEvents the in-channel status
+// Live-view channel: the external, browser-facing surface for a live agent run.
+// It streams the SAME redacted RunEvents the in-channel status
 // card consumes, over Server-Sent Events, to a minimal self-contained page.
 //
 // Auth for a LIVE run is a per-run CAPABILITY TOKEN, not a bearer header: a
@@ -48,14 +48,14 @@ export type IndexRow = RunIndexRowSeed;
 // registry — via `RunsService.authorizeLive` — for the page, the event stream
 // and the stop control. A wrong/missing token on a live run — or an unknown run
 // — is a 404 (never reveal existence). A FINISHED run (still in the registry, or
-// persisted in the run store — #157) is served tokenless in history mode to the
+// persisted in the run store) is served tokenless in history mode to the
 // Access-authenticated viewer, through the same page renderer — and only when
 // the policy table lets that viewer's ACTOR read it (features/authorization.md
-// items 5–7, #428): index.ts resolves the Access identity with the same
+// items 5–7): index.ts resolves the Access identity with the same
 // `accessActor` the `/api/*` adapter uses and hands it in as `ctx.actor`; the
 // index lists through `predicateFor(actor, "runs:read", "run")`, a tokenless
 // read is `authorize`d against the run's own attributes, and a deny renders
-// exactly like an unknown id (KTD8 — the reason reaches the audit line only).
+// exactly like an unknown id (the reason reaches the audit line only).
 // Events are already redacted + capped upstream (runEvents.ts); this layer adds
 // no data and re-exposes nothing.
 //
@@ -79,7 +79,7 @@ export { retentionSentence } from "./webSeed.js";
 
 /** Which live-view route a path is, if any. The bare `/runs` index carries no
  *  id (it is Access-gated, not token-gated); the per-run routes do. `stop` is
- *  the one WRITE route (`POST /runs/:id/stop`, #101). */
+ *  the one WRITE route (`POST /runs/:id/stop`). */
 export type RunRoute =
   { kind: "index" } | { kind: "scheduled" } | { id: string; kind: "page" | "events" | "friction" | "stop" };
 
@@ -115,10 +115,10 @@ export function parseStopMode(raw: string | null): StopMode | null {
 /** The tokenless routes that read a finished run. */
 export type HistoryReadRoute = "page" | "events" | "friction" | "stop";
 
-/** One audit line per tokenless read of a finished run (R9). An allowed
+/** One audit line per tokenless read of a finished run. An allowed
  *  page/events read says who read which run on which route — never any
  *  content. A read the table refused says who was refused on which route and
- *  why (`authorize`'s reason, KTD8: the audit line's, never the reply's) — and
+ *  why (`authorize`'s reason: the audit line's, never the reply's) — and
  *  never which run, so the log reveals no more existence than the 404 does
  *  (the same shape `runs.*` logs). */
 export type HistoryReadAudit =
@@ -128,11 +128,11 @@ export type HistoryReadAudit =
 export interface LiveViewDeps {
   /** The bound web-app shell (webShell.ts): title + seed → the HTML document. */
   shell: ShellRenderer;
-  /** Every run read and the tokenless stop go through the service (KTD7). */
+  /** Every run read and the tokenless stop go through the service. */
   service: RunsService;
   /** The registry's index face: the live rows (with tokens, for their hrefs) and
    *  the live feed. The default `/runs` view is this plus the service's rows live
-   *  elsewhere (run-history item 41); never the store (R11). */
+   *  elsewhere (run-history item 41); never the store. */
   index: Pick<RunRegistry, "listActive" | "subscribeIndex">;
   /** The configured run-history retention, for the index toggle's tooltip; null
    *  when history is off (store: null). */
@@ -140,7 +140,7 @@ export interface LiveViewDeps {
   /** Receives one entry per allowed page/events history read and per refused
    *  tokenless read. Default: console.log. */
   audit?: (entry: HistoryReadAudit) => void;
-  /** The "Scheduled" panel on the index (#244): the schedule registry to list
+  /** The "Scheduled" panel on the index: the schedule registry to list
    *  and, optionally, the store holding each schedule's firings. Absent → no
    *  panel (tests, the CLI). */
   scheduled?: {
@@ -199,7 +199,7 @@ function readableRuns(actor: Actor): Predicate {
 
 /** The table's decision on ONE finished run the viewer asked for tokenless
  *  (authorization.md item 5): admitted to run reads, and allowed this run by
- *  its own attributes — channel, user, stamped visibility (R1). */
+ *  its own attributes — channel, user, stamped visibility. */
 function readDecision(actor: Actor, view: RunView): Decision {
   const admitted = authorize(actor, "runs:read", RUNS_GET);
   return admitted.allow ? authorize(actor, "runs:read", runResource(view)) : admitted;
@@ -248,16 +248,17 @@ const JSON_NO_STORE = { "content-type": "application/json; charset=utf-8", "cach
  * request (so the server stops routing), `false` to fall through. Every read
  * route is GET-only and the one write route is POST-only (405 otherwise):
  *   GET  /runs                 → the runs index HTML page: active runs (Access-gated, NOT token-gated)
- *   GET  /runs?all=1           → the index with finished + persisted runs too (R11)
+ *   GET  /runs?all=1           → the index with finished + persisted runs too
  *   GET  /runs?stream=1[&all=1] → the live runs-index SSE feed
  *   GET  /runs/:id[?t=…]       → the HTML page: a valid token → the live page; no/wrong token →
  *        history mode for a finished or persisted run (tokenless, Access-gated), 404 for a live run
  *   GET  /runs/:id/events[?t=…] → the SSE stream: live with a token; the stored replay + `end` otherwise
  *   GET  /runs/:id/friction[?t=…] → the friction diagnosis JSON (live diagnosis-so-far, or the stored one)
- *   POST /runs/:id/stop?t=…&mode=soft|hard → ask the run to stop (#101): 200 JSON, 400 bad
+ *   POST /runs/:id/stop?t=…&mode=soft|hard → ask the run to stop: 200 JSON, 400 bad
  *        mode, 404 bad/missing token on a live run or unknown run, 409 finished/persisted
  * The live routes are token-gated via the registry (`authorizeLive`, synchronous
- * — KTD6) and ignore the viewer's actor: the token IS the capability. The
+ * — never a store read) and ignore the viewer's actor: the token IS the capability
+ * (docs/decisions/0013-capability-tokens-for-live-run-pages.md). The
  * tokenless history routes and the index are Access-gated at the edge (index.ts
  * gates every method under /runs*) AND bound to the viewer's actor (`ctx.actor`):
  * the index — default live rows, `?all=1`, the `?stream=1` feed, the Scheduled
@@ -265,7 +266,7 @@ const JSON_NO_STORE = { "content-type": "application/json; charset=utf-8", "cach
  * a finished run is `readDecision`-ed on the run's own attributes; a deny is
  * the same 404 an unknown id gets, on every route, and the 409 a tokenless stop
  * gives a finished run is withheld the same way. Unknown, expired, denied and
- * wrong-token-on-live lookups share one 404 body (R4/R10). `?stream=1` (a query
+ * wrong-token-on-live lookups share one 404 body. `?stream=1` (a query
  * flag, not a new path) selects the feed so it never collides with `/runs/<id>`
  * where an id could legitimately be "events" or "stream".
  */
@@ -288,7 +289,7 @@ export function createLiveViewHandler(
   const audit = deps.audit ?? ((entry) => console.log(`[runs] history read ${JSON.stringify(entry)}`));
   /** True when the table lets `actor` read this finished run tokenless; a deny
    *  is audited here (route, actor, reason — never the run) and the caller
-   *  renders it exactly as an unknown id (KTD8). */
+   *  renders it exactly as an unknown id. */
   const readable = (actor: Actor, view: RunView, route: HistoryReadRoute): boolean => {
     const decision = route === "stop" ? stopDecision(actor, view) : readDecision(actor, view);
     if (!decision.allow) audit({ route, identity: actor.id, denied: decision.reason });
@@ -326,7 +327,7 @@ export function createLiveViewHandler(
     cursor?: { before: number; beforeId: string },
   ): Promise<IndexPage> => {
     const tokens = new Map(live.map((s) => [s.id, s.token]));
-    // The viewer's predicate is the store's own filter (R6): the service hands
+    // The viewer's predicate is the store's own filter: the service hands
     // it down and nothing is loaded to be dropped afterwards.
     const { runs, nextBefore, storeUnavailable } = await service.listRuns({
       status: "all",
@@ -336,7 +337,7 @@ export function createLiveViewHandler(
     });
     // A cursor page holds finished runs only — the service leaves the live rows
     // off it (they all sort ahead of any cursor), so the page is a full page.
-    // Only an UNFINISHED row gets its capability token (R10): the seed is data
+    // Only an UNFINISHED row gets its capability token: the seed is data
     // the page ships verbatim, and a finished row must never carry one — the
     // registry may still hold a token for a recently finished run.
     const rows = runs.map((v) => {
@@ -371,7 +372,7 @@ export function createLiveViewHandler(
     // the runs the viewer's actor may read: the default live rows, the `?all=1`
     // page and the `?stream=1` feed all go through the ONE predicate, so a
     // capability link for a run the viewer may not read never reaches the page.
-    // The default view is the live registry only (R11: never a store read);
+    // The default view is the live registry only (never a store read);
     // `?all=1` merges the service's finished + persisted rows in, keeping the
     // live rows' token hrefs.
     if (route.kind === "index") {
@@ -407,7 +408,7 @@ export function createLiveViewHandler(
       if (!all) {
         // The default view is the registry plus the ledger's rows live under
         // other generations (run-history item 41) — tokenless, static (the index
-        // feed is the registry's). Still never a store read (R11).
+        // feed is the registry's). Still never a store read.
         run(res, async () =>
           render({ rows: [...live.filter((s) => !s.finished), ...(await service.liveElsewhere(visibleTo))] }),
         );
@@ -417,7 +418,7 @@ export function createLiveViewHandler(
       return true;
     }
 
-    // The Scheduled tab (#244, item 18): the registry's schedules with each one's
+    // The Scheduled tab (features/live-view.md item 18): the registry's schedules with each one's
     // last firing; a live firing links with its token, so the panel reads the
     // live rows — only those the viewer may read, so it never hands out a token
     // for a run the viewer could not open (a finished firing links tokenless,
@@ -458,8 +459,8 @@ export function createLiveViewHandler(
     const token = url.searchParams.get("t") ?? "";
     const access = token ? service.authorizeLive(route.id, token) : null;
 
-    // ── Live path: the token checked out. Synchronous and byte-identical to the
-    // pre-history handler (KTD6).
+    // ── Live path: the token checked out. Synchronous — the registry answers
+    // from memory, never the store.
     if (access) {
       if (route.kind === "page") {
         const snap = access.snapshot();
@@ -469,7 +470,7 @@ export function createLiveViewHandler(
             page: "run",
             mode: "live",
             id: route.id,
-            // Stop control (#101): same token, POST-only; `&mode=` is appended client-side.
+            // Stop control: same token, POST-only; `&mode=` is appended client-side.
             eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
             stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}`,
             // The stamps the header's one duration reads (features/tracing.md).
@@ -481,7 +482,7 @@ export function createLiveViewHandler(
         );
         return true;
       }
-      // Read-only friction diagnosis of the run's retained backlog (#84): works
+      // Read-only friction diagnosis of the run's retained backlog: works
       // mid-run (a diagnosis so far) and for a finished run still within the TTL.
       if (route.kind === "friction") {
         const snap = access.snapshot();
@@ -500,7 +501,7 @@ export function createLiveViewHandler(
         res.end(JSON.stringify({ id: route.id, finished: snap.finished, diagnosis }));
         return true;
       }
-      // Run control (#101): the only write. Mode is validated BEFORE anything
+      // Run control: the only write. Mode is validated BEFORE anything
       // else so a malformed request is a plain 400; the registry's token-gated
       // stop answers 404 for a vanished run and 409 for a finished one. Never
       // throws: the run loop observes the control on its own schedule — this
@@ -532,7 +533,7 @@ export function createLiveViewHandler(
     }
 
     // ── History path: no token, or one the registry refused. A FINISHED run the
-    // viewer's actor may read is readable here (R10: a live run of THIS process
+    // viewer's actor may read is readable here (a live run of THIS process
     // keeps requiring its token — a wrong token on it is the same 404 as an
     // unknown run; a finished run the table denies is that same 404 too); a
     // finished run still in the registry and a persisted one render identically

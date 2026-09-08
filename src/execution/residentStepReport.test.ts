@@ -10,9 +10,9 @@ import {
 // Feature: features/resident-repos.md item 53 — a failed resident step names
 // the failure. The fixtures below are REAL captures, not invented strings:
 // `PNPM_WARN` is the byte-for-byte stderr of `pnpm install --frozen-lockfile`
-// under the resident image's pnpm (11.x) on coreplanelabs/nominal, and
+// under the resident image's pnpm (11.x) on a pnpm workspace, and
 // `PNPM_ERROR` the stdout of the same command when it genuinely fails. The
-// incident this replaces (2026-09-04): the resident reported
+// failure mode this replaces: the resident reported
 // `provision-failed at install: exit 1: [WARN] The "pnpm" field …` — the
 // warning, which the SAME install prints on success, while the pnpm error that
 // actually explained the exit sat on the discarded stdout.
@@ -113,13 +113,13 @@ describe("stepFailureLog", () => {
   });
 });
 
-// 2026-09-07: the switchboard resident's `npm install` outlived its 5-min
-// budget AND the SDK's 30 s output grace; `output()` rejected with
-// `Process output did not complete within 330000ms`, the cycle recorded
-// `refresh-failed: …` and moved on — leaving npm running in the checkout. The
-// next cycle's `git clean -fdx` raced it (`Directory not empty` on exactly the
-// packages being extracted) and the resident spiralled: every cycle a timeout
-// or a torn clean, `degraded` for as long as main kept moving.
+// An `npm install` that outlives its 5-min budget AND the SDK's 30 s output
+// grace makes `output()` reject with `Process output did not complete within
+// 330000ms`; if the cycle then records `refresh-failed: …` and moves on, npm
+// is left running in the checkout. The next cycle's `git clean -fdx` races it
+// (`Directory not empty` on exactly the packages being extracted) and the
+// resident spirals: every cycle a timeout or a torn clean, `degraded` for as
+// long as the default branch keeps moving.
 describe("abandonedWaitStepResult (a wait that gives up on a live process is the step's own timeout)", () => {
   const sdkMessage = "Process output did not complete within 330000ms";
 

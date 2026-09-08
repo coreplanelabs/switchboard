@@ -1,11 +1,11 @@
 // `POST /admin/crash` — kill injection for the durable-runs receipts
-// (features/run-history.md item 36, plan D12): the bot process exits hard —
+// (features/run-history.md item 36): the bot process exits hard —
 // no drain, no handoff, no finish writes, the platform restarts the container
 // — so the "run survives kill -9" criterion is reproducible from the harness,
 // without a shell on the container. A hard exit, not a self-SIGKILL: the bot
 // is PID 1 in its container and the kernel drops a SIGKILL that init sends
-// itself (seen live 2026-09-08: the 202 came back, the run finished 49 s later
-// on the same generation). For the runs the two are the same event.
+// itself (the 202 comes back and the run then finishes on the same
+// generation, as if nothing happened). For the runs the two are the same event.
 //
 // Same authorization as `deploy restart` (`src/deploy/restart.ts`): a
 // SWITCHBOARD_INGRESS_TOKENS bearer whose identity carries `deploy:write`. The

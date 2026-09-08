@@ -1,5 +1,6 @@
-// The Switchboard CLI — a THIN wrapper over the command registry (#157 KTD20/
-// KTD21): every registered command as `npx tsx src/cli.ts <group> <verb>
+// The Switchboard CLI — a THIN wrapper over the command registry (see
+// docs/decisions/0008-one-command-definition-every-surface.md): every
+// registered command as `npx tsx src/cli.ts <group> <verb>
 // [args…] [--option value…] [--json]`, with the words, positionals, flags,
 // usage and help all DERIVED from the typed definition by commandSurface.ts.
 //   npx tsx src/cli.ts runs list --status all
@@ -8,10 +9,11 @@
 //   npx tsx src/cli.ts friction propose --dry-run --top 3
 //   npx tsx src/cli.ts runs get --help          # derived help
 //   npx tsx src/cli.ts help                     # the catalogue
-// Plus ONE built-in that is not a registry command (KTD22): `ask` sends a
+// Plus ONE built-in that is not a registry command: `ask` sends a
 // message through the channel-agnostic dispatcher — the local test harness and
 // the proof that the core is channel-agnostic. It is a CHANNEL (ConsoleIO),
-// not a command: starting an agent run stays with `dispatch()` (KTD16), the
+// not a command: starting an agent run stays with `dispatch()`
+// (docs/decisions/0002-dispatcher-is-the-only-orchestrator.md), the
 // way mcp.ts keeps its hand-written `dispatch` tool beside the registry tools.
 //   npx tsx src/cli.ts ask "what is 2+2"
 //   npx tsx src/cli.ts ask "agent:coding model:openai/gpt-5 ship a PR that ..."
@@ -23,7 +25,7 @@
 // usage line) or the registry refused the parsed input (the same code every
 // surface returns for that fault); 1 the command (or dispatch) ran and failed
 // with any other code. The caller is
-// `cli:local` holding every scope (KTD10) — whoever can run this process can
+// `cli:local` holding every scope — whoever can run this process can
 // already read the config and the data directory.
 
 import { existsSync } from "node:fs";
@@ -286,7 +288,7 @@ export async function loadBotConfig(
 /** What `main()` binds the commands to: the bot config, opened ONCE. The open
  *  STARTS here (up front, so a command that needs the config pays no extra
  *  latency) but is awaited only by the accessor — i.e. by the first command
- *  that reaches for the config through its deps (#409). A command that never
+ *  that reaches for the config through its deps. A command that never
  *  does (`deploy plan`, `help`, `env`, …) never waits, whatever the state
  *  Worker is doing; nothing classifies commands. A missing file, a configured
  *  Worker without its bearer, or an unreachable Worker reach only the command
@@ -323,7 +325,7 @@ export function bindBotConfig(
 /**
  * What the CLI's catalogue hides (features/command-registry.md item 28),
  * resolved ONCE at startup from the config FILE — a synchronous read, so `help`
- * and the catalogue never wait on the state Worker (#409). A config that is not
+ * and the catalogue never wait on the state Worker. A config that is not
  * a readable file — a `state://` location, a missing or unparsable file — is
  * the FULL catalogue: hiding is a courtesy, and a command that needs the config
  * still fails `unavailable` naming the cause. `ask` resolves its own value from
@@ -345,7 +347,7 @@ export function cliCapabilities(
 
 async function main(): Promise<void> {
   const warn = (m: string) => console.error(m);
-  // The bot config and, from it, the run history store (#157): a CLI `ask`
+  // The bot config and, from it, the run history store: a CLI `ask`
   // persists exactly like a bot run when `runHistory` is configured (null
   // store → history off); the registry commands read the same store. A fresh
   // process holds no live runs, so `runs list` here is persisted history.
@@ -364,7 +366,7 @@ async function main(): Promise<void> {
           warn: (m) => warn(`[run-history] ${m}`),
         }) ?? new NullRunStore(),
     })));
-  // MCP (#394) rides the same config: entries are config scopes, secrets follow
+  // MCP (features/mcp-tools.md) rides the same config: entries are config scopes, secrets follow
   // the overrides backing; connect links point at the bot's PUBLIC_BASE_URL.
   // With `runtimeOverrides.worker` set the CLI and the bot share one ConfigDO
   // (entries, credentials, tickets), so a CLI-minted link completes on the
@@ -372,7 +374,7 @@ async function main(): Promise<void> {
   // overrides document is `cli-overrides.json` (above), so its secrets file is
   // the CLI's too — the two processes never write one JSON file, and a ticket
   // for an entry only the CLI's document holds is never offered to the bot.
-  // Built on first use, behind the same async config open (#409): `mcp list`
+  // Built on first use, behind the same async config open: `mcp list`
   // waits for it, `deploy plan` never asks.
   let mcpLoaded: Promise<ReturnType<typeof buildMcp>> | undefined;
   const mcpWiring = () =>

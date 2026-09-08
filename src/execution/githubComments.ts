@@ -1,7 +1,7 @@
 import { resolveGithubToken } from "./githubApp.js";
 import { redactAndCap } from "../core/redact.js";
 
-// Posting a review back to a PR (issue #69). The bot process posts the comment
+// Posting a review back to a PR. The bot process posts the comment
 // itself over the GitHub REST API with the App installation token — never a
 // `gh` shell-out and never from inside the sandbox/resident (AGENTS.md
 // invariant 5). The App needs `pull_requests:write`. This is the SAME

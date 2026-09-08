@@ -221,7 +221,7 @@ describe("web_fetch tool", () => {
     expect(out).not.toContain("<p>");
   });
 
-  it("hands the model at most MAX_FETCH_TEXT_CHARS of a page and says how to read the rest (#615: one 1 MB page was 307k tokens)", async () => {
+  it("hands the model at most MAX_FETCH_TEXT_CHARS of a page and says how to read the rest (a 1 MB page handed over whole is ~300k tokens)", async () => {
     const big = Array.from({ length: 300_000 }, (_, i) => `w${i}`).join(" "); // ~2 MB of distinct words
     const fetchSpy = vi.fn<FetchLike>(async () =>
       fakeResponse({ headers: { "content-type": "text/plain" }, text: big }),

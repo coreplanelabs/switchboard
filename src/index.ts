@@ -71,7 +71,7 @@ import {
 } from "./core/dispatcher.js";
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
-// --- command registry adapters (#157 U7) ---
+// --- command registry adapters ---
 import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { accessActor, createCommandHttpHandler, isCommandPath, serviceTokenAllowed } from "./channels/commandHttp.js";
 import { coreCommandGroups } from "./core/commands/all.js";
@@ -90,7 +90,7 @@ const PROCESS_STARTED_AT = systemClock();
 const sampleProcessMetrics = startProcessMetrics();
 
 /** Total budget for the drain deadline's `interrupted` full-transcript writes
- *  (#375) — the runs are being abandoned anyway; the tombstones written at
+ *  — the runs are being abandoned anyway; the tombstones written at
  *  their start already cover a write that misses this window. */
 const INTERRUPTED_WRITE_BUDGET_MS = 10_000;
 
@@ -108,7 +108,8 @@ async function main() {
   console.log(`[build] ${build.commit}${build.builtAt ? ` @ ${build.builtAt}` : ""}`);
   // The ingress token map is read once, here: it authenticates POST /ingress
   // and POST /mcp below. What a token's bearer may do is config's `grants`
-  // entry for `http:<subject>` / `mcp:<subject>` (one authorization model, U2).
+  // entry for `http:<subject>` / `mcp:<subject>` (one authorization model,
+  // features/authorization.md).
   const auth = parseIngressTokens(process.env);
   // Runtime overrides (`config set …`) live where `runtimeOverrides.worker`
   // says — the state Worker's ConfigDO in prod, so a container restart keeps
@@ -126,15 +127,15 @@ async function main() {
   const capabilities = capabilitiesFrom(config.config, process.env);
   console.log(`[capabilities] ${JSON.stringify(capabilities)}`);
   const providers = new ProviderRegistry(config.config.providers);
-  // Bundled skills (#100): loaded once from the seeded `skills/` dir and shared
+  // Bundled skills (features/skills.md): loaded once from the seeded `skills/` dir and shared
   // across all channels via CoreDeps, so review/coding get their scoped skill
   // list in-prompt and can load bodies on demand with use_skill.
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
-  // External MCP servers as tools (#394, features/mcp-tools.md): the static
+  // External MCP servers as tools (features/mcp-tools.md): the static
   // `mcp.servers` list, validated loudly here (a bad URL or a missing bearer
   // env var stops startup), served per run by ONE source whose clients ride
   // the SSRF-pinned web fetch. No servers → undefined → requests unchanged.
-  // External MCP servers (#394, features/mcp-tools.md): entries live in the
+  // External MCP servers (features/mcp-tools.md): entries live in the
   // config scopes (already loaded above); credentials and connect tickets go
   // where the overrides go (the ConfigDO, or a file); `mcp add|list|…` and the
   // Access-gated connect page work off ONE service, and its servers are the
@@ -152,17 +153,17 @@ async function main() {
   console.log(
     `[mcp] ${capabilities.mcp ? `on (secrets: ${mcpWiring.service!.secrets.describe()})` : `off — ${mcpWiring.unavailable}`}`,
   );
-  // Cross-session memory (#85): ONE store instance shared by every channel so
+  // Cross-session memory (features/memory.md): ONE store instance shared by every channel so
   // what the reflection pass writes after a run is what the next run reads.
   // Durable WorkerMemoryStore when memory.worker (+ its bearer) is configured;
   // otherwise an in-process store with a loud warning (a restart loses it).
   // Disabled (default) → the NullMemoryStore: nothing read, nothing written.
   const memory =
     buildMemoryStore(config.config.memory, process.env, (m) => console.warn(`[memory] ${m}`)) ?? new NullMemoryStore();
-  // Run history (#157): the durable store every finished run's record lands in.
+  // Run history (features/run-history.md): the durable store every finished run's record lands in.
   // With `runHistory` unconfigured (or misconfigured — buildRunStore warned) it
   // is the NullRunStore → history off, live-only as before. The friction ledger
-  // (Area 7b, #84 — what `friction propose` clusters across) is READ from it:
+  // (what `friction propose` clusters across) is READ from it:
   // the record carries the diagnosis, so nothing is written twice.
   const runHistoryCfg = config.config.runHistory;
   // The hosts our own Workers answer on (features/tracing.md item 21): the one
@@ -286,7 +287,8 @@ async function main() {
     threadsElsewhere,
     runLedger,
   };
-  // --- command registry (#157 U6/U7/U9): the ONE core catalogue (`buildCoreCommands`,
+  // --- command registry (docs/decisions/0008-one-command-definition-every-surface.md):
+  // the ONE core catalogue (`buildCoreCommands`,
   // shared with src/cli.ts), bound ONCE; every adapter
   // (HTTP /api/*, MCP tools, chat) exposes the same registrations over the same
   // deps: `runs.*` on one RunsService, `friction.*` on the ledger selected
@@ -294,7 +296,7 @@ async function main() {
   // resident admin client the config names. ---
   // One RunsService for every surface: the command registry (HTTP/MCP/chat) and the /runs pages.
   const runsService = createRunsService({ registry: defaultRunRegistry, store: runStore, ledger: ledgerClient });
-  // Scheduled firings (#244) are recorded on the state Worker's ScheduleDO;
+  // Scheduled firings are recorded on the state Worker's ScheduleDO;
   // `schedule list` and the /runs "Scheduled" panel read the same store.
   const scheduleStore =
     buildScheduleStore(config.config.schedules, process.env, (m) => console.warn(`[schedules] ${m}`)) ??
@@ -317,7 +319,7 @@ async function main() {
   deps.commands = commands;
   // --- end command registry ---
   const { app } = createSlackApp(deps);
-  // Channel facts for the run stamp (authorization.md item 7, plan U5): with
+  // Channel facts for the run stamp (authorization.md item 7): with
   // the Slack adapter up, `conversations.info` decides whether a `slack:C…`
   // channel is public or private — cached per channel per TTL, `unknown` on any
   // failure — so a public channel's runs are readable by everyone and a private
@@ -332,7 +334,7 @@ async function main() {
       : Promise.resolve(undefined);
 
   // Work in flight = agent runs + the background memory reflections they spawn
-  // + run-history writes still retrying (#157 KTD4: a record lost at SIGTERM is
+  // + run-history writes still retrying (a record lost at SIGTERM is
   // a run that vanishes at eviction). Read by the graceful drain below and
   // reported on /healthz for the deploy preflight (deploy/cloudflare/preflight.mjs).
   const pendingHistoryWrites = () => runHistoryWriter.pending();
@@ -355,7 +357,7 @@ async function main() {
   if (process.env.PORT) {
     const ingress = createIngressHandler(deps, { auth, publicBaseUrl: process.env.PUBLIC_BASE_URL });
     const mcp = createMcpHandler(deps, { auth, commands, grantsFor: (id) => config.grantsFor(id) });
-    // Scheduled jobs (#244) arrive through /ingress like any other caller: the
+    // Scheduled jobs arrive through /ingress like any other caller: the
     // Worker shim (deploy/cloudflare/worker.ts) POSTs each `run` schedule's
     // command as the `cron` identity — the `cron` entry of the same token map —
     // and the dispatcher makes a normal run of it. Nothing to wire here beyond
@@ -424,8 +426,8 @@ async function main() {
     // misconfigured or a client spoofs the header. ACCESS_* stay the env inputs
     // of that strategy; null means Access is not configured.
     const accessConfig = parseAccessConfig(process.env);
-    // ── U8 (#157): live view on RunsService ──────────────────────────────────
-    // Live run view (Area 2 / #43) + run history (#157): GET /runs (index; ?all=1
+    // ── live view on RunsService ─────────────────────────────────────────────
+    // Live run view + run history: GET /runs (index; ?all=1
     // adds finished/persisted runs) + /runs/:id (page) + /runs/:id/events (SSE).
     // Reads go through ONE RunsService over the shared defaultRunRegistry (the
     // run created during dispatch() is the run this streams) and the run store
@@ -433,7 +435,7 @@ async function main() {
     // token in the URL); finished/persisted runs are served tokenless to the
     // Access-authenticated viewer, so — like the index — they must only be
     // exposed behind Access, and both are bound to that viewer's actor
-    // (features/authorization.md items 5–7, #428): the gate's identity is
+    // (features/authorization.md items 5–7): the gate's identity is
     // resolved with the SAME `accessActor` the /api adapter uses and handed to
     // the handler as `ctx.actor` below, so the index lists and the run page
     // reads exactly what `/api/runs.*` would for that identity — under the
@@ -458,7 +460,7 @@ async function main() {
       // schedules are off, not the null one.
       scheduled: { schedules: SCHEDULES, store: capabilities.schedules ? scheduleStore : undefined },
     });
-    // ── end U8 ───────────────────────────────────────────────────────────────
+    // ── end live view ────────────────────────────────────────────────────────
     const accessVerify: VerifyDeps = { fetchJwks: httpJwksFetcher, now: () => systemClock(), cache: new JwksCache() };
     // The dashboard auth strategy (features/access-gate.md, plan D5): ONE
     // verifier, asked once per request below, for everything the dashboard
@@ -480,8 +482,8 @@ async function main() {
       );
     }
     const accessState = `dashboard auth: ${dashboardAuth.describe()}`;
-    // --- command registry over HTTP (#157 U7): /api/<group>.<verb>, behind the
-    // SAME gate as /runs* (gated on `isCommandPath`, KTD13). The handler claims
+    // --- command registry over HTTP: /api/<group>.<verb>, behind the
+    // SAME gate as /runs* (gated on `isCommandPath`). The handler claims
     // all of /api/* and answers its own 404. ---
     const commandHttp = createCommandHttpHandler(commands, {
       grantsFor: (id) => config.grantsFor(id),
@@ -582,11 +584,11 @@ async function main() {
               res.end("forbidden");
               return;
             }
-            // --- /api/* (#157 U7): the command handler owns everything under it. ---
+            // --- /api/*: the command handler owns everything under it. ---
             if (isCommandPath(path)) return commandHttp(req, res, gate.identity);
             // --- end /api/* ---
             if (liveView(req, res, { actor: accessActor(gate.identity, (id) => config.grantsFor(id)) })) return;
-            // --- /mcp/connect/<nonce> (#394): the credential page, identity-bound. ---
+            // --- /mcp/connect/<nonce>: the credential page, identity-bound. ---
             if (mcpConnectView(req, res, gate.identity)) return;
             if (residentsView(req, res)) return;
             if (costsView(req, res)) return;
@@ -793,14 +795,14 @@ async function main() {
   // to DRAIN_DEADLINE_MS), then exit. A plain kill mid-run loses the run and
   // leaves a frozen status card in the thread. Cloudflare's rollout sends
   // SIGTERM and waits up to 15 min before SIGKILL — but a SECOND deploy on top
-  // of a draining instance replaces it at once (live 2026-08-29 23:51Z, a
-  // review killed at 153 s). The deploy preflight warns while `draining` is
+  // of a draining instance replaces it at once, mid-run. The deploy preflight
+  // warns while `draining` is
   // true; the live cards say what is happening meanwhile. Run-history writes
   // drain here too (see `inFlight` above).
   //
   // The socket is closed at the START of the drain, and Cloudflare boots the
   // replacement only after this process exits, so a deploy over a run blacks
-  // Slack out for the run's remaining duration (#272; 7.5 min observed). That
+  // Slack out for the run's remaining duration. That
   // gap is covered by the reconnect catch-up, whose default window is derived
   // from DRAIN_DEADLINE_MS (src/core/drain.ts). Keeping the socket open while
   // draining was rejected: a mention accepted at minute 14 would start a run
@@ -849,7 +851,7 @@ async function main() {
     const sealed = defaultRunRegistry.sealAllFinished();
     if (sealed > 0) console.log(`[drain] sealed ${sealed} finished run(s) whose reply never settled`);
     await new Promise((r) => setImmediate(r));
-    // Tombstone upgrade (#375): the deadline passed with runs still in flight —
+    // Tombstone upgrade: the deadline passed with runs still in flight —
     // they are about to be killed by process.exit. Each still-active registry
     // run already has its provisional `interrupted` tombstone (written at
     // start, a few events); `writeAbandonedRunRecords` rewrites it now from the

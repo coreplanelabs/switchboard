@@ -4,11 +4,12 @@
  *  Worker (like residentDetach / shellQuote) — the tested code IS the shipped
  *  code.
  *
- *  Background (2026-08-29, PR #182): a review run — read-only "by convention"
- *  — held a per-attach GitHub credential file and an `origin` pointing at
- *  GitHub, fetched another PR's branch because the PR body referenced it, and
- *  its verdict landed on the wrong PR (#194 added the post-step guard). This
- *  removes the capability: a read-only attach gets no credential file and an
+ *  Background: a review run — read-only "by convention" — held a per-attach
+ *  GitHub credential file and an `origin` pointing at GitHub, fetched another
+ *  PR's branch because the PR body referenced it, and its verdict landed on
+ *  the wrong PR (the reviewed-head guard on the post step is the other half
+ *  of the fix). This removes the capability: a read-only attach gets no
+ *  credential file and an
  *  `origin` it cannot fetch from, so "read-only" is enforced by the worktree,
  *  not requested of the model.
  *

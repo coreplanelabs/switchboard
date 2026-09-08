@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { selectBindingsToPurge } from "./bindingPurge.js";
 
-// The resident keeps a thread binding after eviction by design (KTD6, features/
+// The resident keeps a thread binding after eviction by design (features/
 // resident-repos.md item 23) — so a load run that attaches fifty synthetic
 // threads leaves fifty evicted rows on the resident's detail page forever. The
 // `purge-bindings` debug op (item 56) deletes exactly the bindings a harness

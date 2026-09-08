@@ -74,11 +74,12 @@ import {
 // LIVE, not merely deployed: after `wrangler deploy` the old container keeps
 // answering while it drains (up to 15 min), so the runner polls `/healthz`
 // until a non-draining container reports the deployed commit as its
-// `build.commit` (2026-08-30 05:12Z: the script said `deployed` and exited 0
-// while the old container was still draining two runs). The sandbox step is
-// likewise done only when its Worker, its container rollout and an `echo ok`
-// probe agree (#569: a thread placed during the image rollout landed on the
-// previous image and every exec failed with an empty error). Only this file
+// `build.commit` (docs/decisions/0015-deploy-order-deployed-is-not-live.md:
+// trusting the upload says `deployed`, exit 0, while the old container is
+// still draining runs). The sandbox step is likewise done only when its
+// Worker, its container rollout and an `echo ok` probe agree (a thread placed
+// during the image rollout lands on the previous image and every exec fails
+// with an empty error). Only this file
 // touches processes; the plan and the live decisions are pure and unit-tested,
 // and the command (src/core/commands/deploy.ts) maps this result onto the
 // registry's error vocabulary.
@@ -234,9 +235,9 @@ function profileFromJson(text: string, where: string, origin: LoadedProfile["ori
 /**
  * The deployment profile on this host: `$SWITCHBOARD_DEPLOY_PROFILE` — a path,
  * or the same `github://owner/repo/path@ref` / `op://Vault/Item/field` forms
- * `configSource` takes, read through the same loaders (our production keeps
- * its profile in the infrastructure repository and the release workflow names
- * it this way) — else `deploy/profile.json` (an installation's own, gitignored),
+ * `configSource` takes, read through the same loaders (a production profile
+ * kept in an infrastructure repository is named this way by the release
+ * workflow) — else `deploy/profile.json` (an installation's own, gitignored),
  * else the checked-in example — which a plan may be read from (a pull request's
  * CI, a fresh clone) and `deploy all` refuses. An unreadable or invalid profile
  * is an error naming the file or reference and each problem; never a silent
@@ -591,7 +592,7 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
   sleep,
 };
 
-/** What the sandbox gate knows about the rollout it waits for (#589): the application as read BEFORE
+/** What the sandbox gate knows about the rollout it waits for: the application as read BEFORE
  *  the upload, and the target wrangler's deploy output named (`null`: no container change printed). */
 export interface SandboxRollout {
   before: Read<AppState>;
@@ -656,7 +657,7 @@ export async function waitUntilSandboxLive(
 }
 
 /** The sandbox's container application as it stands BEFORE the upload — the version the gate must see
- *  the rollout leave (#589). A failed read is logged and returned as such: the gate then needs the
+ *  the rollout leave. A failed read is logged and returned as such: the gate then needs the
  *  deploy's image to show, and a deploy is never refused over it. */
 async function readAppBeforeUpload(
   step: Pick<DeployStep, "name" | "dir">,
@@ -686,7 +687,7 @@ const runStepCommand: StepExec = (step, io) =>
 /**
  * One step: its deploy command, then its gate. A sandbox-gated step reads the
  * container application BEFORE the command runs — the version the rollout must
- * leave — and takes the rollout target from what wrangler printed (#589); a
+ * leave — and takes the rollout target from what wrangler printed; a
  * failed pre-read is logged and handed to the gate, never a reason not to
  * deploy. A step whose preflight refuses is waited out and retried.
  */

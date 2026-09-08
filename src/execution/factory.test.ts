@@ -100,7 +100,7 @@ describe("makeExecutor per-agent provisioning", () => {
     );
   });
 
-  // Security (#79 review): the review agent's sandbox has `gh` + the credential
+  // Security: the review agent's sandbox has `gh` + the credential
   // helper, so a write-capable GH_TOKEN there would let the model — or a
   // prompt-injected diff — post/review/push. Least-privilege closes it at the
   // token: a `readonly` toolset gets a READ-scoped token, a `full` toolset gets
@@ -126,8 +126,8 @@ describe("makeExecutor per-agent provisioning", () => {
   });
 
   // Feature: features/execution.md item 5 — the credential is resolved when a
-  // command runs, never captured when the executor is built (2026-09-07: a
-  // token captured at build time expired under a 20-minute first command).
+  // command runs, never captured when the executor is built (a token captured
+  // at build time would expire under a 20-minute first command).
   it("the sandbox credential is resolved per command, not captured at executor construction", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.mocked(resolveGithubToken).mockClear();
@@ -146,10 +146,10 @@ describe("makeExecutor per-agent provisioning", () => {
   });
 });
 
-// Feature: features/resident-repos.md — resident selection (U5): with a
+// Feature: features/resident-repos.md — resident selection: with a
 // resolved target repo and execution.resident configured, a warm resident
 // serves the thread; any other state falls back to the per-thread backend
-// with a NAMED note (KTD10); probe transport failures are negative-cached so
+// with a NAMED note; probe transport failures are negative-cached so
 // a resident-service outage costs one timeout, not one per dispatch.
 describe("makeExecutor resident selection", () => {
   afterEach(() => {
@@ -255,7 +255,7 @@ describe("makeExecutor resident selection", () => {
     // The warm path is POSITIVELY named (never inferable only from the absence
     // of a fallback note): ref@short-sha of the attached worktree.
     expect(note).toBe("resident · jshttp/vary · master@abc");
-    // The attach answer rides along for the dispatcher (#282): the worktree
+    // The attach answer rides along for the dispatcher: the worktree
     // path for the prompt, the attached sha for the pre-run head check.
     expect(binding).toMatchObject({ ref: "master", sha: "abc", workspace: "/workspace/threads/x/master" });
     // The discriminant is the backend signal the dispatcher branches its
@@ -317,8 +317,9 @@ describe("makeExecutor resident selection", () => {
   });
 
   // features/resident-repos.md item 51: a resolved PR head is passed to /attach
-  // as `sha` so the resident fetches a mirror whose ref tip lags it (the #214
-  // re-review cloned a stale tip); no resolved head → no field (older body).
+  // as `sha` so the resident fetches a mirror whose ref tip lags it (otherwise
+  // a re-review right after a push clones a stale tip); no resolved head → no
+  // field (older body).
   it("a resolved headSha is sent as the attach body's sha; absent headSha sends no sha field", async () => {
     stubEnvs();
     const attachOk = {
@@ -360,10 +361,10 @@ describe("makeExecutor resident selection", () => {
     expect(calls).toEqual(["/status"]);
   });
 
-  // Serviceable non-warm states (live 2026-08-29): the resident keeps serving
-  // the last snapshot while `refreshing` (fetch/rebuild under the mirror lock)
-  // or `degraded` (a failed refresh; previous checkout intact), and /attach
-  // refuses neither — so the bot attaches, and says so on the card (KTD10).
+  // Serviceable non-warm states: the resident keeps serving the last snapshot
+  // while `refreshing` (fetch/rebuild under the mirror lock) or `degraded` (a
+  // failed refresh; previous checkout intact), and /attach refuses neither —
+  // so the bot attaches, and says so on the card.
   it("refreshing probe → ResidentExecutor WITH an informational note (attached to the last snapshot)", async () => {
     stubEnvs();
     const { calls } = stubFetch(
@@ -407,7 +408,7 @@ describe("makeExecutor resident selection", () => {
     );
   });
 
-  // Review finding on #162: a refresh that failed INSIDE the rebuild lock
+  // A refresh that failed INSIDE the rebuild lock
   // (install/build after `git clean -fdx`) leaves a checkout at the new sha with
   // absent/partial deps; a fresh thread would hardlink that broken cache. Those
   // degraded reasons stay cold until the next cycle rebuilds.
@@ -486,7 +487,7 @@ describe("makeExecutor resident selection", () => {
   // AE6 (3-reviewer-corroborated): the resident can degrade between the warm
   // /status probe and /attach (503 mirror-busy, 429 pool-exhausted). Any attach
   // failure that is NOT needs-ref must fall back to the per-thread backend with
-  // a NAMED note (KTD10) — never a silent stall or a raw ⚠️.
+  // a NAMED note — never a silent stall or a raw ⚠️.
   it("warm probe then a NON-needs-ref attach failure → per-thread executor WITH a named 'resident attach failed' note", async () => {
     stubEnvs();
     const { calls } = stubFetch(
@@ -539,7 +540,7 @@ describe("makeExecutor resident selection", () => {
   });
 
   // A repo that is simply not onboarded still runs — on the per-thread backend —
-  // but the fall-through must be VISIBLE (KTD10): the user needs to know coding
+  // but the fall-through must be VISIBLE: the user needs to know coding
   // ran cold instead of on a warm, deps-ready resident, plus how to fix it.
   it("404 not-onboarded → per-thread path with a named cold-fallback note pointing at onboarding", async () => {
     stubEnvs();

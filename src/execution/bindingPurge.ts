@@ -1,5 +1,5 @@
-// The resident keeps a thread binding after eviction by design (KTD6,
-// features/resident-repos.md item 23): the ref stays sticky for the next
+// The resident keeps a thread binding after eviction by design
+// (features/resident-repos.md item 23): the ref stays sticky for the next
 // attach. A load run that attaches fifty synthetic threads therefore leaves
 // fifty evicted rows on the resident's detail page forever. `POST /debug
 // {op: "purge-bindings", prefix}` (item 60) deletes exactly the bindings a

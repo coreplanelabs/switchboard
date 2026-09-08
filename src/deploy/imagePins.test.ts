@@ -7,11 +7,11 @@ const ROOT = resolve(import.meta.dirname, "../..");
 const IMAGES = ["deploy/cloudflare-resident/Dockerfile", "deploy/cloudflare-sandbox/Dockerfile", "Dockerfile"] as const;
 
 // Feature: features/execution.md item 10 — the execution images' toolchain is
-// PINNED. 2026-09-04: `RUN npm install -g pnpm@latest yarn@latest` in the
-// resident image meant the pnpm major changed with the image, not with a
-// commit; the 2026-09-03 rebuild ([#396](…)) silently moved pnpm 10 → 11,
-// which stopped reading `package.json`'s `pnpm` field (overrides, patches,
-// build allowlist). This fence is the reason that cannot recur silently.
+// PINNED. `RUN npm install -g pnpm@latest yarn@latest` in the resident image
+// meant the pnpm major changed with the image, not with a commit: a routine
+// rebuild silently moved pnpm 10 → 11, which stopped reading `package.json`'s
+// `pnpm` field (overrides, patches, build allowlist). This fence is the reason
+// that cannot recur silently.
 
 describe("imagePins (parser)", () => {
   it("reads an exact global install as pinned", () => {

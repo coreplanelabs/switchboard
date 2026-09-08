@@ -12,8 +12,8 @@ import {
   type Executor,
 } from "./executor.js";
 
-// Feature: features/resident-repos.md — U6 LocalOperations: the dev-only
-// second Operations implementation (≥2-implementations invariant, KTD8).
+// Feature: features/resident-repos.md — LocalOperations: the dev-only
+// second Operations implementation (≥2-implementations invariant).
 // No command table and no refs locally — fixed Node conventions run in the
 // thread's local workspace dir, and a requested ref is honestly reported as
 // ignored. A failing command is a RESULT (ok:false), never an error path.
@@ -88,7 +88,7 @@ function ops(dir: string): LocalOperations {
   return new LocalOperations(dir);
 }
 
-// #92: distinguishing an exec-infrastructure failure (a dead/wedged sandbox)
+// Distinguishing an exec-infrastructure failure (a dead/wedged sandbox)
 // from a normal nonzero command exit, and counting consecutive ones so the
 // runner can fail fast instead of toiling into a dead sandbox.
 describe("ExecHealthTracker", () => {
@@ -208,7 +208,7 @@ describe("ExecHealthTracker", () => {
   });
 });
 
-// Feature: features/run-loop.md item 8 (#101) — a hard stop's AbortSignal kills
+// Feature: features/run-loop.md item 8 — a hard stop's AbortSignal kills
 // the local child process instead of waiting out its 5-minute budget.
 describe("LocalExecutor exec abort", () => {
   it("kills a running command when the signal aborts and returns an exit line, never throws", async () => {
@@ -269,7 +269,7 @@ describe("LocalExecutor per-call timeout", () => {
 // executor joins with the hard-stop signal. Built on a plain timer, not
 // `AbortSignal.timeout`: Node runs that one on an internal timer that neither
 // fake timers nor a test can observe, so a deadline built on it could never be
-// proven to fire (#531 — the sandbox executor's deadline is asserted with fake
+// proven to fire (the sandbox executor's deadline is asserted with fake
 // timers in cloudflareSandbox.test.ts).
 describe("execDeadline", () => {
   beforeEach(() => {

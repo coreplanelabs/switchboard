@@ -46,7 +46,7 @@ export interface ExecutionConfig {
    * Resident repo environments (deploy/cloudflare-resident/): when set AND
    * the request resolved a target repo (ctx.repo), a warm resident serves the
    * thread; any other resident state falls back to the per-thread backend
-   * above with a named note (KTD10). No ctx.repo → per-thread, no probe.
+   * above with a named note. No ctx.repo → per-thread, no probe.
    */
   resident?: ResidentExecutionConfig;
 }
@@ -60,7 +60,7 @@ export interface ExecutorFactoryOptions {
 /** What executor selection knows about the run it is provisioning for.
  *  The agent's resource declarations drive whether anything is provisioned at
  *  all; repo/ref carry resident-repo inference (populated by the dispatcher's
- *  repo resolver — U7; undefined means the per-thread path, no probe). */
+ *  repo resolver; undefined means the per-thread path, no probe). */
 export interface ExecutorContext {
   threadKey: string;
   /** the resolved agent (never mutated here) */
@@ -75,7 +75,7 @@ export interface ExecutorContext {
 }
 
 /** Executor selection result. `note` is present when resident selection fell
- *  back to the per-thread backend — the NAMED reason (state + reason, KTD10)
+ *  back to the per-thread backend — the NAMED reason (state + reason)
  *  the dispatcher surfaces on the status card — or when the resident was
  *  attached in a non-warm but serviceable state (`refreshing`/`degraded`: the
  *  last snapshot serves). Never silent. `resident` is the backend
@@ -99,7 +99,7 @@ export interface ExecutorSelection {
   attachMs?: number;
   /** The resident's attach answer (ref, sha, worktree path) on the resident
    *  path — the dispatcher names the path to the model and checks the sha
-   *  against the PR head before a review runs (#282). Unset on every other path. */
+   *  against the PR head before a review runs. Unset on every other path. */
   binding?: ResidentBinding;
 }
 
@@ -110,11 +110,11 @@ export interface ExecutorSelection {
 // attach against a refresh's fetch/rebuild — and that `degraded` does too when
 // the failure happened BEFORE the checkout was touched (fetch/bookkeeping
 // reasons); a failure inside the rebuild can leave a broken dep cache, so
-// those reasons stay cold. Gating on `warm` alone (the original U5 rule) sent
-// every run cold for the whole of every refresh window: with an active default
-// branch (a dozen merges a day, each a 1–2 min rebuild every 10-min cycle)
-// plus each resident deploy's restore, that was most of a working day (live
-// 2026-08-29: "resident refreshing — using fresh sandbox" on run after run).
+// those reasons stay cold. Gating on `warm` alone would send every run cold
+// for the whole of every refresh window: with an active default branch (a
+// dozen merges a day, each a 1–2 min rebuild every 10-min cycle) plus each
+// resident deploy's restore, that is most of a working day of "resident
+// refreshing — using fresh sandbox" on run after run.
 // The engine-owned states stay excluded: `onboarding` (nothing to attach),
 // `restoring` (the disk is being rehydrated; attach's own ensureHydrated would
 // wait, but a restore is short and the note is more honest), `down` (only a
@@ -140,17 +140,17 @@ export async function makeExecutor(
    *  probe and the attach become its `http.client` children (tracing.md item 21). */
   span?: Span,
 ): Promise<ExecutorSelection> {
-  // Agents declare the resources they need (KD2). No repo declared → nothing
+  // Agents declare the resources they need. No repo declared → nothing
   // to provision: no workspace dir, no sandbox created or reconnected, no
   // credential required. The general agent (toolset "none") lands here.
   if (ctx.agent.resources?.repo !== "required") {
     return { executor: new NullExecutor(ctx.agent.name), backend: "local" };
   }
 
-  // Resident selection (KTD11): only when a target repo was resolved AND the
+  // Resident selection: only when a target repo was resolved AND the
   // resident backend is configured. A SERVICEABLE state → ResidentExecutor;
   // anything else (engine-owned state, probe timeout, outage) → the per-thread
-  // backend below, with the reason carried in `note` (KTD10 — never a silent
+  // backend below, with the reason carried in `note` (never a silent
   // stall). A repo that is simply not onboarded also runs per-thread, but
   // carries a note so the cold fall-through is visible (with the onboarding fix).
   let note: string | undefined;
@@ -168,10 +168,10 @@ export async function makeExecutor(
       // (mirror-busy) or 429 (pool-exhausted) surface only at attach time.
       // ResidentNeedsRefError must still propagate (the dispatcher's ask-once
       // flow depends on it); any OTHER attach failure falls back to the
-      // per-thread backend with a named note (KTD10 / AE6 — never a silent
-      // stall or a raw ⚠️ for this window).
+      // per-thread backend with a named note (never a silent stall or a raw
+      // ⚠️ for this window).
       try {
-        // Non-warm but serviceable: the note says so (KTD10) while the run
+        // Non-warm but serviceable: the note says so while the run
         // still gets the worktree it came for; openResident adds ref@sha.
         const nonWarm =
           probe.state === "warm" ? undefined : oneLine(`${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
@@ -207,7 +207,7 @@ export async function makeExecutor(
       note = oneLine(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — using fresh sandbox`);
     } else {
       // not-onboarded is the ordinary per-thread case — but still make the cold
-      // fall-through visible (KTD10): the user needs to know coding ran cold in a
+      // fall-through visible: the user needs to know coding ran cold in a
       // per-thread sandbox instead of on a warm, deps-ready resident, and how to
       // fix it. Routing is unchanged; only the note is added.
       note =
@@ -226,9 +226,9 @@ export async function makeExecutor(
 
 /** Attach to a serviceable resident and name the result POSITIVELY: the note
  *  reads `resident · <owner/name> · <ref>@<sha7>` (warm) or `resident <state>
- *  (<reason>) · <owner/name> · <ref>@<sha7> — attached to the last snapshot` (refreshing/degraded, #162)
+ *  (<reason>) · <owner/name> · <ref>@<sha7> — attached to the last snapshot` (refreshing/degraded)
  *  so a reader can tell the resident path from Slack alone, never only from
- *  the absence of a fallback note (KTD10 in both directions). Needs-ref (no binding for this thread, no branch named): when
+ *  the absence of a fallback note (named in both directions). Needs-ref (no binding for this thread, no branch named): when
  *  the resident's 409 names its default branch, bind to it ONCE here and say
  *  so in the note — the cold path already works on the default branch without
  *  asking, and a coding run branches off it anyway. A 409 without a
@@ -274,8 +274,8 @@ async function openResident(
   // The note is the binding at open time — the worktree the run STARTS on. A
   // mid-run re-attach (evicted worktree) may move to a newer sha; that later
   // state is `executor.binding`, not the card's opening line. It NAMES the
-  // repo: a run that bound the wrong repo (2026-09-04, a nominal request on
-  // the switchboard resident) must be readable from the card, not only from a
+  // repo: a run that bound the wrong repo (a request about one repo landing on
+  // another repo's resident) must be readable from the card, not only from a
   // sha nobody recognizes.
   const where = `${opts.resource.replace(/^repo:/, "")} · ${binding.ref}@${binding.sha.slice(0, 7)}`;
   const why = byDefault ? " (repo default — no branch named)" : "";
@@ -292,8 +292,8 @@ async function openResident(
   };
 }
 
-/** The repo resolver's "is this slug an onboarded resident?" probe (U7, the
- *  2026-08-29 prose-slug guard): one operator `GET /status` per candidate,
+/** The repo resolver's "is this slug an onboarded resident?" probe (the
+ *  prose-slug guard): one operator `GET /status` per candidate,
  *  through the same negative cache as executor selection. `true` for any
  *  lifecycle state of an onboarded resource — even `down` is a real repo;
  *  `not-onboarded` (and a non-transport HTTP error) is `false`; a registry

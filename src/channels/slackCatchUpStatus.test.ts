@@ -10,9 +10,9 @@ import {
 
 // Feature: features/slack-channel.md item 7 — the reconnect catch-up's last
 // outcome and the bot token's missing scopes are observable without container
-// logs (#271): live 2026-08-30 the scan was a silent no-op for hours because
-// `users.conversations` answered `missing_scope` and the only trace was a
-// console.log in container stdout.
+// logs: a token missing `channels:read`/`groups:read` makes the scan a silent
+// no-op — `users.conversations` answers `missing_scope` and the only trace is
+// a console.log in container stdout.
 
 beforeEach(() => resetCatchUpStatus());
 
@@ -75,7 +75,7 @@ describe("missingBotScopes (pure comparison against the adapter's required set)"
     expect(missingBotScopes([...REQUIRED_BOT_SCOPES, "im:history"])).toEqual([]);
   });
 
-  it("names the missing ones, in required order (the 2026-08-30 token lacked channels:read and groups:read)", () => {
+  it("names the missing ones, in required order (a token lacking channels:read and groups:read)", () => {
     const granted = REQUIRED_BOT_SCOPES.filter((s) => s !== "channels:read" && s !== "groups:read");
     expect(missingBotScopes(granted)).toEqual(["channels:read", "groups:read"]);
   });

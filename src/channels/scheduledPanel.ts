@@ -8,7 +8,7 @@ import {
   type ScheduleWorker,
 } from "../core/schedules.js";
 
-// The "Scheduled" tab of the Access-gated /runs page (#244, `/runs/scheduled`): what is armed
+// The "Scheduled" tab of the Access-gated /runs page (`/runs/scheduled`): what is armed
 // (from the schedule registry — the same list the Worker shim fires from), when
 // each fires next (computed from the cron expression, UTC), and what the last
 // firing did (from the ScheduleStore: fired-at, outcome, the run it created).
@@ -35,7 +35,7 @@ export interface ScheduledRow {
     runId?: string;
     /** `/runs/<id>?t=…` while the run is live in the registry (the index is Access-gated,
      *  so the capability link is fine here — same as the run rows); a bare `/runs/<id>`
-     *  otherwise (resolves once run history lands, #157). */
+     *  otherwise (served tokenless from run history to a viewer who may read it). */
     runHref?: string;
     detail?: string;
     /** The trace the firing's root started (features/tracing.md item 22): the id

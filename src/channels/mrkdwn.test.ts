@@ -15,8 +15,8 @@ describe("mdToMrkdwn", () => {
 
   // Asterisk emphasis renders BOLD whichever dialect the model wrote. Mapping
   // `*x*` to italic (standard-Markdown semantics) made the same verdict line
-  // arrive bold or italic depending on the model's dialect of the moment —
-  // seen live 2026-08-30 on back-to-back review verdicts. Italic is `_x_` only.
+  // arrive bold or italic depending on the model's dialect of the moment
+  // (back-to-back review verdicts differed). Italic is `_x_` only.
   it("normalizes both emphasis dialects to bold — `*x*` and `**x**` render identically", () => {
     expect(mdToMrkdwn("*Verdict: approve* — fine")).toBe("*Verdict: approve* — fine");
     expect(mdToMrkdwn("**Verdict: approve** — fine")).toBe("*Verdict: approve* — fine");
@@ -44,8 +44,8 @@ describe("mdToMrkdwn", () => {
     expect(mdToMrkdwn("![alt](https://img.test/a.png)")).toBe("https://img.test/a.png");
   });
 
-  // #88 review: [text](url) -> <url|text> shared the link-injection gap the
-  // (since-retired) SlackFormatter had. The url's structural chars are
+  // [text](url) -> <url|text> is a link-injection surface (the since-retired
+  // SlackFormatter had the gap). The url's structural chars are
   // percent-encoded and the label's escaped so a link can't forge or break
   // out of the <url|label> structure.
   it("escapes link labels and percent-encodes urls so a link can't forge structure", () => {
@@ -54,7 +54,7 @@ describe("mdToMrkdwn", () => {
     );
   });
 
-  // #90: the default reply path (mdToMrkdwn via io.reply) is the highest-traffic
+  // The default reply path (mdToMrkdwn via io.reply) is the highest-traffic
   // Slack output path. An agent answer that quotes <!channel>/<@U…> (from tool
   // output or a prompt injection) must render them as inert visible text, not fire
   // a live broadcast/mention. Prose &/</> are escaped WITHOUT breaking any
@@ -89,10 +89,10 @@ describe("mdToMrkdwn", () => {
     expect(mdToMrkdwn("> quote <!channel>")).toBe("> quote &lt;!channel&gt;");
   });
 
-  // #91 review (BLOCKING): the image path stashed its url verbatim while the link
-  // path ran it through encodeMrkdwnUrl — so an image url of <!channel>/<@U…>
-  // reached Slack live and fired a broadcast/mention. Image urls now go through
-  // encodeMrkdwnUrl exactly like links.
+  // An image path that stashes its url verbatim while the link path runs it
+  // through encodeMrkdwnUrl lets an image url of <!channel>/<@U…> reach Slack
+  // live and fire a broadcast/mention. Image urls go through encodeMrkdwnUrl
+  // exactly like links.
   it("percent-encodes an image url's <!channel> so it can't fire a broadcast", () => {
     const out = mdToMrkdwn("![x](<!channel>)");
     expect(out).toBe("%3C!channel%3E");
@@ -118,7 +118,7 @@ describe("mdToMrkdwn", () => {
     expect(out).not.toContain("<!channel>");
   });
 
-  // #91 review: the stash/restore placeholders are private-use-area sentinels
+  // The stash/restore placeholders are private-use-area sentinels
   // (U+E000–U+E003). Agent-controlled input carrying those literal chars used to
   // collide with real placeholders — restoring an out-of-range index threw
   // (uncaught up the reply path = crash), or an injected struct placeholder

@@ -16,10 +16,10 @@ import {
 import { BASH_TIMEOUT_MS } from "./bashTimeout.js";
 
 // Feature: features/execution.md item 14 — a full sandbox fleet is capacity,
-// not a dead sandbox. 2026-09-07: the #525 review aborted in 33 s on
-// `Failed to create session: 503` (thirteen cold runs in 45 min had exhausted
-// max_instances 10); the runner read the two identical in-body errors as a
-// wedged sandbox and failed fast.
+// not a dead sandbox. When concurrent cold runs exhaust max_instances the
+// 0.3.x client throws `Failed to create session: 503`; read as an ordinary
+// in-body error, two identical ones in a row look like a wedged sandbox and
+// the runner fails fast.
 
 describe("isFleetBusy", () => {
   it("recognizes the SDK 0.3.x client's unparsed 503 from createSession", () => {
@@ -137,9 +137,9 @@ describe("isContainerStarting", () => {
 });
 
 // Feature: features/execution.md items 3 and 6 — a failure text is never
-// empty. 2026-09-07 (#569): during the 0.4.0 Worker+image rollout a new
-// thread's Durable Object was placed on a container still running the 0.3.7
-// image; the 0.12.9 client turned its `{error}` 400 body into a `SandboxError`
+// empty. During a Worker+image rollout a new thread's Durable Object can be
+// placed on a container still running the previous 0.3.x image; the 0.12.x
+// client turns its `{error}` 400 body into a `SandboxError`
 // whose message was `""`, the Worker's `shape.message ?? String(err)` kept the
 // empty string, and seven commands rendered as silent `exit 127`s.
 describe("thrownText", () => {

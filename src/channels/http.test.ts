@@ -471,7 +471,7 @@ describe("parseIngressTokens — a token is a credential, its rights are config'
   });
 });
 
-describe("run receipt in the response (#244)", () => {
+describe("run receipt in the response", () => {
   const options = (dispatch: DispatchFn) => ({
     auth: authConfig({ tok: { subject: "cron", channel: "cron" } }),
     dispatch,

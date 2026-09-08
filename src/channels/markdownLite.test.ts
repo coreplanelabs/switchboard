@@ -84,13 +84,13 @@ describe("renderMarkdownInto — blocks", () => {
     expect(render("# A\n## B\n### C").html).toBe("<h1>A</h1><h2>B</h2><h3>C</h3>");
   });
 
-  it("renders ####/#####/###### headings as h4/h5/h6 — never paragraph text (#209)", () => {
+  it("renders ####/#####/###### headings as h4/h5/h6 — never paragraph text", () => {
     expect(render("#### D\n##### E\n###### F").html).toBe("<h4>D</h4><h5>E</h5><h6>F</h6>");
     // seven+ markers are not a heading — unknown syntax degrades to text
     expect(render("####### G").html).toBe("<p>####### G</p>");
   });
 
-  it("renders a GFM table: header row, |---| separator, body rows (#209)", () => {
+  it("renders a GFM table: header row, |---| separator, body rows", () => {
     expect(render("| File | Lines |\n|---|---|\n| a.ts | 10 |\n| b.ts | 20 |").html).toBe(
       "<table><thead><tr><th>File</th><th>Lines</th></tr></thead>" +
         "<tbody><tr><td>a.ts</td><td>10</td></tr><tr><td>b.ts</td><td>20</td></tr></tbody></table>",
@@ -200,9 +200,9 @@ describe("renderMarkdownInto — safety contract", () => {
     }
   });
 
-  // Review round 1 (#179): a heading marker with no content matched the block
-  // start regex but no block, so the paragraph fall-through made no progress and
-  // the browser tab hung for every viewer. The parser must ALWAYS consume a line.
+  // A heading marker with no content matches the block start regex but no
+  // block; if the paragraph fall-through then makes no progress the browser tab
+  // hangs for every viewer. The parser must ALWAYS consume a line.
   it("a heading marker with no content (`# `) terminates and degrades to text — never hangs", () => {
     const { node } = makeDoc();
     const root = node("div");
@@ -243,7 +243,7 @@ describe("renderMarkdownInto — safety contract", () => {
     expect(html).toBe("<pre><code>&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;</code></pre>");
   });
 
-  it("markup in table cells stays text: <img>/<script>/javascript: never become nodes (#209)", () => {
+  it("markup in table cells stays text: <img>/<script>/javascript: never become nodes", () => {
     const t = render(
       '| <img src=x onerror="alert(1)"> | </td><script>x</script> |\n|---|---|\n| <svg onload=alert(1)> | [x](javascript:alert(1)) |',
     );
@@ -255,7 +255,7 @@ describe("renderMarkdownInto — safety contract", () => {
     expect(t.html).toContain("&lt;/td&gt;&lt;script&gt;");
   });
 
-  it("markup in h4–h6 heading text stays text (#209)", () => {
+  it("markup in h4–h6 heading text stays text", () => {
     const h = render("#### <script>alert(1)</script>\n##### <img src=x onerror=alert(1)>");
     expect(tags(h.root)).not.toContain("script");
     expect(tags(h.root)).not.toContain("img");

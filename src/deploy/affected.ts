@@ -48,13 +48,13 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
     test: /^(\.gitignore|\.nvmrc|\.env\.example|LICENSE|NOTICE|docker-compose\.yml|fly\.toml|tsconfig\.scripts\.json|release-please-config\.json|\.release-please-manifest\.json|project\.json|switchboard\.png)$/,
   },
   { rule: "lint and format config", test: /^(\.prettierignore|\.prettierrc(\.json)?|eslint\.config\.[cm]?js)$/ },
-  // One npm workspace, one lockfile (#496): a per-workspace lockfile in a diff
+  // One npm workspace, one lockfile: a per-workspace lockfile in a diff
   // is the retired file disappearing, never a dependency changing — the root
   // lockfile is judged instead (`ROOT_LOCKFILE`, per Worker by its workspace).
   { rule: "retired per-workspace lockfile", test: /^(deploy\/[^/]+|web|docs)\/package-lock\.json$/ },
 ];
 
-/** The one lockfile (npm workspaces, #496). Judged per Worker: the dependency
+/** The one lockfile (npm workspaces). Judged per Worker: the dependency
  *  closure of ITS workspace(s), not the file as a whole. */
 export const ROOT_LOCKFILE = "package-lock.json";
 

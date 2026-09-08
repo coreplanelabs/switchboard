@@ -114,10 +114,10 @@ describe("capWrappedCommand (run under real bash)", () => {
   });
 
   it("SIGTERM mid-command (the SDK's actual kill) also leaves the files for recovery — no EXIT trap may delete them", async () => {
-    // Live 2026-08-30: the sandbox SDK's timeout kill is TERM-based; bash then
-    // ran the recoverable-mode EXIT trap and deleted the files before the
-    // recovery leg could read them — salvage returned empty on prod while the
-    // SIGKILL-based test above stayed green.
+    // The sandbox SDK's timeout kill is TERM-based; with a recoverable-mode
+    // EXIT trap bash would run it and delete the files before the recovery leg
+    // could read them — salvage returns empty while the SIGKILL-based test
+    // above stays green.
     const files = { out: join(cwd, `term.out`), err: join(cwd, `term.err`) };
     const wrapper = capWrappedCommand(cwd, `echo term-clue && sleep 30`, 1024, files);
     const child = spawn("bash", ["-c", wrapper], { stdio: "ignore", detached: true });

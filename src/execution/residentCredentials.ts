@@ -4,7 +4,7 @@
  *  packages by the Worker (like residentDetach/shellQuote) — the tested code
  *  IS the shipped code.
  *
- *  Background (KTD12): attach writes a 1-hour GitHub App installation token
+ *  Background: attach writes a 1-hour GitHub App installation token
  *  into `<worktree>/.git/github-credentials` and points git's `store` helper
  *  at it. Nothing used to refresh it during a run, so a push more than ~60
  *  minutes after attach got 401 — and git's `store` helper ERASES a rejected
@@ -12,7 +12,7 @@
  *  Worker now asks this function before every writable `/exec` and re-mints
  *  (cached per slug) + rewrites the file when it says so.
  *
- *  The refresh is driven by the TOKEN'S OWN EXPIRY (#528), not the file's age.
+ *  The refresh is driven by the TOKEN'S OWN EXPIRY, not the file's age.
  *  `mintRepoScopedToken` caches per repository slug, so a token minted for an
  *  earlier thread — with only a few minutes of life left — could be written
  *  for a brand-new attach and, keyed on file age alone, read "fresh" for ~45
@@ -24,7 +24,7 @@
 
 import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
 
-/** Backstop for bindings that predate `tokenExpiresAtMs` (item KTD12): re-mint
+/** Backstop for bindings that predate `tokenExpiresAtMs`: re-mint
  *  this long after the file was written when the token's real expiry is
  *  unknown — comfortably before the 60-minute token expiry. New bindings carry
  *  the expiry and take the margin path below instead. */
@@ -32,7 +32,7 @@ export const CREDENTIAL_REFRESH_AFTER_MS = 45 * 60_000;
 
 /** Refresh once the token is within this much of expiry, so a writable exec
  *  never starts on a token that cannot outlive the command it is about to run.
- *  Sized like the sandbox's per-command credential margin (#534): the longest
+ *  Sized like the sandbox's per-command credential margin: the longest
  *  single exec is `BASH_TIMEOUT_MAX_MS` (20 min), plus slack for the mint +
  *  file write and clock skew ⇒ 25 min. This is also `mintRepoScopedToken`'s
  *  cache serve threshold, so the cache and this predicate agree: a token the
@@ -67,7 +67,7 @@ export function shouldRefreshThreadCredentials(input: {
   if (readonly) return { refresh: false, reason: null };
   if (fileBytes === null) return { refresh: true, reason: "missing" };
   if (fileBytes === 0) return { refresh: true, reason: "empty" };
-  // Known expiry (#528): drive the refresh off the token's own life, not the
+  // Known expiry: drive the refresh off the token's own life, not the
   // file's age. Replaces the file-age heuristic for any binding that records it.
   if (tokenExpiresAtMs != null) {
     if (nowMs > tokenExpiresAtMs - CREDENTIAL_EXPIRY_MARGIN_MS) return { refresh: true, reason: "expiring" };

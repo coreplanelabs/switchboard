@@ -4,7 +4,7 @@ import type { Skill } from "../skills/index.js";
 import { listSkillsTool, useSkillTool } from "./skills.js";
 import { TOOLSETS, type ToolContext } from "./workspace.js";
 
-// Feature: features/skills.md — the read-only list_skills/use_skill tools (#100):
+// Feature: features/skills.md — the read-only list_skills/use_skill tools:
 // scoped to the calling agent, present in BOTH the readonly (review) and full
 // (coding) toolsets, and unavailable-graceful when no store is injected.
 
@@ -74,7 +74,7 @@ describe("use_skill tool", () => {
         description: "review it",
         agent: "review",
         source: "https://example.com/cr",
-        // Structured vendoring provenance (#331): repo + commit only — the
+        // Structured vendoring provenance: repo + commit only — the
         // file path is in `source`, the body digest is a check-time concern.
         upstream: { repo: "https://github.com/addyosmani/agent-skills", commit: "d".repeat(40) },
         bodyBytes: Buffer.byteLength("REVIEW BODY", "utf8"),

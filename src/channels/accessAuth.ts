@@ -35,7 +35,7 @@ const DEFAULT_MIN_REFETCH_INTERVAL_MS = 30_000;
 const SKEW_SECONDS = 60;
 
 /** Cloudflare Access application config. `teamDomain` is a bare host like
- *  `coreplane.cloudflareaccess.com`; `aud` is the application's AUD tag. */
+ *  `<team>.cloudflareaccess.com`; `aud` is the application's AUD tag. */
 export interface AccessConfig {
   teamDomain: string;
   aud: string;
@@ -44,7 +44,7 @@ export interface AccessConfig {
 /**
  * The identity carried by a verified Access JWT. A browser session has a
  * non-empty `sub` (+ usually `email`). A Cloudflare Access SERVICE TOKEN — the
- * machine credential for `/api/*` (KTD13) — carries an EMPTY `sub` and a
+ * machine credential for `/api/*` — carries an EMPTY `sub` and a
  * non-empty `common_name` (the token's client id), surfaced as `commonName`.
  * Exactly one of the two forms is ever produced; `isServiceToken` tells them apart.
  */

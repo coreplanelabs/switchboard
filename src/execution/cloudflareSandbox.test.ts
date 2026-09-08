@@ -65,9 +65,9 @@ describe("CloudflareSandboxExecutor trace context", () => {
 });
 
 // Feature: features/execution.md item 5 — the sandbox credential is resolved
-// per command, not per run. 2026-09-07 (review of #521): the token captured at
-// executor construction expired while the run's first command ran for 20
-// minutes, and every later command carried the same dead token.
+// per command, not per run: a token captured at executor construction would
+// expire while the run's first command ran for 20 minutes, and every later
+// command would carry the same dead token.
 describe("CloudflareSandboxExecutor credential freshness", () => {
   const sentEnv = (c: { init: RequestInit }) => sentBody(c).env as Record<string, string>;
 
@@ -94,12 +94,10 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
 });
 
 // Feature: features/execution.md item 5 — the env map rides ONLY in the JSON
-// body; the request carries no `x-env-*` header on any route. 2026-09-07 (#447
-// receipt): Workers Logs record an invocation's request headers and redact by a
-// NAME heuristic — the probe's `x-env-PROBE_VAR: hello-from-env-option` was
-// logged in clear while `x-env-gh_token` happened to be REDACTED. Bodies are
-// not recorded. The one-release `x-env-*` header fallback (#597) retired once
-// the body reader was live everywhere (#447 closed).
+// body; the request carries no `x-env-*` header on any route. Workers Logs
+// record an invocation's request headers and redact by a NAME heuristic —
+// `x-env-PROBE_VAR: hello` is logged in clear while `x-env-gh_token` happens
+// to be REDACTED. Bodies are not recorded.
 describe("CloudflareSandboxExecutor env transport", () => {
   const sentHeaders = (c: { init: RequestInit }) => c.init.headers as Record<string, string>;
 
@@ -154,7 +152,7 @@ describe("CloudflareSandboxExecutor per-call timeout", () => {
 // or HTTP 503 on /read + /write); the executor waits a bounded time and
 // re-sends the identical request, and only when that wait is exhausted throws
 // ExecCapacityError — never ExecInfraError, so the runner's fail-fast breaker
-// (#92) is not tripped by a fleet that is merely full. Fake timers drive the
+// is not tripped by a fleet that is merely full. Fake timers drive the
 // waits; every fetch is mocked.
 describe("CloudflareSandboxExecutor fleet-busy wait", () => {
   const BUSY_EXEC = {
@@ -307,10 +305,10 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
 
 // Feature: features/execution.md items 3 and 9 — a present-but-empty `error`
 // is the Worker's failure shape with its text missing, never a command exit.
-// 2026-09-07 (#569): a thread placed on a previous-image container during a
-// rollout got `{error: "", stdout: "", stderr: "", exitCode: 127}` for every
-// command; the truthy-only check let it through as a plain `exit 127`, the
-// health tracker counted a success, and the model reported its shell "down".
+// A thread placed on a previous-image container during a rollout gets
+// `{error: "", stdout: "", stderr: "", exitCode: 127}` for every command; a
+// truthy-only check would let it through as a plain `exit 127`, the health
+// tracker would count a success, and the model would report its shell "down".
 // A success body has no `error` key at all, so the key's PRESENCE is the
 // signal — a bare exit 127 with no output stays a legitimate command result.
 describe("CloudflareSandboxExecutor in-body empty error", () => {
@@ -340,15 +338,15 @@ describe("CloudflareSandboxExecutor in-body empty error", () => {
 
 // Feature: features/execution.md item 11 — every send to the sandbox Worker
 // has a bot-side deadline of the operation's budget plus EXEC_CALL_MARGIN_MS,
-// covering the WHOLE exchange (headers and streamed body). 2026-09-07 (#531):
-// a coding run waited 60+ minutes on one `/exec` — the sandbox container was
-// gone (`There is no container instance…`), the Worker kept heartbeating
-// while its exec promise never settled, and the bot's read of the body had no
-// deadline at all: neither the command budget nor the run's wall clock could
-// fire. The fetch mocks below honor the WHATWG contract the executor relies
+// covering the WHOLE exchange (headers and streamed body). Without it one
+// `/exec` whose sandbox container is gone (`There is no container instance…`)
+// waits for hours — the Worker keeps heartbeating while its exec promise never
+// settles, and a body read with no deadline lets neither the command budget
+// nor the run's wall clock fire. The fetch mocks below honor the WHATWG
+// contract the executor relies
 // on — an aborted signal rejects the pending fetch, or errors the body stream
 // once headers are out, with the signal's reason.
-describe("CloudflareSandboxExecutor per-send deadline (#531)", () => {
+describe("CloudflareSandboxExecutor per-send deadline", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });

@@ -25,12 +25,12 @@ export interface AgentDef {
    *  model turn plus its tool run) can exceed 5 minutes, or the cache written
    *  by each call expires before the next call can read it. */
   cacheTtl?: CacheTtl;
-  /** Resources the agent needs (KD2: declared per agent, resolved by the
+  /** Resources the agent needs (declared per agent, resolved by the
    *  executor factory). No `repo` declared → no workspace/sandbox is ever
    *  provisioned for this agent's runs. */
   resources?: { repo?: "required" | "none" };
-  /** System prompt variant for resident-repo runs (features/resident-repos.md,
-   *  U7): the workspace is a ready worktree — no cloning, no installs, no repo
+  /** System prompt variant for resident-repo runs (features/resident-repos.md):
+   *  the workspace is a ready worktree — no cloning, no installs, no repo
    *  discovery, no gh CLI. Selected by the dispatcher AFTER executor
    *  resolution via RunOptions.system; the shared AgentDef is never mutated. */
   residentSystem?: string;
@@ -97,7 +97,7 @@ If the request doesn't name a repository and you can't infer it, ask for it inst
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
 Your final message is posted to Slack — keep it readable, lead with the outcome.`;
 
-// Resident-path variant (features/resident-repos.md, U7): the run landed in a
+// Resident-path variant (features/resident-repos.md): the run landed in a
 // resident repo environment — a per-thread worktree that is already cloned,
 // on the thread's bound ref, deps installed, build warm. The scope-first /
 // clone workflow above would waste the head start (and `gh` does not exist in
@@ -160,7 +160,7 @@ Maintain the user-facing status card with the update_status tool: post your plan
 
 Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
 
-// Resident-path variant for review (features/resident-repos.md, U7): same
+// Resident-path variant for review (features/resident-repos.md): same
 // gather-once discipline, but against the ready worktree with git — the
 // resident image has no `gh` CLI.
 export const REVIEW_SYSTEM_RESIDENT = `You are Switchboard's code review agent, operating from a Slack request.
@@ -187,7 +187,7 @@ Maintain the user-facing status card with the update_status tool: post your plan
 
 Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
 
-// Research agent (Area 5 / R16): no repo, no workspace — just web search + URL
+// Research agent: no repo, no workspace — just web search + URL
 // reading, so a user can drop a link or ask a research question and get an
 // answer without invoking a repo-bound agent. Keeps `general` deliberately
 // fast and tool-less.
@@ -214,7 +214,7 @@ Answer directly and concisely. Use Slack-friendly formatting (no markdown header
 
 Your tools work without a workspace: the GitHub tools — \`github_repos\` (the org repositories you can reach), \`github_tree\` / \`github_file\` / \`github_search_code\` (browse, read, search their code and docs, private repos included), \`github_issue_list\` / \`github_issue_get\` (read issues), \`github_issue_create\` / \`github_issue_update\` / \`github_issue_comment\` / \`github_issue_delete\` (act on issues) — and \`web_fetch\` (read a public URL). Use them: when the user names a repo loosely ("the switchboard app"), resolve it with github_repos (or the thread) rather than asking; when asked about one of our repos, read it before answering. Report exactly what a tool did (issue number + URL) — never claim an action you did not perform, and never fabricate file contents, URLs, or command output.
 
-You cannot run commands, clone repositories, edit code, or review pull requests, and you cannot search the web. Other Switchboard agents can: for code changes or PRs tell the user to re-send with \`agent:coding\`; for a PR review, \`agent:review\`; for a web-research question, \`agent:research\` (e.g. "\`agent:coding fix issue #12 in acme/api\`", "\`agent:research compare X and Y\`"). Delete an issue only when the user explicitly asked to delete it (closing is an update).`;
+You cannot run commands, clone repositories, edit code, or review pull requests, and you cannot search the web. Other Switchboard agents can: for code changes or PRs tell the user to re-send with \`agent:coding\`; for a PR review, \`agent:review\`; for a web-research question, \`agent:research\` (e.g. "\`agent:coding fix the failing login test in acme/api\`", "\`agent:research compare X and Y\`"). Delete an issue only when the user explicitly asked to delete it (closing is an update).`;
 
 export const AGENTS: Record<string, AgentDef> = {
   general: {
@@ -238,9 +238,9 @@ export const AGENTS: Record<string, AgentDef> = {
     maxTurns: 60, // scoping is capped at ~5 calls by the prompt; this is implementation room
     maxTokens: 64000,
     maxMinutes: 45,
-    // Coding steps run long: 5-6 min model turns were observed on 2026-08-30
-    // (switchboard#294), and installs/tests add more — a 5m cache entry would
-    // expire between requests, so the 2× write buys reads for the whole run.
+    // Coding steps run long: a single model turn can take 5-6 minutes and
+    // installs/tests add more — a 5m cache entry would expire between
+    // requests, so the 2× write buys reads for the whole run.
     cacheTtl: "1h",
     // No built-in effort: the deployment decides (`defaults.efforts.coding`,
     // `config set channel efforts.coding=…`, or `effort:` per request).
@@ -268,7 +268,7 @@ export const AGENTS: Record<string, AgentDef> = {
     system:
       "You are Switchboard's ship pipeline. This prompt is never sent to a model — the pipeline orchestrates coding and review child runs on their own definitions.",
     // Full toolset so a ship thread provisions a writable workspace class like
-    // coding; nominal budgets — the pipeline is bounded by the `ship` config
+    // coding; placeholder budgets — the pipeline is bounded by the `ship` config
     // caps and by each child's own budgets clipped to the remaining wall clock,
     // never by these numbers.
     toolset: "full",

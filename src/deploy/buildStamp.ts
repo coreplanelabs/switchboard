@@ -5,13 +5,12 @@
 // how `deploy all`'s live gate tells "deployed" from "live". The three Worker
 // SCRIPTS (resident, memory, sandbox) had no equivalent. The resident instead
 // carried a hand-edited `const BUILD_MARKER = "perf53"` whose comment said
-// "bump on every deploy-worthy change"; it was bumped three times in total and
-// then went unbumped across five deploys (2026-08-30 → 2026-09-04, #434
-// included). That cost twice over: a deploy could not be proven from outside
-// (PR #434's receipts had to be assembled from `wrangler versions list` plus a
+// "bump on every deploy-worthy change"; a marker bumped by hand goes unbumped
+// the first busy week. That costs twice over: a deploy cannot be proven from
+// outside (its receipt has to be assembled from `wrangler versions list` plus a
 // container digest), and the test-override guard rail that expires an override
 // when the build changes (resident-repos item 49(c), `ignored:"stale-build …"`)
-// silently stopped expiring anything.
+// silently stops expiring anything.
 //
 // A file cannot carry the stamp into a Worker script the way it does into the
 // bot's image: it would have to be either committed (so a deploy dirties the

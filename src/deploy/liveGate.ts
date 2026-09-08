@@ -2,9 +2,10 @@ import { COLD_START_ALLOWANCE_MS, DRAIN_DEADLINE_MS } from "../core/drain.js";
 
 // "Deployed" is not "live". `wrangler deploy` uploads a Worker version and
 // starts a container rollout, but the OLD bot container keeps serving while it
-// drains in-flight runs (up to DRAIN_DEADLINE_MS) — the first live `deploy:all`
-// (2026-08-30 05:12Z) printed `bot … deployed`, exited 0, and the old container
-// was still draining two runs. This module is the pure half of the live gate
+// drains in-flight runs (up to DRAIN_DEADLINE_MS) — a `deploy:all` that trusted
+// the upload printed `bot … deployed`, exited 0, and the old container was
+// still draining (docs/decisions/0015-deploy-order-deployed-is-not-live.md).
+// This module is the pure half of the live gate
 // `deploy:all` runs after the bot step: read `/healthz`, decide whether the NEW
 // container — identified by the commit baked into its image (`build.commit`,
 // src/channels/health.ts) — is the one answering, and say why not otherwise.

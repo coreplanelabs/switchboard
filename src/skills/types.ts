@@ -1,9 +1,8 @@
-// Skill-loading capability (#100; supersedes the closed #98 — methodology is
-// LOADED as a skill on demand, never baked into a prompt). A skill is a
-// reusable methodology (spec-driven development, code review, …) that an agent
-// lists and loads into its context at run time via the list_skills/use_skill
-// tools. PR1 ships the seam + two stores (bundled + in-memory) and the load
-// path; the DO-backed store for user-uploaded skills is PR2.
+// Skill-loading capability (features/skills.md): methodology is LOADED as a
+// skill on demand, never baked into a prompt. A skill is a reusable
+// methodology (spec-driven development, code review, …) that an agent lists
+// and loads into its context at run time via the list_skills/use_skill tools.
+// This module is the seam; the stores (bundled, in-memory) implement it.
 
 /** A single loadable skill: parsed frontmatter metadata plus the full markdown
  *  body that use_skill returns into the model's context. */

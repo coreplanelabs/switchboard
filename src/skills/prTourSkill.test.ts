@@ -7,7 +7,7 @@ import { parseSkillMarkdown } from "./frontmatter.js";
 // first-party `pr-tour` skill (loaded on demand via use_skill, so every load is
 // a visible skill_use event), while the template keeps only the section list
 // and the mandatory-load instruction. These tests pin the rules that used to be
-// pinned on the template text (#329), now on the skill body.
+// pinned on the template text, now on the skill body.
 describe("the pr-tour skill carries the Tour contract", () => {
   const raw = readFileSync(fileURLToPath(new URL("../../skills/pr-tour/SKILL.md", import.meta.url)), "utf8");
   const skill = parseSkillMarkdown(raw);

@@ -6,11 +6,11 @@ import {
   type ConversationInfoClient,
 } from "./slackChannelDirectory.js";
 
-// Feature: features/authorization.md item 7 (U5), features/slack-channel.md
+// Feature: features/authorization.md item 7, features/slack-channel.md
 // item 6a — the Slack `ChannelDirectory`: `conversations.info` decides a
 // `slack:C…`/`slack:G…` channel's visibility (is_im/is_mpim → dm, is_private →
 // private, else public), cached per channel for a TTL and bounded in size; any
-// failure is `unknown` (never public, R7) and remembered for the TTL so Slack is
+// failure is `unknown` (never public — fail-closed) and remembered for the TTL so Slack is
 // asked and the failure logged once per channel per window. `slack:D…` and
 // non-Slack ids never reach the API — the id alone says what they are.
 
@@ -102,7 +102,7 @@ describe("SlackChannelDirectory.info — visibility from conversations.info", ()
     expect(CHANNEL_INFO_CACHE_MAX).toBe(1000);
   });
 
-  it("fail-closed (R7): an API error, a missing scope, or a reply without a channel is `unknown` — never public — and is logged once per channel per TTL", async () => {
+  it("fail-closed: an API error, a missing scope, or a reply without a channel is `unknown` — never public — and is logged once per channel per TTL", async () => {
     const { client, info } = fakeClient({ CERR: new Error("missing_scope"), CNONE: null });
     const warnings: string[] = [];
     const c = clock();
@@ -136,10 +136,10 @@ describe("SlackChannelDirectory.info — visibility from conversations.info", ()
 });
 
 describe("SlackChannelDirectory.isMember — the membership seam (not enumerated yet)", () => {
-  it("answers `unknown` for every actor and channel — not a member (R7) — until conversations.members lands behind this seam", async () => {
+  it("answers `unknown` for every actor and channel — not a member (fail-closed) — until conversations.members lands behind this seam", async () => {
     const { client, info } = fakeClient({});
     const dir = new SlackChannelDirectory(client, { now: clock().now });
-    expect(await dir.isMember("slack:U1", "slack:C1")).toBe("unknown");
+    expect(await dir.isMember("slack:UA", "slack:C1")).toBe("unknown");
     expect(await dir.isMember("http:ops", "http:ops")).toBe("unknown");
     expect(info).not.toHaveBeenCalled();
   });

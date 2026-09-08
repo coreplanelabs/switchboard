@@ -166,7 +166,7 @@ describe("createRunTimeline — call cards", () => {
     t.push(result("a", { at: 61_500 }));
     t.push(result("b", { at: 59_960 }));
     expect(t.steps()[0].calls[0].facts).toContain("1m 02s");
-    expect(t.steps()[0].calls[1].facts).toContain("1m 00s"); // 59.96 s rounds up and carries into the minute (F1 of #625);
+    expect(t.steps()[0].calls[1].facts).toContain("1m 00s"); // 59.96 s rounds up and carries into the minute
   });
 
   it("no duration when either timestamp is missing or the clock ran backwards", () => {
@@ -255,7 +255,7 @@ describe("createRunTimeline — classification (open-by-default rules key on the
     expect(c.headline).toBe("cd /w"); // nothing but the hop: keep it
   });
 
-  it("a quoted cd path with spaces is a hop too (review nit on #214)", () => {
+  it("a quoted cd path with spaces is a hop too", () => {
     const t = createRunTimeline();
     t.push(call("a", 'cd "/my dir/checkout" && npm test'));
     t.push(call("b", "cd '/my dir' ; git status"));

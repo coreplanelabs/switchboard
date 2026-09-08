@@ -14,8 +14,8 @@ import { namedToInput } from "../core/commandSurface.js";
 import { isServiceToken, type AccessIdentity } from "./accessAuth.js";
 import { MAX_BODY_BYTES, readBody } from "./http.js";
 
-// Generic HTTP adapter for the command registry (#157 U7 — R7/R9/R10, KTD13/
-// KTD15): `/api/<group>.<verb>` for every registered command, with NO
+// Generic HTTP adapter for the command registry: `/api/<group>.<verb>` for
+// every registered command, with NO
 // per-command code. Its only logic is transport: resolve the Caller (identity
 // only — the policy table decides, features/authorization.md) from the
 // Access identity the gate in index.ts already verified, enforce write safety,
@@ -23,13 +23,13 @@ import { MAX_BODY_BYTES, readBody } from "./http.js";
 // (`namedToInput` — kebab-case query keys, camelCase JSON keys), pass it to
 // `invoke`, and write the JSON it returns.
 //
-// KTD13 — ONE route predicate. `isCommandPath` is what index.ts gates on, and
+// ONE route predicate. `isCommandPath` is what index.ts gates on, and
 // the handler claims ALL of `/api/*`, answering its own 404 so no `/api` spelling
 // ever falls through to the `200 ok` health probe. Who may reach it at all is
 // the dashboard auth strategy's decision (dashboardAuth.ts), made before this
 // handler runs — the `none` strategy's loopback rule included.
 //
-// KTD15 — write safety. `effect: "write"` commands are POST-only (405), require
+// Write safety. `effect: "write"` commands are POST-only (405), require
 // `content-type: application/json`, and refuse a foreign `Origin` /
 // `Sec-Fetch-Site` (403) — same-origin is judged against PUBLIC_BASE_URL when
 // set, else the request's Host. No CORS headers are ever emitted, so a browser
@@ -70,7 +70,7 @@ function normalizePath(pathname: string): string {
   return decoded.replace(/\/{2,}/g, "/");
 }
 
-/** KTD13: true for `/api` and everything under `/api/`, in any spelling that
+/** True for `/api` and everything under `/api/`, in any spelling that
  *  could reach the handler. index.ts gates on THIS — never a second prefix list. */
 export function isCommandPath(pathname: string): boolean {
   const p = normalizePath(pathname).toLowerCase();
@@ -97,13 +97,13 @@ export function callerIdFor(identity: AccessIdentity): string {
 }
 
 /**
- * R9: the `Actor` an Access identity resolves to — the ONE resolver for every
+ * The `Actor` an Access identity resolves to — the ONE resolver for every
  * surface the Access gate fronts: `/api/*` here (through `callerFor`) and the
  * `/runs` pages (index.ts hands it to the live-view handler as `ctx.actor`,
  * features/authorization.md item 1). A browser session is the `user`
  * `access:<sub>`, a service token the `service` `access:svc:<common_name>`,
  * each with the grants config names for that id (`grantsFor`). Nothing here
- * decides what either may do (KTD3).
+ * decides what either may do (docs/decisions/0007-authorization-policy-table.md).
  */
 export function accessActor(identity: AccessIdentity, grantsFor: GrantsLookup): Actor {
   return isServiceToken(identity)
@@ -144,7 +144,7 @@ function header(req: IncomingMessage, name: string): string | undefined {
   return Array.isArray(v) ? v[0] : v;
 }
 
-/** KTD15: a write request must come from our own origin. `Sec-Fetch-Site`
+/** A write request must come from our own origin. `Sec-Fetch-Site`
  *  (browsers) must be same-origin/none when present; `Origin` (browsers, and
  *  anything that sends one) must equal PUBLIC_BASE_URL's full origin (scheme,
  *  host and port — a same-host deployment on another port is foreign), or the
@@ -228,7 +228,7 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
     }
 
     // Refuse BEFORE buffering where the table can decide without the input
-    // (KTD15). `invoke` re-checks in every case; this only spares an
+    // (write safety). `invoke` re-checks in every case; this only spares an
     // unauthorized caller's body from being read.
     const caller = callerFor(identity, opts);
     if (CommandRegistry.refuses(cmd, caller)) {
@@ -236,7 +236,7 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
       return;
     }
 
-    // Arguments and options are addressed BY NAME in one flat object (KTD21):
+    // Arguments and options are addressed BY NAME in one flat object:
     // a GET query string in kebab-case (`?id=…&after-seq=3`, coerced by the
     // schemas), a POST body in camelCase JSON (`{"id":…,"afterSeq":3}`). The
     // split into positional `args` and `options` is the definition's, not ours.
