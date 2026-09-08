@@ -15,10 +15,12 @@ import {
   capabilityProblem,
   classifyDeployOutput,
   decideAccount,
+  lastErrorLines,
   UNSET_ENV,
   workersFor,
   type DeployPlan,
   type DeployStep,
+  type SandboxLiveGate,
   type TokenVerifyResult,
   type WorkerDef,
   type WorkerName,
@@ -33,6 +35,22 @@ import {
   type LoadedProfile,
 } from "./profile.js";
 import { classifyRestartResponse, type RestartPlan } from "./restart.js";
+import {
+  containerAppId,
+  decideSandboxLive,
+  decideWorker,
+  parseAppVersion,
+  parseExecStream,
+  parseInstancesPage,
+  parseWranglerJson,
+  PROBE_COMMAND,
+  PROBE_TIMEOUT_MS,
+  probeThreadKey,
+  type ContainerInstance,
+  type HealthRead,
+  type ProbeResult,
+  type Read,
+} from "./sandboxLiveGate.js";
 
 // The production deploy RUNNER behind the registry's `deploy all` (CLI only):
 // runs the four Workers' `npm run deploy` in the plan's canonical order
@@ -45,10 +63,13 @@ import { classifyRestartResponse, type RestartPlan } from "./restart.js";
 // answering while it drains (up to 15 min), so the runner polls `/healthz`
 // until a non-draining container reports the deployed commit as its
 // `build.commit` (2026-08-30 05:12Z: the script said `deployed` and exited 0
-// while the old container was still draining two runs). Only this file touches
-// processes; the plan and the live decision are pure and unit-tested, and the
-// command (src/core/commands/deploy.ts) maps this result onto the registry's
-// error vocabulary.
+// while the old container was still draining two runs). The sandbox step is
+// likewise done only when its Worker, its container rollout and an `echo ok`
+// probe agree (#569: a thread placed during the image rollout landed on the
+// previous image and every exec failed with an empty error). Only this file
+// touches processes; the plan and the live decisions are pure and unit-tested,
+// and the command (src/core/commands/deploy.ts) maps this result onto the
+// registry's error vocabulary.
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..");
 
@@ -279,14 +300,24 @@ async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO): Promise<
   return r.code === 0;
 }
 
-/** GET a `/healthz`; undefined when unreachable or not JSON (never throws). */
-async function fetchHealthz(url: string): Promise<HealthzBody | undefined> {
+/** GET a `/healthz`, with a bearer when the Worker sits behind one (the sandbox):
+ *  the status and the parsed body, or why the request failed. Never throws. */
+async function readHealthz(url: string, bearer?: string): Promise<HealthRead> {
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-    return parseHealthz(await res.text());
-  } catch {
-    return undefined;
+    const res = await fetch(url, {
+      headers: bearer ? { authorization: `Bearer ${bearer}` } : {},
+      signal: AbortSignal.timeout(20_000),
+    });
+    return { status: res.status, body: parseHealthz(await res.text()) };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** The body of an unauthenticated `/healthz`; undefined when unreachable or not JSON. */
+async function fetchHealthz(url: string): Promise<HealthzBody | undefined> {
+  const r = await readHealthz(url);
+  return "body" in r ? r.body : undefined;
 }
 
 interface StepOutcome {
@@ -308,13 +339,13 @@ async function waitUntilLive(
   healthUrl: string,
   expectedCommit: string,
   io: DeployRunnerIO,
-): Promise<{ live: true; commit: string; waitedMs: number } | { live: false; reason: string }> {
+): Promise<GateOutcome> {
   const started = Date.now();
   for (;;) {
     const elapsed = Date.now() - started;
     const body = await fetchHealthz(healthUrl);
     const d = decideLive(body, expectedCommit, elapsed);
-    if (d.kind === "live") return { live: true, commit: d.commit, waitedMs: elapsed };
+    if (d.kind === "live") return { live: true, detail: `commit ${d.commit.slice(0, 7)}`, waitedMs: elapsed };
     if (d.kind === "timeout")
       return {
         live: false,
@@ -327,11 +358,163 @@ async function waitUntilLive(
   }
 }
 
+/** What a live gate ends with: the facts that proved it, or the reason it never held. */
+type GateOutcome = { live: true; detail: string; waitedMs: number } | { live: false; reason: string };
+
+// ---- the sandbox live gate (src/deploy/sandboxLiveGate.ts is the pure half) -----------------------
+
+/** The sandbox gate's I/O, injectable so the loop is unit-tested without a network, wrangler or a clock. */
+export interface SandboxGateDeps {
+  env: Record<string, string | undefined>;
+  readHealth(url: string, bearer: string): Promise<HealthRead>;
+  /** `wrangler containers info <app> --json` → the application's version, run in `dir`. */
+  readAppVersion(dir: string, containerApp: string): Promise<Read<number>>;
+  /** `wrangler containers instances <app> --json`, every page, run in `dir`. */
+  readInstances(dir: string, containerApp: string): Promise<Read<ContainerInstance[]>>;
+  /** `POST /exec` `echo ok` on the probe thread; the streamed body parsed. */
+  probeExec(execUrl: string, bearer: string, threadKey: string): Promise<ProbeResult>;
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+/** One read-only wrangler command in a Worker's dir, its `--json` payload parsed;
+ *  `CLOUDFLARE_ACCOUNT_ID` stripped like every other wrangler call here. */
+async function wranglerJson(dir: string, args: string[]): Promise<Read<unknown>> {
+  const r = await run("npx", ["wrangler", ...args], { cwd: join(REPO_ROOT, dir), unset: UNSET_ENV });
+  if (r.code !== 0)
+    return { error: `wrangler ${args.join(" ")} failed: ${lastErrorLines(r.output) || `exit ${r.code}, no output`}` };
+  const parsed = parseWranglerJson(r.output);
+  return parsed === undefined ? { error: `wrangler ${args.join(" ")}: no JSON in the output` } : { value: parsed };
+}
+
+/** The application id behind a Containers application name — stable, so a
+ *  success is remembered for the process; a failure is retried next poll. */
+const containerAppIds = new Map<string, string>();
+async function resolveContainerAppId(dir: string, containerApp: string): Promise<Read<string>> {
+  const known = containerAppIds.get(containerApp);
+  if (known) return { value: known };
+  const listing = await wranglerJson(dir, ["containers", "list", "--json"]);
+  if ("error" in listing) return listing;
+  const id = containerAppId(listing.value, containerApp);
+  if (!id)
+    return {
+      error: `container application ${containerApp} not in \`wrangler containers list\` (wrong account, or renamed class?)`,
+    };
+  containerAppIds.set(containerApp, id);
+  return { value: id };
+}
+
+/** `--per-page` above the fleet's `max_instances` (25); wrangler answers one page per call. */
+const INSTANCES_PER_PAGE = 100;
+
+export const defaultSandboxGateDeps: SandboxGateDeps = {
+  env: process.env,
+  readHealth: (url, bearer) => readHealthz(url, bearer),
+  readAppVersion: async (dir, containerApp) => {
+    const id = await resolveContainerAppId(dir, containerApp);
+    if ("error" in id) return id;
+    const info = await wranglerJson(dir, ["containers", "info", id.value, "--json"]);
+    if ("error" in info) return info;
+    const version = parseAppVersion(info.value);
+    return version === null
+      ? { error: `wrangler containers info ${id.value}: no numeric version in the output` }
+      : { value: version };
+  },
+  readInstances: async (dir, containerApp) => {
+    const id = await resolveContainerAppId(dir, containerApp);
+    if ("error" in id) return id;
+    const rows: ContainerInstance[] = [];
+    let pageToken: string | null = null;
+    do {
+      const args = ["containers", "instances", id.value, "--json", "--per-page", String(INSTANCES_PER_PAGE)];
+      if (pageToken) args.push("--page-token", pageToken);
+      const page = await wranglerJson(dir, args);
+      if ("error" in page) return page;
+      const parsed = parseInstancesPage(page.value);
+      if (!parsed) return { error: `wrangler containers instances ${id.value}: unexpected JSON shape` };
+      rows.push(...parsed.rows);
+      pageToken = parsed.nextPageToken;
+    } while (pageToken);
+    return { value: rows };
+  },
+  probeExec: async (execUrl, bearer, threadKey) => {
+    try {
+      const res = await fetch(execUrl, {
+        method: "POST",
+        headers: { authorization: `Bearer ${bearer}`, "x-thread-key": threadKey, "content-type": "application/json" },
+        body: JSON.stringify({ command: PROBE_COMMAND, timeoutMs: PROBE_TIMEOUT_MS }),
+        // The command's own budget plus a cold container start; the body streams heartbeats meanwhile.
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS + 60_000),
+      });
+      const text = await res.text();
+      if (!res.ok) return { error: `POST /exec → HTTP ${res.status}: ${text.trim().slice(0, 200)}` };
+      return parseExecStream(text);
+    } catch (err) {
+      return { error: `POST /exec failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  },
+  now: Date.now,
+  sleep,
+};
+
+/**
+ * After the sandbox deploy: poll until the Worker serves the deployed commit,
+ * every running container instance is on the application's version, and an
+ * `echo ok` through the gate's probe thread answers from an instance on that
+ * version — logging every poll's first unmet signal. The rollout and the probe
+ * are read only once the Worker is live (they mean nothing before), and the
+ * probe is sent BEFORE the instance list is read so the list includes the
+ * probe's own instance. One thread key per deployed commit: the probe holds
+ * one fleet slot for the 5-min idle window, not one per poll.
+ */
+export async function waitUntilSandboxLive(
+  step: Pick<DeployStep, "name" | "dir">,
+  gate: SandboxLiveGate,
+  expectedCommit: string,
+  io: Pick<DeployRunnerIO, "log">,
+  deps: SandboxGateDeps = defaultSandboxGateDeps,
+): Promise<GateOutcome> {
+  const bearer = deps.env[gate.bearerEnv];
+  if (!bearer)
+    return {
+      live: false,
+      reason: `${gate.bearerEnv} is not set — the sandbox live gate reads /healthz and probes /exec with it`,
+    };
+  const threadKey = probeThreadKey(expectedCommit);
+  const execUrl = new URL("/exec", gate.healthUrl).toString();
+  const started = deps.now();
+  for (;;) {
+    const elapsed = deps.now() - started;
+    const health = await deps.readHealth(gate.healthUrl, bearer);
+    const rest = decideWorker(health, expectedCommit).ok
+      ? {
+          probe: await deps.probeExec(execUrl, bearer, threadKey),
+          appVersion: await deps.readAppVersion(step.dir, gate.containerApp),
+          instances: await deps.readInstances(step.dir, gate.containerApp),
+        }
+      : { probe: null, appVersion: null, instances: null };
+    const d = decideSandboxLive({
+      health,
+      ...rest,
+      probeThreadKey: threadKey,
+      deployedCommit: expectedCommit,
+      elapsedMs: elapsed,
+    });
+    if (d.kind === "live") return { live: true, detail: d.summary, waitedMs: deps.now() - started };
+    if (d.kind === "failed") return { live: false, reason: d.reason };
+    io.log(
+      `[deploy:all] ${step.name}: deployed, not live yet — ${d.reason} (${Math.floor(elapsed / 60_000)}m ${Math.floor((elapsed % 60_000) / 1000)}s)`,
+    );
+    await deps.sleep(LIVE_GATE_POLL_MS);
+  }
+}
+
 async function deployStep(
   step: DeployStep,
   plan: DeployPlan,
   expectedCommit: string,
   io: DeployRunnerIO,
+  deps: SandboxGateDeps,
 ): Promise<StepOutcome> {
   const started = Date.now();
   const deadline = started + plan.waitMaxMs;
@@ -347,12 +530,15 @@ async function deployStep(
     if (outcome.kind === "deployed") {
       if (!step.liveGate) return { ok: true, versionId: outcome.versionId, live: "n/a" };
       io.log(
-        `[deploy:all] ${step.name}: version ${outcome.versionId ?? "?"} uploaded — waiting until the new container is live (commit ${expectedCommit.slice(0, 7)})`,
+        `[deploy:all] ${step.name}: version ${outcome.versionId ?? "?"} uploaded — waiting until live (commit ${expectedCommit.slice(0, 7)})`,
       );
-      const gate = await waitUntilLive(step, step.liveGate.healthUrl, expectedCommit, io);
+      const gate =
+        step.liveGate.kind === "health"
+          ? await waitUntilLive(step, step.liveGate.healthUrl, expectedCommit, io)
+          : await waitUntilSandboxLive(step, step.liveGate, expectedCommit, io, deps);
       if (gate.live) {
         io.log(
-          `[deploy:all] ${step.name}: live (commit ${gate.commit.slice(0, 7)}, drained after ${Math.round(gate.waitedMs / 1000)}s)`,
+          `[deploy:all] ${step.name}: live (${gate.detail}; ${Math.round(gate.waitedMs / 1000)}s after the upload)`,
         );
         return { ok: true, versionId: outcome.versionId, live: "live" };
       }
@@ -389,7 +575,11 @@ async function deployStep(
 
 /** Execute a plan for real: pre-checks, then the steps in order, stopping at
  *  the first failure so the order holds (later Workers are NOT deployed). */
-export async function runDeployPlan(plan: DeployPlan, io: DeployRunnerIO): Promise<DeployRunResult> {
+export async function runDeployPlan(
+  plan: DeployPlan,
+  io: DeployRunnerIO,
+  deps: SandboxGateDeps = defaultSandboxGateDeps,
+): Promise<DeployRunResult> {
   if (plan.affected) io.log(formatAffectedText(plan.affected));
   if (plan.steps.length === 0) {
     io.log("[deploy:all] nothing to deploy — every Worker already serves this tree's inputs");
@@ -414,8 +604,8 @@ export async function runDeployPlan(plan: DeployPlan, io: DeployRunnerIO): Promi
   }
   for (const w of plan.warnings) io.warn(`[deploy:all] WARNING ${w}`);
 
-  // The commit being deployed — what the bot's /healthz must report before the
-  // bot step counts as live. Read AFTER the origin/main check. If git fails this
+  // The commit being deployed — what a gated Worker's /healthz must report
+  // before its step counts as live. Read AFTER the origin/main check. If git fails this
   // is "" and `sameCommit` refuses anything under 7 chars, so the gate fails
   // closed (never a false "live") — and we say so up front rather than 18 min later.
   const expectedCommit = (await run("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).output.trim();
@@ -423,7 +613,7 @@ export async function runDeployPlan(plan: DeployPlan, io: DeployRunnerIO): Promi
     return {
       kind: "refused",
       problems: [
-        `could not read HEAD (\`git rev-parse HEAD\` gave ${JSON.stringify(expectedCommit.slice(0, 40))}); the bot live gate needs the commit being deployed`,
+        `could not read HEAD (\`git rev-parse HEAD\` gave ${JSON.stringify(expectedCommit.slice(0, 40))}); the live gates need the commit being deployed`,
       ],
     };
   }
@@ -434,7 +624,7 @@ export async function runDeployPlan(plan: DeployPlan, io: DeployRunnerIO): Promi
       results.push({ name: step.name, script: step.script, live: "not deployed", status: "npm ci failed" });
       break;
     }
-    const r = await deployStep(step, plan, expectedCommit, io);
+    const r = await deployStep(step, plan, expectedCommit, io, deps);
     // wrangler always prints `Current Version ID`; a deploy that exits 0 without one is odd enough to say so.
     results.push({
       name: step.name,
@@ -507,24 +697,17 @@ export function hostAffectedProbe(
       const bearer = w.healthBearerEnv ? env[w.healthBearerEnv] : undefined;
       if (w.healthBearerEnv && !bearer)
         return { error: `${w.healthBearerEnv} is not set — cannot read ${w.healthUrl}` };
-      try {
-        const res = await fetch(w.healthUrl, {
-          headers: bearer ? { authorization: `Bearer ${bearer}` } : {},
-          signal: AbortSignal.timeout(20_000),
-        });
-        const text = await res.text();
-        if (!res.ok) return { error: `GET ${w.healthUrl} → HTTP ${res.status}` };
-        const body = parseHealthz(text);
-        const commit =
-          body && typeof body.build === "object" && body.build !== null
-            ? (body.build as { commit?: unknown }).commit
-            : undefined;
-        return typeof commit === "string" && commit !== ""
-          ? { commit }
-          : { error: `GET ${w.healthUrl} carries no build.commit` };
-      } catch (err) {
-        return { error: `GET ${w.healthUrl} failed: ${err instanceof Error ? err.message : String(err)}` };
-      }
+      const r = await readHealthz(w.healthUrl, bearer);
+      if ("error" in r) return { error: `GET ${w.healthUrl} failed: ${r.error}` };
+      if (r.status < 200 || r.status >= 300) return { error: `GET ${w.healthUrl} → HTTP ${r.status}` };
+      const body = r.body;
+      const commit =
+        body && typeof body.build === "object" && body.build !== null
+          ? (body.build as { commit?: unknown }).commit
+          : undefined;
+      return typeof commit === "string" && commit !== ""
+        ? { commit }
+        : { error: `GET ${w.healthUrl} carries no build.commit` };
     },
     isAncestor: async (commit, head) =>
       (await run("git", ["merge-base", "--is-ancestor", commit, head], { cwd: REPO_ROOT })).code === 0,
