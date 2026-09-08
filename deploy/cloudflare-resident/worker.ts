@@ -1632,6 +1632,23 @@ export class ResidentDO extends Sandbox<Env> {
         }
       }
 
+      // A restore an earlier hydrate gave up on may still be writing into these
+      // directories (#573: the SDK call cannot be cancelled, and a rebuild is
+      // exactly what follows a restore that went `down`). The hydrate path
+      // waits for `pendingRestores` before its clean; provisioning must too, or
+      // the clone races a writer. Bounded like the hydrate's wait; a stream
+      // that will not settle even then fails the provision with the wait
+      // named, never a clone over a moving target.
+      if (this.pendingRestores.size > 0) {
+        const n = this.pendingRestores.size;
+        await withTimeout(
+          Promise.allSettled([...this.pendingRestores]),
+          RESTORE_MAX_MS,
+          `${n} earlier restore(s) still running before the clean`,
+        ).catch((err) => {
+          throw new StepError("await-restores", errMsg(err));
+        });
+      }
       await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-workspace");
       await this.ensureGitSetup();
       await this.withMirrorLock(() =>
@@ -1817,7 +1834,13 @@ export class ResidentDO extends Sandbox<Env> {
           `${this.pendingRestores.size} earlier restore(s) still running`,
         );
       } catch (err) {
-        throw await this.goDown(`r2-restore-failed: ${errMsg(err)} — the disk was left untouched`);
+        // Same exit as a stalled restore below: the stream is still running and
+        // a rebuild is what follows a `down`, so the container goes with it.
+        this.clearIncarnationMemos(); // deliberate incarnation swap
+        await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
+        throw await this.goDown(
+          `r2-restore-failed: ${errMsg(err)} — container stopped so the transfer cannot land on a rebuild`,
+        );
       }
     }
     await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-before-restore");
@@ -1832,7 +1855,20 @@ export class ResidentDO extends Sandbox<Env> {
       await this.restoreWithProgress(snap.mirror, "mirror restore", deadlineMs);
       await this.restoreWithProgress(snap.checkout, "checkout restore", deadlineMs);
     } catch (err) {
-      throw await this.goDown(`r2-restore-failed: ${errMsg(err)}`);
+      // A stalled or capped restore is STILL STREAMING (the SDK call cannot be
+      // cancelled); `pendingRestores` keeps the next hydrate off its directory,
+      // but a `down` resident's only exit is a REBUILD, and provisioning owns
+      // the same directories. Live 2026-09-07 23:52 (#573): the restore the
+      // wake path had given up on landed into the checkout the rebuild had just
+      // cloned and linked — tar overwrote in place through the deps store's
+      // hardlinks, resetting every hardened entry file from 444 to 644. Stop
+      // the container on the way down: the disk is ephemeral, the stream dies
+      // with it, and the rebuild starts on an empty one.
+      this.clearIncarnationMemos(); // deliberate incarnation swap
+      await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
+      throw await this.goDown(
+        `r2-restore-failed: ${errMsg(err)} — container stopped so the transfer cannot land on a rebuild`,
+      );
     }
     await this.ensureGitSetup();
 
