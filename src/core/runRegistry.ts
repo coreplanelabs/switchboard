@@ -6,6 +6,7 @@ import {
   type RunActor,
   type RunEvent,
   type StopMode,
+  isSpanRecord,
 } from "./runEvents.js";
 import type { ChannelVisibility } from "./authz/types.js";
 import type { RunStatus } from "./runRecord.js";
@@ -214,10 +215,42 @@ export interface RunSnapshot {
 /** `seq` is the event's 1-based position in the run's stream (the registry's
  *  `eventCount` at publish) — the SSE `id:` a client resumes from. */
 export type RunSubscriber = (event: RunEvent, seq: number) => void;
-/** Called once when the run it is subscribed to finishes. */
-export type RunFinishListener = () => void;
+/** The agent stopped (`finish()`): the SSE `finished` frame. Content events
+ *  stop here; span records keep flowing until the seal. */
+export interface FinishedFrame {
+  finishedAt: number;
+}
+/** The stream closed (`seal()`): the SSE `end` frame. `replyOk` is tri-state
+ *  (features/tracing.md): `true` a reply was attempted and delivered, `false`
+ *  attempted and threw, absent none was measured. */
+export interface SealedFrame {
+  sealedAt: number;
+  replyOk?: boolean;
+}
+/** Called once when the run finishes (immediately, for a run already finished). */
+export type RunFinishedListener = (frame: FinishedFrame) => void;
+/** Called once when the run's stream closes (immediately, for a run already sealed). */
+export type RunSealListener = (frame: SealedFrame) => void;
 /** Tear-down returned by a successful subscribe(); safe to call more than once. */
 export type Unsubscribe = () => void;
+
+/** What `seal()` returns, and what the record writer merges after the reply:
+ *  the events published between finish and seal (span records), the published
+ *  total, and the two seal stamps. An unknown or evicted run yields the empty
+ *  result; a live run yields no stamps; a sealed run yields the same result on
+ *  every call. */
+export interface SealResult {
+  events: RunEvent[];
+  eventCount?: number;
+  sealedAt?: number;
+  replyOk?: boolean;
+}
+
+/** How long a finished run may stay unsealed before the sweep seals it (with
+ *  no `replyOk`) and evicts it: the reply that would have sealed it never
+ *  settled. Reachable only when a reply hangs; while it holds, the run's row,
+ *  its subscribers and its live-view token stay pinned. */
+export const UNSEALED_HOLD_MS = 15 * 60_000;
 
 /**
  * A single change on the Access-gated runs index (`GET /runs`), delivered live to
@@ -263,8 +296,12 @@ export const REPLAY_EVERYTHING: Pick<SubscribeOptions, "limit" | "byteLimit"> = 
  *  budget override (`REPLAY_EVERYTHING` for a store; tests). */
 export interface SubscribeOptions {
   onEvent: RunSubscriber;
-  /** Called once when the run finishes (immediately for a finished run). */
-  onFinish?: RunFinishListener;
+  /** The `finished` frame: fires at finish, or immediately for a finished run;
+   *  the subscriber stays attached for the span records until the seal. */
+  onFinished?: RunFinishedListener;
+  /** The `end` frame: fires at the seal, or immediately for a sealed run, and
+   *  detaches the subscriber. */
+  onSealed?: RunSealListener;
   /** The SSE `Last-Event-ID`: only events with a higher `seq` are offered; 0
    *  (the default) offers the whole retained backlog. */
   afterSeq?: number;
@@ -291,6 +328,13 @@ export interface Subscribed {
 export interface RunRegistryOptions {
   /** Max events retained per run (oldest dropped past it). Default 5000. */
   backlogLimit?: number;
+  /** Transitional (features/tracing.md): while the dispatcher does not yet
+   *  seal after the reply, `finish()` seals the run as its last statement with
+   *  `sealedAt = finishedAt` and no `replyOk`, so the stream closes at finish
+   *  exactly as before the seal existed and the index sees one event per
+   *  finish. Default true; tests pass false to exercise the finished-unsealed
+   *  state. Deleted with the flip. */
+  sealAtFinish?: boolean;
   /** Max bytes retained per run, measured as each event's UTF-8 JSON size; the
    *  oldest events are dropped until under budget (the newest always stays).
    *  Default 4 MiB. */
@@ -307,7 +351,8 @@ export interface RunRegistryOptions {
 
 interface Subscription {
   onEvent: RunSubscriber;
-  onFinish?: RunFinishListener;
+  onFinished?: RunFinishedListener;
+  onSealed?: RunSealListener;
 }
 
 interface RunState {
@@ -322,8 +367,15 @@ interface RunState {
   backlogBytes: number;
   subscribers: Set<Subscription>;
   finished: boolean;
-  /** Wall-clock finish time; drives TTL eviction. */
+  /** Wall-clock finish time (the agent stopped). */
   finishedAt?: number;
+  /** `eventCount` at finish: the seal result's events are the ones after it. */
+  finishSeq?: number;
+  /** Wall-clock seal time (the stream closed); drives TTL eviction. Absent
+   *  between finish and seal — the unsealed hold. */
+  sealedAt?: number;
+  /** The first seal's `replyOk`, when one was given. */
+  replyOk?: boolean;
   /** Terminal status given to `finish()`, projected onto the summary. */
   status?: RunStatus;
   /** Short human label for the runs index; set at create(). */
@@ -389,6 +441,7 @@ export class RunRegistry {
   private readonly backlogLimit: number;
   private readonly backlogBytes: number;
   private readonly ttlMs: number;
+  private readonly sealAtFinish: boolean;
   private readonly genId: () => string;
   private readonly genToken: () => string;
   private readonly now: () => number;
@@ -399,6 +452,7 @@ export class RunRegistry {
     this.backlogLimit = opts.backlogLimit ?? DEFAULT_BACKLOG_LIMIT;
     this.backlogBytes = opts.backlogBytes ?? DEFAULT_BACKLOG_BYTES;
     this.ttlMs = opts.ttlMs ?? 60_000;
+    this.sealAtFinish = opts.sealAtFinish ?? true;
     this.genId = opts.genId ?? (() => randomUUID());
     this.genToken = opts.genToken ?? (() => randomBytes(32).toString("hex"));
     this.now = opts.now ?? Date.now;
@@ -509,12 +563,16 @@ export class RunRegistry {
 
   /** Stamp an event with the run's next `seq`, append it to the backlog (dropping
    *  the oldest past the count or byte bound — the newest always survives), and
-   *  fan it out to live subscribers. A no-op for an unknown or already-finished
-   *  run — never throws, and a throwing subscriber is isolated like an index
-   *  sink: it can neither stop the other subscribers nor reach the publisher. */
+   *  fan it out to live subscribers. Content stops at finish and span records
+   *  stop at the seal (features/tracing.md): a content event on a finished run
+   *  and anything on a sealed or unknown run is a silent no-op. Never throws,
+   *  and a throwing subscriber is isolated like an index sink: it can neither
+   *  stop the other subscribers nor reach the publisher. */
   publish(id: string, event: RunEvent): void {
     const run = this.runs.get(id);
-    if (!run || run.finished) return;
+    if (!run || run.sealedAt !== undefined) return;
+    const span = isSpanRecord(event);
+    if (run.finished && !span) return;
     // ONE counter: `eventCount` is the monotonic published total AND the `seq`
     // stamped on the event — the SSE `id:` a client resumes from.
     const seq = ++run.eventCount;
@@ -530,26 +588,107 @@ export class RunRegistry {
     }
     // Index rows show live activity (event count + running state). Agent tool
     // events are seconds apart, so one upsert per event is not chatty; the
-    // summary is built cheaply from the run we already hold.
-    this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+    // summary is built cheaply from the run we already hold. A span record is
+    // timing, not activity: it never repaints the index.
+    if (!span) this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
   }
 
-  /** Mark a run finished: notify live subscribers, stop forwarding, and start
-   *  the eviction TTL. `status` is the terminal status the caller computed
-   *  (the dispatcher's), stored so every summary projects it — consumers never
-   *  re-derive it. Idempotent; a no-op for an unknown run. */
+  /** Mark a run finished — the agent stopped: stamp `finishedAt`, send every
+   *  attached subscriber the `finished` frame WITHOUT detaching it (span records
+   *  still flow until the seal), and upsert the index. `status` is the terminal
+   *  status the caller computed (the dispatcher's), stored so every summary
+   *  projects it — consumers never re-derive it. Idempotent; a no-op for an
+   *  unknown run. Under `sealAtFinish` the run is then sealed at once, from the
+   *  same clock read (one index event per finish is a property of this path,
+   *  never of two timestamps agreeing). */
   finish(id: string, status?: RunStatus): void {
     const run = this.runs.get(id);
     if (!run || run.finished) return;
     run.finished = true;
     run.finishedAt = this.now();
+    run.finishSeq = run.eventCount;
     if (status !== undefined) run.status = status;
-    const subs = [...run.subscribers];
-    run.subscribers.clear();
-    for (const sub of subs) sub.onFinish?.();
+    const frame: FinishedFrame = { finishedAt: run.finishedAt };
+    for (const sub of [...run.subscribers]) {
+      try {
+        sub.onFinished?.(frame);
+      } catch {
+        // A dead sink must not break the finish for the remaining subscribers.
+      }
+    }
     // A finished run stays on the index (marked finished) until the TTL evicts
     // it — so finish is an upsert, not a removal. Eviction emits the removal.
     this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+    if (this.sealAtFinish) this.sealRun(run, { replyOk: undefined, upsert: false, sealedAt: run.finishedAt });
+  }
+
+  /**
+   * Seal a run — the stream closed: the first reply attempt completed
+   * (`replyOk` true or false), or the run's branch was abandoned without one
+   * (`replyOk` absent). Stamps `sealedAt`, detaches every subscriber with the
+   * `end` frame, upserts the index once, and returns the events published
+   * since finish with the seal stamps. Idempotent and re-readable: a second
+   * seal returns the same result and changes nothing. A live run is untouched
+   * (no stamps in the result); an unknown or evicted run yields the empty
+   * result. Never throws.
+   */
+  seal(id: string, opts: { replyOk?: boolean } = {}): SealResult {
+    const run = this.runs.get(id);
+    if (!run) return { events: [] };
+    return this.sealRun(run, { replyOk: opts.replyOk, upsert: true });
+  }
+
+  /** Seal every finished-but-unsealed run (the drain, before exit); returns how
+   *  many it sealed. */
+  sealAllFinished(opts: { replyOk?: boolean } = {}): number {
+    let sealed = 0;
+    for (const run of this.runs.values()) {
+      if (!run.finished || run.sealedAt !== undefined) continue;
+      this.sealRun(run, { replyOk: opts.replyOk, upsert: true });
+      sealed++;
+    }
+    return sealed;
+  }
+
+  /** The one seal: `finish()` (from its own clock read, no upsert), the public
+   *  `seal()` (now, upsert) and the sweep (now, no upsert) all come here.
+   *  `sealedAt` is stamped and the subscriber set copied-and-cleared BEFORE any
+   *  callback fires, so a re-entrant call is a no-op. */
+  private sealRun(
+    run: RunState,
+    opts: { replyOk: boolean | undefined; upsert: boolean; sealedAt?: number },
+  ): SealResult {
+    if (!run.finished) return { events: [], eventCount: run.eventCount };
+    if (run.sealedAt === undefined) {
+      run.sealedAt = opts.sealedAt ?? this.now();
+      if (opts.replyOk !== undefined) run.replyOk = opts.replyOk;
+      const subs = [...run.subscribers];
+      run.subscribers.clear();
+      const frame = RunRegistry.sealedFrameOf(run);
+      for (const sub of subs) {
+        try {
+          sub.onSealed?.(frame);
+        } catch {
+          // A dead sink must not break the seal for the remaining subscribers.
+        }
+      }
+      if (opts.upsert) this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+    }
+    return this.sealResultOf(run);
+  }
+
+  private sealResultOf(run: RunState): SealResult {
+    const since = run.finishSeq ?? run.eventCount;
+    return {
+      events: run.backlog.filter((e) => (e.seq ?? 0) > since),
+      eventCount: run.eventCount,
+      ...(run.sealedAt !== undefined ? { sealedAt: run.sealedAt } : {}),
+      ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}),
+    };
+  }
+
+  private static sealedFrameOf(run: RunState): SealedFrame {
+    return { sealedAt: run.sealedAt ?? 0, ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}) };
   }
 
   /**
@@ -579,8 +718,9 @@ export class RunRegistry {
    * the retained backlog within the replay budget, then live-forwards new
    * events. Returns `null` if the run is unknown or the token is wrong (the
    * caller maps both to a 404 — never reveal which). If the run is already
-   * finished (but not yet evicted), the replay happens and `onFinish` fires
-   * immediately. `afterSeq` resumes a dropped stream: only events with a higher
+   * finished (but not yet evicted), the replay happens and `onFinished` fires
+   * immediately — then `onSealed` too when it is sealed, else the subscriber
+   * stays attached until the seal. `afterSeq` resumes a dropped stream: only events with a higher
    * `seq` are offered (the SSE `Last-Event-ID`); 0 offers the whole retained
    * backlog. Of the offered events the NEWEST are replayed, up to `limit` and
    * `byteLimit`; the older ones the budget skipped come back as `elided`, a
@@ -591,7 +731,7 @@ export class RunRegistry {
     const run = this.validate(id, token);
     if (!run) return null;
 
-    const { onEvent, onFinish, afterSeq = 0 } = opts;
+    const { onEvent, onFinished, onSealed, afterSeq = 0 } = opts;
     const limit = Math.max(1, Math.floor(opts.limit ?? DEFAULT_REPLAY_LIMIT));
     const byteLimit = opts.byteLimit ?? DEFAULT_REPLAY_BYTES;
     const { backlog, backlogSizes } = run;
@@ -615,12 +755,16 @@ export class RunRegistry {
     for (let i = start; i < backlog.length; i++) onEvent(backlog[i]!, backlog[i]!.seq ?? 0);
     const replayed = backlog.length - start;
 
-    if (run.finished) {
-      onFinish?.();
+    // A finished run says so at once; a sealed run then ends at once and never
+    // attaches. A finished-but-unsealed run attaches like a live one, for the
+    // span records still to come and the `end` frame at the seal.
+    if (run.finished) onFinished?.({ finishedAt: run.finishedAt ?? run.startedAt });
+    if (run.sealedAt !== undefined) {
+      onSealed?.(RunRegistry.sealedFrameOf(run));
       return { unsubscribe: () => {}, replayed, ...(elided ? { elided } : {}) };
     }
 
-    const sub: Subscription = { onEvent, onFinish };
+    const sub: Subscription = { onEvent, onFinished, onSealed };
     run.subscribers.add(sub);
     return { unsubscribe: () => void run.subscribers.delete(sub), replayed, ...(elided ? { elided } : {}) };
   }
@@ -737,6 +881,8 @@ export class RunRegistry {
       startedAt: run.startedAt,
       ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
       ...(m?.receivedAt !== undefined ? { receivedAt: m.receivedAt } : {}),
+      ...(run.sealedAt !== undefined ? { sealedAt: run.sealedAt } : {}),
+      ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}),
       ...(run.status !== undefined ? { status: run.status } : {}),
       eventCount: run.eventCount,
       ...(run.activity !== undefined ? { activity: run.activity } : {}),
@@ -770,19 +916,24 @@ export class RunRegistry {
     return run;
   }
 
-  /** Evict finished runs whose TTL has elapsed. Called on every entry point so
-   *  no background timer is needed (which would keep the process alive / leak). */
+  /** Evict sealed runs whose TTL (from `sealedAt`) has elapsed, and seal-then-
+   *  evict finished runs left unsealed past `UNSEALED_HOLD_MS` (their reply never
+   *  settled). Called on every entry point so no background timer is needed
+   *  (which would keep the process alive / leak). */
   private sweep(): void {
     if (this.runs.size === 0) return;
-    const cutoff = this.now() - this.ttlMs;
+    const now = this.now();
     for (const [id, run] of this.runs) {
-      if (run.finished && run.finishedAt !== undefined && run.finishedAt <= cutoff) {
-        this.runs.delete(id);
-        // Eviction is the ONLY removal signal for the index feed (a finished-but-
-        // -unevicted run stays listed). Fires once per run — the delete above
-        // ensures a later sweep won't re-emit it.
-        this.notifyIndex({ type: "removed", id });
-      }
+      if (!run.finished || run.finishedAt === undefined) continue;
+      if (run.sealedAt === undefined) {
+        if (run.finishedAt > now - UNSEALED_HOLD_MS) continue;
+        this.sealRun(run, { replyOk: undefined, upsert: false });
+      } else if (run.sealedAt > now - this.ttlMs) continue;
+      this.runs.delete(id);
+      // Eviction is the ONLY removal signal for the index feed (a finished-but-
+      // -unevicted run stays listed). Fires once per run — the delete above
+      // ensures a later sweep won't re-emit it.
+      this.notifyIndex({ type: "removed", id });
     }
   }
 }

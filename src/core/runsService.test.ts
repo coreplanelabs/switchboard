@@ -333,7 +333,7 @@ describe("RunsService.listRuns — read merge", () => {
     tick(61_000);
     const persistedRow = await svc.getRun(id);
     if (!liveRow || !liveRow.ok || !persistedRow.ok) throw new Error("both reads must succeed");
-    const finishOnly = ["finishedAt", "status", "storedEventCount", "truncated", "diagnosis", "bytes"];
+    const finishOnly = ["finishedAt", "sealedAt", "status", "storedEventCount", "truncated", "diagnosis", "bytes"];
     const strip = (v: Record<string, unknown>) =>
       Object.fromEntries(Object.entries(v).filter(([k]) => !finishOnly.includes(k)));
     expect(strip(liveRow.value as unknown as Record<string, unknown>)).toEqual(
@@ -782,7 +782,7 @@ describe("RunsService.authorizeLive", () => {
     expect(live).not.toBeNull();
     const seen: RunEvent[] = [];
     let finished = false;
-    const unsub = live!.subscribe({ onEvent: (e) => seen.push(e), onFinish: () => (finished = true) });
+    const unsub = live!.subscribe({ onEvent: (e) => seen.push(e), onSealed: () => (finished = true) });
     expect(unsub).not.toBeNull();
     reg.publish(id, call("$ pwd"));
     expect(seen.map((e) => e.seq)).toEqual([1, 2]);

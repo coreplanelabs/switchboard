@@ -549,6 +549,9 @@ export interface RunClock {
   now(browserNow: number): number;
   /** The run's duration at `browserNow`: frozen once `finishedAt` is known. */
   elapsedMs(browserNow: number): number;
+  /** The run's duration frozen at a server stamp — the `finished` frame's
+   *  `finishedAt` — through the same one definition, never a browser clock. */
+  elapsedAt(finishedAt: number): number;
 }
 
 export function createRunClock(seed: RunClockSeed, browserNowAtSeed: number): RunClock {
@@ -557,7 +560,24 @@ export function createRunClock(seed: RunClockSeed, browserNowAtSeed: number): Ru
     elapsedMs(browserNow) {
       return runDurationMs(seed, this.now(browserNow)) ?? 0;
     },
+    elapsedAt(finishedAt) {
+      return runDurationMs({ receivedAt: seed.receivedAt, startedAt: seed.startedAt, finishedAt }) ?? 0;
+    },
   };
+}
+
+/** Parse a `finished` frame's payload — one finite server stamp — or null. */
+export function parseFinishedFrame(data: string | undefined): { finishedAt: number } | null {
+  if (typeof data !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { finishedAt } = parsed as { finishedAt?: unknown };
+  return typeof finishedAt === "number" && Number.isFinite(finishedAt) && finishedAt > 0 ? { finishedAt } : null;
 }
 
 /** The projected runner clock, provided by the run page to every card so a

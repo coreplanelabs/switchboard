@@ -26,7 +26,7 @@ import {
 import { accessActor, isLoopbackAddress } from "./commandHttp.js";
 import { grantsFor, type GrantsSource } from "../core/authz/grants.js";
 import { NO_GRANTS, predicateFor } from "../core/authz/index.js";
-import { RunRegistry } from "../core/runRegistry.js";
+import { RunRegistry, type RunRegistryOptions } from "../core/runRegistry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { RunRecord } from "../core/runRecord.js";
@@ -66,10 +66,14 @@ const runSeedOf = (html: string) => seedOf(html) as RunLiveSeed | RunHistorySeed
 const scheduledSeedOf = (html: string) => seedOf(html) as ScheduledSeed;
 
 /** Deterministic registry so ids/tokens are predictable in URL assertions. */
-function fixedRegistry() {
+function fixedRegistry(over: Partial<RunRegistryOptions> = {}) {
   let n = 0;
-  return new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
+  return new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}`, ...over });
 }
+/** A span record (features/tracing.md): the union gains the variant with the emitters. */
+const spanEnd = (name: string): RunEvent =>
+  ({ type: "span_end", spanId: `s-${name}`, name, startedAt: 1, durationMs: 5, status: "ok" }) as unknown as RunEvent;
+const FINISHED_THEN_END = /event: finished\ndata: \{"finishedAt":\d+\}\n\nevent: end\ndata: \{"sealedAt":\d+\}\n\n$/;
 
 /** The viewer every handler call below reads as unless a test says otherwise:
  *  a fleet admin resolved through the real Access resolver (`accessActor` over
@@ -230,7 +234,10 @@ describe("serveEvents (SSE, transport-free)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    serveEvents(
+      (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
+      rec.sink,
+    );
     expect(rec.status).toBe(200);
     expect(rec.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
     expect(rec.headers["cache-control"]).toContain("no-cache");
@@ -254,7 +261,11 @@ describe("serveEvents (SSE, transport-free)", () => {
     reg.publish(id, call("three"));
     const rec = recordingSink();
     const afterSeq = parseLastEventId("2");
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish, afterSeq: afterSeq }), rec.sink);
+    serveEvents(
+      (onEvent, onFinished, onSealed) =>
+        reg.subscribe(id, token, { onEvent, onFinished, onSealed, afterSeq: afterSeq }),
+      rec.sink,
+    );
     expect(rec.body()).toBe(PRELUDE + `id: 3\ndata: ${JSON.stringify({ ...call("three"), seq: 3 })}\n\n`);
     reg.publish(id, call("four"));
     expect(rec.body()).toContain(`id: 4\ndata: ${JSON.stringify({ ...call("four"), seq: 4 })}`);
@@ -276,8 +287,8 @@ describe("serveEvents (SSE, transport-free)", () => {
     const { id, token } = reg.create();
     const a = recordingSink();
     const b = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), a.sink);
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), b.sink);
+    serveEvents((onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }), a.sink);
+    serveEvents((onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }), b.sink);
     const spy = vi.spyOn(JSON, "stringify");
     reg.publish(id, result(true, "x".repeat(5000)));
     const calls = spy.mock.calls.filter(
@@ -292,7 +303,10 @@ describe("serveEvents (SSE, transport-free)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    serveEvents(
+      (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
+      rec.sink,
+    );
     expect(rec.status).toBe(200);
     expect(rec.body()).toBe(PRELUDE);
   });
@@ -302,32 +316,61 @@ describe("serveEvents (SSE, transport-free)", () => {
     const { id, token } = reg.create();
     reg.publish(id, call("earlier"));
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    serveEvents(
+      (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
+      rec.sink,
+    );
     expect(rec.status).toBe(200);
     expect(rec.body()).toContain(`data: ${JSON.stringify({ ...call("earlier"), seq: 1 })}`);
   });
 
-  it("writes a terminal `end` frame and closes the stream when the run finishes", () => {
+  it("writes the `finished` frame then the terminal `end` frame (with the seal stamp) and closes the stream when the run finishes", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    serveEvents(
+      (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
+      rec.sink,
+    );
     reg.publish(id, call("x"));
     reg.finish(id);
-    expect(rec.body()).toContain("event: end");
+    expect(rec.body()).toMatch(FINISHED_THEN_END);
     expect(rec.ended).toBe(true);
   });
 
-  it("an already-finished run replays its backlog then ends immediately (still 200)", () => {
+  it("a finished-but-unsealed run: `finished` is written and the stream stays open, span records still flow, and the seal writes `end` carrying `replyOk` and closes it", () => {
+    const reg = fixedRegistry({ sealAtFinish: false });
+    const { id, token } = reg.create();
+    const rec = recordingSink();
+    serveEvents(
+      (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
+      rec.sink,
+    );
+    reg.publish(id, call("x"));
+    reg.finish(id);
+    expect(rec.body()).toMatch(/event: finished\ndata: \{"finishedAt":\d+\}\n\n$/);
+    expect(rec.ended).toBe(false);
+    reg.publish(id, spanEnd("run.agent"));
+    expect(rec.body()).toMatch(/id: 2\ndata: \{"type":"span_end"[^\n]*\n\n$/);
+    reg.seal(id, { replyOk: true });
+    expect(rec.body()).toMatch(/event: end\ndata: \{"sealedAt":\d+,"replyOk":true\}\n\n$/);
+    expect(rec.ended).toBe(true);
+  });
+
+  it("an already-finished run replays its backlog, then `finished`, then `end`, immediately (still 200)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     reg.publish(id, call("done-earlier"));
     reg.finish(id);
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    serveEvents(
+      (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
+      rec.sink,
+    );
     expect(rec.status).toBe(200);
     expect(rec.body()).toContain(`data: ${JSON.stringify({ ...call("done-earlier"), seq: 1 })}`);
-    expect(rec.body()).toContain("event: end");
+    expect(rec.body()).toMatch(FINISHED_THEN_END);
+    expect(rec.body().indexOf("done-earlier")).toBeLessThan(rec.body().indexOf("event: finished"));
     expect(rec.ended).toBe(true);
   });
 
@@ -335,7 +378,10 @@ describe("serveEvents (SSE, transport-free)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    serveEvents(
+      (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
+      rec.sink,
+    );
     rec.fireClose();
     reg.publish(id, call("after-close"));
     expect(rec.body()).not.toContain("after-close");
@@ -929,7 +975,10 @@ describe("serveEvents — live replay budget (item 5)", () => {
     const { id, token } = reg.create();
     for (let i = 1; i <= 3000; i++) reg.publish(id, call(`$ step ${i}`));
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    serveEvents(
+      (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
+      rec.sink,
+    );
     expect(rec.writes[0]).toBe(PRELUDE);
     expect(rec.writes[1]).toBe(elidedFrame(1, 1000));
     const ids = idFrames(rec);
@@ -948,7 +997,10 @@ describe("serveEvents — live replay budget (item 5)", () => {
     const { id, token } = reg.create();
     for (let i = 1; i <= 2000; i++) reg.publish(id, call(`$ step ${i}`));
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    serveEvents(
+      (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
+      rec.sink,
+    );
     expect(idFrames(rec)).toHaveLength(2000);
     expect(rec.body()).not.toContain("replay_elided");
     expect(rec.writes[1]).toMatch(/^id: 1\n/);
@@ -960,10 +1012,13 @@ describe("serveEvents — live replay budget (item 5)", () => {
     for (let i = 1; i <= 2500; i++) reg.publish(id, call(`$ step ${i}`));
     reg.finish(id);
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    serveEvents(
+      (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
+      rec.sink,
+    );
     expect(rec.writes[1]).toBe(elidedFrame(1, 500));
     expect(idFrames(rec)).toHaveLength(2000);
-    expect(rec.writes[rec.writes.length - 1]).toBe("event: end\ndata: {}\n\n");
+    expect(rec.writes[rec.writes.length - 1]).toMatch(/^event: end\ndata: \{"sealedAt":\d+\}\n\n$/);
     expect(rec.ended).toBe(true);
   });
 
@@ -973,7 +1028,8 @@ describe("serveEvents — live replay budget (item 5)", () => {
     for (let i = 1; i <= 3000; i++) reg.publish(id, call(`$ step ${i}`));
     const rec = recordingSink();
     serveEvents(
-      (onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish, afterSeq: parseLastEventId("500") }),
+      (onEvent, onFinished, onSealed) =>
+        reg.subscribe(id, token, { onEvent, onFinished, onSealed, afterSeq: parseLastEventId("500") }),
       rec.sink,
     );
     expect(rec.writes[1]).toBe(elidedFrame(501, 1000));
@@ -983,7 +1039,8 @@ describe("serveEvents — live replay budget (item 5)", () => {
     expect(ids[1999]).toMatch(/^id: 3000\n/);
     const rec2 = recordingSink();
     serveEvents(
-      (onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish, afterSeq: parseLastEventId("2500") }),
+      (onEvent, onFinished, onSealed) =>
+        reg.subscribe(id, token, { onEvent, onFinished, onSealed, afterSeq: parseLastEventId("2500") }),
       rec2.sink,
     );
     const ids2 = idFrames(rec2);
@@ -999,7 +1056,8 @@ describe("serveEvents — live replay budget (item 5)", () => {
     const bytes = (i: number) => Buffer.byteLength(JSON.stringify({ ...call(`$ step ${i}`), seq: i }), "utf8");
     const rec = recordingSink();
     serveEvents(
-      (onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish, byteLimit: bytes(4) + bytes(5) }),
+      (onEvent, onFinished, onSealed) =>
+        reg.subscribe(id, token, { onEvent, onFinished, onSealed, byteLimit: bytes(4) + bytes(5) }),
       rec.sink,
     );
     expect(rec.writes[1]).toBe(elidedFrame(1, 3));

@@ -126,6 +126,14 @@ export type ShipRoundOutcome =
  * event read back from the registry) so replays and history pages can resume
  * from a point without comparing payloads.
  */
+/** A span record (features/tracing.md): timing, not content. The registry
+ *  accepts them between a run's finish and its seal, they never repaint the
+ *  index, and every reader's counts and clocks skip them. The union gains the
+ *  two variants with the emitters; until then the check is by name. */
+export function isSpanRecord(e: { type: string }): boolean {
+  return e.type === "span_start" || e.type === "span_end";
+}
+
 export type RunEvent =
   /** `callId` is the provider's tool_use id — the explicit pair key between a
    *  call and its result (live-view item 13); absent only on legacy captures. */

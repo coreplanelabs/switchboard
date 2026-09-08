@@ -1,6 +1,6 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { serializedOnce, type RunEvent } from "../../core/runEvents.js";
-import type { IndexEvent, Subscribed, Unsubscribe } from "../../core/runRegistry.js";
+import type { FinishedFrame, IndexEvent, SealedFrame, Subscribed, Unsubscribe } from "../../core/runRegistry.js";
 
 // Server-Sent Events transport for the live view: the per-run stream (the
 // registry's budgeted replay + forward, or the stored history replay), the
@@ -69,8 +69,21 @@ export function parseLastEventId(header: string | string[] | undefined): number 
   return Number(raw.trim());
 }
 
-/** The terminal `end` frame the page listens for to close its EventSource. */
-const SSE_END = "event: end\ndata: {}\n\n";
+/** The `finished` frame: the agent stopped (`registry.finish`). The stream stays
+ *  open for the span records published until the seal. Named, no `id:`. */
+function sseFinished(frame: FinishedFrame): string {
+  return `event: finished\ndata: ${JSON.stringify({ finishedAt: frame.finishedAt })}\n\n`;
+}
+
+/** The terminal `end` frame the page listens for to close its EventSource: the
+ *  stream closed (`registry.seal`), carrying the seal stamps when the registry
+ *  has them; a stored stream ends with `{}`. Named, no `id:`. */
+function sseEnd(frame?: SealedFrame): string {
+  const body = frame
+    ? { sealedAt: frame.sealedAt, ...(frame.replyOk !== undefined ? { replyOk: frame.replyOk } : {}) }
+    : {};
+  return `event: end\ndata: ${JSON.stringify(body)}\n\n`;
+}
 
 /** First bytes of every SSE response, written right after the 200 head and before
  *  any buffered replay. It exists to FLUSH THE HEAD immediately: when there is
@@ -108,9 +121,14 @@ export function startSseHeartbeat(req: HttpRequest, res: ServerResponse): void {
  * (already carrying the run id + token, the resume cursor and the replay budget
  * — token validation and the budget live in the registry). Ordering matters:
  * the registry replays synchronously during `subscribe`, before we've decided
- * the status code, so those frames are buffered and flushed only after a 200
- * head is written. A `null` subscribe result (unknown run or bad token) is a
- * 404 — existence is never revealed.
+ * the status code, so those frames — and a `finished` or `end` the registry
+ * reports at once for a run already finished or sealed — are buffered and
+ * flushed only after a 200 head is written, in that order. A `null` subscribe
+ * result (unknown run or bad token) is a 404 — existence is never revealed.
+ *
+ * Two named frames end a live stream: `finished` when the agent stopped (the
+ * stream stays open for the span records still to come) and `end` when the
+ * registry sealed the run, after which the sink is closed.
  *
  * The registry replays the newest events within its budget and reports the
  * retained range it skipped; when it did, one `replay_elided` frame precedes
@@ -121,24 +139,37 @@ export function startSseHeartbeat(req: HttpRequest, res: ServerResponse): void {
  * the cursor.
  */
 export function serveEvents(
-  subscribe: (onEvent: (e: RunEvent, seq: number) => void, onFinish: () => void) => Subscribed | null,
+  subscribe: (
+    onEvent: (e: RunEvent, seq: number) => void,
+    onFinished: (frame: FinishedFrame) => void,
+    onSealed: (frame: SealedFrame) => void,
+  ) => Subscribed | null,
   sink: SseSink,
   onLive?: () => void,
 ): void {
   const replay: Array<{ event: RunEvent; seq: number }> = [];
   let live = false;
-  let endedDuringReplay = false;
-  const onFinish = () => {
+  let finishedDuringReplay: FinishedFrame | undefined;
+  let endedDuringReplay: SealedFrame | undefined;
+  const onFinished = (frame: FinishedFrame) => {
+    if (live) sink.write(sseFinished(frame));
+    else finishedDuringReplay = frame;
+  };
+  const onSealed = (frame: SealedFrame) => {
     if (live) {
-      sink.write(SSE_END);
+      sink.write(sseEnd(frame));
       sink.end();
-    } else endedDuringReplay = true;
+    } else endedDuringReplay = frame;
   };
 
-  const subscribed = subscribe((e, seq) => {
-    if (live) sink.write(sseData(e, seq));
-    else replay.push({ event: e, seq });
-  }, onFinish);
+  const subscribed = subscribe(
+    (e, seq) => {
+      if (live) sink.write(sseData(e, seq));
+      else replay.push({ event: e, seq });
+    },
+    onFinished,
+    onSealed,
+  );
   if (!subscribed) {
     sink.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     sink.write("run not found");
@@ -152,8 +183,9 @@ export function serveEvents(
   if (subscribed.elided) sink.write(sseElided(subscribed.elided));
   for (const { event, seq } of replay) sink.write(sseData(event, seq));
   replay.length = 0;
+  if (finishedDuringReplay) sink.write(sseFinished(finishedDuringReplay));
   if (endedDuringReplay) {
-    sink.write(SSE_END);
+    sink.write(sseEnd(endedDuringReplay));
     sink.end();
     return;
   }
@@ -251,7 +283,7 @@ export function serveHistoryEvents(events: readonly RunEvent[], eventCount: numb
   withOmittedMarkers(events, eventCount).forEach((frame, i) => {
     sink.write(frame.type === "replay_note" ? sseNotice(frame) : sseData(frame, frame.seq ?? i + 1));
   });
-  sink.write(SSE_END);
+  sink.write(sseEnd());
   sink.end();
 }
 
