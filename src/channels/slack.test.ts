@@ -13,6 +13,7 @@ import {
   markForeignLiveCards,
   ownsLiveCard,
   refreshForeignLiveCards,
+  resumeSlackIO,
   setForeignLiveCardsSource,
   render,
   resetSlackNameCaches,
@@ -936,6 +937,64 @@ describe("dedupeDelivery (redelivery guard, #346)", () => {
     await expect(dedupeDelivery(client, { ...ev, caughtUp: true }, REDELIVERY_MS, state)).resolves.toBeNull();
     expect(client.calls).toHaveLength(0);
     expect(state.was("C0BQS7KPJHK", TS)).toBe(true);
+  });
+});
+
+// Feature: features/run-history.md item 38 — a resumed run keeps the card the
+// previous generation posted: `status()` edits it instead of posting a second one.
+describe("SlackIO.status on a resumed run (existing card)", () => {
+  const ev = { channel: "C1", user: "U1", text: "", ts: "1.0", threadTs: "1.0", botUserId: "UBOT" };
+  function client() {
+    const update = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
+    const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true, ts: "new.1" }));
+    const setStatus = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
+    const c = {
+      chat: { update, postMessage },
+      assistant: { threads: { setStatus } },
+    } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    return { c, update, postMessage, setStatus };
+  }
+
+  it("with an existing card, the first frame edits that message and no new card is posted; the handle names it; done() closes it", async () => {
+    const { c, update, postMessage } = client();
+    const io = new SlackIO(c, ev, { existingCard: { ts: "9.9" } });
+    const handle = await io.status({ title: "👀 resuming" });
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update.mock.calls[0][0]).toMatchObject({ channel: "C1", ts: "9.9" });
+    expect(handle.handle).toEqual({ channel: "C1", ts: "9.9" });
+    await handle.done({ title: "✅ done" });
+    expect(update.mock.calls.at(-1)![0]).toMatchObject({ channel: "C1", ts: "9.9" });
+  });
+
+  it("when the existing card cannot be edited (deleted since), a fresh card is posted and becomes the handle", async () => {
+    const { c, update, postMessage } = client();
+    update.mockImplementationOnce(async () => {
+      throw new Error("message_not_found");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const handle = await new SlackIO(c, ev, { existingCard: { ts: "gone.1" } }).status({ title: "👀 resuming" });
+      expect(postMessage).toHaveBeenCalledTimes(1);
+      expect(handle.handle).toEqual({ channel: "C1", ts: "new.1" });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("resumeSlackIO builds the thread IO from the ledger row's parts: replies land in the thread, the card is the existing one; without a card ts a fresh card is posted", async () => {
+    const a = client();
+    const withCard = resumeSlackIO(a.c, { channel: "C1", threadTs: "1.0", user: "U1", cardTs: "9.9" });
+    await withCard.status({ title: "👀" });
+    expect(a.postMessage).not.toHaveBeenCalled();
+    await withCard.reply("hello again");
+    expect(a.postMessage).toHaveBeenCalledTimes(1);
+    expect(a.postMessage.mock.calls[0][0]).toMatchObject({ channel: "C1", thread_ts: "1.0" });
+    const b = client();
+    const noCard = resumeSlackIO(b.c, { channel: "C1", threadTs: "1.0", user: "U1" });
+    const handle = await noCard.status({ title: "👀" });
+    expect(b.postMessage).toHaveBeenCalledTimes(1);
+    expect(handle.handle).toEqual({ channel: "C1", ts: "new.1" });
   });
 });
 

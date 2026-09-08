@@ -41,8 +41,17 @@ import { createRunsService } from "./core/runsService.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { buildRunLedger } from "./core/runLedgerWorker.js";
 import { createLedgerWriteThrough, mintGeneration } from "./core/runLedger/writeThrough.js";
-import { reclaimAtBoot } from "./core/boot.js";
-import { closeReclaimedCards, markForeignLiveCards, setForeignLiveCardsSource } from "./channels/slack.js";
+import { reclaimRuns, startReclaimSweep, closeReclaimed, type ReclaimOutcome } from "./core/boot.js";
+import { launchResumes } from "./core/resumeLaunch.js";
+import { nullChannelIO } from "./core/nullChannelIo.js";
+import { getAgent } from "./agents/registry.js";
+import { systemClock } from "./core/trace/index.js";
+import {
+  closeReclaimedCards,
+  markForeignLiveCards,
+  resumeSlackIO,
+  setForeignLiveCardsSource,
+} from "./channels/slack.js";
 import { handleAdminCrash } from "./channels/adminCrash.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
@@ -599,34 +608,100 @@ async function main() {
   // cards alone. Awaited: the sweep decides ownership inside the connect, so
   // this is the one safe ordering point. Never throws; a ledger that cannot be
   // reached is a warning and the bot boots as before.
-  if (ledgerClient && runLedger) {
-    const reclaimed = await reclaimAtBoot({
-      ledger: ledgerClient,
+  // What one reclaim outcome asks of this process (run-history items 36 and
+  // 38): mark the cards other generations hold, close the cards of runs that had
+  // replied, and launch the resumes. Used at boot and by the periodic sweep.
+  const ledgerReclaim = ledgerClient && runLedger ? { client: ledgerClient } : undefined;
+  // Two acts, because the boot performs them at different times: the cards
+  // before the socket opens (the sweep must see them), the resumes after it.
+  const guardCards = async (outcome: ReclaimOutcome): Promise<void> => {
+    // Every outcome comes from a full listing, so an empty `liveElsewhere` is
+    // the truth (no other generation holds a row) and replaces the set.
+    markForeignLiveCards(outcome.liveElsewhere.flatMap((r) => (r.card ? [r.card] : [])));
+    const closedCards = await closeReclaimedCards(
+      app.client,
+      outcome.closed.map((c) => ({ status: c.status, agent: c.agent, card: c.card })),
+      (w) => console.warn(w),
+    );
+    if (closedCards > 0) console.log(`[reclaim] closed ${closedCards} card(s) of runs that had replied`);
+  };
+  const launch = async (outcome: ReclaimOutcome): Promise<void> => {
+    if (!ledgerReclaim || outcome.resumable.length === 0) return;
+    await launchResumes(deps, outcome.resumable, {
+      agentFor: (name) => {
+        try {
+          return name ? getAgent(name) : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+      ioFor: (row) => {
+        const [platform, channel, threadTs] = row.threadKey.split(":");
+        if (platform === "slack" && channel && threadTs) {
+          return resumeSlackIO(app.client, {
+            channel,
+            threadTs,
+            user: row.meta.userId.replace(/^slack:/, ""),
+            ...(row.card ? { cardTs: row.card.ts } : {}),
+          });
+        }
+        if (platform === "http" || platform === "mcp") return nullChannelIO(row.threadKey);
+        return undefined;
+      },
+      close: async (run, why) => {
+        const closed = await closeReclaimed(ledgerReclaim.client, generation, {
+          row: run.row,
+          events: run.events,
+          status: "interrupted",
+          finishedAt: systemClock(),
+        });
+        console.log(
+          `[resume] ${run.row.runId} ${run.row.threadKey} closed interrupted (${why})${closed.ok ? "" : ` — finish refused (${closed.reason})`}`,
+        );
+      },
+      log: (l) => console.log(l),
+      warn: (w) => console.warn(w),
+    });
+  };
+  let bootReclaim: ReclaimOutcome | undefined;
+  if (ledgerReclaim) {
+    bootReclaim = await reclaimRuns({
+      ledger: ledgerReclaim.client,
       gen: generation,
       log: (l) => console.log(l),
       warn: (w) => console.warn(w),
     });
-    markForeignLiveCards(reclaimed.liveElsewhere.flatMap((r) => (r.card ? [r.card] : [])));
+    // The card sweep guard and the replied runs' cards, before the socket
+    // opens; the resumes wait for it (they post to threads and need the client
+    // connected like any run).
+    await guardCards(bootReclaim);
     // …and on every later reconnect, the ledger's current answer: rows under a
     // live lease held by another generation. An expired lease is a dead
-    // generation — its cards are orphans again, its rows the next boot's.
-    const client = ledgerClient;
+    // generation — its cards are orphans again, its rows the next sweep's.
+    const client = ledgerReclaim.client;
     setForeignLiveCardsSource(async () =>
       (await client.listLive())
         .filter((r) => r.ownerGen !== generation && r.leaseUntil > Date.now())
         .flatMap((r) => (r.card ? [r.card] : [])),
     );
-    // A reclaimed run that had replied keeps a truthful card: closed with how
-    // it ended, before the socket opens (the sweep would otherwise mark it
-    // interrupted). Interrupted runs' cards are the sweep's.
-    const closedCards = await closeReclaimedCards(
-      app.client,
-      reclaimed.closed.map((c) => ({ status: c.status, agent: c.agent, card: c.card })),
-      (w) => console.warn(w),
-    );
-    if (closedCards > 0) console.log(`[reclaim] closed ${closedCards} card(s) of runs that had replied`);
   }
   await app.start();
+  // The runs the boot reclaim found resumable continue now that the socket is
+  // up (run-history item 38), and the reclaim repeats every lease interval so a
+  // row whose lease was still current at boot is taken once it expires.
+  if (ledgerReclaim && bootReclaim) {
+    await launch(bootReclaim);
+    startReclaimSweep({
+      ledger: ledgerReclaim.client,
+      gen: generation,
+      log: (l) => console.log(l),
+      warn: (w) => console.warn(w),
+      onOutcome: async (outcome) => {
+        await guardCards(outcome);
+        await launch(outcome);
+      },
+    });
+  }
 
   console.log(
     `switchboard running (providers: ${providers.names().join(", ")}; default agent: ${config.config.defaults.agent})`,
