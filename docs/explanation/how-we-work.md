@@ -1,6 +1,6 @@
 # How we work
 
-Switchboard is built by the same kind of agents it runs. This page is the loop a change goes through, from the sentence that says what should be true to the release that makes it so, and why each step is where it is. The agent's half of the contract is [AGENTS.md](https://github.com/coreplanelabs/switchboard/blob/main/AGENTS.md); the human's half is [CONTRIBUTING](https://github.com/coreplanelabs/switchboard/blob/main/CONTRIBUTING.md). Both describe this loop.
+Switchboard is built by the same kind of agents it runs. This page is the loop a change goes through, from the sentence that says what should be true to the release that makes it so, and why each step is where it is. The agent's half of the contract is [AGENTS.md](../../AGENTS.md); the human's half is [CONTRIBUTING](../../CONTRIBUTING.md). Both describe this loop.
 
 ## The loop
 
@@ -52,7 +52,7 @@ flowchart LR
 
 ## Switchboard develops Switchboard
 
-The rules in [AGENTS.md](https://github.com/coreplanelabs/switchboard/blob/main/AGENTS.md) are written in terms of the product's own agents, because they are who follows them:
+The rules in [AGENTS.md](../../AGENTS.md) are written in terms of the product's own agents, because they are who follows them:
 
 - **`agent:review` reviews every PR.** Read-only, in a warm checkout, one verdict with labeled findings posted at the head it read; it never approves or merges. The auto-approve workflow trusts its `LGTM`; the reviewed-head guard refuses a verdict for a head it did not read.
 - **`agent:coding` implements issues**, with the vendored skills under `skills/` as its house style (the PR-Tour skill shapes PR bodies), pushing a branch and submitting a typed description that Switchboard renders and opens as the PR.

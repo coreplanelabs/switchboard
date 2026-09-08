@@ -51,10 +51,10 @@ npm run verify
 That is the whole gate, and CI runs nothing else. For a faster loop while you
 work, run only what your change reaches: `npx vitest run --changed origin/main`
 from the root covers the bot and the dashboard at once (see
-[CONTRIBUTING](https://github.com/coreplanelabs/switchboard/blob/main/CONTRIBUTING.md#running-tests)).
+[CONTRIBUTING](../../CONTRIBUTING.md#running-tests)).
 
 ## Next
 
-- **Point it at Slack for real:** the root [README's Setup section](https://github.com/coreplanelabs/switchboard/blob/main/README.md#setup) walks through creating the Slack app and wiring tokens — nothing above changes.
+- **Point it at Slack for real:** the root [README's Setup section](../../README.md#setup) walks through creating the Slack app and wiring tokens — nothing above changes.
 - **Understand what just ran:** [how a request flows](../explanation/how-a-request-flows.md).
 - **Extend it:** [add a provider or agent](../how-to/add-a-provider-or-agent.md).

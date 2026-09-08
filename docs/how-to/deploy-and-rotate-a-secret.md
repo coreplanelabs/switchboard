@@ -2,7 +2,7 @@
 
 Goal: ship a change to the live bot, and separately, rotate a credential without rebuilding anything.
 
-This is the condensed operator runbook. The exhaustive per-Worker manual steps (first-time secret provisioning, each Worker's own `npm run deploy`) live in the root [README's Deployment section](https://github.com/coreplanelabs/switchboard/blob/main/README.md#deployment) — reach for this page for what you actually do day to day.
+This is the condensed operator runbook. The exhaustive per-Worker manual steps (first-time secret provisioning, each Worker's own `npm run deploy`) live in the root [README's Deployment section](../../README.md#deployment) — reach for this page for what you actually do day to day.
 
 ## Ship a change: merge the release PR
 
@@ -64,6 +64,6 @@ A **shared** bearer (`MEMORY_TOKEN`, `SANDBOX_TOKEN`, `RESIDENT_*_TOKEN`) must b
 
 ## See also
 
-- [README: Deployment](https://github.com/coreplanelabs/switchboard/blob/main/README.md#deployment) — every Worker, what host options exist, the full manual runbook.
+- [README: Deployment](../../README.md#deployment) — every Worker, what host options exist, the full manual runbook.
 - [Explanation: Worker topology](../explanation/worker-topology.md) — what's actually behind "four Workers" and why the order matters.
 - [docs/reference/specs/release-and-deploy.md](../reference/specs/release-and-deploy.md) — the contract: how the selection is derived, what CI needs, what is proven where.

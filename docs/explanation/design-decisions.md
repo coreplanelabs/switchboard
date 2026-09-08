@@ -35,4 +35,4 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 
 <!-- /generated:decision-records -->
 
-The dated implementation plans under [`docs/plans/`](https://github.com/coreplanelabs/switchboard/tree/main/docs/plans) are records of the same kind — proposals that were reviewed, built, and then frozen with their final status — and are held to the same check. They are working documents for the repository and are not published on this site.
+The dated implementation plans under [`docs/plans/`](../plans/) are records of the same kind — proposals that were reviewed, built, and then frozen with their final status — and are held to the same check. They are working documents for the repository and are not published on this site.

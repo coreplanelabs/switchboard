@@ -74,7 +74,8 @@ export default withMermaid(
             const target = posix.normalize(posix.join(posix.dirname(env.relativePath ?? ""), file));
             if (target.startsWith("../") || target.startsWith("plans/")) {
               const repoPath = posix.normalize(posix.join("docs", target));
-              token.attrSet("href", `${GITHUB_REPO}/blob/main/${repoPath}${hash ? `#${hash}` : ""}`);
+              const view = repoPath.endsWith("/") ? "tree" : "blob";
+              token.attrSet("href", `${GITHUB_REPO}/${view}/main/${repoPath}${hash ? `#${hash}` : ""}`);
             }
           }
           return linkOpen(tokens, idx, options, env, self);

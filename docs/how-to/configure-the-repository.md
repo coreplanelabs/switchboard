@@ -132,5 +132,5 @@ gh api -X PUT repos/OWNER/REPO/automated-security-fixes
 
 ## See also
 
-- [CONTRIBUTING](https://github.com/coreplanelabs/switchboard/blob/main/CONTRIBUTING.md) — the PR conventions these settings enforce.
+- [CONTRIBUTING](../../CONTRIBUTING.md) — the PR conventions these settings enforce.
 - [Deploy and rotate a secret](deploy-and-rotate-a-secret.md) — the release-to-production path the ruleset protects.
