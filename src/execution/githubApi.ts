@@ -1,4 +1,5 @@
 import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
+import { redactAndCap } from "../core/redact.js";
 
 // The GitHub capability behind the `github_*` agent tools
 // (features/github-tools.md): repository reads (files, trees, code search, the
@@ -340,10 +341,11 @@ export class RestGithubApi implements GithubApi {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      let detail = text.slice(0, 300);
+      // Item 62: a GitHub error body is remote text — redact BEFORE the slice.
+      let detail = redactAndCap(text, 300);
       try {
         const j = JSON.parse(text) as { message?: string };
-        if (typeof j.message === "string") detail = j.message;
+        if (typeof j.message === "string") detail = redactAndCap(j.message, 300);
       } catch {
         /* keep the raw slice */
       }

@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { oneLine } from "../core/redact.js";
 import { mkdirSync } from "node:fs";
 import type { AgentDef } from "../agents/registry.js";
 import { LocalExecutor, type Executor } from "./executor.js";
@@ -149,7 +150,7 @@ export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorCo
         // Non-warm but serviceable: the note says so (KTD10) while the run
         // still gets the worktree it came for; openResident adds ref@sha.
         const nonWarm =
-          probe.state === "warm" ? undefined : `${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`;
+          probe.state === "warm" ? undefined : oneLine(`${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
         // Read-only agents (the review toolset) get a read-only worktree —
         // decided from the agent's declared toolset, never from the prompt
         // (features/resident-repos.md item 50).
@@ -170,12 +171,14 @@ export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorCo
         );
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
-        note = `resident attach failed (${err instanceof Error ? err.message : String(err)}) — using fresh sandbox`;
+        note = oneLine(
+          `resident attach failed (${err instanceof Error ? err.message : String(err)}) — using fresh sandbox`,
+        );
       }
     } else if (probe.kind === "unreachable") {
-      note = `resident unreachable (${probe.error}) — using fresh sandbox`;
+      note = oneLine(`resident unreachable (${probe.error}) — using fresh sandbox`);
     } else if (probe.state !== "not-onboarded") {
-      note = `resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — using fresh sandbox`;
+      note = oneLine(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""} — using fresh sandbox`);
     } else {
       // not-onboarded is the ordinary per-thread case — but still make the cold
       // fall-through visible (KTD10): the user needs to know coding ran cold in a

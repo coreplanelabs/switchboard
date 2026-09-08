@@ -158,6 +158,7 @@ import {
   formatDiskGauge,
   formatGiB,
   orderEvictionCandidates,
+  type DiskKeepWhy,
   parseDfKiB,
   parseDu,
   rawFreeAfterEviction,
@@ -167,6 +168,7 @@ import {
   type ThreadCostKind,
 } from "../../src/execution/residentDiskBudget.js";
 import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
+import { residentText, sanitizeResidentBody } from "../../src/execution/residentText.js";
 import {
   abandonedWaitStepResult,
   describeStepFailure,
@@ -1626,7 +1628,7 @@ export class ResidentDO extends Sandbox<Env> {
 
   private async recordRefreshError(message: string): Promise<void> {
     const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
-    if (facts) await this.ctx.storage.put(FACTS_KEY, { ...facts, lastRefreshError: message });
+    if (facts) await this.ctx.storage.put(FACTS_KEY, { ...facts, lastRefreshError: residentText(message) });
   }
 
   // -- onboarding ------------------------------------------------------------
@@ -2536,7 +2538,8 @@ export class ResidentDO extends Sandbox<Env> {
     let rawFree = df.freeKiB;
     let verdict = decide(rawFree);
     const evicted: Array<{ threadKey: string; freedKiB: number | null }> = [];
-    const kept: Array<{ threadKey: string; detail: string }> = [];
+    // Item 62: keep decisions travel as tokens; the key stays for the log line.
+    const kept: Array<{ threadKey: string; why: DiskKeepWhy }> = [];
     if (!verdict.fits) {
       const live = await this.liveBindings();
       const candidates: DiskEvictionCandidate[] = live.map((b) => ({
@@ -2548,14 +2551,14 @@ export class ResidentDO extends Sandbox<Env> {
         sizeKiB: sample.parts.threads[b.threadKey] ?? null,
       }));
       const ordered = orderEvictionCandidates({ candidates, now: Date.now(), requestingThreadKey: input.threadKey });
-      kept.push(...ordered.kept.map((k) => ({ threadKey: k.threadKey, detail: k.detail })));
+      kept.push(...ordered.kept.map((k) => ({ threadKey: k.threadKey, why: k.why })));
       for (const c of ordered.order) {
         if (verdict.fits) break;
         const binding = live.find((b) => b.threadKey === c.threadKey);
         if (!binding) continue;
         const clean = await this.worktreeCleanliness(binding);
         if (!clean.clean) {
-          kept.push({ threadKey: c.threadKey, detail: clean.reason ?? "dirty" });
+          kept.push({ threadKey: c.threadKey, why: "dirty" });
           continue;
         }
         // Same re-read guards as the sweep: the clean check awaited.
@@ -2566,11 +2569,11 @@ export class ResidentDO extends Sandbox<Env> {
           current.lastAttachAt !== binding.lastAttachAt ||
           (this.threadOpsInFlight.get(c.threadKey) ?? 0) > 0
         ) {
-          kept.push({ threadKey: c.threadKey, detail: "re-attached or busy during the clean check" });
+          kept.push({ threadKey: c.threadKey, why: "busy" });
           continue;
         }
         if (!(await this.evictBinding(current, true, "disk-pressure", DISK_PRESSURE_REASON))) {
-          kept.push({ threadKey: c.threadKey, detail: "re-attached during eviction" });
+          kept.push({ threadKey: c.threadKey, why: "other" });
           continue;
         }
         evicted.push({ threadKey: c.threadKey, freedKiB: c.sizeKiB });
@@ -4567,9 +4570,11 @@ export class ResidentDO extends Sandbox<Env> {
       throw new Error(`state "${state}" requires a reason`);
     }
     this.clearIncarnationMemos();
+    // Item 62: a reason is built from step output; make it safe at the write
+    // so the stored value is safe on every later read, on any bot version.
     await this.ctx.storage.put({
       [STATE_KEY]: state,
-      [REASON_KEY]: reason,
+      [REASON_KEY]: residentText(reason),
       [UPDATED_KEY]: new Date().toISOString(),
     });
   }
@@ -5752,7 +5757,10 @@ function streamHeartbeatJson<T>(
           // stream already errored/cancelled — nothing left to deliver to
         }
       };
-      pending.then((result) => finish(toPayload(result))).catch((err: unknown) => finish(toErrorPayload(err)));
+      // Item 62: the streamed document is the other exit; same sanitizer.
+      pending
+        .then((result) => finish(sanitizeResidentBody(toPayload(result))))
+        .catch((err: unknown) => finish(sanitizeResidentBody(toErrorPayload(err))));
     },
   });
   return new Response(stream, { headers: { "content-type": "application/json" } });
@@ -6026,7 +6034,9 @@ async function runWatchdog(env: Env): Promise<WatchdogSummary> {
 }
 
 function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
+  // Item 62: every non-streamed body leaves through here; its `error`,
+  // `reason` and `summary` strings are made safe at the exit.
+  return new Response(JSON.stringify(sanitizeResidentBody(data)), {
     status,
     headers: { "content-type": "application/json" },
   });

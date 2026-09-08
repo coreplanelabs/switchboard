@@ -1,4 +1,5 @@
 import { resolveGithubToken } from "./githubApp.js";
+import { redactAndCap } from "../core/redact.js";
 
 // Opening and editing pull requests from the bot process (agent:ship pipeline,
 // issue #131). After a coding run pushes its branch and submits the typed
@@ -72,7 +73,7 @@ export async function findOpenPrByHead(repo: string, branch: string): Promise<Op
   );
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`PR lookup failed: HTTP ${res.status} ${text.slice(0, 300)}`);
+    throw new Error(`PR lookup failed: HTTP ${res.status} ${redactAndCap(text, 300)}`);
   }
   const rows = (await res.json()) as Array<{ number: number; html_url: string; head?: { sha?: string } }>;
   if (!Array.isArray(rows) || rows.length === 0) return null;
@@ -112,7 +113,7 @@ export async function openPullRequest(target: PullRequestTarget): Promise<Opened
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`PR create failed: HTTP ${res.status} ${text.slice(0, 300)}`);
+    throw new Error(`PR create failed: HTTP ${res.status} ${redactAndCap(text, 300)}`);
   }
   const data = (await res.json()) as { number: number; html_url: string };
   return { number: data.number, htmlUrl: data.html_url, created: true };
@@ -136,7 +137,7 @@ export async function updatePullRequest(
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`PR update failed: HTTP ${res.status} ${text.slice(0, 300)}`);
+    throw new Error(`PR update failed: HTTP ${res.status} ${redactAndCap(text, 300)}`);
   }
 }
 
@@ -170,7 +171,7 @@ export async function createBranchRef(repo: string, branch: string, fromRef: str
   });
   if (!baseRes.ok) {
     const text = await baseRes.text().catch(() => "");
-    throw new Error(`base ref lookup failed for ${fromRef}: HTTP ${baseRes.status} ${text.slice(0, 300)}`);
+    throw new Error(`base ref lookup failed for ${fromRef}: HTTP ${baseRes.status} ${redactAndCap(text, 300)}`);
   }
   const base = (await baseRes.json().catch(() => null)) as { object?: { sha?: unknown } } | null;
   const sha = typeof base?.object?.sha === "string" && base.object.sha ? base.object.sha : undefined;
@@ -184,7 +185,7 @@ export async function createBranchRef(repo: string, branch: string, fromRef: str
   if (res.ok) return;
   const text = await res.text().catch(() => "");
   if (res.status === 422 && /already exists/i.test(text)) return;
-  throw new Error(`branch create failed for ${branch}: HTTP ${res.status} ${text.slice(0, 300)}`);
+  throw new Error(`branch create failed for ${branch}: HTTP ${res.status} ${redactAndCap(text, 300)}`);
 }
 
 // ---- read-only repo/PR facts for the ship gate (features/agent-ship.md) ----

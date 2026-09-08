@@ -278,6 +278,16 @@ describe("RestGithubApi — reads use the read token", () => {
     expect(await readTextCapped(new Response("abcdef"), 3)).toBe("abc");
   });
 
+  it("a failure body is redacted before it is sliced into the error (resident-repos item 62's GitHub half)", async () => {
+    const { api: gh } = api(() => ({
+      status: 500,
+      body: { message: "upstream said GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789" },
+    }));
+    const err = await gh.listIssues("acme/api").catch((e: unknown) => e);
+    expect((err as Error).message).toContain("HTTP 500");
+    expect((err as Error).message).not.toContain("ghp_");
+  });
+
   it("a non-2xx is a GithubApiError with the status and GitHub's message; no credential is a 401 before any request", async () => {
     const { api: gh, calls } = api(() => ({
       status: 403,

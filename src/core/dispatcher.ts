@@ -52,6 +52,7 @@ import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memo
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource } from "../mcp/source.js";
 import { formatTurnDuration, redactSecrets, type RunEvent, type StopMode } from "./runEvents.js";
+import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import {
   decideFollowUp,
   mergeFollowUps,
@@ -897,7 +898,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // own inside settleReviewedHead.
     const system = composeSystem({ sha: reviewHead, verified: verifiedAtAttach });
 
-    if (note) label = `${label} · ${note}`;
+    if (note) label = `${label} · ${oneLine(note)}`;
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
     setupCard = undefined; // from here the run loop owns the card's close
     card.update({ title: title() }); // the ack card becomes the run card
@@ -1624,8 +1625,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // A card left spinning after a setup failure looks like a hang; close it.
     // Only a card still in setup — a run failure was already closed by the run
     // loop with its checklist, and must not be relabeled here.
-    await setupCard?.done({ title: `❌ setup failed · ${errMsg.slice(0, 120)}` }).catch(() => {});
-    await io.reply(errorReply(err)).catch(() => {});
+    // Item 62: the error may carry remote text (a resident reason, a GitHub
+    // body) — one redacted line on the card, a redacted reply in the thread.
+    await setupCard?.done({ title: `❌ setup failed · ${oneLine(redactAndCap(errMsg, 120))}` }).catch(() => {});
+    await io.reply(redactSecrets(stripAnsi(errorReply(err)))).catch(() => {});
     // A run that threw still has its record (status `failed`, built at finish);
     // a setup failure before the run started has none — nothing to write. A run
     // whose loop completed but whose card close or reply threw lands here too:
