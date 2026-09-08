@@ -30,15 +30,15 @@ import {
   callerIdFor,
   createCommandHttpHandler,
   isCommandPath,
-  isLocalhostBase,
   serviceTokenAllowed,
   type CommandHttpOptions,
 } from "./commandHttp.js";
 
 // Feature: features/command-registry.md — the generic HTTP adapter for `/api/*`
 // (R7/R9/R10, KTD13/KTD15). No per-command code: every registered command is
-// served by name; write safety, caller resolution, and the dev-bypass rule are
-// the adapter's only logic.
+// served by name; write safety and caller resolution are the adapter's only
+// logic (who may reach /api at all is the dashboard auth strategy's decision,
+// dashboardAuth.test.ts).
 
 const NOW = 1_700_000_000_000;
 
@@ -98,7 +98,6 @@ async function fixture(over: Partial<CommandHttpOptions> = {}) {
   const opts: CommandHttpOptions = {
     // Config's grants as `ConfigStore.grantsFor` resolves them: an operator (every read + write over every channel), one service token; every other browser session holds the reads.
     grantsFor: (id) => grantsFor(id, { grants: native(OPERATOR_AND_READER), commandGroups: ["runs"] }),
-    devBypassActive: false,
     ...over,
   };
   const handler = createCommandHttpHandler(commands, opts);
@@ -488,41 +487,6 @@ describe("createCommandHttpHandler — the Access API is bound by channel visibi
   });
 });
 
-describe("createCommandHttpHandler — dev bypass (KTD13)", () => {
-  it("serves loopback callers under the bypass, refuses a non-loopback remote with 403", async () => {
-    const { handler } = await fixture({ devBypassActive: true });
-    const local = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all", remoteAddress: "::ffff:127.0.0.1" });
-    await handler(local.req, local.res, { sub: "dev-bypass" });
-    expect(local.status).toBe(200);
-    const remote = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all", remoteAddress: "10.0.0.7" });
-    await handler(remote.req, remote.res, { sub: "dev-bypass" });
-    expect(remote.status).toBe(403);
-    expect(remote.json().code).toBe("forbidden");
-  });
-
-  it("refuses every /api/* request under the bypass when PUBLIC_BASE_URL names a non-localhost host", async () => {
-    const { handler } = await fixture({ devBypassActive: true, publicBaseUrl: "https://switchboard.example.dev" });
-    const t = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all", remoteAddress: "127.0.0.1" });
-    await handler(t.req, t.res, { sub: "dev-bypass" });
-    expect(t.status).toBe(403);
-    const ok = createCommandHttpHandler((await fixture()).commands, {
-      grantsFor: (id) => grantsFor(id, { commandGroups: ["runs"] }),
-      devBypassActive: true,
-      publicBaseUrl: "http://localhost:3000",
-    });
-    const l = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all" });
-    await ok(l.req, l.res, { sub: "dev-bypass" });
-    expect(l.status).toBe(200);
-  });
-
-  it("the bypass rule does not apply when the bypass is inactive", async () => {
-    const { handler } = await fixture({ publicBaseUrl: "https://switchboard.example.dev" });
-    const t = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all", remoteAddress: "10.0.0.7" });
-    await handler(t.req, t.res, browser);
-    expect(t.status).toBe(200);
-  });
-});
-
 describe("serviceTokenAllowed — a service token is a command-surface credential only", () => {
   it("admits a service token on /api/* (every spelling isCommandPath claims) and nowhere else", () => {
     for (const p of ["/api/runs.list", "/api", "//api/runs.list", "/API/runs.list"])
@@ -607,22 +571,5 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
       kind: "access",
       id: callerIdFor(readerBot),
     });
-  });
-});
-
-describe("isLocalhostBase — the ONE localhost rule for the dev bypass (liveView + /api)", () => {
-  it("unset → localhost; localhost, 127.0.0.1 and [::1] hosts (any port) → true", () => {
-    expect(isLocalhostBase(undefined)).toBe(true);
-    expect(isLocalhostBase("")).toBe(true);
-    expect(isLocalhostBase("http://localhost:3000")).toBe(true);
-    expect(isLocalhostBase("http://127.0.0.1")).toBe(true);
-    expect(isLocalhostBase("http://[::1]:8080")).toBe(true);
-  });
-
-  it("a remote host → false; a malformed value (no scheme) → false and never throws", () => {
-    expect(isLocalhostBase("https://switchboard.example.dev")).toBe(false);
-    expect(() => isLocalhostBase("switchboard.example.com")).not.toThrow();
-    expect(isLocalhostBase("switchboard.example.com")).toBe(false);
-    expect(isLocalhostBase("not a url")).toBe(false);
   });
 });

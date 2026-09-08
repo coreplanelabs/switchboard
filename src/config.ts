@@ -9,6 +9,7 @@ import { RETIRED_SELF_IMPROVEMENT_KEYS, type SelfImprovementConfig } from "./cor
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
 import type { ShipConfig } from "./core/shipPipeline.js";
+import { validateDashboardConfig, type DashboardConfig } from "./core/dashboardAuthConfig.js";
 import { hasAction } from "./core/authz/authorize.js";
 import {
   grantsIn,
@@ -148,6 +149,16 @@ export interface AppConfig {
    * `parseCostsConfig` (src/core/costs.ts); absent → the view answers 503.
    */
   costs?: unknown;
+  /**
+   * Dashboard authentication (features/access-gate.md, plan D5): which
+   * credential gates `/runs*`, `/residents*`, `/costs*`, `/mcp/connect/*` and
+   * `/api/*` — `auth: access | token | none`, plus the `token` strategy's `env`
+   * (default `DASHBOARD_TOKEN`) and `actor` (`access:<name>`). Absent → `access`
+   * when ACCESS_TEAM_DOMAIN + ACCESS_AUD are set, else `none` (loopback callers
+   * on a localhost deployment only). Validated at load
+   * (src/core/dashboardAuthConfig.ts); composed in src/index.ts.
+   */
+  dashboard?: DashboardConfig;
   /** Review-run behavior: the reading-diff artifact's provider switch
    *  (`git` | `meat` | `off`; env `SWITCHBOARD_READING_DIFF` overrides).
    *  See features/reading-diff.md. */
@@ -1093,6 +1104,7 @@ function validateConfig(cfg: AppConfig): void {
   if (cfg.tracing !== undefined) validateTracing(cfg.tracing);
   validateRuntimeOverrides(cfg.runtimeOverrides);
   if (cfg.ship !== undefined) validateShip(cfg.ship);
+  validateDashboardConfig(cfg.dashboard);
 }
 
 /** `grants` (plan U2): every finding names the actor id and axis it is about —

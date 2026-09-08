@@ -1141,3 +1141,26 @@ describe("tracing", () => {
     expect(() => store(`${YAML_FIXTURE}\ntracing: 3\n`)).toThrow(/tracing must be a mapping/);
   });
 });
+
+// Feature: features/access-gate.md (dashboard auth is a strategy) and
+// features/routing-and-config.md — the `dashboard` block is validated at load.
+describe("dashboard", () => {
+  it("accepts each strategy, exposes the block as written, and defaults to absent", () => {
+    expect(store(`${YAML_FIXTURE}\ndashboard:\n  auth: none\n`).config.dashboard).toEqual({ auth: "none" });
+    expect(store(`${YAML_FIXTURE}\ndashboard:\n  auth: access\n`).config.dashboard).toEqual({ auth: "access" });
+    expect(
+      store(`${YAML_FIXTURE}\ndashboard:\n  auth: token\n  token:\n    env: DASH\n    actor: access:ops\n`).config
+        .dashboard,
+    ).toEqual({ auth: "token", token: { env: "DASH", actor: "access:ops" } });
+    expect(store().config.dashboard).toBeUndefined();
+  });
+
+  it("refuses a misspelled mode, an unknown key, and `token` without its actor at load, naming the key", () => {
+    expect(() => store(`${YAML_FIXTURE}\ndashboard:\n  auth: nnoe\n`)).toThrow(
+      /dashboard\.auth must be one of access, token, none/,
+    );
+    expect(() => store(`${YAML_FIXTURE}\ndashboard:\n  mode: none\n`)).toThrow(/dashboard\.mode is not a known key/);
+    expect(() => store(`${YAML_FIXTURE}\ndashboard:\n  auth: token\n`)).toThrow(/dashboard\.token\.actor/);
+    expect(() => store(`${YAML_FIXTURE}\ndashboard: none\n`)).toThrow(/dashboard must be a mapping/);
+  });
+});

@@ -46,11 +46,11 @@ export const MINIMAL: CapabilityFixture = {
   type: local
 `,
   env: {
+    // No Access configured and no `dashboard` block → dashboard auth `none`:
+    // the dashboards for loopback callers of this localhost deployment only.
     ANTHROPIC_API_KEY: "sk-ant-placeholder",
-    // The local-dev dashboard: no SSO, loopback callers only.
-    ACCESS_DEV_BYPASS: "1",
   },
-  capabilities: { ...NO_CAPABILITIES, dashboardAuth: "none" },
+  capabilities: NO_CAPABILITIES,
 };
 
 export const LOCAL_FULL: CapabilityFixture = {
@@ -73,7 +73,6 @@ mcp:
     MCP_CREDENTIAL_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ "local-token": { subject: "local" } }),
     DOCS_BASE_URL: "http://localhost:5173",
-    ACCESS_DEV_BYPASS: "1",
   },
   capabilities: {
     execution: "local",

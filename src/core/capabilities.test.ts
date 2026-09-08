@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AppConfig } from "../config.js";
-import { parseAccessConfig, parseAccessDevBypass } from "../channels/accessAuth.js";
+import { parseAccessConfig } from "../channels/accessAuth.js";
+import { resolveDashboardAuthMode } from "./dashboardAuthConfig.js";
 import { parseMcpSettings } from "../mcp/config.js";
 import { ALL_CAPABILITIES, capabilitiesFrom, NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
 import { buildRunLedger } from "./runLedgerWorker.js";
@@ -28,7 +29,7 @@ const caps = (config: Partial<AppConfig> = {}, env: NodeJS.ProcessEnv = {}): Cap
   capabilitiesFrom({ ...BASE, ...config }, env);
 
 describe("capabilitiesFrom — every axis, on and off", () => {
-  it("a bare config in an empty environment is the minimal installation: everything off, tools on the bot host, the dashboards fail-closed", () => {
+  it("a bare config in an empty environment is the minimal installation: everything off, tools on the bot host, the dashboard local-only", () => {
     expect(caps()).toEqual(NO_CAPABILITIES);
   });
 
@@ -122,24 +123,27 @@ describe("capabilitiesFrom — every axis, on and off", () => {
     expect(caps({}, {}).ingress).toBe(false);
   });
 
-  it("dashboardAuth mirrors the Access gate: `access` when parseAccessConfig answers, `none` under the dev bypass, `token` (fail-closed pages) otherwise; Access wins over a stray bypass", () => {
+  it("dashboardAuth is the strategy the gate runs (features/access-gate.md): `dashboard.auth` when set, else `access` iff parseAccessConfig answers, else `none`; ACCESS_DEV_BYPASS is not read", () => {
     const access = { ACCESS_TEAM_DOMAIN: "acme.cloudflareaccess.com", ACCESS_AUD: "a".repeat(64) };
     const envs: NodeJS.ProcessEnv[] = [
       {},
       access,
       { ACCESS_DEV_BYPASS: "1" },
-      { ACCESS_DEV_BYPASS: "true" },
-      { ACCESS_DEV_BYPASS: "yes" },
       { ...access, ACCESS_DEV_BYPASS: "1" },
       { ACCESS_TEAM_DOMAIN: "acme.cloudflareaccess.com" },
     ];
     for (const env of envs) {
-      const expected = parseAccessConfig(env) ? "access" : parseAccessDevBypass(env) ? "none" : "token";
+      // The one rule the verifier follows (src/core/dashboardAuthConfig.ts).
+      const expected = resolveDashboardAuthMode(undefined, parseAccessConfig(env) !== null);
       expect(caps({}, env).dashboardAuth, JSON.stringify(env)).toBe(expected);
+      expect(caps({ dashboard: { auth: "token" } }, env).dashboardAuth, JSON.stringify(env)).toBe("token");
+      expect(caps({ dashboard: { auth: "none" } }, env).dashboardAuth, JSON.stringify(env)).toBe("none");
+      expect(caps({ dashboard: { auth: "access" } }, env).dashboardAuth, JSON.stringify(env)).toBe("access");
     }
     expect(caps({}, access).dashboardAuth).toBe("access");
+    expect(caps({}, {}).dashboardAuth).toBe("none");
     expect(caps({}, { ACCESS_DEV_BYPASS: "1" }).dashboardAuth).toBe("none");
-    expect(caps({}, {}).dashboardAuth).toBe("token");
+    expect(caps({}, { ...access, ACCESS_DEV_BYPASS: "1" }).dashboardAuth).toBe("access");
   });
 
   it("docs: DOCS_BASE_URL names this installation's docs site", () => {

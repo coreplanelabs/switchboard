@@ -1,10 +1,12 @@
 # Reference: dashboard routes
 
-Every route below sits behind Cloudflare Access (browser session or, for machine callers, a service token) unless noted. None of them set caching headers that would let a proxy or browser cache a response beyond the request that made it (`no-store` throughout) — every load is live.
+Every route below sits behind the dashboard's one identity gate unless noted. Which credential it checks is the `dashboard.auth` strategy in [config.yaml](configuration.md): `access` — a Cloudflare Access browser session or, for machine callers, a service token (the default when `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are set); `token` — an `Authorization: Bearer` header holding the secret in `DASHBOARD_TOKEN` (or the env var `dashboard.token.env` names), which resolves to the one actor `dashboard.token.actor` names; or `none` — no credential, served only to loopback callers of a localhost deployment and refused everywhere else (the default without Access). None of them set caching headers that would let a proxy or browser cache a response beyond the request that made it (`no-store` throughout) — every load is live.
+
+The header lists only the surfaces this installation has: **Residents** appears when resident environments are configured (`execution.resident`), **Costs** when `costs` is configured with its analytics token, the **Scheduled** tab when `schedules.worker` records firings, and the docs link when the installation publishes a docs site (`DOCS_BASE_URL`). The routes themselves still answer without their subsystem — with a `503` naming the config that turns them on.
 
 | Route | Shows | Notes |
 |---|---|---|
-| `GET /runs` | Active runs, newest first | Default view excludes finished runs; each row's link carries that run's capability token — the index itself is Access-gated specifically because of this |
+| `GET /runs` | Active runs, newest first | Default view excludes finished runs; each row's link carries that run's capability token — the index itself is gated specifically because of this |
 | `GET /runs?all=1` | Active **and** finished runs | Only meaningful with `runHistory` configured — otherwise there's nothing finished to show |
 | `GET /runs/<id>` | One run: request → steps (tool calls, results) → answer | Live via SSE while the run is active; served as a static page, no token needed, once it's in history |
 | `GET /runs/<id>/events` | Raw SSE event stream for that run | What the run page itself consumes; resumable via `Last-Event-ID` |
@@ -16,11 +18,11 @@ Every route below sits behind Cloudflare Access (browser session or, for machine
 | `GET /costs/<group>` | Spend for one group | |
 | `GET /costs/<group>.json` | Same data, machine-readable | For scripting/alerting, not for embedding a live dashboard elsewhere |
 | `GET /mcp/connect/<nonce>` | The one-time MCP credential-paste form | Bound to whoever mints it or first opens it; single use, expires in 10 minutes |
-| `GET /healthz` | `{ok, inFlight, draining, catchUp}` | **Not** Access-gated — this is the process health probe, meant to be hit by the deploy tooling and the container platform |
+| `GET /healthz` | `{ok, inFlight, draining, catchUp}` | **Not** gated — this is the process health probe, meant to be hit by the deploy tooling and the container platform |
 
 ## Command routes (`/api/<group>.<verb>`)
 
-Every registered command has an HTTP twin behind the same Access gate, plus an MCP tool of the same name — one definition, every surface ([explanation](../explanation/one-command-many-surfaces.md)). A write is `POST`-only; a read takes either verb (`GET` with a kebab-case query string, `POST` with a camelCase JSON body). The `Scope` column is what an operator identity or service token must hold.
+Every registered command has an HTTP twin behind the same dashboard gate, plus an MCP tool of the same name — one definition, every surface ([explanation](../explanation/one-command-many-surfaces.md)). A write is `POST`-only; a read takes either verb (`GET` with a kebab-case query string, `POST` with a camelCase JSON body). The `Scope` column is what an operator identity or service token must hold.
 
 <!-- generated:api-routes · npm run docs:gen — generated from the code, do not edit by hand -->
 

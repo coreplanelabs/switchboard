@@ -210,7 +210,6 @@ const httpRow: AdapterRow = {
   async call(f, id, named) {
     const handler = createCommandHttpHandler(f.commands, {
       grantsFor: (actorId) => grantsFor(actorId, BROWSER_GRANTS),
-      devBypassActive: false,
     });
     // A query string spells option keys in kebab-case (`?since-ms=…`); argument names are what they are.
     const query = new URLSearchParams(Object.entries(named).map(([k, v]) => [camelToKebab(k), v]));

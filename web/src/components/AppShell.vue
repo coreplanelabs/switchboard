@@ -4,14 +4,22 @@
 // the normalization the port buys — the four hand-rolled shells collapse into
 // this component. Below sm the nav, docs, and theme fold into one finger-sized
 // hamburger menu; page actions (the status slot's controls) stay visible.
+// What the nav and the menu list follows the installation's capabilities (the
+// seed): a section that is off has no entry, and the docs link exists only
+// when this installation publishes a docs site.
 import { computed } from "vue";
 import { useColorMode } from "@vueuse/core";
-import AppNav, { NAV_SECTIONS, type NavSection } from "./AppNav.vue";
+import AppNav, { navSections, type NavSection } from "./AppNav.vue";
 import DocsLink, { DOCS_HREF, DOCS_ICON, DOCS_LABEL } from "./DocsLink.vue";
 import ThemeToggle from "./ThemeToggle.vue";
 import { browser } from "../lib/browser";
+import { useCapabilities } from "../lib/capabilities";
 
 const props = defineProps<{ title: string; nav: NavSection }>();
+
+const caps = useCapabilities();
+const docsOn = caps?.docs === true;
+const sections = computed(() => navSections(caps, props.nav));
 
 const mode = useColorMode({ emitAuto: true });
 const THEMES = [
@@ -23,8 +31,8 @@ const THEMES = [
 const menuItems = computed(() => [
   // The docs sit in their own group: an external destination, not a section of
   // this app, and the only item here that leaves the page.
-  [{ label: DOCS_LABEL, icon: DOCS_ICON, to: DOCS_HREF, target: "_blank" as const }],
-  NAV_SECTIONS.map((s) => ({
+  ...(docsOn ? [[{ label: DOCS_LABEL, icon: DOCS_ICON, to: DOCS_HREF, target: "_blank" as const }]] : []),
+  sections.value.map((s) => ({
     label: s.label,
     icon: s.icon,
     type: "checkbox" as const,
@@ -54,7 +62,7 @@ const menuItems = computed(() => [
         <slot name="actions" />
         <span class="hidden items-center gap-4 sm:flex">
           <AppNav :current="nav" />
-          <DocsLink />
+          <DocsLink v-if="docsOn" />
           <ThemeToggle />
         </span>
         <UDropdownMenu :items="menuItems" :content="{ align: 'end' }" class="sm:hidden">

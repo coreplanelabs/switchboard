@@ -1,12 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync, sign as rsaSign, createHmac, type KeyObject } from "node:crypto";
-import type { IncomingHttpHeaders } from "node:http";
 import {
   isServiceToken,
   JwksCache,
   parseAccessConfig,
-  parseAccessDevBypass,
-  requireAccessForRuns,
   verifyAccessJwt,
   type AccessConfig,
   type AccessJwk,
@@ -15,11 +12,13 @@ import {
 } from "./accessAuth.js";
 
 // Feature: features/access-gate.md — fail-closed, app-layer Cloudflare Access
-// (SSO) enforcement for the /runs* surface. Cloudflare's edge injects a signed
-// RS256 JWT in `Cf-Access-Jwt-Assertion`; we re-verify it ourselves so /runs
-// refuses to serve if the edge rule is ever misconfigured or a client spoofs
-// the header. The JWKS fetch is an injectable seam (real impl + this test impl);
-// a throwaway RSA keypair mints tokens signed exactly as Access signs them.
+// (SSO) verification behind the dashboard's `access` strategy. Cloudflare's edge
+// injects a signed RS256 JWT in `Cf-Access-Jwt-Assertion`; we re-verify it
+// ourselves so the dashboard refuses to serve if the edge rule is ever
+// misconfigured or a client spoofs the header. The JWKS fetch is an injectable
+// seam (real impl + this test impl); a throwaway RSA keypair mints tokens signed
+// exactly as Access signs them. The gate itself (which strategy runs, what a
+// refusal looks like) is dashboardAuth.test.ts.
 
 // --- Test key material + JWT minting ---------------------------------------
 
@@ -357,64 +356,6 @@ describe("parseAccessConfig", () => {
   });
 });
 
-// --- parseAccessDevBypass ---------------------------------------------------
-
-describe("parseAccessDevBypass", () => {
-  it("is true only for truthy '1'/'true' (case-insensitive)", () => {
-    expect(parseAccessDevBypass({ ACCESS_DEV_BYPASS: "1" })).toBe(true);
-    expect(parseAccessDevBypass({ ACCESS_DEV_BYPASS: "true" })).toBe(true);
-    expect(parseAccessDevBypass({ ACCESS_DEV_BYPASS: "TRUE" })).toBe(true);
-  });
-
-  it("is false for anything else, including unset/blank/other strings", () => {
-    expect(parseAccessDevBypass({})).toBe(false);
-    expect(parseAccessDevBypass({ ACCESS_DEV_BYPASS: "" })).toBe(false);
-    expect(parseAccessDevBypass({ ACCESS_DEV_BYPASS: "0" })).toBe(false);
-    expect(parseAccessDevBypass({ ACCESS_DEV_BYPASS: "false" })).toBe(false);
-    expect(parseAccessDevBypass({ ACCESS_DEV_BYPASS: "yes" })).toBe(false);
-  });
-});
-
-// --- requireAccessForRuns (the gate) ----------------------------------------
-
-describe("requireAccessForRuns", () => {
-  const header = (token: string): IncomingHttpHeaders => ({ "cf-access-jwt-assertion": token });
-
-  it("config present + valid header → ok with identity", async () => {
-    const token = mint(privateKey, rs256Header(), claims());
-    const res = await requireAccessForRuns(header(token), { config, verify: deps(), devBypass: false });
-    expect(res).toEqual({ ok: true, identity: { sub: "user-1", email: "user@example.com" } });
-  });
-
-  it("config present + missing header → 403 forbidden", async () => {
-    const res = await requireAccessForRuns({}, { config, verify: deps(), devBypass: false });
-    expect(res).toEqual({ ok: false, status: 403, body: "forbidden" });
-  });
-
-  it("config present + bad token → 403 forbidden", async () => {
-    const res = await requireAccessForRuns(header("garbage.token.here"), { config, verify: deps(), devBypass: false });
-    expect(res).toEqual({ ok: false, status: 403, body: "forbidden" });
-  });
-
-  it("config present + spoofed HS256 token → 403 forbidden", async () => {
-    const h = b64url(JSON.stringify({ alg: "HS256", kid: KID }));
-    const p = b64url(JSON.stringify(claims()));
-    const sig = rsaSign("RSA-SHA256", Buffer.from(`${h}.${p}`), privateKey).toString("base64url");
-    const res = await requireAccessForRuns(header(`${h}.${p}.${sig}`), { config, verify: deps(), devBypass: false });
-    expect(res).toEqual({ ok: false, status: 403, body: "forbidden" });
-  });
-
-  it("config null + no dev bypass → 403 forbidden (FAIL CLOSED)", async () => {
-    const res = await requireAccessForRuns(header("anything"), { config: null, verify: deps(), devBypass: false });
-    expect(res).toEqual({ ok: false, status: 403, body: "forbidden" });
-  });
-
-  it("config null + dev bypass → ok with the dev-bypass identity", async () => {
-    const res = await requireAccessForRuns({}, { config: null, verify: deps(), devBypass: true });
-    expect(res).toEqual({ ok: true, identity: { sub: "dev-bypass" } });
-  });
-});
-
 // --- Service tokens (KTD13) -------------------------------------------------
 
 describe("verifyAccessJwt — Cloudflare Access service tokens", () => {
@@ -455,14 +396,5 @@ describe("verifyAccessJwt — Cloudflare Access service tokens", () => {
   it("service tokens go through the same claim checks (expired → null)", async () => {
     const token = mint(privateKey, rs256Header(), claims({ sub: "", common_name: "svc-1", exp: NOW_SEC - 1 }));
     expect(await verifyAccessJwt(token, config, deps())).toBeNull();
-  });
-
-  it("the gate admits a service token in Cf-Access-Jwt-Assertion", async () => {
-    const token = mint(privateKey, rs256Header(), claims({ sub: "", common_name: "svc-1" }));
-    const res = await requireAccessForRuns(
-      { "cf-access-jwt-assertion": token },
-      { config, verify: deps(), devBypass: false },
-    );
-    expect(res).toEqual({ ok: true, identity: { sub: "", commonName: "svc-1" } });
   });
 });

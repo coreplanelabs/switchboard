@@ -235,6 +235,28 @@ workspaceDir: ./workspaces
 #         00000000000000000000000000000000: server DO
 #       anthropicWorkspaceId: wrkspc_...          # this app's Anthropic workspace
 
+# Dashboard authentication (features/access-gate.md). Everything the dashboard
+# serves — /runs*, /residents*, /costs*, /mcp/connect/*, and every /api/* command
+# — sits behind ONE identity gate; `auth` picks which credential it checks:
+#   access — the Cloudflare Access JWT the edge injects (ACCESS_TEAM_DOMAIN and
+#            ACCESS_AUD in the environment). Production behind an Access app.
+#   token  — `Authorization: Bearer <token>`, the secret read from the env var
+#            `token.env` names (default DASHBOARD_TOKEN); a match is the one
+#            actor `token.actor` names, granted under `grants` like any browser
+#            session. For an Access-free deployment fronted by a proxy, curl or
+#            a script — a bare browser cannot send the header.
+#   none   — no credential; served ONLY to loopback callers on a localhost
+#            deployment (PUBLIC_BASE_URL unset or naming localhost). A remote
+#            caller is refused, and an explicit `none` on a deployment with a
+#            public PUBLIC_BASE_URL is a startup error. Local development.
+# Default when the block is absent: `access` if both ACCESS_* are set, else `none`.
+# A strategy whose inputs are missing fails at startup, naming the piece.
+# dashboard:
+#   auth: token
+#   token:
+#     env: DASHBOARD_TOKEN   # env var holding the bearer (default)
+#     actor: access:ops      # the actor the bearer resolves to — key its grants entry by this id
+
 # Slack adapter — reconnect catch-up (#184). Socket Mode drops every mention
 # posted while the websocket is down (each bot deploy = drain + cold start).
 # On every (re)connect the bot re-reads recent history of the channels it is in

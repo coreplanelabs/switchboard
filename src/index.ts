@@ -22,14 +22,8 @@ import {
 } from "./core/costs.js";
 import { NullResidentAdminClient, residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
-import {
-  httpJwksFetcher,
-  JwksCache,
-  parseAccessConfig,
-  parseAccessDevBypass,
-  requireAccessForRuns,
-  type VerifyDeps,
-} from "./channels/accessAuth.js";
+import { httpJwksFetcher, JwksCache, parseAccessConfig, type VerifyDeps } from "./channels/accessAuth.js";
+import { buildDashboardVerifier } from "./channels/dashboardAuth.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
@@ -77,14 +71,7 @@ import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters (#157 U7) ---
 import { buildCoreCommands } from "./core/commandCatalogue.js";
-import {
-  accessActor,
-  createCommandHttpHandler,
-  isCommandPath,
-  isLocalhostBase,
-  isLoopbackAddress,
-  serviceTokenAllowed,
-} from "./channels/commandHttp.js";
+import { accessActor, createCommandHttpHandler, isCommandPath, serviceTokenAllowed } from "./channels/commandHttp.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 // --- end command registry adapters ---
 
@@ -422,14 +409,14 @@ async function main() {
       ? "GET /runs (index) + /runs/:id (live view)"
       : "GET /runs (index) + live view (no PUBLIC_BASE_URL — per-run links omitted)";
 
-    // The whole /runs*, /residents* and /costs* surface sits behind Cloudflare Access (SSO), enforced
-    // fail-closed in our own code: the edge rule injects a signed RS256 JWT in
-    // `Cf-Access-Jwt-Assertion`, and we re-verify it here so /runs refuses to
-    // serve without a valid Access identity — even if the edge rule is ever
-    // misconfigured or a client spoofs the header. With no ACCESS_* config,
-    // /runs is DENIED (unless ACCESS_DEV_BYPASS is set for local dev).
+    // Everything the dashboard serves — /runs*, /residents*, /costs*,
+    // /mcp/connect/* and /api/* — sits behind ONE identity gate, the dashboard
+    // auth strategy composed below (`dashboardAuth`). Under `access` the edge
+    // rule injects a signed RS256 JWT in `Cf-Access-Jwt-Assertion` and we
+    // re-verify it here, fail-closed — even if the edge rule is ever
+    // misconfigured or a client spoofs the header. ACCESS_* stay the env inputs
+    // of that strategy; null means Access is not configured.
     const accessConfig = parseAccessConfig(process.env);
-    const accessDevBypass = parseAccessDevBypass(process.env);
     // ── U8 (#157): live view on RunsService ──────────────────────────────────
     // Live run view (Area 2 / #43) + run history (#157): GET /runs (index; ?all=1
     // adds finished/persisted runs) + /runs/:id (page) + /runs/:id/events (SSE).
@@ -442,22 +429,14 @@ async function main() {
     // (features/authorization.md items 5–7, #428): the gate's identity is
     // resolved with the SAME `accessActor` the /api adapter uses and handed to
     // the handler as `ctx.actor` below, so the index lists and the run page
-    // reads exactly what `/api/runs.*` would for that identity — under the dev
-    // bypass that identity is `access:dev-bypass`, granted like any other
-    // browser session. KTD13: under the dev bypass, history reads are
-    // served only to a loopback client with no remote PUBLIC_BASE_URL. The
-    // bypass is in effect only when Access is NOT configured (the same rule
-    // `requireAccessForRuns` applies and `commandHttp` is wired with below):
-    // with ACCESS_* set, a stray ACCESS_DEV_BYPASS must not turn the
-    // Access-authenticated viewer's history reads into 403s. `isLocalhostBase` is
-    // the ONE localhost rule (shared with commandHttp); a malformed
-    // PUBLIC_BASE_URL is "not localhost", never a boot crash.
+    // reads exactly what `/api/runs.*` would for that identity — under the
+    // `token` strategy the configured actor, under `none` the local operator
+    // `access:loopback`, each granted like any other browser session.
     const publicBaseUrl = process.env.PUBLIC_BASE_URL;
     // Where /docs* sends a caller: this installation's docs site, the DOCS_BASE_URL
     // var the bot Worker renders from the profile (or a local `npm run docs:dev`);
     // without one, the project's published docs (src/core/docsLink.ts).
     const docsBaseUrl = process.env.DOCS_BASE_URL ?? PROJECT_DOCS_URL;
-    const devBypassActive = accessConfig === null && accessDevBypass;
     const liveView = createLiveViewHandler({
       shell,
       service: runsService,
@@ -466,10 +445,6 @@ async function main() {
         capabilities.runHistory && runHistoryCfg
           ? { retentionDays: retentionPolicyOf(runHistoryCfg).retentionDays }
           : null,
-      devBypass: {
-        active: () => devBypassActive,
-        isLoopback: (req) => isLoopbackAddress(req.socket?.remoteAddress) && isLocalhostBase(publicBaseUrl),
-      },
       // The panel's own off-state wording (live-view item 14: "firing history
       // unavailable", never "never fired") stands until the dashboard paints the
       // off-state from the seed's capabilities; so the panel gets no store when
@@ -478,18 +453,31 @@ async function main() {
     });
     // ── end U8 ───────────────────────────────────────────────────────────────
     const accessVerify: VerifyDeps = { fetchJwks: httpJwksFetcher, now: () => systemClock(), cache: new JwksCache() };
-    const accessState = accessConfig
-      ? `Access SSO configured (${accessConfig.teamDomain})`
-      : accessDevBypass
-        ? "Access DEV BYPASS (/runs open — LOCAL DEV ONLY)"
-        : "Access FAIL-CLOSED (/runs denied — no ACCESS_* configured)";
+    // The dashboard auth strategy (features/access-gate.md, plan D5): ONE
+    // verifier, asked once per request below, for everything the dashboard
+    // serves. `dashboard.auth` picks it — `access` (the Cloudflare Access JWT,
+    // re-verified here, fail-closed), `token` (a bearer → one configured actor)
+    // or `none` (loopback callers on a localhost deployment only); absent →
+    // access when ACCESS_* are set, else none. A strategy missing its inputs is
+    // a startup error, never a silently open or silently closed dashboard.
+    const dashboardAuth = buildDashboardVerifier({
+      dashboard: config.config.dashboard,
+      access: accessConfig,
+      env: process.env,
+      verify: accessVerify,
+      publicBaseUrl,
+    });
+    if (process.env.ACCESS_DEV_BYPASS !== undefined) {
+      console.warn(
+        "[dashboard] ACCESS_DEV_BYPASS is no longer read: without ACCESS_* the dashboard auth is `none` (loopback callers on a localhost deployment) — unset it; a grants entry keyed access:dev-bypass belongs under access:loopback now",
+      );
+    }
+    const accessState = `dashboard auth: ${dashboardAuth.describe()}`;
     // --- command registry over HTTP (#157 U7): /api/<group>.<verb>, behind the
-    // SAME Access gate as /runs* (gated on `isCommandPath`, KTD13). The handler
-    // claims all of /api/* and answers its own 404. Under the dev bypass it
-    // serves loopback callers on a localhost deployment only. ---
+    // SAME gate as /runs* (gated on `isCommandPath`, KTD13). The handler claims
+    // all of /api/* and answers its own 404. ---
     const commandHttp = createCommandHttpHandler(commands, {
       grantsFor: (id) => config.grantsFor(id),
-      devBypassActive,
       publicBaseUrl,
     });
     const commandHttpState = `GET|POST /api/<group>.<verb> (${commands.list().length} commands)`;
@@ -541,9 +529,10 @@ async function main() {
       // may land in web/dist — in particular, keep `build.sourcemap` OFF in
       // web/vite.config.ts, or the app's source would be world-readable here.
       if (webAssets.serve(req, res)) return;
-      // /runs* + /residents* + /costs* SSO gate: identity FIRST (fail-closed), before the view
-      // dispatch. The gate is async (it may fetch the JWKS), so we resolve the
-      // promise here; a rejection is a 403, never a 500 that serves the page.
+      // The dashboard gate: identity FIRST (the configured strategy, fail-closed),
+      // before the view dispatch. The gate is async (`access` may fetch the JWKS),
+      // so we resolve the promise here; a rejection is a 403, never a 500 that
+      // serves the page.
       // On allow, dispatch to the live-view handler (which owns the /runs index,
       // /runs/:id, and /runs/:id/events, and still applies its own per-run
       // capability-token check — defense in depth). Non-/runs paths below are
@@ -559,7 +548,8 @@ async function main() {
         path === "/costs.json" ||
         path.startsWith("/costs/")
       ) {
-        requireAccessForRuns(req.headers, { config: accessConfig, verify: accessVerify, devBypass: accessDevBypass })
+        dashboardAuth
+          .verify(req)
           .then((gate) => {
             if (!gate.ok) {
               res.writeHead(gate.status, { "content-type": "text/plain; charset=utf-8" });

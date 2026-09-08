@@ -59,6 +59,7 @@ interface Env {
   DOCS_BASE_URL?: string; // var: this installation's docs site (profile `workers.docs`) — the /docs redirect target; absent → the project's published docs
   ACCESS_TEAM_DOMAIN?: string; // live-view SSO gate: Cloudflare Access team domain (JWKS + iss)
   ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
+  DASHBOARD_TOKEN?: string; // dashboard auth `token` strategy: the bearer (the default env name; config may name another)
   SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map); the `cron` entry is what scheduled runs present; an entry whose `http:<subject>` actor holds `deploy:write` in the bot's config may POST /admin/restart
   BRAVE_SEARCH_API_KEY?: string; // web_search backend (Brave); web_fetch works without it
   CF_ANALYTICS_TOKEN?: string; // costs dash: Cloudflare API token, Account Analytics:Read only
@@ -84,6 +85,7 @@ const FORWARDED_OPTIONAL = [
   "DOCS_BASE_URL",
   "ACCESS_TEAM_DOMAIN",
   "ACCESS_AUD",
+  "DASHBOARD_TOKEN",
   "CF_ANALYTICS_TOKEN",
   "ANTHROPIC_ADMIN_KEY",
   "SWITCHBOARD_INGRESS_TOKENS",
