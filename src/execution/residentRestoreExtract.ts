@@ -36,30 +36,39 @@ export function restoreMountDir(targetDir: string, attempt: string): string {
   return `${targetDir}.restore-${attempt}`;
 }
 
+/** A backup id as the SDK mints it (a UUID: hex and hyphens, at least one hex
+ *  digit) — it becomes a glob under the mount root, so nothing else may. */
+const BACKUP_ID_RE = /^(?=.*[0-9a-fA-F])[0-9a-fA-F-]{8,64}$/;
+
 /** Unmount ONE staging mount and what hangs off it, as root, tolerating a
  *  path that is not (or no longer) mounted: the fuse-overlayfs at `mountDir`
- *  first, then the squashfuse lower named in its `lowerdir=` option, then the
- *  SDK's `<id>_<ts>_<rand>` dir that held lower/upper/work. `fusermount3 -u`
- *  is the FUSE way; `umount -l` the fallback for a busy mount. */
-export function unmountRestoreScript(mountDir: string): string {
-  const m = shellQuote(mountDir);
+ *  first, then every squashfuse lower under the SDK's `<backupId>_<ts>_<rand>`
+ *  dirs, then those dirs. The lower is found by the backup id, not by the
+ *  overlay's options: fuse-overlayfs exposes no `lowerdir=` in /proc/mounts
+ *  (live 2026-09-08 18:24 UTC the first extraction left two squashfuse lowers
+ *  mounted for exactly that reason — each pinning its unlinked `.sqsh`).
+ *  `fusermount3 -u` is the FUSE way; `umount -l` the fallback for a busy
+ *  mount. */
+export function unmountRestoreScript(input: { mountDir: string; backupId: string }): string {
+  if (!BACKUP_ID_RE.test(input.backupId))
+    throw new Error(`restore: not a backup id: ${JSON.stringify(input.backupId)}`);
+  const m = shellQuote(input.mountDir);
+  const lowers = `${RESTORE_MOUNT_ROOT}/${input.backupId}_*/lower`;
   return [
     `_m=${m}`,
-    // The overlay's lowerdir (a squashfuse mountpoint), read before the overlay goes.
-    `_low=$(awk -v m="$_m" '$2==m {print $4}' /proc/mounts 2>/dev/null | tr ',' '\\n' | sed -n 's/^lowerdir=//p')`,
     `if awk -v m="$_m" '$2==m {f=1} END {exit !f}' /proc/mounts 2>/dev/null; then fusermount3 -u "$_m" 2>/dev/null || umount -l "$_m" 2>/dev/null || true; fi`,
-    // Word-splitting on $_low is deliberate: the SDK mounts ONE lower per
-    // restore and its paths carry no spaces or colons; a multi-lower overlay
-    // would need `:`-splitting here.
-    `for _l in $_low; do`,
+    `for _l in ${lowers}; do`,
     `  if awk -v m="$_l" '$2==m {f=1} END {exit !f}' /proc/mounts 2>/dev/null; then fusermount3 -u "$_l" 2>/dev/null || umount -l "$_l" 2>/dev/null || true; fi`,
+    `done`,
     // The removals are best effort: after a LAZY unmount a still-open file
     // can keep the dir alive for a moment, and this script also runs under
     // `set -e` inside extractRestoreScript — a successful extraction must
     // never be failed by its cleanup. The unmount-all clean step reclaims
-    // whatever is left.
-    `  case "$_l" in ${RESTORE_MOUNT_ROOT}/*) rm -rf "$(dirname "$_l")" 2>/dev/null || true ;; esac`,
-    `done`,
+    // whatever is left. The glob takes EVERY mount dir of this backup id, not
+    // only this attempt's: the SDK serializes backup operations on one queue,
+    // so no other restore of the same archive can be mid-flight here, and an
+    // earlier attempt's dir for the id is exactly the debris to remove.
+    `rm -rf ${RESTORE_MOUNT_ROOT}/${input.backupId}_* 2>/dev/null || true`,
     `rmdir "$_m" 2>/dev/null || rm -rf "$_m" 2>/dev/null || true`,
   ].join("\n");
 }
@@ -74,7 +83,12 @@ export function unmountRestoreScript(mountDir: string): string {
  *   3. rename the extracted tree to the target — the target appears LAST, so
  *      a failure anywhere above leaves no half-populated target.
  *  Prints `extract: unsquashfs` or `extract: cp` so the log says which. */
-export function extractRestoreScript(input: { mountDir: string; archivePath: string; targetDir: string }): string {
+export function extractRestoreScript(input: {
+  mountDir: string;
+  backupId: string;
+  archivePath: string;
+  targetDir: string;
+}): string {
   const attempt = input.mountDir.slice(input.mountDir.lastIndexOf(".restore-") + ".restore-".length);
   const tmp = shellQuote(`${input.targetDir}.extract-${attempt}`);
   const archive = shellQuote(input.archivePath);
@@ -90,7 +104,7 @@ export function extractRestoreScript(input: { mountDir: string; archivePath: str
     `  cp -a ${shellQuote(`${input.mountDir}/.`)} ${tmp}/`,
     `  echo "extract: cp"`,
     `fi`,
-    unmountRestoreScript(input.mountDir),
+    unmountRestoreScript({ mountDir: input.mountDir, backupId: input.backupId }),
     `rm -f ${archive}`,
     `rm -rf ${target}`,
     `mv ${tmp} ${target}`,

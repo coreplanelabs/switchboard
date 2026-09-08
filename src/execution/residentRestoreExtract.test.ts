@@ -34,10 +34,12 @@ describe("residentRestoreExtract (item 61: the SDK's presigned restore MOUNTS th
   it("extract script: unsquashfs from the downloaded archive when the image has it, else cp -a out of the mount; then unmount; the target appears LAST by rename", () => {
     const s = extractRestoreScript({
       mountDir: "/workspace/checkout.restore-a1",
+      backupId: "1111-2222",
       archivePath: "/var/backups/1111-2222.sqsh",
       targetDir: "/workspace/checkout",
     });
     expect(s).toContain("set -e");
+    expect(s).toContain(`${RESTORE_MOUNT_ROOT}/1111-2222_*/lower`);
     expect(s).toContain("command -v unsquashfs");
     expect(s).toContain("unsquashfs -n -no-xattrs -d '/workspace/checkout.extract-a1' '/var/backups/1111-2222.sqsh'");
     expect(s).toContain("cp -a '/workspace/checkout.restore-a1/.' '/workspace/checkout.extract-a1'/");
@@ -49,13 +51,16 @@ describe("residentRestoreExtract (item 61: the SDK's presigned restore MOUNTS th
     expect(s).toContain("rm -f '/var/backups/1111-2222.sqsh'");
   });
 
-  it("unmount script for one staging mount: finds the overlay by mountpoint and its squashfuse lower via lowerdir=, unmounts both, removes the SDK's mount dir; tolerates an unmounted path", () => {
-    const s = unmountRestoreScript("/workspace/checkout.restore-a1");
+  it("unmount script for one staging mount: the overlay by mountpoint, then every squashfuse lower under the SDK's `<backupId>_*` dirs (fuse-overlayfs exposes no lowerdir= in /proc/mounts), then those dirs; tolerates an unmounted path", () => {
+    const s = unmountRestoreScript({ mountDir: "/workspace/checkout.restore-a1", backupId: "1111-2222" });
     expect(s).toContain("/proc/mounts");
-    expect(s).toContain("lowerdir=");
     expect(s).toContain("fusermount3 -u");
     expect(s).toContain("umount -l");
-    expect(s).toContain(RESTORE_MOUNT_ROOT);
+    expect(s).toContain(`${RESTORE_MOUNT_ROOT}/1111-2222_*/lower`);
+    expect(s).toContain(`rm -rf ${RESTORE_MOUNT_ROOT}/1111-2222_*`);
+    expect(s).not.toContain("lowerdir=");
+    expect(() => unmountRestoreScript({ mountDir: "/workspace/x", backupId: "../etc" })).toThrow(/backup id/);
+    expect(() => unmountRestoreScript({ mountDir: "/workspace/x", backupId: "--------" })).toThrow(/backup id/);
   });
 
   it("unmount-all script for the clean steps: every fuse mount under /workspace and under the SDK's mount root, deepest first, then the leftovers", () => {
@@ -72,7 +77,7 @@ describe("residentRestoreExtract (item 61: the SDK's presigned restore MOUNTS th
   });
 
   it("cleanup never fails a finished extraction: every removal in the unmount script is best effort (the extract script runs it under set -e)", () => {
-    const s = unmountRestoreScript("/workspace/checkout.restore-a1");
+    const s = unmountRestoreScript({ mountDir: "/workspace/checkout.restore-a1", backupId: "1111-2222" });
     for (const line of s.split("\n").filter((l) => /\brm(dir)? /.test(l))) expect(line).toMatch(/\|\| true/);
   });
 
@@ -86,6 +91,7 @@ describe("residentRestoreExtract (item 61: the SDK's presigned restore MOUNTS th
       const target = join(root, "checkout");
       const script = extractRestoreScript({
         mountDir: mount,
+        backupId: "a1a1a1a1-0000-4000-8000-000000000000",
         archivePath: join(root, "missing.sqsh"),
         targetDir: target,
       });
