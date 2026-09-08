@@ -1,0 +1,27 @@
+node_modules/
+dist/
+data/
+workspaces/
+.env
+.agent-env/
+config/config.yaml
+node_modules
+build.json
+.DS_Store
+
+# Load-harness receipts (npm run load:*) are posted to the tracker, never committed.
+load-results/
+
+# The docs site is built in place (docs/.vitepress/dist is covered by dist/
+# above); its dev-server cache is not.
+docs/.vitepress/cache
+
+# Generated and installation-specific (see docs/how-to/operate-production.md): the deployment
+# profile is the operator's (or the infrastructure repo's, via SWITCHBOARD_DEPLOY_PROFILE) and every
+# Worker's wrangler.jsonc is rendered from its template by `npm run deploy:gen`.
+deploy/profile.json
+deploy/*/wrangler.jsonc
+
+# The npm package's build copies the repository's LICENSE beside its manifest so the tarball carries it.
+packages/switchboard/LICENSE
+packages/switchboard/README.md

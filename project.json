@@ -1,0 +1,219 @@
+{
+  "$comment": "The one place the project says who it is. Everything that names the project, its home, its docs, or its contact reads this file or is checked against it (npm run check:project-facts). Change a value here and the check names every copy that has to follow.",
+  "name": "switchboard",
+  "displayName": "OpenSwitchboard",
+  "npmPackage": "@coreplane/switchboard",
+  "description": "Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question — on the model you choose, with its tools running where you decide.",
+  "organization": "coreplanelabs",
+  "repository": "https://github.com/coreplanelabs/switchboard",
+  "image": "ghcr.io/coreplanelabs/switchboard",
+  "images": {
+    "bot": "ghcr.io/coreplanelabs/switchboard",
+    "resident": "ghcr.io/coreplanelabs/switchboard-resident",
+    "sandbox": "ghcr.io/coreplanelabs/switchboard-sandbox"
+  },
+  "docs": "https://openswitchboard.dev",
+  "topics": [
+    "ai-agents",
+    "coding-agent",
+    "code-review",
+    "slack-bot",
+    "github-app",
+    "mcp-server",
+    "cloudflare-workers",
+    "llm",
+    "typescript"
+  ],
+  "contact": "dev@coreplane.ai",
+  "steward": {
+    "name": "Coreplane Labs",
+    "url": "https://coreplane.ai"
+  },
+  "commands": {
+    "$comment": "What each root npm script does and when to run it — the source of the Commands table in AGENTS.md (npm run agents:gen). A script without an entry fails agents:check, so a new script cannot ship undocumented.",
+    "verify": {
+      "does": "The whole gate: every root check, every workspace's verify, the site check — exactly what CI runs.",
+      "when": "Before requesting review. ~4 min."
+    },
+    "verify:root": {
+      "does": "The bot package's gate: consistency checks, typecheck, lint, format, tests, dist.",
+      "when": "When only the bot changed."
+    },
+    "check:consistency": {
+      "does": "The sub-second checks that generated and declared things equal the code (lockfile, sandbox pairs, skills, licenses, docs tables, specs, project facts, this table).",
+      "when": "After touching a generated or declared artifact; one CI leg."
+    },
+    "test": {
+      "does": "The whole vitest suite (bot, web, the plain-Node Worker tests) from one entry, after `deploy:gen`.",
+      "when": "Before pushing."
+    },
+    "typecheck": {
+      "does": "TypeScript over the bot and its scripts, no emit.",
+      "when": "After type-level changes; `verify:root` runs it."
+    },
+    "lint": {
+      "does": "ESLint over the whole tree.",
+      "when": "`npm run fix` repairs what it can."
+    },
+    "lint:fix": {
+      "does": "ESLint with autofix.",
+      "when": "Part of `fix`."
+    },
+    "format": {
+      "does": "Prettier over the whole tree (not Markdown).",
+      "when": "Part of `fix`."
+    },
+    "format:check": {
+      "does": "Prettier in check mode.",
+      "when": "Part of `verify:root`."
+    },
+    "fix": {
+      "does": "Regenerates every generated artifact and repairs lint and formatting.",
+      "when": "Before committing; whenever `check:consistency` reports drift."
+    },
+    "build": {
+      "does": "Compiles the bot to `dist/`.",
+      "when": "`check:dist` and the Docker image run it; rarely by hand."
+    },
+    "start": {
+      "does": "Runs the compiled bot from `dist/`.",
+      "when": "Production entry (the container's CMD)."
+    },
+    "dev": {
+      "does": "Runs the bot from source with tsx.",
+      "when": "Local development against a real Slack app."
+    },
+    "cli": {
+      "does": "The operator CLI over the command registry (`-- <group> <verb> …`), plus `ask` to drive the full pipeline without Slack.",
+      "when": "Smoke tests, deploys, config, run history."
+    },
+    "ci:gate": {
+      "does": "Reads the `needs` context of a CI fan-out and passes only when every leg succeeded.",
+      "when": "CI only — the `bot` and `workers` gate jobs."
+    },
+    "check:lockfile": {
+      "does": "Native packages carry Linux x64 and macOS arm64 variants; records mirror their `package.json`.",
+      "when": "After a manifest edit or `npm install`; failures name the fix."
+    },
+    "check:sandbox-pair": {
+      "does": "Each Worker on the `cloudflare/sandbox` image pins `@cloudflare/sandbox` to exactly its Dockerfile tag.",
+      "when": "After bumping either half of a pair."
+    },
+    "check:pr-title": {
+      "does": "Judges one PR title as the changelog line it becomes: grammar, type, scope, the migration note behind `!`.",
+      "when": "`-- \"feat(scope): …\"` before opening a PR; CI's `title` check runs it."
+    },
+    "check:dist": {
+      "does": "Builds, then proves the compiled entry points and the web bundle the image needs exist.",
+      "when": "Part of `verify:root`."
+    },
+    "check:site": {
+      "does": "Every page the dashboard links to is in the built site, and its home page reads `displayName`.",
+      "when": "After a docs change; part of `verify`."
+    },
+    "check:image": {
+      "does": "Builds every Worker's image.",
+      "when": "After touching a Dockerfile; needs Docker. One CI leg per image."
+    },
+    "check:project-facts": {
+      "does": "Every copy of the project's names, repository, docs URL and contact address equals `project.json`; its description, topics and npm package fit their rules.",
+      "when": "After editing `project.json` or a community file; part of `check:consistency`."
+    },
+    "skills:sync": {
+      "does": "Vendors the skills listed in `skills/manifest.yaml`.",
+      "when": "After changing the manifest; part of `fix`."
+    },
+    "skills:check": {
+      "does": "The vendored skills match the manifest byte for byte.",
+      "when": "Part of `check:consistency`."
+    },
+    "licenses:check": {
+      "does": "Every production dependency's license is on the allowlist.",
+      "when": "After adding a dependency."
+    },
+    "docs:gen": {
+      "does": "Writes the generated regions of the reference docs from the command registry.",
+      "when": "After changing a command, flag, route, or config key; part of `fix`."
+    },
+    "docs:check": {
+      "does": "The generated doc regions equal what the code would generate.",
+      "when": "Part of `check:consistency`."
+    },
+    "specs:check": {
+      "does": "Every `file::describe::it` proof in `docs/reference/specs/*.md` names a real test; header paths exist.",
+      "when": "After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit."
+    },
+    "specs:coverage": {
+      "does": "Maps a change's paths to the specs whose `Code`/`Tests` headers cover them, then lists changed source paths no spec covers.",
+      "when": "`-- --changed origin/main...HEAD` before review; `-- --require` fails on an uncovered path (warn-only today); `-- --json` for machines."
+    },
+    "decisions:check": {
+      "does": "Every record under `docs/decisions/` and `docs/plans/` carries a valid `status`, a superseded one names what replaced it, and an accepted record's body is unchanged against `origin/main`.",
+      "when": "Part of `check:consistency`; a failing record is superseded by a new one, never edited."
+    },
+    "hygiene:check": {
+      "does": "The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks.",
+      "when": "Part of `check:consistency`. New hit: rewrite the line or allow it by name in `scripts/public-hygiene.allow`; `-- --list <prefix>` shows the rest."
+    },
+    "hygiene:gen": {
+      "does": "Records the tree's remaining imprint after a scrub; refuses growth unless `-- --force`.",
+      "when": "Part of `fix`; new imprint fails it like `hygiene:check`."
+    },
+    "agents:gen": {
+      "does": "Writes the Commands table in AGENTS.md from `package.json` and this file.",
+      "when": "After adding or changing a script; part of `fix`."
+    },
+    "agents:check": {
+      "does": "AGENTS.md is under its size budget, its Commands table is current, and every root script is described here.",
+      "when": "Part of `check:consistency`."
+    },
+    "clock:gen": {
+      "does": "Regenerates the clock-read allowlist (`src/core/trace/clockAllowlist.json`) from the tree — empty since the ratchet reached zero; a result that is not `{}` names a new direct read.",
+      "when": "Part of `fix`."
+    },
+    "clock:check": {
+      "does": "No production file reads the wall clock directly: the allowlist is empty and the tree agrees.",
+      "when": "Part of `check:consistency`."
+    },
+    "docs:changed": {
+      "does": "Says whether the last push touched the docs or their build (a CI job output).",
+      "when": "CI only — gates the docs deploy."
+    },
+    "deploy:gen": {
+      "does": "Renders each Worker's gitignored `wrangler.jsonc` from its template and the profile in force.",
+      "when": "`test`, each Worker's `verify` and `deploy all` run it; by hand before `wrangler dev`."
+    },
+    "deploy:check": {
+      "does": "The rendered `wrangler.jsonc` files match `deploy:gen`.",
+      "when": "When one looks hand-edited; change the template."
+    },
+    "deploy:targets": {
+      "does": "Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment.",
+      "when": "CI only — the `deploy targets` job."
+    },
+    "docs:dev": {
+      "does": "Serves the docs site locally with live reload.",
+      "when": "Writing docs; `-- --port <n>` picks the port."
+    },
+    "docs:build": {
+      "does": "Builds the docs site to `docs/.vitepress/dist`.",
+      "when": "Rarely by hand; `verify -w docs` and the docs Worker's deploy run it."
+    },
+    "web:preview": {
+      "does": "Serves the dashboard bundle over fixtures for a visual check.",
+      "when": "After a `web/` change."
+    },
+    "screenshots:gen": {
+      "does": "Renders the dashboard's screenshots from the fixture preview, both themes, and records their inputs' hashes in `docs/public/screenshots/manifest.json`.",
+      "when": "After a `web/` or fixture change, once `screenshots:check` names it; needs `npx playwright-core install chromium`, so it is not part of `fix`."
+    },
+    "screenshots:check": {
+      "does": "The dashboard's source and fixtures still hash to what the screenshots were rendered from — no browser.",
+      "when": "Part of `check:consistency`."
+    },
+    "load": {
+      "does": "Load harness: `-- history|resident|sandbox|e2e|cards|provider`.",
+      "when": "Capacity receipts (docs/reference/specs/load-harness.md)."
+    }
+  }
+}

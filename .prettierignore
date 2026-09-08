@@ -1,0 +1,27 @@
+# Build output and installs
+node_modules
+dist
+web/dist
+docs/.vitepress/dist
+docs/.vitepress/cache
+data
+workspaces
+
+# Lockfiles and generated files: owned by their generators, never hand-formatted
+package-lock.json
+# Rendered by `deploy init` from each dir's wrangler.template.jsonc (which IS formatted)
+deploy/*/wrangler.jsonc
+web/auto-imports.d.ts
+web/components.d.ts
+# Written by `npm run screenshots:gen`
+docs/public/screenshots/manifest.json
+src/core/__snapshots__
+src/core/testing/pr329.body.md
+src/core/testing/pr329.description.json
+
+# Vendored third-party skills are copied byte-for-byte (skills/manifest.yaml)
+skills
+
+# Markdown is not formatted: the docs carry generated regions (docs:gen) and
+# the feature specs are prose with wide tables; a reflow would fight both.
+*.md

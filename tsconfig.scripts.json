@@ -1,0 +1,13 @@
+{
+  // Typecheck for scripts/ (review finding on #339): the main tsconfig's
+  // rootDir is src, so scripts/ was never type-checked and a ManifestSkill
+  // shape change broke skills-sync.ts silently. noEmit-only; includes src so
+  // the scripts' ../src imports resolve with the same strictness.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "sourceMap": false
+  },
+  "include": ["scripts/**/*", "src/**/*"]
+}

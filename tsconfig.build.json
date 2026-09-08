@@ -1,0 +1,8 @@
+{
+  // Build config: everything tsconfig.json covers minus test files, so
+  // dist/ (and the Docker image built from it) never ships *.test.js that
+  // would throw on a vitest import pruned from production node_modules.
+  // `npm run typecheck` keeps using tsconfig.json, which includes tests.
+  "extends": "./tsconfig.json",
+  "exclude": ["src/**/*.test.ts", "src/**/testing/**"]
+}
