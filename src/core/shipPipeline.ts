@@ -35,6 +35,7 @@ import type { ExecutorFactoryOptions } from "../execution/factory.js";
 import {
   resolveBaseRef,
   type OpenedPullRequest,
+  type OpenPrRef,
   type PullRequestFacts,
   type PullRequestTarget,
   type RepoShipInfo,
@@ -483,6 +484,9 @@ export interface ShipGithub {
    *  success inside the implementation. Throws on any real failure. */
   createBranchRef: (repo: string, branch: string, fromRef: string) => Promise<void>;
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /** The open PR heading a branch (githubPulls.findOpenPrByHead) — the
+   *  post-step's check before it reports a description-less push as "no PR". */
+  findOpenPrByHead: (repo: string, branch: string) => Promise<OpenPrRef | null>;
   postReviewComment: (target: ReviewCommentTarget, body: string) => Promise<void>;
   fetchPrHead: FetchPrHead;
   fetchPrCommits: FetchPrCommits;
@@ -858,6 +862,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         // resident binding ref, which ship bound to the HEAD branch itself.
         target: { repo: entry.repo, baseRef: entry.base, bindingRef: undefined, resolvedRef: undefined },
         openPullRequest: github.openPullRequest,
+        findOpenPr: github.findOpenPrByHead,
         fetchRepoInfo: github.fetchRepoShipInfo,
         publish: (e) => {
           if (e.type === "pr_opened") opened = { number: e.number, url: e.url, created: e.created };

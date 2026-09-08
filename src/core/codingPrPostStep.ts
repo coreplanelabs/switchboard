@@ -34,6 +34,11 @@
 // opened). `@{u}` is consulted only when the remote probe itself fails.
 // Failure honesty throughout: never a fabricated PR URL, and the branch
 // compare URL is offered only when the remote match proved the branch exists.
+// A proven push with NO description first asks GitHub whether the branch
+// already heads an open PR (a follow-up on an existing PR repushes that PR's
+// own branch): if so the note names that PR as updated by the push and the
+// record gets `pr_opened` with `created: false`; only a branch with no open
+// PR gets the compare URL and "open manually".
 //
 // Base resolution (CodingPrTarget): a bound PR's true base, else the resident
 // binding ref, else the dispatch's resolved ref, else — the true last resort —
@@ -54,6 +59,7 @@ import {
   resolveBaseRef,
   resolveBaseRefLazy,
   type OpenedPullRequest,
+  type OpenPrRef,
   type PullRequestTarget,
   type RepoShipInfo,
 } from "../execution/githubPulls.js";
@@ -293,6 +299,13 @@ export async function runCodingPrPostStep(input: {
   description: PrDescription | undefined;
   target: CodingPrTarget;
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /** The open PR whose head is the branch, or null (githubPulls.ts'
+   *  findOpenPrByHead — the lookup open-or-edit itself starts with). Asked
+   *  ONLY when a proven-pushed branch comes with no description: the push may
+   *  have updated a PR that already exists, and the note must say so instead
+   *  of sending the reader to open a duplicate. A lookup failure degrades to
+   *  the "no PR was opened" note (logged, never thrown). */
+  findOpenPr: (repo: string, branch: string) => Promise<OpenPrRef | null>;
   /** The repo's default branch — the PR base of last resort, fetched via
    *  GitHub (githubPulls.ts' fetchRepoShipInfo; shared with agent:ship's own
    *  base resolution) ONLY when a description was submitted AND none of
@@ -408,6 +421,34 @@ export async function runCodingPrPostStep(input: {
     return `⚠️ A PR description was submitted but the ${what} could not be observed in the workspace, so no PR was opened${compareUrl ? ` — compare & open manually: ${compareUrl}` : "."}`;
   }
   if (pushedBranch && compareUrl) {
+    // No description, but the push is proven. Before telling the reader to
+    // open a PR by hand, ask GitHub whether the pushed branch ALREADY heads an
+    // open PR — a follow-up on an existing PR (a dependabot branch, a PR the
+    // thread was bound to) repushes that PR's own branch, and the push itself
+    // updated the PR; "no PR was opened, compare & open manually" would send
+    // the reader to duplicate it. The lookup is the same one open-or-edit
+    // uses (githubPulls.findOpenPrByHead); the PR body is NOT touched — there
+    // is no description to render — so the note says the push updated it and
+    // the record carries the fact as `pr_opened` with `created: false`.
+    const existing = await input.findOpenPr(repo, branch).catch((err: unknown) => {
+      console.error(
+        `[pr-post] ${logKey} open-PR lookup failed for ${repo} ${branch}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    });
+    if (existing) {
+      console.log(
+        `[pr-post] ${logKey} no description submitted; the push updated the open ${repo}#${existing.number} (${branchLog} @ ${headSha.slice(0, 7)})`,
+      );
+      input.publish({
+        type: "pr_opened",
+        url: existing.htmlUrl,
+        number: existing.number,
+        created: false,
+        at: systemClock(),
+      });
+      return `🔀 PR updated by the push: ${existing.htmlUrl} — \`${branch}\`${branchNote} is at \`${headSha.slice(0, 7)}\`; no PR description was submitted, so the PR's title and body were left as they were`;
+    }
     console.log(`[pr-post] ${logKey} skipped: no description submitted (repo ${repo}, branch ${branch})`);
     return `ℹ️ No PR was opened: the run pushed \`${branch}\` but submitted no PR description (submit_pr_description was never called) — compare & open manually: ${compareUrl}`;
   }
