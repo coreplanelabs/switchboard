@@ -59,6 +59,14 @@ test is a behavior we do not know we have. The Docker images — the bot's, the
 resident's and the sandbox's — have their own check, `npm run check:image`
 (one CI leg per image), which needs Docker locally.
 
+To drive the whole pipeline without a Slack workspace, the CLI's `ask` sends a
+message through the same dispatcher a channel would:
+
+```bash
+npm run cli -- ask "agent:review <PR url>"   # a review run, end to end, from the terminal
+npm run cli -- <group> <verb> --help          # any registry command
+```
+
 ## Running tests
 
 One vitest entry at the root covers every package (the bot, `web/`, and the

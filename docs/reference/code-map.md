@@ -2,6 +2,26 @@
 
 Where each part of Switchboard lives, what it owns, and the rule that keeps it that way. This is the map for someone changing the code; the pipeline it implements is explained in [How a request flows](../explanation/how-a-request-flows.md), and the behavioral contract each area must keep is its spec under [`docs/reference/specs/`](specs/README.md).
 
+## Areas
+
+The map at a glance: each area of the product, where it lives, and the spec that states what it must do.
+
+| Area | Path | Spec |
+|---|---|---|
+| Orchestration: directives, resolution, gates, history, the run | `src/core/dispatcher.ts` | [`routing-and-config.md`](specs/routing-and-config.md), [`run-loop.md`](specs/run-loop.md) |
+| Commands once, every surface (chat, CLI, HTTP, MCP) | `src/core/commandRegistry.ts`, `commands/`, `commandSurface.ts` | [`command-registry.md`](specs/command-registry.md) |
+| Authorization: actors, grants, the policy table, predicates | `src/core/authz/` | [`authorization.md`](specs/authorization.md) |
+| Runs: live registry, history, tracing, the run page | `src/core/runRegistry.ts`, `runStore.ts`, `runsService.ts`, `trace/`, `src/channels/liveView.ts` | [`run-history.md`](specs/run-history.md), [`live-view.md`](specs/live-view.md), [`tracing.md`](specs/tracing.md) |
+| Channels: Slack (transport only), HTTP, MCP ingress | `src/channels/` | [`slack-channel.md`](specs/slack-channel.md), [`http-ingress.md`](specs/http-ingress.md), [`mcp-ingress.md`](specs/mcp-ingress.md) |
+| Agents (data), providers, executors | `src/agents/`, `src/providers/`, `src/execution/` | [`agent-*.md`](specs/README.md), [`execution.md`](specs/execution.md), [`resident-repos.md`](specs/resident-repos.md) |
+| Memory, skills, MCP tools, GitHub tools | `src/core/memory/`, `src/skills/`, `src/mcp/`, `src/tools/` | [`memory.md`](specs/memory.md), [`skills.md`](specs/skills.md), [`mcp-tools.md`](specs/mcp-tools.md), [`github-tools.md`](specs/github-tools.md) |
+| The dashboard (Vue) served from the bot's seed | `web/` | [`live-view.md`](specs/live-view.md) |
+| The runtime Workers and the docs Worker | `deploy/cloudflare*/` | [`release-and-deploy.md`](specs/release-and-deploy.md), [`docs-site.md`](specs/docs-site.md) |
+| Deploy selection, order, and live gate | `src/deploy/` | [`release-and-deploy.md`](specs/release-and-deploy.md) |
+| Human docs and their generated tables | `docs/`, `src/docs/` | [`docs-site.md`](specs/docs-site.md) |
+
+## Modules
+
 Paths are repository-relative. A row's **Notes** column is the invariant or the gotcha a change in that area has to respect.
 
 | Path | What | Notes |
