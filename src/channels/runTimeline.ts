@@ -118,6 +118,8 @@ export type TimelineChange =
       durationMs?: number;
       status?: "ok" | "error";
       at?: number;
+      /** A closed span's own start — what a row born from a lone end (its start elided) is stamped with. */
+      startedAt?: number;
     };
 
 export interface TimelineSkill {
@@ -402,7 +404,19 @@ export function createRunTimeline(): RunTimeline {
           found.call.facts = facts(found.call);
           return [{ kind: "result", step: found.step, call: found.call }];
         }
-        return [{ kind: "span", spanId, name, open: false, durationMs, status, at: num(e.at) }];
+        const startedAt = num(e.startedAt);
+        return [
+          {
+            kind: "span",
+            spanId,
+            name,
+            open: false,
+            durationMs,
+            status,
+            at: num(e.at),
+            ...(startedAt !== undefined ? { startedAt } : {}),
+          },
+        ];
       }
       case "skill_use": {
         const name = str(e.skill);

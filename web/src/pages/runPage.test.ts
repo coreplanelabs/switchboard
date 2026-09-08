@@ -703,6 +703,68 @@ describe("RunPage — live mode", () => {
     expect(wrapper.find("#log .span .dur").text()).toBe("250ms");
   });
 
+  it("the setup spans fold under a Setup head with their count and span, open while setting up, closed by the agent loop's start and reopened by a click; the tail names the open span (features/live-view.md item 25)", async () => {
+    const { wrapper, es } = mountLive();
+    es().emitOpen();
+    es().emitMessage({ type: "span_start", spanId: "root", name: "request", at: 1_000 }, "1");
+    es().emitMessage(assistant("starting", 1_100), "1b"); // a stamped event: the tail has a clock to count from
+    es().emitMessage(
+      { type: "span_start", spanId: "h", name: "dispatch.history", parentSpanId: "root", at: 1_000 },
+      "2",
+    );
+    es().emitMessage(
+      {
+        type: "span_end",
+        spanId: "h",
+        name: "dispatch.history",
+        parentSpanId: "root",
+        startedAt: 1_000,
+        durationMs: 200,
+        status: "ok",
+        at: 1_200,
+      },
+      "3",
+    );
+    es().emitMessage(
+      { type: "span_start", spanId: "a", name: "dispatch.workspace.attach", parentSpanId: "root", at: 1_200 },
+      "4",
+    );
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find("#log .setup-head .glyph").text()).toBe("▾");
+    expect(wrapper.find("#log .setup-head .what").text()).toBe("Setup · 2 steps");
+    expect(wrapper.findAll("#log .setup .span").map((r) => r.find(".what").text())).toEqual([
+      "reading the thread",
+      "attaching the workspace",
+    ]);
+    // the tail names the open counted span, not a rotating verb
+    expect(wrapper.find("#thinking .verb").text()).toBe("attaching the workspace…");
+    es().emitMessage(
+      {
+        type: "span_end",
+        spanId: "a",
+        name: "dispatch.workspace.attach",
+        parentSpanId: "root",
+        startedAt: 1_200,
+        durationMs: 800,
+        status: "ok",
+        at: 2_000,
+      },
+      "5",
+    );
+    es().emitMessage({ type: "span_start", spanId: "agent", name: "run.agent", parentSpanId: "root", at: 2_000 }, "6");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find("#log .setup-head .glyph").text()).toBe("▸");
+    expect(wrapper.find("#log .setup-head .what").text()).toBe("Setup · 2 steps · 1.0s");
+    expect(wrapper.findAll("#log .setup .span")).toHaveLength(0);
+    expect(wrapper.findAll("#log > .span").map((r) => r.find(".what").text())).toEqual([
+      "the request",
+      "the agent loop",
+    ]);
+    await wrapper.find("#log .setup-head").trigger("click");
+    expect(wrapper.findAll("#log .setup .span")).toHaveLength(2);
+    expect(wrapper.find("#log .setup-head").attributes("aria-expanded")).toBe("true");
+  });
+
   it("a replay_elided frame renders as a replay row naming the range the record still has; a malformed or empty one marks nothing", async () => {
     const { wrapper, es } = mountLive();
     es().emitOpen();
