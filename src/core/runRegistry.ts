@@ -661,6 +661,33 @@ export class RunRegistry {
   }
 
   /**
+   * Drop a run that never started (docs/reference/specs/run-history.md item 42):
+   * the run was created at its reservation, before the workspace attach, and
+   * the dispatch ended before its run loop — a refusal, a failed attach, a
+   * throw. The row goes with no finished frame and no record, as the ledger's
+   * `abandon` drops the reservation: a live subscriber gets the `end` frame
+   * (nothing more will come, nothing to reply about), the index feed gets the
+   * removal, and the id is unknown afterwards. A no-op for an unknown run and
+   * for a finished one — a finished run has a record, the sweep evicts it.
+   */
+  discard(id: string): void {
+    const run = this.runs.get(id);
+    if (!run || run.finished) return;
+    this.runs.delete(id);
+    const subs = [...run.subscribers];
+    run.subscribers.clear();
+    const frame: SealedFrame = { sealedAt: this.now() };
+    for (const sub of subs) {
+      try {
+        sub.onSealed?.(frame);
+      } catch {
+        // A dead sink must not break the discard for the remaining subscribers.
+      }
+    }
+    this.notifyIndex({ type: "removed", id });
+  }
+
+  /**
    * Seal a run — the stream closed: the first reply attempt completed
    * (`replyOk` true or false), or the run's branch was abandoned without one
    * (`replyOk` absent). Stamps `sealedAt`, detaches every subscriber with the

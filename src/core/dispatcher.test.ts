@@ -32,7 +32,7 @@ import {
   followUpFromInbox,
 } from "./dispatcher.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
-import { RunControl, RunRegistry, activityOfEvents } from "./runRegistry.js";
+import { RunControl, RunRegistry, activityOfEvents, type IndexEvent } from "./runRegistry.js";
 import { createTracer } from "./trace/tracer.js";
 import { classOf, isStreamed } from "./trace/streamSpans.js";
 import { partition } from "./trace/partition.js";
@@ -9009,12 +9009,16 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(fallbackPuts).toEqual([]);
   });
 
-  it("the run is reserved on the ledger BEFORE the workspace attach (item 42): an attaching row with the request (text, sender, link, attachments), the card and no prompt, under the id the run will have; the claim once the prompt exists promotes that row in place — one row, one id — and the finish clears it", async () => {
+  it("the run is reserved on the ledger BEFORE the workspace attach (item 42): an attaching row with the request (text, sender, link, attachments), the card and no prompt, under the id the run will have, and the registry row — label, token, the same start — exists from that moment too; the claim once the prompt exists promotes that row in place — one row, one id — and the finish clears it", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     let rowAtAttach: ReturnType<InMemoryRunLedger["live"]["get"]>;
+    let registryAtAttach: ReturnType<RunRegistry["getById"]> = null;
+    let indexAtAttach: ReturnType<RunRegistry["listActive"]> = [];
     const real = vi.mocked(makeExecutor).getMockImplementation()!;
     vi.mocked(makeExecutor).mockImplementationOnce(async (...args) => {
       rowAtAttach = structuredClone(ledger.live.get("run-l"));
+      registryAtAttach = registry.getById("run-l");
+      indexAtAttach = registry.listActive();
       return real(...args);
     });
     let rowAtFirstCall: ReturnType<InMemoryRunLedger["live"]["get"]>;
@@ -9025,7 +9029,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
       },
     };
-    const { deps, writer, warnings } = wired(provider, { ledger });
+    const { deps, registry, writer, warnings } = wired(provider, { ledger });
     const { io, replies } = ioWithCard();
     await dispatch(
       deps,
@@ -9038,6 +9042,20 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       io,
     );
     await writer.settled();
+    // At the attach: the registry row is the run's from the reservation on —
+    // its label, its token (the index links the page from second zero), the
+    // reservation's start — so the runs index never sees a labelless ledger
+    // row for a run this process holds.
+    expect(registryAtAttach).toMatchObject({
+      id: "run-l",
+      token: "tok",
+      label: 'general · #CX · ux · "hello there"',
+      agent: "general",
+      finished: false,
+      startedAt: rowAtAttach!.startedAt,
+      eventCount: 0,
+    });
+    expect(indexAtAttach.map((r) => r.id)).toEqual(["run-l"]);
     // At the attach: reserved — identity, request, card; no prompt yet.
     expect(rowAtAttach).toMatchObject({
       runId: "run-l",
@@ -9080,23 +9098,33 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(warnings).toEqual([]);
   });
 
-  it("a dispatch that ends before its prompt exists — here the attach's ask-once branch refusal — abandons its reservation (item 42): the row goes with no record and no warning, so nothing restarts a run that never started", async () => {
+  it("a dispatch that ends before its prompt exists — here the attach's ask-once branch refusal — abandons its reservation and discards its registry row (item 42): both go with no record and no warning, the index feed sees the row come and go, so nothing restarts or lists a run that never started", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
     const ledger = new InMemoryRunLedger(() => 10_000);
     let rowAtAttach: ReturnType<InMemoryRunLedger["live"]["get"]>;
+    let liveAtAttach: string[] = [];
     vi.mocked(makeExecutor).mockImplementationOnce(async () => {
       rowAtAttach = structuredClone(ledger.live.get("run-l"));
+      liveAtAttach = registry.listActive().map((r) => r.id);
       throw new ResidentNeedsRefError("repo:acme/api");
     });
-    const { deps, writer, warnings } = wired(capturingProvider("must not run"), { ledger, yaml: REMOTE_YAML_FIXTURE });
+    const { deps, registry, writer, warnings } = wired(capturingProvider("must not run"), {
+      ledger,
+      yaml: REMOTE_YAML_FIXTURE,
+    });
+    const index: IndexEvent[] = [];
+    registry.subscribeIndex((ev) => index.push(ev));
     const { io, replies } = ioWithCard();
     await dispatch(deps, msg("agent:coding fix it in acme/api", "slack:UADMIN"), io);
     await writer.settled();
     expect(rowAtAttach?.phase).toBe("attaching");
+    expect(liveAtAttach).toEqual(["run-l"]);
     expect(replies.some((r) => r.includes("Which branch"))).toBe(true);
     expect(ledger.live.size).toBe(0);
     expect(ledger.finished.size).toBe(0);
+    expect(registry.listActive()).toEqual([]);
+    expect(index.map((ev) => ev.type)).toEqual(["upsert", "removed"]);
     expect(warnings).toEqual([]);
   });
 

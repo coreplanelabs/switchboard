@@ -103,7 +103,6 @@ import { cliWords } from "./commandSurface.js";
 import {
   activityOfEvents,
   defaultRunRegistry,
-  type RunControl,
   type RunHandle,
   type RunRegistry,
   type RunSnapshot,
@@ -589,13 +588,21 @@ export async function dispatch(
   // holds on its thread while its run is in flight, claimed after the agent
   // gate below and released in the outer finally — where whatever follow-ups
   // the run never consumed are run as a fresh turn (or, after an operator
-  // stop, answered with a note). `liveControl` is the registered run's stop
-  // control, read in the finally — never cached from a return value, so a run
-  // that THREW after a stop was requested still counts as stopped.
+  // stop, answered with a note).
   const admission = deps.admission ?? defaultAdmission;
   const registry = deps.runRegistry ?? defaultRunRegistry;
   let admitted: LiveThread<DispatchFollowUp> | undefined;
-  let liveControl: RunControl | undefined;
+  // The run's registry row, created at its reservation (item 42) — before the
+  // workspace attach, so the runs index, the run page and the stop routes know
+  // the run from the moment its thread does. Hoisted for the reservation's
+  // stop hooks and the outer finally, and read there — never cached from a
+  // return value, so a run that THREW after a stop was requested still counts
+  // as stopped.
+  let registered: RunHandle | undefined;
+  // True once the run loop owns the run (its own finally finishes it). Until
+  // then the outer finally discards the row — the run never started — as it
+  // abandons the reservation.
+  let runLoopStarted = false;
   // The run's row on the ledger (item 35), once claimed; undefined for an
   // untracked run. Read by the record writer (the finish goes through it) and
   // the outer finally (its heartbeat stops with the run).
@@ -605,21 +612,17 @@ export async function dispatch(
   // same handle) or abandoned in the outer finally when the dispatch ends
   // before that. `requestRow` is the request as the row carries it. A fence
   // during the attach means another generation restarted the run: this one
-  // stops at the attach's end and says nothing. A stop relayed before the run
-  // exists is applied the moment it does.
+  // stops at the attach's end and says nothing. A stop relayed during the
+  // attach latches in the run's control; the run loop reads it at its first
+  // step.
   let reserved: LedgerRun | undefined;
   let requestRow: Record<string, unknown> | undefined;
-  let visibilityAtReserve: Awaited<ReturnType<typeof channelVisibilityOf>> | undefined;
   let fencedWhileAttaching = false;
-  let earlyStop: StopMode | undefined;
   const reservationHooks = {
-    onStop: (mode: StopMode) => {
-      if (liveControl) void liveControl.requestStop(mode);
-      else earlyStop = mode;
-    },
+    onStop: (mode: StopMode) => void registered?.control.requestStop(mode),
     onFenced: () => {
       fencedWhileAttaching = true;
-      void liveControl?.requestStop("hard");
+      void registered?.control.requestStop("hard");
     },
   };
   try {
@@ -929,8 +932,8 @@ export async function dispatch(
         state: resume.row.state,
         lastStep: resume.lastStep.step,
         lastSeq: resume.lastSeq,
-        onStop: (mode) => void liveControl?.requestStop(mode),
-        onFenced: () => void liveControl?.requestStop("hard"),
+        onStop: (mode) => void registered?.control.requestStop(mode),
+        onFenced: () => void registered?.control.requestStop("hard"),
       });
     }
     if (restart) {
@@ -965,8 +968,8 @@ export async function dispatch(
       // reached. Their acks were the admitting generation's — none is sent again.
       // Name the run on the slot NOW — its id is the row's — so a boot-gap steer
       // whose push lands after the re-read below finds the run it belongs to and
-      // hands the item over in memory (the registry row is created seconds later,
-      // after the workspace attach, which is too late for that check).
+      // hands the item over in memory (the registry row is created at the
+      // reservation below, after this re-read — too late for that check).
       admitted.runId = carriedRow.runId;
       const known = Math.max(carriedInbox.known, ...carriedInbox.items.map((i) => i.seq));
       const late = await deps.runLedger.readInbox(carriedRow.runId, known);
@@ -1227,16 +1230,69 @@ export async function dispatch(
     // through the attach; the claim after the prompt exists promotes it. A
     // resume adopted its row above; a restart reserved it above.
     // The run's id, minted here (item 42) — after the ship fork, which mints
-    // its own — so the row reserved before the attach, the registry row created
-    // after it and the record all share it; a resume or a restart keeps the row's.
+    // its own — so the registry row, the row reserved before the attach and
+    // the record all share it; a resume or a restart keeps the row's.
     const runId = carriedRow?.runId ?? registry.mintId();
+    // Asked once per run (the authorization spec's channel-visibility rule):
+    // the registry row, the reservation and the claim reuse it.
+    const channelVisibility = await root.span("dispatch.channel_visibility", () =>
+      channelVisibilityOf(deps, msg.channelId),
+    );
+    // The registry row, created NOW — before the reservation and the attach —
+    // so the run is one row on every surface from the moment it is admitted:
+    // the runs index lists it with its label and its capability link, the run
+    // page serves it, a stop during the attach latches in its control. Before
+    // this the row came after the attach, and the runs index showed the
+    // reservation meanwhile as a labelless ledger row with a tokenless link.
+    // Its stream stays empty until the run loop binds the trace below (the
+    // request is the first event of the record, live-view item 12).
+    // A human-first label for the Access-gated runs index (`GET /runs`): agent +
+    // repo (repo runs) or channel/user (chat runs) + a snippet of the request,
+    // so a row reads like `review · #general · alice · "…"` rather
+    // than raw ids. Built from the directive-stripped text so directives (agent:/
+    // model:) never clutter the snippet. The registry redacts and caps it;
+    // `run.label` is the one the record and the friction row carry (never
+    // `runLabel`, which may hold a pasted secret).
+    const runLabel = composeRunLabel({
+      agent: agent.name,
+      repo: repoCtx.repo,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      channelName: msg.channelName,
+      userName: msg.userName,
+      text: directives.text,
+    });
+    const run = registry.create(
+      runLabel,
+      {
+        agent: agent.name,
+        model: resolved.modelRef,
+        channelId: msg.channelId,
+        userId: msg.userId,
+        threadKey: msg.threadKey,
+        channelVisibility,
+        ...(carriedRow ? {} : { receivedAt }), // the window opens at receipt (docs/reference/specs/tracing.md); a resume or restart keeps its original stamps
+        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+        ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+        ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      },
+      // Under the run's id, at the card's start (the reservation's, or the
+      // carried row's) — a resume replays its events, a restart starts them
+      // afresh at the row's original start.
+      { id: runId, startedAt, ...(resume ? { replay: resume.events } : {}) },
+    );
+    registered = run;
+    // With no PUBLIC_BASE_URL the link is simply omitted — the feature
+    // degrades gracefully, the run is otherwise unchanged. The card carries it
+    // from here, and a follow-up's ack/refusal can link the run page
+    // (thread-admission item 1).
+    const liveUrl = liveViewLink(run.id, run.token);
+    shell.setLink(liveUrl ? { url: liveUrl, label: "Live run" } : undefined);
+    if (liveUrl) admitted.runLink = liveUrl;
+    io.runStarted?.({ id: run.id });
     if (!resume && !restart) {
       requestRow = durableInboxMessage(msg, msg.text, receivedAt);
       const request = requestRow;
-      // Asked once per run (the authorization spec's channel-visibility rule): the registry row below reuses it.
-      visibilityAtReserve = await root.span("dispatch.channel_visibility", () =>
-        channelVisibilityOf(deps, msg.channelId),
-      );
       reserved = await root.span("dispatch.ledger_reserve", () =>
         deps.runLedger.reserve({
           runId,
@@ -1248,7 +1304,7 @@ export async function dispatch(
             channelId: msg.channelId,
             userId: msg.userId,
             threadKey: msg.threadKey,
-            channelVisibility: visibilityAtReserve,
+            channelVisibility,
             ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
             ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
             ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
@@ -1511,61 +1567,18 @@ export async function dispatch(
     clearInterval(setupHeartbeat);
     card.update(shell.live()); // the ack card becomes the run card
     let lastActivityAt = clock();
-    // Live run view: register the run and mint its capability
-    // link AFTER the card exists (so nothing awaits between create() and the
-    // run loop's finally that finish()es it). With no PUBLIC_BASE_URL the link
-    // is simply omitted — the feature degrades gracefully, the run is otherwise
-    // unchanged. Events are fed to the registry in onEvent below.
-    // A human-first label for the Access-gated runs index (`GET /runs`): agent +
-    // repo (repo runs) or channel/user (chat runs) + a snippet of the request,
-    // so a row reads like `review · #general · alice · "…"` rather
-    // than raw ids. Built from the directive-stripped text so directives (agent:/
-    // model:) never clutter the snippet.
-    const runLabel = composeRunLabel({
-      agent: agent.name,
-      repo: repoCtx.repo,
-      channelId: msg.channelId,
-      userId: msg.userId,
-      channelName: msg.channelName,
-      userName: msg.userName,
-      text: directives.text,
-    });
-    // The registry redacts and caps the label; `run.label` is the one the record
-    // and the friction row carry (never `runLabel`, which may hold a pasted secret).
-    const channelVisibility =
-      visibilityAtReserve ??
-      (await root.span("dispatch.channel_visibility", () => channelVisibilityOf(deps, msg.channelId)));
-    const run = registry.create(
-      runLabel,
-      {
-        agent: agent.name,
-        model: resolved.modelRef,
-        channelId: msg.channelId,
-        userId: msg.userId,
-        threadKey: msg.threadKey,
-        channelVisibility,
-        ...(carriedRow ? {} : { receivedAt }), // the window opens at receipt (docs/reference/specs/tracing.md); a resume or restart keeps its original stamps
-        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-        ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-        ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-      },
-      // Under the id minted at admission (the reserved row's) — a resume replays
-      // its events, a restart starts them afresh at the row's original start.
-      resume
-        ? { id: runId, replay: resume.events, startedAt: resume.row.startedAt }
-        : { id: runId, ...(restart ? { startedAt: restart.row.startedAt } : {}) },
-    );
-    // A stop another container asked for while this run was still attaching.
-    if (earlyStop) void run.control.requestStop(earlyStop);
-    // The run's stream now carries the request's spans: the setup so far is
-    // backfilled, everything from here is live (docs/reference/specs/tracing.md item 6).
+    // The run loop owns the run from here: its finally finishes it (the outer
+    // finally discards a run that never got this far). Events are fed to the
+    // registry in onEvent below. The run's stream now carries the request's
+    // spans: the setup so far is backfilled, everything from here is live
+    // (docs/reference/specs/tracing.md item 6).
+    runLoopStarted = true;
     trace.bindRun(run.id, (e) => registry.publish(run.id, e));
     if (resume) {
       console.log(
         `[resume] ${msg.threadKey} run ${run.id} continues under ${deps.runLedger.gen}: from step ${resume.plan.step}, ${resume.plan.settlements.length} call(s) to settle, ${resume.events.length} event(s) replayed`,
       );
     }
-    io.runStarted?.({ id: run.id });
     // The narrative events the dispatcher itself publishes — the request, the
     // thread context, the final answer — go straight to the registry: redacted
     // like every event, uncapped (the run record is the source of truth; the
@@ -1627,15 +1640,6 @@ export async function dispatch(
         ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
         at: clock(),
       });
-    const liveUrl = liveViewLink(run.id, run.token);
-    const liveLink = liveUrl ? { url: liveUrl, label: "Live run" } : undefined;
-    shell.setLink(liveLink);
-    // The thread's live slot now names its run: a follow-up's ack/refusal can
-    // link the run page (thread-admission item 1), and the finally reads this
-    // control to tell a stopped run from one that ended by itself (item 4).
-    admitted.runId = run.id;
-    if (liveUrl) admitted.runLink = liveUrl;
-    liveControl = run.control;
     // The thread context fed to the model follows the request as `context`
     // events — text only, attachments as metadata lines, bounded to
     // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
@@ -2404,11 +2408,11 @@ export async function dispatch(
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
     ending.drain(undefined);
-    // A resumed dispatch that ended before its run was created — an unknown
+    // A resumed dispatch that ended before its run loop started — an unknown
     // provider, a refusal, a gate — has adopted a row it will never finish
     // (item 38). Close it `interrupted` here, or the sweep would relaunch it
     // every lease interval forever.
-    if (resume && ledgerRun && !liveControl) {
+    if (resume && ledgerRun && !runLoopStarted) {
       const adopted = ledgerRun;
       await root.span("post.history_write", () =>
         closeResumedRow(adopted, resume, "the resumed dispatch ended before the run started"),
@@ -2427,7 +2431,9 @@ export async function dispatch(
     // ordinary dispatch: it claims the thread itself, and a follow-up arriving
     // during it steers into it.
     const pending = admitted ? admission.release(msg.threadKey, admitted) : [];
-    const stopMode: StopMode | undefined = liveControl?.requested;
+    // A stop counts once the run loop had the run: a stop relayed during an
+    // attach that then refused stopped nothing, and the follow-ups run fresh.
+    const stopMode: StopMode | undefined = runLoopStarted ? registered?.control.requested : undefined;
     if (pending.length > 0 && stopMode) {
       console.log(`[dispatch] ${msg.threadKey} ${pending.length} follow-up(s) dropped: run stopped (${stopMode})`);
       await root.span("post.followups", async () => {
@@ -2478,6 +2484,9 @@ export async function dispatch(
     // or the sweep would restart it forever. A fenced reservation is another
     // generation's to restart: `abandon` is a no-op on it.
     if (reserved && !ledgerRun) await root.span("post.ledger_abandon", () => reserved!.abandon());
+    // …and the registry row created with it goes the same way: no finished
+    // frame, no record — a run that never started is not listed as one that did.
+    if (registered && !runLoopStarted) registry.discard(registered.id);
     // The ledger heartbeat stops with the run (the finish write, in flight
     // through the writer, closes the row itself).
     void ledgerRun?.close();
