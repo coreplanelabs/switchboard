@@ -23,7 +23,15 @@
 //   POST /runs/transcript/clear {runId}                                  → {ok}
 
 import { RUN_ID_PATTERN, type RunRecord } from "./runRecord.js";
-import { PermanentStoreError, RouteMissingError, RUN_STORE_TIMEOUT_MS, TransientStoreError } from "./runStoreWorker.js";
+import type { RunHistoryConfig } from "./runStore.js";
+import {
+  DEFAULT_RUN_STORE_TOKEN_ENV,
+  PermanentStoreError,
+  RouteMissingError,
+  RUN_STORE_KEY,
+  RUN_STORE_TIMEOUT_MS,
+  TransientStoreError,
+} from "./runStoreWorker.js";
 import type { FinishResult, HeartbeatResult, RunLedger } from "./runLedger/ledger.js";
 import { assembleTranscript, chunkRows, turnRows, type AssembledTranscript } from "./runLedger/transcript.js";
 import {
@@ -49,6 +57,28 @@ export interface WorkerRunLedgerOptions {
   /** The history store this ledger's live rows belong to (`runs:default`). */
   storeKey: string;
   fetch?: typeof fetch;
+}
+
+/** The ledger client for the configured run history, or null when history is
+ *  off, on host disk (`store: file` — the ledger is Worker-only, so a file
+ *  store means no write-through), or the bearer is unset. Mirrors
+ *  `buildRunStore`'s selection so the two always point at the same Worker. */
+export function buildRunLedger(
+  cfg: RunHistoryConfig | undefined,
+  env: Record<string, string | undefined>,
+  deps: { fetch?: typeof fetch } = {},
+): WorkerRunLedger | null {
+  if (!cfg || cfg.store === "file") return null;
+  const worker = cfg.worker;
+  if (!worker?.baseUrl) return null;
+  const token = env[worker.tokenEnv ?? DEFAULT_RUN_STORE_TOKEN_ENV]?.trim();
+  if (!token) return null; // buildRunStore already warned
+  return new WorkerRunLedger({
+    baseUrl: worker.baseUrl,
+    token,
+    storeKey: RUN_STORE_KEY,
+    ...(deps.fetch ? { fetch: deps.fetch } : {}),
+  });
 }
 
 export class WorkerRunLedger implements RunLedger {

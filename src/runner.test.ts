@@ -5,7 +5,7 @@ import { RunControl } from "./core/runRegistry.js";
 import type { Executor } from "./execution/executor.js";
 import { ExecCapacityError, ExecInfraError } from "./execution/executor.js";
 import type { RunEvent } from "./core/runEvents.js";
-import { runAgent } from "./runner.js";
+import { runAgent, type StepReport } from "./runner.js";
 import type { RunnableTool } from "./tools/workspace.js";
 import { InMemorySkillStore } from "./skills/index.js";
 import { FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
@@ -1801,5 +1801,96 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
     });
     expect(inbox.size).toBe(1);
     expect(JSON.stringify(provider.requests)).not.toContain("late thought");
+  });
+});
+
+describe("step reports (features/run-history.md item 35)", () => {
+  it("reports each step BEFORE its tools run: the turns appended since the last report, their first index, and the calls in flight", async () => {
+    const order: string[] = [];
+    const reports: StepReport[] = [];
+    const probe: RunnableTool = {
+      name: "probe",
+      description: "records when it ran",
+      inputSchema: { type: "object", properties: {} },
+      run: async () => {
+        order.push("tool");
+        return "ok";
+      },
+    };
+    const provider = scripted([
+      {
+        content: [
+          { type: "text", text: "looking" },
+          { type: "tool_use", id: "p1", name: "probe", input: {} },
+        ],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "tool_use", id: "p2", name: "probe", input: {} }], stopReason: "tool_use" },
+      text("done"),
+    ]);
+    const seed: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "earlier" }] },
+      { role: "assistant", content: [{ type: "text", text: "sure" }] },
+      { role: "user", content: [{ type: "text", text: "go" }] },
+    ];
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ toolset: "none", maxTurns: 5 }),
+      extraTools: [probe],
+      messages: seed,
+      toolContext: { executor: fakeExecutor },
+      onStep: async (s) => {
+        order.push(`step${s.turn}`);
+        reports.push(structuredClone(s));
+      },
+    });
+    expect(order).toEqual(["step1", "tool", "step2", "tool"]);
+    // Step 1: only this step's assistant turn, right after the seed.
+    expect(reports[0].firstIdx).toBe(3);
+    expect(reports[0].turns.map((t) => t.role)).toEqual(["assistant"]);
+    expect(reports[0].inFlight).toEqual([{ callId: "p1", tool: "probe" }]);
+    expect(reports[0].turn).toBe(1);
+    expect(reports[0].iteration).toBe(0);
+    expect(reports[0].remainingMs).toBeGreaterThan(0);
+    // Step 2: the previous step's results turn and this step's assistant turn.
+    expect(reports[1].firstIdx).toBe(4);
+    expect(reports[1].turns.map((t) => t.role)).toEqual(["user", "assistant"]);
+    expect(reports[1].turns[0].content[0]).toMatchObject({ type: "tool_result", toolUseId: "p1" });
+    expect(reports[1].inFlight).toEqual([{ callId: "p2", tool: "probe" }]);
+    // Concatenated, the seed + every reported turn is exactly the conversation the model saw last.
+    const all = [...seed, ...reports.flatMap((r) => r.turns)];
+    expect(provider.requests[2].messages.slice(0, all.length)).toEqual(all);
+  });
+
+  it("a report that throws fails the step before any tool runs — the hook decides, the runner does not swallow", async () => {
+    let ran = false;
+    const probe: RunnableTool = {
+      name: "probe",
+      description: "must not run",
+      inputSchema: { type: "object", properties: {} },
+      run: async () => {
+        ran = true;
+        return "ok";
+      },
+    };
+    const provider = scripted([
+      { content: [{ type: "tool_use", id: "p1", name: "probe", input: {} }], stopReason: "tool_use" },
+      text("done"),
+    ]);
+    await expect(
+      runAgent({
+        provider,
+        model: "m",
+        agent: agent({ toolset: "none" }),
+        extraTools: [probe],
+        messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+        toolContext: { executor: fakeExecutor },
+        onStep: async () => {
+          throw new Error("ledger refused");
+        },
+      }),
+    ).rejects.toThrow("ledger refused");
+    expect(ran).toBe(false);
   });
 });

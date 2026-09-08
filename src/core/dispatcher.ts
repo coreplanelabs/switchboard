@@ -4,7 +4,9 @@ import { selfDescriptionBlock } from "./selfDescription.js";
 import { customInstructionsBlock } from "./customInstructions.js";
 import { AGENTS, getAgent, type AgentDef } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives, type RequestDirectives, type ThreadDirectives } from "../directives.js";
-import { runAgent } from "../runner.js";
+import { mergeTools, runAgent } from "../runner.js";
+import { TOOLSETS } from "../tools/workspace.js";
+import type { LedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { makeWebCapability } from "../tools/web.js";
 import { residentOnboardedProbe, residentSlugsLister } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
@@ -247,6 +249,18 @@ export interface CoreDeps {
    */
   runHistoryWriter?: RunHistoryWriter;
   /**
+   * The run ledger's write-through (features/run-history.md item 35): every
+   * agent run and ship pipeline is claimed on the state Worker's ledger when
+   * its run is created, mirrors its steps/events/state while it runs, takes
+   * `finishing` before the reply and finishes through the ledger's one
+   * transaction (`runHistoryWriter.write(record, { via })`). Absent (tests, or
+   * history off) → the in-process registry alone, exactly as before. Production
+   * wires `createLedgerWriteThrough` beside the run store (src/index.ts), so a
+   * ledger always comes with a writer: without one the finish never reaches the
+   * ledger and a claimed row closes only by lease expiry (a test-only pairing).
+   */
+  runLedger?: LedgerWriteThrough;
+  /**
    * Channel facts for the run record (authorization KTD4/KTD7): every run is
    * stamped with its channel's visibility at create, asked of this directory
    * once per run. Default: the static id-based directory (`http:`/`mcp:` →
@@ -376,7 +390,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     if (!buildHistoryRecord || !deps.runHistoryWriter) return;
     const build = buildHistoryRecord;
     buildHistoryRecord = undefined; // exactly one write per run
-    deps.runHistoryWriter.write(build(failedAfterFinish));
+    // A tracked run finishes through the ledger: the record replaces its live
+    // rows in one transaction (a refused finish falls back to the store).
+    deps.runHistoryWriter.write(build(failedAfterFinish), ledgerRun ? { via: ledgerRun.sink } : undefined);
   };
   // The ack card while setup is still in progress. Cleared the moment it
   // becomes the run card, so the outer catch closes ONLY a card that setup
@@ -392,6 +408,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
   const admission = deps.admission ?? defaultAdmission;
   let admitted: LiveThread<DispatchFollowUp> | undefined;
   let liveControl: RunControl | undefined;
+  // The run's row on the ledger (item 35), once claimed; undefined for an
+  // untracked run. Read by `writeHistory` (the finish goes through it) and the
+  // outer finally (its heartbeat stops with the run).
+  let ledgerRun: LedgerRun | undefined;
   try {
     // Stage A — the ONE text-only fast path (#157 U13/KTD19, phase 4b): a
     // message that names a registered, chat-exposed command (`<group> <verb>
@@ -1021,6 +1041,55 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         );
       }
     }
+    // The ledger claim (features/run-history.md item 35): the run's row on the
+    // state Worker, with everything a resume must hand the model again — the
+    // composed system prompt and the tool definitions verbatim, the card, the
+    // repo context — plus the conversation as its seed. Claimed HERE, once the
+    // prompt exists, not at the in-process admission above: a row without a
+    // prompt could not be resumed. Awaited (one round trip per run) so the
+    // first step's record never precedes its claim. An untracked run (a stale
+    // row on the thread, no routes, a claim that kept failing) runs exactly as
+    // before — the write-through warned once.
+    if (deps.runLedger) {
+      const opened = await deps.runLedger.open({
+        runId: run.id,
+        threadKey: msg.threadKey,
+        startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? Date.now(),
+        meta: {
+          agent: agent.name,
+          model: resolved.modelRef,
+          channelId: msg.channelId,
+          userId: msg.userId,
+          threadKey: msg.threadKey,
+          channelVisibility,
+          ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+          ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+          ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+          ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+          ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
+          ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
+          ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
+          readonly: agent.toolset === "readonly",
+          selection: resident === true ? "resident" : "sandbox",
+          ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
+        },
+        card: card.handle ?? null,
+        system,
+        tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools).map(
+          ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
+        ),
+        seed: messages,
+        // A stop asked of another container (`/runs/stop` there) reaches this
+        // run through its heartbeat and is honored like a local one.
+        onStop: (mode) => void run.control.requestStop(mode),
+      });
+      if (opened) {
+        ledgerRun = opened;
+        // Every event published so far (the request, run_meta, context) and
+        // every one to come, in `seq` order, through the batched flusher.
+        registry.subscribe(run.id, run.token, (event, seq) => opened.event(event, seq));
+      }
+    }
     // The card body is the agent's own checklist (via the update_status tool)
     // plus a live one-line activity trace (current tool call + redacted result
     // summary) so the card reflects progress per tool event, not only on the
@@ -1067,10 +1136,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // The registry backlog is the run's ONE event store (#157 KTD9): the live
     // page, the post-run friction diagnosis and the run record all read it back
     // via `registry.snapshot` — there is no second copy to drift from it.
+    let recordedPushedBranch: string | undefined;
     const onEvent = (e: RunEvent) => {
       registry.publish(run.id, e); // feed the external live-view stream
       if (e.type === "tool_call") toolCalls++;
-      if (isCodingPrRun) pushes.observe(e);
+      if (isCodingPrRun) {
+        pushes.observe(e);
+        const pushedBranch = pushes.branch();
+        if (pushedBranch !== undefined && pushedBranch !== recordedPushedBranch) {
+          recordedPushedBranch = pushedBranch;
+          ledgerRun?.setState({ pushedBranch });
+        }
+      }
       inFlightTool = inFlightToolAfter(inFlightTool, e);
       lastActivityAt = Date.now();
       lastActivity = activityLine(e);
@@ -1095,6 +1172,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // it wraps up would blank it (seen live 2026-08-30 on a review card).
       if (!trimmed) return;
       checklist = trimmed;
+      ledgerRun?.setState({ checklist: trimmed });
       card.update(currentFrame());
     };
     // Heartbeat: the card ticks every 5s no matter what. A ticking timer means
@@ -1137,6 +1215,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     let verdict: ReviewVerdict | undefined;
     const onVerdict = (v: ReviewVerdict) => {
       verdict = v;
+      ledgerRun?.setState({ verdict: v });
     };
     // Coding PR description, set only through the structured
     // submit_pr_description tool (the last valid call wins — a resubmit after
@@ -1146,6 +1225,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     let prDescription: PrDescription | undefined;
     const onPrDescription = (d: PrDescription) => {
       prDescription = d;
+      ledgerRun?.setState({ prDescription: d });
     };
     // The commit actually checked out in the run's workspace when the model
     // finished — read by us, not reported by the model — for the reviewed-head
@@ -1219,6 +1299,8 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         onEvent,
         control: run.control, // operator stop from /runs (#101)
         inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
+        // The step record before each step's tools (run-history item 35).
+        ...(ledgerRun ? { onStep: ledgerRun.step.bind(ledgerRun) } : {}),
       });
       // Reviewed-head settle (features/agent-review.md items 8 + 12,
       // settleReviewedHead in reviewRound.ts): for a PR review, read the
@@ -1444,6 +1526,11 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // unchunkable line) must still give the pool user back, or it is held
     // until the hourly sweep — the toil 16a exists to avoid.
     try {
+      // `live → finishing` on the ledger BEFORE anything reaches the thread
+      // (item 35): the double-answer protection once runs resume — a
+      // generation that lost the run is refused here and must not reply.
+      // Phase 2 records the refusal; the resume phase acts on it.
+      await ledgerRun?.finishing();
       await card.done({
         title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"),
         detail: stopped ? finalDetail() : checkedOffDetail(),
@@ -1574,6 +1661,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         }
       }
     }
+    // The ledger heartbeat stops with the run (the finish write, in flight
+    // through the writer, closes the row itself).
+    void ledgerRun?.close();
     activeRuns--;
   }
 }
@@ -1715,6 +1805,39 @@ async function runShipBranch(
         }),
         { provisional: true },
       );
+    }
+  }
+  // The ledger claim (run-history item 35) for the live index and the finish.
+  // A pipeline has no single model loop of its own — each child round runs
+  // `runAgent` with its own prompt and conversation — so it is claimed without
+  // a seed or step records and closes `interrupted` at a reclaim; resuming a
+  // pipeline mid-round is not built.
+  let ledgerRun: LedgerRun | undefined;
+  if (deps.runLedger) {
+    ledgerRun = await deps.runLedger.open({
+      runId: run.id,
+      threadKey: msg.threadKey,
+      startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? Date.now(),
+      meta: {
+        agent: agent.name,
+        model: ctx.modelRef,
+        channelId: msg.channelId,
+        userId: msg.userId,
+        threadKey: msg.threadKey,
+        channelVisibility,
+        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+        ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+        ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+        ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
+      },
+      card: card.handle ?? null,
+      system: "",
+      tools: [],
+      onStop: (mode) => void run.control.requestStop(mode),
+    });
+    if (ledgerRun) {
+      const opened = ledgerRun;
+      registry.subscribe(run.id, run.token, (event, seq) => opened.event(event, seq));
     }
   }
 
@@ -1873,6 +1996,9 @@ async function runShipBranch(
           ? outcome.status
           : "completed";
     registry.finish(run.id, status);
+    // With a writer the finish write (below, through the ledger sink) closes
+    // the ledger row; without one the heartbeat must stop here.
+    if (!deps.runHistoryWriter) void ledgerRun?.close();
     const snap = deps.frictionLedger || deps.runHistoryWriter ? registry.snapshot(run.id, run.token) : null;
     const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
     const finishedAt = snap?.finishedAt ?? Date.now();
@@ -1912,6 +2038,7 @@ async function runShipBranch(
             status: failedAfterReply && status === "completed" ? "failed" : status,
             diagnosis,
           }),
+          ledgerRun ? { via: ledgerRun.sink } : undefined,
         );
       // A throw skips the post-reply write below — persist the failed record
       // now; the happy path writes after the reply, like the main path.
@@ -1934,6 +2061,7 @@ async function runShipBranch(
           ? "✅"
           : "⚠️";
   try {
+    await ledgerRun?.finishing(); // before anything reaches the thread (item 35)
     await card.done({
       title: title(icon),
       detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(),

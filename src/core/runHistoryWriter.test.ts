@@ -141,6 +141,29 @@ describe("createRunHistoryWriter", () => {
     expect(h.writer.degraded()).toBe(false);
   });
 
+  it("`via` routes one record to another sink with the same retries and accounting; the store never sees it, and the next write uses the store again", async () => {
+    const h = harness([OK]);
+    const viaPuts: RunRecord[] = [];
+    let fails = 1;
+    const via = {
+      put: async (r: RunRecord) => {
+        viaPuts.push(r);
+        if (fails-- > 0) throw new TransientStoreError("HTTP 503");
+      },
+    };
+    h.writer.write(record("run-l"), { via });
+    expect(h.writer.pending()).toBe(1);
+    await h.writer.settled();
+    expect(viaPuts.map((r) => r.id)).toEqual(["run-l", "run-l"]); // retried through the same sink
+    expect(h.sleeps).toHaveLength(1);
+    expect(h.puts).toEqual([]);
+    expect(h.persisted).toEqual(["run-l"]);
+    h.writer.write(record("run-s"));
+    await h.writer.settled();
+    expect(h.puts.map((r) => r.id)).toEqual(["run-s"]);
+    expect(viaPuts).toHaveLength(2);
+  });
+
   it("a PermanentStoreError (413) is never retried: one put, one warn, failures +1, no sleep", async () => {
     const h = harness([new PermanentStoreError("run store /runs/put HTTP 413"), OK]);
     h.writer.write(record("run-big"));

@@ -40,6 +40,8 @@ import { selectFrictionLedger } from "./core/frictionLedger.js";
 import { buildRunStore, FileRunStore, retentionPolicyOf } from "./core/runStore.js";
 import { createRunsService } from "./core/runsService.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
+import { buildRunLedger } from "./core/runLedgerWorker.js";
+import { createLedgerWriteThrough, mintGeneration } from "./core/runLedger/writeThrough.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
@@ -170,6 +172,27 @@ async function main() {
       ? `[run-history] store: ${runStore instanceof FileRunStore ? "host-disk file (data/runs)" : `durable Worker (${runHistoryCfg?.worker?.baseUrl})`}`
       : "[run-history] off (no runHistory config) — runs are live-only",
   );
+  // The run ledger's write-through (features/run-history.md item 35): this
+  // process's generation — its fencing token on every ledger write — is minted
+  // once here, and every run is mirrored onto the state Worker's ledger (claim,
+  // seed, steps, events, state, finishing, finish) so the next generation can
+  // pick it up. Worker-backed history only: a file store has no ledger.
+  const generation = mintGeneration();
+  const ledgerClient = buildRunLedger(runHistoryCfg, process.env);
+  const runLedger =
+    ledgerClient && runStore
+      ? createLedgerWriteThrough({
+          ledger: ledgerClient,
+          gen: generation,
+          fallback: runStore,
+          warn: (m) => console.warn(m),
+        })
+      : undefined;
+  console.log(
+    runLedger
+      ? `[ledger] generation ${generation}: runs are mirrored onto the ledger (${runHistoryCfg?.worker?.baseUrl})`
+      : `[ledger] generation ${generation}: write-through off (${runStore ? "host-disk history has no ledger" : "history off"})`,
+  );
   const frictionLedger = selectFrictionLedger(runStore, legacyFrictionLedger);
   console.log(
     `[friction] ledger: ${runStore ? "run store (legacy rows unioned); legacy write: " : ""}${legacyFrictionLedger instanceof WorkerFrictionLedger ? `durable (${selfImprovement?.worker?.baseUrl})` : "host-disk file"}; ` +
@@ -210,6 +233,7 @@ async function main() {
     memory,
     frictionLedger,
     runHistoryWriter,
+    ...(runLedger ? { runLedger } : {}),
   };
   // --- command registry (#157 U6/U7/U9): the ONE core catalogue (`buildCoreCommands`,
   // shared with src/cli.ts), bound ONCE; every adapter
@@ -533,6 +557,7 @@ async function main() {
               catchUp: getCatchUpStatus(),
               slack: getSocketStatus(),
               build,
+              ...(runLedger ? { generation } : {}),
               startedAt: PROCESS_STARTED_AT,
               httpListeningAt,
               process: sampleProcessMetrics(),

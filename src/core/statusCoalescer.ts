@@ -43,6 +43,7 @@ export function coalesceStatus(
   };
 
   return {
+    ...(inner.handle ? { handle: inner.handle } : {}),
     update(frame) {
       if (closed) return;
       pending = frame;

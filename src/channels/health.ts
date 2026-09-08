@@ -71,6 +71,11 @@ export interface HealthState {
   slack?: SlackSocketStatus;
   /** The running build (`readBuildInfo`), when the entrypoint knows it. */
   build?: BuildInfo;
+  /** The run ledger generation this process writes under (its fencing token,
+   *  `mintGeneration` at boot; features/run-history.md item 35) — the id the
+   *  ledger's live rows name as `ownerGen`, so a row can be matched to the
+   *  container that holds it. Absent when the ledger is off. */
+  generation?: string;
   /** Epoch ms of the process start. `deploy restart` (no image build, same
    *  `build.commit`) tells the restarted container from the old one by this. */
   startedAt?: number;
@@ -107,6 +112,8 @@ export interface HealthPayload {
    *  passes `readBuildInfo(...)`, so on the live `/healthz` it is unconditionally
    *  present (`commit: "unknown"` for an image built without `build.json`). */
   build?: BuildInfo;
+  /** The run ledger generation (present when the ledger is on). */
+  generation?: string;
   /** ISO process start; present whenever `HealthState.startedAt` is given (always on the live `/healthz`). */
   startedAt?: string;
   /** ISO instant the HTTP server began accepting; compare with `slack.since`
@@ -143,6 +150,7 @@ export function healthPayload(state: HealthState): HealthPayload {
       commit: state.build.commit,
       ...(state.build.builtAt !== undefined ? { builtAt: state.build.builtAt } : {}),
     };
+  if (state.generation !== undefined) payload.generation = state.generation;
   if (state.startedAt !== undefined) payload.startedAt = new Date(state.startedAt).toISOString();
   if (state.httpListeningAt !== undefined) payload.httpListeningAt = new Date(state.httpListeningAt).toISOString();
   if (state.process) payload.process = { ...state.process };
