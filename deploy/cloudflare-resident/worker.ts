@@ -186,6 +186,12 @@ import { createTracer } from "../../src/core/trace/tracer.js";
 import { startAdoptedRoot, workerLogSink } from "../../src/core/trace/workerTrace.js";
 import { backupTransferMode } from "../../src/execution/residentBackupTransfer.js";
 import {
+  extractRestoreScript,
+  restoreMountDir,
+  unmountAllRestoresScript,
+  unmountRestoreScript,
+} from "../../src/execution/residentRestoreExtract.js";
+import {
   CHECKOUT_SNAPSHOT_EXCLUDES,
   DEPS_BACKUP_KEY_PREFIX,
   DEPS_BACKUP_TTL_S,
@@ -1287,6 +1293,47 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
+  /** Restore a backup INTO `targetDir` as a plain directory on the resident's
+   *  disk (item 61, #614). In presigned mode the SDK's restore MOUNTS the
+   *  archive (squashfuse + fuse-overlayfs) at the handle's `dir` instead of
+   *  extracting it, which broke every step that treats the mirror, checkout
+   *  or a store entry as a directory on one ext4 filesystem (live 2026-09-08:
+   *  `rm -rf` → Device or resource busy, `chown -R` → a full copy-up, `du -x`
+   *  → ~1 MiB, hardlinks and renames across devices). So the handle is
+   *  re-pointed at a staging mount beside the target, judged by bytes arriving
+   *  like every restore, then `extractRestoreScript` puts a real tree in place
+   *  — `unsquashfs` from the downloaded archive, or `cp -a` out of the mount —
+   *  unmounts, and renames it in LAST. A failure leaves no half target and no
+   *  mount behind. */
+  private async restoreExtracted(
+    backup: DirectoryBackup,
+    targetDir: string,
+    what: string,
+    step: string,
+    deadlineMs: number,
+  ): Promise<void> {
+    const attempt = crypto.randomUUID().slice(0, 8);
+    const mountDir = restoreMountDir(targetDir, attempt);
+    try {
+      await this.restoreWithProgress({ ...backup, dir: mountDir }, what, deadlineMs);
+      const t0 = systemClock();
+      const r = await this.runOk(
+        ["sh", "-c", extractRestoreScript({ mountDir, archivePath: restoreArchivePath(backup.id), targetDir })],
+        `${step}-extract`,
+        { timeoutMs: Math.max(60_000, deadlineMs - systemClock()) },
+      );
+      console.log(`${what}: ${r.trim() || "extracted"} in ${Math.round((systemClock() - t0) / 1000)} s`);
+    } catch (err) {
+      // Neither the staging mount nor a partial extraction may outlive the
+      // attempt: a later clean would hit "Device or resource busy" on the
+      // mount, and a half-extracted tree is multi-GiB debris on a
+      // disk-budgeted resident. Best effort — the clean steps sweep both too.
+      await this.run(["sh", "-c", unmountRestoreScript(mountDir)]).catch(() => {});
+      await this.run(["rm", "-rf", `${targetDir}.extract-${attempt}`]).catch(() => {});
+      throw err;
+    }
+  }
+
   /** Where a running restore's bytes actually land, in KiB: the SDK downloads
    *  the whole archive to `/var/backups/<backupId>.sqsh` FIRST and only then
    *  extracts it into the target directory (`downloadBackupParallel` →
@@ -1809,6 +1856,7 @@ export class ResidentDO extends Sandbox<Env> {
           throw new StepError("await-restores", errMsg(err));
         });
       }
+      await this.runOk(["sh", "-c", unmountAllRestoresScript()], "unmount-restores");
       await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-workspace");
       await this.ensureGitSetup();
       await this.withMirrorLock(() =>
@@ -2003,6 +2051,10 @@ export class ResidentDO extends Sandbox<Env> {
         );
       }
     }
+    // A previous incarnation's restore may still be MOUNTED at these paths
+    // (item 61: the SDK's presigned restore mounts) — `rm -rf` on a mount
+    // point is "Device or resource busy". Unmount first, every time.
+    await this.runOk(["sh", "-c", unmountAllRestoresScript()], "unmount-restores");
     await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-before-restore");
     try {
       // The restore pair IS the cold-wake critical path. Sequential on purpose:
@@ -2012,8 +2064,8 @@ export class ResidentDO extends Sandbox<Env> {
       // a fixed budget: a slow transfer waits, a stalled one goes down with
       // the bytes and the idle span named instead of stranding `restoring` for
       // the watchdog.
-      await this.restoreWithProgress(snap.mirror, "mirror restore", deadlineMs);
-      await this.restoreWithProgress(snap.checkout, "checkout restore", deadlineMs);
+      await this.restoreExtracted(snap.mirror, MIRROR_DIR, "mirror restore", "mirror-restore", deadlineMs);
+      await this.restoreExtracted(snap.checkout, CHECKOUT_DIR, "checkout restore", "checkout-restore", deadlineMs);
     } catch (err) {
       // A stalled or capped restore is STILL STREAMING (the SDK call cannot be
       // cancelled); `pendingRestores` keeps the next hydrate off its directory,
@@ -3760,9 +3812,12 @@ export class ResidentDO extends Sandbox<Env> {
     try {
       await this.ensureDepsStoreDir();
       console.log(`deps: restoring ${key.slice(0, 8)} from backup ${record.backup.id.slice(0, 8)} into ${scratch}`);
-      await this.restoreWithProgress(
-        { ...record.backup, dir: `${scratch}/node_modules` },
+      await this.runOk(["mkdir", "-p", scratch], "deps-restore-scratch");
+      await this.restoreExtracted(
+        record.backup,
+        `${scratch}/node_modules`,
         `deps restore ${key.slice(0, 8)}`,
+        "deps-restore",
         deadlineMs,
       );
       await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, scratch], "deps-restore-chown");
