@@ -1,16 +1,11 @@
 # Lines the public-hygiene ratchet leaves alone, one per line: <path><TAB><the line, trimmed>.
 # Each entry is a line that matches a forbidden class but is right as written — the English word
 # "nominal", a CSS colour that looks like an issue number, an integration's own identifier. Say why
-# in a comment above the entry. A stale entry (the line no longer exists) fails `npm run hygiene:check`.
+# in a comment above the entry. An entry is stale — and fails `npm run hygiene:check` — when its line is gone or no
+# longer matches any class.
 
 # The spec names the plan vocabulary it forbids.
 docs/reference/specs/public-hygiene.md	A repository that grew inside one company is full of that company: its name in URLs and workflow files, its people in comments, its private issue numbers as provenance, its planning vocabulary (`KTD16`, `U3`) in docstrings, its Slack and account ids in fixtures, and dated retellings of incidents where a timeless rule should stand. None of it helps a reader who is not that company, and some of it is a leak. The policy is that every comment, docstring, fixture and prose line in the public tree is answerable from the repo alone; the mechanism is a check, because a policy held by discipline lasts one busy week.
-
-# The spec lists the class patterns by example.
-docs/reference/specs/public-hygiene.md	1. **Five classes, one regex each, tested per line.** `names` (the company, its sibling products, people, the private Slack channel, vault paths — case-insensitive), `trackers` (`#NNN` issue references and the private org's GitHub URLs; a line anchor, an HTML entity, a heading or a hex colour is not a tracker), `planIds` (`KTD…`, `KD…`, `OQ…`, and the bare `U1`–`U9` / `R1`–`R99` markers; a Slack user id and Cloudflare's `R2` are not), `ids` (Slack channel/user/DM ids and 32-hex account ids), `dates` (a full ISO date). A line can hit several classes; each is counted.
-
-# The spec names "nominal" as the canonical allowed English word.
-docs/reference/specs/public-hygiene.md	4. **A legitimate line is allowed by name.** `scripts/public-hygiene.allow` holds `path<TAB>trimmed line` entries with a comment saying why (the English word "nominal", a colour that looks like an issue number, an integration's own identifier). An allowed line is skipped whole. An entry whose line no longer exists is stale and fails the check, so the file cannot rot.
 
 # The spec's red step quotes the forbidden form it plants.
 docs/reference/specs/public-hygiene.md	| The tree equals the committed list and no allow entry is stale (item 3) | `[agent]` `npm run hygiene:check` → `public-hygiene ok — N file(s), M hit(s) still listed, K line(s) allowed`, exit 0. Red step: add `// see #123` to any source file and re-run — it must name the file, the class, `0 → 1`, and exit 1. |
@@ -37,16 +32,6 @@ web/src/pages/scheduled.test.ts	expect(w.find(".trace").attributes("title")).toB
 # project.json's docs URL; changes with D4.
 docs/README.md	You can read this tree here on GitHub or as a site — [docs.switchboard.coreplanelabs.dev](https://docs.switchboard.coreplanelabs.dev), also reachable at `/docs` on the dashboard and from the docs icon in its header. Same markdown, same links: the site is compiled from these files on every push, with search, diagrams, and dark mode.
 
-# `op://` is 1Password's own reference scheme — the shape the `configSource` / `secretsSource` integration speaks — not one of our vault paths.
-docs/decisions/0001-seams-with-two-implementations.md	| Config source | path, `github://`, `op://` |
-docs/how-to/deploy-and-rotate-a-secret.md	# the value comes from the profile's secretsSource (~/.secrets/switchboard/<NAME> by default, or op://Vault/Item)
-docs/how-to/operate-production.md	`configSource` is where the bot's config comes from: a path (the default), `github://owner/repo/path@ref` read with `CONFIG_REPO_TOKEN`, or `op://Vault/Item/field` read with the 1Password CLI and `OP_SERVICE_ACCOUNT_TOKEN`. The image carries no config. `deploy all` reads and validates the config before any Worker deploys and, right before the bot step, pushes it as the `base` document on the state Worker (with `MEMORY_TOKEN`); the bot's container reads that document when it starts (`SWITCHBOARD_CONFIG=state://base`). A config change without a release is `npm run cli -- deploy config` (the profile's source, or `--source <path|github://…|op://…>`) followed by `npm run cli -- deploy restart` — the running container keeps the config it started with, exactly as it keeps its secrets. An unreadable source, a config that does not validate, or a missing `MEMORY_TOKEN` refuses before anything changes.
-docs/how-to/operate-production.md	`secretsSource` is where `deploy secrets <worker>` (`npm run secrets` in each Worker's directory) reads the values of the secrets `deploy/secrets.manifest.json` lists for that Worker: a directory of `<NAME>` files (`~/.secrets/switchboard` when the profile names none) or a 1Password item, `op://Vault/Item`, with one field per secret name (needs `OP_SERVICE_ACCOUNT_TOKEN` or an `op signin` session). The command asks the source once which names it holds and refuses before any upload when a required one is absent; each value goes to `wrangler secret put` on stdin and is never printed. A shared bearer must be put on every Worker the manifest lists for it, and a bot secret is live only after `deploy restart`.
-
-# Generated from the command registry by `docs:gen`: the `deploy secrets` and `env bootstrap` descriptions name 1Password as the integration they speak to, not a vault path.
-docs/reference/cli.md	| `deploy secrets <memory\|bot\|resident\|sandbox> [--only <string>]` | Put a Worker's secrets from the deployment profile's secretsSource (a directory of &lt;NAME&gt; files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into `wrangler secret put`; none is ever printed. | CLI only |
-docs/reference/cli.md	| `env bootstrap --env <string> --service <string> [--apply] [--out <string>] [--manifest <string>]` | Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply). | CLI only |
-
 # `#111` is a CSS colour in a mermaid style line.
 docs/explanation/how-switchboard-improves-itself.md	style HUMAN fill:#fde68a,stroke:#b45309,color:#111
 
@@ -63,24 +48,6 @@ docs/reference/authorization.md	slack:U0123ADMIN:                 # an admin, sp
 src/core/selfDescription.ts	export const SWITCHBOARD_REPO = "coreplanelabs/switchboard";
 src/core/docsLink.ts	export const PROJECT_DOCS_URL = "https://docs.switchboard.coreplanelabs.dev";
 src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Source of truth: the code lives in the GitHub repo coreplanelabs/switchboard — README.md (architecture + agents), AGENTS.md (invariants + map), and one behavioral spec per feature under docs/reference/specs/*.md (e.g. docs/reference/specs/resident-repos.md, docs/reference/specs/routing-and-config.md, docs/reference/specs/github-tools.md). For a question about how Switchboard works beyond this block, read those files with the GitHub tools when you have them (github_tree / github_file on coreplanelabs/switchboard) — they are private, so a public-web fetch 404s; if you have no GitHub tools, answer from this block and point at that path. Never describe yourself as stateless, tool-less by design, or unable to know your own workings."
-
-# op:// is 1Password's own secret-reference scheme: `deploy secrets`, `deploy init` and `env bootstrap` resolve these through `op read`, so the scheme and the product name are the integration's, not an imprint.
-src/core/commands/deploy.ts	"read the config from this source instead of the profile's configSource (a path, github://owner/repo/path@ref, or op://Vault/Item/field)",
-src/core/commands/deploy.ts	"Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into `wrangler secret put`; none is ever printed.",
-src/core/commands/deploy.test.ts	it("reads an op:// source from the profile; the memory Worker gets only its own secret", async () => {
-src/core/commands/deploy.test.ts	profile: { ...TEST_PROFILE, secretsSource: "op://Prod/Switchboard secrets" },
-src/core/commands/deploy.test.ts	source: "op://Prod/Switchboard secrets/<NAME>",
-src/core/commands/env.ts	// env vars into the agent's execution environment from 1Password — the former
-src/core/commands/env.ts	// only: names + op:// refs, nothing read, nothing written); `--apply` resolves
-src/core/commands/env.ts	"Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).",
-src/core/commands/env.test.ts	log("  DATABASE_URL <- op://uat/db/url");
-src/core/commands/env.test.ts	ref: "op://uat/db/url",
-src/core/commands/env.test.ts	entries: [{ name: "DATABASE_URL", ref: "op://uat/db/url" }],
-src/core/commands/env.test.ts	lines: ["PLAN (apply) env=uat service=api", "  DATABASE_URL <- op://uat/db/url"],
-src/core/commands/env.test.ts	"PLAN (apply) env=uat service=api\n  DATABASE_URL <- op://uat/db/url",
-src/core/testing/conformanceFixture.ts	ref: "op://vault/item/field",
-src/core/__snapshots__/capabilitySurfaces.test.ts.snap	deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
-src/core/__snapshots__/capabilitySurfaces.test.ts.snap	env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply)."
 
 # Synthetic Slack ids of the real shape: mention-rendering and directive-position tests need a valid <@U…>/<#C…|name> token.
 src/core/dispatcher.test.ts	composeRunLabel({ ...base, repo: "o/r", text: "<@U0AAAAAAAAA> review this. Sent using <@U0BBBBBBBBB|Claude>" }),
@@ -109,17 +76,14 @@ src/core/commands/schedule.test.ts	"• `resident-watchdog` — `*/10 * * * *` �
 src/core/commands/schedule.test.ts	expect(text).toContain("last 2026-08-30 11:00 UTC → completed (run run-abcd)");
 
 # Our production deployment: the release and docs workflows read this installation's profile from our infrastructure repository with our GitHub App, whose credentials the 1Password action loads; one line each to change for another operator.
-.github/workflows/ci.yml	uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
 .github/workflows/ci.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/ci.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
 .github/workflows/ci.yml	owner: coreplanelabs
 .github/workflows/ci.yml	SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
-.github/workflows/deploy-production.yml	uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
 .github/workflows/deploy-production.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/deploy-production.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
 .github/workflows/deploy-production.yml	owner: coreplanelabs
 .github/workflows/deploy-production.yml	SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
-.github/workflows/release-please.yml	uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
 .github/workflows/release-please.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/release-please.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
 .github/workflows/release-please.yml	owner: coreplanelabs
@@ -131,11 +95,6 @@ src/core/commands/schedule.test.ts	expect(text).toContain("last 2026-08-30 11:00
 
 # The review App this installation runs as, matched by login and immutable id; another operator swaps in their App's.
 .github/workflows/auto-approve-claude-lgtm.yml	(github.event.review.user.login == 'coreplane-switchboard[bot]' && github.event.review.user.id == 318072483)
-
-# The agent-env manifest's reference syntax and its two placeholder entries: op:// is the secrets manager's own reference form, which src/agentEnv/bootstrap.ts parses.
-deploy/agent-env.jsonc	// op://<vault>/<item>/<field>. The tool reads these refs with a READ-ONLY
-deploy/agent-env.jsonc	"DATABASE_URL": "op://REPLACE-ME-UAT-VAULT/example-service-uat/database-url",
-deploy/agent-env.jsonc	"SERVICE_BASE_URL": "op://REPLACE-ME-UAT-VAULT/example-service-uat/base-url"
 
 # The project's own home, docs URL, contact address and steward — the facts in project.json, which check:project-facts holds equal everywhere.
 package.json	"homepage": "https://github.com/coreplanelabs/switchboard#readme",
@@ -159,48 +118,6 @@ deploy/cloudflare/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
 
 # The example profile's placeholder account id: src/deploy/profile.ts requires exactly 32 hex characters, so the placeholder keeps the shape.
 deploy/profile.example.json	"account": "00000000000000000000000000000000",
-
-# The profile and the secrets manifest document the op://Vault/Item source form that src/deploy/configSource.ts and src/deploy/secrets.ts parse.
-deploy/profile.example.json	"$comment": "The deployment profile: where THIS installation runs. Copy to deploy/profile.json and fill it in (or run `switchboard deploy init`). The account is your Cloudflare account id; every hostname must be under `zone`, a zone in that account; `workers.bot` is the one required Worker — leave `memory`, `resident`, `sandbox` or `docs` out and `deploy plan` has no step for them (a bot-only profile is a one-step plan; without `memory` the config is not pushed anywhere); `configSource` is where `deploy all` reads the bot's runtime config from before building the image — a path, `github://owner/repo/path@ref` (needs CONFIG_REPO_TOKEN), or `op://Vault/Item/field` (needs OP_SERVICE_ACCOUNT_TOKEN); `secretsSource` is where `secrets put` reads values from — a directory of <NAME> files (the default when absent) or `op://Vault/Item`. `deploy plan` reads this example when no profile exists; `deploy all` refuses it.",
-deploy/secrets.manifest.json	"$comment": "Every Cloudflare Worker secret Switchboard provisions: its name and which Worker(s) hold it. This file is the contract — src/core/secretsManifest.test.ts keeps it equal to each worker.ts `Env` interface and to the bot container's forwarding list. WHERE the values live is the deployment profile's `secretsSource` (a directory of <NAME> files, `~/.secrets/switchboard` by default, or a 1Password item `op://Vault/Item` with one field per name); `deploy secrets <worker>` (`npm run secrets` in each deploy/cloudflare*/) puts them, refusing before any upload when a required value is absent. A shared bearer must carry ONE value on every Worker listed for it. Rotation: new value at the source, `deploy secrets` on EVERY listed Worker, then `deploy restart` for the bot (its running container keeps the env it started with). Public config (URLs, ids of no consequence) is a wrangler.jsonc var, not a secret.",
-# 1Password is a supported optional config/secrets source (the `op` CLI); `op://` is the integration's own scheme and the vault names here are neutral.
-src/deploy/configSource.test.ts	// a GitHub repository, or a 1Password field — one seam, every failure a
-src/deploy/configSource.test.ts	["op://Acme/Switchboard config/notesPlain", { kind: "op", ref: "op://Acme/Switchboard config/notesPlain" }],
-src/deploy/configSource.test.ts	expect(parseConfigSource("op://Vault/Item")).toMatchObject({ ok: false });
-src/deploy/configSource.test.ts	const src = { kind: "op", ref: "op://Acme/Switchboard/config" } as const;
-src/deploy/configSource.test.ts	).toEqual({ ok: true, text: "providers: {}\n", how: "config from op://Acme/Switchboard/config" });
-src/deploy/configSource.ts	// 1Password item field (read with the `op` CLI and a service-account token).
-src/deploy/configSource.ts	if (value.startsWith("op://")) {
-src/deploy/configSource.ts	// op://<vault>/<item>/<field> — three segments at least; `op read` does the rest.
-src/deploy/configSource.ts	return { ok: false, problem: `configSource "${value}" — expected op://Vault/Item/field` };
-src/deploy/configSource.ts	return { ok: false, problem: `configSource "${value}" — unknown scheme; use a path, github://, or op://` };
-src/deploy/configSource.ts	if (!r) return { ok: false, problem: `configSource ${source.ref}: the 1Password CLI (op) is not installed` };
-src/deploy/loadProfile.test.ts	// `op://` forms `configSource` takes, read through the same loaders (a
-src/deploy/profile.test.ts	expect(parseProfile({ ...TEST_PROFILE, secretsSource: "op://Vault/Switchboard" }).ok).toBe(true);
-src/deploy/profile.ts	/** `path` | `github://owner/repo/path@ref` | `op://Vault/Item/field` — parsed by src/deploy/configSource.ts. */
-src/deploy/profile.ts	*  `op://Vault/Item` with the secret's name as the field. Optional: the
-src/deploy/run.ts	* or the same `github://owner/repo/path@ref` / `op://Vault/Item/field` forms
-src/deploy/secrets.test.ts	expect(parseSecretsSource("op://Acme/Switchboard secrets")).toEqual({
-src/deploy/secrets.test.ts	"op://Acme/Switchboard secrets/MEMORY_TOKEN",
-src/deploy/secrets.test.ts	expect(parseSecretsSource("op://Acme/Item/FIELD")).toMatchObject({
-src/deploy/secrets.test.ts	problem: expect.stringContaining("expected op://Vault/Item"),
-src/deploy/secrets.test.ts	expect(parseSecretsSource("op://Acme")).toMatchObject({ ok: false });
-src/deploy/secrets.ts	// `secretsSource` — a directory of `<NAME>` files (the default) or a 1Password
-src/deploy/secrets.ts	// item (`op://Vault/Item`, the secret's name as the field). `deploy secrets
-src/deploy/secrets.ts	*  `op://Vault/Item` — exactly two segments; the secret's name is the field. */
-src/deploy/secrets.ts	if (s.startsWith("op://")) {
-src/deploy/secrets.ts	const segments = s.slice("op://".length).split("/").filter(Boolean);
-src/deploy/secrets.ts	if (segments.length !== 2 || s.slice("op://".length).split("/").length !== 2)
-src/deploy/secrets.ts	return { ok: false, problem: `secretsSource "${s}" — expected op://Vault/Item (the secret's name is the field)` };
-src/deploy/secrets.ts	return { ok: false, problem: `secretsSource "${s}" — unknown scheme; use a directory path or op://Vault/Item` };
-src/deploy/secrets.ts	return source.kind === "dir" ? `${source.path}/${name}` : `op://${source.vault}/${source.item}/${name}`;
-src/deploy/secretsHost.ts	// (files under a directory, or a 1Password item through the `op` CLI), and the
-src/deploy/secretsHost.ts	/** The 1Password item's field labels — one `op item get`, never a read per name. */
-src/deploy/secretsHost.ts	problem: `secretsSource op://${source.vault}/${source.item} needs OP_SERVICE_ACCOUNT_TOKEN (or an \`op signin\` session) in the environment`,
-src/deploy/secretsHost.ts	problem: `secretsSource op://${source.vault}/${source.item}: the 1Password CLI (op) is not installed`,
-src/deploy/secretsHost.ts	problem: `secretsSource op://${source.vault}/${source.item}: op item get exited ${r.code} — ${r.stderr.trim().split("\n").at(-1) ?? ""}`,
-src/deploy/secretsHost.ts	return { ok: false, problem: `secretsSource op://${source.vault}/${source.item}: op item get returned no JSON` };
-src/deploy/secretsHost.ts	const r = await spawnCollect("op", ["read", `op://${source.vault}/${source.item}/${name}`]);
 
 # The profile schema and the registry path require a 32-hex Cloudflare account id; these are the documented placeholder and synthetic test ids, not an account.
 src/deploy/profile.ts	export const EXAMPLE_ACCOUNT = "00000000000000000000000000000000";
@@ -241,53 +158,6 @@ src/channels/mcpConnectView.ts	`<style>body{font:15px system-ui,sans-serif;max-w
 # A W3C trace id is 32 hex characters by definition; this fixture is one.
 src/channels/scheduledPanel.test.ts	const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
 
-# 1Password is a supported optional config/secrets source (the `op` CLI); `op://` is the integration's own scheme and the vault names here are neutral.
-src/agentEnv/bootstrap.test.ts	DATABASE_URL: "op://Downstream UAT/billing/database-url",
-src/agentEnv/bootstrap.test.ts	STRIPE_API_KEY: "op://Downstream UAT/billing/stripe-key",
-src/agentEnv/bootstrap.test.ts	REDIS_URL: "op://Downstream UAT/checkout/redis-url",
-src/agentEnv/bootstrap.test.ts	it("preserves op:// (with its //) inside string values", () => {
-src/agentEnv/bootstrap.test.ts	const src = '{ "K": "op://Vault/Item/field" }';
-src/agentEnv/bootstrap.test.ts	expect(JSON.parse(stripJsonc(src))).toEqual({ K: "op://Vault/Item/field" });
-src/agentEnv/bootstrap.test.ts	it("strips line comments outside strings but not the op:// inside them", () => {
-src/agentEnv/bootstrap.test.ts	"DATABASE_URL": "op://V/billing/db" // trailing note
-src/agentEnv/bootstrap.test.ts	expect(JSON.parse(stripJsonc(src))).toEqual({ DATABASE_URL: "op://V/billing/db" });
-src/agentEnv/bootstrap.test.ts	/* block */ "A": "op://V/a/f",
-src/agentEnv/bootstrap.test.ts	"B": "op://V/b/f",
-src/agentEnv/bootstrap.test.ts	expect(JSON.parse(stripJsonc(src))).toEqual({ A: "op://V/a/f", B: "op://V/b/f" });
-src/agentEnv/bootstrap.test.ts	"uat": { "billing": { "DATABASE_URL": "op://V/i/f" } }
-src/agentEnv/bootstrap.test.ts	expect(m.uat.billing.DATABASE_URL).toBe("op://V/i/f");
-src/agentEnv/bootstrap.test.ts	expect(() => parseManifest('{ "uat": { "billing": "op://V/i/f" } }')).toThrow(/must be an object/);
-src/agentEnv/bootstrap.test.ts	expect(() => parseManifest('{ "uat": { "svc": { "BAD NAME": "op://v/i/f" } } }')).toThrow(
-src/agentEnv/bootstrap.test.ts	expect(() => parseManifest('{ "uat": { "svc": { "1BAD": "op://v/i/f" } } }')).toThrow(/not a valid env var name/);
-src/agentEnv/bootstrap.test.ts	expect(() => parseManifest('{ "uat": { "svc": { "X;rm": "op://v/i/f" } } }')).toThrow(/not a valid env var name/);
-src/agentEnv/bootstrap.test.ts	parseManifest('{ "uat": { "svc": { "API_TOKEN": "op://v/i/f", "_x": "op://v/i/f", "A1_B2": "op://v/i/f" } } }'),
-src/agentEnv/bootstrap.test.ts	expect(parseOpRef("op://My Vault/my-item/my-field")).toEqual({
-src/agentEnv/bootstrap.test.ts	expect(parseOpRef("op://V/item/section/field")).toEqual({ vault: "V", item: "item", field: "section/field" });
-src/agentEnv/bootstrap.test.ts	expect(() => parseOpRef("op://V/only-item")).toThrow(/malformed op:\/\//);
-src/agentEnv/bootstrap.test.ts	expect(() => buildPlan({ prod: { billing: { X: "op://V/i/f" } } }, { env: "prod", service: "billing" })).toThrow(
-src/agentEnv/bootstrap.test.ts	expect(text).toContain("op://Downstream UAT/billing/database-url");
-src/agentEnv/bootstrap.test.ts	expect(deps.reader.read).toHaveBeenCalledWith("op://Downstream UAT/billing/database-url");
-src/agentEnv/bootstrap.test.ts	expect(deps.reader.read).toHaveBeenCalledWith("op://Downstream UAT/billing/stripe-key");
-src/agentEnv/bootstrap.test.ts	expect(call.contents).toContain("VALUE::op://Downstream UAT/billing/database-url");
-src/agentEnv/bootstrap.test.ts	DATABASE_URL: "VALUE::op://Downstream UAT/billing/database-url",
-src/agentEnv/bootstrap.test.ts	STRIPE_API_KEY: "VALUE::op://Downstream UAT/billing/stripe-key",
-src/agentEnv/bootstrap.test.ts	const deps = mockDeps({ manifest: { prod: { billing: { X: "op://V/i/f" } } } });
-src/agentEnv/bootstrap.test.ts	expect(map).toEqual({ REDIS_URL: "V::op://Downstream UAT/checkout/redis-url" });
-src/agentEnv/bootstrap.test.ts	manifest: { prod: { checkout: { X: "op://V/i/f" } } },
-src/agentEnv/bootstrap.ts	throw new Error('agent-env manifest must be a JSON object of { <env>: { <service>: { <NAME>: "op://…" } } }');
-src/agentEnv/bootstrap.ts	throw new Error(`agent-env manifest: ${env}.${service} must be an object of NAME -> op:// ref`);
-src/agentEnv/bootstrap.ts	throw new Error(`agent-env manifest: ${env}.${service}.${name} must be a string op:// ref`);
-src/agentEnv/bootstrap.ts	/** Parse and validate a secret reference `op://<vault>/<item>/<field>`
-src/agentEnv/bootstrap.ts	if (!ref.startsWith("op://")) {
-src/agentEnv/bootstrap.ts	throw new Error(`not a 1Password reference (must start with op://): "${ref}"`);
-src/agentEnv/bootstrap.ts	const parts = ref.slice("op://".length).split("/");
-src/agentEnv/bootstrap.ts	throw new Error(`malformed op:// reference, expected op://<vault>/<item>/<field>: "${ref}"`);
-src/agentEnv/bootstrap.ts	`UAT-vault-scoped 1Password service account — this allowlist is defense in depth.`,
-src/agentEnv/bootstrap.ts	lines.push(`  ${e.name}  <-  op://${e.vault}/${e.item}/${e.field}`);
-src/agentEnv/bootstrap.ts	lines.push("DRY RUN — nothing read from 1Password, nothing written. Re-run with --apply to materialize these.");
-src/agentEnv/bootstrap.ts	`# Resolved from 1Password (read-only, ${meta.env}-scoped service account). chmod 600.`,
-src/agentEnv/bootstrap.ts	"OP_SERVICE_ACCOUNT_TOKEN is not set. Export a READ-ONLY, UAT-vault-scoped 1Password " +
-
 # The `deploy plan` snapshot prints the documented placeholder account id, not an account.
 src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Checks: wrangler account = 00000000000000000000000000000000; clean tree; HEAD == origin/main; node_modules present in every dir
 
@@ -297,17 +167,8 @@ src/load/history.test.ts	expect(perDay).toEqual({ "2026-09-04": 2, "2026-09-07":
 # The English word "nominal": a jittered delay's pre-jitter value.
 docs/reference/specs/run-history.md	17. **Retry policy.** `createRunHistoryWriter({ store, warn, onPersisted?, sleep?, random? })` retries twice with jittered backoff (nominal 1 s then 4 s, each ±50%) on a `TransientStoreError` (network, timeout, 408/429/5xx) or any unclassified error; never on a `PermanentStoreError` (4xx such as 413, malformed response — one warn, `failures() + 1`); a `RouteMissingError` (404 — the deployed Worker predates the run-history routes) logs `[run-history] state Worker has no /runs/put — deploy the state Worker with run-history routes before this bot version` ONCE per process, sets `degraded()`, never retries, and counts every loss. Retries exhausted → one warn naming the run id and attempt count, `failures() + 1`. On success `onPersisted(id)` runs (exception-isolated) — the dispatcher wires it to `registry.markPersisted`, which sets `persisted: true` on the run's `RunSummary` (the key is absent until then) and emits one index `upsert`; a no-op for an unknown or already-evicted run. A 404/413 on `/runs/put` loses that run for the friction ledger too — it reads run history and has no other source.
 
-# `op://<vault>/<item>/<field>` is the reference syntax the config, secrets and env-bootstrap sources accept — the input contract, not a vault of ours; the env-bootstrap spec names the integration it wraps once.
-docs/reference/specs/agent-env-bootstrap.md	When the switchboard agent works on a **downstream service**, its execution environment — the shell where its `bash` tool runs (resident/sandbox/local-dev) — needs that service's environment variables so the real toolchain works: running the service's tests, generating code against it, deploying to that service's **UAT**. This tool materializes those env vars from 1Password via a **read-only service account scoped to a UAT vault**, so the agent can obtain a downstream service's **UAT** creds — never its prod — without spending agent turns on environment setup.
-docs/reference/specs/agent-env-bootstrap.md	`deploy/agent-env.jsonc` (JSONC — comments allowed; the parser is string-aware so the `//` inside every `op://` ref is never mistaken for a comment). Shape:
-docs/reference/specs/agent-env-bootstrap.md	"ENV_VAR_NAME": "op://<vault>/<item>/<field>"
-docs/reference/specs/agent-env-bootstrap.md	op read "op://<UAT-vault>/<item>/<field>"                        # read works
-docs/reference/specs/command-registry.md	| `deploy.secrets` | `deploy secrets <worker> [--only A,B]` | `deploy:write` | `cli:local` (CLI only) | write | **CLI only**; puts a Worker's secrets from the deployment profile's `secretsSource` — a directory of `<NAME>` files (default `~/.secrets/switchboard`) or `op://Vault/Item` — every name `deploy/secrets.manifest.json` lists for that Worker ([release-and-deploy.md](release-and-deploy.md) item 17); the source is asked once which names it holds, a required name without a value refuses BEFORE any upload (`unavailable`, naming the secret and where it was expected), an absent optional one is skipped and said, `--only` narrows and an unknown name is `invalid_input` naming the Worker's names; each value rides stdin into `wrangler secret put` in the Worker's dir (`deps.deploy.secrets`), a failed put stops naming what was not attempted; no value ever appears in output |
-docs/reference/specs/command-registry.md	| `deploy.config` | `deploy config [--source src]` | `deploy:write` | `cli:local` (CLI only) | write | **CLI only**; reads the bot's config from the profile's `configSource` (or `--source`: a path, `github://…`, `op://…`), validates it, and pushes it as the `base` document on the profile's state Worker ([release-and-deploy.md](release-and-deploy.md) item 15, [routing-and-config.md](routing-and-config.md) item 14) through `deps.deploy.pushConfig`; the text says the version, digest and size and that `deploy restart` makes it live; an unreadable or invalid source, a missing `MEMORY_TOKEN`, or a refusing Worker → `unavailable` with the host's problem |
-docs/reference/specs/command-registry.md	| `deploy.secrets` (CLI only, `deploy:write`): the Worker's manifest secrets that the source holds are put in manifest order from the profile's source (the default directory when unset; an `op://` item reaches the host as `{vault, item}`), the source asked once about the Worker's names; an absent optional secret is skipped and rendered; a required one absent refuses before any put naming it and `<source>/<NAME>`; `--only` narrows, an unknown or lowercase name and an unknown Worker are `invalid_input`; a failed put stops naming the rest as not attempted with wrangler's last line; a missing/invalid manifest, an unreadable source, and a bad `secretsSource` are `unavailable` | `[unit]` `src/core/commands/deploy.test.ts::deploy.secrets::*`; the pure halves: `src/deploy/secrets.test.ts::*` |
-docs/reference/specs/release-and-deploy.md	15. **`deploy all` pushes the bot's config to the state Worker; the image never holds it.** The profile's `configSource` is a path (the default), `github://owner/repo/path@ref` read from the contents API with `CONFIG_REPO_TOKEN`, or `op://Vault/Item/field` read with the `op` CLI under `OP_SERVICE_ACCOUNT_TOKEN`. When the bot is a step, the config is read and validated (`parseAppConfigText`) after the pre-checks and BEFORE any Worker deploys — a source that cannot be read (a missing file, a missing token, a 404, a missing CLI), a config that does not validate, or a missing `MEMORY_TOKEN` refuses the deploy naming the source, the problem, or the variable — and then pushed as the `base` document on the profile's state Worker (`src/configDocument.ts`; [routing-and-config.md](routing-and-config.md) item 14) right before the bot step, after the memory step has rolled; a push that fails stops the run at the bot step naming the Worker's answer. The bot Worker's container reads that document at start (`SWITCHBOARD_CONFIG=state://base`, with `STATE_WORKER_URL` and `MEMORY_TOKEN` forwarded), so the Dockerfile copies no `config/` and `config/` is inert to `--affected`. `deploy config [--source]` pushes alone — how a config change goes live without a release: push, then `deploy restart`. The plan carries `config: { source, document, stateWorkerUrl }` and prints it.
-docs/reference/specs/release-and-deploy.md	18. **Secrets are provisioned from the manifest and the profile's source, never by hand.** `deploy/secrets.manifest.json` says WHICH secrets each Worker holds (name, Workers, optional) — the contract `src/core/secretsManifest.test.ts` keeps equal to each `worker.ts` `Env` interface and to the bot container's forwarding list; the deployment profile's `secretsSource` says WHERE the values are: a directory of `<NAME>` files (`~/.secrets/switchboard` when absent) or a vault item `op://Vault/Item` (read with the `op` CLI) whose fields are the names. `deploy secrets <worker> [--only A,B]` (`npm run secrets` in the Worker's dir) first renders that Worker's `wrangler.jsonc` from its template and the profile when it is absent or stale (the rendered file is generated and gitignored, so a clean checkout has none, and wrangler reads the script name and account from it), then asks the source once which of the Worker's names it holds (a directory: which files exist; an item: one `op item get`, never a read per name), refuses BEFORE any upload when a required name has no value — naming the secret and `<source>/<NAME>` — skips an absent optional one and says so, and then pipes each value into `wrangler secret put <NAME>` on stdin in the Worker's directory, in manifest order; a failed put stops the run naming what was not attempted. A value never appears in argv, in the environment, or in any output — the host half (`src/deploy/secretsHost.ts`) reads it and hands it to wrangler in one function; the command sees only names. An unknown or lowercase `--only` name and an unknown Worker are `invalid_input`; a missing or invalid manifest, an unreadable source (no such directory; `op` absent, unauthenticated, or failing) and an unparseable `secretsSource` are `unavailable`. The manifest carries no vault paths, organization names, or ids — the notes describe each secret's role and rotation rule, nothing about one installation.
+# The spec lists the class patterns by example.
+docs/reference/specs/public-hygiene.md	1. **Five classes, one regex each, tested per line.** `names` (the company, its sibling products, people, the private Slack channel — case-insensitive; a 1Password `op://` reference is an integration's own syntax, not imprint, and a vault path that names the company is caught by the company), `trackers` (`#NNN` issue references and the private org's GitHub URLs; a line anchor, an HTML entity, a heading or a hex colour is not a tracker), `planIds` (`KTD…`, `KD…`, `OQ…`, and the bare `U1`–`U9` / `R1`–`R99` markers; a Slack user id and Cloudflare's `R2` are not), `ids` (Slack channel/user/DM ids and 32-hex account ids), `dates` (a full ISO date). A line can hit several classes; each is counted.
 
-# Catalogue rows carry each command's registered `describe` text; the text follows the source (a unit test holds the id column), so it is scrubbed where the command is defined.
-docs/reference/specs/command-registry.md	| `deploy.secrets` | `deploy secrets <worker> [--only <string>]` | `deploy:write` | `command` | write | cli | Put a Worker's secrets from the deployment profile's secretsSource (a directory of `<NAME>` files, or an `op://Vault/Item`): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into `wrangler secret put`; none is ever printed. |
-docs/reference/specs/command-registry.md	| `env.bootstrap` | `env bootstrap --env <env> --service <svc> [--apply] [--out path] [--manifest path]` | `env:write` | `command` | write | cli | Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply). |
+# The spec names "nominal" as the canonical allowed English word.
+docs/reference/specs/public-hygiene.md	4. **A legitimate line is allowed by name.** `scripts/public-hygiene.allow` holds `path<TAB>trimmed line` entries with a comment saying why (the English word "nominal", a colour that looks like an issue number, an integration's own identifier). An allowed line is skipped whole. An entry is stale — and fails the check — when its line no longer exists or no longer matches any class, so the file carries neither ghosts nor dead weight.
